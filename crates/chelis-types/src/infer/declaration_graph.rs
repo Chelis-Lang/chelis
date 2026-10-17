@@ -222,7 +222,7 @@ impl TopLevelReferenceGraph {
                 return graph;
             }
             let mut references = BTreeSet::new();
-            let mut bound = Vec::new();
+            let mut bound = BoundNames::new();
             let mut external_references = BTreeMap::new();
             collect_top_level_references(
                 expr,
@@ -736,7 +736,7 @@ impl TopLevelReferenceGraph {
 fn collect_top_level_references(
     expr: &deep::Expr,
     vertex_by_name: &UnordMap<String, usize>,
-    bound: &mut Vec<UnordSet<String>>,
+    bound: &mut BoundNames,
     references: &mut BTreeSet<TopLevelReference>,
     applications: &mut UnordMap<usize, ResolvedApplication>,
     external_references: &mut BTreeMap<String, TopLevelReferenceKind>,
@@ -832,14 +832,50 @@ fn collect_top_level_references(
             DeepTag::Fn => {
                 let kids = node.children_slice();
                 if kids.len() >= 2 {
-                    bound.push(
-                        param_source_infos(&kids[0])
-                            .into_iter()
-                            .map(|(name, _)| name)
-                            .collect(),
-                    );
+                    let params = param_source_infos(&kids[0])
+                        .into_iter()
+                        .map(|(name, _)| name);
                     // [04-INF-7]: nested lambda bodies are part of the eager
                     // syntactic reference set even if the closure is stored.
+                    within_binder(bound, params, |bound| {
+                        collect_top_level_references(
+                            &kids[1],
+                            vertex_by_name,
+                            bound,
+                            references,
+                            applications,
+                            external_references,
+                        );
+                    });
+                }
+            }
+            DeepTag::Let => {
+                let kids = node.children_slice();
+                if kids.len() < 2 {
+                    return;
+                }
+                // Each binding's name is bound from the next binding on.
+                within_binder(bound, [], |bound| {
+                    if let Some(bind_kids) = kids
+                        .first()
+                        .and_then(|bindings| tagged_children(bindings, DeepTag::Bind))
+                    {
+                        let mut index = 0;
+                        while index + 1 < bind_kids.len() {
+                            collect_top_level_references(
+                                &bind_kids[index + 1],
+                                vertex_by_name,
+                                bound,
+                                references,
+                                applications,
+                                external_references,
+                            );
+                            if let Some(name) = symbol_name(&bind_kids[index]) {
+                                bound.insert(name.to_string(), ());
+                            }
+                            index += 2;
+                        }
+                    }
                     collect_top_level_references(
                         &kids[1],
                         vertex_by_name,
@@ -848,47 +884,7 @@ fn collect_top_level_references(
                         applications,
                         external_references,
                     );
-                    bound.pop();
-                }
-            }
-            DeepTag::Let => {
-                let kids = node.children_slice();
-                if kids.len() < 2 {
-                    return;
-                }
-                bound.push(UnordSet::new());
-                if let Some(bind_kids) = kids
-                    .first()
-                    .and_then(|bindings| tagged_children(bindings, DeepTag::Bind))
-                {
-                    let mut index = 0;
-                    while index + 1 < bind_kids.len() {
-                        collect_top_level_references(
-                            &bind_kids[index + 1],
-                            vertex_by_name,
-                            bound,
-                            references,
-                            applications,
-                            external_references,
-                        );
-                        if let Some(name) = symbol_name(&bind_kids[index]) {
-                            bound
-                                .last_mut()
-                                .expect("let scope exists")
-                                .insert(name.to_string());
-                        }
-                        index += 2;
-                    }
-                }
-                collect_top_level_references(
-                    &kids[1],
-                    vertex_by_name,
-                    bound,
-                    references,
-                    applications,
-                    external_references,
-                );
-                bound.pop();
+                });
             }
             DeepTag::Match => {
                 let kids = node.children_slice();
@@ -917,22 +913,19 @@ fn collect_top_level_references(
                     let Some(pattern) = arm_kids.first() else {
                         continue;
                     };
-                    bound.push(
-                        chelis_deep::pattern_binder_names(pattern)
-                            .into_iter()
-                            .collect(),
-                    );
-                    for scoped in arm_kids.iter().skip(1) {
-                        collect_top_level_references(
-                            scoped,
-                            vertex_by_name,
-                            bound,
-                            references,
-                            applications,
-                            external_references,
-                        );
-                    }
-                    bound.pop();
+                    let pattern_names = chelis_deep::pattern_binder_names(pattern);
+                    within_binder(bound, pattern_names, |bound| {
+                        for scoped in arm_kids.iter().skip(1) {
+                            collect_top_level_references(
+                                scoped,
+                                vertex_by_name,
+                                bound,
+                                references,
+                                applications,
+                                external_references,
+                            );
+                        }
+                    });
                 }
             }
             _ => {

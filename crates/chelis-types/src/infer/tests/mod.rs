@@ -2005,6 +2005,7 @@ fn builtin_conv_rejects_kernel_precision_mismatch() {
 mod issue_1316;
 mod issue_2975;
 mod issue_3717;
+mod issue_3797;
 mod more;
 mod post_app_ledger_key;
 mod post_app_replay_precedence;
