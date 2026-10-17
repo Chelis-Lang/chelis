@@ -667,6 +667,82 @@ class NixFlakeContractTests(unittest.TestCase):
             self.assertFalse(staging_root.exists())
             self.assertFalse(staging_root.is_symlink())
 
+    @REQUIRES_NIX
+    def test_chelisup_link_roots_a_store_toolchain_and_uninstall_removes_it(self) -> None:
+        package = Path(
+            nix_raw("build", "--no-link", "--print-out-paths", ".#chelisup")
+        )
+        nix_store = Path(NIX).parent / "nix-store"
+        with tempfile.TemporaryDirectory() as raw_scratch:
+            scratch = Path(raw_scratch)
+            source = scratch / "toolchain"
+            fake_chelis = source / "bin" / "chelis"
+            fake_chelis.parent.mkdir(parents=True)
+            fake_chelis.write_text("#!/bin/sh\nprintf 'chelis 0.0.7\\n'\n", encoding="utf-8")
+            fake_chelis.chmod(0o755)
+            added = subprocess.run(
+                [nix_store, "--add", source],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            self.assertEqual(added.returncode, 0, added.stderr)
+            store_toolchain = Path(added.stdout.strip())
+            outside = scratch / "outside"
+            shutil.copytree(source, outside)
+            empty = scratch / "empty"
+            empty.mkdir()
+
+            home = scratch / "home"
+            entry = home / "toolchains" / "0.0.7"
+            root = home / "nix-gcroots" / "toolchain-0.0.7"
+            environment = os.environ.copy()
+            environment["CHELIS_HOME"] = str(home)
+            environment["PATH"] = ""
+
+            def chelisup(*args: object) -> subprocess.CompletedProcess[str]:
+                return subprocess.run(
+                    [package / "bin" / "chelisup", *args],
+                    cwd=REPO_ROOT,
+                    env=environment,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    check=False,
+                )
+
+            linked = chelisup("link", store_toolchain)
+            self.assertEqual(linked.returncode, 0, linked.stderr)
+            self.assertEqual(Path(os.readlink(entry)), store_toolchain)
+            self.assertTrue(root.is_symlink(), f"missing Nix GC root: {root}")
+            self.assertEqual(root.resolve(), store_toolchain.resolve())
+
+            failed = chelisup("link", empty)
+            self.assertNotEqual(failed.returncode, 0)
+            self.assertEqual(root.resolve(), store_toolchain.resolve())
+
+            relinked = chelisup("link", outside)
+            self.assertEqual(relinked.returncode, 0, relinked.stderr)
+            self.assertEqual(Path(os.readlink(entry)), outside.resolve())
+            self.assertFalse(root.exists())
+            self.assertFalse(root.is_symlink())
+
+            linked_again = chelisup("link", store_toolchain / "bin" / "..")
+            self.assertEqual(linked_again.returncode, 0, linked_again.stderr)
+            self.assertEqual(root.resolve(), store_toolchain.resolve())
+
+            removed = chelisup("uninstall", "0.0.7")
+            self.assertEqual(removed.returncode, 0, removed.stderr)
+            self.assertFalse(entry.exists())
+            self.assertFalse(entry.is_symlink())
+            self.assertFalse(root.exists())
+            self.assertFalse(root.is_symlink())
+            self.assertTrue((store_toolchain / "bin" / "chelis").is_file())
+
+            missing = chelisup("uninstall", "0.0.7")
+            self.assertNotEqual(missing.returncode, 0)
+
 
 class NixSourceContractTests(unittest.TestCase):
     def test_package_shape_rejects_every_undeclared_path(self) -> None:

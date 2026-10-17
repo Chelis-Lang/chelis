@@ -58,10 +58,11 @@ The first installed toolchain becomes the default outside a project.
 | Command | What it does |
 |---|---|
 | `chelisup install X.Y.Z` | Downloads and installs that version beside the others. |
+| `chelisup link DIR` | Registers a toolchain directory that contains `bin/chelis`, under the version that its `bin/chelis --version` reports. |
 | `chelisup list-installed` | Lists installed versions. |
 | `chelisup show` | Prints the default, the version the current directory selects, and where toolchains are stored. |
 | `chelisup which` | Prints the compiler binary `chelis` runs in the current directory. |
-| `chelisup uninstall X.Y.Z` | Removes an installed version. |
+| `chelisup uninstall X.Y.Z` | Removes an installed version. For a linked version, it removes only the link. |
 | `chelisup default X.Y.Z` | Sets the default for directories outside a project. |
 
 When you run `chelis`, it selects an installed version in this order, and the

@@ -208,10 +208,39 @@ cold-start and routing layer reef structurally cannot be. New monorepo member
   project pin takes precedence and must be reverted independently. The Nix
   runtime and combined outputs must likewise come from one compiler revision,
   not a mixed pair of store paths.
+- `chelisup link <dir>` — register an external toolchain directory (§5.1.1).
 - `chelisup default <ver>` — set the recorded default the shim falls back to.
 - `chelisup show` / `list-installed` / `which` — status.
 - `chelisup update` — self-update the installer.
-- `chelisup uninstall <ver>` / `chelisup self uninstall`.
+- `chelisup uninstall <ver>` / `chelisup self uninstall`. `uninstall` accepts
+  only an exact `X.Y.Z`. For a linked toolchain it removes the link and never
+  changes the target.
+
+#### 5.1.1 Linked toolchains
+
+`chelisup link <dir>` registers a toolchain that another tool builds, for
+example a package manager. The directory must contain an executable
+`bin/chelis`. chelisup runs `<dir>/bin/chelis --version` and accepts only the
+exact output `chelis X.Y.Z`. It then makes `~/.chelis/toolchains/<X.Y.Z>` a
+symbolic link to the canonical absolute path of `<dir>`. This command is the
+supported way to register an external toolchain, and a hand-made link is not.
+
+The shim, `default`, `which` and `list-installed` treat a linked toolchain as
+installed. `list-installed` marks it with `(linked to <dir>)`. The first
+registered toolchain becomes the default, as with `install`. `link` does not
+copy the shim into `~/.chelis/bin`. When the shim is absent, `link` says that
+`chelisup install <ver>` creates it. `install` of a linked version keeps the
+link and refreshes only the shim.
+
+`link` refuses a version that `install` placed as a real directory, and names
+`chelisup uninstall <ver>`. A new `link` of an already linked version replaces
+that link. A missing or failing `bin/chelis`, or any other version output,
+makes `link` fail and leaves the store unchanged.
+
+A dangling link is a link whose target has no `bin/chelis`. It counts as not
+installed. The shim then names the target and the two remedies, `chelisup
+link` and `chelisup uninstall`. A new `link` or `install` of that version
+replaces the dangling link. `uninstall` removes it.
 
 ### 5.2 The shim — resolution order, reasoned for chelis
 
@@ -381,6 +410,14 @@ shim dependencies and every store reference in the installed launcher.
 The real installer contains no Nix root path or cleanup logic. The installed
 Nix launcher intercepts `self uninstall`. It delegates executable cleanup to
 the real installer and then removes the stable, staging, and partial roots.
+
+The Nix launcher also intercepts `link` and `uninstall <ver>`. After a
+successful `link` of a directory inside the Nix store, it adds the GC root
+`$CHELIS_HOME/nix-gcroots/toolchain-<ver>` for the store path of that
+directory. A link to a directory outside the store gets no root, and a new
+`link` of that version to such a directory removes an earlier root. After a
+successful `uninstall <ver>`, the launcher removes the root of that version.
+A failed `link` or `uninstall` leaves the roots unchanged.
 
 A direct real-binary copy has no Nix root management. Nix does not scan files
 outside the store, so garbage collection can remove its store dependencies.

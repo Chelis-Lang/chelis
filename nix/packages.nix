@@ -218,6 +218,53 @@ let
       exit 0
     fi
 
+    if [ "\''${1:-}" = "link" ]; then
+      resolve_chelis_home
+      set_gc_root_paths
+      "$out/libexec/chelisup" "\$@" || exit \$?
+      if [ "\$#" -ne 2 ] || [ ! -d "\$2" ]; then
+        exit 0
+      fi
+      link_target="\$(${pkgs.coreutils}/bin/realpath -e -- "\$2")"
+      for entry in "\$chelis_home/toolchains"/*; do
+        if [ ! -L "\$entry" ] \
+          || [ "\$(${pkgs.coreutils}/bin/readlink "\$entry")" != "\$link_target" ]; then
+          continue
+        fi
+        toolchain_root="\$gc_root_dir/toolchain-\''${entry##*/}"
+        case "\$link_target" in
+          ${builtins.storeDir}/*)
+            store_rest="\''${link_target#${builtins.storeDir}/}"
+            store_path="${builtins.storeDir}/\''${store_rest%%/*}"
+            ${pkgs.coreutils}/bin/mkdir -p "\$gc_root_dir"
+            if ! ${pkgs.nix}/bin/nix-store \
+              --add-root "\$toolchain_root" \
+              --realise "\$store_path" >/dev/null; then
+              printf 'chelisup: failed to add the Nix GC root %s\n' "\$toolchain_root" >&2
+              exit 1
+            fi
+            ;;
+          *)
+            ${pkgs.coreutils}/bin/rm -f "\$toolchain_root"
+            ;;
+        esac
+      done
+      exit 0
+    fi
+
+    if [ "\''${1:-}" = "uninstall" ] && [ "\$#" -eq 2 ]; then
+      resolve_chelis_home
+      set_gc_root_paths
+      "$out/libexec/chelisup" "\$@" || exit \$?
+      toolchain_root="\$gc_root_dir/toolchain-\$2"
+      if [ -e "\$toolchain_root" ] || [ -L "\$toolchain_root" ]; then
+        ${pkgs.coreutils}/bin/rm -f "\$toolchain_root"
+        printf 'removed %s\n' "\$toolchain_root"
+      fi
+      ${pkgs.coreutils}/bin/rmdir "\$gc_root_dir" 2>/dev/null || true
+      exit 0
+    fi
+
     exec "$out/libexec/chelisup" "\$@"
     EOF
     chmod 0755 $out/bin/chelisup

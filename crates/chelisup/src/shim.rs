@@ -73,9 +73,21 @@ pub fn run_shim(argv: &[OsString]) -> i32 {
 /// Loud error for "a version resolved, but it is not installed."
 ///
 /// The remedy names `chelisup install <ver>` only when `chelisup install`
-/// accepts `<ver>`; a selector such as `+latest` gets the accepted form
-/// instead of a command that would fail in turn.
+/// accepts `<ver>`. A selector such as `+latest` gets the accepted form
+/// instead of a command that would fail in turn. A dangling `chelisup
+/// link` names its target and the two remedies for it.
 fn not_installed_message(store: &Store, resolution: &Resolution) -> String {
+    if let Some(target) = store.linked_target(&resolution.version) {
+        return format!(
+            "chelis: toolchain {ver} (resolved from {src}) is linked to {target}, \
+             which has no bin/chelis.\n  \
+             link a toolchain again: chelisup link <dir>\n  \
+             or remove the link: chelisup uninstall {ver}",
+            ver = resolution.version,
+            src = resolution.source,
+            target = target.display(),
+        );
+    }
     let remedy = match validate_install_version(&resolution.version) {
         Ok(()) => format!("install it: chelisup install {}", resolution.version),
         Err(_) => "a toolchain version is an exact X.Y.Z (for example 0.12.0); \

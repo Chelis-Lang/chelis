@@ -15,9 +15,11 @@ Three layers (design: `spec/design/chelis_packaging_and_install.md`):
 - **Layer 0 — `chelisup`** (`crates/chelisup`): the toolchain installer and the
   pin-resolving `chelis` **shim**. One binary, dual role by `argv[0]`: invoked
   as `chelis` it resolves + execs a toolchain; invoked as `chelisup` it runs
-  the installer CLI (`install`, `default`, `show`, `list-installed`, `which`,
-  `uninstall`, `update`, `self {uninstall,update}`). Bootstrap:
-  `crates/chelisup/bootstrap/chelisup.sh` (the one permitted shell script).
+  the installer CLI (`install`, `link`, `default`, `show`, `list-installed`,
+  `which`, `uninstall`, `update`, `self {uninstall,update}`). `link <dir>`
+  registers an external toolchain directory as a store link (design §5.1.1).
+  Bootstrap: `crates/chelisup/bootstrap/chelisup.sh` (the one permitted shell
+  script).
 - **Layer 1 — reef** (`crates/chelis-reef`): resolve/verify/place source
   packages, chelis-std, source crates (`reef src`), and binary artifacts
   (`[artifacts]` / `LockSource::Binary`).
@@ -61,7 +63,9 @@ A new attempt recovers a stale staging root before it changes that root.
 After success, the Nix wrapper restores itself at `$CHELIS_HOME/bin/chelisup`.
 The generic Rust installer contains no Nix root path or cleanup logic. The
 installed Nix wrapper removes all three roots after the real `self uninstall`
-command succeeds.
+command succeeds. It also intercepts `link` and `uninstall <ver>`. A link to
+a store path gets the root `$CHELIS_HOME/nix-gcroots/toolchain-<ver>`, and a
+successful uninstall removes that root.
 
 The wrapper, package inventory, self-uninstall behavior, Nix contract test,
 and native Nix workflows form one contract. A direct Nix-built executable
