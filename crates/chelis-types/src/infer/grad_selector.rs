@@ -155,7 +155,7 @@ pub(super) fn validate_grad_selector_identity(
             walk_grad_selector_identity(
                 expr,
                 &callables,
-                &BTreeMap::new(),
+                &mut SelectorLocals::new(),
                 &resolution.identities,
                 errors,
             );
@@ -363,7 +363,8 @@ fn collect_selector_callable_declarations(
         else {
             continue;
         };
-        let origin = selector_callable_origin(value, callables, &BTreeMap::new(), identities);
+        let origin =
+            selector_callable_origin(value, callables, &mut SelectorLocals::new(), identities);
         callables.insert(name.to_string(), origin);
     }
 }
@@ -427,10 +428,15 @@ fn selector_indices(expr: &deep::Expr) -> Option<Vec<i64>> {
     children.iter().map(selector_integer_literal).collect()
 }
 
+/// The callable origins of the local names in scope. A binder's origins last
+/// for one [`ScopedMap::scope`], so entering a binder copies nothing
+/// (chelis#3740).
+type SelectorLocals = ScopedMap<String, SelectorCallableOrigin>;
+
 fn walk_grad_selector_identity(
     expr: &deep::Expr,
     callables: &BTreeMap<String, SelectorCallableOrigin>,
-    locals: &BTreeMap<String, SelectorCallableOrigin>,
+    locals: &mut SelectorLocals,
     identities: &SelectorIdentityTable,
     errors: &mut DiagnosticSink<'_>,
 ) {
@@ -445,15 +451,17 @@ fn walk_grad_selector_identity(
 
     match tag {
         DeepTag::Fn if children.len() == 2 => {
-            let mut scoped = locals.clone();
-            if let Some((DeepTag::Params, _, params)) = children.first().and_then(stamped_parts) {
-                for param in params {
-                    if let Some(name) = param_name_for_refs(param) {
-                        scoped.insert(name, SelectorCallableOrigin::Unknown);
+            locals.scope(|scoped| {
+                if let Some((DeepTag::Params, _, params)) = children.first().and_then(stamped_parts)
+                {
+                    for param in params {
+                        if let Some(name) = param_name_for_refs(param) {
+                            scoped.insert(name, SelectorCallableOrigin::Unknown);
+                        }
                     }
                 }
-            }
-            walk_grad_selector_identity(&children[1], callables, &scoped, identities, errors);
+                walk_grad_selector_identity(&children[1], callables, scoped, identities, errors);
+            });
             return;
         }
         DeepTag::Let if children.len() == 2 => {
@@ -464,15 +472,17 @@ fn walk_grad_selector_identity(
             if !bindings.len().is_multiple_of(2) {
                 return;
             }
-            let mut scoped = locals.clone();
-            for pair in bindings.as_chunks::<2>().0 {
-                walk_grad_selector_identity(&pair[1], callables, &scoped, identities, errors);
-                if let Some(name) = symbol_name(&pair[0]) {
-                    let origin = selector_callable_origin(&pair[1], callables, &scoped, identities);
-                    scoped.insert(name.to_string(), origin);
+            locals.scope(|scoped| {
+                for pair in bindings.as_chunks::<2>().0 {
+                    walk_grad_selector_identity(&pair[1], callables, scoped, identities, errors);
+                    if let Some(name) = symbol_name(&pair[0]) {
+                        let origin =
+                            selector_callable_origin(&pair[1], callables, scoped, identities);
+                        scoped.insert(name.to_string(), origin);
+                    }
                 }
-            }
-            walk_grad_selector_identity(&children[1], callables, &scoped, identities, errors);
+                walk_grad_selector_identity(&children[1], callables, scoped, identities, errors);
+            });
             return;
         }
         DeepTag::Match if !children.is_empty() => {
@@ -485,22 +495,23 @@ fn walk_grad_selector_identity(
                 if arm_children.len() != 3 {
                     continue;
                 }
-                let mut scoped = locals.clone();
-                bind_selector_match_pattern(&arm_children[0], &scrutinee, &mut scoped);
-                walk_grad_selector_identity(
-                    &arm_children[1],
-                    callables,
-                    &scoped,
-                    identities,
-                    errors,
-                );
-                walk_grad_selector_identity(
-                    &arm_children[2],
-                    callables,
-                    &scoped,
-                    identities,
-                    errors,
-                );
+                locals.scope(|scoped| {
+                    bind_selector_match_pattern(&arm_children[0], &scrutinee, scoped);
+                    walk_grad_selector_identity(
+                        &arm_children[1],
+                        callables,
+                        scoped,
+                        identities,
+                        errors,
+                    );
+                    walk_grad_selector_identity(
+                        &arm_children[2],
+                        callables,
+                        scoped,
+                        identities,
+                        errors,
+                    );
+                });
             }
             return;
         }
@@ -523,7 +534,7 @@ fn validate_one_grad_selector(
     children: &[deep::Expr],
     wrt: &chelis_deep::annotations::WrtTargets,
     callables: &BTreeMap<String, SelectorCallableOrigin>,
-    locals: &BTreeMap<String, SelectorCallableOrigin>,
+    locals: &mut SelectorLocals,
     identities: &SelectorIdentityTable,
     errors: &mut DiagnosticSink<'_>,
 ) {
@@ -637,7 +648,7 @@ fn validate_one_grad_selector(
 fn selector_match_origin(
     children: &[deep::Expr],
     callables: &BTreeMap<String, SelectorCallableOrigin>,
-    locals: &BTreeMap<String, SelectorCallableOrigin>,
+    locals: &mut SelectorLocals,
     identities: &SelectorIdentityTable,
 ) -> SelectorCallableOrigin {
     let Some(scrutinee_expr) = children.first() else {
@@ -652,9 +663,10 @@ fn selector_match_origin(
         let [pattern, _, body] = arm_children else {
             return SelectorCallableOrigin::Unknown;
         };
-        let mut scoped = locals.clone();
-        bind_selector_match_pattern(pattern, &scrutinee, &mut scoped);
-        let origin = selector_callable_origin(body, callables, &scoped, identities);
+        let origin = locals.scope(|scoped| {
+            bind_selector_match_pattern(pattern, &scrutinee, scoped);
+            selector_callable_origin(body, callables, scoped, identities)
+        });
         result = Some(result.map_or_else(
             || origin.clone(),
             |prior: SelectorCallableOrigin| prior.alternate(&origin),
@@ -666,7 +678,7 @@ fn selector_match_origin(
 fn bind_selector_match_pattern(
     pattern: &deep::Expr,
     value: &SelectorCallableOrigin,
-    locals: &mut BTreeMap<String, SelectorCallableOrigin>,
+    locals: &mut SelectorLocals,
 ) {
     stack_guard!("bind_selector_match_pattern", pattern);
     if let deep::Expr::MetaExpr(meta, _) = pattern {
@@ -747,7 +759,7 @@ fn bind_selector_match_pattern(
 fn selector_callable_origin(
     expr: &deep::Expr,
     callables: &BTreeMap<String, SelectorCallableOrigin>,
-    locals: &BTreeMap<String, SelectorCallableOrigin>,
+    locals: &mut SelectorLocals,
     identities: &SelectorIdentityTable,
 ) -> SelectorCallableOrigin {
     stack_guard!(
@@ -852,15 +864,16 @@ fn selector_callable_origin(
             if !bindings.len().is_multiple_of(2) {
                 return SelectorCallableOrigin::Unknown;
             }
-            let mut scoped = locals.clone();
-            for pair in bindings.as_chunks::<2>().0 {
-                let Some(name) = symbol_name(&pair[0]) else {
-                    return SelectorCallableOrigin::Unknown;
-                };
-                let origin = selector_callable_origin(&pair[1], callables, &scoped, identities);
-                scoped.insert(name.to_string(), origin);
-            }
-            selector_callable_origin(&children[1], callables, &scoped, identities)
+            locals.scope(|scoped| {
+                for pair in bindings.as_chunks::<2>().0 {
+                    let Some(name) = symbol_name(&pair[0]) else {
+                        return SelectorCallableOrigin::Unknown;
+                    };
+                    let origin = selector_callable_origin(&pair[1], callables, scoped, identities);
+                    scoped.insert(name.to_string(), origin);
+                }
+                selector_callable_origin(&children[1], callables, scoped, identities)
+            })
         }
         DeepTag::Lit
         | DeepTag::RecordUpdate

@@ -397,6 +397,140 @@ impl<T: Ord, const N: usize> From<[T; N]> for UnordSet<T> {
     }
 }
 
+/// A map with nested lexical scopes, for a walker whose environment gains
+/// bindings at each binder and loses them when the binder's body ends.
+///
+/// Entering a scope with [`ScopedMap::scope`] copies nothing. Each
+/// [`ScopedMap::insert`] or [`ScopedMap::remove`] inside a scope records the
+/// entry it displaced, and leaving the scope restores those entries in
+/// reverse order, so the map after a scope equals the map before it. A
+/// walker that copied its whole environment at every binder pays instead for
+/// the bindings each scope makes, which keeps a chain of `k` nested binders
+/// linear rather than quadratic in `k`.
+///
+/// Like [`UnordMap`], it has no iteration exit. It is deliberately not
+/// `Clone`: a copy of the environment per scope is the cost it removes.
+pub struct ScopedMap<K, V> {
+    map: UnordMap<K, V>,
+    /// The entries the open scopes displaced, oldest first: a key and the
+    /// value it held before, `None` when it was absent.
+    undo: Vec<(K, Option<V>)>,
+    /// How many scopes are open. A change outside every scope is permanent
+    /// and records nothing.
+    depth: usize,
+}
+
+impl<K, V> fmt::Debug for ScopedMap<K, V> {
+    /// Report the kind, length and scope depth only, as [`UnordMap`] does.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "ScopedMap {{ len: {}, depth: {} }}",
+            self.map.len(),
+            self.depth
+        )
+    }
+}
+
+impl<K, V> Default for ScopedMap<K, V> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<K, V> ScopedMap<K, V> {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            map: UnordMap::new(),
+            undo: Vec::new(),
+            depth: 0,
+        }
+    }
+
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.map.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.map.is_empty()
+    }
+}
+
+impl<K: Ord + Clone, V> ScopedMap<K, V> {
+    #[must_use]
+    pub fn get<Q>(&self, key: &Q) -> Option<&V>
+    where
+        K: Borrow<Q>,
+        Q: Ord + ?Sized,
+    {
+        self.map.get(key)
+    }
+
+    #[must_use]
+    pub fn contains_key<Q>(&self, key: &Q) -> bool
+    where
+        K: Borrow<Q>,
+        Q: Ord + ?Sized,
+    {
+        self.map.contains_key(key)
+    }
+
+    /// Bind `key` to `value` until the innermost open scope ends.
+    pub fn insert(&mut self, key: K, value: V) {
+        let displaced = self.map.insert(key.clone(), value);
+        if self.depth > 0 {
+            self.undo.push((key, displaced));
+        }
+    }
+
+    /// Unbind `key` until the innermost open scope ends.
+    pub fn remove<Q>(&mut self, key: &Q)
+    where
+        K: Borrow<Q>,
+        Q: Ord + ?Sized,
+    {
+        if let Some((key, displaced)) = self.map.inner.remove_entry(key)
+            && self.depth > 0
+        {
+            self.undo.push((key, Some(displaced)));
+        }
+    }
+
+    /// Run `body` in a new scope, then restore every entry its changes
+    /// displaced.
+    pub fn scope<R>(&mut self, body: impl FnOnce(&mut Self) -> R) -> R {
+        let mark = self.undo.len();
+        self.depth += 1;
+        let result = body(self);
+        while self.undo.len() > mark {
+            let (key, displaced) = self.undo.pop().expect("the undo log is above its mark");
+            match displaced {
+                Some(value) => {
+                    self.map.insert(key, value);
+                }
+                None => {
+                    self.map.remove(&key);
+                }
+            }
+        }
+        self.depth -= 1;
+        result
+    }
+}
+
+impl<K: Ord + Clone, V> FromIterator<(K, V)> for ScopedMap<K, V> {
+    fn from_iter<T: IntoIterator<Item = (K, V)>>(iter: T) -> Self {
+        Self {
+            map: iter.into_iter().collect(),
+            undo: Vec::new(),
+            depth: 0,
+        }
+    }
+}
+
 impl<K, V> Serialize for UnordMap<K, V>
 where
     K: Ord + Serialize,

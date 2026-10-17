@@ -11,6 +11,7 @@ use chelis_deep::ast::{Atom, Expr, Metadata};
 use chelis_deep::{ExprCarrier, Span, decode_effect_kind};
 use chelis_types::types::{Effect, EffectSet};
 use chelis_types::{CheckedProgram, InferResult};
+use chelis_unord::ScopedMap;
 use chelis_vocab::EffectKind;
 use chelis_vocab::EffectKindDecodeError;
 
@@ -154,7 +155,7 @@ pub fn check_program(program: &CheckedProgram) -> Result<CheckedProgram, Vec<Eff
                 expr,
                 &effects_by_def,
                 &top_level_callables,
-                &BTreeMap::new(),
+                &mut Locals::new(),
             )
         })
         .collect();
@@ -219,7 +220,7 @@ pub fn check_effects_with_context(
                 expr,
                 &effects_by_def,
                 &top_level_callables,
-                &BTreeMap::new(),
+                &mut Locals::new(),
             )
         })
         .collect();
@@ -345,7 +346,7 @@ fn infer_program_effects_with_context(
         let mut changed = false;
         for (name, body) in &bodies {
             let inferred =
-                infer_expr_effects(body, &effects, &top_level_callables, &BTreeMap::new());
+                infer_expr_effects(body, &effects, &top_level_callables, &mut Locals::new());
             if effects.get(name) != Some(&inferred) {
                 effects.insert(name.clone(), inferred);
                 changed = true;
@@ -426,7 +427,7 @@ fn infer_expr_effects(
     expr: &Expr,
     top_level_effects: &BTreeMap<String, EffectSet>,
     top_level_callables: &BTreeSet<String>,
-    locals: &BTreeMap<String, EffectSet>,
+    locals: &mut Locals,
 ) -> EffectSet {
     record_effect_work(|profile| profile.infer_expr_visits += 1);
     match expr.carrier() {
@@ -457,7 +458,7 @@ fn infer_children_effects(
     children: &[Expr],
     top_level_effects: &BTreeMap<String, EffectSet>,
     top_level_callables: &BTreeSet<String>,
-    locals: &BTreeMap<String, EffectSet>,
+    locals: &mut Locals,
 ) -> EffectSet {
     children
         .iter()
@@ -474,7 +475,7 @@ fn infer_tagged_effects(
     handled_effect: Option<EffectKind>,
     top_level_effects: &BTreeMap<String, EffectSet>,
     top_level_callables: &BTreeSet<String>,
-    locals: &BTreeMap<String, EffectSet>,
+    locals: &mut Locals,
 ) -> EffectSet {
     match tag {
         DeepTag::Var => kids
@@ -499,20 +500,16 @@ fn infer_tagged_effects(
             })
             .unwrap_or_default(),
         DeepTag::App => infer_app_effects(kids, top_level_effects, top_level_callables, locals),
-        DeepTag::Fn => {
-            let scope = lexical_scope(tag, kids, locals);
+        DeepTag::Fn => locals.scope(|scope| {
+            bind_lexical_names(tag, kids, scope);
             kids.get(1)
-                .map(|body| {
-                    infer_expr_effects(body, top_level_effects, top_level_callables, &scope)
-                })
+                .map(|body| infer_expr_effects(body, top_level_effects, top_level_callables, scope))
                 .unwrap_or_default()
-        }
-        DeepTag::Arm => infer_children_effects(
-            kids,
-            top_level_effects,
-            top_level_callables,
-            &lexical_scope(tag, kids, locals),
-        ),
+        }),
+        DeepTag::Arm => locals.scope(|scope| {
+            bind_lexical_names(tag, kids, scope);
+            infer_children_effects(kids, top_level_effects, top_level_callables, scope)
+        }),
         DeepTag::Let => infer_let_effects(kids, top_level_effects, top_level_callables, locals),
         DeepTag::Grad | DeepTag::Vmap => kids
             .first()
@@ -529,26 +526,26 @@ fn infer_tagged_effects(
     }
 }
 
-/// `locals` extended with the names this node binds for its children: a
-/// function's parameters and a match arm's pattern variables. The names come
-/// from the type checker's own binder reading, so a lexical binder that
-/// reuses a builtin's name is the binder here exactly as it is there, and the
-/// builtin's call effect does not apply to it ([04-INF-9]).
-fn lexical_scope(
-    tag: DeepTag,
-    kids: &[Expr],
-    locals: &BTreeMap<String, EffectSet>,
-) -> BTreeMap<String, EffectSet> {
+/// The local names in scope where the walk is, each with the latent effects
+/// of the value it binds. A binder's names last for one
+/// [`ScopedMap::scope`], so entering a binder copies nothing, and a chain of
+/// `k` nested `let`s costs `k` rather than `k` squared (chelis#3740).
+type Locals = ScopedMap<String, EffectSet>;
+
+/// Bind, in the scope `locals` has open, the names this node binds for its
+/// children: a function's parameters and a match arm's pattern variables.
+/// The names come from the type checker's own binder reading, so a lexical
+/// binder that reuses a builtin's name is the binder here exactly as it is
+/// there, and the builtin's call effect does not apply to it ([04-INF-9]).
+fn bind_lexical_names(tag: DeepTag, kids: &[Expr], locals: &mut Locals) {
     let names = match (tag, kids.first()) {
         (DeepTag::Fn, Some(params)) => chelis_types::lexical_param_names(params),
         (DeepTag::Arm, Some(pattern)) => chelis_types::lexical_pattern_names(pattern),
         _ => Vec::new(),
     };
-    let mut scope = locals.clone();
     for name in names {
-        scope.insert(name, EffectSet::new());
+        locals.insert(name, EffectSet::new());
     }
-    scope
 }
 
 /// The names a `let` binding target binds: a plain name, or a destructuring
@@ -564,7 +561,7 @@ fn infer_app_effects(
     kids: &[Expr],
     top_level_effects: &BTreeMap<String, EffectSet>,
     top_level_callables: &BTreeSet<String>,
-    locals: &BTreeMap<String, EffectSet>,
+    locals: &mut Locals,
 ) -> EffectSet {
     let mut effects = EffectSet::new();
     for kid in kids {
@@ -583,56 +580,61 @@ fn infer_let_effects(
     kids: &[Expr],
     top_level_effects: &BTreeMap<String, EffectSet>,
     top_level_callables: &BTreeSet<String>,
-    locals: &BTreeMap<String, EffectSet>,
+    locals: &mut Locals,
 ) -> EffectSet {
     if kids.len() < 2 {
         return EffectSet::new();
     }
 
-    let mut local_scope = locals.clone();
-    let mut effects = EffectSet::new();
+    locals.scope(|local_scope| {
+        let mut effects = EffectSet::new();
 
-    match kids[0].carrier() {
-        ExprCarrier::DecodedNode(DeepTag::Bind, _, bind_kids) => {
-            let mut i = 0;
-            while i + 1 < bind_kids.len() {
-                let value = &bind_kids[i + 1];
-                let value_effects =
-                    infer_expr_effects(value, top_level_effects, top_level_callables, &local_scope);
-                effects.extend(&value_effects);
-                let binding_effects = if value.tag() == Some(DeepTag::Fn) {
-                    value_effects
-                } else {
-                    EffectSet::new()
-                };
-                for name in bind_target_names(&bind_kids[i]) {
-                    local_scope.insert(name, binding_effects.clone());
+        match kids[0].carrier() {
+            ExprCarrier::DecodedNode(DeepTag::Bind, _, bind_kids) => {
+                let mut i = 0;
+                while i + 1 < bind_kids.len() {
+                    let value = &bind_kids[i + 1];
+                    let value_effects = infer_expr_effects(
+                        value,
+                        top_level_effects,
+                        top_level_callables,
+                        local_scope,
+                    );
+                    effects.extend(&value_effects);
+                    let binding_effects = if value.tag() == Some(DeepTag::Fn) {
+                        value_effects
+                    } else {
+                        EffectSet::new()
+                    };
+                    for name in bind_target_names(&bind_kids[i]) {
+                        local_scope.insert(name, binding_effects.clone());
+                    }
+                    i += 2;
                 }
-                i += 2;
+            }
+            ExprCarrier::DecodedNode(_, _, _)
+            | ExprCarrier::StructuralList(_)
+            | ExprCarrier::UndecodableHead(_, _, _)
+            | ExprCarrier::Atom(_)
+            | ExprCarrier::MetadataMap(_)
+            | ExprCarrier::MetadataExpression(_) => {
+                effects.extend(&infer_expr_effects(
+                    &kids[0],
+                    top_level_effects,
+                    top_level_callables,
+                    local_scope,
+                ));
             }
         }
-        ExprCarrier::DecodedNode(_, _, _)
-        | ExprCarrier::StructuralList(_)
-        | ExprCarrier::UndecodableHead(_, _, _)
-        | ExprCarrier::Atom(_)
-        | ExprCarrier::MetadataMap(_)
-        | ExprCarrier::MetadataExpression(_) => {
-            effects.extend(&infer_expr_effects(
-                &kids[0],
-                top_level_effects,
-                top_level_callables,
-                &local_scope,
-            ));
-        }
-    }
 
-    effects.extend(&infer_expr_effects(
-        &kids[1],
-        top_level_effects,
-        top_level_callables,
-        &local_scope,
-    ));
-    effects
+        effects.extend(&infer_expr_effects(
+            &kids[1],
+            top_level_effects,
+            top_level_callables,
+            local_scope,
+        ));
+        effects
+    })
 }
 
 fn infer_handle_effects(
@@ -640,7 +642,7 @@ fn infer_handle_effects(
     handled_effect: Option<EffectKind>,
     top_level_effects: &BTreeMap<String, EffectSet>,
     top_level_callables: &BTreeSet<String>,
-    locals: &BTreeMap<String, EffectSet>,
+    locals: &mut Locals,
 ) -> EffectSet {
     if kids.len() != 2 {
         return infer_children_effects(kids, top_level_effects, top_level_callables, locals);
@@ -662,7 +664,7 @@ fn annotate_effects(
     expr: &Expr,
     top_level_effects: &BTreeMap<String, EffectSet>,
     top_level_callables: &BTreeSet<String>,
-    locals: &BTreeMap<String, EffectSet>,
+    locals: &mut Locals,
 ) -> Expr {
     record_effect_work(|profile| profile.annotation_expr_visits += 1);
     match expr {
@@ -692,24 +694,24 @@ fn annotate_effects(
             *span,
         ),
         Expr::Node(node, span) => {
-            let mut local_scope = locals.clone();
-            let annotated_children =
+            let annotated_children = locals.scope(|scope| {
                 if node.tag() == DeepTag::Let && node.children_slice().len() >= 2 {
                     annotate_let_children(
                         node.children_slice(),
                         top_level_effects,
                         top_level_callables,
-                        &mut local_scope,
+                        scope,
                     )
                 } else {
-                    let scope = lexical_scope(node.tag(), node.children_slice(), locals);
+                    bind_lexical_names(node.tag(), node.children_slice(), scope);
                     node.children_slice()
                         .iter()
                         .map(|child| {
-                            annotate_effects(child, top_level_effects, top_level_callables, &scope)
+                            annotate_effects(child, top_level_effects, top_level_callables, scope)
                         })
                         .collect()
-                };
+                }
+            });
             let mut meta = node
                 .meta()
                 .map_expressions(&mut |value, _| {
@@ -759,7 +761,7 @@ fn annotate_let_children(
     kids: &[Expr],
     top_level_effects: &BTreeMap<String, EffectSet>,
     top_level_callables: &BTreeSet<String>,
-    local_scope: &mut BTreeMap<String, EffectSet>,
+    local_scope: &mut Locals,
 ) -> Vec<Expr> {
     let bind_kids = match kids[0].carrier() {
         ExprCarrier::DecodedNode(DeepTag::Bind, _, children) => children,
@@ -1409,7 +1411,7 @@ mod tests {
                     expr,
                     &successor_effects,
                     &successor_callables,
-                    &BTreeMap::new(),
+                    &mut Locals::new(),
                 )
             })
             .collect::<Vec<_>>();
@@ -1596,7 +1598,7 @@ mod tests {
                     &[bind_slot.clone(), pure_expr()],
                     &BTreeMap::new(),
                     &BTreeSet::new(),
-                    &BTreeMap::new(),
+                    &mut Locals::new(),
                 );
                 (!effects.contains(&Effect::Io)).then_some(*label)
             })
@@ -1614,7 +1616,7 @@ mod tests {
                     &[bind_slot.clone(), pure_expr()],
                     &BTreeMap::new(),
                     &BTreeSet::new(),
-                    &BTreeMap::new(),
+                    &mut Locals::new(),
                 );
                 effects.contains(&Effect::Io).then_some(*label)
             })
@@ -2569,7 +2571,7 @@ mod decode_once_producer_tests {
                 &original,
                 &BTreeMap::new(),
                 &BTreeSet::new(),
-                &BTreeMap::new(),
+                &mut Locals::new(),
             );
             let metadata = match &rewritten {
                 Expr::Node(node, _) => node.meta(),

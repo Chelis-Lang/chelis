@@ -36,29 +36,23 @@ pub(super) fn validate_core_transform_fragment(
     for (_, items) in module_items.to_sorted() {
         let top_level_functions = collect_top_level_function_names(items);
         let module_values = collect_top_level_transform_values(items, &top_level_functions);
-        let lexical_scope = CoreTransformScope::default();
+        let mut lexical_scope = CoreTransformScope::default();
         for expr in items {
             walk_core_transform_targets(
                 expr,
                 &top_level_functions,
                 &module_values,
-                &lexical_scope,
+                &mut lexical_scope,
                 errors,
             );
         }
     }
 }
 
-#[derive(Clone, Default)]
-struct CoreTransformScope {
-    local_values: UnordMap<String, CoreTransformValue>,
-}
-
-impl CoreTransformScope {
-    fn bind_local(&mut self, name: String, value: CoreTransformValue) {
-        self.local_values.insert(name, value);
-    }
-}
+/// The transform-relevant values of the local names in scope. A binder's
+/// values last for one [`ScopedMap::scope`], so entering a binder copies
+/// nothing (chelis#3740).
+type CoreTransformScope = ScopedMap<String, CoreTransformValue>;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 enum CoreTransformValue {
@@ -117,7 +111,7 @@ fn bind_core_transform_pattern(
     match tag {
         DeepTag::PatVar => {
             if let Some(name) = children.first().and_then(symbol_name) {
-                scope.bind_local(name.to_string(), value.clone());
+                scope.insert(name.to_string(), value.clone());
             }
         }
         DeepTag::PatTuple => {
@@ -144,7 +138,7 @@ fn bind_core_transform_pattern(
                     }
                 });
             if let Some(name) = children.first().and_then(symbol_name) {
-                scope.bind_local(name.to_string(), carried.clone());
+                scope.insert(name.to_string(), carried.clone());
             }
             if let Some(inner) = children.get(1) {
                 bind_core_transform_pattern(inner, &carried, scope);
@@ -158,7 +152,7 @@ fn bind_core_transform_pattern(
         DeepTag::PatWild | DeepTag::PatLit => {}
         _ => {
             for name in pattern_names_for_signature(pattern).to_sorted() {
-                scope.bind_local(name.clone(), CoreTransformValue::Ordinary);
+                scope.insert(name.clone(), CoreTransformValue::Ordinary);
             }
         }
     }
@@ -224,7 +218,7 @@ fn collect_top_level_transform_values(
     top_level_functions: &UnordSet<String>,
 ) -> UnordMap<String, CoreTransformValue> {
     let mut module_values = UnordMap::new();
-    let lexical_scope = CoreTransformScope::default();
+    let mut lexical_scope = CoreTransformScope::default();
     for expr in exprs {
         let Some((DeepTag::Def, _, children)) = stamped_parts(expr) else {
             continue;
@@ -237,7 +231,7 @@ fn collect_top_level_transform_values(
             value,
             top_level_functions,
             &module_values,
-            &lexical_scope,
+            &mut lexical_scope,
         );
         module_values.insert(name.to_string(), value);
     }
@@ -248,7 +242,7 @@ fn walk_core_transform_targets(
     expr: &deep::Expr,
     top_level_functions: &UnordSet<String>,
     module_values: &UnordMap<String, CoreTransformValue>,
-    lexical_scope: &CoreTransformScope,
+    lexical_scope: &mut CoreTransformScope,
     errors: &mut DiagnosticSink<'_>,
 ) {
     stack_guard!("walk_core_transform_targets", expr);
@@ -277,14 +271,13 @@ fn walk_core_transform_targets(
                 );
             }
         }
-        DeepTag::Fn => {
-            let mut scoped = lexical_scope.clone();
+        DeepTag::Fn => lexical_scope.scope(|scoped| {
             if let Some(params) = children.first()
                 && let Some((DeepTag::Params, _, params)) = stamped_parts(params)
             {
                 for param in params {
                     if let Some(name) = param_name_for_refs(param) {
-                        scoped.bind_local(name, CoreTransformValue::Ordinary);
+                        scoped.insert(name, CoreTransformValue::Ordinary);
                     }
                 }
             }
@@ -293,11 +286,11 @@ fn walk_core_transform_targets(
                     body,
                     top_level_functions,
                     module_values,
-                    &scoped,
+                    scoped,
                     errors,
                 );
             }
-        }
+        }),
         DeepTag::Let => {
             let (Some(binding), Some(body)) = (children.first(), children.get(1)) else {
                 return;
@@ -326,27 +319,34 @@ fn walk_core_transform_targets(
                 }
                 return;
             }
-            let mut scoped = lexical_scope.clone();
-            for pair in bind_children.as_chunks::<2>().0 {
-                let value = &pair[1];
-                walk_core_transform_targets(
-                    value,
-                    top_level_functions,
-                    module_values,
-                    &scoped,
-                    errors,
-                );
-                if let Some(name) = symbol_name(&pair[0]) {
-                    let value = classify_core_transform_value(
+            lexical_scope.scope(|scoped| {
+                for pair in bind_children.as_chunks::<2>().0 {
+                    let value = &pair[1];
+                    walk_core_transform_targets(
                         value,
                         top_level_functions,
                         module_values,
-                        &scoped,
+                        scoped,
+                        errors,
                     );
-                    scoped.bind_local(name.to_string(), value);
+                    if let Some(name) = symbol_name(&pair[0]) {
+                        let value = classify_core_transform_value(
+                            value,
+                            top_level_functions,
+                            module_values,
+                            scoped,
+                        );
+                        scoped.insert(name.to_string(), value);
+                    }
                 }
-            }
-            walk_core_transform_targets(body, top_level_functions, module_values, &scoped, errors);
+                walk_core_transform_targets(
+                    body,
+                    top_level_functions,
+                    module_values,
+                    scoped,
+                    errors,
+                );
+            });
         }
         DeepTag::Match => {
             let scrutinee_value =
@@ -380,19 +380,20 @@ fn walk_core_transform_targets(
                     );
                     continue;
                 };
-                let mut scoped = lexical_scope.clone();
-                if let Some(pattern) = arm_children.first() {
-                    bind_core_transform_pattern(pattern, &scrutinee_value, &mut scoped);
-                }
-                for child in arm_children.iter().skip(1) {
-                    walk_core_transform_targets(
-                        child,
-                        top_level_functions,
-                        module_values,
-                        &scoped,
-                        errors,
-                    );
-                }
+                lexical_scope.scope(|scoped| {
+                    if let Some(pattern) = arm_children.first() {
+                        bind_core_transform_pattern(pattern, &scrutinee_value, scoped);
+                    }
+                    for child in arm_children.iter().skip(1) {
+                        walk_core_transform_targets(
+                            child,
+                            top_level_functions,
+                            module_values,
+                            scoped,
+                            errors,
+                        );
+                    }
+                });
             }
         }
         DeepTag::Grad | DeepTag::Vmap => {
@@ -441,7 +442,7 @@ fn classify_core_transform_value(
     value: &deep::Expr,
     top_level_functions: &UnordSet<String>,
     module_values: &UnordMap<String, CoreTransformValue>,
-    lexical_scope: &CoreTransformScope,
+    lexical_scope: &mut CoreTransformScope,
 ) -> CoreTransformValue {
     stack_guard!(
         "classify_core_transform_value",
@@ -476,17 +477,13 @@ fn classify_core_transform_value(
             let Some(name) = children.first().and_then(symbol_name) else {
                 return CoreTransformValue::Ordinary;
             };
-            lexical_scope
-                .local_values
-                .get(name)
-                .cloned()
-                .unwrap_or_else(|| {
-                    if top_level_functions.contains(name) {
-                        CoreTransformValue::TopLevelFunctionAlias
-                    } else {
-                        module_values.get(name).cloned().unwrap_or_default()
-                    }
-                })
+            lexical_scope.get(name).cloned().unwrap_or_else(|| {
+                if top_level_functions.contains(name) {
+                    CoreTransformValue::TopLevelFunctionAlias
+                } else {
+                    module_values.get(name).cloned().unwrap_or_default()
+                }
+            })
         }
         DeepTag::Tuple => CoreTransformValue::Tuple(
             children
@@ -526,20 +523,21 @@ fn classify_core_transform_value(
             if !bind_children.len().is_multiple_of(2) {
                 return CoreTransformValue::Ordinary;
             }
-            let mut scoped = lexical_scope.clone();
-            for pair in bind_children.as_chunks::<2>().0 {
-                let Some(name) = symbol_name(&pair[0]) else {
-                    return CoreTransformValue::Ordinary;
-                };
-                let bound_value = classify_core_transform_value(
-                    &pair[1],
-                    top_level_functions,
-                    module_values,
-                    &scoped,
-                );
-                scoped.bind_local(name.to_string(), bound_value);
-            }
-            classify_core_transform_value(body, top_level_functions, module_values, &scoped)
+            lexical_scope.scope(|scoped| {
+                for pair in bind_children.as_chunks::<2>().0 {
+                    let Some(name) = symbol_name(&pair[0]) else {
+                        return CoreTransformValue::Ordinary;
+                    };
+                    let bound_value = classify_core_transform_value(
+                        &pair[1],
+                        top_level_functions,
+                        module_values,
+                        scoped,
+                    );
+                    scoped.insert(name.to_string(), bound_value);
+                }
+                classify_core_transform_value(body, top_level_functions, module_values, scoped)
+            })
         }
         DeepTag::Block => children
             .last()
@@ -570,14 +568,10 @@ fn classify_core_transform_value(
                 else {
                     return CoreTransformValue::Ordinary;
                 };
-                let mut scoped = lexical_scope.clone();
-                bind_core_transform_pattern(pattern, &scrutinee_value, &mut scoped);
-                let arm_value = classify_core_transform_value(
-                    body,
-                    top_level_functions,
-                    module_values,
-                    &scoped,
-                );
+                let arm_value = lexical_scope.scope(|scoped| {
+                    bind_core_transform_pattern(pattern, &scrutinee_value, scoped);
+                    classify_core_transform_value(body, top_level_functions, module_values, scoped)
+                });
                 result =
                     Some(result.map_or_else(|| arm_value.clone(), |known| known.join(&arm_value)));
             }
@@ -600,7 +594,7 @@ fn validate_core_transform_target(
     target: Option<&deep::Expr>,
     top_level_functions: &UnordSet<String>,
     module_values: &UnordMap<String, CoreTransformValue>,
-    lexical_scope: &CoreTransformScope,
+    lexical_scope: &mut CoreTransformScope,
     errors: &mut DiagnosticSink<'_>,
 ) {
     // A copied target is its operand (spec/04 section 8.2).
@@ -611,11 +605,10 @@ fn validate_core_transform_target(
             .then(|| children.first().and_then(symbol_name))
             .flatten()
     });
-    let shadows_top_level = name.is_some_and(|name| {
-        top_level_functions.contains(name) && lexical_scope.local_values.contains_key(name)
-    });
+    let shadows_top_level = name
+        .is_some_and(|name| top_level_functions.contains(name) && lexical_scope.contains_key(name));
     let direct_unshadowed_top_level = name.is_some_and(|name| {
-        top_level_functions.contains(name) && !lexical_scope.local_values.contains_key(name)
+        top_level_functions.contains(name) && !lexical_scope.contains_key(name)
     });
     let target_value = target.map_or(CoreTransformValue::Ordinary, |target| {
         classify_core_transform_value(target, top_level_functions, module_values, lexical_scope)
@@ -675,7 +668,6 @@ mod core_transform_fragment_tests {
 
     fn binding<'a>(scope: &'a CoreTransformScope, name: &str) -> &'a CoreTransformValue {
         scope
-            .local_values
             .get(name)
             .unwrap_or_else(|| panic!("missing pattern binding `{name}`"))
     }
@@ -779,7 +771,7 @@ mod core_transform_fragment_tests {
             binding(&nested, "mapped"),
             &CoreTransformValue::TopLevelFunctionAlias
         );
-        assert!(!nested.local_values.contains_key("_"));
+        assert!(!nested.contains_key("_"));
 
         let siblings = pattern_scope(
             "(pat-tuple {} (pat-var {} left) (pat-var {} right))",
@@ -814,9 +806,12 @@ mod core_transform_fragment_tests {
             "(pat-record {} Box (kv {} value (pat-var {} mapped)))",
         ] {
             let mismatched = pattern_scope(pattern, CoreTransformValue::TopLevelFunctionAlias);
-            for (_, value) in mismatched.local_values.to_sorted() {
+            let binders = chelis_deep::pattern_binder_names(&deep_type(pattern));
+            assert!(!binders.is_empty());
+            assert_eq!(mismatched.len(), binders.len());
+            for name in binders {
                 assert_eq!(
-                    value,
+                    binding(&mismatched, &name),
                     &CoreTransformValue::Ordinary,
                     "{pattern} must not transfer provenance through unknown or mismatched structure"
                 );
@@ -825,9 +820,7 @@ mod core_transform_fragment_tests {
 
         for pattern in ["(pat-wild {})", "(pat-lit {} 0)"] {
             assert!(
-                pattern_scope(pattern, CoreTransformValue::TopLevelFunctionAlias)
-                    .local_values
-                    .is_empty(),
+                pattern_scope(pattern, CoreTransformValue::TopLevelFunctionAlias).is_empty(),
                 "{pattern} binds no value"
             );
         }

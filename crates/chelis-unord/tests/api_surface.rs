@@ -170,6 +170,24 @@ fn public_inherent_api_is_exact() {
             "VacantEntry",
             BTreeSet::from(["insert", "into_key", "key"].map(str::to_owned)),
         ),
+        // A scoped map restores what a scope displaced; it has no order exit
+        // and no copy.
+        (
+            "ScopedMap",
+            BTreeSet::from(
+                [
+                    "contains_key",
+                    "get",
+                    "insert",
+                    "is_empty",
+                    "len",
+                    "new",
+                    "remove",
+                    "scope",
+                ]
+                .map(str::to_owned),
+            ),
+        ),
     ]);
 
     for (type_name, methods) in expected {
@@ -220,12 +238,17 @@ fn public_trait_api_is_exact() {
             .map(str::to_owned)
         )
     );
+    assert_eq!(
+        public_traits("ScopedMap"),
+        BTreeSet::from(["Debug", "Default", "FromIterator"].map(str::to_owned))
+    );
 }
 
-/// The five types the pins above cover.
-const PINNED_TYPES: [&str; 5] = [
+/// The six types the pins above cover.
+const PINNED_TYPES: [&str; 6] = [
     "Entry",
     "OccupiedEntry",
+    "ScopedMap",
     "UnordMap",
     "UnordSet",
     "VacantEntry",
@@ -256,7 +279,7 @@ fn impl_self_name(mut ty: &Type) -> Option<String> {
 fn the_public_surface_is_closed_by_construction() {
     // Two earlier rounds repaired this test by adding the filter case the
     // previous round escaped through. This one enumerates by exclusion
-    // instead: every public item must be one of the five pinned types, and
+    // instead: every public item must be one of the six pinned types, and
     // every `impl` must be on one of them, so there is no shape left to add.
     let source = fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/lib.rs"))
         .expect("read chelis-unord source");
@@ -265,7 +288,7 @@ fn the_public_surface_is_closed_by_construction() {
 
     // An impl on a private type cannot be a public exit, so those are allowed;
     // the closure comes from the public-item check below, which admits only
-    // the pinned five.
+    // the pinned six.
     let private_types: BTreeSet<String> = syntax
         .items
         .iter()
@@ -316,7 +339,7 @@ fn the_public_surface_is_closed_by_construction() {
         }
         assert!(
             matches!(kind, "struct" | "enum"),
-            "unexpected public {kind} `{name}`: the crate's public surface is the five \
+            "unexpected public {kind} `{name}`: the crate's public surface is the six \
              pinned types and nothing else"
         );
         public_types.insert(name);
