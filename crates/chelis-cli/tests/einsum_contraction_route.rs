@@ -11,8 +11,8 @@
 //! zero reduction labels, a matrix-vector product, a runtime contraction
 //! extent, an integer contraction, a lead label only the column operand
 //! carries, f16 and bf16 operands, an f64 accumulator over f32 operands, an
-//! f16 double-rounding witness, and an empty batch whose expansion strides
-//! would exceed i64.
+//! f16 double-rounding witness, and empty batches whose expansion strides
+//! would exceed i64, with static or runtime rows.
 
 mod common;
 
@@ -55,6 +55,7 @@ const RETAINED: &[&str] = &[
     "widened",
     "narrowed",
     "huge_empty",
+    "zero_batch_rows",
 ];
 
 fn stdout(output: &std::process::Output, lane: &str) -> String {

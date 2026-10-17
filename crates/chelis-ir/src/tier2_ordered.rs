@@ -608,12 +608,19 @@ impl EinsumContraction {
 
 /// Whether the static extents of `dims` pass the runtime's own
 /// contiguous-metadata check at `precision`: their strides, element count and
-/// byte size fit i64, an empty shape included. The runtime plan that reads a
-/// runtime extent checks that extent's own factor.
+/// byte size fit i64, an empty shape included.
+///
+/// A runtime extent beside only nonzero static extents is bounded by the
+/// operands that carry it, which exist in memory. Beside a static zero those
+/// operands are empty and bound nothing, so such a shape is refused.
 fn representable(dims: &[DimInfo], precision: Prim) -> bool {
     let Ok(dtype) = precision.runtime_dtype() else {
         return false;
     };
+    let runtime = dims.iter().any(|dim| static_extent(dim).is_none());
+    if runtime && dims.iter().any(|dim| static_extent(dim) == Some(0)) {
+        return false;
+    }
     let extents: Option<Vec<i64>> = dims
         .iter()
         .filter_map(static_extent)
@@ -975,6 +982,12 @@ mod einsum_contraction_tests {
                 lit(&[usize::MAX / 2 + 1, 2, 8]),
                 lit(&[8, 5]),
             ),
+            // A static zero batch beside a runtime row extent.
+            (
+                "bmk,bkn->bmn",
+                vec![DimInfo::Lit(0), runtime("m"), DimInfo::Lit(4_194_304)],
+                lit(&[0, 4_194_304, 4_194_304]),
+            ),
             // An empty batch whose expansion strides exceed i64.
             (
                 "bmk,bkn->bmn",
@@ -1150,7 +1163,8 @@ mod einsum_contraction_tests {
     /// extents drawn from zero, one, three, a runtime extent and a large one,
     /// an accepted contraction lowers to one product sum whose planned shapes
     /// fit i64 and which stores no node larger in bytes than an operand or
-    /// the result. A runtime extent is evaluated at 0 and at 7.
+    /// the result. A runtime extent is evaluated at 0 and at 7, and beside a
+    /// static zero also near i64's limit.
     #[test]
     fn every_accepted_contraction_stores_no_more_than_its_operands_or_result() {
         let precisions = [
@@ -1239,6 +1253,24 @@ mod einsum_contraction_tests {
                             bytes(product) <= i64::MAX as u128,
                             "`{equation}` {a:?} {b:?} expansion bytes"
                         );
+                    }
+                    // Without a static zero, the operands' existence in memory
+                    // bounds every runtime extent. A static zero removes that
+                    // bound, so then every planned shape's strides must fit
+                    // with runtime extents near i64's limit.
+                    if a.iter().chain(&b).any(|dim| static_extent(dim) == Some(0)) {
+                        let near_limit = (1u64 << 62) as f64;
+                        for node in dag.nodes() {
+                            let mut suffix = 1f64;
+                            for dim in node.output_type.dims.iter().rev() {
+                                suffix *= static_extent(dim).map_or(near_limit, |n| n as f64);
+                                assert!(
+                                    suffix <= i64::MAX as f64,
+                                    "`{equation}` {a:?} {b:?} {:?} stride beside a static zero",
+                                    node.op
+                                );
+                            }
+                        }
                     }
                 }
             }
