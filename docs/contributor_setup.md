@@ -235,6 +235,16 @@ The `Cargo.nix freshness` CI job runs the same crate2nix 0.15.0 command and
 fails on any byte difference. Resolve a `Cargo.nix` merge conflict with this
 command, not by hand.
 
+Each Nix crate build gets only its own directory, without `tests/`,
+`benches/`, and `examples/`. A crate build that reads another file, outside
+its directory or under one of these directories, names that path in
+`crateBuildReads` in `nix/packages.nix`. An `include_str!` argument and a
+build script input are examples. Without that entry, the Nix build of the
+crate fails because the file is absent. No crate build reads the other test
+files, so an edit to them changes no crate derivation. Nix builds the crates
+with the minimal profile (rustc, cargo, and rust-std) of the Rust version in
+`rust-toolchain.toml`.
+
 ## Optional Devenv shell
 
 The native path above works without Devenv. The optional shell supplies

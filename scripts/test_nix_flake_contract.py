@@ -1160,23 +1160,28 @@ class NixSourceContractTests(unittest.TestCase):
 
     def test_workspace_source_overrides_preserve_external_compile_assets(self) -> None:
         packages = (REPO_ROOT / "nix" / "packages.nix").read_text(encoding="utf-8")
-        expected_roots = {
-            "chelis-cli": "chelis-source/crates/chelis-cli",
-            "chelis-compiler-api": "chelis-source/crates/chelis-compiler-api",
-            "chelis-cove": "chelis-source/crates/chelis-cove",
-            "chelis-std-bundle": "chelis-source/crates/chelis-std-bundle",
-            "tree-sitter-chelis": "chelis-source/tree-sitter-chelis",
+        build_reads = packages[packages.index("  crateBuildReads = {") :]
+        build_reads = build_reads[: build_reads.index("\n  };\n") + 1]
+        expected_reads = {
+            "chelis-cli": ["hipRuntimeSources", "chelis_metal_runtime.h"],
+            "chelis-compiler-api": [
+                "chelis_runtime.h",
+                "hipRuntimeSources",
+                "packages/chelis-clarabel/src/qp.ch",
+            ],
+            "chelis-cove": ["queries/highlights.scm"],
+            "chelis-std-bundle": ["chelisStdInputs"],
+            "tree-sitter-chelis": ["grammars/tree-sitter-chelis-surf/src/parser.c"],
         }
-        for crate, source_root in expected_roots.items():
+        for crate, reads in expected_reads.items():
             with self.subTest(crate=crate):
-                self.assertIn(f'"{crate}" = attrs:', packages)
-                self.assertIn(f'sourceRoot = "{source_root}";', packages)
-        self.assertEqual(packages.count("src = crateSource;"), len(expected_roots))
-        # The bundle's build script packs packages/chelis-std from the crate
-        # source tree.
-        crate_source = packages[packages.index("crateSource = import ./source.nix") :]
-        crate_source = crate_source[: crate_source.index("};")]
-        self.assertIn('"packages"', crate_source)
+                entry = build_reads[build_reads.index(f'    "{crate}" =') :]
+                entry = entry[: entry.index(";\n")]
+                for read in reads:
+                    self.assertIn(read, entry)
+        # Every workspace crate takes its source from the per-crate views.
+        self.assertIn("lib.genAttrs workspaceCrates", packages)
+        self.assertNotIn("includeRoots", packages)
 
     def test_repository_lint_has_no_generated_graph_exclusion(self) -> None:
         policy = (REPO_ROOT / "chelis-lint.toml").read_text(encoding="utf-8")
@@ -1217,6 +1222,182 @@ class NixSourceContractTests(unittest.TestCase):
             'if [ "$version_output" != ${escape "chelis ${built.version}"} ]; then',
             checks,
         )
+
+
+NIX_STORE = shutil.which("nix-store")
+REQUIRES_NIX_STORE = unittest.skipUnless(NIX and NIX_STORE, "Nix is not installed")
+
+
+def copy_flake_source(destination: Path) -> None:
+    """Copy the files that a Git flake of this checkout holds."""
+    listed = subprocess.run(
+        ["git", "ls-files", "-z", "--cached"],
+        cwd=REPO_ROOT,
+        stdout=subprocess.PIPE,
+        check=True,
+    ).stdout
+    for name in filter(None, listed.split(b"\0")):
+        relative = os.fsdecode(name)
+        source = REPO_ROOT / relative
+        # A deleted file is absent from the flake, and a Git flake omits submodules.
+        if not source.is_symlink() and not source.is_file():
+            continue
+        target = destination / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target, follow_symlinks=False)
+
+
+def crate_derivations(flake: Path, system: str) -> set[str]:
+    """The crate derivations in the closure of `packages.<system>.chelis`."""
+    package = nix_raw("eval", "--raw", f"path:{flake}#packages.{system}.chelis.drvPath")
+    closure = subprocess.run(
+        [NIX_STORE, "--query", "--requisites", package],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if closure.returncode != 0:
+        raise AssertionError(closure.stderr)
+    return {
+        path
+        for path in closure.stdout.split()
+        if path.endswith(".drv") and Path(path).name[33:].startswith("rust_")
+    }
+
+
+def derivation_names(paths: set[str]) -> list[str]:
+    return sorted(Path(path).name[33:].removesuffix(".drv") for path in paths)
+
+
+def derivation_environment(path: str) -> dict[str, str]:
+    shown = nix_json("derivation", "show", path)
+    derivations = shown.get("derivations", shown)
+    (derivation,) = derivations.values()
+    return derivation["env"]
+
+
+class NixCrateRebuildSetTests(unittest.TestCase):
+    """Each crate derivation changes only when a file that its build reads changes."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        if not (NIX and NIX_STORE):
+            return
+        cls.system = nix_raw("eval", "--impure", "--raw", "--expr", "builtins.currentSystem")
+        if cls.system not in EXPECTED_SYSTEMS:
+            raise unittest.SkipTest(f"{cls.system} is not a supported package system")
+        manifest = tomllib.loads((REPO_ROOT / "Cargo.toml").read_text(encoding="utf-8"))
+        cls.version = manifest["workspace"]["package"]["version"]
+        cls.scratch = tempfile.TemporaryDirectory(prefix="chelis-rebuild-set-")
+        # A path flake rejects a symlink in its path, such as /var on macOS.
+        cls.baseline_flake = Path(cls.scratch.name).resolve() / "baseline"
+        copy_flake_source(cls.baseline_flake)
+        cls.baseline = crate_derivations(cls.baseline_flake, cls.system)
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        scratch = getattr(cls, "scratch", None)
+        if scratch is not None:
+            scratch.cleanup()
+
+    def changed_crates(self, relative: str) -> tuple[list[str], list[str]]:
+        """Append a comment to `relative` and give the new and the old crate derivations."""
+        flake = Path(tempfile.mkdtemp(dir=self.baseline_flake.parent))
+        shutil.copytree(self.baseline_flake, flake, symlinks=True, dirs_exist_ok=True)
+        edited = flake / relative
+        self.assertTrue(edited.is_file(), relative)
+        with edited.open("a", encoding="utf-8") as handle:
+            handle.write("\n// A rebuild-set probe.\n")
+        changed = crate_derivations(flake, self.system)
+        return (
+            derivation_names(changed - self.baseline),
+            derivation_names(self.baseline - changed),
+        )
+
+    def baseline_crate(self, crate: str) -> dict[str, str]:
+        (path,) = [
+            path
+            for path in self.baseline
+            if Path(path).name[33:] == f"rust_{crate}-{self.version}.drv"
+        ]
+        return derivation_environment(path)
+
+    @REQUIRES_NIX_STORE
+    def test_compiler_source_edit_changes_only_the_compiler_crate(self) -> None:
+        added, removed = self.changed_crates("crates/chelis-cli/src/main.rs")
+        self.assertEqual(added, [f"rust_chelis-cli-{self.version}"])
+        self.assertEqual(removed, [f"rust_chelis-cli-{self.version}"])
+
+    @REQUIRES_NIX_STORE
+    def test_test_only_edit_changes_no_crate(self) -> None:
+        tests = sorted((REPO_ROOT / "crates" / "chelis-ir" / "tests").glob("*.rs"))
+        self.assertTrue(tests)
+        added, removed = self.changed_crates(str(tests[0].relative_to(REPO_ROOT)))
+        self.assertEqual(added, [])
+        self.assertEqual(removed, [])
+
+    @REQUIRES_NIX_STORE
+    def test_library_source_edit_changes_the_crate_and_its_dependents(self) -> None:
+        # Negative control: the rebuild-set oracle sees an edit that a build reads.
+        added, _removed = self.changed_crates("crates/chelis-ir/src/lib.rs")
+        self.assertIn(f"rust_chelis-ir-{self.version}", added)
+        self.assertIn(f"rust_chelis-cli-{self.version}", added)
+        self.assertNotIn(f"rust_chelis-abi-{self.version}", added)
+
+    @REQUIRES_NIX_STORE
+    def test_crate_views_hold_build_reads_and_omit_test_directories(self) -> None:
+        cli = self.baseline_crate("chelis-cli")
+        self.assertEqual(cli["sourceRoot"], "chelis-source/crates/chelis-cli")
+        cli_view = Path(cli["src"])
+        self.assertTrue((cli_view / "crates/chelis-cli/src/main.rs").is_file())
+        self.assertTrue(
+            (cli_view / "crates/chelis-backend-hip/runtime/chelis_hip_runtime.h").is_file()
+        )
+        self.assertFalse((cli_view / "crates/chelis-cli/tests").exists())
+        self.assertFalse((cli_view / "crates/chelis-backend-hip/src").exists())
+        self.assertFalse((cli_view / "grammars").exists())
+
+        ir = self.baseline_crate("chelis-ir")
+        self.assertNotIn("sourceRoot", ir)
+        self.assertTrue((Path(ir["src"]) / "src/lib.rs").is_file())
+        self.assertFalse((Path(ir["src"]) / "tests").exists())
+
+        crmath = Path(self.baseline_crate("chelis-crmath")["src"])
+        kept = sorted(
+            str(path.relative_to(crmath)) for path in (crmath / "tests").rglob("*") if path.is_file()
+        )
+        self.assertEqual(
+            kept,
+            [
+                "tests/fixtures/binary64_worst_cases.txt",
+                "tests/fixtures/canary.txt",
+                "tests/fixtures/profile_obligations.txt",
+            ],
+        )
+
+        bundle = Path(self.baseline_crate("chelis-std-bundle")["src"])
+        self.assertTrue((bundle / "packages/chelis-std/reef.toml").is_file())
+        self.assertTrue((bundle / "packages/chelis-std/src").is_dir())
+        self.assertFalse((bundle / "packages/chelis-std/tests").exists())
+
+    @REQUIRES_NIX_STORE
+    def test_package_toolchain_is_the_minimal_profile_of_the_pinned_version(self) -> None:
+        pinned = tomllib.loads((REPO_ROOT / "rust-toolchain.toml").read_text(encoding="utf-8"))
+        channel = pinned["toolchain"]["channel"]
+        closure = subprocess.run(
+            [NIX_STORE, "--query", "--requisites", *sorted(self.baseline)],
+            text=True,
+            stdout=subprocess.PIPE,
+            check=True,
+        ).stdout.split()
+        names = {Path(path).name[33:] for path in closure}
+        self.assertIn(f"rust-minimal-{channel}.drv", names)
+        for component in ("clippy", "rustfmt", "rust-docs", "rustc-dev", "rust-default"):
+            with self.subTest(component=component):
+                self.assertFalse(
+                    [name for name in names if name.startswith(f"{component}-")], component
+                )
 
 
 if __name__ == "__main__":
