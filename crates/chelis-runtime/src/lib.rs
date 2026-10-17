@@ -620,6 +620,76 @@ fn runtime_balanced_sum<T: RuntimeArithmetic>(leaves: &mut [T], op: &'static str
     leaves[0].runtime_finalize()
 }
 
+/// [`runtime_balanced_sum`]'s tree fed one subtree at a time, holding only
+/// the completed subtrees: one per set bit of the leaf count, so at most 63
+/// for an admitted i64 count. A subtree entering at level `k` combines with
+/// the completed subtree at each level its position's trailing one bits
+/// name, the earlier subtree on the left, and [`CarryTree::total`] folds the
+/// held subtrees rightmost first, which is each level's carried odd tail.
+/// Node for node it is the adjacent-pair tree.
+struct CarryTree<T> {
+    levels: [T; 64],
+    count: u64,
+}
+
+impl<T: RuntimeArithmetic> CarryTree<T> {
+    fn new() -> Self {
+        Self {
+            levels: [T::default(); 64],
+            count: 0,
+        }
+    }
+
+    /// Whether the next leaf starts a pair, the level-1 subtree of two
+    /// adjacent leaves.
+    #[inline]
+    fn at_pair(&self) -> bool {
+        self.count & 1 == 0
+    }
+
+    /// Enter the subtree over the next `2^level` leaves; level 1 needs the
+    /// tree [`at_pair`](Self::at_pair).
+    #[inline]
+    fn enter(&mut self, subtree: T, level: u32, op: &'static str) {
+        debug_assert!(self.count == 0 || self.count.trailing_zeros() >= level);
+        let mut carry = subtree;
+        let mut depth = level as usize;
+        let mut pending = self.count >> level;
+        while pending & 1 == 1 {
+            // A count below 2^64 has fewer than 64 trailing ones.
+            carry = self.levels[depth & 63].runtime_add(carry, op);
+            pending >>= 1;
+            depth += 1;
+        }
+        self.levels[depth & 63] = carry;
+        self.count += 1 << level;
+        #[cfg(test)]
+        EINSUM_SUBTREES_HELD.with(|held| {
+            held.set(held.get().max(self.count.count_ones() as usize));
+        });
+    }
+
+    /// The root after the last leaf; an empty tree is zero, with no addition.
+    fn total(&self, op: &'static str) -> T {
+        let mut total: Option<T> = None;
+        let mut remaining = self.count;
+        let mut depth = 0;
+        while remaining != 0 {
+            if remaining & 1 == 1 {
+                let level = self.levels[depth];
+                total = Some(match total {
+                    Some(total) => level.runtime_add(total, op),
+                    None => level,
+                });
+            }
+            remaining >>= 1;
+            depth += 1;
+        }
+        // As in `runtime_balanced_sum`, a one-leaf sum still finalizes.
+        total.map_or_else(T::default, T::runtime_finalize)
+    }
+}
+
 /// Numeric ordering without any conversion. Float NaNs sort after numeric
 /// values, compare false for `cmplt`, and remain stable relative to each
 /// other; signed zeros therefore also retain source order.
@@ -7429,8 +7499,9 @@ thread_local! {
     /// Operand offsets `chelis_tensor_einsum` has derived through checked
     /// metadata on this thread; tests read it to bound index work per call.
     static EINSUM_CHECKED_OFFSETS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-    /// Product slots `chelis_tensor_einsum` has reserved on this thread.
-    static EINSUM_PRODUCTS_RESERVED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// The most completed subtrees one output of the last
+    /// `chelis_tensor_einsum` call on this thread held at once.
+    static EINSUM_SUBTREES_HELD: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// Einsum labels iterated row-major, with each operand's offset stride per
@@ -7557,6 +7628,9 @@ pub unsafe extern "C" fn chelis_tensor_einsum(
     );
     let reduction_space =
         metadata_or_fail(IterationSpace::new(&reduction_shape), "einsum reduction");
+    // The loop below buffers no reduction, but a reduction whose accumulator
+    // bytes exceed i64 still fails here, as `chelis eval`, which reserves one
+    // output's products, also fails it.
     metadata_or_fail(
         reduction_space
             .elements()
@@ -7634,10 +7708,7 @@ pub unsafe extern "C" fn chelis_tensor_einsum(
         Output: RuntimeAccumulationOutput<Accumulator>,
     {
         let out_size = (*out).count();
-        let reduction_total = metadata_or_fail(
-            reduction.elements().scratch_len::<Accumulator>(),
-            "einsum reduction scratch",
-        );
+        let reduction_total = metadata_or_fail(reduction.elements().as_usize(), "einsum reduction");
         let lp = Source::data_ptr_unchecked(lhs as *mut chelis_tensor);
         let rp = Source::data_ptr_unchecked(rhs as *mut chelis_tensor);
         let op = Output::data_ptr_unchecked(out);
@@ -7675,33 +7746,45 @@ pub unsafe extern "C" fn chelis_tensor_einsum(
         };
         let mut out_at = EinsumOdometer::new(&plan.output);
         let mut outer_at = EinsumOdometer::new(&outer);
-        // One product buffer serves every output. It is sized at the first
-        // output, so an empty output reserves nothing for its reduction.
-        let mut products = Vec::new();
+        #[cfg(test)]
+        EINSUM_SUBTREES_HELD.with(|held| held.set(0));
         for out_linear in 0..out_size {
-            products.clear();
-            if out_linear == 0 {
-                #[cfg(test)]
-                EINSUM_PRODUCTS_RESERVED.with(|count| count.set(count.get() + reduction_total));
-                products.reserve(reduction_total);
-            }
+            // chelis#3782: each product enters the canonical tree as it is
+            // formed, so an output holds one partial sum per completed
+            // subtree rather than its whole reduction ([05-OP-33]).
+            let mut tree = CarryTree::<Accumulator>::new();
             for _ in 0..outer_count {
-                let mut lhs_at = out_at.offsets[0] + outer_at.offsets[0];
-                let mut rhs_at = out_at.offsets[1] + outer_at.offsets[1];
-                for _ in 0..inner {
-                    let lv = *lp.add(lhs_at as usize);
-                    let rv = *rp.add(rhs_at as usize);
-                    products.push(
-                        lv.into_accumulator()
-                            .runtime_mul(rv.into_accumulator(), "einsum"),
-                    );
-                    lhs_at += inner_strides[0];
-                    rhs_at += inner_strides[1];
+                let mut at = [
+                    out_at.offsets[0] + outer_at.offsets[0],
+                    out_at.offsets[1] + outer_at.offsets[1],
+                ];
+                let mut product = || {
+                    let lv = *lp.add(at[0] as usize);
+                    let rv = *rp.add(at[1] as usize);
+                    at[0] += inner_strides[0];
+                    at[1] += inner_strides[1];
+                    lv.into_accumulator()
+                        .runtime_mul(rv.into_accumulator(), "einsum")
+                };
+                // Adjacent leaves enter the tree as the pair they first form;
+                // a leaf left unpaired at either end of the row enters alone.
+                let mut remaining = inner;
+                if remaining > 0 && !tree.at_pair() {
+                    tree.enter(product(), 0, "einsum");
+                    remaining -= 1;
+                }
+                while remaining >= 2 {
+                    let left = product();
+                    let right = product();
+                    tree.enter(left.runtime_add(right, "einsum"), 1, "einsum");
+                    remaining -= 2;
+                }
+                if remaining == 1 {
+                    tree.enter(product(), 0, "einsum");
                 }
                 outer_at.advance(&outer);
             }
-            *op.add(out_linear) =
-                Output::from_accumulator(runtime_balanced_sum(&mut products, "einsum"));
+            *op.add(out_linear) = Output::from_accumulator(tree.total("einsum"));
             out_at.advance(&plan.output);
         }
     }
@@ -10500,41 +10583,143 @@ mod einsum_index_cost_tests {
         }
     }
 
-    fn products_reserved() -> usize {
-        EINSUM_PRODUCTS_RESERVED.with(std::cell::Cell::get)
+    fn subtrees_held() -> usize {
+        EINSUM_SUBTREES_HELD.with(std::cell::Cell::get)
     }
 
-    /// The product buffer is reserved once, at the first output: a contraction
-    /// whose output is empty reserves nothing however large its reduction, and
-    /// a nonempty one reserves exactly its reduction count.
+    /// The product of the extents `equation` reduces over.
+    fn reduction_count(equation: &str, a: &[i64], b: &[i64]) -> usize {
+        let (inputs, output) = equation.split_once("->").unwrap();
+        let (la, lb) = inputs.split_once(',').unwrap();
+        let mut extent = std::collections::BTreeMap::new();
+        for (labels, shape) in [(la, a), (lb, b)] {
+            for (label, &n) in labels.chars().zip(shape) {
+                extent.insert(label, n);
+            }
+        }
+        extent
+            .iter()
+            .filter(|(label, _)| !output.contains(**label))
+            .map(|(_, &n)| n as usize)
+            .product()
+    }
+
+    /// chelis#3782: products stream into the canonical tree, so one output
+    /// holds at most one completed subtree per bit of its reduction count,
+    /// never the reduction itself, and keeps the tree's result bits. The
+    /// sweep covers every reduction count to 130, rows that start mid-pair,
+    /// several reduction labels, a diagonal and a reduction of 1000.
     #[test]
-    fn the_product_buffer_is_reserved_once_and_only_for_an_output() {
+    fn an_output_holds_one_subtree_per_bit_of_its_reduction_count() {
+        let mut cases: Vec<(&str, Vec<i64>, Vec<i64>)> = Vec::new();
+        for n in 0..=130 {
+            cases.push(("i,i->", vec![n], vec![n]));
+        }
+        for rows in 1..=5 {
+            for columns in 0..=19 {
+                cases.push(("ij,ij->", vec![rows, columns], vec![rows, columns]));
+            }
+        }
+        for (a, b) in [(3, 5), (7, 9), (16, 17), (33, 31)] {
+            cases.push(("i,j->", vec![a], vec![b]));
+        }
+        cases.push(("ijk,jk->i", vec![2, 3, 5], vec![3, 5]));
+        cases.push(("iij,j->i", vec![3, 3, 7], vec![7]));
+        cases.push(("ij,jk->ik", vec![3, 1000], vec![1000, 2]));
+        for (index, (equation, a_shape, b_shape)) in cases.iter().enumerate() {
+            let count = |shape: &[i64]| shape.iter().product::<i64>() as usize;
+            let a = values(count(a_shape), index as u32);
+            let b = values(count(b_shape), 101 + index as u32);
+            let expected = reference(equation, (a_shape, &a), (b_shape, &b));
+            let reduction = reduction_count(equation, a_shape, b_shape);
+            let bound = if reduction == 0 {
+                0
+            } else {
+                reduction.ilog2() as usize + 1
+            };
+            unsafe {
+                let lhs = tensor(a_shape, &a);
+                let rhs = tensor(b_shape, &b);
+                let text = CString::new(*equation).unwrap();
+                let equation_value = chelis_string_from_cstr(text.as_ptr());
+                let out = chelis_tensor_einsum(equation_value, lhs, rhs, CHELIS_DTYPE_F32);
+                let held = subtrees_held();
+                assert!(
+                    held <= bound && (reduction < 2 || held >= 1),
+                    "case {index} `{equation}`: {held} subtrees for {reduction} products"
+                );
+                let data = chelis_tensor_read_view(out).data.cast::<f32>();
+                let actual: Vec<u32> = (0..expected.len())
+                    .map(|i| (*data.add(i)).to_bits())
+                    .collect();
+                let expected: Vec<u32> = expected.iter().map(|v| v.to_bits()).collect();
+                assert_eq!(actual, expected, "case {index} `{equation}` result bits");
+                for value in [out, lhs, rhs] {
+                    chelis_tensor_release(value);
+                }
+                chelis_string_release(equation_value);
+            }
+        }
+    }
+
+    /// Every leaf count to 600, entered singly or as pairs in a mixed
+    /// pattern, folds to `runtime_balanced_sum`'s bits at each accumulator
+    /// width the kernel uses.
+    fn carry_tree_matches_balanced_sum<T: RuntimeArithmetic>(
+        leaf: impl Fn(usize) -> T,
+        bits: impl Fn(T) -> u64,
+    ) {
+        for n in 0..=600usize {
+            let leaves: Vec<T> = (0..n).map(&leaf).collect();
+            let mut tree = CarryTree::new();
+            let mut next = 0;
+            while next < n {
+                let pair = next + 1 < n
+                    && tree.at_pair()
+                    && !(next as u32).wrapping_mul(2_654_435_761).is_multiple_of(3);
+                if pair {
+                    let subtree = leaves[next].runtime_add(leaves[next + 1], "einsum");
+                    tree.enter(subtree, 1, "einsum");
+                    next += 2;
+                } else {
+                    tree.enter(leaves[next], 0, "einsum");
+                    next += 1;
+                }
+            }
+            let expected = runtime_balanced_sum(&mut leaves.clone(), "einsum");
+            assert_eq!(bits(tree.total("einsum")), bits(expected), "{n} leaves");
+        }
+    }
+
+    #[test]
+    fn the_carry_tree_is_the_adjacent_pair_tree() {
+        let wide = values(600, 9);
+        carry_tree_matches_balanced_sum(|i| wide[i], |v: f32| u64::from(v.to_bits()));
+        carry_tree_matches_balanced_sum(|i| f64::from(wide[i]) / 3.0, f64::to_bits);
+        carry_tree_matches_balanced_sum(
+            |i| half::f16::from_f32(wide[i] / 1.0e3),
+            |v| u64::from(v.to_bits()),
+        );
+        carry_tree_matches_balanced_sum(
+            |i| half::bf16::from_f32(wide[i]),
+            |v| u64::from(v.to_bits()),
+        );
+        carry_tree_matches_balanced_sum(|i| (wide[i] * 1.0e3) as i64, |v: i64| v as u64);
+        carry_tree_matches_balanced_sum(|i| wide[i] as i32, |v: i32| u64::from(v as u32));
+    }
+
+    /// An empty output holds nothing however large its reduction.
+    #[test]
+    fn an_empty_output_holds_no_subtree() {
         unsafe {
             let text = CString::new("az,cw->zw").unwrap();
             let equation = chelis_string_from_cstr(text.as_ptr());
             let wide = tensor(&[4_000_000_000, 0], &[]);
             let narrow = tensor(&[2, 0], &[]);
-            let before = products_reserved();
             let empty = chelis_tensor_einsum(equation, wide, narrow, CHELIS_DTYPE_F32);
             assert_eq!(chelis_tensor_numel(empty), 0);
-            assert_eq!(products_reserved() - before, 0, "empty output");
+            assert_eq!(subtrees_held(), 0, "empty output");
             for value in [empty, wide, narrow] {
-                chelis_tensor_release(value);
-            }
-            chelis_string_release(equation);
-
-            let text = CString::new("ij,jk->ik").unwrap();
-            let equation = chelis_string_from_cstr(text.as_ptr());
-            let lhs = tensor(&[9, 37], &values(9 * 37, 1));
-            let rhs = tensor(&[37, 7], &values(37 * 7, 2));
-            let before = products_reserved();
-            let out = chelis_tensor_einsum(equation, lhs, rhs, CHELIS_DTYPE_F32);
-            assert_eq!(
-                products_reserved() - before,
-                37,
-                "63 outputs of 37 products"
-            );
-            for value in [out, lhs, rhs] {
                 chelis_tensor_release(value);
             }
             chelis_string_release(equation);

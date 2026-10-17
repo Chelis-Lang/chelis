@@ -2,12 +2,15 @@
 //!
 //! chelis#3701: a tensor allocation builds no ownership-ledger site string
 //! when the ledger is compiled out. chelis#3737: the canonical adjacent-pair
-//! tree folds within one reused leaf buffer, so `einsum`, `trace` and
-//! additive `scatter` allocate no tree storage per output.
+//! tree folds within one reused leaf buffer, so `trace` and additive
+//! `scatter` allocate no tree storage per output. chelis#3782: `einsum`
+//! streams its products into the tree, so its peak heap does not grow with
+//! the reduction count.
 //!
-//! A counting global allocator records fresh heap allocations on the calling
-//! thread. Growing an existing buffer is not a fresh allocation, so a reused
-//! buffer costs one allocation however large it grows.
+//! A counting global allocator records fresh heap allocations and the live
+//! heap bytes on the calling thread. Growing an existing buffer is not a
+//! fresh allocation, so a reused buffer costs one allocation however large
+//! it grows, but its bytes count.
 
 use chelis_runtime::{
     chelis_alloc, chelis_string_from_cstr, chelis_string_release, chelis_tensor,
@@ -23,24 +26,38 @@ struct Counting;
 
 thread_local! {
     static FRESH: Cell<usize> = const { Cell::new(0) };
+    static LIVE: Cell<isize> = const { Cell::new(0) };
+    static PEAK: Cell<isize> = const { Cell::new(0) };
+}
+
+fn grow(bytes: isize) {
+    let live = LIVE.with(|live| {
+        live.set(live.get() + bytes);
+        live.get()
+    });
+    PEAK.with(|peak| peak.set(peak.get().max(live)));
 }
 
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         FRESH.with(|count| count.set(count.get() + 1));
+        grow(layout.size() as isize);
         unsafe { System.alloc(layout) }
     }
 
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
         FRESH.with(|count| count.set(count.get() + 1));
+        grow(layout.size() as isize);
         unsafe { System.alloc_zeroed(layout) }
     }
 
     unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
+        grow(-(layout.size() as isize));
         unsafe { System.dealloc(pointer, layout) }
     }
 
     unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, size: usize) -> *mut u8 {
+        grow(size as isize - layout.size() as isize);
         unsafe { System.realloc(pointer, layout, size) }
     }
 }
@@ -52,6 +69,14 @@ fn fresh_allocations(action: impl FnOnce()) -> usize {
     let before = FRESH.with(Cell::get);
     action();
     FRESH.with(Cell::get) - before
+}
+
+/// The most heap bytes `action` held at once beyond what was live before it.
+fn peak_bytes(action: impl FnOnce()) -> isize {
+    let before = LIVE.with(Cell::get);
+    PEAK.with(|peak| peak.set(before));
+    action();
+    PEAK.with(Cell::get) - before
 }
 
 unsafe fn tensor<T: Copy>(dtype: u8, shape: &[i64], values: &[T]) -> *mut chelis_tensor {
@@ -189,4 +214,79 @@ fn scatter_add_allocates_no_tree_storage_per_leaf() {
     let scatter = scatter_allocations(5, 2);
     assert_eq!(scatter_allocations(5, 3), scatter);
     assert_eq!(scatter_allocations(5, 65), scatter);
+}
+
+/// The peak heap of one einsum call, its result included, for operands of
+/// `a` and `b` (shapes `a_shape`, `b_shape`) at `dtype`.
+fn einsum_peak<T: Copy>(
+    equation: &str,
+    dtype: u8,
+    (a_shape, a): (&[i64], &[T]),
+    (b_shape, b): (&[i64], &[T]),
+) -> isize {
+    unsafe {
+        let lhs = tensor(dtype, a_shape, a);
+        let rhs = tensor(dtype, b_shape, b);
+        let text = CString::new(equation).unwrap();
+        let equation = chelis_string_from_cstr(text.as_ptr());
+        let peak = peak_bytes(|| {
+            let out = chelis_tensor_einsum(equation, lhs, rhs, dtype);
+            chelis_tensor_release(out);
+        });
+        chelis_string_release(equation);
+        chelis_tensor_release(lhs);
+        chelis_tensor_release(rhs);
+        peak
+    }
+}
+
+/// chelis#3782: one einsum's peak heap is fixed by its output and label
+/// count, whatever its reduction count. The sweep reduces 1 to 2^20 products
+/// into one output, and up to 4096 into each of 48 outputs, at f32 and i64;
+/// a kernel that stored an output's products would grow by four or eight
+/// bytes per product.
+#[test]
+fn einsum_peak_heap_does_not_grow_with_the_reduction() {
+    let extents = [1usize, 2, 3, 7, 64, 255, 1024];
+    for (dtype, name) in [(CHELIS_DTYPE_F32, "f32"), (CHELIS_DTYPE_I64, "i64")] {
+        let peak = |equation: &str, a_shape: &[i64], b_shape: &[i64]| {
+            let a_count = a_shape.iter().product::<i64>() as usize;
+            let b_count = b_shape.iter().product::<i64>() as usize;
+            if dtype == CHELIS_DTYPE_F32 {
+                einsum_peak(
+                    equation,
+                    dtype,
+                    (a_shape, &ramp(a_count)),
+                    (b_shape, &ramp(b_count)),
+                )
+            } else {
+                let ints =
+                    |count: usize| (0..count).map(|i| (i % 5) as i64 - 2).collect::<Vec<_>>();
+                einsum_peak(
+                    equation,
+                    dtype,
+                    (a_shape, &ints(a_count)),
+                    (b_shape, &ints(b_count)),
+                )
+            }
+        };
+        let scalar = peak("i,j->", &[1], &[1]);
+        let rows = peak("ij,jk->ik", &[6, 1], &[1, 8]);
+        for &x in &extents {
+            for &y in &extents {
+                let (x, y) = (x as i64, y as i64);
+                assert_eq!(
+                    peak("i,j->", &[x], &[y]),
+                    scalar,
+                    "{name} `i,j->` over {x}x{y} products"
+                );
+            }
+            let k = x as i64 * 4;
+            assert_eq!(
+                peak("ij,jk->ik", &[6, k], &[k, 8]),
+                rows,
+                "{name} `ij,jk->ik` over {k} products per output"
+            );
+        }
+    }
 }
