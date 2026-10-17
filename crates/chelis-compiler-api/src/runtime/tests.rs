@@ -1235,6 +1235,68 @@ fn issue_2335_read_only_list_builtins_do_not_copy_the_list() {
     );
 }
 
+/// Evaluate a fixture that binds `result`, returning `result` rendered.
+fn evaluate_result(source: &str) -> String {
+    let checked = checked_surf(source);
+    let empty_tensors: UnordMap<String, RuntimeTensorValue> = UnordMap::new();
+    let inputs = HostEvaluationInputs {
+        roots: &empty_tensors,
+        bindings: None,
+    };
+    let outcome =
+        evaluate_host_program_with_library_and_types(&checked, None, None, inputs, None, None)
+            .unwrap_or_else(|failure| panic!("fixture evaluates: {}", failure.message));
+    outcome
+        .host_bindings
+        .get("result")
+        .map(render_value)
+        .expect("fixture binds `result`")
+}
+
+/// chelis#3741: a callable retains each higher-order formal's contract
+/// normalized, once, where the contract is attached. Applying the callable
+/// reads the retained signature and checks only the actual arguments.
+///
+/// `apply_n` retains its formal `f`'s contract on `inc`, then applies `f`
+/// once per fold step. The receipt counts every contract normalization
+/// (`chelis_ir::callable_value::contract_normalizations`), which must not
+/// grow with the number of applications.
+///
+/// Evidentiary status: REGRESSION TEST, proven failing first. With the
+/// per-application normalization #3629 introduced restored, the count grew by
+/// one per application of `f`.
+#[test]
+fn issue_3741_retained_contracts_normalize_once_not_per_application() {
+    fn normalizations(applications: usize) -> u64 {
+        let source = format!(
+            "def apply_n(f: i64 -> i64, n: i64) -> i64 = \
+             fold(fn (acc: i64, i: i64) -> f(acc), 0i64, range(0i64, n))\n\
+             def inc(x: i64) -> i64 = add(x, 1i64)\n\
+             result = apply_n(inc, {applications}i64)\n"
+        );
+        chelis_ir::callable_value::reset_contract_normalizations();
+        let result = evaluate_result(&source);
+        let count = chelis_ir::callable_value::contract_normalizations();
+        assert_eq!(
+            result,
+            applications.to_string(),
+            "#3741: the fold applies `f` once per step"
+        );
+        count
+    }
+    let few = normalizations(10);
+    let many = normalizations(40);
+    eprintln!("#3741 receipt: 10 applications normalized {few}, 40 normalized {many}");
+    assert!(
+        few >= 1,
+        "#3741: retaining `f`'s contract must normalize it, or this receipt measures nothing"
+    );
+    assert_eq!(
+        few, many,
+        "#3741: applying a callable must not normalize its retained contracts again"
+    );
+}
+
 /// chelis#2204: a closure parameter shadows a captured binding of the same
 /// name at the interpreter level, not only inside `Frame`'s own unit tests.
 /// Red-team round 1 on chelis#2208 inverted `Frame::get` to prefer the

@@ -1507,7 +1507,14 @@ impl FrameCaptures<'_> {
             }
             RuntimeValue::Builtin(value) => {
                 let name = self.fresh_name();
-                self.builtin_values.insert(name.clone(), value.clone());
+                // Lowering normalizes against its own registry, from the
+                // authored contracts the runtime value retains.
+                let authored = value
+                    .try_map_contracts(|contract| {
+                        Ok::<_, std::convert::Infallible>(contract.authored().clone())
+                    })
+                    .unwrap_or_else(|never| match never {});
+                self.builtin_values.insert(name.clone(), authored);
                 return Ok(Some(name));
             }
             // A declaration's closure keeps reading top-level names.

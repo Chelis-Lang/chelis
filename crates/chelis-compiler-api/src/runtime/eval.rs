@@ -1557,7 +1557,7 @@ impl<'a> EvalContext<'a> {
         {
             let normalized = normalize_authored_entry_type(signature, self.session.as_ref())?;
             if checked_function_children(&normalized).is_some() {
-                builtin.retain_outer_contract(signature.clone());
+                builtin.retain_outer_contract(self.retained_contract(signature)?);
             }
         }
         self.declaration_values.insert(resolved_name, value.clone());
@@ -3387,7 +3387,7 @@ impl<'a> EvalContext<'a> {
                                 .to_owned(),
                         );
                     }
-                    value.retain_invocation_contract(contract);
+                    value.retain_invocation_contract(self.retained_contract(&contract)?);
                 }
                 let result_producer = self.result_producer.take();
                 self.binding_types.insert(name.to_string(), static_ty);
@@ -3877,6 +3877,16 @@ impl<'a> EvalContext<'a> {
         )
     }
 
+    /// Normalize an authored invocation contract once, where a callable
+    /// retains it. Every later application reads the retained normalized
+    /// signature, so the per-call path only checks actual arguments
+    /// (chelis#3741).
+    fn retained_contract(&self, authored: &Expr) -> Result<NormalizedCallableContract, String> {
+        NormalizedCallableContract::from_authored(&self.adt_registry, authored)?.ok_or_else(|| {
+            "retained invocation contract is not a checked function signature".to_owned()
+        })
+    }
+
     fn apply_resolved_callable_under_result_claim(
         &mut self,
         callable: RuntimeValue,
@@ -3916,17 +3926,8 @@ impl<'a> EvalContext<'a> {
         }
         let mut result_frames = Vec::new();
         if let Some(contracts) = callable.invocation_contracts() {
-            for authored_contract in contracts {
-                let normalized =
-                    chelis_ir::callable_value::NormalizedCallableContract::from_authored(
-                        &self.adt_registry,
-                        authored_contract,
-                    )?
-                    .ok_or_else(|| {
-                        "retained invocation contract is not a checked function signature"
-                            .to_owned()
-                    })?;
-                let contract = normalized.signature();
+            for retained in contracts {
+                let contract = retained.signature();
                 let actualized = check_callable_invocation_contract(
                     contract,
                     &args,
@@ -4334,7 +4335,7 @@ impl<'a> EvalContext<'a> {
                                 }
                                 _ => contract,
                             };
-                            arg.retain_invocation_contract(origin.clone());
+                            arg.retain_invocation_contract(self.retained_contract(origin)?);
                         }
                         self.binding_types.insert(param.clone(), declared);
                         let producer = ResultProducer::interface_load(&arg);

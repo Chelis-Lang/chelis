@@ -1,7 +1,26 @@
 //! Static builtin values retain identity and every independent contract frame.
 
 use chelis_deep::{DeepTag, Expr};
+use std::cell::Cell;
 use std::sync::Arc;
+
+thread_local! {
+    /// Authored contracts normalized on this thread since the last reset
+    /// (chelis#3741). Counted at the normalization, never estimated.
+    static CONTRACT_NORMALIZATIONS: Cell<u64> = const { Cell::new(0) };
+}
+
+/// Authored contracts [`NormalizedCallableContract::from_authored`] normalized
+/// on this thread. A runtime callable carries its contracts normalized, so
+/// applying it again must not add to this count.
+pub fn contract_normalizations() -> u64 {
+    CONTRACT_NORMALIZATIONS.with(Cell::get)
+}
+
+/// Reset [`contract_normalizations`] for this thread.
+pub fn reset_contract_normalizations() {
+    CONTRACT_NORMALIZATIONS.with(|normalizations| normalizations.set(0));
+}
 
 /// Semantic invocation frames expose checked syntax, never numeric payloads.
 /// Runtime owners may retain additional opaque defining-scope evidence.
@@ -123,6 +142,7 @@ impl NormalizedCallableContract {
         registry: &chelis_types::adt::AdtRegistry,
         authored: &Expr,
     ) -> Result<Option<Self>, String> {
+        CONTRACT_NORMALIZATIONS.with(|normalizations| normalizations.set(normalizations.get() + 1));
         let normalized = crate::host::normalize_authored_entry_type(registry, authored)?;
         let mut signature = &normalized;
         loop {
