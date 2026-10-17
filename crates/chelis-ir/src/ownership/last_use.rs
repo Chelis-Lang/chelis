@@ -504,8 +504,10 @@ fn apply_copy_upgrade(
     block.ops.remove(rewrite.copy_index);
     unit.owners.remove(&rewrite.copy);
     census.remove(&rewrite.copy);
+    // The owner had at least the copy's source operand and its `Drop`, so
+    // the net loss of one cannot underflow.
     if let Some(count) = census.get_mut(&rewrite.owner) {
-        *count = count.saturating_sub(1);
+        *count -= 1;
     }
 }
 
