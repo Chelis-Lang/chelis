@@ -506,10 +506,6 @@ struct ContextFixtureEnvelope {
     payload: Vec<u8>,
 }
 
-fn magic_len(bytes: &[u8]) -> usize {
-    bytes.iter().position(|byte| *byte == b'\n').unwrap() + 1
-}
-
 fn change_numeric_bits(payload: &mut [u8], storage: bool) {
     let expected = expected_numeric_payloads(true);
     let row = expected
@@ -550,8 +546,7 @@ fn cache_reconstruction_rejects_changed_numeric_bits_after_checksum_recomputed()
         &chelis_std_bundle::EMBEDDED_RUNTIME,
     )
     .unwrap();
-    let compiled_bytes = compiled.encode().unwrap();
-    let (handoff_bytes, handoff_digest) = compiled.encode_for_handoff().unwrap();
+    let (compiled_bytes, compiled_digest) = compiled.encode_for_handoff().unwrap();
     let compiled_path = directory.path().join("numeric.ctx");
     for storage in [false, true] {
         let std_magic = b"CHELIS_CACHE_ENV_V1\n";
@@ -567,12 +562,16 @@ fn cache_reconstruction_rejects_changed_numeric_bits_after_checksum_recomputed()
             matches!(error,cache_envelope::CacheError::Decode(ref message) if message.contains("lowered library payload")),
             "{error}"
         );
-        let disk_magic = magic_len(&compiled_bytes);
+        let magic_len = compiled_bytes
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .unwrap()
+            + 1;
         let mut envelope: ContextFixtureEnvelope =
-            bincode::deserialize(&compiled_bytes[disk_magic..]).unwrap();
+            bincode::deserialize(&compiled_bytes[magic_len..]).unwrap();
         change_numeric_bits(&mut envelope.payload, storage);
         envelope.payload_sha256 = Sha256::digest(&envelope.payload).into();
-        let mut changed = compiled_bytes[..disk_magic].to_vec();
+        let mut changed = compiled_bytes[..magic_len].to_vec();
         changed.extend(bincode::serialize(&envelope).unwrap());
         fs::write(&compiled_path, &changed).unwrap();
         let error = CompiledContext::decode(&changed).unwrap_err();
@@ -588,34 +587,16 @@ fn cache_reconstruction_rejects_changed_numeric_bits_after_checksum_recomputed()
             matches!(error,CacheError::Decode(ref message) if message.contains("lowered library payload")),
             "{error}"
         );
-        // chelis#2211, chelis#2256: the authenticated route reads the handoff
-        // envelope, which carries no lowering, so the numeric storage this
-        // rewrite targets is not in its bytes at all. The worker re-derives it
-        // from the checked library and gets the producer's bits; a rewrite of
-        // anything the handoff does carry is refused by the producer's digest
-        // (`authenticated_decode_rejects_a_payload_rewritten_after_encode`).
-        let handoff_payload = bincode::deserialize::<ContextFixtureEnvelope>(
-            &handoff_bytes[magic_len(&handoff_bytes)..],
-        )
-        .unwrap()
-        .payload;
-        let numeric = expected_numeric_payloads(true)
-            .into_iter()
-            .find(|row| row["dtype"] == "f64" && (row["kind"] == "storage") == storage)
-            .unwrap();
-        let numeric = unhex(numeric["bincode"].as_str().unwrap());
-        assert!(
-            !handoff_payload
-                .windows(numeric.len())
-                .any(|window| window == numeric),
-            "the handoff payload carries lowered numeric storage it should not"
-        );
-        let worker = CompiledContext::decode_authenticated(&handoff_bytes, &handoff_digest)
+        // chelis#2211: the same rewrite, against the authenticated route. That
+        // route does not re-derive, so it has to catch this some other way, and
+        // it does: the producer's digest names the original payload and never
+        // travelled with these bytes, so resealing the envelope buys nothing.
+        let error = CompiledContext::decode_authenticated(&changed, &compiled_digest).unwrap_err();
+        assert!(error.contains("digest its producer delivered"), "{error}");
+        // And the untouched bytes still authenticate, so the assertion above is
+        // detecting the rewrite rather than rejecting everything.
+        CompiledContext::decode_authenticated(&compiled_bytes, &compiled_digest)
             .expect("the producer's own bytes must authenticate");
-        assert_eq!(
-            historical_producer::context_numeric_payloads(&worker),
-            expected_numeric_payloads(true)
-        );
     }
 }
 

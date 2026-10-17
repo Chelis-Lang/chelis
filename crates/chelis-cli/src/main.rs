@@ -7949,9 +7949,9 @@ fn cmd_test(
     // and the discovered test files import, and every worker runs its files
     // against this one context.
     let test_entries = test_entry_imports(&test_files);
-    // chelis#3744: the parent only hands the context on, so on a cache hit the
-    // handoff is sealed from the verified cache payload rather than encoded
-    // from the decoded context.
+    // chelis#3744: the parent only hands the context on, so on a cache hit it
+    // passes the verified cache bytes through rather than encoding the decoded
+    // context again.
     let context = match chelis_compiler_api::load_or_compile_package_context(
         &reef_home_path,
         &cwd,
@@ -7977,8 +7977,7 @@ fn cmd_test(
             ));
         }
     };
-    let (context_bytes, context_digest) = context.encode_for_handoff()?;
-    drop(context);
+    let (context_bytes, context_digest) = context.into_handoff()?;
     let context_handoff = CompiledContextHandoff::new(
         CompiledContextTempfile::write(&context_bytes)?,
         &context_digest,

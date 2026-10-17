@@ -1,16 +1,14 @@
 //! chelis#3744 and chelis#2256: what `chelis test`'s parent hands its workers.
 //!
 //! The parent only hands the compiled context on. On a warm run it reads the
-//! disk cache, verifies it through the untrusted route, and must then seal the
-//! worker handoff from the verified bytes rather than encode the decoded
-//! context again; on a cold run one encoding serves both the cache file and the
-//! handoff. The oracle is the compiler's own count of context payload encodes.
+//! disk cache and verifies it through the untrusted route, and must then pass
+//! the verified bytes through rather than encode the decoded context again; on
+//! a cold run one encoding serves both the cache file and the handoff. The
+//! oracle is the compiler's own count of context envelope encodes.
 //!
-//! The handoff carries the checked parts and no lowering, because the worker
-//! re-derives the lowering and would only discard a transmitted one
-//! (chelis#2256). The disk payload is the handoff payload followed by the
-//! lowering, which is what lets a verified cache entry supply the handoff
-//! without an encode.
+//! The worker re-derives the lowering from the checked library, so its route
+//! never decodes the transmitted lowering (chelis#2256): a handoff whose
+//! lowering section is cut away still reconstructs the same context there.
 //!
 //! The steps share one test function on purpose: the count is process-wide,
 //! and `cargo test` runs the tests of one binary on parallel threads.
@@ -20,10 +18,11 @@ use std::path::{Path, PathBuf};
 
 use bincode::Options;
 use chelis_compiler_api::{
-    COMPILER_VERSION, CompiledContext, compiled_context_payload_encodes,
+    COMPILER_VERSION, CompiledContext, HandoffDigest, compiled_context_payload_encodes,
     load_or_compile_package_context,
 };
 use chelis_reef::EntryImports;
+use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
 fn package_fixture() -> (TempDir, PathBuf) {
@@ -60,19 +59,19 @@ fn package_fixture() -> (TempDir, PathBuf) {
 }
 
 /// Mirror of the private envelope.
-#[derive(serde::Deserialize)]
+#[derive(serde::Serialize, serde::Deserialize)]
 struct EnvelopeMirror {
-    _version: u32,
-    _source_hash: chelis_compiler_api::ContextHash,
-    _identity: chelis_compiler_api::CacheIdentity,
-    _payload_sha256: [u8; 32],
+    version: u32,
+    source_hash: chelis_compiler_api::ContextHash,
+    identity: chelis_compiler_api::CacheIdentity,
+    payload_sha256: [u8; 32],
     payload: Vec<u8>,
 }
 
-/// Mirror of the handoff payload: the checked parts, no lowering.
+/// Mirror of the checked parts that lead the payload.
 #[derive(serde::Deserialize)]
 #[allow(dead_code)]
-struct HandoffWireMirror {
+struct CheckedPartsMirror {
     source_hash: chelis_compiler_api::ContextHash,
     identity: chelis_compiler_api::CacheIdentity,
     reef_state: chelis_reef::PreparedReefGraph,
@@ -80,15 +79,12 @@ struct HandoffWireMirror {
     library_checked: chelis_types::CheckedProgram,
 }
 
-fn envelope_payload(bytes: &[u8]) -> Vec<u8> {
-    let magic = bytes
+fn magic_len(bytes: &[u8]) -> usize {
+    bytes
         .iter()
         .position(|byte| *byte == b'\n')
         .expect("the envelope carries its magic prefix")
-        + 1;
-    bincode::deserialize::<EnvelopeMirror>(&bytes[magic..])
-        .expect("the envelope decodes")
-        .payload
+        + 1
 }
 
 fn load(reef_home: &Path, root: &Path) -> chelis_compiler_api::LoadedContext {
@@ -113,88 +109,97 @@ fn the_only_cache_file(reef_home: &Path) -> PathBuf {
 }
 
 #[test]
-fn the_parent_hands_workers_verified_cache_bytes_without_the_lowering() {
+fn the_parent_hands_workers_the_verified_cache_bytes() {
     let (_dir, root) = package_fixture();
     let reef_home = TempDir::new().expect("reef home");
 
     // Cold: one encode writes the cache file and supplies the handoff.
     let before = compiled_context_payload_encodes();
-    let cold = load(reef_home.path(), &root);
-    let (cold_bytes, cold_digest) = cold.encode_for_handoff().expect("cold handoff");
+    let (cold_bytes, cold_digest) = load(reef_home.path(), &root)
+        .into_handoff()
+        .expect("cold handoff");
     assert_eq!(
         compiled_context_payload_encodes() - before,
         1,
         "a cold load must encode the context once for both the cache file and the handoff"
     );
     let cache_bytes = fs::read(the_only_cache_file(reef_home.path())).expect("read cache file");
+    assert!(
+        cold_bytes == cache_bytes,
+        "the cold handoff differs from the cache file it was saved as"
+    );
 
-    // Warm: the handoff is sealed from the verified cache payload.
+    // Warm: the handoff is the verified cache file itself.
     let before = compiled_context_payload_encodes();
     let warm = load(reef_home.path(), &root);
-    let (warm_bytes, warm_digest) = warm.encode_for_handoff().expect("warm handoff");
+    let context = load(reef_home.path(), &root).into_context();
+    let (warm_bytes, warm_digest) = warm.into_handoff().expect("warm handoff");
     assert_eq!(
         compiled_context_payload_encodes() - before,
         0,
-        "a warm load re-encoded the context it had just verified; the handoff must be sealed \
-         from the verified cache payload (chelis#3744)"
+        "a warm load re-encoded the context it had just verified; the handoff must be the \
+         verified cache bytes (chelis#3744)"
     );
-    assert_eq!(
-        warm_bytes, cold_bytes,
-        "warm and cold runs hand workers different bytes"
+    assert!(
+        warm_bytes == cache_bytes,
+        "the warm handoff is not the cache file"
     );
     assert_eq!(warm_digest, cold_digest);
 
-    // The equivalence the warm route relies on: what it seals from the cache
-    // payload is what encoding the verified context produces.
-    let context = warm.into_context();
+    // The equivalence the warm route relies on: encoding the context the cache
+    // decodes to reproduces the cache bytes and digest.
     let (encoded, encoded_digest) = context
         .encode_for_handoff()
         .expect("encode the verified context");
     assert!(
-        encoded == warm_bytes,
-        "the handoff sealed from the cache payload differs from encoding the context it decodes to"
+        encoded == cache_bytes,
+        "encoding the decoded cache entry does not reproduce its bytes"
     );
     assert_eq!(encoded_digest, warm_digest);
-
-    // chelis#2256: the handoff payload is exactly the checked parts. A
-    // lowering left in it would be trailing bytes here.
-    let handoff_payload = envelope_payload(&warm_bytes);
-    bincode::DefaultOptions::new()
-        .with_fixint_encoding()
-        .deserialize::<HandoffWireMirror>(&handoff_payload)
-        .expect("the handoff payload is the checked parts and nothing else");
-    // The disk payload is those bytes followed by the lowering.
-    let disk_payload = envelope_payload(&cache_bytes);
-    assert!(
-        disk_payload.len() > handoff_payload.len() && disk_payload.starts_with(&handoff_payload),
-        "the disk payload must be the handoff payload followed by the lowering ({} vs {} bytes)",
-        disk_payload.len(),
-        handoff_payload.len()
-    );
-    let lowering: chelis_ir::lower::LoweredLibrary =
-        bincode::deserialize(&disk_payload[handoff_payload.len()..])
-            .expect("the disk payload's second section is the lowering");
-    assert!(
-        bincode::serialize(&lowering).expect("encode the lowering")
-            == disk_payload[handoff_payload.len()..],
-        "the disk payload ends with exactly the lowering"
-    );
 
     // The worker route accepts the handoff and reconstructs the same context
     // the disk route does.
     let worker = CompiledContext::decode_authenticated(&warm_bytes, &warm_digest)
         .expect("the worker route accepts the handoff");
+    let expected = bincode::serialize(&context).expect("encode the verified context");
     assert!(
-        bincode::serialize(&worker).expect("encode the worker's context")
-            == bincode::serialize(&context).expect("encode the verified context"),
+        bincode::serialize(&worker).expect("encode the worker's context") == expected,
         "the worker reconstructs a different context from the handoff"
     );
 
-    // Each route names its own shape and refuses the other's before decoding.
-    let error = CompiledContext::decode(&warm_bytes)
-        .expect_err("the disk route must refuse handoff bytes, which carry no lowering");
-    assert!(error.contains("magic"), "{error}");
-    let error = CompiledContext::decode_authenticated(&cache_bytes, &warm_digest)
-        .expect_err("the worker route must refuse disk-cache bytes");
-    assert!(error.contains("magic"), "{error}");
+    // chelis#2256: the worker route never decodes the transmitted lowering.
+    // Cut the lowering away, reseal the envelope, and deliver the digest of
+    // what is left: the worker still reconstructs the same context, while the
+    // disk route, which compares against the lowering, refuses the bytes.
+    let magic = magic_len(&warm_bytes);
+    let mut envelope: EnvelopeMirror =
+        bincode::deserialize(&warm_bytes[magic..]).expect("the envelope decodes");
+    let mut rest = envelope.payload.as_slice();
+    let _: CheckedPartsMirror =
+        serde::Deserialize::deserialize(&mut bincode::Deserializer::with_reader(
+            &mut rest,
+            bincode::DefaultOptions::new()
+                .with_fixint_encoding()
+                .allow_trailing_bytes(),
+        ))
+        .expect("the payload leads with the checked parts");
+    let parts_len = envelope.payload.len() - rest.len();
+    assert!(
+        parts_len < envelope.payload.len(),
+        "the payload carries a lowering after the checked parts"
+    );
+    envelope.payload.truncate(parts_len);
+    envelope.payload_sha256 = Sha256::digest(&envelope.payload).into();
+    let mut unlowered = warm_bytes[..magic].to_vec();
+    unlowered.extend(bincode::serialize(&envelope).expect("reseal the envelope"));
+    let digest = HandoffDigest::from_hex(&format!("{:x}", Sha256::digest(&envelope.payload)))
+        .expect("a freshly computed digest parses");
+    let worker = CompiledContext::decode_authenticated(&unlowered, &digest)
+        .expect("the worker route reads only the checked parts");
+    assert!(
+        bincode::serialize(&worker).expect("encode the worker's context") == expected,
+        "without the transmitted lowering the worker reconstructs a different context"
+    );
+    CompiledContext::decode(&unlowered)
+        .expect_err("the disk route must refuse a payload without its lowering");
 }

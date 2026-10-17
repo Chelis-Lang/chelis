@@ -203,7 +203,7 @@ const FOREIGN_LIBRARY: &str = "module Mylib.Math\nexport (triple, offset)\n\n\
      def triple(x: i64) -> i64 = x + x + x\n\
      def offset(x: f32, y: f32) -> f32 = x - y\n";
 
-fn compiled_fixture_from(body: &str, std_layer: StdLayer) -> (TempDir, CompiledContext) {
+fn encoded_fixture_from(body: &str, std_layer: StdLayer) -> (TempDir, Vec<u8>, HandoffDigest) {
     let (dir, root) = library_fixture(body, std_layer);
     let context = compile_reef_context(
         Path::new("/tmp/chelis-2211-unused-reef-home"),
@@ -211,51 +211,35 @@ fn compiled_fixture_from(body: &str, std_layer: StdLayer) -> (TempDir, CompiledC
         &chelis_std_bundle::EMBEDDED_RUNTIME,
     )
     .expect("the fixture package must compile");
-    (dir, context)
-}
-
-fn encoded_fixture_from(body: &str, std_layer: StdLayer) -> (TempDir, Vec<u8>, HandoffDigest) {
-    let (dir, context) = compiled_fixture_from(body, std_layer);
     let (bytes, digest) = context
         .encode_for_handoff()
         .expect("a compiled context must encode");
     (dir, bytes, digest)
-}
-
-/// The primary library compiled, with its handoff bytes checked against the
-/// floor below.
-fn representative_fixture(
-    std_layer: StdLayer,
-) -> (TempDir, CompiledContext, Vec<u8>, HandoffDigest) {
-    let (dir, context) =
-        compiled_fixture_from(&primary_library(FIXTURE_BULK_DEFINITIONS), std_layer);
-    let (bytes, digest) = context
-        .encode_for_handoff()
-        .expect("a compiled context must encode");
-    assert!(
-        bytes.len() >= FIXTURE_MINIMUM_BYTES,
-        "the route-equivalence fixture encodes {} bytes, below the {FIXTURE_MINIMUM_BYTES}-byte \
-         floor this comparison is supposed to cover",
-        bytes.len()
-    );
-    assert!(
-        !wire_of(&bytes).reef_state.linked_stdlib_decls.is_empty(),
-        "the fixture links no chelis-std declarations, so compile_reef_context took the \
-         monolithic path rather than the layered one every real package takes"
-    );
-    (dir, context, bytes, digest)
 }
 
 fn encoded_fixture(std_layer: StdLayer) -> (TempDir, Vec<u8>, HandoffDigest) {
-    let (dir, _context, bytes, digest) = representative_fixture(std_layer);
-    (dir, bytes, digest)
+    let fixture = encoded_fixture_from(&primary_library(FIXTURE_BULK_DEFINITIONS), std_layer);
+    assert!(
+        fixture.1.len() >= FIXTURE_MINIMUM_BYTES,
+        "the route-equivalence fixture encodes {} bytes, below the {FIXTURE_MINIMUM_BYTES}-byte \
+         floor this comparison is supposed to cover",
+        fixture.1.len()
+    );
+    assert!(
+        !wire_of(&fixture.1)
+            .reef_state
+            .linked_stdlib_decls
+            .is_empty(),
+        "the fixture links no chelis-std declarations, so compile_reef_context took the \
+         monolithic path rather than the layered one every real package takes"
+    );
+    fixture
 }
 
-/// One context, reconstructed both ways, must produce the same value.
+/// One payload, reconstructed both ways, must produce the same value.
 ///
 /// Both routes bind the transmitted program and re-lower it; the untrusted
-/// route, reading the disk envelope, also compares the re-lowering against the
-/// lowering that envelope carries. The handoff carries none (chelis#2256). Before
+/// route also compares the re-lowering against the transmitted one. Before
 /// chelis#2558 the untrusted route reran the effect and linearity checkers, and
 /// this test was the guard that doing so reproduced the transmitted program;
 /// `cached_program_is_a_checker_fixed_point` now carries that guard directly,
@@ -267,10 +251,9 @@ fn encoded_fixture(std_layer: StdLayer) -> (TempDir, Vec<u8>, HandoffDigest) {
 /// here is a value difference, not an ordering artifact.
 #[test]
 fn both_decode_routes_reconstruct_identical_contexts() {
-    let (_dir, context, bytes, digest) = representative_fixture(StdLayer::Whole);
-    let disk = context.encode().expect("a compiled context must encode");
+    let (_dir, bytes, digest) = encoded_fixture(StdLayer::Whole);
 
-    let untrusted = CompiledContext::decode(&disk).expect("the untrusted route must accept");
+    let untrusted = CompiledContext::decode(&bytes).expect("the untrusted route must accept");
     let authenticated = CompiledContext::decode_authenticated(&bytes, &digest)
         .expect("the authenticated route must accept");
 
@@ -355,8 +338,7 @@ fn cached_program_is_a_checker_fixed_point() {
     // Take the program the disk route adopts: decode through it, then read the
     // bound program back out of its re-encoding.
     let decoded = CompiledContext::decode(&bytes).expect("the disk route must accept");
-    let adopted =
-        disk_wire_of(&decoded.encode().expect("a decoded context must re-encode")).checked;
+    let adopted = wire_of(&decoded.encode().expect("a decoded context must re-encode"));
     assert!(
         !adopted.reef_state.linked_stdlib_decls.is_empty(),
         "the fixture links no chelis-std declarations, so compile_reef_context took the \
@@ -504,9 +486,8 @@ fn authenticated_decode_rejects_a_digest_minted_for_other_bytes() {
 /// coverage that justifies keeping the re-derivation for the disk cache.
 #[test]
 fn the_untrusted_route_still_accepts_a_payload_with_no_accompanying_digest() {
-    let (_dir, context, _bytes, _digest) = representative_fixture(StdLayer::Minimal);
-    let disk = context.encode().expect("a compiled context must encode");
-    CompiledContext::decode(&disk)
+    let (_dir, bytes, _digest) = encoded_fixture(StdLayer::Minimal);
+    CompiledContext::decode(&bytes)
         .expect("decode must keep working for a caller that has only the bytes");
 }
 
@@ -601,7 +582,7 @@ fn authenticated_decode_rejects_a_type_environment_from_another_library() {
     );
 }
 
-/// Mirror of the private handoff payload, positionally identical because
+/// Mirror of the private `CompiledContextWire`, positionally identical because
 /// bincode is positional. If the real wire gains, loses or reorders a field,
 /// `wire_of` fails to decode and the tests above fail loudly rather than
 /// quietly testing a different shape.
@@ -612,15 +593,6 @@ struct WireMirror {
     reef_state: chelis_reef::PreparedReefGraph,
     type_env: chelis_types::TypeEnv,
     library_checked: chelis_types::CheckedProgram,
-}
-
-/// Mirror of the private disk payload: the handoff payload followed by the
-/// lowering. A nested struct adds no framing in bincode, so this is
-/// positionally the same six fields.
-#[derive(serde::Deserialize)]
-struct DiskWireMirror {
-    checked: WireMirror,
-    #[allow(dead_code)]
     library_dag: chelis_ir::lower::LoweredLibrary,
 }
 
@@ -629,13 +601,6 @@ fn wire_of(bytes: &[u8]) -> WireMirror {
         bincode::deserialize(&bytes[magic_len(bytes)..]).expect("the fixture envelope must decode");
     bincode::deserialize(&envelope.payload)
         .expect("the payload must decode as the wire this test mirrors")
-}
-
-fn disk_wire_of(bytes: &[u8]) -> DiskWireMirror {
-    let envelope: ContextFixtureEnvelope =
-        bincode::deserialize(&bytes[magic_len(bytes)..]).expect("the disk envelope must decode");
-    bincode::deserialize(&envelope.payload)
-        .expect("the disk payload must decode as the wire this test mirrors")
 }
 
 /// Rebuild a self-consistent envelope around `wire` and mint the digest a
