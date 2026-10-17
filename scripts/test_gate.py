@@ -3532,10 +3532,8 @@ NIX_EVAL_COMMAND = (
     "nix flake check --no-build --all-systems "
     "--option allow-import-from-derivation false"
 )
-NIX_FORMAT_COMMAND = (
-    "git ls-files -z -- '*.nix' ':(exclude)Cargo.nix' | xargs -0 nix shell "
-    "--inputs-from . nixpkgs#nixfmt --command nixfmt --check"
-)
+# The flake formatter checks every tracked .nix file except Cargo.nix.
+NIX_FORMAT_COMMAND = "nix fmt -- --check"
 
 
 def _assert_nix_eval_job(block: str) -> None:
@@ -3568,9 +3566,9 @@ class NixEvalJobTests(unittest.TestCase):
                 "allow-import-from-derivation false", "allow-import-from-derivation true", 1
             ),
             "builds allowed": block.replace(" --no-build", "", 1),
-            "format check writes": block.replace("nixfmt --check", "nixfmt", 1),
+            "format check writes": block.replace("nix fmt -- --check", "nix fmt", 1),
             "format check skips files": block.replace(
-                "':(exclude)Cargo.nix'", "'nix/*.nix'", 1
+                "nix fmt -- --check", "nix fmt -- --check nix/contracts.nix", 1
             ),
             "evaluation quoted as a no-op": block.replace(
                 f"run: {NIX_EVAL_COMMAND}", f"run: \"true # {NIX_EVAL_COMMAND}\"", 1

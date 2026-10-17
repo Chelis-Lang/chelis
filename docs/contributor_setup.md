@@ -217,12 +217,12 @@ It runs these two commands, which you can also run before a push:
 
 ```sh
 nix flake check --no-build --all-systems --option allow-import-from-derivation false
-git ls-files -z -- '*.nix' ':(exclude)Cargo.nix' | xargs -0 nix shell --inputs-from . nixpkgs#nixfmt --command nixfmt --check
+nix fmt -- --check
 ```
 
 The first command evaluates the packages and checks of every supported system.
 The second command checks the format of each tracked Nix file except the
-generated `Cargo.nix`. Remove `--check` to format the files.
+generated `Cargo.nix`. Run `nix fmt` to format the files.
 
 The flake imports the committed `Cargo.nix`, so Nix evaluation needs no import
 from derivation. A change to `Cargo.lock`, a workspace manifest, or a crate
