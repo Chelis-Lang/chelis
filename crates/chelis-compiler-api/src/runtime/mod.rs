@@ -22,6 +22,7 @@ pub use frame::Frame;
 use frame::ResultProducer;
 #[cfg(feature = "clarabel-provider")]
 mod clarabel;
+mod closure_body;
 #[cfg(feature = "clarabel-provider")]
 pub use clarabel::{
     RegisteredClarabelProvider, linked_package_solve_symbol, linked_provider_binding,
@@ -250,7 +251,9 @@ pub enum RuntimeValue {
         /// invocation contract. Each is normalized once, where it is
         /// retained, never again per application (chelis#3741).
         invocation_contracts: Box<Vec<NormalizedCallableContract>>,
-        body: Expr,
+        /// The body, with the reads in it that are their binding's last
+        /// use. Shared, so a clone of the closure copies no syntax.
+        body: Arc<closure_body::ClosureBody>,
         env: Frame,
         /// Lexically captured concrete precision variables. A call derives a
         /// fresh specialization from checked argument/result types and lets
@@ -871,6 +874,7 @@ fn evaluate_host_program_on_grown_stack(
         system: system_boundary,
         failure_kind: RuntimeFailureKind::Ordinary,
         activation_extents: Default::default(),
+        last_uses: Default::default(),
     };
 
     for name in top_level_order {
@@ -1434,6 +1438,9 @@ struct EvalContext<'a> {
     failure_kind: RuntimeFailureKind,
     /// The dimension-binder extents of each executing activation.
     activation_extents: eval::ActivationExtents,
+    /// The executing closure body's last-use reads and the frame snapshots
+    /// its `let` and `match` forms restore (chelis#3720).
+    last_uses: closure_body::LastUses,
 }
 
 /// True when the checked-program effect annotation on this node carries a

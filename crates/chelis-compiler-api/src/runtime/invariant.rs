@@ -862,6 +862,7 @@ fn revalidate_adt_value_inner(
         system: super::system::EvalSystemBoundary::deny_all(),
         failure_kind: RuntimeFailureKind::Ordinary,
         activation_extents: Default::default(),
+        last_uses: Default::default(),
     };
     ctx.bindings.insert(pred.binder.clone(), value.clone());
 

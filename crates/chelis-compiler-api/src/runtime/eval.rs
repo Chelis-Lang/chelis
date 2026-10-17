@@ -2290,8 +2290,41 @@ impl<'a> EvalContext<'a> {
             .first()
             .and_then(symbol_name)
             .ok_or_else(|| "var missing name".to_string())?;
-        if let Some(value) = self.bindings.get(name).cloned() {
-            self.result_producer = self.bindings.result_producer(name).cloned();
+        let at_last_use = match self.bindings.lookup(name) {
+            frame::Lookup::Live(value) => {
+                // chelis#3720: a container read at its binding's last use is
+                // taken rather than shared, so a write that follows owns it
+                // alone and changes it in place.
+                if matches!(value, RuntimeValue::List(_) | RuntimeValue::Dict(_))
+                    && self.last_uses.is_last_use(node.expr)
+                {
+                    true
+                } else {
+                    let value = value.clone();
+                    self.result_producer = self.bindings.result_producer(name).cloned();
+                    return Ok(value);
+                }
+            }
+            frame::Lookup::Released => {
+                return Err(format!(
+                    "host runtime: `{name}` was read again after its last use released it"
+                ));
+            }
+            frame::Lookup::Unbound => false,
+        };
+        if at_last_use {
+            let (value, producer) = match self.last_uses.release(&mut self.bindings, name) {
+                Some(released) => released,
+                // A captured binding is shared with its closures and stays.
+                None => (
+                    self.bindings
+                        .get(name)
+                        .cloned()
+                        .ok_or_else(|| format!("host runtime: `{name}` lost its binding"))?,
+                    self.bindings.result_producer(name).cloned(),
+                ),
+            };
+            self.result_producer = producer;
             return Ok(value);
         }
         // A dimension binder a site of this activation bound, which outlives
@@ -2395,7 +2428,7 @@ impl<'a> EvalContext<'a> {
             return_type,
             checked_signature: node.metadata.ty().map(|ty| ty.expression().clone()),
             invocation_contracts: Box::default(),
-            body,
+            body: closure_body::ClosureBody::new(body),
             // Named declarations are initialized in an empty lexical frame;
             // an anonymous fn must retain every actual local shadow.
             env: self.bindings.capture(),
@@ -2633,7 +2666,12 @@ impl<'a> EvalContext<'a> {
             let shape_claims_checked = self.check_builtin_shape_claims(name, &args, claims)?;
             let builtin_result = match explicit_accumulator(node.metadata) {
                 Some(accumulator) => accumulated_builtin_value(name, &args, accumulator),
-                None => self.eval_builtin(name, &args, &arg_type_exprs, result_type_expr.as_ref()),
+                None => self.eval_builtin_owning_operand(
+                    name,
+                    &mut args,
+                    &arg_type_exprs,
+                    result_type_expr.as_ref(),
+                ),
             };
             return self.finish_builtin_application(
                 name,
@@ -3199,7 +3237,7 @@ impl<'a> EvalContext<'a> {
         if bind_node.tag != DeepTag::Bind {
             return Err("let bindings malformed".to_string());
         }
-        let saved = self.bindings.clone();
+        self.last_uses.push_snapshot(self.bindings.clone());
         let saved_types = self.binding_types.clone();
         // Restore both frame maps on every exit path (including bind or body
         // evaluation errors) so a caught-and-continued error can never leak
@@ -3414,7 +3452,7 @@ impl<'a> EvalContext<'a> {
                 (Some(claims), None) => self.eval_under_result_claim(planned_body, claims),
             }
         })();
-        self.bindings = saved;
+        self.bindings = self.last_uses.pop_snapshot();
         self.binding_types = saved_types;
         result
     }
@@ -3627,18 +3665,28 @@ impl<'a> EvalContext<'a> {
                     "match `arm` must contain exactly a pattern, guard, and body".to_string(),
                 );
             }
-            let saved = self.bindings.clone();
+            self.last_uses.push_snapshot(self.bindings.clone());
             let saved_types = self.binding_types.clone();
             // Pattern-bound names carry no declared types; insert `None`
             // markers afterwards so they shadow rather than leak an outer
             // same-named binding's type into the arm body (chelis#338).
-            if pattern_matches_with_result_producer(
+            let matched = pattern_matches_with_result_producer(
                 &scrutinee,
                 &arm_kids[0],
                 &mut self.bindings,
                 &self.adt_fields,
                 scrutinee_producer.as_ref(),
-            )? {
+            );
+            let matched = match matched {
+                Ok(matched) => matched,
+                Err(error) => {
+                    self.bindings = self.last_uses.pop_snapshot();
+                    self.binding_types = saved_types;
+                    return Err(error);
+                }
+            };
+            if matched {
+                let saved = self.last_uses.last_snapshot();
                 for (name, _) in self.bindings.to_sorted() {
                     if !saved.contains_key(name) {
                         self.binding_types.insert(name.clone(), None);
@@ -3649,17 +3697,17 @@ impl<'a> EvalContext<'a> {
                 // tries the next arm; a failing guard fails the match.
                 let selected = self.eval_match_guard(&arm_kids[1]);
                 if !matches!(selected, Ok(true)) {
-                    self.bindings = saved;
+                    self.bindings = self.last_uses.pop_snapshot();
                     self.binding_types = saved_types;
                     selected?;
                     continue;
                 }
                 let value = self.eval_under_result_claim(&arm_kids[2], claims);
-                self.bindings = saved;
+                self.bindings = self.last_uses.pop_snapshot();
                 self.binding_types = saved_types;
                 return value;
             }
-            self.bindings = saved;
+            self.bindings = self.last_uses.pop_snapshot();
             self.binding_types = saved_types;
         }
         Err("non-exhaustive runtime match".to_string())
@@ -4001,7 +4049,7 @@ impl<'a> EvalContext<'a> {
     fn apply_resolved_callable_with_arg_types_impl(
         &mut self,
         callable: RuntimeValue,
-        args: Vec<RuntimeValue>,
+        mut args: Vec<RuntimeValue>,
         arg_type_exprs: &[Option<Expr>],
         result_type_expr: Option<&Expr>,
         inherited_claims: &[DeclaredResultClaim],
@@ -4028,8 +4076,12 @@ impl<'a> EvalContext<'a> {
                     .unwrap_or_else(|| args.iter().map(ResultProducer::interface_load).collect());
                 let shape_claims_checked =
                     self.check_builtin_shape_claims(operation.symbol(), &args, inherited_claims)?;
-                let value =
-                    self.eval_builtin(operation.symbol(), &args, arg_type_exprs, result_type_expr);
+                let value = self.eval_builtin_owning_operand(
+                    operation.symbol(),
+                    &mut args,
+                    arg_type_exprs,
+                    result_type_expr,
+                );
                 self.finish_builtin_application(
                     operation.symbol(),
                     &args,
@@ -4097,6 +4149,7 @@ impl<'a> EvalContext<'a> {
                 let saved_precisions = std::mem::take(&mut self.precision_bindings);
                 self.bindings = env;
                 self.precision_bindings = precision_env;
+                let caller_last_uses = self.last_uses.enter(Arc::clone(&body));
                 if let Some(name) = active_declaration.as_ref() {
                     self.active_declaration_names.push(name.clone());
                 }
@@ -4395,7 +4448,7 @@ impl<'a> EvalContext<'a> {
                     if let Some(index) = forwarding_index {
                         self.loop_compositions[index].forwarding_position = Some(0);
                     }
-                    let result = self.eval_under_result_claim(&body, &claims);
+                    let result = self.eval_under_result_claim(body.expr(), &claims);
                     if let Some(index) = forwarding_index {
                         self.loop_compositions[index].forwarding_position = None;
                     }
@@ -4416,6 +4469,7 @@ impl<'a> EvalContext<'a> {
                     Ok(value)
                 })();
                 self.activation_extents.exit(caller_activation);
+                self.last_uses.exit(caller_last_uses);
                 if active_declaration.is_some() {
                     let popped = self.active_declaration_names.pop();
                     debug_assert_eq!(popped.as_ref(), active_declaration.as_ref());
@@ -4976,6 +5030,52 @@ impl<'a> EvalContext<'a> {
             }
         }
         Ok(value)
+    }
+
+    /// The writing List and Dict operations take their first operand, and the
+    /// operand they add, out of `args`. When the caller held the operand's
+    /// only reference, a value read at its binding's last use, the write
+    /// changes it in place instead of copying every element (chelis#3720).
+    /// Every other operation, and any argument shape these arms do not
+    /// match, evaluates exactly as [`Self::eval_builtin`] does.
+    fn eval_builtin_owning_operand(
+        &mut self,
+        name: &str,
+        args: &mut [RuntimeValue],
+        arg_type_exprs: &[Option<Expr>],
+        result_type_expr: Option<&Expr>,
+    ) -> Result<RuntimeValue, String> {
+        match (name, &mut *args) {
+            ("append", [RuntimeValue::List(list), item]) => {
+                let mut list = std::mem::take(list);
+                list.push(std::mem::replace(item, RuntimeValue::Unit));
+                Ok(RuntimeValue::List(list))
+            }
+            ("concat", [RuntimeValue::List(lhs), RuntimeValue::List(rhs)]) => {
+                let mut lhs = std::mem::take(lhs);
+                lhs.extend(std::mem::take(rhs));
+                Ok(RuntimeValue::List(lhs))
+            }
+            ("dict_insert", [RuntimeValue::Dict(dict), key, value]) => {
+                ensure_dict_key_supported(key)?;
+                let mut dict = std::mem::take(dict);
+                upsert_dict_entry(
+                    &mut dict,
+                    std::mem::replace(key, RuntimeValue::Unit),
+                    std::mem::replace(value, RuntimeValue::Unit),
+                );
+                Ok(RuntimeValue::Dict(dict))
+            }
+            ("dict_merge", [RuntimeValue::Dict(lhs), RuntimeValue::Dict(rhs)]) => {
+                let mut lhs = std::mem::take(lhs);
+                for (key, value) in std::mem::take(rhs) {
+                    ensure_dict_key_supported(&key)?;
+                    upsert_dict_entry(&mut lhs, key, value);
+                }
+                Ok(RuntimeValue::Dict(lhs))
+            }
+            _ => self.eval_builtin(name, args, arg_type_exprs, result_type_expr),
+        }
     }
 
     fn eval_builtin(
@@ -7756,6 +7856,7 @@ mod legacy_capture_order_tests {
             system: system::EvalSystemBoundary::permissive(),
             failure_kind: RuntimeFailureKind::Ordinary,
             activation_extents: Default::default(),
+            last_uses: Default::default(),
         }
     }
 
