@@ -1,6 +1,7 @@
 use chelis_deep::DeepTag;
 use chelis_runtime::host_round::{FloatLayout, round_to_bits};
 use chelis_unord::UnordMap;
+use std::hash::{Hash, Hasher};
 use std::path::Path;
 
 use chelis_deep::ast::{Atom, Expr, ExprCarrier};
@@ -445,16 +446,173 @@ impl DeclaredResultClaim {
     }
 }
 
-/// Append `claim` to `claims` unless an earlier claim states the same
-/// obligation. Claims are checked in order and the first failure names the
-/// trap, and two claims with the same obligation reach the same verdict, so a
-/// later copy can never name one. Keeping one copy bounds a claim list by its
-/// distinct obligations rather than by the depth of the recursion that
-/// inherits it (chelis#3838).
-fn push_result_claim(claims: &mut Vec<DeclaredResultClaim>, claim: DeclaredResultClaim) {
-    if !claims.iter().any(|kept| kept.same_obligation(&claim)) {
-        claims.push(claim);
+impl DeclaredResultClaim {
+    /// A fingerprint of the numeric fields [`Self::same_obligation`]
+    /// compares, so two claims with the same obligation share one. Names
+    /// enter only the full comparison. A nested claim's pattern enters by
+    /// identity, as the comparison takes it.
+    fn obligation_fingerprint(&self) -> u64 {
+        let mut hasher = ObligationHasher::default();
+        hasher.write_usize(self.rank);
+        for claim in &self.axes {
+            hasher.write_usize(claim.axis);
+            hasher.write_i64(claim.required);
+            hasher.write_usize(
+                claim
+                    .source
+                    .as_ref()
+                    .map_or(usize::MAX, |source| source.axis),
+            );
+        }
+        for site in &self.first_sites {
+            hasher.write_usize(site.axis);
+            hasher.write_u64(site.activation);
+        }
+        if let Some(nested) = &self.nested {
+            std::ptr::hash(Arc::as_ptr(&nested.pattern), &mut hasher);
+            nested.node.hash(&mut hasher);
+            for (_, source, extent) in nested.binders.iter() {
+                hasher.write_usize(source.axis);
+                hasher.write_i64(*extent);
+            }
+        }
+        hasher.finish()
     }
+}
+
+/// A fast multiplicative hasher for [`DeclaredResultClaim::obligation_fingerprint`].
+/// A fingerprint only groups claims for the full comparison, so neither its
+/// quality nor its value reaches any result.
+#[derive(Default)]
+struct ObligationHasher(u64);
+
+impl Hasher for ObligationHasher {
+    fn write(&mut self, bytes: &[u8]) {
+        for chunk in bytes.chunks(8) {
+            let mut word = [0u8; 8];
+            word[..chunk.len()].copy_from_slice(chunk);
+            self.write_u64(u64::from_le_bytes(word));
+        }
+    }
+
+    fn write_u64(&mut self, word: u64) {
+        self.0 = (self.0.rotate_left(5) ^ word).wrapping_mul(0x51_7c_c1_b7_27_22_0a_95);
+    }
+
+    fn write_usize(&mut self, word: usize) {
+        self.write_u64(word as u64);
+    }
+
+    fn finish(&self) -> u64 {
+        self.0
+    }
+}
+
+/// A result-claim list that keeps one copy per obligation. Claims are checked
+/// in order and the first failure names the trap, and two claims with the
+/// same obligation reach the same verdict, so a later copy can never name
+/// one. Keeping one copy bounds a list by its distinct obligations rather than
+/// by the depth of the recursion that inherits it (chelis#3838). A claim is
+/// compared in full only with earlier claims that share its obligation's
+/// fingerprint, so building a list costs about the same whether its claims
+/// repeat or are all distinct.
+#[derive(Default)]
+struct ResultClaimList {
+    /// Every claim pushed, in order, with its obligation's fingerprint.
+    offered: Vec<(u64, DeclaredResultClaim)>,
+}
+
+impl ResultClaimList {
+    fn push(&mut self, claim: DeclaredResultClaim) {
+        self.offered.push((claim.obligation_fingerprint(), claim));
+    }
+
+    /// The first copy of each obligation, in the order the claims were
+    /// pushed. `site` names the list for the per-site receipt.
+    fn into_claims(self, site: ResultClaimSite) -> Vec<DeclaredResultClaim> {
+        let offered = self.offered;
+        let mut keep = vec![true; offered.len()];
+        if offered.len() > 1 {
+            // Group by fingerprint, earliest first within a group, so each
+            // claim meets only the earlier claims that could equal it.
+            let mut order = (0..offered.len()).collect::<Vec<_>>();
+            order.sort_unstable_by_key(|&index| (offered[index].0, index));
+            let mut group_start = 0;
+            for position in 0..order.len() {
+                let index = order[position];
+                if position > 0 && offered[order[position - 1]].0 != offered[index].0 {
+                    group_start = position;
+                }
+                for &earlier in &order[group_start..position] {
+                    if !keep[earlier] {
+                        continue;
+                    }
+                    #[cfg(test)]
+                    RESULT_CLAIM_COMPARISONS.with(|v| v.set(v.get() + 1));
+                    if offered[earlier].1.same_obligation(&offered[index].1) {
+                        keep[index] = false;
+                        break;
+                    }
+                }
+            }
+        }
+        let count = offered.len();
+        let claims = offered
+            .into_iter()
+            .zip(keep)
+            .filter_map(|((_, claim), kept)| kept.then_some(claim))
+            .collect::<Vec<_>>();
+        note_result_claim_site(site, count, &claims);
+        claims
+    }
+}
+
+impl FromIterator<DeclaredResultClaim> for ResultClaimList {
+    fn from_iter<I: IntoIterator<Item = DeclaredResultClaim>>(claims: I) -> Self {
+        let mut list = Self::default();
+        for claim in claims {
+            list.push(claim);
+        }
+        list
+    }
+}
+
+/// The places that build a result-claim list, for the per-site receipt.
+#[derive(Clone, Copy)]
+pub(super) enum ResultClaimSite {
+    /// A function application's own list.
+    Apply = 0,
+    /// A callable's retained-contract frames ahead of the inherited claims.
+    Formal = 1,
+    /// A local nested ascription after the enclosing claims.
+    Ascription = 2,
+    /// A checked local-ascription region after the enclosing claims.
+    Region = 3,
+}
+
+/// Record, in tests, how many claims `site` dropped as copies and how many
+/// copies it kept. A kept copy means the site did not deduplicate.
+fn note_result_claim_site(site: ResultClaimSite, offered: usize, claims: &[DeclaredResultClaim]) {
+    #[cfg(test)]
+    {
+        let copies_kept = claims
+            .iter()
+            .enumerate()
+            .filter(|(index, claim)| {
+                claims[..*index]
+                    .iter()
+                    .any(|earlier| earlier.same_obligation(claim))
+            })
+            .count();
+        RESULT_CLAIM_SITES.with(|sites| {
+            let mut sites = sites.borrow_mut();
+            let entry = &mut sites[site as usize];
+            entry.0 += (offered - claims.len()) as u64;
+            entry.1 += copies_kept as u64;
+        });
+    }
+    #[cfg(not(test))]
+    let _ = (site, offered, claims);
 }
 
 /// One position of a nested result claim's walk: the pattern node, the value
@@ -1233,6 +1391,22 @@ thread_local! {
     static INVOCATION_CONTRACT_CHECKS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     static CLOSURE_ENTRY_BUILDS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     static RESULT_CLAIMS_HELD: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static RESULT_CLAIM_COMPARISONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static RESULT_CLAIM_SITES: std::cell::RefCell<[(u64, u64); 4]> =
+        const { std::cell::RefCell::new([(0, 0); 4]) };
+}
+
+/// Full claim comparisons the claim lists made while deduplicating
+/// (chelis#3838).
+#[cfg(test)]
+pub(super) fn result_claim_comparisons() -> u64 {
+    RESULT_CLAIM_COMPARISONS.with(std::cell::Cell::get)
+}
+
+/// For `site`: the copies it dropped and the copies it kept (chelis#3838).
+#[cfg(test)]
+pub(super) fn result_claim_site(site: ResultClaimSite) -> (u64, u64) {
+    RESULT_CLAIM_SITES.with(|sites| sites.borrow()[site as usize])
 }
 
 /// Result claims the evaluated function bodies were held to, summed over the
@@ -1288,6 +1462,8 @@ pub(super) fn reset_entry_claim_work() {
     INVOCATION_CONTRACT_CHECKS.with(|v| v.set(0));
     CLOSURE_ENTRY_BUILDS.with(|v| v.set(0));
     RESULT_CLAIMS_HELD.with(|v| v.set(0));
+    RESULT_CLAIM_COMPARISONS.with(|v| v.set(0));
+    RESULT_CLAIM_SITES.with(|sites| *sites.borrow_mut() = [(0, 0); 4]);
 }
 #[cfg(test)]
 pub(super) fn entry_claim_work() -> u64 {
@@ -3527,8 +3703,12 @@ impl<'a> EvalContext<'a> {
                 {
                     // The enclosing claims precede the local annotation, in
                     // declaration order.
-                    let mut ascribed = local_claims.to_vec();
-                    push_result_claim(&mut ascribed, ascription);
+                    let ascribed = local_claims
+                        .iter()
+                        .cloned()
+                        .chain([ascription])
+                        .collect::<ResultClaimList>()
+                        .into_claims(ResultClaimSite::Ascription);
                     self.eval_under_result_claim(binding.initializer, &ascribed)?
                 } else if guarded == Some(index) {
                     self.eval_under_result_claim(
@@ -3606,7 +3786,10 @@ impl<'a> EvalContext<'a> {
             .host_local_ascription_claims(region)
             .map_err(|diagnostic| diagnostic.to_string())?
         {
-            let mut claims = inherited_result_claims.to_vec();
+            let mut claims = inherited_result_claims
+                .iter()
+                .cloned()
+                .collect::<ResultClaimList>();
             for claim in local_claims {
                 let axes = claim
                     .dims
@@ -3619,16 +3802,14 @@ impl<'a> EvalContext<'a> {
                         DimInfo::Named(_, _) => None,
                     })
                     .collect();
-                push_result_claim(
-                    &mut claims,
-                    DeclaredResultClaim {
-                        rank: claim.dims.len(),
-                        axes,
-                        first_sites: Vec::new(),
-                        nested: None,
-                    },
-                );
+                claims.push(DeclaredResultClaim {
+                    rank: claim.dims.len(),
+                    axes,
+                    first_sites: Vec::new(),
+                    nested: None,
+                });
             }
+            let claims = claims.into_claims(ResultClaimSite::Region);
             return self.eval_under_result_claim(region.initializer(), &claims);
         }
         let lowering = lowering
@@ -4172,15 +4353,13 @@ impl<'a> EvalContext<'a> {
         }
         // Entry contracts run outer to inner above. Results unwind the same
         // invocation stack, retaining declaration order within each frame.
-        let mut formal_claims = Vec::new();
-        for claim in result_frames
+        let formal_claims = result_frames
             .into_iter()
             .rev()
             .flatten()
             .chain(claims.iter().cloned())
-        {
-            push_result_claim(&mut formal_claims, claim);
-        }
+            .collect::<ResultClaimList>()
+            .into_claims(ResultClaimSite::Formal);
         self.apply_resolved_callable_with_arg_types_impl(
             callable,
             args,
@@ -4210,7 +4389,7 @@ impl<'a> EvalContext<'a> {
         // A caller's first-site axes resolve in the caller's activation,
         // whose sites have all run by the time its callee produces the
         // result: the callee only ever sees concrete axes.
-        let inherited_claims = &inherited_claims
+        let mut inherited_claims = inherited_claims
             .iter()
             .map(|claim| self.resolve_first_sites(claim))
             .collect::<Vec<_>>();
@@ -4224,7 +4403,7 @@ impl<'a> EvalContext<'a> {
                 let arg_producers = arg_producers
                     .unwrap_or_else(|| args.iter().map(ResultProducer::interface_load).collect());
                 let shape_claims_checked =
-                    self.check_builtin_shape_claims(operation.symbol(), &args, inherited_claims)?;
+                    self.check_builtin_shape_claims(operation.symbol(), &args, &inherited_claims)?;
                 let value = self.eval_builtin_owning_operand(
                     operation.symbol(),
                     &mut args,
@@ -4236,7 +4415,7 @@ impl<'a> EvalContext<'a> {
                     &args,
                     arg_producers,
                     value,
-                    inherited_claims,
+                    &inherited_claims,
                     shape_claims_checked,
                 )
             }
@@ -4265,7 +4444,7 @@ impl<'a> EvalContext<'a> {
                 if self.native_clarabel_solve && def_name.as_deref() == Some(super::clarabel::SOLVE)
                 {
                     let value = super::clarabel::invoke(&args)?;
-                    for claim in inherited_claims {
+                    for claim in &inherited_claims {
                         self.check_declared_result_claim(claim, &value, "Clarabel.solve")?;
                     }
                     self.result_producer =
@@ -4288,7 +4467,7 @@ impl<'a> EvalContext<'a> {
                     let saved_types = std::mem::take(&mut self.binding_types);
                     let saved_precisions = std::mem::take(&mut self.precision_bindings);
                     let result =
-                        self.apply_def_kernel(name, &kernel, &params, args, inherited_claims);
+                        self.apply_def_kernel(name, &kernel, &params, args, &inherited_claims);
                     self.bindings = saved;
                     self.binding_types = saved_types;
                     self.precision_bindings = saved_precisions;
@@ -4574,8 +4753,9 @@ impl<'a> EvalContext<'a> {
                     // return whose producing binding is followed by a `print`
                     // must trap before the print runs.
                     //
-                    // Frames retain distinct declarations even when the literal
-                    // values agree. Forwarding a frame does not append it again.
+                    // A frame holds each distinct obligation once, even when
+                    // two declarations state it: equal claims owe one check.
+                    // Forwarding a frame does not append it again.
                     // The authored spelling, aliases unexpanded: the
                     // derivation keeps their nominal dimension arguments.
                     let nested_claim = match (&active_declaration, &return_type) {
@@ -4598,14 +4778,12 @@ impl<'a> EvalContext<'a> {
                     // recursive activation, self or mutual, holds each
                     // distinct claim once and names the trap it would name
                     // with the copy.
-                    let mut claims = Vec::new();
-                    for claim in declaration_claim
+                    let claims = declaration_claim
                         .into_iter()
                         .chain(nested_claim)
-                        .chain(inherited_claims.iter().cloned())
-                    {
-                        push_result_claim(&mut claims, claim);
-                    }
+                        .chain(std::mem::take(&mut inherited_claims))
+                        .collect::<ResultClaimList>()
+                        .into_claims(ResultClaimSite::Apply);
                     #[cfg(test)]
                     RESULT_CLAIMS_HELD.with(|v| v.set(v.get() + claims.len() as u64));
                     let forwarding_index =
@@ -4649,7 +4827,7 @@ impl<'a> EvalContext<'a> {
                 transform_expr,
                 captured_env,
                 invocation_contracts: _,
-            } => self.apply_transform(kind, &transform_expr, captured_env, args, inherited_claims),
+            } => self.apply_transform(kind, &transform_expr, captured_env, args, &inherited_claims),
             other => Err(format!("value is not callable: {other:?}")),
         }
     }

@@ -6283,3 +6283,113 @@ fn issue_3838_tensor_recursion_holds_bounded_result_claims() {
         }
     }
 }
+
+/// chelis#3838: every place that builds a result-claim list keeps one copy per
+/// obligation. Each program reaches one site with a copy to drop: a
+/// recursion's own application list, a callable's retained-contract frame
+/// over the inherited claims, a local nested ascription inside a recursion,
+/// and a checked host local-ascription region under its declaration's equal
+/// claim. The receipt counts, per site, the copies dropped and the copies
+/// kept; a site that stopped deduplicating keeps a copy.
+///
+/// Evidentiary status: REGRESSION TEST, proven failing first. Reverting any
+/// one site to an undeduplicated list, the others left in place, kept copies
+/// at that site.
+#[test]
+fn issue_3838_each_claim_site_keeps_one_copy_per_obligation() {
+    use super::eval::{ResultClaimSite, result_claim_site};
+    let tensor = "tensor(shape=[2], data=[1.0, 2.0])";
+    let cases = [
+        (
+            "apply",
+            ResultClaimSite::Apply,
+            "a = to_tensor([1.0f32, 2.0f32])\n\
+             def f(n: i64, b: tensor[2, f32]) -> tensor[2, f32] = \
+             if eq(n, 0i64) then b else f(sub(n, 1i64), b)\n\
+             result = f(50i64, a)\n",
+            tensor,
+        ),
+        (
+            "formal",
+            ResultClaimSite::Formal,
+            "a = to_tensor([1.0f32, 2.0f32])\n\
+             def keep(b: tensor[2, f32]) -> tensor[2, f32] = b\n\
+             def walk(g: (tensor[2, f32]) -> tensor[2, f32], n: i64, b: tensor[2, f32]) -> \
+             tensor[2, f32] = if eq(n, 0i64) then g(b) else walk(g, sub(n, 1i64), b)\n\
+             result = walk(keep, 50i64, a)\n",
+            tensor,
+        ),
+        (
+            "ascription",
+            ResultClaimSite::Ascription,
+            "a = to_tensor([1.0f32, 2.0f32])\n\
+             def f(n: i64, b: tensor[2, f32]) -> (tensor[2, f32], i64) = {\n  \
+             y: (tensor[2, f32], i64) = if eq(n, 0i64) then (b, 0i64) else f(sub(n, 1i64), b)\n  \
+             y\n\
+             }\n\
+             result = f(50i64, a)\n",
+            "(tensor(shape=[2], data=[1.0, 2.0]), 0)",
+        ),
+        (
+            "region",
+            ResultClaimSite::Region,
+            "def value(w: i64) -> tensor[1, 2, i64] = {\n  \
+             ids: tensor[1, 2, i64] = pad_sequences_to([[1i64, 2i64]], w, 0i64)\n  \
+             ids\n\
+             }\n\
+             result = value(2i64)\n",
+            "tensor(shape=[1, 2], data=[1, 2])",
+        ),
+    ];
+    for (name, site, source, expected) in cases {
+        super::eval::reset_entry_claim_work();
+        assert_eq!(evaluate_result(source), expected, "#3838 {name}");
+        let (dropped, kept) = result_claim_site(site);
+        eprintln!("#3838 receipt: the {name} site dropped {dropped} copies and kept {kept}");
+        assert!(
+            dropped > 0,
+            "#3838 {name}: the program offers the site a copy to drop"
+        );
+        assert_eq!(
+            kept, 0,
+            "#3838 {name}: the site kept a copy of an obligation"
+        );
+    }
+}
+
+/// chelis#3838: deduplicating a claim list compares a claim in full only
+/// with kept claims whose obligation fingerprint it shares. In a recursion
+/// whose every level re-witnesses its binder with a different extent, every
+/// claim is distinct, and comparing each against every kept claim made the
+/// work cubic in depth on a path that can only end in a trap. The receipt
+/// requires the full comparisons not to exceed the claims the bodies are held
+/// to.
+///
+/// Evidentiary status: REGRESSION TEST, proven failing first. With a linear
+/// scan over the kept claims, depth 100 compared 343,201 claims for 5,150
+/// held.
+#[test]
+fn issue_3838_distinct_claims_compare_within_their_fingerprint() {
+    for depth in [100, 200] {
+        let source = format!(
+            "def produce(size: i64) -> tensor[*, f32] = insert(scalar_to_tensor(0.0f32), 0i32, size)\n\
+             def f[m](u: tensor[m, f32], n: i64, k: i64) -> tensor[m, f32] = \
+             if gt(n, 0i64) then f(produce(add(n, 2i64)), sub(n, 1i64), k) else produce(k)\n\
+             result = shape(f(produce(3i64), {depth}i64, 3i64), 0i32)\n"
+        );
+        super::eval::reset_entry_claim_work();
+        let failure = evaluate_result_or_failure(&source).expect_err("the innermost level traps");
+        assert!(failure.contains("numeric trap"), "#3838: {failure}");
+        let held = super::eval::result_claims_held();
+        let comparisons = super::eval::result_claim_comparisons();
+        eprintln!("#3838 receipt: depth {depth} held {held} claims, compared {comparisons}");
+        assert!(
+            held >= depth as u64,
+            "#3838: every level is held to its claims"
+        );
+        assert!(
+            comparisons <= held,
+            "#3838: depth {depth} compared {comparisons} claims for {held} held"
+        );
+    }
+}
