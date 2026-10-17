@@ -21,7 +21,7 @@
 //! `nn/embedding.ch`. See the gdb backtrace recorded in this commit's
 //! body for the canonical reproducer.
 
-use chelis_unord::{UnordMap, UnordSet};
+use chelis_unord::{PersistentMap, PersistentSet, UnordMap, UnordSet};
 use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
@@ -55,6 +55,66 @@ struct LevelTransition {
     kind: LevelTransitionKind,
     level: u32,
     watermarks: VarWatermarks,
+}
+
+/// The ordered enter, leave and resume transitions of one solver, kept
+/// persistent so a speculative copy of the substitution shares the log
+/// instead of copying it: the log grows with every scope the module enters,
+/// and a copy is taken per trial unification (chelis#2536). Serialized as
+/// the plain sequence of transitions.
+#[derive(Debug, Clone, Default)]
+struct TransitionLog {
+    entries: PersistentMap<u32, LevelTransition>,
+}
+
+impl TransitionLog {
+    fn push(&mut self, transition: LevelTransition) {
+        let position = u32::try_from(self.entries.len()).expect("the transition log fits u32");
+        self.entries.insert(position, transition);
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+    }
+
+    /// The last transition whose watermark `watermark_of` is at most `id`.
+    /// Watermarks never decrease along the log, so those transitions are a
+    /// prefix of it.
+    fn last_at_or_below(
+        &self,
+        id: u32,
+        watermark_of: impl Fn(&LevelTransition) -> u32,
+    ) -> Option<&LevelTransition> {
+        self.entries
+            .last_where(|_, transition| watermark_of(transition) <= id)
+            .map(|(_, transition)| transition)
+    }
+}
+
+impl Serialize for TransitionLog {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_seq(
+            self.entries
+                .to_sorted()
+                .into_iter()
+                .map(|(_, transition)| transition),
+        )
+    }
+}
+
+impl<'de> Deserialize<'de> for TransitionLog {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let mut log = Self::default();
+        for transition in Vec::<LevelTransition>::deserialize(deserializer)? {
+            log.push(transition);
+        }
+        Ok(log)
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -192,16 +252,21 @@ impl DimObservation {
 /// substitution into its own thread-local state), so the locking cost
 /// is one atomic compare-exchange per call. Use [`Subst::insert_type`] /
 /// [`Subst::insert_dim`] to record new bindings during unification.
+///
+/// The module-sized tables are persistent: the checker copies the whole
+/// substitution for every speculative unification it may discard, and a copy
+/// shares them, so a trial costs the bindings it writes rather than the
+/// module it starts from.
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Subst {
     #[serde(skip)]
     result_constraints: Mutex<Vec<crate::types::ResultConstraint>>,
-    types: Mutex<UnordMap<TypeVar, Type>>,
+    types: Mutex<PersistentMap<TypeVar, Type>>,
     /// Semantic domains attached to unresolved type variables. This is
     /// serialized with reusable checking contexts: a constrained function
     /// value must not become unconstrained after a cache round trip.
     #[serde(default)]
-    tvar_restrictions: Mutex<UnordMap<TypeVar, TypeVarRestriction>>,
+    tvar_restrictions: Mutex<PersistentMap<TypeVar, TypeVarRestriction>>,
     /// [04-LIN-10]: the type variables that stand for a function's type
     /// parameter, each with the generic it belongs to, so a violation names
     /// it. Generalization marks every variable it quantifies, instantiation
@@ -215,21 +280,21 @@ pub struct Subst {
     /// Serialized, so a library's generics keep the rule across a context
     /// round trip.
     #[serde(default)]
-    key_free_tvars: Mutex<UnordMap<TypeVar, GenericParameter>>,
+    key_free_tvars: Mutex<PersistentMap<TypeVar, GenericParameter>>,
     /// Spec/04 section 8.4.1: the data types of this check whose fields carry
     /// a key, installed once every `type` declaration is registered and read
     /// when a [`Self::key_free_tvars`] variable is bound to a data type.
     #[serde(default)]
-    key_carrying_adts: UnordSet<String>,
-    dims: Mutex<UnordMap<DimVar, Dim>>,
+    key_carrying_adts: PersistentSet<String>,
+    dims: Mutex<PersistentMap<DimVar, Dim>>,
     /// Named-axis view of a checker dimension identity, plus reserved
     /// compiler-owned annotations on synthetic dimension identities. Schemes
     /// retain these IDs and instantiation copies their annotations to fresh
     /// IDs. This mandatory snapshot field is not evidence that arbitrary
     /// equal names have equal sizes.
-    dimension_labels: Mutex<UnordMap<DimVar, String>>,
+    dimension_labels: Mutex<PersistentMap<DimVar, String>>,
     #[serde(skip)]
-    protected_dimensions: UnordSet<DimVar>,
+    protected_dimensions: PersistentSet<DimVar>,
     /// chelis#1801: the alias CLASSES that have met a runtime extent `*`
     /// without being bound to it, keyed by the class root.
     ///
@@ -257,7 +322,7 @@ pub struct Subst {
     /// serialized: transient per-pass bookkeeping, like the deferred ledgers
     /// below.
     #[serde(skip)]
-    wildcard_touched_classes: UnordSet<DimVar>,
+    wildcard_touched_classes: PersistentSet<DimVar>,
     /// chelis#1801: the alias classes a DECLARED dimension of the definition
     /// under check pins, keyed and merged exactly like the set above.
     ///
@@ -273,7 +338,7 @@ pub struct Subst {
     /// set is what keeps that answer stable when a merge or a compose demotes
     /// the protected member out of the root position.
     #[serde(skip)]
-    binder_pinned_classes: UnordSet<DimVar>,
+    binder_pinned_classes: PersistentSet<DimVar>,
     #[serde(skip)]
     label_unification_depth: usize,
     /// Only labels written by the active outer unification need rollback.
@@ -285,7 +350,7 @@ pub struct Subst {
     /// Rank-variable bindings: a `RankVar` binds to the *entire* shape vector
     /// it stands for (Tier-2 rank polymorphism). A binding to `[Dim::Rank(r2)]`
     /// is a rank-to-rank alias resolved transitively by `resolve_rvar`.
-    ranks: Mutex<UnordMap<RankVar, Vec<Dim>>>,
+    ranks: Mutex<PersistentMap<RankVar, Vec<Dim>>>,
     /// Issue #256 soundness ledger. The `borrow` inference arm accepts a
     /// borrow whose inner type is still an unresolved `Type::Var`,
     /// deferring the tensor-or-carrier classification to subsequent
@@ -397,14 +462,14 @@ pub struct Subst {
     current_level: u32,
     /// Ordered enter/leave/resume watermarks used to recover mint levels.
     #[serde(default)]
-    level_transitions: Vec<LevelTransition>,
+    level_transitions: TransitionLog,
     /// Sparse overrides for variables unified into an older scope.
     #[serde(default)]
-    lowered_tvar_levels: UnordMap<TypeVar, u32>,
+    lowered_tvar_levels: PersistentMap<TypeVar, u32>,
     #[serde(default)]
-    lowered_dvar_levels: UnordMap<DimVar, u32>,
+    lowered_dvar_levels: PersistentMap<DimVar, u32>,
     #[serde(default)]
-    lowered_rvar_levels: UnordMap<RankVar, u32>,
+    lowered_rvar_levels: PersistentMap<RankVar, u32>,
     /// IDs below these floors came from an earlier persisted check and are
     /// always level zero in the resumed check.
     #[serde(default)]
@@ -1054,6 +1119,15 @@ pub enum DeferredOpaqueUse {
     RecordUpdate,
 }
 
+/// An ordinary map holding the same entries as `map`, for a snapshot that
+/// leaves the substitution.
+fn sorted_copy<K: Ord + Clone, V: Clone>(map: &PersistentMap<K, V>) -> UnordMap<K, V> {
+    map.to_sorted()
+        .into_iter()
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect()
+}
+
 impl Clone for Subst {
     fn clone(&self) -> Self {
         Subst {
@@ -1259,17 +1333,13 @@ impl Subst {
         if id < floor {
             return 0;
         }
-        let transition_index = self.level_transitions.partition_point(|transition| {
-            let watermark = match class {
+        self.level_transitions
+            .last_at_or_below(id, |transition| match class {
                 VarClass::Type => transition.watermarks.next_tvar,
                 VarClass::Dim => transition.watermarks.next_dvar,
                 VarClass::Rank => transition.watermarks.next_rvar,
-            };
-            watermark <= id
-        });
-        transition_index
-            .checked_sub(1)
-            .map_or(0, |index| self.level_transitions[index].level)
+            })
+            .map_or(0, |transition| transition.level)
     }
 
     pub(crate) fn level_of_tvar(&self, var: TypeVar) -> u32 {
@@ -1362,12 +1432,12 @@ impl Subst {
     /// Snapshot of the type-variable bindings (cloned out of the lock).
     /// Useful for serialization, tests, and read-only inspection.
     pub fn types_snapshot(&self) -> UnordMap<TypeVar, Type> {
-        self.types.lock().expect("subst.types poisoned").clone()
+        sorted_copy(&self.types.lock().expect("subst.types poisoned"))
     }
 
     /// Snapshot of the dim-variable bindings.
     pub fn dims_snapshot(&self) -> UnordMap<DimVar, Dim> {
-        self.dims.lock().expect("subst.dims poisoned").clone()
+        sorted_copy(&self.dims.lock().expect("subst.dims poisoned"))
     }
 
     /// Number of type-variable bindings currently in the substitution.
@@ -1434,10 +1504,12 @@ impl Subst {
     }
 
     fn tvar_restrictions_snapshot(&self) -> UnordMap<TypeVar, TypeVarRestriction> {
-        self.tvar_restrictions
-            .lock()
-            .expect("subst.tvar_restrictions poisoned")
-            .clone()
+        sorted_copy(
+            &self
+                .tvar_restrictions
+                .lock()
+                .expect("subst.tvar_restrictions poisoned"),
+        )
     }
 
     fn remove_tvar_restriction(&self, v: TypeVar) {
@@ -1454,8 +1526,7 @@ impl Subst {
         self.key_free_tvars
             .lock()
             .expect("subst.key_free_tvars poisoned")
-            .entry(v)
-            .or_insert(origin);
+            .get_or_insert_with(v, || origin);
     }
 
     /// The generic `v` stands for a type parameter of, when it is marked.
@@ -1545,7 +1616,7 @@ impl Subst {
 
     /// Install spec/04 section 8.4.1's key-carrying data types for this check.
     pub(crate) fn set_key_carrying_adts(&mut self, adts: UnordSet<String>) {
-        self.key_carrying_adts = adts;
+        self.key_carrying_adts = adts.into_sorted().into_iter().collect();
     }
 
     /// Record a new dim-variable binding.
@@ -1623,7 +1694,7 @@ impl Subst {
     }
     /// Snapshot of the rank-variable bindings.
     pub fn ranks_snapshot(&self) -> UnordMap<RankVar, Vec<Dim>> {
-        self.ranks.lock().expect("subst.ranks poisoned").clone()
+        sorted_copy(&self.ranks.lock().expect("subst.ranks poisoned"))
     }
 
     /// Number of rank-variable bindings currently in the substitution.
@@ -3218,7 +3289,7 @@ impl Subst {
         }
         trial
             .key_carrying_adts
-            .merge(other.key_carrying_adts.clone());
+            .extend(other.key_carrying_adts.to_sorted().into_iter().cloned());
 
         *self = trial;
         Ok(())
@@ -3376,19 +3447,19 @@ impl Subst {
         {
             let mut self_types = self.types.lock().expect("subst.types poisoned");
             for (k, v) in other_types.into_sorted() {
-                self_types.entry(k).or_insert(v);
+                self_types.get_or_insert_with(k, || v);
             }
         }
         {
             let mut self_dims = self.dims.lock().expect("subst.dims poisoned");
             for (k, v) in other_dims.into_sorted() {
-                self_dims.entry(k).or_insert(v);
+                self_dims.get_or_insert_with(k, || v);
             }
         }
         {
             let mut self_ranks = self.ranks.lock().expect("subst.ranks poisoned");
             for (k, v) in other_ranks.into_sorted() {
-                self_ranks.entry(k).or_insert(v);
+                self_ranks.get_or_insert_with(k, || v);
             }
         }
         // `deferred_borrow_vars` is intentionally NOT merged: it is a transient
@@ -5041,6 +5112,52 @@ mod tests {
 
     fn var_gen() -> VarGen {
         VarGen::default()
+    }
+
+    #[test]
+    fn the_transition_log_serializes_as_the_plain_sequence_and_finds_every_mint_level() {
+        // The log is stored persistently but must keep the wire form of the
+        // `Vec` it replaced, and its descent must answer what the sorted scan
+        // answered for every identifier.
+        let mut log = TransitionLog::default();
+        let mut plain = Vec::new();
+        for index in 0..200u32 {
+            let transition = LevelTransition {
+                kind: if index % 2 == 0 {
+                    LevelTransitionKind::Enter
+                } else {
+                    LevelTransitionKind::Leave
+                },
+                level: index % 7,
+                watermarks: VarWatermarks {
+                    next_tvar: index * 3,
+                    next_dvar: index * 2,
+                    next_rvar: index,
+                },
+            };
+            log.push(transition);
+            plain.push(transition);
+        }
+        assert_eq!(
+            serde_json::to_string(&log).unwrap(),
+            serde_json::to_string(&plain).unwrap()
+        );
+        assert_eq!(
+            bincode::serialize(&log).unwrap(),
+            bincode::serialize(&plain).unwrap()
+        );
+        let decoded: TransitionLog =
+            bincode::deserialize(&bincode::serialize(&plain).unwrap()).unwrap();
+        for id in 0..700u32 {
+            let scanned = plain
+                .partition_point(|transition| transition.watermarks.next_tvar <= id)
+                .checked_sub(1)
+                .map(|index| plain[index]);
+            let found = decoded
+                .last_at_or_below(id, |transition| transition.watermarks.next_tvar)
+                .copied();
+            assert_eq!(found, scanned, "type variable {id}");
+        }
     }
 
     #[test]

@@ -32,6 +32,8 @@ thread_local! {
     static SUPPRESS_DIAGNOSTIC_PANIC_OUTPUT: Cell<bool> = const { Cell::new(false) };
     /// Counts whole-program context preparations on this thread (chelis#2207).
     static PROGRAM_CONTEXT_PREPARATIONS: Cell<u64> = const { Cell::new(0) };
+    /// Counts the declarations examined to find the one owning a body.
+    static DECLARATION_BODY_VISITS: Cell<u64> = const { Cell::new(0) };
 }
 
 /// Context preparations on this thread. Prepare once and share immutable
@@ -42,6 +44,14 @@ pub fn program_context_preparations() -> u64 {
 
 pub fn reset_program_context_preparations() {
     PROGRAM_CONTEXT_PREPARATIONS.with(|passes| passes.set(0));
+}
+
+/// Declarations examined on this thread to find the one whose function body
+/// a lowering was handed: a work counter that lets a test assert the cost per
+/// lowered definition does not grow with the program (chelis#3785).
+#[doc(hidden)]
+pub fn declaration_body_visits() -> u64 {
+    DECLARATION_BODY_VISITS.with(Cell::get)
 }
 
 pub fn with_suppress_unrepresentable_panic<R>(f: impl FnOnce() -> R) -> R {
@@ -1765,6 +1775,40 @@ pub(crate) struct TensorCallsiteSpecialization {
 type ResolvedBuiltinValueCache =
     Arc<OnceLock<Result<Arc<BTreeMap<String, ResolvedBuiltinValue>>, String>>>;
 
+/// The program's definitions by the [`body_key`] of their function body,
+/// built the first time a lowering asks which declaration owns a body and
+/// shared by every lowering of the program (chelis#3785). Equal bodies have
+/// equal keys, so a bucket holds every declaration a scan of the whole program
+/// could have matched, in the program's name order.
+type DeclarationBodyIndex = Arc<OnceLock<BTreeMap<BodyKey, Vec<String>>>>;
+
+type BodyKey = (Option<String>, usize, usize);
+
+/// Where `expr` came from: its root's source span identifier and its span.
+/// Both are fields `Expr` equality compares, so equal expressions have equal
+/// keys; two different expressions may share one, and the caller compares in
+/// full within a key. Surf-lowered bodies carry distinct identifiers and
+/// Deep-parsed bodies distinct spans, so a key holds one definition in
+/// practice.
+fn body_key(expr: &Expr) -> BodyKey {
+    let span = expr.span();
+    (expr.span_id().map(str::to_string), span.offset, span.len)
+}
+
+/// The body of a well-formed `fn` form: exactly the forms
+/// `LowerCtx::extract_fn_parts` reads, without collecting the parameter
+/// names.
+fn fn_form_body(function: &Expr) -> Option<&Expr> {
+    let Some((DeepTag::Fn, _, kids)) = stamped_parts(function) else {
+        return None;
+    };
+    let body = kids.get(1)?;
+    let Some((DeepTag::Params, _, _)) = kids.first().and_then(stamped_parts) else {
+        return None;
+    };
+    Some(body)
+}
+
 #[derive(Clone, Debug)]
 pub struct SubexprLoweringContext {
     /// Already evaluated lexical host values. They remain bound while a
@@ -1776,6 +1820,8 @@ pub struct SubexprLoweringContext {
     program_defs: Arc<BTreeMap<String, Expr>>,
     program_signatures: Arc<BTreeMap<String, Expr>>,
     local_ascriptions: Arc<Vec<chelis_types::CheckedLocalAscription>>,
+    /// See [`LowerCtx::declaration_bodies`].
+    declaration_bodies: DeclarationBodyIndex,
     /// See [`LowerCtx::constructor_layouts`].
     constructor_layouts: Arc<ConstructorLayouts>,
     tensor_specialization: TensorCallsiteSpecialization,
@@ -2346,6 +2392,7 @@ pub(crate) fn prepare_subexpr_lowering_context(
         program_defs,
         program_signatures,
         local_ascriptions: Arc::new(Vec::new()),
+        declaration_bodies: Arc::default(),
         constructor_layouts: Arc::default(),
         tensor_specialization: TensorCallsiteSpecialization::default(),
         activation_record: ActivationRecord::Nothing,
@@ -2650,6 +2697,7 @@ pub(crate) fn try_lower_staged_host_region(
         ctx.local_ascriptions = context.local_ascriptions.clone();
         ctx.constructor_layouts = context.constructor_layouts.clone();
         ctx.resolved_builtin_values = Arc::clone(&context.resolved_builtin_values);
+        ctx.declaration_bodies = Arc::clone(&context.declaration_bodies);
         ctx.activation_record = context.activation_record;
         ctx.prec_substitutions = context
             .tensor_specialization
@@ -2806,6 +2854,7 @@ fn lower_subexpr_program_inner_impl(
     ctx.local_ascriptions = context.local_ascriptions.clone();
     ctx.constructor_layouts = context.constructor_layouts.clone();
     ctx.resolved_builtin_values = Arc::clone(&context.resolved_builtin_values);
+    ctx.declaration_bodies = Arc::clone(&context.declaration_bodies);
     ctx.activation_record = context.activation_record;
     ctx.prec_substitutions = context
         .tensor_specialization
@@ -9810,6 +9859,9 @@ struct LowerCtx<'program> {
     program_types: Arc<BTreeMap<String, TensorType>>,
     program_defs: Arc<BTreeMap<String, Expr>>,
     resolved_builtin_values: ResolvedBuiltinValueCache,
+    /// Which declaration owns a function body, indexed once per program; see
+    /// [`DeclarationBodyIndex`].
+    declaration_bodies: DeclarationBodyIndex,
     program_signatures: Arc<BTreeMap<String, Expr>>,
     /// The checked program's declared constructor field orders, which
     /// record construction stores its slots in (chelis#3230). Empty when
@@ -10028,6 +10080,7 @@ impl<'program> LowerCtx<'program> {
             program_types: program_types.into(),
             program_defs,
             resolved_builtin_values: Arc::new(OnceLock::new()),
+            declaration_bodies: Arc::default(),
             program_signatures,
             constructor_layouts: Arc::default(),
             random_path_condition: None,
@@ -11568,6 +11621,7 @@ impl<'program> LowerCtx<'program> {
         );
         scratch.constructor_layouts = Arc::clone(&self.constructor_layouts);
         scratch.resolved_builtin_values = Arc::clone(&self.resolved_builtin_values);
+        scratch.declaration_bodies = Arc::clone(&self.declaration_bodies);
         scratch.decl = Some(scratch.dag.declare(name));
         scratch.local_ascriptions = self.local_ascriptions.clone();
         scratch.activation_record = self.activation_record;
@@ -13254,13 +13308,25 @@ impl<'program> LowerCtx<'program> {
         }
     }
 
+    /// The one declaration whose function body is `body`, or `None` when no
+    /// declaration or more than one has it.
     fn declaration_name_for_body(&self, body: &Expr) -> Option<String> {
+        let index = self.declaration_bodies.get_or_init(|| {
+            let mut index = BTreeMap::<BodyKey, Vec<String>>::new();
+            for (name, function) in self.program_defs.iter() {
+                if let Some(candidate) = fn_form_body(function) {
+                    index
+                        .entry(body_key(candidate))
+                        .or_default()
+                        .push(name.clone());
+                }
+            }
+            index
+        });
         let mut owner = None;
-        for (name, function) in self.program_defs.iter() {
-            let Some((_, candidate)) = self.extract_fn_parts(function) else {
-                continue;
-            };
-            if candidate != body {
+        for name in index.get(&body_key(body)).into_iter().flatten() {
+            DECLARATION_BODY_VISITS.with(|visits| visits.set(visits.get() + 1));
+            if self.program_defs.get(name).and_then(fn_form_body) != Some(body) {
                 continue;
             }
             if owner.is_some() {
@@ -14723,6 +14789,7 @@ impl<'program> LowerCtx<'program> {
         );
         subctx.constructor_layouts = Arc::clone(&self.constructor_layouts);
         subctx.resolved_builtin_values = Arc::clone(&self.resolved_builtin_values);
+        subctx.declaration_bodies = Arc::clone(&self.declaration_bodies);
         // The body is lowered on this declaration's behalf and spliced back
         // into it, so its nodes are this declaration's: the sub-graph shares
         // this graph's declarations and the splice keeps each node's `decl`.
@@ -16788,6 +16855,7 @@ impl<'program> LowerCtx<'program> {
         );
         subctx.constructor_layouts = Arc::clone(&self.constructor_layouts);
         subctx.resolved_builtin_values = Arc::clone(&self.resolved_builtin_values);
+        subctx.declaration_bodies = Arc::clone(&self.declaration_bodies);
         // The body is lowered on this declaration's behalf and spliced back
         // into it, so its nodes are this declaration's: the sub-graph shares
         // this graph's declarations and the splice keeps each node's `decl`.
@@ -17150,6 +17218,7 @@ impl<'program> LowerCtx<'program> {
         );
         subctx.constructor_layouts = Arc::clone(&self.constructor_layouts);
         subctx.resolved_builtin_values = Arc::clone(&self.resolved_builtin_values);
+        subctx.declaration_bodies = Arc::clone(&self.declaration_bodies);
         // The body is lowered on this declaration's behalf and spliced back
         // into it, so its nodes are this declaration's: the sub-graph shares
         // this graph's declarations and the splice keeps each node's `decl`.
@@ -21552,6 +21621,7 @@ impl<'program> LowerCtx<'program> {
         );
         subctx.constructor_layouts = Arc::clone(&self.constructor_layouts);
         subctx.resolved_builtin_values = Arc::clone(&self.resolved_builtin_values);
+        subctx.declaration_bodies = Arc::clone(&self.declaration_bodies);
         subctx.dag.inherit_declarations(&self.dag);
         subctx.activation_serial = Arc::clone(&self.activation_serial);
         subctx.decl = self.decl;
@@ -21702,6 +21772,7 @@ impl<'program> LowerCtx<'program> {
         );
         subctx.constructor_layouts = Arc::clone(&self.constructor_layouts);
         subctx.resolved_builtin_values = Arc::clone(&self.resolved_builtin_values);
+        subctx.declaration_bodies = Arc::clone(&self.declaration_bodies);
         subctx.dag.inherit_declarations(&self.dag);
         subctx.activation_serial = Arc::clone(&self.activation_serial);
         subctx.decl = self.decl;
@@ -28799,6 +28870,7 @@ mod tests {
             program_defs: Arc::new(BTreeMap::new()),
             program_signatures: Arc::new(BTreeMap::new()),
             local_ascriptions: Arc::new(Vec::new()),
+            declaration_bodies: Arc::default(),
             constructor_layouts: Arc::default(),
             tensor_specialization: TensorCallsiteSpecialization::default(),
             activation_record: ActivationRecord::Nothing,
@@ -29167,6 +29239,7 @@ mod tests {
             program_defs: Arc::new(BTreeMap::new()),
             program_signatures: Arc::new(BTreeMap::new()),
             local_ascriptions: Arc::new(vec![ascription.clone()]),
+            declaration_bodies: Arc::default(),
             constructor_layouts: Arc::default(),
             tensor_specialization: TensorCallsiteSpecialization::default(),
             activation_record: ActivationRecord::Nothing,
@@ -29368,6 +29441,64 @@ mod tests {
             checked.type_env()
         );
         assert_eq!(decisions.get("out"), Some(&false), "{decisions:?}");
+    }
+
+    /// The scan the body-owner index replaces: the one declaration whose
+    /// function body equals `body`, or `None` for none or several.
+    fn scanned_body_owner(defs: &BTreeMap<String, Expr>, body: &Expr) -> Option<String> {
+        let mut owner = None;
+        for (name, function) in defs {
+            if fn_form_body(function) != Some(body) {
+                continue;
+            }
+            if owner.is_some() {
+                return None;
+            }
+            owner = Some(name.clone());
+        }
+        owner
+    }
+
+    #[test]
+    fn the_body_owner_index_answers_every_body_as_the_scan_did() {
+        // Two definitions with the same text, a distinct one, and a copy of
+        // one body bound under a second name, which makes that body ambiguous.
+        let checked = parse_and_check(
+            "(def {} f (fn {} (params {} (x {type: (t-prim {} f32)})) (app {} (var {} add) (var {} x) (var {} x))))\n\
+             (def {} g (fn {} (params {} (x {type: (t-prim {} f32)})) (app {} (var {} add) (var {} x) (var {} x))))\n\
+             (def {} h (fn {} (params {} (y {type: (t-prim {} f32)})) (app {} (var {} mul) (var {} y) (var {} y))))",
+        );
+        let mut defs = collect_top_level_defs(checked.exprs());
+        let copied = defs["h"].clone();
+        defs.insert("h_copy".to_string(), copied);
+        let not_a_body = defs["f"].clone();
+        let ctx = LowerCtx::new(
+            BTreeMap::new(),
+            defs.clone(),
+            BTreeMap::new(),
+            LinearityInfo::default(),
+        );
+        let mut queries = defs
+            .values()
+            .filter_map(fn_form_body)
+            .cloned()
+            .collect::<Vec<_>>();
+        queries.push(not_a_body);
+        for query in &queries {
+            assert_eq!(
+                ctx.declaration_name_for_body(query),
+                scanned_body_owner(&defs, query),
+                "owner of {query:?}"
+            );
+        }
+        assert_eq!(
+            ctx.declaration_name_for_body(fn_form_body(&defs["f"]).unwrap()),
+            Some("f".to_string())
+        );
+        assert_eq!(
+            ctx.declaration_name_for_body(fn_form_body(&defs["h"]).unwrap()),
+            None
+        );
     }
 
     fn parse_and_check(src: &str) -> chelis_types::CheckedProgram {

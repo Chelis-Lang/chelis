@@ -56,6 +56,11 @@ thread_local! {
     // compiled: it lets a counted receipt in `chelis-compiler-api` bound the
     // interpreter's probe work without a wall clock.
     static HOST_SUMMARY_PROBE_BUILDS: Cell<u64> = const { Cell::new(0) };
+    /// Expression and metadata nodes the record-projection hoist built or
+    /// copied while a test counts them, so it can bound the hoist's work by the
+    /// body's size (chelis#3793). `None` when nothing counts, and then the hoist
+    /// does no counting walk at all.
+    static RECORD_HOIST_NODES: Cell<Option<u64>> = const { Cell::new(None) };
     /// Fallback for platforms where native stack headroom cannot be measured.
     static HOST_LOWER_DEPTH: Cell<usize> = const { Cell::new(0) };
     /// Reserve chosen from the stack available at the outermost host-lowering
@@ -471,6 +476,8 @@ struct DefLaneFacts {
     helper_summary_rejects: RefCell<UnordMap<String, bool>>,
     /// Program-wide: the top-level fn call graph.
     call_graph: RefCell<Option<Arc<CallGraph>>>,
+    /// Program-wide: what the kernel decision asks of the call graph.
+    call_graph_facts: RefCell<Option<Arc<CallGraphFacts>>>,
     /// Program-wide: every top-level definition body by name.
     program_defs: RefCell<Option<Arc<BTreeMap<String, Expr>>>>,
     resolved_builtin_values: RefCell<Option<Arc<BTreeMap<String, StaticBuiltinValue>>>>,
@@ -495,6 +502,7 @@ struct DefLaneFacts {
 #[derive(Default)]
 struct SharedProgramFacts {
     call_graph: OnceLock<Arc<CallGraph>>,
+    call_graph_facts: OnceLock<Arc<CallGraphFacts>>,
     program_defs: OnceLock<Arc<BTreeMap<String, Expr>>>,
     resolved_builtin_values: OnceLock<Arc<BTreeMap<String, StaticBuiltinValue>>>,
     def_effect_rows: OnceLock<Arc<BTreeMap<String, chelis_types::types::EffectSet>>>,
@@ -868,6 +876,34 @@ fn elementwise_function_of_operands(builtin: &str) -> bool {
 
 pub fn host_summary_probe_builds() -> u64 {
     HOST_SUMMARY_PROBE_BUILDS.with(Cell::get)
+}
+
+/// Run `work`, counting the nodes the record-projection hoist builds or
+/// copies on this thread meanwhile.
+#[doc(hidden)]
+pub fn counting_record_hoist_nodes<R>(work: impl FnOnce() -> R) -> (R, u64) {
+    struct Restore(Option<u64>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            RECORD_HOIST_NODES.with(|count| count.set(self.0));
+        }
+    }
+    let restore = Restore(RECORD_HOIST_NODES.with(|count| count.replace(Some(0))));
+    let result = work();
+    let counted = RECORD_HOIST_NODES
+        .with(Cell::get)
+        .expect("the count stays armed while the work runs");
+    drop(restore);
+    (result, counted)
+}
+
+/// Add `nodes()` to the count, evaluating it only while a test counts.
+fn note_record_hoist_nodes(nodes: impl FnOnce() -> usize) {
+    RECORD_HOIST_NODES.with(|count| {
+        if let Some(counted) = count.get() {
+            count.set(Some(counted + nodes() as u64));
+        }
+    });
 }
 
 /// Reset [`host_summary_probe_builds`] for this thread.
@@ -7410,6 +7446,7 @@ fn hoist_record_projections(
             if node.tag() == DeepTag::Access
                 && let Some(hoist) = record_projection_hoist(expr, program, scope, bound)
             {
+                note_record_hoist_nodes(|| 1);
                 return var_expr_node(&hoisted_local_name(hoists, hoist), *span);
             }
             let children = node
@@ -7418,50 +7455,71 @@ fn hoist_record_projections(
                 .enumerate()
                 .map(|(index, child)| {
                     if is_bound_bare_projection(node.tag(), index, child) {
+                        note_record_hoist_nodes(|| deep_expr_nodes(child));
                         child.clone()
                     } else {
                         hoist_record_projections(child, program, scope, bound, hoists)
                     }
                 })
                 .collect();
-            let mut rewritten = node.clone();
-            // A rewrite that the node gate refuses leaves the subtree alone;
-            // the caller then takes the unhoisted path it takes today.
-            if rewritten.try_replace_children(children).is_err() {
-                return expr.clone();
+            // Rebuilt from the tag, the metadata and the rewritten children:
+            // copying the node first would copy the subtree it replaces, at
+            // every level of the body (chelis#3793). A rewrite that the node
+            // gate refuses leaves the subtree alone; the caller then takes the
+            // unhoisted path it takes today.
+            match Node::try_new(node.tag(), node.meta().clone(), children) {
+                Ok(rewritten) => {
+                    note_record_hoist_nodes(|| 1 + deep_metadata_nodes(node.meta()));
+                    Expr::Node(Box::new(rewritten), *span)
+                }
+                Err(_) => {
+                    note_record_hoist_nodes(|| deep_expr_nodes(expr));
+                    expr.clone()
+                }
             }
-            Expr::Node(rewritten, *span)
         }
-        Expr::BareList(items, span) => Expr::BareList(
-            items
-                .iter()
-                .map(|item| hoist_record_projections(item, program, scope, bound, hoists))
-                .collect(),
-            *span,
-        ),
+        Expr::BareList(items, span) => {
+            note_record_hoist_nodes(|| 1);
+            Expr::BareList(
+                items
+                    .iter()
+                    .map(|item| hoist_record_projections(item, program, scope, bound, hoists))
+                    .collect(),
+                *span,
+            )
+        }
         // Round 2, P3: an unstamped form carries children like any other, and
         // a typed parameter is one, so the rewriter descends it rather than
         // relying on the reader having refused first.
-        Expr::UnknownForm(data) => Expr::UnknownForm(Box::new(chelis_deep::ast::UnknownFormData {
-            head: data.head.clone(),
-            meta: data.meta.clone(),
-            children: data
-                .children
-                .iter()
-                .map(|child| hoist_record_projections(child, program, scope, bound, hoists))
-                .collect(),
-            span: data.span,
-        })),
-        Expr::MetaExpr(meta, span) => Expr::MetaExpr(
-            chelis_deep::ast::MetaExpr {
-                metadata: meta.metadata.clone(),
-                expr: Box::new(hoist_record_projections(
-                    &meta.expr, program, scope, bound, hoists,
-                )),
-            },
-            *span,
-        ),
-        _ => expr.clone(),
+        Expr::UnknownForm(data) => {
+            note_record_hoist_nodes(|| 1 + deep_metadata_nodes(&data.meta));
+            Expr::UnknownForm(Box::new(chelis_deep::ast::UnknownFormData {
+                head: data.head.clone(),
+                meta: data.meta.clone(),
+                children: data
+                    .children
+                    .iter()
+                    .map(|child| hoist_record_projections(child, program, scope, bound, hoists))
+                    .collect(),
+                span: data.span,
+            }))
+        }
+        Expr::MetaExpr(meta, span) => {
+            note_record_hoist_nodes(|| 1 + deep_metadata_nodes(&meta.metadata));
+            Expr::MetaExpr(
+                chelis_deep::ast::MetaExpr {
+                    metadata: meta.metadata.clone(),
+                    expr: Box::new(hoist_record_projections(
+                        &meta.expr, program, scope, bound, hoists,
+                    )),
+                },
+                *span,
+            )
+        }
+        _ => {
+            note_record_hoist_nodes(|| deep_expr_nodes(expr));
+            expr.clone()
+        }
     }
 }
 
@@ -20182,20 +20240,19 @@ fn inline_local_callable_lets(expr: &Expr) -> Expr {
 
 fn expr_needs_host_lane_tensor_lowering(expr: &Expr, program: &HostLoweringSession<'_>) -> bool {
     let graph = top_level_fn_call_graph(program);
-    let recursive = recursive_top_level_fn_names_from_graph(&graph);
-    let fn_names = graph.keys().cloned().collect::<BTreeSet<_>>();
-    collect_called_top_level_fns(expr, &fn_names)
-        .into_iter()
-        .any(|name| call_graph_reaches_any(&graph, &name, &recursive))
+    let facts = top_level_fn_call_graph_facts(program);
+    collect_called_top_level_fns(expr, |name| graph.contains_key(name))
+        .iter()
+        .any(|name| facts.reaches_recursive.contains(name))
 }
 
 fn top_level_fn_needs_host_lane_tensor_lowering(
     program: &HostLoweringSession<'_>,
     name: &str,
 ) -> bool {
-    let graph = top_level_fn_call_graph(program);
-    let recursive = recursive_top_level_fn_names_from_graph(&graph);
-    call_graph_reaches_any(&graph, name, &recursive)
+    top_level_fn_call_graph_facts(program)
+        .reaches_recursive
+        .contains(name)
 }
 
 /// A caller of `name` must fall back to a plain host function call
@@ -20209,7 +20266,7 @@ fn top_level_fn_needs_host_lane_tensor_lowering(
 ///
 /// This is the structured replacement for the previous incidental
 /// trigger: the over-broad recursion classification (every function was
-/// marked recursive by the reflexive `call_graph_reaches_any`) forced
+/// marked recursive by a reflexive reachability walk) forced
 /// every caller through the host-lane fallback, which happened to route
 /// rejected helpers to a host call. With recursion classification
 /// corrected, the fallback is driven directly off the
@@ -20311,8 +20368,7 @@ fn expr_calls_top_level_fn_with_callable_param(
     program: &HostLoweringSession<'_>,
 ) -> bool {
     let graph = top_level_fn_call_graph(program);
-    let fn_names = graph.keys().cloned().collect::<BTreeSet<_>>();
-    collect_called_top_level_fns(expr, &fn_names)
+    collect_called_top_level_fns(expr, |name| graph.contains_key(name))
         .iter()
         .any(|name| top_level_fn_has_callable_param(program, name))
 }
@@ -20337,13 +20393,13 @@ fn expr_calls_summary_rejecting_top_level_fn(
     program: &HostLoweringSession<'_>,
 ) -> Result<bool, crate::lower::LowerDiagnostic> {
     let graph = top_level_fn_call_graph(program);
-    let fn_names = graph.keys().cloned().collect::<BTreeSet<_>>();
     // Sorted, not UnordSet order: each probe is state-isolated by
     // `MonoProbeGuard`, but probe ORDER must not vary per process either
     // (harden-bounded-monomorphization D1).
-    let mut called: Vec<String> = collect_called_top_level_fns(expr, &fn_names)
-        .into_iter()
-        .collect();
+    let mut called: Vec<String> =
+        collect_called_top_level_fns(expr, |name| graph.contains_key(name))
+            .into_iter()
+            .collect();
     called.sort_unstable();
     for name in called {
         if top_level_fn_helper_summary_rejects(program, &name)? {
@@ -20376,7 +20432,7 @@ fn derive_top_level_fn_call_graph(program: &HostLoweringSession<'_>) -> Arc<Call
         .map(|name| {
             let callees = defs
                 .get(name)
-                .map(|body| collect_called_top_level_fns(body, &fn_names))
+                .map(|body| collect_called_top_level_fns(body, |callee| fn_names.contains(callee)))
                 .unwrap_or_default();
             (name.clone(), callees)
         })
@@ -20395,22 +20451,139 @@ fn top_level_fn_transfers_literal_result_claims(
     cached_def_effect_rows(program)
         .get(name)
         .is_some_and(|effects| effects.is_empty())
-        && top_level_fn_call_graph(program)
-            .iter()
-            .any(|(caller, callees)| caller != name && callees.contains(name))
+        && top_level_fn_call_graph_facts(program)
+            .called_by_another
+            .contains(name)
 }
 
-fn recursive_top_level_fn_names_from_graph(
-    graph: &BTreeMap<String, BTreeSet<String>>,
-) -> BTreeSet<String> {
-    graph
-        .keys()
-        .filter(|name| call_graph_reaches_any(graph, name, &BTreeSet::from([(*name).clone()])))
+/// What the kernel decision asks of the top-level call graph, derived from
+/// the graph once per program. Each answer is a set lookup, so deciding a
+/// definition costs its own callees, never a walk of the whole graph
+/// (chelis#3785).
+struct CallGraphFacts {
+    /// The functions from which one or more calls reach a recursive function.
+    reaches_recursive: BTreeSet<String>,
+    /// The functions some other function calls.
+    called_by_another: BTreeSet<String>,
+}
+
+fn top_level_fn_call_graph_facts(program: &HostLoweringSession<'_>) -> Arc<CallGraphFacts> {
+    program_fact(
+        &program.facts.call_graph_facts,
+        program.shared.map(|shared| &shared.call_graph_facts),
+        || Arc::new(derive_call_graph_facts(&top_level_fn_call_graph(program))),
+    )
+}
+
+fn derive_call_graph_facts(graph: &CallGraph) -> CallGraphFacts {
+    let recursive = recursive_top_level_fn_names_from_graph(graph);
+    let mut callers = BTreeMap::<&str, Vec<&str>>::new();
+    for (caller, callees) in graph {
+        for callee in callees {
+            callers.entry(callee).or_default().push(caller);
+        }
+    }
+    // A function reaches a recursive one exactly when it calls one, or calls
+    // a function that reaches one: walk the callers backwards from the cycles.
+    let mut reaches_recursive = BTreeSet::new();
+    let mut pending = recursive
+        .iter()
+        .flat_map(|name| callers.get(name.as_str()).into_iter().flatten().copied())
+        .collect::<Vec<_>>();
+    while let Some(name) = pending.pop() {
+        if reaches_recursive.insert(name.to_string()) {
+            pending.extend(callers.get(name).into_iter().flatten().copied());
+        }
+    }
+    let called_by_another = graph
+        .iter()
+        .flat_map(|(caller, callees)| callees.iter().filter(move |callee| *callee != caller))
         .cloned()
-        .collect()
+        .collect();
+    CallGraphFacts {
+        reaches_recursive,
+        called_by_another,
+    }
 }
 
-fn collect_called_top_level_fns(expr: &Expr, fn_names: &BTreeSet<String>) -> BTreeSet<String> {
+/// The functions on a call cycle, found as the strongly connected components
+/// of the graph (Tarjan's algorithm, iterative so a long call chain cannot
+/// exhaust the stack): a member of a component with two or more functions, or
+/// a function that calls itself. One pass over the graph's calls.
+fn recursive_top_level_fn_names_from_graph(graph: &CallGraph) -> BTreeSet<String> {
+    let names = graph.keys().collect::<Vec<_>>();
+    let position = names
+        .iter()
+        .enumerate()
+        .map(|(index, name)| (name.as_str(), index))
+        .collect::<BTreeMap<_, _>>();
+    let successors = names
+        .iter()
+        .map(|name| {
+            graph[*name]
+                .iter()
+                .filter_map(|callee| position.get(callee.as_str()).copied())
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    let mut order = vec![None::<usize>; names.len()];
+    let mut low = vec![0; names.len()];
+    let mut on_stack = vec![false; names.len()];
+    let mut stack = Vec::new();
+    let mut visited = 0;
+    let mut recursive = BTreeSet::new();
+    for root in 0..names.len() {
+        if order[root].is_some() {
+            continue;
+        }
+        let mut work = vec![(root, 0)];
+        order[root] = Some(visited);
+        low[root] = visited;
+        visited += 1;
+        stack.push(root);
+        on_stack[root] = true;
+        while let Some(frame) = work.last_mut() {
+            let (node, edge) = *frame;
+            if let Some(&next) = successors[node].get(edge) {
+                frame.1 += 1;
+                match order[next] {
+                    None => {
+                        order[next] = Some(visited);
+                        low[next] = visited;
+                        visited += 1;
+                        stack.push(next);
+                        on_stack[next] = true;
+                        work.push((next, 0));
+                    }
+                    Some(seen) if on_stack[next] => low[node] = low[node].min(seen),
+                    Some(_) => {}
+                }
+                continue;
+            }
+            work.pop();
+            if let Some(&(parent, _)) = work.last() {
+                low[parent] = low[parent].min(low[node]);
+            }
+            if Some(low[node]) == order[node] {
+                let mut component = Vec::new();
+                loop {
+                    let member = stack.pop().expect("the component's root is on the stack");
+                    on_stack[member] = false;
+                    component.push(member);
+                    if member == node {
+                        break;
+                    }
+                }
+                if component.len() > 1 || successors[node].contains(&node) {
+                    recursive.extend(component.into_iter().map(|member| names[member].clone()));
+                }
+            }
+        }
+    }
+    recursive
+}
+
+fn collect_called_top_level_fns(expr: &Expr, is_fn: impl Fn(&str) -> bool) -> BTreeSet<String> {
     let mut out = BTreeSet::new();
     let mut stack = vec![expr];
     while let Some(current) = stack.pop() {
@@ -20421,7 +20594,7 @@ fn collect_called_top_level_fns(expr: &Expr, fn_names: &BTreeSet<String>) -> BTr
                     && let Some(callee) = list.children_slice().first().and_then(as_node)
                     && callee.tag() == DeepTag::Var
                     && let Some(name) = callee.children_slice().first().and_then(symbol_name)
-                    && fn_names.contains(name)
+                    && is_fn(name)
                 {
                     out.insert(name.to_string());
                 }
@@ -20431,31 +20604,6 @@ fn collect_called_top_level_fns(expr: &Expr, fn_names: &BTreeSet<String>) -> BTr
         }
     }
     out
-}
-
-fn call_graph_reaches_any(
-    graph: &BTreeMap<String, BTreeSet<String>>,
-    start: &str,
-    targets: &BTreeSet<String>,
-) -> bool {
-    let mut visited = UnordSet::new();
-    let mut stack = graph
-        .get(start)
-        .into_iter()
-        .flat_map(|callees| callees.iter().cloned())
-        .collect::<Vec<_>>();
-    while let Some(name) = stack.pop() {
-        if targets.contains(&name) {
-            return true;
-        }
-        if !visited.insert(name.clone()) {
-            continue;
-        }
-        if let Some(next) = graph.get(&name) {
-            stack.extend(next.iter().cloned());
-        }
-    }
-    false
 }
 
 /// Which operands of an application [`hoist_host_lane_tensor_bindings`]
@@ -31975,6 +32123,109 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
             recursive.contains("mut_a") && recursive.contains("mut_b"),
             "mutual recursion must still be detected"
         );
+    }
+
+    /// The per-question walk the derived call-graph facts replace: whether one
+    /// or more calls from `start` reach a name in `targets`.
+    fn reference_reaches_any(graph: &CallGraph, start: &str, targets: &BTreeSet<String>) -> bool {
+        let mut visited = BTreeSet::new();
+        let mut stack = graph
+            .get(start)
+            .into_iter()
+            .flat_map(|callees| callees.iter().cloned())
+            .collect::<Vec<_>>();
+        while let Some(name) = stack.pop() {
+            if targets.contains(&name) {
+                return true;
+            }
+            if !visited.insert(name.clone()) {
+                continue;
+            }
+            if let Some(next) = graph.get(&name) {
+                stack.extend(next.iter().cloned());
+            }
+        }
+        false
+    }
+
+    #[test]
+    fn derived_call_graph_facts_answer_every_four_function_graph_as_the_walks_did() {
+        // Every graph on four functions, self-calls included: 2^16 graphs, so
+        // the derived facts are checked on every shape of cycle, chain and
+        // fan the per-question walks could see at this size.
+        let names = ["a", "b", "c", "d"].map(str::to_string);
+        for edges in 0u32..(1 << 16) {
+            let graph: CallGraph = names
+                .iter()
+                .enumerate()
+                .map(|(from, name)| {
+                    let callees = names
+                        .iter()
+                        .enumerate()
+                        .filter(|(to, _)| edges & (1 << (from * 4 + to)) != 0)
+                        .map(|(_, callee)| callee.clone())
+                        .collect();
+                    (name.clone(), callees)
+                })
+                .collect();
+            let recursive = names
+                .iter()
+                .filter(|name| {
+                    reference_reaches_any(&graph, name, &BTreeSet::from([(*name).clone()]))
+                })
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            assert_eq!(
+                recursive_top_level_fn_names_from_graph(&graph),
+                recursive,
+                "recursive functions of graph {edges:#06x}"
+            );
+            let facts = derive_call_graph_facts(&graph);
+            let reaches = names
+                .iter()
+                .filter(|name| reference_reaches_any(&graph, name, &recursive))
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            assert_eq!(
+                facts.reaches_recursive, reaches,
+                "functions reaching recursion in graph {edges:#06x}"
+            );
+            let called_by_another = names
+                .iter()
+                .filter(|name| {
+                    graph
+                        .iter()
+                        .any(|(caller, callees)| caller != *name && callees.contains(*name))
+                })
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            assert_eq!(
+                facts.called_by_another, called_by_another,
+                "functions called by another in graph {edges:#06x}"
+            );
+        }
+    }
+
+    #[test]
+    fn recursion_detection_handles_a_hundred_thousand_function_chain() {
+        // The iterative walk holds a call chain far deeper than a thread's
+        // stack, and finds the one cycle at its end.
+        let length = 100_000;
+        let mut graph = (0..length)
+            .map(|index| {
+                (
+                    format!("f{index}"),
+                    BTreeSet::from([format!("f{}", index + 1)]),
+                )
+            })
+            .collect::<CallGraph>();
+        graph.insert(format!("f{length}"), BTreeSet::from(["f0".to_string()]));
+        assert_eq!(
+            recursive_top_level_fn_names_from_graph(&graph).len(),
+            length + 1
+        );
+        graph.insert(format!("f{length}"), BTreeSet::new());
+        assert!(recursive_top_level_fn_names_from_graph(&graph).is_empty());
     }
 
     #[test]

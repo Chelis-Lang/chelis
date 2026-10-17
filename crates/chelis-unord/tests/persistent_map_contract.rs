@@ -147,3 +147,50 @@ fn debug_reports_the_length_only() {
     let set: PersistentSet<&str> = ["secret"].into_iter().collect();
     assert_eq!(format!("{set:?}"), "PersistentSet { len: 1 }");
 }
+
+#[test]
+fn last_where_finds_the_end_of_a_true_prefix() {
+    // Every size up to 300 and every prefix length: the descent answers what a
+    // scan of the sorted entries answers.
+    for len in 0..300u64 {
+        let map: PersistentMap<u64, u64> = (0..len).map(|key| (key * 3, key)).collect();
+        for cut in 0..=len {
+            let found = map
+                .last_where(|key, _| *key < cut * 3)
+                .map(|(key, value)| (*key, *value));
+            let expected = cut.checked_sub(1).map(|last| (last * 3, last));
+            assert_eq!(found, expected, "len {len}, prefix {cut}");
+        }
+    }
+}
+
+#[test]
+fn a_set_serializes_as_the_unordered_set_does() {
+    // Every snapshot of a random insert and remove history writes the JSON
+    // the `UnordSet` with the same contents writes, and reads back to the
+    // same contents.
+    let mut generator = Generator(0x1405_7b7e_f767_814f);
+    let mut set = PersistentSet::new();
+    let mut model = UnordSet::new();
+    for _ in 0..2000 {
+        let value = generator.below(128);
+        if generator.below(3) == 0 {
+            set.remove(&value);
+            model.remove(&value);
+        } else {
+            set.insert(value);
+            model.insert(value);
+        }
+        let bytes = serde_json::to_string(&set).unwrap();
+        assert_eq!(bytes, serde_json::to_string(&model).unwrap());
+        let decoded: PersistentSet<u64> = serde_json::from_str(&bytes).unwrap();
+        assert_eq!(decoded.to_sorted(), set.to_sorted());
+    }
+    assert!(
+        serde_json::from_str::<PersistentSet<u64>>("[1,1]").is_err(),
+        "a duplicate element is rejected, as UnordSet rejects it"
+    );
+    let unsorted: PersistentSet<u64> = serde_json::from_str("[3,1,2]").unwrap();
+    assert_eq!(unsorted.to_sorted(), vec![&1, &2, &3]);
+    assert_eq!(serde_json::to_string(&unsorted).unwrap(), "[1,2,3]");
+}
