@@ -12,6 +12,7 @@
 //! Integer scans are forward-only and check every accumulator addition.
 //! Integer trace and einsum retain their checked host paths (chelis#3377).
 
+use chelis_abi::metadata::ShapeMetadata;
 use chelis_types::types::Prim;
 
 use crate::dag::{Dag, DimExpr, DimInfo, NodeId, Owner, RiscOp, RtAxis, RtDim, TensorType};
@@ -447,6 +448,10 @@ pub fn lower_einsum(
 /// product sum over one axis, with nothing materialized beyond an operand's
 /// or the result's own size.
 ///
+/// Its operand dtype is its resolved accumulator, so each product multiplies
+/// the stored operands in place; a reduced float or a widened accumulator
+/// would store an accumulator-width copy of each operand. Every shape the
+/// graph plans has strides, an element count and a byte size that fit i64.
 /// It has one reduction label `k` that both operands carry, no diagonal, and
 /// an output `[batch.., rows.., m, n]`: `m` and `rows` are labels only the row
 /// operand carries, `n` a label only the column operand carries, and `batch`
@@ -483,8 +488,19 @@ pub fn einsum_contraction(
     equation: &str,
     lhs: &TensorType,
     rhs: &TensorType,
+    accumulator: Option<Prim>,
 ) -> Option<EinsumContraction> {
-    if lhs.precision != rhs.precision || !lhs.precision.is_float() {
+    let precision = lhs.precision;
+    if rhs.precision != precision || !precision.is_float() {
+        return None;
+    }
+    // Only an operand already at the accumulator multiplies in place: any
+    // other dtype would store an accumulator-width copy of each operand.
+    let accumulator = match accumulator {
+        Some(accumulator) => accumulator,
+        None => precision.default_reduce_sum_accumulator().ok()?,
+    };
+    if accumulator != precision {
         return None;
     }
     let (inputs, output) = equation.split_once("->")?;
@@ -539,12 +555,12 @@ pub fn einsum_contraction(
     if rows.iter().any(|l| column.contains(l) || !row.contains(l)) {
         return None;
     }
-    flattened_rows(
+    let flat = flattened_rows(
         rows.iter()
             .chain([&m])
             .map(|l| &row_ty.dims[row.iter().position(|own| own == l).expect("row label")]),
     )?;
-    Some(EinsumContraction {
+    let plan = EinsumContraction {
         swapped,
         batch: batch.to_vec(),
         rows: rows.to_vec(),
@@ -552,7 +568,58 @@ pub fn einsum_contraction(
         k,
         n,
         labels: if swapped { [b, a] } else { [a, b] },
-    })
+    };
+    // Every shape the graph plans, the expansion included, has strides, an
+    // element count and a byte size that fit i64.
+    let (row_ty, column_ty) = if swapped { (rhs, lhs) } else { (lhs, rhs) };
+    let shapes = plan.planned_shapes(row_ty, column_ty, flat);
+    shapes
+        .iter()
+        .all(|dims| representable(dims, precision))
+        .then_some(plan)
+}
+
+impl EinsumContraction {
+    /// The flattened row operand, the product and expansions, and the output.
+    fn planned_shapes(
+        &self,
+        row: &TensorType,
+        column: &TensorType,
+        flat: DimInfo,
+    ) -> [Vec<DimInfo>; 3] {
+        let dim = |ty: &TensorType, side: usize, label: u8| {
+            ty.dims[self.labels[side]
+                .iter()
+                .position(|&l| l == label)
+                .expect("own label")]
+            .clone()
+        };
+        let batch: Vec<DimInfo> = self.batch.iter().map(|&l| dim(row, 0, l)).collect();
+        let mut rows = batch.clone();
+        rows.extend([flat, dim(row, 0, self.k)]);
+        let mut product = rows.clone();
+        product.push(dim(column, 1, self.n));
+        let mut output = batch;
+        output.extend(self.rows.iter().chain(&[self.m]).map(|&l| dim(row, 0, l)));
+        output.push(dim(column, 1, self.n));
+        [rows, product, output]
+    }
+}
+
+/// Whether the static extents of `dims` pass the runtime's own
+/// contiguous-metadata check at `precision`: their strides, element count and
+/// byte size fit i64, an empty shape included. The runtime plan that reads a
+/// runtime extent checks that extent's own factor.
+fn representable(dims: &[DimInfo], precision: Prim) -> bool {
+    let Ok(dtype) = precision.runtime_dtype() else {
+        return false;
+    };
+    let extents: Option<Vec<i64>> = dims
+        .iter()
+        .filter_map(static_extent)
+        .map(|n| i64::try_from(n).ok())
+        .collect();
+    extents.is_some_and(|extents| ShapeMetadata::contiguous(&extents, dtype).is_ok())
 }
 
 /// One row axis for `dims`: their static product, or their one runtime
@@ -584,16 +651,15 @@ fn static_extent(dim: &DimInfo) -> Option<usize> {
 }
 
 /// [05-OP-33] `einsum` in its [`EinsumContraction`] form, built as the
-/// graph spec/05 §4.1 gives `matmul`. Each operand converts exactly to the
-/// accumulator and is permuted to `[batch.., rows.., m, k]` or
+/// graph spec/05 §4.1 gives `matmul`. The operands, already at the
+/// accumulator, are permuted to `[batch.., rows.., m, k]` or
 /// `[batch.., k, n]`; the row operand's `rows.., m` reshape into one row axis.
 /// The two meet as `Sum(Mul(Expand(row), Expand(column)))` over `k`, which a
 /// lane runs as its product-sum kernel without storing either expansion, and
 /// the sum reshapes back to the output. Each product finalizes at the
 /// accumulator and the `k` products enter the canonical balanced tree in
-/// increasing order, the bits [05-OP-33] fixes; the result finalizes once at
-/// `sum_result(p, accumulator)`. No node holds more elements than an operand
-/// or the result.
+/// increasing order, the bits [05-OP-33] fixes. No stored node holds more
+/// bytes than an operand or the result.
 ///
 /// A label only one operand carries may have a runtime extent; the column
 /// expansion reads the row extent from the row operand's shape.
@@ -615,7 +681,9 @@ pub fn lower_einsum_contraction(
         Some(accumulator) => accumulator,
         None => precision.default_reduce_sum_accumulator()?,
     };
-    let result = precision.sum_result_precision(accumulator);
+    if accumulator != precision {
+        return Err("the contraction form multiplies at the operand dtype".to_string());
+    }
     let at = |dims: &[DimInfo]| TensorType {
         dims: dims.to_vec(),
         precision: accumulator,
@@ -625,15 +693,9 @@ pub fn lower_einsum_contraction(
         let axis = plan.labels[side].iter().position(|&l| l == label);
         ty.dims[axis.expect("own label")].clone()
     };
-    // Convert and permute one operand to `order`.
+    // Permute one operand to `order`.
     let arrange = |dag: &mut Dag, side: usize, node: NodeId, ty: &TensorType, order: &[u8]| {
         let mut node = node;
-        if precision != accumulator {
-            let cast = RiscOp::Cast {
-                new_precision: accumulator,
-            };
-            node = add_synth(owner, dag, cast, vec![node], at(&ty.dims), span);
-        }
         let labels = &plan.labels[side];
         let axes: Vec<usize> = order
             .iter()
@@ -736,19 +798,8 @@ pub fn lower_einsum_contraction(
             at(&out_dims),
             span,
         );
-        dims = out_dims;
     }
-    if result == accumulator {
-        return Ok(node);
-    }
-    let cast = RiscOp::Cast {
-        new_precision: result,
-    };
-    let ty = TensorType {
-        dims,
-        precision: result,
-    };
-    Ok(add_synth(owner, dag, cast, vec![node], ty, span))
+    Ok(node)
 }
 
 fn rt_axis(axis: usize) -> RtAxis {
@@ -793,12 +844,12 @@ mod einsum_contraction_tests {
     }
 
     fn plan(equation: &str, a: &[DimInfo], b: &[DimInfo], p: Prim) -> Option<EinsumContraction> {
-        einsum_contraction(equation, &ty(a, p), &ty(b, p))
+        einsum_contraction(equation, &ty(a, p), &ty(b, p), None)
     }
 
     /// [05-OP-33]'s one-reduction-label contractions whose output is
     /// `[batch.., rows.., m, n]`, with the row operand's labels flattening
-    /// to one axis.
+    /// to one axis, at an operand dtype that is its own accumulator.
     #[test]
     fn matmul_shaped_float_contractions_have_the_contraction_form() {
         let f32 = Prim::F32;
@@ -828,12 +879,17 @@ mod einsum_contraction_tests {
         ] {
             assert!(plan(equation, &a, &b, f32).is_some(), "`{equation}`");
         }
-        for p in [Prim::F64, Prim::F16, Prim::Bf16] {
-            assert!(
-                plan("mk,kn->mn", &lit(&[3, 7]), &lit(&[7, 5]), p).is_some(),
-                "{p:?}"
-            );
-        }
+        assert!(plan("mk,kn->mn", &lit(&[3, 7]), &lit(&[7, 5]), Prim::F64).is_some());
+        let explicit = einsum_contraction(
+            "mk,kn->mn",
+            &ty(&lit(&[3, 7]), f32),
+            &ty(&lit(&[7, 5]), f32),
+            Some(f32),
+        );
+        assert!(
+            explicit.is_some(),
+            "an explicit accumulator equal to the operand dtype"
+        );
         let swapped = plan("nk,mk->mn", &lit(&[5, 7]), &lit(&[3, 7]), f32).unwrap();
         assert!(swapped.swapped);
         assert!(
@@ -843,24 +899,33 @@ mod einsum_contraction_tests {
         );
     }
 
-    /// Everything else keeps the runtime kernel: integers, diagonals, no or
-    /// several reduction labels, an output that does not end in a row and a
-    /// column, a shared label without one static extent, and a lead label
-    /// the contraction could only reach by copying an operand along it.
+    /// Everything else keeps the runtime kernel: integers, an operand dtype
+    /// that is not its accumulator, diagonals, no or several reduction labels,
+    /// an output that does not end in a row and a column, a shared label
+    /// without one static extent, a lead label the contraction could only
+    /// reach by copying an operand, and a planned shape i64 cannot hold.
     #[test]
     fn every_other_einsum_has_no_contraction_form() {
         let f32 = Prim::F32;
-        for p in [Prim::Int32, Prim::Int64, Prim::Int8] {
+        for p in [Prim::Int32, Prim::Int64, Prim::Int8, Prim::F16, Prim::Bf16] {
             assert!(
                 plan("mk,kn->mn", &lit(&[3, 7]), &lit(&[7, 5]), p).is_none(),
                 "{p:?}"
             );
         }
+        let widened = einsum_contraction(
+            "mk,kn->mn",
+            &ty(&lit(&[3, 7]), f32),
+            &ty(&lit(&[7, 5]), f32),
+            Some(Prim::F64),
+        );
+        assert!(widened.is_none(), "an f64 accumulator over f32 operands");
         assert!(
             einsum_contraction(
                 "mk,kn->mn",
                 &ty(&lit(&[3, 7]), f32),
-                &ty(&lit(&[7, 5]), Prim::F64)
+                &ty(&lit(&[7, 5]), Prim::F64),
+                None
             )
             .is_none()
         );
@@ -905,19 +970,29 @@ mod einsum_contraction_tests {
                 vec![DimInfo::Lit(2), runtime("m"), DimInfo::Lit(8)],
                 lit(&[8, 5]),
             ),
-            // Rows whose static product has no representation.
             (
                 "amk,kn->amn",
                 lit(&[usize::MAX / 2 + 1, 2, 8]),
                 lit(&[8, 5]),
+            ),
+            // An empty batch whose expansion strides exceed i64.
+            (
+                "bmk,bkn->bmn",
+                lit(&[0, 4_194_304, 4_194_304]),
+                lit(&[0, 4_194_304, 4_194_304]),
             ),
         ] {
             assert!(plan(equation, &a, &b, f32).is_none(), "`{equation}`");
         }
     }
 
-    fn lowered(equation: &str, a: &[DimInfo], b: &[DimInfo], p: Prim) -> (Dag, NodeId) {
-        let plan = plan(equation, a, b, p).expect("contraction form");
+    fn lowered(
+        equation: &str,
+        a: &[DimInfo],
+        b: &[DimInfo],
+        p: Prim,
+        plan: &EinsumContraction,
+    ) -> (Dag, NodeId) {
         let mut dag = Dag::new();
         let owner = Owner::from(dag.declare("test"));
         let a_ty = ty(a, p);
@@ -937,7 +1012,7 @@ mod einsum_contraction_tests {
             None,
         );
         let root =
-            lower_einsum_contraction(owner, &mut dag, &plan, [(x, &a_ty), (y, &b_ty)], None, None)
+            lower_einsum_contraction(owner, &mut dag, plan, [(x, &a_ty), (y, &b_ty)], None, None)
                 .expect("lowered");
         dag.set_roots(vec![root]);
         assert!(
@@ -971,14 +1046,14 @@ mod einsum_contraction_tests {
                 "nk,mk->mn",
                 lit(&[5, 7]),
                 lit(&[3, 7]),
-                Prim::F16,
+                Prim::F32,
                 lit(&[3, 5]),
             ),
             (
                 "bamk,bkn->bamn",
                 lit(&[2, 5, 3, 9]),
                 lit(&[2, 9, 4]),
-                Prim::Bf16,
+                Prim::F64,
                 lit(&[2, 5, 3, 4]),
             ),
             (
@@ -989,13 +1064,13 @@ mod einsum_contraction_tests {
                 vec![DimInfo::Lit(1), runtime("s"), runtime("e")],
             ),
         ] {
-            let (dag, root) = lowered(equation, &a, &b, p);
+            let contraction = plan(equation, &a, &b, p).expect("contraction form");
+            let (dag, root) = lowered(equation, &a, &b, p, &contraction);
             let inlined = reduction_inlined_products(&dag);
             assert_eq!(inlined.len(), 1, "`{equation}` product sum");
             let product = dag.get(inlined[0].product).unwrap();
             let rank = product.output_type.dims.len();
-            let accumulator = p.default_reduce_sum_accumulator().unwrap();
-            assert_eq!(product.output_type.precision, accumulator);
+            assert_eq!(product.output_type.precision, p);
             assert!(
                 matches!(dag.get(inlined[0].sum).unwrap().op, RiscOp::Sum { axis, .. } if axis == rank - 2)
             );
@@ -1017,45 +1092,160 @@ mod einsum_contraction_tests {
         }
     }
 
-    /// No stored node is larger than an operand or the result: the only
-    /// expansions are the two the product sum reads without storing, so the
-    /// column operand is never copied along a row-only label.
-    #[test]
-    fn the_contraction_stores_nothing_larger_than_an_operand_or_the_result() {
-        let elements = |ty: &TensorType| -> usize {
-            ty.dims
-                .iter()
-                .map(|dim| static_extent(dim).expect("static"))
-                .product()
-        };
-        for (equation, a, b) in [
-            ("amk,kn->amn", lit(&[256, 1, 512]), lit(&[512, 512])),
-            ("abmk,kn->abmn", lit(&[4, 8, 3, 64]), lit(&[64, 32])),
-            ("mak,kn->amn", lit(&[3, 16, 64]), lit(&[64, 32])),
-            ("bamk,bkn->bamn", lit(&[2, 16, 3, 32]), lit(&[2, 32, 8])),
-            ("mk,nk->mn", lit(&[3, 64]), lit(&[32, 64])),
-        ] {
-            let (dag, root) = lowered(equation, &a, &b, Prim::F32);
-            let inlined = reduction_inlined_products(&dag);
-            let skipped = inlined[0].skipped();
-            let bound = elements(&ty(&a, Prim::F32))
-                .max(elements(&ty(&b, Prim::F32)))
-                .max(elements(&dag.get(root).unwrap().output_type));
-            for node in dag.nodes() {
-                if skipped.contains(&node.id) {
-                    continue;
+    /// Every two-operand equation over up to four labels, each operand of
+    /// rank one to three.
+    fn equations() -> Vec<String> {
+        let letters = *b"abcd";
+        let mut sequences = vec![Vec::new()];
+        for _ in 0..3 {
+            let mut longer = Vec::new();
+            for sequence in &sequences {
+                for &letter in &letters {
+                    if !sequence.contains(&letter) {
+                        let mut next: Vec<u8> = sequence.clone();
+                        next.push(letter);
+                        longer.push(next);
+                    }
                 }
-                assert!(
-                    !matches!(node.op, RiscOp::Expand { .. }),
-                    "`{equation}` stores an expansion"
-                );
-                assert!(
-                    elements(&node.output_type) <= bound,
-                    "`{equation}` stores {:?} of {} elements, over {bound}",
-                    node.op,
-                    elements(&node.output_type)
-                );
+            }
+            sequences.extend(
+                longer
+                    .iter()
+                    .filter(|s| !sequences.contains(s))
+                    .cloned()
+                    .collect::<Vec<_>>(),
+            );
+        }
+        sequences.sort();
+        sequences.dedup();
+        let operands: Vec<&Vec<u8>> = sequences.iter().filter(|s| !s.is_empty()).collect();
+        let mut out = Vec::new();
+        for a in &operands {
+            for b in &operands {
+                let union: Vec<u8> = letters
+                    .iter()
+                    .copied()
+                    .filter(|l| a.contains(l) || b.contains(l))
+                    .collect();
+                for output in sequences
+                    .iter()
+                    .filter(|s| s.iter().all(|l| union.contains(l)))
+                {
+                    out.push(format!(
+                        "{},{}->{}",
+                        String::from_utf8_lossy(a),
+                        String::from_utf8_lossy(b),
+                        String::from_utf8_lossy(output)
+                    ));
+                }
             }
         }
+        out
+    }
+
+    const LARGE: usize = 1 << 21;
+
+    /// The class oracle over the classifier's own acceptances: for every
+    /// generated equation, operand dtype and accumulator, and per-label
+    /// extents drawn from zero, one, three, a runtime extent and a large one,
+    /// an accepted contraction lowers to one product sum whose planned shapes
+    /// fit i64 and which stores no node larger in bytes than an operand or
+    /// the result. A runtime extent is evaluated at 0 and at 7.
+    #[test]
+    fn every_accepted_contraction_stores_no_more_than_its_operands_or_result() {
+        let precisions = [
+            (Prim::F16, None),
+            (Prim::Bf16, None),
+            (Prim::F32, None),
+            (Prim::F64, None),
+            (Prim::F32, Some(Prim::F64)),
+        ];
+        let extents = [
+            DimInfo::Lit(0),
+            DimInfo::Lit(1),
+            DimInfo::Lit(3),
+            runtime("r"),
+            DimInfo::Lit(LARGE),
+        ];
+        let mut state = 0x3777_u64;
+        let mut accepted = 0usize;
+        for equation in equations() {
+            let (inputs, _) = equation.split_once("->").unwrap();
+            let (la, lb) = inputs.split_once(',').unwrap();
+            for _ in 0..4 {
+                let mut extent = std::collections::BTreeMap::new();
+                for label in la.bytes().chain(lb.bytes()) {
+                    extent.entry(label).or_insert_with(|| {
+                        state = state
+                            .wrapping_mul(6_364_136_223_846_793_005)
+                            .wrapping_add(1);
+                        let mut dim = extents[(state >> 33) as usize % extents.len()].clone();
+                        if let DimInfo::Named(_, None) = dim {
+                            dim = runtime(&format!("r{}", char::from(label)));
+                        }
+                        dim
+                    });
+                }
+                let a: Vec<DimInfo> = la.bytes().map(|l| extent[&l].clone()).collect();
+                let b: Vec<DimInfo> = lb.bytes().map(|l| extent[&l].clone()).collect();
+                for &(p, accumulator) in &precisions {
+                    let Some(contraction) =
+                        einsum_contraction(&equation, &ty(&a, p), &ty(&b, p), accumulator)
+                    else {
+                        continue;
+                    };
+                    accepted += 1;
+                    let (dag, root) = lowered(&equation, &a, &b, p, &contraction);
+                    let inlined = reduction_inlined_products(&dag);
+                    assert_eq!(inlined.len(), 1, "`{equation}` {a:?} {b:?} {p:?}");
+                    let skipped = inlined[0].skipped();
+                    let product = &dag.get(inlined[0].product).unwrap().output_type;
+                    for binding in [0u128, 7] {
+                        let count = |ty: &TensorType| -> u128 {
+                            ty.dims
+                                .iter()
+                                .map(|dim| static_extent(dim).map_or(binding, |n| n as u128))
+                                .product()
+                        };
+                        let bytes = |ty: &TensorType| -> u128 {
+                            let width = ty.precision.runtime_dtype().unwrap().byte_width() as u128;
+                            count(ty) * width
+                        };
+                        let bound = bytes(&ty(&a, p))
+                            .max(bytes(&ty(&b, p)))
+                            .max(bytes(&dag.get(root).unwrap().output_type));
+                        for node in dag.nodes() {
+                            if skipped.contains(&node.id) {
+                                continue;
+                            }
+                            assert!(
+                                bytes(&node.output_type) <= bound,
+                                "`{equation}` {a:?} {b:?} {p:?}/{accumulator:?} stores {:?} of {} bytes, over {bound}",
+                                node.op,
+                                bytes(&node.output_type)
+                            );
+                        }
+                        // Every stride and the byte size of the planned
+                        // expansion fit i64.
+                        let mut suffix = 1u128;
+                        for dim in product.dims.iter().rev() {
+                            suffix *= static_extent(dim).map_or(binding.max(1), |n| n as u128);
+                            assert!(
+                                suffix <= i64::MAX as u128,
+                                "`{equation}` {a:?} {b:?} expansion stride"
+                            );
+                        }
+                        assert!(
+                            bytes(product) <= i64::MAX as u128,
+                            "`{equation}` {a:?} {b:?} expansion bytes"
+                        );
+                    }
+                }
+            }
+        }
+        assert!(
+            accepted > 1000,
+            "the oracle reached {accepted} accepted cases"
+        );
     }
 }

@@ -1,14 +1,18 @@
-//! chelis#3736 / chelis#3703: a compiled float `einsum` whose [05-OP-33]
-//! contraction is spec/05 §4.1's product sum over one reduction label runs
-//! the emitted product-sum kernel `matmul` uses, with the bits `chelis eval`
-//! computes; every other einsum keeps the runtime kernel.
+//! chelis#3736 / chelis#3703: a compiled f32 or f64 `einsum`, at its own
+//! accumulator, whose [05-OP-33] contraction is spec/05 §4.1's product sum
+//! over one reduction label runs the emitted product-sum kernel `matmul`
+//! uses, with the bits `chelis eval` computes; every other einsum keeps the
+//! runtime kernel.
 //!
-//! The fixture covers both sides. Its routed definitions span f32, f64, f16
-//! and bf16, an explicit f64 accumulator, permuted and swapped operands,
-//! batch and runtime row extents (including zero rows), a 257-leaf tree,
-//! inf, NaN and signed-zero products, and an f16 double-rounding witness. Its retained definitions are a diagonal, two and
+//! The fixture covers both sides. Its routed definitions span f32 and f64,
+//! permuted and swapped operands, batch and runtime row extents (including
+//! zero rows), flattened row labels, a 257-leaf tree, and inf, NaN and
+//! signed-zero products. Its retained definitions are a diagonal, two and
 //! zero reduction labels, a matrix-vector product, a runtime contraction
-//! extent and an integer contraction.
+//! extent, an integer contraction, a lead label only the column operand
+//! carries, f16 and bf16 operands, an f64 accumulator over f32 operands, an
+//! f16 double-rounding witness, and an empty batch whose expansion strides
+//! would exceed i64.
 
 mod common;
 
@@ -29,16 +33,11 @@ const ROUTED: &[&str] = &[
     "transposed",
     "swapped",
     "batched",
-    "half",
-    "brain",
-    "wide",
     "runtime_rows",
     "deep",
     "flattened",
     "interleaved",
     "sequence",
-    "widened",
-    "narrowed",
     "special",
 ];
 
@@ -50,6 +49,12 @@ const RETAINED: &[&str] = &[
     "runtime_depth",
     "integer",
     "broadcast_columns",
+    "half",
+    "brain",
+    "wide",
+    "widened",
+    "narrowed",
+    "huge_empty",
 ];
 
 fn stdout(output: &std::process::Output, lane: &str) -> String {

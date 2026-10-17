@@ -15265,7 +15265,8 @@ fn einsum_lowers_to_contraction(
     ) else {
         return false;
     };
-    crate::tier2_ordered::einsum_contraction(equation, &lhs, &rhs).is_some()
+    crate::tier2_ordered::einsum_contraction(equation, &lhs, &rhs, explicit_accumulator(list))
+        .is_some()
 }
 
 fn lower_closed_host_application(

@@ -20151,9 +20151,9 @@ impl<'program> LowerCtx<'program> {
                 let b = self.lower_expr_node(&args[2], "einsum rhs");
                 let a_ty = self.lowered_type_or(a, ty);
                 let b_ty = self.lowered_type_or(b, ty);
-                let plan = contraction
-                    .as_deref()
-                    .and_then(|equation| tier2_ordered::einsum_contraction(equation, &a_ty, &b_ty));
+                let plan = contraction.as_deref().and_then(|equation| {
+                    tier2_ordered::einsum_contraction(equation, &a_ty, &b_ty, accumulator)
+                });
                 let span = self.current_span_id.clone();
                 match plan.map(|plan| {
                     tier2_ordered::lower_einsum_contraction(
