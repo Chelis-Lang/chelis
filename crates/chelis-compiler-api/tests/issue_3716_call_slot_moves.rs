@@ -87,6 +87,15 @@ const CORPUS: &[(&str, &str)] = &[
         "def h(a: List[i64], n: i64) -> i64 = add(len(a), n)\n\
          def g(x: List[i64]) -> i64 = h(x, len(x))\nout = g([1i64, 2i64, 3i64])\n",
     ),
+    // A direct self-tail call reuses the frame as a loop and writes both
+    // next formals from one value: one slot moves it, the other takes the
+    // inserted copy, and the dropped formal is released each iteration.
+    (
+        "dup_self_tail_call",
+        "def walk(a: List[i64], b: List[i64], n: i64) -> i64 = \
+         if (n == 0i64) then add(len(a), len(b)) else walk(b, b, (n - 1i64))\n\
+         out = walk([1i64], [2i64, 3i64], 3i64)\n",
+    ),
     (
         "root_value_reused",
         "xs: List[i64] = [1i64, 2i64]\nout = f2(xs, xs)\n",
