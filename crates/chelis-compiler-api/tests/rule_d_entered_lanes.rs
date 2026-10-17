@@ -1933,7 +1933,7 @@ fn a_vmapped_arms_c_kernel_reads_each_rows_activation_once() {
         (
             "integer sum",
             vmapped_sum_arm("gt(s, -2.0f32)", 3),
-            "__sum_level_",
+            "__carry = ",
         ),
     ] {
         let artifact = compile_c(&source, "selected");

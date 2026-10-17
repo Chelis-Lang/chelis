@@ -89,7 +89,7 @@ fn f64_matmul_subgraph_stays_off_blas_path_in_c_backend() {
 
     assert!(!result.c_source.contains("cblas_sgemm("));
     assert!(!result.c_source.contains("cblas_dgemm("));
-    assert!(result.c_source.contains("__sum_level_"));
+    assert!(result.c_source.contains("_level[64]"));
 
     // F64 slot allocation should still be present (the data is F64;
     // the generic expand+mul+sum path computes against it).
@@ -180,7 +180,7 @@ fn f32_matmul_subgraph_preserves_canonical_arithmetic_in_c_backend() {
     assert!(!result.c_source.contains("cblas_sgemm("));
     assert!(!result.requirements.needs_blas);
     assert!(result.c_source.contains("CHELIS_DTYPE_F32"));
-    assert!(result.c_source.contains("__sum_level_"));
+    assert!(result.c_source.contains("_level[64]"));
 }
 
 /// spec/05 section 4.1's `[m,k] x [k,n]` graph; `observe_product` also
@@ -259,7 +259,7 @@ fn matmul_stores_no_rank_three_intermediate() {
         assert_eq!(c.matches("chelis_movement_check_target(").count(), 2, "{c}");
         assert_eq!(c.matches("chelis_movement_plan_release(").count(), 2, "{c}");
         assert!(c.contains("chelis_shape_reduction_plan("), "{c}");
-        assert!(c.contains("__sum_level_"), "{c}");
+        assert!(c.contains("_level[64]"), "{c}");
     }
 }
 
@@ -324,7 +324,9 @@ fn column_blocks_keep_bounded_tree_scratch() {
             .unwrap()
             .c_source;
         assert!(c.contains("__sum_lanes_"), "{prim:?}: {c}");
-        assert!(c.contains("__pair_lane"), "{prim:?}: {c}");
+        assert!(c.contains("_level[64][8]"), "{prim:?}: {c}");
+        assert!(c.contains("__carry_lane"), "{prim:?}: {c}");
+        assert!(!c.contains("__sum_scratch_"), "{prim:?}: {c}");
         assert!(!c.contains("chelis_alloc(3,"), "{prim:?}: {c}");
     }
 }

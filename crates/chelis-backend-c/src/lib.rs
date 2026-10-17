@@ -1103,7 +1103,7 @@ mod tests {
         .unwrap();
         assert!(!result.requirements.needs_blas);
         assert!(!result.c_source.contains("cblas_sgemm("));
-        assert!(result.c_source.contains("__sum_level_"));
+        assert!(result.c_source.contains("_level[64]"));
     }
 
     // ---- Compilation tests ----
@@ -3095,7 +3095,7 @@ int main(int argc, char **argv) {
                 .contains("int64_t seq = chelis_tensor_shape(inputs[0], 2);")
         );
         assert!(!result.c_source.contains("cblas_sgemm"));
-        assert!(result.c_source.contains("__sum_level_"));
+        assert!(result.c_source.contains("_level[64]"));
 
         let lines = compile_and_run_input_cases(
             &dag,
