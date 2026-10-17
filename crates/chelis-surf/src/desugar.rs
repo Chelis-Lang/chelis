@@ -409,39 +409,59 @@ impl CallableOrigin {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct LexicalCallableId(u64);
 
-#[derive(Clone, Default)]
-struct CallableScope {
-    values: UnordMap<String, CallableOrigin>,
+/// The callable origins visible at one lexical point. The module-wide table is
+/// the root frame, and each enclosing local scope adds a frame that borrows
+/// its parent, so entering a scope never copies the bindings already visible
+/// (chelis#3739). The type is deliberately not `Clone`: a scope is extended
+/// with [`CallableScope::child`], never copied.
+#[derive(Default)]
+struct CallableScope<'a> {
+    parent: Option<&'a CallableScope<'a>>,
+    frame: UnordMap<String, CallableOrigin>,
 }
 
-impl CallableScope {
+impl CallableScope<'_> {
+    fn child(&self) -> CallableScope<'_> {
+        CallableScope {
+            parent: Some(self),
+            frame: UnordMap::new(),
+        }
+    }
+
+    /// The innermost binding of `name`, as the frames shadow one another.
     fn lookup(&self, name: &str) -> CallableOrigin {
-        self.values
-            .get(name)
-            .cloned()
-            .unwrap_or(CallableOrigin::Unknown)
+        let mut scope = Some(self);
+        while let Some(current) = scope {
+            if let Some(value) = current.frame.get(name) {
+                return value.clone();
+            }
+            scope = current.parent;
+        }
+        CallableOrigin::Unknown
     }
 
     fn bind(&mut self, name: String, value: CallableOrigin) {
-        self.values.insert(name, value);
+        self.frame.insert(name, value);
     }
 }
 
 #[derive(Default)]
 struct GradSelectorResolver {
-    globals: CallableScope,
+    globals: CallableScope<'static>,
+    origins: OriginWalker,
+}
+
+/// The resolver state that walking an expression updates. It is separate from
+/// the module-wide table so that a walk can borrow that table as the root of
+/// its scope while it records selectors and allocates identities.
+#[derive(Default)]
+struct OriginWalker {
     resolved: Vec<(usize, Vec<i64>)>,
     next_callable_identity: u64,
     deep_callable_identities: UnordMap<usize, LexicalCallableId>,
 }
 
 impl GradSelectorResolver {
-    fn fresh_callable_identity(&mut self) -> LexicalCallableId {
-        let identity = LexicalCallableId(self.next_callable_identity);
-        self.next_callable_identity += 1;
-        identity
-    }
-
     fn resolve_program_with_context(
         decls: &[Decl],
         context: &[deep::Expr],
@@ -455,7 +475,7 @@ impl GradSelectorResolver {
         for decl in decls {
             resolver.visit_decl(decl)?;
         }
-        Ok(resolver.resolved)
+        Ok(resolver.origins.resolved)
     }
 
     fn preseed_deep_function_origins(&mut self, exprs: &[deep::Expr]) {
@@ -472,7 +492,7 @@ impl GradSelectorResolver {
                     let Some(params) = deep_function_parameters(&children[1]) else {
                         continue;
                     };
-                    let identity = self.deep_callable_identity(&children[1]);
+                    let identity = self.origins.deep_callable_identity(&children[1]);
                     self.globals.bind(
                         name.to_string(),
                         CallableOrigin::Known {
@@ -487,17 +507,6 @@ impl GradSelectorResolver {
         }
     }
 
-    fn deep_callable_identity(&mut self, expr: &deep::Expr) -> LexicalCallableId {
-        let expr = strip_deep_metadata(expr);
-        let key = expr as *const deep::Expr as usize;
-        if let Some(identity) = self.deep_callable_identities.get(&key) {
-            return *identity;
-        }
-        let identity = self.fresh_callable_identity();
-        self.deep_callable_identities.insert(key, identity);
-        identity
-    }
-
     fn seed_deep_origins(&mut self, exprs: &[deep::Expr]) {
         for expr in exprs {
             let deep::ExprCarrier::DecodedNode(tag, _, children) = expr.carrier() else {
@@ -509,8 +518,9 @@ impl GradSelectorResolver {
                     let Some(name) = deep_symbol_name(&children[0]) else {
                         continue;
                     };
-                    let scope = self.globals.clone();
-                    let value = self.deep_callable_origin(&children[1], &scope, name);
+                    let value =
+                        self.origins
+                            .deep_callable_origin(&children[1], &self.globals, name);
                     self.globals.bind(name.to_string(), value);
                 }
                 _ => {}
@@ -520,8 +530,10 @@ impl GradSelectorResolver {
 
     fn resolve_expression(expr: &Expr) -> Result<Vec<(usize, Vec<i64>)>, DesugarError> {
         let mut resolver = Self::default();
-        resolver.visit_expr(expr, &CallableScope::default())?;
-        Ok(resolver.resolved)
+        resolver
+            .origins
+            .visit_expr(expr, &CallableScope::default())?;
+        Ok(resolver.origins.resolved)
     }
 
     fn resolve_expression_in_program(
@@ -536,12 +548,12 @@ impl GradSelectorResolver {
         for decl in decls {
             resolver.visit_decl(decl)?;
         }
-        let mut scope = resolver.globals.clone();
+        let mut scope = resolver.globals.child();
         for name in bound_names {
             scope.bind(name.clone(), CallableOrigin::Unknown);
         }
-        resolver.visit_expr(expr, &scope)?;
-        Ok(resolver.resolved)
+        resolver.origins.visit_expr(expr, &scope)?;
+        Ok(resolver.origins.resolved)
     }
 
     fn seed_function_origins(&mut self, decl: &Decl) {
@@ -552,7 +564,7 @@ impl GradSelectorResolver {
                 }
             }
             Decl::FunDef { name, params, .. } | Decl::Property { name, params, .. } => {
-                let identity = self.fresh_callable_identity();
+                let identity = self.origins.fresh_callable_identity();
                 self.globals.bind(
                     name.clone(),
                     CallableOrigin::Known {
@@ -580,7 +592,7 @@ impl GradSelectorResolver {
                 name, params, body, ..
             } => {
                 let callable = self.globals.lookup(name);
-                let mut scope = self.globals.clone();
+                let mut scope = self.globals.child();
                 for param in params {
                     scope.bind(param.name.clone(), CallableOrigin::Unknown);
                 }
@@ -591,44 +603,44 @@ impl GradSelectorResolver {
                 } = decl
                 {
                     for precondition in preconditions {
-                        self.visit_expr(precondition, &scope)?;
+                        self.origins.visit_expr(precondition, &scope)?;
                     }
                     for option in options {
                         match option {
                             PropertyOption::Tolerance(value, _)
                             | PropertyOption::Seed(value, _)
                             | PropertyOption::Samples(value, _) => {
-                                self.visit_expr(value, &scope)?;
+                                self.origins.visit_expr(value, &scope)?;
                             }
                             PropertyOption::Contract(..) => {}
                         }
                     }
                 }
-                self.visit_expr(body, &scope)?;
+                self.origins.visit_expr(body, &scope)?;
                 self.globals.bind(name.clone(), callable);
             }
             Decl::LetDef { name, value, .. } => {
-                let scope = self.globals.clone();
-                let value = self.visit_expr(value, &scope)?;
+                let scope = self.globals.child();
+                let value = self.origins.visit_expr(value, &scope)?;
                 self.globals.bind(name.clone(), value);
             }
             Decl::MacroDef {
                 params, body, name, ..
             } => {
-                let mut scope = self.globals.clone();
+                let mut scope = self.globals.child();
                 for param in params {
                     scope.bind(param.clone(), CallableOrigin::Unknown);
                 }
-                let value = self.visit_expr(body, &scope)?;
+                let value = self.origins.visit_expr(body, &scope)?;
                 self.globals.bind(name.clone(), value);
             }
             Decl::TypeDef {
                 invariant: Some(invariant),
                 ..
             } => {
-                let mut scope = self.globals.clone();
+                let mut scope = self.globals.child();
                 scope.bind(invariant.binder.clone(), CallableOrigin::Unknown);
-                self.visit_expr(&invariant.body, &scope)?;
+                self.origins.visit_expr(&invariant.body, &scope)?;
             }
             Decl::Import { .. }
             | Decl::Sig { .. }
@@ -641,11 +653,30 @@ impl GradSelectorResolver {
         }
         Ok(())
     }
+}
+
+impl OriginWalker {
+    fn fresh_callable_identity(&mut self) -> LexicalCallableId {
+        let identity = LexicalCallableId(self.next_callable_identity);
+        self.next_callable_identity += 1;
+        identity
+    }
+
+    fn deep_callable_identity(&mut self, expr: &deep::Expr) -> LexicalCallableId {
+        let expr = strip_deep_metadata(expr);
+        let key = expr as *const deep::Expr as usize;
+        if let Some(identity) = self.deep_callable_identities.get(&key) {
+            return *identity;
+        }
+        let identity = self.fresh_callable_identity();
+        self.deep_callable_identities.insert(key, identity);
+        identity
+    }
 
     fn visit_expr(
         &mut self,
         expr: &Expr,
-        scope: &CallableScope,
+        scope: &CallableScope<'_>,
     ) -> Result<CallableOrigin, DesugarError> {
         let ordinary = match expr {
             Expr::Lit(..) | Expr::Constructor(..) => CallableOrigin::NonCallable,
@@ -740,7 +771,7 @@ impl GradSelectorResolver {
                 let scrutinee = self.visit_expr(scrutinee, scope)?;
                 let mut result: Option<CallableOrigin> = None;
                 for arm in arms {
-                    let mut arm_scope = scope.clone();
+                    let mut arm_scope = scope.child();
                     bind_match_pattern(&arm.pattern, &scrutinee, &mut arm_scope);
                     if let Some(guard) = &arm.guard {
                         self.visit_expr(guard, &arm_scope)?;
@@ -759,7 +790,7 @@ impl GradSelectorResolver {
                     .iter()
                     .map(|param| param.name.clone())
                     .collect::<Vec<_>>();
-                let mut body_scope = scope.clone();
+                let mut body_scope = scope.child();
                 for name in &names {
                     body_scope.bind(name.clone(), CallableOrigin::Unknown);
                 }
@@ -806,7 +837,7 @@ impl GradSelectorResolver {
             }
             Expr::Annotate(value, _, _) => self.visit_expr(value, scope)?,
             Expr::Block(bindings, body, _) => {
-                let mut block_scope = scope.clone();
+                let mut block_scope = scope.child();
                 for binding in bindings {
                     let value = self.visit_expr(&binding.value, &block_scope)?;
                     bind_let_pattern(&binding.pattern, &value, &mut block_scope);
@@ -820,7 +851,7 @@ impl GradSelectorResolver {
     fn deep_callable_origin(
         &mut self,
         expr: &deep::Expr,
-        scope: &CallableScope,
+        scope: &CallableScope<'_>,
         lexical_name: &str,
     ) -> CallableOrigin {
         let expr = strip_deep_metadata(expr);
@@ -864,7 +895,7 @@ impl GradSelectorResolver {
                     if arm_children.len() != 3 {
                         return CallableOrigin::Unknown;
                     }
-                    let mut arm_scope = scope.clone();
+                    let mut arm_scope = scope.child();
                     bind_deep_match_pattern(&arm_children[0], &scrutinee, &mut arm_scope);
                     let arm_origin =
                         self.deep_callable_origin(&arm_children[2], &arm_scope, lexical_name);
@@ -947,7 +978,7 @@ impl GradSelectorResolver {
                 if !bindings.len().is_multiple_of(2) {
                     return CallableOrigin::Unknown;
                 }
-                let mut scoped = scope.clone();
+                let mut scoped = scope.child();
                 for pair in bindings.as_chunks::<2>().0 {
                     let Some(name) = deep_symbol_name(&pair[0]) else {
                         return CallableOrigin::Unknown;
@@ -1302,7 +1333,7 @@ fn resolve_selector_indices(
         .collect()
 }
 
-fn bind_let_pattern(pattern: &LetPattern, value: &CallableOrigin, scope: &mut CallableScope) {
+fn bind_let_pattern(pattern: &LetPattern, value: &CallableOrigin, scope: &mut CallableScope<'_>) {
     match pattern {
         LetPattern::Var(name, _) => scope.bind(name.clone(), value.clone()),
         LetPattern::Wildcard(_) => {}
@@ -1321,7 +1352,7 @@ fn bind_let_pattern(pattern: &LetPattern, value: &CallableOrigin, scope: &mut Ca
     }
 }
 
-fn bind_match_pattern(pattern: &Pattern, value: &CallableOrigin, scope: &mut CallableScope) {
+fn bind_match_pattern(pattern: &Pattern, value: &CallableOrigin, scope: &mut CallableScope<'_>) {
     match pattern {
         Pattern::Wildcard(..) | Pattern::Lit(..) => {}
         Pattern::Var(name, _) => scope.bind(name.clone(), value.clone()),
@@ -1439,7 +1470,7 @@ fn deep_integer_literal(expr: &deep::Expr) -> Option<i64> {
 fn bind_deep_match_pattern(
     pattern: &deep::Expr,
     value: &CallableOrigin,
-    scope: &mut CallableScope,
+    scope: &mut CallableScope<'_>,
 ) {
     let deep::ExprCarrier::DecodedNode(tag, _, children) = pattern.carrier() else {
         return;
