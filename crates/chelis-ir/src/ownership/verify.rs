@@ -1168,7 +1168,13 @@ fn verify_unit(
 
 fn derive_callable_schema(unit: &Unit) -> Result<Option<CallableSchema>, OwnershipError> {
     let body = match (unit.kind, unit.callable_body) {
-        (UnitKind::Roots, None) => return Ok(None),
+        (UnitKind::Roots, None) if unit.captured_globals.is_empty() => return Ok(None),
+        (UnitKind::Roots, None) => {
+            return Err(OwnershipError::LoweringInvariant {
+                unit: unit.name.clone(),
+                detail: "the roots unit records a captured global".to_string(),
+            });
+        }
         (UnitKind::Function, Some(body)) => body,
         _ => {
             return Err(OwnershipError::LoweringInvariant {
@@ -1191,6 +1197,7 @@ fn derive_callable_schema(unit: &Unit) -> Result<Option<CallableSchema>, Ownersh
     let mut operands = Vec::with_capacity(callable.params.len());
     let mut parameter_classes = Vec::with_capacity(callable.params.len());
     let mut saw_capture = false;
+    let mut environment = BTreeSet::new();
     for param in &callable.params {
         if param.mode == ParamMode::EntryBorrow {
             return Err(OwnershipError::LoweringInvariant {
@@ -1230,8 +1237,21 @@ fn derive_callable_schema(unit: &Unit) -> Result<Option<CallableSchema>, Ownersh
                         ),
                     });
                 }
+                environment.insert(param.owner);
             }
         }
+    }
+    // Each environment parameter is a capture, recorded under the global it
+    // borrows, and each record names one of them.
+    if !environment.iter().eq(unit.captured_globals.keys()) {
+        return Err(OwnershipError::LoweringInvariant {
+            unit: unit.name.clone(),
+            detail: format!(
+                "callable environment parameters {environment:?} disagree with the captured-global \
+                 records {:?}",
+                unit.captured_globals.keys().collect::<Vec<_>>()
+            ),
+        });
     }
 
     let mut result: Option<ValueClass> = None;

@@ -1099,6 +1099,11 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
             entry,
             blocks,
             owners: self.owners,
+            captured_globals: self
+                .captures
+                .into_iter()
+                .map(|(name, owner)| (owner, name))
+                .collect(),
         })
     }
 
