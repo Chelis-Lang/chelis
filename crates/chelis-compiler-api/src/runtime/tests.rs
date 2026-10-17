@@ -1444,6 +1444,199 @@ fn issue_3741_retained_contracts_normalize_once_not_per_application() {
     );
 }
 
+fn evaluate_result_or_failure(source: &str) -> Result<String, String> {
+    let checked = checked_surf(source);
+    let empty_tensors: UnordMap<String, RuntimeTensorValue> = UnordMap::new();
+    let inputs = HostEvaluationInputs {
+        roots: &empty_tensors,
+        bindings: None,
+    };
+    evaluate_host_program_with_library_and_types(&checked, None, None, inputs, None, None)
+        .map(|outcome| {
+            outcome
+                .host_bindings
+                .get("result")
+                .map(render_value)
+                .expect("fixture binds `result`")
+        })
+        .map_err(|failure| failure.message)
+}
+
+/// chelis#3758: a function value passed back through the same higher-order
+/// formal at every level of a recursion keeps a bounded chain of retained
+/// contracts, so each application of it checks a bounded number of frames.
+///
+/// `walk` passes `f` back through its own formal; `ping` and `pong` pass it
+/// through two formals with different contracts. The receipt counts every
+/// retained frame checked (`invocation_contract_checks`); each level applies
+/// `f` once, so the count is at most two frames per distinct contract per
+/// level.
+///
+/// Evidentiary status: REGRESSION TEST, proven failing first. With every
+/// retained frame kept, the counts were the triangular numbers of the depth.
+#[test]
+fn issue_3758_recursive_higher_order_chains_check_bounded_frames() {
+    fn checks(source: &str, expected: &str) -> u64 {
+        super::eval::reset_entry_claim_work();
+        assert_eq!(evaluate_result(source), expected);
+        super::eval::invocation_contract_checks()
+    }
+    let walk = |depth: usize| {
+        format!(
+            "def inc(x: i64) -> i64 = add(x, 1i64)\n\
+             def walk(f: i64 -> i64, acc: i64, k: i64) -> i64 = \
+             if eq(k, 0i64) then acc else walk(f, f(acc), sub(k, 1i64))\n\
+             result = walk(inc, 0i64, {depth}i64)\n"
+        )
+    };
+    let ping_pong = |depth: usize| {
+        format!(
+            "def keep(x: tensor[*, f32]) -> tensor[*, f32] = x\n\
+             def ping(f: tensor[*, f32] -> tensor[*, f32], x: tensor[*, f32], k: i64) -> \
+             tensor[*, f32] = if eq(k, 0i64) then x else pong(f, f(x), sub(k, 1i64))\n\
+             def pong(g: tensor[*, f32] -> tensor[2, f32], x: tensor[*, f32], k: i64) -> \
+             tensor[*, f32] = if eq(k, 0i64) then x else ping(g, g(x), sub(k, 1i64))\n\
+             result = ping(keep, to_tensor([1.0f32, 2.0f32]), {depth}i64)\n"
+        )
+    };
+    let mut excessive = Vec::new();
+    for depth in [50, 200] {
+        let self_checks = checks(&walk(depth), &depth.to_string());
+        let mutual_checks = checks(&ping_pong(depth), "tensor(shape=[2], data=[1.0, 2.0])");
+        eprintln!(
+            "#3758 receipt: depth {depth} checked {self_checks} (self), {mutual_checks} (mutual)"
+        );
+        assert!(
+            self_checks >= depth as u64,
+            "#3758: every application of `f` checks its retained contract, or this receipt measures nothing"
+        );
+        if self_checks > 2 * depth as u64 {
+            excessive.push(format!("self recursion at depth {depth}: {self_checks}"));
+        }
+        if mutual_checks > 4 * depth as u64 {
+            excessive.push(format!(
+                "mutual recursion at depth {depth}: {mutual_checks}"
+            ));
+        }
+    }
+    assert!(
+        excessive.is_empty(),
+        "#3758: retained frames must stay bounded per distinct contract:\n{}",
+        excessive.join("\n")
+    );
+}
+
+/// chelis#3758: bounding the chain keeps every verdict. A frame retained at
+/// the first level still rejects a later level's argument, and a contract
+/// retained through the other formal of a mutual recursion still rejects the
+/// result it claims, with the message of an unbounded chain.
+#[test]
+fn issue_3758_bounded_chains_keep_every_rejection() {
+    let entry = "def grow(x: tensor[*, f32]) -> tensor[*, f32] = concat([x, x], 0i32)\n\
+                 def walk(f: tensor[2, f32] -> tensor[*, f32], x: tensor[*, f32], k: i64) -> \
+                 tensor[*, f32] = if eq(k, 0i64) then x else walk(f, f(x), sub(k, 1i64))\n\
+                 result = walk(grow, to_tensor([1.0f32, 2.0f32]), 3i64)\n";
+    let error = evaluate_result_or_failure(entry).expect_err("the second level's entry fails");
+    assert!(
+        error.contains("extent `2`: claimed = 2, arg0 axis 0 = 4"),
+        "#3758: a retained entry frame still rejects at a later level: {error}"
+    );
+    let result = "def grow(x: tensor[*, f32]) -> tensor[*, f32] = concat([x, x], 0i32)\n\
+                  def ping(f: tensor[*, f32] -> tensor[*, f32], x: tensor[*, f32], k: i64) -> \
+                  tensor[*, f32] = if eq(k, 0i64) then x else pong(f, f(x), sub(k, 1i64))\n\
+                  def pong(g: tensor[*, f32] -> tensor[8, f32], x: tensor[*, f32], k: i64) -> \
+                  tensor[*, f32] = if eq(k, 0i64) then x else ping(g, g(x), sub(k, 1i64))\n\
+                  result = ping(grow, to_tensor([1.0f32]), 6i64)\n";
+    let error =
+        evaluate_result_or_failure(result).expect_err("an inner frame's result claim fails");
+    assert!(
+        error.contains("extent `8`: claimed = 8, concat axis 0 = 4"),
+        "#3758: a frame retained through the other formal still claims its result: {error}"
+    );
+}
+
+/// chelis#3761: an application walks a List argument's elements only when
+/// they hold a tensor whose entry the formal claims. A fold that grows a
+/// `List[i64]` visits no element at any step, while a formal over
+/// `List[tensor[2, f32]]` still visits, and checks, every element.
+///
+/// Evidentiary status: REGRESSION TEST, proven failing first. With the walk
+/// unconditional, the `List[i64]` fold visited every accumulated element at
+/// every step: 5,050 and 80,200 elements at 100 and 400 steps.
+#[test]
+fn issue_3761_list_without_tensors_is_not_walked_per_application() {
+    for steps in [100usize, 400] {
+        super::eval::reset_entry_claim_work();
+        let result = evaluate_result(&format!(
+            "result = len(fold(fn (acc: List[i64], i: i64) -> append(acc, i), [0i64], \
+             range(0i64, {steps}i64)))\n"
+        ));
+        assert_eq!(result, (steps + 1).to_string());
+        let visited = super::eval::entry_list_element_steps();
+        eprintln!("#3761 receipt: {steps} steps visited {visited} List[i64] elements");
+        assert_eq!(
+            visited, 0,
+            "#3761: a List[i64] accumulator owes no per-element entry step"
+        );
+    }
+    let tensors = |second: &str| {
+        format!(
+            "def first(xs: List[tensor[2, f32]]) -> tensor[2, f32] = index(xs, 0i64)\n\
+             result = first([to_tensor([1.0f32, 2.0f32]), to_tensor({second}), \
+             to_tensor([5.0f32, 6.0f32])])\n"
+        )
+    };
+    super::eval::reset_entry_claim_work();
+    assert_eq!(
+        evaluate_result(&tensors("[3.0f32, 4.0f32]")),
+        "tensor(shape=[2], data=[1.0, 2.0])"
+    );
+    assert_eq!(
+        super::eval::entry_list_element_steps(),
+        3,
+        "#3761: a List of claimed tensors is still walked element by element"
+    );
+    let error = evaluate_result_or_failure(&tensors("[3.0f32]"))
+        .expect_err("the second element's extent violates its claim");
+    assert!(
+        error.contains("extent `2`: claimed = 2, xs[1] axis 0 = 1"),
+        "#3761: the walk still names the offending element: {error}"
+    );
+}
+
+/// chelis#3778: what a closure's fixed syntax determines about its entry
+/// (normalized parameter and result types and the entry contract) is built
+/// once per closure value, not at every application. The fold applies one
+/// closure value at every step; its clones share the built facts.
+///
+/// Evidentiary status: REGRESSION TEST, proven failing first. With a fresh
+/// cache per application, the build count equalled the application count.
+#[test]
+fn issue_3778_closure_entry_types_are_built_once_per_closure() {
+    let mut builds = Vec::new();
+    for steps in [10usize, 40] {
+        super::eval::reset_entry_claim_work();
+        let result = evaluate_result(&format!(
+            "result = fold(fn (acc: (i64, f32), i: i64) -> (add(acc.0, i), acc.1), \
+             (0i64, 1.0f32), range(0i64, {steps}i64)).0\n"
+        ));
+        assert_eq!(result, (steps * (steps - 1) / 2).to_string());
+        builds.push(super::eval::closure_entry_builds());
+    }
+    eprintln!(
+        "#3778 receipt: entry types built {} for 10 applications, {} for 40",
+        builds[0], builds[1]
+    );
+    assert!(
+        builds[0] >= 1,
+        "#3778: applying the closure builds its entry types, or this receipt measures nothing"
+    );
+    assert_eq!(
+        builds[0], builds[1],
+        "#3778: applying a closure again must not rebuild its entry types"
+    );
+}
+
 /// chelis#2204: a closure parameter shadows a captured binding of the same
 /// name at the interpreter level, not only inside `Frame`'s own unit tests.
 /// Red-team round 1 on chelis#2208 inverted `Frame::get` to prefer the
@@ -4768,11 +4961,12 @@ fn fo_diag_bools_strings_and_nonnumeric_controls() {
     .remove(0);
     assert_eq!(
         describe_value(&RuntimeValue::Closure {
-            checked_function: Box::new(checked_function),
-            params: vec!["x".to_string()],
-            param_types: vec![None],
+            checked_function: std::sync::Arc::new(checked_function),
+            params: vec!["x".to_string()].into(),
+            param_types: vec![None].into(),
             return_type: None,
             checked_signature: None,
+            entry_types: Default::default(),
             invocation_contracts: Box::default(),
             body: super::closure_body::ClosureBody::new(chelis_deep::ast::Expr::Atom(
                 chelis_deep::ast::Atom::Bool(false),

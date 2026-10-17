@@ -15,6 +15,7 @@ use chelis_types::{
 };
 use chelis_vocab::EffectKind;
 use chelis_vocab::EffectKindDecodeError;
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -119,16 +120,13 @@ fn tail_binding_name(body: &Expr) -> Option<&str> {
 
 /// Select the original producing binding, following aliases in sequential
 /// scope. The naming walk and the guard-placement walk use this same result.
-fn let_result_binding_index(bind_list: &Expr, body: &Expr) -> Option<usize> {
+fn let_result_binding_index(bind_kids: &[&Expr], body: &Expr) -> Option<usize> {
     let mut name = tail_binding_name(body)?;
-    let (DeepTag::Bind, bind_kids) = tagged_expr_children(bind_list)? else {
-        return None;
-    };
     let mut found = None;
     for (index, pair) in bind_kids.as_chunks::<2>().0.iter().enumerate().rev() {
-        if symbol_name(&pair[0]) == Some(name) {
+        if symbol_name(pair[0]) == Some(name) {
             found = Some(index * 2);
-            match tail_binding_name(&pair[1]) {
+            match tail_binding_name(pair[1]) {
                 Some(alias) => name = alias,
                 None => break,
             }
@@ -146,7 +144,9 @@ struct SequentialEvalLetBinding<'expr> {
 
 struct SequentialEvalLetChain<'expr> {
     bindings: Vec<SequentialEvalLetBinding<'expr>>,
-    bind_expr: Expr,
+    /// Every layer's binder and initializer, alternating and borrowed: an
+    /// evaluation of the chain copies no syntax (chelis#3778).
+    bind_kids: Vec<&'expr Expr>,
     body: &'expr Expr,
 }
 
@@ -188,19 +188,14 @@ fn sequential_eval_let_chain(expr: &Expr) -> Option<SequentialEvalLetChain<'_>> 
 
     // Every pair keeps its binder and binding-value positions, so each
     // initializer's binding-origin metadata stays admitted.
-    let mut bind_children = Vec::with_capacity(bindings.len() * 2);
+    let mut bind_kids = Vec::with_capacity(bindings.len() * 2);
     for binding in &bindings {
-        bind_children.push(binding.binding.clone());
-        bind_children.push(binding.initializer.clone());
+        bind_kids.push(binding.binding);
+        bind_kids.push(binding.initializer);
     }
     Some(SequentialEvalLetChain {
         bindings,
-        bind_expr: Expr::node(
-            DeepTag::Bind,
-            Metadata::default(),
-            bind_children,
-            expr.span(),
-        ),
+        bind_kids,
         body,
     })
 }
@@ -1222,6 +1217,30 @@ thread_local! {
     static ENTRY_CLAIM_TRAVERSAL_WORK: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     static FORWARDING_ROUTE_WORK: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     static COMPOSITION_SOURCE_BYTES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static ENTRY_LIST_ELEMENT_STEPS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static INVOCATION_CONTRACT_CHECKS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static CLOSURE_ENTRY_BUILDS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Retained invocation contracts checked, one per frame per application
+/// (chelis#3758).
+#[cfg(test)]
+pub(super) fn invocation_contract_checks() -> u64 {
+    INVOCATION_CONTRACT_CHECKS.with(std::cell::Cell::get)
+}
+
+/// [`ClosureEntryTypes`] built (chelis#3778).
+#[cfg(test)]
+pub(super) fn closure_entry_builds() -> u64 {
+    CLOSURE_ENTRY_BUILDS.with(std::cell::Cell::get)
+}
+
+/// List elements an application's entry walk visits for its direct formals
+/// (chelis#3761). Separate from the claim units above, whose bounds are
+/// stated for the accumulator receipts.
+#[cfg(test)]
+pub(super) fn entry_list_element_steps() -> u64 {
+    ENTRY_LIST_ELEMENT_STEPS.with(std::cell::Cell::get)
 }
 
 /// Conservative structural-comparison budget, including checked metadata.
@@ -1245,6 +1264,9 @@ pub(super) fn reset_entry_claim_work() {
     ENTRY_CLAIM_TRAVERSAL_WORK.with(|v| v.set(0));
     COMPOSITION_SOURCE_BYTES.with(|v| v.set(0));
     FORWARDING_ROUTE_WORK.with(|v| v.set(0));
+    ENTRY_LIST_ELEMENT_STEPS.with(|v| v.set(0));
+    INVOCATION_CONTRACT_CHECKS.with(|v| v.set(0));
+    CLOSURE_ENTRY_BUILDS.with(|v| v.set(0));
 }
 #[cfg(test)]
 pub(super) fn entry_claim_work() -> u64 {
@@ -1282,12 +1304,124 @@ fn actualize_tensor_entry_parameters(
     nested: Option<EntryClaimPatterns<'_>>,
     loop_entry: Option<&mut LoopEntryReceipt>,
 ) -> Result<Vec<(String, TensorType, Vec<usize>)>, String> {
-    if loop_entry
-        .as_ref()
-        .is_some_and(|receipt| receipt.witnesses.is_some())
-    {
+    if loop_entry_is_witnessed(loop_entry.as_deref()) {
         return Ok(Vec::new());
     }
+    let normalized_authored = authored_params
+        .iter()
+        .map(|formal| {
+            formal
+                .as_ref()
+                .map(|formal| normalize_authored_entry_type(formal, session))
+                .transpose()
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let contract = entry_contract(&normalized_authored, checked_params, names)?;
+    actualize_entry_contract(
+        &normalized_authored,
+        &contract,
+        checked_params,
+        authored_params,
+        args,
+        present,
+        nested,
+        loop_entry,
+    )
+}
+
+/// What a closure's fixed syntax determines about its entry: each authored
+/// parameter type and the declared result type, normalized against the
+/// program's registry, and the entry contract built from them. Each is a pure
+/// function of syntax the closure never changes, so it is built at the
+/// closure's first application and shared by every clone instead of being
+/// rebuilt at every application (chelis#3778). A failure is kept as a value,
+/// so an application reports it where a rebuilt value reported it.
+#[derive(Debug)]
+pub struct ClosureEntryTypes {
+    params: Vec<Result<Option<Expr>, String>>,
+    result: Result<Option<Expr>, String>,
+    contract: Result<(Vec<Option<Expr>>, chelis_ir::host::EntryContract<Expr>), String>,
+}
+
+impl ClosureEntryTypes {
+    fn build(
+        param_types: &[Option<Expr>],
+        return_type: Option<&Expr>,
+        checked_params: Option<&[Expr]>,
+        names: &[String],
+        session: Option<&chelis_ir::host::HostLoweringSession<'_>>,
+    ) -> Self {
+        #[cfg(test)]
+        CLOSURE_ENTRY_BUILDS.with(|v| v.set(v.get() + 1));
+        let normalize = |ty: Option<&Expr>| {
+            ty.map(|ty| normalize_authored_entry_type(ty, session))
+                .transpose()
+        };
+        let params = param_types
+            .iter()
+            .map(|ty| normalize(ty.as_ref()))
+            .collect::<Vec<_>>();
+        let contract = params
+            .iter()
+            .cloned()
+            .collect::<Result<Vec<_>, _>>()
+            .and_then(|normalized| {
+                let contract = entry_contract(&normalized, checked_params, names)?;
+                Ok((normalized, contract))
+            });
+        Self {
+            params,
+            result: normalize(return_type),
+            contract,
+        }
+    }
+}
+
+/// A loop receipt that already holds its witnesses owes no entry actual.
+fn loop_entry_is_witnessed(loop_entry: Option<&LoopEntryReceipt>) -> bool {
+    loop_entry.is_some_and(|receipt| receipt.witnesses.is_some())
+}
+
+/// The List and direct-tensor entry contract of registry-normalized formals.
+fn entry_contract(
+    normalized_authored: &[Option<Expr>],
+    checked_params: Option<&[Expr]>,
+    names: &[String],
+) -> Result<chelis_ir::host::EntryContract<Expr>, String> {
+    chelis_ir::host::EntryContract::from_normalized_types(
+        normalized_authored,
+        checked_params,
+        names,
+    )?
+    .try_map_tensor(|index, _tensor| {
+        fn tensor_leaf(expr: &Expr) -> Option<&Expr> {
+            if tensor_type_dim_exprs(expr).is_some() {
+                return Some(expr);
+            }
+            checked_list_element(expr).and_then(tensor_leaf)
+        }
+        normalized_authored[index]
+            .as_ref()
+            .and_then(tensor_leaf)
+            .or_else(|| checked_params.and_then(|items| items.get(index)))
+            .and_then(tensor_leaf)
+            .cloned()
+            .ok_or_else(|| "host runtime: could not retain entry tensor syntax".to_string())
+    })
+}
+
+/// [`actualize_tensor_entry_parameters`] against an already built contract.
+#[allow(clippy::too_many_arguments)]
+fn actualize_entry_contract(
+    normalized_authored: &[Option<Expr>],
+    contract: &chelis_ir::host::EntryContract<Expr>,
+    checked_params: Option<&[Expr]>,
+    authored_params: &[Option<Expr>],
+    args: &[RuntimeValue],
+    present: Option<&[bool]>,
+    nested: Option<EntryClaimPatterns<'_>>,
+    loop_entry: Option<&mut LoopEntryReceipt>,
+) -> Result<Vec<(String, TensorType, Vec<usize>)>, String> {
     fn collect(
         pattern: &EntryPattern<Expr>,
         checked: Option<&Expr>,
@@ -1330,8 +1464,16 @@ fn actualize_tensor_entry_parameters(
                         "input `{path}` does not match its declared tensor type"
                     ));
                 };
+                // Elements that hold no tensor owe no entry actual, so a
+                // `List[i64]` argument costs no per-element step at each
+                // application (chelis#3761).
+                if !inner.has_tensor() {
+                    return Ok(());
+                }
                 let checked_item = checked.and_then(checked_list_element);
                 for (index, item) in items.iter().enumerate() {
+                    #[cfg(test)]
+                    ENTRY_LIST_ELEMENT_STEPS.with(|v| v.set(v.get() + 1));
                     collect(inner, checked_item, item, format!("{path}[{index}]"), out)?;
                 }
             }
@@ -1340,35 +1482,6 @@ fn actualize_tensor_entry_parameters(
         Ok(())
     }
 
-    let normalized_authored = authored_params
-        .iter()
-        .map(|formal| {
-            formal
-                .as_ref()
-                .map(|formal| normalize_authored_entry_type(formal, session))
-                .transpose()
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let contract = chelis_ir::host::EntryContract::from_normalized_types(
-        &normalized_authored,
-        checked_params,
-        names,
-    )?
-    .try_map_tensor(|index, _tensor| {
-        fn tensor_leaf(expr: &Expr) -> Option<&Expr> {
-            if tensor_type_dim_exprs(expr).is_some() {
-                return Some(expr);
-            }
-            checked_list_element(expr).and_then(tensor_leaf)
-        }
-        normalized_authored[index]
-            .as_ref()
-            .and_then(tensor_leaf)
-            .or_else(|| checked_params.and_then(|items| items.get(index)))
-            .and_then(tensor_leaf)
-            .cloned()
-            .ok_or_else(|| "host runtime: could not retain entry tensor syntax".to_string())
-    })?;
     let mut actuals = Vec::new();
     if args.len() != contract.formals().len() {
         return Err("host runtime: entry contract lost argument alignment".into());
@@ -2422,11 +2535,15 @@ impl<'a> EvalContext<'a> {
             })
             .cloned();
         Ok(RuntimeValue::Closure {
-            checked_function: Box::new(node.expr.clone()),
-            params,
-            param_types,
-            return_type,
-            checked_signature: node.metadata.ty().map(|ty| ty.expression().clone()),
+            checked_function: Arc::new(node.expr.clone()),
+            params: params.into(),
+            param_types: param_types.into(),
+            return_type: return_type.map(Arc::new),
+            checked_signature: node
+                .metadata
+                .ty()
+                .map(|ty| Arc::new(ty.expression().clone())),
+            entry_types: Arc::default(),
             invocation_contracts: Box::default(),
             body: closure_body::ClosureBody::new(body),
             // Named declarations are initialized in an empty lexical frame;
@@ -3265,8 +3382,8 @@ impl<'a> EvalContext<'a> {
                 .as_ref()
                 .and_then(|chain| {
                     lowering.as_ref().map(|context| {
-                        context.local_ascription_binding_regions(
-                            &chain.bind_expr,
+                        context.local_ascription_binding_pair_regions(
+                            &chain.bind_kids,
                             declaration_name.as_deref(),
                         )
                     })
@@ -3292,24 +3409,25 @@ impl<'a> EvalContext<'a> {
                     layer: 0,
                 })
                 .collect::<Vec<_>>();
-            let (let_bindings, planned_bind_expr, planned_body) = if crosses_nested_let {
+            let current_bind_kids = bind_node.children.iter().collect::<Vec<_>>();
+            let (let_bindings, planned_bind_kids, planned_body) = if crosses_nested_let {
                 let chain = flattened
                     .as_ref()
                     .expect("cross-layer local region requires a flattened let chain");
-                (&chain.bindings, &chain.bind_expr, chain.body)
+                (&chain.bindings, &chain.bind_kids, chain.body)
             } else {
-                (&current_bindings, bind_list_expr, body)
+                (&current_bindings, &current_bind_kids, body)
             };
             let guarded =
-                claims.and_then(|_| let_result_binding_index(planned_bind_expr, planned_body));
+                claims.and_then(|_| let_result_binding_index(planned_bind_kids, planned_body));
             let local_regions = if crosses_nested_let {
                 flattened_regions
             } else {
                 lowering
                     .as_ref()
                     .map(|context| {
-                        context.local_ascription_binding_regions(
-                            planned_bind_expr,
+                        context.local_ascription_binding_pair_regions(
+                            planned_bind_kids,
                             declaration_name.as_deref(),
                         )
                     })
@@ -3977,6 +4095,8 @@ impl<'a> EvalContext<'a> {
         let mut result_frames = Vec::new();
         if let Some(contracts) = callable.invocation_contracts() {
             for retained in contracts {
+                #[cfg(test)]
+                INVOCATION_CONTRACT_CHECKS.with(|v| v.set(v.get() + 1));
                 let contract = retained.signature();
                 let actualized = check_callable_invocation_contract(
                     contract,
@@ -4100,6 +4220,7 @@ impl<'a> EvalContext<'a> {
                 param_types,
                 return_type,
                 checked_signature,
+                entry_types,
                 invocation_contracts: _,
                 body,
                 env,
@@ -4176,23 +4297,38 @@ impl<'a> EvalContext<'a> {
                         ENTRY_CLAIM_WORK.with(|v| v.set(v.get() + 1));
                     }
                     let checked_params = checked_signature
-                        .as_ref()
+                        .as_deref()
                         .and_then(checked_function_children)
                         .and_then(|children| children.split_last())
                         .map(|(_, params)| params);
-                    let actualized_entries = actualize_tensor_entry_parameters(
-                        checked_params,
-                        &param_types,
-                        &args,
-                        &params,
-                        self.session.as_ref(),
-                        present,
-                        Some(EntryClaimPatterns {
-                            registry: &self.adt_registry,
-                            cache: &self.claim_patterns,
-                        }),
-                        loop_entry.as_deref_mut(),
-                    )?;
+                    let entry = entry_types.get_or_init(|| {
+                        ClosureEntryTypes::build(
+                            &param_types,
+                            return_type.as_deref(),
+                            checked_params,
+                            &params,
+                            self.session.as_ref(),
+                        )
+                    });
+                    let actualized_entries = if loop_entry_is_witnessed(loop_entry.as_deref()) {
+                        Vec::new()
+                    } else {
+                        let (normalized, contract) =
+                            entry.contract.as_ref().map_err(Clone::clone)?;
+                        actualize_entry_contract(
+                            normalized,
+                            contract,
+                            checked_params,
+                            &param_types,
+                            &args,
+                            present,
+                            Some(EntryClaimPatterns {
+                                registry: &self.adt_registry,
+                                cache: &self.claim_patterns,
+                            }),
+                            loop_entry.as_deref_mut(),
+                        )?
+                    };
                     let mut entry_inputs = Vec::with_capacity(actualized_entries.len());
                     let mut entry_shapes: Vec<Vec<usize>> =
                         Vec::with_capacity(actualized_entries.len());
@@ -4272,7 +4408,7 @@ impl<'a> EvalContext<'a> {
                     // both from the same checked call-site evidence; body-local
                     // collectors must not infer a dtype from their payload.
                     if let Some((checked_result, checked_params)) = checked_signature
-                        .as_ref()
+                        .as_deref()
                         .and_then(checked_function_children)
                         .and_then(|children| children.split_last())
                     {
@@ -4300,15 +4436,12 @@ impl<'a> EvalContext<'a> {
                     // binding instead of conflicting with it.
                     self.precision_bindings.merge(call_precisions);
                     let checked_result = checked_signature
-                        .as_ref()
+                        .as_deref()
                         .and_then(checked_function_children)
                         .and_then(<[Expr]>::last);
                     // Alias substitution retains the authored dimension names
                     // through the result, just as through List parameters.
-                    let authored_result = return_type
-                        .as_ref()
-                        .map(|ty| normalize_authored_entry_type(ty, self.session.as_ref()))
-                        .transpose()?;
+                    let authored_result = entry.result.as_ref().map_err(Clone::clone)?;
                     let declared_result = authored_result
                         .as_ref()
                         .filter(|ty| tensor_type_dim_exprs(ty).is_some())
@@ -4352,7 +4485,7 @@ impl<'a> EvalContext<'a> {
                         })?;
                         self.bindings.insert(name, RuntimeValue::int64(size));
                     }
-                    for (index, (param, arg)) in params.into_iter().zip(args).enumerate() {
+                    for (index, (param, arg)) in params.iter().zip(args).enumerate() {
                         let declared = param_types
                             .get(index)
                             .cloned()
@@ -4371,18 +4504,25 @@ impl<'a> EvalContext<'a> {
                             }
                             (_, arg) => arg,
                         };
-                        let authored_callable = declared
-                            .as_ref()
-                            .map(|ty| normalize_authored_entry_type(ty, self.session.as_ref()))
-                            .transpose()?;
+                        // A declared formal's normalization is the closure's
+                        // own; only a call-site type is normalized here.
+                        let authored_callable = match entry.params.get(index) {
+                            Some(Ok(Some(normalized))) => Some(Cow::Borrowed(normalized)),
+                            Some(Err(error)) => return Err(error.clone()),
+                            Some(Ok(None)) | None => declared
+                                .as_ref()
+                                .map(|ty| normalize_authored_entry_type(ty, self.session.as_ref()))
+                                .transpose()?
+                                .map(Cow::Owned),
+                        };
                         let callable_contract = authored_callable
-                            .as_ref()
+                            .as_deref()
                             .filter(|ty| checked_function_children(ty).is_some())
                             .or_else(|| checked_params.and_then(|params| params.get(index)));
                         if let Some(contract) =
                             callable_contract.filter(|ty| checked_function_children(ty).is_some())
                         {
-                            let origin = match (declared.as_ref(), authored_callable.as_ref()) {
+                            let origin = match (declared.as_ref(), authored_callable.as_deref()) {
                                 (Some(origin), Some(normalized))
                                     if checked_function_children(normalized).is_some() =>
                                 {
@@ -4395,7 +4535,7 @@ impl<'a> EvalContext<'a> {
                         self.binding_types.insert(param.clone(), declared);
                         let producer = ResultProducer::interface_load(&arg);
                         self.bindings
-                            .insert_with_result_producer(param, arg, producer);
+                            .insert_with_result_producer(param.clone(), arg, producer);
                     }
                     // chelis#1739 and chelis#1771: a declared literal result
                     // extent is a claim the host lane owes a runtime verdict

@@ -230,25 +230,30 @@ pub enum RuntimeValue {
     /// canonical declaration and whole checked scheme; no closure source is
     /// reconstructed and no caller binding can redirect the operation.
     Builtin(chelis_ir::callable_value::ResolvedBuiltinValue<RetainedContract>),
+    /// Every syntax field is shared: a list combinator clones its callback
+    /// once per element, and that clone copies no syntax (chelis#3778).
     Closure {
         /// Exact checked `(fn ...)` expression that produced this closure.
         /// Transform lowering reuses this carrier directly: rebuilding a
         /// function from `params` and `body` drops checker-owned parameter
         /// and callable metadata (chelis#676).
-        checked_function: Box<Expr>,
-        params: Vec<String>,
+        checked_function: Arc<Expr>,
+        params: Arc<[String]>,
         /// Declared Deep type expression per param, when the `(fn ...)`
         /// carried checker-annotated `{type: ...}` param metadata.
         /// Consulted by the chelis#338 named-axis routing to recover a
         /// frame binding's static tensor type (named dims) at eval time.
-        param_types: Vec<Option<Expr>>,
+        param_types: Arc<[Option<Expr>]>,
         /// Declared result type from the owning `defsig`, when available.
         /// Generic cast actualization matches this against the checker-owned
         /// call expression result, including context-fixed empty containers.
-        return_type: Option<Expr>,
+        return_type: Option<Arc<Expr>>,
         /// The checked function type retains renamed precision binders used
         /// by body metadata, alongside the signature's declared names.
-        checked_signature: Option<Expr>,
+        checked_signature: Option<Arc<Expr>>,
+        /// The entry facts the fields above determine, built at the first
+        /// application of any clone.
+        entry_types: Arc<std::sync::OnceLock<eval::ClosureEntryTypes>>,
         /// Authored higher-order formal signatures retained at each
         /// specialization boundary. These execute before this closure's own
         /// entry so a broader supplied callable cannot erase a narrower
@@ -256,7 +261,7 @@ pub enum RuntimeValue {
         /// retained, never again per application (chelis#3741).
         invocation_contracts: Box<Vec<RetainedContract>>,
         /// The body, with the reads in it that are their binding's last
-        /// use. Shared, so a clone of the closure copies no syntax.
+        /// use.
         body: Arc<closure_body::ClosureBody>,
         env: Frame,
         /// Lexically captured concrete precision variables. A call derives a
@@ -315,9 +320,12 @@ impl RuntimeValue {
                 invocation_contracts,
                 ..
             } => {
-                invocation_contracts.insert(0, contract);
+                chelis_ir::callable_value::retain_outer_normalized_frame(
+                    invocation_contracts,
+                    contract,
+                );
             }
-            Self::Builtin(value) => value.retain_outer_contract(contract),
+            Self::Builtin(value) => value.retain_outer_normalized_contract(contract),
             _ => {}
         }
     }
@@ -1066,6 +1074,7 @@ fn stamp_def_closure(value: RuntimeValue, name: &str, body: &Expr) -> RuntimeVal
             param_types,
             return_type,
             checked_signature,
+            entry_types,
             invocation_contracts,
             body: closure_body,
             env,
@@ -1077,6 +1086,7 @@ fn stamp_def_closure(value: RuntimeValue, name: &str, body: &Expr) -> RuntimeVal
             param_types,
             return_type,
             checked_signature,
+            entry_types,
             invocation_contracts,
             body: closure_body,
             env,

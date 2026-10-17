@@ -2039,7 +2039,7 @@ impl SubexprLoweringContext {
     pub fn local_ascription_binding_regions(
         &self,
         bindings: &Expr,
-        _declaration_name: Option<&str>,
+        declaration_name: Option<&str>,
     ) -> Vec<LocalAscriptionBindingRegion> {
         let bind_kids = match bindings.carrier() {
             ExprCarrier::DecodedNode(DeepTag::Bind, _, children) => children,
@@ -2050,7 +2050,20 @@ impl SubexprLoweringContext {
             | ExprCarrier::MetadataMap(_)
             | ExprCarrier::MetadataExpression(_) => return Vec::new(),
         };
+        self.local_ascription_binding_pair_regions(
+            &bind_kids.iter().collect::<Vec<_>>(),
+            declaration_name,
+        )
+    }
 
+    /// [`Self::local_ascription_binding_regions`] over borrowed alternating
+    /// binder and initializer positions, so a caller that flattens nested
+    /// binding layers copies no syntax to ask (chelis#3778).
+    pub fn local_ascription_binding_pair_regions(
+        &self,
+        bind_kids: &[&Expr],
+        _declaration_name: Option<&str>,
+    ) -> Vec<LocalAscriptionBindingRegion> {
         #[derive(Default)]
         struct RegionParts {
             binding_indices: BTreeSet<usize>,
@@ -2061,7 +2074,7 @@ impl SubexprLoweringContext {
         let mut regions = BTreeMap::<usize, RegionParts>::new();
         let mut binding_index = 0;
         while binding_index + 1 < bind_kids.len() {
-            let Some(name) = symbol_name(&bind_kids[binding_index]) else {
+            let Some(name) = symbol_name(bind_kids[binding_index]) else {
                 binding_index += 2;
                 continue;
             };
@@ -2073,8 +2086,8 @@ impl SubexprLoweringContext {
                     LowerCtx::local_ascription_matches_binding(
                         ascription,
                         name,
-                        &bind_kids[binding_index],
-                        &bind_kids[binding_index + 1],
+                        bind_kids[binding_index],
+                        bind_kids[binding_index + 1],
                     )
                 })
                 .map(|ascription| ascription.id().get())
@@ -2086,11 +2099,11 @@ impl SubexprLoweringContext {
 
             let mut path = BTreeSet::from([binding_index]);
             let mut producer_binding_index = binding_index;
-            while let Some(alias) = bare_var_name(&bind_kids[producer_binding_index + 1]) {
+            while let Some(alias) = bare_var_name(bind_kids[producer_binding_index + 1]) {
                 let Some(predecessor) = (0..producer_binding_index)
                     .step_by(2)
                     .rev()
-                    .find(|candidate| symbol_name(&bind_kids[*candidate]) == Some(alias.as_str()))
+                    .find(|candidate| symbol_name(bind_kids[*candidate]) == Some(alias.as_str()))
                 else {
                     break;
                 };
@@ -2113,7 +2126,7 @@ impl SubexprLoweringContext {
                     .iter()
                     .next_back()
                     .copied()?;
-                let result_name = symbol_name(&bind_kids[result_binding_index])?;
+                let result_name = symbol_name(bind_kids[result_binding_index])?;
                 let span = bind_kids[producer_binding_index + 1].span();
                 let mut bind_children = Vec::with_capacity(2 * parts.binding_indices.len());
                 for index in parts.binding_indices {
