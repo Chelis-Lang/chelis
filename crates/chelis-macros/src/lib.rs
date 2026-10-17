@@ -610,11 +610,19 @@ impl Expander {
                 if arm_kids.len() >= 3 {
                     let mut arm_scope = scope.clone();
                     arm_scope.add_blockers(chelis_deep::pattern_binder_names(&arm_kids[0]));
-                    let mut arm_children = arm_kids.to_vec();
-                    arm_children[2] = self.expand_expr(&arm_kids[2], macros, &arm_scope)?;
-                    if !is_unit_list(&arm_kids[1]) {
-                        arm_children[1] = self.expand_expr(&arm_kids[1], macros, &arm_scope)?;
-                    }
+                    // Copy only the children that expansion leaves as they
+                    // are, never the guard or body it is about to replace.
+                    // The body expands before the guard, which fixes the
+                    // order of hygienic names.
+                    let body = self.expand_expr(&arm_kids[2], macros, &arm_scope)?;
+                    let guard = if is_unit_list(&arm_kids[1]) {
+                        arm_kids[1].clone()
+                    } else {
+                        self.expand_expr(&arm_kids[1], macros, &arm_scope)?
+                    };
+                    let mut arm_children = Vec::with_capacity(arm_kids.len());
+                    arm_children.extend([arm_kids[0].clone(), guard, body]);
+                    arm_children.extend_from_slice(&arm_kids[3..]);
                     children.push(try_rebuild_macro_node(
                         arm_node,
                         arm_node.metadata.clone(),
@@ -640,18 +648,18 @@ impl Expander {
         let Some(name) = var_name(&node.children[0]) else {
             return Ok(None);
         };
-        let name = name.to_string();
-        let args = node.children[1..].to_vec();
-
-        if scope.blocks(&name) {
+        // Every node of the program passes through here, so the common
+        // non-macro case must neither copy nor allocate.
+        if scope.blocks(name) {
             return Ok(None);
         }
-        let Some(def) = macros.get(&name) else {
+        let Some(def) = macros.get(name) else {
             return Ok(None);
         };
-        let arguments = def.bind_arguments(node.metadata, &args)?;
+        let args = &node.children[1..];
+        let arguments = def.bind_arguments(node.metadata, args)?;
         self.consume_expansion_budget()?;
-        let invocation = macro_source(&def.name, &args);
+        let invocation = macro_source(&def.name, args);
         let (placeholder_params, placeholder_args) =
             macro_arg_placeholders(&def.body, arguments, self.expansions);
         let placeholder_body = substitute_expr(&def.body, &placeholder_params, &UnordSet::new());
