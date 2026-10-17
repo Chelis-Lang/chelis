@@ -459,3 +459,135 @@ fn issue_3697_the_largest_negative_role_pairs_with_a_huge_operand() {
     assert!(witness(&record, "x") <= -1.0e300, "{record:#}");
     assert_eq!(witness(&record, "y"), -f64::from_bits(1), "{record:#}");
 }
+
+// --- only the scheduled binders join the interleave ----------------------
+//
+// Round 1's P1. `arity` and `position` were read off the property's whole
+// parameter list, but a `bool`, a `string` and a tensor binder draw at random
+// whatever the attempt. Such a binder therefore switched the interleave on
+// while contributing nothing to it, and consumed an odometer digit that
+// multiplied every useful cell index by the radix.
+
+/// Half (a): a property with one *scheduled* binder beside a `bool` must keep
+/// the arity-one carve-out. `1e-323` is candidate 42 of the unguarded `f64`
+/// schedule, so a budget of 44 reaches it one attempt at a time; under the
+/// defect the interleave halved the rate and this passed at 44, 50 and 86,
+/// refuting only at 87.
+#[test]
+fn issue_3697_an_unscheduled_binder_does_not_halve_the_diagonal() {
+    let plain = "module Pair.Plain
+@property not_bottom forall(x: f64):
+  (x != 1.0e-323f64)
+";
+    let with_bool = "module Pair.WithBool
+@property not_bottom forall(x: f64, b: bool):
+  ((x != 1.0e-323f64) || (b != b))
+";
+    let with_string = "module Pair.WithString
+@property not_bottom forall(x: f64, s: string):
+  ((x != 1.0e-323f64) || (s != s))
+";
+    let (code, baseline) = prove(plain, "44", "0");
+    assert_eq!(code, 1, "{baseline:#}");
+    for source in [with_bool, with_string] {
+        let (code, record) = prove(source, "44", "0");
+        assert_eq!(code, 1, "{source}: {record:#}");
+        assert_eq!(witness(&record, "x"), 1.0e-323, "{source}: {record:#}");
+        assert_eq!(
+            record["attempted_samples"], baseline["attempted_samples"],
+            "an unscheduled binder must not change the schedule's rate: {source}: {record:#}"
+        );
+    }
+}
+
+/// Half (b): an unscheduled binder declared *first* must not displace the
+/// cells. This is the pull request's own deliverable class -- a two-float
+/// property false at exactly one off-diagonal pair -- and under the defect the
+/// leading `bool` took digit 0, pushing the refutation from attempt 62 to 362
+/// and so past the default budget.
+#[test]
+fn issue_3697_a_leading_unscheduled_binder_does_not_displace_the_cells() {
+    let plain = "module Pair.Floats
+@property off_diag forall(x: f64, y: f64):
+  ((x != 1.7976931348623157e308f64) || (y != 1.0f64))
+";
+    let leading_bool = "module Pair.LeadingBool
+@property off_diag forall(bb: bool, x: f64, y: f64):
+  ((x != 1.7976931348623157e308f64) || (y != 1.0f64))
+";
+    let (code, baseline) = prove(plain, "100", "0");
+    assert_eq!(code, 1, "{baseline:#}");
+    let (code, record) = prove(leading_bool, "100", "0");
+    assert_eq!(
+        code, 1,
+        "a leading `bool` must not push the cell past the default budget: {record:#}"
+    );
+    assert_eq!(witness(&record, "x"), f64::MAX, "{record:#}");
+    assert_eq!(witness(&record, "y"), 1.0, "{record:#}");
+    assert_eq!(
+        record["attempted_samples"], baseline["attempted_samples"],
+        "the cell index must not depend on an unscheduled binder: {record:#}"
+    );
+}
+
+/// Negative parity: an unscheduled binder is still *sampled*, and a property
+/// that needs it true still passes. The repair must not stop drawing it.
+#[test]
+fn issue_3697_unscheduled_binders_are_still_drawn() {
+    let source = "module Pair.BoolDrawn
+@property either forall(x: f64, b: bool):
+  ((b == b) && (x == x))
+";
+    let (code, record) = prove(source, "100", "0");
+    assert_eq!(code, 0, "{record:#}");
+    assert_eq!(record["status"], "passed", "{record:#}");
+    assert_eq!(record["accepted_samples"], 100, "{record:#}");
+    assert_eq!(record["rejected_samples"], 0, "{record:#}");
+}
+
+/// An integer binder *is* scheduled, so it must still join the odometer: the
+/// repair narrows which binders participate and must not drop a real one.
+/// This is the same pairing `issue_3697_integer_binder_joins_the_odometer`
+/// pins, asserted here against an unscheduled binder declared beside it.
+#[test]
+fn issue_3697_an_integer_binder_still_counts_beside_an_unscheduled_one() {
+    let source = "module Pair.IntAndBool
+@property not_huge_and_minus_999 forall(x: f64, n: i32, b: bool):
+  (((x < 1.0e300f64) || (n != -999)) || (b != b))
+";
+    let (code, record) = prove(source, "100", "0");
+    assert_eq!(code, 1, "{record:#}");
+    assert!(witness(&record, "x") >= 1.0e300, "{record:#}");
+    assert_eq!(record["counterexample"]["n"], -999, "{record:#}");
+}
+
+/// The cost of the split, pinned at the exact budget. The design doc states
+/// that 87 samples now reach the whole 44-candidate schedule where 44 did
+/// before, and that `[44, 87)` is a new degradation band. A figure in prose
+/// drifts; this is the measurement.
+///
+/// `-1e-323` is candidate 43, the schedule's last entry, proposed at diagonal
+/// attempt 86. No extremal representative is that rung, so only the diagonal
+/// reaches it.
+#[test]
+fn issue_3697_the_whole_diagonal_needs_eighty_seven_samples() {
+    let source = "module Pair.LastCandidate
+@property not_last forall(x: f64, y: f64):
+  ((x != -1.0e-323f64) || (y != -1.0e-323f64))
+";
+    for samples in ["44", "86"] {
+        let (code, record) = prove(source, samples, "0");
+        assert_eq!(
+            code, 0,
+            "samples {samples} is inside the new degradation band and must not reach \
+             candidate 43: {record:#}"
+        );
+    }
+    for samples in ["87", "100"] {
+        let (code, record) = prove(source, samples, "0");
+        assert_eq!(code, 1, "samples {samples}: {record:#}");
+        assert_eq!(record["attempted_samples"], 87, "{record:#}");
+        assert_eq!(witness(&record, "x"), -1.0e-323, "{record:#}");
+        assert_eq!(witness(&record, "y"), -1.0e-323, "{record:#}");
+    }
+}

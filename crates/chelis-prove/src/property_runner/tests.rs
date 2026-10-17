@@ -2331,6 +2331,23 @@ fn issue_3697_representatives_are_a_deduplicated_subset_of_the_schedule() {
             .collect::<BTreeSet<_>>();
         assert_eq!(distinct.len(), reps.len(), "[{lower}, {upper}]: {reps:?}");
     }
+    // The comparator choice is observable in exactly one place: a range whose
+    // only candidates are the two zeros, where `total_cmp` orders `-0.0`
+    // below `+0.0` and so decides which zero is digit 0. `f64::max`/`min`
+    // leave that unspecified, which is why the selection does not use them,
+    // and asserting only subset/dedup above would not notice.
+    let zeros = float_edge_candidates(FloatKind::F64, 0.0, 0.0, &[]);
+    assert_eq!(
+        zeros.len(),
+        2,
+        "both signed zeros are candidates: {zeros:?}"
+    );
+    let reps = extremal_class_representatives(&zeros);
+    assert_eq!(reps.len(), 2, "{reps:?}");
+    assert!(
+        reps[0].is_sign_positive() && reps[1].is_sign_negative(),
+        "`total_cmp` puts `+0.0` first, so it is digit 0: {reps:?}"
+    );
 }
 
 /// The roles, named. An unguarded `f64` binder fills all six: the two finite
@@ -2463,4 +2480,103 @@ fn issue_3697_integer_representatives_are_the_schedules_prefix() {
         scheduled_int(ScheduleSlot::Cell(5), &narrow),
         Some(narrow[5 % narrow.len()])
     );
+}
+
+/// The anti-drift guard for chelis#3697's P1: `takes_schedule_slot` and
+/// `sample_value` must agree about which binders read the schedule.
+///
+/// They are two places stating one fact, and when they disagreed the cost was
+/// not a crash but a silent loss of the feature: a `bool` binder switched the
+/// interleave on while ignoring its own slot, so a property with one
+/// *scheduled* binder beside it paid the halved diagonal rate for no pairing
+/// benefit, and a `bool` declared first consumed digit 0 and multiplied every
+/// useful cell index by the radix -- which pushed a two-float-binder
+/// refutation from attempt 62 to attempt 362, past the default budget.
+///
+/// So the agreement is checked by *observation* rather than by reading the
+/// match arms: for every type the sampler supports, draw twice from an
+/// identically seeded generator at two different slots and see whether the
+/// value actually moved. The types are parsed from Surf rather than
+/// constructed, so the spellings under test are the ones a property can
+/// actually declare.
+#[test]
+fn issue_3697_schedule_participation_matches_the_sampler() {
+    let spellings = [
+        "bool",
+        "string",
+        "i8",
+        "i16",
+        "i32",
+        "i64",
+        "f32",
+        "f64",
+        "tensor[2, f32]",
+        "tensor[2, 2, f32]",
+    ];
+    for spelling in spellings {
+        let source =
+            format!("module T.Probe\n@property p forall(v: {spelling}):\n  (1.0f64 == 1.0f64)\n");
+        let decls = chelis_surf::parser::parse_str(&source)
+            .unwrap_or_else(|error| panic!("`{spelling}` must parse: {error}"));
+        let mut found = Vec::new();
+        collect_property_decls(&decls, None, &mut Vec::new(), &mut found);
+        let ty = found
+            .first()
+            .and_then(|(_, decl)| match decl {
+                Decl::Property { params, .. } => params.first()?.ty.clone(),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("`{spelling}` must yield a typed binder"));
+
+        let draw = |slot| {
+            let mut rng = Lcg::new(7);
+            sample_value("v", &ty, &mut rng, slot).map(|value| value.json)
+        };
+        let first = draw(ScheduleSlot::Diagonal(0))
+            .unwrap_or_else(|error| panic!("`{spelling}` must sample: {error:?}"));
+        let second = draw(ScheduleSlot::Diagonal(1))
+            .unwrap_or_else(|error| panic!("`{spelling}` must sample: {error:?}"));
+        let moved = first != second;
+        let scheduled = takes_schedule_slot(&ty);
+        assert_eq!(
+            moved,
+            scheduled,
+            "`{spelling}`: takes_schedule_slot says {scheduled}, but the drawn value {} with \
+             the slot ({first} vs {second}). The two must agree, or a binder that ignores its \
+             slot still consumes an odometer digit.",
+            if moved { "moved" } else { "did not move" },
+        );
+    }
+}
+
+/// The odometer's arity and digit positions count only the scheduled binders,
+/// so an unscheduled one neither switches the interleave on nor takes a digit.
+#[test]
+fn issue_3697_unscheduled_binders_take_no_digit() {
+    let sp = chelis_deep::Span::new(0, 0);
+    let f64_ty = TypeExpr::Named("f64".to_string(), sp);
+    let bool_ty = TypeExpr::Named("bool".to_string(), sp);
+
+    // One scheduled binder beside a `bool` is still arity one, so it keeps the
+    // carve-out and walks its schedule one attempt at a time.
+    let (arity, positions) = arity_and_positions(&[Some(&f64_ty), Some(&bool_ty)]);
+    assert_eq!(
+        arity, 1,
+        "a `bool` must not make this a two-binder odometer"
+    );
+    assert_eq!(positions, vec![Some(0), None]);
+
+    // A `bool` declared first must not occupy digit 0.
+    let (arity, positions) = arity_and_positions(&[Some(&bool_ty), Some(&f64_ty), Some(&f64_ty)]);
+    assert_eq!(arity, 2, "only the two floats are scheduled");
+    assert_eq!(
+        positions,
+        vec![None, Some(0), Some(1)],
+        "the floats take digits 0 and 1, not 1 and 2"
+    );
+
+    // A missing type is not scheduled either; it errors in the sampler.
+    let (arity, positions) = arity_and_positions(&[None, Some(&f64_ty)]);
+    assert_eq!(arity, 1);
+    assert_eq!(positions, vec![None, Some(0)]);
 }

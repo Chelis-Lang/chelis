@@ -417,10 +417,18 @@ binder at one candidate for a whole cycle. The unguarded `f64` schedule is 44
 candidates long, so at the default 100 samples the diagonal gives every binder
 all 44 of its own classes while covering 44 of 1936 pairs, and a full-schedule
 odometer gives the slowest binder 3 of 44 while covering 100 of 1936. Full
-grid coverage needs 1936 attempts, and `44^n` for `n` binders. **No index
-policy over the full schedule reaches the off-diagonal class within a budget
-linear in the schedule length**; it only chooses which vanishing fraction of
-the grid to spend the budget on.
+grid coverage needs 1936 attempts, and `44^n` for `n` binders, so **no index
+policy covers the grid within a budget linear in the schedule length**; each
+one only chooses which vanishing fraction to spend the budget on.
+
+The weaker claim — that no index policy reaches *any* off-diagonal pair
+cheaply — would be false, and the figures above are what refute it: a
+full-schedule odometer reaches the pair (binder 1's candidate `a`, binder 2's
+candidate `b`) at cell `a + 44b`, so the `x / y` counterexample is its cell 1,
+earlier than this policy's attempt 13. What it buys that with is the per-binder
+coverage chelis#3636 exists to provide, holding the slowest binder at 3 of its
+44 classes. So the choice between them is not "reachable or not"; it is which
+coverage to keep, and the argument that settles it is the next paragraph's.
 
 So the policy is a budget policy, and it rests on the observation that **the
 grid is only large because the schedule is fine-grained.** The 44 candidates
@@ -480,10 +488,13 @@ Three consequences are deliberate and bounded:
 
 - The interleave **halves the rate** at which a multi-binder property's
   diagonal is walked, so one refuted only at a late candidate needs about
-  twice the samples it did. The default budget of 100 covers the 44-candidate
-  unguarded `f64` schedule at that rate; a budget below 88 reaches only a
-  prefix of it, which is the degradation a budget smaller than the schedule
-  already had.
+  twice the samples it did. The last of the 44 unguarded `f64` candidates is
+  index 43, proposed at diagonal attempt 86, so **87 samples** now reach the
+  whole schedule where 44 did before, and the default budget of 100 still
+  covers it. Budgets in `[44, 87)` are a **new** degradation band that this
+  policy introduces: they used to cover the schedule completely and now reach
+  a prefix. That is a real cost of the split, not a restatement of the older
+  one — a budget "smaller than the schedule" was `[1, 44)` and is unchanged.
 - A single-binder property takes **neither** half: its attempts index the
   schedule exactly as before. An odometer over one binder's own classes is the
   diagonal, so the phase would only halve the rate at which that schedule is

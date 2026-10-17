@@ -3342,6 +3342,49 @@ fn magnitude_rank(value: f64) -> (u32, u64) {
     (exponent.abs_diff(UNIT_EXPONENT), bits)
 }
 
+/// Whether a binder of type `ty` takes an entry from the deterministic
+/// schedule at all (chelis#3697).
+///
+/// Only the arms of [`sample_value`] that consult their [`ScheduleSlot`] do:
+/// the integer widths and `f32`/`f64`. A `bool`, a `string` and a tensor are
+/// drawn at random whatever the attempt, so they must not switch the
+/// interleave on, and must not consume an odometer digit either -- a digit
+/// spent on a binder that ignores it multiplies every useful cell index by
+/// the radix, which pushed a two-float-binder refutation from attempt 62 to
+/// attempt 362 and so past the default budget.
+///
+/// [`arity_and_positions`] and [`sample_value`] must agree about this, or the
+/// defect returns. `issue_3697_schedule_participation_matches_the_sampler`
+/// asserts the agreement by observation rather than by inspection: for every
+/// supported type it checks whether the drawn value actually varies with the
+/// slot.
+fn takes_schedule_slot(ty: &TypeExpr) -> bool {
+    match ty {
+        TypeExpr::Named(type_name, _) => {
+            crate::opaque::is_int_width(type_name) || type_name == "f32" || type_name == "f64"
+        }
+        _ => false,
+    }
+}
+
+/// The interleave's arity, and each parameter's digit position within it,
+/// counting **only** the binders that take a schedule slot (chelis#3697).
+///
+/// A parameter that takes none gets `None` and is drawn at random.
+fn arity_and_positions(types: &[Option<&TypeExpr>]) -> (usize, Vec<Option<usize>>) {
+    let mut positions = Vec::with_capacity(types.len());
+    let mut arity = 0usize;
+    for ty in types {
+        if ty.is_some_and(takes_schedule_slot) {
+            positions.push(Some(arity));
+            arity += 1;
+        } else {
+            positions.push(None);
+        }
+    }
+    (arity, positions)
+}
+
 /// Which entry of a binder's schedule an attempt proposes (chelis#3697).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ScheduleSlot {
@@ -4505,19 +4548,23 @@ fn sample_property(
     attempt: usize,
 ) -> Result<Sample, SamplingError> {
     let mut values = Vec::new();
-    let arity = property.params.len();
-    for (position, param) in property.params.iter().enumerate() {
+    let types = property
+        .params
+        .iter()
+        .map(|param| param.ty.as_ref())
+        .collect::<Vec<_>>();
+    let (arity, positions) = arity_and_positions(&types);
+    for (param, position) in property.params.iter().zip(positions) {
         let ty = param.ty.as_ref().ok_or_else(|| {
             SamplingError::Unsupported(format!("{} is missing an explicit type", param.name))
         })?;
-        values.push(sample_value(
-            &param.name,
-            ty,
-            rng,
-            attempt,
-            position,
-            arity,
-        )?);
+        // A binder that takes no schedule entry neither switches the
+        // interleave on nor consumes an odometer digit; its arm ignores the
+        // slot and draws at random.
+        let slot = position.map_or(ScheduleSlot::Random, |position| {
+            schedule_slot(attempt, arity, position)
+        });
+        values.push(sample_value(&param.name, ty, rng, slot)?);
     }
     Ok(Sample { values })
 }
@@ -4593,26 +4640,24 @@ fn sample_property_with_constraints(
 /// Draw one binder value for the typed generator: the lane a property takes
 /// when it has no guards at all, or guards the constraint plan cannot read.
 ///
-/// `attempt` is the run's zero-based attempt ordinal, and `position`/`arity`
-/// place this binder among the property's others. The schedule proposes the
+/// `slot` is what the run's attempt ordinal selects for this binder: the
 /// binder's deterministic edge points (chelis#3636) — for a binder with no
 /// guards the admissible range is the whole dtype, so `±MAX` and the
-/// subnormals are reached here — then, for two or more binders, the
-/// off-diagonal odometer over the extremal classes (chelis#3697), then the
-/// historical uniform draw. Guards still filter the proposal: a precondition
-/// rejects an edge point exactly as it rejects a random one.
+/// subnormals are reached here — then, for two or more *scheduled* binders,
+/// the off-diagonal odometer over the extremal classes (chelis#3697), then
+/// the historical uniform draw. Guards still filter the proposal: a
+/// precondition rejects an edge point exactly as it rejects a random one.
 ///
-/// The odometer's digit order is the binders' declaration order, which in
-/// this lane is also the order they are drawn in.
+/// The caller resolves the slot, because the odometer's arity and digit order
+/// count only the binders that take one: see [`arity_and_positions`]. The
+/// arms below that ignore `slot` are exactly the types
+/// [`takes_schedule_slot`] rejects, and a test holds the two in agreement.
 fn sample_value(
     name: &str,
     ty: &TypeExpr,
     rng: &mut Lcg,
-    attempt: usize,
-    position: usize,
-    arity: usize,
+    slot: ScheduleSlot,
 ) -> Result<SampleValue, SamplingError> {
-    let slot = schedule_slot(attempt, arity, position);
     let sp = chelis_deep::Span::new(0, 0);
     match ty {
         TypeExpr::Named(type_name, _) if type_name == "bool" => {
@@ -5986,19 +6031,23 @@ fn sample_deep_property(
     attempt: usize,
 ) -> Result<Sample, SamplingError> {
     let mut values = Vec::new();
-    let arity = property.params.len();
-    for (position, param) in property.params.iter().enumerate() {
+    let types = property
+        .params
+        .iter()
+        .map(|param| param.ty.as_ref())
+        .collect::<Vec<_>>();
+    let (arity, positions) = arity_and_positions(&types);
+    for (param, position) in property.params.iter().zip(positions) {
         let ty = param.ty.as_ref().ok_or_else(|| {
             SamplingError::Unsupported(format!("{} is missing an explicit type", param.name))
         })?;
-        values.push(sample_value(
-            &param.name,
-            ty,
-            rng,
-            attempt,
-            position,
-            arity,
-        )?);
+        // A binder that takes no schedule entry neither switches the
+        // interleave on nor consumes an odometer digit; its arm ignores the
+        // slot and draws at random.
+        let slot = position.map_or(ScheduleSlot::Random, |position| {
+            schedule_slot(attempt, arity, position)
+        });
+        values.push(sample_value(&param.name, ty, rng, slot)?);
     }
     Ok(Sample { values })
 }
