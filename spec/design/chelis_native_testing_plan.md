@@ -429,8 +429,8 @@ and evaluator does not merge source scope: before combination, each test file an
 synthetic roots are rewritten as an independent module under a deterministic reserved
 identity, and the combined unit contains only exact internal names. A declaration in one
 test file is therefore invisible to another unless the language's ordinary import rule
-made it visible. Files with top-level module-init bindings or conservatively detected
-top-level name collisions may still use the per-file worker path instead.
+made it visible. Files with top-level module-init bindings use the per-file worker path
+instead.
 
 The shard bound is required, not an optimization. One unbounded batch runs in a single
 subprocess, so the suite's whole compile and evaluation sits on one thread while worker
@@ -440,13 +440,11 @@ batching: chelis#1391 measured `Chelis-Lang/shoals`' 49-file suite under its own
 cost 3.1x the wall to save 9% of the CPU, and a hosted 2-vCPU runner could not fit it in
 a 2400s suite budget at all.
 
-The bound is a constant and deliberately not a function of the worker count. Batch
-admission judges name collisions per batch, so a core-count-dependent partition would
-make *which* files demote -- and therefore the `CHELIS_TEST_EXPLAIN_BATCHING` output and
-any abandoned-batch warning -- differ between two machines running the same suite, which
-the determinism requirement below forbids. Narrower scopes also collide less often, so
-sharding admits at least as many files to batching as one shared scope did. A suite with
-no more files than the bound forms exactly one shard and behaves exactly as before.
+The bound is a constant and deliberately not a function of the worker count. A shard
+succeeds or is abandoned as a unit, so a core-count-dependent partition would make the
+files an abandoned-batch warning names differ between two machines running the same
+suite, which the determinism requirement below forbids. A suite with no more files than
+the bound forms exactly one shard.
 
 Each shard succeeds or is abandoned on its own, so one unusable shard costs only its own
 files their batching rather than the whole suite's.
@@ -454,42 +452,29 @@ files their batching rather than the whole suite's.
 If the shared package context fails to compile, `chelis test` fails fast and does not fan
 out identical per-worker errors.
 
-#### Batch admission is not scope authority
+#### Batch admission is a property of each file
 
-The parent keeps a conservative admission guard so obviously conflicting files can take
-the established per-file path without constructing a batch that will fail. It recognizes
-these conditions:
+Whether a file joins a batch depends on that file alone, never on its neighbours. A file
+takes the per-file path when it cannot be read, parsed, or have its tests enumerated, or
+when it has a top-level module-init binding, which a shared batch would run once for
+every file. Nothing else demotes it.
 
-- two files declare the same name (including ADT variant constructors, which share one
-  namespace before isolated rewriting);
-- one file declares a name that another file explicitly imported, in either order. This
-  is the chelis#1261 collision that the original raw merge misresolved;
-- two files import the same name from different modules;
-- a file carries a wildcard import, whose name set the runner cannot enumerate without
-  resolving the package graph.
-
-Importing the same name from the same module is agreement, not collision, and must not
-demote either file: nearly every suite shares one assertion helper import, and demoting
-on that would delete the batch path entirely. A file that repeats a name internally
-(a `sig` beside its `def`) is likewise not colliding with itself.
-
-The parent's eligibility classifier and the batch worker's own duplicate guard admit
-files through one shared rule. A worker guard stricter than the classifier rejects
-manifests the parent already built, which surfaces only as an unexplained fallback.
-That rule is a performance/admission policy, not proof of language scope. It cannot
-enumerate a file's unresolved bare references, and a future declaration shape must not
-be able to confer scope merely because the guard has no arm for it. Correctness comes
-from independently rewriting each file through the ordinary module resolver, then
-combining only the rewritten declarations and exact synthetic-root identities. The
-cached-context and legacy prepared-graph workers consume the same isolated rewrite
-product, and neither re-runs the eval-entry rewriter over that product.
+In particular, names shared between files are not collisions. Two files may declare the
+same test, helper, type, constructor, or property name, import the same name from the
+same or from different modules, or import a whole module, and stay batched. Correctness
+comes from independently rewriting each file through the ordinary module resolver under
+its own reserved module identity, then combining only the rewritten declarations and
+exact synthetic-root identities, so no declaration in one file can collide with or
+capture a binding in another. The cached-context and legacy prepared-graph workers
+consume the same isolated rewrite product, and neither re-runs the eval-entry rewriter
+over that product. Test identity in rows and reports is the file plus the test name, so
+two files' `test_probe` rows stay distinct.
 
 Demotion is the sanctioned per-file path, not a degradation, and is not reported by
 default: `--batch-mode file` produces the same rows and the same exit code. The reason is
 computed anyway, so it is available on demand. Setting `CHELIS_TEST_EXPLAIN_BATCHING=1`
-prints one stderr line per demoted file naming the collision (or the read, parse,
-enumeration, or module-init reason). Without it, a maintainer whose suite quietly lost the
-batch path has to bisect the colliding names by hand.
+prints one stderr line per demoted file naming the read, parse, enumeration, or
+module-init reason.
 
 `--batch-mode auto` and `--batch-mode file` are verdict-equivalent: they emit the same
 file/test pass-fail rows and the same exit status for the same sources. A resolver or
