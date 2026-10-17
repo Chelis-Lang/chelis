@@ -27,22 +27,32 @@
 //! | the diagonal's priority over the cells | `..._the_whole_diagonal_still_needs_only_forty_four_samples` |
 //! | the long-schedule exemption | `..._a_long_schedule_is_not_displaced_past_the_budget` |
 //! | the cell cap | `..._a_high_arity_rejection_lane_property_still_collects_its_samples` |
-//! | the arity-one carve-out | `..._single_binder_schedule_takes_no_cell` |
+//! | the arity-one carve-out | unit test only -- see below |
 //! | the digit's dependence on binder position | every pairing test here |
 //! | the largest-candidate role | `..._the_refuting_pair_is_off_diagonal_...` |
 //! | the smallest-candidate role | `..._the_largest_negative_role_...` |
 //! | the smallest-positive role | `..._the_smallest_positive_role_...` |
 //! | the largest-negative role | `..._the_largest_negative_role_...` |
 //! | the moderate role | `..._typed_generator_lane_pairs_off_diagonal` |
-//! | counting only the scheduled binders | `..._an_unscheduled_binder_...`, `..._a_leading_unscheduled_binder_...` |
+//! | counting only the scheduled binders | `..._a_leading_unscheduled_binder_...` |
 //! | the zero role | unit test only -- see below |
 //!
-//! The **zero role** has no discriminator at this level, and this says so
-//! rather than implying one: wherever the guards admit a zero it is also the
-//! interval's endpoint or its smallest-magnitude candidate, so another role
-//! proposes it anyway and only the exact role list can see the difference. It
-//! is pinned in `chelis-prove`'s `property_runner::tests`, under the same
-//! `issue_3697_` prefix, along with the slot arithmetic no property observes.
+//! Two rows have no discriminator at this level, and this says so rather than
+//! implying one. The **zero role**: wherever the guards admit a zero it is
+//! also the interval's endpoint or its smallest-magnitude candidate, so
+//! another role proposes it anyway and only the exact role list can see the
+//! difference. The **arity-one carve-out**: because the diagonal is no longer
+//! rationed, removing the carve-out leaves a single binder's early attempts on
+//! the diagonal regardless, so no property distinguishes it -- which is the
+//! carve-out becoming cheap rather than untested. Both are pinned in
+//! `chelis-prove`'s `property_runner::tests`, under the same `issue_3697_`
+//! prefix, along with the slot arithmetic no property observes.
+//!
+//! `..._an_unscheduled_binder_does_not_shift_the_diagonal` is a regression
+//! control rather than a discriminator: it asserts equality with the
+//! single-binder baseline, which holds under the mis-counting mutation too
+//! now that the diagonal runs at full rate. It earns its place by pinning
+//! that equality, not by catching that rule.
 use assert_cmd::Command;
 use serde_json::Value;
 use tempfile::tempdir;
