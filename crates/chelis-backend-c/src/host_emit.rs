@@ -4,6 +4,7 @@ use chelis_ir::host::{
 };
 mod entry;
 mod entry_walk;
+mod origin_elision;
 use entry_walk::function_entry_plan;
 
 /// Sparse-op kind discriminator for the C summary-derived emission path.
@@ -5277,6 +5278,7 @@ fn emit_function(
         entry.push("    __chelis_tail_loop_entry: ;".to_string());
         emitter.lines.splice(0..0, entry);
     }
+    origin_elision::elide_inert_origin_bookkeeping(&mut emitter.lines);
     out.extend(emitter.lines);
     out.push("    return __result;".to_string());
     out.push("}".to_string());
@@ -5654,6 +5656,7 @@ fn emit_main(
         })?;
     emitter.emit_terminal_site(terminal, None)?;
     emitter.finish_expression_sites()?;
+    origin_elision::elide_inert_origin_bookkeeping(&mut emitter.lines);
     out.extend(emitter.lines);
     out.push("    __chelis_host_result_origin_arena_destroy(__chelis_origin_arena);".to_string());
     out.push("    return 0;".to_string());

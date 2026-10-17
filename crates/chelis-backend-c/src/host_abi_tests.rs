@@ -1104,6 +1104,40 @@ fn executed_owned_body(source: &str, name: &str, expected: &str) -> String {
     .to_string()
 }
 
+fn scalar_let_chain_source(bindings: usize) -> String {
+    let mut source = String::from("def chain() -> i64 = {\n  y0 = 1i64\n");
+    for index in 1..bindings {
+        source.push_str(&format!("  y{index} = add(y{}, 1i64)\n", index - 1));
+    }
+    source.push_str(&format!("  y{}\n}}\nout = chain()\n", bindings - 1));
+    source
+}
+
+/// chelis#3692: a binding whose origin is provably always NULL registers no
+/// root, and a scope with no root or claim traffic is not emitted, so a
+/// chain of scalar lets carries a fixed amount of origin bookkeeping. The
+/// program still runs, so the arena's teardown check holds after elision.
+#[test]
+fn inert_origin_bookkeeping_does_not_grow_with_a_scalar_let_chain() {
+    let counts = [4, 16].map(|bindings| {
+        let body = executed_owned_body(
+            &scalar_let_chain_source(bindings),
+            "chain",
+            &format!("out = {bindings}\n"),
+        );
+        [
+            "__chelis_global_origin_root_enter(",
+            "__chelis_global_origin_scope_enter(",
+            "__chelis_global_origin_assign(",
+        ]
+        .map(|helper| body.matches(helper).count())
+    });
+    assert_eq!(
+        counts[0], counts[1],
+        "origin roots, scopes and assignments grew with the let chain: {counts:?}"
+    );
+}
+
 /// Whether `body` calls the C identifier `name` itself, not merely an
 /// identifier that ends with it.
 fn calls_c_identifier(body: &str, name: &str) -> bool {
