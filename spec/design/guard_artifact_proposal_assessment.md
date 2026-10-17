@@ -506,12 +506,14 @@ definition replacement is specified above.
 - Keep `FROZEN_PHASE_A_DIGEST` while Phase A remains closed. Its rare moves
   have carried measured row-by-row deltas.
 - Keep the temporary Nix workflow digest only while its event-policy condition
-  remains explicit. Retire it in the reviewed change that ends the temporary
-  manual-dispatch/published-release-only policy, after replacement event and
-  native-recipe controls pass and the complete native flake checks and Devenv
-  smoke checks pass on both supported systems under the replacement policy.
-  A recipe edit while the temporary policy still stands requires an explicit
-  reviewed freeze move; it does not satisfy the retirement condition.
+  stays explicit. The temporary policy keeps pull requests and pushes out of the
+  workflow. Manual dispatch, published releases, and the daily schedule start it.
+  Retire the digest in the reviewed change that ends that policy. First,
+  replacement event and native-recipe controls must pass. The complete native
+  flake checks and Devenv smoke checks must also pass on every supported system
+  under the replacement policy.
+- A recipe edit while the temporary policy stands needs an explicit reviewed
+  freeze move. It does not satisfy the retirement condition.
 - Keep the loud-unsupported `BASELINE`. It is a shrink-only count census, not a
   content hash, and it has recorded true catches.
 
