@@ -11621,6 +11621,103 @@ mod tests {
             }
         }
         assert!(emitted >= 60, "{emitted} programs emitted");
+        // Chained products: one kernel's total, reshaped, is the next
+        // kernel's operand, so the reshape is the first product's absorbed
+        // output and the second product reads it in place.
+        for p in [Prim::F32, Prim::F16] {
+            for runtime_rows in [false, true] {
+                let ty = |dims: &[DimInfo]| TensorType {
+                    dims: dims.to_vec(),
+                    precision: p,
+                };
+                let (first_eq, first_x, mid, second_eq) = if runtime_rows {
+                    (
+                        "amk,kn->amn",
+                        vec![DimInfo::Lit(1), runtime("s"), DimInfo::Lit(4)],
+                        vec![DimInfo::Lit(1), runtime("s"), DimInfo::Lit(4)],
+                        "amk,kn->amn",
+                    )
+                } else {
+                    ("mk,kn->mn", lit(&[6, 4]), lit(&[3, 8]), "mk,kn->mn")
+                };
+                let first_w = lit(&[4, 4]);
+                let second_w = lit(&[
+                    mid.last().map_or(0, |d| match d {
+                        DimInfo::Lit(n) => *n,
+                        _ => 0,
+                    }),
+                    5,
+                ]);
+                let mut dag = Dag::new();
+                let owner = Owner::from(dag.declare("probe"));
+                let load = |dag: &mut Dag, name: &str, dims: &[DimInfo]| {
+                    dag.add_node(
+                        owner,
+                        RiscOp::Load { name: name.into() },
+                        vec![],
+                        ty(dims),
+                        None,
+                    )
+                };
+                let x = load(&mut dag, "x", &first_x);
+                let w = load(&mut dag, "w", &first_w);
+                let v = load(&mut dag, "v", &second_w);
+                let lower = |dag: &mut Dag,
+                             equation: &str,
+                             a: (NodeId, &TensorType),
+                             b: (NodeId, &TensorType)| {
+                    let contraction =
+                        chelis_ir::tier2_ordered::einsum_contraction(equation, a.1, b.1, None)
+                            .unwrap_or_else(|| panic!("`{equation}` contraction form"));
+                    chelis_ir::tier2_ordered::lower_einsum_contraction(
+                        owner,
+                        dag,
+                        &contraction,
+                        [a, b],
+                        None,
+                    )
+                    .expect("contraction lowers")
+                };
+                let first = lower(&mut dag, first_eq, (x, &ty(&first_x)), (w, &ty(&first_w)));
+                let between = if runtime_rows {
+                    first
+                } else {
+                    dag.add_node(
+                        owner,
+                        RiscOp::Reshape {
+                            new_shape: vec![RtDim::Lit(3), RtDim::Lit(8)],
+                        },
+                        vec![first],
+                        ty(&mid),
+                        None,
+                    )
+                };
+                let root = lower(
+                    &mut dag,
+                    second_eq,
+                    (between, &ty(&mid)),
+                    (v, &ty(&second_w)),
+                );
+                dag.set_roots(vec![root]);
+                let verified = crate::testing::verified_dag(&dag, crate::CodegenOptions::default())
+                    .expect("chained DAG verifies ownership");
+                let emission = verified.emission();
+                let plan =
+                    chelis_ir::ownership::plan_c_storage_layout(emission).unwrap_or_else(|error| {
+                        panic!("chained {p:?} runtime={runtime_rows}: {error}")
+                    });
+                assert_eq!(emission.reduction_inlined_products().len(), 2);
+                for product in emission.reduction_inlined_products() {
+                    assert!(
+                        plan.placements()[product.output().0].slot().is_some(),
+                        "chained {p:?} runtime={runtime_rows}: a kernel output owns no slot"
+                    );
+                }
+                emit_test_dag(&dag, "probe").unwrap_or_else(|error| {
+                    panic!("chained {p:?} runtime={runtime_rows}: {error:?}")
+                });
+            }
+        }
     }
 
     /// `x: [name]` doubled, with `span` on the addition.
