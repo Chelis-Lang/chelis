@@ -7429,6 +7429,8 @@ thread_local! {
     /// Operand offsets `chelis_tensor_einsum` has derived through checked
     /// metadata on this thread; tests read it to bound index work per call.
     static EINSUM_CHECKED_OFFSETS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Product slots `chelis_tensor_einsum` has reserved on this thread.
+    static EINSUM_PRODUCTS_RESERVED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// Einsum labels iterated row-major, with each operand's offset stride per
@@ -7673,10 +7675,16 @@ pub unsafe extern "C" fn chelis_tensor_einsum(
         };
         let mut out_at = EinsumOdometer::new(&plan.output);
         let mut outer_at = EinsumOdometer::new(&outer);
-        // One product buffer serves every output.
-        let mut products = Vec::with_capacity(reduction_total);
+        // One product buffer serves every output. It is sized at the first
+        // output, so an empty output reserves nothing for its reduction.
+        let mut products = Vec::new();
         for out_linear in 0..out_size {
             products.clear();
+            if out_linear == 0 {
+                #[cfg(test)]
+                EINSUM_PRODUCTS_RESERVED.with(|count| count.set(count.get() + reduction_total));
+                products.reserve(reduction_total);
+            }
             for _ in 0..outer_count {
                 let mut lhs_at = out_at.offsets[0] + outer_at.offsets[0];
                 let mut rhs_at = out_at.offsets[1] + outer_at.offsets[1];
@@ -10489,6 +10497,47 @@ mod einsum_index_cost_tests {
                 }
                 chelis_string_release(equation_value);
             }
+        }
+    }
+
+    fn products_reserved() -> usize {
+        EINSUM_PRODUCTS_RESERVED.with(std::cell::Cell::get)
+    }
+
+    /// The product buffer is reserved once, at the first output: a contraction
+    /// whose output is empty reserves nothing however large its reduction, and
+    /// a nonempty one reserves exactly its reduction count.
+    #[test]
+    fn the_product_buffer_is_reserved_once_and_only_for_an_output() {
+        unsafe {
+            let text = CString::new("az,cw->zw").unwrap();
+            let equation = chelis_string_from_cstr(text.as_ptr());
+            let wide = tensor(&[4_000_000_000, 0], &[]);
+            let narrow = tensor(&[2, 0], &[]);
+            let before = products_reserved();
+            let empty = chelis_tensor_einsum(equation, wide, narrow, CHELIS_DTYPE_F32);
+            assert_eq!(chelis_tensor_numel(empty), 0);
+            assert_eq!(products_reserved() - before, 0, "empty output");
+            for value in [empty, wide, narrow] {
+                chelis_tensor_release(value);
+            }
+            chelis_string_release(equation);
+
+            let text = CString::new("ij,jk->ik").unwrap();
+            let equation = chelis_string_from_cstr(text.as_ptr());
+            let lhs = tensor(&[9, 37], &values(9 * 37, 1));
+            let rhs = tensor(&[37, 7], &values(37 * 7, 2));
+            let before = products_reserved();
+            let out = chelis_tensor_einsum(equation, lhs, rhs, CHELIS_DTYPE_F32);
+            assert_eq!(
+                products_reserved() - before,
+                37,
+                "63 outputs of 37 products"
+            );
+            for value in [out, lhs, rhs] {
+                chelis_tensor_release(value);
+            }
+            chelis_string_release(equation);
         }
     }
 
