@@ -7,7 +7,17 @@ binding. This document covers build prerequisites and configuration.
 
 - **Binding:** `cvc5-rs = "0.3"` (safe high-level Rust API)
 - **Underlying:** cvc5 1.3.1 (built from bundled source by `cvc5-sys`)
-- **License:** BSD 3-clause (commercial-friendly, compatible with MIT workspace)
+- **License:** BSD 3-clause (commercial-friendly, compatible with MIT workspace).
+  The build turns GPL off (`ENABLE_GPL=OFF`).
+- **Configuration:** `configure.sh` of `cvc5-sys` 0.3.1 uses the Production
+  build type and turns LibPoly on. The flake (`nix/cvc5.nix`) builds the same
+  configuration from `nix/ci-cvc5.nix`.
+- **Statically linked dependencies:** these keep their own licenses.
+  - GMP 6.3.0: LGPL-3.0 or GPL-2.0. The cvc5 `COPYING` file states that the
+    combined work stays under the BSD license.
+  - LibPoly 0.2.0: LGPL-3.0.
+  - CaDiCaL 2.1.3: MIT.
+  - SymFPU (headers only): a BSD-style 3-clause license.
 
 ## Build Prerequisites
 

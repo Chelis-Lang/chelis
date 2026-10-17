@@ -119,6 +119,23 @@ def assert_documented_crate2nix_matches_profile(
         )
 
 
+def assert_release_cvc5_configuration(flake_cvc5: str, release_cvc5: str) -> None:
+    """Check that the flake cvc5 is the cvc5-sys 0.3.1 configure.sh configuration."""
+    assert "import ./ci-cvc5.nix args" in flake_cvc5, "nix/cvc5.nix must reuse nix/ci-cvc5.nix"
+    assert "cmakeFlags" not in flake_cvc5, "nix/cvc5.nix must not declare a second cvc5 configuration"
+    for required in (
+        '"-DUSE_POLY=ON"',
+        '"-DENABLE_GPL=OFF"',
+        'cmakeBuildType = "Production";',
+        "license = lib.licenses.bsd3;",
+        '"$out/build/deps/lib/libpicpoly.a"',
+        '"$out/build/deps/lib/libpicpolyxx.a"',
+    ):
+        assert required in release_cvc5, f"nix/ci-cvc5.nix must contain {required}"
+    for forbidden in ('"-DUSE_POLY=OFF"', '"-DENABLE_GPL=ON"', "gpl3Only"):
+        assert forbidden not in release_cvc5, f"nix/ci-cvc5.nix must not contain {forbidden}"
+
+
 def assert_committed_crate2nix_contract(
     *,
     flake: str,
@@ -675,9 +692,40 @@ class NixSourceContractTests(unittest.TestCase):
         self.assertIn('find "$package" -mindepth 1 -printf \'%P\\n\' | sort', checks)
 
     def test_static_cvc5_library_does_not_force_a_static_executable(self) -> None:
-        cvc5 = (REPO_ROOT / "nix" / "cvc5.nix").read_text(encoding="utf-8")
+        cvc5 = (REPO_ROOT / "nix" / "ci-cvc5.nix").read_text(encoding="utf-8")
         self.assertIn('"-DBUILD_SHARED_LIBS=OFF"', cvc5)
         self.assertIn('"-DSTATIC_BINARY=OFF"', cvc5)
+
+    def test_flake_cvc5_uses_the_release_configuration(self) -> None:
+        flake_cvc5 = (REPO_ROOT / "nix" / "cvc5.nix").read_text(encoding="utf-8")
+        release_cvc5 = (REPO_ROOT / "nix" / "ci-cvc5.nix").read_text(encoding="utf-8")
+        assert_release_cvc5_configuration(flake_cvc5, release_cvc5)
+
+    def test_cvc5_configuration_contract_rejects_each_drift(self) -> None:
+        flake_cvc5 = (REPO_ROOT / "nix" / "cvc5.nix").read_text(encoding="utf-8")
+        release_cvc5 = (REPO_ROOT / "nix" / "ci-cvc5.nix").read_text(encoding="utf-8")
+        release_drifts = {
+            "LibPoly off": ('"-DUSE_POLY=ON"', '"-DUSE_POLY=OFF"'),
+            "GPL on": ('"-DENABLE_GPL=OFF"', '"-DENABLE_GPL=ON"'),
+            "debug build": ('cmakeBuildType = "Production";', 'cmakeBuildType = "Debug";'),
+            "GPL metadata": ("license = lib.licenses.bsd3;", "license = lib.licenses.gpl3Only;"),
+            "no LibPoly archive": ('"$out/build/deps/lib/libpicpoly.a"', '"$out/build/deps/lib/other.a"'),
+        }
+        for name, (old, new) in release_drifts.items():
+            with self.subTest(name):
+                self.assertIn(old, release_cvc5)
+                with self.assertRaises(AssertionError):
+                    assert_release_cvc5_configuration(flake_cvc5, release_cvc5.replace(old, new))
+        with self.subTest("second flake configuration"):
+            with self.assertRaises(AssertionError):
+                assert_release_cvc5_configuration(
+                    flake_cvc5 + '\n# cmakeFlags = [ "-DUSE_POLY=OFF" ]\n', release_cvc5
+                )
+        with self.subTest("no release import"):
+            with self.assertRaises(AssertionError):
+                assert_release_cvc5_configuration(
+                    flake_cvc5.replace("import ./ci-cvc5.nix args", "pkgs.cvc5"), release_cvc5
+                )
 
     def test_rust_builds_import_the_committed_crate2nix_graph(self) -> None:
         inputs = read_contract_inputs()
