@@ -636,6 +636,9 @@ struct CFunctionDefinition {
 struct ParsedCTranslationUnit {
     functions: Vec<CFunctionDefinition>,
     error_context: String,
+    /// The start of every [`ADMITTED_NOINLINE`] specifier of a
+    /// translation-unit-private function definition, ascending.
+    admitted_noinline: Vec<usize>,
 }
 
 /// One tree-sitter parse of a generated unit, with the projected text that it
@@ -694,9 +697,10 @@ fn bind_c_definitions(
     parse: &mut Option<ParsedProjection>,
 ) -> Result<BTreeMap<String, String>, GeneratedHeaderError> {
     validate_generated_include_set(source)?;
-    validate_generated_pragmas(source)?;
-    // One scan of the source serves every export below (chelis#2637).
-    let lines = preprocessor_logical_line_spans(source);
+    // One scan of the source serves every check below (chelis#2637).
+    let tracked = TrackedCText::new(source);
+    let attributes = validate_generated_pragmas(&tracked)?;
+    let lines = tracked.logical_line_spans();
     let depths = ConditionalDepths::new(source, &lines)?;
     if depths.total() != 0 {
         return Err(GeneratedHeaderError::new(
@@ -705,6 +709,14 @@ fn bind_c_definitions(
     }
     let directives = directive_commitment(&lines);
     let parsed = parsed_projection(source, parse)?;
+    if let Some(&attribute) = attributes
+        .iter()
+        .find(|at| parsed.admitted_noinline.binary_search(at).is_err())
+    {
+        return Err(GeneratedHeaderError::new(format!(
+            "generated source uses unsupported compiler extension `__attribute__` at byte {attribute}; only `{ADMITTED_NOINLINE}` on a `static` function definition is admitted"
+        )));
+    }
     let functions = &parsed.functions;
     let mut claimed = vec![false; functions.len()];
     let mut digests = BTreeMap::new();
@@ -827,6 +839,7 @@ fn parse_projected_c_unit(
     }
     let mut nodes = Vec::new();
     collect_function_nodes(tree.root_node(), &mut nodes);
+    let nodes_for_attributes = nodes.clone();
     let functions = nodes
         .into_iter()
         .map(|node| {
@@ -848,6 +861,25 @@ fn parse_projected_c_unit(
             })
         })
         .collect::<Result<Vec<_>, _>>()?;
+    let mut admitted_noinline = Vec::new();
+    for node in &nodes_for_attributes {
+        if !has_static_function_storage(*node, projected_source.as_bytes()) {
+            continue;
+        }
+        let Some(declarator) = node.child_by_field_name("declarator") else {
+            continue;
+        };
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if child.end_byte() <= declarator.start_byte()
+                && child.kind() == "attribute_specifier"
+                && child.utf8_text(projected_source.as_bytes()) == Ok(ADMITTED_NOINLINE)
+            {
+                admitted_noinline.push(child.start_byte());
+            }
+        }
+    }
+    admitted_noinline.sort_unstable();
     let mut errors = Vec::new();
     collect_c_errors(tree.root_node(), &mut errors);
     let mut error_hasher = Sha256::new();
@@ -858,6 +890,7 @@ fn parse_projected_c_unit(
     Ok(ParsedCTranslationUnit {
         functions,
         error_context: format!("{:x}", error_hasher.finalize()),
+        admitted_noinline,
     })
 }
 
@@ -1468,25 +1501,37 @@ fn validate_generated_include_set(source: &str) -> Result<(), GeneratedHeaderErr
     Ok(())
 }
 
-fn validate_generated_pragmas(source: &str) -> Result<(), GeneratedHeaderError> {
-    let stripped = strip_c_comments(&splice_c_lines(source));
-    for forbidden in [
-        "_Pragma",
-        "__attribute",
-        "__attribute__",
-        "__declspec",
-        "__asm",
-        "__asm__",
-        "asm",
-    ] {
-        if contains_unquoted_c_identifier(&stripped, forbidden) {
-            return Err(GeneratedHeaderError::new(format!(
-                "generated source uses unsupported compiler extension `{forbidden}`"
-            )));
+/// The one compiler extension generated source may spell, exactly these
+/// bytes, as a declaration specifier of a `static` function definition. It
+/// changes neither a symbol, a linkage, nor a definition's bytes once sealed,
+/// so the [01-CID-1] export contract does not see it; it only keeps the
+/// compiler from inlining the result-origin helpers at every call site
+/// (chelis#3692).
+const ADMITTED_NOINLINE: &str = "__attribute__((noinline))";
+
+/// Reject every compiler extension and pragma outside the generated-C
+/// contract. Extensions can define or alias symbols (`alias`, `asm` labels,
+/// `#pragma weak`) or change linkage and placement, which the export
+/// contract cannot follow, so each is rejected by name wherever it appears
+/// outside a literal or comment. The one exception is [`ADMITTED_NOINLINE`]:
+/// this returns the source offset of every `__attribute__`, and the caller
+/// admits it only where the structural parse finds exactly that specifier on
+/// a `static` function definition.
+fn validate_generated_pragmas(tracked: &TrackedCText) -> Result<Vec<usize>, GeneratedHeaderError> {
+    let mut attributes = Vec::new();
+    for (at, identifier) in unquoted_c_identifiers(&tracked.text) {
+        match identifier {
+            "__attribute__" => attributes.push(tracked.origin(at)),
+            "_Pragma" | "__attribute" | "__declspec" | "__asm" | "__asm__" | "asm" => {
+                return Err(GeneratedHeaderError::new(format!(
+                    "generated source uses unsupported compiler extension `{identifier}`"
+                )));
+            }
+            _ => {}
         }
     }
-    for line in preprocessor_logical_lines(source) {
-        let Some(payload) = preprocessor_directive_payload(&line, "pragma") else {
+    for line in tracked.text.lines() {
+        let Some(payload) = preprocessor_directive_payload(line, "pragma") else {
             continue;
         };
         // A parallel loop is an `omp for` inside a bare `omp parallel` region
@@ -1509,11 +1554,14 @@ fn validate_generated_pragmas(source: &str) -> Result<(), GeneratedHeaderError> 
             )));
         }
     }
-    Ok(())
+    Ok(attributes)
 }
 
-fn contains_unquoted_c_identifier(source: &str, expected: &str) -> bool {
+/// Every identifier of `source` outside a string or character literal, with
+/// its byte offset.
+fn unquoted_c_identifiers(source: &str) -> Vec<(usize, &str)> {
     let bytes = source.as_bytes();
+    let mut identifiers = Vec::new();
     let mut index = 0;
     let mut quote = None;
     while index < bytes.len() {
@@ -1541,14 +1589,12 @@ fn contains_unquoted_c_identifier(source: &str, expected: &str) -> bool {
             {
                 index += 1;
             }
-            if &source[start..index] == expected {
-                return true;
-            }
+            identifiers.push((start, &source[start..index]));
             continue;
         }
         index += 1;
     }
-    false
+    identifiers
 }
 
 fn preprocessor_directive_payload<'a>(line: &'a str, expected: &str) -> Option<&'a str> {
@@ -1578,11 +1624,44 @@ struct LogicalLine {
     text: String,
 }
 
+/// A source after line splicing and comment removal, with the source offset
+/// of each of its bytes.
+struct TrackedCText {
+    text: String,
+    origins: Vec<usize>,
+    source_len: usize,
+}
+
+impl TrackedCText {
+    fn new(source: &str) -> Self {
+        let (spliced, splice_origins) = splice_c_lines_tracked(source, true);
+        let (text, origins) = strip_c_comments_tracked(&spliced, splice_origins.as_deref());
+        Self {
+            text,
+            origins: origins.expect("a tracked pass records every output byte's origin"),
+            source_len: source.len(),
+        }
+    }
+
+    /// The source offset of text byte `at`; the end of the text maps to the
+    /// end of the source.
+    fn origin(&self, at: usize) -> usize {
+        self.origins.get(at).copied().unwrap_or(self.source_len)
+    }
+
+    fn logical_line_spans(&self) -> Vec<LogicalLine> {
+        preprocessor_logical_line_spans_of(self)
+    }
+}
+
+#[cfg(test)]
 fn preprocessor_logical_line_spans(source: &str) -> Vec<LogicalLine> {
-    let (spliced, splice_origins) = splice_c_lines_tracked(source, true);
-    let (text, origins) = strip_c_comments_tracked(&spliced, splice_origins.as_deref());
-    let origins = origins.expect("a tracked pass records every output byte's origin");
-    let origin = |at: usize| origins.get(at).copied().unwrap_or(source.len());
+    preprocessor_logical_line_spans_of(&TrackedCText::new(source))
+}
+
+fn preprocessor_logical_line_spans_of(tracked: &TrackedCText) -> Vec<LogicalLine> {
+    let text = &tracked.text;
+    let origin = |at: usize| tracked.origin(at);
     let mut lines = Vec::new();
     let mut first = 0;
     for line in text.lines() {
@@ -2603,6 +2682,144 @@ mod tests {
             assert!(
                 seal_generated_artifact("demo", &source, &header).is_err(),
                 "preprocessing must not erase a sealed export or add definitions from an unknown header"
+            );
+        }
+    }
+
+    fn seal_with_private_source(
+        private_source: &str,
+    ) -> Result<(String, String), super::GeneratedHeaderError> {
+        let (header, export) = raw_export(
+            "alpha",
+            "chelis_fn_616c706861",
+            "int chelis_fn_616c706861(int x);",
+            "int chelis_fn_616c706861(int x) {\n    return helper(x) + 1;\n}",
+        );
+        seal_generated_artifact("demo", &format!("{private_source}{export}\n"), &header)
+    }
+
+    /// chelis#3692: the seal admits exactly `__attribute__((noinline))` as a
+    /// declaration specifier of a `static` function definition, and the
+    /// sealed artifact validates.
+    #[test]
+    fn sealed_artifact_admits_noinline_on_static_function_definitions() {
+        for private_source in [
+            "static __attribute__((noinline)) int helper(int x) {\n    return x;\n}\n",
+            "__attribute__((noinline)) static int helper(int x) {\n    return x;\n}\n",
+            "static __attribute__((noinline)) __attribute__((noinline)) int helper(int x) {\n    return x;\n}\n",
+            "#ifndef HELPER\n#define HELPER\nstatic __attribute__((noinline)) int helper(int x) {\n    return x;\n}\n#endif\n",
+            // Literals and comments are not uses.
+            "static const char *note = \"__attribute__((alias(\\\"x\\\")))\";\n/* __attribute__((used)) */\nstatic __attribute__((noinline)) int helper(int x) {\n    return x;\n}\n",
+        ] {
+            let (source, header) = seal_with_private_source(private_source)
+                .unwrap_or_else(|error| panic!("{private_source}: {error}"));
+            GeneratedHeader::parse(&header)
+                .expect("sealed header")
+                .validate_source(&source)
+                .unwrap_or_else(|error| panic!("{private_source}: {error}"));
+        }
+    }
+
+    /// Every other attribute, spelling, position, and extension stays
+    /// rejected, including variants a token-level check could miss.
+    #[test]
+    fn sealed_artifact_rejects_every_other_attribute_and_extension() {
+        let body = "int helper(int x) {\n    return x;\n}\n";
+        let mut cases = Vec::new();
+        for attribute in [
+            "alias(\"chelis_fn_616c706861\")",
+            "visibility(\"default\")",
+            "section(\".text.chelis\")",
+            "used",
+            "weak",
+            "always_inline",
+            "constructor",
+            "cold",
+            "noinline, cold",
+            "noinline(1)",
+            "(noinline)",
+            "__noinline__",
+            "noinline,",
+        ] {
+            cases.push(format!("static __attribute__(({attribute})) {body}"));
+        }
+        cases.extend(
+            [
+                // Extra or differently spaced tokens.
+                "static __attribute__ ((noinline)) ",
+                "static __attribute__(( noinline )) ",
+                "static __attribute__((noinline )) ",
+                "static __attribute__(\n(noinline)) ",
+                "static __attribute__/**/((noinline)) ",
+                "static __attribute__((noinline)/* c */) ",
+                "static __attribute__((noinline))__attribute__((used)) ",
+                // Line splices and trigraph splices inside the specifier.
+                "static __attri\\\nbute__((noinline)) ",
+                "static __attribute__((noin\\\nline)) ",
+                "static __attribute__((noinline))??/\n ",
+                "static __attri??/\nbute__((noinline)) ",
+                // Not a translation-unit-private definition.
+                "__attribute__((noinline)) ",
+                "extern __attribute__((noinline)) ",
+                // Other extensions.
+                "static __declspec(noinline) ",
+                "static __attribute((noinline)) ",
+            ]
+            .map(|prefix| format!("{prefix}{body}")),
+        );
+        cases.extend(
+            [
+                // A declaration without a definition.
+                "static __attribute__((noinline)) int helper(int x);\nstatic int helper(int x) {\n    return x;\n}\n",
+                // A variable.
+                "static __attribute__((noinline)) int counter = 0;\nstatic int helper(int x) {\n    return x + counter;\n}\n",
+                // A parameter and a body-local declaration.
+                "static int helper(__attribute__((noinline)) int x) {\n    return x;\n}\n",
+                "static void release(int *x) {\n    (void)x;\n}\nstatic int helper(int x) {\n    __attribute__((cleanup(release))) int y = x;\n    return y;\n}\n",
+                // A macro that spells the specifier, used or not.
+                "#define NOINLINE __attribute__((noinline))\nstatic NOINLINE int helper(int x) {\n    return x;\n}\n",
+                "#define NOINLINE __attribute__((noinline))\nstatic int helper(int x) {\n    return x;\n}\n",
+                // The other extension spellings.
+                "_Pragma(\"GCC optimize(\\\"O0\\\")\")\nstatic int helper(int x) {\n    return x;\n}\n",
+                "static int helper(int x) asm(\"other\");\nstatic int helper(int x) {\n    return x;\n}\n",
+                "static int helper(int x) {\n    __asm__(\"\");\n    return x;\n}\n",
+            ]
+            .map(str::to_string),
+        );
+        for private_source in &cases {
+            assert!(
+                seal_with_private_source(private_source).is_err(),
+                "the seal admitted:\n{private_source}"
+            );
+        }
+        // On the export itself: externally linked, so never admitted.
+        let (header, export) = raw_export(
+            "alpha",
+            "chelis_fn_616c706861",
+            "int chelis_fn_616c706861(int x);",
+            "__attribute__((noinline)) int chelis_fn_616c706861(int x) {\n    return x + 1;\n}",
+        );
+        let error = seal_generated_artifact("demo", &format!("{export}\n"), &header)
+            .expect_err("an exported definition cannot carry the specifier");
+        assert!(error.to_string().contains("__attribute__"), "{error}");
+    }
+
+    /// An attribute the parse does not admit is rejected as an extension,
+    /// whatever other check would also catch it.
+    #[test]
+    fn unadmitted_noinline_spellings_report_the_extension() {
+        for private_source in [
+            "static __attribute__ ((noinline)) int helper(int x) {\n    return x;\n}\n",
+            "static __attribute__((noinline)) int counter = 0;\nstatic int helper(int x) {\n    return x + counter;\n}\n",
+            "static __attribute__((noinline)) int helper(int x);\nstatic int helper(int x) {\n    return x;\n}\n",
+        ] {
+            let error = seal_with_private_source(private_source)
+                .expect_err("the specifier is not admitted here");
+            assert!(
+                error
+                    .to_string()
+                    .contains("unsupported compiler extension `__attribute__`"),
+                "{private_source}: {error}"
             );
         }
     }
