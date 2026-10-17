@@ -261,6 +261,7 @@ fn issue_1125_eval_raw_expr(expr: &Expr) -> Result<RuntimeValue, String> {
         system: system::EvalSystemBoundary::permissive(),
         failure_kind: RuntimeFailureKind::Ordinary,
         activation_extents: Default::default(),
+        last_uses: Default::default(),
     };
     ctx.eval_expr(expr)
 }
@@ -317,6 +318,7 @@ fn issue_1125_eval_checked_root(
         system: system::EvalSystemBoundary::permissive(),
         failure_kind: RuntimeFailureKind::Ordinary,
         activation_extents: Default::default(),
+        last_uses: Default::default(),
     };
     ctx.resolve_top_level(root)
 }
@@ -1235,6 +1237,213 @@ fn issue_2335_read_only_list_builtins_do_not_copy_the_list() {
     );
 }
 
+/// Evaluate a fixture that binds `result`, returning the container elements
+/// copied while evaluating it and `result` rendered.
+fn evaluate_counting_element_copies(source: &str) -> (u64, String) {
+    let checked = checked_surf(source);
+    let empty_tensors: UnordMap<String, RuntimeTensorValue> = UnordMap::new();
+    let inputs = HostEvaluationInputs {
+        roots: &empty_tensors,
+        bindings: None,
+    };
+    super::shared_values::reset_element_copies();
+    let outcome =
+        evaluate_host_program_with_library_and_types(&checked, None, None, inputs, None, None)
+            .unwrap_or_else(|failure| panic!("fixture evaluates: {}", failure.message));
+    let copies = super::shared_values::element_copies();
+    let value = outcome
+        .host_bindings
+        .get("result")
+        .map(render_value)
+        .expect("fixture binds `result`");
+    (copies, value)
+}
+
+/// chelis#3720: a container read at its binding's last use is taken, not
+/// shared, so the write that follows changes it in place. Every accumulator
+/// shape here grew its container by one element per step and copied the
+/// whole container per step: quadratic in the step count.
+///
+/// The receipt counts container elements copied (`element_copies`) at two
+/// lengths. The fold copies its own list once, one element per step; every
+/// write beyond that must copy nothing, so the count stays within a small
+/// multiple of the length.
+///
+/// Evidentiary status: REGRESSION TEST, proven failing first. Without the
+/// last-use release the 100-step fold copied 5,150 elements.
+#[test]
+fn issue_3720_container_accumulators_write_in_place() {
+    /// A described accumulator shape and its source at a step count.
+    type Fixture = (&'static str, fn(usize) -> String);
+    let fixtures: [Fixture; 6] = [
+        ("fold with append", |n| {
+            format!(
+                "result = len(fold(fn (acc: List[i64], i: i64) -> append(acc, i), \
+                 [0i64], range(0i64, {n}i64)))\n"
+            )
+        }),
+        ("recursion through both branches of an if", |n| {
+            format!(
+                "def grow(acc: List[i64], k: i64) -> List[i64] = \
+                 if eq(k, 0i64) then acc else grow(append(acc, k), sub(k, 1i64))\n\
+                 result = len(grow([0i64], {n}i64))\n"
+            )
+        }),
+        ("a let in the body and a helper definition", |n| {
+            format!(
+                "def push(xs: List[i64], x: i64) -> List[i64] = append(xs, x)\n\
+                 result = len(fold(fn (acc: List[i64], i: i64) -> {{\n  \
+                 doubled = mul(i, 2i64)\n  push(acc, doubled)\n}}, \
+                 [0i64], range(0i64, {n}i64)))\n"
+            )
+        }),
+        ("fold with concat", |n| {
+            format!(
+                "result = len(fold(fn (acc: List[i64], i: i64) -> concat(acc, [i]), \
+                 [0i64], range(0i64, {n}i64)))\n"
+            )
+        }),
+        ("fold with dict_insert", |n| {
+            format!(
+                "seed: Dict[i64, i64] = dict_of([(0i64, 0i64)])\n\
+                 result = len(fold(fn (acc: Dict[i64, i64], i: i64) -> dict_insert(acc, add(i, 1i64), i), \
+                 seed, range(0i64, {n}i64)))\n"
+            )
+        }),
+        ("a builtin value as the fold callback", |n| {
+            format!("result = len(fold(append, [0i64], range(0i64, {n}i64)))\n")
+        }),
+    ];
+    for (shape, fixture) in fixtures {
+        for steps in [100usize, 400] {
+            let (copies, result) = evaluate_counting_element_copies(&fixture(steps));
+            eprintln!("#3720 receipt: {shape}, {steps} steps copied {copies}");
+            assert_eq!(result, (steps + 1).to_string(), "#3720 {shape}: the length");
+            assert!(
+                copies <= 4 * steps as u64,
+                "#3720 {shape}: {steps} steps copied {copies} elements; each write must \
+                 change its container in place"
+            );
+        }
+    }
+}
+
+/// chelis#3720 negative controls: a container still read after a write keeps
+/// its value, so the write copies it; a binding a closure captured is shared
+/// with that closure and is never released, however often it runs.
+#[test]
+fn issue_3720_a_container_read_again_is_still_copied() {
+    // `acc` is read again after the append, so it is never released, and
+    // every step copies the list grown so far.
+    let reread = |steps: usize| {
+        format!(
+            "result = len(fold(fn (acc: List[i64], i: i64) -> {{\n  \
+             grown = append(acc, i)\n  if gt(len(acc), -1i64) then grown else acc\n}}, \
+             [0i64], range(0i64, {steps}i64)))\n"
+        )
+    };
+    let (copies, result) = evaluate_counting_element_copies(&reread(100));
+    assert_eq!(result, "101");
+    assert!(
+        copies >= 100 * 100 / 2,
+        "#3720: a list read after its append must be copied by it, or this receipt \
+         measures nothing; copied {copies}"
+    );
+    // The original list stays observable after a write to it.
+    let (_, both) = evaluate_counting_element_copies(
+        "def both(xs: List[i64]) -> i64 = {\n  ys = append(xs, 7i64)\n  add(len(xs), len(ys))\n}\n\
+         result = both(range(0i64, 5i64))\n",
+    );
+    assert_eq!(
+        both, "11",
+        "#3720: a list read after its append keeps its length"
+    );
+    // One branch reads `xs` once and a later read follows, so the branch read
+    // is not a last use.
+    let (_, branch) = evaluate_counting_element_copies(
+        "def pick(xs: List[i64], c: bool) -> i64 = {\n  \
+         ys = if c then append(xs, 1i64) else xs\n  add(len(ys), len(xs))\n}\n\
+         result = add(mul(pick(range(0i64, 5i64), true), 100i64), pick(range(0i64, 5i64), false))\n",
+    );
+    assert_eq!(
+        branch, "1110",
+        "#3720: a read inside a branch then after it"
+    );
+    // `xs` is read once, inside a closure that runs twice: the captured
+    // binding must survive the first run.
+    let (_, captured) = evaluate_counting_element_copies(
+        "def total(xs: List[i64]) -> i64 = {\n  g = fn (i: i64) -> len(append(xs, i))\n  \
+         add(g(1i64), g(2i64))\n}\n\
+         result = total(range(0i64, 5i64))\n",
+    );
+    assert_eq!(
+        captured, "12",
+        "#3720: a captured list is read by every run"
+    );
+}
+
+/// Evaluate a fixture that binds `result`, returning `result` rendered.
+fn evaluate_result(source: &str) -> String {
+    let checked = checked_surf(source);
+    let empty_tensors: UnordMap<String, RuntimeTensorValue> = UnordMap::new();
+    let inputs = HostEvaluationInputs {
+        roots: &empty_tensors,
+        bindings: None,
+    };
+    let outcome =
+        evaluate_host_program_with_library_and_types(&checked, None, None, inputs, None, None)
+            .unwrap_or_else(|failure| panic!("fixture evaluates: {}", failure.message));
+    outcome
+        .host_bindings
+        .get("result")
+        .map(render_value)
+        .expect("fixture binds `result`")
+}
+
+/// chelis#3741: a callable retains each higher-order formal's contract
+/// normalized, once, where the contract is attached. Applying the callable
+/// reads the retained signature and checks only the actual arguments.
+///
+/// `apply_n` retains its formal `f`'s contract on `inc`, then applies `f`
+/// once per fold step. The receipt counts every contract normalization
+/// (`chelis_ir::callable_value::contract_normalizations`), which must not
+/// grow with the number of applications.
+///
+/// Evidentiary status: REGRESSION TEST, proven failing first. With the
+/// per-application normalization #3629 introduced restored, the count grew by
+/// one per application of `f`.
+#[test]
+fn issue_3741_retained_contracts_normalize_once_not_per_application() {
+    fn normalizations(applications: usize) -> u64 {
+        let source = format!(
+            "def apply_n(f: i64 -> i64, n: i64) -> i64 = \
+             fold(fn (acc: i64, i: i64) -> f(acc), 0i64, range(0i64, n))\n\
+             def inc(x: i64) -> i64 = add(x, 1i64)\n\
+             result = apply_n(inc, {applications}i64)\n"
+        );
+        chelis_ir::callable_value::reset_contract_normalizations();
+        let result = evaluate_result(&source);
+        let count = chelis_ir::callable_value::contract_normalizations();
+        assert_eq!(
+            result,
+            applications.to_string(),
+            "#3741: the fold applies `f` once per step"
+        );
+        count
+    }
+    let few = normalizations(10);
+    let many = normalizations(40);
+    eprintln!("#3741 receipt: 10 applications normalized {few}, 40 normalized {many}");
+    assert!(
+        few >= 1,
+        "#3741: retaining `f`'s contract must normalize it, or this receipt measures nothing"
+    );
+    assert_eq!(
+        few, many,
+        "#3741: applying a callable must not normalize its retained contracts again"
+    );
+}
+
 /// chelis#2204: a closure parameter shadows a captured binding of the same
 /// name at the interpreter level, not only inside `Frame`'s own unit tests.
 /// Red-team round 1 on chelis#2208 inverted `Frame::get` to prefer the
@@ -2039,6 +2248,7 @@ fn eval_deep_with_bindings(
         system: system::EvalSystemBoundary::permissive(),
         failure_kind: RuntimeFailureKind::Ordinary,
         activation_extents: Default::default(),
+        last_uses: Default::default(),
     };
     for (name, value) in args {
         ctx.bindings.insert((*name).to_string(), value.clone());
@@ -4564,10 +4774,10 @@ fn fo_diag_bools_strings_and_nonnumeric_controls() {
             return_type: None,
             checked_signature: None,
             invocation_contracts: Box::default(),
-            body: chelis_deep::ast::Expr::Atom(
+            body: super::closure_body::ClosureBody::new(chelis_deep::ast::Expr::Atom(
                 chelis_deep::ast::Atom::Bool(false),
-                chelis_deep::Span::new(0, 0)
-            ),
+                chelis_deep::Span::new(0, 0),
+            )),
             env: Frame::new(),
             precision_env: UnordMap::new(),
             def_name: None,

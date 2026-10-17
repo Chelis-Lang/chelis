@@ -13,6 +13,13 @@
 //! a frame's own bindings adds the entries copied to a per-thread counter, and
 //! the receipt test in `runtime/tests.rs` asserts that the count does not
 //! scale with the number of closure applications.
+//!
+//! A binding in the innermost scope can be released at its last read
+//! (chelis#3720): the read takes the value instead of sharing it, so a
+//! container written next is solely owned and changes in place. The released
+//! name stays in its scope, so it still shadows every captured binding of the
+//! same name, and a later read finds it released instead of resolving
+//! outward.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -133,6 +140,17 @@ impl ResultProducer {
 struct Binding {
     value: RuntimeValue,
     result_producer: Option<ResultProducer>,
+    /// The value was taken at the binding's last read; `value` is a
+    /// placeholder that no lookup returns.
+    released: bool,
+}
+
+/// What a name resolves to: the innermost binding of it, and whether that
+/// binding was released at its last read.
+pub(crate) enum Lookup<'a> {
+    Live(&'a RuntimeValue),
+    Released,
+    Unbound,
 }
 
 thread_local! {
@@ -191,31 +209,68 @@ impl Frame {
         Self::default()
     }
 
-    /// The innermost binding of `name`, if any scope binds it.
-    pub(crate) fn get(&self, name: &str) -> Option<&RuntimeValue> {
+    /// The innermost binding of `name` in any scope.
+    fn binding(&self, name: &str) -> Option<&Binding> {
         let mut frame = self;
         loop {
             if let Some(binding) = frame.locals.get(name) {
-                return Some(&binding.value);
+                return Some(binding);
             }
             frame = frame.captured.as_deref()?;
+        }
+    }
+
+    /// What `name` resolves to. A released binding still shadows every
+    /// outer binding of the same name.
+    pub(crate) fn lookup(&self, name: &str) -> Lookup<'_> {
+        match self.binding(name) {
+            Some(binding) if binding.released => Lookup::Released,
+            Some(binding) => Lookup::Live(&binding.value),
+            None => Lookup::Unbound,
+        }
+    }
+
+    /// The innermost binding of `name`, if any scope binds it and it was not
+    /// released.
+    pub(crate) fn get(&self, name: &str) -> Option<&RuntimeValue> {
+        match self.lookup(name) {
+            Lookup::Live(value) => Some(value),
+            Lookup::Released | Lookup::Unbound => None,
         }
     }
 
     /// Producer provenance retained beside a lexical value. It is private
     /// execution metadata, not part of the value or its public representation.
     pub(crate) fn result_producer(&self, name: &str) -> Option<&ResultProducer> {
-        let mut frame = self;
-        loop {
-            if let Some(binding) = frame.locals.get(name) {
-                return binding.result_producer.as_ref();
-            }
-            frame = frame.captured.as_deref()?;
-        }
+        self.binding(name)
+            .filter(|binding| !binding.released)
+            .and_then(|binding| binding.result_producer.as_ref())
     }
 
+    /// Whether any scope binds `name`, released or not: a released local is
+    /// still the binding that name denotes in its scope.
     pub(crate) fn contains_key(&self, name: &str) -> bool {
-        self.get(name).is_some()
+        self.binding(name).is_some()
+    }
+
+    /// Take the value and producer this frame's innermost scope binds to
+    /// `name`, leaving the name bound and released. A binding in a captured
+    /// scope is shared with the closures that captured it and is never
+    /// released, so this returns `None` for it, as it does for a name the
+    /// innermost scope does not bind or already released.
+    pub(crate) fn release_local(
+        &mut self,
+        name: &str,
+    ) -> Option<(RuntimeValue, Option<ResultProducer>)> {
+        let binding = self
+            .locals
+            .get_mut(name)
+            .filter(|binding| !binding.released)?;
+        binding.released = true;
+        Some((
+            std::mem::replace(&mut binding.value, RuntimeValue::Unit),
+            binding.result_producer.take(),
+        ))
     }
 
     /// Bind `name` in the innermost scope, shadowing any captured binding.
@@ -239,8 +294,10 @@ impl Frame {
                 Binding {
                     value,
                     result_producer,
+                    released: false,
                 },
             )
+            .filter(|binding| !binding.released)
             .map(|binding| binding.value)
     }
 
@@ -271,14 +328,18 @@ impl Frame {
                 None => break,
             }
         }
-        let mut merged: BTreeMap<&String, &RuntimeValue> = BTreeMap::new();
+        let mut merged: BTreeMap<&String, Option<&RuntimeValue>> = BTreeMap::new();
         // Outermost first, so an inner scope's binding overwrites an outer one.
+        // A released binding hides the outer ones and is not listed itself.
         for frame in chain.into_iter().rev() {
             for (name, binding) in frame.locals.to_sorted() {
-                merged.insert(name, &binding.value);
+                merged.insert(name, (!binding.released).then_some(&binding.value));
             }
         }
-        merged.into_iter().collect()
+        merged
+            .into_iter()
+            .filter_map(|(name, value)| Some((name, value?)))
+            .collect()
     }
 
     /// Snapshot this frame for a closure without copying a value.
@@ -369,6 +430,48 @@ mod tests {
         assert!(!inner.is_empty());
         assert!(Frame::new().is_empty());
         assert!(Frame::new().capture().is_empty());
+    }
+
+    #[test]
+    fn a_released_local_shadows_its_captured_name_and_reads_as_released() {
+        let mut frame = Frame::new();
+        frame.insert("xs".to_string(), int(1));
+        let mut inner = frame.capture();
+        inner.insert("xs".to_string(), int(2));
+        let (value, _) = inner.release_local("xs").expect("a live local releases");
+        assert_eq!(
+            super::super::host_ops::render_value(&value),
+            super::super::host_ops::render_value(&int(2))
+        );
+        assert!(matches!(inner.lookup("xs"), Lookup::Released));
+        assert!(
+            inner.get("xs").is_none(),
+            "the captured `xs` stays shadowed"
+        );
+        assert!(inner.contains_key("xs"));
+        assert!(inner.to_sorted().is_empty());
+        assert!(
+            inner.release_local("xs").is_none(),
+            "a release happens once"
+        );
+        // A later binding of the name is live again.
+        inner.insert("xs".to_string(), int(3));
+        assert_eq!(
+            read(&inner, "xs"),
+            read(&Frame::from_value("xs", int(3)), "xs")
+        );
+    }
+
+    #[test]
+    fn a_captured_binding_is_never_released() {
+        let mut frame = Frame::new();
+        frame.insert("xs".to_string(), int(1));
+        let closure_env = frame.capture();
+        assert!(
+            frame.release_local("xs").is_none(),
+            "a captured binding is shared with the closure that captured it"
+        );
+        assert_eq!(read(&closure_env, "xs"), read(&frame, "xs"));
     }
 
     #[test]

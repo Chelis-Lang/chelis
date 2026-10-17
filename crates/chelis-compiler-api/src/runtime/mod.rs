@@ -4,6 +4,11 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use chelis_deep::ast::{Atom, Expr, Metadata};
+use chelis_ir::callable_value::NormalizedCallableContract;
+
+/// A retained invocation contract, normalized once and shared by every clone
+/// of the callable that carries it (chelis#3741).
+type RetainedContract = Arc<NormalizedCallableContract>;
 use chelis_ir::eval::TensorValue as IrTensorValue;
 use chelis_ir::lower::top_level_lowering_map;
 use chelis_types::{
@@ -21,6 +26,7 @@ pub use frame::Frame;
 use frame::ResultProducer;
 #[cfg(feature = "clarabel-provider")]
 mod clarabel;
+mod closure_body;
 #[cfg(feature = "clarabel-provider")]
 pub use clarabel::{
     RegisteredClarabelProvider, linked_package_solve_symbol, linked_provider_binding,
@@ -223,7 +229,7 @@ pub enum RuntimeValue {
     /// A statically admitted operation value. Its sealed token owns both the
     /// canonical declaration and whole checked scheme; no closure source is
     /// reconstructed and no caller binding can redirect the operation.
-    Builtin(chelis_ir::callable_value::ResolvedBuiltinValue<Expr>),
+    Builtin(chelis_ir::callable_value::ResolvedBuiltinValue<RetainedContract>),
     Closure {
         /// Exact checked `(fn ...)` expression that produced this closure.
         /// Transform lowering reuses this carrier directly: rebuilding a
@@ -246,9 +252,12 @@ pub enum RuntimeValue {
         /// Authored higher-order formal signatures retained at each
         /// specialization boundary. These execute before this closure's own
         /// entry so a broader supplied callable cannot erase a narrower
-        /// invocation contract.
-        invocation_contracts: Box<Vec<Expr>>,
-        body: Expr,
+        /// invocation contract. Each is normalized once, where it is
+        /// retained, never again per application (chelis#3741).
+        invocation_contracts: Box<Vec<RetainedContract>>,
+        /// The body, with the reads in it that are their binding's last
+        /// use. Shared, so a clone of the closure copies no syntax.
+        body: Arc<closure_body::ClosureBody>,
         env: Frame,
         /// Lexically captured concrete precision variables. A call derives a
         /// fresh specialization from checked argument/result types and lets
@@ -275,13 +284,13 @@ pub enum RuntimeValue {
         /// Authored higher-order formal signatures retained at each
         /// specialization boundary, shared with ordinary closures so every
         /// supported runtime callable executes the same invocation protocol.
-        invocation_contracts: Box<Vec<Expr>>,
+        invocation_contracts: Box<Vec<RetainedContract>>,
     },
     Unit,
 }
 
 impl RuntimeValue {
-    fn invocation_contracts(&self) -> Option<&[Expr]> {
+    fn invocation_contracts(&self) -> Option<&[RetainedContract]> {
         match self {
             Self::Closure {
                 invocation_contracts,
@@ -296,7 +305,7 @@ impl RuntimeValue {
         }
     }
 
-    fn retain_invocation_contract(&mut self, contract: Expr) {
+    fn retain_invocation_contract(&mut self, contract: RetainedContract) {
         match self {
             Self::Closure {
                 invocation_contracts,
@@ -677,8 +686,40 @@ pub(crate) fn evaluate_host_program_with_library_and_types_and_system(
     )
 }
 
+/// Every host evaluation runs on the stack segment the check pipeline grows
+/// (`chelis_types::run_on_grown_stack`), whichever thread its caller is on.
+/// The recursion guard measures the stack actually left (spec/08-backends.md
+/// section 1.1), so the depth a program reaches is a property of this
+/// evaluator, not of whether `chelis eval` or a `chelis test` worker thread
+/// called it (chelis#3742). Under a caller that already grew a segment this
+/// is a second segment of the same size, never a different budget.
 #[allow(clippy::too_many_arguments)]
 fn evaluate_host_program_core(
+    prepared: Option<&PreparedHostEvaluation>,
+    program: &CheckedProgram,
+    library: Option<&CheckedProgram>,
+    library_lowered_names: Option<&BTreeMap<String, bool>>,
+    inputs: HostEvaluationInputs<'_>,
+    selected_roots: Option<&[String]>,
+    manifested_lowered_names: Option<&BTreeMap<String, bool>>,
+    system_boundary: system::EvalSystemBoundary,
+) -> Result<RuntimeOutcome, RuntimeFailure> {
+    chelis_types::run_on_grown_stack(|| {
+        evaluate_host_program_on_grown_stack(
+            prepared,
+            program,
+            library,
+            library_lowered_names,
+            inputs,
+            selected_roots,
+            manifested_lowered_names,
+            system_boundary,
+        )
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn evaluate_host_program_on_grown_stack(
     prepared: Option<&PreparedHostEvaluation>,
     program: &CheckedProgram,
     library: Option<&CheckedProgram>,
@@ -837,6 +878,7 @@ fn evaluate_host_program_core(
         system: system_boundary,
         failure_kind: RuntimeFailureKind::Ordinary,
         activation_extents: Default::default(),
+        last_uses: Default::default(),
     };
 
     for name in top_level_order {
@@ -1400,6 +1442,9 @@ struct EvalContext<'a> {
     failure_kind: RuntimeFailureKind,
     /// The dimension-binder extents of each executing activation.
     activation_extents: eval::ActivationExtents,
+    /// The executing closure body's last-use reads and the frame snapshots
+    /// its `let` and `match` forms restore (chelis#3720).
+    last_uses: closure_body::LastUses,
 }
 
 /// True when the checked-program effect annotation on this node carries a
