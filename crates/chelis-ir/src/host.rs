@@ -8,7 +8,7 @@ pub use signature_entry::{EntryContract, EntryPattern, SignatureEntryPlan};
 
 use chelis_deep::cons_spine::ConsSpine;
 use chelis_deep::{DeepTag, ExprCarrier};
-use chelis_unord::{UnordMap, UnordSet};
+use chelis_unord::{PersistentMap, UnordMap, UnordSet};
 use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -61,6 +61,10 @@ thread_local! {
     /// body's size (chelis#3793). `None` when nothing counts, and then the hoist
     /// does no counting walk at all.
     static RECORD_HOIST_NODES: Cell<Option<u64>> = const { Cell::new(None) };
+    /// Type-scope entries host type refinement copied or bound while a test
+    /// counts them, so it can bound refinement's work by the body's size
+    /// (chelis#3797). `None` when nothing counts.
+    static REFINE_SCOPE_ENTRIES: Cell<Option<u64>> = const { Cell::new(None) };
     /// Fallback for platforms where native stack headroom cannot be measured.
     static HOST_LOWER_DEPTH: Cell<usize> = const { Cell::new(0) };
     /// Reserve chosen from the stack available at the outermost host-lowering
@@ -895,6 +899,34 @@ pub fn counting_record_hoist_nodes<R>(work: impl FnOnce() -> R) -> (R, u64) {
         .expect("the count stays armed while the work runs");
     drop(restore);
     (result, counted)
+}
+
+/// Run `work`, counting the type-scope entries host type refinement copies
+/// or binds on this thread meanwhile.
+#[doc(hidden)]
+pub fn counting_refine_scope_entries<R>(work: impl FnOnce() -> R) -> (R, u64) {
+    struct Restore(Option<u64>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            REFINE_SCOPE_ENTRIES.with(|count| count.set(self.0));
+        }
+    }
+    let restore = Restore(REFINE_SCOPE_ENTRIES.with(|count| count.replace(Some(0))));
+    let result = work();
+    let counted = REFINE_SCOPE_ENTRIES
+        .with(Cell::get)
+        .expect("the count stays armed while the work runs");
+    drop(restore);
+    (result, counted)
+}
+
+/// Add `entries` to the refinement count while a test counts.
+fn note_refine_scope_entries(entries: usize) {
+    REFINE_SCOPE_ENTRIES.with(|count| {
+        if let Some(counted) = count.get() {
+            count.set(Some(counted + entries as u64));
+        }
+    });
 }
 
 /// Add `nodes()` to the count, evaluating it only while a test counts.
@@ -10349,7 +10381,7 @@ fn refine_host_function_signatures(functions: &mut [HostFunction]) -> bool {
                 .params
                 .iter()
                 .map(|param| (param.name.clone(), param.ty.clone()))
-                .collect::<UnordMap<_, _>>();
+                .collect::<RefineScope>();
             if refine_host_expr_types(&mut function.body, &mut scope, &signatures) {
                 changed = true;
             }
@@ -10443,7 +10475,7 @@ fn refine_host_globals(globals: &mut [HostBinding], functions: &[HostFunction]) 
             .collect::<UnordMap<_, _>>();
 
         let mut changed = false;
-        let mut scope = UnordMap::new();
+        let mut scope = RefineScope::new();
         for binding in globals.iter_mut() {
             if refine_host_expr_types(&mut binding.value, &mut scope, &signatures) {
                 changed = true;
@@ -10453,7 +10485,7 @@ fn refine_host_globals(globals: &mut [HostBinding], functions: &[HostFunction]) 
                 binding.ty = inferred.clone();
                 changed = true;
             }
-            bind_host_local(&mut scope, binding.name.clone(), binding.ty.clone());
+            bind_refined_local(&mut scope, binding.name.clone(), binding.ty.clone());
         }
 
         if !changed {
@@ -10807,9 +10839,23 @@ fn infer_callable_param_types_in_callback(
     }
 }
 
+/// The type scope host type refinement reads. Every `let`, arm and callback
+/// body refines under its own copy of the enclosing scope, and a copy of this
+/// map shares its storage, so a chain of `k` nested bindings copies no
+/// entries instead of `k^2 / 2` of them (chelis#3797).
+type RefineScope = PersistentMap<String, HostTypeTerm>;
+
+/// [`bind_host_local`] for the refinement scope.
+fn bind_refined_local(scope: &mut RefineScope, name: String, ty: HostTypeTerm) {
+    note_refine_scope_entries(1);
+    scope.remove(&callable_origin_key(&name));
+    scope.remove(&builtin_payload_origin_key(&name));
+    scope.insert(name, ty);
+}
+
 fn refine_host_expr_types(
     expr: &mut HostExpr,
-    scope: &mut UnordMap<String, HostTypeTerm>,
+    scope: &mut RefineScope,
     signatures: &UnordMap<String, (Vec<HostTypeTerm>, HostTypeTerm)>,
 ) -> bool {
     let mut changed = false;
@@ -10966,7 +11012,7 @@ fn refine_host_expr_types(
             let mut some_scope = scope.clone();
             let inner_ty = option_inner_type(scrutinee);
             if !inner_ty.is_unresolved() {
-                bind_host_local(&mut some_scope, bind_name.clone(), inner_ty);
+                bind_refined_local(&mut some_scope, bind_name.clone(), inner_ty);
             }
             changed |= refine_host_expr_types(some_expr, &mut some_scope, signatures);
             changed |= refine_host_expr_types(none_expr, scope, signatures);
@@ -10994,7 +11040,7 @@ fn refine_host_expr_types(
             for arm in arms.iter_mut() {
                 let mut arm_scope = scope.clone();
                 for binding in &arm.bindings {
-                    bind_host_local(&mut arm_scope, binding.name.clone(), binding.ty.clone());
+                    bind_refined_local(&mut arm_scope, binding.name.clone(), binding.ty.clone());
                 }
                 changed |= refine_host_expr_types(&mut arm.expr, &mut arm_scope, signatures);
             }
@@ -11029,7 +11075,7 @@ fn refine_host_expr_types(
                         changed = true;
                     }
                 }
-                bind_host_local(&mut local_scope, binding.name.clone(), binding.ty.clone());
+                bind_refined_local(&mut local_scope, binding.name.clone(), binding.ty.clone());
             }
             changed |= refine_host_expr_types(body, &mut local_scope, signatures);
             if ty.is_unresolved() {
@@ -11167,14 +11213,14 @@ fn specialize_host_callback_types(
 
 fn refine_host_callback_types(
     callback: &mut HostCallback,
-    scope: &mut UnordMap<String, HostTypeTerm>,
+    scope: &mut RefineScope,
     signatures: &UnordMap<String, (Vec<HostTypeTerm>, HostTypeTerm)>,
 ) -> bool {
     match &mut callback.kind {
         HostCallbackKind::Inline { params, body } => {
             let mut callback_scope = scope.clone();
             for param in params.iter() {
-                bind_host_local(&mut callback_scope, param.name.clone(), param.ty.clone());
+                bind_refined_local(&mut callback_scope, param.name.clone(), param.ty.clone());
             }
             let mut changed = refine_host_expr_types(body, &mut callback_scope, signatures);
             let inferred = host_expr_type(body);
