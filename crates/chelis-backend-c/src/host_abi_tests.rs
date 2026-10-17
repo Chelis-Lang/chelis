@@ -1138,6 +1138,43 @@ fn inert_origin_bookkeeping_does_not_grow_with_a_scalar_let_chain() {
     );
 }
 
+/// chelis#3692: elision keeps the bookkeeping of origins that are set. A
+/// tensor's producer origin flows through a copy and a projection; the
+/// program runs, so the arena's teardown check proves every set origin was
+/// still released through a root, and the body keeps those roots.
+#[test]
+fn live_origin_bookkeeping_survives_elision() {
+    let body = executed_owned_body(
+        "def produce(size: i64) -> tensor[*, f32] = insert(scalar_to_tensor(0.0f32), 0i32, size)\n\
+         def chain() -> i64 = {\n  \
+           pair = (produce(3i64), 1i64)\n  \
+           a = pair.0\n  \
+           b = a\n  \
+           shape(b, 0i32)\n\
+         }\n\
+         out = chain()\n",
+        "chain",
+        "out = 3\n",
+    );
+    // `pair`, `a` and `b` are the three let bindings; each holds the tensor
+    // producer's origin, so each keeps its root.
+    let bindings = (0..3)
+        .map(|index| format!("__chelis_result_origin___let_binding_{index}"))
+        .collect::<Vec<_>>();
+    for slot in &bindings {
+        assert!(
+            body.contains(&format!(
+                "const __chelis_host_result_origin *{slot} = NULL;"
+            )),
+            "missing let binding `{slot}`:\n{body}"
+        );
+        let root = format!(
+            "__chelis_global_origin_root_enter(__chelis_origin_arena, &__chelis_global_origin_root_{slot}, &{slot});"
+        );
+        assert!(body.contains(&root), "`{slot}` lost its root:\n{body}");
+    }
+}
+
 /// Whether `body` calls the C identifier `name` itself, not merely an
 /// identifier that ends with it.
 fn calls_c_identifier(body: &str, name: &str) -> bool {

@@ -1010,6 +1010,58 @@ mod tests {
     }
 
     #[test]
+    fn a_write_the_pass_cannot_read_keeps_the_root() {
+        let leaf = "__chelis_host_result_origin_leaf(__chelis_origin_arena, \"add\", \"t\")";
+        for write in [
+            // A statement split across lines.
+            "s = __chelis_host_result_origin_leaf(\n__chelis_origin_arena, \"add\", \"t\");".to_string(),
+            "__chelis_global_origin_assign(&s,\n__chelis_host_result_origin_leaf(__chelis_origin_arena, \"add\", \"t\"));".to_string(),
+            // A comma expression.
+            format!("s = {leaf}, x = 1;"),
+        ] {
+            let source = format!("{}{write}\n", slot("s", "NULL"));
+            assert_eq!(elide(&source).1.roots, 0, "{write}");
+        }
+        let split_declaration = "const __chelis_host_result_origin *s = __chelis_host_result_origin_leaf(\n__chelis_origin_arena, \"add\", \"t\");\n__chelis_global_origin_root r;\n__chelis_global_origin_root_enter(__chelis_origin_arena, &r, &s);\n";
+        assert_eq!(elide(split_declaration).1.roots, 0);
+    }
+
+    #[test]
+    fn a_projection_with_a_side_effecting_index_is_kept() {
+        let assign =
+            "__chelis_global_origin_assign(&b, __chelis_host_result_origin_child(a, i++));";
+        let source = format!("{}{}{assign}\n", slot("a", "NULL"), slot("b", "NULL"));
+        let (lines, counts) = elide(&source);
+        assert_eq!(counts.roots, 1, "only `a` is provably NULL");
+        assert!(lines.iter().any(|line| line == assign), "{lines:#?}");
+    }
+
+    #[test]
+    fn a_slot_in_an_unrecognized_declaration_is_not_a_candidate() {
+        let source = "static const __chelis_host_result_origin *s = NULL;\n__chelis_global_origin_root r;\n__chelis_global_origin_root_enter(__chelis_origin_arena, &r, &s);\n";
+        assert_eq!(elide(source).1.roots, 0);
+    }
+
+    #[test]
+    fn a_scope_that_touches_the_root_or_claim_list_directly_is_kept() {
+        for body in ["other->root_head = NULL;\n", "other->claim_head = NULL;\n"] {
+            assert_eq!(elide(&scope("outer", body)).1.scopes, 0, "{body}");
+        }
+    }
+
+    #[test]
+    fn a_scope_without_a_well_ordered_leave_is_kept() {
+        // Entered, never left: refused, not a panic.
+        let unclosed = "__chelis_global_origin_scope s = __chelis_global_origin_scope_enter(__chelis_origin_arena);\nx = 1;\n";
+        let (lines, counts) = elide(unclosed);
+        assert_eq!(counts, OriginElision::default());
+        assert_eq!(lines.len(), 2);
+        // A leave of the name before its enter belongs to something else.
+        let early = "__chelis_global_origin_scope_leave(__chelis_origin_arena, s);\n__chelis_global_origin_scope s = __chelis_global_origin_scope_enter(__chelis_origin_arena);\ny = callee(__chelis_origin_arena);\n__chelis_global_origin_scope_leave(__chelis_origin_arena, s);\n";
+        assert_eq!(elide(early).1.scopes, 0);
+    }
+
+    #[test]
     fn names_inside_literals_and_comments_are_not_uses() {
         let source = format!("{}log(\"&s = s\"); // keep(&s)\n", slot("s", "NULL"));
         assert_eq!(elide(&source).1.roots, 1);
