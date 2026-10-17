@@ -60,7 +60,7 @@ def broken(x: i64) -> f32 = x
 
 #[test]
 fn one_declaration_context_per_file() {
-    support::isolate();
+    crate::support::isolate();
 
     // Positive: every property passes, and all four shared one build.
     let (outcomes, builds) = run(FOUR_FUZZED, "fuzz-only", 4);
