@@ -328,7 +328,6 @@ fn run_lint_for_single_file(file: &Path) -> Vec<Violation> {
             }];
         }
     };
-    let exceptions_list = exceptions();
     // Anchor exception matching against the detected Cargo workspace
     // root, mirroring the standalone `chelis lint` subcommand. Closes
     // `Lint-ExceptionPathRoot-F1` for the build-time style gate as
@@ -336,22 +335,43 @@ fn run_lint_for_single_file(file: &Path) -> Vec<Violation> {
     // builds (`chelis check foo.ch`, `chelis build foo.ch`) now anchor
     // exceptions against the real workspace root regardless of which
     // directory the CLI was invoked from.
-    //
-    // If detection fails the file is not inside a Cargo workspace, so
-    // no workspace-rooted exception glob can legitimately apply. The
-    // raw violations pass through unfiltered: that is the correct
-    // behavior (a file outside the workspace is not, e.g.,
-    // `crates/chelisup/bootstrap/chelisup.sh`), not a second
-    // detection mechanism with different semantics.
     let probe_dir = file
         .parent()
         .filter(|path| !path.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
-    match detect_lint_workspace_root(probe_dir) {
-        Ok(workspace_root) => {
-            chelis_lint::exceptions::apply_exceptions(&raw, &exceptions_list, &workspace_root)
-        }
-        Err(_) => raw,
+    filter_excepted_violations(raw, &exceptions(), || detect_lint_workspace_root(probe_dir))
+}
+
+/// `violations` without those an entry of `exceptions` exempts, with the
+/// exception globs anchored at the workspace root `workspace_root` reports.
+///
+/// An exception exempts only violations of its own rule, so when no
+/// violation's rule has an exception the result is `violations` whatever the
+/// root is, and `workspace_root` is not called. That keeps every clean file,
+/// and every file whose rules have no exception, from spawning `cargo
+/// locate-project` (chelis#1329).
+///
+/// If detection fails the file is not inside a Cargo workspace, so no
+/// workspace-rooted exception glob can legitimately apply. The violations
+/// pass through unfiltered: that is the correct behavior (a file outside the
+/// workspace is not, e.g., `crates/chelisup/bootstrap/chelisup.sh`), not a
+/// second detection mechanism with different semantics.
+pub fn filter_excepted_violations(
+    violations: Vec<Violation>,
+    exceptions: &[Exception],
+    workspace_root: impl FnOnce() -> Result<PathBuf, String>,
+) -> Vec<Violation> {
+    let excepted_rule = |violation: &Violation| {
+        exceptions
+            .iter()
+            .any(|exception| exception.rule_id == violation.rule_id)
+    };
+    if !violations.iter().any(excepted_rule) {
+        return violations;
+    }
+    match workspace_root() {
+        Ok(root) => chelis_lint::exceptions::apply_exceptions(&violations, exceptions, &root),
+        Err(_) => violations,
     }
 }
 
@@ -449,6 +469,66 @@ mod tests {
             1,
             "only the one carve-out path is excepted"
         );
+    }
+
+    fn identities(violations: &[Violation]) -> Vec<(String, std::path::PathBuf)> {
+        violations
+            .iter()
+            .map(|violation| (violation.rule_id.clone(), violation.path.clone()))
+            .collect()
+    }
+
+    fn violation(rule_id: &str, path: &str) -> Violation {
+        Violation {
+            rule_id: rule_id.to_string(),
+            spec_ref: "§0".to_string(),
+            path: std::path::Path::new("/repo").join(path),
+            line: None,
+            col: None,
+            message: "probe".to_string(),
+        }
+    }
+
+    #[test]
+    fn exception_filter_skips_the_workspace_probe_when_no_rule_is_excepted() {
+        // chelis#1329: no exception names these rules, so the root cannot
+        // change the result and the probe must not run.
+        let violations = vec![
+            violation("surf-value-snake-case", "src/a.ch"),
+            violation("doc-filename-convention", "docs/B.md"),
+        ];
+        let kept = filter_excepted_violations(violations.clone(), &exceptions(), || {
+            panic!("the workspace probe ran although no exception names these rules")
+        });
+        assert_eq!(identities(&kept), identities(&violations));
+        let none = filter_excepted_violations(Vec::new(), &exceptions(), || {
+            panic!("the workspace probe ran for a clean file")
+        });
+        assert!(none.is_empty());
+    }
+
+    #[test]
+    fn exception_filter_probes_once_when_a_rule_is_excepted() {
+        let excepted = violation("no-shell-scripts", "crates/chelisup/bootstrap/chelisup.sh");
+        let other = violation("no-shell-scripts", "scripts/whatever.sh");
+        let unrelated = violation("surf-value-snake-case", "src/a.ch");
+        let mut probes = 0;
+        let kept = filter_excepted_violations(
+            vec![excepted.clone(), other.clone(), unrelated.clone()],
+            &exceptions(),
+            || {
+                probes += 1;
+                Ok(std::path::PathBuf::from("/repo"))
+            },
+        );
+        assert_eq!(probes, 1);
+        assert_eq!(identities(&kept), identities(&[other, unrelated]));
+
+        // A failed probe means no workspace, so nothing is excepted.
+        let kept = filter_excepted_violations(vec![excepted.clone()], &exceptions(), || {
+            Err("no workspace".to_string())
+        });
+        assert_eq!(identities(&kept), identities(&[excepted]));
     }
 
     #[test]

@@ -10,16 +10,16 @@
 use super::validate::derive_ir_builtin_output_type;
 use super::*;
 
-/// Name-keyed shape evidence for one validation scope.
+/// Name-keyed shape evidence for the validation scope being walked.
 ///
-/// Every access is a keyed lookup, insert, or whole-env clone: no caller
-/// iterates this environment, and none may start to. The facts here decide a
-/// checker verdict, so an iteration order that picked between two of them
-/// would be exactly the chelis#1341 class. `UnordMap` has no iteration exit
-/// that is not a written `to_sorted` claim of C3.1 authority, which a name
-/// keyed by an arbitrary source identifier cannot make; `BTreeMap` would
-/// leave `iter` and `keys` open to a later edit.
-pub(super) type ShapeTypeEnv = UnordMap<String, deep::Expr>;
+/// Every access is a keyed lookup, insert, or remove, and a binder's facts
+/// live for one [`ScopedMap::scope`]: no caller iterates this environment,
+/// and none may start to. The facts here decide a checker verdict, so an
+/// iteration order that picked between two of them would be exactly the
+/// chelis#1341 class. `ScopedMap` has no iteration exit at all. It also has
+/// no copy, because copying the environment at every binder made a chain of
+/// `k` nested `let`s cost `k` squared in time and memory (chelis#3740).
+pub(super) type ShapeTypeEnv = ScopedMap<String, deep::Expr>;
 
 pub(super) fn shape_type_env(type_env: &IrTypeEnv) -> ShapeTypeEnv {
     type_env
@@ -33,27 +33,25 @@ pub(super) fn shape_type_env(type_env: &IrTypeEnv) -> ShapeTypeEnv {
 /// keeps those types on `defsig` rather than duplicating them into `(params
 /// ...)`; without this bridge, the post-inference shape validator loses every
 /// parameter rank at the function boundary.
-pub(super) fn extend_ir_env_with_declared_fn_params(
+pub(super) fn bind_declared_fn_params(
     fn_expr: &deep::Expr,
     parameter_types: &[deep::Expr],
-    type_env: &ShapeTypeEnv,
-) -> ShapeTypeEnv {
-    let mut scoped = type_env.clone();
+    type_env: &mut ShapeTypeEnv,
+) {
     let Some((DeepTag::Fn, _, fn_children)) = stamped_parts(fn_expr) else {
-        return scoped;
+        return;
     };
     let Some(params_expr) = fn_children.first() else {
-        return scoped;
+        return;
     };
     let Some((DeepTag::Params, _, params)) = stamped_parts(params_expr) else {
-        return scoped;
+        return;
     };
     for (param, parameter_type) in params.iter().zip(parameter_types) {
         if let Some(name) = param_name_for_refs(param) {
-            scoped.insert(name, parameter_type.clone());
+            type_env.insert(name, parameter_type.clone());
         }
     }
-    scoped
 }
 
 /// Resolve the tensor type expression of a callsite argument, peeking through
@@ -134,7 +132,7 @@ pub(super) fn record_let_binding_shape_fact(
     name: &str,
     value_expr: &deep::Expr,
     type_env: &mut ShapeTypeEnv,
-    static_env: &UnordMap<String, StaticValue>,
+    static_env: &StaticEnv,
 ) {
     // If the RHS is a shape-sensitive IR builtin
     // whose output type is derivable from its args,

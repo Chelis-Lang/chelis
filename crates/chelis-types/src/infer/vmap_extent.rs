@@ -155,7 +155,7 @@ fn summarize_function(
         .iter()
         .enumerate()
         .map(|(index, name)| (name.clone(), ParamDeps::from([index])))
-        .collect::<UnordMap<_, _>>();
+        .collect::<ScopedMap<_, _>>();
     let mut movement_deps = BTreeMap::new();
     let return_deps = analyze_expr(&def.body, &mut locals, summaries, &mut movement_deps);
     FunctionSummary {
@@ -166,7 +166,7 @@ fn summarize_function(
 
 fn analyze_expr(
     expr: &deep::Expr,
-    locals: &mut UnordMap<String, ParamDeps>,
+    locals: &mut ScopedMap<String, ParamDeps>,
     summaries: &BTreeMap<String, FunctionSummary>,
     movement_deps: &mut BTreeMap<usize, MovementWitness>,
 ) -> ParamDeps {
@@ -210,32 +210,35 @@ fn analyze_expr(
 
 fn analyze_let(
     kids: &[deep::Expr],
-    locals: &mut UnordMap<String, ParamDeps>,
+    locals: &mut ScopedMap<String, ParamDeps>,
     summaries: &BTreeMap<String, FunctionSummary>,
     movement_deps: &mut BTreeMap<usize, MovementWitness>,
 ) -> ParamDeps {
-    let mut let_locals = locals.clone();
-    if let Some(bindings) = kids.first()
-        && let Some((DeepTag::Bind, _, binding_kids)) = stamped_parts(bindings)
-    {
-        let (pairs, _) = binding_kids.as_chunks::<2>();
-        for pair in pairs {
-            let Some(name) = param_name_for_refs(&pair[0]) else {
-                continue;
-            };
-            let deps = analyze_expr(&pair[1], &mut let_locals, summaries, movement_deps);
-            let_locals.insert(name, deps);
+    // The bindings last for the let's own scope; entering it copies nothing
+    // (chelis#3740).
+    locals.scope(|let_locals| {
+        if let Some(bindings) = kids.first()
+            && let Some((DeepTag::Bind, _, binding_kids)) = stamped_parts(bindings)
+        {
+            let (pairs, _) = binding_kids.as_chunks::<2>();
+            for pair in pairs {
+                let Some(name) = param_name_for_refs(&pair[0]) else {
+                    continue;
+                };
+                let deps = analyze_expr(&pair[1], let_locals, summaries, movement_deps);
+                let_locals.insert(name, deps);
+            }
         }
-    }
-    kids.get(1)
-        .map(|body| analyze_expr(body, &mut let_locals, summaries, movement_deps))
-        .unwrap_or_default()
+        kids.get(1)
+            .map(|body| analyze_expr(body, let_locals, summaries, movement_deps))
+            .unwrap_or_default()
+    })
 }
 
 fn analyze_app(
     expr: &deep::Expr,
     kids: &[deep::Expr],
-    locals: &mut UnordMap<String, ParamDeps>,
+    locals: &mut ScopedMap<String, ParamDeps>,
     summaries: &BTreeMap<String, FunctionSummary>,
     movement_deps: &mut BTreeMap<usize, MovementWitness>,
 ) -> ParamDeps {
@@ -308,7 +311,7 @@ fn movement_bound_dependencies(operation: &str, args: &[ParamDeps]) -> ParamDeps
 
 fn union_children(
     children: &[deep::Expr],
-    locals: &mut UnordMap<String, ParamDeps>,
+    locals: &mut ScopedMap<String, ParamDeps>,
     summaries: &BTreeMap<String, FunctionSummary>,
     movement_deps: &mut BTreeMap<usize, MovementWitness>,
 ) -> ParamDeps {

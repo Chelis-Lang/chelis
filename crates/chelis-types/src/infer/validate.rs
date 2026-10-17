@@ -68,8 +68,8 @@ pub(super) fn validate_semantic_program(
     validate_core_transform_fragment(exprs, errors);
     validate_grad_selector_identity(exprs, selector_context, errors);
     validate_vmap_extent_dependencies(exprs, type_env, errors);
-    let mut static_env = UnordMap::new();
-    let shape_env = shape_type_env(type_env);
+    let mut static_env = StaticEnv::new();
+    let mut shape_env = shape_type_env(type_env);
     let declared_signatures = collect_declared_sig_metadata(top_level_decl_items(exprs));
     // chelis#930: per-top-level-declaration cancellation, same grain as
     // inference. Without it this validator is one uninterruptible step whose
@@ -85,7 +85,7 @@ pub(super) fn validate_semantic_program(
         }
         validate_ir_expr(
             expr,
-            &shape_env,
+            &mut shape_env,
             &mut static_env,
             &declared_signatures,
             errors,
@@ -578,8 +578,8 @@ pub(super) fn parse_t_fn_parts(expr: &deep::Expr) -> Option<(Vec<deep::Expr>, de
 /// validate once through the ordinary path.
 fn validate_static_cons_spine(
     expr: &deep::Expr,
-    type_env: &ShapeTypeEnv,
-    static_env: &mut UnordMap<String, StaticValue>,
+    type_env: &mut ShapeTypeEnv,
+    static_env: &mut StaticEnv,
     declared_signatures: &UnordMap<String, DeclaredSigMetadata>,
     errors: &mut DiagnosticSink<'_>,
 ) -> Option<StaticValue> {
@@ -627,8 +627,8 @@ fn validate_static_cons_spine(
 
 pub(super) fn validate_ir_expr(
     expr: &deep::Expr,
-    type_env: &ShapeTypeEnv,
-    static_env: &mut UnordMap<String, StaticValue>,
+    type_env: &mut ShapeTypeEnv,
+    static_env: &mut StaticEnv,
     declared_signatures: &UnordMap<String, DeclaredSigMetadata>,
     errors: &mut DiagnosticSink<'_>,
 ) -> StaticValue {
@@ -656,113 +656,116 @@ pub(super) fn validate_ir_expr(
                 let Some(value_expr) = kids.get(1) else {
                     return StaticValue::Unknown;
                 };
-                let signature_env = declared_signatures.get(name).map(|signature| {
-                    extend_ir_env_with_declared_fn_params(
+                let value = match declared_signatures.get(name) {
+                    Some(signature) => type_env.scope(|type_env| {
+                        bind_declared_fn_params(value_expr, &signature.param_types, type_env);
+                        validate_ir_expr(
+                            value_expr,
+                            type_env,
+                            static_env,
+                            declared_signatures,
+                            errors,
+                        )
+                    }),
+                    None => validate_ir_expr(
                         value_expr,
-                        &signature.param_types,
                         type_env,
-                    )
-                });
-                let value = validate_ir_expr(
-                    value_expr,
-                    signature_env.as_ref().unwrap_or(type_env),
-                    static_env,
-                    declared_signatures,
-                    errors,
-                );
+                        static_env,
+                        declared_signatures,
+                        errors,
+                    ),
+                };
                 static_env.insert(name.to_string(), value);
                 return StaticValue::Unknown;
             }
             if node.tag() == DeepTag::Fn {
-                let scoped_env = extend_ir_env_with_fn_params(node, type_env);
-                let mut scoped_static_env = static_env.clone();
-                bind_fn_params_unknown(node, &mut scoped_static_env);
-                node.meta().visit_syntax(&mut |_, value| {
-                    validate_ir_expr(
-                        value,
-                        &scoped_env,
-                        &mut scoped_static_env,
-                        declared_signatures,
-                        errors,
-                    );
+                type_env.scope(|type_env| {
+                    static_env.scope(|static_env| {
+                        bind_ir_fn_params(node, type_env);
+                        bind_fn_params_unknown(node, static_env);
+                        node.meta().visit_syntax(&mut |_, value| {
+                            validate_ir_expr(
+                                value,
+                                type_env,
+                                static_env,
+                                declared_signatures,
+                                errors,
+                            );
+                        });
+                        for elem in node.children_slice() {
+                            validate_ir_expr(
+                                elem,
+                                type_env,
+                                static_env,
+                                declared_signatures,
+                                errors,
+                            );
+                        }
+                    })
                 });
-                for elem in node.children_slice() {
-                    validate_ir_expr(
-                        elem,
-                        &scoped_env,
-                        &mut scoped_static_env,
-                        declared_signatures,
-                        errors,
-                    );
-                }
                 return StaticValue::Unknown;
             }
             if node.tag() == DeepTag::Arm {
                 let kids = node.children_slice();
-                let mut scoped_static_env = static_env.clone();
-                if let Some(pattern) = kids.first() {
-                    for name in chelis_deep::pattern_binder_names(pattern) {
-                        scoped_static_env.insert(name, StaticValue::Unknown);
+                static_env.scope(|static_env| {
+                    if let Some(pattern) = kids.first() {
+                        for name in chelis_deep::pattern_binder_names(pattern) {
+                            static_env.insert(name, StaticValue::Unknown);
+                        }
                     }
-                }
-                // The pattern is binding syntax. Only the optional guard and
-                // body execute in the arm's lexical scope.
-                for elem in kids.iter().skip(1) {
-                    validate_ir_expr(
-                        elem,
-                        type_env,
-                        &mut scoped_static_env,
-                        declared_signatures,
-                        errors,
-                    );
-                }
+                    // The pattern is binding syntax. Only the optional guard
+                    // and body execute in the arm's lexical scope.
+                    for elem in kids.iter().skip(1) {
+                        validate_ir_expr(elem, type_env, static_env, declared_signatures, errors);
+                    }
+                });
                 return StaticValue::Unknown;
             }
             if node.tag() == DeepTag::Let {
                 let kids = node.children_slice();
-                let mut scoped_static_env = static_env.clone();
-                // Clone the type env on let-scope entry so each binding's
-                // derivable IR-shape-sensitive type (e.g. conv's output
-                // dims) can extend the env visible to the let body. Without
-                // this the validator cannot resolve `(var y)` for a let-
-                // bound `y = conv(...)` and silently rejects the next
-                // shape-sensitive call that consumes `y` (RT-205 F5).
-                let mut scoped_type_env = type_env.clone();
-                if let Some(bind_expr) = kids.first()
-                    && let Some((DeepTag::Bind, _, bind_children)) = stamped_parts(bind_expr)
-                {
-                    let mut index = 0;
-                    while index + 1 < bind_children.len() {
-                        if let Some(name) = symbol_name(&bind_children[index]) {
-                            let value_expr = &bind_children[index + 1];
-                            let value = validate_ir_expr(
-                                value_expr,
-                                &scoped_type_env,
-                                &mut scoped_static_env,
+                // Each binding's derivable IR-shape-sensitive type (e.g.
+                // conv's output dims) extends the env visible to the rest of
+                // the let. Without this the validator cannot resolve
+                // `(var y)` for a let-bound `y = conv(...)` and silently
+                // rejects the next shape-sensitive call that consumes `y`
+                // (RT-205 F5). The bindings last for the let's own scope.
+                return type_env.scope(|type_env| {
+                    static_env.scope(|static_env| {
+                        if let Some(bind_expr) = kids.first()
+                            && let Some((DeepTag::Bind, _, bind_children)) =
+                                stamped_parts(bind_expr)
+                        {
+                            let mut index = 0;
+                            while index + 1 < bind_children.len() {
+                                if let Some(name) = symbol_name(&bind_children[index]) {
+                                    let value_expr = &bind_children[index + 1];
+                                    let value = validate_ir_expr(
+                                        value_expr,
+                                        type_env,
+                                        static_env,
+                                        declared_signatures,
+                                        errors,
+                                    );
+                                    static_env.insert(name.to_string(), value);
+                                    record_let_binding_shape_fact(
+                                        name, value_expr, type_env, static_env,
+                                    );
+                                }
+                                index += 2;
+                            }
+                        }
+                        match kids.get(1) {
+                            Some(body) => validate_ir_expr(
+                                body,
+                                type_env,
+                                static_env,
                                 declared_signatures,
                                 errors,
-                            );
-                            scoped_static_env.insert(name.to_string(), value);
-                            record_let_binding_shape_fact(
-                                name,
-                                value_expr,
-                                &mut scoped_type_env,
-                                &scoped_static_env,
-                            );
+                            ),
+                            None => StaticValue::Unknown,
                         }
-                        index += 2;
-                    }
-                }
-                if let Some(body) = kids.get(1) {
-                    return validate_ir_expr(
-                        body,
-                        &scoped_type_env,
-                        &mut scoped_static_env,
-                        declared_signatures,
-                        errors,
-                    );
-                }
-                return StaticValue::Unknown;
+                    })
+                });
             }
             // `jit` is a spec-blessed pass-through form. `par` retains a
             // legacy validation disposition here, but infer_expr owns the
@@ -892,8 +895,8 @@ pub(super) fn validate_ir_expr(
 /// validator as ordinary runtime children.
 fn validate_expression_metadata(
     metadata: &deep::Metadata,
-    type_env: &ShapeTypeEnv,
-    static_env: &mut UnordMap<String, StaticValue>,
+    type_env: &mut ShapeTypeEnv,
+    static_env: &mut StaticEnv,
     declared_signatures: &UnordMap<String, DeclaredSigMetadata>,
     errors: &mut DiagnosticSink<'_>,
 ) {
@@ -1093,15 +1096,12 @@ pub(super) fn ir_builtin_name(node: &DeepNode) -> Option<&str> {
 /// and pattern binders are inserted before their bodies are visited.
 pub(super) fn active_ir_builtin_name<'a>(
     node: &'a DeepNode,
-    static_env: &UnordMap<String, StaticValue>,
+    static_env: &StaticEnv,
 ) -> Option<&'a str> {
     ir_builtin_name(node).filter(|name| compiler_name_is_active(name, static_env))
 }
 
-pub(super) fn compiler_name_is_active(
-    name: &str,
-    static_env: &UnordMap<String, StaticValue>,
-) -> bool {
+pub(super) fn compiler_name_is_active(name: &str, static_env: &StaticEnv) -> bool {
     !builtins::BUILTIN_NAMES.contains(&name) || !static_env.contains_key(name)
 }
 
@@ -1217,16 +1217,12 @@ fn let_type_expr(expr: &deep::Expr, type_env: &IrTypeEnv) -> Option<deep::Expr> 
     expr_type_expr(current, &scoped)
 }
 
-pub(super) fn extend_ir_env_with_fn_params(
-    fn_node: &DeepNode,
-    type_env: &ShapeTypeEnv,
-) -> ShapeTypeEnv {
-    let mut scoped = type_env.clone();
+pub(super) fn bind_ir_fn_params(fn_node: &DeepNode, type_env: &mut ShapeTypeEnv) {
     let Some(params_expr) = fn_node.children_slice().first() else {
-        return scoped;
+        return;
     };
     let Some((DeepTag::Params, _, param_entries)) = stamped_parts(params_expr) else {
-        return scoped;
+        return;
     };
     for param in param_entries {
         // An inline-annotated entry `(x {type: T})` is symbol-headed, so the
@@ -1256,9 +1252,8 @@ pub(super) fn extend_ir_env_with_fn_params(
         if is_wildcard_tvar_expr(ty.expression()) {
             continue;
         }
-        scoped.insert(name.to_string(), ty.expression().clone());
+        type_env.insert(name.to_string(), ty.expression().clone());
     }
-    scoped
 }
 
 pub(super) fn validate_ir_builtin_semantic_requirements(
@@ -1452,7 +1447,7 @@ pub(super) fn conv_output_extent(
 pub(super) fn derive_ir_builtin_output_type(
     expr: &deep::Expr,
     type_env: &ShapeTypeEnv,
-    static_env: &UnordMap<String, StaticValue>,
+    static_env: &StaticEnv,
 ) -> Option<deep::Expr> {
     let deep::Expr::Node(node, _) = expr else {
         return None;
@@ -1489,7 +1484,7 @@ pub(super) fn derive_ir_builtin_output_type(
 pub(super) fn derive_unary_shape_passthrough(
     node: &DeepNode,
     type_env: &ShapeTypeEnv,
-    static_env: &UnordMap<String, StaticValue>,
+    static_env: &StaticEnv,
 ) -> Option<deep::Expr> {
     let arg = node.children_slice().get(1)?;
     resolve_let_value_tensor_type(arg, type_env, static_env)
@@ -1505,7 +1500,7 @@ pub(super) fn derive_unary_shape_passthrough(
 pub(super) fn derive_identity_shape_passthrough(
     node: &DeepNode,
     type_env: &ShapeTypeEnv,
-    static_env: &UnordMap<String, StaticValue>,
+    static_env: &StaticEnv,
 ) -> Option<deep::Expr> {
     node.children_slice()
         .iter()
@@ -1517,7 +1512,7 @@ pub(super) fn derive_identity_shape_passthrough(
 fn resolve_let_value_tensor_type(
     expr: &deep::Expr,
     type_env: &ShapeTypeEnv,
-    static_env: &UnordMap<String, StaticValue>,
+    static_env: &StaticEnv,
 ) -> Option<deep::Expr> {
     // Peek through borrow before recursing in case a wrapper op
     // appears under an `&` borrow (uncommon but cheap).

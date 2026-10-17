@@ -428,14 +428,36 @@ struct BindingRecord {
     copy_leaves: Option<Vec<CopyLeaf>>,
 }
 
-#[derive(Debug, Clone, Default)]
-struct LinearScope {
-    /// All checker state, keyed by binding generation.
+/// The generations every function declaration reads: the program scope once
+/// its top-level initializers are checked ([`LinearScope::freeze`]). Every
+/// scope forked from it shares one copy, so a fork costs the forking scope's
+/// own bindings rather than the program's (chelis#3719).
+#[derive(Debug, Default)]
+struct FrozenScope {
     records: UnordMap<BindingId, BindingRecord>,
-    /// Name -> stack of generations, innermost last. Shadowing pushes,
-    /// scope exit pops. This map answers "which binding does this use
-    /// site mean" and nothing else; every consumption mark, alias link,
-    /// and component mark lives on the id-keyed record it resolved to.
+    /// Name -> stack of frozen generations, innermost last.
+    visible: UnordMap<String, Vec<BindingId>>,
+    /// The frozen generations whose record carries the destructured mark,
+    /// which [`LinearScope::clear_destructured_marks`] clears in a branch.
+    destructured: Vec<BindingId>,
+}
+
+#[derive(Debug, Default)]
+struct LinearScope {
+    /// The shared program-level generations under this scope. Empty until
+    /// the root scope freezes.
+    frozen: Rc<FrozenScope>,
+    /// All checker state for the generations declared since the freeze,
+    /// plus a copy of each frozen record this scope has changed, keyed by
+    /// binding generation. A record here shadows the frozen one.
+    records: UnordMap<BindingId, BindingRecord>,
+    /// The frozen generations this scope popped.
+    popped: UnordSet<BindingId>,
+    /// Name -> stack of generations declared since the freeze, innermost
+    /// last, standing above that name's frozen stack. Shadowing pushes,
+    /// scope exit pops. This map answers "which binding does this use site
+    /// mean" and nothing else; every consumption mark, alias link, and
+    /// component mark lives on the id-keyed record it resolved to.
     visible: UnordMap<String, Vec<BindingId>>,
     /// Generation counter. Shared (`Rc`) across clones so branch and
     /// closure scopes forked from one root cannot mint colliding ids;
@@ -445,6 +467,73 @@ struct LinearScope {
     /// every other scope must be a clone of it: a second
     /// `LinearScope::default()` mid-check would fork the counter.
     next: Rc<Cell<u32>>,
+}
+
+// Counts the binding records copied by forking or writing a scope, for the
+// chelis#3719 scaling oracle: a fork copies only the forking scope's own
+// records, and a write copies only the frozen record it changes.
+#[cfg(test)]
+thread_local! {
+    static SCOPE_RECORD_COPIES: Cell<usize> = const { Cell::new(0) };
+    static SCOPE_FREEZE_DISABLED: Cell<bool> = const { Cell::new(false) };
+}
+
+fn count_scope_record_copies(copies: usize) {
+    #[cfg(test)]
+    SCOPE_RECORD_COPIES.with(|count| count.set(count.get() + copies));
+    #[cfg(not(test))]
+    let _ = copies;
+}
+
+impl Clone for LinearScope {
+    fn clone(&self) -> Self {
+        count_scope_record_copies(self.records.len());
+        Self {
+            frozen: Rc::clone(&self.frozen),
+            records: self.records.clone(),
+            popped: self.popped.clone(),
+            visible: self.visible.clone(),
+            next: Rc::clone(&self.next),
+        }
+    }
+}
+
+/// The generations visible where branches fork from a scope, for joining
+/// them back.
+struct ForkPoint {
+    frozen: Rc<FrozenScope>,
+    popped: UnordSet<BindingId>,
+    /// The visible generations declared since the freeze, sorted.
+    declared: Vec<BindingId>,
+}
+
+impl ForkPoint {
+    /// The generations visible at the fork that a join over `branches` must
+    /// visit, sorted: every one declared since the freeze, and every frozen
+    /// one some branch holds its own copy of. A frozen generation no branch
+    /// copied has, in every branch, the record it has at the fork, and
+    /// joining identical records leaves the record unchanged, so skipping
+    /// it keeps a join's cost to the branches' own bindings.
+    fn joined_ids(&self, branches: &[&LinearScope]) -> Vec<BindingId> {
+        let mut ids = self.declared.clone();
+        for branch in branches {
+            debug_assert!(
+                Rc::ptr_eq(&branch.frozen, &self.frozen),
+                "a branch shares its fork point's frozen scope"
+            );
+            ids.extend(
+                branch
+                    .records
+                    .to_sorted()
+                    .into_iter()
+                    .map(|(id, _)| *id)
+                    .filter(|id| self.frozen.records.contains_key(id) && !self.popped.contains(id)),
+            );
+        }
+        ids.sort_unstable();
+        ids.dedup();
+        ids
+    }
 }
 
 impl LinearScope {
@@ -482,8 +571,24 @@ impl LinearScope {
     }
 
     fn pop(&mut self, id: BindingId) -> Option<(Option<Expr>, BindingState)> {
-        let record = self.records.remove(&id)?;
-        if let Some(stack) = self.visible.get_mut(&record.name) {
+        let frozen = self.frozen.records.contains_key(&id) && !self.popped.contains(&id);
+        let record = match self.records.remove(&id) {
+            Some(record) => record,
+            None if frozen => {
+                count_scope_record_copies(1);
+                self.frozen.records.get(&id)?.clone()
+            }
+            None => return None,
+        };
+        if frozen {
+            debug_assert!(
+                self.visible
+                    .get(&record.name)
+                    .is_none_or(|stack| stack.is_empty()),
+                "scope exit must unwind LIFO per name"
+            );
+            self.popped.insert(id);
+        } else if let Some(stack) = self.visible.get_mut(&record.name) {
             debug_assert_eq!(
                 stack.last(),
                 Some(&id),
@@ -507,13 +612,38 @@ impl LinearScope {
             .get(name)
             .and_then(|stack| stack.last())
             .copied()
+            .or_else(|| {
+                self.frozen
+                    .visible
+                    .get(name)?
+                    .iter()
+                    .rev()
+                    .find(|id| !self.popped.contains(*id))
+                    .copied()
+            })
     }
 
     fn record(&self, id: BindingId) -> Option<&BindingRecord> {
-        self.records.get(&id)
+        self.records.get(&id).or_else(|| {
+            if self.popped.contains(&id) {
+                None
+            } else {
+                self.frozen.records.get(&id)
+            }
+        })
     }
 
+    /// The record for `id`, writable. A frozen record is copied into this
+    /// scope on its first write, so the shared frozen scope never changes.
     fn record_mut(&mut self, id: BindingId) -> Option<&mut BindingRecord> {
+        if !self.records.contains_key(&id) {
+            if self.popped.contains(&id) {
+                return None;
+            }
+            let record = self.frozen.records.get(&id)?.clone();
+            count_scope_record_copies(1);
+            self.records.insert(id, record);
+        }
         self.records.get_mut(&id)
     }
 
@@ -549,6 +679,21 @@ impl LinearScope {
     /// join that only saw stack tops would drop that consume
     /// (chelis#1209).
     fn all_visible_ids(&self) -> Vec<BindingId> {
+        let mut ids = self.declared_visible_ids();
+        ids.extend(
+            self.frozen
+                .visible
+                .to_sorted()
+                .into_iter()
+                .flat_map(|(_, ids)| ids.iter().copied())
+                .filter(|id| !self.popped.contains(id)),
+        );
+        ids.sort_unstable();
+        ids
+    }
+
+    /// The visible generations declared since the freeze, sorted.
+    fn declared_visible_ids(&self) -> Vec<BindingId> {
         let mut ids: Vec<BindingId> = self
             .visible
             .to_sorted()
@@ -557,6 +702,52 @@ impl LinearScope {
             .collect();
         ids.sort_unstable();
         ids
+    }
+
+    /// Where branches fork from this scope. A join visits the generations
+    /// [`ForkPoint::joined_ids`] names, which are the generations visible
+    /// here that a branch can have changed.
+    fn fork_point(&self) -> ForkPoint {
+        ForkPoint {
+            frozen: Rc::clone(&self.frozen),
+            popped: self.popped.clone(),
+            declared: self.declared_visible_ids(),
+        }
+    }
+
+    /// Make every visible generation part of a new frozen scope shared by
+    /// every scope later forked from this one. The root scope freezes once,
+    /// after the top-level initializers and before the function
+    /// declarations, which only read the program scope through their own
+    /// forks (chelis#3719).
+    fn freeze(&mut self) {
+        #[cfg(test)]
+        if SCOPE_FREEZE_DISABLED.with(Cell::get) {
+            return;
+        }
+        let mut frozen = FrozenScope::default();
+        // A name's stack holds its generations in minting order, because
+        // `declare` pushes the newest id and `pop` unwinds LIFO, so
+        // rebuilding each stack in id order preserves it.
+        for id in self.all_visible_ids() {
+            let record = self
+                .record(id)
+                .expect("a visible generation has a record")
+                .clone();
+            frozen
+                .visible
+                .entry(record.name.clone())
+                .or_default()
+                .push(id);
+            if record.origin.destructured {
+                frozen.destructured.push(id);
+            }
+            frozen.records.insert(id, record);
+        }
+        self.frozen = Rc::new(frozen);
+        self.records = UnordMap::new();
+        self.popped = UnordSet::new();
+        self.visible = UnordMap::new();
     }
 
     /// Record that the binding generation `alias` is an aliasing copy
@@ -641,6 +832,14 @@ impl LinearScope {
                 .get_mut(&id)
                 .expect("collected binding id remains present");
             record.origin.destructured = false;
+        }
+        let frozen = Rc::clone(&self.frozen);
+        for id in &frozen.destructured {
+            if self.is_destructured_id(*id)
+                && let Some(record) = self.record_mut(*id)
+            {
+                record.origin.destructured = false;
+            }
         }
     }
 
@@ -756,6 +955,14 @@ struct Checker {
     /// inference that the inferencer already computed. Closes the
     /// chelis#229 sibling-sweep gap.
     signature_inference: SignatureInferenceMetadata,
+    /// Every user function's display signature from `signature_inference`,
+    /// built once per walk, so the closure-body consuming-use probe in
+    /// `check_fn` can recognize user-defined borrow-arg callees inside the
+    /// body. The probe's secondary `type_env` lookup also matches direct
+    /// annotations in `top_level_types`, but this map matches by `Type`
+    /// (the inferencer's own metadata), so it covers user functions whose
+    /// parameters were auto-borrow-inferred.
+    available_signatures: UnordMap<String, Type>,
     type_headers: crate::deep_type::TypeResolutionEnv,
     /// The owner whose projection chain `check_projection_use` already
     /// checked against its dropped components ([04-LIN-11]), while the walk
@@ -1166,6 +1373,7 @@ fn walk_linearity(
         tensor_carrying_adts,
         key_carrying_adts,
         signature_inference: program.signature_inference().clone(),
+        available_signatures: display_signatures(program.signature_inference()),
         type_headers: program.type_headers().clone(),
         projection_root: None,
         current_def: None,
@@ -1299,6 +1507,7 @@ pub fn check_linearity_with_context(
         top_level_types: new_program.type_env().clone(),
         tensor_carrying_adts,
         key_carrying_adts,
+        available_signatures: display_signatures(&merged_signature_inference),
         signature_inference: merged_signature_inference,
         type_headers: merged_type_headers,
         projection_root: None,
@@ -1349,6 +1558,14 @@ pub fn check_linearity_with_context(
     }
 }
 
+fn display_signatures(inference: &SignatureInferenceMetadata) -> UnordMap<String, Type> {
+    inference
+        .functions
+        .iter()
+        .map(|(name, signature)| (name.clone(), signature.display_signature.clone()))
+        .collect()
+}
+
 /// The body of a top-level `def` whose initializer is a lambda, which
 /// [04-INF-7] makes a function declaration rather than an eager value.
 fn function_declaration_body(children: &[Expr]) -> Option<&Expr> {
@@ -1371,6 +1588,9 @@ impl Checker {
             }
             self.check_top_level(expr, scope);
         }
+        // Function declarations read the program scope through their own
+        // forks and never change it, so they share one frozen copy.
+        scope.freeze();
         for expr in exprs {
             if cancelled() {
                 self.errors.push(crate::cancel::cancellation_check_error());
@@ -2215,20 +2435,6 @@ impl Checker {
         let captured = free_vars(&children[1], &params);
         let mut inner_scope = outer_scope.clone();
         let body = &children[1];
-        // Build a temporary `UnordMap<String, Type>` of currently-known
-        // user-fn display signatures so the closure-body consuming-use
-        // probe can recognize user-defined borrow-arg callees inside
-        // the body. The probe's secondary `type_env` lookup also
-        // matches direct annotations in `top_level_types`, but
-        // `available_signatures` matches by `Type` (the inferencer's
-        // own metadata) so passing the inferred display signatures
-        // covers user fns whose params were auto-borrow-inferred.
-        let available_signatures: UnordMap<String, Type> = self
-            .signature_inference
-            .functions
-            .iter()
-            .map(|(name, sig)| (name.clone(), sig.display_signature.clone()))
-            .collect();
         for name in captured {
             let Some(ty) = outer_scope.ty(&name) else {
                 continue;
@@ -2284,7 +2490,7 @@ impl Checker {
             let body_consumes = crate::infer::param_has_consuming_use(
                 body,
                 name.as_str(),
-                &available_signatures,
+                &self.available_signatures,
                 &self.top_level_types,
                 &self.type_headers,
             )
@@ -2429,7 +2635,7 @@ impl Checker {
             return;
         }
         self.check_expr(&children[0], scope);
-        let visible_ids = scope.all_visible_ids();
+        let fork = scope.fork_point();
         let mut then_scope = scope.clone();
         let mut else_scope = scope.clone();
         // chelis#1200 Q1: a branch body is a new declaration region, so
@@ -2439,6 +2645,7 @@ impl Checker {
         else_scope.clear_destructured_marks();
         self.check_expr(&children[1], &mut then_scope);
         self.check_expr(&children[2], &mut else_scope);
+        let visible_ids = fork.joined_ids(&[&then_scope, &else_scope]);
         self.join_branch_states(scope, &visible_ids, &[then_scope, else_scope]);
     }
 
@@ -2463,7 +2670,7 @@ impl Checker {
             self.scrutinee_projection = false;
         }
 
-        let visible_ids = scope.all_visible_ids();
+        let fork = scope.fork_point();
         let mut arm_scopes = Vec::new();
         // [04-LIN-9] on every control-flow path: an arm's guard runs before
         // its body and, when it fails, before every later arm. `fallthrough`
@@ -2507,6 +2714,7 @@ impl Checker {
             // the same carrier when it actually occupies a runtime slot.
             if !is_absent_match_guard(&arm_kids[1]) {
                 self.check_expr(&arm_kids[1], &mut arm_scope);
+                let visible_ids = fork.joined_ids(&[&arm_scope]);
                 self.carry_guard_key_consumes(
                     &arm_scope,
                     &mut fallthrough,
@@ -2522,6 +2730,7 @@ impl Checker {
             }
             arm_scopes.push(arm_scope);
         }
+        let visible_ids = fork.joined_ids(&arm_scopes.iter().collect::<Vec<_>>());
         self.join_branch_states(scope, &visible_ids, &arm_scopes);
     }
 
@@ -5948,6 +6157,120 @@ mod tests {
                         && error.message.contains("variable `x`")
                 }),
                 "the malformed arm's nested realize must remain visible: {errors:?}"
+            );
+        }
+    }
+
+    mod issue_3719 {
+        //! A function declaration forks the program scope without copying
+        //! it, so linearity's copying work grows with the program, not with
+        //! its square.
+
+        use super::*;
+
+        fn checked(source: &str) -> CheckedProgram {
+            let declarations =
+                chelis_surf::parser::parse_str(source).expect("generated Surf parses");
+            let program = chelis_surf::desugar::desugar_program(&declarations)
+                .expect("generated Surf desugars");
+            crate::check_typed_program(&program).expect("generated Surf checks")
+        }
+
+        /// `count` declarations, each with a closure and a branch, reading a
+        /// top-level tensor value and calling the previous declaration.
+        fn program(count: usize) -> String {
+            let mut source = String::from(
+                "w = to_tensor([1.0f32, 2.0f32])\n\
+                 def f0(x: tensor[2, f32], k: i64) -> tensor[2, f32] = add(w, x)\n",
+            );
+            for index in 1..count {
+                let previous = index - 1;
+                source.push_str(&format!(
+                    "def f{index}(x: tensor[2, f32], k: i64) -> tensor[2, f32] = {{\n  \
+                     g = fn (y: tensor[2, f32]) -> add(w, y)\n  \
+                     if lt(k, 0i64) then g(x) else f{previous}(x, k)\n}}\n"
+                ));
+            }
+            source
+        }
+
+        fn record_copies(program: &CheckedProgram) -> usize {
+            SCOPE_RECORD_COPIES.with(|count| count.set(0));
+            check_linearity(program).expect("generated program is linear");
+            SCOPE_RECORD_COPIES.with(|count| count.replace(0))
+        }
+
+        /// Whether `counts`, measured at sizes doubling from the first,
+        /// grows at most linearly: doubling the program at most doubles the
+        /// work, plus a constant.
+        fn grows_linearly(counts: &[usize]) -> bool {
+            counts.windows(2).all(|pair| pair[1] <= 2 * pair[0] + 16)
+        }
+
+        fn copies_at_doubling_sizes() -> Vec<usize> {
+            [16, 32, 64, 128]
+                .into_iter()
+                .map(|count| record_copies(&checked(&program(count))))
+                .collect()
+        }
+
+        #[test]
+        fn declaration_forks_copy_linear_records() {
+            let copies = copies_at_doubling_sizes();
+            eprintln!("binding records copied at 16, 32, 64, 128 declarations: {copies:?}");
+            assert!(
+                grows_linearly(&copies),
+                "linearity copied binding records superlinearly in the declaration \
+                 count: {copies:?}"
+            );
+        }
+
+        #[test]
+        fn the_guard_catches_a_per_declaration_scope_copy() {
+            // Negative control: without the freeze every declaration and
+            // every closure copies the whole program scope again, and the
+            // guard must see it.
+            struct Restore;
+            impl Drop for Restore {
+                fn drop(&mut self) {
+                    SCOPE_FREEZE_DISABLED.with(|disabled| disabled.set(false));
+                }
+            }
+            SCOPE_FREEZE_DISABLED.with(|disabled| disabled.set(true));
+            let _restore = Restore;
+            let copies = copies_at_doubling_sizes();
+            eprintln!("binding records copied at 16, 32, 64, 128 declarations: {copies:?}");
+            assert!(
+                !grows_linearly(&copies),
+                "the guard missed a per-declaration copy of the program scope: {copies:?}"
+            );
+        }
+
+        #[test]
+        fn declarations_see_the_program_scope_but_not_each_other() {
+            // Each declaration's capture of `w` is its own: a consume in one
+            // declaration's fork must not reach the next one, and a top-level
+            // initializer that consumed `w` must still reject every reader.
+            let isolated = checked(
+                "w = to_tensor([1.0f32, 2.0f32])\n\
+                 def f(x: tensor[2, f32]) -> tensor[2, f32] = realize(add(w, x))\n\
+                 def g(x: tensor[2, f32]) -> tensor[2, f32] = add(w, x)\n\
+                 def h(x: tensor[2, f32]) -> tensor[2, f32] = add(w, x)\n",
+            );
+            check_linearity(&isolated).expect("independent declarations each read `w`");
+
+            let consumed = checked(
+                "w = to_tensor([1.0f32, 2.0f32])\n\
+                 v = realize(w)\n\
+                 def g(x: tensor[2, f32]) -> tensor[2, f32] = add(w, x)\n",
+            );
+            let errors = check_linearity(&consumed)
+                .expect_err("a declaration may not read a value an initializer consumed");
+            assert!(
+                errors
+                    .iter()
+                    .any(|error| matches!(error.kind, CheckErrorKind::UseAfterConsume)),
+                "{errors:?}"
             );
         }
     }

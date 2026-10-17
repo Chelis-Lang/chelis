@@ -22,7 +22,12 @@ pub(super) struct StaticTensor {
     int_values: Option<Vec<i64>>,
 }
 
-pub(super) fn bind_fn_params_unknown(fn_node: &DeepNode, env: &mut UnordMap<String, StaticValue>) {
+/// The static values of the names in scope where the validator is walking.
+/// A binder's values last for one [`ScopedMap::scope`], so entering a binder
+/// copies nothing (chelis#3740).
+pub(super) type StaticEnv = ScopedMap<String, StaticValue>;
+
+pub(super) fn bind_fn_params_unknown(fn_node: &DeepNode, env: &mut StaticEnv) {
     let Some(params_expr) = fn_node.children_slice().first() else {
         return;
     };
