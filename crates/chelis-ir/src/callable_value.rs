@@ -142,10 +142,62 @@ impl<C: CallableContractFrame> ResolvedBuiltinValue<C> {
 
 /// A whole registry-normalized authored function signature and its origin.
 /// Entry and result members are retained even when the entry emits no guard.
-#[derive(Clone, Debug)]
+///
+/// Equality compares both trees, nodes and annotations, which is everything
+/// a check reads from the frame.
+#[derive(Clone, Debug, PartialEq)]
 pub struct NormalizedCallableContract {
     authored: Expr,
     signature: Expr,
+}
+
+impl ResolvedBuiltinValue<Arc<NormalizedCallableContract>> {
+    /// [`Self::retain_outer_contract`] through [`retain_outer_normalized_frame`].
+    pub fn retain_outer_normalized_contract(&mut self, contract: Arc<NormalizedCallableContract>) {
+        retain_outer_normalized_frame(Arc::make_mut(&mut self.contracts), contract);
+    }
+}
+
+/// Retain `contract` as the outermost frame of `chain`, whose first frame is
+/// its outermost, for an evaluator that checks each frame from its value.
+///
+/// Entry checks run the frames outer to inner and result claims inner to
+/// outer; each order stops at its first failure, and a frame's check reads
+/// only the frame and the invocation's values. Two equal frames therefore
+/// pass or fail together and report the same failure. A frame with an equal
+/// frame both before and after it is never the first failure in either order,
+/// and a run of equal frames acts as one, so dropping either changes no
+/// verdict and no diagnostic. Every other frame is kept, in order. A value
+/// that re-enters one formal at every level of a recursion therefore keeps a
+/// bounded chain, at most two frames per distinct contract, instead of one
+/// frame per level (chelis#3758).
+pub fn retain_outer_normalized_frame(
+    chain: &mut Vec<Arc<NormalizedCallableContract>>,
+    contract: Arc<NormalizedCallableContract>,
+) {
+    let same = |frame: &Arc<NormalizedCallableContract>| {
+        Arc::ptr_eq(frame, &contract) || **frame == *contract
+    };
+    let equal = chain
+        .iter()
+        .enumerate()
+        .filter(|(_, frame)| same(frame))
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    // Once `contract` is outermost, an earlier equal frame sits between two
+    // equal frames. The last one stays unless only equal frames precede it,
+    // in which case it joins the new outermost frame's run.
+    let keep_last = equal
+        .last()
+        .copied()
+        .filter(|last| chain[..*last].iter().any(|frame| !same(frame)));
+    let mut index = 0;
+    chain.retain(|_| {
+        let keep = !equal.contains(&index) || Some(index) == keep_last;
+        index += 1;
+        keep
+    });
+    chain.insert(0, contract);
 }
 
 impl NormalizedCallableContract {
@@ -496,5 +548,89 @@ mod tests {
             .unwrap()
             .remove(0);
         assert!(NormalizedCallableContract::from_authored(&registry, &malformed).is_err());
+    }
+
+    /// chelis#3758: every chain [`retain_outer_normalized_frame`] builds
+    /// reports what the unreduced chain reports, and holds at most two equal
+    /// frames. The sweep covers every retention sequence of up to seven frames
+    /// over three distinct contracts, each retention a fresh allocation so
+    /// equality, not sharing, decides. Each failure set is a set of frames
+    /// whose check fails: the entry verdict is the first failing frame outer
+    /// to inner, the result verdict the first inner to outer.
+    #[test]
+    fn retained_frame_reduction_keeps_both_verdict_orders_and_bounds_the_chain() {
+        type Chain = Vec<Arc<NormalizedCallableContract>>;
+        let contracts = ["(t-prim {} f64)", "(t-prim {} f32)", "(t-prim {} i64)"]
+            .map(|result| {
+                let signature = function_contract(result);
+                NormalizedCallableContract {
+                    authored: signature.clone(),
+                    signature,
+                }
+            });
+        let label = |frame: &Arc<NormalizedCallableContract>| {
+            contracts
+                .iter()
+                .position(|contract| **frame == *contract)
+                .unwrap()
+        };
+        let verdicts = |chain: &Chain, failing: usize| {
+            let fails = |frame: &&Arc<NormalizedCallableContract>| failing & (1 << label(frame)) != 0;
+            (
+                chain.iter().find(fails).map(label),
+                chain.iter().rev().find(fails).map(label),
+            )
+        };
+        let equivalent = |left: &Chain, right: &Chain| {
+            (0..1usize << contracts.len()).all(|failing| verdicts(left, failing) == verdicts(right, failing))
+        };
+        // Keeping only the first of each contract loses the result order's
+        // verdict, so the equivalence oracle is not vacuous.
+        let first_only = |chain: &Chain| {
+            let mut kept = Chain::new();
+            for frame in chain {
+                if !kept.iter().any(|seen| **seen == **frame) {
+                    kept.push(Arc::clone(frame));
+                }
+            }
+            kept
+        };
+        let mut sequences = vec![Vec::<usize>::new()];
+        let mut first_only_diverged = false;
+        let mut unreduced_exceeded = false;
+        while let Some(sequence) = sequences.pop() {
+            let mut reduced = Chain::new();
+            let mut unreduced = Chain::new();
+            for &index in &sequence {
+                let fresh = || Arc::new(contracts[index].clone());
+                retain_outer_normalized_frame(&mut reduced, fresh());
+                unreduced.insert(0, fresh());
+            }
+            assert!(
+                equivalent(&reduced, &unreduced),
+                "retention {sequence:?} changed a verdict: {:?} against {:?}",
+                reduced.iter().map(label).collect::<Vec<_>>(),
+                unreduced.iter().map(label).collect::<Vec<_>>()
+            );
+            for contract in 0..contracts.len() {
+                let count = |chain: &Chain| chain.iter().filter(|frame| label(frame) == contract).count();
+                assert!(
+                    count(&reduced) <= 2,
+                    "retention {sequence:?} kept {} equal frames",
+                    count(&reduced)
+                );
+                unreduced_exceeded |= count(&unreduced) > 2;
+            }
+            first_only_diverged |= !equivalent(&first_only(&unreduced), &unreduced);
+            if sequence.len() < 7 {
+                for index in 0..contracts.len() {
+                    let mut next = sequence.clone();
+                    next.push(index);
+                    sequences.push(next);
+                }
+            }
+        }
+        assert!(unreduced_exceeded, "the sweep must reach chains the bound rejects");
+        assert!(first_only_diverged, "the sweep must reach chains a lossy reduction breaks");
     }
 }

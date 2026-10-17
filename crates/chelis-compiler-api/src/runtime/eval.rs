@@ -1218,7 +1218,15 @@ thread_local! {
     static FORWARDING_ROUTE_WORK: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     static COMPOSITION_SOURCE_BYTES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     static ENTRY_LIST_ELEMENT_STEPS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static INVOCATION_CONTRACT_CHECKS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     static CLOSURE_ENTRY_BUILDS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Retained invocation contracts checked, one per frame per application
+/// (chelis#3758).
+#[cfg(test)]
+pub(super) fn invocation_contract_checks() -> u64 {
+    INVOCATION_CONTRACT_CHECKS.with(std::cell::Cell::get)
 }
 
 /// [`ClosureEntryTypes`] built (chelis#3778).
@@ -1257,6 +1265,7 @@ pub(super) fn reset_entry_claim_work() {
     COMPOSITION_SOURCE_BYTES.with(|v| v.set(0));
     FORWARDING_ROUTE_WORK.with(|v| v.set(0));
     ENTRY_LIST_ELEMENT_STEPS.with(|v| v.set(0));
+    INVOCATION_CONTRACT_CHECKS.with(|v| v.set(0));
     CLOSURE_ENTRY_BUILDS.with(|v| v.set(0));
 }
 #[cfg(test)]
@@ -4086,6 +4095,8 @@ impl<'a> EvalContext<'a> {
         let mut result_frames = Vec::new();
         if let Some(contracts) = callable.invocation_contracts() {
             for retained in contracts {
+                #[cfg(test)]
+                INVOCATION_CONTRACT_CHECKS.with(|v| v.set(v.get() + 1));
                 let contract = retained.signature();
                 let actualized = check_callable_invocation_contract(
                     contract,

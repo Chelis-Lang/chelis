@@ -320,9 +320,12 @@ impl RuntimeValue {
                 invocation_contracts,
                 ..
             } => {
-                invocation_contracts.insert(0, contract);
+                chelis_ir::callable_value::retain_outer_normalized_frame(
+                    invocation_contracts,
+                    contract,
+                );
             }
-            Self::Builtin(value) => value.retain_outer_contract(contract),
+            Self::Builtin(value) => value.retain_outer_normalized_contract(contract),
             _ => {}
         }
     }
