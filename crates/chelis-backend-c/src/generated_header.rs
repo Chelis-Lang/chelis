@@ -102,6 +102,16 @@ impl GeneratedHeader {
 
     /// Require this exact generated source, program identity, and export manifest.
     pub fn validate_source(&self, source: &str) -> Result<(), GeneratedHeaderError> {
+        self.validate_source_with(source, &mut None)
+    }
+
+    /// [`Self::validate_source`] with a parse slot that a seal shares
+    /// between its two binds (see [`ParsedProjection`]).
+    fn validate_source_with(
+        &self,
+        source: &str,
+        parse: &mut Option<ParsedProjection>,
+    ) -> Result<(), GeneratedHeaderError> {
         let actual_digest = source_digest(source);
         if actual_digest != self.source_digest {
             return Err(GeneratedHeaderError::new(format!(
@@ -109,10 +119,14 @@ impl GeneratedHeader {
                 self.source_digest
             )));
         }
-        self.validate_structure(source)
+        self.validate_structure(source, parse)
     }
 
-    fn validate_structure(&self, source: &str) -> Result<(), GeneratedHeaderError> {
+    fn validate_structure(
+        &self,
+        source: &str,
+        parse: &mut Option<ParsedProjection>,
+    ) -> Result<(), GeneratedHeaderError> {
         let (program_identity, definitions) = parse_source_manifest(source, ManifestMode::Sealed)?;
         if program_identity != self.program_identity {
             return Err(GeneratedHeaderError::new(format!(
@@ -125,6 +139,7 @@ impl GeneratedHeader {
             source,
             &self.declarations,
             &definitions,
+            parse,
         )
     }
 }
@@ -521,10 +536,11 @@ fn validate_export_records(
     source: &str,
     declarations: &BTreeMap<String, GeneratedDeclaration>,
     definitions: &BTreeMap<String, SourceDefinition>,
+    parse: &mut Option<ParsedProjection>,
 ) -> Result<(), GeneratedHeaderError> {
     validate_export_identities(program_identity, declarations, definitions)?;
     reject_export_macro_aliases(source, definitions.values())?;
-    validate_c_definitions(source, declarations, definitions)
+    validate_c_definitions(source, declarations, definitions, parse)
 }
 
 fn validate_export_identities(
@@ -622,12 +638,42 @@ struct ParsedCTranslationUnit {
     error_context: String,
 }
 
+/// One tree-sitter parse of a generated unit, with the projected text that it
+/// parsed. The parse depends only on those bytes. A seal writes its real
+/// digests over placeholders of the same length, and the projection writes
+/// the placeholder back over every digest. So the sealed source projects to
+/// the same bytes as the provisional one, and the seal parses once
+/// (chelis#3722).
+struct ParsedProjection {
+    projected: String,
+    unit: ParsedCTranslationUnit,
+}
+
+/// The parse of `source`'s projection. A kept parse serves only a source
+/// whose projection is byte-identical. For any other source, this function
+/// parses the projection and keeps that parse instead.
+fn parsed_projection<'a>(
+    source: &str,
+    kept: &'a mut Option<ParsedProjection>,
+) -> Result<&'a ParsedCTranslationUnit, GeneratedHeaderError> {
+    let projected = normalize_manifest_digests_for_c_parse(source);
+    if kept
+        .as_ref()
+        .is_none_or(|parsed| parsed.projected != projected)
+    {
+        let unit = parse_projected_c_unit(&projected)?;
+        *kept = Some(ParsedProjection { projected, unit });
+    }
+    Ok(&kept.as_ref().expect("a parse is kept").unit)
+}
+
 fn validate_c_definitions(
     source: &str,
     declarations: &BTreeMap<String, GeneratedDeclaration>,
     definitions: &BTreeMap<String, SourceDefinition>,
+    parse: &mut Option<ParsedProjection>,
 ) -> Result<(), GeneratedHeaderError> {
-    let digests = bind_c_definitions(source, definitions, true)?;
+    let digests = bind_c_definitions(source, definitions, true, parse)?;
     for (source_name, declaration) in declarations {
         let actual = digests
             .get(source_name)
@@ -645,6 +691,7 @@ fn bind_c_definitions(
     source: &str,
     definitions: &BTreeMap<String, SourceDefinition>,
     enforce_digest: bool,
+    parse: &mut Option<ParsedProjection>,
 ) -> Result<BTreeMap<String, String>, GeneratedHeaderError> {
     validate_generated_include_set(source)?;
     validate_generated_pragmas(source)?;
@@ -657,7 +704,7 @@ fn bind_c_definitions(
         ));
     }
     let directives = directive_commitment(&lines);
-    let parsed = parse_c_function_definitions(source)?;
+    let parsed = parsed_projection(source, parse)?;
     let functions = &parsed.functions;
     let mut claimed = vec![false; functions.len()];
     let mut digests = BTreeMap::new();
@@ -760,11 +807,11 @@ fn definition_commitment(
     format!("{:x}", hasher.finalize())
 }
 
-fn parse_c_function_definitions(
-    source: &str,
+fn parse_projected_c_unit(
+    projected_source: &str,
 ) -> Result<ParsedCTranslationUnit, GeneratedHeaderError> {
-    let projected = normalize_manifest_digests_for_c_parse(source);
-    let projected_source = projected.as_str();
+    #[cfg(test)]
+    tests::C_PARSES.with(|parses| parses.set(parses.get() + 1));
     let mut parser = tree_sitter::Parser::new();
     let language = tree_sitter_c::LANGUAGE.into();
     parser.set_language(&language).map_err(|error| {
@@ -1047,8 +1094,13 @@ pub(crate) fn seal_generated_artifact(
         attach_source_definition_digests(&raw_enveloped_source, &definitions, &placeholder_digests);
     let (_, provisional_definitions) =
         parse_source_manifest(&provisional_source, ManifestMode::Sealed)?;
-    let definition_digests =
-        bind_c_definitions(&provisional_source, &provisional_definitions, false)?;
+    let mut parse = None;
+    let definition_digests = bind_c_definitions(
+        &provisional_source,
+        &provisional_definitions,
+        false,
+        &mut parse,
+    )?;
     for (source_name, declaration) in &mut declarations {
         declaration.definition_digest = definition_digests
             .get(source_name)
@@ -1062,7 +1114,7 @@ pub(crate) fn seal_generated_artifact(
     );
     let digest = source_digest(&sealed_source);
     let sealed_header = render_sealed_header(program_identity, &digest, &declarations);
-    GeneratedHeader::parse(&sealed_header)?.validate_source(&sealed_source)?;
+    GeneratedHeader::parse(&sealed_header)?.validate_source_with(&sealed_source, &mut parse)?;
     Ok((sealed_source, sealed_header))
 }
 
@@ -1083,7 +1135,7 @@ pub(crate) fn reseal_generated_artifact(
         "{SOURCE_VERSION}\n{PROGRAM_IDENTITY_PREFIX}{}{METADATA_SUFFIX}\n{raw_source}",
         encode_hex(program_identity)
     );
-    generated.validate_structure(&sealed_source)?;
+    generated.validate_structure(&sealed_source, &mut None)?;
     let digest = source_digest(&sealed_source);
     let sealed_header = render_sealed_header(program_identity, &digest, &generated.declarations);
     Ok((sealed_source, sealed_header))
@@ -1798,6 +1850,8 @@ mod tests {
     thread_local! {
         /// Line-splicing passes over a source, each the start of a full scan.
         pub(super) static SOURCE_SCANS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+        /// Tree-sitter parses of a whole generated unit (chelis#3722).
+        pub(super) static C_PARSES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     }
 
     /// Sources whose line splices, comments, quotes, line endings and
@@ -1879,6 +1933,64 @@ mod tests {
         let few = scans_to_seal(2);
         assert!(few > 0, "the counter observes the scans");
         assert_eq!(scans_to_seal(40), few);
+    }
+
+    /// chelis#3722: a seal parses the generated unit once. Writing the real
+    /// digests changes no byte of the parsed projection, so the validation of
+    /// the sealed source reuses that parse.
+    #[test]
+    fn sealing_parses_the_generated_unit_once() {
+        let symbol = format!("chelis_fn_{}", encode_hex("f"));
+        let declaration = format!("int {symbol}(int s);");
+        let (record, export) = raw_export(
+            "f",
+            &symbol,
+            &declaration,
+            &format!("int {symbol}(int s) {{\n    return s + 1;\n}}"),
+        );
+        let source = format!("#include <stdio.h>\n{export}\n");
+        C_PARSES.with(|parses| parses.set(0));
+        seal_generated_artifact("demo", &source, &record).expect("one export seals");
+        assert_eq!(C_PARSES.with(std::cell::Cell::get), 1);
+    }
+
+    /// chelis#3722: a kept parse serves only a source with the same projection.
+    /// A longer source, and a source of the same length with other bytes, each
+    /// get their own parse. So the validation still refuses the unregistered
+    /// definition that each of them adds.
+    #[test]
+    fn a_kept_parse_serves_only_its_own_projection() {
+        let comment = "/* int external_helper(int x) { return x - 1; } */\n";
+        let (source, header) = sealed_fixture(
+            "demo",
+            "alpha",
+            "chelis_fn_616c706861",
+            "int chelis_fn_616c706861(int x);",
+            "int chelis_fn_616c706861(int x) {\n    return x + 1;\n}",
+            comment,
+        );
+        let uncommented = comment.replace("/*", "  ").replace("*/", "  ");
+        let same_length = source.replacen(comment, &uncommented, 1);
+        assert_ne!(same_length, source);
+        assert_eq!(same_length.len(), source.len());
+        let longer = format!("{source}\nint external_helper(int x) {{\n    return x - 1;\n}}\n");
+        for (case, other) in [("longer", longer), ("same length", same_length)] {
+            let mut kept = None;
+            GeneratedHeader::parse(&header)
+                .expect("sealed header")
+                .validate_source_with(&source, &mut kept)
+                .expect("the sealed pair validates");
+            let resealed = rewrite_source_digest(&header, &other);
+            C_PARSES.with(|parses| parses.set(0));
+            assert!(
+                GeneratedHeader::parse(&resealed)
+                    .expect("syntactically resealed header")
+                    .validate_source_with(&other, &mut kept)
+                    .is_err(),
+                "{case}: a parse of another source must not admit an unregistered external definition"
+            );
+            assert_eq!(C_PARSES.with(std::cell::Cell::get), 1, "{case}");
+        }
     }
 
     fn declaration_record_prefix(source_name: &str) -> String {
