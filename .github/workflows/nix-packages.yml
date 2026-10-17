@@ -4,9 +4,14 @@ on:
   workflow_dispatch:
   release:
     types: [published]
+  # The nightly run builds and publishes the default branch when the
+  # chelis-lang cache does not hold its packages.
+  schedule:
+    - cron: '37 2 * * *'
 
+# A scheduled run must not cancel a manual dispatch on the same branch.
 concurrency:
-  group: nix-packages-${{ github.ref }}
+  group: nix-packages-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -14,8 +19,13 @@ permissions:
 
 jobs:
   # Reserve headroom for cold Devenv realization before native checks.
+  # A scheduled run skips this job when the cache-status job below finds
+  # every package path in the cache. A failed cache report leaves
+  # `complete` empty, so the job runs.
   nix-linux-x86-64:
     name: Nix Packages (x86_64-linux)
+    needs: [cache-status]
+    if: ${{ !cancelled() && (github.event_name != 'schedule' || needs.cache-status.outputs.complete != 'true') }}
     runs-on: ubuntu-latest
     timeout-minutes: 135
     # Native package acceptance runs on the hosted builder on every ref.
@@ -58,9 +68,9 @@ jobs:
         run: python scripts/test_nix_flake_contract.py
       - name: Run the complete native flake check set
         run: nix flake check --print-build-logs
-      # release.yml dispatches this workflow on each release tag, and a
-      # maintainer can dispatch it on main. A run on any other ref pushes
-      # nothing.
+      # release.yml dispatches this workflow on each release tag. The
+      # schedule runs it on main, and a maintainer can dispatch it on main.
+      # A run on any other ref pushes nothing.
       - name: Publish the packages and their build inputs to Cachix
         if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
         env:
@@ -69,7 +79,9 @@ jobs:
 
   nix-darwin-arm64:
     name: Nix Packages (aarch64-darwin)
-    # Keep release and manual coverage native on both supported systems.
+    needs: [cache-status]
+    if: ${{ !cancelled() && (github.event_name != 'schedule' || needs.cache-status.outputs.complete != 'true') }}
+    # Keep release, scheduled, and manual coverage native on both systems.
     runs-on: macos-latest
     timeout-minutes: 145
     env:
@@ -107,3 +119,23 @@ jobs:
         env:
           CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_DEPLOY }}
         run: python scripts/publish_nix_cache.py
+
+  # Evaluate the package output paths of each supported system and ask the
+  # chelis-lang cache for each one. A scheduled run skips the native jobs
+  # when the cache holds every path. Manual and release runs use the
+  # report only as information.
+  cache-status:
+    name: Nix cache status
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      complete: ${{ steps.status.outputs.complete }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up portable Devenv
+        uses: ./.github/actions/vendor/ci/actions/setup-devenv
+      - name: Check the chelis-lang cache for the package outputs
+        id: status
+        run: python3 scripts/nix_cache_status.py --github-output "$GITHUB_OUTPUT"

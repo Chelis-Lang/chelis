@@ -180,11 +180,14 @@ each `chelis` process computes SHA-256 over the whole executable.
 
 A run of `nix-packages.yml` on `main` or on a release tag pushes to the
 `chelis-lang` Cachix cache. It pushes the `chelis`, `chelis-runtime`, and
-`chelisup` outputs, the cvc5 tree, and the Rust crate builds. `flake.nix` names
-that cache and its public signing key. When Nix trusts the cache, a build of a
-pushed revision downloads those outputs. A build of a later revision downloads
-the unchanged cvc5 tree and crates. It compiles only the crates whose sources or
-dependencies changed.
+`chelisup` outputs, the cvc5 tree, and the Rust crate builds. A daily schedule
+runs the workflow on `main`. That run skips its native builds when the cache
+already holds the packages of the `main` revision.
+
+`flake.nix` names that cache and its public signing key. When Nix trusts the
+cache, a build of a pushed revision downloads those outputs. A build of a later
+revision downloads the unchanged cvc5 tree and crates. It compiles only the
+crates whose sources or dependencies changed.
 
 Nix applies these flake settings only for a trusted user. On a single-user
 install, or as a user in `trusted-users`, pass `--accept-flake-config`. On a
@@ -193,6 +196,18 @@ Nix compiles the packages. For them, an administrator adds
 `https://chelis-lang.cachix.org` to `extra-substituters` and the key from
 `flake.nix` to `extra-trusted-public-keys` in the system Nix configuration (for
 example `/etc/nix/nix.conf`). Then the administrator restarts the Nix daemon.
+
+Each pull request runs the `Nix flake evaluation` CI job. It builds nothing.
+It runs these two commands, which you can also run before a push:
+
+```sh
+nix flake check --no-build --all-systems --option allow-import-from-derivation false
+git ls-files -z -- '*.nix' ':(exclude)Cargo.nix' | xargs -0 nix shell --inputs-from . nixpkgs#nixfmt --command nixfmt --check
+```
+
+The first command evaluates the packages and checks of every supported system.
+The second command checks the format of each tracked Nix file except the
+generated `Cargo.nix`. Remove `--check` to format the files.
 
 The flake imports the committed `Cargo.nix`, so Nix evaluation needs no import
 from derivation. A change to `Cargo.lock`, a workspace manifest, or a crate

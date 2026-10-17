@@ -1961,3 +1961,28 @@ jobs:
           crate2nix-version: "0.15.0"
           feature-mode: none
           features: chelis-cli/distribution
+
+  # Evaluate every flake output of every supported system with import from
+  # derivation disabled. Then check the format of each tracked Nix file
+  # except the generated Cargo.nix. The job builds nothing, so it needs no
+  # cache and runs for every event. nix-packages.yml builds the packages.
+  nix-eval:
+    name: Nix flake evaluation
+    runs-on: ubuntu-latest
+    needs: [changes]
+    if: ${{ !cancelled() }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.changes.outputs.candidate_sha }}
+          persist-credentials: false
+
+      - name: Set up portable Devenv
+        uses: ./.github/actions/vendor/ci/actions/setup-devenv
+
+      - name: Evaluate the flake for every supported system
+        run: nix flake check --no-build --all-systems --option allow-import-from-derivation false
+
+      - name: Check the format of the tracked Nix files
+        run: git ls-files -z -- '*.nix' ':(exclude)Cargo.nix' | xargs -0 nix shell --inputs-from . nixpkgs#nixfmt --command nixfmt --check

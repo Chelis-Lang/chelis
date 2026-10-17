@@ -235,14 +235,14 @@ class ReleaseTriggerContractTests(unittest.TestCase):
             ("release", '--ref "$GITHUB_REF_NAME"', "--ref main", "on the release tag"),
             (
                 "nix",
-                f"      # nothing.\n{publish_step}        {PUBLISH_GATE}\n",
-                f"      # nothing.\n{publish_step}        if: github.event_name == 'release'\n",
+                f" pushes nothing.\n{publish_step}        {PUBLISH_GATE}\n",
+                f" pushes nothing.\n{publish_step}        if: github.event_name == 'release'\n",
                 "must run only on main or a release tag",
             ),
             (
                 "nix",
-                f"      # nothing.\n{publish_step}        {PUBLISH_GATE}\n",
-                f"      # nothing.\n{publish_step}"
+                f" pushes nothing.\n{publish_step}        {PUBLISH_GATE}\n",
+                f" pushes nothing.\n{publish_step}"
                 "        if: startsWith(github.ref, 'refs/heads/') || startsWith(github.ref, 'refs/tags/v')\n",
                 "must run only on main or a release tag",
             ),

@@ -3,7 +3,8 @@
 
 `nix-packages.yml` runs this script on `main` and on release tags, after the
 complete native flake check set passed on that system. `release.yml` dispatches
-that run on each release tag, and a maintainer can dispatch it on `main`.
+that run on each release tag. A daily schedule runs it on `main` when the cache
+does not hold the packages, and a maintainer can dispatch it on `main`.
 
 The script gives three groups of paths to `cachix push`:
 
