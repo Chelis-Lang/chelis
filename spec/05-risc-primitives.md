@@ -5465,8 +5465,9 @@ lie. Rendering never repairs, rounds, or rejects stored values.
 > contribute an owed root. Applying an effectful declaration merely to observe
 > it would change its execution count and SHALL NOT occur. Parameterized
 > definitions are callable entries, not observation
-> roots until evaluation explicitly selects one and supplies all of its runtime
-> inputs; that concrete call result becomes an owed root. A zero-parameter
+> roots until evaluation explicitly selects one and supplies a value for every
+> parameter as [05-OBS-9] requires; that concrete call result becomes an owed
+> root. A zero-parameter
 > generic definition whose result retains an unresolved type, dimension, or
 > rank parameter likewise remains a callable entry until a concrete call
 > instantiates its result. A selected target's declarations are its entry
@@ -5489,7 +5490,18 @@ lie. Rendering never repairs, rounds, or rejects stored values.
 > assign each entry its Tensor or Host lane and exactly the free runtime tensor
 > inputs in that root's reachable closure. Selecting one root SHALL NOT make a
 > sibling root's input live. Dotted descendants inherit their originating
-> root's lane and input closure.
+> root's lane and input closure. A selected parameterized definition SHALL
+> receive each tensor parameter as a runtime tensor input and each other
+> parameter as a call argument: a typed value whose type is exactly the
+> parameter's checked type, admitted without promotion, narrowing, or any
+> other conversion. A call that omits a parameter's value, supplies a value
+> that names no parameter, supplies a tensor as a call argument, or supplies a
+> value of another type SHALL be rejected before evaluation. Call arguments
+> are inputs of that one call; they are not runtime tensor inputs and SHALL NOT
+> appear among the entry's required inputs.
+
+(Call arguments of a generic data type are not fully implemented; see
+[chelis#3804](https://github.com/Chelis-Lang/chelis/issues/3804).)
 
 > **[05-OBS-10]** Lane assignment SHALL be target-aware. A root whose declared
 > dtype is outside the selected target's Tensor capability SHALL route through

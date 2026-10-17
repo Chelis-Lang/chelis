@@ -25,7 +25,7 @@ use chelis_types::{
 use sha2::{Digest, Sha256};
 
 use crate::runtime::{
-    RuntimeTensorValue, evaluate_host_program_filtered,
+    RuntimeTensorValue, RuntimeValue, evaluate_host_program_filtered,
     evaluate_host_program_with_library_and_types, lookup_runtime_value_for_manifest_root,
     runtime_value_to_schema,
 };
@@ -36,11 +36,11 @@ use crate::schema::{
     DeepCallGraphRequest, DeepCallGraphResult, DeepFunctionOutline, DeepOutlineRequest,
     DeepOutlineResult, DeepReference, DeepReferencesRequest, DeepReferencesResult, DesugarRequest,
     DesugarResult, Diagnostic, DiagnosticSpan, EvalRequest, EvalResult, EvaluatedRoot,
-    FitnessComponents, GeneralKind, GeneratedFile, GradRequest, GradResult, LowerRequest,
-    LowerResult, ParseRequest, ParseResult, RenameRequest, RenameResult, ReplaceFunctionRequest,
-    ReplaceFunctionResult, RootManifestEntryResult, RootManifestResult, SourceKind, Span,
-    ValidateMode, ValidateRequest, ValidateResult, WireBinOp, WireComparisonKind, WireDag,
-    WireDagNode, WireDagSchemaError, WireDimExpr, WireDimInfo, WireExtentWitnessSite,
+    ExecutionValue, FitnessComponents, GeneralKind, GeneratedFile, GradRequest, GradResult,
+    LowerRequest, LowerResult, ParseRequest, ParseResult, RenameRequest, RenameResult,
+    ReplaceFunctionRequest, ReplaceFunctionResult, RootManifestEntryResult, RootManifestResult,
+    SourceKind, Span, ValidateMode, ValidateRequest, ValidateResult, WireBinOp, WireComparisonKind,
+    WireDag, WireDagNode, WireDagSchemaError, WireDimExpr, WireDimInfo, WireExtentWitnessSite,
     WireExtremaKind, WireExtremaOperand, WireFusedInput, WireFusedStep, WireFusedStepOp,
     WireImportKind, WireLetBinding, WireLetPattern, WireLogicalKind, WireMatchArm,
     WireNamedCastMode, WireParam, WirePattern, WirePropertyOption, WireRecordExprField,
@@ -2666,6 +2666,203 @@ impl PreparedEval {
         let roots = [root.to_string()];
         eval_compiled(&self.compiled, bindings, Some(&roots))
     }
+
+    /// Evaluate one call of the selected parameterized root `root`
+    /// ([05-OBS-7], [05-OBS-9]). `arguments` supplies every authored
+    /// non-tensor parameter by name, each a value of exactly the parameter's
+    /// checked type; tensor parameters arrive in `bindings` as for
+    /// [`Self::eval_root`]. A missing, extra, tensor-valued or mistyped
+    /// argument is rejected before evaluation. The call runs on the Host lane.
+    pub fn call_root(
+        &self,
+        root: &str,
+        arguments: BTreeMap<String, ExecutionValue>,
+        bindings: BTreeMap<String, crate::schema::TensorValue>,
+    ) -> Result<EvalResult> {
+        let _fp_env = chelis_runtime::FpEnvGuard::enter();
+        let call = admit_call(&self.compiled, root, &arguments)?;
+        let roots = [root.to_string()];
+        eval_compiled_call(&self.compiled, bindings, Some(&roots), Some(&call))
+    }
+}
+
+/// Check one call's argument values against `root`'s checked signature and
+/// decode them through the value codec (spec/05 [05-OBS-9]): every authored
+/// non-tensor parameter has exactly one argument, its value has exactly the
+/// parameter's checked type (no promotion and no narrowing), and every other
+/// supplied name is an error. A record value is decoded against the program's
+/// declarations, its invariant revalidated, as every in-process value of an
+/// invariant-carrying type is.
+fn admit_call(
+    compiled: &CompiledSource,
+    root: &str,
+    arguments: &BTreeMap<String, ExecutionValue>,
+) -> Result<crate::runtime::HostCall> {
+    let reject = |message: String| stage_error(EVAL_STAGE, message, GeneralKind::EvalError);
+    let signature = compiled
+        .checked()
+        .signature_inference()
+        .functions
+        .get(root)
+        .filter(|signature| !signature.params.is_empty())
+        .ok_or_else(|| {
+            reject(format!(
+                "`{root}` is not a parameterized definition to call"
+            ))
+        })?;
+    for name in arguments.keys() {
+        if !signature.params.iter().any(|param| param.name == *name) {
+            return Err(reject(format!(
+                "the call of `{root}` supplies `{name}`, which names no parameter"
+            )));
+        }
+    }
+    let program = compiled
+        .host_program()
+        .map(crate::runtime::PreparedHostEvaluation::program);
+    let mut decoded = BTreeMap::new();
+    for param in &signature.params {
+        let tensor = type_is_tensor_runtime_input(&param.checked_type);
+        let value = match (tensor, arguments.get(&param.name)) {
+            (true, None) => continue,
+            (true, Some(_)) => {
+                return Err(reject(format!(
+                    "parameter `{}` of `{root}` is a tensor; a tensor arrives as a binding, \
+                     not a call argument",
+                    param.name
+                )));
+            }
+            (false, None) => {
+                return Err(reject(format!(
+                    "the call of `{root}` supplies no value for parameter `{}`",
+                    param.name
+                )));
+            }
+            (false, Some(value)) => value,
+        };
+        let runtime = if execution_value_has_record(value) {
+            let program = program.ok_or_else(|| {
+                reject(
+                    "a record argument needs the host program, and the library and the \
+                        source did not compose"
+                        .to_string(),
+                )
+            })?;
+            crate::decode::try_decode_adt_value(program.exprs(), value)
+        } else {
+            crate::decode::decode_without_records(value)
+        }
+        .map_err(|error| {
+            reject(format!(
+                "argument `{}` of `{root}` does not decode: {error}",
+                param.name
+            ))
+        })?;
+        argument_conforms(
+            &runtime,
+            &param.checked_type,
+            compiled.checked().adt_registry(),
+        )
+        .map_err(|reason| {
+            reject(format!(
+                "argument `{}` of `{root}` is not a value of its parameter type `{}`: {reason}",
+                param.name, param.checked_type
+            ))
+        })?;
+        decoded.insert(param.name.clone(), runtime);
+    }
+    Ok(crate::runtime::HostCall {
+        root: root.to_string(),
+        arguments: decoded,
+    })
+}
+
+fn execution_value_has_record(value: &ExecutionValue) -> bool {
+    // A nested payload grows the native stack as the codec's own walk does.
+    stacker::maybe_grow(128 * 1024, 8 * 1024 * 1024, || {
+        execution_value_has_record_inner(value)
+    })
+}
+
+fn execution_value_has_record_inner(value: &ExecutionValue) -> bool {
+    match value {
+        ExecutionValue::Adt { .. } => true,
+        ExecutionValue::List { value } | ExecutionValue::Tuple { value } => {
+            value.iter().any(execution_value_has_record)
+        }
+        ExecutionValue::Dict { entries } => entries.iter().any(|entry| {
+            execution_value_has_record(&entry.key) || execution_value_has_record(&entry.value)
+        }),
+        ExecutionValue::Tensor { .. }
+        | ExecutionValue::Scalar { .. }
+        | ExecutionValue::Bool { .. }
+        | ExecutionValue::Key { .. }
+        | ExecutionValue::String { .. }
+        | ExecutionValue::Unit => false,
+    }
+}
+
+/// Whether a decoded argument is a value of exactly `ty`. A scalar's dtype tag
+/// must equal the declared primitive; containers check every element; a
+/// record's constructor must belong to the declared data type, whose fields
+/// the codec already checked against their declarations.
+fn argument_conforms(
+    value: &RuntimeValue,
+    ty: &chelis_types::types::Type,
+    adts: &chelis_types::adt::AdtRegistry,
+) -> std::result::Result<(), String> {
+    // A nested value grows the native stack as the codec's own walk does.
+    stacker::maybe_grow(128 * 1024, 8 * 1024 * 1024, || {
+        argument_conforms_inner(value, ty, adts)
+    })
+}
+
+fn argument_conforms_inner(
+    value: &RuntimeValue,
+    ty: &chelis_types::types::Type,
+    adts: &chelis_types::adt::AdtRegistry,
+) -> std::result::Result<(), String> {
+    use chelis_types::types::Type;
+    let mismatch = || Err(format!("it is {}", crate::runtime::describe_value(value)));
+    match (ty, value) {
+        (Type::Ref(inner), _) => argument_conforms(value, inner, adts),
+        (Type::Prim(Prim::Bool), RuntimeValue::Bool(_))
+        | (Type::Prim(Prim::String), RuntimeValue::String(_))
+        | (Type::Prim(Prim::Key), RuntimeValue::Key(_))
+        | (Type::Unit, RuntimeValue::Unit) => Ok(()),
+        (Type::Prim(prim), RuntimeValue::Scalar(payload)) if payload.dtype() == *prim => Ok(()),
+        (Type::Tuple(types), RuntimeValue::Tuple(values)) if types.len() == values.len() => types
+            .iter()
+            .zip(values.iter())
+            .try_for_each(|(ty, value)| argument_conforms(value, ty, adts)),
+        (Type::Adt(name, args), RuntimeValue::List(values))
+            if name == "List" && args.len() == 1 =>
+        {
+            values
+                .iter()
+                .try_for_each(|value| argument_conforms(value, &args[0], adts))
+        }
+        (Type::Adt(name, args), RuntimeValue::Dict(entries))
+            if name == "Dict" && args.len() == 2 =>
+        {
+            entries.iter().try_for_each(|(key, value)| {
+                argument_conforms(key, &args[0], adts)?;
+                argument_conforms(value, &args[1], adts)
+            })
+        }
+        (Type::Adt(name, args), RuntimeValue::Adt { ctor, .. }) => {
+            if !args.is_empty() {
+                return Err(format!(
+                    "a value of the generic data type `{name}` is not admitted as a call argument"
+                ));
+            }
+            match adts.lookup_variant(ctor) {
+                Some((owner, _)) if owner == name => Ok(()),
+                _ => mismatch(),
+            }
+        }
+        _ => mismatch(),
+    }
 }
 
 /// Compile a program once so downstream callers can cheaply evaluate
@@ -3083,6 +3280,17 @@ fn eval_compiled(
     bindings: BTreeMap<String, crate::schema::TensorValue>,
     selected_root_names: Option<&[String]>,
 ) -> Result<EvalResult> {
+    eval_compiled_call(compiled, bindings, selected_root_names, None)
+}
+
+/// [`eval_compiled`], with the admitted non-tensor argument values of one
+/// selected callable root when `call` is `Some`.
+fn eval_compiled_call(
+    compiled: &CompiledSource,
+    bindings: BTreeMap<String, crate::schema::TensorValue>,
+    selected_root_names: Option<&[String]>,
+    call: Option<&crate::runtime::HostCall>,
+) -> Result<EvalResult> {
     // [04-NUM-2] results assume round-to-nearest-even with subnormals kept.
     // The evaluator runs in its host's thread (the CLI, or a Python or Rust
     // embedding that may have set a rounding mode or flush-to-zero), so every
@@ -3098,6 +3306,7 @@ fn eval_compiled(
         compiled,
         bindings.keys().map(String::as_str),
         selected_root_names,
+        call,
     )?;
     let manifest = effective_manifest.as_ref();
     let selected =
@@ -3265,7 +3474,18 @@ fn eval_compiled(
             },
             host_selected_root_names,
             Some(&manifested_lowered_names),
+            call,
         )
+    } else if call.is_some() {
+        // The host program is what a call's arguments enter; without it the
+        // library and the source did not compose, so nothing can run.
+        return Err(stage_error(
+            EVAL_STAGE,
+            "a call with argument values needs the host program, and the library \
+             and the source did not compose"
+                .to_string(),
+            GeneralKind::EvalError,
+        ));
     } else if let Some(library) = compiled.library_runtime.as_ref() {
         evaluate_host_program_with_library_and_types(
             compiled.checked(),
@@ -3793,6 +4013,7 @@ fn manifest_for_eval<'a>(
     compiled: &CompiledSource,
     binding_names: impl Iterator<Item = &'a str>,
     selected_root_names: Option<&[String]>,
+    call: Option<&crate::runtime::HostCall>,
 ) -> Result<std::sync::Arc<RootManifest>> {
     let available = binding_names.collect::<UnordSet<_>>();
     let candidate_names = selected_root_names
@@ -3868,8 +4089,17 @@ fn manifest_for_eval<'a>(
             .iter()
             .map(|param| param.name.clone())
             .collect::<BTreeSet<_>>();
+        // A call's argument values supply its non-tensor parameters; they are
+        // call inputs, never required inputs ([05-OBS-9]).
+        let arguments = call
+            .filter(|call| call.root == candidate)
+            .map(|call| &call.arguments);
+        let argued = |name: &str| arguments.is_some_and(|arguments| arguments.contains_key(name));
         let live_parameter_names =
-            chelis_effects::realizability::referenced_runtime_inputs(body, &parameter_names);
+            chelis_effects::realizability::referenced_runtime_inputs(body, &parameter_names)
+                .into_iter()
+                .filter(|name| !argued(name))
+                .collect::<BTreeSet<_>>();
         if live_parameter_names.iter().any(|name| {
             signature
                 .params
@@ -3878,8 +4108,8 @@ fn manifest_for_eval<'a>(
                 .is_none_or(|param| !type_is_tensor_runtime_input(&param.checked_type))
         }) {
             // EvalRequest bindings carry tensors. A live scalar/container
-            // parameter therefore has not been supplied through this API and
-            // the callable remains a declaration.
+            // parameter that no call argument supplies leaves the callable a
+            // declaration.
             continue;
         }
         let mut required_inputs = selected_roots
@@ -3905,6 +4135,10 @@ fn manifest_for_eval<'a>(
             });
             match selected_host_input_demand(session.as_ref(), candidate, &parameter_names) {
                 Ok(Some(inputs)) => {
+                    let inputs = inputs
+                        .into_iter()
+                        .filter(|name| !argued(name))
+                        .collect::<BTreeSet<_>>();
                     if inputs.iter().any(|name| {
                         signature
                             .params
@@ -3941,7 +4175,14 @@ fn manifest_for_eval<'a>(
                         .contains(prim)
                 })
         });
-        let lane = if unsupported_prim.is_some() || selected_roots.len() != selected_entries.len() {
+        // Argument values enter the host program, so a call that supplies any
+        // runs on the Host lane (docs/design/issue_912_root_boundary_plan.md,
+        // decision 20).
+        let argument_call = arguments.is_some_and(|arguments| !arguments.is_empty());
+        let lane = if unsupported_prim.is_some()
+            || argument_call
+            || selected_roots.len() != selected_entries.len()
+        {
             Lane::Host
         } else {
             Lane::Tensor
@@ -3953,6 +4194,12 @@ fn manifest_for_eval<'a>(
                 entry
                     .reasons
                     .push(chelis_types::manifest::HostReason::PrecisionExceedsCapability { prim });
+            } else if argument_call {
+                entry
+                    .reasons
+                    .push(chelis_types::manifest::HostReason::StructuralForm {
+                        tag: "selected-callable-arguments".to_string(),
+                    });
             } else if lane == Lane::Host {
                 entry
                     .reasons
@@ -7391,9 +7638,6 @@ fn wire_op(op: &RiscOp) -> WireResult<WireRiscOp> {
         },
     })
 }
-
-#[cfg(test)]
-use crate::schema::ExecutionValue;
 
 #[cfg(test)]
 #[path = "../../../tests/support/wire_values.rs"]

@@ -134,6 +134,25 @@ for f32-declared tensors) is the eval-f64-intermediate vs C-f32-float gap —
     is independently owned; non-root owners drop. This ownership lowering is
     downstream #1286 work and does not add a second root manifest.
 
+20. **A call with argument values runs on the Host lane.** [05-OBS-9] admits a
+    selected parameterized definition with typed call arguments for its
+    non-tensor parameters (`compiler::PreparedEval::call_root`, chelis#3801).
+    Those values enter the host evaluator, which applies the definition to
+    them, so the manifest entry of a call that supplies any argument is
+    assigned the Host lane with the `StructuralForm` reason
+    `selected-callable-arguments`; a call whose parameters are all tensors
+    keeps the lane the Tensor-lane realizability check gives it. The Host lane
+    holds every dtype, so this assignment never narrows a value and satisfies
+    [05-OBS-10]. The entry's required inputs stay its tensor inputs. Admission
+    decodes each argument through the value codec, so a record of an
+    invariant-carrying type is revalidated as every in-process value of that
+    type is, and checks the decoded value against the parameter's checked type:
+    a scalar's dtype tag equals the declared primitive; booleans, strings,
+    keys and unit match their own types; tuples, `List`, and `Dict` check every
+    element; and a record's constructor belongs to the declared data type. A
+    value of a generic user data type is rejected at the call boundary, since
+    its field types depend on arguments the codec does not resolve.
+
 ## Coordination
 
 - **#733** (spec provenance): manifest machinery binds to atoms.

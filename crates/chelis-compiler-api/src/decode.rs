@@ -170,6 +170,14 @@ pub(crate) fn decode_with_tables(
 /// that any ADT node matches its declared representation. Non-ADT payloads
 /// convert structurally (used for nested scalar/tensor fields); a top-level
 /// non-ADT payload converts but carries no opaque invariant.
+/// Decode a payload that holds no record: no constructor table or invariant
+/// applies, so its values convert exactly as their tags state.
+pub(crate) fn decode_without_records(
+    payload: &ExecutionValue,
+) -> Result<RuntimeValue, DecodeError> {
+    structural_decode(payload, &UnordMap::new())
+}
+
 fn structural_decode(
     payload: &ExecutionValue,
     field_types: &UnordMap<String, Vec<DecodeField>>,
