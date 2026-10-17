@@ -6,7 +6,6 @@ use chelis_types::{
     clean_fitness_from_stats,
 };
 
-use crate::roots::root_metadata;
 use crate::{
     CheckedCompilation, CheckedLibrary, ContextCheckedCompilation, ContextualLibraryTypeAnalysis,
     ContextualTypeAnalysis, LibraryRejection, PreparedLibraryAnalysis, PreparedProgram,
@@ -237,13 +236,11 @@ fn complete_checks_in_context(
     }
     .map_err(|errors| SemanticRejection::Linearity { errors })?;
 
-    let root_metadata = root_metadata(&program, None);
-    Ok(CheckedCompilation {
-        expanded_deep: analysis.prepared.expanded_deep,
-        fitness: analysis.fitness,
+    Ok(CheckedCompilation::new(
+        analysis.prepared.expanded_deep,
+        analysis.fitness,
         program,
-        root_metadata,
-    })
+    ))
 }
 
 /// Complete semantic checks against the library bound to the analysis.
@@ -286,13 +283,7 @@ fn compose_context(library: &CheckedLibrary, extension: CheckedCompilation) -> C
         chelis_types::structural_stats(&combined_deep),
         program.infer_stats(),
     );
-    let root_metadata = root_metadata(&program, None);
-    CheckedCompilation {
-        expanded_deep: combined_deep,
-        fitness,
-        program,
-        root_metadata,
-    }
+    CheckedCompilation::new(combined_deep, fitness, program)
 }
 
 fn bind_checked_library(
