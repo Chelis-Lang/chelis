@@ -52,6 +52,18 @@ impl HostVerification {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    static CALL_GRAPH_VISITS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Call-graph nodes and calls visited on this thread while finding the
+/// components the live-byte bound composes over.
+#[cfg(test)]
+pub(super) fn call_graph_visits() -> u64 {
+    CALL_GRAPH_VISITS.with(std::cell::Cell::get)
+}
+
 pub(super) fn verify(program: &OwnershipProgram) -> Result<HostVerification, OwnershipError> {
     if super::last_use::has_schedule(program) {
         super::last_use::verify_canonical(program)?;
@@ -1393,20 +1405,126 @@ fn live_byte_cost(
     Ok(result)
 }
 
-fn unit_reaches(start: UnitId, target: UnitId, facts: &BTreeMap<UnitId, UnitLiveFacts>) -> bool {
-    let mut pending = vec![start];
-    let mut visited = BTreeSet::new();
-    while let Some(unit) = pending.pop() {
-        if unit == target {
-            return true;
+/// The strongly connected components of the direct-call graph, found by one
+/// iterative pass of Tarjan's algorithm, so the work is linear in units plus
+/// calls (chelis#3723). Roots are taken in ascending unit order and callees in
+/// call order, so the components and their order are deterministic.
+fn call_graph_components(facts: &BTreeMap<UnitId, UnitLiveFacts>) -> Vec<Vec<UnitId>> {
+    let nodes = facts.keys().copied().collect::<Vec<_>>();
+    let index_of = nodes
+        .iter()
+        .enumerate()
+        .map(|(index, unit)| (*unit, index))
+        .collect::<BTreeMap<_, _>>();
+    let successors = nodes
+        .iter()
+        .map(|unit| {
+            facts[unit]
+                .direct_calls
+                .iter()
+                .filter_map(|call| index_of.get(&call.callee).copied())
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    let mut discovered = vec![None::<usize>; nodes.len()];
+    let mut lowlink = vec![0; nodes.len()];
+    let mut on_stack = vec![false; nodes.len()];
+    let mut stack = Vec::new();
+    let mut components = Vec::new();
+    let mut next_discovery = 0;
+    for root in 0..nodes.len() {
+        if discovered[root].is_some() {
+            continue;
         }
-        if visited.insert(unit)
-            && let Some(next) = facts.get(&unit)
-        {
-            pending.extend(next.direct_calls.iter().map(|call| call.callee));
+        // Each frame is a node and the position of its next unexplored callee.
+        let mut frames = vec![(root, 0)];
+        while let Some(&(node, position)) = frames.last() {
+            if position == 0 && discovered[node].is_none() {
+                #[cfg(test)]
+                CALL_GRAPH_VISITS.with(|visits| visits.set(visits.get() + 1));
+                discovered[node] = Some(next_discovery);
+                lowlink[node] = next_discovery;
+                next_discovery += 1;
+                stack.push(node);
+                on_stack[node] = true;
+            }
+            if let Some(&callee) = successors[node].get(position) {
+                #[cfg(test)]
+                CALL_GRAPH_VISITS.with(|visits| visits.set(visits.get() + 1));
+                frames.last_mut().expect("current frame").1 += 1;
+                match discovered[callee] {
+                    None => frames.push((callee, 0)),
+                    Some(order) if on_stack[callee] => lowlink[node] = lowlink[node].min(order),
+                    Some(_) => {}
+                }
+                continue;
+            }
+            frames.pop();
+            if let Some(&(caller, _)) = frames.last() {
+                lowlink[caller] = lowlink[caller].min(lowlink[node]);
+            }
+            if Some(lowlink[node]) == discovered[node] {
+                let mut component = Vec::new();
+                loop {
+                    let member = stack.pop().expect("component root is on the stack");
+                    on_stack[member] = false;
+                    component.push(nodes[member]);
+                    if member == node {
+                        break;
+                    }
+                }
+                component.sort_unstable();
+                components.push(component);
+            }
         }
     }
-    false
+    #[cfg(test)]
+    if nodes.len() <= 64 {
+        let mut found = components.clone();
+        found.sort_unstable();
+        assert_eq!(
+            found,
+            reference_call_graph_components(facts),
+            "linear components diverged from pairwise reachability"
+        );
+    }
+    components
+}
+
+/// The components by pairwise reachability, as verification found them
+/// before the linear pass: a test-build cross-check on small call graphs.
+#[cfg(test)]
+fn reference_call_graph_components(facts: &BTreeMap<UnitId, UnitLiveFacts>) -> Vec<Vec<UnitId>> {
+    let reaches = |start: UnitId, target: UnitId| {
+        let mut pending = vec![start];
+        let mut visited = BTreeSet::new();
+        while let Some(unit) = pending.pop() {
+            if unit == target {
+                return true;
+            }
+            if visited.insert(unit)
+                && let Some(next) = facts.get(&unit)
+            {
+                pending.extend(next.direct_calls.iter().map(|call| call.callee));
+            }
+        }
+        false
+    };
+    let mut remaining = facts.keys().copied().collect::<BTreeSet<_>>();
+    let mut components = Vec::new();
+    while let Some(first) = remaining.first().copied() {
+        let component = remaining
+            .iter()
+            .copied()
+            .filter(|candidate| reaches(first, *candidate) && reaches(*candidate, first))
+            .collect::<Vec<_>>();
+        for unit in &component {
+            remaining.remove(unit);
+        }
+        components.push(component);
+    }
+    components.sort_unstable();
+    components
 }
 
 #[derive(Debug)]
@@ -1419,21 +1537,7 @@ fn compose_live_byte_bound(
     units: &[Unit],
     facts: &BTreeMap<UnitId, UnitLiveFacts>,
 ) -> Result<super::LiveByteBound, OwnershipError> {
-    let mut remaining = units.iter().map(|unit| unit.id).collect::<BTreeSet<_>>();
-    let mut components = Vec::<BTreeSet<UnitId>>::new();
-    while let Some(first) = remaining.first().copied() {
-        let component = remaining
-            .iter()
-            .copied()
-            .filter(|candidate| {
-                unit_reaches(first, *candidate, facts) && unit_reaches(*candidate, first, facts)
-            })
-            .collect::<BTreeSet<_>>();
-        for unit in &component {
-            remaining.remove(unit);
-        }
-        components.push(component);
-    }
+    let components = call_graph_components(facts);
     let component_of = components
         .iter()
         .enumerate()

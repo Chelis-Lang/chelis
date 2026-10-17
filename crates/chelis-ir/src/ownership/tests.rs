@@ -4078,3 +4078,177 @@ fn the_copy_rewrite_takes_one_operand_census_per_unit() {
         "{CHAINS} upgrades took {censuses} operand censuses of one unit"
     );
 }
+
+/// The largest growth factor between consecutive sizes of a doubling sweep.
+/// Every count must be positive: a sweep that never reaches the counted work
+/// proves nothing.
+fn max_doubling_ratio(visits: &[u64]) -> f64 {
+    assert!(
+        visits.iter().all(|&count| count > 0),
+        "the sweep must exercise the counted work: {visits:?}"
+    );
+    visits
+        .windows(2)
+        .map(|pair| pair[1] as f64 / pair[0] as f64)
+        .fold(0.0, f64::max)
+}
+
+/// chelis#3723: a chain of `count` self-recursive functions, each calling the
+/// previous one, so the call graph has `count` singleton cyclic components.
+fn recursive_call_chain_program(count: u32) -> RawProgram {
+    let call = |dest: u32, callee: u32| Op::Apply {
+        dest: Some(OwnerId(dest)),
+        label: "chain call".into(),
+        kind: ApplyKind::DirectCall {
+            callee: UnitId(callee),
+        },
+        schema: OperationSchema::new(
+            Vec::new(),
+            Some(ValueClass::NonHeap(NonHeapKind::Scalar(Prim::Int64))),
+        ),
+        args: Vec::new(),
+    };
+    let mut units = vec![Unit {
+        id: UnitId(0),
+        name: "roots".into(),
+        kind: UnitKind::Roots,
+        schedule: ScheduleState::Phase2ScopeExit,
+        callable_body: None,
+        entry: BlockId(0),
+        blocks: vec![block(0, vec![], vec![], Terminator::Exit)],
+        owners: BTreeMap::new(),
+    }];
+    for index in 1..=count {
+        let ops = if index == 1 {
+            vec![call(0, index)]
+        } else {
+            vec![
+                call(0, index),
+                Op::Discard { owner: OwnerId(0) },
+                call(1, index - 1),
+            ]
+        };
+        let result = if index == 1 { 0 } else { 1 };
+        units.push(Unit {
+            id: UnitId(index),
+            name: format!("h{index}"),
+            kind: UnitKind::Function,
+            schedule: ScheduleState::Phase2ScopeExit,
+            callable_body: Some(CallableBody::new(BlockId(0))),
+            entry: BlockId(0),
+            blocks: vec![block(
+                0,
+                vec![],
+                ops,
+                Terminator::Return {
+                    result: Operand::move_(OwnerId(result)),
+                },
+            )],
+            owners: (0..=result)
+                .map(|owner| (OwnerId(owner), info(Prim::Int64, OwnerOrigin::Owned)))
+                .collect(),
+        });
+    }
+    RawProgram { units }
+}
+
+#[test]
+fn live_byte_composition_finds_call_graph_components_in_linear_work() {
+    // Call-graph nodes visited while composing the verified live-byte bound
+    // (chelis#3723). Pairwise reachability makes a call chain cubic, about 8x
+    // per doubling.
+    let visits = [50, 100, 200, 400]
+        .iter()
+        .map(|&count| {
+            let before = super::verify::call_graph_visits();
+            let verified = super::verify::verify(&recursive_call_chain_program(count)).unwrap();
+            assert_eq!(
+                verified.live_set_bound().max_live_bytes,
+                LiveByteBound::Exact(0)
+            );
+            super::verify::call_graph_visits() - before
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        max_doubling_ratio(&visits) <= 2.2,
+        "call-graph visits per doubling must stay linear: {visits:?}"
+    );
+}
+
+/// chelis#3723: deterministic pseudo-random call graphs, cyclic and acyclic.
+/// The test build checks the linear components against pairwise
+/// reachability on every graph of at most 64 units, and the composed bound
+/// is the same whichever way the components are found.
+#[test]
+fn call_graph_components_agree_with_pairwise_reachability() {
+    let mut state = 0x2545_f491_4f6c_dd1du64;
+    let mut next = |bound: u32| {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        u32::try_from(state % u64::from(bound)).unwrap()
+    };
+    for _ in 0..64 {
+        let count = 2 + next(30);
+        let mut units = vec![Unit {
+            id: UnitId(0),
+            name: "roots".into(),
+            kind: UnitKind::Roots,
+            schedule: ScheduleState::Phase2ScopeExit,
+            callable_body: None,
+            entry: BlockId(0),
+            blocks: vec![block(0, vec![], vec![], Terminator::Exit)],
+            owners: BTreeMap::new(),
+        }];
+        for index in 1..=count {
+            let calls = next(4);
+            // A tensor live across every call gives each call a positive
+            // carry, so a cycle is unbounded and the bound sees the partition.
+            let mut ops = vec![define(0)];
+            let mut owners = BTreeMap::from([(OwnerId(0), fixed_tensor_info(1 + index as usize))]);
+            for call in 0..calls {
+                let dest = 1 + call;
+                ops.push(Op::Apply {
+                    dest: Some(OwnerId(dest)),
+                    label: "random call".into(),
+                    kind: ApplyKind::DirectCall {
+                        callee: UnitId(1 + next(count)),
+                    },
+                    schema: OperationSchema::new(
+                        Vec::new(),
+                        Some(ValueClass::NonHeap(NonHeapKind::Scalar(Prim::Int64))),
+                    ),
+                    args: Vec::new(),
+                });
+                ops.push(Op::Discard {
+                    owner: OwnerId(dest),
+                });
+                owners.insert(OwnerId(dest), info(Prim::Int64, OwnerOrigin::Owned));
+            }
+            let result = 1 + calls;
+            ops.push(Op::Drop {
+                owner: Operand::move_(OwnerId(0)),
+            });
+            ops.push(define(result));
+            owners.insert(OwnerId(result), info(Prim::Int64, OwnerOrigin::Owned));
+            units.push(Unit {
+                id: UnitId(index),
+                name: format!("f{index}"),
+                kind: UnitKind::Function,
+                schedule: ScheduleState::Phase2ScopeExit,
+                callable_body: Some(CallableBody::new(BlockId(0))),
+                entry: BlockId(0),
+                blocks: vec![block(
+                    0,
+                    vec![],
+                    ops,
+                    Terminator::Return {
+                        result: Operand::move_(OwnerId(result)),
+                    },
+                )],
+                owners,
+            });
+        }
+        super::verify::verify(&RawProgram { units }).unwrap();
+    }
+}
