@@ -2689,6 +2689,19 @@ int main(void) {{
             loop_body.find("chelis_sparse_check_index(").unwrap()
                 < loop_body.find("t2_base_index =").unwrap()
         );
+        // chelis#3735: the loop compares each index with the selected-axis
+        // extent inline. Only an index outside the axis calls the runtime
+        // check, which reports the trap.
+        let check = loop_body
+            .lines()
+            .find(|line| line.contains("chelis_sparse_check_index("))
+            .unwrap();
+        assert!(
+            check
+                .trim_start()
+                .starts_with("if (t2_selected < 0 || t2_selected >= "),
+            "{check}"
+        );
         let tmp = tempfile::tempdir().unwrap();
         stage_runtime(tmp.path());
         write_temp_file(tmp.path(), "model.c", &result.c_source);
@@ -2702,7 +2715,8 @@ int main(int argc, char **argv) {
     const uint32_t bits[12] = {0x80000000,0x00000001,0x3f800000,0xbf800000,0x7fc12345,0x7f800000,0xff800000,0x00000000,0x00800000,0x80800000,0x3eaaaaab,0xbeaaaaab};
     const uint32_t expected[8] = {0x7fc12345,0x7f800000,0x80000000,0x00000001,0x00800000,0x80800000,0x3eaaaaab,0xbeaaaaab};
     int64_t picks[4] = {2,0,1,2};
-    if (argc > 1 && !empty) picks[0] = -1;
+    if (argc > 1 && strcmp(argv[1], "bad") == 0) picks[0] = -1;
+    if (argc > 1 && strcmp(argv[1], "high") == 0) picks[0] = 3;
     chelis_tensor *values = chelis_alloc(3, (int64_t[]){batch,3,2}, CHELIS_DTYPE_F32);
     chelis_tensor *indices = chelis_alloc(2, (int64_t[]){batch,2}, CHELIS_DTYPE_I64);
     chelis_tensor_write *guard = chelis_tensor_begin_write(values);
@@ -2764,6 +2778,135 @@ int main(int argc, char **argv) {
             stderr.contains("numeric trap: domain in gather at i64"),
             "{stderr}"
         );
+        let high = Command::new(&binary).arg("high").output().unwrap();
+        assert_eq!(high.status.code(), Some(1), "{:?}", high);
+        let stderr = String::from_utf8_lossy(&high.stderr);
+        assert!(
+            stderr.contains("gather index 3 out of bounds at axis 1 of extent 3"),
+            "{stderr}"
+        );
+        assert!(
+            stderr.contains("numeric trap: domain in gather at i64"),
+            "{stderr}"
+        );
+    }
+
+    /// chelis#3735: each compiled scatter form traps on a selected index
+    /// outside the axis, below it and at its extent. The trap has the form's own
+    /// context and trap line. The last position of the axis is in range.
+    #[test]
+    fn sparse_scatter_forms_trap_outside_the_selected_axis() {
+        for (op, name) in [
+            (
+                RiscOp::ScatterAdd {
+                    axis: 0,
+                    batch_rank: 0,
+                },
+                "scatter",
+            ),
+            (
+                RiscOp::Scatter {
+                    axis: 0,
+                    batch_rank: 0,
+                },
+                "scatter_replace",
+            ),
+            (RiscOp::ScatterElements { axis: 0 }, "scatter_elements"),
+        ] {
+            let mut dag = Dag::new();
+            let decl = dag.declare("sparse_trap");
+            let load = |dag: &mut Dag, name: &str, shape: &[usize], dtype| {
+                dag.add_node(
+                    decl,
+                    RiscOp::Load { name: name.into() },
+                    vec![],
+                    tensor_ty(shape, dtype),
+                    None,
+                )
+            };
+            let base = load(&mut dag, "base", &[3], Prim::F32);
+            let indices = load(&mut dag, "indices", &[2], Prim::Int64);
+            let updates = load(&mut dag, "updates", &[2], Prim::F32);
+            let scattered = dag.add_node(
+                decl,
+                op,
+                vec![base, indices, updates],
+                tensor_ty(&[3], Prim::F32),
+                None,
+            );
+            dag.add_root(scattered);
+            let result = codegen(&dag, "sparse_trap").unwrap();
+            let tmp = tempfile::tempdir().unwrap();
+            stage_runtime(tmp.path());
+            write_temp_file(tmp.path(), "model.c", &result.c_source);
+            let order = result
+                .input_labels
+                .iter()
+                .map(|label| label.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let main = format!(
+                r#"
+#include "chelis_runtime.h"
+#include <stdlib.h>
+#include <string.h>
+void sparse_trap(chelis_tensor **, int, chelis_tensor **, int);
+static chelis_tensor *filled(int64_t count, chelis_dtype dtype, const void *data, size_t bytes) {{
+    chelis_tensor *tensor = chelis_alloc(1, (int64_t[]){{count}}, dtype);
+    chelis_tensor_write *guard = chelis_tensor_begin_write(tensor);
+    memcpy(chelis_tensor_write_view(guard).data, data, bytes);
+    chelis_tensor_end_write(guard);
+    return tensor;
+}}
+int main(int argc, char **argv) {{
+    const float base_values[3] = {{1.0f, 2.0f, 3.0f}};
+    const float update_values[2] = {{10.0f, 20.0f}};
+    int64_t picks[2] = {{0, 0}};
+    picks[1] = strtoll(argv[1], 0, 10);
+    chelis_tensor *base = filled(3, CHELIS_DTYPE_F32, base_values, sizeof(base_values));
+    chelis_tensor *indices = filled(2, CHELIS_DTYPE_I64, picks, sizeof(picks));
+    chelis_tensor *updates = filled(2, CHELIS_DTYPE_F32, update_values, sizeof(update_values));
+    chelis_tensor *inputs[3] = {{{order}}}, *outputs[1] = {{0}};
+    sparse_trap(inputs, 3, outputs, 1);
+    chelis_tensor_release(outputs[0]);
+    return 0;
+}}
+"#
+            );
+            write_temp_file(tmp.path(), "main.c", &main);
+            let binary = tmp.path().join("sparse_trap");
+            let toolchain = test_toolchain(result.requirements);
+            let mut command = Command::new(&toolchain.compiler);
+            apply_c_test_flags(&mut command);
+            command.args(["-O2", "-fsanitize=undefined", "-fno-sanitize-recover=all"]);
+            command
+                .args(&toolchain.compile_flags)
+                .arg(tmp.path().join("main.c"))
+                .arg(tmp.path().join("model.c"));
+            add_runtime_link(&mut command, tmp.path());
+            command.args(&toolchain.link_flags).arg("-o").arg(&binary);
+            let built = command.output().unwrap();
+            assert!(
+                built.status.success(),
+                "{name}: {}",
+                String::from_utf8_lossy(&built.stderr)
+            );
+            let last = Command::new(&binary).arg("2").output().unwrap();
+            assert!(last.status.success(), "{name}: {last:?}");
+            for selected in ["-1", "3"] {
+                let run = Command::new(&binary).arg(selected).output().unwrap();
+                assert_eq!(run.status.code(), Some(1), "{name} {selected}: {run:?}");
+                let stderr = String::from_utf8_lossy(&run.stderr);
+                assert_eq!(
+                    stderr.lines().collect::<Vec<_>>(),
+                    [
+                        format!("{name} index {selected} out of bounds at axis 0 of extent 3"),
+                        format!("numeric trap: domain in {name} at i64"),
+                    ],
+                    "{name} {selected}"
+                );
+            }
+        }
     }
 
     #[test]

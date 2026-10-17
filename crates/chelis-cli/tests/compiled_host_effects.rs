@@ -702,6 +702,51 @@ fn language_failures_exit_like_eval() {
             "numeric trap: domain in gather at i64",
         ),
         (
+            "gather_negative",
+            format!(
+                "t = to_tensor([1i64, 2i64, 3i64])\ng = gather(t, to_tensor({}), 0i32)\n",
+                runtime_list("sub(i, 1i64)")
+            ),
+            "gather index -1 out of bounds at axis 0 of extent 3",
+            "numeric trap: domain in gather at i64",
+        ),
+        (
+            "scatter_replace",
+            format!(
+                "t = to_tensor([1i64, 2i64, 3i64])\n\
+                 r = scatter_replace(t, to_tensor({}), to_tensor([5i64, 6i64]), 0i32)\n",
+                runtime_list("add(i, 2i64)")
+            ),
+            "scatter_replace index 3 out of bounds at axis 0 of extent 3",
+            "numeric trap: domain in scatter_replace at i64",
+        ),
+        // A user `def` around a sparse builtin compiles to the host lane's
+        // sparse summary loop (chelis#3735 checks both loops inline).
+        (
+            "summary_gather_negative",
+            format!(
+                "def pick(table: tensor[3, i64], indices: tensor[2, i64]) -> tensor[2, i64] = \
+                 gather(table, indices, 0)\n\
+                 t = to_tensor([1i64, 2i64, 3i64])\n\
+                 g = pick(t, to_tensor({}))\n",
+                runtime_list("sub(i, 1i64)")
+            ),
+            "gather index -1 out of bounds at axis 0 of extent 3",
+            "numeric trap: domain in gather at i64",
+        ),
+        (
+            "summary_scatter_replace",
+            format!(
+                "def put(table: tensor[3, i64], indices: tensor[2, i64], updates: tensor[2, i64]) \
+                 -> tensor[3, i64] = scatter_replace(table, indices, updates, 0)\n\
+                 t = to_tensor([1i64, 2i64, 3i64])\n\
+                 r = put(t, to_tensor({}), to_tensor([5i64, 6i64]))\n",
+                runtime_list("add(i, 2i64)")
+            ),
+            "scatter_replace index 3 out of bounds at axis 0 of extent 3",
+            "numeric trap: domain in scatter_replace at i64",
+        ),
+        (
             "index",
             "xs = [1i64, 2i64]\ny = index(xs, add(1i64, 4i64))\n".to_string(),
             "",

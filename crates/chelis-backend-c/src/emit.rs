@@ -7206,8 +7206,10 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         self.line(&format!("chelis_matmul_plan_release(t{id}_matmul);"));
     }
 
-    /// Sparse offsets use immutable checked projection terms; only the selected
-    /// payload index still owes a per-iteration trap.
+    /// Sparse offsets use immutable checked projection terms. SELECTED's modulus
+    /// is the selected base-axis extent, so a loop compares each selected index
+    /// with it inline. Only an index outside the axis calls the runtime check,
+    /// which reports the trap (chelis#3735).
     pub(crate) fn sparse_projection_terms(
         prefix: &str,
         plan: &str,
@@ -7230,6 +7232,7 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
             }
         }
         lines.push(format!("const {index_type} {prefix}_selected_scale = chelis_sparse_term({plan}, CHELIS_SPARSE_SELECTED, CHELIS_PROJECTION_SCALE, chelis_scalar_from_bits(CHELIS_DTYPE_I64, 0));"));
+        lines.push(format!("const {index_type} {prefix}_selected_extent = chelis_sparse_term({plan}, CHELIS_SPARSE_SELECTED, CHELIS_PROJECTION_MODULUS, chelis_scalar_from_bits(CHELIS_DTYPE_I64, 0));"));
         lines.into_iter().map(|line| (0, line)).collect()
     }
 
@@ -7334,7 +7337,7 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
             Self::sparse_projection_index(&prefix, "base", domain_rank, &format!("t{id}_i"));
         self.line(&format!("{index_type} t{id}_index_slot = {slot};"));
         self.line(&format!("{index_type} t{id}_selected = ((const {index_element}*)t{indices}_data)[t{id}_index_slot];"));
-        self.line(&format!("chelis_sparse_check_index(t{id}_sparse, chelis_scalar_from_bits(CHELIS_DTYPE_I64, t{id}_selected));"));
+        self.line(&format!("if (t{id}_selected < 0 || t{id}_selected >= {prefix}_selected_extent) chelis_sparse_check_index(t{id}_sparse, chelis_scalar_from_bits(CHELIS_DTYPE_I64, t{id}_selected));"));
         self.line(&format!(
             "{index_type} t{id}_base_index = {offset} + t{id}_selected * {prefix}_selected_scale;"
         ));

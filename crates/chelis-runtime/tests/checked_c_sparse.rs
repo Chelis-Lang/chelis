@@ -36,6 +36,12 @@ fn sparse_plans_preserve_exact_slots_shapes_and_input_lifetimes() {
                 chelis_sparse_term(p, CHELIS_SPARSE_SELECTED, CHELIS_PROJECTION_SCALE, int(0)),
                 2
             );
+            // SELECTED's modulus is the selected base-axis extent. Compiled loops
+            // compare each index with it inline (chelis#3735).
+            assert_eq!(
+                chelis_sparse_term(p, CHELIS_SPARSE_SELECTED, CHELIS_PROJECTION_MODULUS, int(0)),
+                3
+            );
             chelis_sparse_check_index(p, int(2));
 
             assert_eq!(chelis_sparse_extent(p, int(-1)), 2);
@@ -66,6 +72,10 @@ fn sparse_plans_preserve_exact_slots_shapes_and_input_lifetimes() {
                 chelis_tensor_sparse_plan(base, indices, updates, int(1), CHELIS_SPARSE_ELEMENTS);
             assert_eq!(chelis_sparse_count(p), 4);
             chelis_sparse_check_target(p, int(2), [int(2), int(3)].as_ptr());
+            assert_eq!(
+                chelis_sparse_term(p, CHELIS_SPARSE_SELECTED, CHELIS_PROJECTION_MODULUS, int(0)),
+                3
+            );
             assert_eq!(chelis_sparse_data_index(p, int(2), int(1)), 4);
             chelis_sparse_plan_release(p);
             chelis_tensor_release(base);
