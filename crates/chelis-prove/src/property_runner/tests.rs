@@ -2287,3 +2287,180 @@ fn issue_3636_scheduled_attempts_may_leave_the_proposal_window() {
         "the schedule must propose magnitudes the window cannot reach"
     );
 }
+
+// --- chelis#3697: the off-diagonal phase's exact contract ----------------
+//
+// Three properties of the pairing decide whether it is safe, and none is
+// observable through a CLI property: that a representative is always a value
+// the diagonal already proposes, that the interleave leaves arity one alone,
+// and that the cells run out so a long run regains its uniform draws.
+
+/// Every representative comes from the binder's own candidate list, there are
+/// at most `EXTREMAL_CLASSES` of them, and they are distinct by bit pattern.
+///
+/// The first of those is the safety property: a representative is in the
+/// binder's resolved range by construction, so a cell can no more escape a
+/// guard — or propose a value the diagonal would not — than the diagonal can.
+#[test]
+fn issue_3697_representatives_are_a_deduplicated_subset_of_the_schedule() {
+    for (lower, upper) in [
+        (-f64::MAX, f64::MAX),
+        (f64::from_bits(1), f64::MAX),
+        (1.0, 2.0),
+        (-1.0, 1.0),
+        (-3.0, -1.0),
+        (0.0, 0.0),
+    ] {
+        let candidates = float_edge_candidates(FloatKind::F64, lower, upper, &[]);
+        let reps = extremal_class_representatives(&candidates);
+        assert!(
+            reps.len() <= EXTREMAL_CLASSES,
+            "[{lower}, {upper}] produced {} representatives",
+            reps.len()
+        );
+        assert!(!reps.is_empty(), "[{lower}, {upper}] produced none");
+        for value in &reps {
+            assert!(
+                candidates.iter().any(|c| c.to_bits() == value.to_bits()),
+                "[{lower}, {upper}] invented {value}, which is not a candidate"
+            );
+        }
+        let distinct = reps
+            .iter()
+            .map(|value| value.to_bits())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(distinct.len(), reps.len(), "[{lower}, {upper}]: {reps:?}");
+    }
+}
+
+/// The roles, named. An unguarded `f64` binder fills all six: the two finite
+/// extrema, the two subnormal-adjacent values, a zero, and a moderate
+/// operand. `+0.0` is the zero chosen, because `total_cmp` orders `-0.0`
+/// below it and so neither extremum role picks the one a pole is written
+/// against.
+#[test]
+fn issue_3697_unguarded_binder_fills_every_extremal_role() {
+    let candidates = float_edge_candidates(FloatKind::F64, -f64::MAX, f64::MAX, &[]);
+    let reps = extremal_class_representatives(&candidates);
+    assert_eq!(
+        reps,
+        vec![
+            f64::MAX,
+            -f64::MAX,
+            f64::from_bits(1),
+            -f64::from_bits(1),
+            0.0,
+            1.0,
+        ],
+        "{reps:?}"
+    );
+    assert!(
+        reps[4].is_sign_positive(),
+        "the zero role must prefer `+0.0`: {reps:?}"
+    );
+}
+
+/// Negative parity for the roles: a binder whose guards admit neither a zero
+/// nor a negative value fills fewer of them, and does not substitute a value
+/// from outside its range to reach six. This is why the odometer reduces its
+/// digit modulo the binder's own count rather than assuming a full radix.
+#[test]
+fn issue_3697_narrow_guards_fill_fewer_extremal_roles() {
+    let lower = FloatKind::F64.next_up(0.0);
+    let candidates = float_edge_candidates(FloatKind::F64, lower, f64::MAX, &[]);
+    let reps = extremal_class_representatives(&candidates);
+    assert_eq!(reps, vec![f64::MAX, f64::from_bits(1), 1.0], "{reps:?}");
+    assert!(
+        reps.iter().all(|value| *value > 0.0),
+        "`x > 0.0` admits no zero and no negative: {reps:?}"
+    );
+}
+
+/// A single-binder property is not interleaved: its attempt ordinal indexes
+/// the schedule one-for-one, which is chelis#3636's behaviour unchanged.
+#[test]
+fn issue_3697_arity_one_is_never_interleaved() {
+    for attempt in 0..128 {
+        assert_eq!(
+            schedule_slot(attempt, 1, 0),
+            ScheduleSlot::Diagonal(attempt),
+            "attempt {attempt}"
+        );
+    }
+}
+
+/// Two binders split the budget in half: even attempts carry the diagonal at
+/// half the previous rate, odd attempts carry the cells, and each binder
+/// takes its own digit of the same cell.
+#[test]
+fn issue_3697_two_binders_interleave_the_diagonal_and_the_cells() {
+    assert_eq!(schedule_slot(0, 2, 0), ScheduleSlot::Diagonal(0));
+    assert_eq!(schedule_slot(0, 2, 1), ScheduleSlot::Diagonal(0));
+    assert_eq!(schedule_slot(84, 2, 0), ScheduleSlot::Diagonal(42));
+    assert_eq!(schedule_slot(84, 2, 1), ScheduleSlot::Diagonal(42));
+    // Cell 6 is digit 0 for the first binder and digit 1 for the second: the
+    // pairing that refutes chelis#3697's own `x / y` reproduction, where the
+    // guards leave each binder three representatives.
+    assert_eq!(schedule_slot(13, 2, 0), ScheduleSlot::Cell(0));
+    assert_eq!(schedule_slot(13, 2, 1), ScheduleSlot::Cell(1));
+}
+
+/// The cells run out, so a run longer than the grid regains the uniform
+/// draws the odometer displaced. Without this the window would never be
+/// sampled again at any budget.
+#[test]
+fn issue_3697_cells_exhaust_and_yield_back_to_the_uniform_draw() {
+    let cells = EXTREMAL_CLASSES * EXTREMAL_CLASSES;
+    // The last cell, then the first attempt past the grid.
+    assert!(matches!(
+        schedule_slot(2 * (cells - 1) + 1, 2, 0),
+        ScheduleSlot::Cell(_)
+    ));
+    assert_eq!(schedule_slot(2 * cells + 1, 2, 0), ScheduleSlot::Random);
+    // Even attempts past the grid are still the diagonal, which falls back to
+    // a random draw on its own once the candidate list is spent.
+    assert_eq!(
+        schedule_slot(2 * cells, 2, 0),
+        ScheduleSlot::Diagonal(cells)
+    );
+}
+
+/// An absurd arity must not panic. `EXTREMAL_CLASSES.pow(arity)` overflows
+/// well before `usize::MAX` binders, and `EXTREMAL_CLASSES.pow(position)`
+/// overflows at the same point, so neither the cap nor the digit may be
+/// computed that way.
+#[test]
+fn issue_3697_an_absurd_arity_does_not_overflow() {
+    for arity in [25usize, 64, 1024, usize::MAX] {
+        let slot = schedule_slot(4097, arity, 0);
+        assert!(matches!(slot, ScheduleSlot::Cell(_)), "arity {arity}");
+        // A high-order digit is simply zero: the odometer has not reached it.
+        assert_eq!(
+            schedule_slot(4097, arity, 24),
+            ScheduleSlot::Cell(0),
+            "arity {arity}"
+        );
+    }
+}
+
+/// The integer schedule's prefix is its class set, and it is a prefix of the
+/// same list the diagonal walks rather than a separate construction.
+#[test]
+fn issue_3697_integer_representatives_are_the_schedules_prefix() {
+    let candidates = int_edge_candidates(-1000, 1000);
+    assert!(candidates.len() > EXTREMAL_CLASSES, "{candidates:?}");
+    for digit in 0..EXTREMAL_CLASSES {
+        assert_eq!(
+            scheduled_int(ScheduleSlot::Cell(digit), &candidates),
+            Some(candidates[digit]),
+            "digit {digit} of {candidates:?}"
+        );
+    }
+    // A shorter list wraps rather than indexing past its end.
+    let narrow = int_edge_candidates(0, 1);
+    assert_eq!(narrow, vec![0, 1], "{narrow:?}");
+    assert_eq!(
+        scheduled_int(ScheduleSlot::Cell(5), &narrow),
+        Some(narrow[5 % narrow.len()])
+    );
+}
