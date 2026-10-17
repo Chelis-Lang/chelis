@@ -36,9 +36,9 @@ use chelis_runtime::{
     chelis_alloc, chelis_list_from_values, chelis_list_index, chelis_list_len,
     chelis_scalar_from_bits, chelis_string_from_cstr, chelis_tensor, chelis_tensor_begin_write,
     chelis_tensor_borrow_value, chelis_tensor_concat, chelis_tensor_einsum,
-    chelis_tensor_end_write, chelis_tensor_entry_borrow, chelis_tensor_numel, chelis_tensor_rank,
-    chelis_tensor_read_view, chelis_tensor_shape, chelis_tensor_split, chelis_tensor_write_view,
-    chelis_value_box_scalar, chelis_value_take_tensor, CHELIS_DTYPE_F32, CHELIS_DTYPE_I64,
+    chelis_tensor_end_write, chelis_tensor_numel, chelis_tensor_rank, chelis_tensor_read_view,
+    chelis_tensor_shape, chelis_tensor_split, chelis_tensor_write_view, chelis_value_box_scalar,
+    chelis_value_take_tensor, CHELIS_DTYPE_F32, CHELIS_DTYPE_F64, CHELIS_DTYPE_I64,
 };
 use std::env;
 use std::ffi::CString;
@@ -50,7 +50,8 @@ const CHILD_ENV: &str = "CHELIS_OP33_INT64_EXTENT_CHILD";
 /// band a `usize` fold accepts and an i64 fold rejects. 4e9 * 4e9 = 1.6e19.
 const BAND_EXTENT: i64 = 4_000_000_000;
 
-/// 2^31 * 2^31 = 2^62, a legal i64 count whose f32 byte size (2^64) is not.
+/// 2^31 * 2^31 = 2^62, a legal i64 reduction count whose f32 byte size
+/// (2^64) is not; an einsum streams its reduction, so nothing has that size.
 const BUFFER_BAND_EXTENT: i64 = 1 << 31;
 
 unsafe fn tensor(shape: &[i64], dtype: u8) -> *mut chelis_tensor {
@@ -70,43 +71,6 @@ unsafe fn write_f32(tensor: *mut chelis_tensor, values: &[f32]) {
 unsafe fn read_f32(tensor: *const chelis_tensor) -> Vec<f32> {
     let view = chelis_tensor_read_view(tensor);
     std::slice::from_raw_parts(view.data.cast::<f32>(), view.count as usize).to_vec()
-}
-
-/// A structurally valid carrier that *declares* a large extent and the
-/// matching capacity without materializing it.
-///
-/// The entry-borrow boundary validates the declaration and constructs an
-/// opaque descriptor. Every case built this way must trap before element access, so
-/// the undersized backing buffer is never read; that is the property under
-/// test.
-struct DeclaredCarrier {
-    _data: Box<[f32]>,
-    tensor: *mut chelis_tensor,
-}
-
-unsafe fn declared_carrier(shape: &[i64]) -> DeclaredCarrier {
-    let size = shape
-        .iter()
-        .copied()
-        .try_fold(1_i64, i64::checked_mul)
-        .expect("fixture element count fits i64");
-    let data = vec![0.0_f32; 8].into_boxed_slice();
-    let pointer: *const std::ffi::c_void = if size == 0 {
-        std::ptr::null()
-    } else {
-        data.as_ptr().cast()
-    };
-    let tensor = chelis_tensor_entry_borrow(
-        shape.len() as i32,
-        shape.as_ptr(),
-        CHELIS_DTYPE_F32,
-        pointer,
-        size.checked_mul(4).expect("fixture capacity fits i64"),
-    );
-    DeclaredCarrier {
-        _data: data,
-        tensor,
-    }
 }
 
 unsafe fn einsum(equation: &str, lhs: *const chelis_tensor, rhs: *const chelis_tensor) {
@@ -150,13 +114,6 @@ fn run_case(case: &str) -> ! {
                 let lhs = tensor(&[5_000_000_000, 0], CHELIS_DTYPE_F32);
                 let rhs = tensor(&[5_000_000_000, 0], CHELIS_DTYPE_F32);
                 einsum("az,cw->zw", lhs, rhs);
-            }
-            // Reduction count 2^62 is a legal i64 extent product; the f32
-            // accumulation buffer it names is 2^64 bytes and is not.
-            "einsum-reduction-buffer-byte-size" => {
-                let lhs = declared_carrier(&[BUFFER_BAND_EXTENT, 1]);
-                let rhs = declared_carrier(&[BUFFER_BAND_EXTENT, 1]);
-                einsum("az,cw->zw", lhs.tensor, rhs.tensor);
             }
             // i64::MAX + 1 through the size list.
             "split-size-sum-at-i64-ceiling" => {
@@ -228,10 +185,6 @@ const NEGATIVE_MATRIX: &[(&str, &str)] = &[
     (
         "einsum-reduction-above-host-ceiling",
         "Overflow: einsum reduction extent product exceeds i64",
-    ),
-    (
-        "einsum-reduction-buffer-byte-size",
-        "Overflow: einsum reduction buffer byte size exceeds i64",
     ),
     (
         "split-size-sum-at-i64-ceiling",
@@ -383,6 +336,22 @@ fn legal_products_sums_and_zero_extents_still_execute_exactly() {
             CHELIS_DTYPE_F32,
         );
         assert_eq!(chelis_tensor_numel(empty), 0);
+
+        // einsum (chelis#3805): an empty output over a legal 2^62-product
+        // reduction, whose products would fill 2^64 bytes at f32 and 2^65 at
+        // f64, returns empty: the reduction is streamed and sizes nothing.
+        for accumulator in [CHELIS_DTYPE_F32, CHELIS_DTYPE_F64] {
+            let lhs = tensor(&[BUFFER_BAND_EXTENT, 0], CHELIS_DTYPE_F32);
+            let rhs = tensor(&[BUFFER_BAND_EXTENT, 0], CHELIS_DTYPE_F32);
+            let text = CString::new("az,cw->zw").expect("equation is C-compatible");
+            let empty = chelis_tensor_einsum(
+                chelis_string_from_cstr(text.as_ptr()),
+                lhs,
+                rhs,
+                accumulator,
+            );
+            assert_eq!(chelis_tensor_numel(empty), 0);
+        }
 
         // split: nonnegative sizes summing to the extent, including a zero.
         let source = tensor(&[4, 1], CHELIS_DTYPE_F32);
