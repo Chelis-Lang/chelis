@@ -1342,6 +1342,9 @@ fn reject_export_macro_aliases<'a>(
             "extern",
             "inline",
             "main",
+            // The one admitted attribute keeps its meaning only while its
+            // name is not a macro (see `ADMITTED_NOINLINE`).
+            "noinline",
             "static",
             "typedef",
         ]
@@ -1506,7 +1509,8 @@ fn validate_generated_include_set(source: &str) -> Result<(), GeneratedHeaderErr
 /// changes neither a symbol, a linkage, nor a definition's bytes once sealed,
 /// so the [01-CID-1] export contract does not see it; it only keeps the
 /// compiler from inlining the result-origin helpers at every call site
-/// (chelis#3692).
+/// (chelis#3692). That holds only while `noinline` is not a macro, so
+/// `reject_export_macro_aliases` forbids defining or undefining it.
 const ADMITTED_NOINLINE: &str = "__attribute__((noinline))";
 
 /// Reject every compiler extension and pragma outside the generated-C
@@ -2720,12 +2724,26 @@ mod tests {
         }
     }
 
+    const UNADMITTED_ATTRIBUTE: &str = "unsupported compiler extension `__attribute__` at byte";
+    const UNPARSEABLE: &str = "not structurally parseable before preprocessing";
+
+    /// Seal `private_source` beside one export and require the rejection
+    /// `reason`, so each case shows which check refused it.
+    fn assert_rejected(private_source: &str, reason: &str) {
+        let error = seal_with_private_source(private_source)
+            .err()
+            .unwrap_or_else(|| panic!("the seal admitted:\n{private_source}"));
+        assert!(
+            error.to_string().contains(reason),
+            "{private_source}\nwas rejected for `{error}`, not `{reason}`"
+        );
+    }
+
     /// Every other attribute, spelling, position, and extension stays
     /// rejected, including variants a token-level check could miss.
     #[test]
     fn sealed_artifact_rejects_every_other_attribute_and_extension() {
         let body = "int helper(int x) {\n    return x;\n}\n";
-        let mut cases = Vec::new();
         for attribute in [
             "alias(\"chelis_fn_616c706861\")",
             "visibility(\"default\")",
@@ -2739,58 +2757,95 @@ mod tests {
             "noinline(1)",
             "(noinline)",
             "__noinline__",
-            "noinline,",
         ] {
-            cases.push(format!("static __attribute__(({attribute})) {body}"));
-        }
-        cases.extend(
-            [
-                // Extra or differently spaced tokens.
-                "static __attribute__ ((noinline)) ",
-                "static __attribute__(( noinline )) ",
-                "static __attribute__((noinline )) ",
-                "static __attribute__(\n(noinline)) ",
-                "static __attribute__/**/((noinline)) ",
-                "static __attribute__((noinline)/* c */) ",
-                "static __attribute__((noinline))__attribute__((used)) ",
-                // Line splices and trigraph splices inside the specifier.
-                "static __attri\\\nbute__((noinline)) ",
-                "static __attribute__((noin\\\nline)) ",
-                "static __attribute__((noinline))??/\n ",
-                "static __attri??/\nbute__((noinline)) ",
-                // Not a translation-unit-private definition.
-                "__attribute__((noinline)) ",
-                "extern __attribute__((noinline)) ",
-                // Other extensions.
-                "static __declspec(noinline) ",
-                "static __attribute((noinline)) ",
-            ]
-            .map(|prefix| format!("{prefix}{body}")),
-        );
-        cases.extend(
-            [
-                // A declaration without a definition.
-                "static __attribute__((noinline)) int helper(int x);\nstatic int helper(int x) {\n    return x;\n}\n",
-                // A variable.
-                "static __attribute__((noinline)) int counter = 0;\nstatic int helper(int x) {\n    return x + counter;\n}\n",
-                // A parameter and a body-local declaration.
-                "static int helper(__attribute__((noinline)) int x) {\n    return x;\n}\n",
-                "static void release(int *x) {\n    (void)x;\n}\nstatic int helper(int x) {\n    __attribute__((cleanup(release))) int y = x;\n    return y;\n}\n",
-                // A macro that spells the specifier, used or not.
-                "#define NOINLINE __attribute__((noinline))\nstatic NOINLINE int helper(int x) {\n    return x;\n}\n",
-                "#define NOINLINE __attribute__((noinline))\nstatic int helper(int x) {\n    return x;\n}\n",
-                // The other extension spellings.
-                "_Pragma(\"GCC optimize(\\\"O0\\\")\")\nstatic int helper(int x) {\n    return x;\n}\n",
-                "static int helper(int x) asm(\"other\");\nstatic int helper(int x) {\n    return x;\n}\n",
-                "static int helper(int x) {\n    __asm__(\"\");\n    return x;\n}\n",
-            ]
-            .map(str::to_string),
-        );
-        for private_source in &cases {
-            assert!(
-                seal_with_private_source(private_source).is_err(),
-                "the seal admitted:\n{private_source}"
+            assert_rejected(
+                &format!("static __attribute__(({attribute})) {body}"),
+                UNADMITTED_ATTRIBUTE,
             );
+        }
+        for (prefix, reason) in [
+            // Extra or differently spaced tokens.
+            ("static __attribute__((noinline,)) ", UNPARSEABLE),
+            ("static __attribute__ ((noinline)) ", UNADMITTED_ATTRIBUTE),
+            ("static __attribute__(( noinline )) ", UNADMITTED_ATTRIBUTE),
+            ("static __attribute__((noinline )) ", UNADMITTED_ATTRIBUTE),
+            ("static __attribute__(\n(noinline)) ", UNADMITTED_ATTRIBUTE),
+            (
+                "static __attribute__/**/((noinline)) ",
+                UNADMITTED_ATTRIBUTE,
+            ),
+            (
+                "static __attribute__((noinline)/* c */) ",
+                UNADMITTED_ATTRIBUTE,
+            ),
+            (
+                "static __attribute__((noinline))__attribute__((used)) ",
+                UNADMITTED_ATTRIBUTE,
+            ),
+            // Line splices and trigraph splices inside the specifier.
+            ("static __attri\\\nbute__((noinline)) ", UNPARSEABLE),
+            ("static __attribute__((noin\\\nline)) ", UNPARSEABLE),
+            ("static __attribute__((noinline))??/\n ", UNPARSEABLE),
+            ("static __attri??/\nbute__((noinline)) ", UNPARSEABLE),
+            // Not a translation-unit-private definition.
+            ("__attribute__((noinline)) ", UNADMITTED_ATTRIBUTE),
+            ("extern __attribute__((noinline)) ", UNADMITTED_ATTRIBUTE),
+            // Other extensions.
+            (
+                "static __declspec(noinline) ",
+                "unsupported compiler extension `__declspec`",
+            ),
+            (
+                "static __attribute((noinline)) ",
+                "unsupported compiler extension `__attribute`",
+            ),
+        ] {
+            assert_rejected(&format!("{prefix}{body}"), reason);
+        }
+        for (private_source, reason) in [
+            // A declaration without a definition.
+            (
+                "static __attribute__((noinline)) int helper(int x);\nstatic int helper(int x) {\n    return x;\n}\n",
+                UNADMITTED_ATTRIBUTE,
+            ),
+            // A variable.
+            (
+                "static __attribute__((noinline)) int counter = 0;\nstatic int helper(int x) {\n    return x + counter;\n}\n",
+                UNADMITTED_ATTRIBUTE,
+            ),
+            // A parameter and a body-local declaration.
+            (
+                "static int helper(__attribute__((noinline)) int x) {\n    return x;\n}\n",
+                UNADMITTED_ATTRIBUTE,
+            ),
+            (
+                "static void release(int *x) {\n    (void)x;\n}\nstatic int helper(int x) {\n    __attribute__((cleanup(release))) int y = x;\n    return y;\n}\n",
+                UNADMITTED_ATTRIBUTE,
+            ),
+            // A macro that spells the specifier, used or not.
+            (
+                "#define NOINLINE __attribute__((noinline))\nstatic NOINLINE int helper(int x) {\n    return x;\n}\n",
+                UNPARSEABLE,
+            ),
+            (
+                "#define NOINLINE __attribute__((noinline))\nstatic int helper(int x) {\n    return x;\n}\n",
+                UNADMITTED_ATTRIBUTE,
+            ),
+            // The other extension spellings.
+            (
+                "_Pragma(\"GCC optimize(\\\"O0\\\")\")\nstatic int helper(int x) {\n    return x;\n}\n",
+                "unsupported compiler extension `_Pragma`",
+            ),
+            (
+                "static int helper(int x) asm(\"other\");\nstatic int helper(int x) {\n    return x;\n}\n",
+                "unsupported compiler extension `asm`",
+            ),
+            (
+                "static int helper(int x) {\n    __asm__(\"\");\n    return x;\n}\n",
+                "unsupported compiler extension `__asm__`",
+            ),
+        ] {
+            assert_rejected(private_source, reason);
         }
         // On the export itself: externally linked, so never admitted.
         let (header, export) = raw_export(
@@ -2801,25 +2856,25 @@ mod tests {
         );
         let error = seal_generated_artifact("demo", &format!("{export}\n"), &header)
             .expect_err("an exported definition cannot carry the specifier");
-        assert!(error.to_string().contains("__attribute__"), "{error}");
+        assert!(error.to_string().contains(UNADMITTED_ATTRIBUTE), "{error}");
     }
 
-    /// An attribute the parse does not admit is rejected as an extension,
-    /// whatever other check would also catch it.
+    /// `noinline` inside the admitted bytes is an ordinary token, so a macro
+    /// could rebind the specifier to any other attribute. Generated source
+    /// may neither define nor undefine it.
     #[test]
-    fn unadmitted_noinline_spellings_report_the_extension() {
-        for private_source in [
-            "static __attribute__ ((noinline)) int helper(int x) {\n    return x;\n}\n",
-            "static __attribute__((noinline)) int counter = 0;\nstatic int helper(int x) {\n    return x + counter;\n}\n",
-            "static __attribute__((noinline)) int helper(int x);\nstatic int helper(int x) {\n    return x;\n}\n",
+    fn sealed_artifact_rejects_a_preprocessor_rebinding_of_noinline() {
+        let helper = "static __attribute__((noinline)) int helper(int x) {\n    return x;\n}\n";
+        for rebinding in [
+            "#define noinline constructor\n",
+            "#define noinline section(\".init_array\")\n",
+            "#define noinline used, visibility(\"default\")\n",
+            "#undef noinline\n#define noinline weak\n",
+            "#define noinline\n",
         ] {
-            let error = seal_with_private_source(private_source)
-                .expect_err("the specifier is not admitted here");
-            assert!(
-                error
-                    .to_string()
-                    .contains("unsupported compiler extension `__attribute__`"),
-                "{private_source}: {error}"
+            assert_rejected(
+                &format!("{rebinding}{helper}"),
+                "preprocessor-rebinds exported declaration token `noinline`",
             );
         }
     }
