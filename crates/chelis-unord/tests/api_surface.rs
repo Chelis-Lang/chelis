@@ -188,6 +188,45 @@ fn public_inherent_api_is_exact() {
                 .map(str::to_owned),
             ),
         ),
+        // A persistent map's copy shares its storage; its order exit is the
+        // same `to_sorted` the unordered collections have.
+        (
+            "PersistentMap",
+            BTreeSet::from(
+                [
+                    "clear",
+                    "contains_key",
+                    "get",
+                    "get_mut",
+                    "get_or_insert_with",
+                    "insert",
+                    "into_sorted",
+                    "is_empty",
+                    "len",
+                    "new",
+                    "remove",
+                    "to_sorted",
+                ]
+                .map(str::to_owned),
+            ),
+        ),
+        (
+            "PersistentSet",
+            BTreeSet::from(
+                [
+                    "clear",
+                    "contains",
+                    "insert",
+                    "into_sorted",
+                    "is_empty",
+                    "len",
+                    "new",
+                    "remove",
+                    "to_sorted",
+                ]
+                .map(str::to_owned),
+            ),
+        ),
     ]);
 
     for (type_name, methods) in expected {
@@ -239,15 +278,36 @@ fn public_trait_api_is_exact() {
         )
     );
     assert_eq!(
+        public_traits("PersistentMap"),
+        BTreeSet::from(
+            [
+                "Clone",
+                "Debug",
+                "Default",
+                "Deserialize",
+                "Extend",
+                "FromIterator",
+                "Serialize",
+            ]
+            .map(str::to_owned)
+        )
+    );
+    assert_eq!(
+        public_traits("PersistentSet"),
+        BTreeSet::from(["Clone", "Debug", "Default", "Extend", "FromIterator"].map(str::to_owned))
+    );
+    assert_eq!(
         public_traits("ScopedMap"),
         BTreeSet::from(["Debug", "Default", "FromIterator"].map(str::to_owned))
     );
 }
 
-/// The six types the pins above cover.
-const PINNED_TYPES: [&str; 6] = [
+/// The eight types the pins above cover.
+const PINNED_TYPES: [&str; 8] = [
     "Entry",
     "OccupiedEntry",
+    "PersistentMap",
+    "PersistentSet",
     "ScopedMap",
     "UnordMap",
     "UnordSet",
@@ -279,7 +339,7 @@ fn impl_self_name(mut ty: &Type) -> Option<String> {
 fn the_public_surface_is_closed_by_construction() {
     // Two earlier rounds repaired this test by adding the filter case the
     // previous round escaped through. This one enumerates by exclusion
-    // instead: every public item must be one of the six pinned types, and
+    // instead: every public item must be one of the eight pinned types, and
     // every `impl` must be on one of them, so there is no shape left to add.
     let source = fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/lib.rs"))
         .expect("read chelis-unord source");
@@ -288,7 +348,7 @@ fn the_public_surface_is_closed_by_construction() {
 
     // An impl on a private type cannot be a public exit, so those are allowed;
     // the closure comes from the public-item check below, which admits only
-    // the pinned six.
+    // the pinned eight.
     let private_types: BTreeSet<String> = syntax
         .items
         .iter()
@@ -339,7 +399,7 @@ fn the_public_surface_is_closed_by_construction() {
         }
         assert!(
             matches!(kind, "struct" | "enum"),
-            "unexpected public {kind} `{name}`: the crate's public surface is the six \
+            "unexpected public {kind} `{name}`: the crate's public surface is the eight \
              pinned types and nothing else"
         );
         public_types.insert(name);
