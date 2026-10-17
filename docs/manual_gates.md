@@ -168,6 +168,10 @@ execution on the same hardware tuple, first build the check, then run
 the rebuild compares its new output with the cached result. Neither operation
 turns a Darwin run into a Linux verdict.
 
+The same gate exists as `.#checks.aarch64-linux.lane-check`. Run it on a native
+arm64 Linux builder with sandboxing. The expected result and the rebuild
+procedure are the same. Each verdict applies only to its own system.
+
 ## Developer-environment acceptance gates
 
 These executable/manual gates are not ignored Rust tests. Run them from one
