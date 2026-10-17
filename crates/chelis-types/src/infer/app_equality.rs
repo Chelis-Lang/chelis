@@ -17,6 +17,7 @@
 
 use super::*;
 use crate::adt::AdtDef;
+use std::sync::Arc;
 
 /// The verdict [05-OP-36]'s domain gives one operand type.
 pub(super) enum EqualityDomain {
@@ -76,13 +77,13 @@ fn reach(ty: &Type, summaries: &BTreeMap<String, Summary>) -> Reach {
                 continue;
             }
             Type::Adt(name, args) => type_arguments(&name, &args),
-            Type::KindedAdt(name, args) => (name, args),
+            Type::KindedAdt(name, args) => (name, args.to_vec()),
             Type::Tuple(items) => {
-                pending.extend(items.into_iter().rev());
+                pending.extend(items.iter().rev().cloned());
                 continue;
             }
             Type::Ref(inner) => {
-                pending.push(*inner);
+                pending.push(Arc::unwrap_or_clone(inner));
                 continue;
             }
             Type::Var(var) => {
@@ -122,7 +123,7 @@ fn reachable_definitions<'a>(ty: &Type, adt_reg: &'a AdtRegistry) -> BTreeMap<St
     while let Some(ty) = pending.pop() {
         match ty {
             Type::Adt(name, args) => {
-                pending.extend(args);
+                pending.extend(args.iter().cloned());
                 if let Some(def) = adt_reg.lookup(&name)
                     && !definitions.contains_key(&name)
                 {
@@ -135,8 +136,8 @@ fn reachable_definitions<'a>(ty: &Type, adt_reg: &'a AdtRegistry) -> BTreeMap<St
                 }
             }
             Type::KindedAdt(name, args) => {
-                pending.extend(args.into_iter().filter_map(|arg| match arg {
-                    NominalArg::Type(argument) => Some(argument),
+                pending.extend(args.iter().filter_map(|arg| match arg {
+                    NominalArg::Type(argument) => Some(argument.clone()),
                     NominalArg::Dimension(_) => None,
                 }));
                 if let Some(def) = adt_reg.lookup(&name)
@@ -150,8 +151,8 @@ fn reachable_definitions<'a>(ty: &Type, adt_reg: &'a AdtRegistry) -> BTreeMap<St
                     definitions.insert(name, def);
                 }
             }
-            Type::Tuple(items) => pending.extend(items),
-            Type::Ref(inner) => pending.push(*inner),
+            Type::Tuple(items) => pending.extend(items.iter().cloned()),
+            Type::Ref(inner) => pending.push(Arc::unwrap_or_clone(inner)),
             // A function is incomparable whatever it mentions.
             Type::Fn(..)
             | Type::Prim(_)

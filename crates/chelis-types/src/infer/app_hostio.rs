@@ -6,9 +6,9 @@
 use super::*;
 
 fn csv_table_ty() -> Type {
-    Type::Adt(
+    Type::adt(
         "List".to_string(),
-        vec![Type::Adt(
+        vec![Type::adt(
             "Dict".to_string(),
             vec![Type::Prim(Prim::String), Type::Prim(Prim::String)],
         )],
@@ -223,7 +223,7 @@ pub(super) fn check_csv_builtin_signature(
         }
         "to_csv" => Type::Prim(Prim::String),
         "csv_nrows" => Type::Prim(Prim::Int64),
-        "csv_cols" => Type::Adt("List".to_string(), vec![Type::Prim(Prim::String)]),
+        "csv_cols" => Type::adt("List".to_string(), vec![Type::Prim(Prim::String)]),
         "csv_f64s" | "csv_ints" | "csv_strs" => {
             require_slot!(
                 1,
@@ -231,9 +231,9 @@ pub(super) fn check_csv_builtin_signature(
                 "a column-name string second argument"
             );
             match fname {
-                "csv_f64s" => Type::Adt("List".to_string(), vec![Type::Prim(Prim::F64)]),
-                "csv_ints" => Type::Adt("List".to_string(), vec![Type::Prim(Prim::Int64)]),
-                _ => Type::Adt("List".to_string(), vec![Type::Prim(Prim::String)]),
+                "csv_f64s" => Type::adt("List".to_string(), vec![Type::Prim(Prim::F64)]),
+                "csv_ints" => Type::adt("List".to_string(), vec![Type::Prim(Prim::Int64)]),
+                _ => Type::adt("List".to_string(), vec![Type::Prim(Prim::String)]),
             }
         }
         "csv_f64" | "csv_int" | "csv_str" => {
@@ -311,7 +311,7 @@ pub(super) fn infer_mmap_tensor_app(
     if let Some(err) = propagate_if_error(arg_tys.iter()) {
         return err;
     }
-    let mapped = Type::Adt("MappedFile".to_string(), Vec::new());
+    let mapped = Type::adt("MappedFile".to_string(), Vec::new());
     let slots = [
         (&mapped, "a MappedFile handle"),
         (&Type::Prim(Prim::Int64), "an i64 byte offset"),
@@ -386,9 +386,9 @@ pub(super) fn infer_mmap_tensor_app(
         _ => Dim::Wildcard,
     };
     let result = Type::Tensor(vec![extent], precision);
-    let signature = Type::Fn(
+    let signature = Type::function(
         vec![mapped, Type::Prim(Prim::Int64), Type::Prim(Prim::Int64)],
-        Box::new(result.clone()),
+        result.clone(),
     );
     if let Err(error) = unify(&callee_ty, &signature, subst) {
         return report_at_check_site(errors, error.into(), CheckSite::Expr(expr));

@@ -6057,7 +6057,7 @@ fn collect_prelude_numeric_prims(ty: &chelis_types::types::Type, prims: &mut BTr
             }
         }
         Type::Adt(_, args) | Type::Tuple(args) | Type::Fn(args, _) => {
-            for arg in args {
+            for arg in args.iter() {
                 collect_prelude_numeric_prims(arg, prims);
             }
             if let Type::Fn(_, ret) = ty {

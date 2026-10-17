@@ -5,6 +5,7 @@
 use chelis_deep::DeepTag;
 use chelis_unord::{UnordMap, UnordSet};
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use chelis_deep::ast as deep;
 use serde::{Deserialize, Serialize};
@@ -338,7 +339,7 @@ impl AdtRegistry {
             })
             .collect();
         let adt_type = if param_kinds.contains(&NominalParamKind::Dimension) {
-            Type::KindedAdt(name.clone(), param_args.clone())
+            Type::kinded_adt(name.clone(), param_args.clone())
         } else {
             Type::Adt(
                 name.clone(),
@@ -363,7 +364,7 @@ impl AdtRegistry {
                             .iter()
                             .map(|(_, field_type)| field_type.clone())
                             .collect(),
-                        Box::new(adt_type.clone()),
+                        Arc::new(adt_type.clone()),
                     )
                 };
                 (
@@ -745,7 +746,7 @@ impl AdtRegistry {
                     .collect();
 
                 if seen.contains(name) {
-                    return Type::Adt(name.clone(), resolved_args);
+                    return Type::adt(name.clone(), resolved_args);
                 }
 
                 if let Some(expanded) = self.instantiate_alias(name, &resolved_args) {
@@ -754,7 +755,7 @@ impl AdtRegistry {
                     seen.remove(name);
                     resolved
                 } else {
-                    Type::Adt(name.clone(), resolved_args)
+                    Type::adt(name.clone(), resolved_args)
                 }
             }
             Type::KindedAdt(name, args) => {
@@ -769,7 +770,7 @@ impl AdtRegistry {
                     .collect::<Vec<_>>();
 
                 if seen.contains(name) {
-                    return Type::KindedAdt(name.clone(), resolved_args);
+                    return Type::kinded_adt(name.clone(), resolved_args);
                 }
 
                 if let Some(expanded) = self.instantiate_nominal_alias(name, &resolved_args) {
@@ -778,14 +779,14 @@ impl AdtRegistry {
                     seen.remove(name);
                     resolved
                 } else {
-                    Type::KindedAdt(name.clone(), resolved_args)
+                    Type::kinded_adt(name.clone(), resolved_args)
                 }
             }
             Type::Fn(args, ret) => Type::Fn(
                 args.iter()
                     .map(|a| self.expand_aliases_inner(a, seen))
                     .collect(),
-                Box::new(self.expand_aliases_inner(ret, seen)),
+                Arc::new(self.expand_aliases_inner(ret, seen)),
             ),
             Type::Tuple(ts) => Type::Tuple(
                 ts.iter()
@@ -861,9 +862,7 @@ pub(crate) fn substitute_nominal_type(
 ) -> Type {
     match ty {
         Type::Var(tv) => type_subst.get(tv).cloned().unwrap_or(Type::Var(*tv)),
-        Type::Ref(inner) => Type::Ref(Box::new(substitute_nominal_type(
-            inner, type_subst, dim_subst,
-        ))),
+        Type::Ref(inner) => Type::reference(substitute_nominal_type(inner, type_subst, dim_subst)),
         Type::Tensor(dims, precision) => {
             let precision = match precision {
                 TensorPrec::Var(var) => match type_subst.get(var) {
@@ -887,7 +886,7 @@ pub(crate) fn substitute_nominal_type(
             args.iter()
                 .map(|arg| substitute_nominal_type(arg, type_subst, dim_subst))
                 .collect(),
-            Box::new(substitute_nominal_type(ret, type_subst, dim_subst)),
+            Arc::new(substitute_nominal_type(ret, type_subst, dim_subst)),
         ),
         Type::Adt(name, args) => Type::Adt(
             name.clone(),
@@ -933,15 +932,12 @@ mod alias_syntax_materialization_tests {
             vec!["n".into()],
             vec![NominalParamKind::Dimension],
             vec![NominalArg::Dimension(Dim::Var(DimVar(77)))],
-            Type::Fn(
-                vec![Type::Ref(Box::new(Type::Tensor(
+            Type::function(
+                vec![Type::reference(Type::Tensor(
                     vec![Dim::Wildcard],
                     TensorPrec::Concrete(Prim::F64),
-                )))],
-                Box::new(Type::Tensor(
-                    vec![Dim::Var(DimVar(77))],
-                    TensorPrec::Concrete(Prim::Bool),
-                )),
+                ))],
+                Type::Tensor(vec![Dim::Var(DimVar(77))], TensorPrec::Concrete(Prim::Bool)),
             ),
         );
         registry.register_alias(
@@ -1057,14 +1053,14 @@ mod alias_syntax_materialization_tests {
             Vec::new(),
             Vec::new(),
             Vec::new(),
-            Type::Ref(Box::new(Type::Adt("B".into(), Vec::new()))),
+            Type::reference(Type::adt("B".into(), Vec::new())),
         );
         registry.register_alias(
             "B".into(),
             Vec::new(),
             Vec::new(),
             Vec::new(),
-            Type::Adt("A".into(), Vec::new()),
+            Type::adt("A".into(), Vec::new()),
         );
         assert!(
             registry
@@ -1096,12 +1092,9 @@ mod alias_syntax_materialization_tests {
                 NominalArg::Type(Type::Var(TypeVar(77))),
                 NominalArg::Dimension(Dim::Var(DimVar(99))),
             ],
-            Type::Fn(
-                vec![Type::Ref(Box::new(Type::Var(TypeVar(77))))],
-                Box::new(Type::Tensor(
-                    vec![Dim::Var(DimVar(99))],
-                    TensorPrec::Concrete(Prim::Bool),
-                )),
+            Type::function(
+                vec![Type::reference(Type::Var(TypeVar(77)))],
+                Type::Tensor(vec![Dim::Var(DimVar(99))], TensorPrec::Concrete(Prim::Bool)),
             ),
         );
         registry
@@ -1253,9 +1246,9 @@ mod alias_syntax_materialization_tests {
             Vec::new(),
             Vec::new(),
             Vec::new(),
-            Type::Tuple(vec![
+            Type::tuple(vec![
                 Type::Prim(Prim::Int64),
-                Type::Adt("R".into(), Vec::new()),
+                Type::adt("R".into(), Vec::new()),
             ]),
         );
         registry.register_alias(
@@ -1263,11 +1256,11 @@ mod alias_syntax_materialization_tests {
             vec!["a".into()],
             vec![NominalParamKind::Type],
             vec![NominalArg::Type(Type::Var(TypeVar(17)))],
-            Type::Tuple(vec![
+            Type::tuple(vec![
                 Type::Var(TypeVar(17)),
-                Type::Adt(
+                Type::adt(
                     "Grow".into(),
-                    vec![Type::Tuple(vec![
+                    vec![Type::tuple(vec![
                         Type::Var(TypeVar(17)),
                         Type::Var(TypeVar(17)),
                     ])],
@@ -1305,14 +1298,14 @@ mod alias_syntax_materialization_tests {
             Vec::new(),
             Vec::new(),
             Vec::new(),
-            Type::Ref(Box::new(Type::Adt("B".into(), Vec::new()))),
+            Type::reference(Type::adt("B".into(), Vec::new())),
         );
         registry.register_alias(
             "B".into(),
             Vec::new(),
             Vec::new(),
             Vec::new(),
-            Type::Adt("A".into(), Vec::new()),
+            Type::adt("A".into(), Vec::new()),
         );
         registry.register_alias(
             "Broken".into(),

@@ -4,6 +4,7 @@
 //! The extraction preserves control flow and diagnostic order.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use super::*;
 
@@ -21,7 +22,7 @@ pub(super) fn auto_borrow_call_arg_types(
         .map(
             |(index, actual)| match params.get(index).map(|param| subst.apply(param)) {
                 Some(Type::Ref(_)) if !matches!(subst.apply(&actual), Type::Ref(_)) => {
-                    Type::Ref(Box::new(actual))
+                    Type::reference(actual)
                 }
                 _ => actual,
             },
@@ -83,7 +84,7 @@ pub(super) fn unify_checked_call_contract(
 ) -> Result<Type, Type> {
     let ret_ty = vg.fresh_type();
     let unify_arg_tys = auto_borrow_call_arg_types(func_ty, arg_tys.to_vec(), subst);
-    let expected_fn = Type::Fn(unify_arg_tys.clone(), Box::new(ret_ty.clone()));
+    let expected_fn = Type::function(unify_arg_tys.clone(), ret_ty.clone());
 
     match unify(func_ty, &expected_fn, subst) {
         Ok(()) => Ok(ret_ty),
@@ -318,7 +319,9 @@ fn mismatching_declared_precision(
         (Type::Adt(expected_name, expected_args), Type::Adt(actual_name, actual_args))
             if expected_name == actual_name && expected_args.len() == actual_args.len() =>
         {
-            for (index, (expected, actual)) in expected_args.iter().zip(actual_args).enumerate() {
+            for (index, (expected, actual)) in
+                expected_args.iter().zip(actual_args.iter()).enumerate()
+            {
                 components.push(if expected_name == "List" {
                     "List element".to_string()
                 } else {
@@ -332,7 +335,7 @@ fn mismatching_declared_precision(
             None
         }
         (Type::Tuple(expected), Type::Tuple(actual)) if expected.len() == actual.len() => {
-            for (index, (expected, actual)) in expected.iter().zip(actual).enumerate() {
+            for (index, (expected, actual)) in expected.iter().zip(actual.iter()).enumerate() {
                 components.push(format!("tuple component {}", index + 1));
                 if let Some(pair) = mismatching_declared_precision(expected, actual, components) {
                     return Some(pair);
@@ -400,7 +403,9 @@ fn mismatching_tensor_dimension(
         (Type::Adt(expected_name, expected_args), Type::Adt(actual_name, actual_args))
             if expected_name == actual_name && expected_args.len() == actual_args.len() =>
         {
-            for (index, (expected, actual)) in expected_args.iter().zip(actual_args).enumerate() {
+            for (index, (expected, actual)) in
+                expected_args.iter().zip(actual_args.iter()).enumerate()
+            {
                 let component = if expected_name == "List" && index == 0 {
                     "List element".to_string()
                 } else {
@@ -419,7 +424,9 @@ fn mismatching_tensor_dimension(
             Type::KindedAdt(expected_name, expected_args),
             Type::KindedAdt(actual_name, actual_args),
         ) if expected_name == actual_name && expected_args.len() == actual_args.len() => {
-            for (index, (expected, actual)) in expected_args.iter().zip(actual_args).enumerate() {
+            for (index, (expected, actual)) in
+                expected_args.iter().zip(actual_args.iter()).enumerate()
+            {
                 if let (NominalArg::Type(expected), NominalArg::Type(actual)) = (expected, actual) {
                     components.push(format!("{expected_name} type argument {}", index + 1));
                     let mismatch =
@@ -433,7 +440,7 @@ fn mismatching_tensor_dimension(
             None
         }
         (Type::Tuple(expected), Type::Tuple(actual)) if expected.len() == actual.len() => {
-            for (index, (expected, actual)) in expected.iter().zip(actual).enumerate() {
+            for (index, (expected, actual)) in expected.iter().zip(actual.iter()).enumerate() {
                 components.push(format!("tuple element {}", index + 1));
                 let mismatch = mismatching_tensor_dimension(expected, actual, subst, components);
                 components.pop();
@@ -505,7 +512,7 @@ pub(super) fn shape_a_relaxed_return(
     }
     Some(Type::Fn(
         decl_params.clone(),
-        Box::new(Type::Ref(Box::new(decl_ret.as_ref().clone()))),
+        Arc::new(Type::reference(decl_ret.as_ref().clone())),
     ))
 }
 
@@ -882,15 +889,18 @@ pub(super) fn types_structurally_equal(a: &Type, b: &Type) -> bool {
         (Type::KindedAdt(n1, a1), Type::KindedAdt(n2, a2)) => {
             n1 == n2
                 && a1.len() == a2.len()
-                && a1.iter().zip(a2).all(|(left, right)| match (left, right) {
-                    (NominalArg::Type(left), NominalArg::Type(right)) => {
-                        types_structurally_equal(left, right)
-                    }
-                    (NominalArg::Dimension(left), NominalArg::Dimension(right)) => {
-                        dims_identical(left, right)
-                    }
-                    _ => false,
-                })
+                && a1
+                    .iter()
+                    .zip(a2.iter())
+                    .all(|(left, right)| match (left, right) {
+                        (NominalArg::Type(left), NominalArg::Type(right)) => {
+                            types_structurally_equal(left, right)
+                        }
+                        (NominalArg::Dimension(left), NominalArg::Dimension(right)) => {
+                            dims_identical(left, right)
+                        }
+                        _ => false,
+                    })
         }
         (Type::Fn(p1, r1), Type::Fn(p2, r2)) => {
             p1.len() == p2.len()

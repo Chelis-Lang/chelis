@@ -4,6 +4,7 @@
 //! The extraction preserves control flow and diagnostic order.
 
 use super::*;
+use std::sync::Arc;
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn infer_grad(
@@ -56,7 +57,7 @@ pub(super) fn infer_grad(
                 // so application can bind the types before cotangent selection.
                 // This also covers recursive-group inference (chelis#2626).
                 GradDecision::Awaits { operand, awaited } => {
-                    let published = Type::Fn(args.clone(), Box::new(vg.fresh_type()));
+                    let published = Type::Fn(args.clone(), Arc::new(vg.fresh_type()));
                     let mut operands = vec![operand];
                     operands.extend(awaited);
                     product.defer_shape_check(
@@ -215,7 +216,7 @@ fn grad_function_type(
     if !grad_output_supported(ret) {
         return Err(grad_output_rejection(ret));
     }
-    grad_result_type(args, wrt, adt_reg).map(|grad_ret| Type::Fn(args.to_vec(), Box::new(grad_ret)))
+    grad_result_type(args, wrt, adt_reg).map(|grad_ret| Type::function(args.to_vec(), grad_ret))
 }
 
 fn grad_output_rejection(ret: &Type) -> Box<CheckError> {
@@ -293,7 +294,7 @@ fn grad_result_type(
     Ok(match targets.as_slice() {
         [] => Type::Unit,
         [single] => single.clone(),
-        _ => Type::Tuple(targets),
+        _ => Type::tuple(targets),
     })
 }
 
@@ -425,7 +426,7 @@ pub(super) fn grad_argument_type(arg: &Type, adt_reg: &AdtRegistry) -> Option<Ty
             // A recursively all-discrete List is forward-only.
             Type::Adt(name, args) if name == "List" && args.len() == 1 => {
                 let (element, has_float) = cotangent(&args[0], adt_reg, visiting);
-                (Type::Adt(name.clone(), vec![element]), has_float)
+                (Type::adt(name.clone(), vec![element]), has_float)
             }
             Type::Tuple(items) => {
                 let mapped = items
@@ -630,7 +631,7 @@ pub(super) fn infer_vmap(
             );
 
             match (args, ret) {
-                (Ok(args), Ok(ret)) => Type::Fn(args, Box::new(ret)),
+                (Ok(args), Ok(ret)) => Type::function(args, ret),
                 (Err(message), _) | (_, Err(message)) => report(
                     errors,
                     CheckError::new(
@@ -665,11 +666,11 @@ fn vmap_provisional_type(source: &Type, vg: &mut VarGen) -> Type {
                     // Publish the known borrow before an application can
                     // bind this parameter. Ordinary calls auto-borrow an
                     // owned actual only when the formal is already Ref.
-                    Type::Ref(_) => Type::Ref(Box::new(vg.fresh_type())),
+                    Type::Ref(_) => Type::reference(vg.fresh_type()),
                     _ => vg.fresh_type(),
                 })
                 .collect(),
-            Box::new(vg.fresh_type()),
+            Arc::new(vg.fresh_type()),
         ),
         Type::Var(_) => vg.fresh_type(),
         _ => unreachable!("only function and variable types defer vmap"),
@@ -774,14 +775,14 @@ pub(super) fn vmap_transform_param_type(
     mapped_axis_renaming: &mut UnordMap<DimVar, DimVar>,
 ) -> Result<Type, String> {
     match ty {
-        Type::Ref(inner) => Ok(Type::Ref(Box::new(vmap_transform_param_type(
+        Type::Ref(inner) => Ok(Type::reference(vmap_transform_param_type(
             inner,
             axis,
             batch_var,
             vg,
             subst,
             mapped_axis_renaming,
-        )?))),
+        )?)),
         Type::Tensor(dims, precision) => {
             let dims = vmap_transform_dims(dims, axis, batch_var, vg, subst, mapped_axis_renaming)?;
             Ok(Type::Tensor(dims, precision.clone()))
@@ -823,14 +824,14 @@ pub(super) fn vmap_transform_result_type(
     mapped_axis_renaming: &mut UnordMap<DimVar, DimVar>,
 ) -> Result<Type, String> {
     match ty {
-        Type::Ref(inner) => Ok(Type::Ref(Box::new(vmap_transform_result_type(
+        Type::Ref(inner) => Ok(Type::reference(vmap_transform_result_type(
             inner,
             axis,
             batch_var,
             vg,
             subst,
             mapped_axis_renaming,
-        )?))),
+        )?)),
         Type::Prim(precision) => Ok(Type::Tensor(
             vec![Dim::Var(batch_var)],
             TensorPrec::Concrete(*precision),
@@ -896,8 +897,8 @@ mod grad_argument_type_tests {
     #[test]
     fn list_cotangent_recurses_and_preserves_the_container_shape() {
         let registry = AdtRegistry::default();
-        let floats = Type::Adt("List".to_string(), vec![Type::Prim(Prim::F32)]);
-        let nested = Type::Adt("List".to_string(), vec![floats.clone()]);
+        let floats = Type::adt("List".to_string(), vec![Type::Prim(Prim::F32)]);
+        let nested = Type::adt("List".to_string(), vec![floats.clone()]);
 
         assert_eq!(grad_argument_type(&floats, &registry), Some(floats));
         assert_eq!(grad_argument_type(&nested, &registry), Some(nested));
@@ -906,7 +907,7 @@ mod grad_argument_type_tests {
     #[test]
     fn recursively_all_discrete_list_is_not_a_gradient_target() {
         let registry = AdtRegistry::default();
-        let ints = Type::Adt("List".to_string(), vec![Type::Prim(Prim::Int64)]);
+        let ints = Type::adt("List".to_string(), vec![Type::Prim(Prim::Int64)]);
 
         assert_eq!(grad_argument_type(&ints, &registry), None);
     }

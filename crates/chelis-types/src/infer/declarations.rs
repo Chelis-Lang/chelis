@@ -338,7 +338,7 @@ pub(super) fn infer_signature_metadata_with_context_and_headers(
         let recursive_cycle = recursive_members.contains(name);
         let all_written_by_defsig =
             defsig_names.contains(name) && param_infos.iter().all(|(_, written)| !*written);
-        let mut display_args = checked_args.clone();
+        let mut display_args = checked_args.to_vec();
         let mut params = Vec::new();
 
         for (index, (pname, param_written)) in param_infos.iter().enumerate() {
@@ -363,7 +363,7 @@ pub(super) fn infer_signature_metadata_with_context_and_headers(
                     errors,
                 );
             let display_type = if inferred_read_only {
-                Type::Ref(Box::new(checked_type.clone()))
+                Type::reference(checked_type.clone())
             } else {
                 checked_type.clone()
             };
@@ -380,7 +380,7 @@ pub(super) fn infer_signature_metadata_with_context_and_headers(
             });
         }
 
-        let display_signature = Type::Fn(display_args, checked_ret);
+        let display_signature = Type::Fn(display_args.into(), checked_ret);
         available_signatures.insert(name.to_string(), display_signature.clone());
         functions.insert(
             name.to_string(),

@@ -56,6 +56,7 @@
 //!    the member's published signature to fit a reference.
 
 use super::*;
+use std::sync::Arc;
 
 /// One in-group reference to a member whose header omits a type.
 #[derive(Clone)]
@@ -1077,15 +1078,15 @@ impl Renaming {
 fn renamed(ty: &Type, renaming: &mut Renaming) -> Type {
     match ty {
         Type::Var(var) => match renaming.binder_name(Variable::Type(*var)) {
-            Some(name) => Type::Adt(name.to_string(), Vec::new()),
+            Some(name) => Type::adt(name.to_string(), Vec::new()),
             None => Type::Var(TypeVar(Renaming::position(&mut renaming.types, *var))),
         },
         Type::Prim(_) | Type::Unit | Type::Error(_) => ty.clone(),
         Type::Fn(args, ret) => Type::Fn(
             args.iter().map(|arg| renamed(arg, renaming)).collect(),
-            Box::new(renamed(ret, renaming)),
+            Arc::new(renamed(ret, renaming)),
         ),
-        Type::Ref(inner) => Type::Ref(Box::new(renamed(inner, renaming))),
+        Type::Ref(inner) => Type::reference(renamed(inner, renaming)),
         Type::Tensor(dims, precision) => Type::Tensor(
             dims.iter().map(|dim| renamed_dim(dim, renaming)).collect(),
             match precision {

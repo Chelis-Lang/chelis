@@ -343,10 +343,7 @@ mod rejected_signature_resolution_tests {
         );
         assert_eq!(
             result.expect("valid signature").into_type(),
-            Type::Fn(
-                vec![Type::Prim(Prim::Int32)],
-                Box::new(Type::Prim(Prim::Bool))
-            )
+            Type::function(vec![Type::Prim(Prim::Int32)], Type::Prim(Prim::Bool))
         );
         assert!(errors.is_empty(), "{errors:?}");
     }
@@ -871,7 +868,7 @@ pub(crate) fn checked_alias_argument_kinds(
                     vec![crate::types::NominalParamKind::Type; arguments.len()]
                 }
                 crate::types::Type::KindedAdt(_, arguments) => arguments
-                    .into_iter()
+                    .iter()
                     .map(|argument| match argument {
                         crate::types::NominalArg::Type(_) => crate::types::NominalParamKind::Type,
                         crate::types::NominalArg::Dimension(_) => {

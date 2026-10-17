@@ -809,7 +809,7 @@ fn run_tier_c(
     };
     // Classify each producer parameter.
     let mut kinds = Vec::new();
-    for t in arg_types {
+    for t in arg_types.iter() {
         match t {
             Type::Prim(p) => kinds.push(ArgKind::Scalar(prim_name(p))),
             Type::Tensor(dims, precision) => {
@@ -1415,7 +1415,7 @@ fn generation_producers(
         }
         let mut kinds = Vec::new();
         let mut raw_ok = true;
-        for a in args {
+        for a in args.iter() {
             match a {
                 Type::Prim(p) => kinds.push(GenParamKind::Scalar(prim_name(p))),
                 Type::Tensor(dims, precision) => {

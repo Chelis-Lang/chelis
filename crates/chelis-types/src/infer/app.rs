@@ -950,7 +950,7 @@ fn infer_app_inner(
             }
             let joined_prec = subst.apply_tensor_prec(head_prec);
             let elem = Type::Tensor(joined_dims, joined_prec);
-            return_with_collection_cleanup!(Type::Adt("List".to_string(), vec![elem]));
+            return_with_collection_cleanup!(Type::adt("List".to_string(), vec![elem]));
         }
     }
 

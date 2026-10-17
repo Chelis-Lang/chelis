@@ -101,9 +101,9 @@ fn invalid_domain_case_declarations_fail_loudly() {
 
 #[test]
 fn every_declared_identity_has_a_unique_case_selector_witness() {
-    let list = Type::Adt("List".into(), vec![Type::Prim(Prim::F32)]);
+    let list = Type::adt("List".into(), vec![Type::Prim(Prim::F32)]);
     let tensor = Type::Tensor(vec![], TensorPrec::Concrete(Prim::F32));
-    let dict = Type::Adt(
+    let dict = Type::adt(
         "Dict".into(),
         vec![Type::Prim(Prim::String), Type::Prim(Prim::F32)],
     );
@@ -114,7 +114,7 @@ fn every_declared_identity_has_a_unique_case_selector_witness() {
             "concat" => vec![
                 vec![list.clone(), list.clone()],
                 vec![
-                    Type::Adt("List".into(), vec![tensor.clone()]),
+                    Type::adt("List".into(), vec![tensor.clone()]),
                     Type::Prim(Prim::Int32),
                 ],
             ],
@@ -126,11 +126,11 @@ fn every_declared_identity_has_a_unique_case_selector_witness() {
                 tensor.clone(),
                 list.clone(),
                 dict.clone(),
-                Type::Adt("Option".into(), vec![Type::Prim(Prim::F32)]),
-                Type::Adt("User".into(), vec![]),
-                Type::Tuple(vec![]),
+                Type::adt("Option".into(), vec![Type::Prim(Prim::F32)]),
+                Type::adt("User".into(), vec![]),
+                Type::tuple(vec![]),
                 Type::Unit,
-                Type::Fn(vec![], Box::new(Type::Unit)),
+                Type::function(vec![], Type::Unit),
             ]
             .into_iter()
             .map(|t| vec![t])
@@ -159,8 +159,8 @@ fn every_declared_identity_has_a_unique_case_selector_witness() {
 
 #[test]
 fn overloaded_applications_resolve_one_exact_case() {
-    let list = Type::Adt("List".into(), vec![Type::Prim(Prim::F32)]);
-    let dict = Type::Adt(
+    let list = Type::adt("List".into(), vec![Type::Prim(Prim::F32)]);
+    let dict = Type::adt(
         "Dict".into(),
         vec![Type::Prim(Prim::String), Type::Prim(Prim::F32)],
     );
@@ -230,13 +230,13 @@ fn observation_rejections_have_explicit_cases_not_an_accepted_wildcard() {
     let decl = builtin_decl("to_string").unwrap();
     for (ty, case) in [
         (Type::Unit, "ToStringUnit"),
-        (Type::Tuple(vec![]), "ToStringTuple"),
+        (Type::tuple(vec![]), "ToStringTuple"),
         (
-            Type::Adt("Option".into(), vec![Type::Prim(Prim::F32)]),
+            Type::adt("Option".into(), vec![Type::Prim(Prim::F32)]),
             "ToStringOption",
         ),
-        (Type::Adt("UserValue".into(), vec![]), "ToStringAdt"),
-        (Type::Fn(vec![], Box::new(Type::Unit)), "ToStringFunction"),
+        (Type::adt("UserValue".into(), vec![]), "ToStringAdt"),
+        (Type::function(vec![], Type::Unit), "ToStringFunction"),
     ] {
         assert_eq!(
             decl.semantic_case(&[ty]).unwrap(),
@@ -329,7 +329,7 @@ fn symbolic_selection_resolves_each_instantiation_without_a_default_case() {
                 },
             ),
             (
-                Type::Adt("List".into(), vec![Type::Prim(Prim::F32)]),
+                Type::adt("List".into(), vec![Type::Prim(Prim::F32)]),
                 match name {
                     "eq" => "Container:eq:EqRecursive",
                     "neq" => "Container:neq:NeqRecursive",

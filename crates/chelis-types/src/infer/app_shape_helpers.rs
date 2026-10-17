@@ -332,7 +332,7 @@ pub(super) fn check_authored_dvars_rigid(
     };
 
     let mut param_dvars = Vec::new();
-    for ty in decl_params {
+    for ty in decl_params.iter() {
         for dv in crate::env::free_dvars(ty) {
             if !param_dvars.contains(&dv) {
                 param_dvars.push(dv);
@@ -366,7 +366,7 @@ pub(super) fn check_authored_dvars_rigid(
     // flagged unless another authored dimension identity participates.
     let render = |dv: DimVar| render_declared_dim(dim_names, dv);
     let mut param_dims = Vec::new();
-    for ty in decl_params {
+    for ty in decl_params.iter() {
         crate::env::collect_dims(ty, &mut param_dims);
     }
     let resolved_param_dims = param_dims

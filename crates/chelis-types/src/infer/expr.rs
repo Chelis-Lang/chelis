@@ -112,7 +112,7 @@ pub(crate) fn settled_borrow_type(resolved: Type) -> Option<Type> {
         | Type::Adt(_, _)
         | Type::KindedAdt(_, _)
         | Type::Tuple(_)
-        | Type::Error(_) => Some(Type::Ref(Box::new(resolved))),
+        | Type::Error(_) => Some(Type::reference(resolved)),
         _ => None,
     }
 }
@@ -435,7 +435,7 @@ pub(super) fn infer_expr_with_type_metadata_ownership(
                             // `validate_deferred_borrow_vars`.
                             Type::Var(tv) => {
                                 subst.record_deferred_borrow_var(tv);
-                                Type::Ref(Box::new(Type::Var(tv)))
+                                Type::reference(Type::Var(tv))
                             }
                             settled => match settled_borrow_type(settled.clone()) {
                                 Some(borrowed) => borrowed,

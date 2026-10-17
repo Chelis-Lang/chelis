@@ -451,7 +451,7 @@ pub(super) fn infer_reshape_app(
     let mut arg_tys = vec![input_ty];
     if let Some(shape_expr) = kids.get(2) {
         let shape_ty = infer_expr(shape_expr, env, vg, subst, adt_reg, errors, product);
-        let expected_shape_ty = Type::Adt("List".to_string(), vec![Type::Prim(Prim::Int64)]);
+        let expected_shape_ty = Type::adt("List".to_string(), vec![Type::Prim(Prim::Int64)]);
         if let Err(_te) = unify(&shape_ty, &expected_shape_ty, subst) {
             // The target slot's demand is not a unification-order artifact.
             let got = subst.apply(&shape_ty).to_string();
@@ -691,8 +691,8 @@ pub(super) fn check_shrink_signature(
 
     // The bounds argument must be a `List[List[Int64]]` (extent-domain
     // under [05-DIM-1]).
-    let int_list = Type::Adt("List".to_string(), vec![Type::Prim(Prim::Int64)]);
-    let expected_bounds_ty = Type::Adt("List".to_string(), vec![int_list]);
+    let int_list = Type::adt("List".to_string(), vec![Type::Prim(Prim::Int64)]);
+    let expected_bounds_ty = Type::adt("List".to_string(), vec![int_list]);
     if let Err(_te) = unify(&bounds_ty, &expected_bounds_ty, subst) {
         let actual_bounds_ty = subst.apply(&bounds_ty);
         return report_at_check_site(
@@ -1168,8 +1168,8 @@ pub(super) fn check_pad_signature(
     let fill_ty = arg_tys[2].clone();
 
     // Padding pairs are extent-domain ([05-DIM-1]): List[List[Int64]].
-    let int_list = Type::Adt("List".to_string(), vec![Type::Prim(Prim::Int64)]);
-    let expected_padding_ty = Type::Adt("List".to_string(), vec![int_list]);
+    let int_list = Type::adt("List".to_string(), vec![Type::Prim(Prim::Int64)]);
+    let expected_padding_ty = Type::adt("List".to_string(), vec![int_list]);
     if let Err(_te) = unify(&padding_ty, &expected_padding_ty, subst) {
         let expected = expected_padding_ty.to_string();
         let got = subst.apply(&padding_ty).to_string();
@@ -1449,7 +1449,7 @@ pub(super) fn check_reduce_window_signature(
     let window_ty = arg_tys[1].clone();
     let stride_ty = arg_tys[2].clone();
 
-    let int_list = Type::Adt("List".to_string(), vec![Type::Prim(Prim::Int64)]);
+    let int_list = Type::adt("List".to_string(), vec![Type::Prim(Prim::Int64)]);
     if let Err(_te) = unify(&window_ty, &int_list, subst) {
         let expected = int_list.to_string();
         let got = subst.apply(&window_ty).to_string();

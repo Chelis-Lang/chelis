@@ -433,7 +433,7 @@ mod tests {
         let lowered_dvar = inner.var_gen.fresh_dvar();
         let lowered_rvar = inner.var_gen.fresh_rvar();
         let child_tvar = inner.var_gen.fresh_tvar();
-        let composite = Type::Tuple(vec![
+        let composite = Type::tuple(vec![
             Type::Var(lowered_tvar),
             Type::Tensor(
                 vec![Dim::Var(lowered_dvar), Dim::Rank(lowered_rvar)],
@@ -525,7 +525,7 @@ mod tests {
             let precision = resumed.var_gen.fresh_tvar();
             let tensor = Type::Tensor(vec![Dim::Lit(3)], TensorPrec::Var(precision));
             let operand = if matches!(params[0], Type::Ref(_)) {
-                Type::Ref(Box::new(tensor))
+                Type::reference(tensor)
             } else {
                 tensor
             };

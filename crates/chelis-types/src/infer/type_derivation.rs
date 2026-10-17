@@ -16,6 +16,7 @@
 //! the instantiations of a target that never bound rather than dropped.
 
 use super::*;
+use std::sync::Arc;
 
 /// What a deferred derivation reads off its target.
 #[derive(Clone, Debug)]
@@ -62,7 +63,9 @@ impl TypeDerivation {
     /// the operand's own.
     fn witness_slot(&self, projected: &Type, subst: &Subst) -> Type {
         match (self, subst.apply(projected)) {
-            (Self::Grad { .. } | Self::Vmap { .. }, Type::Fn(_, result)) => *result,
+            (Self::Grad { .. } | Self::Vmap { .. }, Type::Fn(_, result)) => {
+                Arc::unwrap_or_clone(result)
+            }
             _ => projected.clone(),
         }
     }
@@ -199,7 +202,7 @@ pub(super) fn resolve_type_derivation(
             // The gradient's parameters are the operand's, as they are for a
             // call that published the function itself, so tie them first and
             // decide on what those applications determined.
-            let gradient = Type::Fn(args.clone(), Box::new(vg.fresh_type()));
+            let gradient = Type::Fn(args.clone(), Arc::new(vg.fresh_type()));
             if let Err(error) = unify(projected, &gradient, subst) {
                 let witness = report(errors, error.into());
                 let slot = derivation.witness_slot(projected, subst);
@@ -262,7 +265,7 @@ fn resolve_vmap_derivation(
     let source_ty = subst.apply(source);
     if let Type::Error(witness) = &source_ty {
         let slot = match subst.apply(projected) {
-            Type::Fn(_, result) => *result,
+            Type::Fn(_, result) => Arc::unwrap_or_clone(result),
             other => other,
         };
         let _ = unify(&slot, &propagate(witness), subst);
@@ -276,7 +279,7 @@ fn resolve_vmap_derivation(
     if let (Type::Var(_), Type::Fn(mapped_args, _)) = (&source_ty, &published) {
         let row_function = Type::Fn(
             mapped_args.iter().map(|_| vg.fresh_type()).collect(),
-            Box::new(vg.fresh_type()),
+            Arc::new(vg.fresh_type()),
         );
         if let Err(error) = unify(source, &row_function, subst) {
             return reject_vmap_derivation(projected, error.into(), subst, errors);
@@ -318,7 +321,7 @@ fn resolve_vmap_derivation(
             );
         }
         let mut progress = false;
-        for (row, mapped) in row_args.iter().zip(mapped_args) {
+        for (row, mapped) in row_args.iter().zip(mapped_args.iter()) {
             match infer_vmap_row_parameter(row, mapped, axis, batch_var, subst) {
                 Ok(changed) => progress |= changed,
                 Err(error) => return reject_vmap_derivation(projected, *error, subst, errors),
@@ -361,7 +364,7 @@ fn resolve_vmap_derivation(
     let mapped_result =
         vmap_transform_result_type(&row_result, axis, batch_var, vg, subst, &mut renaming);
     let decided = match (mapped_args, mapped_result) {
-        (Ok(args), Ok(result)) => Type::Fn(args, Box::new(result)),
+        (Ok(args), Ok(result)) => Type::function(args, result),
         (Err(message), _) | (_, Err(message)) => {
             return reject_vmap_derivation(
                 projected,
@@ -416,7 +419,7 @@ fn infer_vmap_row_parameter(
         }
         (Type::Tuple(rows), Type::Tuple(mapped)) if rows.len() == mapped.len() => {
             let mut progress = false;
-            for (row, mapped) in rows.iter().zip(&mapped) {
+            for (row, mapped) in rows.iter().zip(mapped.iter()) {
                 progress |= infer_vmap_row_parameter(row, mapped, axis, batch_var, subst)?;
             }
             Ok(progress)
@@ -460,17 +463,18 @@ fn unmap_vmap_parameter(
                 .map_err(|error| Box::new(CheckError::from(error)))?;
             Ok(Some(Type::Tensor(row_dims, precision.clone())))
         }
-        Type::Ref(inner) => Ok(unmap_vmap_parameter(inner, axis, batch_var, subst)?
-            .map(|row| Type::Ref(Box::new(row)))),
+        Type::Ref(inner) => {
+            Ok(unmap_vmap_parameter(inner, axis, batch_var, subst)?.map(Type::reference))
+        }
         Type::Tuple(items) => {
             let mut rows = Vec::with_capacity(items.len());
-            for item in items {
+            for item in items.iter() {
                 let Some(row) = unmap_vmap_parameter(item, axis, batch_var, subst)? else {
                     return Ok(None);
                 };
                 rows.push(row);
             }
-            Ok(Some(Type::Tuple(rows)))
+            Ok(Some(Type::tuple(rows)))
         }
         Type::Error(_) => Ok(None),
         other => Ok(Some(other.clone())),
@@ -485,7 +489,7 @@ fn reject_vmap_derivation(
 ) -> DerivationStep {
     let witness = report(errors, error);
     let slot = match subst.apply(projected) {
-        Type::Fn(_, result) => *result,
+        Type::Fn(_, result) => Arc::unwrap_or_clone(result),
         other => other,
     };
     let _ = unify(&slot, &witness, subst);

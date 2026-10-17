@@ -5,6 +5,7 @@
 
 use super::*;
 use chelis_deep::{CastMode, NamedCastMode};
+use std::sync::Arc;
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn infer_tuple(
@@ -21,7 +22,7 @@ pub(super) fn infer_tuple(
         .iter()
         .map(|e| infer_expr(e, env, vg, subst, adt_reg, errors, product))
         .collect();
-    Type::Tuple(elems)
+    Type::tuple(elems)
 }
 
 /// Extract a non-negative tuple-projection index from a Deep index
@@ -489,7 +490,7 @@ pub(super) fn instantiate_variant_of(
         })
         .collect::<Vec<_>>();
     let ret = if adt_def.param_kinds.contains(&NominalParamKind::Dimension) {
-        Type::KindedAdt(adt_def.name.clone(), renamed_args)
+        Type::kinded_adt(adt_def.name.clone(), renamed_args)
     } else {
         Type::Adt(
             adt_def.name.clone(),
@@ -567,7 +568,7 @@ pub(super) fn infer_access(
     // Peel borrow layers: an `&T` target reads through the borrow.
     let mut resolved = subst.apply(&target_ty);
     while let Type::Ref(inner) = resolved {
-        resolved = *inner;
+        resolved = Arc::unwrap_or_clone(inner);
     }
     match resolved {
         Type::Adt(ref adt_name, _) | Type::KindedAdt(ref adt_name, _) => {
@@ -703,7 +704,7 @@ fn split_record_result_origin(
     subst: &Subst,
     product: &mut InferenceProduct,
 ) {
-    let signature = Type::Fn(fields.clone(), Box::new(result.clone()));
+    let signature = Type::function(fields.clone(), result.clone());
     let variables = crate::env::free_tvars(&signature)
         .into_iter()
         .collect::<Vec<_>>();
@@ -713,7 +714,7 @@ fn split_record_result_origin(
         }
         product.import_result_constraints(subst);
         if let Type::Fn(params, _) = origin.body {
-            *fields = params;
+            *fields = params.to_vec();
         }
     }
 }
@@ -782,7 +783,7 @@ pub(super) fn infer_record_update(
     }
     let mut resolved = subst.apply(&target_ty);
     while let Type::Ref(inner) = resolved {
-        resolved = *inner;
+        resolved = Arc::unwrap_or_clone(inner);
     }
     match resolved {
         Type::Adt(ref adt_name, _) | Type::KindedAdt(ref adt_name, _) => {
@@ -974,7 +975,7 @@ pub(super) fn infer_cast(
                 // only after exact canonical syntax validation and only for a
                 // registered zero-arity ADT or transparent alias target.
                 None if canonical => match cast_target_nominal_name(&name, adt_reg) {
-                    Some(target) => Type::Adt(target, Vec::new()),
+                    Some(target) => Type::adt(target, Vec::new()),
                     None => {
                         return report_unknown_cast_target(errors, &name, target_location.as_ref());
                     }

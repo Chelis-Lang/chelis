@@ -25,6 +25,7 @@
 use chelis_unord::UnordSet;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
@@ -526,10 +527,10 @@ pub(crate) fn demangle_type(ty: &Type) -> Type {
         ),
         Type::Fn(args, ret) => Type::Fn(
             args.iter().map(demangle_type).collect(),
-            Box::new(demangle_type(ret)),
+            Arc::new(demangle_type(ret)),
         ),
         Type::Tuple(items) => Type::Tuple(items.iter().map(demangle_type).collect()),
-        Type::Ref(inner) => Type::Ref(Box::new(demangle_type(inner))),
+        Type::Ref(inner) => Type::reference(demangle_type(inner)),
         other => other.clone(),
     }
 }
@@ -1019,12 +1020,9 @@ mod tests {
     #[test]
     fn demangle_type_rewrites_adt_names_in_signatures() {
         use crate::types::Prim;
-        let ty = Type::Fn(
+        let ty = Type::function(
             vec![Type::Prim(Prim::F32)],
-            Box::new(Type::Adt(
-                "Pkg__opq__Demo__Types__Probability".to_string(),
-                vec![],
-            )),
+            Type::adt("Pkg__opq__Demo__Types__Probability".to_string(), vec![]),
         );
         assert_eq!(demangle_type(&ty).to_string(), "(f32) -> Probability");
     }

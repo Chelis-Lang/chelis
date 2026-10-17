@@ -1633,7 +1633,7 @@ pub(crate) fn closed_key_relation_variables(scheme: &Scheme) -> UnordSet<TypeVar
         match ty {
             Type::Fn(args, ret) => {
                 let mut found = outside_callable(ret, callable, outside);
-                for arg in args {
+                for arg in args.iter() {
                     found |= outside_callable(arg, callable, outside);
                 }
                 found
@@ -1641,14 +1641,14 @@ pub(crate) fn closed_key_relation_variables(scheme: &Scheme) -> UnordSet<TypeVar
             Type::Ref(inner) => outside_callable(inner, callable, outside),
             Type::Adt(_, args) | Type::Tuple(args) => {
                 let mut found = false;
-                for arg in args {
+                for arg in args.iter() {
                     found |= outside_callable(arg, callable, outside);
                 }
                 found
             }
             Type::KindedAdt(_, args) => {
                 let mut found = false;
-                for arg in args {
+                for arg in args.iter() {
                     if let NominalArg::Type(arg) = arg {
                         found |= outside_callable(arg, callable, outside);
                     }
@@ -1760,26 +1760,26 @@ fn collect_tvars(ty: &Type, vars: &mut Vec<TypeVar>) {
     match ty {
         Type::Var(v) => vars.push(*v),
         Type::Fn(args, ret) => {
-            for a in args {
+            for a in args.iter() {
                 collect_tvars(a, vars);
             }
             collect_tvars(ret, vars);
         }
         Type::Ref(inner) => collect_tvars(inner, vars),
         Type::Adt(_, args) => {
-            for a in args {
+            for a in args.iter() {
                 collect_tvars(a, vars);
             }
         }
         Type::KindedAdt(_, args) => {
-            for argument in args {
+            for argument in args.iter() {
                 if let NominalArg::Type(ty) = argument {
                     collect_tvars(ty, vars);
                 }
             }
         }
         Type::Tuple(ts) => {
-            for t in ts {
+            for t in ts.iter() {
                 collect_tvars(t, vars);
             }
         }
@@ -1820,7 +1820,7 @@ mod module_scope_tests {
         let env = Env::new();
         let mut var_gen = VarGen::default();
         let mut subst = Subst::new();
-        let list = Type::Adt(
+        let list = Type::adt(
             "List".to_string(),
             vec![Type::Tensor(
                 vec![Dim::Lit(2), Dim::Lit(3)],
@@ -1843,7 +1843,7 @@ mod module_scope_tests {
             dvars: Vec::new(),
             rvars: Vec::new(),
             constraints: vec![constraint.clone()],
-            body: Type::Fn(vec![list, Type::Prim(Prim::Int32)], Box::new(result)),
+            body: Type::function(vec![list, Type::Prim(Prim::Int32)], result),
         };
 
         let component = subst.enter_level(&var_gen);
@@ -1890,7 +1890,7 @@ mod module_scope_tests {
             .rank_vars
             .insert("shape".to_string(), authored_rank);
         env.set_type_resolution_scope(Some(&identities), None);
-        let ty = Type::Tuple(vec![
+        let ty = Type::tuple(vec![
             Type::Var(authored_type),
             Type::Tensor(
                 vec![Dim::Var(authored), Dim::Rank(authored_rank)],
@@ -1903,7 +1903,7 @@ mod module_scope_tests {
         let nested_local = var_gen.fresh_dvar();
         let nested_rank = var_gen.fresh_rvar();
         subst.leave_level(nested, &var_gen);
-        let nested_ty = Type::Tuple(vec![
+        let nested_ty = Type::tuple(vec![
             ty.clone(),
             Type::Var(nested_type),
             Type::Tensor(
@@ -1940,7 +1940,7 @@ mod module_scope_tests {
         let mut subst = Subst::new();
         let group = subst.enter_level(&var_gen);
         let body_var = var_gen.fresh_tvar();
-        let body = Type::Fn(vec![Type::Var(body_var)], Box::new(Type::Var(body_var)));
+        let body = Type::function(vec![Type::Var(body_var)], Type::Var(body_var));
         let mut captured = Env::new();
         captured.begin_group_level(subst.current_level());
         let in_group = captured.generalize(&body, &subst);
@@ -1965,8 +1965,8 @@ mod module_scope_tests {
         // instantiating `day` in the scrutinee mints join intermediates in the
         // declaration scope, beside the pattern variable `found`. The
         // destructure's `let` then carries those joins with its own body.
-        let pair = || Type::Tuple(vec![Type::Prim(Prim::Int64), Type::Prim(Prim::Int64)]);
-        let option = |ty: Type| Type::Adt("Option".to_string(), vec![ty]);
+        let pair = || Type::tuple(vec![Type::Prim(Prim::Int64), Type::Prim(Prim::Int64)]);
+        let option = |ty: Type| Type::adt("Option".to_string(), vec![ty]);
         let carried = |body: Type, equations: &[ResultConstraint]| {
             Type::Tuple(
                 std::iter::once(body)
@@ -2068,19 +2068,19 @@ fn collect_dvars(ty: &Type, vars: &mut Vec<DimVar>) {
             }
         }
         Type::Fn(args, ret) => {
-            for a in args {
+            for a in args.iter() {
                 collect_dvars(a, vars);
             }
             collect_dvars(ret, vars);
         }
         Type::Ref(inner) => collect_dvars(inner, vars),
         Type::Adt(_, args) => {
-            for a in args {
+            for a in args.iter() {
                 collect_dvars(a, vars);
             }
         }
         Type::KindedAdt(_, args) => {
-            for argument in args {
+            for argument in args.iter() {
                 match argument {
                     NominalArg::Type(ty) => collect_dvars(ty, vars),
                     NominalArg::Dimension(Dim::Var(var)) => vars.push(*var),
@@ -2089,7 +2089,7 @@ fn collect_dvars(ty: &Type, vars: &mut Vec<DimVar>) {
             }
         }
         Type::Tuple(ts) => {
-            for t in ts {
+            for t in ts.iter() {
                 collect_dvars(t, vars);
             }
         }
@@ -2108,19 +2108,19 @@ pub fn collect_dims(ty: &Type, dims: &mut Vec<Dim>) {
             dims.extend(ds.iter().cloned());
         }
         Type::Fn(args, ret) => {
-            for a in args {
+            for a in args.iter() {
                 collect_dims(a, dims);
             }
             collect_dims(ret, dims);
         }
         Type::Ref(inner) => collect_dims(inner, dims),
         Type::Adt(_, args) => {
-            for a in args {
+            for a in args.iter() {
                 collect_dims(a, dims);
             }
         }
         Type::KindedAdt(_, args) => {
-            for argument in args {
+            for argument in args.iter() {
                 match argument {
                     NominalArg::Type(ty) => collect_dims(ty, dims),
                     NominalArg::Dimension(dim) => dims.push(dim.clone()),
@@ -2128,7 +2128,7 @@ pub fn collect_dims(ty: &Type, dims: &mut Vec<Dim>) {
             }
         }
         Type::Tuple(ts) => {
-            for t in ts {
+            for t in ts.iter() {
                 collect_dims(t, dims);
             }
         }
@@ -2155,19 +2155,19 @@ fn collect_rvars(ty: &Type, vars: &mut Vec<RankVar>) {
             }
         }
         Type::Fn(args, ret) => {
-            for a in args {
+            for a in args.iter() {
                 collect_rvars(a, vars);
             }
             collect_rvars(ret, vars);
         }
         Type::Ref(inner) => collect_rvars(inner, vars),
         Type::Adt(_, args) => {
-            for a in args {
+            for a in args.iter() {
                 collect_rvars(a, vars);
             }
         }
         Type::KindedAdt(_, args) => {
-            for argument in args {
+            for argument in args.iter() {
                 match argument {
                     NominalArg::Type(ty) => collect_rvars(ty, vars),
                     NominalArg::Dimension(Dim::Rank(var)) => vars.push(*var),
@@ -2176,7 +2176,7 @@ fn collect_rvars(ty: &Type, vars: &mut Vec<RankVar>) {
             }
         }
         Type::Tuple(ts) => {
-            for t in ts {
+            for t in ts.iter() {
                 collect_rvars(t, vars);
             }
         }
@@ -2214,7 +2214,7 @@ mod tests {
         // A function that also exposes the operation's result variable as
         // ordinary data has authored a generic key-carrying surface. The
         // checked relation grants no exception to that occurrence.
-        scheme.body = Type::Tuple(vec![callable.clone(), result]);
+        scheme.body = Type::tuple(vec![callable.clone(), result]);
         assert_eq!(
             closed_key_relation_variables(&scheme).into_sorted(),
             vec![TypeVar(1)]
@@ -2237,7 +2237,7 @@ mod tests {
             operand: operand.clone(),
             result: result.clone(),
         };
-        let list = Type::Adt("List".to_string(), vec![operand.clone()]);
+        let list = Type::adt("List".to_string(), vec![operand.clone()]);
         let append_relation = CollectionConstraint::Append {
             list: list.clone(),
             value: operand.clone(),
@@ -2281,7 +2281,7 @@ mod tests {
             tvar_restrictions: vec![(TypeVar(2), TypeVarRestriction::ActiveFloat)],
             dvars: vec![DimVar(3), DimVar(4)],
             rvars: vec![RankVar(5)],
-            body: Type::Tuple(vec![
+            body: Type::tuple(vec![
                 Type::Var(TypeVar(1)),
                 Type::Tensor(
                     vec![
@@ -2485,9 +2485,9 @@ mod tests {
     #[test]
     fn lexical_value_shadowing_does_not_replace_constructor_authority() {
         let mut env = Env::new();
-        let constructor = Scheme::mono(Type::Fn(
+        let constructor = Scheme::mono(Type::function(
             vec![Type::Prim(Prim::F64)],
-            Box::new(Type::Adt("Box".to_string(), Vec::new())),
+            Type::adt("Box".to_string(), Vec::new()),
         ));
         env.bind_constructor("N".to_string(), "Box".to_string(), constructor.clone());
         env.bind_lexical("N".to_string(), Scheme::mono(Type::Prim(Prim::F64)));
@@ -2512,9 +2512,9 @@ mod tests {
         env.bind_constructor(
             "Some".to_string(),
             "Option".to_string(),
-            Scheme::mono(Type::Adt("Option".to_string(), Vec::new())),
+            Scheme::mono(Type::adt("Option".to_string(), Vec::new())),
         );
-        let wrapper_scheme = Scheme::mono(Type::Adt("Wrapper".to_string(), Vec::new()));
+        let wrapper_scheme = Scheme::mono(Type::adt("Wrapper".to_string(), Vec::new()));
         env.bind_constructor(
             "Some".to_string(),
             "Wrapper".to_string(),
@@ -2553,7 +2553,7 @@ mod tests {
             tvar_restrictions: vec![],
             dvars: vec![quantified_dim],
             rvars: vec![quantified_rank],
-            body: Type::Tuple(vec![
+            body: Type::tuple(vec![
                 Type::Var(quantified_type),
                 Type::Tensor(
                     vec![Dim::Var(quantified_dim), Dim::Rank(quantified_rank)],
@@ -2590,7 +2590,7 @@ mod tests {
             tvar_restrictions: vec![],
             dvars: vec![quantified_dim],
             rvars: vec![quantified_rank],
-            body: Type::Tuple(vec![
+            body: Type::tuple(vec![
                 Type::Var(outer_type),
                 Type::Tensor(
                     vec![Dim::Var(outer_dim), Dim::Rank(outer_rank)],
@@ -2632,7 +2632,7 @@ mod tests {
             tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
-            body: Type::Tuple(vec![
+            body: Type::tuple(vec![
                 Type::Var(source_type),
                 Type::Tensor(
                     vec![Dim::Var(source_dim), Dim::Rank(source_rank)],

@@ -1,6 +1,7 @@
 //! Additional unit tests for inference.
 
 use super::*;
+use std::sync::Arc;
 
 #[test]
 fn builtin_relu() {
@@ -2003,7 +2004,7 @@ def use_it(x: tensor[3, f32]) -> tensor[3, f32] =
 #[test]
 fn narrow_substitutes_param_bound_dim_var_for_wildcard() {
     let n = DimVar(7);
-    let decl = Type::Fn(
+    let decl = Type::function(
         vec![
             Type::Tensor(
                 vec![Dim::Var(n), Dim::Lit(1)],
@@ -2011,13 +2012,13 @@ fn narrow_substitutes_param_bound_dim_var_for_wildcard() {
             ),
             Type::Prim(Prim::F64),
         ],
-        Box::new(Type::Tensor(
+        Type::Tensor(
             vec![Dim::Var(n), Dim::Lit(1)],
             TensorPrec::Concrete(Prim::F64),
-        )),
+        ),
     );
     // The inferred body return is the shape-erased `tensor[*, 1]`.
-    let body = Type::Fn(
+    let body = Type::function(
         vec![
             Type::Tensor(
                 vec![Dim::Var(n), Dim::Lit(1)],
@@ -2025,10 +2026,10 @@ fn narrow_substitutes_param_bound_dim_var_for_wildcard() {
             ),
             Type::Prim(Prim::F64),
         ],
-        Box::new(Type::Tensor(
+        Type::Tensor(
             vec![Dim::Wildcard, Dim::Lit(1)],
             TensorPrec::Concrete(Prim::F64),
-        )),
+        ),
     );
     let param_dvars = param_bound_dims(&decl);
     assert!(
@@ -2053,22 +2054,22 @@ fn narrow_substitutes_param_bound_dim_var_for_wildcard() {
 fn declared_named_dimension_requires_its_own_signature_parameter() {
     for has_parameter in [true, false] {
         let parameter_dim = Dim::Name(if has_parameter { "rows" } else { "cols" }.into());
-        let declared = Type::Fn(
+        let declared = Type::function(
             vec![Type::Tensor(
                 vec![parameter_dim],
                 TensorPrec::Concrete(Prim::F32),
             )],
-            Box::new(Type::Tensor(
+            Type::Tensor(
                 vec![Dim::Name("rows".into()), Dim::Lit(2)],
                 TensorPrec::Concrete(Prim::F32),
-            )),
+            ),
         );
         let Type::Fn(params, _) = &declared else {
             unreachable!()
         };
         let body = Type::Fn(
             params.clone(),
-            Box::new(Type::Tensor(
+            Arc::new(Type::Tensor(
                 vec![Dim::Wildcard, Dim::Lit(2)],
                 TensorPrec::Concrete(Prim::F32),
             )),
@@ -2087,19 +2088,13 @@ fn declared_named_dimension_requires_its_own_signature_parameter() {
 #[test]
 fn narrow_keeps_wildcard_for_return_only_dim_var() {
     let n = DimVar(11);
-    let decl = Type::Fn(
+    let decl = Type::function(
         vec![Type::Prim(Prim::Int32), Type::Prim(Prim::Int32)],
-        Box::new(Type::Tensor(
-            vec![Dim::Var(n)],
-            TensorPrec::Concrete(Prim::Int32),
-        )),
+        Type::Tensor(vec![Dim::Var(n)], TensorPrec::Concrete(Prim::Int32)),
     );
-    let body = Type::Fn(
+    let body = Type::function(
         vec![Type::Prim(Prim::Int32), Type::Prim(Prim::Int32)],
-        Box::new(Type::Tensor(
-            vec![Dim::Wildcard],
-            TensorPrec::Concrete(Prim::Int32),
-        )),
+        Type::Tensor(vec![Dim::Wildcard], TensorPrec::Concrete(Prim::Int32)),
     );
     let param_dvars = param_bound_dims(&decl);
     assert!(

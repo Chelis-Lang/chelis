@@ -1034,7 +1034,7 @@ fn type_to_deep_expr_with(
         }
         Type::KindedAdt(name, args) => {
             let mut children = vec![symbol_expr(name)];
-            for argument in args {
+            for argument in args.iter() {
                 children.push(match argument {
                     NominalArg::Type(ty) => type_to_deep_expr_with(ty, make_node, actuals)?,
                     NominalArg::Dimension(dim) => dimension(dim),

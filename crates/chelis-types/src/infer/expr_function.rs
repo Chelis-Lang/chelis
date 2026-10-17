@@ -106,7 +106,7 @@ pub(super) fn infer_fn(
     let resolved_params: Vec<Type> = param_types.iter().map(|t| subst.apply(t)).collect();
     let resolved_body = subst.apply(&body_ty);
 
-    Type::Fn(resolved_params, Box::new(resolved_body))
+    Type::function(resolved_params, resolved_body)
 }
 
 /// Whether one annotated `def` parameter is an independent contract or a
@@ -318,7 +318,7 @@ pub(super) fn infer_def_body_with_sig(
     let resolved_params: Vec<Type> = param_types.iter().map(|t| subst.apply(t)).collect();
     let resolved_body = subst.apply(&body_ty);
 
-    Type::Fn(resolved_params, Box::new(resolved_body))
+    Type::function(resolved_params, resolved_body)
 }
 
 fn canonical_parameter_elements(expr: &deep::Expr) -> Option<&[deep::Expr]> {

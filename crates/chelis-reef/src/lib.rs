@@ -18,6 +18,7 @@ use std::fs;
 use std::io::{Cursor, Read, Write};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::time::Duration;
@@ -10394,25 +10395,25 @@ mod shell_type_variable_canonicalization_tests {
     }
 
     fn representative_type(t_first: u32, t_second: u32, dim: u32, rank: u32) -> Type {
-        Type::Fn(
+        Type::function(
             vec![
                 Type::Var(TypeVar(t_first)),
-                Type::Ref(Box::new(Type::Tensor(
+                Type::reference(Type::Tensor(
                     vec![Dim::Var(DimVar(dim)), Dim::Rank(RankVar(rank))],
                     TensorPrec::Var(TypeVar(t_second)),
-                ))),
-                Type::Adt(
+                )),
+                Type::adt(
                     "Boxed".to_string(),
-                    vec![Type::Tuple(vec![
+                    vec![Type::tuple(vec![
                         Type::Var(TypeVar(t_first)),
                         Type::Var(TypeVar(t_second)),
                     ])],
                 ),
             ],
-            Box::new(Type::Tensor(
+            Type::Tensor(
                 vec![Dim::Var(DimVar(dim)), Dim::Rank(RankVar(rank))],
                 TensorPrec::Var(TypeVar(t_first)),
-            )),
+            ),
         )
     }
 
@@ -10432,13 +10433,13 @@ mod shell_type_variable_canonicalization_tests {
 
     #[test]
     fn shared_and_independent_variables_remain_distinct() {
-        let shared = Type::Fn(
+        let shared = Type::function(
             vec![Type::Var(TypeVar(50)), Type::Var(TypeVar(50))],
-            Box::new(Type::Var(TypeVar(50))),
+            Type::Var(TypeVar(50)),
         );
-        let independent = Type::Fn(
+        let independent = Type::function(
             vec![Type::Var(TypeVar(50)), Type::Var(TypeVar(51))],
-            Box::new(Type::Var(TypeVar(50))),
+            Type::Var(TypeVar(50)),
         );
 
         assert_ne!(
@@ -10449,7 +10450,7 @@ mod shell_type_variable_canonicalization_tests {
 
     #[test]
     fn canonical_names_do_not_collapse_existing_canonical_looking_ids() {
-        let ty = Type::Tuple(vec![Type::Var(TypeVar(99)), Type::Var(TypeVar(0))]);
+        let ty = Type::tuple(vec![Type::Var(TypeVar(99)), Type::Var(TypeVar(0))]);
         let rendered = canonical_shell_type_repr(&type_to_deep_expr(&ty));
 
         assert_eq!(rendered.matches("(t-var {} t0)").count(), 1);
@@ -10517,10 +10518,7 @@ mod shell_type_variable_canonicalization_tests {
                 tvar_restrictions: vec![],
                 dvars: vec![],
                 rvars: vec![],
-                body: Type::Fn(
-                    vec![Type::Var(TypeVar(33))],
-                    Box::new(Type::Var(TypeVar(33))),
-                ),
+                body: Type::function(vec![Type::Var(TypeVar(33))], Type::Var(TypeVar(33))),
             },
             Scheme::mono(Type::Prim(chelis_types::types::Prim::Int32)),
         ] {
@@ -10568,9 +10566,9 @@ mod shell_type_variable_canonicalization_tests {
                     operand: Type::Var(TypeVar(element)),
                     result: Type::Prim(chelis_types::types::Prim::Int64),
                 }],
-                body: Type::Fn(
+                body: Type::function(
                     vec![Type::Var(TypeVar(element))],
-                    Box::new(Type::Prim(chelis_types::types::Prim::Int64)),
+                    Type::Prim(chelis_types::types::Prim::Int64),
                 ),
             }
         }
@@ -10621,7 +10619,7 @@ mod shell_type_variable_canonicalization_tests {
                 append.clone(),
                 append,
             ],
-            body: Type::Fn(vec![Type::Var(TypeVar(0))], Box::new(Type::Var(TypeVar(1)))),
+            body: Type::function(vec![Type::Var(TypeVar(0))], Type::Var(TypeVar(1))),
         };
 
         let published = canonical_shell_scheme(&scheme).expect("scheme must canonicalize");
@@ -10649,9 +10647,9 @@ mod shell_type_variable_canonicalization_tests {
                 operand: Type::Var(TypeVar(1)),
                 result: Type::Prim(chelis_types::types::Prim::Int64),
             }],
-            body: Type::Fn(
+            body: Type::function(
                 vec![Type::Var(TypeVar(0))],
-                Box::new(Type::Prim(chelis_types::types::Prim::Int64)),
+                Type::Prim(chelis_types::types::Prim::Int64),
             ),
         };
 
@@ -10668,9 +10666,9 @@ mod shell_type_variable_canonicalization_tests {
     fn a_changed_obligation_changes_the_exported_identity() {
         use chelis_types::types::CollectionConstraint;
 
-        let body = Type::Fn(
+        let body = Type::function(
             vec![Type::Var(TypeVar(4))],
-            Box::new(Type::Prim(chelis_types::types::Prim::Int64)),
+            Type::Prim(chelis_types::types::Prim::Int64),
         );
         let obligated = |constraint: CollectionConstraint| Scheme {
             result_origin: None,
@@ -10983,9 +10981,9 @@ impl SchemeVariableRenamer {
                     .iter()
                     .map(|argument| self.rewrite_type(argument))
                     .collect(),
-                Box::new(self.rewrite_type(result)),
+                Arc::new(self.rewrite_type(result)),
             ),
-            Type::Ref(inner) => Type::Ref(Box::new(self.rewrite_type(inner))),
+            Type::Ref(inner) => Type::reference(self.rewrite_type(inner)),
             Type::Tensor(dimensions, precision) => Type::Tensor(
                 dimensions
                     .iter()

@@ -921,7 +921,7 @@ impl InferenceProduct {
                     }
                 }
                 Type::Ref(inner) => pending.push(inner),
-                Type::Adt(_, fields) | Type::Tuple(fields) => pending.extend(fields),
+                Type::Adt(_, fields) | Type::Tuple(fields) => pending.extend(fields.iter()),
                 Type::KindedAdt(_, arguments) => {
                     pending.extend(arguments.iter().filter_map(NominalArg::as_type));
                 }
@@ -1056,6 +1056,10 @@ impl InferenceProduct {
         };
         self.active_declaration_name = None;
 
+        // Each node's recorded type shares its children with the types
+        // recorded inside it, so one memo across the epoch applies each
+        // distinct subtree once.
+        let mut memo = crate::unify::ApplyMemo::default();
         for (key, requirement) in epoch.owners.into_sorted() {
             let Some(writes) = epoch.writes.get(&key) else {
                 // Missing owners are diagnosed at the exact annotation lookup,
@@ -1064,7 +1068,7 @@ impl InferenceProduct {
             };
             let mut resolved = writes
                 .iter()
-                .map(|write| (subst.apply(&write.ty), write.source));
+                .map(|write| (subst.apply_memoized(&write.ty, &mut memo), write.source));
             let Some((canonical, canonical_source)) = resolved.next() else {
                 continue;
             };

@@ -118,7 +118,7 @@ impl DeepTypeResolver<'_, '_, '_> {
                     .collect();
                 TypeResolution::compose(parts, |mut parts| {
                     let result = parts.pop().expect("a function type has a result child");
-                    Type::Fn(parts, Box::new(result))
+                    Type::function(parts, result)
                 })
             }
             Some(DeepTag::TTuple) => {
@@ -126,14 +126,14 @@ impl DeepTypeResolver<'_, '_, '_> {
                     .iter()
                     .map(|child| self.recover_type(child))
                     .collect();
-                TypeResolution::compose(parts, Type::Tuple)
+                TypeResolution::compose(parts, Type::tuple)
             }
             Some(DeepTag::TRef) => {
                 if let Err(witness) = self.exact_arity(tag, children, 1) {
                     return TypeResolution::failed(witness);
                 }
                 TypeResolution::compose(vec![self.recover_type(&children[0])], |mut parts| {
-                    Type::Ref(Box::new(parts.pop().expect("a reference has one child")))
+                    Type::reference(parts.pop().expect("a reference has one child"))
                 })
             }
             Some(DeepTag::TTensor) => self.recover_tensor(children),
@@ -276,7 +276,7 @@ impl DeepTypeResolver<'_, '_, '_> {
             );
         }
         let ty = if kinds.contains(&NominalParamKind::Dimension) {
-            Type::KindedAdt(name.to_string(), arguments)
+            Type::kinded_adt(name.to_string(), arguments)
         } else {
             Type::Adt(
                 name.to_string(),

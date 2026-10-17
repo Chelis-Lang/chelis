@@ -1,6 +1,7 @@
 //! Result equations and their origin across generalization and application.
 
 use super::*;
+use std::sync::Arc;
 
 impl InferenceProduct {
     /// An ascription may check a suspended derivation's output only after its
@@ -60,15 +61,15 @@ impl InferenceProduct {
         let pairs: Option<Vec<(&Type, &Type)>> = match (&actual, &declared) {
             (Type::Fn(a, ar), Type::Fn(b, br)) if a.len() == b.len() => Some(
                 a.iter()
-                    .zip(b)
+                    .zip(b.iter())
                     .chain(std::iter::once((ar.as_ref(), br.as_ref())))
                     .collect(),
             ),
             (Type::Tuple(a), Type::Tuple(b)) if a.len() == b.len() => {
-                Some(a.iter().zip(b).collect())
+                Some(a.iter().zip(b.iter()).collect())
             }
             (Type::Adt(a, aa), Type::Adt(b, ba)) if a == b && aa.len() == ba.len() => {
-                Some(aa.iter().zip(ba).collect())
+                Some(aa.iter().zip(ba.iter()).collect())
             }
             (Type::Ref(a), Type::Ref(b)) => Some(vec![(a.as_ref(), b.as_ref())]),
             _ => None,
@@ -490,12 +491,12 @@ impl InferenceProduct {
                         .collect(),
                 ),
                 (Type::Tuple(args), Type::Tuple(other)) if args.len() == other.len() => {
-                    Some(other.clone())
+                    Some(other.to_vec())
                 }
                 (Type::Adt(name, args), Type::Adt(other_name, other))
                     if name == other_name && args.len() == other.len() =>
                 {
-                    Some(other.clone())
+                    Some(other.to_vec())
                 }
                 (Type::Ref(_), Type::Ref(other)) => Some(vec![(**other).clone()]),
                 _ => None,
@@ -691,27 +692,27 @@ fn walk_corresponding_types(
         (Type::Fn(args, result), Type::Fn(other_args, other_result))
             if args.len() == other_args.len() =>
         {
-            for (from, to) in args.iter().zip(other_args) {
+            for (from, to) in args.iter().zip(other_args.iter()) {
                 walk_corresponding_types(needle, from, to, found, variable_dependencies);
             }
             walk_corresponding_types(needle, result, other_result, found, variable_dependencies);
         }
         (Type::Tuple(items), Type::Tuple(other)) if items.len() == other.len() => {
-            for (from, to) in items.iter().zip(other) {
+            for (from, to) in items.iter().zip(other.iter()) {
                 walk_corresponding_types(needle, from, to, found, variable_dependencies);
             }
         }
         (Type::Adt(name, items), Type::Adt(other_name, other))
             if name == other_name && items.len() == other.len() =>
         {
-            for (from, to) in items.iter().zip(other) {
+            for (from, to) in items.iter().zip(other.iter()) {
                 walk_corresponding_types(needle, from, to, found, variable_dependencies);
             }
         }
         (Type::KindedAdt(name, items), Type::KindedAdt(other_name, other))
             if name == other_name && items.len() == other.len() =>
         {
-            for (from, to) in items.iter().zip(other) {
+            for (from, to) in items.iter().zip(other.iter()) {
                 if let (NominalArg::Type(from), NominalArg::Type(to)) = (from, to) {
                     walk_corresponding_types(needle, from, to, found, variable_dependencies);
                 }
@@ -753,36 +754,36 @@ fn common_result_structure(left: &Type, right: &Type, vg: &mut VarGen) -> Type {
         (Type::Var(_), _) | (_, Type::Var(_)) => vg.fresh_type(),
         (Type::Fn(a, ar), Type::Fn(b, br)) if a.len() == b.len() => Type::Fn(
             a.iter()
-                .zip(b)
+                .zip(b.iter())
                 .map(|(a, b)| common_result_structure(a, b, vg))
                 .collect(),
-            Box::new(common_result_structure(ar, br, vg)),
+            Arc::new(common_result_structure(ar, br, vg)),
         ),
         (Type::Tuple(a), Type::Tuple(b)) if a.len() == b.len() => Type::Tuple(
             a.iter()
-                .zip(b)
+                .zip(b.iter())
                 .map(|(a, b)| common_result_structure(a, b, vg))
                 .collect(),
         ),
-        (Type::Ref(a), Type::Ref(b)) => Type::Ref(Box::new(common_result_structure(a, b, vg))),
+        (Type::Ref(a), Type::Ref(b)) => Type::reference(common_result_structure(a, b, vg)),
         (Type::Adt(a, aa), Type::Adt(b, ba)) if a == b && aa.len() == ba.len() => Type::Adt(
             a.clone(),
             aa.iter()
-                .zip(ba)
+                .zip(ba.iter())
                 .map(|(a, b)| common_result_structure(a, b, vg))
                 .collect(),
         ),
         (Type::KindedAdt(a, aa), Type::KindedAdt(b, ba))
             if a == b
                 && aa.len() == ba.len()
-                && aa.iter().zip(ba).all(|(a, b)| {
+                && aa.iter().zip(ba.iter()).all(|(a, b)| {
                     matches!((a, b), (NominalArg::Type(_), NominalArg::Type(_))) || a == b
                 }) =>
         {
             Type::KindedAdt(
                 a.clone(),
                 aa.iter()
-                    .zip(ba)
+                    .zip(ba.iter())
                     .map(|(a, b)| match (a, b) {
                         (NominalArg::Type(a), NominalArg::Type(b)) => {
                             NominalArg::Type(common_result_structure(a, b, vg))

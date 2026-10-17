@@ -4184,13 +4184,13 @@ mod inferred_wire_extent_tests {
             let invalid = Type::Tensor(vec![Dim::Lit(extent)], TensorPrec::Concrete(Prim::F32));
             for ty in [
                 invalid.clone(),
-                Type::Ref(Box::new(invalid.clone())),
-                Type::Fn(vec![invalid.clone()], Box::new(Type::Unit)),
-                Type::Fn(vec![], Box::new(invalid.clone())),
-                Type::Tuple(vec![invalid.clone()]),
-                Type::Adt("Holder".into(), vec![invalid.clone()]),
-                Type::KindedAdt("Holder".into(), vec![NominalArg::Type(invalid)]),
-                Type::KindedAdt(
+                Type::reference(invalid.clone()),
+                Type::function(vec![invalid.clone()], Type::Unit),
+                Type::function(vec![], invalid.clone()),
+                Type::tuple(vec![invalid.clone()]),
+                Type::adt("Holder".into(), vec![invalid.clone()]),
+                Type::kinded_adt("Holder".into(), vec![NominalArg::Type(invalid)]),
+                Type::kinded_adt(
                     "Sized".into(),
                     vec![NominalArg::Dimension(Dim::Lit(extent))],
                 ),

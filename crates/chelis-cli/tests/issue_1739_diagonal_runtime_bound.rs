@@ -1345,8 +1345,8 @@ fn signature_entry_inventory(
         let Type::Fn(args, result) = remainder else {
             panic!("missing function parameters for {}", signature.name)
         };
-        parameters.extend(args);
-        remainder = result;
+        parameters.extend(args.iter());
+        remainder = &**result;
     }
     assert_eq!(parameters.len(), signature.params.len());
     assert_eq!(parameters.len(), c_parameters.len());
