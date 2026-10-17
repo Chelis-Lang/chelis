@@ -4,11 +4,17 @@ description: Validate a project against its immutable shared OpenSpec store
 
 inputs:
   app-client-id:
-    description: Client ID for the read-only OpenSpec store GitHub App
-    required: true
+    description: Client ID for the read-only OpenSpec store GitHub App; supply with app-private-key instead of token
+    required: false
+    default: ''
   app-private-key:
-    description: Private key for the read-only OpenSpec store GitHub App
-    required: true
+    description: Private key for the read-only OpenSpec store GitHub App; supply with app-client-id instead of token
+    required: false
+    default: ''
+  token:
+    description: Installation token that reads only the store repository, such as a chelis-release-token openspec-scope token; supply instead of the App inputs
+    required: false
+    default: ''
   store-lock:
     description: Repository-relative path to the OpenSpec store lock
     required: false
@@ -46,14 +52,19 @@ runs:
       shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
       env:
         ACTION_PATH: ${{ github.action_path }}
+        INPUT_APP_CLIENT_ID_SUPPLIED: ${{ inputs.app-client-id != '' }}
+        INPUT_APP_PRIVATE_KEY_SUPPLIED: ${{ inputs.app-private-key != '' }}
         INPUT_STORE_LOCK: ${{ inputs.store-lock }}
+        INPUT_TOKEN_SUPPLIED: ${{ inputs.token != '' }}
       run: >-
         python3 "$ACTION_PATH/openspec_store.py"
         --lock "$INPUT_STORE_LOCK"
+        --check-credential-form
         --github-output "$GITHUB_OUTPUT"
 
     - name: Create the store installation token
       id: app-token
+      if: inputs.token == ''
       uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
       with:
         client-id: ${{ inputs.app-client-id }}
@@ -66,7 +77,7 @@ runs:
       shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
       env:
         ACTION_PATH: ${{ github.action_path }}
-        CHELIS_OPENSPEC_STORE_TOKEN: ${{ steps.app-token.outputs.token }}
+        CHELIS_OPENSPEC_STORE_TOKEN: ${{ inputs.token || steps.app-token.outputs.token }}
         INPUT_STORE_LOCK: ${{ inputs.store-lock }}
       run: >-
         python3 "$ACTION_PATH/openspec_store.py"
@@ -78,7 +89,7 @@ runs:
       with:
         repository: ${{ steps.store-lock.outputs.repository }}
         ref: ${{ steps.store-lock.outputs.commit }}
-        token: ${{ steps.app-token.outputs.token }}
+        token: ${{ inputs.token || steps.app-token.outputs.token }}
         path: .ci-store/chelis-plans
         fetch-depth: 1
         persist-credentials: false

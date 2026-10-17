@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Shared installer core for portable setup and the central cache seed commit.
+# Shared installer core for portable setup.
 #
 # Usage:
 #   core.sh add-profile <profile_root> <devenv_output> <expected_version>
-#   core.sh prewarm <environment_root> <devenv_binary> [<profile>]
+#   core.sh prewarm <environment_root> <devenv_binary>
 #
 # `add-profile` substitutes the pinned Devenv output into an isolated Nix
 # profile and requires the exact reported version. `prewarm` evaluates the
@@ -28,17 +28,12 @@ core_add_profile() {
 }
 
 core_prewarm() {
-  local environment_root=$1 devenv_binary=$2 profile=${3:-} attempt
+  local environment_root=$1 devenv_binary=$2 attempt
   local prewarm_attempts=3
-  # Bash 3.2 treats an empty array as unset under nounset.
-  local -a devenv_arguments=(--no-tui)
-  if [[ -n $profile ]]; then
-    devenv_arguments+=(--profile "$profile")
-  fi
   for ((attempt = 1; attempt <= prewarm_attempts; attempt++)); do
     if (
       cd "$environment_root"
-      "$devenv_binary" "${devenv_arguments[@]}" shell -- true
+      "$devenv_binary" --no-tui shell -- true
     ); then
       return 0
     fi
@@ -56,8 +51,8 @@ case ${1:-} in
     core_add_profile "$2" "$3" "$4"
     ;;
   prewarm)
-    [[ $# -eq 3 || $# -eq 4 ]] || fail_output "core-usage"
-    core_prewarm "$2" "$3" "${4:-}"
+    [[ $# -eq 3 ]] || fail_output "core-usage"
+    core_prewarm "$2" "$3"
     ;;
   *)
     fail_output "core-usage"

@@ -25,6 +25,7 @@ if [[ -n ${CHELIS_DEVENV_PROFILE:-} || -n ${CHELIS_ACTION_REPOSITORY:-} || -n ${
 
   case "$(uname -s):$(uname -m)" in
     Linux:x86_64) system=x86_64-linux ;;
+    Linux:aarch64 | Linux:arm64) system=aarch64-linux ;;
     Darwin:arm64 | Darwin:aarch64) system=aarch64-darwin ;;
     *) fail_profile "unsupported-system" ;;
   esac
@@ -40,12 +41,28 @@ if [[ -n ${CHELIS_DEVENV_PROFILE:-} || -n ${CHELIS_ACTION_REPOSITORY:-} || -n ${
 
   if [[ $system == aarch64-darwin ]]; then
     case "$CHELIS_DEVENV_PROFILE" in
-      check-cargo-nix | openspec-governance | ruff) ;;
+      check-cargo-nix | openspec-governance | ruff | rust-release-binary) ;;
       *) fail_profile "incompatible-profile" ;;
     esac
   fi
 
+  # No action profile declares aarch64-linux. That runner uses only the unprofiled shell.
+  if [[ $system == aarch64-linux ]]; then
+    fail_profile "incompatible-profile"
+  fi
+
   selected_profile=$CHELIS_DEVENV_PROFILE
+fi
+
+# An unprofiled command may opt into the reviewed Nix C toolchain. A profiled
+# action's toolchain comes from its reviewed record and cannot be changed here.
+selected_c_toolchain=
+if [[ -n ${CHELIS_DEVENV_C_TOOLCHAIN:-} ]]; then
+  [[ -z $selected_profile ]] || fail_profile "c-toolchain-with-profile"
+  case "$CHELIS_DEVENV_C_TOOLCHAIN" in
+    nix) selected_c_toolchain=c-toolchain-nix ;;
+    *) fail_profile "unknown-c-toolchain" ;;
+  esac
 fi
 
 workdir=$PWD
@@ -55,6 +72,9 @@ devenv_args=(--no-tui)
 if [[ -n $selected_profile ]]; then
   profile_record_source="$environment_root/.devenv/chelis-action-profile.json"
   devenv_args+=(--profile "$selected_profile")
+fi
+if [[ -n $selected_c_toolchain ]]; then
+  devenv_args+=(--profile "$selected_c_toolchain")
 fi
 
 cd "$environment_root"

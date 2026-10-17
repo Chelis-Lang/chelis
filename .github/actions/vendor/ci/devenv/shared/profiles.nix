@@ -55,12 +55,24 @@ let
       runtime
       ;
   }) compatibleProfiles;
+  # A profile whose record declares the nix C toolchain extends this profile;
+  # every other shell keeps the base, which carries no C compiler.
+  nixCToolchainProfile = "c-toolchain-nix";
   actionProfileDeclarations = builtins.mapAttrs (name: package: {
+    extends = lib.optional (compatibleProfiles.${name}."c-toolchain" == "nix") nixCToolchainProfile;
     module = {
       packages = [ package ];
       files.".devenv/chelis-action-profile.json".json = canonicalProfiles.${name};
     };
   }) compatibleActionProfilePackages;
+  # Devenv's own defaults, which the shared base replaces: the pinned stdenv
+  # compiler wrapper and, on macOS, the Apple SDK.
+  nixCToolchainDeclaration = {
+    module = {
+      stdenv = pkgs.stdenv;
+      apple.sdk = if pkgs.stdenv.hostPlatform.isDarwin then pkgs.apple-sdk else null;
+    };
+  };
   versionType = types.strMatching "[0-9]+\\.[0-9]+\\.[0-9]+";
   profileType = types.submodule {
     options = {
@@ -68,6 +80,7 @@ let
       systems = mkOption {
         type = types.listOf (types.enum contracts.supportedSystems);
       };
+      "c-toolchain" = mkOption { type = types.enum contracts.cToolchains; };
       constructor = mkOption {
         type = types.enum (builtins.attrValues contracts.profileConstructors);
       };
@@ -98,6 +111,8 @@ in
     _module.args.actionProfilePackages = actionProfilePackages;
     chelis.actionProfileSchema = profileData.schema;
     chelis.actionProfiles = profileData.profiles;
-    profiles = actionProfileDeclarations;
+    profiles = actionProfileDeclarations // {
+      ${nixCToolchainProfile} = nixCToolchainDeclaration;
+    };
   };
 }

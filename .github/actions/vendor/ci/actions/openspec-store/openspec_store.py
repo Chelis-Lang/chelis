@@ -25,6 +25,9 @@ LOCK_INTEGER = re.compile(r"^(0|[1-9][0-9]*)$")
 COMMIT_SHA = re.compile(r"^[0-9a-f]{40}$")
 EXPECTED_OPENSPEC_VERSION = "1.6.0"
 TOKEN_ENVIRONMENT = "CHELIS_OPENSPEC_STORE_TOKEN"
+TOKEN_SUPPLIED_ENVIRONMENT = "INPUT_TOKEN_SUPPLIED"
+APP_CLIENT_ID_SUPPLIED_ENVIRONMENT = "INPUT_APP_CLIENT_ID_SUPPLIED"
+APP_PRIVATE_KEY_SUPPLIED_ENVIRONMENT = "INPUT_APP_PRIVATE_KEY_SUPPLIED"
 LOCAL_SPEC_MARKER = "openspec" + "/specs/"
 DEPENDENCY_SOURCE_SUFFIXES = frozenset({".nix", ".py", ".sh", ".yaml", ".yml"})
 SETUP_CONTRACT_MARKER = "This change SHALL NOT claim or perform a consumer migration"
@@ -48,6 +51,11 @@ class StoreRepository(StrEnum):
 
 class RootSource(StrEnum):
     DECLARED = "declared"
+
+
+class CredentialForm(StrEnum):
+    TOKEN = "token"
+    APP = "app"
 
 
 class SpecificationId(StrEnum):
@@ -263,6 +271,30 @@ def verify_store_checkout(
 
 def require_store_token(environment: Mapping[str, str]) -> StoreToken:
     return StoreToken.parse(environment.get(TOKEN_ENVIRONMENT, ""))
+
+
+def _credential_supplied(environment: Mapping[str, str], name: str) -> bool:
+    value = environment.get(name)
+    if value == "true":
+        return True
+    if value == "false":
+        return False
+    raise StoreError(f"The credential presence flag is absent or malformed: {name}")
+
+
+def require_credential_form(environment: Mapping[str, str]) -> CredentialForm:
+    token = _credential_supplied(environment, TOKEN_SUPPLIED_ENVIRONMENT)
+    client_id = _credential_supplied(environment, APP_CLIENT_ID_SUPPLIED_ENVIRONMENT)
+    private_key = _credential_supplied(
+        environment, APP_PRIVATE_KEY_SUPPLIED_ENVIRONMENT
+    )
+    if token and (client_id or private_key):
+        raise StoreError("Supply either token or the App inputs, not both.")
+    if token:
+        return CredentialForm.TOKEN
+    if client_id and private_key:
+        return CredentialForm.APP
+    raise StoreError("Supply either token or both app-client-id and app-private-key.")
 
 
 def _bounded_body(stream: object) -> bytes:
@@ -535,6 +567,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--github-output", type=Path)
     parser.add_argument("--github-summary", type=Path)
     parser.add_argument("--check-access", action="store_true")
+    parser.add_argument("--check-credential-form", action="store_true")
     parser.add_argument("--assert-setup-contract", action="store_true")
     parser.add_argument("--check-local-spec-dependencies", action="store_true")
     return parser
@@ -543,6 +576,8 @@ def _parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     arguments = _parser().parse_args(argv)
     try:
+        if arguments.check_credential_form:
+            require_credential_form(os.environ)
         revision = load_store_lock(arguments.lock.value)
         checkout = None
         if arguments.check_access:

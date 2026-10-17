@@ -214,7 +214,7 @@ in
     name = "rust-release-helpers";
     version = profileVersion "rust-release-binary";
     paths = [ (exactPackage (profileVersion "rust-release-binary") ciPkgs.python311) ];
-    platforms = linuxSystems;
+    platforms = allSystems;
   };
   "nixpkgs-typos" = exactPackage (profileVersion "typos") ciPkgs.typos;
   "zizmor-wheel" = zizmorPackage;
