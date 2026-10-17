@@ -208,6 +208,21 @@ impl<'de> Deserialize<'de> for StdLibContext {
     }
 }
 
+/// Lower a library for a typecheck cache entry, best-effort: `None` when it
+/// does not lower standalone. A cancellation is an error, so the caller stops
+/// instead of saving an entry without the lowering it would otherwise carry.
+pub(crate) fn lower_library_unless_cancelled(
+    library: &crate::pipeline::CheckedLibrary,
+) -> Result<Option<crate::pipeline::LoweredLibrary>, CompilerError> {
+    match crate::pipeline::lower_library(library) {
+        Ok(lowered) => Ok(Some(lowered)),
+        Err(crate::pipeline::PipelineRejection::Cancelled { stage }) => {
+            Err(crate::compiler::cancelled_stage_error(stage))
+        }
+        Err(_) => Ok(None),
+    }
+}
+
 /// Bind a decoded typecheck cache payload under the one rule
 /// `spec/design/checker_totality.md` section C3 states for every on-disk
 /// route: the stored effect and linearity results are adopted only when the
@@ -601,8 +616,9 @@ pub fn build_declaration_context(
     // and `build` falls back to the monolithic lowering path when it is
     // `None`. Some chelis-std defs are only lowerable once a concrete
     // caller pins a symbolic axis; the unpruned whole-library lower can
-    // legitimately hit that.
-    let library_dag = crate::pipeline::lower_library(&library).ok();
+    // legitimately hit that. A cancelled lowering is a cancelled build,
+    // never an entry to save.
+    let library_dag = lower_library_unless_cancelled(&library)?;
 
     Ok(StdLibContext {
         library,

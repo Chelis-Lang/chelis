@@ -152,15 +152,9 @@ pub struct LibraryContext {
     /// types win on shadow over chelis-std, exactly as the monolithic
     /// whole-library build produces.
     library: crate::pipeline::CheckedLibrary,
-    /// A lowering of `library`, stored so a decoder can re-derive it and
-    /// compare instead of rerunning the effect and linearity checkers (see
-    /// [`crate::stdlib_cache::bind_typecheck_cache_library`]).
-    ///
-    /// `None` when the composed library cannot be lowered as a standalone
-    /// library: a definition whose lowering needs a caller to pin a symbolic
-    /// axis makes the unpruned whole-library lowering decline. Such an entry
-    /// still caches the typecheck, and its decoder reruns the checkers.
-    library_dag: Option<crate::pipeline::LoweredLibrary>,
+    /// What this context knows about a lowering of `library`. See
+    /// [`LibraryLowering`].
+    lowering: LibraryLowering,
     /// Number of expanded Deep exprs the dependency decls contribute.
     ///
     /// The build-lane caller must expand `dependencies ++ entry` as ONE
@@ -201,13 +195,36 @@ impl LibraryContext {
         self.library.program()
     }
 
-    /// The stored lowering of the composed library, when it lowers
-    /// standalone. A decoder that holds one re-derives and compares it rather
-    /// than rerunning the effect and linearity checkers.
-    pub fn library_dag(&self) -> Option<&crate::pipeline::LoweredLibrary> {
+    /// Whether this context's cache entry carries a lowering of the composed
+    /// library: one it will write, or one its decoder re-derived and
+    /// compared instead of rerunning the effect and linearity checkers.
+    pub fn carries_lowering(&self) -> bool {
         let _fp_env = chelis_runtime::FpEnvGuard::enter();
-        self.library_dag.as_ref()
+        !matches!(self.lowering, LibraryLowering::Absent)
     }
+}
+
+/// The lowering a [`LibraryContext`] stores so that a decoder can re-derive
+/// and compare it instead of rerunning the effect and linearity checkers
+/// (see [`crate::stdlib_cache::bind_typecheck_cache_library`]).
+///
+/// The `chelis build` path lowers the final composed whole program itself and
+/// never reads this lowering, so a context holds it only until its entry is
+/// written; a decoded context keeps only the fact that the comparison matched.
+#[derive(Debug, Clone)]
+enum LibraryLowering {
+    /// A context built in this process whose entry has not been written.
+    Built(Box<crate::pipeline::LoweredLibrary>),
+    /// A lowering the entry carries that this context no longer holds: a
+    /// decoded context whose stored lowering was re-derived and matched, or a
+    /// built context after its entry was written. Encoding it again
+    /// re-derives the lowering, which is deterministic.
+    Released,
+    /// The composed library does not lower standalone: a definition whose
+    /// lowering needs a caller to pin a symbolic axis makes the unpruned
+    /// whole-library lowering decline. The entry still caches the typecheck,
+    /// and its decoder reruns the checkers.
+    Absent,
 }
 
 /// Serde carrier for the cache envelope. Decode binds it through
@@ -230,13 +247,20 @@ impl Serialize for LibraryContext {
     where
         S: serde::Serializer,
     {
+        let library_dag = match &self.lowering {
+            LibraryLowering::Built(lowered) => Some(lowered.raw().clone()),
+            LibraryLowering::Released => Some(
+                crate::pipeline::lower_library(&self.library)
+                    .map_err(serde::ser::Error::custom)?
+                    .raw()
+                    .clone(),
+            ),
+            LibraryLowering::Absent => None,
+        };
         LibraryContextWire {
             type_env: self.library.type_env().clone(),
             library_checked: self.library.program().clone(),
-            library_dag: self
-                .library_dag
-                .as_ref()
-                .map(|library| library.raw().clone()),
+            library_dag,
             dependency_expanded_len: self.dependency_expanded_len,
             dependency_deep_digest: self.dependency_deep_digest,
         }
@@ -251,15 +275,20 @@ impl<'de> Deserialize<'de> for LibraryContext {
     {
         let wire = LibraryContextWire::deserialize(deserializer)?;
         let _linked = chelis_types::install_linked_program_guard();
-        let (library, library_dag) = crate::stdlib_cache::bind_typecheck_cache_library(
+        let (library, compared) = crate::stdlib_cache::bind_typecheck_cache_library(
             wire.type_env,
             wire.library_checked,
             wire.library_dag,
         )
         .map_err(serde::de::Error::custom)?;
+        // The re-derived lowering has no reader past the comparison.
+        let lowering = match compared {
+            Some(_) => LibraryLowering::Released,
+            None => LibraryLowering::Absent,
+        };
         Ok(Self {
             library,
-            library_dag,
+            lowering,
             dependency_expanded_len: wire.dependency_expanded_len,
             dependency_deep_digest: wire.dependency_deep_digest,
         })
@@ -433,12 +462,17 @@ pub fn load_or_build_library_context(
         }
     }
 
-    let built = build_library_context(stdlib_ctx, dependency_decls)?;
+    let mut built = build_library_context(stdlib_ctx, dependency_decls)?;
     // Only a clean compose is cacheable; an `Ok(None)` fallback is not an
     // artifact and must not be written (the next build re-derives the
     // byte-identical monolithic error path).
-    if let Some(ctx) = &built {
-        match cache_envelope::save(&cache_path, key, ctx) {
+    if let Some(ctx) = &mut built {
+        let saved = cache_envelope::save(&cache_path, key, &*ctx);
+        // The written entry is the lowering's only reader.
+        if let LibraryLowering::Built(_) = ctx.lowering {
+            ctx.lowering = LibraryLowering::Released;
+        }
+        match saved {
             Ok(()) => {
                 // chelis#1183: keep the cache dir bounded. Only on the miss
                 // path, after a successful write, never evicting what we just
@@ -641,12 +675,16 @@ pub fn build_library_context(
     };
 
     // Best-effort, as for chelis-std: a library that does not lower
-    // standalone is still cached, and its decoder reruns the checkers.
-    let library_dag = crate::pipeline::lower_library(&library).ok();
+    // standalone is still cached, and its decoder reruns the checkers. A
+    // cancelled lowering is a cancelled build, never an entry to save.
+    let lowering = match crate::stdlib_cache::lower_library_unless_cancelled(&library)? {
+        Some(lowered) => LibraryLowering::Built(Box::new(lowered)),
+        None => LibraryLowering::Absent,
+    };
 
     Ok(Some(LibraryContext {
         library,
-        library_dag,
+        lowering,
         dependency_expanded_len,
         dependency_deep_digest,
     }))

@@ -740,7 +740,7 @@ fn caches_without_a_lowering_reject_a_program_only_edit_into_a_linearity_violati
         .unwrap()
         .expect("the dependency must compose");
     assert!(
-        dependency.library_dag().is_some(),
+        dependency.carries_lowering(),
         "the fixture must lower, so removing the lowering is the edit this control makes"
     );
     let dependency_key = library_cache_key(&decls, [0x5a; 32]);
@@ -750,7 +750,7 @@ fn caches_without_a_lowering_reject_a_program_only_edit_into_a_linearity_violati
     let unlowered = cache_envelope::load::<LibraryContext>(&dependency_path, dependency_key)
         .unwrap()
         .expect("the dependency entry without a lowering must still hit");
-    assert!(unlowered.library_dag().is_none());
+    assert!(!unlowered.carries_lowering());
     assert_linearity_edit_is_rejected::<LibraryContext>(
         "dependency typecheck cache without a lowering",
         &dependency_path,
@@ -795,7 +795,7 @@ fn caches_with_a_lowering_reject_a_program_only_edit_into_a_linearity_violation(
     let dependency = build_library_context(&empty_stdlib, &decls)
         .unwrap()
         .expect("the dependency must compose");
-    assert!(dependency.library_dag().is_some());
+    assert!(dependency.carries_lowering());
     let dependency_key = library_cache_key(&decls, [0x5a; 32]);
     let dependency_path = directory.path().join("dependency.tc");
     cache_envelope::save(&dependency_path, dependency_key, &dependency).unwrap();

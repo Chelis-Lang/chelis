@@ -481,9 +481,10 @@ file's `0600` mode leaves open, which is a `TMPDIR` other users can write to,
 the ordinary shape of a shared build machine.
 
 Adopting the producer's checker results is sound only while rerunning the
-checkers reproduces the program they were handed. The compiled-context and
-stdlib routes no longer re-derive them, so nothing at run time would notice a
-checker that started to normalize, sort, dedup or intern, or a layer
+checkers reproduces the program they were handed. The compiled-context route
+and both typecheck cache routes, chelis-std's and the dependency cache's, no
+longer re-derive them when a lowering is stored, so nothing at run time would
+notice a checker that started to normalize, sort, dedup or intern, or a layer
 composition that lost one layer's results. `chelis-compiler-api`'s
 `compiled_context_authenticated_handoff.rs` holds the test that would:
 `cached_program_is_a_checker_fixed_point` builds a package that links the

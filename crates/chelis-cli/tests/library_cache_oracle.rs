@@ -56,11 +56,12 @@
 //! 12. An invalid file outside the selected Reef target does not block build.
 //! 13. An unreachable tensor_scan definition builds in every cache mode.
 //! 14. `warm_dependency_hit_matches_cache_disabled_on_accepted_and_rejected_entries`
-//!     — with the dependency cache warm (its entry carries a lowering, so the
-//!     load adopts the stored effect and linearity results, chelis#3729), entry
-//!     edits that break a type, an effect or a linearity rule reject with the
-//!     diagnostics a cache-disabled build gives, and an accepted entry emits
-//!     the same C.
+//!     — with the dependency cache warm, entry edits that break a type, an
+//!     effect or a linearity rule reject with the diagnostics a cache-disabled
+//!     build gives, and an accepted entry emits the same C. This is a parity
+//!     oracle across cache states only: which decode route the hit takes
+//!     (chelis#3729) is asserted by `chelis-compiler-api`'s
+//!     `cache_wire_compatibility.rs`, not here.
 
 use assert_cmd::Command;
 use std::fs;
