@@ -17,6 +17,25 @@ pub(super) fn take_signature_sweep_visits() -> usize {
     SIGNATURE_SWEEP_VISITS.with(|visits| visits.replace(0))
 }
 
+// Counts the binder tables the declaration walks consult per variable read,
+// for the chelis#3797 scaling oracle.
+#[cfg(test)]
+thread_local! {
+    static BINDER_LOOKUPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(super) fn take_binder_lookups() -> usize {
+    BINDER_LOOKUPS.with(|lookups| lookups.replace(0))
+}
+
+fn note_binder_lookups(tables: usize) {
+    #[cfg(test)]
+    BINDER_LOOKUPS.with(|lookups| lookups.set(lookups.get() + tables));
+    #[cfg(not(test))]
+    let _ = tables;
+}
+
 pub(super) fn top_level_decl_name(expr: &deep::Expr) -> Option<&str> {
     let (tag, _, kids) = stamped_parts(expr)?;
     if !matches!(
@@ -471,7 +490,7 @@ pub(super) fn param_has_consuming_use_with_headers(
     type_headers: &TypeResolutionEnv,
     errors: &mut DiagnosticSink<'_>,
 ) -> bool {
-    let mut bound = Vec::new();
+    let mut bound = BoundNames::new();
     param_has_consuming_use_inner(
         expr,
         param,
@@ -486,7 +505,7 @@ pub(super) fn param_has_consuming_use_with_headers(
 pub(super) fn param_has_consuming_use_inner(
     expr: &deep::Expr,
     param: &str,
-    bound: &mut Vec<UnordSet<String>>,
+    bound: &mut BoundNames,
     available_signatures: &UnordMap<String, Type>,
     type_env: &BTreeMap<String, deep::Expr>,
     type_headers: &TypeResolutionEnv,
@@ -580,18 +599,17 @@ pub(super) fn param_has_consuming_use_inner(
                         index += 2;
                     }
                 }
-                bound.push(let_names);
-                let result = param_has_consuming_use_inner(
-                    &kids[1],
-                    param,
-                    bound,
-                    available_signatures,
-                    type_env,
-                    type_headers,
-                    errors,
-                );
-                bound.pop();
-                result
+                within_binder(bound, let_names.into_sorted(), |bound| {
+                    param_has_consuming_use_inner(
+                        &kids[1],
+                        param,
+                        bound,
+                        available_signatures,
+                        type_env,
+                        type_headers,
+                        errors,
+                    )
+                })
             }
             DeepTag::Match => {
                 let kids = node.children_slice();
@@ -608,25 +626,26 @@ pub(super) fn param_has_consuming_use_inner(
                     if arm_kids.len() < 3 {
                         continue;
                     }
-                    bound.push(pattern_names_for_signature(&arm_kids[0]));
-                    let consumes = param_has_consuming_use_inner(
-                        &arm_kids[1],
-                        param,
-                        bound,
-                        available_signatures,
-                        type_env,
-                        type_headers,
-                        errors,
-                    ) || param_has_consuming_use_inner(
-                        &arm_kids[2],
-                        param,
-                        bound,
-                        available_signatures,
-                        type_env,
-                        type_headers,
-                        errors,
-                    );
-                    bound.pop();
+                    let pattern_names = pattern_names_for_signature(&arm_kids[0]).into_sorted();
+                    let consumes = within_binder(bound, pattern_names, |bound| {
+                        param_has_consuming_use_inner(
+                            &arm_kids[1],
+                            param,
+                            bound,
+                            available_signatures,
+                            type_env,
+                            type_headers,
+                            errors,
+                        ) || param_has_consuming_use_inner(
+                            &arm_kids[2],
+                            param,
+                            bound,
+                            available_signatures,
+                            type_env,
+                            type_headers,
+                            errors,
+                        )
+                    });
                     if consumes {
                         return true;
                     }
@@ -673,7 +692,7 @@ pub(super) fn param_has_consuming_use_inner(
 pub(super) fn param_nested_consuming_use(
     expr: &deep::Expr,
     param: &str,
-    bound: &mut Vec<UnordSet<String>>,
+    bound: &mut BoundNames,
     available_signatures: &UnordMap<String, Type>,
     type_env: &BTreeMap<String, deep::Expr>,
     type_headers: &TypeResolutionEnv,
@@ -696,7 +715,7 @@ pub(super) fn param_nested_consuming_use(
 pub(super) fn app_consumes_param(
     node: &DeepNode,
     param: &str,
-    bound: &mut Vec<UnordSet<String>>,
+    bound: &mut BoundNames,
     available_signatures: &UnordMap<String, Type>,
     type_env: &BTreeMap<String, deep::Expr>,
     type_headers: &TypeResolutionEnv,
@@ -789,7 +808,7 @@ pub(super) fn builtin_arg_is_ref(name: &str, index: usize) -> bool {
 pub(super) fn expr_mentions_unshadowed_name(
     expr: &deep::Expr,
     name: &str,
-    bound: &mut Vec<UnordSet<String>>,
+    bound: &mut BoundNames,
 ) -> bool {
     stack_guard!("expr_mentions_unshadowed_name", expr, false);
     match expr {
@@ -805,15 +824,10 @@ pub(super) fn expr_mentions_unshadowed_name(
                 if kids.len() < 2 {
                     return false;
                 }
-                bound.push(
-                    param_source_infos(&kids[0])
-                        .into_iter()
-                        .map(|(n, _)| n)
-                        .collect(),
-                );
-                let result = expr_mentions_unshadowed_name(&kids[1], name, bound);
-                bound.pop();
-                result
+                let params = param_source_infos(&kids[0]).into_iter().map(|(n, _)| n);
+                within_binder(bound, params, |bound| {
+                    expr_mentions_unshadowed_name(&kids[1], name, bound)
+                })
             }
             _ => node
                 .children_slice()
@@ -1195,16 +1209,33 @@ pub(super) fn borrow_inner_for_signature(expr: &deep::Expr) -> Option<&deep::Exp
     kids.first()
 }
 
-pub(super) fn is_direct_unshadowed_var(
-    expr: &deep::Expr,
-    name: &str,
-    bound: &[UnordSet<String>],
-) -> bool {
+pub(super) fn is_direct_unshadowed_var(expr: &deep::Expr, name: &str, bound: &BoundNames) -> bool {
     var_name_expr(expr) == Some(name) && !is_bound_name(name, bound)
 }
 
-pub(super) fn is_bound_name(name: &str, bound: &[UnordSet<String>]) -> bool {
-    bound.iter().rev().any(|scope| scope.contains(name))
+/// The runtime names the enclosing binders of a declaration walk bind. It is
+/// one table however deeply the binders nest: each binder's names join it for
+/// the binder's body and leave when the body ends, so a read consults one
+/// table rather than one per enclosing binder (chelis#3797).
+pub(super) type BoundNames = ScopedMap<String, ()>;
+
+pub(super) fn is_bound_name(name: &str, bound: &BoundNames) -> bool {
+    note_binder_lookups(1);
+    bound.contains_key(name)
+}
+
+/// Run `body` with `names` bound, as the body of the binder that binds them.
+pub(super) fn within_binder<R>(
+    bound: &mut BoundNames,
+    names: impl IntoIterator<Item = String>,
+    body: impl FnOnce(&mut BoundNames) -> R,
+) -> R {
+    bound.scope(|bound| {
+        for name in names {
+            bound.insert(name, ());
+        }
+        body(bound)
+    })
 }
 
 /// Check whether a def body carries its own explicit type stamp and is a

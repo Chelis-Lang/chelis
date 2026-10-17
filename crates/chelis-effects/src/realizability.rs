@@ -8,7 +8,7 @@
 //!
 //! This module does NOT modify `enum Effect` or the mechanized `EffectRow`.
 
-use chelis_unord::UnordSet;
+use chelis_unord::{ScopedMap, UnordSet};
 use std::collections::{BTreeMap, BTreeSet};
 
 use chelis_deep::{
@@ -508,6 +508,41 @@ fn tagged_meta(expr: &Expr) -> Option<&Metadata> {
     }
 }
 
+// Counts the binder tables the dependency walk consults per variable read, for
+// the chelis#3797 scaling oracle. It counts only while a test arms it.
+thread_local! {
+    static DEPENDENCY_BINDER_LOOKUPS: std::cell::Cell<Option<u64>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Run `work`, counting the binder tables the top-level dependency walk
+/// consults on this thread meanwhile.
+#[doc(hidden)]
+pub fn counting_dependency_binder_lookups<R>(work: impl FnOnce() -> R) -> (R, u64) {
+    struct Restore(Option<u64>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            DEPENDENCY_BINDER_LOOKUPS.with(|count| count.set(self.0));
+        }
+    }
+    let restore = Restore(DEPENDENCY_BINDER_LOOKUPS.with(|count| count.replace(Some(0))));
+    let result = work();
+    let counted = DEPENDENCY_BINDER_LOOKUPS
+        .with(std::cell::Cell::get)
+        .expect("the count stays armed while the work runs");
+    drop(restore);
+    (result, counted)
+}
+
+/// Add `tables` to the count while a test counts.
+fn note_dependency_binder_lookups(tables: usize) {
+    DEPENDENCY_BINDER_LOOKUPS.with(|count| {
+        if let Some(counted) = count.get() {
+            count.set(Some(counted + tables as u64));
+        }
+    });
+}
+
 fn collect_top_level_dependencies(
     expr: &Expr,
     current_def: &str,
@@ -516,7 +551,10 @@ fn collect_top_level_dependencies(
     dependencies: &mut BTreeSet<String>,
     references_self: &mut bool,
 ) {
-    let mut bound = vec![initial_bound.clone()];
+    let mut bound = initial_bound
+        .iter()
+        .map(|name| (name.clone(), ()))
+        .collect::<BoundNames>();
     collect_top_level_dependencies_scoped(
         expr,
         current_def,
@@ -550,7 +588,7 @@ fn collect_top_level_dependencies_scoped(
     expr: &Expr,
     current_def: &str,
     top_level_names: &BTreeSet<String>,
-    bound: &mut Vec<BTreeSet<String>>,
+    bound: &mut BoundNames,
     dependencies: &mut BTreeSet<String>,
     references_self: &mut bool,
 ) {
@@ -558,7 +596,7 @@ fn collect_top_level_dependencies_scoped(
         match tag {
             DeepTag::Var => {
                 if let Some(name) = children.first().and_then(symbol_name)
-                    && !bound.iter().rev().any(|scope| scope.contains(name))
+                    && !binds(bound, name)
                     && top_level_names.contains(name)
                 {
                     if name == current_def {
@@ -570,16 +608,16 @@ fn collect_top_level_dependencies_scoped(
             }
             DeepTag::Fn => {
                 if children.len() >= 2 {
-                    bound.push(dependency_param_names(&children[0]));
-                    collect_top_level_dependencies_scoped(
-                        &children[1],
-                        current_def,
-                        top_level_names,
-                        bound,
-                        dependencies,
-                        references_self,
-                    );
-                    bound.pop();
+                    within_binder(bound, dependency_param_names(&children[0]), |bound| {
+                        collect_top_level_dependencies_scoped(
+                            &children[1],
+                            current_def,
+                            top_level_names,
+                            bound,
+                            dependencies,
+                            references_self,
+                        );
+                    });
                 }
             }
             DeepTag::Let => {
@@ -602,16 +640,16 @@ fn collect_top_level_dependencies_scoped(
                         index += 2;
                     }
                 }
-                bound.push(let_scope);
-                collect_top_level_dependencies_scoped(
-                    &children[1],
-                    current_def,
-                    top_level_names,
-                    bound,
-                    dependencies,
-                    references_self,
-                );
-                bound.pop();
+                within_binder(bound, let_scope, |bound| {
+                    collect_top_level_dependencies_scoped(
+                        &children[1],
+                        current_def,
+                        top_level_names,
+                        bound,
+                        dependencies,
+                        references_self,
+                    );
+                });
             }
             DeepTag::Match => {
                 let Some((scrutinee, arms)) = children.split_first() else {
@@ -634,18 +672,18 @@ fn collect_top_level_dependencies_scoped(
                     };
                     let mut arm_scope = BTreeSet::new();
                     dependency_binding_names(pattern, &mut arm_scope);
-                    bound.push(arm_scope);
-                    for child in scoped_children {
-                        collect_top_level_dependencies_scoped(
-                            child,
-                            current_def,
-                            top_level_names,
-                            bound,
-                            dependencies,
-                            references_self,
-                        );
-                    }
-                    bound.pop();
+                    within_binder(bound, arm_scope, |bound| {
+                        for child in scoped_children {
+                            collect_top_level_dependencies_scoped(
+                                child,
+                                current_def,
+                                top_level_names,
+                                bound,
+                                dependencies,
+                                references_self,
+                            );
+                        }
+                    });
                 }
             }
             _ => {
@@ -699,6 +737,32 @@ fn collect_top_level_dependencies_scoped(
         ),
         ExprCarrier::DecodedNode(_, _, _) | ExprCarrier::Atom(_) | ExprCarrier::MetadataMap(_) => {}
     }
+}
+
+/// The names the enclosing binders of the dependency walk bind. It is one
+/// table however deeply the binders nest: each binder's names join it for the
+/// binder's body and leave when the body ends, so a read consults one table
+/// rather than one per enclosing binder (chelis#3797).
+type BoundNames = ScopedMap<String, ()>;
+
+/// Whether an enclosing binder binds `name`.
+fn binds(bound: &BoundNames, name: &str) -> bool {
+    note_dependency_binder_lookups(1);
+    bound.contains_key(name)
+}
+
+/// Run `body` with `names` bound, as the body of the binder that binds them.
+fn within_binder<R>(
+    bound: &mut BoundNames,
+    names: BTreeSet<String>,
+    body: impl FnOnce(&mut BoundNames) -> R,
+) -> R {
+    bound.scope(|bound| {
+        for name in names {
+            bound.insert(name, ());
+        }
+        body(bound)
+    })
 }
 
 fn dependency_param_names(params_expr: &Expr) -> BTreeSet<String> {
