@@ -4655,10 +4655,10 @@ where
             if product.skipped().iter().any(|node| roots.contains(node)) {
                 continue;
             }
-            // The sum stays dense; its product, expansions and widenings
-            // are read in place.
+            // The sum and its narrowing stay dense; the product, its
+            // expansions and their widenings are read in place.
             for node in product.skipped() {
-                if node != product.sum {
+                if node != product.sum && Some(node) != product.narrowing {
                     virtual_nodes[node.0] = true;
                 }
             }

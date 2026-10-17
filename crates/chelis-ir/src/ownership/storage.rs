@@ -596,6 +596,9 @@ fn build_storage_plan(
         StorageLaneKind::Hip => skipped.extend(hip_emission_literals(dag)),
     }
     let mut placements = classify_nodes(dag, lane, &skipped);
+    if lane == StorageLaneKind::C {
+        check_inlined_product_storage(dag, &placements, views.as_ref())?;
+    }
     let owner_of = compute_owner_map(&placements);
     let destructively_dropped = destructively_dropped_owners(&placements, &owner_of);
     let mut requirements = owner_requirements(dag, &placements, &owner_of)?;
@@ -666,6 +669,44 @@ fn hip_emission_literals(dag: VerifiedDagView<'_>) -> Vec<NodeId> {
         })
         .map(|node| node.id)
         .collect()
+}
+
+/// Every node an inlined product claims has the one storage decision its
+/// kernel needs: the kernel's output owns a slot, each component it computes
+/// in place is skipped, and each reshape it reads in place is a deferred view
+/// or owns a slot, never skipped as a component (chelis#3802).
+fn check_inlined_product_storage(
+    dag: VerifiedDagView<'_>,
+    placements: &[StoragePlacement],
+    views: Option<&crate::contraction_views::ContractionViews>,
+) -> Result<(), OwnershipError> {
+    let conflict = |node: NodeId, detail: &str| OwnershipError::DagStorageConflict {
+        node: node.0,
+        detail: detail.to_string(),
+    };
+    for product in dag.reduction_inlined_products() {
+        let output = product.output();
+        if placements[output.0].slot().is_none()
+            || views.is_some_and(|views| views.is_deferred(output))
+        {
+            return Err(conflict(output, "an inlined product's output owns no slot"));
+        }
+        for node in product.skipped() {
+            if !matches!(placements[node.0], StoragePlacement::Skipped) {
+                return Err(conflict(node, "an inlined product's component is stored"));
+            }
+        }
+        for reshape in product.view_reshapes.iter().flatten() {
+            let deferred = views.is_some_and(|views| views.is_deferred(*reshape));
+            if deferred != matches!(placements[reshape.0], StoragePlacement::Skipped) {
+                return Err(conflict(
+                    *reshape,
+                    "an inlined product's view reshape is neither deferred nor stored",
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn classify_nodes(

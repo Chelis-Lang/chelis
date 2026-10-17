@@ -233,6 +233,8 @@ pub enum OwnershipError {
     DagStorageCapacity { node: usize, detail: String },
     #[error("DAG storage planner cannot represent dtype `{dtype}` for n{node}")]
     DagStorageDType { node: usize, dtype: &'static str },
+    #[error("DAG storage decisions for n{node} conflict: {detail}")]
+    DagStorageConflict { node: usize, detail: String },
     #[error("DAG storage reuse token for n{consumer} was already consumed")]
     DagStorageReuseTaken { consumer: usize },
 }
