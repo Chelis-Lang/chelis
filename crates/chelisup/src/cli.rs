@@ -1,13 +1,14 @@
 //! The `chelisup` installer CLI (clap derive).
 //!
-//! Subcommands: `install`, `default`, `show`, `list-installed`, `which`,
-//! `uninstall`, `update` (a documented stub), and `self {uninstall,
+//! Subcommands: `install`, `link`, `default`, `show`, `list-installed`,
+//! `which`, `uninstall`, `update` (a documented stub), and `self {uninstall,
 //! update}`.
 
 use clap::{Parser, Subcommand};
 
 use crate::UPGRADE_ADVICE;
 use crate::install;
+use crate::link;
 use crate::paths::Store;
 use crate::resolve::{Resolution, ResolveInput, resolve};
 use crate::runtime_check::RuntimeCheck;
@@ -31,6 +32,12 @@ enum Command {
         /// The version to install, as X.Y.Z (for example 0.12.0)
         version: String,
     },
+    /// Register an external toolchain directory that contains bin/chelis,
+    /// under the version that its `bin/chelis --version` reports
+    Link {
+        /// The toolchain directory (the parent of its bin/chelis)
+        dir: std::path::PathBuf,
+    },
     /// Set the recorded default toolchain (used outside any reef package)
     Default {
         /// An installed version, as X.Y.Z
@@ -42,7 +49,7 @@ enum Command {
     ListInstalled,
     /// Print the toolchain binary that `chelis` resolves to here
     Which,
-    /// Remove an installed toolchain
+    /// Remove an installed toolchain, or only the link of a linked one
     Uninstall {
         /// The version to remove, as X.Y.Z
         version: String,
@@ -77,6 +84,7 @@ pub fn run_cli() -> i32 {
     };
     match cli.command {
         Command::Install { version } => cmd_install(&store, &version),
+        Command::Link { dir } => cmd_link(&store, &dir),
         Command::Default { version } => cmd_default(&store, &version),
         Command::Show => cmd_show(&store),
         Command::ListInstalled => cmd_list_installed(&store),
@@ -124,6 +132,29 @@ fn cmd_install(store: &Store, version: &str) -> i32 {
         }
         Err(e) => {
             eprintln!("chelisup: install failed: {e}");
+            1
+        }
+    }
+}
+
+fn cmd_link(store: &Store, dir: &std::path::Path) -> i32 {
+    match link::link(store, dir) {
+        Ok(outcome) => {
+            let version = &outcome.version;
+            println!("linked chelis {version} to {}", outcome.target.display());
+            if let Some(previous) = &outcome.replaced {
+                println!("replaced the link to {}", previous.display());
+            }
+            if !store.shim_path().is_file() {
+                println!(
+                    "the chelis shim is not at {}; create it with: chelisup install {version}",
+                    store.shim_path().display()
+                );
+            }
+            0
+        }
+        Err(e) => {
+            eprintln!("chelisup: link failed: {e}");
             1
         }
     }
@@ -183,10 +214,17 @@ fn cmd_list_installed(store: &Store) -> i32 {
     } else {
         let default = store.read_default();
         for v in versions {
+            let mut notes = Vec::new();
             if default.as_deref() == Some(v.as_str()) {
-                println!("{v} (default)");
-            } else {
+                notes.push("default".to_string());
+            }
+            if let Some(target) = store.linked_target(&v) {
+                notes.push(format!("linked to {}", target.display()));
+            }
+            if notes.is_empty() {
                 println!("{v}");
+            } else {
+                println!("{v} ({})", notes.join(", "));
             }
         }
     }
@@ -225,9 +263,15 @@ fn cmd_which(store: &Store) -> i32 {
 
 fn cmd_uninstall(store: &Store, version: &str) -> i32 {
     match install::uninstall(store, version) {
-        Ok(was_default) => {
-            println!("removed chelis {version}");
-            if was_default {
+        Ok(removed) => {
+            match &removed.link_target {
+                Some(target) => println!(
+                    "removed the link of chelis {version}; {} was left in place",
+                    target.display()
+                ),
+                None => println!("removed chelis {version}"),
+            }
+            if removed.was_default {
                 println!(
                     "note: {version} was the default; the default is now unset \
                      (set a new one with: chelisup default <ver>)"

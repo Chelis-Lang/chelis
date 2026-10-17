@@ -28,7 +28,8 @@
 //! ~/.chelis/
 //!   bin/chelis        the shim (a copy of the chelisup binary)
 //!   bin/chelisup      the installer
-//!   toolchains/<ver>/ side-by-side toolchains; <ver>/bin/chelis is real
+//!   toolchains/<ver>/ side-by-side toolchains: a real <ver>/bin/chelis,
+//!                     or a `chelisup link` to an external directory
 //!   default           recorded default version (one bare line)
 //! ```
 //!
@@ -48,6 +49,7 @@
 
 pub mod cli;
 pub mod install;
+pub mod link;
 pub mod nss;
 pub mod paths;
 pub mod resolve;

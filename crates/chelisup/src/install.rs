@@ -661,11 +661,14 @@ fn extract_tarball(tarball: &Path, dest: &Path) -> Result<PathBuf, String> {
 }
 
 /// Move `unpacked` into `<home>/toolchains/<ver>/`, replacing any
-/// existing directory there. Falls back to a recursive copy if the
-/// rename crosses a filesystem boundary.
+/// existing directory or dangling `chelisup link` there. Falls back to a
+/// recursive copy if the rename crosses a filesystem boundary.
 fn install_into_store(store: &Store, version: &str, unpacked: &Path) -> Result<(), String> {
     let target = store.toolchain_dir(version);
-    if target.exists() {
+    if store.linked_target(version).is_some() {
+        fs::remove_file(&target)
+            .map_err(|e| format!("could not replace the link {}: {e}", target.display()))?;
+    } else if target.exists() {
         fs::remove_dir_all(&target)
             .map_err(|e| format!("could not replace {}: {e}", target.display()))?;
     }
@@ -708,7 +711,7 @@ pub(crate) fn ensure_shim_installed(store: &Store) -> Result<(), String> {
 
 /// Seed the default on the first install only. Never overwrites an
 /// existing default (installing must not repoint the machine default).
-fn ensure_default_seeded(store: &Store, version: &str) -> Result<(), String> {
+pub(crate) fn ensure_default_seeded(store: &Store, version: &str) -> Result<(), String> {
     if store.read_default().is_none() {
         store.write_default(version)?;
     }
@@ -780,26 +783,46 @@ fn copy_dir_all(src: &Path, dst: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Remove an installed toolchain. Errors if it is not installed. Returns
-/// whether the removed version was the recorded default (so the caller
-/// can warn that the default is now unset).
+/// Remove an installed toolchain. For a `chelisup link`, dangling or not,
+/// remove only the link and never its target. A directory without
+/// `bin/chelis`, left by a half-removed install, is removed too. Errors on
+/// a malformed version or a version with no store entry. Returns what it
+/// removed.
 ///
 /// `pub(crate)`: chelisup owns the toolchain lifecycle. Other crates drive
 /// it through the `chelisup` binary, never in-process (see [`install`]).
-pub(crate) fn uninstall(store: &Store, version: &str) -> Result<bool, String> {
-    if !store.is_installed(version) {
+pub(crate) fn uninstall(store: &Store, version: &str) -> Result<Uninstalled, String> {
+    validate_install_version(version)?;
+    let dir = store.toolchain_dir(version);
+    let link_target = store.linked_target(version);
+    if link_target.is_some() {
+        fs::remove_file(&dir)
+            .map_err(|e| format!("could not remove the link {}: {e}", dir.display()))?;
+    } else if dir.is_dir() {
+        fs::remove_dir_all(&dir).map_err(|e| format!("could not remove {}: {e}", dir.display()))?;
+    } else {
         return Err(format!(
             "toolchain {version} is not installed.\n  installed: {}",
             installed_or_none(store)
         ));
     }
-    let dir = store.toolchain_dir(version);
-    fs::remove_dir_all(&dir).map_err(|e| format!("could not remove {}: {e}", dir.display()))?;
     let was_default = store.read_default().as_deref() == Some(version);
     if was_default {
         let _ = fs::remove_file(store.default_file());
     }
-    Ok(was_default)
+    Ok(Uninstalled {
+        link_target,
+        was_default,
+    })
+}
+
+/// What [`uninstall`] removed.
+pub(crate) struct Uninstalled {
+    /// The target of the removed link. `None` for a removed directory.
+    pub(crate) link_target: Option<PathBuf>,
+    /// Whether the removed version was the recorded default. The caller
+    /// then says that the default is unset.
+    pub(crate) was_default: bool,
 }
 
 /// Removes the shim, installer copy, and recorded default.

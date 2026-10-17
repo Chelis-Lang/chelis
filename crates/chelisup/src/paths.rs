@@ -117,6 +117,19 @@ impl Store {
         self.toolchain_bin(version).is_file()
     }
 
+    /// The target of `<home>/toolchains/<ver>` when `chelisup link` made it
+    /// a symbolic link, dangling or not. `None` for a real directory or no
+    /// entry.
+    pub fn linked_target(&self, version: &str) -> Option<PathBuf> {
+        let dir = self.toolchain_dir(version);
+        let metadata = fs::symlink_metadata(&dir).ok()?;
+        if metadata.file_type().is_symlink() {
+            fs::read_link(&dir).ok()
+        } else {
+            None
+        }
+    }
+
     /// Sorted list of installed toolchain versions (those with a real
     /// `bin/chelis`). Empty when none are installed.
     pub fn installed_versions(&self) -> Vec<String> {
