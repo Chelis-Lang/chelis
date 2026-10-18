@@ -426,6 +426,16 @@ let
         ];
       };
       bare = "env -i PATH=/var/empty HOME=$TMPDIR TMPDIR=$TMPDIR";
+      # The PATH that the wrapper gives the compiler: its PATH prefix, then
+      # the PATH of `bare`. The wrapper arguments start with that prefix.
+      wrapperPath =
+        assert
+          lib.take 3 built.chelisWrapperArgs == [
+            "--prefix"
+            "PATH"
+            ":"
+          ];
+        "${builtins.elemAt built.chelisWrapperArgs 3}:/var/empty";
     in
     pkgs.runCommand "chelis-wrapped-build" { } ''
       cp ${examples}/hello_tensor.ch ${examples}/native_library.ch \
@@ -454,6 +464,26 @@ let
         printf 'expected: %s\nactual: %s\n' "$blas_expected" "$blas_actual" >&2
         exit 1
       fi
+      ${lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
+
+        # Negative control: the real compiler with the PATH of the wrapper,
+        # but without the two OpenBLAS variables, must not find OpenBLAS.
+        # The error must name the OpenBLAS header or library, so that an
+        # unrelated failure does not pass.
+        status=0
+        env -i PATH=${wrapperPath} HOME=$TMPDIR TMPDIR=$TMPDIR \
+          ${packages.chelis}/libexec/chelis build recurrence_extent_scope.ch -o blas-undeclared \
+          2>"$TMPDIR/blas-undeclared-stderr" || status=$?
+        if [ "$status" -eq 0 ] \
+          || ! grep -Eq 'cblas\.h|lopenblas' "$TMPDIR/blas-undeclared-stderr"; then
+          echo "the BLAS build without the OpenBLAS variables did not fail on OpenBLAS" >&2
+          echo "exit status: $status" >&2
+          cat "$TMPDIR/blas-undeclared-stderr" >&2
+          exit 1
+        fi
+        echo "BLAS negative control: the build without the OpenBLAS variables failed:"
+        cat "$TMPDIR/blas-undeclared-stderr"
+      ''}
 
       ${bare} ${packages.chelis}/bin/chelis build native_library.ch -o library
       if [ "$(head -c 8 library/libnative_library.a)" != '!<arch>' ]; then
