@@ -251,11 +251,21 @@ fn atom_text(atom: &Atom) -> String {
     out
 }
 
-/// The pretty layout. Every width it measures is a flat rendering from
-/// [`write_flat`]; only breaking a line recurses.
+/// The pretty layout, written once into one buffer.
+///
+/// An earlier layout rendered each child to its own string and copied it,
+/// split into lines, into every enclosing level, so a byte nested `d` deep
+/// was copied `d` times, and it rendered each node's whole subtree flat to
+/// compare it with the line width. On deep nesting that was cubic in the
+/// depth (chelis#3852). Here each byte is written once, and a width test
+/// stops at the line width.
+#[derive(Clone, Copy)]
 struct Printer {
     max_width: usize,
     indent_step: usize,
+    /// Whether the tree has a leaf whose own spelling holds a carriage
+    /// return, ends in a line feed, or is empty; see [`Printer::split_lines`].
+    split_sensitive: bool,
 }
 
 impl Printer {
@@ -263,185 +273,44 @@ impl Printer {
         Self {
             max_width: MAX_LINE,
             indent_step: INDENT_STEP,
+            split_sensitive: false,
         }
-    }
-
-    fn fmt_expr(&self, expr: &WireExpr, indent: usize) -> String {
-        match expr {
-            WireExpr::ExtensionData(data) => data.syntax().to_string(),
-            WireExpr::Atom(atom, _) => atom_text(atom),
-            WireExpr::Map(map, _) => self.fmt_map(map, indent),
-            WireExpr::MetaExpr(meta, _) => self.fmt_meta_expr(meta, indent),
-            WireExpr::Node(node, _) => self.fmt_node(node, indent),
-            WireExpr::BareList(items, _) => self.fmt_list(expr, items, indent),
-            WireExpr::UnknownForm(form) => self.fmt_unknown_form(expr, form, indent),
-        }
-    }
-
-    /// A stamped node prints as its canonical `(tag {meta} children...)`
-    /// form, with the tag regenerated from the decoded [`DeepTag`].
-    fn fmt_node(&self, node: &WireNode, indent: usize) -> String {
-        let flat = render_flat(Flat::Node(node));
-        if force_flat_tag(node.tag) {
-            return flat;
-        }
-        if !force_break_tag(node.tag) && indent + flat.len() <= self.max_width {
-            return flat;
-        }
-        self.fmt_canonical_node(node, indent)
-    }
-
-    fn fmt_canonical_node(&self, node: &WireNode, indent: usize) -> String {
-        let tag = node.tag.as_str();
-        let children = &node.children;
-        let meta_indent = indent + 1 + tag.len() + 1;
-        let meta_text = self.fmt_map(&node.meta, meta_indent);
-        let header = format!("({tag} {meta_text}");
-
-        if children.is_empty() {
-            return format!("{header})");
-        }
-
-        let child_indent = indent + self.indent_step;
-        let prefix = " ".repeat(child_indent);
-        let mut lines: Vec<String> = header.lines().map(ToString::to_string).collect();
-        for child in children {
-            push_child_lines(&mut lines, &prefix, &self.fmt_expr(child, child_indent));
-        }
-        lines
-            .last_mut()
-            .expect("canonical node has at least one child line")
-            .push(')');
-        lines.join("\n")
-    }
-
-    /// A structural list prints flat when it fits, else broken after its
-    /// first element.
-    fn fmt_list(&self, list: &WireExpr, items: &[WireExpr], indent: usize) -> String {
-        let flat = render_flat(Flat::Expr(list));
-        let Some((first, rest)) = items.split_first() else {
-            return flat;
-        };
-        if indent + flat.len() <= self.max_width {
-            return flat;
-        }
-        let first = self.fmt_expr(first, indent + self.indent_step);
-        self.fmt_broken_list(&first, None, rest, indent)
-    }
-
-    /// An unknown form prints as the list of its head symbol, its metadata
-    /// map and its children, laid out from the borrowed form.
-    fn fmt_unknown_form(&self, form_expr: &WireExpr, form: &WireUnknown, indent: usize) -> String {
-        let flat = render_flat(Flat::Expr(form_expr));
-        if indent + flat.len() <= self.max_width {
-            return flat;
-        }
-        self.fmt_broken_list(&form.head, Some(&form.meta), &form.children, indent)
-    }
-
-    /// A list too wide for one line: `first` follows the opening parenthesis,
-    /// and the metadata map, when there is one, and every item start their
-    /// own lines.
-    fn fmt_broken_list(
-        &self,
-        first: &str,
-        meta: Option<&MetaMap>,
-        items: &[WireExpr],
-        indent: usize,
-    ) -> String {
-        let child_indent = indent + self.indent_step;
-        let prefix = " ".repeat(child_indent);
-        let mut lines = vec![format!("({first}")];
-        if let Some(meta) = meta {
-            push_child_lines(&mut lines, &prefix, &self.fmt_map(meta, child_indent));
-        }
-        for item in items {
-            push_child_lines(&mut lines, &prefix, &self.fmt_expr(item, child_indent));
-        }
-        lines
-            .last_mut()
-            .expect("generic list always has a header line")
-            .push(')');
-        lines.join("\n")
-    }
-
-    fn fmt_map(&self, map: &MetaMap, indent: usize) -> String {
-        let flat = render_flat(Flat::Map(map));
-        // An empty map has no entry to break before, so `{}` stays flat at any
-        // indent; breaking it would print only its closing brace.
-        if map.entries.is_empty() || indent + flat.len() <= self.max_width {
-            return flat;
-        }
-
-        let sorted = sorted_entries(&map.entries);
-        let mut lines = Vec::new();
-        for (index, (key, value)) in sorted.iter().enumerate() {
-            let entry_indent = indent + self.indent_step;
-            let value_indent = entry_indent + key.len() + 2;
-            let rendered = self.fmt_expr(value, value_indent);
-            let mut value_lines = rendered.lines();
-            let first = value_lines.next().unwrap_or("");
-            let line = if index == 0 {
-                format!("{{{}: {}", key, first)
-            } else {
-                format!("{}{}: {}", " ".repeat(entry_indent), key, first)
-            };
-            lines.push(line);
-            for continuation in value_lines {
-                lines.push(continuation.to_string());
-            }
-            if index + 1 != sorted.len()
-                && let Some(last) = lines.last_mut()
-            {
-                last.push(',');
-            }
-        }
-        lines.push(format!("{}}}", " ".repeat(indent)));
-        lines.join("\n")
-    }
-
-    fn fmt_meta_expr(&self, meta: &MetaExpr, indent: usize) -> String {
-        let flat = render_flat(Flat::MetaExpr(meta));
-        if indent + flat.len() <= self.max_width {
-            return flat;
-        }
-
-        let meta_part = render_flat(Flat::MetaEntries(&meta.entries));
-        let expr_indent = indent + meta_part.len() + 1;
-        let expr_text = self.fmt_expr(&meta.expr, expr_indent);
-        let mut lines = expr_text.lines();
-        let first = lines.next().unwrap_or("");
-        let mut output = format!("{meta_part} {first}");
-        for line in lines {
-            output.push('\n');
-            output.push_str(line);
-        }
-        output
     }
 }
 
-/// The streaming layout: the same decisions as [`Printer::fmt_expr`],
-/// written once into one buffer.
-///
-/// The returning layout renders each child to its own string and copies it,
-/// split into lines, into every enclosing level, so a byte nested `d` deep
-/// is copied `d` times, and it renders each node's whole subtree flat to
-/// compare it with the line width. On deep nesting that is cubic in the
-/// depth (chelis#3852). Here each byte is written once, and a width test
-/// stops at the line width.
-///
-/// Splitting a child into lines and joining them again is the identity on
-/// everything this printer lays out, except text holding a carriage return,
-/// ending in a line feed, or empty, which only a leaf's own spelling can
-/// be. A tree with such a leaf keeps the returning layout, so the output is
-/// the same for every tree.
 impl Printer {
     fn write_pretty(&self, expr: &WireExpr, out: &mut String) {
-        if has_line_sensitive_leaf(expr) {
-            out.push_str(&self.fmt_expr(expr, 0));
-        } else {
-            self.write_expr(expr, 0, out);
+        let printer = Self {
+            split_sensitive: has_split_sensitive_leaf(expr),
+            ..*self
+        };
+        printer.write_expr(expr, 0, out);
+    }
+
+    /// The line normalization the layout has always applied where it places
+    /// a child's text on lines of its own: the text from `start` is split
+    /// with [`str::lines`] and joined with line feeds. That drops a carriage
+    /// return before each line feed and one trailing line feed, and a child
+    /// with no lines at all leaves no line, so the line break and indent
+    /// written for it at `line_start`, when there is one, go too.
+    ///
+    /// It changes nothing unless the tree has a leaf spelling with a carriage
+    /// return, a trailing line feed, or no characters, which only extension
+    /// data's source spelling has in practice; otherwise it is skipped. That
+    /// its effect depends on where a leaf sits, and so changes such data, is
+    /// chelis#3863.
+    fn split_lines(&self, out: &mut String, line_start: Option<usize>, start: usize) {
+        if !self.split_sensitive {
+            return;
         }
+        let lines: Vec<&str> = out[start..].lines().collect();
+        if lines.is_empty() {
+            out.truncate(line_start.unwrap_or(start));
+            return;
+        }
+        let joined = lines.join("\n");
+        out.truncate(start);
+        out.push_str(&joined);
     }
 
     /// The width left on a line at `indent`, or `None` when nothing fits.
@@ -472,14 +341,17 @@ impl Printer {
             return;
         }
         let tag = node.tag.as_str();
+        let header = out.len();
         out.push('(');
         out.push_str(tag);
         out.push(' ');
         self.write_map(&node.meta, indent + 1 + tag.len() + 1, out);
+        self.split_lines(out, None, header);
         let child_indent = indent + self.indent_step;
         for child in &node.children {
-            push_line_start(out, child_indent);
-            self.write_expr(child, child_indent, out);
+            self.write_child_line(child_indent, out, |out| {
+                self.write_expr(child, child_indent, out);
+            });
         }
         out.push(')');
     }
@@ -522,12 +394,14 @@ impl Printer {
     ) {
         let child_indent = indent + self.indent_step;
         if let Some(meta) = meta {
-            push_line_start(out, child_indent);
-            self.write_map(meta, child_indent, out);
+            self.write_child_line(child_indent, out, |out| {
+                self.write_map(meta, child_indent, out);
+            });
         }
         for item in items {
-            push_line_start(out, child_indent);
-            self.write_expr(item, child_indent, out);
+            self.write_child_line(child_indent, out, |out| {
+                self.write_expr(item, child_indent, out);
+            });
         }
         out.push(')');
     }
@@ -550,7 +424,9 @@ impl Printer {
             }
             out.push_str(key);
             out.push_str(": ");
+            let value_start = out.len();
             self.write_expr(value, entry_indent + key.len() + 2, out);
+            self.split_lines(out, None, value_start);
             if index + 1 != sorted.len() {
                 out.push(',');
             }
@@ -567,7 +443,18 @@ impl Printer {
         write_flat(Flat::MetaEntries(&meta.entries), out);
         let expr_indent = indent + (out.len() - start) + 1;
         out.push(' ');
+        let expr_start = out.len();
         self.write_expr(&meta.expr, expr_indent, out);
+        self.split_lines(out, None, expr_start);
+    }
+
+    /// Put a child on a line of its own, indented to `indent`.
+    fn write_child_line(&self, indent: usize, out: &mut String, write: impl FnOnce(&mut String)) {
+        let line_start = out.len();
+        push_line_start(out, indent);
+        let start = out.len();
+        write(out);
+        self.split_lines(out, Some(line_start), start);
     }
 }
 
@@ -578,9 +465,9 @@ fn push_line_start(out: &mut String, indent: usize) {
 }
 
 /// Whether some leaf's own spelling holds a carriage return, ends in a line
-/// feed, or is empty, where splitting a child into lines and joining them
-/// again is not the identity.
-fn has_line_sensitive_leaf(expr: &WireExpr) -> bool {
+/// feed, or is empty: the only text on which [`Printer::split_lines`]
+/// changes anything, since the layout writes none of these itself.
+fn has_split_sensitive_leaf(expr: &WireExpr) -> bool {
     fn sensitive(text: &str) -> bool {
         text.is_empty() || text.ends_with('\n') || text.contains('\r')
     }
@@ -636,16 +523,6 @@ fn has_line_sensitive_leaf(expr: &WireExpr) -> bool {
         }
     }
     false
-}
-
-/// Append a rendered child: its first line indented by `prefix`, and its
-/// continuation lines as rendered.
-fn push_child_lines(lines: &mut Vec<String>, prefix: &str, rendered: &str) {
-    let mut child_lines = rendered.lines();
-    if let Some(first) = child_lines.next() {
-        lines.push(format!("{prefix}{first}"));
-    }
-    lines.extend(child_lines.map(ToString::to_string));
 }
 
 /// Leaf tags that always print on one line.
@@ -725,16 +602,194 @@ mod tests {
         )
     }
 
-    /// The returning layout, which the streaming one must reproduce byte
-    /// for byte (chelis#3852).
+    /// The layout before chelis#3852, which returned each child's text and
+    /// split it into lines at every enclosing level. Kept only as the byte
+    /// oracle the streaming layout must reproduce.
+    struct Returning {
+        max_width: usize,
+        indent_step: usize,
+    }
+
+    impl Returning {
+        fn fmt_expr(&self, expr: &WireExpr, indent: usize) -> String {
+            match expr {
+                WireExpr::ExtensionData(data) => data.syntax().to_string(),
+                WireExpr::Atom(atom, _) => atom_text(atom),
+                WireExpr::Map(map, _) => self.fmt_map(map, indent),
+                WireExpr::MetaExpr(meta, _) => self.fmt_meta_expr(meta, indent),
+                WireExpr::Node(node, _) => self.fmt_node(node, indent),
+                WireExpr::BareList(items, _) => self.fmt_list(expr, items, indent),
+                WireExpr::UnknownForm(form) => self.fmt_unknown_form(expr, form, indent),
+            }
+        }
+
+        /// A stamped node prints as its canonical `(tag {meta} children...)`
+        /// form, with the tag regenerated from the decoded [`DeepTag`].
+        fn fmt_node(&self, node: &WireNode, indent: usize) -> String {
+            let flat = render_flat(Flat::Node(node));
+            if force_flat_tag(node.tag) {
+                return flat;
+            }
+            if !force_break_tag(node.tag) && indent + flat.len() <= self.max_width {
+                return flat;
+            }
+            self.fmt_canonical_node(node, indent)
+        }
+
+        fn fmt_canonical_node(&self, node: &WireNode, indent: usize) -> String {
+            let tag = node.tag.as_str();
+            let children = &node.children;
+            let meta_indent = indent + 1 + tag.len() + 1;
+            let meta_text = self.fmt_map(&node.meta, meta_indent);
+            let header = format!("({tag} {meta_text}");
+
+            if children.is_empty() {
+                return format!("{header})");
+            }
+
+            let child_indent = indent + self.indent_step;
+            let prefix = " ".repeat(child_indent);
+            let mut lines: Vec<String> = header.lines().map(ToString::to_string).collect();
+            for child in children {
+                push_child_lines(&mut lines, &prefix, &self.fmt_expr(child, child_indent));
+            }
+            lines
+                .last_mut()
+                .expect("canonical node has at least one child line")
+                .push(')');
+            lines.join("\n")
+        }
+
+        /// A structural list prints flat when it fits, else broken after its
+        /// first element.
+        fn fmt_list(&self, list: &WireExpr, items: &[WireExpr], indent: usize) -> String {
+            let flat = render_flat(Flat::Expr(list));
+            let Some((first, rest)) = items.split_first() else {
+                return flat;
+            };
+            if indent + flat.len() <= self.max_width {
+                return flat;
+            }
+            let first = self.fmt_expr(first, indent + self.indent_step);
+            self.fmt_broken_list(&first, None, rest, indent)
+        }
+
+        /// An unknown form prints as the list of its head symbol, its metadata
+        /// map and its children, laid out from the borrowed form.
+        fn fmt_unknown_form(
+            &self,
+            form_expr: &WireExpr,
+            form: &WireUnknown,
+            indent: usize,
+        ) -> String {
+            let flat = render_flat(Flat::Expr(form_expr));
+            if indent + flat.len() <= self.max_width {
+                return flat;
+            }
+            self.fmt_broken_list(&form.head, Some(&form.meta), &form.children, indent)
+        }
+
+        /// A list too wide for one line: `first` follows the opening parenthesis,
+        /// and the metadata map, when there is one, and every item start their
+        /// own lines.
+        fn fmt_broken_list(
+            &self,
+            first: &str,
+            meta: Option<&MetaMap>,
+            items: &[WireExpr],
+            indent: usize,
+        ) -> String {
+            let child_indent = indent + self.indent_step;
+            let prefix = " ".repeat(child_indent);
+            let mut lines = vec![format!("({first}")];
+            if let Some(meta) = meta {
+                push_child_lines(&mut lines, &prefix, &self.fmt_map(meta, child_indent));
+            }
+            for item in items {
+                push_child_lines(&mut lines, &prefix, &self.fmt_expr(item, child_indent));
+            }
+            lines
+                .last_mut()
+                .expect("generic list always has a header line")
+                .push(')');
+            lines.join("\n")
+        }
+
+        fn fmt_map(&self, map: &MetaMap, indent: usize) -> String {
+            let flat = render_flat(Flat::Map(map));
+            // An empty map has no entry to break before, so `{}` stays flat at any
+            // indent; breaking it would print only its closing brace.
+            if map.entries.is_empty() || indent + flat.len() <= self.max_width {
+                return flat;
+            }
+
+            let sorted = sorted_entries(&map.entries);
+            let mut lines = Vec::new();
+            for (index, (key, value)) in sorted.iter().enumerate() {
+                let entry_indent = indent + self.indent_step;
+                let value_indent = entry_indent + key.len() + 2;
+                let rendered = self.fmt_expr(value, value_indent);
+                let mut value_lines = rendered.lines();
+                let first = value_lines.next().unwrap_or("");
+                let line = if index == 0 {
+                    format!("{{{}: {}", key, first)
+                } else {
+                    format!("{}{}: {}", " ".repeat(entry_indent), key, first)
+                };
+                lines.push(line);
+                for continuation in value_lines {
+                    lines.push(continuation.to_string());
+                }
+                if index + 1 != sorted.len()
+                    && let Some(last) = lines.last_mut()
+                {
+                    last.push(',');
+                }
+            }
+            lines.push(format!("{}}}", " ".repeat(indent)));
+            lines.join("\n")
+        }
+
+        fn fmt_meta_expr(&self, meta: &super::MetaExpr, indent: usize) -> String {
+            let flat = render_flat(Flat::MetaExpr(meta));
+            if indent + flat.len() <= self.max_width {
+                return flat;
+            }
+
+            let meta_part = render_flat(Flat::MetaEntries(&meta.entries));
+            let expr_indent = indent + meta_part.len() + 1;
+            let expr_text = self.fmt_expr(&meta.expr, expr_indent);
+            let mut lines = expr_text.lines();
+            let first = lines.next().unwrap_or("");
+            let mut output = format!("{meta_part} {first}");
+            for line in lines {
+                output.push('\n');
+                output.push_str(line);
+            }
+            output
+        }
+    }
+
+    /// Append a rendered child: its first line indented by `prefix`, and its
+    /// continuation lines as rendered.
+    fn push_child_lines(lines: &mut Vec<String>, prefix: &str, rendered: &str) {
+        let mut child_lines = rendered.lines();
+        if let Some(first) = child_lines.next() {
+            lines.push(format!("{prefix}{first}"));
+        }
+        lines.extend(child_lines.map(ToString::to_string));
+    }
+
     fn returning_layout(exprs: &[Expr]) -> String {
-        let printer = Printer::new();
+        let printer = Returning {
+            max_width: MAX_LINE,
+            indent_step: INDENT_STEP,
+        };
         print_program(exprs, |wire, out| out.push_str(&printer.fmt_expr(wire, 0)))
     }
 
     fn streaming_layout(exprs: &[Expr]) -> String {
-        let printer = Printer::new();
-        print_program(exprs, |wire, out| printer.write_expr(wire, 0, out))
+        print_canonical(exprs)
     }
 
     const I32: &str = "(lit {type: (t-prim {} i32)} 1)";
@@ -834,11 +889,6 @@ mod tests {
                         returning_layout(&exprs),
                         "{source}"
                     );
-                    assert_eq!(
-                        print_canonical(&exprs),
-                        returning_layout(&exprs),
-                        "{source}"
-                    );
                     compared += 1;
                 }
                 for width in [1, 2, 4, 8, 16, 32] {
@@ -861,10 +911,11 @@ mod tests {
     }
 
     #[test]
-    fn issue_3852_line_sensitive_leaves_keep_the_returning_layout() {
+    fn issue_3852_line_normalization_matches_the_returning_layout() {
         // A carriage return, a trailing line feed, or an empty spelling is
         // where splitting into lines and joining again is not the identity;
-        // such a tree is printed by the returning layout.
+        // the streaming layout applies the same normalization at the same
+        // places (chelis#3863 records that it changes such data).
         let mut sensitive_trees = 0;
         for raw in ["\"a\nb\"", "\"a\r\nb\"", "\"a\n\"", "\"\n\n\""] {
             let long = "w ".repeat(40);
@@ -876,7 +927,7 @@ mod tests {
                 let exprs = crate::parser::parse_str(&source).expect("the probe parses");
                 let sensitive = exprs
                     .iter()
-                    .any(|expr| with_wire(expr, has_line_sensitive_leaf));
+                    .any(|expr| with_wire(expr, has_split_sensitive_leaf));
                 assert_eq!(
                     print_canonical(&exprs),
                     returning_layout(&exprs),
@@ -892,7 +943,7 @@ mod tests {
         }
         assert!(
             sensitive_trees >= 2,
-            "the probes reached the fallback {sensitive_trees} times"
+            "the probes reached the normalization {sensitive_trees} times"
         );
     }
 
