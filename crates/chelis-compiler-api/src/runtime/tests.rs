@@ -6484,7 +6484,7 @@ fn issue_3778_equal_formal_types_at_different_addresses_agree() {
 /// The lock parses every runtime source, `runtime/` and every directory
 /// below it outside that module and the test files, and resolves each path
 /// expression through the file's `use` declarations (groups, `self`,
-/// renames, a crate alias, a crate-root path) to the path it names. It
+/// renames, a crate alias by `use` or `extern crate`, a crate-root path) to the path it names. It
 /// rejects any path the parser resolves to `chelis_ir`'s crate root or its
 /// `lower` or `host` modules whose last segment is a function with the word
 /// `lower` in its name
@@ -6563,6 +6563,10 @@ fn every_unit_lowering_is_charged() {
         ),
         (
             "use chelis_ir as ir;\nfn f() { ir::lower::try_lower_subexpr_program(e); }",
+            true,
+        ),
+        (
+            "extern crate chelis_ir as ir;\nfn f() { ir::lower::try_lower_subexpr_program(e); }",
             true,
         ),
         (
@@ -6770,6 +6774,13 @@ fn unit_lowering_calls(source: &str) -> Vec<String> {
     impl<'ast> Visit<'ast> for UseCollector {
         fn visit_item_use(&mut self, item: &'ast syn::ItemUse) {
             self.0.add(&item.tree, &[]);
+        }
+
+        fn visit_item_extern_crate(&mut self, item: &'ast syn::ItemExternCrate) {
+            if let Some((_, alias)) = &item.rename {
+                let krate = vec![item.ident.to_string()];
+                self.0.names.push((alias.to_string(), krate));
+            }
         }
     }
 
