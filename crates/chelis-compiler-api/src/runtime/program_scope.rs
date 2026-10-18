@@ -120,6 +120,13 @@ impl ProgramScope {
         &self.defs
     }
 
+    /// The definitions table, shared: a caller that reads a definition's
+    /// body while it changes the context borrows the body from this handle
+    /// instead of copying it.
+    pub(super) fn shared_defs(&self) -> std::sync::Arc<UnordMap<String, Expr>> {
+        std::sync::Arc::clone(&self.defs)
+    }
+
     pub(super) fn type_env(&self) -> &UnordMap<String, Expr> {
         &self.type_env
     }

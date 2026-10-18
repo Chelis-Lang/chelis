@@ -238,7 +238,7 @@ fn issue_1125_eval_raw_expr(expr: &Expr) -> Result<RuntimeValue, String> {
         native_clarabel_solve: false,
         bindings: Frame::new(),
         result_producer: None,
-        binding_types: UnordMap::new(),
+        binding_types: chelis_unord::PersistentMap::new(),
         precision_bindings: UnordMap::new(),
         declaration_values: UnordMap::new(),
         named_axis_route_cache: UnordMap::new(),
@@ -288,7 +288,7 @@ fn issue_1125_eval_checked_root(
         native_clarabel_solve: false,
         bindings: Frame::new(),
         result_producer: None,
-        binding_types: UnordMap::new(),
+        binding_types: chelis_unord::PersistentMap::new(),
         precision_bindings: UnordMap::new(),
         declaration_values: UnordMap::new(),
         named_axis_route_cache: UnordMap::new(),
@@ -2418,7 +2418,7 @@ fn eval_deep_with_bindings(
         native_clarabel_solve: false,
         bindings: Frame::new(),
         result_producer: None,
-        binding_types: UnordMap::new(),
+        binding_types: chelis_unord::PersistentMap::new(),
         precision_bindings: UnordMap::new(),
         declaration_values: UnordMap::new(),
         named_axis_route_cache: UnordMap::new(),
@@ -6392,4 +6392,30 @@ fn issue_3838_distinct_claims_compare_within_their_fingerprint() {
             "#3838: depth {depth} compared {comparisons} claims for {held} held"
         );
     }
+}
+
+/// chelis#3778: two closures whose formals carry structurally equal nested
+/// types, built from separate syntax, each derive their claim patterns from
+/// the type's structure, so an application's result and its trap never depend
+/// on which allocation holds the syntax, and two evaluations agree exactly.
+#[test]
+fn issue_3778_equal_formal_types_at_different_addresses_agree() {
+    let source = "def first(p: (tensor[2, f32], i64)) -> tensor[2, f32] = match p with {\n  \
+                  | (v, _) => v\n}\n\
+                  def second(q: (tensor[2, f32], i64)) -> tensor[2, f32] = match q with {\n  \
+                  | (w, _) => w\n}\n\
+                  a = to_tensor([1.0f32, 2.0f32])\n\
+                  result = (first((a, 1i64)), second((a, 2i64)), \
+                  fold(fn (acc: (tensor[2, f32], i64), x: i64) -> acc, (a, 0i64), range(0i64, 3i64)))\n";
+    let first = evaluate_result_or_failure(source);
+    let again = evaluate_result_or_failure(source);
+    assert_eq!(first, again, "#3778: two evaluations of one program agree");
+    assert_eq!(
+        first.as_deref(),
+        Ok(
+            "(tensor(shape=[2], data=[1.0, 2.0]), tensor(shape=[2], data=[1.0, 2.0]), \
+            (tensor(shape=[2], data=[1.0, 2.0]), 0))"
+        ),
+        "#3778: equal formal types reach equal results"
+    );
 }

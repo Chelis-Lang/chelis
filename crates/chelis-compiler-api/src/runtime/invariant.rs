@@ -835,7 +835,7 @@ fn revalidate_adt_value_inner(
         native_clarabel_solve: false,
         bindings: Frame::new(),
         result_producer: None,
-        binding_types: UnordMap::new(),
+        binding_types: chelis_unord::PersistentMap::new(),
         precision_bindings: UnordMap::new(),
         declaration_values: UnordMap::new(),
         named_axis_route_cache: UnordMap::new(),

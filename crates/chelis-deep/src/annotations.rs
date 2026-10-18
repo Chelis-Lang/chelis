@@ -63,20 +63,28 @@ impl SpanId {
     }
 }
 
+/// A validated expression payload. Its expression is shared behind a
+/// reference count, so a consumer that keeps the type a node carries, such as
+/// the evaluator's per-binding type scope, holds the same expression rather
+/// than a copy of it (chelis#3778).
 macro_rules! expression_payload {
     ($name:ident, $key:literal) => {
         #[derive(Debug, Clone, PartialEq)]
-        pub struct $name(Expr);
+        pub struct $name(std::sync::Arc<Expr>);
         impl $name {
             pub fn try_new(value: Expr) -> Result<Self, MetadataError> {
                 crate::metadata::validate_payload($key, &value)?;
-                Ok(Self(value))
+                Ok(Self(std::sync::Arc::new(value)))
             }
             pub fn expression(&self) -> &Expr {
                 &self.0
             }
+            /// The expression, shared with this payload.
+            pub fn shared(&self) -> &std::sync::Arc<Expr> {
+                &self.0
+            }
             pub fn into_expression(self) -> Expr {
-                self.0
+                std::sync::Arc::unwrap_or_clone(self.0)
             }
             pub fn span(&self) -> Span {
                 self.0.span()
@@ -659,8 +667,18 @@ impl Storage {
         };
         for mut value in std::mem::take(&mut self.core) {
             match &mut value {
-                MetadataValue::Type(value) => take_expression(&mut value.0),
-                MetadataValue::Accumulator(value) => take_expression(&mut value.0),
+                // A shared payload whose other holders outlive this one keeps
+                // its expression; the last holder takes it for the walk.
+                MetadataValue::Type(value) => {
+                    if let Some(expression) = std::sync::Arc::get_mut(&mut value.0) {
+                        take_expression(expression);
+                    }
+                }
+                MetadataValue::Accumulator(value) => {
+                    if let Some(expression) = std::sync::Arc::get_mut(&mut value.0) {
+                        take_expression(expression);
+                    }
+                }
                 MetadataValue::PropertyTolerance(value)
                 | MetadataValue::PropertySeed(value)
                 | MetadataValue::PropertySamples(value) => take_expression(&mut value.0),
