@@ -4273,7 +4273,7 @@ impl<'a> EvalContext<'a> {
             args,
             arg_types,
             result_type,
-            &[],
+            Vec::new(),
             None,
             Some(receipt),
             has_composition,
@@ -4429,7 +4429,7 @@ impl<'a> EvalContext<'a> {
             args,
             arg_type_exprs,
             result_type_expr,
-            &formal_claims,
+            formal_claims,
             present,
             receipt,
             false,
@@ -4444,7 +4444,7 @@ impl<'a> EvalContext<'a> {
         mut args: Vec<RuntimeValue>,
         arg_type_exprs: &[Option<Arc<Expr>>],
         result_type_expr: Option<&Expr>,
-        inherited_claims: &[DeclaredResultClaim],
+        inherited_claims: Vec<DeclaredResultClaim>,
         present: Option<&[bool]>,
         mut loop_entry: Option<&mut LoopEntryReceipt>,
         activate_forwarding: bool,
@@ -4452,10 +4452,11 @@ impl<'a> EvalContext<'a> {
     ) -> Result<RuntimeValue, String> {
         // A caller's first-site axes resolve in the caller's activation,
         // whose sites have all run by the time its callee produces the
-        // result: the callee only ever sees concrete axes.
+        // result: the callee only ever sees concrete axes. The caller's list
+        // is consumed here rather than kept alive beside its resolution.
         let mut inherited_claims = inherited_claims
-            .iter()
-            .map(|claim| self.resolve_first_sites(claim))
+            .into_iter()
+            .map(|claim| self.resolve_first_sites(&claim))
             .collect::<Vec<_>>();
         match callable {
             RuntimeValue::Builtin(value) => {

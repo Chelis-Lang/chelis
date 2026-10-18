@@ -11,8 +11,8 @@
 //! The receipt is the heap a level keeps live, measured by this binary's
 //! allocator as the difference in peak live bytes between recursions of 2,000
 //! and 4,000 levels over an `i64`, a `List[i64]` and a `tensor[2, f32]`
-//! argument, each well below the stack budget. Each bound is at most two
-//! thirds of what a level of that kind kept before.
+//! argument, each well below the stack budget. The bound, 2,048 bytes, is
+//! at most two thirds of what a level of any of these kinds kept before.
 //!
 //! Evidentiary status: REGRESSION TEST, proven failing first. On the base a
 //! level kept about 3,000, 3,360 and 6,150 bytes.
@@ -78,7 +78,7 @@ fn a_recursion_level_keeps_a_bounded_heap() {
             "a = to_tensor([1.0f32, 2.0f32])\n",
             "tensor[2, f32]",
             "a",
-            3072,
+            2048,
         ),
     ];
     std::thread::Builder::new()
