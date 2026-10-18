@@ -155,7 +155,9 @@ fn a_test_worker_thread_reaches_the_same_budget() {
 
 /// Definitions applied at the bottom of [`charged_source`]'s recursion. The
 /// `h` chain runs as one kernel; `leaf` runs as one routed named-axis call,
-/// with `tot` inlined; `grad(total)` and `grad(gated)` run as one transform.
+/// with `tot` inlined; `grad(total)` and `grad(gated)` run as one transform;
+/// `staged_kernel` and `staged_source` run as staged plans, a `reshape` whose
+/// target an interpreted source stage computes.
 const UNITS: &str = "\
 def h1(x: tensor[2, f32]) -> tensor[2, f32] = add(x, x)
 def h2(x: tensor[2, f32]) -> tensor[2, f32] = h1(h1(x))
@@ -166,6 +168,11 @@ def gated(x: tensor[2, f32]) -> f32 = if gt(tensor_to_scalar(sum(x, 0i32)), 100.
 def tot[pre, post](x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, ..post, f32] = sum(x, seq)
 def leaf(x: tensor[seq, f32]) -> f32 = tensor_to_scalar(tot(x))
 def via(g: tensor[seq, f32] -> f32, x: tensor[seq, f32]) -> f32 = g(x)
+def t1[n](x: tensor[n, f32]) -> tensor[n, f32] = add(x, x)
+def t2[n](x: tensor[n, f32]) -> tensor[n, f32] = t1(t1(x))
+def k1(v: i64) -> i64 = add(v, 0i64)
+def staged_kernel[m, n](source: tensor[m, f32], x: tensor[n, f32]) -> tensor[*, f32] = reshape(t2(x), [numel(source)])
+def staged_source[m, n](source: tensor[m, f32], x: tensor[n, f32]) -> tensor[*, f32] = reshape(x, [k1(numel(source))])
 ";
 
 /// `padder` nests `levels - charge` applications and then evaluates `unit`,
@@ -202,6 +209,21 @@ fn an_application_evaluated_as_a_unit_is_charged_its_deepest_chain() {
         ),
         // A transform: `grad(total)`, `total`, and the `h2` chain.
         ("transform", format!("numel(grad(total)({tensor}))"), 4, 2),
+        // A staged plan: the `t2` chain runs inside a kernel stage and is
+        // charged; `k1` runs in an interpreted source stage and counts
+        // itself, once.
+        (
+            "staged kernel stage",
+            format!("numel(staged_kernel({tensor}, {tensor}))"),
+            3,
+            2,
+        ),
+        (
+            "staged source stage",
+            format!("numel(staged_source({tensor}, {tensor}))"),
+            2,
+            2,
+        ),
     ];
     for (case, unit, charge, expected) in cases {
         assert_evaluates(
