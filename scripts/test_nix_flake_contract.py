@@ -1186,10 +1186,10 @@ class NixFlakeContractTests(unittest.TestCase):
         self.assertFalse(entry.is_symlink())
         self.assertTrue((entry / "bin" / "chelis").is_file())
         root, store_toolchain = roots["0.0.7"]
-        self.assertFalse(root.exists())
         self.assertFalse(
             root.is_symlink(), f"the install kept the Nix GC root {root} of the replaced link"
         )
+        self.assertFalse(root.exists())
         self.assertIn(f"removed {root}", installed.stdout)
         self.assertTrue(store_toolchain.is_dir())
         # The link of 0.0.8 still names its store toolchain, so its root stays.

@@ -311,13 +311,13 @@ let
         exit "\$install_status"
       fi
 
-      remove_stale_toolchain_roots
       restore_nix_wrapper
       if ! ${pkgs.nix}/bin/nix-store --add-root "\$gc_root" --realise "$out" >/dev/null; then
         printf '%s\n' 'chelisup: failed to promote the Nix GC root' >&2
         exit 1
       fi
       ${pkgs.coreutils}/bin/rm -f "\$partial_root" "\$staging_root"
+      remove_stale_toolchain_roots
       exit 0
     fi
 
