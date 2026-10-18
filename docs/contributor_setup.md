@@ -204,6 +204,12 @@ they run enters `packageScripts` in `nix/packages.nix`, a store path with only
 those scripts. Thus an edit of the documentation keeps every package
 derivation, and `scripts/test_nix_flake_contract.py` checks this.
 
+The checks also refer to no full copy of the flake source. Each check that
+reads repository files gets a view from `checkSources` in `nix/checks.nix`,
+with only the files that it reads. A file that a new check reads goes into its
+view. An edit of the documentation keeps every check derivation, and the same
+script checks this.
+
 On Linux, `nix flake check` also checks that `libexec/chelis` carries a
 GNU build id. The compiler identifies its own build by that id. Without it,
 each `chelis` process computes SHA-256 over the whole executable.

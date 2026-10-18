@@ -97,20 +97,36 @@ let
     touch "$out"
   '';
 
+  # Each check below reads a source view with only the files that it uses,
+  # as the packages do. So an edit of another file, such as a document,
+  # changes no check derivation (chelis#3909).
+  checkSources =
+    files:
+    lib.fileset.toSource {
+      root = ./..;
+      fileset = lib.fileset.unions files;
+    };
+  lockParitySources = checkSources [
+    ../scripts/check_nix_lock_parity.py
+    ../flake.lock
+    ../devenv.lock
+  ];
   lockParity =
     pkgs.runCommand "nix-lock-parity"
       {
         nativeBuildInputs = [ pkgs.python311 ];
+        passthru.sources = lockParitySources;
       }
       ''
-        python3 ${root}/scripts/check_nix_lock_parity.py \
-          --flake-lock ${root}/flake.lock \
-          --devenv-lock ${root}/devenv.lock
+        python3 ${lockParitySources}/scripts/check_nix_lock_parity.py \
+          --flake-lock ${lockParitySources}/flake.lock \
+          --devenv-lock ${lockParitySources}/devenv.lock
         touch "$out"
       '';
   # The committed graph must contain every product member and record the
   # canonical generator version and arguments. The Cargo.nix freshness job in
   # ci.yml proves that the bytes match an exact regeneration.
+  crate2nixGraphSources = checkSources [ ../Cargo.nix ];
   crate2nixGraph =
     let
       requiredWorkspaceMembers = [
@@ -125,12 +141,12 @@ let
       commandLine = "#   ${built.crate2nixCommand}";
     in
     assert missingWorkspaceMembers == [ ];
-    pkgs.runCommand "crate2nix-graph-contract" { } ''
-      if [ "$(sed -n 2p ${root}/Cargo.nix)" != ${escape versionLine} ]; then
+    pkgs.runCommand "crate2nix-graph-contract" { passthru.sources = crate2nixGraphSources; } ''
+      if [ "$(sed -n 2p ${crate2nixGraphSources}/Cargo.nix)" != ${escape versionLine} ]; then
         echo ${escape "line 2 of Cargo.nix does not record crate2nix ${built.crate2nixVersion}"} >&2
         exit 1
       fi
-      if [ "$(sed -n 3p ${root}/Cargo.nix)" != ${escape commandLine} ]; then
+      if [ "$(sed -n 3p ${crate2nixGraphSources}/Cargo.nix)" != ${escape commandLine} ]; then
         echo ${escape "line 3 of Cargo.nix does not record the command: ${built.crate2nixCommand}"} >&2
         exit 1
       fi
@@ -138,6 +154,15 @@ let
     '';
 
   platformBuildInputs = lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.openblas ];
+  # The Clarabel probes compile the package and the example. They read no
+  # Markdown file, so the README of the package stays out of the view.
+  compilerBehaviorSources = checkSources [
+    ../.github/scripts/verify_release_smt.py
+    (lib.fileset.difference ../packages/chelis-clarabel (
+      lib.fileset.fileFilter (file: file.hasExt "md") ../packages/chelis-clarabel
+    ))
+    ../examples/clarabel_qp
+  ];
   compilerBehavior =
     pkgs.runCommand "chelis-compiler-behavior"
       {
@@ -146,6 +171,7 @@ let
           pkgs.stdenv.cc
         ]
         ++ platformBuildInputs;
+        passthru.sources = compilerBehaviorSources;
       }
       ''
         export HOME="$TMPDIR/home"
@@ -171,9 +197,9 @@ let
         # a writable copy with the layout that verify_release_smt.py reads.
         verify="$TMPDIR/verify"
         mkdir -p "$verify/.github/scripts" "$verify/packages" "$verify/examples"
-        cp ${root}/.github/scripts/verify_release_smt.py "$verify/.github/scripts/"
-        cp -R ${root}/packages/chelis-clarabel "$verify/packages/"
-        cp -R ${root}/examples/clarabel_qp "$verify/examples/"
+        cp ${compilerBehaviorSources}/.github/scripts/verify_release_smt.py "$verify/.github/scripts/"
+        cp -R ${compilerBehaviorSources}/packages/chelis-clarabel "$verify/packages/"
+        cp -R ${compilerBehaviorSources}/examples/clarabel_qp "$verify/examples/"
         chmod -R u+w "$verify"
         cd "$TMPDIR"
         python3 "$verify/.github/scripts/verify_release_smt.py" --clarabel ${packages.chelis}/bin/chelis
@@ -206,6 +232,12 @@ let
           name = "chelis-lane-check-corpus";
           path = root + "/tests/corpus/lane_check";
         };
+        # The receipt records `source_sha256` of `built.source`, the package
+        # source view, and not of this view.
+        sources = checkSources [
+          ../scripts/lane_check_scope.py
+          ../flake.lock
+        ];
         cc = pkgs.stdenv.cc;
         # The scope report records these derivations by path, and no step reads
         # their outputs. A plain `drvPath` reference would make Nix realize
@@ -225,15 +257,16 @@ let
           NIX_LDFLAGS = "-L${pkgs.openblas}/lib -L${pkgs.glibc}/lib -rpath ${pkgs.openblas}/lib";
           OMP_NUM_THREADS = "1";
           OPENBLAS_NUM_THREADS = "1";
+          passthru.sources = sources;
         }
         ''
           export HOME="$TMPDIR/home"
           mkdir -p "$HOME" "$out"
-          python3 ${root}/scripts/lane_check_scope.py \
+          python3 ${sources}/scripts/lane_check_scope.py \
             --source ${built.source} \
             --compiler-source ${built.crateSource} \
             --corpus ${corpus} \
-            --flake-lock ${root}/flake.lock \
+            --flake-lock ${sources}/flake.lock \
             --chelis ${packages.chelis} \
             --chelis-drv ${recorded packages.chelis} \
             --compiler ${cc} \
