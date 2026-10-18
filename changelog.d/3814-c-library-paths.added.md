@@ -6,9 +6,9 @@ colon-separated list of absolute directories. Each include directory adds
 
 The C builds of `chelis build`, the compiler check and the C compile of the
 Python bindings use these flags. So does the host program of a HIP or Metal
-build or of a HIP binding. A device-only HIP or Metal build or HIP binding
-compiles no C source and does not use them. A relative entry fails a build that
-uses them. On Linux, the `chelis` Nix package declares the OpenBLAS directories,
+build. A device-only HIP or Metal build or HIP binding compiles no C source and
+does not use them. A relative entry fails a build or a binding that uses them.
+On Linux, the `chelis` Nix package declares the OpenBLAS directories,
 so a program that calls BLAS builds and runs. See
 [#3814](https://github.com/Chelis-Lang/chelis/issues/3814) and
 [#3893](https://github.com/Chelis-Lang/chelis/issues/3893).

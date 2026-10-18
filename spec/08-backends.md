@@ -515,9 +515,8 @@ for `<dir>` to every C link.
 
 These flags are part of the profile. The compiler check and its floating-point
 canary SHALL use them. Every C compile and C link of a build or a binding SHALL
-use them. A HIP or Metal build, or a HIP binding, that has a host program
-compiles that program with the C flags of the profile. That compile and its link
-SHALL also use them.
+use them. A HIP or Metal build that has a host program compiles that program
+with the C flags of the profile. That compile and its link SHALL also use them.
 
 A device-only HIP or Metal build, or a device-only HIP binding, has no host
 program and compiles no C source. It compiles generated C++ or Objective-C++
