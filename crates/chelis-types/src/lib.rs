@@ -100,7 +100,7 @@ pub use infer::{
     check_ir_with_context, check_ir_with_signature_context, check_typed_program,
     compose_local_ascriptions, fold_static_int_expr, infer_ir_program, infer_program,
     reset_grow_segment_bytes_for_test, resolve_declared_surface, run_on_grown_stack,
-    set_grow_segment_bytes_for_test,
+    run_on_grown_stack_of, set_grow_segment_bytes_for_test,
 };
 pub use linearity::{
     CopyRepair, CopyRepairUse, CopyRepairUseKind, LinearityInfo, check_linearity,

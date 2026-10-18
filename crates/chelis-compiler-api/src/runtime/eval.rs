@@ -41,24 +41,60 @@ thread_local! {
     /// program applies its helpers many times; each non-drawing helper is
     /// planned once however often it is applied.
     static DEF_KERNEL_PLANNINGS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
-    /// A fallback only for targets where the native remaining stack cannot be measured.
+    /// Function applications in progress on this thread: the count the
+    /// recursion budget bounds.
     static EVAL_CALL_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
+
+/// The most function applications evaluation nests (spec/08-backends.md
+/// section 1.1). A count, so whether a program reaches it depends only on
+/// the program and its inputs.
+pub(super) const EVAL_MAX_NESTED_APPLICATIONS: usize = 10_000;
+
+/// The stack segment evaluation runs on. It holds
+/// [`EVAL_MAX_NESTED_APPLICATIONS`] levels of an ordinary body before the
+/// native-stack backstop fires, so the budget, not the stack, ends a deep
+/// recursion. The largest levels measured are a body nested 64 expressions
+/// deep, about 10 KB of stack in an optimized build and 64 KB in an
+/// unoptimized one, and a recursion through a `fold` callback, up to about
+/// 135 KB a level unoptimized. The segment is reserved address space: only
+/// the pages a recursion touches become resident.
+pub(super) const EVAL_SEGMENT_BYTES: usize = if cfg!(debug_assertions) {
+    2 * 1024 * 1024 * 1024
+} else {
+    512 * 1024 * 1024
+};
 
 // One interpreted call traverses several frames before reaching this guard
 // again. Leave room for that path, its error construction, and unwinding.
 const EVAL_STACK_RED_ZONE_BYTES: usize = 512 * 1024;
 const EVAL_FALLBACK_MAX_CALL_DEPTH: usize = 8;
 
-/// Tracks calls rather than expression visits: each recursive user function
-/// crosses the callable boundary, while ordinary expression evaluation stays
-/// off this hot-path budget check.
+/// One function application in progress. Tracks calls rather than
+/// expression visits: each recursive user function crosses the callable
+/// boundary, while ordinary expression evaluation stays off this hot-path
+/// budget check.
 struct EvalCallStackFrame;
 
 impl EvalCallStackFrame {
-    fn enter() -> Self {
-        EVAL_CALL_DEPTH.with(|depth| depth.set(depth.get() + 1));
-        Self
+    /// Begin an application, or report why it cannot be entered: it would
+    /// exceed the recursion budget, or the native stack is nearly exhausted.
+    fn enter() -> Result<Self, String> {
+        let depth = EVAL_CALL_DEPTH.with(|depth| {
+            depth.set(depth.get() + 1);
+            depth.get()
+        });
+        let frame = Self;
+        if depth > EVAL_MAX_NESTED_APPLICATIONS {
+            return Err(format!(
+                "evaluation recursion budget exhausted: more than \
+                 {EVAL_MAX_NESTED_APPLICATIONS} nested function applications"
+            ));
+        }
+        if Self::budget_exhausted() {
+            return Err("evaluation stack budget exhausted during a function call".to_owned());
+        }
+        Ok(frame)
     }
 
     fn budget_exhausted() -> bool {
@@ -4258,10 +4294,7 @@ impl<'a> EvalContext<'a> {
                 result_type,
             );
         }
-        let _stack_frame = EvalCallStackFrame::enter();
-        if EvalCallStackFrame::budget_exhausted() {
-            return Err("evaluation stack budget exhausted during a function call".to_owned());
-        }
+        let _stack_frame = EvalCallStackFrame::enter()?;
         let composed = receipt.composition.take();
         let has_composition = composed.is_some();
         if let Some(mut composition) = composed {
@@ -4357,10 +4390,7 @@ impl<'a> EvalContext<'a> {
         receipt: Option<&mut LoopEntryReceipt>,
         arg_producers: Option<Vec<Option<ResultProducer>>>,
     ) -> Result<RuntimeValue, String> {
-        let _stack_frame = EvalCallStackFrame::enter();
-        if EvalCallStackFrame::budget_exhausted() {
-            return Err("evaluation stack budget exhausted during a function call".to_owned());
-        }
+        let _stack_frame = EvalCallStackFrame::enter()?;
         let mut result_frames = Vec::new();
         if let Some(contracts) = callable.invocation_contracts() {
             for retained in contracts {
