@@ -10,6 +10,11 @@
 //! did about `k^2` work. They now read per-unit position tables built in one
 //! pass.
 //!
+//! The verified emission's per-function views found each function's sites
+//! by filtering every site record of the program, so projecting `n`
+//! definitions compared `n` times the program's sites (chelis#3847). They now
+//! read the records indexed by unit.
+//!
 //! The oracle is the lookups' own count of the entries they visit (table
 //! entries built plus lookups answered), kept per thread while the test
 //! counts, which is deterministic for a fixed program. Doubling the chain must
@@ -56,6 +61,22 @@ fn site_lookup_entries(source: &str) -> u64 {
             .map(|site| site.actions().count())
             .sum::<usize>();
         assert!(actions > 0, "the probe has site actions");
+        // What the C projection reads per function, and for the roots.
+        let function_sites = (0..emission.function_count())
+            .map(|index| {
+                emission
+                    .function(index)
+                    .expect("function census")
+                    .sites()
+                    .count()
+            })
+            .sum::<usize>();
+        let root_sites = emission.root_sites().count();
+        assert_eq!(
+            function_sites + root_sites,
+            emission.sites().count(),
+            "every site belongs to the roots or to one function"
+        );
     });
     entries
 }
@@ -87,6 +108,23 @@ fn branch_chain(k: usize) -> String {
     let items = (0..k).map(|index| format!("t{index}")).collect::<Vec<_>>();
     writeln!(source, "  [{}]\n}}", items.join(", ")).unwrap();
     source.push_str("r = index(g(1i64), 0i64)\n");
+    source
+}
+
+/// `k` one-line definitions and one root that calls each of them.
+fn definitions(k: usize) -> String {
+    let mut source = String::new();
+    for index in 0..k {
+        writeln!(
+            source,
+            "def f{index}(x: i64) -> i64 = add(mul(x, x), {index}i64)"
+        )
+        .unwrap();
+    }
+    let calls = (0..k)
+        .map(|index| format!("f{index}(1i64)"))
+        .collect::<Vec<_>>();
+    writeln!(source, "r = [{}]", calls.join(", ")).unwrap();
     source
 }
 
@@ -125,6 +163,15 @@ fn site_lookups_over_a_branch_chain_visit_linearly_many_entries() {
         "site lookup entries, branch chain",
         BRANCH_SIZES,
         sweep(branch_chain, BRANCH_SIZES),
+    );
+}
+
+#[test]
+fn per_function_site_views_visit_linearly_many_entries_over_many_definitions() {
+    assert_linear(
+        "site lookup entries, definitions",
+        BRANCH_SIZES,
+        sweep(definitions, BRANCH_SIZES),
     );
 }
 
