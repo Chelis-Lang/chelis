@@ -242,6 +242,28 @@ let
       ${pkgs.coreutils}/bin/rmdir "\$gc_root_dir" 2>/dev/null || true
     }
 
+    # Remove each toolchain root whose entry in toolchains/ is no longer a
+    # link into the store path of that root. An install replaces the link of
+    # a version with a real directory.
+    remove_stale_toolchain_roots() {
+      for toolchain_root in "\$gc_root_dir"/toolchain-*; do
+        if [ ! -L "\$toolchain_root" ]; then
+          continue
+        fi
+        entry="\$chelis_home/toolchains/\''${toolchain_root##*/toolchain-}"
+        if [ -L "\$entry" ]; then
+          root_target="\$(${pkgs.coreutils}/bin/readlink "\$toolchain_root")"
+          case "\$(${pkgs.coreutils}/bin/readlink "\$entry")" in
+            "\$root_target" | "\$root_target"/*)
+              continue
+              ;;
+          esac
+        fi
+        ${pkgs.coreutils}/bin/rm -f "\$toolchain_root"
+        printf 'removed %s\n' "\$toolchain_root"
+      done
+    }
+
     if [ "\''${1:-}" = "self" ] && [ "\''${2:-}" = "uninstall" ]; then
       resolve_chelis_home
       set_gc_root_paths
@@ -289,6 +311,7 @@ let
         exit "\$install_status"
       fi
 
+      remove_stale_toolchain_roots
       restore_nix_wrapper
       if ! ${pkgs.nix}/bin/nix-store --add-root "\$gc_root" --realise "$out" >/dev/null; then
         printf '%s\n' 'chelisup: failed to promote the Nix GC root' >&2

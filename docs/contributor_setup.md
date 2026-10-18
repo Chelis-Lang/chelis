@@ -177,8 +177,18 @@ compiler. The wrapper puts the C compiler and the binutils of the Nix `stdenv`
 first on `PATH`, so `chelis build` needs no host toolchain. The
 `chelisWrapperArgs` list in `nix/packages.nix` holds the wrapper arguments.
 The `wrappedBuild` check builds an executable and a static library with an
-empty host `PATH`, and runs the executable. The same build with
-`libexec/chelis` must fail.
+empty host `PATH`, and runs the executable. It also builds and runs the BLAS
+fixture program `examples/recurrence_extent_scope.ch`, whose generated C
+includes `chelis_blas.h`. On Linux, the build links the OpenBLAS that the
+wrapper declares. The check has two negative controls:
+
+- The empty-`PATH` control builds `hello_tensor.ch` with `libexec/chelis` and
+  an empty `PATH`. The build must fail, and its error must contain
+  `was not found`.
+- The OpenBLAS control runs on Linux. It builds the BLAS fixture with
+  `libexec/chelis` and the `PATH` of the wrapper, but without
+  `CHELIS_C_INCLUDE_PATH` and `CHELIS_C_LIBRARY_PATH`. The build must fail, and
+  its error must name `cblas.h` or `-lopenblas`.
 
 Both `chelis` and `chelis-runtime` verify their copied archive and all six
 public headers against the sealed compiler's export. `nix flake check`
