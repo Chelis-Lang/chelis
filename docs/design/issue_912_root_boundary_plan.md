@@ -134,6 +134,39 @@ for f32-declared tensors) is the eval-f64-intermediate vs C-f32-float gap —
     is independently owned; non-root owners drop. This ownership lowering is
     downstream #1286 work and does not add a second root manifest.
 
+20. **A call with argument values runs on the Host lane.** [05-OBS-9] admits a
+    selected parameterized definition with typed call arguments for its
+    non-tensor parameters (`compiler::PreparedEval::call_root`, chelis#3801).
+    Those values enter the host evaluator, which applies the definition to
+    them, so the manifest entry of a call that supplies any argument is
+    assigned the Host lane with the `StructuralForm` reason
+    `selected-callable-arguments`; a call whose parameters are all tensors
+    keeps the lane the Tensor-lane realizability check gives it. The Host lane
+    holds every dtype, so the assignment satisfies [05-OBS-10]. The entry's
+    required inputs stay its tensor inputs: the live tensor parameters, never
+    an argued one. A call the manifest does not specialize, because an input
+    its result reads has no binding, is an error rather than a result without
+    its root.
+
+    Admission happens before anything evaluates, and converts nothing. A call
+    argument is a numeric scalar whose dtype tag equals the declared primitive,
+    a boolean, or a string; a parameter of any other non-tensor type, a key
+    included, is rejected
+    with a typed `unsupported` diagnostic citing #3804, and so is a call of a
+    root with a tensor parameter whose precision is a variable (bounded or not)
+    or whose extents are not all literal, since checking a binding against a
+    bound or a shared dimension variable is the same open work. A literal
+    tensor parameter's binding is admitted at exactly the declared dtype and
+    every extent, and rejected otherwise, as the Tensor lane's input load
+    rejects it; the
+    host evaluator's own binding ingress, which rounds or range-checks a
+    binding to its declared dtype, therefore receives only bindings already at
+    that dtype and changes none of them.
+    The container arguments #3804 tracks owe, beyond per-element types, each
+    type's own value rules: [05-OP-56] key uniqueness for a `Dict`, under the
+    [05-OP-32] key equivalence it cites; constructor lookup within the declared
+    type rather than by name across types; and invariant revalidation.
+
 ## Coordination
 
 - **#733** (spec provenance): manifest machinery binds to atoms.

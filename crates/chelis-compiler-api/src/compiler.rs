@@ -25,7 +25,7 @@ use chelis_types::{
 use sha2::{Digest, Sha256};
 
 use crate::runtime::{
-    RuntimeTensorValue, evaluate_host_program_filtered,
+    RuntimeTensorValue, RuntimeValue, evaluate_host_program_filtered,
     evaluate_host_program_with_library_and_types, lookup_runtime_value_for_manifest_root,
     runtime_value_to_schema,
 };
@@ -36,11 +36,11 @@ use crate::schema::{
     DeepCallGraphRequest, DeepCallGraphResult, DeepFunctionOutline, DeepOutlineRequest,
     DeepOutlineResult, DeepReference, DeepReferencesRequest, DeepReferencesResult, DesugarRequest,
     DesugarResult, Diagnostic, DiagnosticSpan, EvalRequest, EvalResult, EvaluatedRoot,
-    FitnessComponents, GeneralKind, GeneratedFile, GradRequest, GradResult, LowerRequest,
-    LowerResult, ParseRequest, ParseResult, RenameRequest, RenameResult, ReplaceFunctionRequest,
-    ReplaceFunctionResult, RootManifestEntryResult, RootManifestResult, SourceKind, Span,
-    ValidateMode, ValidateRequest, ValidateResult, WireBinOp, WireComparisonKind, WireDag,
-    WireDagNode, WireDagSchemaError, WireDimExpr, WireDimInfo, WireExtentWitnessSite,
+    ExecutionValue, FitnessComponents, GeneralKind, GeneratedFile, GradRequest, GradResult,
+    LowerRequest, LowerResult, ParseRequest, ParseResult, RenameRequest, RenameResult,
+    ReplaceFunctionRequest, ReplaceFunctionResult, RootManifestEntryResult, RootManifestResult,
+    SourceKind, Span, ValidateMode, ValidateRequest, ValidateResult, WireBinOp, WireComparisonKind,
+    WireDag, WireDagNode, WireDagSchemaError, WireDimExpr, WireDimInfo, WireExtentWitnessSite,
     WireExtremaKind, WireExtremaOperand, WireFusedInput, WireFusedStep, WireFusedStepOp,
     WireImportKind, WireLetBinding, WireLetPattern, WireLogicalKind, WireMatchArm,
     WireNamedCastMode, WireParam, WirePattern, WirePropertyOption, WireRecordExprField,
@@ -2666,6 +2666,271 @@ impl PreparedEval {
         let roots = [root.to_string()];
         eval_compiled(&self.compiled, bindings, Some(&roots))
     }
+
+    /// Evaluate one call of the selected parameterized root `root`
+    /// ([05-OBS-7], [05-OBS-9]). `arguments` supplies every authored
+    /// non-tensor parameter by name, each a value of exactly the parameter's
+    /// checked type; tensor parameters arrive in `bindings` as for
+    /// [`Self::eval_root`]. A missing, extra, tensor-valued or mistyped
+    /// argument is rejected before evaluation. A call that supplies any
+    /// argument runs on the Host lane; a root whose parameters are all
+    /// tensors keeps the lane its own realizability gives it.
+    pub fn call_root(
+        &self,
+        root: &str,
+        arguments: BTreeMap<String, ExecutionValue>,
+        bindings: BTreeMap<String, crate::schema::TensorValue>,
+    ) -> Result<EvalResult> {
+        let _fp_env = chelis_runtime::FpEnvGuard::enter();
+        let call = admit_call(&self.compiled, root, &arguments, &bindings)?;
+        let roots = [root.to_string()];
+        eval_compiled_call(&self.compiled, bindings, Some(&roots), Some(&call))
+    }
+}
+
+/// Admit one call's inputs against `root`'s checked signature ([05-OBS-9]),
+/// before anything evaluates. Every non-tensor parameter has exactly one
+/// argument, of exactly its checked type; no other name is supplied as an
+/// argument; and every tensor binding a tensor parameter receives has exactly
+/// the declared dtype and literal extents, never a converted one.
+fn admit_call(
+    compiled: &CompiledSource,
+    root: &str,
+    arguments: &BTreeMap<String, ExecutionValue>,
+    bindings: &BTreeMap<String, crate::schema::TensorValue>,
+) -> Result<crate::runtime::HostCall> {
+    let reject = |message: String| stage_error(EVAL_STAGE, message, GeneralKind::EvalError);
+    let signature = compiled
+        .checked()
+        .signature_inference()
+        .functions
+        .get(root)
+        .filter(|signature| !signature.params.is_empty())
+        .ok_or_else(|| {
+            reject(format!(
+                "`{root}` is not a parameterized definition to call"
+            ))
+        })?;
+    for name in arguments.keys() {
+        if !signature.params.iter().any(|param| param.name == *name) {
+            return Err(reject(format!(
+                "the call of `{root}` supplies `{name}`, which names no parameter"
+            )));
+        }
+    }
+    let mut admitted = BTreeMap::new();
+    for param in &signature.params {
+        let ty = &param.checked_type;
+        if type_is_tensor_runtime_input(ty) {
+            if arguments.contains_key(&param.name) {
+                return Err(reject(format!(
+                    "parameter `{}` of `{root}` is a tensor; a tensor arrives as a binding, \
+                     not a call argument",
+                    param.name
+                )));
+            }
+            if !tensor_type_is_literal(ty) {
+                return Err(unimplemented_call_input(format!(
+                    "a tensor parameter `{}` of `{root}` whose type `{ty}` has a precision \
+                     variable or a non-literal extent",
+                    param.name
+                )));
+            }
+            if let Some(binding) = bindings.get(&param.name) {
+                admit_tensor_binding(binding, ty).map_err(|reason| {
+                    reject(format!("binding `{}` of `{root}` {reason}", param.name))
+                })?;
+            }
+            continue;
+        }
+        let Some(value) = arguments.get(&param.name) else {
+            return Err(reject(format!(
+                "the call of `{root}` supplies no value for parameter `{}`",
+                param.name
+            )));
+        };
+        let runtime = admit_argument(value, ty, root, &param.name)?;
+        admitted.insert(param.name.clone(), runtime);
+    }
+    Ok(crate::runtime::HostCall {
+        root: root.to_string(),
+        arguments: admitted,
+    })
+}
+
+/// Admit one call argument: a scalar of exactly the declared dtype, a
+/// boolean, or a string. Every other parameter type is a call argument
+/// [05-OBS-9] admits that this boundary does not implement.
+fn admit_argument(
+    value: &ExecutionValue,
+    ty: &chelis_types::types::Type,
+    root: &str,
+    param: &str,
+) -> Result<RuntimeValue> {
+    use chelis_types::types::Type;
+    let declared = match ty {
+        Type::Ref(inner) => inner.as_ref(),
+        other => other,
+    };
+    let admitted = match (declared, value) {
+        (Type::Prim(Prim::Bool), ExecutionValue::Bool { value }) => RuntimeValue::Bool(*value),
+        (Type::Prim(Prim::String), ExecutionValue::String { value }) => {
+            RuntimeValue::String(value.clone())
+        }
+        (Type::Prim(prim), ExecutionValue::Scalar { value })
+            if (prim.is_float() || prim.is_integer()) && value.get().prim() == *prim =>
+        {
+            RuntimeValue::from_scalar_value(value.get())
+        }
+        (Type::Prim(prim), _)
+            if prim.is_float()
+                || prim.is_integer()
+                || matches!(prim, Prim::Bool | Prim::String) =>
+        {
+            return Err(stage_error(
+                EVAL_STAGE,
+                format!(
+                    "argument `{param}` of `{root}` is not a value of its parameter type `{ty}`: \
+                     it is {}",
+                    describe_execution_value(value)
+                ),
+                GeneralKind::EvalError,
+            ));
+        }
+        _ => {
+            return Err(unimplemented_call_input(format!(
+                "a call argument of type `{ty}` for parameter `{param}` of `{root}`"
+            )));
+        }
+    };
+    Ok(admitted)
+}
+
+/// The tensor inputs a call of `root` reads and has no binding for: its live
+/// tensor parameters and the free tensor inputs its result's closure reads.
+fn unbound_call_inputs(
+    compiled: &CompiledSource,
+    root: &str,
+    bindings: &BTreeMap<String, crate::schema::TensorValue>,
+) -> BTreeSet<String> {
+    let mut read = BTreeSet::new();
+    if let (Some(signature), Some(body)) = (
+        compiled.checked().signature_inference().functions.get(root),
+        selected_callable_result_expr(compiled.checked(), root),
+    ) {
+        let tensors = signature
+            .params
+            .iter()
+            .filter(|param| type_is_tensor_runtime_input(&param.checked_type))
+            .map(|param| param.name.clone())
+            .collect::<BTreeSet<_>>();
+        read.extend(chelis_effects::realizability::referenced_runtime_inputs(
+            body, &tensors,
+        ));
+    }
+    if let Some(free) = compiled
+        .eval_facts()
+        .realizability
+        .required_inputs_by_def
+        .get(root)
+    {
+        read.extend(free.iter().cloned());
+    }
+    read.retain(|name| !bindings.contains_key(name));
+    read
+}
+
+/// The typed rejection of a call input the call boundary does not implement
+/// (chelis#3804): a call argument other than a scalar, a boolean or a string,
+/// or a tensor parameter whose type is not literal.
+fn unimplemented_call_input(what: String) -> CompilerError {
+    let mut error = unsupported_stage_error(chelis_types::unsupported::Unsupported::new(
+        chelis_types::unsupported::UnsupportedKind::Construct(what),
+        "a call admits numeric scalar, boolean and string arguments and tensor bindings \
+         of a literal type",
+        chelis_types::unsupported::Stage::Runtime,
+        chelis_types::unimplemented_rejection!(
+            3804,
+            "declare the value in the program and call a definition whose parameters are \
+             scalars, booleans, strings or tensors of a literal type"
+        ),
+    ));
+    error.stage = EVAL_STAGE.to_string();
+    error
+}
+
+/// Whether a tensor parameter's type is literal: a concrete precision and
+/// every extent a literal size.
+fn tensor_type_is_literal(ty: &chelis_types::types::Type) -> bool {
+    use chelis_types::types::{Dim, TensorPrec, Type};
+    match ty {
+        Type::Ref(inner) => tensor_type_is_literal(inner),
+        Type::Tensor(dims, TensorPrec::Concrete(_)) => {
+            dims.iter().all(|dim| matches!(dim, Dim::Lit(_)))
+        }
+        _ => false,
+    }
+}
+
+/// Admit a tensor binding at exactly its parameter's declared dtype and
+/// literal extents, as the Tensor lane's input load does: a binding of
+/// another dtype is rejected, never cast or rounded, and so is one whose rank
+/// or extent differs. The caller admits only literal tensor parameter types.
+fn admit_tensor_binding(
+    binding: &crate::schema::TensorValue,
+    ty: &chelis_types::types::Type,
+) -> std::result::Result<(), String> {
+    use chelis_types::types::{Dim, TensorPrec, Type};
+    let declared = match ty {
+        Type::Ref(inner) => inner.as_ref(),
+        other => other,
+    };
+    let Type::Tensor(dims, precision) = declared else {
+        unreachable!("a tensor runtime input has a tensor type");
+    };
+    let tensor = crate::decode::wire_tensor_to_ir(binding)
+        .map_err(|error| format!("is not a tensor value: {error}"))?;
+    let TensorPrec::Concrete(prim) = precision else {
+        unreachable!("a call admits only literal tensor parameter types");
+    };
+    if tensor.prim() != *prim {
+        return Err(format!(
+            "is a tensor of `{}`, and the parameter is `{ty}`; a binding is admitted at its \
+             declared dtype, and casts are explicit",
+            tensor.prim().name()
+        ));
+    }
+    if dims.len() != tensor.shape.len() {
+        return Err(format!(
+            "has rank {}, and the parameter is `{ty}`",
+            tensor.shape.len()
+        ));
+    }
+    for (axis, (dim, extent)) in dims.iter().zip(tensor.shape.iter()).enumerate() {
+        if let Dim::Lit(declared) = dim
+            && usize::try_from(*declared).ok() != Some(*extent)
+        {
+            return Err(format!(
+                "has extent {extent} on axis {axis}, and the parameter is `{ty}`"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn describe_execution_value(value: &ExecutionValue) -> String {
+    match value {
+        ExecutionValue::Tensor { .. } => "a tensor".to_string(),
+        ExecutionValue::Scalar { value } => format!("a scalar `{}`", value.get().prim().name()),
+        ExecutionValue::Bool { .. } => "a bool".to_string(),
+        ExecutionValue::Key { .. } => "a key".to_string(),
+        ExecutionValue::String { .. } => "a string".to_string(),
+        ExecutionValue::List { .. } => "a list".to_string(),
+        ExecutionValue::Dict { .. } => "a dict".to_string(),
+        ExecutionValue::Tuple { .. } => "a tuple".to_string(),
+        ExecutionValue::Adt { ctor, .. } => format!("a `{ctor}` value"),
+        ExecutionValue::Unit => "unit".to_string(),
+    }
 }
 
 /// Compile a program once so downstream callers can cheaply evaluate
@@ -3083,6 +3348,17 @@ fn eval_compiled(
     bindings: BTreeMap<String, crate::schema::TensorValue>,
     selected_root_names: Option<&[String]>,
 ) -> Result<EvalResult> {
+    eval_compiled_call(compiled, bindings, selected_root_names, None)
+}
+
+/// [`eval_compiled`], with the admitted non-tensor argument values of one
+/// selected callable root when `call` is `Some`.
+fn eval_compiled_call(
+    compiled: &CompiledSource,
+    bindings: BTreeMap<String, crate::schema::TensorValue>,
+    selected_root_names: Option<&[String]>,
+    call: Option<&crate::runtime::HostCall>,
+) -> Result<EvalResult> {
     // [04-NUM-2] results assume round-to-nearest-even with subnormals kept.
     // The evaluator runs in its host's thread (the CLI, or a Python or Rust
     // embedding that may have set a rounding mode or flush-to-zero), so every
@@ -3098,8 +3374,37 @@ fn eval_compiled(
         compiled,
         bindings.keys().map(String::as_str),
         selected_root_names,
+        call,
     )?;
     let manifest = effective_manifest.as_ref();
+    // A call is owed exactly when its inputs are supplied ([05-OBS-7]); a call
+    // the manifest does not specialize has an unbound live tensor input, and
+    // it is an error, never a result without its root.
+    if let Some(call) = call
+        && !manifest
+            .entries
+            .iter()
+            .any(|entry| entry.def_name == call.root)
+    {
+        let missing = unbound_call_inputs(compiled, &call.root, &bindings);
+        let reason = if missing.is_empty() {
+            "an input its result reads is not supplied".to_string()
+        } else {
+            format!(
+                "it reads {} with no binding",
+                missing
+                    .iter()
+                    .map(|name| format!("`{name}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        };
+        return Err(stage_error(
+            EVAL_STAGE,
+            format!("the call of `{}` is not owed: {reason}", call.root),
+            GeneralKind::EvalError,
+        ));
+    }
     let selected =
         selected_root_names.map(|roots| roots.iter().cloned().collect::<BTreeSet<String>>());
     let observed_entries = manifest
@@ -3265,7 +3570,18 @@ fn eval_compiled(
             },
             host_selected_root_names,
             Some(&manifested_lowered_names),
+            call,
         )
+    } else if call.is_some() {
+        // The host program is what a call's arguments enter; without it the
+        // library and the source did not compose, so nothing can run.
+        return Err(stage_error(
+            EVAL_STAGE,
+            "a call with argument values needs the host program, and the library \
+             and the source did not compose"
+                .to_string(),
+            GeneralKind::EvalError,
+        ));
     } else if let Some(library) = compiled.library_runtime.as_ref() {
         evaluate_host_program_with_library_and_types(
             compiled.checked(),
@@ -3793,6 +4109,7 @@ fn manifest_for_eval<'a>(
     compiled: &CompiledSource,
     binding_names: impl Iterator<Item = &'a str>,
     selected_root_names: Option<&[String]>,
+    call: Option<&crate::runtime::HostCall>,
 ) -> Result<std::sync::Arc<RootManifest>> {
     let available = binding_names.collect::<UnordSet<_>>();
     let candidate_names = selected_root_names
@@ -3868,8 +4185,17 @@ fn manifest_for_eval<'a>(
             .iter()
             .map(|param| param.name.clone())
             .collect::<BTreeSet<_>>();
+        // A call's argument values supply its non-tensor parameters; they are
+        // call inputs, never required inputs ([05-OBS-9]).
+        let arguments = call
+            .filter(|call| call.root == candidate)
+            .map(|call| &call.arguments);
+        let argued = |name: &str| arguments.is_some_and(|arguments| arguments.contains_key(name));
         let live_parameter_names =
-            chelis_effects::realizability::referenced_runtime_inputs(body, &parameter_names);
+            chelis_effects::realizability::referenced_runtime_inputs(body, &parameter_names)
+                .into_iter()
+                .filter(|name| !argued(name))
+                .collect::<BTreeSet<_>>();
         if live_parameter_names.iter().any(|name| {
             signature
                 .params
@@ -3878,8 +4204,8 @@ fn manifest_for_eval<'a>(
                 .is_none_or(|param| !type_is_tensor_runtime_input(&param.checked_type))
         }) {
             // EvalRequest bindings carry tensors. A live scalar/container
-            // parameter therefore has not been supplied through this API and
-            // the callable remains a declaration.
+            // parameter that no call argument supplies leaves the callable a
+            // declaration.
             continue;
         }
         let mut required_inputs = selected_roots
@@ -3890,6 +4216,9 @@ fn manifest_for_eval<'a>(
         if let Some(top_level_inputs) = realizability.required_inputs_by_def.get(candidate) {
             required_inputs.extend(top_level_inputs.iter().cloned());
         }
+        // The callable's lowered body reads an argued parameter as a graph
+        // input; the call supplies it, so it is never a required input.
+        required_inputs.retain(|input| !argued(input));
         if !required_inputs
             .iter()
             .all(|input| available.contains(input.as_str()))
@@ -3905,6 +4234,10 @@ fn manifest_for_eval<'a>(
             });
             match selected_host_input_demand(session.as_ref(), candidate, &parameter_names) {
                 Ok(Some(inputs)) => {
+                    let inputs = inputs
+                        .into_iter()
+                        .filter(|name| !argued(name))
+                        .collect::<BTreeSet<_>>();
                     if inputs.iter().any(|name| {
                         signature
                             .params
@@ -3941,7 +4274,14 @@ fn manifest_for_eval<'a>(
                         .contains(prim)
                 })
         });
-        let lane = if unsupported_prim.is_some() || selected_roots.len() != selected_entries.len() {
+        // Argument values enter the host program, so a call that supplies any
+        // runs on the Host lane (docs/design/issue_912_root_boundary_plan.md,
+        // decision 20).
+        let argument_call = arguments.is_some_and(|arguments| !arguments.is_empty());
+        let lane = if unsupported_prim.is_some()
+            || argument_call
+            || selected_roots.len() != selected_entries.len()
+        {
             Lane::Host
         } else {
             Lane::Tensor
@@ -3953,6 +4293,12 @@ fn manifest_for_eval<'a>(
                 entry
                     .reasons
                     .push(chelis_types::manifest::HostReason::PrecisionExceedsCapability { prim });
+            } else if argument_call {
+                entry
+                    .reasons
+                    .push(chelis_types::manifest::HostReason::StructuralForm {
+                        tag: "selected-callable-arguments".to_string(),
+                    });
             } else if lane == Lane::Host {
                 entry
                     .reasons
@@ -7393,9 +7739,6 @@ fn wire_op(op: &RiscOp) -> WireResult<WireRiscOp> {
         },
     })
 }
-
-#[cfg(test)]
-use crate::schema::ExecutionValue;
 
 #[cfg(test)]
 #[path = "../../../tests/support/wire_values.rs"]

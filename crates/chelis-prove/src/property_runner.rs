@@ -3826,7 +3826,7 @@ fn prove_surf_property_fuzz(
         }
     };
 
-    let lane = SurfLane { program, property };
+    let lane = SurfLane::new(program, property);
     let mut draws = sample_batch::AttemptDraws::new(&lane, max_attempts);
     let mut draw = |attempt: usize| {
         draw_attempt(match &constraint_plan {
@@ -4747,6 +4747,57 @@ fn surf_probe_decl(root: &str, property: &Property, sample: &Sample, preconditio
 struct SurfLane<'a> {
     program: &'a SurfEvalProgram,
     property: &'a Property,
+    call: OnceCell<Option<sample_batch::CallProgram>>,
+}
+
+impl<'a> SurfLane<'a> {
+    fn new(program: &'a SurfEvalProgram, property: &'a Property) -> Self {
+        Self {
+            program,
+            property,
+            call: OnceCell::new(),
+        }
+    }
+
+    /// The property's guard and predicate as functions of its binders,
+    /// checked and lowered once against the prepared declarations.
+    fn call_program(&self) -> Option<&sample_batch::CallProgram> {
+        self.call
+            .get_or_init(|| {
+                if !binders_take_arguments(&self.property.params) {
+                    return None;
+                }
+                let sp = chelis_deep::Span::new(0, 0);
+                let function = |name: &str, body: Expr| Decl::FunDef {
+                    name: name.to_string(),
+                    type_binders: Vec::new(),
+                    params: self.property.params.clone(),
+                    ret_ty: None,
+                    effects: None,
+                    body,
+                    span: sp,
+                };
+                let mut names = self.program.names.clone();
+                let mut decls = Vec::new();
+                let pre = (!self.property.preconditions.is_empty()).then(|| {
+                    let root = names.fresh(SampleRoots::PRE_STEM);
+                    decls.push(function(
+                        &root,
+                        combine_preconditions(&self.property.preconditions),
+                    ));
+                    root
+                });
+                let probe = names.fresh(SampleRoots::PROBE_STEM);
+                decls.push(function(&probe, property_application(self.property)));
+                let prepared = chelis_compiler_api::compiler::prepare_decls_with_library(
+                    &self.program.library,
+                    &decls,
+                )
+                .ok()?;
+                Some(sample_batch::CallProgram::new(prepared, pre, probe))
+            })
+            .as_ref()
+    }
 }
 
 impl sample_batch::SampleLane for SurfLane<'_> {
@@ -4754,6 +4805,11 @@ impl sample_batch::SampleLane for SurfLane<'_> {
 
     fn guarded(&self) -> bool {
         !self.property.preconditions.is_empty()
+    }
+
+    fn call(&self, sample: &Sample, precondition: bool) -> Option<Result<bool, String>> {
+        let arguments = sample_arguments(sample, &self.property.params)?;
+        self.call_program()?.call(arguments, precondition)
     }
 
     fn eval_alone(&self, sample: &Sample, precondition: bool) -> Result<bool, String> {
@@ -4803,17 +4859,83 @@ fn sample_block_expr(property: &Property, sample: &Sample, precondition: bool) -
     let body = if precondition {
         combine_preconditions(&property.preconditions)
     } else {
-        Expr::Apply(
-            Box::new(Expr::Var(property.name.clone(), sp)),
-            property
-                .params
-                .iter()
-                .map(|param| Expr::Var(param.name.clone(), sp))
-                .collect(),
-            sp,
-        )
+        property_application(property)
     };
     Expr::Block(bindings, Box::new(body), sp)
+}
+
+/// The property applied to its binders, as a probe evaluates it.
+fn property_application(property: &Property) -> Expr {
+    let sp = chelis_deep::Span::new(0, 0);
+    Expr::Apply(
+        Box::new(Expr::Var(property.name.clone(), sp)),
+        property
+            .params
+            .iter()
+            .map(|param| Expr::Var(param.name.clone(), sp))
+            .collect(),
+        sp,
+    )
+}
+
+/// Whether every binder's value can be a call argument: a property with at
+/// least one binder, each a boolean, string, integer or float scalar.
+fn binders_take_arguments(params: &[Param]) -> bool {
+    !params.is_empty()
+        && params.iter().all(|param| {
+            matches!(param.ty.as_ref(), Some(TypeExpr::Named(name, _))
+                if matches!(name.as_str(), "bool" | "string" | "f32" | "f64")
+                    || crate::opaque::is_int_width(name))
+        })
+}
+
+/// The sample's binder values as call arguments of its property's
+/// [`sample_batch::CallProgram`], each at its binder's declared type: the
+/// value its literal spells, through the same tagged ingress a literal takes.
+/// `None` when a binder has no such value (a float the record could not
+/// keep, such as a NaN).
+fn sample_arguments(sample: &Sample, params: &[Param]) -> Option<BTreeMap<String, ExecutionValue>> {
+    sample
+        .values
+        .iter()
+        .map(|value| {
+            let ty = params
+                .iter()
+                .find(|param| param.name == value.name)?
+                .ty
+                .as_ref()?;
+            Some((value.name.clone(), sample_argument(value, ty)?))
+        })
+        .collect()
+}
+
+fn sample_argument(value: &SampleValue, ty: &TypeExpr) -> Option<ExecutionValue> {
+    const INGRESS: &str = "prove sample argument";
+    let TypeExpr::Named(type_name, _) = ty else {
+        return None;
+    };
+    match type_name.as_str() {
+        "bool" => Some(ExecutionValue::Bool {
+            value: value.json.as_bool()?,
+        }),
+        "string" => Some(ExecutionValue::String {
+            value: value.json.as_str()?.to_string(),
+        }),
+        _ => {
+            let prim = Prim::parse_name(type_name)?;
+            let scalar = if prim.is_integer() {
+                chelis_types::scalar_from_i64(INGRESS, prim, value.json.as_i64()?)
+            } else if prim.is_float() {
+                chelis_types::scalar_from_f64(INGRESS, prim, value.json.as_f64()?)
+            } else {
+                return None;
+            }
+            .ok()?;
+            Some(ExecutionValue::Scalar {
+                value: scalar.try_into().ok()?,
+            })
+        }
+    }
 }
 
 fn combine_preconditions(preconditions: &[Expr]) -> Expr {
@@ -5174,6 +5296,8 @@ struct DeepProperty {
     params: Vec<Param>,
     preconditions: Vec<DeepExpr>,
     body: DeepExpr,
+    /// The property's `fn`, whose parameters its call program reuses.
+    function: DeepExpr,
     samples: Option<usize>,
     seed: Option<u64>,
 }
@@ -5234,6 +5358,7 @@ fn discover_deep_properties_expr(
                         body: deep_fn_body(fn_expr).cloned().ok_or_else(|| {
                             format!("property `{name}` def body must be a callable `fn`")
                         })?,
+                        function: fn_expr.clone(),
                         samples: deep_int_meta(meta.property_samples()),
                         seed: deep_int_meta(meta.property_seed()).map(|value| value as u64),
                     });
@@ -5416,6 +5541,7 @@ fn prove_deep_property_fuzz(
         property,
         roots: &roots,
         names: &names,
+        call: OnceCell::new(),
     };
     let mut draws = sample_batch::AttemptDraws::new(&lane, max_attempts);
     let mut draw = |attempt: usize| {
@@ -5899,6 +6025,51 @@ struct DeepLane<'a> {
     property: &'a DeepProperty,
     roots: &'a SampleRoots,
     names: &'a NameSupply,
+    call: OnceCell<Option<sample_batch::CallProgram>>,
+}
+
+impl DeepLane<'_> {
+    /// The property's guard and predicate as functions of its binders: its
+    /// own `fn` with the guard, or its body, as the body. They join the whole
+    /// program, compiled once.
+    fn call_program(&self) -> Option<&sample_batch::CallProgram> {
+        self.call
+            .get_or_init(|| {
+                if !binders_take_arguments(&self.property.params) {
+                    return None;
+                }
+                let function = |name: &str, body: DeepExpr| {
+                    let (tag, meta, children) = deep_node_parts(&self.property.function)?;
+                    let params = children.first()?.clone();
+                    let function =
+                        DeepExpr::node(tag, meta.clone(), vec![params, body], deep_span());
+                    Some(deep_node("def", vec![deep_symbol(name), function]))
+                };
+                let mut names = self.names.clone();
+                let mut source_exprs = self.exprs.to_vec();
+                let pre = if self.property.preconditions.is_empty() {
+                    None
+                } else {
+                    let root = names.fresh(SampleRoots::PRE_STEM);
+                    source_exprs.push(function(
+                        &root,
+                        combine_deep_preconditions(&self.property.preconditions),
+                    )?);
+                    Some(root)
+                };
+                let probe = names.fresh(SampleRoots::PROBE_STEM);
+                source_exprs.push(function(&probe, self.property.body.clone())?);
+                #[allow(deprecated)]
+                let prepared = chelis_compiler_api::compiler::prepare_eval(EvalRequest {
+                    source_kind: SourceKind::Deep,
+                    source: chelis_deep::printer::print_canonical(&source_exprs),
+                    bindings: BTreeMap::new(),
+                })
+                .ok()?;
+                Some(sample_batch::CallProgram::new(prepared, pre, probe))
+            })
+            .as_ref()
+    }
 }
 
 impl sample_batch::SampleLane for DeepLane<'_> {
@@ -5906,6 +6077,11 @@ impl sample_batch::SampleLane for DeepLane<'_> {
 
     fn guarded(&self) -> bool {
         !self.property.preconditions.is_empty()
+    }
+
+    fn call(&self, sample: &Sample, precondition: bool) -> Option<Result<bool, String>> {
+        let arguments = sample_arguments(sample, &self.property.params)?;
+        self.call_program()?.call(arguments, precondition)
     }
 
     fn eval_alone(&self, sample: &Sample, precondition: bool) -> Result<bool, String> {
