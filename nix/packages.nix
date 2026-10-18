@@ -232,6 +232,44 @@ let
         || { ${pkgs.coreutils}/bin/rm -f "\$wrapper_tmp"; return 1; }
     }
 
+    # The nix-store of the Nix installation of the user. The package brings no
+    # Nix of its own (chelis#3910). The search reads PATH first and then the
+    # standard profile locations. It skips each entry that is not absolute.
+    find_nix_store() {
+      nix_store=""
+      nix_store_dirs=()
+      IFS=: read -r -a nix_store_dirs <<< "\''${PATH:-}"
+      nix_store_dirs+=(/nix/var/nix/profiles/default/bin /run/current-system/sw/bin)
+      if [ -n "\''${HOME:-}" ]; then
+        nix_store_dirs+=("\$HOME/.nix-profile/bin")
+      fi
+      if [ -n "\''${XDG_STATE_HOME:-}" ]; then
+        nix_store_dirs+=("\$XDG_STATE_HOME/nix/profile/bin")
+      elif [ -n "\''${HOME:-}" ]; then
+        nix_store_dirs+=("\$HOME/.local/state/nix/profile/bin")
+      fi
+      for nix_store_dir in "\''${nix_store_dirs[@]}"; do
+        case "\$nix_store_dir" in
+          /*) ;;
+          *) continue ;;
+        esac
+        if [ -f "\$nix_store_dir/nix-store" ] && [ -x "\$nix_store_dir/nix-store" ]; then
+          nix_store="\$nix_store_dir/nix-store"
+          return 0
+        fi
+      done
+      return 1
+    }
+
+    # An operation that adds a Nix GC root calls this before it changes a root
+    # or runs the installer. Without nix-store, the operation stops.
+    require_nix_store() {
+      if ! find_nix_store; then
+        printf 'chelisup: cannot add the Nix GC root %s: nix-store is not on PATH or in a standard Nix profile\n' "\$1" >&2
+        exit 1
+      fi
+    }
+
     remove_gc_roots() {
       for root in "\$gc_root" "\$staging_root" "\$partial_root"; do
         if [ -e "\$root" ] || [ -L "\$root" ]; then
@@ -279,12 +317,13 @@ let
     if [ "\''${1:-}" = "install" ]; then
       resolve_chelis_home
       set_gc_root_paths
+      require_nix_store "\$gc_root"
       ${pkgs.coreutils}/bin/mkdir -p "\$gc_root_dir"
 
       if [ -L "\$staging_root" ]; then
         staged_package="\$(${pkgs.coreutils}/bin/readlink "\$staging_root")"
         if copy_matches_package "\$staged_package"; then
-          ${pkgs.nix}/bin/nix-store \
+          "\$nix_store" \
             --add-root "\$partial_root" \
             --realise "\$staged_package" >/dev/null
         fi
@@ -294,13 +333,13 @@ let
         exit 1
       fi
 
-      ${pkgs.nix}/bin/nix-store --add-root "\$staging_root" --realise "$out" >/dev/null
+      "\$nix_store" --add-root "\$staging_root" --realise "$out" >/dev/null
 
       install_status=0
       "$out/libexec/chelisup" "\$@" || install_status=\$?
       if [ "\$install_status" -ne 0 ]; then
         if copy_matches_package "$out"; then
-          ${pkgs.nix}/bin/nix-store \
+          "\$nix_store" \
             --add-root "\$partial_root" \
             --realise "$out" >/dev/null
         fi
@@ -312,7 +351,7 @@ let
       fi
 
       restore_nix_wrapper
-      if ! ${pkgs.nix}/bin/nix-store --add-root "\$gc_root" --realise "$out" >/dev/null; then
+      if ! "\$nix_store" --add-root "\$gc_root" --realise "$out" >/dev/null; then
         printf '%s\n' 'chelisup: failed to promote the Nix GC root' >&2
         exit 1
       fi
@@ -335,6 +374,16 @@ let
     if [ "\''${1:-}" = "link" ]; then
       resolve_chelis_home
       set_gc_root_paths
+      single_operand "\$@"
+      if [ -n "\$operand" ] && [ -d "\$operand" ]; then
+        link_target="\$(${pkgs.coreutils}/bin/realpath -e -- "\$operand")"
+        case "\$link_target" in
+          ${builtins.storeDir}/*)
+            store_rest="\''${link_target#${builtins.storeDir}/}"
+            require_nix_store "for ${builtins.storeDir}/\''${store_rest%%/*} in \$gc_root_dir"
+            ;;
+        esac
+      fi
       "$out/libexec/chelisup" "\$@" || exit \$?
       single_operand "\$@"
       if [ -z "\$operand" ] || [ ! -d "\$operand" ]; then
@@ -351,8 +400,9 @@ let
           ${builtins.storeDir}/*)
             store_rest="\''${link_target#${builtins.storeDir}/}"
             store_path="${builtins.storeDir}/\''${store_rest%%/*}"
+            require_nix_store "\$toolchain_root"
             ${pkgs.coreutils}/bin/mkdir -p "\$gc_root_dir"
-            if ! ${pkgs.nix}/bin/nix-store \
+            if ! "\$nix_store" \
               --add-root "\$toolchain_root" \
               --realise "\$store_path" >/dev/null; then
               printf 'chelisup: failed to add the Nix GC root %s\n' "\$toolchain_root" >&2

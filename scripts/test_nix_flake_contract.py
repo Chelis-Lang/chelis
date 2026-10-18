@@ -159,6 +159,52 @@ def write_release_asset(release: Path, build: str, dangling_compiler: bool = Fal
             archive.add(member, arcname=member.name)
 
 
+# The directories of the system Nix profiles that the chelisup launcher
+# searches for nix-store after PATH.
+SYSTEM_NIX_PROFILE_BINS = ("/nix/var/nix/profiles/default/bin", "/run/current-system/sw/bin")
+# The name of a store path of Nix or of one of its split libraries, such as
+# nix-2.34.7 or nix-store-2.34.7.
+NIX_PACKAGE_NAME = re.compile(r"nix(?:-[a-z]+)*-[0-9][^/]*")
+
+
+def store_path_names(text: str, store_dir: str) -> list[str]:
+    """The names of the store paths that `text` names, without the hash."""
+    pattern = re.escape(store_dir) + r"/[0-9a-z]{32}-([^/\s\"'`]+)"
+    return re.findall(pattern, text)
+
+
+def nix_names(names: list[str]) -> list[str]:
+    return sorted(name for name in names if NIX_PACKAGE_NAME.fullmatch(name))
+
+
+def relocate_system_nix_profiles(package: Path, scratch: Path) -> tuple[Path, list[Path]]:
+    """Copy the chelisup launcher with its system profile directories below `scratch`.
+
+    The copy runs the libexec program of `package`. The returned directories
+    stand in for SYSTEM_NIX_PROFILE_BINS and do not exist.
+    """
+    text = (package / "bin" / "chelisup").read_text(encoding="utf-8")
+    relocated = []
+    for index, directory in enumerate(SYSTEM_NIX_PROFILE_BINS):
+        replacement = scratch / f"system-profile-{index}" / "bin"
+        text = text.replace(directory, str(replacement))
+        relocated.append(replacement)
+    launcher = scratch / "chelisup"
+    launcher.write_text(text, encoding="utf-8")
+    launcher.chmod(0o755)
+    return launcher, relocated
+
+
+def gc_root_snapshot(root_dir: Path) -> dict[str, str] | None:
+    """Each entry of `root_dir` and its link target, or None without the directory."""
+    if not root_dir.is_dir():
+        return None
+    return {
+        entry.name: os.readlink(entry) if entry.is_symlink() else "not a link"
+        for entry in sorted(root_dir.iterdir())
+    }
+
+
 def read_contract_inputs() -> dict[str, str | None]:
     cargo_nix = REPO_ROOT / "Cargo.nix"
     return {
@@ -1008,6 +1054,199 @@ class NixFlakeContractTests(unittest.TestCase):
             staging_root = home / "nix-gcroots" / "chelisup.next"
             self.assertFalse(staging_root.exists())
             self.assertFalse(staging_root.is_symlink())
+
+    @REQUIRES_NIX
+    def test_chelisup_brings_no_nix_of_its_own(self) -> None:
+        # The launcher uses the nix-store of the Nix installation of the user
+        # (chelis#3910). A launcher that named a Nix of nixpkgs put that Nix
+        # and its libraries in the chelisup closure.
+        store_dir = nix_raw("eval", "--raw", "--expr", "builtins.storeDir")
+        flake = f"builtins.getFlake {json.dumps(str(REPO_ROOT))}"
+        for system in EXPECTED_SYSTEMS:
+            with self.subTest(system=system):
+                shown = nix_json("derivation", "show", f".#packages.{system}.chelisup")
+                derivations = shown.get("derivations", shown)
+                self.assertEqual(len(derivations), 1, sorted(derivations))
+                (derivation,) = derivations.values()
+                if "inputs" in derivation:
+                    input_drvs = derivation["inputs"]["drvs"]
+                else:
+                    input_drvs = derivation["inputDrvs"]
+                names = [
+                    Path(drv).name[33:].removesuffix(".drv") for drv in input_drvs
+                ]
+                self.assertTrue(
+                    any(name.startswith("rust_chelisup-") for name in names), names
+                )
+                self.assertEqual(nix_names(names), [])
+
+                launcher = nix_raw("eval", "--raw", f".#packages.{system}.chelisup.buildCommand")
+                nix_out = nix_raw(
+                    "eval",
+                    "--impure",
+                    "--raw",
+                    "--expr",
+                    f"({flake}).inputs.nixpkgs.legacyPackages.{system}.nix.outPath",
+                )
+                self.assertNotIn(nix_out, launcher)
+                self.assertEqual(nix_names(store_path_names(launcher, store_dir)), [])
+
+    @REQUIRES_NIX
+    def test_chelisup_closure_holds_no_nix(self) -> None:
+        package = Path(
+            nix_raw("build", "--no-link", "--print-out-paths", ".#chelisup")
+        )
+        store_dir = str(package.parent)
+        launcher = (package / "bin" / "chelisup").read_text(encoding="utf-8")
+        self.assertEqual(nix_names(store_path_names(launcher, store_dir)), [])
+        for directory in SYSTEM_NIX_PROFILE_BINS:
+            self.assertEqual(launcher.count(directory), 1, directory)
+        closure = nix_raw("path-info", "--recursive", str(package)).split()
+        self.assertEqual(nix_names([Path(path).name[33:] for path in closure]), [])
+
+    @REQUIRES_NIX
+    def test_chelisup_without_nix_store_stops_before_any_root_change(self) -> None:
+        package = Path(
+            nix_raw("build", "--no-link", "--print-out-paths", ".#chelisup")
+        )
+        manifest = tomllib.loads((REPO_ROOT / "Cargo.toml").read_text(encoding="utf-8"))
+        version = manifest["workspace"]["package"]["version"]
+        # Upstream Nix rejects a link below a symbolic link, and the macOS
+        # temporary directory is below /var, a symbolic link.
+        scratch = Path(self.enterContext(tempfile.TemporaryDirectory())).resolve()
+        launcher, _ = relocate_system_nix_profiles(package, scratch)
+        store_toolchain = add_store_toolchain(scratch)
+
+        home = scratch / "home"
+        home.mkdir()
+        chelis_home = scratch / "chelis-home"
+        toolchain = chelis_home / "toolchains" / version / "bin" / "chelis"
+        toolchain.parent.mkdir(parents=True)
+        toolchain.write_text("placeholder toolchain\n", encoding="utf-8")
+        root_dir = chelis_home / "nix-gcroots"
+        root_dir.mkdir()
+        # A stable root and a stale staging root. An install with nix-store
+        # replaces the stable root and removes the staging root.
+        (root_dir / "chelisup").symlink_to(package / "libexec" / "chelisup")
+        (root_dir / "chelisup.next").symlink_to(package)
+        before = gc_root_snapshot(root_dir)
+        # A nix-store in the working directory. The launcher must not use the
+        # relative entry of PATH that names it.
+        relative = scratch / "relative-bin"
+        relative.mkdir()
+        (relative / "nix-store").symlink_to(Path(NIX).parent / "nix-store")
+
+        environment = {
+            name: value
+            for name, value in os.environ.items()
+            if name not in ("PATH", "XDG_STATE_HOME")
+        }
+        environment["HOME"] = str(home)
+        environment["CHELIS_HOME"] = str(chelis_home)
+        for path in ("", "relative-bin"):
+            environment["PATH"] = path
+
+            def chelisup(*args: object) -> subprocess.CompletedProcess[str]:
+                return subprocess.run(
+                    [launcher, *args],
+                    cwd=scratch,
+                    env=environment,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    check=False,
+                )
+
+            with self.subTest(command="install", path=path):
+                installed = chelisup("install", version)
+                self.assertNotEqual(installed.returncode, 0, installed.stdout)
+                self.assertIn(
+                    f"chelisup: cannot add the Nix GC root {root_dir / 'chelisup'}: "
+                    "nix-store is not on PATH or in a standard Nix profile",
+                    installed.stderr,
+                )
+                self.assertEqual(gc_root_snapshot(root_dir), before)
+                # The installer did not run, so it copied no program.
+                self.assertFalse((chelis_home / "bin").exists())
+
+            with self.subTest(command="link", path=path):
+                linked = chelisup("link", store_toolchain)
+                self.assertNotEqual(linked.returncode, 0, linked.stdout)
+                self.assertIn(
+                    f"chelisup: cannot add the Nix GC root for {store_toolchain} in {root_dir}: "
+                    "nix-store is not on PATH or in a standard Nix profile",
+                    linked.stderr,
+                )
+                self.assertEqual(gc_root_snapshot(root_dir), before)
+                entry = chelis_home / "toolchains" / "0.0.7"
+                self.assertFalse(entry.exists() or entry.is_symlink())
+
+    @REQUIRES_NIX
+    def test_chelisup_finds_nix_store_in_each_search_location(self) -> None:
+        package = Path(
+            nix_raw("build", "--no-link", "--print-out-paths", ".#chelisup")
+        )
+        manifest = tomllib.loads((REPO_ROOT / "Cargo.toml").read_text(encoding="utf-8"))
+        version = manifest["workspace"]["package"]["version"]
+        nix_store = Path(NIX).parent / "nix-store"
+        locations = [
+            "PATH",
+            "default profile",
+            "system profile",
+            "user profile",
+            "XDG state profile",
+            "default state profile",
+        ]
+        for location in locations:
+            with self.subTest(location=location):
+                with tempfile.TemporaryDirectory() as raw:
+                    scratch = Path(raw).resolve()
+                    launcher, system_profiles = relocate_system_nix_profiles(
+                        package, scratch
+                    )
+                    home = scratch / "home"
+                    state = scratch / "state"
+                    directories = {
+                        "PATH": scratch / "path-bin",
+                        "default profile": system_profiles[0],
+                        "system profile": system_profiles[1],
+                        "user profile": home / ".nix-profile" / "bin",
+                        "XDG state profile": state / "nix" / "profile" / "bin",
+                        "default state profile": home / ".local" / "state" / "nix" / "profile" / "bin",
+                    }
+                    directories[location].mkdir(parents=True)
+                    (directories[location] / "nix-store").symlink_to(nix_store)
+                    home.mkdir(exist_ok=True)
+                    chelis_home = scratch / "chelis-home"
+                    toolchain = chelis_home / "toolchains" / version / "bin" / "chelis"
+                    toolchain.parent.mkdir(parents=True)
+                    toolchain.write_text("placeholder toolchain\n", encoding="utf-8")
+
+                    environment = {
+                        name: value
+                        for name, value in os.environ.items()
+                        if name not in ("PATH", "XDG_STATE_HOME")
+                    }
+                    environment["HOME"] = str(home)
+                    environment["CHELIS_HOME"] = str(chelis_home)
+                    environment["PATH"] = (
+                        f"relative:{directories['PATH']}" if location == "PATH" else ""
+                    )
+                    if location == "XDG state profile":
+                        environment["XDG_STATE_HOME"] = str(state)
+                    installed = subprocess.run(
+                        [launcher, "install", version],
+                        cwd=scratch,
+                        env=environment,
+                        text=True,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        check=False,
+                    )
+                    self.assertEqual(installed.returncode, 0, installed.stderr)
+                    gc_root = chelis_home / "nix-gcroots" / "chelisup"
+                    self.assertTrue(gc_root.is_symlink(), f"missing Nix GC root: {gc_root}")
+                    self.assertEqual(gc_root.resolve(), package.resolve())
 
     @REQUIRES_NIX
     def test_chelisup_link_roots_a_store_toolchain_and_uninstall_removes_it(self) -> None:
