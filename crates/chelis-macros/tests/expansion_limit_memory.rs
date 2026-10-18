@@ -1,13 +1,15 @@
-//! chelis#3853: a program that never finishes expanding is rejected at the
-//! expansion limit in memory polynomial in the limit.
+//! chelis#3853: a recursive macro set whose argument grows by a bounded
+//! amount is rejected at the expansion limit in memory polynomial in the
+//! limit.
 //!
 //! Every node an expansion creates carries a `source` record holding a copy
 //! of the invocation's arguments, provenance included. A recursive macro
 //! whose argument grows passes the previous expansion's stamped nodes back
 //! in, so each record embedded about four copies of the one before and the
-//! limit was never reached: about 2 GB within ten expansions. Expansion now
-//! finds the limit without building provenance, which it adds only to a
-//! program that finishes expanding.
+//! limit was never reached: about 2 GB within ten expansions. When the
+//! program's macros might recur, expansion now finds the limit without
+//! building provenance, which it adds only to a program that finishes
+//! expanding.
 //!
 //! The oracle is the peak live heap of one expansion, counted by this
 //! binary's allocator, which is deterministic for a fixed program. This
