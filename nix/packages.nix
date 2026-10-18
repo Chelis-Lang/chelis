@@ -108,6 +108,14 @@ let
   crateSource = sources.workspaceView (
     lib.fileset.unions (map (crate: crate.fileset) (builtins.attrValues crateSources))
   );
+  # `cargo build --release` gives each crate the codegen units of the release
+  # profile, 16 when Cargo.toml sets no value. buildRustCrate uses one codegen
+  # unit by default, which makes each long workspace crate compile serially.
+  # Only the workspace crates get this value. The third-party crate
+  # derivations stay the same, so their cached outputs stay valid. They
+  # change only with Cargo.lock, but the workspace crates rebuild after each
+  # source edit.
+  releaseCodegenUnits = manifest.profile.release.codegen-units or 16;
   buildRustCrateForPkgs =
     cratePkgs:
     cratePkgs.buildRustCrate.override {
@@ -117,7 +125,7 @@ let
         cratePkgs.defaultCrateOverrides
         // lib.mapAttrs (
           _name: crate: _attrs:
-          builtins.removeAttrs crate [ "fileset" ]
+          builtins.removeAttrs crate [ "fileset" ] // { codegenUnits = releaseCodegenUnits; }
         ) crateSources
         // {
           "cvc5-sys" = attrs: {
@@ -153,10 +161,6 @@ let
     license = lib.licenses.mit;
     platforms = contracts.supportedSystems;
   };
-  compiler = pkgs.runCommand "chelis-cli-${version}" { } ''
-    test -x ${compilerCrate}/bin/chelis
-    install -Dm755 ${compilerCrate}/bin/chelis $out/bin/chelis
-  '';
   # The runtime the compiler carries (spec/08-backends.md §2.1): `chelis-runtime`
   # and `chelis` ship the compiler's export, never a separately built crate.
   runtime =
@@ -169,7 +173,7 @@ let
       }
       ''
         export_dir="$TMPDIR/runtime-export"
-        ${compiler}/bin/chelis runtime export "$export_dir"
+        ${compilerCrate}/bin/chelis runtime export "$export_dir"
         install -Dm444 "$export_dir/libchelis_runtime.a" $out/lib/libchelis_runtime.a
         mkdir -p $out/include
         ${lib.concatMapStringsSep "\n" (header: ''
@@ -418,6 +422,10 @@ let
     ":"
     "${lib.getLib pkgs.openblas}/lib"
   ];
+  # `libexec/chelis` is a symlink to the binary of the compiler crate, so the
+  # store holds one copy of the compiler. The compiler reads no file relative
+  # to its own path. The lane check compares canonical paths, and readelf
+  # follows the symlink.
   chelis =
     pkgs.runCommand "chelis-${version}"
       {
@@ -433,7 +441,7 @@ let
       }
       ''
         mkdir -p $out/bin $out/lib $out/include $out/libexec
-        cp ${compiler}/bin/chelis $out/libexec/chelis
+        ln -s ${compilerCrate}/bin/chelis $out/libexec/chelis
         makeBinaryWrapper $out/libexec/chelis $out/bin/chelis \
           ${lib.escapeShellArgs chelisWrapperArgs}
         cp ${runtime}/lib/libchelis_runtime.a $out/lib/libchelis_runtime.a
@@ -458,7 +466,6 @@ in
     chelis
     chelisWrapperArgs
     chelisupCrate
-    compiler
     compilerCrate
     crate2nixCommand
     crate2nixVersion

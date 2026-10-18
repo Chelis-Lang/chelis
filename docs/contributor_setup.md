@@ -173,9 +173,11 @@ nix run .#chelis -- --version
 ```
 
 In the `chelis` package, `bin/chelis` is a wrapper, and `libexec/chelis` is the
-compiler. The wrapper puts the C compiler and the binutils of the Nix `stdenv`
-first on `PATH`, so `chelis build` needs no host toolchain. The
-`chelisWrapperArgs` list in `nix/packages.nix` holds the wrapper arguments.
+compiler. `libexec/chelis` is a symlink to the binary of the `chelis-cli` crate
+build, so the store holds one copy of the compiler. The wrapper puts the C
+compiler and the binutils of the Nix `stdenv` first on `PATH`, so
+`chelis build` needs no host toolchain. The `chelisWrapperArgs` list in
+`nix/packages.nix` holds the wrapper arguments.
 The `wrappedBuild` check builds an executable and a static library with an
 empty host `PATH`, and runs the executable. It also builds and runs the BLAS
 fixture program `examples/recurrence_extent_scope.ch`, whose generated C
@@ -262,6 +264,11 @@ crate fails because the file is absent. No crate build reads the other test
 files, so an edit to them changes no crate derivation. Nix builds the crates
 with the minimal profile (rustc, cargo, and rust-std) of the Rust version in
 `rust-toolchain.toml`.
+
+The workspace crates build with the codegen units of the Cargo release
+profile, 16 when `Cargo.toml` sets no value, as `cargo build --release` does.
+The third-party crates keep the one codegen unit of `buildRustCrate`. Their
+derivations change only with `Cargo.lock`, so the cache keeps their outputs.
 
 ## Optional Devenv shell
 
