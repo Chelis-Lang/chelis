@@ -243,7 +243,7 @@ pub enum RuntimeValue {
         /// carried checker-annotated `{type: ...}` param metadata.
         /// Consulted by the chelis#338 named-axis routing to recover a
         /// frame binding's static tensor type (named dims) at eval time.
-        param_types: Arc<[Option<Expr>]>,
+        param_types: Arc<[Option<Arc<Expr>>]>,
         /// Declared result type from the owning `defsig`, when available.
         /// Generic cast actualization matches this against the checker-owned
         /// call expression result, including context-fixed empty containers.
@@ -866,7 +866,7 @@ fn evaluate_host_program_on_grown_stack(
         native_clarabel_solve: prepared.is_some_and(|prepared| prepared.native_clarabel_solve),
         bindings: Frame::new(),
         result_producer: None,
-        binding_types: UnordMap::new(),
+        binding_types: chelis_unord::PersistentMap::new(),
         precision_bindings: UnordMap::new(),
         declaration_values: UnordMap::new(),
         named_axis_route_cache: UnordMap::new(),
@@ -1382,7 +1382,7 @@ struct EvalContext<'a> {
     /// `None` otherwise. The explicit `None` marker matters: it masks a
     /// same-named top-level `type_env` entry so a local shadow is never
     /// typed with the outer binding's type (chelis#338 named-axis routing).
-    binding_types: UnordMap<String, Option<Expr>>,
+    binding_types: chelis_unord::PersistentMap<String, Option<Arc<Expr>>>,
     /// Call-frame actualizations for precision variables used by generic
     /// casts. Values come only from checker-owned call-site argument/result
     /// types matched against the callee's declared signature.

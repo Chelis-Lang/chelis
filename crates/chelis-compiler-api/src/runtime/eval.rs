@@ -982,6 +982,35 @@ impl EntryClaimPatterns<'_> {
     }
 }
 
+/// One formal's claim pattern, derived at its first need.
+type FormalPatternMemo =
+    std::sync::OnceLock<Result<Option<Arc<chelis_ir::claim_pattern::ClaimPattern>>, String>>;
+
+/// Where an entry walk finds the claim pattern of a formal that nests its
+/// tensors. A closure's formals have fixed authored types, so a closure
+/// derives each formal's pattern once, at its first application, and later
+/// applications read it rather than deriving it again (chelis#3778).
+#[derive(Clone, Copy)]
+struct NestedPatterns<'a> {
+    derive: EntryClaimPatterns<'a>,
+    /// One memo per formal, in formal order, when the formals are a
+    /// closure's.
+    memo: Option<&'a [FormalPatternMemo]>,
+}
+
+impl NestedPatterns<'_> {
+    fn pattern(
+        &self,
+        index: usize,
+        authored: &Expr,
+    ) -> Result<Option<Arc<chelis_ir::claim_pattern::ClaimPattern>>, String> {
+        match self.memo.and_then(|memo| memo.get(index)) {
+            Some(memo) => memo.get_or_init(|| self.derive.pattern(authored)).clone(),
+            None => self.derive.pattern(authored),
+        }
+    }
+}
+
 /// An entry path as the compiled entry walk renders it. A path of 512 bytes
 /// or more keeps its first bytes, cut back to a character boundary, and ends
 /// in a truncation marker. Only that prefix is kept, so each observation a
@@ -1491,9 +1520,9 @@ pub(super) fn forwarding_route_work() -> u64 {
 /// must reach [`check_signature_entry_plan`] instead of being rejected during
 /// specialization.
 #[allow(clippy::too_many_arguments)]
-fn actualize_tensor_entry_parameters(
+fn actualize_tensor_entry_parameters<T: std::borrow::Borrow<Expr>>(
     checked_params: Option<&[Expr]>,
-    authored_params: &[Option<Expr>],
+    authored_params: &[Option<T>],
     args: &[RuntimeValue],
     names: &[String],
     session: Option<&chelis_ir::host::HostLoweringSession<'_>>,
@@ -1509,7 +1538,7 @@ fn actualize_tensor_entry_parameters(
         .map(|formal| {
             formal
                 .as_ref()
-                .map(|formal| normalize_authored_entry_type(formal, session))
+                .map(|formal| normalize_authored_entry_type(formal.borrow(), session))
                 .transpose()
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -1521,7 +1550,7 @@ fn actualize_tensor_entry_parameters(
         authored_params,
         args,
         present,
-        nested,
+        nested.map(|derive| NestedPatterns { derive, memo: None }),
         loop_entry,
     )
 }
@@ -1538,11 +1567,13 @@ pub struct ClosureEntryTypes {
     params: Vec<Result<Option<Expr>, String>>,
     result: Result<Option<Expr>, String>,
     contract: Result<(Vec<Option<Expr>>, chelis_ir::host::EntryContract<Expr>), String>,
+    /// Each formal's nested claim pattern, derived at its first need.
+    nested: Vec<FormalPatternMemo>,
 }
 
 impl ClosureEntryTypes {
     fn build(
-        param_types: &[Option<Expr>],
+        param_types: &[Option<Arc<Expr>>],
         return_type: Option<&Expr>,
         checked_params: Option<&[Expr]>,
         names: &[String],
@@ -1556,7 +1587,7 @@ impl ClosureEntryTypes {
         };
         let params = param_types
             .iter()
-            .map(|ty| normalize(ty.as_ref()))
+            .map(|ty| normalize(ty.as_deref()))
             .collect::<Vec<_>>();
         let contract = params
             .iter()
@@ -1567,6 +1598,10 @@ impl ClosureEntryTypes {
                 Ok((normalized, contract))
             });
         Self {
+            nested: param_types
+                .iter()
+                .map(|_| FormalPatternMemo::new())
+                .collect(),
             params,
             result: normalize(return_type),
             contract,
@@ -1609,14 +1644,14 @@ fn entry_contract(
 
 /// [`actualize_tensor_entry_parameters`] against an already built contract.
 #[allow(clippy::too_many_arguments)]
-fn actualize_entry_contract(
+fn actualize_entry_contract<T: std::borrow::Borrow<Expr>>(
     normalized_authored: &[Option<Expr>],
     contract: &chelis_ir::host::EntryContract<Expr>,
     checked_params: Option<&[Expr]>,
-    authored_params: &[Option<Expr>],
+    authored_params: &[Option<T>],
     args: &[RuntimeValue],
     present: Option<&[bool]>,
-    nested: Option<EntryClaimPatterns<'_>>,
+    nested: Option<NestedPatterns<'_>>,
     loop_entry: Option<&mut LoopEntryReceipt>,
 ) -> Result<Vec<(String, TensorType, Vec<usize>)>, String> {
     fn collect(
@@ -1712,8 +1747,11 @@ fn actualize_entry_contract(
         // C6.5): signature order, then depth-first declared order.
         if !formal.pattern().has_tensor()
             && let Some(nested) = nested
-            && let Some(authored) = authored_params.get(index).and_then(Option::as_ref)
-            && let Some(pattern) = nested.pattern(authored)?
+            && let Some(authored) = authored_params
+                .get(index)
+                .and_then(Option::as_ref)
+                .map(std::borrow::Borrow::borrow)
+            && let Some(pattern) = nested.pattern(index, authored)?
             && let Some(root) = pattern.nested_root()
         {
             collect_nested_entry_actuals(
@@ -1824,7 +1862,12 @@ impl<'a> EvalContext<'a> {
     }
 
     pub(super) fn resolve_top_level(&mut self, name: &str) -> Result<RuntimeValue, String> {
-        let Some((resolved_name, expr)) = self.lookup_top_level_def(name) else {
+        let defs = self.program.shared_defs();
+        let Some((resolved_name, expr)) = self
+            .top_level_def_key(name)
+            .and_then(|key| defs.get_key_value(key))
+            .map(|(key, expr)| (key.clone(), expr))
+        else {
             return Err(format!("unknown runtime name `{name}`"));
         };
         if let Some(value) = self.declaration_values.get(&resolved_name) {
@@ -1851,17 +1894,17 @@ impl<'a> EvalContext<'a> {
             .type_env()
             .get(&resolved_name)
             .is_some_and(|ty| ty.tag() == Some(DeepTag::TFn))
-            && let Some(alias) = var_name(&expr)
+            && let Some(alias) = var_name(expr)
         {
             self.resolve_top_level(alias)
         } else {
-            self.eval_expr(&expr)
+            self.eval_expr(expr)
         };
         self.bindings = saved;
         self.binding_types = saved_types;
         self.precision_bindings = saved_precisions;
         self.resolving_top_levels.pop();
-        let mut value = stamp_def_closure(value?, &resolved_name, &expr);
+        let mut value = stamp_def_closure(value?, &resolved_name, expr);
         if let RuntimeValue::Builtin(builtin) = &mut value
             && let Some(signature) = self.declared_signatures.get(&resolved_name)
         {
@@ -2173,9 +2216,16 @@ impl<'a> EvalContext<'a> {
     }
 
     pub(super) fn lookup_top_level_def(&self, name: &str) -> Option<(String, Expr)> {
-        let key = self.program.resolve_def_key(name)?;
+        let key = self.top_level_def_key(name)?;
         let body = self.program.defs().get(key)?;
         Some((key.to_owned(), body.clone()))
+    }
+
+    /// The canonical key of the top-level definition `name` resolves to,
+    /// without copying its body.
+    pub(super) fn top_level_def_key<'s>(&'s self, name: &'s str) -> Option<&'s str> {
+        let key = self.program.resolve_def_key(name)?;
+        self.program.defs().contains_key(key).then_some(key)
     }
 
     fn lookup_declared_signature(&self, name: &str) -> Option<&Expr> {
@@ -2649,7 +2699,8 @@ impl<'a> EvalContext<'a> {
             self.result_producer = Some(ResultProducer::tensor("load"));
             return Ok(RuntimeValue::Tensor(value.clone()));
         }
-        if let Some((_, definition)) = self.lookup_top_level_def(name) {
+        let defs = self.program.shared_defs();
+        if let Some(definition) = self.top_level_def_key(name).and_then(|key| defs.get(key)) {
             let value = self.resolve_top_level(name)?;
             // A zero-parameter top-level declaration is a value thunk when
             // referenced in expression position. Calls still resolve their
@@ -2714,7 +2765,7 @@ impl<'a> EvalContext<'a> {
         let param_types = decoded_params
             .iter()
             .map(|(_, metadata)| {
-                metadata.and_then(|metadata| metadata.ty().map(|ty| ty.expression().clone()))
+                metadata.and_then(|metadata| metadata.ty().map(|ty| Arc::clone(ty.shared())))
             })
             .collect::<Vec<_>>();
         let body = kids
@@ -2924,15 +2975,13 @@ impl<'a> EvalContext<'a> {
         // is UTF-8 lexicographic, which preserves Unicode scalar-value order
         // for valid Rust strings.
         if let Some(name) = var_name(func)
-            && self
-                .lookup_top_level_def(name)
-                .is_some_and(|(resolved, _)| {
-                    matches!(
-                        resolved.as_str(),
-                        "Pkg__chelis__std__Std__Io__Json__canonical_object_entries"
-                            | "pkg__chelis__std__Std__Io__Json__canonical_object_entries"
-                    )
-                })
+            && self.top_level_def_key(name).is_some_and(|resolved| {
+                matches!(
+                    resolved,
+                    "Pkg__chelis__std__Std__Io__Json__canonical_object_entries"
+                        | "pkg__chelis__std__Std__Io__Json__canonical_object_entries"
+                )
+            })
         {
             let mut entries = expect_dict_arg(&args, 0)?;
             entries.sort_by(|(lhs, _), (rhs, _)| match (lhs, rhs) {
@@ -3008,14 +3057,18 @@ impl<'a> EvalContext<'a> {
         if let Some(callee) = var_name(func)
             && !self.bindings.contains_key(callee)
             && !self.tensor_bindings.contains_key(callee)
-            && let Some((resolved, def_expr)) = self.lookup_top_level_def(callee)
+            && let defs = self.program.shared_defs()
+            && let Some((resolved, def_expr)) = self
+                .top_level_def_key(callee)
+                .and_then(|key| defs.get_key_value(key))
+                .map(|(key, expr)| (key.clone(), expr))
             && def_expr.tag() == Some(DeepTag::Fn)
             && self.def_requires_named_axis_routing(&resolved)
             // chelis#1277 B2h: a def the C lane lowers as a kernel takes that
             // kernel at application; site B keeps only the defs C also
             // handles per call (rank- and precision-polymorphic ones).
             && self.def_kernel(&resolved)?.is_none()
-            && let Some(routed) = self.try_named_axis_def_call(&resolved, &def_expr, kids, &args)?
+            && let Some(routed) = self.try_named_axis_def_call(&resolved, def_expr, kids, &args)?
         {
             return Ok(routed);
         }
@@ -3032,14 +3085,19 @@ impl<'a> EvalContext<'a> {
         // eval_var's nullary-thunk rule to an alias here would call it twice.
         let callable = if let Some(callee) = var_name(func)
             && !self.bindings.contains_key(callee)
-            && let Some((resolved, def_expr)) = self.lookup_top_level_def(callee)
-            && (def_expr.tag() == Some(DeepTag::Fn)
+            && let Some(resolved) = self.top_level_def_key(callee)
+            && (self
+                .program
+                .defs()
+                .get(resolved)
+                .is_some_and(|def_expr| def_expr.tag() == Some(DeepTag::Fn))
                 || self
                     .program
                     .type_env()
-                    .get(&resolved)
+                    .get(resolved)
                     .is_some_and(|ty| ty.tag() == Some(DeepTag::TFn)))
         {
+            let resolved = resolved.to_owned();
             self.resolve_top_level(&resolved)?
         } else {
             self.eval_expr(func)?
@@ -3237,10 +3295,10 @@ impl<'a> EvalContext<'a> {
     /// declaration variables; their literal sizes are evidence only for spread
     /// width and never become result claims. A fixed-rank declaration retains
     /// the established checked-signature path above.
-    fn declared_result_claim_at_callsite(
+    fn declared_result_claim_at_callsite<T: std::borrow::Borrow<Expr>>(
         declared: Option<&Expr>,
         checked_params: Option<&[Expr]>,
-        authored_params: &[Option<Expr>],
+        authored_params: &[Option<T>],
         args: &[RuntimeValue],
     ) -> Result<Option<DeclaredResultClaim>, String> {
         let Some(declared) = declared else {
@@ -3268,10 +3326,16 @@ impl<'a> EvalContext<'a> {
             };
             let checked = checked_params
                 .and_then(|params| params.get(index))
-                .or_else(|| authored_params.get(index).and_then(Option::as_ref));
+                .or_else(|| {
+                    authored_params
+                        .get(index)
+                        .and_then(Option::as_ref)
+                        .map(std::borrow::Borrow::borrow)
+                });
             let authored = authored_params
                 .get(index)
                 .and_then(Option::as_ref)
+                .map(std::borrow::Borrow::borrow)
                 .or(checked);
             let (Some(checked), Some(authored)) = (checked, authored) else {
                 continue;
@@ -3843,7 +3907,7 @@ impl<'a> EvalContext<'a> {
                     precision: self
                         .binding_types
                         .get(name)
-                        .and_then(Option::as_ref)
+                        .and_then(Option::as_deref)
                         .and_then(extract_prim_from_type_expr)
                         .unwrap_or(payload.dtype()),
                 },
@@ -4174,7 +4238,7 @@ impl<'a> EvalContext<'a> {
         &mut self,
         callback: RuntimeValue,
         args: Vec<RuntimeValue>,
-        arg_types: &[Option<Expr>],
+        arg_types: &[Option<Arc<Expr>>],
         result_type: Option<&Expr>,
         receipt: Option<&mut LoopEntryReceipt>,
     ) -> Result<RuntimeValue, String> {
@@ -4235,7 +4299,7 @@ impl<'a> EvalContext<'a> {
         &mut self,
         callable: RuntimeValue,
         args: Vec<RuntimeValue>,
-        arg_type_exprs: &[Option<Expr>],
+        arg_type_exprs: &[Option<Arc<Expr>>],
         result_type_expr: Option<&Expr>,
     ) -> Result<RuntimeValue, String> {
         self.apply_resolved_callable_under_result_claim(
@@ -4264,7 +4328,7 @@ impl<'a> EvalContext<'a> {
         &mut self,
         callable: RuntimeValue,
         args: Vec<RuntimeValue>,
-        arg_type_exprs: &[Option<Expr>],
+        arg_type_exprs: &[Option<Arc<Expr>>],
         result_type_expr: Option<&Expr>,
         claims: &[DeclaredResultClaim],
         present: Option<&[bool]>,
@@ -4286,7 +4350,7 @@ impl<'a> EvalContext<'a> {
         &mut self,
         callable: RuntimeValue,
         args: Vec<RuntimeValue>,
-        arg_type_exprs: &[Option<Expr>],
+        arg_type_exprs: &[Option<Arc<Expr>>],
         result_type_expr: Option<&Expr>,
         claims: &[DeclaredResultClaim],
         present: Option<&[bool]>,
@@ -4378,7 +4442,7 @@ impl<'a> EvalContext<'a> {
         &mut self,
         callable: RuntimeValue,
         mut args: Vec<RuntimeValue>,
-        arg_type_exprs: &[Option<Expr>],
+        arg_type_exprs: &[Option<Arc<Expr>>],
         result_type_expr: Option<&Expr>,
         inherited_claims: &[DeclaredResultClaim],
         present: Option<&[bool]>,
@@ -4528,9 +4592,12 @@ impl<'a> EvalContext<'a> {
                             &param_types,
                             &args,
                             present,
-                            Some(EntryClaimPatterns {
-                                registry: &self.adt_registry,
-                                cache: &self.claim_patterns,
+                            Some(NestedPatterns {
+                                derive: EntryClaimPatterns {
+                                    registry: &self.adt_registry,
+                                    cache: &self.claim_patterns,
+                                },
+                                memo: Some(&entry.nested),
                             }),
                             loop_entry.as_deref_mut(),
                         )?
@@ -4703,20 +4770,20 @@ impl<'a> EvalContext<'a> {
                         // this, an Int64-tagged `to_tensor` literal flows into an
                         // i8-typed param and the arithmetic runs at the wrong
                         // width (the chelis#718 eval-tensor cell).
-                        let mut arg = match (declared.as_ref().and_then(declared_tensor_prim), arg)
-                        {
-                            (Some(prim), RuntimeValue::Tensor(tensor)) => {
-                                RuntimeValue::Tensor(ingress_tensor_to_declared(tensor, prim)?)
-                            }
-                            (_, arg) => arg,
-                        };
+                        let mut arg =
+                            match (declared.as_deref().and_then(declared_tensor_prim), arg) {
+                                (Some(prim), RuntimeValue::Tensor(tensor)) => {
+                                    RuntimeValue::Tensor(ingress_tensor_to_declared(tensor, prim)?)
+                                }
+                                (_, arg) => arg,
+                            };
                         // A declared formal's normalization is the closure's
                         // own; only a call-site type is normalized here.
                         let authored_callable = match entry.params.get(index) {
                             Some(Ok(Some(normalized))) => Some(Cow::Borrowed(normalized)),
                             Some(Err(error)) => return Err(error.clone()),
                             Some(Ok(None)) | None => declared
-                                .as_ref()
+                                .as_deref()
                                 .map(|ty| normalize_authored_entry_type(ty, self.session.as_ref()))
                                 .transpose()?
                                 .map(Cow::Owned),
@@ -4728,7 +4795,7 @@ impl<'a> EvalContext<'a> {
                         if let Some(contract) =
                             callable_contract.filter(|ty| checked_function_children(ty).is_some())
                         {
-                            let origin = match (declared.as_ref(), authored_callable.as_deref()) {
+                            let origin = match (declared.as_deref(), authored_callable.as_deref()) {
                                 (Some(origin), Some(normalized))
                                     if checked_function_children(normalized).is_some() =>
                                 {
@@ -5385,7 +5452,7 @@ impl<'a> EvalContext<'a> {
         &mut self,
         name: &str,
         args: &mut [RuntimeValue],
-        arg_type_exprs: &[Option<Expr>],
+        arg_type_exprs: &[Option<Arc<Expr>>],
         result_type_expr: Option<&Expr>,
     ) -> Result<RuntimeValue, String> {
         match (name, &mut *args) {
@@ -5425,7 +5492,7 @@ impl<'a> EvalContext<'a> {
         &mut self,
         name: &str,
         args: &[RuntimeValue],
-        arg_type_exprs: &[Option<Expr>],
+        arg_type_exprs: &[Option<Arc<Expr>>],
         result_type_expr: Option<&Expr>,
     ) -> Result<RuntimeValue, String> {
         if matches!(
@@ -5864,9 +5931,9 @@ impl<'a> EvalContext<'a> {
                 let items = expect_list_arg(args, 1)?;
                 let callback_arg_types = [arg_type_exprs
                     .get(1)
-                    .and_then(Option::as_ref)
+                    .and_then(Option::as_deref)
                     .and_then(checked_list_element)
-                    .cloned()];
+                    .map(|ty| Arc::new(ty.clone()))];
                 let callback_result_type = result_type_expr.and_then(checked_list_element);
                 let mut out = Vec::with_capacity(items.len());
                 for item in items {
@@ -5887,9 +5954,9 @@ impl<'a> EvalContext<'a> {
                 let items = expect_list_arg(args, 1)?;
                 let callback_arg_types = [arg_type_exprs
                     .get(1)
-                    .and_then(Option::as_ref)
+                    .and_then(Option::as_deref)
                     .and_then(checked_list_element)
-                    .cloned()];
+                    .map(|ty| Arc::new(ty.clone()))];
                 let mut out = Vec::new();
                 for item in items {
                     let keep = self.apply_resolved_callable_with_arg_types(
@@ -5922,9 +5989,9 @@ impl<'a> EvalContext<'a> {
                     arg_type_exprs.get(1).cloned().flatten(),
                     arg_type_exprs
                         .get(2)
-                        .and_then(Option::as_ref)
+                        .and_then(Option::as_deref)
                         .and_then(checked_list_element)
-                        .cloned(),
+                        .map(|ty| Arc::new(ty.clone())),
                 ];
                 let mut receipt = self.loop_callback_receipt(&callback);
                 for item in items {
@@ -5952,9 +6019,9 @@ impl<'a> EvalContext<'a> {
                     arg_type_exprs.get(1).cloned().flatten(),
                     arg_type_exprs
                         .get(2)
-                        .and_then(Option::as_ref)
+                        .and_then(Option::as_deref)
                         .and_then(checked_list_element)
-                        .cloned(),
+                        .map(|ty| Arc::new(ty.clone())),
                 ];
                 let callback_result_type = result_type_expr.and_then(checked_list_element);
                 let mut out = Vec::with_capacity(items.len());
@@ -6007,12 +6074,14 @@ impl<'a> EvalContext<'a> {
                         let precision = state.precision;
                         let callback_type_children = arg_type_exprs
                             .get(1)
-                            .and_then(Option::as_ref)
+                            .and_then(Option::as_deref)
                             .and_then(checked_function_children);
                         let initial_type = arg_type_exprs.first().cloned().flatten();
                         let callback_arg_types = [
                             initial_type.clone(),
-                            callback_type_children.and_then(|children| children.get(1).cloned()),
+                            callback_type_children.and_then(|children| {
+                                children.get(1).map(|ty| Arc::new(ty.clone()))
+                            }),
                         ];
                         let mut elements = Vec::new();
                         let mut acc = initial.clone();
@@ -6021,7 +6090,7 @@ impl<'a> EvalContext<'a> {
                                 callback.clone(),
                                 vec![acc, RuntimeValue::int64(i as i64)],
                                 &callback_arg_types,
-                                initial_type.as_ref(),
+                                initial_type.as_deref(),
                             )?;
                             let RuntimeValue::Tensor(next) = &acc else {
                                 return Err(format!(
@@ -6091,14 +6160,15 @@ impl<'a> EvalContext<'a> {
                 let mut acc = initial;
                 let callback_type_children = arg_type_exprs
                     .get(1)
-                    .and_then(Option::as_ref)
+                    .and_then(Option::as_deref)
                     .and_then(checked_function_children);
                 let initial_type = arg_type_exprs.first().cloned().flatten();
                 let callback_arg_types = [
                     initial_type.clone(),
-                    callback_type_children.and_then(|children| children.get(1).cloned()),
+                    callback_type_children
+                        .and_then(|children| children.get(1).map(|ty| Arc::new(ty.clone()))),
                 ];
-                let callback_result_type = initial_type.as_ref();
+                let callback_result_type = initial_type.as_deref();
                 for i in 0..n {
                     let index = RuntimeValue::int64(i as i64);
                     acc = self.apply_resolved_callable_with_arg_types(
@@ -6158,9 +6228,9 @@ impl<'a> EvalContext<'a> {
                 let items = expect_list_arg(args, 1)?;
                 let callback_arg_types = [arg_type_exprs
                     .get(1)
-                    .and_then(Option::as_ref)
+                    .and_then(Option::as_deref)
                     .and_then(checked_list_element)
-                    .cloned()];
+                    .map(|ty| Arc::new(ty.clone()))];
                 let mut kept = Vec::new();
                 let mut rejected = Vec::new();
                 for item in items {
@@ -6196,9 +6266,9 @@ impl<'a> EvalContext<'a> {
                 let items = expect_list_arg(args, 1)?;
                 let callback_arg_types = [arg_type_exprs
                     .get(1)
-                    .and_then(Option::as_ref)
+                    .and_then(Option::as_deref)
                     .and_then(checked_list_element)
-                    .cloned()];
+                    .map(|ty| Arc::new(ty.clone()))];
                 let mut out = Vec::new();
                 for item in items {
                     let mapped = self.apply_resolved_callable_with_arg_types(
@@ -6364,7 +6434,7 @@ impl<'a> EvalContext<'a> {
                 // [05-OP-57]: recover dtype and rank from checked types, not
                 // from payloads (empty Lists cannot carry that evidence).
                 let mut list_depth = 0;
-                let mut leaf_type = arg_type_exprs.first().and_then(Option::as_ref);
+                let mut leaf_type = arg_type_exprs.first().and_then(Option::as_deref);
                 while let Some(inner) = leaf_type.and_then(checked_list_element) {
                     list_depth += 1;
                     leaf_type = Some(inner);
@@ -8169,7 +8239,7 @@ mod legacy_capture_order_tests {
             native_clarabel_solve: false,
             bindings: Frame::new(),
             result_producer: None,
-            binding_types: UnordMap::new(),
+            binding_types: chelis_unord::PersistentMap::new(),
             precision_bindings: UnordMap::new(),
             declaration_values: UnordMap::new(),
             named_axis_route_cache: UnordMap::new(),
@@ -8707,14 +8777,20 @@ mod legacy_capture_order_tests {
         assert!(ty.is_some());
         ctx.bindings
             .insert("caller_value".into(), RuntimeValue::int_lit(71));
-        ctx.binding_types.insert("caller_type".into(), ty.clone());
+        ctx.binding_types
+            .insert("caller_type".into(), ty.clone().map(Arc::new));
         ctx.precision_bindings.insert("p".into(), Prim::F64);
         ty
     }
 
     fn assert_declaration_caller_frame(ctx: &EvalContext<'_>, ty: &Option<Expr>) {
         assert_eq!(ctx.binding_types.len(), 1);
-        assert_eq!(ctx.binding_types.get("caller_type"), Some(ty));
+        assert_eq!(
+            ctx.binding_types
+                .get("caller_type")
+                .map(|ty| ty.as_deref().cloned()),
+            Some(ty.clone())
+        );
         assert_eq!(ctx.precision_bindings.len(), 1);
         assert_eq!(ctx.precision_bindings.get("p"), Some(&Prim::F64));
         assert_eq!(

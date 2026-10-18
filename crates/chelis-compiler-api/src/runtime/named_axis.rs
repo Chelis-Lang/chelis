@@ -71,7 +71,7 @@ impl<'a> EvalContext<'a> {
             return true;
         }
         for name in vars {
-            let Some((referenced, _)) = self.lookup_top_level_def(&name) else {
+            let Some(referenced) = self.top_level_def_key(&name).map(str::to_owned) else {
                 continue;
             };
             if referenced == resolved_name {
@@ -96,17 +96,19 @@ impl<'a> EvalContext<'a> {
     /// the top-level type-env entry. A local binding with an unknown
     /// type masks any same-named top-level entry (explicit `None`
     /// marker in `binding_types`), so a shadow is never mistyped.
-    pub(super) fn static_type_expr_of(&self, expr: &Expr) -> Option<Expr> {
+    /// The static type of `expr`, shared with the syntax or scope that
+    /// carries it rather than copied (chelis#3778).
+    pub(super) fn static_type_expr_of(&self, expr: &Expr) -> Option<Arc<Expr>> {
         match expr {
             Expr::MetaExpr(meta, _) => {
-                if let Some(ty) = meta.metadata.ty().map(|ty| ty.expression()) {
-                    return Some(ty.clone());
+                if let Some(ty) = meta.metadata.ty() {
+                    return Some(Arc::clone(ty.shared()));
                 }
                 self.static_type_expr_of(&meta.expr)
             }
             Expr::Node(node, _) => {
-                if let Some(ty) = node.meta().ty().map(|ty| ty.expression()) {
-                    return Some(ty.clone());
+                if let Some(ty) = node.meta().ty() {
+                    return Some(Arc::clone(ty.shared()));
                 }
                 if node.tag() == DeepTag::Var
                     && let Some(name) = node.children_slice().first().and_then(symbol_name)
@@ -115,12 +117,12 @@ impl<'a> EvalContext<'a> {
                         return declared.clone();
                     }
                     if let Some(ty) = self.program.type_env().get(name) {
-                        return Some(ty.clone());
+                        return Some(Arc::new(ty.clone()));
                     }
-                    if let Some((resolved, _)) = self.lookup_top_level_def(name)
-                        && let Some(ty) = self.program.type_env().get(&resolved)
+                    if let Some(resolved) = self.top_level_def_key(name)
+                        && let Some(ty) = self.program.type_env().get(resolved)
                     {
-                        return Some(ty.clone());
+                        return Some(Arc::new(ty.clone()));
                     }
                 }
                 None
