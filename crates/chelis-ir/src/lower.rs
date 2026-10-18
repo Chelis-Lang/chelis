@@ -26,18 +26,18 @@ thread_local! {
     /// unwinds into structured diagnostics. The panic hook stays quiet in
     /// that scope so users see only the returned diagnostic.
     static SUPPRESS_LOWERING_PANIC_OUTPUT: Cell<bool> = const { Cell::new(false) };
-    /// Function bodies the current unroll has inlined since it first
-    /// recursed inside a runtime branch, against [`MAX_UNROLLED_BODIES`];
-    /// `None` outside every lowering boundary. Every lowering context draws
-    /// on the one count, and it returns to zero when no name is recursing
-    /// any more, so it measures one unroll at a time (chelis#3864).
+    /// Function bodies the current unroll has inlined, against
+    /// [`MAX_UNROLLED_BODIES`] once the unroll branches; `None` outside every
+    /// lowering boundary. Every lowering context draws on the one count, and
+    /// it returns to zero when no name is recursing any more, so it measures
+    /// one unroll at a time (chelis#3864).
     static UNROLLED_BODIES: Cell<Option<usize>> = const { Cell::new(None) };
     /// Names with more than one active inline level, across every lowering
     /// context on this thread: a recursion is unrolling while this is
     /// nonzero.
     static RECURSING_NAMES: Cell<usize> = const { Cell::new(0) };
-    /// Whether the current unroll has inlined a recursive call inside an arm
-    /// of a runtime `if`, which lowers every arm: only such an unroll counts.
+    /// Whether a frame of the current unroll has made more than one
+    /// recursive call back into its own recursion.
     static UNROLL_BRANCHED: Cell<bool> = const { Cell::new(false) };
     /// Set while [`catch_lowering_diagnostic`] encloses a post-lowering pass.
     /// The hook stays quiet only for a lowering diagnostic's own unwind; any
@@ -8001,18 +8001,18 @@ fn extract_cons_chain_tensor(expr: &Expr) -> Option<LiteralToTensor> {
 /// runtime-bounded recursion hits the cap in milliseconds and errors loudly
 /// instead of hanging.
 const MAX_STATIC_RECURSION_DEPTH: usize = 512;
-/// Limit on the function bodies an unroll that recurses inside a runtime
-/// branch inlines (chelis#3864). The depth caps above bound how deep an
-/// unroll goes, not how wide: a recursive call in an arm of a runtime `if`
-/// is lowered with every other arm, so a recursion that recurses in two arms
-/// unrolls into a binary tree that stays under every depth cap while it
-/// doubles at each level. From an unroll's first recursive call inside a
-/// runtime arm until no name is recursing, every body it inlines counts,
-/// helpers included, across every lowering context of one lowering boundary.
-/// An unroll that never recurses inside a runtime branch is not counted; the
-/// depth caps bound it. The budget is a count, so it depends only on the
-/// program, and an unroll that exceeds it is rejected loudly like the depth
-/// caps.
+/// Limit on the function bodies an unroll inlines once one of its frames makes
+/// more than one recursive call back into its own recursion (chelis#3864). The depth caps above bound how deep an unroll goes, not how
+/// wide: a recursive call in an arm of a runtime `if` is lowered with every
+/// other arm, so a recursion that recurses in two arms unrolls into a binary
+/// tree that stays under every depth cap while it doubles at each level. An
+/// unroll counts every body it inlines, helpers included, from its first
+/// recursive call until no name is recursing, across every lowering context
+/// of one lowering boundary, and the budget applies once some frame of the
+/// unroll has made more than one recursive call back into its own recursion,
+/// which no chain does. A chain-shaped unroll is never limited; the depth caps
+/// bound it. The budget is a count, so it depends only on the program, and an
+/// unroll that exceeds it is rejected loudly like the depth caps.
 const MAX_UNROLLED_BODIES: usize = 1 << 15;
 /// Total limit on simultaneously active inlined bodies across all names.
 /// Each level costs roughly ten lowering frames (a few KB of Rust stack), so
@@ -8021,8 +8021,8 @@ const MAX_UNROLLED_BODIES: usize = 1 << 15;
 const MAX_TOTAL_INLINE_DEPTH: usize = 1024;
 
 impl LowerCtx<'_> {
-    /// Count one body a branched unroll inlines, and reject the unroll once
-    /// it passes the budget.
+    /// Count one body the unroll inlines, and reject the unroll once a frame
+    /// has branched and the count passes the budget.
     fn count_unrolled_body(&mut self, fn_expr: &Expr, callee: Option<&str>) {
         let Some(unrolled) = UNROLLED_BODIES.with(|count| {
             let unrolled = count.get().map(|unrolled| unrolled + 1);
@@ -8043,7 +8043,7 @@ impl LowerCtx<'_> {
         });
         #[cfg(not(test))]
         let budget = MAX_UNROLLED_BODIES;
-        if unrolled <= budget {
+        if unrolled <= budget || !UNROLL_BRANCHED.with(Cell::get) {
             return;
         }
         // Name the recursion whose unroll is growing, not the helper that
@@ -8061,9 +8061,10 @@ impl LowerCtx<'_> {
             .unwrap_or("an anonymous function");
         let message = format!(
             "recursive inlining of `{name}` exceeded the budget of {budget} function bodies \
-             for an unroll that recurses inside a runtime branch: recursion lowers by bounded \
-             static unrolling, and a recursive call under a condition known only at runtime \
-             unrolls every arm, so the unroll grows with each level (chelis#620, chelis#3864)"
+             for an unroll in which a frame makes more than one recursive call back into its \
+             own recursion: recursion lowers by bounded static unrolling, and such a \
+             recursion, as in both arms of a condition known only at runtime, grows with each \
+             level (chelis#620, chelis#3864)"
         );
         #[cfg(test)]
         UNROLL_BUDGET_PROBE.with(|probe| {
@@ -10025,6 +10026,9 @@ struct LowerCtx<'program> {
     /// acceptable because every lowering error unwinds through the per-entry
     /// `catch_lowering` and the ctx is abandoned.
     inlining_depths: UnordMap<String, usize>,
+    /// Per recursive name, its active inlined frames, innermost last, each
+    /// with the recursive calls credited to it (chelis#3864).
+    recursion_frames: UnordMap<String, Vec<usize>>,
     /// Total active inlined bodies across all names. Bounds the Rust stack
     /// (each level is roughly ten lowering frames) for deep or mutually
     /// recursive chains that stay under every per-name cap.
@@ -10218,6 +10222,7 @@ impl<'program> LowerCtx<'program> {
             selected_arm_depth: 0,
             linearity,
             inlining_depths: UnordMap::new(),
+            recursion_frames: UnordMap::new(),
             inlining_active: 0,
             declaration_root_claim: false,
             fn_typed_params: PersistentSet::new(),
@@ -16045,18 +16050,22 @@ impl<'program> LowerCtx<'program> {
         {
             RECURSING_NAMES.with(|names| names.set(names.get() + 1));
         }
-        // A recursive call inside a runtime arm marks the unroll as one that
-        // lowers every arm, and from then on every body it inlines counts.
-        if self.selected_arm_depth > 0
-            && let Some(name) = &inlining_name
-            && self
-                .inlining_depths
-                .get(name)
-                .is_some_and(|depth| *depth > 1)
-        {
-            UNROLL_BRANCHED.with(|branched| branched.set(true));
+        // A recursive call is credited to the most recent active frame of
+        // its name, the frame whose recursion it extends: directly, or
+        // through the frames of its mutual-recursion group in between. A
+        // chain credits each frame once; a frame credited twice recurses
+        // more than once per level, and its unroll branches.
+        if let Some(name) = &inlining_name {
+            let frames = self.recursion_frames.entry(name.clone()).or_default();
+            if let Some(extended) = frames.last_mut() {
+                *extended += 1;
+                if *extended > 1 {
+                    UNROLL_BRANCHED.with(|branched| branched.set(true));
+                }
+            }
+            frames.push(0);
         }
-        if RECURSING_NAMES.with(Cell::get) > 0 && UNROLL_BRANCHED.with(Cell::get) {
+        if RECURSING_NAMES.with(Cell::get) > 0 {
             self.count_unrolled_body(fn_expr, inlining_name.as_deref());
         }
         if self.inlining_active > MAX_TOTAL_INLINE_DEPTH {
@@ -16231,6 +16240,12 @@ impl<'program> LowerCtx<'program> {
             *depth = depth.saturating_sub(1);
             if *depth == 0 {
                 self.inlining_depths.remove(name);
+            }
+            if let Some(frames) = self.recursion_frames.get_mut(name) {
+                frames.pop();
+                if frames.is_empty() {
+                    self.recursion_frames.remove(name);
+                }
             }
         }
         self.bindings = saved;
@@ -35771,8 +35786,8 @@ def example() -> f32 = bisection(erf_projectile, cast(0.1, f32), cast(0.7, f32),
         let message = rejection.expect("the budget rejected the entry");
         assert!(
             message.starts_with(&format!(
-                "recursive inlining of `bisection_rec` exceeded the budget of {TEST_BUDGET} function bodies for an unroll that recurses inside a runtime branch"
-            )) && message.contains("known only at runtime unrolls every arm")
+                "recursive inlining of `bisection_rec` exceeded the budget of {TEST_BUDGET} function bodies for an unroll in which a frame makes more than one recursive call"
+            )) && message.contains("both arms of a condition known only at runtime")
                 && message.contains("chelis#620"),
             "the rejection names the recursion, the budget and the runtime branch: {message}"
         );
@@ -35832,21 +35847,52 @@ def example() -> f32 = bisection(erf_projectile, cast(0.1, f32), cast(0.7, f32),
         )
     }
 
+    /// Lower `source`'s `example` under `budget`, and check that its unroll
+    /// counted past the budget yet was not limited.
+    fn assert_never_limited(source: String, budget: usize) {
+        let (lowered, counted, rejection) = lower_example(source, budget);
+        assert!(lowered, "the chain lowers: {rejection:?}");
+        assert_eq!(rejection, None);
+        assert!(
+            counted > budget,
+            "the chain inlined past the budget: {counted}"
+        );
+    }
+
     #[test]
-    fn a_static_loop_with_a_heavy_helper_never_counts() {
-        // chelis#3864 rounds 2 and 3: a loop whose base case folds never
-        // recurses inside a runtime branch, so neither its calls nor the
-        // 31-body helper each iteration inlines count; the depth caps bound
-        // it. 32 iterations and a 300-level recursion lower under a budget
-        // of 10.
+    fn a_static_loop_with_a_heavy_helper_is_never_limited() {
+        // chelis#3864 rounds 2 and 3: a loop whose base case folds is a chain,
+        // so its bodies, a 31-body helper per iteration among them, never
+        // meet the budget; the depth caps bound it.
         let source = format!(
             "{}{}def step(x: tensor[3, f32], i: i64) -> tensor[3, f32] = if gte(i, cast(32, i64)) then x else step(h4(x), add(i, cast(1, i64)))\ndef example(seed: tensor[3, f32]) -> tensor[3, f32] = up(step(seed, cast(0, i64)), cast(0, i64))\n",
             helper_tree("tensor[3, f32]"),
             count_up("up", 300)
         );
-        let (lowered, counted, rejection) = lower_example(source, 10);
-        assert!(lowered, "the loops lower: {rejection:?}");
-        assert_eq!(counted, 0, "a static loop is not counted");
+        assert_never_limited(source, 10);
+    }
+
+    #[test]
+    fn an_early_exit_chain_with_a_heavy_helper_is_never_limited() {
+        // chelis#3864 round 4: a static cap, a convergence test decided at
+        // runtime, and the recursive call in one arm only. The call sits in
+        // a runtime arm, but the unroll is a chain.
+        let source = format!(
+            "{}def step(x: f32, i: i64) -> f32 = if gte(i, cast(32, i64)) then x else if lt(sin(x), cast(-2.0, f32)) then x else step(h4(x), add(i, cast(1, i64)))\ndef example() -> f32 = step(cast(1.5, f32), cast(0, i64))\n",
+            helper_tree("f32")
+        );
+        assert_never_limited(source, 10);
+    }
+
+    #[test]
+    fn a_mutual_recursion_chain_is_never_limited() {
+        // `ping` and `pong` call each other once per level: a chain through
+        // two names.
+        let source = format!(
+            "{}def ping(x: f32, k: i64) -> f32 = if gte(k, cast(100, i64)) then x else pong(h3(x), add(k, cast(1, i64)))\ndef pong(x: f32, k: i64) -> f32 = ping(h3(x), add(k, cast(1, i64)))\ndef example() -> f32 = ping(cast(1.5, f32), cast(0, i64))\n",
+            helper_tree("f32")
+        );
+        assert_never_limited(source, 10);
     }
 
     #[test]
@@ -35865,7 +35911,7 @@ def example() -> f32 = bisection(erf_projectile, cast(0.1, f32), cast(0.7, f32),
         let message = rejection.expect("the budget rejected the unroll");
         assert!(
             message.starts_with(
-                "recursive inlining of `tree` exceeded the budget of 1000 function bodies for an unroll that recurses inside a runtime branch"
+                "recursive inlining of `tree` exceeded the budget of 1000 function bodies for an unroll in which a frame makes more than one recursive call"
             ),
             "{message}"
         );
@@ -35956,5 +36002,41 @@ def example() -> f32 = bisection(erf_projectile, cast(0.1, f32), cast(0.7, f32),
         UNROLLED_BODIES.with(|count| count.set(None));
         RECURSING_NAMES.with(|names| names.set(0));
         UNROLL_BRANCHED.with(|branched| branched.set(false));
+    }
+
+    #[test]
+    fn sequential_and_nested_loops_inside_a_loop_are_never_limited() {
+        // chelis#3864 round 4: `f` runs a complete static `g` loop at each of
+        // its levels, and `g` runs a complete static `i` loop at each of its,
+        // each level inlining a 15-body helper.
+        // Every frame makes one recursive call back into its own recursion,
+        // so the polynomial nest is a set of chains, never a tree.
+        let source = format!(
+            "{}def ib(x: f32, k: i64) -> f32 = if gte(k, cast(6, i64)) then x else ib(h3(x), add(k, cast(1, i64)))\n\
+             def gb(x: f32, k: i64) -> f32 = if gte(k, cast(12, i64)) then x else gb(ib(h3(x), cast(0, i64)), add(k, cast(1, i64)))\n\
+             def fb(x: f32, k: i64) -> f32 = if gte(k, cast(12, i64)) then x else fb(gb(gb(h3(x), cast(0, i64)), cast(0, i64)), add(k, cast(1, i64)))\n\
+             def example() -> f32 = fb(cast(1.5, f32), cast(0, i64))\n",
+            helper_tree("f32")
+        );
+        assert_never_limited(source, 100);
+    }
+
+    #[test]
+    fn a_frame_that_recurses_twice_through_a_helper_trips() {
+        // `fv` calls the non-recursive `via` helper twice per level, and each
+        // call re-enters `fv`: both re-entries extend the same frame of `fv`,
+        // so the unroll is a tree.
+        let source = "def via(x: f32, k: i64) -> f32 = fv(x, k)\n\
+             def fv(x: f32, k: i64) -> f32 = if gte(k, cast(10, i64)) then x else add(via(x, add(k, cast(1, i64))), via(neg(x), add(k, cast(1, i64))))\n\
+             def example() -> f32 = fv(cast(1.5, f32), cast(0, i64))\n"
+            .to_string();
+        let (lowered, counted, rejection) = lower_example(source, 100);
+        assert!(!lowered);
+        assert_eq!(counted, 101);
+        assert!(
+            rejection.is_some_and(|message| message.starts_with("recursive inlining of `fv`")
+                || message.starts_with("recursive inlining of `via`")),
+            "the rejection names the recursion"
+        );
     }
 }
