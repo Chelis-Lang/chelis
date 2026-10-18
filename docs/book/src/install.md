@@ -170,6 +170,13 @@ removes the link and the root, and keeps the store path. When
 `chelisup install X.Y.Z` replaces the link with a release toolchain, it also
 removes the root.
 
+The `chelisup` of the flake does not bring its own Nix. To add a root, it uses
+the `nix-store` of your Nix installation. It looks on `PATH` first, then in
+`/nix/var/nix/profiles/default/bin`, `/run/current-system/sw/bin`,
+`~/.nix-profile/bin`, and `${XDG_STATE_HOME:-~/.local/state}/nix/profile/bin`.
+If it finds no `nix-store`, `chelisup install` and `chelisup link` of a store
+path stop with a message before they change a root or a toolchain.
+
 To add the packages to your own Nix package set, use the overlay of the flake.
 It adds `chelis`, `chelis-runtime`, and `chelisup` for a system that the flake
 supports:
