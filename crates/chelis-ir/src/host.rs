@@ -24388,7 +24388,11 @@ fn terminal_name_matches(full_name: &str, short_name: &str) -> bool {
     full_name == short_name || terminal_name(full_name) == terminal_name(short_name)
 }
 
+/// Every terminal-segment comparison and table key goes through here, so a
+/// scan that resolves names by segment is visible to the counted oracle
+/// however it is written (chelis#3854).
 fn terminal_name(name: &str) -> &str {
+    note_terminal_name_comparisons(1);
     name.rsplit_once("__")
         .map(|(_, tail)| tail)
         .or_else(|| name.rsplit_once('.').map(|(_, tail)| tail))

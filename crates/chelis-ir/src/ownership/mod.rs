@@ -1267,13 +1267,13 @@ impl<'a> VerifiedHostFunctionView<'a> {
     pub fn sites(self) -> impl Iterator<Item = VerifiedHostSiteView<'a>> + 'a {
         let unit = self.index + 1;
         let program = self.emission.ownership_program();
-        let records = &self.emission.sites.records;
+        let records = self.emission.sites;
         self.emission
             .sites_by_unit
             .of(unit)
             .iter()
             .map(move |&position| VerifiedHostSiteView {
-                record: &records[position],
+                record: records.record(position).expect("indexed site record"),
                 program,
                 verification: self.emission.verification,
             })
@@ -1358,8 +1358,7 @@ impl<'a> VerifiedHostEmission<'a> {
     pub fn sites(self) -> impl ExactSizeIterator<Item = VerifiedHostSiteView<'a>> + 'a {
         let program = self.ownership_program();
         self.sites
-            .records
-            .iter()
+            .records()
             .map(move |record| VerifiedHostSiteView {
                 record,
                 program,
@@ -1369,12 +1368,12 @@ impl<'a> VerifiedHostEmission<'a> {
 
     pub fn root_sites(self) -> impl Iterator<Item = VerifiedHostSiteView<'a>> + 'a {
         let program = self.ownership_program();
-        let records = &self.sites.records;
+        let records = self.sites;
         self.sites_by_unit
             .of(0)
             .iter()
             .map(move |&position| VerifiedHostSiteView {
-                record: &records[position],
+                record: records.record(position).expect("indexed site record"),
                 program,
                 verification: self.verification,
             })
@@ -1635,8 +1634,7 @@ fn verify_manifest_sinks(
         .map(|entry| entry.name.as_str())
         .collect::<Vec<_>>();
     let actual = sites
-        .records
-        .iter()
+        .records()
         .filter(|site| {
             site.actions.iter().any(|action| {
                 matches!(

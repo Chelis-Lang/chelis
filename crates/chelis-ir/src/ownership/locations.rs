@@ -225,8 +225,7 @@ pub(super) struct SitesByUnit {
 impl SitesByUnit {
     pub(super) fn new(sites: &HostSiteMap) -> Self {
         let mut units = BTreeMap::<usize, Vec<usize>>::new();
-        for (position, record) in sites.records.iter().enumerate() {
-            note_site_lookup_entries(1);
+        for (position, record) in sites.records().enumerate() {
             units.entry(record.unit).or_default().push(position);
         }
         Self { units }

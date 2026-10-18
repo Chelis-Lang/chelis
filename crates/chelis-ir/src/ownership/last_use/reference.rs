@@ -320,14 +320,14 @@ pub(super) fn rebuild_host_sites(
     sites: &mut HostSiteMap,
     placed: &[(usize, Vec<Placed>)],
 ) -> Result<(), OwnershipError> {
-    if sites.records.is_empty() {
+    if sites.is_empty() {
         return Ok(());
     }
     let ids = placed
         .iter()
         .flat_map(|(unit, terminals)| terminals.iter().map(move |terminal| (*unit, terminal.id)))
         .collect::<BTreeSet<_>>();
-    for record in &mut sites.records {
+    for record in sites.records_mut() {
         reference_visited(record.actions.len());
         record.actions.retain(|action| {
             !matches!(
@@ -347,83 +347,79 @@ pub(super) fn rebuild_host_sites(
         terminals
             .sort_by_key(|terminal| (terminal.point, std::cmp::Reverse(terminal.definition_order)));
         for terminal in terminals {
-            let (site_index, anchor) =
-                match terminal.point {
-                    Placement::OnEdge { source, edge } => sites
-                        .records
-                        .iter()
-                        .enumerate()
-                        .find_map(|(index, record)| {
-                            reference_visited(1 + record.actions.len());
-                            edge_anchor_position(record, *unit_index, unit, source, edge)
-                                .map(|anchor| (index, anchor + 1))
-                        }),
-                    Placement::InBlock { block, after } => {
-                        let anchor = if after == 0 {
-                            None
-                        } else {
-                            Some(
-                                non_scheduled_ops(find_block(unit, block)?)
-                                    .nth(after - 1)
-                                    .map(|operation| operation.id)
-                                    .ok_or_else(|| OwnershipError::HostSiteMap {
-                                        detail: format!(
-                                            "scheduled terminal o{} has an invalid block anchor",
-                                            terminal.id.0
-                                        ),
-                                    })?,
-                            )
-                        };
-                        sites
-                            .records
-                            .iter()
-                            .enumerate()
-                            .find_map(|(index, record)| {
-                                reference_visited(1 + record.actions.len());
-                                record
-                                    .actions
-                                    .iter()
-                                    .position(|action| match *action {
-                                        HostSiteAction::Operation {
-                                            unit,
-                                            block: action_block,
-                                            operation,
-                                        } => {
-                                            unit == *unit_index
-                                                && action_block == block
-                                                && anchor == Some(operation)
-                                        }
-                                        _ => false,
-                                    })
-                                    .map(|anchor| (index, anchor + 1))
-                                    .or_else(|| {
-                                        (after == 0
-                                            && record.unit == *unit_index
-                                            && record.kind
-                                                == super::super::ir::HostSiteKind::FunctionEntry)
-                                            .then_some((index, 0))
-                                    })
-                            })
-                    }
+            let (site_index, anchor) = match terminal.point {
+                Placement::OnEdge { source, edge } => {
+                    sites.records().enumerate().find_map(|(index, record)| {
+                        reference_visited(1 + record.actions.len());
+                        edge_anchor_position(record, *unit_index, unit, source, edge)
+                            .map(|anchor| (index, anchor + 1))
+                    })
                 }
-                .ok_or_else(|| OwnershipError::HostSiteMap {
-                    detail: format!(
-                        "scheduled terminal o{} has no structural site",
-                        terminal.id.0
-                    ),
-                })?;
+                Placement::InBlock { block, after } => {
+                    let anchor = if after == 0 {
+                        None
+                    } else {
+                        Some(
+                            non_scheduled_ops(find_block(unit, block)?)
+                                .nth(after - 1)
+                                .map(|operation| operation.id)
+                                .ok_or_else(|| OwnershipError::HostSiteMap {
+                                    detail: format!(
+                                        "scheduled terminal o{} has an invalid block anchor",
+                                        terminal.id.0
+                                    ),
+                                })?,
+                        )
+                    };
+                    sites.records().enumerate().find_map(|(index, record)| {
+                        reference_visited(1 + record.actions.len());
+                        record
+                            .actions
+                            .iter()
+                            .position(|action| match *action {
+                                HostSiteAction::Operation {
+                                    unit,
+                                    block: action_block,
+                                    operation,
+                                } => {
+                                    unit == *unit_index
+                                        && action_block == block
+                                        && anchor == Some(operation)
+                                }
+                                _ => false,
+                            })
+                            .map(|anchor| (index, anchor + 1))
+                            .or_else(|| {
+                                (after == 0
+                                    && record.unit == *unit_index
+                                    && record.kind == super::super::ir::HostSiteKind::FunctionEntry)
+                                    .then_some((index, 0))
+                            })
+                    })
+                }
+            }
+            .ok_or_else(|| OwnershipError::HostSiteMap {
+                detail: format!(
+                    "scheduled terminal o{} has no structural site",
+                    terminal.id.0
+                ),
+            })?;
             let offset = inserted.entry((site_index, terminal.point)).or_default();
             let block = match terminal.point {
                 Placement::InBlock { block, .. } | Placement::OnEdge { source: block, .. } => block,
             };
-            sites.records[site_index].actions.insert(
-                anchor + *offset,
-                HostSiteAction::Operation {
-                    unit: *unit_index,
-                    block,
-                    operation: terminal.id,
-                },
-            );
+            sites
+                .record_mut(site_index)
+                .expect("collected site index")
+                .actions
+                .insert(
+                    anchor + *offset,
+                    HostSiteAction::Operation {
+                        unit: *unit_index,
+                        block,
+                        operation: terminal.id,
+                    },
+                );
             *offset += 1;
         }
     }

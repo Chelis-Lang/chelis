@@ -158,16 +158,16 @@ pub(super) fn verify_host_payload_sites(
 ) -> Result<(), OwnershipError> {
     verify_materialized_roots(host, manifest)?;
     let expected = census_host_payload(host, manifest)?;
-    if expected.len() != sites.records.len() {
+    if expected.len() != sites.len() {
         return Err(OwnershipError::HostSiteMap {
             detail: format!(
                 "payload has {} structural sites, directive map has {}",
                 expected.len(),
-                sites.records.len()
+                sites.len()
             ),
         });
     }
-    for (index, (expected_site, site)) in expected.iter().zip(&sites.records).enumerate() {
+    for (index, (expected_site, site)) in expected.iter().zip(sites.records()).enumerate() {
         if site.id.index() != index {
             return Err(OwnershipError::HostSiteMap {
                 detail: format!("site at position {index} has a different opaque identity"),
@@ -207,7 +207,7 @@ pub(super) fn verify_host_actions(
     // One derivation for the whole program; each control-edge action reads
     // its row, and the bijection check below compares the whole table.
     let expected_controls = collect_expected_controls(program);
-    for (index, site) in sites.records.iter().enumerate() {
+    for (index, site) in sites.records().enumerate() {
         if matches!(
             site.kind,
             super::ir::HostSiteKind::Binding | super::ir::HostSiteKind::Argument
@@ -433,7 +433,7 @@ pub(super) fn verify_host_actions(
     }
     for (manifest_index, (site_index, owner)) in roots {
         let entry = &manifest.entries[manifest_index];
-        let site = &sites.records[site_index];
+        let site = sites.record(site_index).expect("collected site index");
         let consumes = site
             .actions
             .iter()
@@ -464,7 +464,7 @@ pub(super) fn verify_host_actions(
         }
     }
     for (site_index, owner) in display_roots {
-        let site = &sites.records[site_index];
+        let site = sites.record(site_index).expect("collected site index");
         let consumes = site
             .actions
             .iter()
