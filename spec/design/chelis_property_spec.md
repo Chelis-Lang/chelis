@@ -406,7 +406,11 @@ equal ranges take the same candidate at every scheduled attempt and a
 multi-binder property is evaluated only on the **diagonal** of the edge grid.
 `forall(x: f64, y: f64) where x > 0.0f64, y > 0.0f64` never pairs a large `x`
 with a tiny `y`, and `x / y` being finite -- false at exactly such a pair --
-reports `fuzz_validated` at every sample count. That is chelis#3636's own
+reports `fuzz_validated` at every sample count measured, up to 50000 with
+`accepted == attempted` throughout. The bound is mechanical rather than
+sampled: past attempt 44 the draw falls back to the `[-10, 10]` window, and
+the overflow needs `y` near `1e-309`, which that window cannot reach. That is
+chelis#3636's own
 defect surviving for multi-binder properties, and chelis#3697 owns it.
 
 **No off-diagonal policy is implemented.** This section records what an
@@ -455,6 +459,16 @@ magnitude-class odometer instead:
 | 3 | 26/30 | **0/30** |
 | 4 | 23/30 | **0/30** |
 
+The attempt that produced the right-hand column grouped each binder's
+candidates into six magnitude classes — its largest and smallest candidates,
+its smallest strictly positive and largest strictly negative ones, a zero
+where the guards admit one, and the candidate nearest `1.0` in magnitude —
+and ran a mixed-radix odometer over them. Four of those six are non-negative,
+which is why a predecessor drawn from them pushes `y > x` into a non-negative
+range in the next subsection. The classes are recorded because the `6` in the
+arithmetic below is otherwise unverifiable: the code that defined them is not
+in the tree.
+
 At three or more binders a `6`-class odometer needs `6^n >= 216` attempts,
 which exceeds the 56 that follow the 44-attempt diagonal at the default
 budget, so **every** post-diagonal attempt becomes a pair and the uniform
@@ -474,9 +488,9 @@ here:
 
 - Changing a predecessor's value re-indexes every successor, and entries the
   schedule proposed at attempt `i` can end up proposed at no attempt at all.
-  Four of the six magnitude classes of an unbounded binder are non-negative,
-  so a predecessor drawn from them pushes `y > x` into a non-negative range
-  and deletes every negative candidate from `y`'s list.
+  Four of the six magnitude classes listed above are non-negative for an
+  unbounded binder, so a predecessor drawn from them pushes `y > x` into a
+  non-negative range and deletes every negative candidate from `y`'s list.
 - The perturbation cannot be confined to predecessors. A proposal anywhere in
   the property changes how many values the attempt draws from the generator,
   which shifts every later predecessor's uniform draw and so its successors'
@@ -497,8 +511,14 @@ off for the whole property restored 18/30.
    independent of the other binders' draws.
 3. Keep every binder's own schedule reachable in the samples it takes today:
    a schedule longer than the span a policy reserves for it must not have its
-   tail displaced past the budget. Each `!=` exclusion adds two candidates, so
-   `L = 44 + 2k`.
+   tail displaced past the budget. An `!=` exclusion adds **at most** two
+   candidates — its two representable neighbours — so `L <= 44 + 2k` for `k`
+   exclusions, and a policy reserving a span must use the bound rather than an
+   equality. It is only a bound because `push` drops a value the exclusion
+   list contains, so an exclusion that is itself a schedule member removes
+   itself first: `x != 1.0f64` measures `L = 45`, not 46, and `x != 0.0f64`
+   measures **42**, because `0.0 == -0.0` in Rust deletes both zeros while the
+   neighbours it would add are already the subnormal candidates.
 4. Leave a single-binder property alone, and leave a binder that reads no
    schedule -- `bool`, `string`, a tensor -- out of any arity or index
    arithmetic, so it neither enables a scheme nor consumes a position in it.
@@ -531,9 +551,13 @@ The chelis#3697 hazard oracle is:
 cargo nextest run -p chelis-cli --test issue_3697_multi_binder_hazards
 ```
 
-It pins the current behaviour the analysis above measured, not a policy: the
-diagonal limitation itself, and the post-diagonal uniform draws' yield. A
-policy that changes either has to change these tests deliberately.
+It pins the two measurements above that no existing test covers: the
+post-diagonal uniform draws' yield, and an order successor's dependence on its
+predecessor. The diagonal limitation itself is pinned by the chelis#3636
+oracle three lines above — `issue_3636_multi_binder_schedule_visits_only_the_diagonal`
+and its narrowed witness — so closing chelis#3697 means deleting assertions
+there, not here. A policy that changes any of them has to change those tests
+deliberately.
 
 V1 reports the first deterministic counterexample. Shrinking is deferred.
 

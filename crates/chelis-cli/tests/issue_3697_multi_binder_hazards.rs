@@ -14,6 +14,15 @@
 //! `spec/design/chelis_property_spec.md` § "Why the multi-binder diagonal is
 //! still open" carries the arithmetic and the full tables.
 //!
+//! **The diagonal limitation itself is not pinned here.**
+//! `issue_3636_edge_sampling.rs` already owns it, in
+//! `issue_3636_multi_binder_schedule_visits_only_the_diagonal` and
+//! `issue_3636_the_diagonal_witness_is_real_when_the_guards_align_it` — that
+//! file asserts the `x / y` property is *not* refuted and that its witness is
+//! real once the guards align it. Duplicating them here would give whoever
+//! closes chelis#3697 two deletion sites instead of one, so this file covers
+//! only what they do not.
+//!
 //! A policy that changes any of these is expected to change these tests
 //! deliberately, with the measurement that justifies it.
 use assert_cmd::Command;
@@ -53,53 +62,6 @@ fn prove(source: &str, samples: &str, seed: &str) -> (i32, Value) {
             )
         });
     (output.status.code().unwrap_or(-1), record)
-}
-
-/// The limitation itself, pinned so it is not rediscovered. `x / y` overflows
-/// when a large `x` meets a tiny `y`, and both components satisfy
-/// `x > 0, y > 0`, so the pair is a true counterexample the diagonal never
-/// proposes.
-///
-/// This asserts the property is **not** refuted. That is deliberate: the
-/// assertion is the open defect, and whoever closes chelis#3697 should have
-/// to delete it on purpose after reading the design doc's measurements.
-#[test]
-fn issue_3697_the_multi_binder_diagonal_is_still_open() {
-    let source = "module Hazard.Diagonal
-def subject(x: f64, y: f64) -> f64 = (x / y)
-@property div_finite forall(x: f64, y: f64)
-where x > 0.0f64, y > 0.0f64:
-  ((subject(x, y) <= 1.7976931348623157e308f64) && (subject(x, y) >= -1.7976931348623157e308f64))
-";
-    for seed in ["0", "1", "7", "99"] {
-        let (code, record) = prove(source, "2000", seed);
-        assert_eq!(
-            code, 0,
-            "seed {seed}: the diagonal limitation is expected to leave this \
-             unrefuted; if this now fails, chelis#3697 is closed and this test \
-             should be deleted on purpose: {record:#}"
-        );
-        assert_eq!(record["status"], "passed", "seed {seed}: {record:#}");
-    }
-}
-
-/// The narrowed witness, which proves the limitation is about *pairing* and
-/// not about reach. With the guards moved so the diagonal lands on the
-/// refuting pair, the same body refutes immediately -- so each binder does
-/// reach the extremes on its own.
-#[test]
-fn issue_3697_the_diagonal_witness_is_real_when_the_guards_align_it() {
-    let source = "module Hazard.Aligned
-def subject(x: f64, y: f64) -> f64 = (x / y)
-@property div_finite forall(x: f64, y: f64)
-where x > 1.0e300f64, y > 0.0f64, y < 1.0e-300f64:
-  ((subject(x, y) <= 1.7976931348623157e308f64) && (subject(x, y) >= -1.7976931348623157e308f64))
-";
-    let (code, record) = prove(source, "100", "0");
-    assert_eq!(code, 1, "{record:#}");
-    let x = record["counterexample"]["x"].as_f64().expect("x");
-    let y = record["counterexample"]["y"].as_f64().expect("y");
-    assert!(x > 1.0e300 && y > 0.0 && y < 1.0e-300, "{record:#}");
 }
 
 /// **The post-diagonal uniform draws are not spare budget.** They are the
@@ -181,12 +143,18 @@ where y > x, {exclusions}:
   (y != -1.0e-323f64)
 "
     );
+    // 77 is where this shape's schedule reaches `-1e-323`: the 44 base
+    // candidates plus the exclusions' surviving neighbours. A different count
+    // means the draw sequence moved, which is what this test is for -- but it
+    // does not say whether the move is benign, so read the design doc's
+    // order-chain figures before adjusting it.
     for (seed, attempts) in [("1", 77), ("3", 77)] {
         let (code, record) = prove(&source, "100", seed);
         assert_eq!(code, 1, "seed {seed}: {record:#}");
         assert_eq!(
             record["attempted_samples"], attempts,
-            "seed {seed}: {record:#}"
+            "seed {seed}: expected the refutation at attempt {attempts}; a \
+             different count means the draw sequence moved: {record:#}"
         );
         let witness = record["counterexample"]["x"]
             .as_f64()
