@@ -186,8 +186,11 @@ pub(crate) fn reset_frame_value_copies() {
 /// only the representation of "everything in scope" changed.
 #[derive(Debug, Default)]
 pub struct Frame {
-    /// Bindings made in this scope since it was last captured.
-    locals: UnordMap<String, Binding>,
+    /// Bindings made in this scope since it was last captured. Each binding
+    /// is boxed: an ordered map's node reserves room for every slot, and an
+    /// unboxed binding is large, so a frame of two bindings held about 2.5 KB
+    /// while a recursion kept it alive (chelis#3842).
+    locals: UnordMap<String, Box<Binding>>,
     /// Every scope captured below this one, innermost first. Shared with the
     /// closures that captured it and never mutated after freezing.
     captured: Option<Arc<Frame>>,
@@ -291,11 +294,11 @@ impl Frame {
         self.locals
             .insert(
                 name,
-                Binding {
+                Box::new(Binding {
                     value,
                     result_producer,
                     released: false,
-                },
+                }),
             )
             .filter(|binding| !binding.released)
             .map(|binding| binding.value)
