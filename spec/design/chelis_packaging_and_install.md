@@ -422,7 +422,12 @@ successful `link` of a directory inside the Nix store, it adds the GC root
 directory. A link to a directory outside the store gets no root, and a new
 `link` of that version to such a directory removes an earlier root. After a
 successful `uninstall <ver>`, the launcher removes the root of that version.
-A failed `link` or `uninstall` leaves the roots unchanged.
+
+The real installer replaces the link of a version with a real directory when
+the linked directory has no `bin/chelis`. After a successful `install`, the
+launcher removes each toolchain root whose `toolchains/<ver>` entry is no
+longer a link into the store path of that root. A failed `link`, `install`, or
+`uninstall` leaves the toolchain roots unchanged.
 
 A direct real-binary copy has no Nix root management. Nix does not scan files
 outside the store, so garbage collection can remove its store dependencies.

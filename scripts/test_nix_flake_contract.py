@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import json
 import os
+import platform
 import re
 import shutil
 import subprocess
+import tarfile
 import tempfile
 import tomllib
 import unittest
@@ -98,13 +100,22 @@ def assert_install_guide_names_supported_systems(guide: str) -> None:
         )
 
 
-def add_store_toolchain(scratch: Path) -> Path:
-    """Add a fake toolchain that reports chelis 0.0.7 to the Nix store."""
-    source = scratch / "toolchain"
+def add_store_toolchain(
+    scratch: Path, version: str = "0.0.7", compiler: Path | None = None
+) -> Path:
+    """Add a fake toolchain that reports chelis `version` to the Nix store.
+
+    With `compiler`, the bin/chelis of the toolchain is a link to that program
+    outside the store. A test can then remove the compiler of the toolchain.
+    """
+    source = scratch / f"toolchain-{version}"
     fake_chelis = source / "bin" / "chelis"
     fake_chelis.parent.mkdir(parents=True)
-    fake_chelis.write_text("#!/bin/sh\nprintf 'chelis 0.0.7\\n'\n", encoding="utf-8")
-    fake_chelis.chmod(0o755)
+    program = compiler or fake_chelis
+    program.write_text(f"#!/bin/sh\nprintf 'chelis {version}\\n'\n", encoding="utf-8")
+    program.chmod(0o755)
+    if compiler is not None:
+        fake_chelis.symlink_to(compiler)
     added = subprocess.run(
         [Path(NIX).parent / "nix-store", "--add", source],
         text=True,
@@ -115,6 +126,37 @@ def add_store_toolchain(scratch: Path) -> Path:
     if added.returncode != 0:
         raise AssertionError(added.stderr)
     return Path(added.stdout.strip())
+
+
+def chelisup_release_build() -> str | None:
+    """The build that chelisup installs for release 0.0.7 on this host, if any."""
+    return {
+        ("Darwin", "arm64"): "darwin-arm64",
+        ("Darwin", "x86_64"): "darwin-x86_64",
+        ("Linux", "x86_64"): "linux-x86_64",
+    }.get((platform.system(), platform.machine()))
+
+
+def write_release_asset(release: Path, build: str, dangling_compiler: bool = False) -> None:
+    """Write the chelis 0.0.7 release asset for `build` below `release`.
+
+    With `dangling_compiler`, bin/chelis is a relative link to a file beside
+    the release directory in the archive. The link resolves after the
+    extraction. It dangles after the installer moves the release directory
+    into toolchains/, so the post-install check of the installer fails.
+    """
+    content = release / "content"
+    top = content / f"chelis-v0.0.7-{build}"
+    compiler = top / "bin" / "chelis"
+    compiler.parent.mkdir(parents=True)
+    program = content / "compiler" if dangling_compiler else compiler
+    program.write_text("#!/bin/sh\nprintf 'chelis 0.0.7\\n'\n", encoding="utf-8")
+    program.chmod(0o755)
+    if dangling_compiler:
+        compiler.symlink_to(Path("..") / ".." / "compiler")
+    with tarfile.open(release / f"chelis-v0.0.7-{build}.tar.gz", "w:gz") as archive:
+        for member in sorted(content.iterdir()):
+            archive.add(member, arcname=member.name)
 
 
 def read_contract_inputs() -> dict[str, str | None]:
@@ -976,7 +1018,7 @@ class NixFlakeContractTests(unittest.TestCase):
             scratch = Path(raw_scratch)
             store_toolchain = add_store_toolchain(scratch)
             outside = scratch / "outside"
-            shutil.copytree(scratch / "toolchain", outside)
+            shutil.copytree(scratch / "toolchain-0.0.7", outside)
             empty = scratch / "empty"
             empty.mkdir()
 
@@ -1081,6 +1123,93 @@ class NixFlakeContractTests(unittest.TestCase):
             self.assertTrue(entry.is_symlink())
             self.assertTrue(
                 root.is_symlink(), f"the failed uninstall removed the Nix GC root {root}"
+            )
+            self.assertEqual(root.resolve(), store_toolchain.resolve())
+
+    def run_install_over_a_linked_store_toolchain(
+        self, dangling_compiler: bool
+    ) -> tuple[subprocess.CompletedProcess[str], Path, dict[str, tuple[Path, Path]]]:
+        """Link 0.0.7 and 0.0.8 from the store, then install 0.0.7 over its link.
+
+        The compiler of the linked 0.0.7 is removed before the install, so the
+        installer replaces the link with the release directory. The result maps
+        each version to its Nix GC root and its store toolchain.
+        """
+        build = chelisup_release_build()
+        if build is None:
+            self.skipTest("chelisup installs no release build on this host")
+        package = Path(
+            nix_raw("build", "--no-link", "--print-out-paths", ".#chelisup")
+        )
+        scratch = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        compiler = scratch / "compiler-0.0.7"
+        toolchains = {
+            "0.0.7": add_store_toolchain(scratch, "0.0.7", compiler),
+            "0.0.8": add_store_toolchain(scratch, "0.0.8"),
+        }
+        release = scratch / "release"
+        release.mkdir()
+        write_release_asset(release, build, dangling_compiler)
+        home = scratch / "home"
+        environment = os.environ.copy()
+        environment["CHELIS_HOME"] = str(home)
+        environment["CHELISUP_RELEASE_BASE"] = str(release)
+        environment["PATH"] = ""
+
+        def chelisup(*args: object) -> subprocess.CompletedProcess[str]:
+            return subprocess.run(
+                [package / "bin" / "chelisup", *args],
+                cwd=REPO_ROOT,
+                env=environment,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+
+        roots = {}
+        for version, store_toolchain in toolchains.items():
+            linked = chelisup("link", store_toolchain)
+            self.assertEqual(linked.returncode, 0, linked.stderr)
+            root = home / "nix-gcroots" / f"toolchain-{version}"
+            self.assertEqual(root.resolve(), store_toolchain.resolve())
+            roots[version] = (root, store_toolchain)
+        compiler.unlink()
+        return chelisup("install", "0.0.7"), home / "toolchains" / "0.0.7", roots
+
+    @REQUIRES_NIX
+    def test_install_over_a_linked_store_toolchain_removes_its_gc_root(self) -> None:
+        installed, entry, roots = self.run_install_over_a_linked_store_toolchain(
+            dangling_compiler=False
+        )
+        self.assertEqual(installed.returncode, 0, installed.stderr)
+        self.assertFalse(entry.is_symlink())
+        self.assertTrue((entry / "bin" / "chelis").is_file())
+        root, store_toolchain = roots["0.0.7"]
+        self.assertFalse(
+            root.is_symlink(), f"the install kept the Nix GC root {root} of the replaced link"
+        )
+        self.assertFalse(root.exists())
+        self.assertIn(f"removed {root}", installed.stdout)
+        self.assertTrue(store_toolchain.is_dir())
+        # The link of 0.0.8 still names its store toolchain, so its root stays.
+        kept_root, kept_toolchain = roots["0.0.8"]
+        self.assertEqual(kept_root.resolve(), kept_toolchain.resolve())
+
+    @REQUIRES_NIX
+    def test_failed_install_over_a_linked_store_toolchain_keeps_its_gc_root(self) -> None:
+        # The installer removes the link and then fails its post-install
+        # check. The entry is then no longer a link, but a failed install
+        # keeps every toolchain root.
+        failed, entry, roots = self.run_install_over_a_linked_store_toolchain(
+            dangling_compiler=True
+        )
+        self.assertNotEqual(failed.returncode, 0, failed.stdout)
+        self.assertIn("post-install check failed", failed.stderr)
+        self.assertFalse(entry.is_symlink())
+        for root, store_toolchain in roots.values():
+            self.assertTrue(
+                root.is_symlink(), f"the failed install removed the Nix GC root {root}"
             )
             self.assertEqual(root.resolve(), store_toolchain.resolve())
 

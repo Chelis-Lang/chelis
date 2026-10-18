@@ -67,6 +67,9 @@ installed Nix wrapper removes all three roots after the real `self uninstall`
 command succeeds. It also intercepts `link` and `uninstall <ver>`. A link to
 a store path gets the root `$CHELIS_HOME/nix-gcroots/toolchain-<ver>`, and a
 successful uninstall removes that root.
+After a successful install, the wrapper removes each toolchain root whose
+`toolchains/<ver>` entry is no longer a link into the store path of that root.
+A failed install keeps every toolchain root.
 
 The wrapper, package inventory, self-uninstall behavior, Nix contract test,
 and native Nix workflows form one contract. A direct Nix-built executable
