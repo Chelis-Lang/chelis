@@ -577,14 +577,12 @@ fn issue_3636_auto_does_not_report_green_for_a_refutable_property() {
 
 /// A mixed-type property takes the typed-generator lane, where a guard is
 /// enforced by rejection rather than by interval construction. Both binders
-/// read the same attempt ordinal, so a rejected integer candidate discards
-/// the float candidate drawn at that attempt — the limitation recorded in
-/// `spec/design/chelis_property_spec.md`, and one chelis#3697's off-diagonal
-/// phase does not change, because it reindexes the pairing rather than
-/// decoupling the attempts. The lane must still propose enough of each
-/// schedule to refute: `x * x` overflows at the float binder's `±MAX`, and
-/// the surviving attempt is the one whose integer candidate satisfies
-/// `n > 0`.
+/// index the same schedule, so a rejected integer candidate discards the
+/// float candidate at that ordinal — the limitation recorded in
+/// `spec/design/chelis_property_spec.md`. The lane must still propose enough
+/// of each schedule to refute: `x * x` overflows at the float binder's
+/// `±MAX`, and the surviving attempt is the one whose integer candidate
+/// satisfies `n > 0`.
 #[test]
 fn issue_3636_mixed_binder_lane_proposes_edge_points_despite_rejection() {
     let source = "module Edge.Mixed
@@ -927,21 +925,38 @@ fn issue_3636_strict_chain_without_room_still_fails_closed_before_sampling() {
     }
 }
 
-// The multi-binder diagonal limitation this file used to pin --
-// `issue_3636_multi_binder_schedule_visits_only_the_diagonal`, which asserted
-// that `x / y` being finite was *not* refuted -- is gone, deliberately and by
-// the instruction its own docstring carried. chelis#3697 gave the schedule an
-// off-diagonal phase, so the property is now refuted, and the assertion that
-// it is not would be false. The pairing policy and the budget arithmetic
-// behind it are in `spec/design/chelis_property_spec.md`, "The off-diagonal
-// phase", and the behaviour is pinned by
-// `crates/chelis-cli/tests/issue_3697_off_diagonal_pairing.rs`.
+/// The multi-binder diagonal, pinned as a known limitation rather than left
+/// to be rediscovered. Binders with equal ranges take the same candidate
+/// index at every scheduled attempt, so this property -- false at a pair of
+/// guard-admitted representable values -- is not refuted.
+///
+/// This test asserts the limitation, so it fails if the pairing ever changes.
+/// That is deliberate: the change would be an improvement, and whoever makes
+/// it should have to read the budget analysis in
+/// `spec/design/chelis_property_spec.md` and delete this test on purpose.
+#[test]
+fn issue_3636_multi_binder_schedule_visits_only_the_diagonal() {
+    let source = "module Edge.Diagonal
+def subject(x: f64, y: f64) -> f64 = (x / y)
+@property div_finite forall(x: f64, y: f64)
+where x > 0.0f64, y > 0.0f64:
+  ((subject(x, y) <= 1.7976931348623157e308f64) && (subject(x, y) >= -1.7976931348623157e308f64))
+";
+    for seed in ["0", "1", "7", "99"] {
+        let (code, record) = prove(source, "200", seed);
+        assert_eq!(
+            code, 0,
+            "seed {seed}: the diagonal limitation is expected to leave this unrefuted; \
+             if this now fails, the pairing improved and this test should be deleted: {record:#}"
+        );
+        assert_eq!(record["status"], "passed", "seed {seed}: {record:#}");
+    }
+}
 
-/// The same property with the guards narrowed so the *diagonal* lands on the
-/// refuting pair. The off-diagonal phase makes this redundant as a refutation
-/// test and keeps it as a discriminator: it proves the witness is reachable
-/// through the shared ordinal alone, so a failure here is a magnitude-reach
-/// regression in the schedule rather than a pairing one.
+/// The same property with the guards narrowed so the diagonal lands on the
+/// refuting pair. This proves the witness exists and that the sampler reaches
+/// it when the pairing allows, so the test above records a pairing limit and
+/// not a magnitude-reach limit.
 #[test]
 fn issue_3636_the_diagonal_witness_is_real_when_the_guards_align_it() {
     let source = "module Edge.DiagonalAligned
