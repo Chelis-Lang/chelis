@@ -13,7 +13,10 @@
 //! rate, and once a binder's schedule is spent the attempts that would have
 //! been uniform draws carry a mixed-radix odometer over each binder's
 //! **extremal class representatives**, selected from that binder's own edge
-//! candidates. Each test below names the part of that policy it pins, and
+//! candidates. It applies only where no binder's range is resolved from
+//! another's value: an order-guarded property keeps chelis#3636's schedule
+//! and gets no pairing, because there the diagonal is not a stable sequence
+//! at all. Each test below names the part of that policy it pins, and
 //! every positive test is paired with the control that keeps it from passing
 //! for the wrong reason.
 //!
@@ -35,6 +38,7 @@
 //! | the largest-negative role | `..._the_largest_negative_role_...` |
 //! | the moderate role | `..._typed_generator_lane_pairs_off_diagonal` |
 //! | counting only the scheduled binders | `..._a_leading_unscheduled_binder_...` |
+//! | the order-guard exemption | `..._an_order_guarded_property_keeps_the_unpaired_schedule`, `..._the_order_guard_is_what_gives_up_the_pairing` |
 //! | the zero role | unit test only -- see below |
 //!
 //! Two rows have no discriminator at this level, and this says so rather than
@@ -657,5 +661,74 @@ where a > 1.1f64, a < 9.7f64, b > 1.1f64, b < 9.7f64, c > 1.1f64, c < 9.7f64,
     assert_ne!(
         record["status"], "error",
         "the capped cell phase must not exhaust the generator: {record:#}"
+    );
+}
+
+// --- an order-guarded property takes no cell ------------------------------
+//
+// Round 3's P1, and the reason the phase is switched off wholesale for these
+// properties rather than only for the predecessors.
+//
+// The constraint-directed lane has no stable per-binder diagonal: a binder's
+// candidates are rebuilt inside the attempt from the order predecessors
+// already drawn, so `Diagonal(i)` names entry `i` of a list whose contents
+// depend on what the predecessor got. Worse, a cell proposed for *any* binder
+// changes how many values the attempt draws, which shifts every later
+// predecessor's uniform draw and so its successors' ranges. Over thirty seeds
+// the property below refuted 18 times before this change, 0 times with cells
+// everywhere, and still only 11 with cells kept away from predecessors alone.
+
+/// An order-guarded property is byte-identical to chelis#3636's schedule.
+/// These counts were measured against a build with the off-diagonal phase
+/// forced off entirely, so a change here means a cell reached a lane where
+/// the diagonal is not stable.
+#[test]
+fn issue_3697_an_order_guarded_property_keeps_the_unpaired_schedule() {
+    let exclusions = (20..40)
+        .map(|value| format!("y != {value}.0f64"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let source = format!(
+        "module Pair.Chained
+@property not_bottom forall(x: f64, y: f64)
+where y > x, {exclusions}:
+  (y != -1.0e-323f64)
+"
+    );
+    for (seed, attempts) in [("1", 77), ("2", 75), ("3", 77), ("5", 77), ("9", 77)] {
+        let (code, record) = prove(&source, "100", seed);
+        assert_eq!(code, 1, "seed {seed}: {record:#}");
+        assert_eq!(
+            record["attempted_samples"], attempts,
+            "seed {seed}: an order-guarded property must draw exactly as it did \
+             before the off-diagonal phase existed: {record:#}"
+        );
+        assert_eq!(witness(&record, "y"), -1.0e-323, "seed {seed}: {record:#}");
+    }
+}
+
+/// The discriminator, and the declared cost. This pair is reachable only from
+/// a cell -- `x` at its smallest candidate with `y` at the moderate
+/// representative -- so the unguarded form refutes and the order-guarded form
+/// does not. An order guard buys chelis#3636's schedule and no pairing.
+#[test]
+fn issue_3697_the_order_guard_is_what_gives_up_the_pairing() {
+    let body = "((x != -1.7976931348623157e308f64) || (y != 1.0f64))";
+    let unchained = format!("module Pair.Free\n@property p forall(x: f64, y: f64):\n  {body}\n");
+    let chained =
+        format!("module Pair.Ord\n@property p forall(x: f64, y: f64)\nwhere y > x:\n  {body}\n");
+
+    let (code, record) = prove(&unchained, "200", "0");
+    assert_eq!(
+        code, 1,
+        "without an order guard the cell reaches it: {record:#}"
+    );
+    assert_eq!(record["attempted_samples"], 76, "{record:#}");
+
+    let (code, record) = prove(&chained, "200", "0");
+    assert_eq!(
+        code, 0,
+        "with an order guard there are no cells, so this pair is unreachable; \
+         if this now refutes, a cell reached the chained lane: {record:#}"
     );
 }

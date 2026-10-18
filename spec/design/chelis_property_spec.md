@@ -438,7 +438,24 @@ were already nearly worthless**: they draw uniformly over the narrow proposal
 window (chelis#644 owns its width), which is exactly the draw chelis#3636
 exists because it refutes so little. Those are the attempts the pairing takes.
 
-For a property with **two or more scheduled binders**:
+The phase applies only to a property with **no order guard between its
+binders**. Where one binder's admissible range is resolved from another's
+value, this lane has **no stable per-binder diagonal**:
+`float_edge_candidates` is recomputed inside the attempt from the
+predecessors already drawn, so `Diagonal(i)` does not name a fixed value --
+it names entry `i` of a list whose contents depend on what the predecessor
+got. And a cell proposed for *any* binder changes how many values the attempt
+draws, which shifts every later predecessor's uniform draw and so its
+successors' ranges. The perturbation therefore cannot be confined to
+predecessors, and it is not hypothetical: over thirty seeds,
+`forall(x: f64, y: f64) where y > x, <twenty `!=` exclusions on y>:
+(y != -1.0e-323f64)` refuted 18 times under the pre-phase schedule, 0 times
+with cells everywhere, and 11 with cells withheld from predecessors alone.
+An order-guarded property therefore keeps chelis#3636's schedule unchanged
+and gets no pairing. That is a real limit on the phase's reach, and it is
+the one the dependency structure permits.
+
+For a property with **two or more scheduled binders and no order guard**:
 
 - **the diagonal runs first, at chelis#3636's unchanged one-for-one rate**:
   attempt `i` proposes every binder's edge candidate `i`, until that binder's
@@ -504,11 +521,14 @@ generator. That was measured: a five-binder rejection-lane property went from
 the cost, and a high-arity property covers a prefix of its grid.
 
 The arithmetic this buys, for the two-binder case at the default 100 samples:
-44 diagonal attempts cover all 44 per-binder classes, 36 cells cover the whole
-`6 x 6` extremal grid at attempts 44 through 79, and 20 attempts remain on
-uniform draws. The issue's own `x / y` counterexample is the cell pairing
-`x`'s largest candidate with `y`'s smallest positive one, cell 6, so attempt
-50 -- the fifty-first attempt refutes. For three binders the 216 cells exceed
+44 diagonal attempts cover all 44 per-binder classes, 36 cells run at attempts
+44 through 79, and 20 attempts remain on uniform draws. Those 36 cells cover
+the whole `6 x 6` grid only for binders that fill all six roles; the issue's
+own guards leave each binder three representatives, so there the 36 cells
+cover 9 distinct pairs, several times each. The issue's `x / y`
+counterexample is cell 6, pairing `x`'s largest candidate with `y`'s
+*smallest* candidate -- which under `y > 0` is also its smallest positive one
+-- so attempt 50, and the fifty-first attempt refutes. For three binders the 216 cells exceed
 the default budget, so the phase covers a prefix of them and a larger
 `--samples` reaches the rest.
 
