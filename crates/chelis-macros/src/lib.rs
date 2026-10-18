@@ -350,7 +350,28 @@ pub fn expand_program(
     } else {
         UnordMap::new()
     };
-    let mut expander = Expander::new(options.max_iterations, prelude);
+    // Every node an expansion creates records the invocation it came from,
+    // and that record copies the invocation's arguments, their own records
+    // included. Records therefore grow with each expansion that consumes an
+    // earlier one's output, about fourfold for a recursive macro whose
+    // argument grows, so a program that never finishes expanding exhausted
+    // memory before reaching the limit (chelis#3853). The records never
+    // decide what expands, so a first pass without them finds the limit in
+    // memory the expansion itself needs. A program that finishes is then
+    // expanded again with its records, exactly as before.
+    let mut plain = Expander::new(options.max_iterations, prelude.clone(), Provenance::Omitted);
+    match plain.expand_sequence(exprs, &UnordMap::new()) {
+        Err(error @ ExpansionError::ExpansionLimitExceeded { .. }) => return Err(error),
+        // With no expansion there is no record, so this is the program.
+        Ok(exprs) if plain.expansions == 0 => {
+            return Ok(ExpandedProgram {
+                exprs,
+                expansions: 0,
+            });
+        }
+        Ok(_) | Err(_) => {}
+    }
+    let mut expander = Expander::new(options.max_iterations, prelude, Provenance::Recorded);
     let exprs = expander.expand_sequence(exprs, &UnordMap::new())?;
     Ok(ExpandedProgram {
         exprs,
@@ -389,20 +410,33 @@ pub fn reject_standard_prelude_collisions(
     first_standard_prelude_collision(&standard_prelude_macros()?, declarations)
 }
 
+/// Whether an expansion stamps the nodes it creates with their `source`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Provenance {
+    Recorded,
+    Omitted,
+}
+
 struct Expander {
     remaining_expansions: usize,
     hygiene_counter: usize,
     expansions: usize,
     prelude_macros: UnordMap<String, MacroDef>,
+    provenance: Provenance,
 }
 
 impl Expander {
-    fn new(limit: usize, prelude_macros: UnordMap<String, MacroDef>) -> Self {
+    fn new(
+        limit: usize,
+        prelude_macros: UnordMap<String, MacroDef>,
+        provenance: Provenance,
+    ) -> Self {
         Self {
             remaining_expansions: limit,
             hygiene_counter: 0,
             expansions: 0,
             prelude_macros,
+            provenance,
         }
     }
 
@@ -659,7 +693,6 @@ impl Expander {
         let args = &node.children[1..];
         let arguments = def.bind_arguments(node.metadata, args)?;
         self.consume_expansion_budget()?;
-        let invocation = macro_source(&def.name, args);
         let (placeholder_params, placeholder_args) =
             macro_arg_placeholders(&def.body, arguments, self.expansions);
         let placeholder_body =
@@ -674,9 +707,12 @@ impl Expander {
             node.expr,
         )?
         .try_inherit_extensions(node.expr)?;
+        if self.provenance == Provenance::Omitted {
+            return Ok(Some(substituted));
+        }
         Ok(Some(annotate_source_expr(
             &substituted,
-            &MacroSource::try_from_expression(&invocation)?,
+            &MacroSource::try_from_expression(&macro_source(&def.name, args))?,
         )))
     }
 
@@ -1793,6 +1829,124 @@ fn node(tag: DeepTag, children: Vec<Expr>) -> Expr {
 mod tests {
     use super::*;
 
+    /// The single pass that records provenance as it expands, which
+    /// [`expand_program`] reruns once its first pass finishes (chelis#3853).
+    fn expand_recorded(
+        exprs: &[Expr],
+        options: &ExpansionOptions,
+    ) -> Result<ExpandedProgram, ExpansionError> {
+        let prelude = if options.load_std_prelude {
+            standard_prelude_macros()?
+        } else {
+            UnordMap::new()
+        };
+        let mut expander = Expander::new(options.max_iterations, prelude, Provenance::Recorded);
+        let exprs = expander.expand_sequence(exprs, &UnordMap::new())?;
+        Ok(ExpandedProgram {
+            exprs,
+            expansions: expander.expansions,
+        })
+    }
+
+    fn outcome(result: Result<ExpandedProgram, ExpansionError>) -> Result<(String, usize), String> {
+        result
+            .map(|program| {
+                (
+                    chelis_deep::printer::print_canonical(program.exprs()),
+                    program.expansions(),
+                )
+            })
+            .map_err(|error| format!("{error} / {error:?}"))
+    }
+
+    /// `m0(x) = m1(add(x, 1))` ... `mk(x) = x`: each record holds the last.
+    fn macro_chain(length: usize) -> String {
+        let mut source = String::new();
+        for index in 0..length {
+            source.push_str(&format!(
+                "(defmacro {{}} m{index} (params {{}} x) (app {{}} (var {{}} m{}) \
+                 (app {{}} (var {{}} add) (var {{}} x) (lit {{type: (t-prim {{}} i32)}} 1))))\n",
+                index + 1
+            ));
+        }
+        source.push_str(&format!(
+            "(defmacro {{}} m{length} (params {{}} x) (var {{}} x))\n"
+        ));
+        source.push_str("(def {} main (app {} (var {} m0) (lit {type: (t-prim {} i32)} 1)))\n");
+        source
+    }
+
+    /// `inc(inc(... inc(1)))`, `depth` calls deep.
+    fn nested_calls(depth: usize) -> String {
+        let inc = "(defmacro {} inc (params {} x) (app {} (var {} add) (var {} x) \
+                   (lit {type: (t-prim {} i32)} 1)))\n";
+        let body = "(app {} (var {} inc) ".repeat(depth)
+            + "(lit {type: (t-prim {} i32)} 1)"
+            + &")".repeat(depth);
+        format!("{inc}(def {{}} main {body})\n")
+    }
+
+    const RECURSIVE: &str = "(defmacro {} rec (params {} x) (app {} (var {} rec) \
+        (app {} (var {} add) (var {} x) (lit {type: (t-prim {} i32)} 1))))\n\
+        (def {} main (app {} (var {} rec) (lit {type: (t-prim {} i32)} 1)))\n";
+
+    /// A call the second expansion makes with the wrong arity, and a binder
+    /// the template introduces around a nested call, so the arity error and
+    /// hygiene both run inside a nested expansion.
+    const NESTED_ARITY: &str = "(defmacro {} outer (params {} x) (let {} (bind {} y (var {} x)) \
+        (app {} (var {} inner) (var {} y) (var {} y))))\n\
+        (defmacro {} inner (params {} z) (var {} z))\n\
+        (def {} main (app {} (var {} outer) (lit {type: (t-prim {} i32)} 1)))\n";
+
+    #[test]
+    fn issue_3853_the_first_pass_never_changes_what_expansion_returns() {
+        let mut programs = Vec::new();
+        for length in 0..=5 {
+            programs.push((format!("chain {length}"), macro_chain(length), 100));
+        }
+        for depth in [0, 1, 4, 10] {
+            programs.push((format!("nested {depth}"), nested_calls(depth), 100));
+        }
+        // Small limits, where the recording pass still reaches the limit.
+        for limit in 0..=5 {
+            programs.push((
+                format!("recursive, limit {limit}"),
+                RECURSIVE.to_string(),
+                limit,
+            ));
+            programs.push((format!("chain 5, limit {limit}"), macro_chain(5), limit));
+        }
+        programs.push((
+            "nested arity error".to_string(),
+            NESTED_ARITY.to_string(),
+            100,
+        ));
+        for (label, source, limit) in programs {
+            let exprs = chelis_deep::parser::parse_str(&source).expect("the probe parses");
+            for load_std_prelude in [false, true] {
+                let options = ExpansionOptions {
+                    max_iterations: limit,
+                    load_std_prelude,
+                };
+                let expected = outcome(expand_recorded(&exprs, &options));
+                let first = outcome(expand_program(&exprs, &options));
+                let second = outcome(expand_program(&exprs, &options));
+                assert_eq!(first, expected, "{label}: the result changed");
+                assert_eq!(second, first, "{label}: two runs differ");
+            }
+        }
+        // The arity error does fire inside the nested expansion, and names
+        // only the macro and the counts.
+        let exprs = chelis_deep::parser::parse_str(NESTED_ARITY).expect("the probe parses");
+        let error = expand_program(&exprs, &ExpansionOptions::default())
+            .expect_err("the nested call has the wrong arity");
+        assert_eq!(
+            error.to_string(),
+            "macro `inner` expects 1 argument(s), but this call supplies 2; a macro call supplies \
+             exactly one positional argument per parameter (spec/02-surf-syntax.md [02-MACRO-2])"
+        );
+    }
+
     /// An annotated `(name {})` parameter, the structural list a `params`
     /// node carries for a typed binder.
     fn typed_parameter(name: &str) -> Expr {
@@ -1910,7 +2064,7 @@ mod tests {
                 DeepTag::Fn,
                 vec![params.clone(), app("rewrite", Vec::new())],
             );
-            let mut expander = Expander::new(10, UnordMap::new());
+            let mut expander = Expander::new(10, UnordMap::new(), Provenance::Recorded);
             let expanded = expander
                 .expand_expr(&function, &macros, &Scope::default())
                 .expect("valid source-specific parameter admits expansion");
@@ -1981,7 +2135,7 @@ mod tests {
                 var("outer"),
             ],
         );
-        let mut expander = Expander::new(10, UnordMap::new());
+        let mut expander = Expander::new(10, UnordMap::new(), Provenance::Recorded);
         assert_eq!(
             expander
                 .expand_expr(&malformed_fn, &macros, &Scope::default())
