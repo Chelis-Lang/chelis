@@ -7,8 +7,10 @@
 //! ([`chelis_ir::lower::recording_inline_depth`]) and hands it back as a
 //! [`UnitDepth`], which the caller charges to the recursion budget for as
 //! long as the unit runs. `runtime::tests::every_unit_lowering_is_charged`
-//! rejects a lowering call anywhere else in the runtime, so no evaluation
-//! path can run a unit without this record.
+//! scans the runtime sources outside this module and rejects the lowering
+//! spellings it recognizes: a `chelis_ir` `lower` or `host` path or import
+//! naming a function with the word `lower`, a glob or module import of
+//! either, and `host_def_kernel` or `recording_inline_depth`.
 
 use chelis_deep::ast::Expr;
 use chelis_ir::dag::{Dag, TensorType};

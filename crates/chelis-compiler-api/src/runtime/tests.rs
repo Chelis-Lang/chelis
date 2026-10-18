@@ -6479,64 +6479,319 @@ fn issue_3778_equal_formal_types_at_different_addresses_agree() {
 
 /// chelis#3842: every tensor DAG the evaluator runs as one unit is lowered
 /// through `runtime::charged_lowering`, which records the unit's inline depth
-/// so the recursion budget can charge it. A lowering called anywhere else in
-/// the runtime would run a unit uncharged, so the evaluator sources must not
-/// name one outside that module.
+/// so the recursion budget can charge it.
+///
+/// The lock is a scan of the runtime sources, `runtime/` and every
+/// directory below it, outside that module and the test files. It rejects,
+/// in code (comments and literals removed): a path through `chelis_ir`'s
+/// `lower` or `host` module that names a function whose name has the word
+/// `lower` (`try_lower_subexpr_program_with_context`,
+/// `lower_named_tensor_entry_dags`), whether called by path or imported by a
+/// `use` list; a glob or module import of either module, which would hide
+/// such a name; and `host_def_kernel` or `recording_inline_depth` anywhere.
+/// It recognizes calls by those spellings only; a function reached another
+/// way is outside what it checks.
 ///
 /// Evidentiary status: a structural lock. Before the module existed, a
 /// checked local-ascription region lowered its DAG directly and a 402-level
-/// unrolled recursion inside it was charged one level.
+/// unrolled recursion inside it was charged one level. The negative
+/// controls below show each spelling the scan must flag is flagged.
 #[test]
 fn every_unit_lowering_is_charged() {
-    fn lowering_calls(source: &str) -> Vec<String> {
-        source
-            .lines()
-            .map(|line| line.split("//").next().unwrap_or_default())
-            .flat_map(|code| code.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_')))
-            .filter(|token| {
-                token.starts_with("try_lower")
-                    || token.starts_with("lower_subexpr_program")
-                    || token.starts_with("lower_program")
-                    || *token == "host_def_kernel"
-                    || *token == "recording_inline_depth"
-            })
-            .map(str::to_owned)
-            .collect()
-    }
     let runtime = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/runtime");
     let helper = std::fs::read_to_string(runtime.join("charged_lowering.rs"))
         .expect("the charged lowering module is readable");
     assert!(
-        !lowering_calls(&helper).is_empty(),
+        !unit_lowering_calls(&helper).is_empty(),
         "#3842: the scan must see the helper's own lowering calls, or it checks nothing"
     );
-    let mut offenders = Vec::new();
-    let mut entries: Vec<_> = std::fs::read_dir(&runtime)
-        .expect("the runtime directory is readable")
-        .map(|entry| entry.expect("a runtime directory entry").path())
-        .collect();
-    entries.sort();
-    for path in entries {
-        let name = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or_default();
-        if !name.ends_with(".rs")
-            || name == "charged_lowering.rs"
-            || name == "tests.rs"
-            || name.ends_with("_tests.rs")
-        {
-            continue;
-        }
-        let source = std::fs::read_to_string(&path).expect("a runtime source is readable");
-        for call in lowering_calls(&source) {
-            offenders.push(format!("{name}: {call}"));
-        }
+    for (fixture, flagged) in [
+        // A lowering API outside any fixed name list.
+        (
+            "let d = chelis_ir::host::lower_named_tensor_entry_dags(&x);",
+            true,
+        ),
+        (
+            "let d = chelis_ir :: lower :: try_lower_subexpr_program(e);",
+            true,
+        ),
+        // A `//` inside a literal does not start a comment.
+        (
+            "let s = \"a//b\"; let d = chelis_ir::lower::try_lower_subexpr_program_with_context(e);",
+            true,
+        ),
+        (
+            "let s = r#\"a \" // b\"#; let d = chelis_ir::host::host_def_kernel(s, n);",
+            true,
+        ),
+        (
+            "let c = '\"'; let d = chelis_ir::lower::try_lower_staged(e);",
+            true,
+        ),
+        // Imports that bring a lowering name, or every name, into scope.
+        (
+            "use chelis_ir::lower::{SubexprLoweringContext, try_lower_subexpr_program as l};",
+            true,
+        ),
+        ("use chelis_ir::host::{staged::{lower_stage}};", true),
+        ("use chelis_ir::host::*;", true),
+        ("use chelis_ir::lower as l;", true),
+        ("let (r, d) = recording_inline_depth(|| f());", true),
+        // Not a lowering: a comment, a literal, a type, a classification.
+        ("// chelis_ir::lower::try_lower_subexpr_program(e)", false),
+        (
+            "/* chelis_ir::host::host_def_kernel(s, n) */ let x = 1;",
+            false,
+        ),
+        (
+            "let s = \"chelis_ir::lower::try_lower_subexpr_program\";",
+            false,
+        ),
+        ("use chelis_ir::lower::SubexprLoweringContext;", false),
+        (
+            "let m = chelis_ir::lower::top_level_lowering_map(e, t);",
+            false,
+        ),
+        ("use chelis_ir::host_type_state::HostTypeTerm;", false),
+    ] {
+        assert_eq!(
+            !unit_lowering_calls(fixture).is_empty(),
+            flagged,
+            "#3842 guard control: {fixture}"
+        );
     }
+    // A module in a directory below the scanned root is scanned.
+    let fixture_root = std::env::temp_dir().join(format!(
+        "chelis-3842-guard-{}-{}",
+        std::process::id(),
+        std::thread::current()
+            .name()
+            .unwrap_or("main")
+            .replace("::", "-")
+    ));
+    let nested = fixture_root.join("nested");
+    std::fs::create_dir_all(&nested).expect("fixture directory");
+    std::fs::write(fixture_root.join("clean.rs"), "fn f() {}\n").expect("fixture file");
+    std::fs::write(
+        nested.join("hidden.rs"),
+        "fn g() { chelis_ir::lower::try_lower_subexpr_program(e); }\n",
+    )
+    .expect("fixture file");
+    let fixture_offenders = runtime_unit_lowering_offenders(&fixture_root);
+    std::fs::remove_dir_all(&fixture_root).expect("fixture cleanup");
+    assert_eq!(
+        fixture_offenders.len(),
+        1,
+        "#3842 guard control: a nested module is scanned: {}",
+        fixture_offenders.join(", ")
+    );
+
+    let offenders = runtime_unit_lowering_offenders(&runtime);
     assert!(
         offenders.is_empty(),
         "#3842: lower a unit the evaluator runs through runtime::charged_lowering, which \
          charges its inline depth to the recursion budget: {}",
         offenders.join(", ")
     );
+}
+
+/// Every unit-lowering spelling in the runtime sources below `root`, outside
+/// `charged_lowering.rs` and the test files, as `path: name`.
+fn runtime_unit_lowering_offenders(root: &std::path::Path) -> Vec<String> {
+    let mut pending = vec![root.to_path_buf()];
+    let mut files = Vec::new();
+    while let Some(dir) = pending.pop() {
+        for entry in std::fs::read_dir(&dir).expect("a runtime directory is readable") {
+            let path = entry.expect("a runtime directory entry").path();
+            if path.is_dir() {
+                pending.push(path);
+            } else if path.extension().is_some_and(|extension| extension == "rs") {
+                files.push(path);
+            }
+        }
+    }
+    files.sort();
+    let mut offenders = Vec::new();
+    for path in files {
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default();
+        if name == "charged_lowering.rs" || name == "tests.rs" || name.ends_with("_tests.rs") {
+            continue;
+        }
+        let source = std::fs::read_to_string(&path).expect("a runtime source is readable");
+        let shown = path
+            .strip_prefix(root)
+            .unwrap_or(&path)
+            .display()
+            .to_string();
+        for call in unit_lowering_calls(&source) {
+            offenders.push(format!("{shown}: {call}"));
+        }
+    }
+    offenders
+}
+
+/// The unit-lowering spellings in `source`'s code.
+fn unit_lowering_calls(source: &str) -> Vec<String> {
+    let tokens = rust_code_tokens(source);
+    let names_lower = |name: &str| name.split('_').any(|word| word == "lower");
+    let mut found = Vec::new();
+    for (index, token) in tokens.iter().enumerate() {
+        if token == "host_def_kernel" || token == "recording_inline_depth" {
+            found.push(token.clone());
+        }
+        let module = match (
+            tokens.get(index + 1),
+            tokens.get(index + 2),
+            tokens.get(index + 3),
+        ) {
+            (Some(colon), Some(colon2), Some(module))
+                if token == "chelis_ir"
+                    && colon == ":"
+                    && colon2 == ":"
+                    && (module == "lower" || module == "host") =>
+            {
+                module
+            }
+            _ => continue,
+        };
+        let mut cursor = index + 4;
+        if tokens.get(cursor).map(String::as_str) != Some(":")
+            || tokens.get(cursor + 1).map(String::as_str) != Some(":")
+        {
+            found.push(format!("chelis_ir::{module} imported as a module"));
+            continue;
+        }
+        cursor += 2;
+        // A path, or a `use` list whose braces may nest.
+        let mut depth = 0usize;
+        while let Some(next) = tokens.get(cursor) {
+            match next.as_str() {
+                "{" => depth += 1,
+                "}" if depth > 0 => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                "*" => found.push(format!("chelis_ir::{module}::* glob import")),
+                ":" | "," | "as" => {}
+                name if name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') => {
+                    if names_lower(name) {
+                        found.push(format!("chelis_ir::{module}::{name}"));
+                    }
+                    let continues = tokens.get(cursor + 1).map(String::as_str) == Some(":");
+                    if depth == 0 && !continues {
+                        break;
+                    }
+                }
+                _ if depth == 0 => break,
+                _ => {}
+            }
+            cursor += 1;
+        }
+    }
+    found
+}
+
+/// `source`'s code tokens: identifiers and single punctuation characters,
+/// with comments, string, raw string and character literals removed.
+fn rust_code_tokens(source: &str) -> Vec<String> {
+    let chars: Vec<char> = source.chars().collect();
+    let mut tokens = Vec::new();
+    let mut index = 0;
+    while index < chars.len() {
+        let c = chars[index];
+        let next = chars.get(index + 1).copied();
+        if c == '/' && next == Some('/') {
+            while index < chars.len() && chars[index] != '\n' {
+                index += 1;
+            }
+        } else if c == '/' && next == Some('*') {
+            let mut depth = 0usize;
+            while index < chars.len() {
+                if chars[index] == '/' && chars.get(index + 1) == Some(&'*') {
+                    depth += 1;
+                    index += 2;
+                } else if chars[index] == '*' && chars.get(index + 1) == Some(&'/') {
+                    depth -= 1;
+                    index += 2;
+                    if depth == 0 {
+                        break;
+                    }
+                } else {
+                    index += 1;
+                }
+            }
+        } else if c == '"' {
+            index += 1;
+            while index < chars.len() && chars[index] != '"' {
+                index += if chars[index] == '\\' { 2 } else { 1 };
+            }
+            index += 1;
+        } else if (c == 'r' || c == 'b')
+            && (index == 0
+                || !(chars[index - 1].is_ascii_alphanumeric() || chars[index - 1] == '_'))
+            && raw_string_hashes(&chars, index).is_some()
+        {
+            let (start, hashes) = raw_string_hashes(&chars, index).expect("checked above");
+            index = start;
+            loop {
+                if index >= chars.len() {
+                    break;
+                }
+                if chars[index] == '"'
+                    && (1..=hashes).all(|offset| chars.get(index + offset) == Some(&'#'))
+                {
+                    index += 1 + hashes;
+                    break;
+                }
+                index += 1;
+            }
+        } else if c == '\'' {
+            // A character literal closes within a few characters; a lifetime
+            // does not.
+            let close = if next == Some('\\') {
+                (index + 2..chars.len().min(index + 12)).find(|&at| chars[at] == '\'')
+            } else {
+                (chars.get(index + 2) == Some(&'\'')).then_some(index + 2)
+            };
+            match close {
+                Some(close) => index = close + 1,
+                None => index += 1,
+            }
+        } else if c.is_ascii_alphanumeric() || c == '_' {
+            let start = index;
+            while index < chars.len()
+                && (chars[index].is_ascii_alphanumeric() || chars[index] == '_')
+            {
+                index += 1;
+            }
+            tokens.push(chars[start..index].iter().collect());
+        } else {
+            if !c.is_whitespace() {
+                tokens.push(c.to_string());
+            }
+            index += 1;
+        }
+    }
+    tokens
+}
+
+/// The index after the opening quote of a raw string starting at `start`
+/// (`r"`, `r#"`, `br##"`), and its hash count.
+fn raw_string_hashes(chars: &[char], start: usize) -> Option<(usize, usize)> {
+    let mut index = start;
+    if chars.get(index) == Some(&'b') {
+        index += 1;
+    }
+    if chars.get(index) != Some(&'r') {
+        return None;
+    }
+    index += 1;
+    let hashes = chars[index..].iter().take_while(|&&c| c == '#').count();
+    index += hashes;
+    (chars.get(index) == Some(&'"')).then_some((index + 1, hashes))
 }
