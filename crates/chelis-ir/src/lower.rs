@@ -39,6 +39,12 @@ thread_local! {
     /// Whether a frame of the current unroll has made more than one
     /// recursive call back into its own recursion.
     static UNROLL_BRANCHED: Cell<bool> = const { Cell::new(false) };
+    /// Whether the innermost lowering boundary enforces the unroll budget.
+    static UNROLL_ENFORCED: Cell<bool> = const { Cell::new(false) };
+    /// The function whose frame first branched in the current unroll, which
+    /// a rejection names.
+    static UNROLL_BRANCHED_AT: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
     /// Set while [`catch_lowering_diagnostic`] encloses a post-lowering pass.
     /// The hook stays quiet only for a lowering diagnostic's own unwind; any
     /// other panic in that scope still prints, since it is resumed.
@@ -736,6 +742,19 @@ fn panic_payload_to_lower_diagnostic(payload: &(dyn Any + Send)) -> LowerDiagnos
 /// segment size.
 const LOWERING_GROW_SEGMENT_BYTES: usize = 512 * 1024 * 1024;
 
+/// Whether a lowering boundary enforces [`MAX_UNROLLED_BODIES`]
+/// (chelis#3864). Every boundary states its choice; there is no default.
+/// Only `chelis cost`'s per-entry tensor-DAG lowering enforces the budget,
+/// because its caller omits a rejected entry. Every other lowering, eval and
+/// build included, counts nothing and behaves as it would with no budget. A
+/// boundary nested inside an enforcing one enforces too, so a probe within a
+/// cost entry cannot escape the entry's budget.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum UnrollBudget {
+    Enforced,
+    Unbounded,
+}
+
 /// The unroll state of one lowering boundary. Each boundary starts its own
 /// count and restores the enclosing one's on exit, so lowering inside a
 /// nested boundary, a scratch probe whose failure becomes a verdict among
@@ -746,14 +765,20 @@ struct UnrollScope {
     count: Option<usize>,
     recursing: usize,
     branched: bool,
+    branched_at: Option<String>,
+    enforced: bool,
 }
 
 impl UnrollScope {
-    fn enter() -> Self {
+    fn enter(budget: UnrollBudget) -> Self {
         Self {
+            enforced: UNROLL_ENFORCED.with(|enforced| {
+                enforced.replace(enforced.get() || budget == UnrollBudget::Enforced)
+            }),
             count: UNROLLED_BODIES.with(|count| count.replace(Some(0))),
             recursing: RECURSING_NAMES.with(|names| names.replace(0)),
             branched: UNROLL_BRANCHED.with(|branched| branched.replace(false)),
+            branched_at: UNROLL_BRANCHED_AT.with(|at| at.borrow_mut().take()),
         }
     }
 }
@@ -763,6 +788,8 @@ impl Drop for UnrollScope {
         UNROLLED_BODIES.with(|count| count.set(self.count));
         RECURSING_NAMES.with(|names| names.set(self.recursing));
         UNROLL_BRANCHED.with(|branched| branched.set(self.branched));
+        UNROLL_ENFORCED.with(|enforced| enforced.set(self.enforced));
+        UNROLL_BRANCHED_AT.with(|at| *at.borrow_mut() = self.branched_at.take());
     }
 }
 
@@ -774,6 +801,7 @@ fn end_unroll() {
         }
     });
     UNROLL_BRANCHED.with(|branched| branched.set(false));
+    UNROLL_BRANCHED_AT.with(|at| *at.borrow_mut() = None);
 }
 
 #[cfg(test)]
@@ -784,7 +812,10 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
-fn catch_lowering<R>(f: impl FnOnce() -> R + std::panic::UnwindSafe) -> Result<R, LowerDiagnostic> {
+fn catch_lowering<R>(
+    budget: UnrollBudget,
+    f: impl FnOnce() -> R + std::panic::UnwindSafe,
+) -> Result<R, LowerDiagnostic> {
     struct Guard;
     impl Drop for Guard {
         fn drop(&mut self) {
@@ -794,7 +825,7 @@ fn catch_lowering<R>(f: impl FnOnce() -> R + std::panic::UnwindSafe) -> Result<R
     install_chelis_panic_hook();
     SUPPRESS_LOWERING_PANIC_OUTPUT.with(|cell| cell.set(true));
     let _guard = Guard;
-    let _unroll = UnrollScope::enter();
+    let _unroll = UnrollScope::enter(budget);
     std::panic::catch_unwind(|| stacker::grow(LOWERING_GROW_SEGMENT_BYTES, f))
         .map_err(|payload| panic_payload_to_lower_diagnostic(&*payload))
 }
@@ -806,9 +837,10 @@ fn catch_lowering<R>(f: impl FnOnce() -> R + std::panic::UnwindSafe) -> Result<R
 /// `LowerDiagnostic`. Crate-internal only by design; the build CLI
 /// goes through `host::try_lower_compiled_program` instead.
 pub(crate) fn catch_lowering_external<R>(
+    budget: UnrollBudget,
     f: impl FnOnce() -> R + std::panic::UnwindSafe,
 ) -> Result<R, LowerDiagnostic> {
-    catch_lowering(f)
+    catch_lowering(budget, f)
 }
 
 /// Return the lowering diagnostic a post-lowering pass raises, and nothing
@@ -822,6 +854,7 @@ pub(crate) fn catch_lowering_external<R>(
 /// resumed rather than converted, so an internal fault is not laundered into
 /// a host-fallback diagnostic.
 pub(crate) fn catch_lowering_diagnostic<R>(
+    budget: UnrollBudget,
     f: impl FnOnce() -> R + std::panic::UnwindSafe,
 ) -> Result<R, LowerDiagnostic> {
     struct Restore(bool);
@@ -834,7 +867,7 @@ pub(crate) fn catch_lowering_diagnostic<R>(
 
     install_chelis_panic_hook();
     let _restore = Restore(SUPPRESS_DIAGNOSTIC_PANIC_OUTPUT.with(|cell| cell.replace(true)));
-    let _unroll = UnrollScope::enter();
+    let _unroll = UnrollScope::enter(budget);
     match std::panic::catch_unwind(f) {
         Ok(value) => Ok(value),
         Err(payload) if payload.is::<LowerDiagnostic>() || payload.is::<UnrepresentableDag>() => {
@@ -1078,7 +1111,7 @@ pub fn try_lower_program_to_library(
     program: &CheckedProgram,
 ) -> Result<LoweredLibrary, LowerDiagnostic> {
     assert_checked_library_boundary(program);
-    catch_lowering(|| {
+    catch_lowering(UnrollBudget::Unbounded, || {
         lower_program_to_library_inner(
             program,
             #[cfg(feature = "lowering-trace")]
@@ -1103,7 +1136,7 @@ pub(crate) fn try_lower_program_to_library_with_trace(
     assert_checked_library_boundary(program);
     // The collector is created and consumed inside the unwind boundary. A
     // failed lowering discards all partial observations with its contexts.
-    catch_lowering(|| {
+    catch_lowering(UnrollBudget::Unbounded, || {
         let collector = crate::lowering_trace::Collector::new();
         let library = lower_program_to_library_inner(program, Some(collector.clone()));
         (library, collector.finish())
@@ -1506,7 +1539,9 @@ pub fn try_lower_program_with_context(
         "lower_program_with_context: library program_defs",
         &library.program_defs,
     );
-    catch_lowering(|| lower_program_with_context_inner(library, new_program))
+    catch_lowering(UnrollBudget::Unbounded, || {
+        lower_program_with_context_inner(library, new_program)
+    })
 }
 
 fn lower_program_with_context_inner(
@@ -2482,7 +2517,7 @@ pub fn try_lower_subexpr_program_with_context_and_controls(
     context: &SubexprLoweringContext,
 ) -> Result<LoweredSubexprWithControls, LowerDiagnostic> {
     assert_decode_once_at_boundary("lower_subexpr_program: expr", std::slice::from_ref(expr));
-    catch_lowering(|| {
+    catch_lowering(UnrollBudget::Unbounded, || {
         let (dag, value_root_count, list_checks, ordered_list_checks) =
             lower_subexpr_program_inner_impl(
                 expr,
@@ -2549,6 +2584,36 @@ pub(crate) fn try_lower_subexpr_program_with_ordered_inputs(
             #[cfg(feature = "lowering-trace")]
             trace: None,
         },
+        UnrollBudget::Unbounded,
+    )
+}
+
+/// [`try_lower_subexpr_program_with_ordered_inputs`] for one entry of
+/// `chelis cost`'s per-entry tensor-DAG lowering, the one lowering that
+/// enforces [`MAX_UNROLLED_BODIES`]: its caller omits an entry whose unroll is
+/// rejected (chelis#3864).
+pub(crate) fn try_lower_cost_entry_with_ordered_inputs(
+    expr: &Expr,
+    scoped_bindings: Vec<(String, TensorType)>,
+    context: &SubexprLoweringContext,
+    result_claim: Option<&TensorType>,
+    authored_signature: bool,
+) -> Result<Dag, LowerDiagnostic> {
+    try_lower_subexpr_program_with_ordered_inputs_impl(
+        expr,
+        scoped_bindings,
+        context,
+        result_claim,
+        SubexprLoweringOptions {
+            root: SubexprRoot::Expression,
+            root_operation: None,
+            include_list_controls: false,
+            authored_signature,
+            literal_result_claim_ownership: LiteralResultClaimOwnership::Legacy,
+            #[cfg(feature = "lowering-trace")]
+            trace: None,
+        },
+        UnrollBudget::Enforced,
     )
 }
 
@@ -2592,8 +2657,9 @@ pub(crate) fn try_lower_prepared_named_call(
     #[cfg(not(feature = "lowering-trace"))]
     let _ = collect_trace;
     assert_decode_once_at_boundary("prepared_named_call: expr", std::slice::from_ref(expr));
-    let (dag, value_root_count, list_checks, ordered_list_checks) =
-        catch_lowering(std::panic::AssertUnwindSafe(|| {
+    let (dag, value_root_count, list_checks, ordered_list_checks) = catch_lowering(
+        UnrollBudget::Unbounded,
+        std::panic::AssertUnwindSafe(|| {
             lower_subexpr_program_inner_impl(
                 expr,
                 scoped_bindings,
@@ -2610,7 +2676,8 @@ pub(crate) fn try_lower_prepared_named_call(
                     trace: collector.clone(),
                 },
             )
-        }))?;
+        }),
+    )?;
     Ok(PreparedNamedCallHelper {
         lowered: LoweredSubexprWithControls {
             dag,
@@ -2645,6 +2712,7 @@ pub(crate) fn try_lower_tensor_helper_program_with_ordered_inputs(
             #[cfg(feature = "lowering-trace")]
             trace: None,
         },
+        UnrollBudget::Unbounded,
     )
 }
 
@@ -2670,6 +2738,7 @@ pub(crate) fn try_lower_subexpr_program_with_ordered_inputs_and_trace(
             literal_result_claim_ownership: LiteralResultClaimOwnership::Legacy,
             trace: Some(collector.clone()),
         },
+        UnrollBudget::Unbounded,
     )?;
     Ok((dag, collector.finish_helper()))
 }
@@ -2697,6 +2766,7 @@ pub(crate) fn try_lower_tensor_helper_program_with_ordered_inputs_and_trace(
             literal_result_claim_ownership: LiteralResultClaimOwnership::AuthoredTensorHelper,
             trace: Some(collector.clone()),
         },
+        UnrollBudget::Unbounded,
     )?;
     Ok((dag, collector.finish_helper()))
 }
@@ -2707,14 +2777,23 @@ fn try_lower_subexpr_program_with_ordered_inputs_impl(
     context: &SubexprLoweringContext,
     result_claim: Option<&TensorType>,
     options: SubexprLoweringOptions,
+    budget: UnrollBudget,
 ) -> Result<Dag, LowerDiagnostic> {
     assert_decode_once_at_boundary("lower_subexpr_program: expr", std::slice::from_ref(expr));
     // As above, a failed attempt owns and discards its complete collector.
-    catch_lowering(std::panic::AssertUnwindSafe(|| {
-        let (dag, _, _, _) =
-            lower_subexpr_program_inner_impl(expr, scoped_bindings, context, result_claim, options);
-        dag
-    }))
+    catch_lowering(
+        budget,
+        std::panic::AssertUnwindSafe(|| {
+            let (dag, _, _, _) = lower_subexpr_program_inner_impl(
+                expr,
+                scoped_bindings,
+                context,
+                result_claim,
+                options,
+            );
+            dag
+        }),
+    )
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -2747,99 +2826,102 @@ pub(crate) fn try_lower_staged_host_region(
 > {
     use crate::host::staged::{StagingAttempt, StagingStatus};
     let status = std::rc::Rc::new(Cell::new(StagingStatus::Searching));
-    let result = catch_lowering(std::panic::AssertUnwindSafe(|| {
-        let mut ctx = LowerCtx::new(
-            context.program_types.clone(),
-            context.program_defs.clone(),
-            context.program_signatures.clone(),
-            LinearityInfo::default(),
-        );
-        // The staged region is this graph's only declaration.
-        ctx.decl = Some(ctx.dag.declare(""));
-        ctx.local_ascriptions = context.local_ascriptions.clone();
-        ctx.constructor_layouts = context.constructor_layouts.clone();
-        ctx.resolved_builtin_values = Arc::clone(&context.resolved_builtin_values);
-        ctx.declaration_bodies = Arc::clone(&context.declaration_bodies);
-        ctx.activation_record = context.activation_record;
-        ctx.prec_substitutions = context
-            .tensor_specialization
-            .precision_substitutions
-            .clone();
-        ctx.rank_substitutions = context.tensor_specialization.rank_substitutions.clone();
-        ctx.dim_axis_positions = context.tensor_specialization.dim_axis_positions.clone();
-        ctx.checked_dim_substitutions = context
-            .tensor_specialization
-            .checked_dim_substitutions
-            .clone();
-        ctx.host_program = Some(program);
-        ctx.host_stage_status = status.clone();
-        ctx.literal_result_claim_ownership = options.literal_result_claim_ownership;
-        let mut names = Vec::new();
-        let mut types = Vec::new();
-        for param in params {
-            if let Some(ty) = crate::host::tensor_type_from_host_input(&param.ty) {
-                let load = ctx.dag.add_node(
-                    ctx.owner(),
-                    RiscOp::Load {
-                        name: param.name.as_str().into(),
-                    },
-                    Vec::new(),
-                    ty.clone(),
-                    None,
-                );
-                ctx.interface_loads.insert(param.name.clone());
-                ctx.bindings
-                    .insert(param.name.clone(), LoweredValue::Node(load));
-                ctx.host_value_types.insert(load, param.ty.clone());
-                ctx.host_external_inputs.insert(load, param.name.clone());
-                names.push(param.name.clone());
-                types.push(ty);
-            } else {
-                let id = crate::host::staged::HostValueId(ctx.next_host_value);
-                ctx.next_host_value += 1;
-                ctx.host_parameters
-                    .insert(id, (param.name.clone(), param.ty.clone()));
-                ctx.bindings.insert(
-                    param.name.clone(),
-                    LoweredValue::Host {
-                        id,
-                        ty: param.ty.clone(),
-                    },
-                );
+    let result = catch_lowering(
+        UnrollBudget::Unbounded,
+        std::panic::AssertUnwindSafe(|| {
+            let mut ctx = LowerCtx::new(
+                context.program_types.clone(),
+                context.program_defs.clone(),
+                context.program_signatures.clone(),
+                LinearityInfo::default(),
+            );
+            // The staged region is this graph's only declaration.
+            ctx.decl = Some(ctx.dag.declare(""));
+            ctx.local_ascriptions = context.local_ascriptions.clone();
+            ctx.constructor_layouts = context.constructor_layouts.clone();
+            ctx.resolved_builtin_values = Arc::clone(&context.resolved_builtin_values);
+            ctx.declaration_bodies = Arc::clone(&context.declaration_bodies);
+            ctx.activation_record = context.activation_record;
+            ctx.prec_substitutions = context
+                .tensor_specialization
+                .precision_substitutions
+                .clone();
+            ctx.rank_substitutions = context.tensor_specialization.rank_substitutions.clone();
+            ctx.dim_axis_positions = context.tensor_specialization.dim_axis_positions.clone();
+            ctx.checked_dim_substitutions = context
+                .tensor_specialization
+                .checked_dim_substitutions
+                .clone();
+            ctx.host_program = Some(program);
+            ctx.host_stage_status = status.clone();
+            ctx.literal_result_claim_ownership = options.literal_result_claim_ownership;
+            let mut names = Vec::new();
+            let mut types = Vec::new();
+            for param in params {
+                if let Some(ty) = crate::host::tensor_type_from_host_input(&param.ty) {
+                    let load = ctx.dag.add_node(
+                        ctx.owner(),
+                        RiscOp::Load {
+                            name: param.name.as_str().into(),
+                        },
+                        Vec::new(),
+                        ty.clone(),
+                        None,
+                    );
+                    ctx.interface_loads.insert(param.name.clone());
+                    ctx.bindings
+                        .insert(param.name.clone(), LoweredValue::Node(load));
+                    ctx.host_value_types.insert(load, param.ty.clone());
+                    ctx.host_external_inputs.insert(load, param.name.clone());
+                    names.push(param.name.clone());
+                    types.push(ty);
+                } else {
+                    let id = crate::host::staged::HostValueId(ctx.next_host_value);
+                    ctx.next_host_value += 1;
+                    ctx.host_parameters
+                        .insert(id, (param.name.clone(), param.ty.clone()));
+                    ctx.bindings.insert(
+                        param.name.clone(),
+                        LoweredValue::Host {
+                            id,
+                            ty: param.ty.clone(),
+                        },
+                    );
+                }
             }
-        }
-        // A staged host region's inputs are the partition's, not an author's.
-        ctx.prepare_parameter_witnesses(&names, &types, None, None, false);
-        ctx.bindings.clear_witnesses();
-        ctx.prepare_local_ascription_tokens(expr, None);
-        // Do not infer equality between repeated spellings in the machine-built
-        // parameter list above. The returned result type is nevertheless the
-        // authored declaration's claim, so resolve it against the first exact
-        // parameter witness for each binder and give an eligible same-shape
-        // producer the same ownership it has outside staging.
-        ctx.signature_is_authored = true;
-        ctx.declaration_root_claim = true;
-        let result = ctx.lower_expr_with_claim(expr, Some(result_claim), true);
-        ctx.validate_local_ascription_token_ownership();
-        ctx.preserve_declared_result(&result, result_claim, None);
-        let result = ctx.retain_invocation_witnesses(result, 0);
-        if ctx.host_sources.is_empty() {
-            return None;
-        }
-        let root = result.expect_node("staged host tensor region");
-        ctx.dag.add_root(root);
-        let plan = crate::host::staged::partition(
-            &ctx.dag,
-            &ctx.host_sources,
-            params,
-            &ctx.host_external_inputs,
-            &ctx.host_parameters,
-        )
-        .unwrap_or_else(|error| {
-            raise_lowering_error(error, Some(expr.span()), expr.span_id().map(str::to_owned))
-        });
-        Some((ctx.dag, plan))
-    }));
+            // A staged host region's inputs are the partition's, not an author's.
+            ctx.prepare_parameter_witnesses(&names, &types, None, None, false);
+            ctx.bindings.clear_witnesses();
+            ctx.prepare_local_ascription_tokens(expr, None);
+            // Do not infer equality between repeated spellings in the machine-built
+            // parameter list above. The returned result type is nevertheless the
+            // authored declaration's claim, so resolve it against the first exact
+            // parameter witness for each binder and give an eligible same-shape
+            // producer the same ownership it has outside staging.
+            ctx.signature_is_authored = true;
+            ctx.declaration_root_claim = true;
+            let result = ctx.lower_expr_with_claim(expr, Some(result_claim), true);
+            ctx.validate_local_ascription_token_ownership();
+            ctx.preserve_declared_result(&result, result_claim, None);
+            let result = ctx.retain_invocation_witnesses(result, 0);
+            if ctx.host_sources.is_empty() {
+                return None;
+            }
+            let root = result.expect_node("staged host tensor region");
+            ctx.dag.add_root(root);
+            let plan = crate::host::staged::partition(
+                &ctx.dag,
+                &ctx.host_sources,
+                params,
+                &ctx.host_external_inputs,
+                &ctx.host_parameters,
+            )
+            .unwrap_or_else(|error| {
+                raise_lowering_error(error, Some(expr.span()), expr.span_id().map(str::to_owned))
+            });
+            Some((ctx.dag, plan))
+        }),
+    );
     match (result, status.get()) {
         (Err(_), StagingStatus::HostControlBoundary) => Ok(StagingAttempt::HostControlBoundary),
         (Err(diagnostic), StagingStatus::HasSources) => Err(diagnostic.fatal()),
@@ -8046,17 +8128,11 @@ impl LowerCtx<'_> {
         if unrolled <= budget || !UNROLL_BRANCHED.with(Cell::get) {
             return;
         }
-        // Name the recursion whose unroll is growing, not the helper that
-        // happened to cross the budget: the deepest active name, ties broken
-        // by the sorted order so the text is deterministic.
-        let mut deepest: Option<(&String, usize)> = None;
-        for (name, depth) in self.inlining_depths.to_sorted() {
-            if *depth > 1 && deepest.is_none_or(|(_, deepest)| *depth > deepest) {
-                deepest = Some((name, *depth));
-            }
-        }
-        let name = deepest
-            .map(|(name, _)| name.as_str())
+        // Name the function whose frame branched, not the helper that
+        // happened to cross the budget nor a chain that encloses the tree.
+        let branched_at = UNROLL_BRANCHED_AT.with(|at| at.borrow().clone());
+        let name = branched_at
+            .as_deref()
             .or(callee)
             .unwrap_or("an anonymous function");
         let message = format!(
@@ -11786,10 +11862,13 @@ impl<'program> LowerCtx<'program> {
         // `catch_lowering` clears the panic-output suppression on exit; an
         // enclosing lowering that set it keeps it.
         let suppressed = SUPPRESS_LOWERING_PANIC_OUTPUT.with(Cell::get);
-        let lowered = catch_lowering(std::panic::AssertUnwindSafe(|| {
-            let value = scratch.lower_initializer(&initializer);
-            (value, scratch.dag, scratch.program_value_verdicts)
-        }));
+        let lowered = catch_lowering(
+            UnrollBudget::Unbounded,
+            std::panic::AssertUnwindSafe(|| {
+                let value = scratch.lower_initializer(&initializer);
+                (value, scratch.dag, scratch.program_value_verdicts)
+            }),
+        );
         SUPPRESS_LOWERING_PANIC_OUTPUT.with(|cell| cell.set(suppressed));
         let Ok((value, lowered, reached)) = lowered else {
             return (None, UnordMap::new());
@@ -16087,12 +16166,16 @@ impl<'program> LowerCtx<'program> {
             .find(|(key, _)| *key == frame_key)
         {
             *credits += 1;
-            if *credits > 1 {
-                UNROLL_BRANCHED.with(|branched| branched.set(true));
+            if *credits > 1 && !UNROLL_BRANCHED.with(|branched| branched.replace(true)) {
+                let name = match &frame_key {
+                    RecursionFrameKey::Declaration(name) => Some(name.clone()),
+                    RecursionFrameKey::Literal(_) => inlining_name.clone(),
+                };
+                UNROLL_BRANCHED_AT.with(|at| *at.borrow_mut() = name);
             }
         }
         self.recursion_frames.push((frame_key, 0));
-        if RECURSING_NAMES.with(Cell::get) > 0 {
+        if RECURSING_NAMES.with(Cell::get) > 0 && UNROLL_ENFORCED.with(Cell::get) {
             self.count_unrolled_body(fn_expr, inlining_name.as_deref());
         }
         if self.inlining_active > MAX_TOTAL_INLINE_DEPTH {
@@ -29193,7 +29276,7 @@ mod tests {
 
     #[test]
     fn gradient_axis_mapping_rejects_missing_sources_before_publication() {
-        let missing = catch_lowering(|| {
+        let missing = catch_lowering(UnrollBudget::Unbounded, || {
             let mut ctx = empty_lower_ctx();
             ctx.zero_tensor_node(
                 &TensorType {
@@ -29209,7 +29292,7 @@ mod tests {
                 .to_string()
                 .contains("no differentiated actual axis source")
         );
-        let stale = catch_lowering(|| {
+        let stale = catch_lowering(UnrollBudget::Unbounded, || {
             let ctx = empty_lower_ctx();
             ctx.verify_gradient_axis_source(NodeId(7));
         })
@@ -29219,7 +29302,7 @@ mod tests {
                 .to_string()
                 .contains("gradient axis source is not live")
         );
-        let remapped = catch_lowering(|| {
+        let remapped = catch_lowering(UnrollBudget::Unbounded, || {
             let mut ctx = empty_lower_ctx();
             let zero = ctx.dag.add_node(
                 ctx.owner(),
@@ -29588,7 +29671,7 @@ mod tests {
                 ],
                 span,
             );
-            let outcome = catch_lowering(move || {
+            let outcome = catch_lowering(UnrollBudget::Unbounded, move || {
                 let mut ctx = empty_lower_ctx();
                 ctx.lower_expr(&function)
             });
@@ -32359,7 +32442,7 @@ mod tests {
             .into_iter()
             .next()
             .expect("one expression");
-        let outcome = catch_lowering(move || {
+        let outcome = catch_lowering(UnrollBudget::Unbounded, move || {
             let mut ctx = LowerCtx::new(
                 BTreeMap::new(),
                 BTreeMap::new(),
@@ -35994,14 +36077,14 @@ def example() -> f32 = bisection(erf_projectile, cast(0.1, f32), cast(0.7, f32),
         UNROLLED_BODIES.with(|count| count.set(Some(390)));
         RECURSING_NAMES.with(|names| names.set(2));
         UNROLL_BRANCHED.with(|branched| branched.set(true));
-        let inner = catch_lowering(state).expect("the probe returns");
+        let inner = catch_lowering(UnrollBudget::Unbounded, state).expect("the probe returns");
         assert_eq!(inner, (Some(0), 0, false), "the probe starts its own count");
         assert_eq!(
             state(),
             (Some(390), 2, true),
             "a returning probe restores the unroll"
         );
-        let raised = catch_lowering(|| {
+        let raised = catch_lowering(UnrollBudget::Unbounded, || {
             UNROLLED_BODIES.with(|count| count.set(Some(7)));
             RECURSING_NAMES.with(|names| names.set(3));
             raise_lowering_error("probe failure", None, None)
@@ -36012,7 +36095,7 @@ def example() -> f32 = bisection(erf_projectile, cast(0.1, f32), cast(0.7, f32),
             (Some(390), 2, true),
             "a raising probe restores the unroll"
         );
-        let diagnosed = catch_lowering_diagnostic(|| {
+        let diagnosed = catch_lowering_diagnostic(UnrollBudget::Unbounded, || {
             RECURSING_NAMES.with(|names| names.set(4));
             raise_lowering_error("pass failure", None, None)
         });
@@ -36102,6 +36185,58 @@ def example() -> f32 = bisection(erf_projectile, cast(0.1, f32), cast(0.7, f32),
         assert!(
             rejection.is_some_and(|message| message.contains("recursive inlining of `it`")),
             "the rejection names the combinator"
+        );
+    }
+
+    #[test]
+    fn only_cost_entries_enforce_the_budget() {
+        // chelis#3864 round 3: eval, build and every lowering other than
+        // `chelis cost`'s per-entry lowering have no fallback for a rejected
+        // unroll, so they count nothing. The same branched tree that a cost
+        // entry rejects lowers through the very same entry lowering when cost
+        // is not the caller.
+        // A static tree: both calls of every level are lowered, so each
+        // frame is credited twice, with no runtime condition at all.
+        let source = "def tree(x: tensor[3, f32], k: i64) -> tensor[3, f32] = if gte(k, cast(8, i64)) then x else add(tree(x, add(k, cast(1, i64))), tree(neg(x), add(k, cast(1, i64))))\n\
+             def example(seed: tensor[3, f32]) -> tensor[3, f32] = tree(seed, cast(0, i64))\n\
+             out = example(to_tensor([1.0f32, 2.0f32, 3.0f32]))\n"
+            .to_string();
+        let cost_program = checked(&source);
+        let (cost, _, rejection) = with_budget(100, move || {
+            crate::host::lower_named_tensor_entry_dags(&cost_program, &["example".to_string()])
+                .map(|dag| dag.is_some())
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(cost, [false], "the cost entry is rejected");
+        assert!(rejection.is_some());
+        let entry_program = checked(&source);
+        let (entry, counted, rejection) = with_budget(100, move || {
+            crate::host::lower_named_tensor_entry_dag(&entry_program, "example").is_some()
+        });
+        assert!(
+            entry,
+            "the same entry lowering outside cost is unbounded: {rejection:?}"
+        );
+        assert_eq!(counted, 0);
+    }
+
+    #[test]
+    fn the_rejection_names_the_branching_function_not_its_enclosing_chain() {
+        // chelis#3864 round 3: a chain `walk` runs a branched `tree` at each
+        // step. `walk` is the deeper name, but `tree` is the frame that
+        // branched, and the rejection names it.
+        let source = format!(
+            "{}def walk(x: f32, i: i64) -> f32 = if gte(i, cast(20, i64)) then x else walk(tree(x, cast(0, i64)), add(i, cast(1, i64)))\ndef example() -> f32 = walk(cast(1.5, f32), cast(0, i64))\n",
+            branched_tree("tree", 6, "")
+        );
+        // Under a budget of 1,000 the trip comes about eight steps in, when
+        // `walk` is deeper than any level of `tree`.
+        let (lowered, _, rejection) = lower_example(source, 1_000);
+        assert!(!lowered);
+        let message = rejection.expect("the budget rejected the unroll");
+        assert!(
+            message.starts_with("recursive inlining of `tree`"),
+            "{message}"
         );
     }
 }
