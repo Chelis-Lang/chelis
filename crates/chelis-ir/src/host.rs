@@ -3497,7 +3497,7 @@ pub fn lower_named_tensor_entry_dag(program: &CheckedProgram, name: &str) -> Opt
 /// made outside this crate, so no other caller can enforce it:
 ///
 /// ```compile_fail
-/// let _ = chelis_ir::lower::UnrollBudget::Enforced;
+/// let _ = chelis_ir::lower::UnrollBudget::Unbounded;
 /// ```
 ///
 /// ```compile_fail

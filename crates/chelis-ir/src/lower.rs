@@ -751,7 +751,8 @@ const LOWERING_GROW_SEGMENT_BYTES: usize = 512 * 1024 * 1024;
 /// cost entry cannot escape the entry's budget.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum UnrollBudget {
-    Enforced,
+    /// Only [`cost_entry`] can construct the token.
+    Enforced(cost_entry::CostEntryOnly),
     Unbounded,
 }
 
@@ -772,12 +773,12 @@ struct UnrollScope {
 impl UnrollScope {
     fn enter(budget: UnrollBudget) -> Self {
         #[cfg(test)]
-        if budget == UnrollBudget::Enforced || UNROLL_ENFORCED.with(Cell::get) {
+        if matches!(budget, UnrollBudget::Enforced(_)) || UNROLL_ENFORCED.with(Cell::get) {
             ENFORCING_SCOPES_ENTERED.with(|entered| entered.set(entered.get() + 1));
         }
         Self {
             enforced: UNROLL_ENFORCED.with(|enforced| {
-                enforced.replace(enforced.get() || budget == UnrollBudget::Enforced)
+                enforced.replace(enforced.get() || matches!(budget, UnrollBudget::Enforced(_)))
             }),
             count: UNROLLED_BODIES.with(|count| count.replace(Some(0))),
             recursing: RECURSING_NAMES.with(|names| names.replace(0)),
@@ -2595,33 +2596,45 @@ pub(crate) fn try_lower_subexpr_program_with_ordered_inputs(
     )
 }
 
-/// [`try_lower_subexpr_program_with_ordered_inputs`] for one entry of
-/// `chelis cost`'s per-entry tensor-DAG lowering, the one lowering that
-/// enforces [`MAX_UNROLLED_BODIES`]: its caller omits an entry whose unroll is
-/// rejected (chelis#3864).
-pub(crate) fn try_lower_cost_entry_with_ordered_inputs(
-    expr: &Expr,
-    scoped_bindings: Vec<(String, TensorType)>,
-    context: &SubexprLoweringContext,
-    result_claim: Option<&TensorType>,
-    authored_signature: bool,
-) -> Result<Dag, LowerDiagnostic> {
-    try_lower_subexpr_program_with_ordered_inputs_impl(
-        expr,
-        scoped_bindings,
-        context,
-        result_claim,
-        SubexprLoweringOptions {
-            root: SubexprRoot::Expression,
-            root_operation: None,
-            include_list_controls: false,
-            authored_signature,
-            literal_result_claim_ownership: LiteralResultClaimOwnership::Legacy,
-            #[cfg(feature = "lowering-trace")]
-            trace: None,
-        },
-        UnrollBudget::Enforced,
-    )
+pub(crate) use cost_entry::try_lower_cost_entry_with_ordered_inputs;
+
+/// The one lowering that enforces [`MAX_UNROLLED_BODIES`], and the only code
+/// that can construct [`UnrollBudget::Enforced`]: the token's field is
+/// private to this module (chelis#3864).
+mod cost_entry {
+    use super::*;
+
+    /// Proof that a boundary is `chelis cost`'s per-entry lowering.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(crate) struct CostEntryOnly(());
+
+    /// [`try_lower_subexpr_program_with_ordered_inputs`] for one entry of
+    /// `chelis cost`'s per-entry tensor-DAG lowering, whose caller omits an
+    /// entry whose unroll is rejected.
+    pub(crate) fn try_lower_cost_entry_with_ordered_inputs(
+        expr: &Expr,
+        scoped_bindings: Vec<(String, TensorType)>,
+        context: &SubexprLoweringContext,
+        result_claim: Option<&TensorType>,
+        authored_signature: bool,
+    ) -> Result<Dag, LowerDiagnostic> {
+        try_lower_subexpr_program_with_ordered_inputs_impl(
+            expr,
+            scoped_bindings,
+            context,
+            result_claim,
+            SubexprLoweringOptions {
+                root: SubexprRoot::Expression,
+                root_operation: None,
+                include_list_controls: false,
+                authored_signature,
+                literal_result_claim_ownership: LiteralResultClaimOwnership::Legacy,
+                #[cfg(feature = "lowering-trace")]
+                trace: None,
+            },
+            UnrollBudget::Enforced(CostEntryOnly(())),
+        )
+    }
 }
 
 /// A complete named invocation lowered over its own once-prepared actuals.
