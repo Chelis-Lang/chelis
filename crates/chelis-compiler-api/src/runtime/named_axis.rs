@@ -265,6 +265,11 @@ impl<'a> EvalContext<'a> {
         // DAG never demands them.
         let reached = self.program.reached_by_call(resolved_name);
         self.initialize_reached_values(&reached)?;
+        // The routed call runs as one DAG, the routed function and every
+        // function it applies included.
+        let _routed = super::eval::EvalCallStackFrame::enter_weighted(
+            self.program.application_depth(resolved_name),
+        )?;
         // Source actuals and their checked types were prepared in the caller
         // above. Free loads in the named body belong to declaration scope.
         let saved = std::mem::take(&mut self.bindings);

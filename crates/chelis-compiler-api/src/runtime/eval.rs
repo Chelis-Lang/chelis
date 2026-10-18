@@ -54,9 +54,11 @@ pub(super) const EVAL_MAX_NESTED_APPLICATIONS: usize = 10_000;
 /// The stack segment evaluation runs on. It holds
 /// [`EVAL_MAX_NESTED_APPLICATIONS`] levels of an ordinary body before the
 /// native-stack backstop fires, so the budget, not the stack, ends a deep
-/// recursion. The largest levels measured are a body nested 64 expressions
-/// deep, about 10 KB of stack in an optimized build and 64 KB in an
-/// unoptimized one, and a recursion through a `fold` callback, up to about
+/// recursion. Each expression a recursive call sits inside adds stack to
+/// every level: measured at the budget, a call nested up to 16 expressions
+/// deep reaches it in an optimized build, which meets the backstop first
+/// from about 24, and up to 6 deep in an unoptimized one, where 7 peaks at
+/// about 1.9 GB. A recursion through a `fold` callback takes up to about
 /// 135 KB a level unoptimized. The segment is reserved address space: only
 /// the pages a recursion touches become resident.
 pub(super) const EVAL_SEGMENT_BYTES: usize = if cfg!(debug_assertions) {
@@ -70,21 +72,30 @@ pub(super) const EVAL_SEGMENT_BYTES: usize = if cfg!(debug_assertions) {
 const EVAL_STACK_RED_ZONE_BYTES: usize = 512 * 1024;
 const EVAL_FALLBACK_MAX_CALL_DEPTH: usize = 8;
 
-/// One function application in progress. Tracks calls rather than
-/// expression visits: each recursive user function crosses the callable
-/// boundary, while ordinary expression evaluation stays off this hot-path
-/// budget check.
-struct EvalCallStackFrame;
+/// Function applications in progress, charged to the recursion budget.
+/// Tracks calls rather than expression visits: each recursive user function
+/// crosses the callable boundary, while ordinary expression evaluation stays
+/// off this hot-path budget check.
+pub(super) struct EvalCallStackFrame {
+    levels: usize,
+}
 
 impl EvalCallStackFrame {
     /// Begin an application, or report why it cannot be entered: it would
     /// exceed the recursion budget, or the native stack is nearly exhausted.
     fn enter() -> Result<Self, String> {
+        Self::enter_weighted(1)
+    }
+
+    /// Charge `levels` applications for as long as the frame lives: an
+    /// application evaluated as a single unit holds the deepest chain its
+    /// body can make ([`super::program_scope::ProgramScope::application_depth`]).
+    pub(super) fn enter_weighted(levels: usize) -> Result<Self, String> {
         let depth = EVAL_CALL_DEPTH.with(|depth| {
-            depth.set(depth.get() + 1);
+            depth.set(depth.get() + levels);
             depth.get()
         });
-        let frame = Self;
+        let frame = Self { levels };
         if depth > EVAL_MAX_NESTED_APPLICATIONS {
             return Err(format!(
                 "evaluation recursion budget exhausted: more than \
@@ -107,7 +118,7 @@ impl EvalCallStackFrame {
 
 impl Drop for EvalCallStackFrame {
     fn drop(&mut self) {
-        EVAL_CALL_DEPTH.with(|depth| depth.set(depth.get() - 1));
+        EVAL_CALL_DEPTH.with(|depth| depth.set(depth.get() - self.levels));
     }
 }
 
@@ -2014,6 +2025,11 @@ impl<'a> EvalContext<'a> {
         if let Some(plan) = &kernel.staged {
             return self.apply_staged_host_plan(name, plan, params, args);
         }
+        // The kernel runs every function its body applies inside one DAG;
+        // charge the chain beyond the application already entered.
+        let _inlined = EvalCallStackFrame::enter_weighted(
+            self.program.application_depth(name).saturating_sub(1),
+        )?;
         if params.len() != args.len() {
             return Err(format!(
                 "closure expected {} args, got {}",
@@ -2205,6 +2221,12 @@ impl<'a> EvalContext<'a> {
                     }
                 }
                 HostStage::Kernel { dag, outputs } => {
+                    // A kernel stage runs inlined functions as one DAG; a
+                    // source stage above is interpreted and counts its own
+                    // applications.
+                    let _inlined = EvalCallStackFrame::enter_weighted(
+                        self.program.application_depth(name).saturating_sub(1),
+                    )?;
                     let mut inputs = UnordMap::new();
                     for node in dag.nodes() {
                         if let RiscOp::Load { name: input } = &node.op {

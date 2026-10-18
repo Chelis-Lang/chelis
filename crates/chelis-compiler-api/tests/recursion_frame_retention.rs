@@ -1,9 +1,9 @@
 //! A recursion keeps only what each level's body needs (chelis#3842).
 //!
-//! The evaluator's recursion guard counts native stack, so a runaway
-//! recursion fills its stack budget before it reports
-//! `evaluation stack budget exhausted`. The heap each live level holds adds
-//! to that, and to every deep recursion that never trips the guard: an
+//! A runaway recursion runs to 10,000 nested applications before it reports
+//! `evaluation recursion budget exhausted: more than 10000 nested function
+//! applications`, and the heap each live level holds is part of the memory
+//! it reaches by then, as it is of every deep recursion within the budget: an
 //! unboxed binding map node reserved room for every slot, and a call kept its
 //! whole entry phase (actuals, the entry plan's DAG, precision maps) alive
 //! until its body returned, so a level held 3.0 to 6.2 KB.
@@ -11,7 +11,7 @@
 //! The receipt is the heap a level keeps live, measured by this binary's
 //! allocator as the difference in peak live bytes between recursions of 2,000
 //! and 4,000 levels over an `i64`, a `List[i64]` and a `tensor[2, f32]`
-//! argument, each well below the stack budget. The bound, 2,048 bytes, is
+//! argument, each well below the recursion budget. The bound, 2,048 bytes, is
 //! at most two thirds of what a level of any of these kinds kept before.
 //!
 //! Evidentiary status: REGRESSION TEST, proven failing first. On the base a

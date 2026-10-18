@@ -39,8 +39,13 @@ Evaluation bounds how deeply function applications nest. Each application of
 a declared function (`def`) or of a function value, including a callback that
 a list operation such as `fold`, `map` or `scan` applies, counts one level from
 the moment it is entered until it returns. A built-in operation called by name
-is not such an application. At most 10,000 levels are in progress at once.
-An application that would begin level 10,001 is not entered: evaluation
+is not such an application. An application that evaluation carries out as a
+single unit, rather than one nested application at a time, counts for as long
+as it runs as many levels as the deepest chain of nested applications its body
+can make, whichever way its conditionals go. Such an application may therefore
+stop an evaluation before the applications actually in progress reach the
+bound, and at no point are more than 10,000 levels in progress.
+An application that would take the count past 10,000 is not entered: evaluation
 reports the error `evaluation recursion budget exhausted: more than 10000
 nested function applications` through these channels, and no effect after it
 executes. Whether a program exceeds the bound depends only on the program and

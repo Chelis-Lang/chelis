@@ -152,3 +152,85 @@ fn a_test_worker_thread_reaches_the_same_budget() {
         }
     }
 }
+
+/// Definitions applied at the bottom of [`charged_source`]'s recursion. The
+/// `h` chain runs as one kernel; `leaf` runs as one routed named-axis call,
+/// with `tot` inlined; `grad(total)` and `grad(gated)` run as one transform.
+const UNITS: &str = "\
+def h1(x: tensor[2, f32]) -> tensor[2, f32] = add(x, x)
+def h2(x: tensor[2, f32]) -> tensor[2, f32] = h1(h1(x))
+def h3(x: tensor[2, f32]) -> tensor[2, f32] = h2(x)
+def h4(x: tensor[2, f32]) -> tensor[2, f32] = h3(x)
+def total(x: tensor[2, f32]) -> f32 = tensor_to_scalar(sum(h2(x), 0i32))
+def gated(x: tensor[2, f32]) -> f32 = if gt(tensor_to_scalar(sum(x, 0i32)), 100.0f32) then tensor_to_scalar(sum(h4(x), 0i32)) else tensor_to_scalar(sum(x, 0i32))
+def tot[pre, post](x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, ..post, f32] = sum(x, seq)
+def leaf(x: tensor[seq, f32]) -> f32 = tensor_to_scalar(tot(x))
+def via(g: tensor[seq, f32] -> f32, x: tensor[seq, f32]) -> f32 = g(x)
+";
+
+/// `padder` nests `levels - charge` applications and then evaluates `unit`,
+/// which is charged `charge` more.
+fn charged_source(levels: usize, unit: &str, charge: usize) -> String {
+    format!(
+        "{UNITS}def padder(n: i64) -> i64 = if eq(n, 0i64) then {unit} else padder(sub(n, 1i64))\n\
+         out = {{\n  _ = print(\"before\")\n  r = padder({k}i64)\n  _ = print(\"after\")\n  r\n}}\n",
+        k = levels - charge - 1
+    )
+}
+
+/// An application evaluated as a single unit is charged the deepest chain
+/// of applications its body can make, every function a kernel, a routed
+/// call or a transform inlines included, so it meets the bound exactly
+/// where the same applications interpreted one at a time would.
+#[test]
+fn an_application_evaluated_as_a_unit_is_charged_its_deepest_chain() {
+    let tensor = "to_tensor([1.0f32, 2.0f32])";
+    let cases = [
+        // A kernel, by the depth of the functions it inlines.
+        ("kernel h1", format!("numel(h1({tensor}))"), 1, 2),
+        ("kernel h2", format!("numel(h2({tensor}))"), 2, 2),
+        ("kernel h3", format!("numel(h3({tensor}))"), 3, 2),
+        ("kernel h4", format!("numel(h4({tensor}))"), 4, 2),
+        // A routed named-axis call: `leaf` and the `tot` it inlines, and
+        // through `via`'s function parameter one more.
+        ("routed leaf", format!("cast(leaf({tensor}), i64)"), 2, 3),
+        (
+            "routed leaf via g",
+            format!("cast(via(leaf, {tensor}), i64)"),
+            3,
+            3,
+        ),
+        // A transform: `grad(total)`, `total`, and the `h2` chain.
+        ("transform", format!("numel(grad(total)({tensor}))"), 4, 2),
+    ];
+    for (case, unit, charge, expected) in cases {
+        assert_evaluates(
+            &format!("{case}, 10,000 levels"),
+            eval(request(charged_source(LEVELS, &unit, charge))),
+            expected,
+        );
+        assert_exhausts_budget(
+            &format!("{case}, 10,001 levels"),
+            eval(request(charged_source(LEVELS + 1, &unit, charge))),
+        );
+    }
+}
+
+/// The charge is the deepest chain whichever way a conditional goes, so a
+/// unit whose deeper arm is not taken stops the evaluation early: `gated`
+/// takes its shallow arm, two applications interpreted one at a time, but
+/// as one transform it is charged the six its deeper arm could make. The
+/// boundary is the same on every run and in every build.
+#[test]
+fn a_unit_is_charged_its_deeper_arm_even_when_it_is_not_taken() {
+    let unit = "numel(grad(gated)(to_tensor([1.0f32, 2.0f32])))";
+    assert_evaluates(
+        "untaken arm, 10,000 charged levels",
+        eval(request(charged_source(LEVELS, unit, 6))),
+        2,
+    );
+    assert_exhausts_budget(
+        "untaken arm, 10,001 charged levels",
+        eval(request(charged_source(LEVELS + 1, unit, 6))),
+    );
+}

@@ -817,6 +817,15 @@ impl<'a> EvalContext<'a> {
             }
             _ => {}
         }
+        // The transform runs its target as one DAG, every function the
+        // target applies included.
+        let target_levels = match fn_expr {
+            Some(target) => self
+                .program
+                .application_depth_of(target, &|name| captured_env.contains_key(name)),
+            None => 0,
+        };
+        let _target_levels = super::eval::EvalCallStackFrame::enter_weighted(target_levels)?;
         let mut provider_failed = false;
         let prepare_input = |name: &str, demand: TensorInputDemand| {
             let top_level_source = chelis_ir::LoadStoreName::top_level_source_for_label(name)?;
