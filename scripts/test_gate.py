@@ -384,7 +384,7 @@ def _assert_prove_uses_vendored_gmp_family(
 
 def _assert_native_devenv_recipe(workflow: str) -> None:
     blocks = _workflow_job_blocks(workflow)
-    for job in ("nix-linux-x86-64", "nix-darwin-arm64"):
+    for job in _NIX_NATIVE_JOBS:
         if job not in blocks:
             raise AssertionError(f"missing native Nix job {job!r}")
         block = blocks[job]
@@ -518,10 +518,10 @@ def _nix_workflow_events(workflow: str) -> dict[str, dict[str, str]]:
 
 
 _NIX_REVIEWED_WORKFLOW_SHA256 = (
-    "dfc82d0a07b8db9fdeab0f345bccd5ec768391176e67abf9ef5ca509dd427c08"
+    "9f9a64c4e439aa022adee4e428fa3afb837ff532610168653241f53aa52d8f90"
 )
 _NIX_REVIEWED_SCHEDULE = "'37 2 * * *'"
-_NIX_NATIVE_JOBS = ("nix-linux-x86-64", "nix-darwin-arm64")
+_NIX_NATIVE_JOBS = ("nix-linux-x86-64", "nix-linux-arm64", "nix-darwin-arm64")
 _NIX_CACHE_STATUS_RUN = (
     'run: python3 scripts/nix_cache_status.py --github-output "$GITHUB_OUTPUT"'
 )
@@ -559,7 +559,7 @@ def _assert_nix_workflow_matches_reviewed_recipe(workflow: str) -> None:
 def _assert_nix_schedule_cache_gate(workflow: str) -> None:
     """A scheduled run skips the native jobs only when the cache is complete.
 
-    Manual dispatches and releases always run both native jobs. A failed
+    Manual dispatches and releases always run every native job. A failed
     cache report leaves the output empty, so a scheduled run builds.
     """
     blocks = _workflow_job_blocks(workflow)
@@ -613,6 +613,7 @@ def _assert_runner_resource_bounds(workflow: str) -> None:
     blocks = _workflow_job_blocks(workflow)
     max_jobs = {
         "nix-linux-x86-64": "max-jobs = 2",
+        "nix-linux-arm64": "max-jobs = 2",
         "nix-darwin-arm64": "max-jobs = 1",
     }
     for job, bound in max_jobs.items():
@@ -3619,7 +3620,7 @@ class NixEvalJobTests(unittest.TestCase):
 
 
 class NixPackagesWorkflowTests(unittest.TestCase):
-    """Lock the two native Nix package jobs and their complete check command."""
+    """Lock the native Nix package jobs and their complete check command."""
 
     def test_workflow_reader_preserves_raw_newlines_for_the_digest(self):
         raw = NIX_PACKAGES_YML.read_bytes().replace(b"\n", b"\r\n")
@@ -3648,7 +3649,9 @@ class NixPackagesWorkflowTests(unittest.TestCase):
         text = _read_nix_packages_workflow()
         required = [
             "name: Nix Packages (x86_64-linux)",
+            "name: Nix Packages (aarch64-linux)",
             "name: Nix Packages (aarch64-darwin)",
+            "runs-on: ubuntu-24.04-arm",
             "runs-on: macos-latest",
         ]
         for marker in required:
@@ -3658,7 +3661,7 @@ class NixPackagesWorkflowTests(unittest.TestCase):
         text = _read_nix_packages_workflow()
         self.assertEqual(
             text.count("run: nix flake check --print-build-logs"),
-            2,
+            3,
             "each native Nix job must run the complete flake check set",
         )
         self.assertNotIn(
@@ -3686,9 +3689,16 @@ class NixPackagesWorkflowTests(unittest.TestCase):
 
     def test_each_native_job_rejects_the_wrong_runner_system(self):
         text = _read_nix_packages_workflow()
-        self.assertEqual(text.count("name: Verify the runner system"), 2)
+        self.assertEqual(text.count("name: Verify the runner system"), 3)
         self.assertIn('assert system == "x86_64-linux", system', text)
+        self.assertIn('assert system == "aarch64-linux", system', text)
         self.assertIn('assert system == "aarch64-darwin", system', text)
+
+    def test_arm64_linux_job_runs_on_the_hosted_arm_runner(self):
+        block = _workflow_job_blocks(_read_nix_packages_workflow())["nix-linux-arm64"]
+        self.assertIn("    runs-on: ubuntu-24.04-arm\n", block)
+        self.assertIn('assert system == "aarch64-linux", system', block)
+        self.assertNotIn("fromJSON", block)
 
     def test_supported_systems_have_exact_native_job_parity(self):
         contracts = (REPO_ROOT / "nix" / "contracts.nix").read_text(encoding="utf-8")

@@ -69,9 +69,18 @@ let
       "-p"
       "kache"
     ];
-    checkFlags = lib.optionals pkgs.stdenv.hostPlatform.isDarwin [
-      "--skip=store::tests::test_exclude_from_indexing_sets_tmutil_xattr"
-    ];
+    checkFlags =
+      lib.optionals pkgs.stdenv.hostPlatform.isDarwin [
+        "--skip=store::tests::test_exclude_from_indexing_sets_tmutil_xattr"
+      ]
+      # This test writes a mock compiler and runs it at once. A parallel test
+      # that forks in that window keeps the file open, and exec fails with
+      # ETXTBSY. The first aarch64-linux build hit that race (chelis#3818).
+      # The list stays empty on the other systems, so their cached
+      # derivations do not change.
+      ++ lib.optionals (pkgs.stdenv.hostPlatform.system == "aarch64-linux") [
+        "--skip=probe::tests::probe_spawns_pin_lc_all_c"
+      ];
     # Upstream tests bind loopback mock servers; keep the sandbox enabled.
     __darwinAllowLocalNetworking = true;
     preCheck = ''

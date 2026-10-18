@@ -115,7 +115,7 @@ Tag the merge commit by SHA, never a moving `main`, and never tag the PR branch.
 3. `release-e2e.yml` starts when the tag run succeeds. Read its summary table. It reports
    and does not gate publishing; a failing host becomes an issue, not a re-release.
 4. The tag run's `dispatch-nix-packages` job starts `nix-packages.yml` on the tag. That
-   run checks the Nix packages on both systems in about 80 minutes. Then it pushes them
+   run checks the Nix packages on each supported system in about 80 minutes. Then it pushes them
    to the `chelis-lang` Cachix cache. A failure there does not unpublish the release:
    rerun a flaky job with `gh run rerun <id> --failed`, and report a real failure.
 5. Report to the user: the tag, the release URL, the release run, the E2E table, and

@@ -780,15 +780,12 @@ def stage_niks3(root: Path) -> Path:
         platform.system() == "Linux" and platform.machine() == "x86_64",
         "unsupported-niks3-platform",
     )
-    package = nix.load_package(
-        (Path(__file__).parent / nix.INVENTORY.relative_to("tools")).read_text(
-            encoding="utf-8"
-        )
-    )
     archive = root / "niks3.tar.gz"
     # No nix-prefetch-url: setup/publication must not register artifacts in the
     # production store. Only the reviewed digest's one regular member is staged.
-    require(download_archive(package.url, archive) == package.sha256, "niks3-digest")
+    require(
+        download_archive(nix.NIKS3_URL, archive) == nix.NIKS3_SHA256, "niks3-digest"
+    )
     binary = root / "niks3"
     with tarfile.open(archive, "r:gz") as handle:
         member = handle.getmember("niks3")

@@ -158,7 +158,14 @@ tree. The [SMT build guide](smt_build_setup.md) has the prerequisites.
 ## Nix source packages
 
 From the checkout root, Nix provides source builds of `chelis`,
-`chelis-runtime`, and `chelisup` on `x86_64-linux` and `aarch64-darwin`:
+`chelis-runtime`, and `chelisup` on `x86_64-linux`, `aarch64-linux`, and
+`aarch64-darwin`. Each system has a native CI job that runs the complete check
+set, and `checks.<system>.lane-check` exists on both Linux systems.
+
+`x86_64-darwin` (Intel macOS) is not supported. nixpkgs removes that system for
+26.11 (NixOS/nixpkgs#535508), and Devenv publishes no build for it.
+
+Build and run the compiler:
 
 ```sh
 nix build .#chelis
@@ -249,8 +256,8 @@ with the minimal profile (rustc, cargo, and rust-std) of the Rust version in
 ## Optional Devenv shell
 
 The native path above works without Devenv. The optional shell supplies
-pinned Rust, Python, C and contributor tools on `x86_64-linux` and
-`aarch64-darwin`. It creates `.devenv/state/venv` for Python 3.11 and does not
+pinned Rust, Python, C and contributor tools on `x86_64-linux`,
+`aarch64-linux`, and `aarch64-darwin`. It creates `.devenv/state/venv` for Python 3.11 and does not
 replace the root `.venv`.
 
 Install Nix using its [official instructions](https://nixos.org/download/):
@@ -262,11 +269,11 @@ Open a new shell after installation. The repository pins the Devenv
 release with:
 
 ```sh
-nix --extra-experimental-features 'nix-command flakes' profile install github:cachix/devenv/360b5eb1397291383d10845a63a0247981bd5598
+nix --extra-experimental-features 'nix-command flakes' profile install github:cachix/devenv/v2.4.0
 devenv --version
 ```
 
-The pinned CLI reports `2.2.3`. Do not run `devenv init`; this checkout
+The pinned CLI reports `2.4.0`. Do not run `devenv init`. This checkout
 already has its configuration. If Devenv reports a Bash evaluation error
 on macOS, install a current Bash with
 `nix-env --install --attr bashInteractive -f https://github.com/NixOS/nixpkgs/tarball/nixpkgs-unstable`.
@@ -285,7 +292,7 @@ Inside a persistent shell, use `cargo build -p chelis-cli` and
 channel.
 
 For optional local direnv activation, install direnv and enable its hook in
-your shell after installing the pinned Devenv 2.2.3. Create an ignored `.envrc`
+your shell after installing the pinned Devenv 2.4.0. Create an ignored `.envrc`
 in each worktree with:
 
 ```sh

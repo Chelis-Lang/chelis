@@ -195,8 +195,8 @@ let
         touch "$out"
       '';
 
-  # Only native Linux produces a gate verdict.  Darwin evaluation never
-  # constructs (or attempts to run) an x86_64-linux check derivation.
+  # Only native Linux produces a gate verdict, on each Linux system that the
+  # flake supports.  Darwin evaluation never constructs a lane-check derivation.
   laneCheck =
     if !pkgs.stdenv.hostPlatform.isLinux then
       null
@@ -244,7 +244,8 @@ let
             --math-provider ${pkgs.openblas} \
             --math-provider-drv ${recorded pkgs.openblas} \
             --rustc ${built.toolchain}/bin/rustc \
-            --build-target x86_64-unknown-linux-gnu \
+            --nix-system ${pkgs.stdenv.hostPlatform.system} \
+            --build-target ${pkgs.stdenv.hostPlatform.rust.rustcTarget} \
             --output "$TMPDIR/proof-scope.json"
 
           # Ask the wrapper for its *effective* cc1 and linker commands, not

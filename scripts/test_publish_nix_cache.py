@@ -136,7 +136,8 @@ def assert_releases_reach_the_publisher(release: str, nix: str) -> None:
     publish_steps = [
         step for step in nix.split("\n      - ") if f"\n        {PUBLISH_RUN}\n" in f"\n{step}\n"
     ]
-    if len(publish_steps) != 2:
+    native_jobs = len(re.findall(r"^    name: Nix Packages \(", nix, re.MULTILINE))
+    if len(publish_steps) != native_jobs:
         raise AssertionError("each native Nix job must have one publish step")
     for step in publish_steps:
         if f"\n        {PUBLISH_GATE}\n" not in step:
@@ -354,7 +355,7 @@ class FlakeCacheContractTests(unittest.TestCase):
     def test_each_native_job_reads_the_cache_that_the_flake_trusts(self) -> None:
         # A job with an old key refuses the cache's signatures and builds each
         # path from source again, and no step fails.
-        for job in ("nix-linux-x86-64", "nix-darwin-arm64"):
+        for job in ("nix-linux-x86-64", "nix-linux-arm64", "nix-darwin-arm64"):
             with self.subTest(job=job):
                 settings = self.nix_config(job)
                 for setting in ("extra-substituters", "extra-trusted-public-keys"):

@@ -16,9 +16,9 @@ from typing import Any
 REPO_ROOT = Path(__file__).resolve().parents[1]
 GIT_HOOKS_MODULE = REPO_ROOT / "devenv/git-hooks.nix"
 SMOKE_TEST_MODULE = REPO_ROOT / "devenv/smoke-tests.nix"
-EXPECTED_REVISION = "360b5eb1397291383d10845a63a0247981bd5598"
+EXPECTED_REVISION = "b904dcb51fe48c30db250038241507f60752f222"
 EXPECTED_URL = f"github:cachix/devenv/{EXPECTED_REVISION}?dir=src/modules"
-EXPECTED_CLI_REQUIREMENT = "=2.2.3"
+EXPECTED_CLI_REQUIREMENT = "=2.4.0"
 EXPECTED_TEST_TASKS = (
     "chelis:toolchain-test",
     "chelis:python-test",

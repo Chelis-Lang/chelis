@@ -46,10 +46,30 @@ let
     "check-cargo-nix"
     "openspec-governance"
     "ruff"
+    "rust-release-binary"
   ];
   profileSystems = builtins.mapAttrs (
     name: _: if builtins.elem name crossSystemProfiles then supportedSystems else [ "x86_64-linux" ]
   ) profileActions;
+  # The C toolchain each profile shell carries. The shared base carries none.
+  # nix: the pinned Nix compiler wrapper and Apple SDK, for output that stays
+  # on the runner or ships through Nix. runner: none, because the profile links
+  # artifacts that leave the machine with the runner's own compiler. none: the
+  # profile compiles nothing.
+  cToolchains = [
+    "nix"
+    "none"
+    "runner"
+  ];
+  profileCToolchains = builtins.mapAttrs (
+    name: _: cToolchainOverrides.${name} or "none"
+  ) profileActions;
+  cToolchainOverrides = {
+    "cargo-llvm-cov" = "nix";
+    "cargo-mutants" = "nix";
+    "rust-lint" = "nix";
+    "rust-release-binary" = "runner";
+  };
   digestProfiles = [
     "actionlint"
     "cargo-deny"
@@ -62,6 +82,7 @@ let
   };
   recordFields = [
     "action"
+    "c-toolchain"
     "constructor"
     "digest"
     "runtime"
@@ -137,8 +158,6 @@ let
     "ci:lint" = [ "ci:deterministic" ];
     "ci:format-check" = [ "ci:deterministic" ];
     "ci:readme-check" = [ "ci:deterministic" ];
-    "ci:warm-cache" = [ "ci:deterministic" ];
-    "ci:warm-nix-cache" = [ "ci:deterministic" ];
     "ci:parity" = [
       "ci:toolchain-versions"
       "ci:devenv-contract"
@@ -152,8 +171,6 @@ let
       "ci:lint"
       "ci:format-check"
       "ci:readme-check"
-      "ci:warm-cache"
-      "ci:warm-nix-cache"
     ];
     "devenv:git-hooks:run" = [ "ci:parity" ];
     "ci:tracked-after" = [ "devenv:git-hooks:run" ];
@@ -238,6 +255,7 @@ let
     && record.action == profileActions.${name}
     && record.constructor == profileConstructors.${name}
     && record.systems == profileSystems.${name}
+    && record."c-toolchain" == profileCToolchains.${name}
     && versionMatches record.version
     && builtins.isAttrs record.runtime
     && builtins.attrNames record.runtime == runtimeKeys
@@ -261,6 +279,8 @@ rec {
     digestProfiles
     profileRuntimeKeys
     ciTaskDependencies
+    cToolchains
+    profileCToolchains
     ;
 
   validateProfiles =
@@ -416,10 +436,10 @@ rec {
         ]
       &&
         value == {
-          driverModuleCount = 57;
-          driverSuiteCount = 36;
-          moduleCount = 63;
-          suiteCount = 41;
+          driverModuleCount = 53;
+          driverSuiteCount = 35;
+          moduleCount = 59;
+          suiteCount = 40;
         }
     then
       value

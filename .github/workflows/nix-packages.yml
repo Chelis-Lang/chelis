@@ -81,11 +81,61 @@ jobs:
           CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_DEPLOY }}
         run: python scripts/publish_nix_cache.py
 
+  # The arm64 Linux job runs the same steps as the x86_64 job on a native
+  # hosted runner. lane-check gives its own native verdict here.
+  nix-linux-arm64:
+    name: Nix Packages (aarch64-linux)
+    needs: [cache-status]
+    if: ${{ !cancelled() && (github.event_name != 'schedule' || needs.cache-status.outputs.complete != 'true') }}
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 135
+    env:
+      NIX_CONFIG: |
+        sandbox = true
+        require-sigs = true
+        max-jobs = 2
+        cores = 0
+        extra-substituters = https://chelis-lang.cachix.org
+        extra-trusted-public-keys = chelis-lang.cachix.org-1:F4W65FQ7sunLoF2q6rzkWNTIBd3P/tJ/NFcv12OS9v8=
+    defaults:
+      run:
+        shell: chelis-ci-shell run {0}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Reclaim hosted runner disk space
+        if: runner.environment == 'github-hosted'
+        uses: ./.github/actions/vendor/ci/actions/reclaim-ubuntu-runner-disk
+      - name: Set up portable Devenv
+        uses: ./.github/actions/vendor/ci/actions/setup-devenv
+      - name: Activate the project CI environment
+        shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
+        run: python scripts/ci_devenv.py --profile base
+      - name: Verify the runner system
+        run: python3 -c 'import subprocess; system = subprocess.check_output(["nix", "eval", "--impure", "--raw", "--expr", "builtins.currentSystem"], text=True).strip(); assert system == "aarch64-linux", system'
+      - name: Verify the Nix sandbox
+        run: python3 -c 'import subprocess; value = subprocess.check_output(["nix", "config", "show", "sandbox"], text=True).strip(); assert value == "true", value'
+      - name: Run the Devenv shell smoke checks
+        run: devenv test --no-tui
+      - name: Run the Nix flake contract suite
+        run: python scripts/test_nix_flake_contract.py
+      - name: Run the complete native flake check set
+        run: nix flake check --print-build-logs
+      - name: List the paths to publish to Cachix
+        run: python scripts/publish_nix_cache.py --dry-run
+      # As in the other native jobs, only a main or tag run publishes.
+      - name: Publish the packages and their build inputs to Cachix
+        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+        env:
+          CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_DEPLOY }}
+        run: python scripts/publish_nix_cache.py
+
   nix-darwin-arm64:
     name: Nix Packages (aarch64-darwin)
     needs: [cache-status]
     if: ${{ !cancelled() && (github.event_name != 'schedule' || needs.cache-status.outputs.complete != 'true') }}
-    # Keep release, scheduled, and manual coverage native on both systems.
+    # Keep release, scheduled, and manual coverage native on each system.
     runs-on: macos-latest
     timeout-minutes: 145
     env:

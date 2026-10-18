@@ -1,6 +1,7 @@
 {
   supportedSystems = [
     "x86_64-linux"
+    "aarch64-linux"
     "aarch64-darwin"
   ];
 
@@ -117,6 +118,7 @@
 
   runtimeConsumers = {
     x86_64-linux = "OpenBLAS";
+    aarch64-linux = "OpenBLAS";
     aarch64-darwin = "Accelerate";
   };
 }

@@ -291,6 +291,48 @@ fn hex_digest(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
+/// The Nix systems that a pinned proof scope can name. Each pairs with the CPU
+/// architecture as `std::env::consts::ARCH` and GNU triples spell it.
+const PROOF_SYSTEMS: [(&str, &str); 2] = [("x86_64-linux", "x86_64"), ("aarch64-linux", "aarch64")];
+
+fn proof_system_architecture(nix_system: &str) -> Option<&'static str> {
+    PROOF_SYSTEMS
+        .iter()
+        .find(|(system, _)| *system == nix_system)
+        .map(|(_, architecture)| *architecture)
+}
+
+/// The scope must name a supported Linux system, and its execution identity
+/// must equal both that system and the host that runs the gate.
+fn check_native_execution(
+    nix_system: &str,
+    execution: &ExecutionIdentity,
+    host_os: &str,
+    host_architecture: &str,
+) -> Result<(), String> {
+    let Some(architecture) = proof_system_architecture(nix_system) else {
+        return Err(format!(
+            "proof-scope Nix system {nix_system:?} is not a supported native Linux system"
+        ));
+    };
+    if execution.os != "linux"
+        || execution.os != host_os
+        || execution.cpu_isa != architecture
+        || execution.cpu_isa != host_architecture
+    {
+        return Err("proof-scope execution OS/CPU contradicts the selected Nix system".into());
+    }
+    Ok(())
+}
+
+/// True for a GNU triple `<architecture>-<vendor>-linux-<abi>`.
+fn is_linux_triple_for(triple: &str, architecture: &str) -> bool {
+    triple
+        .strip_prefix(architecture)
+        .and_then(|rest| rest.strip_prefix('-'))
+        .is_some_and(|rest| rest.split('-').any(|part| part == "linux"))
+}
+
 fn load_input(path: &Path, corpus_hash: &str) -> Result<ProofInput, String> {
     let input: ProofInput =
         serde_json::from_slice(&fs::read(path).map_err(|error| error.to_string())?)
@@ -339,12 +381,12 @@ fn load_input(path: &Path, corpus_hash: &str) -> Result<ProofInput, String> {
     {
         return Err("proof-scope input is missing required closure identity".into());
     }
-    if input.nix_system != "x86_64-linux"
-        || input.execution.os != std::env::consts::OS
-        || input.execution.cpu_isa != std::env::consts::ARCH
-    {
-        return Err("proof-scope execution OS/CPU contradicts the selected Nix system".into());
-    }
+    check_native_execution(
+        &input.nix_system,
+        &input.execution,
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+    )?;
     for (key, expected) in [("OMP_NUM_THREADS", "1"), ("OPENBLAS_NUM_THREADS", "1")] {
         if input.environment.get(key).map(String::as_str) != Some(expected) {
             return Err(format!("proof-scope environment requires {key}={expected}"));
@@ -737,15 +779,15 @@ fn check_identity(
                 input.compiler.target
             ));
         }
-        if !target.starts_with("x86_64")
-            || !target.contains("linux")
-            || !input.chelis.build_host.starts_with("x86_64")
-            || !input.chelis.build_host.contains("linux")
-            || !input.chelis.build_target.starts_with("x86_64")
-            || !input.chelis.build_target.contains("linux")
+        let architecture = proof_system_architecture(&input.nix_system)
+            .ok_or("proof-scope Nix system is not a supported native Linux system")?;
+        if !is_linux_triple_for(&target, architecture)
+            || !is_linux_triple_for(&input.chelis.build_host, architecture)
+            || !is_linux_triple_for(&input.chelis.build_target, architecture)
         {
             return Err(format!(
-                "compiler target {target:?} or Rust host/target contradicts x86_64-linux"
+                "compiler target {target:?} or Rust host/target contradicts {}",
+                input.nix_system
             ));
         }
         for library in [
@@ -1303,12 +1345,82 @@ pub(super) fn run(
 mod tests {
     #[cfg(unix)]
     use super::capture;
-    use super::first_difference;
+    use super::{ExecutionIdentity, check_native_execution, first_difference, is_linux_triple_for};
     use chelis_types::agreement::compare_exact_observations;
     #[cfg(unix)]
     use std::collections::BTreeMap;
     #[cfg(unix)]
     use std::time::Duration;
+
+    fn execution(os: &str, cpu_isa: &str) -> ExecutionIdentity {
+        ExecutionIdentity {
+            os: os.into(),
+            cpu_isa: cpu_isa.into(),
+        }
+    }
+
+    #[test]
+    fn each_supported_linux_system_accepts_its_own_native_host() {
+        for (system, architecture) in [("x86_64-linux", "x86_64"), ("aarch64-linux", "aarch64")] {
+            assert_eq!(
+                check_native_execution(
+                    system,
+                    &execution("linux", architecture),
+                    "linux",
+                    architecture
+                ),
+                Ok(()),
+                "{system}"
+            );
+        }
+    }
+
+    #[test]
+    fn unsupported_or_contradicting_systems_are_rejected() {
+        for (system, os, cpu_isa, host_os, host_architecture) in [
+            // A system outside the closed table.
+            ("aarch64-darwin", "macos", "aarch64", "macos", "aarch64"),
+            ("x86_64-darwin", "macos", "x86_64", "macos", "x86_64"),
+            ("riscv64-linux", "linux", "riscv64", "linux", "riscv64"),
+            ("", "linux", "x86_64", "linux", "x86_64"),
+            // The scope names one system and its execution names another.
+            ("aarch64-linux", "linux", "x86_64", "linux", "x86_64"),
+            ("x86_64-linux", "linux", "aarch64", "linux", "aarch64"),
+            // The scope agrees with itself but not with the host.
+            ("aarch64-linux", "linux", "aarch64", "linux", "x86_64"),
+            ("x86_64-linux", "linux", "x86_64", "linux", "aarch64"),
+            ("x86_64-linux", "linux", "x86_64", "macos", "x86_64"),
+            ("x86_64-linux", "macos", "x86_64", "macos", "x86_64"),
+        ] {
+            assert!(
+                check_native_execution(system, &execution(os, cpu_isa), host_os, host_architecture)
+                    .is_err(),
+                "{system} {os}/{cpu_isa} on {host_os}/{host_architecture}"
+            );
+        }
+    }
+
+    #[test]
+    fn linux_triples_must_name_the_selected_architecture() {
+        for (triple, architecture) in [
+            ("x86_64-unknown-linux-gnu", "x86_64"),
+            ("x86_64-pc-linux-gnu", "x86_64"),
+            ("aarch64-unknown-linux-gnu", "aarch64"),
+        ] {
+            assert!(is_linux_triple_for(triple, architecture), "{triple}");
+        }
+        for (triple, architecture) in [
+            ("aarch64-unknown-linux-gnu", "x86_64"),
+            ("x86_64-unknown-linux-gnu", "aarch64"),
+            ("x86_64h-apple-darwin", "x86_64"),
+            ("aarch64-apple-darwin", "aarch64"),
+            ("aarch64_be-unknown-linux-gnu", "aarch64"),
+            ("x86_64-unknown-linuxish-gnu", "x86_64"),
+            ("", "x86_64"),
+        ] {
+            assert!(!is_linux_triple_for(triple, architecture), "{triple}");
+        }
+    }
 
     #[cfg(unix)]
     #[test]
