@@ -9,7 +9,8 @@
 //! included: one program per obligation over a per-run constant. The module
 //! mixes passing, refuted (with shrink trials that trap) and trapping
 //! producers over scalar, boolean, Option and tensor signatures, plus a
-//! nullary producer.
+//! nullary producer. A rank-0 tensor input, which the per-sample probe
+//! misspelled as rank 1, now checks.
 //!
 //! A producer whose input is itself an opaque record is evaluated per sample,
 //! decided from its signature before anything runs (its argument is a record,
@@ -58,6 +59,19 @@ def half() -> Probability = Probability { value: 0.5 }
 "#;
 
 const PRODUCERS: usize = 9;
+
+/// A producer of a rank-0 tensor. The per-sample probe spelled its sample as
+/// a rank-1 literal, so every sample errored; the call binds it at shape `[]`
+/// and the obligation checks.
+const RANK0: &str = r#"module Stats.Rank0
+export (rank0)
+@opaque
+@invariant(p) (p.value >= 0.0)
+type Pos =
+  | Pos { value: f32 }
+
+def rank0(t: tensor[f32]) -> Pos = Pos { value: abs(tensor_to_scalar(t)) }
+"#;
 
 /// A producer whose input is an opaque record.
 const PER_SAMPLE: &str = r#"module Stats.Scale
@@ -155,6 +169,18 @@ fn scalar_and_tensor_producers_compile_once_per_obligation() {
         "each scalar/tensor producer's obligation compiles once whatever the sample \
          count, shrinks included: one obligation compiles {single}, all {PRODUCERS} \
          compile by sample count {counts:?} (chelis#3800)"
+    );
+
+    // A rank-0 tensor input is bound at its own rank, and the obligation
+    // reaches its verdict.
+    let (outcomes, _) = run(RANK0, 25, None);
+    assert_eq!(
+        outcomes
+            .iter()
+            .map(|outcome| (outcome.status, outcome.reason.as_deref()))
+            .collect::<Vec<_>>(),
+        [(ObligationStatus::Passed, None)],
+        "{outcomes:#?}"
     );
 
     // Opaque-input producers stay on the per-sample route.
