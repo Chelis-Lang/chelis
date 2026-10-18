@@ -153,172 +153,189 @@ fn a_test_worker_thread_reaches_the_same_budget() {
     }
 }
 
-/// Definitions applied at the bottom of [`charged_source`]'s recursion. The
-/// `h` chain runs as one kernel; `leaf` runs as one routed named-axis call,
-/// with `tot` inlined; `grad(total)` and `grad(gated)` run as one transform;
-/// `staged_kernel` and `staged_source` run as staged plans, a `reshape` whose
-/// target an interpreted source stage computes.
-const UNITS: &str = "\
-def h1(x: tensor[2, f32]) -> tensor[2, f32] = add(x, x)
-def h2(x: tensor[2, f32]) -> tensor[2, f32] = h1(h1(x))
-def h3(x: tensor[2, f32]) -> tensor[2, f32] = h2(x)
-def h4(x: tensor[2, f32]) -> tensor[2, f32] = h3(x)
-def total(x: tensor[2, f32]) -> f32 = tensor_to_scalar(sum(h2(x), 0i32))
-def gated(x: tensor[2, f32]) -> f32 = if gt(tensor_to_scalar(sum(x, 0i32)), 100.0f32) then tensor_to_scalar(sum(h4(x), 0i32)) else tensor_to_scalar(sum(x, 0i32))
-def tot[pre, post](x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, ..post, f32] = sum(x, seq)
-def leaf(x: tensor[seq, f32]) -> f32 = tensor_to_scalar(tot(x))
-def via(g: tensor[seq, f32] -> f32, x: tensor[seq, f32]) -> f32 = g(x)
-def t1[n](x: tensor[n, f32]) -> tensor[n, f32] = add(x, x)
-def t2[n](x: tensor[n, f32]) -> tensor[n, f32] = t1(t1(x))
-def k1(v: i64) -> i64 = add(v, 0i64)
-def staged_kernel[m, n](source: tensor[m, f32], x: tensor[n, f32]) -> tensor[*, f32] = reshape(t2(x), [numel(source)])
-def staged_source[m, n](source: tensor[m, f32], x: tensor[n, f32]) -> tensor[*, f32] = reshape(x, [k1(numel(source))])
-def cu(x: tensor[2, f32], k: i64) -> tensor[2, f32] = if gte(k, cast(400, i64)) then x else cu(add(x, x), add(k, cast(1, i64)))
-def loss(x: tensor[2, f32]) -> tensor[f32] = sum(cu(x, cast(0, i64)), 0i32)
-def cus(x: tensor[f32], k: i64) -> tensor[f32] = if gte(k, cast(300, i64)) then x else cus(add(x, x), add(k, cast(1, i64)))
-def one(x: tensor[f32]) -> tensor[f32] = cus(x, cast(0, i64))
-def kfold(x: tensor[2, f32]) -> tensor[2, f32] = fold(fn (acc: tensor[2, f32], v: i64) -> h2(acc), x, [1i64, 2i64])
-def cua(x: tensor[*, f32], k: i64) -> tensor[*, f32] = if gte(k, cast(400, i64)) then x else cua(add(x, x), add(k, cast(1, i64)))
-def ascribed(x: tensor[*, f32]) -> tensor[f32] = {
-  _ = print(\"in\")
-  y: tensor[2, f32] = cua(x, cast(0, i64))
-  sum(y, 0i32)
-}
-";
-
-/// `padder` nests `levels - charge` applications and then evaluates `unit`,
-/// which is charged `charge` more.
-fn charged_source(levels: usize, unit: &str, charge: usize) -> String {
-    format!(
-        "{UNITS}def padder(n: i64) -> i64 = if eq(n, 0i64) then {unit} else padder(sub(n, 1i64))\n\
-         out = {{\n  _ = print(\"before\")\n  r = padder({k}i64)\n  _ = print(\"after\")\n  r\n}}\n",
-        k = levels - charge - 1
-    )
-}
-
-/// An application evaluated as a single unit is charged the deepest nesting
-/// of applications its evaluation as a unit performs, every function a
-/// kernel, a routed call or a transform inlines included, so it meets the
-/// bound exactly where the same applications interpreted one at a time
-/// would.
-#[test]
-fn an_application_evaluated_as_a_unit_is_charged_its_deepest_chain() {
-    let tensor = "to_tensor([1.0f32, 2.0f32])";
-    let cases = [
-        // A kernel, by the depth of the functions it inlines.
-        ("kernel h1", format!("numel(h1({tensor}))"), 1, 2),
-        ("kernel h2", format!("numel(h2({tensor}))"), 2, 2),
-        ("kernel h3", format!("numel(h3({tensor}))"), 3, 2),
-        ("kernel h4", format!("numel(h4({tensor}))"), 4, 2),
-        // A routed named-axis call: `leaf` and the `tot` it inlines, and
-        // through `via`'s function parameter one more.
-        ("routed leaf", format!("cast(leaf({tensor}), i64)"), 2, 3),
-        (
-            "routed leaf via g",
-            format!("cast(via(leaf, {tensor}), i64)"),
-            3,
-            3,
-        ),
-        // A transform: `grad(total)`, `total`, and the `h2` chain.
-        ("transform", format!("numel(grad(total)({tensor}))"), 4, 2),
-        // A staged plan: the `t2` chain runs inside a kernel stage and is
-        // charged; `k1` runs in an interpreted source stage and counts
-        // itself, once.
-        (
-            "staged kernel stage",
-            format!("numel(staged_kernel({tensor}, {tensor}))"),
-            3,
-            2,
-        ),
-        (
-            "staged source stage",
-            format!("numel(staged_source({tensor}, {tensor}))"),
-            2,
-            2,
-        ),
-        // A recursion a transform's lowering unrolls: `grad(loss)`, `loss`,
-        // and 401 levels of `cu`; `vmap(one)`, `one`, and 301 of `cus`.
-        (
-            "grad unrolled",
-            format!("numel(grad(loss)({tensor}))"),
-            403,
-            2,
-        ),
-        (
-            "vmap unrolled",
-            format!("numel(vmap(one)({tensor}))"),
-            303,
-            2,
-        ),
-        // A captured local function: `grad`, the inline `fn`, and `h3`'s
-        // chain through `f`.
-        (
-            "captured local",
-            format!(
-                "numel({{\n  f = h3\n  grad(fn (x: tensor[2, f32]) -> sum(f(x), 0i32))({tensor})\n}})"
-            ),
-            5,
-            2,
-        ),
-        // A callback a `fold` over a literal list applies: `kfold`, the
-        // callback, and the `h2` chain.
-        (
-            "literal-list fold callback",
-            format!("numel(kfold({tensor}))"),
-            4,
-            2,
-        ),
-    ];
-    for (case, unit, charge, expected) in cases {
-        assert_evaluates(
-            &format!("{case}, 10,000 levels"),
-            eval(request(charged_source(LEVELS, &unit, charge))),
-            expected,
-        );
-        assert_exhausts_budget(
-            &format!("{case}, 10,001 levels"),
-            eval(request(charged_source(LEVELS + 1, &unit, charge))),
-        );
+/// A function chain `c0 .. c{depth}` over `ty`, each applying the one before:
+/// interpreted, applying `c{depth}` nests `depth + 1` applications.
+fn chain(prefix: &str, generic: &str, ty: &str, depth: usize) -> String {
+    let mut chain = format!("def {prefix}_c0{generic}(x: {ty}) -> {ty} = add(x, x)\n");
+    for index in 1..=depth {
+        chain.push_str(&format!(
+            "def {prefix}_c{index}{generic}(x: {ty}) -> {ty} = {prefix}_c{}(add(x, x))\n",
+            index - 1
+        ));
     }
+    chain
 }
 
-/// A unit's evaluation can perform both arms of a conditional, so a unit
-/// whose deeper arm is not taken can stop the evaluation early: `gated`
-/// takes its shallow arm, two applications interpreted one at a time, but
-/// its transform performs the deeper arm too and is charged six. The
-/// boundary is the same on every run and in every build.
-#[test]
-fn a_unit_is_charged_its_deeper_arm_even_when_it_is_not_taken() {
-    let unit = "numel(grad(gated)(to_tensor([1.0f32, 2.0f32])))";
-    assert_evaluates(
-        "untaken arm, 10,000 charged levels",
-        eval(request(charged_source(LEVELS, unit, 6))),
-        2,
-    );
-    assert_exhausts_budget(
-        "untaken arm, 10,001 charged levels",
-        eval(request(charged_source(LEVELS + 1, unit, 6))),
-    );
+/// The work inside a unit: the chain applied directly, or through a `fold`
+/// or `map` callback, or through a nested `grad`.
+#[derive(Clone, Copy, Debug)]
+enum Inner {
+    Chain,
+    Fold,
+    Map,
+    Transform,
 }
 
-/// A checked local ascription in an interpreted body runs its initializer as
-/// one DAG: `ascribed` prints, so it is interpreted, and the region inlines
-/// 401 levels of `cua`, so a call of it holds 402. Its print runs before the
-/// region is entered, on both sides of the boundary.
+/// An application the evaluator runs as one compiled unit.
+#[derive(Clone, Copy, Debug)]
+enum Unit {
+    Kernel,
+    Staged,
+    Grad,
+    Vmap,
+    NamedAxis,
+    LocalAscription,
+}
+
+/// Where the unit is applied: directly at the bottom of the interpreted
+/// recursion, or inside an interpreted `fold` callback there.
+#[derive(Clone, Copy, Debug)]
+enum Position {
+    Direct,
+    Callback,
+}
+
+/// A program whose interpreted applications, counted from its source, total
+/// `levels`, with `unit` applied at the bottom of an interpreted recursion and
+/// nesting `depth + 1` further applications inside its compiled body.
+fn unit_source(
+    unit: Unit,
+    inner: Inner,
+    position: Position,
+    depth: usize,
+    levels: usize,
+) -> String {
+    let tensor = "to_tensor([1.0f32, 2.0f32])";
+    let (prefix, generic, ty) = match unit {
+        Unit::Kernel | Unit::Grad => ("two", "", "tensor[2, f32]"),
+        Unit::Staged => ("gen", "[n]", "tensor[n, f32]"),
+        Unit::Vmap => ("scalar", "", "tensor[f32]"),
+        Unit::NamedAxis => ("seq", "", "tensor[seq, f32]"),
+        Unit::LocalAscription => ("star", "", "tensor[*, f32]"),
+    };
+    let mut program = chain(prefix, generic, ty, depth);
+    program.push_str(
+        "def tot[pre, post](x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, ..post, f32] = sum(x, seq)\n",
+    );
+    let top = format!("{prefix}_c{depth}");
+    let total = match unit {
+        Unit::Vmap => format!("def inner_total(x: {ty}) -> tensor[f32] = {top}(x)\n"),
+        _ => format!("def inner_total{generic}(x: {ty}) -> tensor[f32] = sum({top}(x), 0i32)\n"),
+    };
+    program.push_str(&total);
+    let body = match inner {
+        Inner::Chain => format!("{top}(x)"),
+        Inner::Fold => format!("fold(fn (acc: {ty}, v: i64) -> {top}(acc), x, [1i64])"),
+        Inner::Map => format!("index(map(fn (v: i64) -> {top}(x), [1i64]), 0i64)"),
+        Inner::Transform => "grad(inner_total)(x)".to_owned(),
+    };
+    let (definition, call) = match unit {
+        Unit::Kernel => (
+            format!("def unit(x: tensor[2, f32]) -> tensor[2, f32] = {body}\n"),
+            format!("numel(unit({tensor}))"),
+        ),
+        Unit::Staged => (
+            format!(
+                "def unit[m, n](source: tensor[m, f32], x: tensor[n, f32]) -> tensor[*, f32] = \
+                 reshape({body}, [numel(source)])\n"
+            ),
+            format!("numel(unit({tensor}, {tensor}))"),
+        ),
+        Unit::Grad => (
+            format!("def unit(x: tensor[2, f32]) -> tensor[f32] = sum({body}, 0i32)\n"),
+            format!("numel(grad(unit)({tensor}))"),
+        ),
+        Unit::Vmap => (
+            format!("def unit(x: tensor[f32]) -> tensor[f32] = {body}\n"),
+            format!("numel(vmap(unit)({tensor}))"),
+        ),
+        Unit::NamedAxis => (
+            format!("def unit(x: tensor[seq, f32]) -> f32 = tensor_to_scalar(tot({body}))\n"),
+            format!("if gt(unit({tensor}), 0.0f32) then 1i64 else 0i64"),
+        ),
+        // `unit` prints, so it is interpreted; its ascribed binding runs as
+        // one DAG, which is no application.
+        Unit::LocalAscription => (
+            format!(
+                "def unit(x: tensor[*, f32]) -> tensor[f32] = {{\n  _ = print(\"in\")\n  \
+                 y: tensor[2, f32] = {body}\n  sum(y, 0i32)\n}}\n"
+            ),
+            format!("numel(unit({tensor}))"),
+        ),
+    };
+    program.push_str(&definition);
+    // Above `padder`: the unit, one level, and in `Callback` position the
+    // interpreted callback that applies it.
+    let (above, leaf) = match position {
+        Position::Direct => (1, call),
+        Position::Callback => (
+            2,
+            format!("fold(fn (acc: i64, v: i64) -> add(acc, {call}), 0i64, [1i64])"),
+        ),
+    };
+    // `padder(k)` nests `k + 1` applications.
+    let k = levels - above - 1;
+    program.push_str(&format!(
+        "def padder(n: i64) -> i64 = if eq(n, 0i64) then {leaf} else padder(sub(n, 1i64))\n\
+         out = padder({k}i64)\n"
+    ));
+    program
+}
+
+/// An application the evaluator runs as one compiled unit counts one level,
+/// however many applications its compiled body nests: the trip point is the
+/// count of interpreted applications in the source, whatever the depth
+/// inside the unit (spec/08-backends.md section 1.1). Every unit kind with
+/// every kind of inner work that compiles into it, in both positions, at two
+/// inner depths: 10,000 counted levels evaluate and 10,001 report the budget.
+///
+/// Evidentiary status: REGRESSION TEST. A unit that also counted the
+/// applications its body nests would trip at 10,000 for the deeper inner
+/// chain; a unit that counted nothing would evaluate at 10,001.
 #[test]
-fn a_local_ascription_region_is_charged_its_inline_depth() {
-    let unit = "numel(ascribed(to_tensor([1.0f32, 2.0f32])))";
-    let result = eval(request(charged_source(LEVELS, unit, 402)))
-        .unwrap_or_else(|error| panic!("10,000 levels evaluates: {:?}", error.errors));
-    assert_eq!(result.transcript, ["before", "in", "after"]);
-    assert_eq!(result.roots[0].display.as_deref(), Some("1"));
-    let error = eval(request(charged_source(LEVELS + 1, unit, 402)))
-        .expect_err("10,001 levels exhausts the budget");
-    assert_eq!(error.transcript, ["before", "in"]);
-    let messages: Vec<&str> = error
-        .errors
-        .iter()
-        .map(|diagnostic| diagnostic.message.as_str())
-        .collect();
-    assert_eq!(messages, [BUDGET_MESSAGE], "{:?}", error.errors);
+fn a_compiled_unit_counts_one_level_whatever_it_nests() {
+    use Inner::{Chain, Fold, Map, Transform};
+    // The inner work each unit compiles. A kernel, a staged plan or a
+    // named-axis call that holds a list callback, or an ascription whose
+    // initializer does, is not one unit: it is interpreted application by
+    // application, which the other tests count.
+    let cases = [
+        (Unit::Kernel, [Chain, Transform].as_slice()),
+        (Unit::Staged, [Chain, Transform].as_slice()),
+        (Unit::Grad, [Chain, Fold, Map, Transform].as_slice()),
+        (Unit::Vmap, [Chain, Fold, Map, Transform].as_slice()),
+        (Unit::NamedAxis, [Chain, Transform].as_slice()),
+        (Unit::LocalAscription, [Chain, Transform].as_slice()),
+    ];
+    for (unit, inners) in cases {
+        for &inner in inners {
+            for position in [Position::Direct, Position::Callback] {
+                for depth in [0, 24] {
+                    let case = format!("{unit:?} {inner:?} {position:?} inner depth {depth}");
+                    let within = eval(request(unit_source(unit, inner, position, depth, LEVELS)));
+                    let past = eval(request(unit_source(
+                        unit,
+                        inner,
+                        position,
+                        depth,
+                        LEVELS + 1,
+                    )));
+                    assert!(
+                        within.is_ok(),
+                        "{case}, 10,000 levels: {:?}",
+                        within.err().map(|error| error.errors)
+                    );
+                    let error = past.expect_err(&format!("{case}, 10,001 levels: evaluated"));
+                    assert!(
+                        error
+                            .errors
+                            .iter()
+                            .any(|diagnostic| diagnostic.message == BUDGET_MESSAGE),
+                        "{case}, 10,001 levels: {:?}",
+                        error.errors
+                    );
+                }
+            }
+        }
+    }
 }

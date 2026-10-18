@@ -260,6 +260,9 @@ impl<'a> EvalContext<'a> {
             staged.insert(placeholder, tensor_value);
         }
         let app_expr = Expr::node(DeepTag::App, Metadata::default(), app_children, span);
+        // The routed call is one application, entered here as the
+        // interpreter would enter it (spec/08-backends.md section 1.1).
+        let _application = super::eval::EvalCallStackFrame::enter()?;
         // spec/03 §4.4: the routed body runs here, after its actuals, so the
         // value declarations it reaches initialize here even when the lowered
         // DAG never demands them.

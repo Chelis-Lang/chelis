@@ -54,9 +54,11 @@ pub(super) const EVAL_MAX_NESTED_APPLICATIONS: usize = 10_000;
 /// The stack segment evaluation runs on. It holds
 /// [`EVAL_MAX_NESTED_APPLICATIONS`] levels of an ordinary body before the
 /// native-stack backstop fires, so the budget, not the stack, ends a deep
-/// recursion. The largest levels measured are a body nested 64 expressions
-/// deep, about 10 KB of stack in an optimized build and 64 KB in an
-/// unoptimized one, and a recursion through a `fold` callback, up to about
+/// recursion. Each expression a recursive call sits inside adds stack to
+/// every level: measured at the budget, a call nested up to 16 expressions
+/// deep reaches it in an optimized build, which meets the backstop first
+/// from about 24, and up to 6 deep in an unoptimized one, where 7 peaks at
+/// about 1.9 GB. A recursion through a `fold` callback takes up to about
 /// 135 KB a level unoptimized. The segment is reserved address space: only
 /// the pages a recursion touches become resident.
 pub(super) const EVAL_SEGMENT_BYTES: usize = if cfg!(debug_assertions) {
@@ -74,12 +76,12 @@ const EVAL_FALLBACK_MAX_CALL_DEPTH: usize = 8;
 /// expression visits: each recursive user function crosses the callable
 /// boundary, while ordinary expression evaluation stays off this hot-path
 /// budget check.
-struct EvalCallStackFrame;
+pub(super) struct EvalCallStackFrame;
 
 impl EvalCallStackFrame {
     /// Begin an application, or report why it cannot be entered: it would
     /// exceed the recursion budget, or the native stack is nearly exhausted.
-    fn enter() -> Result<Self, String> {
+    pub(super) fn enter() -> Result<Self, String> {
         let depth = EVAL_CALL_DEPTH.with(|depth| {
             depth.set(depth.get() + 1);
             depth.get()
