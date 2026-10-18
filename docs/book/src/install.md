@@ -115,8 +115,11 @@ generated static library.
 
 ## Install with Nix
 
-The Chelis flake builds the compiler from source for Linux x86_64 and macOS
-arm64. It is a second channel beside the release binaries. `chelisup` stays
+The Chelis flake builds the compiler from source for `x86_64-linux`,
+`aarch64-linux`, and `aarch64-darwin`. The `aarch64-linux` packages start with
+the first release after 0.20.0. `x86_64-darwin` is not supported, because
+nixpkgs removes that system and Devenv publishes no build for it. The flake is
+a second channel beside the release binaries. `chelisup` stays
 the installer of release toolchains and selects the compiler version for each
 project. Run a release compiler, or install it in your Nix profile. Replace
 `X.Y.Z` with a release version, as in the commands above:

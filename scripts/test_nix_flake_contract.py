@@ -68,6 +68,55 @@ FRESHNESS_STEP = re.compile(
 )
 
 
+def assert_install_guide_names_supported_systems(guide: str) -> None:
+    """Check the Nix section of the install guide against the supported systems."""
+    start = guide.find("\n## Install with Nix\n")
+    if start < 0:
+        raise AssertionError("the install guide must have the section Install with Nix")
+    following = guide.find("\n## ", start + 1)
+    section = " ".join(guide[start : following if following >= 0 else None].split())
+    sentences = re.split(r"(?<=\.) ", section)
+    # One sentence lists every supported system. The sentence that names the
+    # most of them shows the systems that the list omits.
+    listing = max(
+        sentences, key=lambda sentence: sum(f"`{system}`" in sentence for system in EXPECTED_SYSTEMS)
+    )
+    missing = [system for system in EXPECTED_SYSTEMS if f"`{system}`" not in listing]
+    if missing:
+        raise AssertionError(
+            f"the Nix section of the install guide must list the supported systems {missing}"
+        )
+    if not any(
+        "`x86_64-darwin` is not supported" in sentence
+        and "nixpkgs" in sentence
+        and "Devenv" in sentence
+        for sentence in sentences
+    ):
+        raise AssertionError(
+            "the Nix section of the install guide must say that x86_64-darwin is not "
+            "supported, with the nixpkgs and the Devenv reason"
+        )
+
+
+def add_store_toolchain(scratch: Path) -> Path:
+    """Add a fake toolchain that reports chelis 0.0.7 to the Nix store."""
+    source = scratch / "toolchain"
+    fake_chelis = source / "bin" / "chelis"
+    fake_chelis.parent.mkdir(parents=True)
+    fake_chelis.write_text("#!/bin/sh\nprintf 'chelis 0.0.7\\n'\n", encoding="utf-8")
+    fake_chelis.chmod(0o755)
+    added = subprocess.run(
+        [Path(NIX).parent / "nix-store", "--add", source],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if added.returncode != 0:
+        raise AssertionError(added.stderr)
+    return Path(added.stdout.strip())
+
+
 def read_contract_inputs() -> dict[str, str | None]:
     cargo_nix = REPO_ROOT / "Cargo.nix"
     return {
@@ -428,17 +477,20 @@ class NixFlakeContractTests(unittest.TestCase):
                         "license = meta.license.spdxId; "
                         "mainProgram = meta.mainProgram or null; }",
                     )
-                    self.assertTrue(meta["description"])
-                    self.assertEqual(meta["homepage"], "https://chelis.ch")
-                    self.assertEqual(meta["license"], "MIT")
-                    self.assertEqual(sorted(meta["platforms"]), EXPECTED_SYSTEMS)
-                    self.assertEqual(meta["mainProgram"], main_program)
+                    where = f"packages.{system}.{name}.meta"
+                    self.assertTrue(meta["description"], f"{where}.description")
+                    self.assertEqual(meta["homepage"], "https://chelis.ch", f"{where}.homepage")
+                    self.assertEqual(meta["license"], "MIT", f"{where}.license")
+                    self.assertEqual(
+                        sorted(meta["platforms"]), EXPECTED_SYSTEMS, f"{where}.platforms"
+                    )
+                    self.assertEqual(meta["mainProgram"], main_program, f"{where}.mainProgram")
             for app in EXPECTED_APPS:
                 with self.subTest(system=system, app=app):
                     description = nix_raw(
                         "eval", "--raw", f".#apps.{system}.{app}.meta.description"
                     )
-                    self.assertTrue(description)
+                    self.assertTrue(description, f"apps.{system}.{app}.meta.description")
 
     @REQUIRES_NIX
     def test_overlay_adds_the_packages_of_the_consumer_system(self) -> None:
@@ -920,25 +972,11 @@ class NixFlakeContractTests(unittest.TestCase):
         package = Path(
             nix_raw("build", "--no-link", "--print-out-paths", ".#chelisup")
         )
-        nix_store = Path(NIX).parent / "nix-store"
         with tempfile.TemporaryDirectory() as raw_scratch:
             scratch = Path(raw_scratch)
-            source = scratch / "toolchain"
-            fake_chelis = source / "bin" / "chelis"
-            fake_chelis.parent.mkdir(parents=True)
-            fake_chelis.write_text("#!/bin/sh\nprintf 'chelis 0.0.7\\n'\n", encoding="utf-8")
-            fake_chelis.chmod(0o755)
-            added = subprocess.run(
-                [nix_store, "--add", source],
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                check=False,
-            )
-            self.assertEqual(added.returncode, 0, added.stderr)
-            store_toolchain = Path(added.stdout.strip())
+            store_toolchain = add_store_toolchain(scratch)
             outside = scratch / "outside"
-            shutil.copytree(source, outside)
+            shutil.copytree(scratch / "toolchain", outside)
             empty = scratch / "empty"
             empty.mkdir()
 
@@ -1000,8 +1038,112 @@ class NixFlakeContractTests(unittest.TestCase):
             self.assertFalse(root.exists())
             self.assertFalse(root.is_symlink())
 
+    @REQUIRES_NIX
+    def test_failed_uninstall_of_a_linked_toolchain_keeps_its_gc_root(self) -> None:
+        package = Path(
+            nix_raw("build", "--no-link", "--print-out-paths", ".#chelisup")
+        )
+        with tempfile.TemporaryDirectory() as raw_scratch:
+            scratch = Path(raw_scratch)
+            store_toolchain = add_store_toolchain(scratch)
+            home = scratch / "home"
+            toolchains = home / "toolchains"
+            entry = toolchains / "0.0.7"
+            root = home / "nix-gcroots" / "toolchain-0.0.7"
+            environment = os.environ.copy()
+            environment["CHELIS_HOME"] = str(home)
+            environment["PATH"] = ""
+
+            def chelisup(*args: object) -> subprocess.CompletedProcess[str]:
+                return subprocess.run(
+                    [package / "bin" / "chelisup", *args],
+                    cwd=REPO_ROOT,
+                    env=environment,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    check=False,
+                )
+
+            linked = chelisup("link", store_toolchain)
+            self.assertEqual(linked.returncode, 0, linked.stderr)
+            self.assertTrue(root.is_symlink(), f"missing Nix GC root: {root}")
+
+            # The real installer cannot remove the link from a read-only
+            # toolchains directory, so the uninstall fails.
+            toolchains.chmod(0o555)
+            try:
+                failed = chelisup("uninstall", "0.0.7")
+            finally:
+                toolchains.chmod(0o755)
+            self.assertNotEqual(failed.returncode, 0, failed.stdout)
+            self.assertIn("could not remove the link", failed.stderr)
+            self.assertTrue(entry.is_symlink())
+            self.assertTrue(
+                root.is_symlink(), f"the failed uninstall removed the Nix GC root {root}"
+            )
+            self.assertEqual(root.resolve(), store_toolchain.resolve())
+
+    @REQUIRES_NIX
+    def test_crate_build_fails_without_a_declared_external_read(self) -> None:
+        if not NIX_STORE:
+            self.skipTest("nix-store is not installed")
+        system = nix_raw("eval", "--impure", "--raw", "--expr", "builtins.currentSystem")
+        if system not in EXPECTED_SYSTEMS:
+            self.skipTest(f"{system} is not a supported package system")
+        dropped = "grammars/tree-sitter-chelis-surf/src/parser.c"
+        manifest = tomllib.loads((REPO_ROOT / "Cargo.toml").read_text(encoding="utf-8"))
+        version = manifest["workspace"]["package"]["version"]
+        with tempfile.TemporaryDirectory(prefix="chelis-build-read-") as raw_scratch:
+            # A path flake rejects a symlink in its path, such as /var on macOS.
+            flake = Path(raw_scratch).resolve() / "flake"
+            copy_flake_source(flake)
+            packages = flake / "nix" / "packages.nix"
+            text = packages.read_text(encoding="utf-8")
+            entry = f'      "{dropped}"\n'
+            self.assertEqual(text.count(entry), 1)
+            packages.write_text(text.replace(entry, ""), encoding="utf-8")
+            (crate,) = [
+                path
+                for path in crate_derivations(flake, system)
+                if Path(path).name[33:] == f"rust_tree-sitter-chelis-{version}.drv"
+            ]
+            built = subprocess.run(
+                [NIX, "build", "--no-link", "--print-build-logs", f"{crate}^*"],
+                cwd=flake,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                check=False,
+            )
+        self.assertNotEqual(
+            built.returncode, 0, f"the crate built without {dropped}:\n{built.stdout}"
+        )
+        missing = re.escape(dropped)
+        self.assertRegex(
+            built.stdout,
+            rf"(?im)^.*(no such file.*{missing}|{missing}.*no such file)",
+        )
+
 
 class NixSourceContractTests(unittest.TestCase):
+    def test_install_guide_names_each_supported_system(self) -> None:
+        guide = (REPO_ROOT / "docs" / "book" / "src" / "install.md").read_text(encoding="utf-8")
+        assert_install_guide_names_supported_systems(guide)
+
+    def test_install_guide_rule_rejects_each_omission(self) -> None:
+        guide = (REPO_ROOT / "docs" / "book" / "src" / "install.md").read_text(encoding="utf-8")
+        mutations = {
+            system: (f"`{system}`", "a system") for system in EXPECTED_SYSTEMS
+        }
+        mutations["x86_64-darwin"] = ("`x86_64-darwin` is not supported", "`x86_64-darwin` works")
+        for name, (old, new) in mutations.items():
+            with self.subTest(mutation=name):
+                mutated = guide.replace(old, new)
+                self.assertNotEqual(mutated, guide)
+                with self.assertRaisesRegex(AssertionError, name):
+                    assert_install_guide_names_supported_systems(mutated)
+
     def test_package_shape_rejects_every_undeclared_path(self) -> None:
         checks = (REPO_ROOT / "nix" / "checks.nix").read_text(encoding="utf-8")
         self.assertIn("assert_exact_inventory", checks)
