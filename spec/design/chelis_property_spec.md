@@ -399,28 +399,132 @@ admits a property only when every binder is `f32`/`f64`, so a property with an
 `i32` binder cannot enter it. Widening that lane to mixed binders would be the
 fix.
 
-The shared ordinal has a second, larger consequence: **for several binders the
-schedule visits only the diagonal of the edge grid.** Binders with equal
-ranges take the same candidate index at every scheduled attempt, so
-`forall(x: f64, y: f64) where x > 0.0f64, y > 0.0f64` never pairs a large `x`
-with a tiny `y`, and a property false only at such a pair -- `x / y` being
-finite, for instance -- still reports `fuzz_validated`. That is chelis#3636's
-own defect surviving for multi-binder properties.
+### Why the multi-binder diagonal is still open (chelis#3697)
 
-A per-binder cursor is nonetheless not the fix, and the reason is budget
-rather than reproducibility: an index derived from `attempt` is a pure
-function of `attempt`, so a mixed-radix odometer would be exactly as
-reproducible and as seed-independent. It would, however, hold the slowest
-binder at one candidate for a whole cycle. The unguarded `f64` schedule is 44
+The shared attempt ordinal indexes every binder's schedule, so binders with
+equal ranges take the same candidate at every scheduled attempt and a
+multi-binder property is evaluated only on the **diagonal** of the edge grid.
+`forall(x: f64, y: f64) where x > 0.0f64, y > 0.0f64` never pairs a large `x`
+with a tiny `y`, and `x / y` being finite -- false at exactly such a pair --
+reports `fuzz_validated` at every sample count measured, up to 50000 with
+`accepted == attempted` throughout. The bound is mechanical rather than
+sampled: past attempt 44 the draw falls back to the `[-10, 10]` window, and
+the overflow needs `y` near `1e-309`, which that window cannot reach. That is
+chelis#3636's own
+defect surviving for multi-binder properties, and chelis#3697 owns it.
+
+**No off-diagonal policy is implemented.** This section records what an
+attempt at one measured, because the measurements constrain the design far
+more than the original issue's option list did. Each figure below was taken
+with `--tier fuzz-only` at the stated budget against a build of this
+tier.
+
+#### Reindexing alone cannot pay for it
+
+An index derived from `attempt` is a pure function of `attempt`, so a
+mixed-radix odometer over the full schedule would be exactly as reproducible
+and as seed-independent as the diagonal. The unguarded `f64` schedule is 44
 candidates long, so at the default 100 samples the diagonal gives every binder
-all 44 of its own classes while covering 44 of 1936 pairs, and an odometer
-gives the slowest binder 3 of 44 while covering 100 of 1936. Full grid
-coverage needs 1936 attempts. No reindexing makes the off-diagonal class
-impossible within a budget linear in the schedule length; it only chooses
-which vanishing fraction of the grid to spend the budget on, and the diagonal
-spends it on the per-binder classes this schedule exists to reach. Closing the
-multi-binder case needs a budget policy, not an index policy; chelis#3697 owns
-that question.
+all 44 of its own classes while covering 44 of 1936 pairs, and a full-schedule
+odometer gives the slowest binder 3 of 44 while covering 100 of 1936. Full
+grid coverage needs 1936 attempts, and `44^n` for `n` binders, so **no index
+policy covers the grid within a budget linear in the schedule length.**
+
+The weaker claim -- that no index policy reaches *any* off-diagonal pair
+cheaply -- is false, and these figures refute it: a full-schedule odometer
+reaches the pair (binder 1's candidate `a`, binder 2's candidate `b`) at cell
+`a + 44b`, so the `x / y` counterexample above is its cell 1. What it buys
+that with is the per-binder coverage chelis#3636 exists to provide. The choice
+is which coverage to keep, not whether a pair is reachable.
+
+#### The attempts after the schedule is spent are not spare
+
+The obvious place to find a budget is the attempts past the schedule, which
+draw uniformly over the narrow proposal window (chelis#644 owns its width).
+chelis#3636 exists because such a draw rarely finds an IEEE edge case, and it
+is tempting to read that as those attempts being nearly worthless. **They are
+not.** They are the only thing that finds a counterexample in the *interior*
+of the window, where no edge candidate and no magnitude-class representative
+lands.
+
+Measured with a property false on `(-7.5, -7.0)` -- 2.5% of the window,
+containing no candidate of any schedule -- at the default 100 samples over
+seeds 0 to 29, against a build that spent those attempts on a
+magnitude-class odometer instead:
+
+| scheduled binders | refutations, uniform draws kept | refutations, attempts spent on pairs |
+|---|---|---|
+| 1 | 20/30 | 20/30 (control: a single binder took no pair) |
+| 2 | 24/30 | 11/30 |
+| 3 | 26/30 | **0/30** |
+| 4 | 23/30 | **0/30** |
+
+The attempt that produced the right-hand column grouped each binder's
+candidates into six magnitude classes — its largest and smallest candidates,
+its smallest strictly positive and largest strictly negative ones, a zero
+where the guards admit one, and the candidate nearest `1.0` in magnitude —
+and ran a mixed-radix odometer over them. Four of those six are non-negative,
+which is why a predecessor drawn from them pushes `y > x` into a non-negative
+range in the next subsection. The classes are recorded because the `6` in the
+arithmetic below is otherwise unverifiable: the code that defined them is not
+in the tree.
+
+At three or more binders a `6`-class odometer needs `6^n >= 216` attempts,
+which exceeds the 56 that follow the 44-attempt diagonal at the default
+budget, so **every** post-diagonal attempt becomes a pair and the uniform
+generator never runs. The loss is total and seed-independent, not a reduced
+chance. Any future policy that funds pairing from these attempts owes this
+measurement a bound, and a negative control that a window-interior refutation
+still happens at the arity it targets.
+
+#### The constraint-directed lane has no stable per-binder diagonal
+
+`ConstraintSamplingPlan::sample` recomputes each binder's
+`float_edge_candidates` **inside the attempt**, from the order predecessors
+already drawn in that attempt. So an index into that list does not name a
+fixed value: it names entry `i` of a list whose contents depend on what the
+predecessor got. Two consequences bind any scheme that proposes new values
+here:
+
+- Changing a predecessor's value re-indexes every successor, and entries the
+  schedule proposed at attempt `i` can end up proposed at no attempt at all.
+  Four of the six magnitude classes listed above are non-negative for an
+  unbounded binder, so a predecessor drawn from them pushes `y > x` into a
+  non-negative range and deletes every negative candidate from `y`'s list.
+- The perturbation cannot be confined to predecessors. A proposal anywhere in
+  the property changes how many values the attempt draws from the generator,
+  which shifts every later predecessor's uniform draw and so its successors'
+  ranges.
+
+Measured on `forall(x: f64, y: f64) where y > x, <twenty `!=` exclusions on
+y>: (y != -1.0e-323f64)` at the default budget over 30 seeds: 18/30
+refutations as the tier stands, 0/30 with pairs proposed everywhere, and
+11/30 with pairs withheld from predecessors only. Only switching the scheme
+off for the whole property restored 18/30.
+
+#### What a future policy has to satisfy
+
+1. Not fund itself from the post-diagonal uniform draws without bounding the
+   loss above, at the arity it targets.
+2. Not propose values in the constraint-directed lane for a property whose
+   binders are order-guarded, or else make that lane's per-binder sequence
+   independent of the other binders' draws.
+3. Keep every binder's own schedule reachable in the samples it takes today:
+   a schedule longer than the span a policy reserves for it must not have its
+   tail displaced past the budget. An `!=` exclusion adds **at most** two
+   candidates — its two representable neighbours — so `L <= 44 + 2k` for `k`
+   exclusions, and a policy reserving a span must use the bound rather than an
+   equality. It is only a bound because `push` drops a value the exclusion
+   list contains, so an exclusion that is itself a schedule member removes
+   itself first: `x != 1.0f64` measures `L = 45`, not 46, and `x != 0.0f64`
+   measures **42**, because `0.0 == -0.0` in Rust deletes both zeros while the
+   neighbours it would add are already the subnormal candidates.
+4. Leave a single-binder property alone, and leave a binder that reads no
+   schedule -- `bool`, `string`, a tensor -- out of any arity or index
+   arithmetic, so it neither enables a scheme nor consumes a position in it.
+
+Those four are the shapes an attempt broke, each measured, and they are
+recorded here so the next attempt starts from them.
 
 The shared Tier-C runner is enabled in every normal CLI build, including a
 build without the `smt` feature, and is also the Tide implementation. Solver
@@ -440,6 +544,20 @@ The chelis#3636 edge-schedule oracle is:
 ```sh
 cargo nextest run -p chelis-cli --test issue_3636_edge_sampling
 ```
+
+The chelis#3697 hazard oracle is:
+
+```sh
+cargo nextest run -p chelis-cli --test issue_3697_multi_binder_hazards
+```
+
+It pins the two measurements above that no existing test covers: the
+post-diagonal uniform draws' yield, and an order successor's dependence on its
+predecessor. The diagonal limitation itself is pinned by the chelis#3636
+oracle three lines above — `issue_3636_multi_binder_schedule_visits_only_the_diagonal`
+and its narrowed witness — so closing chelis#3697 means deleting assertions
+there, not here. A policy that changes any of them has to change those tests
+deliberately.
 
 V1 reports the first deterministic counterexample. Shrinking is deferred.
 
