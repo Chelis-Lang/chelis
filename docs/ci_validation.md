@@ -34,7 +34,7 @@ Native Nix validation has total job timeouts of 135 minutes on Linux and 145 min
 
 The manual package-expansion lane is separate. Its executor's 80-minute deadline starts at `run-shard`, inside the unchanged 90-minute total job timeout.
 
-GitHub starts no workflow for a release that `GITHUB_TOKEN` publishes, so the `release` event never starts `nix-packages.yml`. After `release.yml` publishes a release, its `dispatch-nix-packages` job dispatches `nix-packages.yml` on the release tag. A daily schedule at 02:37 UTC runs `nix-packages.yml` on `main`, and a maintainer can also dispatch it on `main`. Only a run on `main` or on a `v*` tag pushes to the `chelis-lang` Cachix cache. It pushes the package outputs, the cvc5 tree, the Rust crate builds, and the closure of the Devenv shell root and profile. Every run lists these paths with `--dry-run`, but a dispatch on another branch pushes nothing.
+GitHub starts no workflow for a release that `GITHUB_TOKEN` publishes, so the `release` event never starts `nix-packages.yml`. After `release.yml` publishes a release, its `dispatch-nix-packages` job dispatches `nix-packages.yml` on the release tag. A daily schedule at 02:37 UTC runs `nix-packages.yml` on `main`, and a maintainer can also dispatch it on `main`. Only a run on `main` or on a `v*` tag pushes to the `chelis-lang` Cachix cache. It pushes the package outputs, the cvc5 tree, the Rust crate builds, and the closures of the Devenv profile and three Devenv shell roots. Every run lists these paths with `--dry-run`, but a dispatch on another branch pushes nothing.
 
 The `cache-status` job of `nix-packages.yml` runs `scripts/nix_cache_status.py`. The script evaluates the output paths of `chelis`, `chelis-runtime`, and `chelisup` for each supported system. Then it asks `https://chelis-lang.cachix.org` for each path with `nix path-info --store`.
 
@@ -43,6 +43,10 @@ On a scheduled run, the native jobs skip when the cache holds every path, becaus
 The native Nix jobs activate the base Devenv configuration, which `devenv test` also uses, instead of the `ci` profile. That profile adds OpenBLAS and the numeric cache, and no step of these jobs uses them. The base configuration does not build the legacy Kache fixture.
 
 The jobs also read the `chelis-lang` cache through `NIX_CONFIG`. A run downloads Kache, the Rust toolchain, the Devenv profile, and the cvc5 tree from that cache. It also downloads the crate builds of the last push from `main` or a tag. It builds only the paths that the cache does not hold.
+
+The step "Activate the project CI environment" runs `scripts/ci_devenv.py`. When activation completes, that script keeps two GC roots under `.devenv/gc/`. `activated-shell` holds the shell that activation built. `activated-shell-env` holds the shell environment that Devenv built from that shell. Devenv keeps no root for that environment, so the script reads its store path from the `shell` rows of `.devenv/nix-eval-cache.db`, the evaluation cache of Devenv 2.4. If the script cannot find that path, activation fails.
+
+The step "Run the Devenv shell smoke checks" then points `.devenv/gc/shell` at the `devenv test` shell. `scripts/publish_nix_cache.py` pushes the closures of all three roots. If either activated root is missing, the publisher stops before it runs a Nix command. Thus a later run on an unchanged Devenv configuration downloads the activated shell and its environment, and it builds no derivation during activation.
 
 The `nix-eval` job of `ci.yml` is the pull request check for the Nix files. It builds nothing, so it needs no cache. It evaluates every flake output of every supported system with import from derivation disabled. It also checks the format of each tracked Nix file except the generated `Cargo.nix`. Pull requests and pushes do not start `nix-packages.yml`, so the native package builds stay out of pull request CI.
 

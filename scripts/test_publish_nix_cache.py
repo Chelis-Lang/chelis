@@ -43,13 +43,24 @@ CLOSURE = [
     "/nix/store/mmmm-cvc5-1.3.1",
     TREE,
 ]
-# The Devenv shell: its `gc/shell` root and its profile.
+# The Devenv shell: the `gc/shell` root of `devenv test`, the two roots that
+# activation keeps, and the profile.
 DOTFILE = "/home/runner/work/chelis/chelis/.devenv"
 SHELL = "/nix/store/nnnn-devenv-shell"
+ACTIVATED_SHELL = "/nix/store/pppp-devenv-shell"
+ACTIVATED_ENVIRONMENT = "/nix/store/qqqq-devenv-shell-env"
 PROFILE = "/nix/store/oooo-devenv-profile"
-RESOLVED = {f"{DOTFILE}/gc/shell": SHELL, PROFILE: PROFILE}
+ACTIVATED_LINKS = (f"{DOTFILE}/gc/activated-shell", f"{DOTFILE}/gc/activated-shell-env")
+RESOLVED = {
+    f"{DOTFILE}/gc/shell": SHELL,
+    ACTIVATED_LINKS[0]: ACTIVATED_SHELL,
+    ACTIVATED_LINKS[1]: ACTIVATED_ENVIRONMENT,
+    PROFILE: PROFILE,
+}
 DEVENV = {"DEVENV_DOTFILE": DOTFILE, "DEVENV_PROFILE": PROFILE}
-PUSHED = sorted([CHELIS, RUNTIME, CHELISUP, TREE, CRATE_LIB, CRATE_OUT, SHELL, PROFILE])
+PUSHED = sorted(
+    [CHELIS, RUNTIME, CHELISUP, TREE, CRATE_LIB, CRATE_OUT, SHELL, ACTIVATED_SHELL, ACTIVATED_ENVIRONMENT, PROFILE]
+)
 TOKEN = {publish_nix_cache.TOKEN_VARIABLE: "token", **DEVENV}
 RELEASE_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "release.yml"
 NIX_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "nix-packages.yml"
@@ -95,12 +106,15 @@ class FakeNix:
 
 
 def run_main(
-    nix: FakeNix, argv: Sequence[str] = (), environ: dict[str, str] = TOKEN
+    nix: FakeNix,
+    argv: Sequence[str] = (),
+    environ: dict[str, str] = TOKEN,
+    resolved: dict[str, str] = RESOLVED,
 ) -> tuple[int, str, str]:
     stdout, stderr = io.StringIO(), io.StringIO()
     with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
         code = publish_nix_cache.main(
-            list(argv), run=nix, environ=environ, resolve=lambda path: RESOLVED.get(path, path)
+            list(argv), run=nix, environ=environ, resolve=lambda path: resolved.get(path, path)
         )
     return code, stdout.getvalue(), stderr.getvalue()
 
@@ -206,6 +220,26 @@ class PublishNixCacheTests(unittest.TestCase):
         [(_, stdin)] = nix.pushes()
         self.assertIn(f"{SHELL}\n", stdin)
         self.assertIn(f"{PROFILE}\n", stdin)
+
+    def test_pushes_the_activated_shell_and_its_environment(self) -> None:
+        # `devenv test` replaces `gc/shell`, so only these roots hold the
+        # shell and the environment that activation builds.
+        nix = FakeNix()
+        code, _, _ = run_main(nix)
+        self.assertEqual(code, 0)
+        [(_, stdin)] = nix.pushes()
+        self.assertIn(f"{ACTIVATED_SHELL}\n", stdin)
+        self.assertIn(f"{ACTIVATED_ENVIRONMENT}\n", stdin)
+
+    def test_a_missing_activated_root_stops_before_any_nix_command(self) -> None:
+        for link in ACTIVATED_LINKS:
+            with self.subTest(link=link):
+                nix = FakeNix()
+                resolved = {key: value for key, value in RESOLVED.items() if key != link}
+                code, _, stderr = run_main(nix, resolved=resolved)
+                self.assertEqual(code, 1)
+                self.assertIn(f"not a store path: {link}", stderr)
+                self.assertEqual(nix.calls, [], "the shell check runs before any Nix command")
 
     def test_no_active_devenv_shell_stops_before_the_push(self) -> None:
         for missing in ("DEVENV_DOTFILE", "DEVENV_PROFILE"):

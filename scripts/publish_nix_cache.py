@@ -13,11 +13,12 @@ The script gives four groups of paths to `cachix push`:
   `legacyPackages.<system>.cvc5-dir`.
 - Each Rust crate build in the build closure of the three packages.
   `buildRustCrate` names each crate derivation `rust_<crate>-<version>`.
-- The Devenv shell: the `$DEVENV_DOTFILE/gc/shell` root and the
-  `$DEVENV_PROFILE` profile. At publish time the root holds the shell of the
-  `devenv test` smoke step. That shell differs from the activated shell only in
-  small generated files. Their runtime closure holds the Rust toolchain, Kache,
-  and the other shell packages.
+- The Devenv shell roots under `$DEVENV_DOTFILE/gc/` and the `$DEVENV_PROFILE`
+  profile. `scripts/ci_devenv.py` keeps `activated-shell`, the shell that
+  activation built, and `activated-shell-env`, the shell environment that
+  Devenv built from it. At publish time `shell` holds the shell of the
+  `devenv test` smoke step. Their runtime closures hold the Rust toolchain,
+  Kache, the other shell packages, and the small generated shell files.
 
 Cachix also pushes the runtime closure of each path. With the default
 "upstream caches" setting of the cache, Cachix skips each path that
@@ -25,8 +26,8 @@ cache.nixos.org serves.
 
 A build of a later revision then downloads the unchanged cvc5 tree and crates.
 It compiles only the crates whose sources or dependencies changed. A later run
-on an unchanged Devenv shell downloads Kache, the Rust toolchain, and the
-profile, and it builds only the small generated shell files.
+on an unchanged Devenv shell downloads the activated shell and its environment,
+and it builds no derivation during activation.
 
 The Cachix CLI comes from the flake's pinned Nixpkgs, and it reads its token
 from `CACHIX_AUTH_TOKEN`. The workflow fills that variable from the
@@ -35,8 +36,8 @@ from `CACHIX_AUTH_TOKEN`. The workflow fills that variable from the
 users download these paths instead of compiling them.
 
 Exit codes: 0 pushed (or, with `--dry-run`, listed), 1 a Nix or Cachix command
-failed, the build closure held no crate build, or no Devenv shell root was
-found, 2 the token is missing.
+failed, the build closure held no crate build, or a Devenv shell root was
+missing, 2 the token is missing.
 """
 
 from __future__ import annotations
@@ -57,6 +58,9 @@ CVC5_TREE = "cvc5-dir"
 # buildRustCrate names each crate derivation `rust_<crate>-<version>`.
 CRATE_PREFIX = "rust_"
 STORE_PREFIX = "/nix/store/"
+# The roots under `$DEVENV_DOTFILE/gc/`. `devenv test` replaces `shell`.
+# `scripts/ci_devenv.py` keeps the two activated roots.
+DEVENV_ROOTS = ("shell", "activated-shell", "activated-shell-env")
 
 Runner = Callable[[Sequence[str], str | None], str]
 Resolver = Callable[[str], str]
@@ -143,14 +147,15 @@ def crate_builds(system: str, run: Runner) -> list[str]:
 def devenv_shell_roots(
     environ: Mapping[str, str], resolve: Resolver = os.path.realpath
 ) -> list[str]:
-    """The store paths of the Devenv shell root and its profile."""
+    """The store paths of the Devenv shell roots and the profile."""
     dotfile = environ.get("DEVENV_DOTFILE")
     profile = environ.get("DEVENV_PROFILE")
     if not dotfile or not profile:
         raise PublishError(
             "DEVENV_DOTFILE and DEVENV_PROFILE are not set, so no Devenv shell is active"
         )
-    roots = [resolve(str(Path(dotfile) / "gc" / "shell")), resolve(profile)]
+    links = [*(str(Path(dotfile) / "gc" / name) for name in DEVENV_ROOTS), profile]
+    roots = [resolve(link) for link in links]
     for root in roots:
         if not root.startswith(STORE_PREFIX):
             raise PublishError(f"a Devenv shell root is not a store path: {root}")

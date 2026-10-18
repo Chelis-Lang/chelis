@@ -9,9 +9,12 @@ a fresh completion receipt before publishing any environment.
 from __future__ import annotations
 
 import argparse
+from collections.abc import Callable
+import contextlib
 import json
 import os
 from pathlib import Path
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -50,8 +53,63 @@ def profile_arguments(profile: str) -> list[str]:
     return [] if profile == BASE_PROFILE else ["--profile", profile]
 
 
+# `devenv test` points `gc/shell` at its own test shell, and Devenv keeps no
+# root for the shell environment that it builds from a shell. The
+# Nix cache publisher pushes the closures of these two roots.
+ACTIVATED_SHELL_ROOT = "activated-shell"
+ACTIVATED_ENVIRONMENT_ROOT = "activated-shell-env"
+STORE_PREFIX = "/nix/store/"
+
+
+def activated_shell_paths(dotfile: Path) -> tuple[str, str]:
+    """The activated shell and the shell environment that Devenv built from it.
+
+    Devenv 2.4 records the store paths of each shell evaluation in the `shell`
+    rows of its evaluation cache. `devenv.yaml` pins that release.
+    """
+    shell = os.path.realpath(dotfile / "gc" / "shell")
+    if not shell.startswith(STORE_PREFIX):
+        raise RuntimeError(f"the Devenv shell root is not a store path: {shell}")
+    cache = dotfile / "nix-eval-cache.db"
+    try:
+        with contextlib.closing(
+            sqlite3.connect(f"{cache.absolute().as_uri()}?mode=ro", uri=True)
+        ) as database:
+            rows = database.execute(
+                "SELECT json_output FROM cached_eval WHERE attr_name = 'shell'"
+            ).fetchall()
+        recorded = [json.loads(output) for (output,) in rows]
+    except (sqlite3.Error, ValueError) as error:
+        raise RuntimeError(f"cannot read the Devenv evaluation cache {cache}: {error}") from error
+    environments = {
+        paths.get("env_path")
+        for paths in recorded
+        if isinstance(paths, dict) and paths.get("out_path") == shell and paths.get("env_path")
+    }
+    if len(environments) != 1:
+        raise RuntimeError(
+            f"the Devenv evaluation cache records {len(environments)} environments for {shell}, not 1"
+        )
+    [environment] = environments
+    if not isinstance(environment, str) or not environment.startswith(STORE_PREFIX):
+        raise RuntimeError(f"the Devenv shell environment is not a store path: {environment}")
+    return shell, environment
+
+
+def keep_activated_roots(dotfile: Path) -> None:
+    """Root the activated shell and its environment under `gc/`."""
+    for name, path in zip(
+        (ACTIVATED_SHELL_ROOT, ACTIVATED_ENVIRONMENT_ROOT), activated_shell_paths(dotfile)
+    ):
+        subprocess.run(
+            ["nix-store", "--add-root", str(dotfile / "gc" / name), "--realise", path],
+            stdout=subprocess.DEVNULL, check=True,
+        )
+
+
 def activate(
     root: Path, devenv: str, github_env: Path, github_path: Path, *, profile: str = "ci",
+    keep_roots: Callable[[Path], None] = keep_activated_roots,
 ) -> int:
     """Commit the shell environment only after a successful captured entry."""
     with tempfile.TemporaryDirectory(prefix="chelis-ci-entry-") as temporary:
@@ -91,6 +149,11 @@ exec python "$2" capture "$3"
             print(f"project Devenv activation failed: {result.returncode}", file=sys.stderr)
             return (128 - result.returncode if result.returncode < 0 else result.returncode) or 1
         values = json.loads(destination.read_text(encoding="utf-8"))
+        try:
+            keep_roots(Path(values["DEVENV_DOTFILE"]))
+        except (RuntimeError, subprocess.CalledProcessError) as error:
+            print(f"project Devenv activation failed: {error}", file=sys.stderr)
+            return 1
         # GitHub's native Node actions must keep the host loader's libraries.
         # Only repository command subprocesses consume the Nix runtime path.
         values["CHELIS_CI_LIBRARY_PATH"] = values.pop("LD_LIBRARY_PATH", "")

@@ -6,10 +6,12 @@ import os
 import shlex
 import shutil
 from pathlib import Path
+import sqlite3
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 import venv
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -39,8 +41,9 @@ class ProjectActivationTests(unittest.TestCase):
             f"{shlex.quote(str(Path(ci_devenv.__file__)))} \"$@\"\n"
         )
         self.wrapper.chmod(0o700)
+        self.kept = []
 
-    def activate(self, body, profile="ci"):
+    def activate(self, body, profile="ci", keep_roots=None):
         shell_environment = (
             f"export DEVENV_DOTFILE={shlex.quote(str(self.state))}\n"
             f"export DEVENV_STATE={shlex.quote(str(self.state))}\n"
@@ -61,6 +64,7 @@ class ProjectActivationTests(unittest.TestCase):
         self.devenv.chmod(0o700)
         return ci_devenv.activate(
             self.root, str(self.devenv), self.output, self.path_output, profile=profile,
+            keep_roots=keep_roots or self.kept.append,
         )
 
     def initialize_body(self):
@@ -95,6 +99,18 @@ class ProjectActivationTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.strip(), str(self.environment))
+
+    def test_success_keeps_the_activated_roots_in_the_devenv_dotfile(self):
+        self.assertEqual(self.activate(self.initialize_body()), 0)
+        self.assertEqual(self.kept, [self.state])
+
+    def test_root_failure_never_publishes(self):
+        def fail(dotfile):
+            raise RuntimeError("no shell environment")
+
+        self.assertEqual(self.activate(self.initialize_body(), keep_roots=fail), 1)
+        self.assertEqual(self.output.read_text(), "EXISTING=kept\n")
+        self.assertEqual(self.path_output.read_text(), "/existing/bin\n")
 
     def test_each_devenv_command_selects_the_requested_profile(self):
         # `base` is the configuration that `devenv test` evaluates, so neither
@@ -176,6 +192,98 @@ class ProjectActivationTests(unittest.TestCase):
         failed = subprocess.run(command, env=env, capture_output=True, text=True)
         self.assertNotEqual(failed.returncode, 0)
         self.assertFalse(capture.exists())
+
+
+class ActivatedRootTests(unittest.TestCase):
+    """Find the activated shell and its environment, then root both."""
+
+    SHELL = "/nix/store/aaaa-devenv-shell"
+    ENVIRONMENT = "/nix/store/bbbb-devenv-shell-env"
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.dotfile = self.root / ".devenv"
+        (self.dotfile / "gc").mkdir(parents=True)
+        (self.dotfile / "gc" / "shell").symlink_to(self.SHELL)
+        bin_directory = self.root / "bin"
+        bin_directory.mkdir()
+        self.calls = self.root / "nix-store-calls"
+        fake = bin_directory / "nix-store"
+        fake.write_text(
+            f"#!{sys.executable}\nimport sys\n"
+            f"with open({str(self.calls)!r}, 'a') as log:\n"
+            "    log.write(' '.join(sys.argv[1:]) + '\\n')\n"
+        )
+        fake.chmod(0o700)
+        path = f"{bin_directory}{os.pathsep}{os.environ.get('PATH', '')}"
+        patcher = mock.patch.dict(os.environ, {"PATH": path})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def record(self, *rows):
+        with sqlite3.connect(self.dotfile / "nix-eval-cache.db") as database:
+            database.execute(
+                "CREATE TABLE cached_eval (id INTEGER PRIMARY KEY, attr_name TEXT, json_output TEXT)"
+            )
+            database.executemany(
+                "INSERT INTO cached_eval (attr_name, json_output) VALUES (?, ?)",
+                [(name, json.dumps(output)) for name, output in rows],
+            )
+        database.close()
+
+    def shell_row(self, out_path, env_path):
+        return "shell", {"drv_path": f"{out_path}.drv", "out_path": out_path, "env_path": env_path}
+
+    def test_roots_the_shell_and_the_environment_of_the_activated_evaluation(self):
+        # `devenv test` adds a second shell row. Only the row of the shell
+        # that `gc/shell` holds names the activated environment.
+        self.record(
+            ("config.cachix.enable", True),
+            self.shell_row("/nix/store/cccc-devenv-shell", "/nix/store/dddd-devenv-shell-env"),
+            self.shell_row(self.SHELL, self.ENVIRONMENT),
+        )
+        ci_devenv.keep_activated_roots(self.dotfile)
+        gc = self.dotfile / "gc"
+        self.assertEqual(
+            self.calls.read_text().splitlines(),
+            [
+                f"--add-root {gc / 'activated-shell'} --realise {self.SHELL}",
+                f"--add-root {gc / 'activated-shell-env'} --realise {self.ENVIRONMENT}",
+            ],
+        )
+
+    def test_each_unknown_environment_fails_before_any_root(self):
+        cases = {
+            "no shell row": [("config.cachix.enable", True)],
+            "no environment": [self.shell_row(self.SHELL, None)],
+            "two environments": [
+                self.shell_row(self.SHELL, self.ENVIRONMENT),
+                self.shell_row(self.SHELL, "/nix/store/eeee-devenv-shell-env"),
+            ],
+            "outside the store": [self.shell_row(self.SHELL, "/tmp/devenv-shell-env")],
+        }
+        for case, rows in cases.items():
+            with self.subTest(case=case):
+                (self.dotfile / "nix-eval-cache.db").unlink(missing_ok=True)
+                self.record(*rows)
+                with self.assertRaises(RuntimeError):
+                    ci_devenv.keep_activated_roots(self.dotfile)
+                self.assertFalse(self.calls.exists())
+
+    def test_missing_evaluation_cache_fails_before_any_root(self):
+        with self.assertRaisesRegex(RuntimeError, "Devenv evaluation cache"):
+            ci_devenv.keep_activated_roots(self.dotfile)
+        self.assertFalse(self.calls.exists())
+
+    def test_shell_root_outside_the_store_fails_before_any_root(self):
+        (self.dotfile / "gc" / "shell").unlink()
+        (self.dotfile / "gc" / "shell").symlink_to(self.root / "shell")
+        self.record(self.shell_row(str(self.root / "shell"), self.ENVIRONMENT))
+        with self.assertRaisesRegex(RuntimeError, "not a store path"):
+            ci_devenv.keep_activated_roots(self.dotfile)
+        self.assertFalse(self.calls.exists())
 
 
 if __name__ == "__main__":
