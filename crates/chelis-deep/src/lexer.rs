@@ -372,6 +372,32 @@ fn lex_string(source: &str, i: &mut usize) -> Result<Token, LexError> {
                     b't' => s.push('\t'),
                     b'r' => s.push('\r'),
                     b'0' => s.push('\0'),
+                    // `\u{h}`: one to six hexadecimal digits, any case and
+                    // padding, naming a Unicode scalar value (spec/02 P11).
+                    b'u' => {
+                        let digits_start = *i + 2;
+                        // `get` rather than an index: after `\u`, the next
+                        // byte may begin a multibyte character.
+                        let close = source.get(digits_start..).and_then(|rest| rest.find('}'));
+                        let scalar = (bytes.get(*i + 1) == Some(&b'{'))
+                            .then_some(close)
+                            .flatten()
+                            .and_then(|len| source.get(digits_start..digits_start + len))
+                            .filter(|digits| {
+                                (1..=6).contains(&digits.len())
+                                    && digits.bytes().all(|b| b.is_ascii_hexdigit())
+                            })
+                            .and_then(|digits| u32::from_str_radix(digits, 16).ok())
+                            .and_then(char::from_u32);
+                        let Some(ch) = scalar else {
+                            return Err(LexError::InvalidEscape {
+                                ch: 'u',
+                                offset: *i,
+                            });
+                        };
+                        s.push(ch);
+                        *i = digits_start + close.expect("a scalar was read up to `}`");
+                    }
                     other => {
                         return Err(LexError::InvalidEscape {
                             ch: other as char,
@@ -909,6 +935,100 @@ mod tests {
             lex(r#""hello"#),
             Err(LexError::UnterminatedString { .. })
         ));
+    }
+
+    #[test]
+    fn strings_with_unicode_escapes_lex_without_panicking() {
+        // Seeded strings of escape fragments and multibyte characters, so a
+        // byte index inside a character would panic (chelis#3862).
+        const PIECES: &[&str] = &[
+            "\\u",
+            "{",
+            "}",
+            "4",
+            "1",
+            "f",
+            "F",
+            "0",
+            "g",
+            "\"",
+            "\u{e9}",
+            "\u{4e2d}",
+            "\u{1f600}",
+            "\\",
+            "x",
+            " ",
+            "\n",
+            "\r",
+        ];
+        let mut state = 7u64;
+        let mut next = move || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            state
+        };
+        let mut panics = Vec::new();
+        for _ in 0..50_000 {
+            let mut source = String::from("\"");
+            for _ in 0..1 + (next() >> 59) as usize {
+                source.push_str(PIECES[((next() >> 33) % PIECES.len() as u64) as usize]);
+            }
+            if std::panic::catch_unwind(|| {
+                let _ = lex(&source);
+            })
+            .is_err()
+            {
+                panics.push(source);
+                if panics.len() == 3 {
+                    break;
+                }
+            }
+        }
+        assert!(panics.is_empty(), "lexing panicked on {panics:?}");
+    }
+
+    #[test]
+    fn unicode_escapes_name_a_scalar_in_any_case_and_padding() {
+        assert_eq!(
+            lex_kinds(r#""\u{41}" "\u{0041}" "\u{1F600}" "\u{a}" "\u{7f}" "\u{00001b}""#),
+            vec![
+                TokenKind::Str("A".into()),
+                TokenKind::Str("A".into()),
+                TokenKind::Str("\u{1f600}".into()),
+                TokenKind::Str("\n".into()),
+                TokenKind::Str("\u{7f}".into()),
+                TokenKind::Str("\u{1b}".into()),
+            ]
+        );
+        // `\u` before a multibyte character is rejected where it stands, with
+        // the message and offset an unknown escape always had.
+        for source in [r#""\ué""#, r#""\u中""#, r#""\u😀""#] {
+            let error = lex(source).expect_err("a bare `\\u` is not an escape");
+            assert!(
+                matches!(error, LexError::InvalidEscape { ch: 'u', offset: 2 }),
+                "{source}: {error:?}"
+            );
+            assert_eq!(
+                error.to_string(),
+                "invalid escape sequence '\\u' at byte 2",
+                "{source}"
+            );
+        }
+        for invalid in [
+            r#""\u{}""#,
+            r#""\u{1234567}""#,
+            r#""\u{d800}""#,
+            r#""\u{110000}""#,
+            r#""\u{g}""#,
+            r#""\u41""#,
+            r#""\u{41""#,
+        ] {
+            assert!(
+                matches!(lex(invalid), Err(LexError::InvalidEscape { .. })),
+                "{invalid} must be rejected"
+            );
+        }
     }
 
     #[test]

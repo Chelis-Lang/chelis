@@ -158,7 +158,12 @@ Nested entry order and duplicates are preserved; annotation-key uniqueness
 applies to the enclosing annotation map. Lexical syntax, escaping and balanced
 structure are checked, but AST shape, placement, binder, type and effect rules
 do not apply inside data. Scalar tokens, including numeric suffixes, retain
-their spelling; formatting may canonicalize whitespace and separators.
+their spelling, except that a raw control character inside a string token
+prints as its canonical String escape (§6.4): its named escape where one
+exists, otherwise minimal lowercase `\u{h}`. An escape the author wrote keeps
+its spelling, and the decoded value is unchanged, so canonical Deep holds no
+raw control character inside extension data. Formatting may canonicalize
+whitespace and separators.
 
 Semantic expression traversal excludes extension data. A surviving or
 replacement AST node preserves its originating owner's extensions; copying a
