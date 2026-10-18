@@ -79,6 +79,71 @@ let
     shapeCheck "chelis-runtime" packages.chelis-runtime
       contracts.packageShapes.chelis-runtime;
   chelisupShape = shapeCheck "chelisup" packages.chelisup contracts.packageShapes.chelisup;
+  unwrappedShape =
+    shapeCheck "chelis-unwrapped" packages.chelis-unwrapped
+      contracts.packageShapes.chelis-unwrapped;
+
+  # The store paths that only the wrapper of `chelis` brings: the stdenv C
+  # compiler, its binutils, and OpenBLAS. The library outputs of the C
+  # compiler stay allowed, because the compiler binary links libstdc++ on
+  # Linux. The paths carry no string context, so the check does not build
+  # them. Thus Darwin builds no OpenBLAS for this check.
+  toolchainPaths =
+    let
+      outputsOf = drv: map (output: drv.${output}) drv.outputs;
+    in
+    map builtins.unsafeDiscardStringContext (
+      outputsOf pkgs.stdenv.cc
+      ++ [ pkgs.stdenv.cc.cc.out ]
+      ++ outputsOf pkgs.stdenv.cc.bintools
+      ++ outputsOf pkgs.stdenv.cc.bintools.bintools
+      ++ outputsOf pkgs.openblas
+    );
+  # The runtime closure of `chelis-unwrapped` holds no path of toolchainPaths.
+  # Control: the closure of `chelis` holds the stdenv C compiler. Otherwise a
+  # change of the path form makes the check pass for each package.
+  unwrappedClosure =
+    let
+      closure = package: pkgs.closureInfo { rootPaths = [ package ]; };
+    in
+    pkgs.runCommand "chelis-unwrapped-closure" { } ''
+      if ! grep -Fqx ${escape (builtins.unsafeDiscardStringContext "${pkgs.stdenv.cc}")} \
+        ${closure packages.chelis}/store-paths; then
+        echo "control failed: the closure of chelis does not hold the stdenv C compiler" >&2
+        exit 1
+      fi
+      # The job log records both closure sizes and the closure of the
+      # unwrapped package.
+      echo "chelis closure NAR size: $(cat ${closure packages.chelis}/total-nar-size) bytes"
+      echo "chelis-unwrapped closure NAR size: $(cat ${closure packages.chelis-unwrapped}/total-nar-size) bytes"
+      echo "chelis-unwrapped closure paths:"
+      cat ${closure packages.chelis-unwrapped}/store-paths
+      status=0
+      while IFS= read -r path; do
+        for toolchain in ${lib.escapeShellArgs toolchainPaths}; do
+          if [ "$path" = "$toolchain" ]; then
+            echo "chelis-unwrapped holds the C toolchain path $path" >&2
+            status=1
+          fi
+        done
+      done <${closure packages.chelis-unwrapped}/store-paths
+      if [ "$status" -ne 0 ]; then
+        exit 1
+      fi
+      touch "$out"
+    '';
+
+  # Both compiler packages run one compiler binary, and no package copies it.
+  sharedCompiler = pkgs.runCommand "chelis-shared-compiler" { } ''
+    wrapped="$(readlink -f ${packages.chelis}/libexec/chelis)"
+    unwrapped="$(readlink -f ${packages.chelis-unwrapped}/bin/chelis)"
+    if [ "$wrapped" != "$unwrapped" ]; then
+      echo "chelis and chelis-unwrapped run different compiler files" >&2
+      printf 'chelis: %s\nchelis-unwrapped: %s\n' "$wrapped" "$unwrapped" >&2
+      exit 1
+    fi
+    touch "$out"
+  '';
 
   cvc5Dir = pkgs.runCommand "cvc5-dir-contract" { } ''
     test -f ${cvc5.dir}/cmake/version-base.cmake
@@ -159,6 +224,11 @@ let
           exit 1
         fi
         ${packages.chelis}/bin/chelis --help >/dev/null
+        unwrapped_output="$(${packages.chelis-unwrapped}/bin/chelis --version 2>&1)"
+        if [ "$unwrapped_output" != ${escape "chelis ${built.version}"} ]; then
+          echo "unexpected chelis-unwrapped version output: $unwrapped_output" >&2
+          exit 1
+        fi
 
         cp -R ${built.source}/crates/chelis-cli/tests/fixtures/release_pipe_stage \
           "$TMPDIR/release-fixture"
@@ -394,6 +464,7 @@ let
         }
         check_runtime_consumer ${packages.chelis-runtime} runtime-consumer-standalone
         check_runtime_consumer ${packages.chelis} runtime-consumer-combined
+        check_runtime_consumer ${packages.chelis-unwrapped} runtime-consumer-unwrapped
         touch "$out"
       '';
 
@@ -407,6 +478,7 @@ let
         ${packages.chelis}/bin/chelis runtime export "$export_dir"
         python3 ${built.packageScripts}/verify_runtime_package.py "$export_dir" ${packages.chelis}
         python3 ${built.packageScripts}/verify_runtime_package.py "$export_dir" ${packages.chelis-runtime}
+        python3 ${built.packageScripts}/verify_runtime_package.py "$export_dir" ${packages.chelis-unwrapped}
         touch "$out"
       '';
 
@@ -558,6 +630,9 @@ let
     runtimeConsumer
     runtimeCorrespondence
     runtimeShape
+    sharedCompiler
+    unwrappedClosure
+    unwrappedShape
     wrappedBuild
   ]
   ++ lib.optionals pkgs.stdenv.hostPlatform.isLinux [
@@ -568,6 +643,7 @@ let
     ${lib.concatMapStringsSep "\n" (check: "test -e ${check}") contractChecks}
     test -e ${packages.chelis}
     test -e ${packages.chelis-runtime}
+    test -e ${packages.chelis-unwrapped}
     test -e ${packages.chelisup}
     touch "$out"
   '';
@@ -588,10 +664,14 @@ in
     runtimeConsumer
     runtimeCorrespondence
     runtimeShape
+    sharedCompiler
+    unwrappedClosure
+    unwrappedShape
     wrappedBuild
     ;
   chelis = packages.chelis;
   chelis-runtime = packages.chelis-runtime;
+  chelis-unwrapped = packages.chelis-unwrapped;
   chelisup = packages.chelisup;
 }
 // lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {

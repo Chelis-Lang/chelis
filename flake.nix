@@ -45,7 +45,7 @@
             root = self;
           };
           packages = rec {
-            inherit (built) chelis chelisup;
+            inherit (built) chelis chelis-unwrapped chelisup;
             chelis-runtime = built.runtime;
             default = chelis;
           };
@@ -135,7 +135,12 @@
           system = prev.stdenv.hostPlatform.system;
         in
         lib.optionalAttrs (self.packages ? ${system}) {
-          inherit (self.packages.${system}) chelis chelis-runtime chelisup;
+          inherit (self.packages.${system})
+            chelis
+            chelis-runtime
+            chelis-unwrapped
+            chelisup
+            ;
         };
       legacyPackages = lib.mapAttrs (_system: outputs: outputs.legacy) perSystem;
     };

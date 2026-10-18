@@ -132,11 +132,12 @@ nix profile install github:Chelis-Lang/chelis/vX.Y.Z
 The overlay and the C toolchain in the `chelis` package, which the text below
 describes, start with the first release after 0.20.0.
 
-The flake has three packages:
+The flake has four packages:
 
 | Package | Contents |
 |---|---|
-| `chelis` (the default) | The compiler, the runtime archive in `lib/`, and its headers in `include/`. |
+| `chelis` (the default) | The compiler, the runtime archive in `lib/`, and its headers in `include/`, with a C compiler and binutils from Nix. |
+| `chelis-unwrapped` | The same compiler, runtime archive, and headers, without a C toolchain. It has the layout of a release toolchain. |
 | `chelis-runtime` | Only the runtime archive and its headers, for C programs that link generated code. |
 | `chelisup` | The toolchain manager. |
 
@@ -155,6 +156,22 @@ On Linux, `bin/chelis` also declares the OpenBLAS headers and libraries
 through `CHELIS_C_INCLUDE_PATH` and `CHELIS_C_LIBRARY_PATH`. Thus a program
 that calls BLAS builds and runs without other setup. Directories that you
 declare in these variables come after the OpenBLAS directories.
+
+Use `chelis` when Nix supplies the complete toolchain, for example in a Nix
+shell or on a host without a C compiler. Use `chelis-unwrapped` when the host
+already has a C compiler and binutils, as for a release toolchain. Its closure
+holds no C compiler, no binutils, and no OpenBLAS, so it is much smaller. Both
+packages run the same compiler binary. The `chelis-unwrapped` package starts
+with the first release after 0.20.0:
+
+```sh
+nix run github:Chelis-Lang/chelis/vX.Y.Z#chelis-unwrapped -- --version
+```
+
+With `chelis-unwrapped`, `chelis build` finds `cc` and `ar` on your `PATH`, or
+`CHELIS_CC` and `CHELIS_AR` select them. On Linux, a program that calls BLAS
+needs OpenBLAS. Declare its headers and libraries through
+`CHELIS_C_INCLUDE_PATH` and `CHELIS_C_LIBRARY_PATH`.
 
 To let the `chelis` shim of `chelisup` run a Nix-built compiler, register the
 package with `chelisup link`:
@@ -178,8 +195,8 @@ If it finds no `nix-store`, `chelisup install` and `chelisup link` of a store
 path stop with a message before they change a root or a toolchain.
 
 To add the packages to your own Nix package set, use the overlay of the flake.
-It adds `chelis`, `chelis-runtime`, and `chelisup` for a system that the flake
-supports:
+It adds `chelis`, `chelis-unwrapped`, `chelis-runtime`, and `chelisup` for a
+system that the flake supports:
 
 ```nix
 {

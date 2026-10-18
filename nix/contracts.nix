@@ -8,6 +8,7 @@
   packageNames = [
     "chelis"
     "chelis-runtime"
+    "chelis-unwrapped"
     "chelisup"
     "default"
   ];
@@ -80,6 +81,38 @@
       inventory = [
         "include"
         "lib"
+        "lib/libchelis_runtime.a"
+        "include/chelis_runtime.h"
+        "include/chelis_runtime_views.h"
+        "include/chelis_runtime_dtype.h"
+        "include/chelis_blas.h"
+        "include/chelis_simd.h"
+        "include/chelis_math.h"
+      ];
+    };
+
+    # The layout of the release tarball: bin/chelis is the compiler itself.
+    chelis-unwrapped = {
+      required = [
+        "bin/chelis"
+        "lib/libchelis_runtime.a"
+        "include/chelis_runtime.h"
+        "include/chelis_runtime_views.h"
+        "include/chelis_runtime_dtype.h"
+        "include/chelis_blas.h"
+        "include/chelis_simd.h"
+        "include/chelis_math.h"
+      ];
+      forbidden = [
+        "bin/chelisup"
+        "libexec"
+      ];
+      allowedProductExecutables = [ "bin/chelis" ];
+      inventory = [
+        "bin"
+        "include"
+        "lib"
+        "bin/chelis"
         "lib/libchelis_runtime.a"
         "include/chelis_runtime.h"
         "include/chelis_runtime_views.h"

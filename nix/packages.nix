@@ -180,6 +180,31 @@ let
         '') contracts.publicRuntimeHeaders}
         python3 ${packageScripts}/verify_runtime_package.py "$export_dir" "$out"
       '';
+  # The compiler without the C toolchain, in the layout of the release
+  # tarball. bin/chelis is the binary of the compiler crate, which `chelis`
+  # also runs, so the store holds one copy. The user supplies the C compiler
+  # and binutils on PATH. verify_runtime_package.py needs real runtime files,
+  # so the archive and the headers are copies.
+  chelis-unwrapped =
+    pkgs.runCommand "chelis-unwrapped-${version}"
+      {
+        inherit version;
+        meta = packageMeta // {
+          description = "Chelis compiler without a C toolchain, for a host C compiler and binutils";
+          mainProgram = "chelis";
+        };
+        nativeBuildInputs = [ pkgs.python311 ];
+      }
+      ''
+        mkdir -p $out/bin $out/lib $out/include
+        test -x ${compilerCrate}/bin/chelis
+        ln -s ${compilerCrate}/bin/chelis $out/bin/chelis
+        cp ${runtime}/lib/libchelis_runtime.a $out/lib/libchelis_runtime.a
+        cp ${runtime}/include/*.h $out/include/
+        export_dir="$TMPDIR/unwrapped-export"
+        $out/bin/chelis runtime export "$export_dir"
+        python3 ${packageScripts}/verify_runtime_package.py "$export_dir" "$out"
+      '';
   chelisup = pkgs.runCommand "chelisup-${version}" { } ''
     test -x ${chelisupCrate}/bin/chelisup
     install -Dm755 ${chelisupCrate}/bin/chelisup $out/libexec/chelisup
@@ -513,6 +538,7 @@ in
   inherit
     cargoGraph
     chelis
+    chelis-unwrapped
     chelisWrapperArgs
     chelisupCrate
     compilerCrate
