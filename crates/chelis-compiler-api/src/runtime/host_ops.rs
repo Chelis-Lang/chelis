@@ -3,8 +3,8 @@ use chelis_unord::UnordMap;
 use chelis_deep::ast::{Atom, Expr, ExprCarrier};
 use chelis_ir::dag::{Dag, DeclId, DimInfo, NodeId, RiscOp, TensorType};
 use chelis_ir::eval::{
-    AdmittedResult, TENSOR_ALLOCATION_FAILED, TensorValue as IrTensorValue, admit_padded_shape,
-    admit_result, admit_tensor, eval_tensor_roots_with,
+    AdmittedResult, TensorValue as IrTensorValue, admit_padded_shape, admit_result, admit_tensor,
+    eval_tensor_roots_with,
 };
 use chelis_ir::tier2;
 use chelis_types::{
@@ -2963,40 +2963,103 @@ fn trace_balanced_sum(
 /// group is the accumulator's zero.
 fn balanced_accumulator_sum(
     op: &'static str,
-    mut level: Vec<ScalarValue>,
+    level: Vec<ScalarValue>,
     accumulator: Prim,
     result: Prim,
 ) -> Result<ScalarValue, String> {
-    if level.is_empty() {
-        let zero = if accumulator.is_integer() {
-            scalar_from_i64(op, accumulator, 0)
+    let mut tree = AccumulatorTree::new(op, accumulator);
+    for leaf in level {
+        tree.push(leaf)?;
+    }
+    tree.total(result)
+}
+
+/// [`balanced_accumulator_sum`]'s tree fed one leaf at a time, as the C
+/// runtime's einsum streams it (chelis#3782). It holds only the completed
+/// subtrees, one per set bit of the leaf count: a leaf combines with the
+/// completed subtree at each level its position's trailing one bits name,
+/// the earlier subtree on the left, and [`Self::total`] folds the held
+/// subtrees rightmost first, which is each level's carried odd leaf. Node for
+/// node it is the adjacent-pair tree over the stored leaves, so a streamed
+/// sum keeps the stored sum's bits, and an integer overflow anywhere in it is
+/// the one overflow trap of `op` at the accumulator dtype ([05-OP-33]).
+struct AccumulatorTree {
+    op: &'static str,
+    accumulator: Prim,
+    /// The completed subtree at each level whose bit of `count` is set.
+    levels: Vec<ScalarValue>,
+    count: u64,
+}
+
+impl AccumulatorTree {
+    fn new(op: &'static str, accumulator: Prim) -> Self {
+        Self {
+            op,
+            accumulator,
+            levels: Vec::new(),
+            count: 0,
+        }
+    }
+
+    fn add(&self, left: ScalarValue, right: ScalarValue) -> Result<ScalarValue, String> {
+        if self.accumulator.is_integer() {
+            int_binop(IntBinOp::Add, left, right).map_err(|error| reported_as(self.op, error))
         } else {
-            scalar_from_f64(op, accumulator, 0.0)
+            float_binop(FloatBinOp::Add, left, right).map_err(|error| error.to_string())
         }
-        .map_err(|error| error.to_string())?;
-        return cast_scalar(op, zero, result).map_err(|error| error.to_string());
     }
-    while level.len() > 1 {
-        let mut source = level.into_iter();
-        let mut next = Vec::with_capacity(source.len().div_ceil(2));
-        while let Some(left) = source.next() {
-            let combined = match source.next() {
-                Some(right) if accumulator.is_integer() => {
-                    int_binop(IntBinOp::Add, left, right).map_err(|error| reported_as(op, error))?
-                }
-                Some(right) => {
-                    float_binop(FloatBinOp::Add, left, right).map_err(|error| error.to_string())?
-                }
-                None => left,
-            };
-            next.push(combined);
+
+    fn push(&mut self, leaf: ScalarValue) -> Result<(), String> {
+        let mut carry = leaf;
+        let mut depth = 0;
+        let mut pending = self.count;
+        while pending & 1 == 1 {
+            carry = self.add(self.levels[depth], carry)?;
+            pending >>= 1;
+            depth += 1;
         }
-        level = next;
+        if depth == self.levels.len() {
+            self.levels.push(carry);
+        } else {
+            self.levels[depth] = carry;
+        }
+        self.count += 1;
+        note_einsum_partials_held(self.count.count_ones() as usize);
+        Ok(())
     }
-    // A one-leaf group is still a sum ([05-OP-30]); its value finalizes like
-    // any other arithmetic result, as `sum(diagonal(..))` does.
-    let total = chelis_types::canonical_nan_scalar(level[0]);
-    cast_scalar(op, total, result).map_err(|error| error.to_string())
+
+    /// The root after the last leaf, finalized once and narrowed to
+    /// `result`. An empty tree is the accumulator's zero.
+    fn total(self, result: Prim) -> Result<ScalarValue, String> {
+        let op = self.op;
+        let mut total: Option<ScalarValue> = None;
+        let mut remaining = self.count;
+        let mut depth = 0;
+        while remaining != 0 {
+            if remaining & 1 == 1 {
+                let level = self.levels[depth];
+                total = Some(match total {
+                    Some(total) => self.add(level, total)?,
+                    None => level,
+                });
+            }
+            remaining >>= 1;
+            depth += 1;
+        }
+        let Some(total) = total else {
+            let zero = if self.accumulator.is_integer() {
+                scalar_from_i64(op, self.accumulator, 0)
+            } else {
+                scalar_from_f64(op, self.accumulator, 0.0)
+            }
+            .map_err(|error| error.to_string())?;
+            return cast_scalar(op, zero, result).map_err(|error| error.to_string());
+        };
+        // A one-leaf group is still a sum ([05-OP-30]); its value finalizes like
+        // any other arithmetic result, as `sum(diagonal(..))` does.
+        let total = chelis_types::canonical_nan_scalar(total);
+        cast_scalar(op, total, result).map_err(|error| error.to_string())
+    }
 }
 
 /// A contraction's integer overflow traps under the contraction's own name,
@@ -3145,6 +3208,20 @@ pub(super) fn tensor_clamp_value(
     )))
 }
 
+// The most partial sums one einsum output held at once on this thread, for
+// the chelis#3807 receipt.
+#[cfg(test)]
+thread_local! {
+    static EINSUM_PARTIALS_HELD: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+fn note_einsum_partials_held(held: usize) {
+    #[cfg(test)]
+    EINSUM_PARTIALS_HELD.with(|most| most.set(most.get().max(held)));
+    #[cfg(not(test))]
+    let _ = held;
+}
+
 pub(super) fn tensor_einsum_value(
     equation: &str,
     lhs: &RuntimeTensorValue,
@@ -3291,13 +3368,10 @@ pub(super) fn tensor_einsum_value(
         for (label, value) in out_labels.iter().zip(out_index.iter()) {
             label_values.insert(*label, *value);
         }
-        // The reduction's extents multiply across operands, so its scratch is
-        // not bounded by any one of them: reserve it fallibly, refusing as
-        // the C runtime's allocation failure (chelis#3418).
-        let mut products = Vec::new();
-        products
-            .try_reserve_exact(reduction_total)
-            .map_err(|_| TENSOR_ALLOCATION_FAILED.to_string())?;
+        // Each product enters the canonical tree as it is formed, so an
+        // output holds one partial sum per completed subtree rather than its
+        // whole reduction, as the C runtime's einsum does (chelis#3807).
+        let mut tree = AccumulatorTree::new("einsum", accumulator);
         for reduction_linear in 0..reduction_total {
             let reduction_index = linear_to_indices(reduction_linear, &reduction_shape);
             for (label, value) in reduction_labels.iter().zip(reduction_index.iter()) {
@@ -3313,21 +3387,16 @@ pub(super) fn tensor_einsum_value(
                 .collect::<Vec<_>>();
             let left = widen(lhs, indices_to_linear(&lhs_index, &lhs.value.shape))?;
             let right = widen(rhs, indices_to_linear(&rhs_index, &rhs.value.shape))?;
-            products.push(
+            tree.push(
                 if accumulator.is_integer() {
                     int_binop(IntBinOp::Mul, left, right)
                 } else {
                     float_binop(FloatBinOp::Mul, left, right)
                 }
                 .map_err(|error| reported_as("einsum", error))?,
-            );
+            )?;
         }
-        out.push(balanced_accumulator_sum(
-            "einsum",
-            products,
-            accumulator,
-            result,
-        )?);
+        out.push(tree.total(result)?);
     }
     Ok(RuntimeTensorValue::new(IrTensorValue::from_storage(
         out_shape,
@@ -3831,5 +3900,237 @@ mod numeric_trap_forwarding_tests {
         assert_eq!(err, "numeric trap: overflow in sum at i32");
         assert!(!err.contains("IR eval failed"));
         assert!(!err.contains("composed unary"));
+    }
+}
+
+#[cfg(test)]
+mod einsum_stream_tests {
+    //! chelis#3807: eval's host einsum streams each output's products into
+    //! the adjacent-pair tree, holding one partial sum per set bit of the
+    //! reduction count instead of the whole reduction, and keeps the tree's
+    //! result bits and integer traps. The reference below is the stored-leaf
+    //! level-by-level sum the lane used before, transcribed independently.
+    use super::*;
+
+    fn take_partials_held() -> usize {
+        EINSUM_PARTIALS_HELD.with(|most| most.replace(0))
+    }
+
+    /// Deterministic finite leaves with mixed magnitudes and signs.
+    fn f32_values(count: usize, seed: u32) -> Vec<f64> {
+        let mut state = seed.wrapping_mul(2_654_435_761).wrapping_add(1);
+        (0..count)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 17;
+                state ^= state << 5;
+                let mantissa = f64::from(state % 2001) - 1000.0;
+                let scale = [1.0e-3, 1.0, 7.0e2, 3.0e5][(state >> 11) as usize % 4];
+                mantissa * scale
+            })
+            .collect()
+    }
+
+    fn tensor(prim: Prim, shape: &[usize], values: &[f64]) -> RuntimeTensorValue {
+        let scalars = values
+            .iter()
+            .map(|&value| {
+                if prim.is_integer() {
+                    scalar_from_i64("test", prim, value as i64)
+                } else {
+                    scalar_from_f64("test", prim, value)
+                }
+                .expect("the leaf is representable")
+            })
+            .collect::<Vec<_>>();
+        RuntimeTensorValue::new(IrTensorValue::from_storage(
+            shape.to_vec(),
+            tensor_from_scalars(prim, &scalars),
+        ))
+    }
+
+    /// The level-by-level sum over stored leaves.
+    fn reference_sum(
+        mut level: Vec<ScalarValue>,
+        accumulator: Prim,
+        result: Prim,
+    ) -> Result<ScalarValue, String> {
+        if level.is_empty() {
+            let zero = if accumulator.is_integer() {
+                scalar_from_i64("einsum", accumulator, 0)
+            } else {
+                scalar_from_f64("einsum", accumulator, 0.0)
+            }
+            .map_err(|error| error.to_string())?;
+            return cast_scalar("einsum", zero, result).map_err(|error| error.to_string());
+        }
+        while level.len() > 1 {
+            let mut next = Vec::new();
+            for pair in level.chunks(2) {
+                next.push(match pair {
+                    [left, right] if accumulator.is_integer() => {
+                        int_binop(IntBinOp::Add, *left, *right)
+                            .map_err(|error| reported_as("einsum", error))?
+                    }
+                    [left, right] => float_binop(FloatBinOp::Add, *left, *right)
+                        .map_err(|error| error.to_string())?,
+                    [single] => *single,
+                    _ => unreachable!("chunks of two"),
+                });
+            }
+            level = next;
+        }
+        let total = chelis_types::canonical_nan_scalar(level[0]);
+        cast_scalar("einsum", total, result).map_err(|error| error.to_string())
+    }
+
+    /// `i,i->` over the two operands, every product stored first.
+    fn reference_dot(
+        lhs: &RuntimeTensorValue,
+        rhs: &RuntimeTensorValue,
+    ) -> Result<ScalarValue, String> {
+        let accumulator = lhs.precision.default_reduce_sum_accumulator()?;
+        let result = lhs.precision.default_reduce_sum_result_precision()?;
+        let mut products = Vec::new();
+        for index in 0..lhs.value.len() {
+            let left = cast_scalar("einsum", lhs.value.storage().scalar_at(index), accumulator)
+                .map_err(|error| error.to_string())?;
+            let right = cast_scalar("einsum", rhs.value.storage().scalar_at(index), accumulator)
+                .map_err(|error| error.to_string())?;
+            products.push(
+                if accumulator.is_integer() {
+                    int_binop(IntBinOp::Mul, left, right)
+                } else {
+                    float_binop(FloatBinOp::Mul, left, right)
+                }
+                .map_err(|error| reported_as("einsum", error))?,
+            );
+        }
+        reference_sum(products, accumulator, result)
+    }
+
+    fn same_bits(left: ScalarValue, right: ScalarValue) -> bool {
+        left == right && left.as_f64_lossy().to_bits() == right.as_f64_lossy().to_bits()
+    }
+
+    /// One output holds at most one partial sum per bit of its reduction
+    /// count, never the reduction, and its value has the stored-leaf sum's
+    /// bits, for every count to 130 and two large ones.
+    ///
+    /// Evidentiary status: REGRESSION TEST, proven failing first. Storing
+    /// every product, one output held its whole reduction count.
+    #[test]
+    fn issue_3807_an_output_holds_one_partial_per_bit_of_its_reduction_count() {
+        let counts = (0..=130).chain([1000, 4096]);
+        for count in counts {
+            let lhs = tensor(Prim::F32, &[count], &f32_values(count, count as u32));
+            let rhs = tensor(Prim::F32, &[count], &f32_values(count, 7 + count as u32));
+            take_partials_held();
+            let out = tensor_einsum_value("i,i->", &lhs, &rhs).expect("the dot product evaluates");
+            let held = take_partials_held();
+            let bound = if count == 0 {
+                0
+            } else {
+                count.ilog2() as usize + 1
+            };
+            assert!(
+                held <= bound,
+                "#3807: {count} products held {held} partial sums, more than {bound}"
+            );
+            let expected = reference_dot(&lhs, &rhs).expect("the reference evaluates");
+            assert!(
+                same_bits(out.value.storage().scalar_at(0), expected),
+                "#3807: {count} products changed the sum's bits"
+            );
+        }
+    }
+
+    /// Several outputs and several reduction labels keep the stored-leaf
+    /// bits, output by output.
+    #[test]
+    fn issue_3807_multi_label_reductions_keep_their_bits() {
+        /// An equation with its operand and output shapes.
+        type Case = (&'static str, Vec<usize>, Vec<usize>, Vec<usize>);
+        let cases: [Case; 4] = [
+            ("ij,jk->ik", vec![3, 37], vec![37, 2], vec![3, 2]),
+            ("ijk,jk->i", vec![2, 3, 11], vec![3, 11], vec![2]),
+            ("i,j->", vec![9], vec![13], vec![]),
+            ("ij,ij->", vec![5, 19], vec![5, 19], vec![]),
+        ];
+        for (equation, lhs_shape, rhs_shape, out_shape) in cases {
+            let count = |shape: &[usize]| shape.iter().product::<usize>();
+            let lhs = tensor(Prim::F32, &lhs_shape, &f32_values(count(&lhs_shape), 3));
+            let rhs = tensor(Prim::F32, &rhs_shape, &f32_values(count(&rhs_shape), 5));
+            let out = tensor_einsum_value(equation, &lhs, &rhs).expect("the einsum evaluates");
+            assert_eq!(out.value.shape, out_shape, "#3807 {equation}");
+            // The stored-leaf sum of each output, its products in row-major
+            // reduction order.
+            let (inputs, output) = equation.split_once("->").unwrap();
+            let (lhs_labels, rhs_labels) = inputs.split_once(',').unwrap();
+            let mut extents = std::collections::BTreeMap::new();
+            for (labels, shape) in [(lhs_labels, &lhs_shape), (rhs_labels, &rhs_shape)] {
+                for (label, &extent) in labels.chars().zip(shape.iter()) {
+                    extents.insert(label, extent);
+                }
+            }
+            let mut reduced = Vec::new();
+            for label in lhs_labels.chars().chain(rhs_labels.chars()) {
+                if !output.contains(label) && !reduced.contains(&label) {
+                    reduced.push(label);
+                }
+            }
+            let reduced_shape = reduced
+                .iter()
+                .map(|label| extents[label])
+                .collect::<Vec<_>>();
+            let out_labels = output.chars().collect::<Vec<_>>();
+            for out_linear in 0..count(&out_shape) {
+                let out_index = linear_to_indices(out_linear, &out_shape);
+                let mut products = Vec::new();
+                for reduced_linear in 0..count(&reduced_shape) {
+                    let reduced_index = linear_to_indices(reduced_linear, &reduced_shape);
+                    let value_of = |label: char| {
+                        out_labels
+                            .iter()
+                            .position(|&candidate| candidate == label)
+                            .map(|position| out_index[position])
+                            .unwrap_or_else(|| {
+                                reduced_index[reduced.iter().position(|&r| r == label).unwrap()]
+                            })
+                    };
+                    let at = |labels: &str, shape: &[usize]| {
+                        indices_to_linear(&labels.chars().map(value_of).collect::<Vec<_>>(), shape)
+                    };
+                    let left = lhs.value.storage().scalar_at(at(lhs_labels, &lhs_shape));
+                    let right = rhs.value.storage().scalar_at(at(rhs_labels, &rhs_shape));
+                    products.push(float_binop(FloatBinOp::Mul, left, right).unwrap());
+                }
+                let expected = reference_sum(products, Prim::F32, Prim::F32).unwrap();
+                assert!(
+                    same_bits(out.value.storage().scalar_at(out_linear), expected),
+                    "#3807 {equation}: output {out_linear} changed its bits"
+                );
+            }
+        }
+    }
+
+    /// An integer overflow traps as einsum's overflow at the accumulator
+    /// dtype whether a product or a partial sum overflows, as the stored-leaf
+    /// sum reported it ([05-OP-33]).
+    #[test]
+    fn issue_3807_integer_overflow_reports_the_einsum_trap() {
+        let big = 5.0e18;
+        for (lhs_values, rhs_values) in [
+            (vec![big, big, 1.0], vec![1.0, 1.0, 1.0]),
+            (vec![1.0, big, big, big, 1.0], vec![1.0, 1.0, 1.0, 1.0, 1.0]),
+            (vec![big, 2.0], vec![4.0, 1.0]),
+        ] {
+            let count = lhs_values.len();
+            let lhs = tensor(Prim::Int64, &[count], &lhs_values);
+            let rhs = tensor(Prim::Int64, &[count], &rhs_values);
+            let streamed = tensor_einsum_value("i,i->", &lhs, &rhs).expect_err("the sum overflows");
+            let stored = reference_dot(&lhs, &rhs).expect_err("the reference overflows");
+            assert_eq!(streamed, stored, "#3807: the einsum trap changed");
+        }
     }
 }
