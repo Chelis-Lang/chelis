@@ -3620,7 +3620,7 @@ class NixEvalJobTests(unittest.TestCase):
 
 
 class NixPackagesWorkflowTests(unittest.TestCase):
-    """Lock the two native Nix package jobs and their complete check command."""
+    """Lock the native Nix package jobs and their complete check command."""
 
     def test_workflow_reader_preserves_raw_newlines_for_the_digest(self):
         raw = NIX_PACKAGES_YML.read_bytes().replace(b"\n", b"\r\n")
