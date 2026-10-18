@@ -1156,6 +1156,63 @@ fn issue_2204_frame_copies_do_not_scale_with_closure_applications() {
     );
 }
 
+/// chelis#3842: a `let` or `match` arm copies no binding when it saves its
+/// frame.
+///
+/// Every `let` saves the frame before binding and restores it afterwards, so
+/// a block of `n` sequential bindings saves frames of 1, 2, ..., `n`
+/// bindings. When a save copied each binding, a call of such a block copied
+/// `n * (n + 1) / 2` of them, and boxing the bindings turned each copy into
+/// an allocation. A binding now moves behind a reference count the first time
+/// a save copies it, and every later save shares it.
+///
+/// Counted receipt in the shape of chelis#2204's: `binding_copies` counts
+/// bindings copied or moved behind a count. The promise is that the count
+/// per call grows linearly with the block's length, asserted as a comparison
+/// between two lengths rather than a machine budget: doubling the block may
+/// at most about double the count, where a quadratic count quadruples it.
+///
+/// Evidentiary status: REGRESSION TEST, proven failing first. With a save
+/// that copies every owned binding, 40 bindings copied 820 per call and 80
+/// copied 3,240.
+#[test]
+fn issue_3842_a_let_save_copies_each_binding_at_most_once() {
+    fn copies_per_call(lets: usize) -> u64 {
+        let calls = 10;
+        let mut source = String::from("def chain(x0: i64) -> i64 = {\n");
+        for index in 1..=lets {
+            source += &format!("  x{index} = add(x{}, {index}i64)\n", index - 1);
+        }
+        source += &format!(
+            "  x{lets}\n}}\nresult = fold(fn (acc: i64, i: i64) -> add(acc, chain(i)), \
+             0i64, range(0i64, {calls}i64))\n"
+        );
+        let checked = checked_surf(&source);
+        let empty_tensors: UnordMap<String, RuntimeTensorValue> = UnordMap::new();
+        let inputs = HostEvaluationInputs {
+            roots: &empty_tensors,
+            bindings: None,
+        };
+        super::frame::reset_binding_copies();
+        evaluate_host_program_with_library_and_types(&checked, None, None, inputs, None, None)
+            .expect("#3842 fixture evaluates");
+        super::frame::binding_copies() / calls
+    }
+
+    let short = copies_per_call(40);
+    let long = copies_per_call(80);
+    eprintln!("#3842 receipt: 40 bindings copied {short} per call, 80 copied {long}");
+    assert!(
+        short >= 40,
+        "#3842: every binding is saved once, or this receipt measures nothing"
+    );
+    assert!(
+        long * 2 <= short * 5,
+        "#3842: a call of 80 bindings copied {long} of them and a call of 40 copied {short}; \
+         a frame save must share the bindings it copies"
+    );
+}
+
 /// chelis#2335: a read-only list builtin reads its list argument in place.
 ///
 /// `expect_list_arg` copied the whole list for every list builtin, so a

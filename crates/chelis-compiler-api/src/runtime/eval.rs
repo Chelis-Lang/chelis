@@ -3615,7 +3615,7 @@ impl<'a> EvalContext<'a> {
         if bind_node.tag != DeepTag::Bind {
             return Err("let bindings malformed".to_string());
         }
-        self.last_uses.push_snapshot(self.bindings.clone());
+        self.last_uses.push_snapshot(self.bindings.snapshot());
         let saved_types = self.binding_types.clone();
         // Restore both frame maps on every exit path (including bind or body
         // evaluation errors) so a caught-and-continued error can never leak
@@ -4052,7 +4052,7 @@ impl<'a> EvalContext<'a> {
                     "match `arm` must contain exactly a pattern, guard, and body".to_string(),
                 );
             }
-            self.last_uses.push_snapshot(self.bindings.clone());
+            self.last_uses.push_snapshot(self.bindings.snapshot());
             let saved_types = self.binding_types.clone();
             // Pattern-bound names carry no declared types; insert `None`
             // markers afterwards so they shadow rather than leak an outer
@@ -4273,7 +4273,7 @@ impl<'a> EvalContext<'a> {
             args,
             arg_types,
             result_type,
-            &[],
+            Vec::new(),
             None,
             Some(receipt),
             has_composition,
@@ -4429,7 +4429,7 @@ impl<'a> EvalContext<'a> {
             args,
             arg_type_exprs,
             result_type_expr,
-            &formal_claims,
+            formal_claims,
             present,
             receipt,
             false,
@@ -4444,7 +4444,7 @@ impl<'a> EvalContext<'a> {
         mut args: Vec<RuntimeValue>,
         arg_type_exprs: &[Option<Arc<Expr>>],
         result_type_expr: Option<&Expr>,
-        inherited_claims: &[DeclaredResultClaim],
+        inherited_claims: Vec<DeclaredResultClaim>,
         present: Option<&[bool]>,
         mut loop_entry: Option<&mut LoopEntryReceipt>,
         activate_forwarding: bool,
@@ -4452,10 +4452,11 @@ impl<'a> EvalContext<'a> {
     ) -> Result<RuntimeValue, String> {
         // A caller's first-site axes resolve in the caller's activation,
         // whose sites have all run by the time its callee produces the
-        // result: the callee only ever sees concrete axes.
+        // result: the callee only ever sees concrete axes. The caller's list
+        // is consumed here rather than kept alive beside its resolution.
         let mut inherited_claims = inherited_claims
-            .iter()
-            .map(|claim| self.resolve_first_sites(claim))
+            .into_iter()
+            .map(|claim| self.resolve_first_sites(&claim))
             .collect::<Vec<_>>();
         match callable {
             RuntimeValue::Builtin(value) => {
@@ -4548,117 +4549,133 @@ impl<'a> EvalContext<'a> {
                 }
                 let caller_activation = self.activation_extents.enter();
                 let value = (|| {
-                    // A dimension variable declared by a tensor parameter is
-                    // also an exact runtime i64 value in the callee frame.
-                    // Recover it from the actual tensor shape before the
-                    // arguments are moved into their ordinary bindings. This
-                    // makes `expand(b, 0, k)` consume the same witnessed
-                    // extent as compiled lowering instead of looking up an
-                    // unbound textual runtime name (chelis#1382).
-                    let mut dimension_bindings: UnordMap<String, usize> = UnordMap::new();
-                    let mut named_result_witnesses: Vec<(String, NamedResultSource, usize)> =
-                        loop_entry
-                            .as_ref()
-                            .and_then(|receipt| receipt.witnesses.clone())
-                            .unwrap_or_default();
-                    for (name, _, extent) in &named_result_witnesses {
-                        dimension_bindings.insert(name.clone(), *extent);
-                        #[cfg(test)]
-                        ENTRY_CLAIM_WORK.with(|v| v.set(v.get() + 1));
-                    }
-                    let checked_params = checked_signature
-                        .as_deref()
-                        .and_then(checked_function_children)
-                        .and_then(|children| children.split_last())
-                        .map(|(_, params)| params);
-                    let entry = entry_types.get_or_init(|| {
-                        ClosureEntryTypes::build(
-                            &param_types,
-                            return_type.as_deref(),
-                            checked_params,
-                            &params,
-                            self.session.as_ref(),
-                        )
-                    });
-                    let actualized_entries = if loop_entry_is_witnessed(loop_entry.as_deref()) {
-                        Vec::new()
-                    } else {
-                        let (normalized, contract) =
-                            entry.contract.as_ref().map_err(Clone::clone)?;
-                        actualize_entry_contract(
-                            normalized,
-                            contract,
-                            checked_params,
-                            &param_types,
-                            &args,
-                            present,
-                            Some(NestedPatterns {
-                                derive: EntryClaimPatterns {
-                                    registry: &self.adt_registry,
-                                    cache: &self.claim_patterns,
-                                },
-                                memo: Some(&entry.nested),
-                            }),
-                            loop_entry.as_deref_mut(),
-                        )?
-                    };
-                    let mut entry_inputs = Vec::with_capacity(actualized_entries.len());
-                    let mut entry_shapes: Vec<Vec<usize>> =
-                        Vec::with_capacity(actualized_entries.len());
-                    for (parameter, ty, shape) in actualized_entries {
-                        for (axis, (dim, size)) in ty.dims.iter().zip(&shape).enumerate() {
+                    // The entry phase's working state (actuals, the entry
+                    // plan, precision maps, witnesses) is dropped before the
+                    // body runs, so a recursion keeps only what the body
+                    // reads: its claims (chelis#3842).
+                    let (claims, late_first_sites) = {
+                        // A dimension variable declared by a tensor parameter is
+                        // also an exact runtime i64 value in the callee frame.
+                        // Recover it from the actual tensor shape before the
+                        // arguments are moved into their ordinary bindings. This
+                        // makes `expand(b, 0, k)` consume the same witnessed
+                        // extent as compiled lowering instead of looking up an
+                        // unbound textual runtime name (chelis#1382).
+                        let mut dimension_bindings: UnordMap<String, usize> = UnordMap::new();
+                        let mut named_result_witnesses: Vec<(String, NamedResultSource, usize)> =
+                            loop_entry
+                                .as_ref()
+                                .and_then(|receipt| receipt.witnesses.clone())
+                                .unwrap_or_default();
+                        for (name, _, extent) in &named_result_witnesses {
+                            dimension_bindings.insert(name.clone(), *extent);
                             #[cfg(test)]
                             ENTRY_CLAIM_WORK.with(|v| v.set(v.get() + 1));
-                            if let DimInfo::Named(name, _) = dim
-                                && name != "*"
-                            {
-                                dimension_bindings.entry(name.clone()).or_insert(*size);
-                                if !named_result_witnesses.iter().any(|(seen, _, _)| {
-                                    #[cfg(test)]
-                                    ENTRY_CLAIM_WORK.with(|v| v.set(v.get() + 1));
-                                    seen == name
-                                }) {
-                                    named_result_witnesses.push((
-                                        name.clone(),
-                                        NamedResultSource {
-                                            claim: chelis_ir::lower::extent_binder_label(name),
-                                            parameter: parameter.clone().into(),
-                                            axis,
-                                        },
-                                        *size,
-                                    ));
+                        }
+                        let checked_params = checked_signature
+                            .as_deref()
+                            .and_then(checked_function_children)
+                            .and_then(|children| children.split_last())
+                            .map(|(_, params)| params);
+                        let entry = entry_types.get_or_init(|| {
+                            ClosureEntryTypes::build(
+                                &param_types,
+                                return_type.as_deref(),
+                                checked_params,
+                                &params,
+                                self.session.as_ref(),
+                            )
+                        });
+                        let actualized_entries = if loop_entry_is_witnessed(loop_entry.as_deref()) {
+                            Vec::new()
+                        } else {
+                            let (normalized, contract) =
+                                entry.contract.as_ref().map_err(Clone::clone)?;
+                            actualize_entry_contract(
+                                normalized,
+                                contract,
+                                checked_params,
+                                &param_types,
+                                &args,
+                                present,
+                                Some(NestedPatterns {
+                                    derive: EntryClaimPatterns {
+                                        registry: &self.adt_registry,
+                                        cache: &self.claim_patterns,
+                                    },
+                                    memo: Some(&entry.nested),
+                                }),
+                                loop_entry.as_deref_mut(),
+                            )?
+                        };
+                        let mut entry_inputs = Vec::with_capacity(actualized_entries.len());
+                        let mut entry_shapes: Vec<Vec<usize>> =
+                            Vec::with_capacity(actualized_entries.len());
+                        for (parameter, ty, shape) in actualized_entries {
+                            for (axis, (dim, size)) in ty.dims.iter().zip(&shape).enumerate() {
+                                #[cfg(test)]
+                                ENTRY_CLAIM_WORK.with(|v| v.set(v.get() + 1));
+                                if let DimInfo::Named(name, _) = dim
+                                    && name != "*"
+                                {
+                                    dimension_bindings.entry(name.clone()).or_insert(*size);
+                                    if !named_result_witnesses.iter().any(|(seen, _, _)| {
+                                        #[cfg(test)]
+                                        ENTRY_CLAIM_WORK.with(|v| v.set(v.get() + 1));
+                                        seen == name
+                                    }) {
+                                        named_result_witnesses.push((
+                                            name.clone(),
+                                            NamedResultSource {
+                                                claim: chelis_ir::lower::extent_binder_label(name),
+                                                parameter: parameter.clone().into(),
+                                                axis,
+                                            },
+                                            *size,
+                                        ));
+                                    }
                                 }
                             }
+                            entry_inputs.push(chelis_ir::host::HostTensorInput {
+                                name: parameter,
+                                ty,
+                            });
+                            entry_shapes.push(shape);
                         }
-                        entry_inputs.push(chelis_ir::host::HostTensorInput {
-                            name: parameter,
-                            ty,
-                        });
-                        entry_shapes.push(shape);
-                    }
-                    let entry_plan = chelis_ir::host::SignatureEntryPlan::new(entry_inputs);
-                    check_signature_entry_plan(
-                        &entry_plan,
-                        &entry_shapes.iter().map(Vec::as_slice).collect::<Vec<_>>(),
-                    )?;
-                    if let Some(receipt) = loop_entry {
-                        if let Some(delta) = &mut receipt.delta {
-                            delta.checked = Some(std::mem::take(&mut delta.pending));
-                            delta.old_list_len = match args.first() {
-                                Some(RuntimeValue::List(items)) => items.len(),
-                                _ => 0,
-                            };
-                        } else if receipt.witnesses.is_none() {
-                            receipt.witnesses = Some(named_result_witnesses.clone());
-                            #[cfg(test)]
-                            ENTRY_CLAIM_WORK
-                                .with(|v| v.set(v.get() + named_result_witnesses.len() as u64));
+                        let entry_plan = chelis_ir::host::SignatureEntryPlan::new(entry_inputs);
+                        check_signature_entry_plan(
+                            &entry_plan,
+                            &entry_shapes.iter().map(Vec::as_slice).collect::<Vec<_>>(),
+                        )?;
+                        if let Some(receipt) = loop_entry {
+                            if let Some(delta) = &mut receipt.delta {
+                                delta.checked = Some(std::mem::take(&mut delta.pending));
+                                delta.old_list_len = match args.first() {
+                                    Some(RuntimeValue::List(items)) => items.len(),
+                                    _ => 0,
+                                };
+                            } else if receipt.witnesses.is_none() {
+                                receipt.witnesses = Some(named_result_witnesses.clone());
+                                #[cfg(test)]
+                                ENTRY_CLAIM_WORK
+                                    .with(|v| v.set(v.get() + named_result_witnesses.len() as u64));
+                            }
                         }
-                    }
-                    let caller_precisions = saved_precisions.clone();
-                    let mut call_precisions = UnordMap::new();
-                    for (declared, actual) in param_types.iter().zip(arg_type_exprs) {
-                        if let (Some(declared), Some(actual)) = (declared, actual) {
+                        let caller_precisions = saved_precisions.clone();
+                        let mut call_precisions = UnordMap::new();
+                        for (declared, actual) in param_types.iter().zip(arg_type_exprs) {
+                            if let (Some(declared), Some(actual)) = (declared, actual) {
+                                collect_checked_precision_bindings(
+                                    declared,
+                                    actual,
+                                    &caller_precisions,
+                                    &mut call_precisions,
+                                )?;
+                            }
+                        }
+                        if let (Some(declared), Some(actual)) =
+                            (return_type.as_ref(), result_type_expr)
+                        {
                             collect_checked_precision_bindings(
                                 declared,
                                 actual,
@@ -4666,191 +4683,188 @@ impl<'a> EvalContext<'a> {
                                 &mut call_precisions,
                             )?;
                         }
-                    }
-                    if let (Some(declared), Some(actual)) = (return_type.as_ref(), result_type_expr)
-                    {
-                        collect_checked_precision_bindings(
-                            declared,
-                            actual,
-                            &caller_precisions,
-                            &mut call_precisions,
-                        )?;
-                    }
-                    // A separately declared signature and the checked body can
-                    // name the same precision with different binders. Actualize
-                    // both from the same checked call-site evidence; body-local
-                    // collectors must not infer a dtype from their payload.
-                    if let Some((checked_result, checked_params)) = checked_signature
-                        .as_deref()
-                        .and_then(checked_function_children)
-                        .and_then(|children| children.split_last())
-                    {
-                        for (checked, actual) in checked_params.iter().zip(arg_type_exprs) {
-                            if let Some(actual) = actual {
+                        // A separately declared signature and the checked body can
+                        // name the same precision with different binders. Actualize
+                        // both from the same checked call-site evidence; body-local
+                        // collectors must not infer a dtype from their payload.
+                        if let Some((checked_result, checked_params)) = checked_signature
+                            .as_deref()
+                            .and_then(checked_function_children)
+                            .and_then(|children| children.split_last())
+                        {
+                            for (checked, actual) in checked_params.iter().zip(arg_type_exprs) {
+                                if let Some(actual) = actual {
+                                    collect_checked_precision_bindings(
+                                        checked,
+                                        actual,
+                                        &caller_precisions,
+                                        &mut call_precisions,
+                                    )?;
+                                }
+                            }
+                            if let Some(actual) = result_type_expr {
                                 collect_checked_precision_bindings(
-                                    checked,
+                                    checked_result,
                                     actual,
                                     &caller_precisions,
                                     &mut call_precisions,
                                 )?;
                             }
                         }
-                        if let Some(actual) = result_type_expr {
-                            collect_checked_precision_bindings(
-                                checked_result,
-                                actual,
-                                &caller_precisions,
-                                &mut call_precisions,
-                            )?;
-                        }
-                    }
-                    // The call-site instantiation is fresh (spec/04 §5.8):
-                    // callee-owned binders shadow a same-spelled lexical
-                    // binding instead of conflicting with it.
-                    self.precision_bindings.merge(call_precisions);
-                    let checked_result = checked_signature
-                        .as_deref()
-                        .and_then(checked_function_children)
-                        .and_then(<[Expr]>::last);
-                    // Alias substitution retains the authored dimension names
-                    // through the result, just as through List parameters.
-                    let authored_result = entry.result.as_ref().map_err(Clone::clone)?;
-                    let declared_result = authored_result
-                        .as_ref()
-                        .filter(|ty| tensor_type_dim_exprs(ty).is_some())
-                        .or(checked_result);
-                    let declaration_claim = Self::declared_result_claim_at_callsite(
-                        declared_result,
-                        checked_params,
-                        &param_types,
-                        &args,
-                    )?;
-                    // The parameters bind their binders before the body runs;
-                    // the body's sites bind the rest.
-                    for (name, source, size) in &named_result_witnesses {
-                        let size = i64::try_from(*size).map_err(|_| {
-                            format!("dimension binder `{name}` exceeds the exact i64 range")
-                        })?;
-                        self.activation_extents.bind(
-                            chelis_ir::lower::extent_binder_label(name),
-                            source.clone(),
-                            size,
-                        );
-                    }
-                    // The body's first sites bind exactly the declaration's
-                    // return-only binders, the set its named sites read.
-                    let roles = match (active_declaration.as_deref(), self.session.as_ref()) {
-                        (Some(name), Some(session)) => session
-                            .checked_subexpr_lowering_context()
-                            .dim_binder_roles(name),
-                        _ => chelis_ir::lower::DimBinderRoles::default(),
-                    };
-                    let declaration_claim = Self::with_named_result_axes(
-                        declaration_claim,
-                        declared_result,
-                        &named_result_witnesses,
-                        Some((self.activation_extents.current, &roles)),
-                    )?;
-                    // Dimension-name order is canonical for extending the callee frame.
-                    for (name, size) in dimension_bindings.into_sorted() {
-                        let size = i64::try_from(size).map_err(|_| {
-                            format!("dimension binder `{name}` exceeds the exact i64 range")
-                        })?;
-                        self.bindings.insert(name, RuntimeValue::int64(size));
-                    }
-                    for (index, (param, arg)) in params.iter().zip(args).enumerate() {
-                        let declared = param_types
-                            .get(index)
-                            .cloned()
-                            .flatten()
-                            .or_else(|| arg_type_exprs.get(index).cloned().flatten());
-                        // chelis#729 Phase 1: a tensor argument ingress-finalizes
-                        // at the param's DECLARED element dtype (the host-lane
-                        // mirror of the DAG evaluator's Load ingress). Without
-                        // this, an Int64-tagged `to_tensor` literal flows into an
-                        // i8-typed param and the arithmetic runs at the wrong
-                        // width (the chelis#718 eval-tensor cell).
-                        let mut arg =
-                            match (declared.as_deref().and_then(declared_tensor_prim), arg) {
-                                (Some(prim), RuntimeValue::Tensor(tensor)) => {
-                                    RuntimeValue::Tensor(ingress_tensor_to_declared(tensor, prim)?)
-                                }
-                                (_, arg) => arg,
-                            };
-                        // A declared formal's normalization is the closure's
-                        // own; only a call-site type is normalized here.
-                        let authored_callable = match entry.params.get(index) {
-                            Some(Ok(Some(normalized))) => Some(Cow::Borrowed(normalized)),
-                            Some(Err(error)) => return Err(error.clone()),
-                            Some(Ok(None)) | None => declared
-                                .as_deref()
-                                .map(|ty| normalize_authored_entry_type(ty, self.session.as_ref()))
-                                .transpose()?
-                                .map(Cow::Owned),
-                        };
-                        let callable_contract = authored_callable
+                        // The call-site instantiation is fresh (spec/04 §5.8):
+                        // callee-owned binders shadow a same-spelled lexical
+                        // binding instead of conflicting with it.
+                        self.precision_bindings.merge(call_precisions);
+                        let checked_result = checked_signature
                             .as_deref()
-                            .filter(|ty| checked_function_children(ty).is_some())
-                            .or_else(|| checked_params.and_then(|params| params.get(index)));
-                        if let Some(contract) =
-                            callable_contract.filter(|ty| checked_function_children(ty).is_some())
-                        {
-                            let origin = match (declared.as_deref(), authored_callable.as_deref()) {
-                                (Some(origin), Some(normalized))
-                                    if checked_function_children(normalized).is_some() =>
-                                {
-                                    origin
-                                }
-                                _ => contract,
+                            .and_then(checked_function_children)
+                            .and_then(<[Expr]>::last);
+                        // Alias substitution retains the authored dimension names
+                        // through the result, just as through List parameters.
+                        let authored_result = entry.result.as_ref().map_err(Clone::clone)?;
+                        let declared_result = authored_result
+                            .as_ref()
+                            .filter(|ty| tensor_type_dim_exprs(ty).is_some())
+                            .or(checked_result);
+                        let declaration_claim = Self::declared_result_claim_at_callsite(
+                            declared_result,
+                            checked_params,
+                            &param_types,
+                            &args,
+                        )?;
+                        // The parameters bind their binders before the body runs;
+                        // the body's sites bind the rest.
+                        for (name, source, size) in &named_result_witnesses {
+                            let size = i64::try_from(*size).map_err(|_| {
+                                format!("dimension binder `{name}` exceeds the exact i64 range")
+                            })?;
+                            self.activation_extents.bind(
+                                chelis_ir::lower::extent_binder_label(name),
+                                source.clone(),
+                                size,
+                            );
+                        }
+                        // The body's first sites bind exactly the declaration's
+                        // return-only binders, the set its named sites read.
+                        let roles = match (active_declaration.as_deref(), self.session.as_ref()) {
+                            (Some(name), Some(session)) => session
+                                .checked_subexpr_lowering_context()
+                                .dim_binder_roles(name),
+                            _ => chelis_ir::lower::DimBinderRoles::default(),
+                        };
+                        let declaration_claim = Self::with_named_result_axes(
+                            declaration_claim,
+                            declared_result,
+                            &named_result_witnesses,
+                            Some((self.activation_extents.current, &roles)),
+                        )?;
+                        // Dimension-name order is canonical for extending the callee frame.
+                        for (name, size) in dimension_bindings.into_sorted() {
+                            let size = i64::try_from(size).map_err(|_| {
+                                format!("dimension binder `{name}` exceeds the exact i64 range")
+                            })?;
+                            self.bindings.insert(name, RuntimeValue::int64(size));
+                        }
+                        for (index, (param, arg)) in params.iter().zip(args).enumerate() {
+                            let declared = param_types
+                                .get(index)
+                                .cloned()
+                                .flatten()
+                                .or_else(|| arg_type_exprs.get(index).cloned().flatten());
+                            // chelis#729 Phase 1: a tensor argument ingress-finalizes
+                            // at the param's DECLARED element dtype (the host-lane
+                            // mirror of the DAG evaluator's Load ingress). Without
+                            // this, an Int64-tagged `to_tensor` literal flows into an
+                            // i8-typed param and the arithmetic runs at the wrong
+                            // width (the chelis#718 eval-tensor cell).
+                            let mut arg =
+                                match (declared.as_deref().and_then(declared_tensor_prim), arg) {
+                                    (Some(prim), RuntimeValue::Tensor(tensor)) => {
+                                        RuntimeValue::Tensor(ingress_tensor_to_declared(
+                                            tensor, prim,
+                                        )?)
+                                    }
+                                    (_, arg) => arg,
+                                };
+                            // A declared formal's normalization is the closure's
+                            // own; only a call-site type is normalized here.
+                            let authored_callable = match entry.params.get(index) {
+                                Some(Ok(Some(normalized))) => Some(Cow::Borrowed(normalized)),
+                                Some(Err(error)) => return Err(error.clone()),
+                                Some(Ok(None)) | None => declared
+                                    .as_deref()
+                                    .map(|ty| {
+                                        normalize_authored_entry_type(ty, self.session.as_ref())
+                                    })
+                                    .transpose()?
+                                    .map(Cow::Owned),
                             };
-                            arg.retain_invocation_contract(self.retained_contract(origin)?);
+                            let callable_contract = authored_callable
+                                .as_deref()
+                                .filter(|ty| checked_function_children(ty).is_some())
+                                .or_else(|| checked_params.and_then(|params| params.get(index)));
+                            if let Some(contract) = callable_contract
+                                .filter(|ty| checked_function_children(ty).is_some())
+                            {
+                                let origin =
+                                    match (declared.as_deref(), authored_callable.as_deref()) {
+                                        (Some(origin), Some(normalized))
+                                            if checked_function_children(normalized).is_some() =>
+                                        {
+                                            origin
+                                        }
+                                        _ => contract,
+                                    };
+                                arg.retain_invocation_contract(self.retained_contract(origin)?);
+                            }
+                            self.binding_types.insert(param.clone(), declared);
+                            let producer = ResultProducer::interface_load(&arg);
+                            self.bindings
+                                .insert_with_result_producer(param.clone(), arg, producer);
                         }
-                        self.binding_types.insert(param.clone(), declared);
-                        let producer = ResultProducer::interface_load(&arg);
-                        self.bindings
-                            .insert_with_result_producer(param.clone(), arg, producer);
-                    }
-                    // chelis#1739 and chelis#1771: a declared literal result
-                    // extent is a claim the host lane owes a runtime verdict
-                    // on, and section 4.7 places that verdict at the source
-                    // position of the operation that produces the returned
-                    // value rather than at the return boundary. That is why the
-                    // body is evaluated through `eval_under_result_claim`
-                    // instead of being checked after it returns: a block-bodied
-                    // return whose producing binding is followed by a `print`
-                    // must trap before the print runs.
-                    //
-                    // A frame holds each distinct obligation once, even when
-                    // two declarations state it: equal claims owe one check.
-                    // Forwarding a frame does not append it again.
-                    // The authored spelling, aliases unexpanded: the
-                    // derivation keeps their nominal dimension arguments.
-                    let nested_claim = match (&active_declaration, &return_type) {
-                        (Some(_), Some(authored)) => {
-                            self.nested_result_claim(authored, &named_result_witnesses)?
-                        }
-                        _ => None,
+                        // chelis#1739 and chelis#1771: a declared literal result
+                        // extent is a claim the host lane owes a runtime verdict
+                        // on, and section 4.7 places that verdict at the source
+                        // position of the operation that produces the returned
+                        // value rather than at the return boundary. That is why the
+                        // body is evaluated through `eval_under_result_claim`
+                        // instead of being checked after it returns: a block-bodied
+                        // return whose producing binding is followed by a `print`
+                        // must trap before the print runs.
+                        //
+                        // A frame holds each distinct obligation once, even when
+                        // two declarations state it: equal claims owe one check.
+                        // Forwarding a frame does not append it again.
+                        // The authored spelling, aliases unexpanded: the
+                        // derivation keeps their nominal dimension arguments.
+                        let nested_claim = match (&active_declaration, &return_type) {
+                            (Some(_), Some(authored)) => {
+                                self.nested_result_claim(authored, &named_result_witnesses)?
+                            }
+                            _ => None,
+                        };
+                        let late_first_sites = declaration_claim
+                            .as_ref()
+                            .filter(|claim| !claim.first_sites.is_empty())
+                            .map(|claim| DeclaredResultClaim {
+                                rank: claim.rank,
+                                axes: Vec::new(),
+                                first_sites: claim.first_sites.clone(),
+                                nested: None,
+                            });
+                        // The declared claims keep their place ahead of the
+                        // inherited ones, and a later equal copy is dropped: a
+                        // recursive activation, self or mutual, holds each
+                        // distinct claim once and names the trap it would name
+                        // with the copy.
+                        let claims = declaration_claim
+                            .into_iter()
+                            .chain(nested_claim)
+                            .chain(std::mem::take(&mut inherited_claims))
+                            .collect::<ResultClaimList>()
+                            .into_claims(ResultClaimSite::Apply);
+                        (claims, late_first_sites)
                     };
-                    let late_first_sites = declaration_claim
-                        .as_ref()
-                        .filter(|claim| !claim.first_sites.is_empty())
-                        .map(|claim| DeclaredResultClaim {
-                            rank: claim.rank,
-                            axes: Vec::new(),
-                            first_sites: claim.first_sites.clone(),
-                            nested: None,
-                        });
-                    // The declared claims keep their place ahead of the
-                    // inherited ones, and a later equal copy is dropped: a
-                    // recursive activation, self or mutual, holds each
-                    // distinct claim once and names the trap it would name
-                    // with the copy.
-                    let claims = declaration_claim
-                        .into_iter()
-                        .chain(nested_claim)
-                        .chain(std::mem::take(&mut inherited_claims))
-                        .collect::<ResultClaimList>()
-                        .into_claims(ResultClaimSite::Apply);
                     #[cfg(test)]
                     RESULT_CLAIMS_HELD.with(|v| v.set(v.get() + claims.len() as u64));
                     let forwarding_index =

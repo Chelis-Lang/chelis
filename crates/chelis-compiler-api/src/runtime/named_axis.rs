@@ -116,13 +116,13 @@ impl<'a> EvalContext<'a> {
                     if let Some(declared) = self.binding_types.get(name) {
                         return declared.clone();
                     }
-                    if let Some(ty) = self.program.type_env().get(name) {
-                        return Some(Arc::new(ty.clone()));
+                    if let Some(ty) = self.program.shared_type(name) {
+                        return Some(ty);
                     }
                     if let Some(resolved) = self.top_level_def_key(name)
-                        && let Some(ty) = self.program.type_env().get(resolved)
+                        && let Some(ty) = self.program.shared_type(resolved)
                     {
-                        return Some(Arc::new(ty.clone()));
+                        return Some(ty);
                     }
                 }
                 None

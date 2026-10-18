@@ -88,6 +88,10 @@ pub(super) struct ProgramScope {
     /// [`Self::reached_by_call`] per spelling, derived once: a kernel applied
     /// in a loop walks its body once, not once per application.
     reached_by_call: RefCell<UnordMap<String, Rc<[String]>>>,
+    /// Each type-environment entry a read has asked for, shared: a static
+    /// type read once per application otherwise copied the declared type
+    /// every time, and a recursion kept each copy alive (chelis#3842).
+    shared_types: RefCell<UnordMap<String, std::sync::Arc<Expr>>>,
 }
 
 impl ProgramScope {
@@ -113,6 +117,7 @@ impl ProgramScope {
             transform_lowering_context: OnceCell::new(),
             terminal_index,
             reached_by_call: RefCell::new(UnordMap::new()),
+            shared_types: RefCell::new(UnordMap::new()),
         }
     }
 
@@ -129,6 +134,18 @@ impl ProgramScope {
 
     pub(super) fn type_env(&self) -> &UnordMap<String, Expr> {
         &self.type_env
+    }
+
+    /// The type environment's entry for `name`, shared rather than copied.
+    pub(super) fn shared_type(&self, name: &str) -> Option<std::sync::Arc<Expr>> {
+        if let Some(shared) = self.shared_types.borrow().get(name) {
+            return Some(std::sync::Arc::clone(shared));
+        }
+        let shared = std::sync::Arc::new(self.type_env.get(name)?.clone());
+        self.shared_types
+            .borrow_mut()
+            .insert(name.to_owned(), std::sync::Arc::clone(&shared));
+        Some(shared)
     }
 
     /// The definition key a reference spelled `name` resolves to: the exact

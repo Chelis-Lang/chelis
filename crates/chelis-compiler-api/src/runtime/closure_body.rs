@@ -330,6 +330,8 @@ impl LastUses {
         for snapshot in &mut self.snapshots[self.base..] {
             snapshot.release_local(name);
         }
-        Some(released)
+        // Every snapshot has dropped its share, so the value moves out
+        // solely owned.
+        Some(released.into_parts())
     }
 }
