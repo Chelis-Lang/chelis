@@ -286,14 +286,17 @@ fn unit_source(
 /// however many applications its compiled body nests: the trip point is the
 /// count of interpreted applications in the source, whatever the depth
 /// inside the unit (spec/08-backends.md section 1.1). Every unit kind with
-/// every kind of inner work that compiles into it, in both positions, at two
-/// inner depths: 10,000 counted levels evaluate and 10,001 report the budget.
+/// every kind of inner work that compiles into it, in both positions, with 25
+/// applications nested inside the unit: 10,000 counted levels evaluate and
+/// 10,001 report the budget.
 ///
 /// Evidentiary status: REGRESSION TEST. A unit that also counted the
-/// applications its body nests would trip at 10,000 for the deeper inner
-/// chain; a unit that counted nothing would evaluate at 10,001.
+/// applications its body nests would trip at 10,000; a unit that counted
+/// nothing, or counted two levels, would move the trip by one.
 #[test]
 fn a_compiled_unit_counts_one_level_whatever_it_nests() {
+    // `c0 ..= c24`: 25 applications nested inside the unit.
+    const INNER_DEPTH: usize = 24;
     use Inner::{Chain, Fold, Map, Transform};
     // The inner work each unit compiles. A kernel, a staged plan or a
     // named-axis call that holds a list callback, or an ascription whose
@@ -310,31 +313,35 @@ fn a_compiled_unit_counts_one_level_whatever_it_nests() {
     for (unit, inners) in cases {
         for &inner in inners {
             for position in [Position::Direct, Position::Callback] {
-                for depth in [0, 24] {
-                    let case = format!("{unit:?} {inner:?} {position:?} inner depth {depth}");
-                    let within = eval(request(unit_source(unit, inner, position, depth, LEVELS)));
-                    let past = eval(request(unit_source(
-                        unit,
-                        inner,
-                        position,
-                        depth,
-                        LEVELS + 1,
-                    )));
-                    assert!(
-                        within.is_ok(),
-                        "{case}, 10,000 levels: {:?}",
-                        within.err().map(|error| error.errors)
-                    );
-                    let error = past.expect_err(&format!("{case}, 10,001 levels: evaluated"));
-                    assert!(
-                        error
-                            .errors
-                            .iter()
-                            .any(|diagnostic| diagnostic.message == BUDGET_MESSAGE),
-                        "{case}, 10,001 levels: {:?}",
-                        error.errors
-                    );
-                }
+                let case = format!("{unit:?} {inner:?} {position:?}");
+                let within = eval(request(unit_source(
+                    unit,
+                    inner,
+                    position,
+                    INNER_DEPTH,
+                    LEVELS,
+                )));
+                let past = eval(request(unit_source(
+                    unit,
+                    inner,
+                    position,
+                    INNER_DEPTH,
+                    LEVELS + 1,
+                )));
+                assert!(
+                    within.is_ok(),
+                    "{case}, 10,000 levels: {:?}",
+                    within.err().map(|error| error.errors)
+                );
+                let error = past.expect_err(&format!("{case}, 10,001 levels: evaluated"));
+                assert!(
+                    error
+                        .errors
+                        .iter()
+                        .any(|diagnostic| diagnostic.message == BUDGET_MESSAGE),
+                    "{case}, 10,001 levels: {:?}",
+                    error.errors
+                );
             }
         }
     }
