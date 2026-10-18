@@ -24,8 +24,6 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use chelis_unord::UnordMap;
-
 use super::RuntimeValue;
 
 /// Private producer provenance paired with a runtime value. Aggregates retain
@@ -140,9 +138,126 @@ impl ResultProducer {
 struct Binding {
     value: RuntimeValue,
     result_producer: Option<ResultProducer>,
-    /// The value was taken at the binding's last read; `value` is a
-    /// placeholder that no lookup returns.
-    released: bool,
+}
+
+/// What one scope binds a name to.
+#[derive(Debug)]
+enum Slot {
+    /// Held by this scope alone. A binding stays inline until a snapshot
+    /// first copies its scope, so a scope that is never snapshotted makes
+    /// no allocation per binding.
+    Owned(Binding),
+    /// Shared behind a reference count with the snapshots of this scope, so
+    /// each later snapshot copies a pointer, not the binding.
+    Shared(Arc<Binding>),
+    /// The value was taken at the binding's last read.
+    Released,
+}
+
+impl Clone for Slot {
+    /// Copies an owned binding and shares a shared one.
+    fn clone(&self) -> Self {
+        match self {
+            Self::Owned(binding) => {
+                record_binding_copy();
+                Self::Owned(binding.clone())
+            }
+            Self::Shared(binding) => Self::Shared(Arc::clone(binding)),
+            Self::Released => Self::Released,
+        }
+    }
+}
+
+impl Slot {
+    fn binding(&self) -> Option<&Binding> {
+        match self {
+            Self::Owned(binding) => Some(binding),
+            Self::Shared(binding) => Some(binding),
+            Self::Released => None,
+        }
+    }
+
+    /// Move an owned binding behind a reference count so copies share it.
+    fn share(&mut self) {
+        if let Self::Owned(_) = self {
+            let Self::Owned(binding) = std::mem::replace(self, Self::Released) else {
+                unreachable!("the slot was just matched as owned");
+            };
+            record_binding_copy();
+            *self = Self::Shared(Arc::new(binding));
+        }
+    }
+}
+
+/// A binding taken from a scope at its last read. Every snapshot that shared
+/// it releases its own copy before [`Self::into_parts`] runs, so the value
+/// then moves out solely owned.
+pub(crate) struct ReleasedBinding(Slot);
+
+impl ReleasedBinding {
+    /// The value and its producer: moved out when no scope still shares the
+    /// binding, cloned otherwise.
+    pub(crate) fn into_parts(self) -> (RuntimeValue, Option<ResultProducer>) {
+        let Binding {
+            value,
+            result_producer,
+        } = match self.0 {
+            Slot::Owned(binding) => binding,
+            Slot::Shared(binding) => Arc::unwrap_or_clone(binding),
+            Slot::Released => unreachable!("only a live slot is released"),
+        };
+        (value, result_producer)
+    }
+}
+
+/// One scope's bindings, sorted by name.
+///
+/// A sorted vector rather than an ordered map: a map node reserves room for
+/// eleven entries whatever the scope holds, and a binding is large, so a
+/// scope of two bindings held about 2.5 KB while a recursion kept its frame
+/// alive (chelis#3842). The vector's first allocation holds four entries.
+#[derive(Clone, Default)]
+struct Scope {
+    entries: Vec<(String, Slot)>,
+}
+
+impl std::fmt::Debug for Scope {
+    /// The length only, as the ordered map it replaced reported.
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "Scope {{ len: {} }}", self.entries.len())
+    }
+}
+
+impl Scope {
+    fn position(&self, name: &str) -> Result<usize, usize> {
+        self.entries
+            .binary_search_by(|(bound, _)| bound.as_str().cmp(name))
+    }
+
+    fn get(&self, name: &str) -> Option<&Slot> {
+        let index = self.position(name).ok()?;
+        Some(&self.entries[index].1)
+    }
+
+    fn get_mut(&mut self, name: &str) -> Option<&mut Slot> {
+        let index = self.position(name).ok()?;
+        Some(&mut self.entries[index].1)
+    }
+
+    fn insert(&mut self, name: String, slot: Slot) {
+        match self.position(&name) {
+            Ok(index) => self.entries[index].1 = slot,
+            Err(index) => self.entries.insert(index, (name, slot)),
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
 }
 
 /// What a name resolves to: the innermost binding of it, and whether that
@@ -177,6 +292,29 @@ pub(crate) fn reset_frame_value_copies() {
     FRAME_VALUE_COPIES.with(|copies| copies.set(0));
 }
 
+thread_local! {
+    /// Bindings copied, or moved behind a reference count, on this thread
+    /// since the last reset. Counted at the copy, never estimated.
+    static BINDING_COPIES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+fn record_binding_copy() {
+    BINDING_COPIES.with(|copies| copies.set(copies.get() + 1));
+}
+
+/// Bindings copied, or moved behind a reference count, on this thread since
+/// the last reset.
+#[cfg(test)]
+pub(crate) fn binding_copies() -> u64 {
+    BINDING_COPIES.with(std::cell::Cell::get)
+}
+
+/// Reset [`binding_copies`] for this thread.
+#[cfg(test)]
+pub(crate) fn reset_binding_copies() {
+    BINDING_COPIES.with(|copies| copies.set(0));
+}
+
 /// A lexical binding frame: an owned innermost scope over a chain of shared
 /// captured scopes.
 ///
@@ -186,18 +324,16 @@ pub(crate) fn reset_frame_value_copies() {
 /// only the representation of "everything in scope" changed.
 #[derive(Debug, Default)]
 pub struct Frame {
-    /// Bindings made in this scope since it was last captured. Each binding
-    /// is boxed: an ordered map's node reserves room for every slot, and an
-    /// unboxed binding is large, so a frame of two bindings held about 2.5 KB
-    /// while a recursion kept it alive (chelis#3842).
-    locals: UnordMap<String, Box<Binding>>,
+    /// Bindings made in this scope since it was last captured.
+    locals: Scope,
     /// Every scope captured below this one, innermost first. Shared with the
     /// closures that captured it and never mutated after freezing.
     captured: Option<Arc<Frame>>,
 }
 
 impl Clone for Frame {
-    /// Copies the innermost scope's values and shares the captured chain.
+    /// Copies the innermost scope's entries and shares the captured chain. An
+    /// owned binding is copied; a shared one is shared.
     fn clone(&self) -> Self {
         record_frame_copy(self.locals.len());
         Self {
@@ -212,12 +348,22 @@ impl Frame {
         Self::default()
     }
 
-    /// The innermost binding of `name` in any scope.
-    fn binding(&self, name: &str) -> Option<&Binding> {
+    /// A copy of this frame to restore later, sharing every binding with it.
+    /// Each binding moves behind a reference count the first time a
+    /// snapshot copies it, so it is never copied twice.
+    pub(crate) fn snapshot(&mut self) -> Frame {
+        for (_, slot) in &mut self.locals.entries {
+            slot.share();
+        }
+        self.clone()
+    }
+
+    /// What the innermost scope that binds `name` binds it to.
+    fn slot(&self, name: &str) -> Option<&Slot> {
         let mut frame = self;
         loop {
-            if let Some(binding) = frame.locals.get(name) {
-                return Some(binding);
+            if let Some(slot) = frame.locals.get(name) {
+                return Some(slot);
             }
             frame = frame.captured.as_deref()?;
         }
@@ -226,9 +372,9 @@ impl Frame {
     /// What `name` resolves to. A released binding still shadows every
     /// outer binding of the same name.
     pub(crate) fn lookup(&self, name: &str) -> Lookup<'_> {
-        match self.binding(name) {
-            Some(binding) if binding.released => Lookup::Released,
-            Some(binding) => Lookup::Live(&binding.value),
+        match self.slot(name).map(Slot::binding) {
+            Some(Some(binding)) => Lookup::Live(&binding.value),
+            Some(None) => Lookup::Released,
             None => Lookup::Unbound,
         }
     }
@@ -245,41 +391,33 @@ impl Frame {
     /// Producer provenance retained beside a lexical value. It is private
     /// execution metadata, not part of the value or its public representation.
     pub(crate) fn result_producer(&self, name: &str) -> Option<&ResultProducer> {
-        self.binding(name)
-            .filter(|binding| !binding.released)
+        self.slot(name)
+            .and_then(Slot::binding)
             .and_then(|binding| binding.result_producer.as_ref())
     }
 
     /// Whether any scope binds `name`, released or not: a released local is
     /// still the binding that name denotes in its scope.
     pub(crate) fn contains_key(&self, name: &str) -> bool {
-        self.binding(name).is_some()
+        self.slot(name).is_some()
     }
 
-    /// Take the value and producer this frame's innermost scope binds to
-    /// `name`, leaving the name bound and released. A binding in a captured
-    /// scope is shared with the closures that captured it and is never
-    /// released, so this returns `None` for it, as it does for a name the
-    /// innermost scope does not bind or already released.
-    pub(crate) fn release_local(
-        &mut self,
-        name: &str,
-    ) -> Option<(RuntimeValue, Option<ResultProducer>)> {
-        let binding = self
-            .locals
-            .get_mut(name)
-            .filter(|binding| !binding.released)?;
-        binding.released = true;
-        Some((
-            std::mem::replace(&mut binding.value, RuntimeValue::Unit),
-            binding.result_producer.take(),
-        ))
+    /// Take the binding this frame's innermost scope binds to `name`,
+    /// leaving the name bound and released. A binding in a captured scope is
+    /// shared with the closures that captured it and is never released, so
+    /// this returns `None` for it, as it does for a name the innermost scope
+    /// does not bind or already released.
+    pub(crate) fn release_local(&mut self, name: &str) -> Option<ReleasedBinding> {
+        let slot = self.locals.get_mut(name)?;
+        match std::mem::replace(slot, Slot::Released) {
+            Slot::Released => None,
+            live => Some(ReleasedBinding(live)),
+        }
     }
 
     /// Bind `name` in the innermost scope, shadowing any captured binding.
-    /// Returns the value this scope previously bound to `name`, if any.
-    pub(crate) fn insert(&mut self, name: String, value: RuntimeValue) -> Option<RuntimeValue> {
-        self.insert_with_result_producer(name, value, None)
+    pub(crate) fn insert(&mut self, name: String, value: RuntimeValue) {
+        self.insert_with_result_producer(name, value, None);
     }
 
     /// Bind a value and the operation that produced this exact tensor result.
@@ -290,18 +428,12 @@ impl Frame {
         name: String,
         value: RuntimeValue,
         result_producer: Option<ResultProducer>,
-    ) -> Option<RuntimeValue> {
-        self.locals
-            .insert(
-                name,
-                Box::new(Binding {
-                    value,
-                    result_producer,
-                    released: false,
-                }),
-            )
-            .filter(|binding| !binding.released)
-            .map(|binding| binding.value)
+    ) {
+        let binding = Binding {
+            value,
+            result_producer,
+        };
+        self.locals.insert(name, Slot::Owned(binding));
     }
 
     /// Whether no scope binds anything. Test-only receipt support.
@@ -335,8 +467,8 @@ impl Frame {
         // Outermost first, so an inner scope's binding overwrites an outer one.
         // A released binding hides the outer ones and is not listed itself.
         for frame in chain.into_iter().rev() {
-            for (name, binding) in frame.locals.to_sorted() {
-                merged.insert(name, (!binding.released).then_some(&binding.value));
+            for (name, slot) in &frame.locals.entries {
+                merged.insert(name, slot.binding().map(|binding| &binding.value));
             }
         }
         merged
@@ -362,7 +494,7 @@ impl Frame {
             self.captured = Some(Arc::new(frozen));
         }
         Frame {
-            locals: UnordMap::new(),
+            locals: Scope::default(),
             captured: self.captured.clone(),
         }
     }
@@ -441,7 +573,10 @@ mod tests {
         frame.insert("xs".to_string(), int(1));
         let mut inner = frame.capture();
         inner.insert("xs".to_string(), int(2));
-        let (value, _) = inner.release_local("xs").expect("a live local releases");
+        let (value, _) = inner
+            .release_local("xs")
+            .expect("a live local releases")
+            .into_parts();
         assert_eq!(
             super::super::host_ops::render_value(&value),
             super::super::host_ops::render_value(&int(2))

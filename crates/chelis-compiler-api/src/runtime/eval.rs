@@ -3615,7 +3615,7 @@ impl<'a> EvalContext<'a> {
         if bind_node.tag != DeepTag::Bind {
             return Err("let bindings malformed".to_string());
         }
-        self.last_uses.push_snapshot(self.bindings.clone());
+        self.last_uses.push_snapshot(self.bindings.snapshot());
         let saved_types = self.binding_types.clone();
         // Restore both frame maps on every exit path (including bind or body
         // evaluation errors) so a caught-and-continued error can never leak
@@ -4052,7 +4052,7 @@ impl<'a> EvalContext<'a> {
                     "match `arm` must contain exactly a pattern, guard, and body".to_string(),
                 );
             }
-            self.last_uses.push_snapshot(self.bindings.clone());
+            self.last_uses.push_snapshot(self.bindings.snapshot());
             let saved_types = self.binding_types.clone();
             // Pattern-bound names carry no declared types; insert `None`
             // markers afterwards so they shadow rather than leak an outer
