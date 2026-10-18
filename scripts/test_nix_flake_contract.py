@@ -1958,6 +1958,54 @@ class NixCrateRebuildSetTests(unittest.TestCase):
                     [name for name in names if name.startswith(f"{component}-")], component
                 )
 
+    @REQUIRES_NIX_STORE
+    def test_workspace_crates_use_the_codegen_units_of_the_release_profile(self) -> None:
+        manifest = tomllib.loads((REPO_ROOT / "Cargo.toml").read_text(encoding="utf-8"))
+        # Cargo gives the release profile 16 codegen units when it sets no value.
+        expected = manifest.get("profile", {}).get("release", {}).get("codegen-units", 16)
+        shown = nix_json("derivation", "show", *sorted(self.baseline))
+        derivations = shown.get("derivations", shown).values()
+        units = {
+            derivation["env"]["crateName"]: set(
+                re.findall(r"-C codegen-units=(\d+)", derivation["env"]["buildPhase"])
+            )
+            for derivation in derivations
+        }
+        for crate in ("chelis-cli", "chelis-compiler-api", "chelis-ir", "chelis-types"):
+            with self.subTest(crate=crate):
+                self.assertEqual(units[crate], {str(expected)})
+        # Negative control: a third-party crate keeps the buildRustCrate default.
+        self.assertEqual(units["serde"], {"1"})
+
+    @REQUIRES_NIX_STORE
+    def test_chelis_package_links_the_compiler_crate_binary(self) -> None:
+        package = nix_raw(
+            "eval", "--raw", f"path:{self.baseline_flake}#packages.{self.system}.chelis.drvPath"
+        )
+        closure = subprocess.run(
+            [NIX_STORE, "--query", "--requisites", package],
+            text=True,
+            stdout=subprocess.PIPE,
+            check=True,
+        ).stdout.split()
+        names = {Path(path).name[33:] for path in closure}
+        self.assertFalse(
+            f"chelis-cli-{self.version}.drv" in names,
+            "the chelis closure holds a copy of the compiler binary",
+        )
+        (crate,) = [
+            path
+            for path in self.baseline
+            if Path(path).name[33:] == f"rust_chelis-cli-{self.version}.drv"
+        ]
+        shown = nix_json("derivation", "show", crate)
+        (derivation,) = shown.get("derivations", shown).values()
+        crate_out = derivation["outputs"]["out"]["path"]
+        if not crate_out.startswith("/"):
+            crate_out = f"{Path(package).parent}/{crate_out}"
+        build = derivation_environment(package)["buildCommand"]
+        self.assertIn(f"ln -s {crate_out}/bin/chelis $out/libexec/chelis", build)
+
 
 if __name__ == "__main__":
     unittest.main()
