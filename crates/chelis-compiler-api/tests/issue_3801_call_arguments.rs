@@ -202,7 +202,10 @@ fn malformed_calls_are_rejected_before_evaluation() {
     // required input, and a call without its binding is rejected rather than
     // returning no root; a dead one needs no binding.
     let unbound = rejection(&program, "tensor_echo", vec![("k", scalar_f32(1.0))]);
-    assert!(unbound.contains("is not owed"), "{unbound}");
+    assert!(
+        unbound.contains("is not owed") && unbound.contains("reads `t` with no binding"),
+        "the rejection names the unbound parameter: {unbound}"
+    );
     let tensor: ExecutionValue = serde_json::from_value(serde_json::json!({
         "type": "tensor",
         "value": {"shape": [2], "data": {"dtype": "f32", "bits": ["3f800000", "40000000"]}}

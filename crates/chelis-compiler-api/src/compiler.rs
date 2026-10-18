@@ -2672,7 +2672,9 @@ impl PreparedEval {
     /// non-tensor parameter by name, each a value of exactly the parameter's
     /// checked type; tensor parameters arrive in `bindings` as for
     /// [`Self::eval_root`]. A missing, extra, tensor-valued or mistyped
-    /// argument is rejected before evaluation. The call runs on the Host lane.
+    /// argument is rejected before evaluation. A call that supplies any
+    /// argument runs on the Host lane; a root whose parameters are all
+    /// tensors keeps the lane its own realizability gives it.
     pub fn call_root(
         &self,
         root: &str,
@@ -2804,14 +2806,48 @@ fn admit_argument(
     Ok(admitted)
 }
 
+/// The tensor inputs a call of `root` reads and has no binding for: its live
+/// tensor parameters and the free tensor inputs its result's closure reads.
+fn unbound_call_inputs(
+    compiled: &CompiledSource,
+    root: &str,
+    bindings: &BTreeMap<String, crate::schema::TensorValue>,
+) -> BTreeSet<String> {
+    let mut read = BTreeSet::new();
+    if let (Some(signature), Some(body)) = (
+        compiled.checked().signature_inference().functions.get(root),
+        selected_callable_result_expr(compiled.checked(), root),
+    ) {
+        let tensors = signature
+            .params
+            .iter()
+            .filter(|param| type_is_tensor_runtime_input(&param.checked_type))
+            .map(|param| param.name.clone())
+            .collect::<BTreeSet<_>>();
+        read.extend(chelis_effects::realizability::referenced_runtime_inputs(
+            body, &tensors,
+        ));
+    }
+    if let Some(free) = compiled
+        .eval_facts()
+        .realizability
+        .required_inputs_by_def
+        .get(root)
+    {
+        read.extend(free.iter().cloned());
+    }
+    read.retain(|name| !bindings.contains_key(name));
+    read
+}
+
 /// The typed rejection of a call input the call boundary does not implement
 /// (chelis#3804): a call argument other than a scalar, a boolean or a string,
 /// or a tensor parameter whose type is not literal.
 fn unimplemented_call_input(what: String) -> CompilerError {
     let mut error = unsupported_stage_error(chelis_types::unsupported::Unsupported::new(
         chelis_types::unsupported::UnsupportedKind::Construct(what),
-        "a call admits scalar, boolean and string arguments and tensor bindings of a \
-         literal type",
+        "a call admits numeric scalar, boolean and string arguments and tensor bindings \
+         of a literal type",
         chelis_types::unsupported::Stage::Runtime,
         chelis_types::unimplemented_rejection!(
             3804,
@@ -3350,13 +3386,22 @@ fn eval_compiled_call(
             .iter()
             .any(|entry| entry.def_name == call.root)
     {
+        let missing = unbound_call_inputs(compiled, &call.root, &bindings);
+        let reason = if missing.is_empty() {
+            "an input its result reads is not supplied".to_string()
+        } else {
+            format!(
+                "it reads {} with no binding",
+                missing
+                    .iter()
+                    .map(|name| format!("`{name}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        };
         return Err(stage_error(
             EVAL_STAGE,
-            format!(
-                "the call of `{}` is not owed: an input its result reads is not supplied (a \
-                 live tensor parameter, or a free tensor input, with no binding)",
-                call.root
-            ),
+            format!("the call of `{}` is not owed: {reason}", call.root),
             GeneralKind::EvalError,
         ));
     }

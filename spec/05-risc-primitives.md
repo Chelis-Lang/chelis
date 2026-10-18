@@ -5504,9 +5504,10 @@ lie. Rendering never repairs, rounds, or rejects stored values.
 > are not runtime tensor inputs and SHALL NOT appear among the entry's required
 > inputs.
 
-(Call arguments other than scalars, booleans and strings, and tensor
-parameters whose precision or extents are not literal, are not fully
-implemented; see [chelis#3804](https://github.com/Chelis-Lang/chelis/issues/3804).)
+(Call arguments are implemented only for numeric scalars, booleans and
+strings: keys and every other argument type are not fully implemented, nor are
+tensor parameters whose precision or extents are not literal; see
+[chelis#3804](https://github.com/Chelis-Lang/chelis/issues/3804).)
 
 > **[05-OBS-10]** Lane assignment SHALL be target-aware. A root whose declared
 > dtype is outside the selected target's Tensor capability SHALL route through

@@ -149,8 +149,9 @@ for f32-declared tensors) is the eval-f64-intermediate vs C-f32-float gap —
     its root.
 
     Admission happens before anything evaluates, and converts nothing. A call
-    argument is a scalar whose dtype tag equals the declared primitive, a
-    boolean, or a string; a parameter of any other non-tensor type is rejected
+    argument is a numeric scalar whose dtype tag equals the declared primitive,
+    a boolean, or a string; a parameter of any other non-tensor type, a key
+    included, is rejected
     with a typed `unsupported` diagnostic citing #3804, and so is a call of a
     root with a tensor parameter whose precision is a variable (bounded or not)
     or whose extents are not all literal, since checking a binding against a
