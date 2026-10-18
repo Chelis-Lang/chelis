@@ -8309,6 +8309,28 @@ struct ResolvedFunction {
     scope: CallableScope,
 }
 
+/// The function an inlined frame belongs to: its declaration, or for a
+/// function literal its shared body, compared by identity. Two different
+/// functions reached through the same parameter name are different keys, and
+/// the same function reached through any name is one key (chelis#3864).
+#[derive(Debug, PartialEq, Eq)]
+enum RecursionFrameKey {
+    Declaration(String),
+    Literal(usize),
+}
+
+impl RecursionFrameKey {
+    fn of(function: &ResolvedFunction) -> Self {
+        match &function.declaration_name {
+            Some(name) => Self::Declaration(name.clone()),
+            // The body is shared across lexical scope snapshots, so its
+            // address names the literal while any frame of it is active; it
+            // is compared, never ordered or printed.
+            None => Self::Literal(std::sync::Arc::as_ptr(&function.expression) as usize),
+        }
+    }
+}
+
 /// Where a callable's body resolves its free names (chelis#2588).
 ///
 /// Inlining lowers a body at its call site, but lexical scoping gives the
@@ -10026,9 +10048,9 @@ struct LowerCtx<'program> {
     /// acceptable because every lowering error unwinds through the per-entry
     /// `catch_lowering` and the ctx is abandoned.
     inlining_depths: UnordMap<String, usize>,
-    /// Per recursive name, its active inlined frames, innermost last, each
-    /// with the recursive calls credited to it (chelis#3864).
-    recursion_frames: UnordMap<String, Vec<usize>>,
+    /// The active inlined frames, innermost last, each with its function and
+    /// the recursive calls credited to it (chelis#3864).
+    recursion_frames: Vec<(RecursionFrameKey, usize)>,
     /// Total active inlined bodies across all names. Bounds the Rust stack
     /// (each level is roughly ten lowering frames) for deep or mutually
     /// recursive chains that stay under every per-name cap.
@@ -10222,7 +10244,7 @@ impl<'program> LowerCtx<'program> {
             selected_arm_depth: 0,
             linearity,
             inlining_depths: UnordMap::new(),
-            recursion_frames: UnordMap::new(),
+            recursion_frames: Vec::new(),
             inlining_active: 0,
             declaration_root_claim: false,
             fn_typed_params: PersistentSet::new(),
@@ -16051,20 +16073,25 @@ impl<'program> LowerCtx<'program> {
             RECURSING_NAMES.with(|names| names.set(names.get() + 1));
         }
         // A recursive call is credited to the most recent active frame of
-        // its name, the frame whose recursion it extends: directly, or
+        // its callee, the frame whose recursion it extends: directly, or
         // through the frames of its mutual-recursion group in between. A
         // chain credits each frame once; a frame credited twice recurses
-        // more than once per level, and its unroll branches.
-        if let Some(name) = &inlining_name {
-            let frames = self.recursion_frames.entry(name.clone()).or_default();
-            if let Some(extended) = frames.last_mut() {
-                *extended += 1;
-                if *extended > 1 {
-                    UNROLL_BRANCHED.with(|branched| branched.set(true));
-                }
+        // more than once per level, and its unroll branches. Frames are keyed
+        // by the function being inlined, never by the name it was called
+        // through: two combinators' callbacks may share a parameter name.
+        let frame_key = RecursionFrameKey::of(fn_expr);
+        if let Some((_, credits)) = self
+            .recursion_frames
+            .iter_mut()
+            .rev()
+            .find(|(key, _)| *key == frame_key)
+        {
+            *credits += 1;
+            if *credits > 1 {
+                UNROLL_BRANCHED.with(|branched| branched.set(true));
             }
-            frames.push(0);
         }
+        self.recursion_frames.push((frame_key, 0));
         if RECURSING_NAMES.with(Cell::get) > 0 {
             self.count_unrolled_body(fn_expr, inlining_name.as_deref());
         }
@@ -16241,13 +16268,9 @@ impl<'program> LowerCtx<'program> {
             if *depth == 0 {
                 self.inlining_depths.remove(name);
             }
-            if let Some(frames) = self.recursion_frames.get_mut(name) {
-                frames.pop();
-                if frames.is_empty() {
-                    self.recursion_frames.remove(name);
-                }
-            }
         }
+        // Inline levels nest, so this frame is the innermost one.
+        self.recursion_frames.pop();
         self.bindings = saved;
         self.local_callables = saved_callables;
         self.fn_typed_params = saved_fn_typed_params;
@@ -36037,6 +36060,48 @@ def example() -> f32 = bisection(erf_projectile, cast(0.1, f32), cast(0.7, f32),
             rejection.is_some_and(|message| message.starts_with("recursive inlining of `fv`")
                 || message.starts_with("recursive inlining of `via`")),
             "the rejection names the recursion"
+        );
+    }
+
+    /// Two loop combinators that each apply a callback named `f`.
+    fn combinators() -> String {
+        "def it(f: f32 -> f32, x: f32, i: i64, n: i64) -> f32 = if gte(i, n) then x else it(f, f(x), add(i, cast(1, i64)), n)\n\
+         def it2(f: f32 -> f32, x: f32, i: i64, n: i64) -> f32 = if gte(i, n) then x else it2(f, f(x), add(i, cast(1, i64)), n)\n"
+            .to_string()
+    }
+
+    #[test]
+    fn distinct_combinators_sharing_a_callback_name_are_never_limited() {
+        // chelis#3864 round 5: `it2` iterates `row`, which runs a complete
+        // `it` loop over `h4`. Both callbacks are called through a parameter
+        // named `f`, but they are different functions, so each frame is
+        // credited once: two nested chains.
+        let source = format!(
+            "{}{}def row(x: f32) -> f32 = it(h4, x, cast(0, i64), cast(8, i64))\ndef example() -> f32 = it2(row, cast(1.5, f32), cast(0, i64), cast(8, i64))\n",
+            helper_tree("f32"),
+            combinators()
+        );
+        assert_never_limited(source, 100);
+    }
+
+    #[test]
+    fn a_combinator_nested_in_itself_is_one_recursion() {
+        // The same combinator run inside its own callback re-enters the same
+        // function: the inner loop and the outer loop both extend the outer
+        // frame of `it`, so the unroll is a tree, and it is limited.
+        let source = format!(
+            "{}{}def row(x: f32) -> f32 = it(h4, x, cast(0, i64), cast(8, i64))\ndef example() -> f32 = it(row, cast(1.5, f32), cast(0, i64), cast(8, i64))\n",
+            helper_tree("f32"),
+            combinators()
+        );
+        let (lowered, counted, rejection) = lower_example(source, 100);
+        assert!(!lowered, "the nested combinator is limited");
+        // The outer frame's second credit comes after the first inner loop,
+        // and the count accumulated by then applies at once.
+        assert!(counted > 100, "{counted}");
+        assert!(
+            rejection.is_some_and(|message| message.contains("recursive inlining of `it`")),
+            "the rejection names the combinator"
         );
     }
 }
