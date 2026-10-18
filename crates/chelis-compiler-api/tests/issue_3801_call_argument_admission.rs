@@ -112,6 +112,14 @@ const TENSOR_TYPES: [(&str, Prim, &[usize]); 4] = [
     ("tensor[3, i64]", Prim::Int64, &[3]),
 ];
 
+/// Tensor parameters whose type is not literal: a bounded precision variable
+/// and a dimension variable. The call boundary does not implement them.
+const GENERIC_TENSORS: &str = r#"
+def bounded_precision[p: Float](t: tensor[3, p], k: i64) -> i64 = k
+
+def named_extent[n](t: tensor[n, f32], k: i64) -> i64 = k
+"#;
+
 fn half(prim: Prim, bits: &str) -> ExecutionValue {
     serde_json::from_value(json!({"type": "scalar", "value": {"dtype": prim.name(), "bits": bits}}))
         .unwrap()
@@ -221,6 +229,7 @@ fn source() -> String {
             "\ndef tensor_{index}(t: {spelling}, k: i64) -> {spelling} = t\n"
         ));
     }
+    source.push_str(GENERIC_TENSORS);
     source
 }
 
@@ -389,4 +398,46 @@ fn tensor_bindings_are_admitted_at_their_exact_type_or_rejected() {
         }
     }
     assert!(planted >= 70, "the oracle planted only {planted} bindings");
+}
+
+#[test]
+fn tensor_parameters_of_a_non_literal_type_are_typed_unsupported_rejections() {
+    let program = prepared();
+    // Both directions: a binding the bound or extent admits and one it does
+    // not are rejected alike, before evaluation, with the typed diagnostic.
+    for (root, bindings) in [
+        (
+            "bounded_precision",
+            [
+                tensor_value(Prim::F32, &[3]),
+                tensor_value(Prim::Int32, &[3]),
+            ],
+        ),
+        (
+            "named_extent",
+            [tensor_value(Prim::F32, &[3]), tensor_value(Prim::F64, &[3])],
+        ),
+    ] {
+        for binding in bindings {
+            let error = call(
+                &program,
+                root,
+                vec![("k", scalar_integer(Prim::Int64, 0))],
+                vec![("t", binding)],
+            )
+            .expect_err("a non-literal tensor parameter type is rejected");
+            assert!(
+                error.contains("a tensor parameter `t`") && error.contains("3804"),
+                "{root}: {error}"
+            );
+        }
+        let error = call(
+            &program,
+            root,
+            vec![("k", scalar_integer(Prim::Int64, 0))],
+            vec![],
+        )
+        .expect_err("an unbound non-literal tensor parameter is rejected too");
+        assert!(error.contains("3804"), "{root}: {error}");
+    }
 }

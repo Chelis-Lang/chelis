@@ -2727,6 +2727,13 @@ fn admit_call(
                     param.name
                 )));
             }
+            if !tensor_type_is_literal(ty) {
+                return Err(unimplemented_call_input(format!(
+                    "a tensor parameter `{}` of `{root}` whose type `{ty}` has a precision \
+                     variable or a non-literal extent",
+                    param.name
+                )));
+            }
             if let Some(binding) = bindings.get(&param.name) {
                 admit_tensor_binding(binding, ty).map_err(|reason| {
                     reject(format!("binding `{}` of `{root}` {reason}", param.name))
@@ -2789,29 +2796,50 @@ fn admit_argument(
             ));
         }
         _ => {
-            let mut error = unsupported_stage_error(chelis_types::unsupported::Unsupported::new(
-                chelis_types::unsupported::UnsupportedKind::Construct(format!(
-                    "a call argument of type `{ty}` for parameter `{param}` of `{root}`"
-                )),
-                "a call argument is admitted as a scalar, a boolean or a string",
-                chelis_types::unsupported::Stage::Runtime,
-                chelis_types::unimplemented_rejection!(
-                    3804,
-                    "declare the value in the program and call a definition whose \
-                             parameters are scalars, booleans or strings"
-                ),
-            ));
-            error.stage = EVAL_STAGE.to_string();
-            return Err(error);
+            return Err(unimplemented_call_input(format!(
+                "a call argument of type `{ty}` for parameter `{param}` of `{root}`"
+            )));
         }
     };
     Ok(admitted)
 }
 
+/// The typed rejection of a call input the call boundary does not implement
+/// (chelis#3804): a call argument other than a scalar, a boolean or a string,
+/// or a tensor parameter whose type is not literal.
+fn unimplemented_call_input(what: String) -> CompilerError {
+    let mut error = unsupported_stage_error(chelis_types::unsupported::Unsupported::new(
+        chelis_types::unsupported::UnsupportedKind::Construct(what),
+        "a call admits scalar, boolean and string arguments and tensor bindings of a \
+         literal type",
+        chelis_types::unsupported::Stage::Runtime,
+        chelis_types::unimplemented_rejection!(
+            3804,
+            "declare the value in the program and call a definition whose parameters are \
+             scalars, booleans, strings or tensors of a literal type"
+        ),
+    ));
+    error.stage = EVAL_STAGE.to_string();
+    error
+}
+
+/// Whether a tensor parameter's type is literal: a concrete precision and
+/// every extent a literal size.
+fn tensor_type_is_literal(ty: &chelis_types::types::Type) -> bool {
+    use chelis_types::types::{Dim, TensorPrec, Type};
+    match ty {
+        Type::Ref(inner) => tensor_type_is_literal(inner),
+        Type::Tensor(dims, TensorPrec::Concrete(_)) => {
+            dims.iter().all(|dim| matches!(dim, Dim::Lit(_)))
+        }
+        _ => false,
+    }
+}
+
 /// Admit a tensor binding at exactly its parameter's declared dtype and
 /// literal extents, as the Tensor lane's input load does: a binding of
 /// another dtype is rejected, never cast or rounded, and so is one whose rank
-/// or literal extent differs. A non-literal extent binds to the binding's.
+/// or extent differs. The caller admits only literal tensor parameter types.
 fn admit_tensor_binding(
     binding: &crate::schema::TensorValue,
     ty: &chelis_types::types::Type,
@@ -2826,17 +2854,15 @@ fn admit_tensor_binding(
     };
     let tensor = crate::decode::wire_tensor_to_ir(binding)
         .map_err(|error| format!("is not a tensor value: {error}"))?;
-    if let TensorPrec::Concrete(prim) = precision
-        && tensor.prim() != *prim
-    {
+    let TensorPrec::Concrete(prim) = precision else {
+        unreachable!("a call admits only literal tensor parameter types");
+    };
+    if tensor.prim() != *prim {
         return Err(format!(
             "is a tensor of `{}`, and the parameter is `{ty}`; a binding is admitted at its \
              declared dtype, and casts are explicit",
             tensor.prim().name()
         ));
-    }
-    if dims.iter().any(|dim| matches!(dim, Dim::Rank(_))) {
-        return Ok(());
     }
     if dims.len() != tensor.shape.len() {
         return Err(format!(

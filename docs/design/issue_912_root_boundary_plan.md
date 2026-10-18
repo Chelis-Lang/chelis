@@ -151,9 +151,13 @@ for f32-declared tensors) is the eval-f64-intermediate vs C-f32-float gap —
     Admission happens before anything evaluates, and converts nothing. A call
     argument is a scalar whose dtype tag equals the declared primitive, a
     boolean, or a string; a parameter of any other non-tensor type is rejected
-    with a typed `unsupported` diagnostic citing #3804. A tensor parameter's
-    binding is admitted at exactly the declared dtype and every literal extent,
-    and rejected otherwise, as the Tensor lane's input load rejects it; the
+    with a typed `unsupported` diagnostic citing #3804, and so is a call of a
+    root with a tensor parameter whose precision is a variable (bounded or not)
+    or whose extents are not all literal, since checking a binding against a
+    bound or a shared dimension variable is the same open work. A literal
+    tensor parameter's binding is admitted at exactly the declared dtype and
+    every extent, and rejected otherwise, as the Tensor lane's input load
+    rejects it; the
     host evaluator's own binding ingress, which rounds or range-checks a
     binding to its declared dtype, therefore receives only bindings already at
     that dtype and changes none of them.

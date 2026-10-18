@@ -7,6 +7,6 @@ never cast or rounded. A live tensor parameter is required, and a dead one need
 not be bound. The call runs on the Host lane and always produces its result
 root. A missing, extra or mistyped argument, and a call whose live tensor
 parameter has no binding, is rejected before evaluation. Parameters of other
-types (tuples, lists, dicts, records, variants) are not yet admitted as call
-arguments (#3804). `spec/05-risc-primitives.md` [05-OBS-9] states the rule. See
+types (tuples, lists, dicts, records, variants), and tensor parameters whose
+precision or extents are not literal, are not yet admitted (#3804). `spec/05-risc-primitives.md` [05-OBS-9] states the rule. See
 [#3801](https://github.com/Chelis-Lang/chelis/issues/3801).
