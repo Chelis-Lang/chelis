@@ -350,12 +350,300 @@ pub fn expand_program(
     } else {
         UnordMap::new()
     };
-    let mut expander = Expander::new(options.max_iterations, prelude);
+    // Every node an expansion creates records the invocation it came from,
+    // and that record copies the invocation's arguments, their own records
+    // included. Records therefore grow with each expansion that consumes an
+    // earlier one's output, about fourfold for a recursive macro whose
+    // argument grows, so a recursive macro set exhausted memory before
+    // reaching the limit (chelis#3853). The records never decide what
+    // expands, so when expansion might not finish, a first pass without them
+    // finds the limit in the memory the expansion itself needs, and a
+    // program that finishes is then expanded again with its records, exactly
+    // as before. A program whose macros cannot recur always finishes, and is
+    // expanded once, as before; when such a program exceeds the limit, its
+    // records grow as they always did, which is chelis#3857.
+    if expansion_may_recur(exprs, &prelude) {
+        let mut plain = Expander::new(options.max_iterations, prelude.clone(), Provenance::Omitted);
+        match plain.expand_sequence(exprs, &UnordMap::new()) {
+            Err(error @ ExpansionError::ExpansionLimitExceeded { .. }) => return Err(error),
+            // With no expansion there is no record, so this is the program.
+            Ok(exprs) if plain.expansions == 0 => {
+                return Ok(ExpandedProgram {
+                    exprs,
+                    expansions: 0,
+                });
+            }
+            Ok(_) | Err(_) => {}
+        }
+    }
+    let mut expander = Expander::new(options.max_iterations, prelude, Provenance::Recorded);
     let exprs = expander.expand_sequence(exprs, &UnordMap::new())?;
     Ok(ExpandedProgram {
         exprs,
         expansions: expander.expansions,
     })
+}
+
+/// Whether expanding `exprs` might never finish, judged from the macro
+/// definitions alone and erring towards yes (chelis#3853).
+///
+/// Every macro call's head is a name. An expansion chain that never ends
+/// re-invokes some macro from inside its own expansion, and that call's
+/// head comes from a template that mentions the macro, from a parameter a
+/// template calls (bound to a macro name that appears somewhere other than
+/// as a call's head), or from a template that defines macros. The program's
+/// own text holds finitely many calls. So expansion finishes when the graph
+/// in which each macro points at the macros its body mentions, and each
+/// macro that calls a parameter points at every macro whose name appears
+/// other than as a call's head, has no cycle, and no template holds a
+/// definition or a module. Anything else, including a definition that does
+/// not parse, answers yes. A yes only costs the first pass; a no expands
+/// exactly as before.
+fn expansion_may_recur(exprs: &[Expr], prelude: &UnordMap<String, MacroDef>) -> bool {
+    let mut definitions: Vec<MacroDef> = prelude
+        .to_sorted()
+        .into_iter()
+        .map(|(_, def)| def.clone())
+        .collect();
+    // Definitions take effect only where expansion collects them: in a
+    // declaration sequence, at the top level or in a module.
+    let mut sequences = vec![exprs];
+    while let Some(sequence) = sequences.pop() {
+        for expr in sequence {
+            match extract_macro_def(expr) {
+                Ok(Some(def)) => definitions.push(def),
+                Ok(None) => {
+                    if let ExprCarrier::DecodedNode(DeepTag::Module, _, children) = expr.carrier() {
+                        sequences.push(children.get(1..).unwrap_or(&[]));
+                    }
+                }
+                Err(_) => return true,
+            }
+        }
+    }
+    if definitions.iter().any(template_defines) {
+        return true;
+    }
+    let names: UnordSet<String> = definitions.iter().map(|def| def.name.clone()).collect();
+    let mut calls: UnordMap<String, UnordSet<String>> = UnordMap::new();
+    for def in &definitions {
+        let mut symbols = UnordSet::new();
+        collect_symbols(&def.body, &mut symbols);
+        let entry = calls.entry(def.name.clone()).or_default();
+        for symbol in symbols.into_sorted() {
+            if names.contains(&symbol) {
+                entry.insert(symbol);
+            }
+        }
+    }
+    let higher_order: Vec<&MacroDef> = definitions
+        .iter()
+        .filter(|def| calls_a_parameter(def))
+        .collect();
+    if !higher_order.is_empty() {
+        // A macro that calls a parameter may call any macro whose name is
+        // handed to it as an argument, and only a macro that reaches a
+        // higher-order one can close a cycle that way. So the question is
+        // whether such a name appears anywhere other than as a call's head.
+        let reaching = macros_reaching(&calls, &higher_order);
+        let escapes = exprs
+            .iter()
+            .chain(definitions.iter().map(|def| &def.body))
+            .any(|root| names_escape(root, &reaching));
+        if escapes {
+            for def in higher_order {
+                let entry = calls.entry(def.name.clone()).or_default();
+                for name in reaching.to_sorted() {
+                    entry.insert(name.clone());
+                }
+            }
+        }
+    }
+    reference_cycle(&calls)
+}
+
+/// The macros from which some higher-order macro can be reached through the
+/// names bodies mention, the higher-order macros included.
+fn macros_reaching(
+    calls: &UnordMap<String, UnordSet<String>>,
+    higher_order: &[&MacroDef],
+) -> UnordSet<String> {
+    let mut reaching: UnordSet<String> = higher_order.iter().map(|def| def.name.clone()).collect();
+    loop {
+        let mut grew = false;
+        for (caller, callees) in calls.to_sorted() {
+            if !reaching.contains(caller.as_str())
+                && callees
+                    .to_sorted()
+                    .iter()
+                    .any(|callee| reaching.contains(callee.as_str()))
+            {
+                reaching.insert(caller.clone());
+                grew = true;
+            }
+        }
+        if !grew {
+            return reaching;
+        }
+    }
+}
+
+/// Whether any name in `names` appears in `root` other than as the head of
+/// a call, metadata syntax included. Children are walked without recursion.
+fn names_escape(root: &Expr, names: &UnordSet<String>) -> bool {
+    let mut pending = vec![root];
+    while let Some(expr) = pending.pop() {
+        let mut found = false;
+        let mut in_metadata = |value: &Expr| {
+            if !found {
+                found = names_escape(value, names);
+            }
+        };
+        // A definition's own name is not an occurrence, and its body is
+        // walked as a template.
+        if matches!(extract_macro_def(expr), Ok(Some(_))) {
+            continue;
+        }
+        match expr.carrier() {
+            ExprCarrier::Atom(Atom::Name(name)) => {
+                if names.contains(name.as_str()) {
+                    return true;
+                }
+            }
+            ExprCarrier::Atom(_) => {}
+            ExprCarrier::MetadataMap(meta) => meta.visit_syntax(&mut |_, value| in_metadata(value)),
+            ExprCarrier::MetadataExpression(meta) => {
+                meta.metadata
+                    .visit_syntax(&mut |_, value| in_metadata(value));
+                pending.push(&meta.expr);
+            }
+            ExprCarrier::StructuralList(elements) => pending.extend(elements),
+            ExprCarrier::UndecodableHead(_, metadata, children) => {
+                metadata.visit_syntax(&mut |_, value| in_metadata(value));
+                pending.extend(children);
+            }
+            ExprCarrier::DecodedNode(tag, metadata, children) => {
+                metadata.visit_syntax(&mut |_, value| in_metadata(value));
+                match children.split_first() {
+                    // A call whose head is a name: the name is the callee,
+                    // not an argument. Its arguments are walked as usual.
+                    Some((head, arguments)) if tag == DeepTag::App && var_name(head).is_some() => {
+                        if let ExprCarrier::DecodedNode(_, head_metadata, _) = head.carrier() {
+                            head_metadata.visit_syntax(&mut |_, value| in_metadata(value));
+                        }
+                        pending.extend(arguments);
+                    }
+                    _ => pending.extend(children),
+                }
+            }
+        }
+        if found {
+            return true;
+        }
+    }
+    false
+}
+
+/// Whether a template holds a macro definition or a module, either of which
+/// would let its expansion define macros the analysis never saw.
+fn template_defines(def: &MacroDef) -> bool {
+    walk_exprs(&def.body, &mut |expr| {
+        matches!(
+            expr.carrier(),
+            ExprCarrier::DecodedNode(DeepTag::Module, _, _)
+        ) || matches!(extract_macro_def(expr), Ok(Some(_)) | Err(_))
+    })
+}
+
+/// Whether a template calls one of its own parameters, anywhere in its body
+/// or its metadata syntax.
+fn calls_a_parameter(def: &MacroDef) -> bool {
+    walk_exprs(&def.body, &mut |expr| match expr.carrier() {
+        ExprCarrier::DecodedNode(DeepTag::App, _, children) => children
+            .first()
+            .and_then(var_name)
+            .is_some_and(|head| def.params.iter().any(|param| param == head)),
+        _ => false,
+    })
+}
+
+/// Whether a macro reaches itself through the names its body mentions.
+fn reference_cycle(calls: &UnordMap<String, UnordSet<String>>) -> bool {
+    #[derive(Clone, Copy, PartialEq)]
+    enum Mark {
+        Open,
+        Done,
+    }
+    let mut marks: UnordMap<&str, Mark> = UnordMap::new();
+    for (start, _) in calls.to_sorted() {
+        if marks.contains_key(start.as_str()) {
+            continue;
+        }
+        // Depth-first over an explicit stack of (macro, next callee index).
+        let mut stack: Vec<(&str, Vec<&str>, usize)> = Vec::new();
+        let callees = |name: &str| -> Vec<&str> {
+            calls
+                .get(name)
+                .map(|set| set.to_sorted().into_iter().map(String::as_str).collect())
+                .unwrap_or_default()
+        };
+        marks.insert(start.as_str(), Mark::Open);
+        stack.push((start.as_str(), callees(start), 0));
+        while let Some((name, next, index)) = stack.last_mut() {
+            let Some(&callee) = next.get(*index) else {
+                marks.insert(name, Mark::Done);
+                stack.pop();
+                continue;
+            };
+            *index += 1;
+            match marks.get(callee) {
+                Some(Mark::Open) => return true,
+                Some(Mark::Done) => {}
+                None => {
+                    marks.insert(callee, Mark::Open);
+                    stack.push((callee, callees(callee), 0));
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Visit `root` and every expression below it, metadata syntax included,
+/// until `visit` returns true, and report whether it did. Children are walked without
+/// recursion, so a deep program does not bound the native stack.
+fn walk_exprs(root: &Expr, visit: &mut impl FnMut(&Expr) -> bool) -> bool {
+    let mut pending = vec![root];
+    while let Some(expr) = pending.pop() {
+        if visit(expr) {
+            return true;
+        }
+        let mut stop = false;
+        let mut in_metadata = |value: &Expr| {
+            if !stop {
+                stop = walk_exprs(value, visit);
+            }
+        };
+        match expr.carrier() {
+            ExprCarrier::Atom(_) => {}
+            ExprCarrier::MetadataMap(meta) => meta.visit_syntax(&mut |_, value| in_metadata(value)),
+            ExprCarrier::MetadataExpression(meta) => {
+                meta.metadata
+                    .visit_syntax(&mut |_, value| in_metadata(value));
+                pending.push(&meta.expr);
+            }
+            ExprCarrier::StructuralList(elements) => pending.extend(elements),
+            ExprCarrier::UndecodableHead(_, metadata, children)
+            | ExprCarrier::DecodedNode(_, metadata, children) => {
+                metadata.visit_syntax(&mut |_, value| in_metadata(value));
+                pending.extend(children);
+            }
+        }
+        if stop {
+            return true;
+        }
+    }
+    false
 }
 
 /// An ordinary top-level declaration kind that the standard-prelude
@@ -389,20 +677,33 @@ pub fn reject_standard_prelude_collisions(
     first_standard_prelude_collision(&standard_prelude_macros()?, declarations)
 }
 
+/// Whether an expansion stamps the nodes it creates with their `source`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Provenance {
+    Recorded,
+    Omitted,
+}
+
 struct Expander {
     remaining_expansions: usize,
     hygiene_counter: usize,
     expansions: usize,
     prelude_macros: UnordMap<String, MacroDef>,
+    provenance: Provenance,
 }
 
 impl Expander {
-    fn new(limit: usize, prelude_macros: UnordMap<String, MacroDef>) -> Self {
+    fn new(
+        limit: usize,
+        prelude_macros: UnordMap<String, MacroDef>,
+        provenance: Provenance,
+    ) -> Self {
         Self {
             remaining_expansions: limit,
             hygiene_counter: 0,
             expansions: 0,
             prelude_macros,
+            provenance,
         }
     }
 
@@ -659,7 +960,6 @@ impl Expander {
         let args = &node.children[1..];
         let arguments = def.bind_arguments(node.metadata, args)?;
         self.consume_expansion_budget()?;
-        let invocation = macro_source(&def.name, args);
         let (placeholder_params, placeholder_args) =
             macro_arg_placeholders(&def.body, arguments, self.expansions);
         let placeholder_body =
@@ -674,9 +974,12 @@ impl Expander {
             node.expr,
         )?
         .try_inherit_extensions(node.expr)?;
+        if self.provenance == Provenance::Omitted {
+            return Ok(Some(substituted));
+        }
         Ok(Some(annotate_source_expr(
             &substituted,
-            &MacroSource::try_from_expression(&invocation)?,
+            &MacroSource::try_from_expression(&macro_source(&def.name, args))?,
         )))
     }
 
@@ -1793,6 +2096,268 @@ fn node(tag: DeepTag, children: Vec<Expr>) -> Expr {
 mod tests {
     use super::*;
 
+    /// The single pass that records provenance as it expands, which
+    /// [`expand_program`] reruns once its first pass finishes (chelis#3853).
+    fn expand_recorded(
+        exprs: &[Expr],
+        options: &ExpansionOptions,
+    ) -> Result<ExpandedProgram, ExpansionError> {
+        let prelude = if options.load_std_prelude {
+            standard_prelude_macros()?
+        } else {
+            UnordMap::new()
+        };
+        let mut expander = Expander::new(options.max_iterations, prelude, Provenance::Recorded);
+        let exprs = expander.expand_sequence(exprs, &UnordMap::new())?;
+        Ok(ExpandedProgram {
+            exprs,
+            expansions: expander.expansions,
+        })
+    }
+
+    fn outcome(result: Result<ExpandedProgram, ExpansionError>) -> Result<(String, usize), String> {
+        result
+            .map(|program| {
+                (
+                    chelis_deep::printer::print_canonical(program.exprs()),
+                    program.expansions(),
+                )
+            })
+            .map_err(|error| format!("{error} / {error:?}"))
+    }
+
+    /// `m0(x) = m1(add(x, 1))` ... `mk(x) = x`: each record holds the last.
+    fn macro_chain(length: usize) -> String {
+        let mut source = String::new();
+        for index in 0..length {
+            source.push_str(&format!(
+                "(defmacro {{}} m{index} (params {{}} x) (app {{}} (var {{}} m{}) \
+                 (app {{}} (var {{}} add) (var {{}} x) (lit {{type: (t-prim {{}} i32)}} 1))))\n",
+                index + 1
+            ));
+        }
+        source.push_str(&format!(
+            "(defmacro {{}} m{length} (params {{}} x) (var {{}} x))\n"
+        ));
+        source.push_str("(def {} main (app {} (var {} m0) (lit {type: (t-prim {} i32)} 1)))\n");
+        source
+    }
+
+    /// `inc(inc(... inc(1)))`, `depth` calls deep.
+    fn nested_calls(depth: usize) -> String {
+        let inc = "(defmacro {} inc (params {} x) (app {} (var {} add) (var {} x) \
+                   (lit {type: (t-prim {} i32)} 1)))\n";
+        let body = "(app {} (var {} inc) ".repeat(depth)
+            + "(lit {type: (t-prim {} i32)} 1)"
+            + &")".repeat(depth);
+        format!("{inc}(def {{}} main {body})\n")
+    }
+
+    const RECURSIVE: &str = "(defmacro {} rec (params {} x) (app {} (var {} rec) \
+        (app {} (var {} add) (var {} x) (lit {type: (t-prim {} i32)} 1))))\n\
+        (def {} main (app {} (var {} rec) (lit {type: (t-prim {} i32)} 1)))\n";
+
+    /// A call the second expansion makes with the wrong arity, and a binder
+    /// the template introduces around a nested call, so the arity error and
+    /// hygiene both run inside a nested expansion.
+    const NESTED_ARITY: &str = "(defmacro {} outer (params {} x) (let {} (bind {} y (var {} x)) \
+        (app {} (var {} inner) (var {} y) (var {} y))))\n\
+        (defmacro {} inner (params {} z) (var {} z))\n\
+        (def {} main (app {} (var {} outer) (lit {type: (t-prim {} i32)} 1)))\n";
+
+    fn defmacro(name: &str, params: &str, body: &str) -> String {
+        format!("(defmacro {{}} {name} (params {{}} {params}) {body})\n")
+    }
+
+    const ONE: &str = "(lit {type: (t-prim {} i32)} 1)";
+
+    fn routes_to_first_pass(source: &str) -> bool {
+        let exprs = chelis_deep::parser::parse_str(source).expect("the probe parses");
+        expansion_may_recur(
+            &exprs,
+            &standard_prelude_macros().expect("the prelude loads"),
+        )
+    }
+
+    #[test]
+    fn issue_3853_a_macro_set_that_may_recur_takes_the_first_pass() {
+        let add = |x: &str| format!("(app {{}} (var {{}} add) {x} {ONE})");
+        let cases = [
+            (
+                "direct recursion",
+                defmacro(
+                    "rec",
+                    "x",
+                    &format!("(app {{}} (var {{}} rec) {})", add("(var {} x)")),
+                ),
+            ),
+            (
+                "mutual recursion",
+                defmacro("a", "x", "(app {} (var {} b) (var {} x))")
+                    + &defmacro("b", "y", "(app {} (var {} a) (var {} y))"),
+            ),
+            (
+                "three-cycle",
+                defmacro("a", "x", "(app {} (var {} b) (var {} x))")
+                    + &defmacro("b", "x", "(app {} (var {} c) (var {} x))")
+                    + &defmacro("c", "x", "(app {} (var {} a) (var {} x))"),
+            ),
+            (
+                "a self-reference hidden in metadata syntax",
+                defmacro("hid", "x", "(lit {type: (t-adt {} hid)} (var {} x))"),
+            ),
+            (
+                "a higher-order macro handed itself",
+                defmacro("apply", "f x", "(app {} (var {} f) (var {} x))")
+                    + &format!(
+                        "(def {{}} main (app {{}} (var {{}} apply) (var {{}} apply) {ONE}))\n"
+                    ),
+            ),
+            (
+                "a macro that hands itself to a higher-order macro",
+                defmacro("apply", "f x", "(app {} (var {} f) (var {} x))")
+                    + &defmacro("go", "x", "(app {} (var {} apply) (var {} go) (var {} x))"),
+            ),
+            (
+                "a template that defines a macro",
+                defmacro("maker", "x", "(defmacro {} made (params {} y) (var {} y))"),
+            ),
+            (
+                "a template that holds a module",
+                defmacro("wrap", "x", "(module {} inner (def {} y (var {} x)))"),
+            ),
+            (
+                "a name a local binder shadows",
+                defmacro("m", "x", "(let {} (bind {} m (var {} x)) (var {} m))"),
+            ),
+            (
+                "a definition that does not parse",
+                "(defmacro {} broken)\n".to_string(),
+            ),
+        ];
+        for (label, source) in cases {
+            assert!(
+                routes_to_first_pass(&source),
+                "{label} must take the first pass:\n{source}"
+            );
+        }
+    }
+
+    #[test]
+    fn issue_3853_a_macro_set_that_cannot_recur_expands_once() {
+        let add = |x: &str| format!("(app {{}} (var {{}} add) {x} {ONE})");
+        let cases = [
+            ("no macro", format!("(def {{}} main {ONE})\n")),
+            ("the prelude only", format!("(def {{}} main {ONE})\n")),
+            ("a chain of six", macro_chain(6)),
+            (
+                "a higher-order macro handed no macro",
+                defmacro("apply", "f x", "(app {} (var {} f) (var {} x))")
+                    + &format!(
+                        "(def {{}} main (app {{}} (var {{}} apply) (var {{}} add) {ONE}))\n"
+                    ),
+            ),
+            (
+                "a macro name handed to a higher-order macro, without a cycle",
+                defmacro("apply", "f x", "(app {} (var {} f) (var {} x))")
+                    + &defmacro("inc", "x", &add("(var {} x)"))
+                    + &defmacro("go", "x", "(app {} (var {} apply) (var {} inc) (var {} x))")
+                    + &format!("(def {{}} main (app {{}} (var {{}} go) {ONE}))\n"),
+            ),
+            ("nested calls", nested_calls(10)),
+            (
+                "an expansion that calls a different macro",
+                defmacro("inner", "x", &add("(var {} x)"))
+                    + &defmacro("outer", "x", "(app {} (var {} inner) (var {} x))")
+                    + &format!("(def {{}} main (app {{}} (var {{}} outer) {ONE}))\n"),
+            ),
+        ];
+        for (label, source) in cases {
+            assert!(
+                !routes_to_first_pass(&source),
+                "{label} must expand once:\n{source}"
+            );
+        }
+    }
+
+    #[test]
+    fn issue_3853_routing_never_changes_what_expansion_returns() {
+        // A binder that shadows the macro's own name, so the set looks
+        // recursive but finishes, and an expansion that calls a different
+        // macro, on the cheap path: both outcomes are the recording pass's.
+        let add = |x: &str| format!("(app {{}} (var {{}} add) {x} {ONE})");
+        let shadowing = defmacro("m", "x", "(let {} (bind {} m (var {} x)) (var {} m))")
+            + &format!("(def {{}} main (app {{}} (var {{}} m) {ONE}))\n");
+        let chained = defmacro("inner", "x", &add("(var {} x)"))
+            + &defmacro("outer", "x", "(app {} (var {} inner) (var {} x))")
+            + &format!("(def {{}} main (app {{}} (var {{}} outer) {ONE}))\n");
+        for source in [shadowing, chained] {
+            let exprs = chelis_deep::parser::parse_str(&source).expect("the probe parses");
+            for load_std_prelude in [false, true] {
+                let options = ExpansionOptions {
+                    max_iterations: 100,
+                    load_std_prelude,
+                };
+                let expected = outcome(expand_recorded(&exprs, &options));
+                assert!(expected.is_ok(), "{source}: {expected:?}");
+                assert_eq!(
+                    outcome(expand_program(&exprs, &options)),
+                    expected,
+                    "{source}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn issue_3853_the_first_pass_never_changes_what_expansion_returns() {
+        let mut programs = Vec::new();
+        for length in 0..=5 {
+            programs.push((format!("chain {length}"), macro_chain(length), 100));
+        }
+        for depth in [0, 1, 4, 10] {
+            programs.push((format!("nested {depth}"), nested_calls(depth), 100));
+        }
+        // Small limits, where the recording pass still reaches the limit.
+        for limit in 0..=5 {
+            programs.push((
+                format!("recursive, limit {limit}"),
+                RECURSIVE.to_string(),
+                limit,
+            ));
+            programs.push((format!("chain 5, limit {limit}"), macro_chain(5), limit));
+        }
+        programs.push((
+            "nested arity error".to_string(),
+            NESTED_ARITY.to_string(),
+            100,
+        ));
+        for (label, source, limit) in programs {
+            let exprs = chelis_deep::parser::parse_str(&source).expect("the probe parses");
+            for load_std_prelude in [false, true] {
+                let options = ExpansionOptions {
+                    max_iterations: limit,
+                    load_std_prelude,
+                };
+                let expected = outcome(expand_recorded(&exprs, &options));
+                let first = outcome(expand_program(&exprs, &options));
+                let second = outcome(expand_program(&exprs, &options));
+                assert_eq!(first, expected, "{label}: the result changed");
+                assert_eq!(second, first, "{label}: two runs differ");
+            }
+        }
+        // The arity error does fire inside the nested expansion, and names
+        // only the macro and the counts.
+        let exprs = chelis_deep::parser::parse_str(NESTED_ARITY).expect("the probe parses");
+        let error = expand_program(&exprs, &ExpansionOptions::default())
+            .expect_err("the nested call has the wrong arity");
+        assert_eq!(
+            error.to_string(),
+            "macro `inner` expects 1 argument(s), but this call supplies 2; a macro call supplies \
+             exactly one positional argument per parameter (spec/02-surf-syntax.md [02-MACRO-2])"
+        );
+    }
+
     /// An annotated `(name {})` parameter, the structural list a `params`
     /// node carries for a typed binder.
     fn typed_parameter(name: &str) -> Expr {
@@ -1910,7 +2475,7 @@ mod tests {
                 DeepTag::Fn,
                 vec![params.clone(), app("rewrite", Vec::new())],
             );
-            let mut expander = Expander::new(10, UnordMap::new());
+            let mut expander = Expander::new(10, UnordMap::new(), Provenance::Recorded);
             let expanded = expander
                 .expand_expr(&function, &macros, &Scope::default())
                 .expect("valid source-specific parameter admits expansion");
@@ -1981,7 +2546,7 @@ mod tests {
                 var("outer"),
             ],
         );
-        let mut expander = Expander::new(10, UnordMap::new());
+        let mut expander = Expander::new(10, UnordMap::new(), Provenance::Recorded);
         assert_eq!(
             expander
                 .expand_expr(&malformed_fn, &macros, &Scope::default())
