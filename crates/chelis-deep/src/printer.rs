@@ -18,7 +18,7 @@ const INDENT_STEP: usize = 2;
 /// single newline.
 pub fn print_canonical(exprs: &[Expr]) -> String {
     let printer = Printer::new();
-    print_program(exprs, |wire, out| out.push_str(&printer.fmt_expr(wire, 0)))
+    print_program(exprs, |wire, out| printer.write_pretty(wire, out))
 }
 
 /// Print a slice of top-level expressions in flat canonical form.
@@ -28,7 +28,11 @@ pub fn print_canonical_flat(exprs: &[Expr]) -> String {
 
 /// Print a single expression in canonical pretty form (no trailing newline).
 pub fn print_expr(expr: &Expr) -> String {
-    with_wire(expr, |wire| Printer::new().fmt_expr(wire, 0))
+    with_wire(expr, |wire| {
+        let mut out = String::new();
+        Printer::new().write_pretty(wire, &mut out);
+        out
+    })
 }
 
 /// Print a single expression in canonical flat form (no trailing newline).
@@ -92,70 +96,90 @@ fn render_flat(item: Flat<'_>) -> String {
 fn write_flat(item: Flat<'_>, out: &mut String) {
     let mut stack = vec![item];
     while let Some(item) = stack.pop() {
-        match item {
-            Flat::Text(text) => out.push_str(text),
-            Flat::Expr(expr) => match expr {
-                WireExpr::ExtensionData(data) => out.push_str(data.syntax()),
-                WireExpr::Atom(atom, _) => write_atom(out, atom),
-                WireExpr::Map(map, _) => stack.push(Flat::Map(map)),
-                WireExpr::MetaExpr(meta, _) => stack.push(Flat::MetaExpr(meta)),
-                WireExpr::Node(node, _) => stack.push(Flat::Node(node)),
-                WireExpr::BareList(items, _) => {
-                    out.push('(');
-                    stack.push(Flat::Text(")"));
-                    for (index, item) in items.iter().enumerate().rev() {
-                        stack.push(Flat::Expr(item));
-                        if index > 0 {
-                            stack.push(Flat::Text(" "));
-                        }
-                    }
-                }
-                WireExpr::UnknownForm(form) => {
-                    open_form(&form.head, &form.meta, &form.children, out, &mut stack);
-                }
-            },
-            Flat::Node(node) => {
-                open_form(
-                    node.tag.as_str(),
-                    &node.meta,
-                    &node.children,
-                    out,
-                    &mut stack,
-                );
-            }
-            Flat::Map(map) => {
-                out.push('{');
-                stack.push(Flat::Text("}"));
-                let entries = sorted_entries(&map.entries);
-                for (index, (key, value)) in entries.into_iter().enumerate().rev() {
-                    stack.push(Flat::Expr(value));
-                    stack.push(Flat::Text(": "));
-                    stack.push(Flat::Text(key));
-                    if index > 0 {
-                        stack.push(Flat::Text(", "));
-                    }
-                }
-            }
-            Flat::MetaExpr(meta) => {
-                stack.push(Flat::Expr(&meta.expr));
-                stack.push(Flat::Text(" "));
-                stack.push(Flat::MetaEntries(&meta.entries));
-            }
-            Flat::MetaEntries(entries) => {
-                out.push_str("^{");
-                stack.push(Flat::Text("}"));
-                for (index, (key, value)) in sorted_entries(entries).into_iter().enumerate().rev() {
-                    stack.push(Flat::Expr(value));
-                    stack.push(Flat::Text(" "));
-                    stack.push(Flat::Text(key));
-                    stack.push(Flat::Text(":"));
+        write_flat_step(item, out, &mut stack);
+    }
+}
+
+/// Write one pending piece of flat output, queueing the pieces it contains.
+fn write_flat_step<'a>(item: Flat<'a>, out: &mut String, stack: &mut Vec<Flat<'a>>) {
+    match item {
+        Flat::Text(text) => out.push_str(text),
+        Flat::Expr(expr) => match expr {
+            WireExpr::ExtensionData(data) => out.push_str(data.syntax()),
+            WireExpr::Atom(atom, _) => write_atom(out, atom),
+            WireExpr::Map(map, _) => stack.push(Flat::Map(map)),
+            WireExpr::MetaExpr(meta, _) => stack.push(Flat::MetaExpr(meta)),
+            WireExpr::Node(node, _) => stack.push(Flat::Node(node)),
+            WireExpr::BareList(items, _) => {
+                out.push('(');
+                stack.push(Flat::Text(")"));
+                for (index, item) in items.iter().enumerate().rev() {
+                    stack.push(Flat::Expr(item));
                     if index > 0 {
                         stack.push(Flat::Text(" "));
                     }
                 }
             }
+            WireExpr::UnknownForm(form) => {
+                open_form(&form.head, &form.meta, &form.children, out, stack);
+            }
+        },
+        Flat::Node(node) => {
+            open_form(node.tag.as_str(), &node.meta, &node.children, out, stack);
+        }
+        Flat::Map(map) => {
+            out.push('{');
+            stack.push(Flat::Text("}"));
+            let entries = sorted_entries(&map.entries);
+            for (index, (key, value)) in entries.into_iter().enumerate().rev() {
+                stack.push(Flat::Expr(value));
+                stack.push(Flat::Text(": "));
+                stack.push(Flat::Text(key));
+                if index > 0 {
+                    stack.push(Flat::Text(", "));
+                }
+            }
+        }
+        Flat::MetaExpr(meta) => {
+            stack.push(Flat::Expr(&meta.expr));
+            stack.push(Flat::Text(" "));
+            stack.push(Flat::MetaEntries(&meta.entries));
+        }
+        Flat::MetaEntries(entries) => {
+            out.push_str("^{");
+            stack.push(Flat::Text("}"));
+            for (index, (key, value)) in sorted_entries(entries).into_iter().enumerate().rev() {
+                stack.push(Flat::Expr(value));
+                stack.push(Flat::Text(" "));
+                stack.push(Flat::Text(key));
+                stack.push(Flat::Text(":"));
+                if index > 0 {
+                    stack.push(Flat::Text(" "));
+                }
+            }
         }
     }
+}
+
+/// Append the flat canonical form of `item` to `out` if it is at most
+/// `budget` bytes wide, and report whether it was. A form that does not fit
+/// is abandoned as soon as it passes the budget and `out` is left as it was,
+/// so measuring a node's width costs at most the budget rather than the
+/// node's whole subtree (chelis#3852).
+fn write_flat_within(item: Flat<'_>, out: &mut String, budget: Option<usize>) -> bool {
+    let Some(budget) = budget else {
+        return false;
+    };
+    let start = out.len();
+    let mut stack = vec![item];
+    while let Some(item) = stack.pop() {
+        write_flat_step(item, out, &mut stack);
+        if out.len() - start > budget {
+            out.truncate(start);
+            return false;
+        }
+    }
+    true
 }
 
 /// Write a form's `(head ` and queue the `{meta} child...)` that follows it.
@@ -396,6 +420,224 @@ impl Printer {
     }
 }
 
+/// The streaming layout: the same decisions as [`Printer::fmt_expr`],
+/// written once into one buffer.
+///
+/// The returning layout renders each child to its own string and copies it,
+/// split into lines, into every enclosing level, so a byte nested `d` deep
+/// is copied `d` times, and it renders each node's whole subtree flat to
+/// compare it with the line width. On deep nesting that is cubic in the
+/// depth (chelis#3852). Here each byte is written once, and a width test
+/// stops at the line width.
+///
+/// Splitting a child into lines and joining them again is the identity on
+/// everything this printer lays out, except text holding a carriage return,
+/// ending in a line feed, or empty, which only a leaf's own spelling can
+/// be. A tree with such a leaf keeps the returning layout, so the output is
+/// the same for every tree.
+impl Printer {
+    fn write_pretty(&self, expr: &WireExpr, out: &mut String) {
+        if has_line_sensitive_leaf(expr) {
+            out.push_str(&self.fmt_expr(expr, 0));
+        } else {
+            self.write_expr(expr, 0, out);
+        }
+    }
+
+    /// The width left on a line at `indent`, or `None` when nothing fits.
+    fn budget(&self, indent: usize) -> Option<usize> {
+        self.max_width.checked_sub(indent)
+    }
+
+    fn write_expr(&self, expr: &WireExpr, indent: usize, out: &mut String) {
+        match expr {
+            WireExpr::ExtensionData(data) => out.push_str(data.syntax()),
+            WireExpr::Atom(atom, _) => write_atom(out, atom),
+            WireExpr::Map(map, _) => self.write_map(map, indent, out),
+            WireExpr::MetaExpr(meta, _) => self.write_meta_expr(meta, indent, out),
+            WireExpr::Node(node, _) => self.write_node(node, indent, out),
+            WireExpr::BareList(items, _) => self.write_list(expr, items, indent, out),
+            WireExpr::UnknownForm(form) => self.write_unknown_form(expr, form, indent, out),
+        }
+    }
+
+    fn write_node(&self, node: &WireNode, indent: usize, out: &mut String) {
+        if force_flat_tag(node.tag) {
+            write_flat(Flat::Node(node), out);
+            return;
+        }
+        if !force_break_tag(node.tag)
+            && write_flat_within(Flat::Node(node), out, self.budget(indent))
+        {
+            return;
+        }
+        let tag = node.tag.as_str();
+        out.push('(');
+        out.push_str(tag);
+        out.push(' ');
+        self.write_map(&node.meta, indent + 1 + tag.len() + 1, out);
+        let child_indent = indent + self.indent_step;
+        for child in &node.children {
+            push_line_start(out, child_indent);
+            self.write_expr(child, child_indent, out);
+        }
+        out.push(')');
+    }
+
+    fn write_list(&self, list: &WireExpr, items: &[WireExpr], indent: usize, out: &mut String) {
+        let Some((first, rest)) = items.split_first() else {
+            write_flat(Flat::Expr(list), out);
+            return;
+        };
+        if write_flat_within(Flat::Expr(list), out, self.budget(indent)) {
+            return;
+        }
+        out.push('(');
+        self.write_expr(first, indent + self.indent_step, out);
+        self.write_broken_items(None, rest, indent, out);
+    }
+
+    fn write_unknown_form(
+        &self,
+        form_expr: &WireExpr,
+        form: &WireUnknown,
+        indent: usize,
+        out: &mut String,
+    ) {
+        if write_flat_within(Flat::Expr(form_expr), out, self.budget(indent)) {
+            return;
+        }
+        out.push('(');
+        out.push_str(&form.head);
+        self.write_broken_items(Some(&form.meta), &form.children, indent, out);
+    }
+
+    /// The lines of a broken list after its first element.
+    fn write_broken_items(
+        &self,
+        meta: Option<&MetaMap>,
+        items: &[WireExpr],
+        indent: usize,
+        out: &mut String,
+    ) {
+        let child_indent = indent + self.indent_step;
+        if let Some(meta) = meta {
+            push_line_start(out, child_indent);
+            self.write_map(meta, child_indent, out);
+        }
+        for item in items {
+            push_line_start(out, child_indent);
+            self.write_expr(item, child_indent, out);
+        }
+        out.push(')');
+    }
+
+    fn write_map(&self, map: &MetaMap, indent: usize, out: &mut String) {
+        if map.entries.is_empty() {
+            write_flat(Flat::Map(map), out);
+            return;
+        }
+        if write_flat_within(Flat::Map(map), out, self.budget(indent)) {
+            return;
+        }
+        let sorted = sorted_entries(&map.entries);
+        let entry_indent = indent + self.indent_step;
+        for (index, (key, value)) in sorted.iter().enumerate() {
+            if index == 0 {
+                out.push('{');
+            } else {
+                push_line_start(out, entry_indent);
+            }
+            out.push_str(key);
+            out.push_str(": ");
+            self.write_expr(value, entry_indent + key.len() + 2, out);
+            if index + 1 != sorted.len() {
+                out.push(',');
+            }
+        }
+        push_line_start(out, indent);
+        out.push('}');
+    }
+
+    fn write_meta_expr(&self, meta: &MetaExpr, indent: usize, out: &mut String) {
+        if write_flat_within(Flat::MetaExpr(meta), out, self.budget(indent)) {
+            return;
+        }
+        let start = out.len();
+        write_flat(Flat::MetaEntries(&meta.entries), out);
+        let expr_indent = indent + (out.len() - start) + 1;
+        out.push(' ');
+        self.write_expr(&meta.expr, expr_indent, out);
+    }
+}
+
+/// Start a new line indented to `indent`.
+fn push_line_start(out: &mut String, indent: usize) {
+    out.push('\n');
+    out.extend(std::iter::repeat_n(' ', indent));
+}
+
+/// Whether some leaf's own spelling holds a carriage return, ends in a line
+/// feed, or is empty, where splitting a child into lines and joining them
+/// again is not the identity.
+fn has_line_sensitive_leaf(expr: &WireExpr) -> bool {
+    fn sensitive(text: &str) -> bool {
+        text.is_empty() || text.ends_with('\n') || text.contains('\r')
+    }
+    fn map_sensitive<'a>(map: &'a MetaMap, pending: &mut Vec<&'a WireExpr>) -> bool {
+        for (key, value) in &map.entries {
+            if sensitive(key) {
+                return true;
+            }
+            pending.push(value);
+        }
+        false
+    }
+    let mut pending = vec![expr];
+    while let Some(expr) = pending.pop() {
+        match expr {
+            WireExpr::ExtensionData(data) => {
+                if sensitive(data.syntax()) {
+                    return true;
+                }
+            }
+            WireExpr::Atom(atom, _) => {
+                if sensitive(&atom_text(atom)) {
+                    return true;
+                }
+            }
+            WireExpr::Map(map, _) => {
+                if map_sensitive(map, &mut pending) {
+                    return true;
+                }
+            }
+            WireExpr::MetaExpr(meta, _) => {
+                for (key, value) in &meta.entries {
+                    if sensitive(key) {
+                        return true;
+                    }
+                    pending.push(value);
+                }
+                pending.push(&meta.expr);
+            }
+            WireExpr::Node(node, _) => {
+                if map_sensitive(&node.meta, &mut pending) {
+                    return true;
+                }
+                pending.extend(&node.children);
+            }
+            WireExpr::BareList(items, _) => pending.extend(items),
+            WireExpr::UnknownForm(form) => {
+                if sensitive(&form.head) || map_sensitive(&form.meta, &mut pending) {
+                    return true;
+                }
+                pending.extend(&form.children);
+            }
+        }
+    }
+    false
+}
+
 /// Append a rendered child: its first line indented by `prefix`, and its
 /// continuation lines as rendered.
 fn push_child_lines(lines: &mut Vec<String>, prefix: &str, rendered: &str) {
@@ -481,6 +723,177 @@ mod tests {
             },
             sp(),
         )
+    }
+
+    /// The returning layout, which the streaming one must reproduce byte
+    /// for byte (chelis#3852).
+    fn returning_layout(exprs: &[Expr]) -> String {
+        let printer = Printer::new();
+        print_program(exprs, |wire, out| out.push_str(&printer.fmt_expr(wire, 0)))
+    }
+
+    fn streaming_layout(exprs: &[Expr]) -> String {
+        let printer = Printer::new();
+        print_program(exprs, |wire, out| printer.write_expr(wire, 0, out))
+    }
+
+    const I32: &str = "(lit {type: (t-prim {} i32)} 1)";
+
+    fn tuple_chain(depth: usize) -> String {
+        let body = format!("(tuple {{}} {I32} ").repeat(depth) + I32 + &")".repeat(depth);
+        format!("(def {{}} main (fn {{}} (params {{}}) {body}))\n")
+    }
+
+    fn let_chain(depth: usize) -> String {
+        let mut body = String::new();
+        for index in 0..depth {
+            body.push_str(&format!("(let {{}} (bind {{}} x{index} {I32}) "));
+        }
+        body.push_str("(var {} x0)");
+        body.push_str(&")".repeat(depth));
+        format!("(def {{}} main (fn {{}} (params {{}}) {body}))\n")
+    }
+
+    fn deep_type(depth: usize) -> String {
+        "(t-tuple {} (t-prim {} f32) ".repeat(depth) + "(t-prim {} i64)" + &")".repeat(depth)
+    }
+
+    /// Typed parameters and an annotated body: maps that must break.
+    fn typed_program(depth: usize) -> String {
+        let ty = deep_type(depth);
+        format!(
+            "(def {{type: (t-fn {{}} {ty} {ty})}} f (fn {{}} (params {{}} (x {{type: {ty}}})) \
+             (var {{type: {ty}}} x)))\n"
+        )
+    }
+
+    /// Structural lists, unknown forms, legacy prefix metadata, extension
+    /// data and long names, as list Deep.
+    fn list_program(width: usize, seed: u64) -> String {
+        let mut state = seed;
+        let mut next = move |bound: u64| {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (state >> 33) % bound
+        };
+        let mut out = String::new();
+        for item in 0..width {
+            let name = "n".repeat(1 + next(90) as usize);
+            match next(6) {
+                0 => out.push_str(&format!(
+                    "({name} {item} \"s{item}\" {}) ",
+                    "(a b) ".repeat(next(12) as usize)
+                )),
+                1 => out.push_str(&format!(
+                    "(frob {{custom: ({}), k{item}: {name}}} {name}) ",
+                    "x ".repeat(next(30) as usize)
+                )),
+                2 => out.push_str(&format!(
+                    "^{{:custom ({}) :doc \"d\"}} {name} ",
+                    "y ".repeat(next(30) as usize)
+                )),
+                3 => out.push_str(&format!(
+                    "{{b: {item}, a: ({}), c: {name}}} ",
+                    "z ".repeat(next(40) as usize)
+                )),
+                4 => out.push_str(&format!(
+                    "({}{}) ",
+                    "(".repeat(next(8) as usize),
+                    ")".repeat(0)
+                )),
+                _ => out.push_str(&format!("{name} ")),
+            }
+        }
+        let balanced: String = {
+            // Close any parenthesis case 4 opened.
+            let open = out.matches('(').count();
+            let close = out.matches(')').count();
+            out.clone() + &")".repeat(open.saturating_sub(close))
+        };
+        format!("(top {balanced})\n")
+    }
+
+    #[test]
+    fn issue_3852_streaming_layout_reproduces_the_returning_layout() {
+        let mut stamped = Vec::new();
+        for depth in [0, 1, 2, 3, 5, 8, 13, 21, 40, 80] {
+            stamped.push(tuple_chain(depth));
+            stamped.push(let_chain(depth));
+            stamped.push(typed_program(depth));
+        }
+        let mut compared = 0;
+        let on_large_stack = std::thread::Builder::new().stack_size(256 * 1024 * 1024);
+        let handle = on_large_stack
+            .spawn(move || {
+                for source in &stamped {
+                    let exprs =
+                        crate::parser::parse_and_stamp_file(source).expect("stamped probe parses");
+                    assert_eq!(
+                        streaming_layout(&exprs),
+                        returning_layout(&exprs),
+                        "{source}"
+                    );
+                    assert_eq!(
+                        print_canonical(&exprs),
+                        returning_layout(&exprs),
+                        "{source}"
+                    );
+                    compared += 1;
+                }
+                for width in [1, 2, 4, 8, 16, 32] {
+                    for seed in 0..40 {
+                        let source = list_program(width, seed);
+                        let exprs = crate::parser::parse_str(&source).expect("list probe parses");
+                        assert_eq!(
+                            streaming_layout(&exprs),
+                            returning_layout(&exprs),
+                            "{source}"
+                        );
+                        compared += 1;
+                    }
+                }
+                compared
+            })
+            .expect("spawn the comparing thread");
+        let compared = handle.join().expect("the comparison finishes");
+        assert!(compared > 250, "compared {compared} programs");
+    }
+
+    #[test]
+    fn issue_3852_line_sensitive_leaves_keep_the_returning_layout() {
+        // A carriage return, a trailing line feed, or an empty spelling is
+        // where splitting into lines and joining again is not the identity;
+        // such a tree is printed by the returning layout.
+        let mut sensitive_trees = 0;
+        for raw in ["\"a\nb\"", "\"a\r\nb\"", "\"a\n\"", "\"\n\n\""] {
+            let long = "w ".repeat(40);
+            for source in [
+                format!("(top {{custom: {raw}}} ({long}) {raw})\n"),
+                format!("(top ({long} {raw}) ({long}))\n"),
+                format!("(def {{custom: {raw}}} main (fn {{}} (params {{}}) {I32}))\n"),
+            ] {
+                let exprs = crate::parser::parse_str(&source).expect("the probe parses");
+                let sensitive = exprs
+                    .iter()
+                    .any(|expr| with_wire(expr, has_line_sensitive_leaf));
+                assert_eq!(
+                    print_canonical(&exprs),
+                    returning_layout(&exprs),
+                    "{source}"
+                );
+                // Only extension data keeps a leaf's own spelling; a string atom
+                // is printed escaped.
+                if raw.contains('\r') && source.contains("custom") {
+                    assert!(sensitive, "{source}");
+                }
+                sensitive_trees += usize::from(sensitive);
+            }
+        }
+        assert!(
+            sensitive_trees >= 2,
+            "the probes reached the fallback {sensitive_trees} times"
+        );
     }
 
     #[test]
