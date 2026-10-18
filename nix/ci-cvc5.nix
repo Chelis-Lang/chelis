@@ -29,6 +29,8 @@ let
 
   # This is the exact rel-2.1.3-elevate source selected by FindCaDiCaL.cmake,
   # built with the same stdenv as cvc5 and the Rust linker in the CI shell.
+  # cvc5 links only the library, so the build skips the CaDiCaL and mobical
+  # test suites of the nixpkgs check phase. The cvc5 build keeps doCheck off.
   cadical =
     (pkgs.cadical.override {
       inherit stdenv;
@@ -46,6 +48,7 @@ let
           ./configure --quiet --no-contrib -fPIC CXXFLAGS="-std=c++11"
           runHook postConfigure
         '';
+        doCheck = false;
       });
 
   poly = (pkgs.libpoly.override { inherit stdenv gmp; }).overrideAttrs (_old: {

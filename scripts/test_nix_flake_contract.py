@@ -257,6 +257,18 @@ def assert_documented_crate2nix_matches_profile(
         )
 
 
+def assert_cadical_runs_no_test_suite(release_cvc5: str) -> None:
+    """chelis#3908: the CaDiCaL build of the cvc5 tree skips the nixpkgs check phase.
+
+    That phase ran the CaDiCaL and mobical test suites on the critical path of
+    a cold cvc5 build.
+    """
+    cadical = release_cvc5.split("\n  cadical =\n", 1)[1].split("\n  poly =", 1)[0]
+    assert re.findall(r"doCheck = \w+;", cadical) == ["doCheck = false;"], (
+        "the CaDiCaL override in nix/ci-cvc5.nix must set doCheck = false once"
+    )
+
+
 def assert_release_cvc5_configuration(flake_cvc5: str, release_cvc5: str) -> None:
     """Check that the flake cvc5 is the cvc5-sys 0.3.1 configure.sh configuration."""
     assert "import ./ci-cvc5.nix args" in flake_cvc5, "nix/cvc5.nix must reuse nix/ci-cvc5.nix"
@@ -1521,6 +1533,18 @@ class NixSourceContractTests(unittest.TestCase):
         cvc5 = (REPO_ROOT / "nix" / "ci-cvc5.nix").read_text(encoding="utf-8")
         self.assertIn('"-DBUILD_SHARED_LIBS=OFF"', cvc5)
         self.assertIn('"-DSTATIC_BINARY=OFF"', cvc5)
+
+    def test_cadical_build_runs_no_test_suite(self) -> None:
+        cvc5 = (REPO_ROOT / "nix" / "ci-cvc5.nix").read_text(encoding="utf-8")
+        assert_cadical_runs_no_test_suite(cvc5)
+        for name, mutated in {
+            "check phase kept": cvc5.replace("        doCheck = false;\n      });\n\n  poly =", "      });\n\n  poly =", 1),
+            "check phase on": cvc5.replace("        doCheck = false;\n      });\n\n  poly =", "        doCheck = true;\n      });\n\n  poly =", 1),
+        }.items():
+            with self.subTest(name):
+                self.assertNotEqual(mutated, cvc5)
+                with self.assertRaises(AssertionError):
+                    assert_cadical_runs_no_test_suite(mutated)
 
     def test_flake_cvc5_uses_the_release_configuration(self) -> None:
         flake_cvc5 = (REPO_ROOT / "nix" / "cvc5.nix").read_text(encoding="utf-8")

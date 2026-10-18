@@ -89,6 +89,12 @@ CI_CACHE_WARM_YML = REPO_ROOT / ".github" / "workflows" / "ci-cache-warm.yml"
 CHELIS_PROVE_TOML = REPO_ROOT / "crates" / "chelis-prove" / "Cargo.toml"
 NIX_PACKAGES_YML = REPO_ROOT / ".github" / "workflows" / "nix-packages.yml"
 DEVENV_SETUP_ACTION = "./.github/actions/vendor/ci/actions/setup-devenv"
+# Jobs that use only nix and python3 install Nix with the action that the
+# central Devenv setup and release-e2e.yml pin.
+NIX_INSTALL_ACTION = (
+    "cachix/install-nix-action@630ae543ea3a38a9a4166f03376c02c50f408342 # v31.11.0"
+)
+NIX_INSTALL_URL = "install_url: https://releases.nixos.org/nix/nix-2.34.4/install"
 PORTABLE_DEVENV_SHELL = "devenv-ci bash --noprofile --norc -e -o pipefail {0}"
 WORKFLOWS_DIR = REPO_ROOT / ".github" / "workflows"
 CARCARA_FULL_SUITE_COMMAND = (
@@ -407,16 +413,20 @@ def _assert_native_devenv_recipe(workflow: str) -> None:
                 f"native Devenv setup in {job!r} must precede the runner verification"
             )
 
+    # The cache-status job installs Nix only, so the check reads the native
+    # jobs and not the whole workflow.
     forbidden_markers = (
         "uses: cachix/install-nix-action@",
         "uses: cachix/cachix-action@",
         "nix profile add github:cachix/devenv/",
     )
-    for marker in forbidden_markers:
-        if marker in workflow:
-            raise AssertionError(
-                f"native Devenv recipe duplicates central setup marker {marker!r}"
-            )
+    for job in _NIX_NATIVE_JOBS:
+        for marker in forbidden_markers:
+            if marker in blocks[job]:
+                raise AssertionError(
+                    f"native Devenv recipe in {job!r} duplicates central setup "
+                    f"marker {marker!r}"
+                )
 
 
 _SIMPLE_YAML_KEY = re.compile(
@@ -518,13 +528,14 @@ def _nix_workflow_events(workflow: str) -> dict[str, dict[str, str]]:
 
 
 _NIX_REVIEWED_WORKFLOW_SHA256 = (
-    "9f9a64c4e439aa022adee4e428fa3afb837ff532610168653241f53aa52d8f90"
+    "61dc2e3803a75e3e740b6086bc83f679f3309906eaa10d31d2bc8f3faba3b362"
 )
 _NIX_REVIEWED_SCHEDULE = "'37 2 * * *'"
 _NIX_NATIVE_JOBS = ("nix-linux-x86-64", "nix-linux-arm64", "nix-darwin-arm64")
 _NIX_CACHE_STATUS_RUN = (
     'run: python3 scripts/nix_cache_status.py --github-output "$GITHUB_OUTPUT"'
 )
+_NIX_CACHE_STATUS_IF = "    if: github.event_name == 'schedule'\n"
 _NIX_NATIVE_CACHE_GATE = (
     "    needs: [cache-status]\n"
     "    if: ${{ !cancelled() && (github.event_name != 'schedule' || "
@@ -556,6 +567,16 @@ def _assert_nix_workflow_matches_reviewed_recipe(workflow: str) -> None:
         )
 
 
+def _assert_nix_only_setup(block: str, job: str) -> None:
+    """A job that uses only nix and python3 installs Nix without Devenv."""
+    for marker in (f"        uses: {NIX_INSTALL_ACTION}\n", f"          {NIX_INSTALL_URL}\n"):
+        if block.count(marker) != 1:
+            raise AssertionError(f"the {job} job must contain {marker.strip()!r} once")
+    for marker in (DEVENV_SETUP_ACTION, "devenv"):
+        if marker in block:
+            raise AssertionError(f"the {job} job must install Nix only, not {marker!r}")
+
+
 def _assert_nix_schedule_cache_gate(workflow: str) -> None:
     """A scheduled run skips the native jobs only when the cache is complete.
 
@@ -575,8 +596,11 @@ def _assert_nix_schedule_cache_gate(workflow: str) -> None:
             raise AssertionError(
                 f"the cache-status job must contain {marker.strip()!r} once"
             )
-    if re.search(r"^    if:", status, re.MULTILINE):
-        raise AssertionError("the cache-status job must run on every event")
+    # Only a scheduled run reads the report. Manual and release runs skip the
+    # job, and the `!cancelled()` condition starts their native jobs at once.
+    if re.findall(r"^    if:.*\n", status, re.MULTILINE) != [_NIX_CACHE_STATUS_IF]:
+        raise AssertionError("the cache-status job must run only for a scheduled run")
+    _assert_nix_only_setup(status, "cache-status")
     for job in _NIX_NATIVE_JOBS:
         block = blocks.get(job)
         if block is None:
@@ -3542,11 +3566,11 @@ def _assert_nix_eval_job(block: str) -> None:
     for marker in (
         "    name: Nix flake evaluation\n",
         "    runs-on: ubuntu-latest\n",
-        f"        uses: {DEVENV_SETUP_ACTION}\n",
         "          ref: ${{ needs.changes.outputs.candidate_sha }}\n",
     ):
         if block.count(marker) != 1:
             raise AssertionError(f"the nix-eval job must contain {marker.strip()!r} once")
+    _assert_nix_only_setup(block, "nix-eval")
     _assert_executable_run_once(block, NIX_EVAL_COMMAND)
     _assert_executable_run_once(block, NIX_FORMAT_COMMAND)
     if re.search(r"^\s+(?:continue-on-error|if):", block.split("    steps:\n", 1)[1], re.MULTILINE):
@@ -3589,6 +3613,15 @@ class NixEvalJobTests(unittest.TestCase):
             "base checkout": block.replace(
                 "          ref: ${{ needs.changes.outputs.candidate_sha }}\n", "", 1
             ),
+            "portable Devenv setup": block.replace(
+                f"        uses: {NIX_INSTALL_ACTION}\n",
+                f"        uses: {DEVENV_SETUP_ACTION}\n",
+                1,
+            ),
+            "unpinned Nix installer": block.replace(
+                NIX_INSTALL_ACTION, "cachix/install-nix-action@v31", 1
+            ),
+            "default Nix version": block.replace(f"          {NIX_INSTALL_URL}\n", "", 1),
         }
         for name, mutated in mutations.items():
             with self.subTest(name=name):
@@ -3841,14 +3874,25 @@ class NixPackagesWorkflowTests(unittest.TestCase):
                 text.replace(_NIX_CACHE_STATUS_RUN, "run: 'true'", 1),
                 "nix_cache_status.py",
             ),
-            "cache report limited to one event": (
+            "cache report on every event": (
+                text.replace(_NIX_CACHE_STATUS_IF, "", 1),
+                "must run only for a scheduled run",
+            ),
+            "cache report on a dispatch": (
                 text.replace(
-                    "    name: Nix cache status\n",
-                    "    name: Nix cache status\n"
-                    "    if: github.event_name == 'schedule'\n",
+                    _NIX_CACHE_STATUS_IF,
+                    "    if: github.event_name != 'release'\n",
                     1,
                 ),
-                "must run on every event",
+                "must run only for a scheduled run",
+            ),
+            "cache report through Devenv": (
+                text.replace(
+                    f"      - name: Install Nix\n        uses: {NIX_INSTALL_ACTION}\n",
+                    f"      - name: Install Nix\n        uses: {DEVENV_SETUP_ACTION}\n",
+                    1,
+                ),
+                "must contain|install Nix only",
             ),
         }
         for name, (mutated, message) in mutations.items():

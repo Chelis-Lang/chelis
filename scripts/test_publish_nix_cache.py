@@ -128,25 +128,48 @@ def job_block(workflow: str, job: str) -> str | None:
     return workflow[start : start + 1 + following.start()] if following else workflow[start:]
 
 
+TAG_PUSH = "    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')\n"
+DISPATCH_RUN = (
+    'run_id=$(gh api --method POST "repos/$GITHUB_REPOSITORY/actions/workflows/nix-packages.yml/dispatches" '
+    '-f ref="$GITHUB_REF_NAME" -F return_run_details=true --jq .workflow_run_id)'
+)
+RUN_ID_CHECK = '          if [[ ! "$run_id" =~ ^[0-9]+$ ]]; then\n'
+RUN_LINK = '>> "$GITHUB_STEP_SUMMARY"'
+
+
 def assert_releases_reach_the_publisher(release: str, nix: str) -> None:
     """GitHub starts no workflow for a release that GITHUB_TOKEN publishes.
 
-    release.yml therefore dispatches nix-packages.yml on the release tag. Only
-    a run on main or on a release tag may push to the cache.
+    release.yml therefore dispatches nix-packages.yml on the release tag right
+    after the preflight, so the Nix run builds beside the release builds. No
+    release job waits for the Nix run, so each run keeps its own conclusion,
+    and release-e2e.yml still starts when the release run succeeds. Only a run
+    on main or on a release tag may push to the cache.
     """
     dispatch = job_block(release, "dispatch-nix-packages")
     if dispatch is None:
-        raise AssertionError("release.yml must dispatch nix-packages.yml after it publishes a release")
+        raise AssertionError("release.yml must dispatch nix-packages.yml on a release tag")
     rules = {
-        "    needs: [publish-release]\n": "must run after publish-release",
-        "    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')\n": "must run only for a tag push",
+        "    needs: [preflight]\n": "must start after the preflight, beside the release builds",
+        TAG_PUSH: "must run only for a tag push",
         "    permissions:\n      actions: write\n    steps:\n": "must hold only the actions: write permission",
         "GH_TOKEN: ${{ github.token }}": "must dispatch with GITHUB_TOKEN",
-        'run: gh workflow run nix-packages.yml --repo "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME"': "must dispatch nix-packages.yml on the release tag",
+        DISPATCH_RUN: "must dispatch nix-packages.yml on the release tag",
+        RUN_ID_CHECK: "must fail when the dispatch gives no run",
+        RUN_LINK: "must link the Nix run in the job summary",
     }
     for text, rule in rules.items():
-        if text not in dispatch:
+        if dispatch.count(text) != 1:
             raise AssertionError(f"the dispatch job {rule}")
+    if "continue-on-error" in dispatch:
+        raise AssertionError("the dispatch job must not hide a failed dispatch")
+    waiting = [
+        line
+        for line in release.splitlines()
+        if line.startswith("    needs:") and "dispatch-nix-packages" in line
+    ]
+    if waiting or "gh run watch" in dispatch:
+        raise AssertionError("no release job may wait for the Nix run")
     publish_steps = [
         step for step in nix.split("\n      - ") if f"\n        {PUBLISH_RUN}\n" in f"\n{step}\n"
     ]
@@ -288,9 +311,14 @@ class ReleaseTriggerContractTests(unittest.TestCase):
                 "release",
                 "\n  dispatch-nix-packages:\n",
                 "\n  dispatch-nix-packages-retired:\n",
-                "must dispatch nix-packages.yml after it publishes",
+                "must dispatch nix-packages.yml on a release tag",
             ),
-            ("release", "    needs: [publish-release]\n", "    needs: [preflight]\n", "must run after publish-release"),
+            (
+                "release",
+                "    name: Dispatch the Nix package checks\n    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')\n    needs: [preflight]\n",
+                "    name: Dispatch the Nix package checks\n    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')\n    needs: [publish-release]\n",
+                "must start after the preflight",
+            ),
             (
                 "release",
                 "    name: Dispatch the Nix package checks\n"
@@ -304,7 +332,22 @@ class ReleaseTriggerContractTests(unittest.TestCase):
                 "      actions: write\n      contents: write\n    steps:\n",
                 "only the actions: write permission",
             ),
-            ("release", '--ref "$GITHUB_REF_NAME"', "--ref main", "on the release tag"),
+            ("release", '-f ref="$GITHUB_REF_NAME"', "-f ref=main", "on the release tag"),
+            ("release", " -F return_run_details=true", "", "on the release tag"),
+            ("release", RUN_ID_CHECK, "          if false; then\n", "must fail when the dispatch gives no run"),
+            ("release", RUN_LINK, ">> /dev/null", "must link the Nix run"),
+            (
+                "release",
+                "    runs-on: ubuntu-latest\n    timeout-minutes: 5\n    permissions:\n      actions: write\n",
+                "    runs-on: ubuntu-latest\n    continue-on-error: true\n    timeout-minutes: 5\n    permissions:\n      actions: write\n",
+                "must not hide a failed dispatch",
+            ),
+            (
+                "release",
+                "    needs: [build-linux-x86_64, build-linux-x86_64-glibc231,",
+                "    needs: [dispatch-nix-packages, build-linux-x86_64, build-linux-x86_64-glibc231,",
+                "no release job may wait for the Nix run",
+            ),
             (
                 "nix",
                 f" pushes nothing.\n{publish_step}        {PUBLISH_GATE}\n",
