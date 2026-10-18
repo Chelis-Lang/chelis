@@ -218,7 +218,10 @@ A `local_registry` entry gives two elements. The `archive` file is
 whose `file` is its locked `asset`. `path` and `bundled` entries, and a legacy
 `local_registry` entry for `chelis-std`, give no element. A `local_registry` entry
 with no `remote_origin`, or with an origin that does not parse, makes the command
-fail. The public URL serves public releases only.
+fail. A `binary` entry also makes the command fail when its `name` is not a bare file
+name, or when its `asset` is not a bare file name of ASCII letters, digits, `.`, `-`,
+`_`, or `~` (chelis#3891). The diagnostic names the lock entry. The public URL serves
+public releases only.
 
 The import walks the entries of `reef.lock` as `--from-lockfile` does. For each
 element it reads `<dir>/<file>` and compares the file SHA-256 with the lock before any

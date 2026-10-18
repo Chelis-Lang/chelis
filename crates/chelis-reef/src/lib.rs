@@ -6018,6 +6018,14 @@ pub enum LockfileInstallError {
     /// chelis#3813: a `local_registry` entry has no `remote_origin`, so
     /// a fetch plan cannot give its download URL.
     MissingOrigin { name: String, version: String },
+    /// chelis#3891: a `binary` entry has a `name` or an `asset` that is
+    /// not a bare, URL-safe file name, so a fetch plan cannot give its
+    /// `file` or its download URL.
+    UnsafeBinaryName {
+        name: String,
+        version: String,
+        message: String,
+    },
 }
 
 impl std::fmt::Display for LockfileInstallError {
@@ -6052,6 +6060,11 @@ impl std::fmt::Display for LockfileInstallError {
                  download URL. Run `chelis reef install --bootstrap` or `--from-github` and \
                  rebuild to record the origin"
             ),
+            Self::UnsafeBinaryName {
+                name,
+                version,
+                message,
+            } => write!(f, "lockfile entry `{name}` v{version}: {message}"),
         }
     }
 }
@@ -6102,7 +6115,9 @@ pub const FETCH_PLAN_FORMAT_VERSION: u32 = 1;
 /// access. A `local_registry` entry gives its archive and its shell, and a
 /// `binary` entry gives its asset. `path` and `bundled` entries, and a
 /// legacy `local_registry` entry for `chelis-std`, give nothing. An entry
-/// with no origin, or with an origin that does not parse, is an error.
+/// with no origin, or with an origin that does not parse, is an error. A
+/// `binary` entry whose `name` is not [`is_safe_artifact_name`], or whose
+/// `asset` is not [`is_url_safe_asset_name`], is an error (chelis#3891).
 pub fn lockfile_fetch_plan(package_root: &Path) -> Result<FetchPlan, LockfileInstallError> {
     let (_, lock) = read_install_lock(package_root)?;
     let mut artifacts = Vec::new();
@@ -6162,6 +6177,18 @@ pub fn lockfile_fetch_plan(package_root: &Path) -> Result<FetchPlan, LockfileIns
                 asset,
                 sha256,
             } => {
+                if !is_safe_artifact_name(&dep.name) || !is_url_safe_asset_name(asset) {
+                    return Err(LockfileInstallError::UnsafeBinaryName {
+                        name: dep.name.clone(),
+                        version: dep.version.clone(),
+                        message: format!(
+                            "refusing to plan binary `{}` from asset `{asset}`: the name must be \
+                             a bare file name, and the asset must be a bare file name of ASCII \
+                             letters, digits, `.`, `-`, `_`, or `~`",
+                            dep.name
+                        ),
+                    });
+                }
                 let spec = parse(remote_origin)?;
                 artifacts.push(PlannedDownload {
                     platform: Some(platform.clone()),
@@ -8468,6 +8495,18 @@ fn is_safe_artifact_name(name: &str) -> bool {
     !name
         .chars()
         .any(|c| c == '/' || c == '\\' || c == '\0' || c.is_control())
+}
+
+/// chelis#3891: true iff `asset` is safe both as the final path
+/// component of `<dir>/<asset>` and as the final segment of a release
+/// download URL. It must pass [`is_safe_artifact_name`] and contain only
+/// RFC 3986 unreserved characters (ASCII letters, digits, `.`, `-`, `_`,
+/// `~`), so no `?`, `#`, `%`, or other character can change the URL.
+fn is_url_safe_asset_name(asset: &str) -> bool {
+    is_safe_artifact_name(asset)
+        && asset
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_' | b'~'))
 }
 
 fn resolver_requirement(
