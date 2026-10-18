@@ -178,10 +178,14 @@ jobs:
 
   # Evaluate the package output paths of each supported system and ask the
   # chelis-lang cache for each one. A scheduled run skips the native jobs
-  # when the cache holds every path. Manual and release runs use the
-  # report only as information.
+  # when the cache holds every path. Manual and release runs always run the
+  # native jobs, so they skip this job and the native jobs start at once.
+  # The `!cancelled()` condition of each native job runs it after a skipped
+  # report. The job uses only nix and python3, so it installs Nix without
+  # Devenv.
   cache-status:
     name: Nix cache status
+    if: github.event_name == 'schedule'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     outputs:
@@ -190,8 +194,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Set up portable Devenv
-        uses: ./.github/actions/vendor/ci/actions/setup-devenv
+      - name: Install Nix
+        uses: cachix/install-nix-action@630ae543ea3a38a9a4166f03376c02c50f408342 # v31.11.0
+        with:
+          install_url: https://releases.nixos.org/nix/nix-2.34.4/install
       - name: Check the chelis-lang cache for the package outputs
         id: status
         run: python3 scripts/nix_cache_status.py --github-output "$GITHUB_OUTPUT"

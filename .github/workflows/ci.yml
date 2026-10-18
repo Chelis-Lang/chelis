@@ -1966,6 +1966,7 @@ jobs:
   # derivation disabled. Then check the format of each tracked Nix file
   # except the generated Cargo.nix. The job builds nothing, so it needs no
   # cache and runs for every event. nix-packages.yml builds the packages.
+  # The job uses only nix and python3, so it installs Nix without Devenv.
   nix-eval:
     name: Nix flake evaluation
     runs-on: ubuntu-latest
@@ -1978,8 +1979,10 @@ jobs:
           ref: ${{ needs.changes.outputs.candidate_sha }}
           persist-credentials: false
 
-      - name: Set up portable Devenv
-        uses: ./.github/actions/vendor/ci/actions/setup-devenv
+      - name: Install Nix
+        uses: cachix/install-nix-action@630ae543ea3a38a9a4166f03376c02c50f408342 # v31.11.0
+        with:
+          install_url: https://releases.nixos.org/nix/nix-2.34.4/install
 
       - name: Evaluate the flake for every supported system
         run: nix flake check --no-build --all-systems --option allow-import-from-derivation false

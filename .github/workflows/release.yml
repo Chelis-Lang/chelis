@@ -805,12 +805,20 @@ jobs:
   # GitHub starts no workflow for the release that GITHUB_TOKEN publishes, so
   # `release: published` never starts nix-packages.yml. GITHUB_TOKEN can still
   # dispatch a workflow. This job starts the native Nix checks on the release
-  # tag, and that run pushes the Nix packages and their build inputs to the
-  # chelis-lang Cachix cache.
+  # tag right after the preflight, so they run beside the release builds. That
+  # run pushes the Nix packages and their build inputs to the chelis-lang
+  # Cachix cache.
+  #
+  # No job of this workflow waits for the Nix run, and the Nix run waits for no
+  # release job. So each run keeps its own conclusion: a failed Nix run does
+  # not stop or fail the release, and a failed release build does not stop the
+  # Nix checks of the tag. release-e2e.yml starts when this run succeeds, so a
+  # wait for the Nix run here would delay it and skip it after a Nix failure.
+  # The job summary links the Nix run so that the release report names it.
   dispatch-nix-packages:
     name: Dispatch the Nix package checks
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-    needs: [publish-release]
+    needs: [preflight]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -819,4 +827,12 @@ jobs:
       - name: Dispatch nix-packages.yml on the release tag
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh workflow run nix-packages.yml --repo "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME"
+        run: |
+          run_id=$(gh api --method POST "repos/$GITHUB_REPOSITORY/actions/workflows/nix-packages.yml/dispatches" -f ref="$GITHUB_REF_NAME" -F return_run_details=true --jq .workflow_run_id)
+          if [[ ! "$run_id" =~ ^[0-9]+$ ]]; then
+            echo "::error::the dispatch returned no workflow run ID: '$run_id'"
+            exit 1
+          fi
+          url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$run_id"
+          echo "Nix package checks of $GITHUB_REF_NAME: $url"
+          echo "Nix package checks of \`$GITHUB_REF_NAME\`: $url" >> "$GITHUB_STEP_SUMMARY"
