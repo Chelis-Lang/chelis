@@ -2,11 +2,11 @@
 //!
 //! Element-by-element emission gave every element two locals, an origin
 //! slot and a box statement in one basic block, and C compilers spend
-//! superlinear time selecting instructions for such a block: a 4,096-element
-//! `f16` literal took 23 s under `clang -O2`. The host emitter now writes the
-//! elements' tagged scalars into a function-local `static const` table and
-//! boxes and releases them in two loops, so the emitted statements no longer
-//! grow with the literal. These tests count those statements and compare
+//! superlinear time selecting instructions for such a block: each doubling
+//! of the literal cost several times more compile time. The host emitter
+//! now writes the elements' tagged scalars into a function-local
+//! `static const` table and boxes and releases them in two loops, so the
+//! emitted statements no longer grow with the literal. These tests count those statements and compare
 //! the built program's output with `chelis eval`, widened to `f64` so the
 //! printed form names every bit.
 
