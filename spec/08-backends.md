@@ -41,8 +41,9 @@ a list operation such as `fold`, `map` or `scan` applies, counts one level from
 the moment it is entered until it returns. A built-in operation called by name
 is not such an application. An application that evaluation carries out as a
 single unit, rather than one nested application at a time, counts for as long
-as it runs as many levels as the deepest chain of nested applications its body
-can make, whichever way its conditionals go. Such an application may therefore
+as it runs as many levels as the deepest nesting of applications its evaluation
+as a unit performs, which can include both arms of a conditional. Such an
+application may therefore
 stop an evaluation before the applications actually in progress reach the
 bound, and at no point are more than 10,000 levels in progress.
 An application that would take the count past 10,000 is not entered: evaluation

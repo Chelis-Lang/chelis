@@ -173,6 +173,11 @@ def t2[n](x: tensor[n, f32]) -> tensor[n, f32] = t1(t1(x))
 def k1(v: i64) -> i64 = add(v, 0i64)
 def staged_kernel[m, n](source: tensor[m, f32], x: tensor[n, f32]) -> tensor[*, f32] = reshape(t2(x), [numel(source)])
 def staged_source[m, n](source: tensor[m, f32], x: tensor[n, f32]) -> tensor[*, f32] = reshape(x, [k1(numel(source))])
+def cu(x: tensor[2, f32], k: i64) -> tensor[2, f32] = if gte(k, cast(400, i64)) then x else cu(add(x, x), add(k, cast(1, i64)))
+def loss(x: tensor[2, f32]) -> tensor[f32] = sum(cu(x, cast(0, i64)), 0i32)
+def cus(x: tensor[f32], k: i64) -> tensor[f32] = if gte(k, cast(300, i64)) then x else cus(add(x, x), add(k, cast(1, i64)))
+def one(x: tensor[f32]) -> tensor[f32] = cus(x, cast(0, i64))
+def kfold(x: tensor[2, f32]) -> tensor[2, f32] = fold(fn (acc: tensor[2, f32], v: i64) -> h2(acc), x, [1i64, 2i64])
 ";
 
 /// `padder` nests `levels - charge` applications and then evaluates `unit`,
@@ -185,10 +190,11 @@ fn charged_source(levels: usize, unit: &str, charge: usize) -> String {
     )
 }
 
-/// An application evaluated as a single unit is charged the deepest chain
-/// of applications its body can make, every function a kernel, a routed
-/// call or a transform inlines included, so it meets the bound exactly
-/// where the same applications interpreted one at a time would.
+/// An application evaluated as a single unit is charged the deepest nesting
+/// of applications its evaluation as a unit performs, every function a
+/// kernel, a routed call or a transform inlines included, so it meets the
+/// bound exactly where the same applications interpreted one at a time
+/// would.
 #[test]
 fn an_application_evaluated_as_a_unit_is_charged_its_deepest_chain() {
     let tensor = "to_tensor([1.0f32, 2.0f32])";
@@ -224,6 +230,38 @@ fn an_application_evaluated_as_a_unit_is_charged_its_deepest_chain() {
             2,
             2,
         ),
+        // A recursion a transform's lowering unrolls: `grad(loss)`, `loss`,
+        // and 401 levels of `cu`; `vmap(one)`, `one`, and 301 of `cus`.
+        (
+            "grad unrolled",
+            format!("numel(grad(loss)({tensor}))"),
+            403,
+            2,
+        ),
+        (
+            "vmap unrolled",
+            format!("numel(vmap(one)({tensor}))"),
+            303,
+            2,
+        ),
+        // A captured local function: `grad`, the inline `fn`, and `h3`'s
+        // chain through `f`.
+        (
+            "captured local",
+            format!(
+                "numel({{\n  f = h3\n  grad(fn (x: tensor[2, f32]) -> sum(f(x), 0i32))({tensor})\n}})"
+            ),
+            5,
+            2,
+        ),
+        // A callback a `fold` over a literal list applies: `kfold`, the
+        // callback, and the `h2` chain.
+        (
+            "literal-list fold callback",
+            format!("numel(kfold({tensor}))"),
+            4,
+            2,
+        ),
     ];
     for (case, unit, charge, expected) in cases {
         assert_evaluates(
@@ -238,10 +276,10 @@ fn an_application_evaluated_as_a_unit_is_charged_its_deepest_chain() {
     }
 }
 
-/// The charge is the deepest chain whichever way a conditional goes, so a
-/// unit whose deeper arm is not taken stops the evaluation early: `gated`
+/// A unit's evaluation can perform both arms of a conditional, so a unit
+/// whose deeper arm is not taken can stop the evaluation early: `gated`
 /// takes its shallow arm, two applications interpreted one at a time, but
-/// as one transform it is charged the six its deeper arm could make. The
+/// its transform performs the deeper arm too and is charged six. The
 /// boundary is the same on every run and in every build.
 #[test]
 fn a_unit_is_charged_its_deeper_arm_even_when_it_is_not_taken() {

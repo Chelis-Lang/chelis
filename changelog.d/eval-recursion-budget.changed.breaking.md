@@ -11,9 +11,10 @@ deep that used to evaluate in a release build now fails. A runaway recursion
 also stops with far less memory: about 108 MiB instead of 637 MiB for a
 `List` recursion and 115 MiB instead of 672 MiB for a tensor one. A call the
 evaluator runs as one compiled unit, such as a kernel, a named-axis reduction
-or a `grad` or `vmap` target, counts as the deepest chain of applications its
-body can make, whichever way its conditionals go, so it can stop a recursion
-a few levels before 10,000 applications are actually in progress. The native
+or a `grad` or `vmap` target, counts as the deepest nesting of applications
+it performs as one unit, which can include both arms of a conditional, so it
+can stop a recursion a few levels before 10,000 applications are actually in
+progress. The native
 stack check remains for recursive calls that sit inside deeply nested
 expressions: calls nested up to 6 expressions deep reach the 10,000 limit in
 every build, and up to 16 in a release build. See

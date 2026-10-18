@@ -88,8 +88,9 @@ impl EvalCallStackFrame {
     }
 
     /// Charge `levels` applications for as long as the frame lives: an
-    /// application evaluated as a single unit holds the deepest chain its
-    /// body can make ([`super::program_scope::ProgramScope::application_depth`]).
+    /// application evaluated as a single unit holds the deepest nesting of
+    /// applications its lowering inlined
+    /// ([`chelis_ir::lower::recording_inline_depth`]).
     pub(super) fn enter_weighted(levels: usize) -> Result<Self, String> {
         let depth = EVAL_CALL_DEPTH.with(|depth| {
             depth.set(depth.get() + levels);
@@ -1974,7 +1975,7 @@ impl<'a> EvalContext<'a> {
     /// fall-through is chelis#1515 and is not inherited here).
     pub(super) fn def_kernel(&mut self, name: &str) -> Result<Option<Arc<HostDefKernel>>, String> {
         if let Some(cached) = self.def_kernels.get(name) {
-            return Ok(cached.clone());
+            return Ok(cached.as_ref().map(|(kernel, _)| kernel.clone()));
         }
         let Some(session) = self.session.as_ref() else {
             return Ok(None);
@@ -1982,11 +1983,25 @@ impl<'a> EvalContext<'a> {
         record_def_kernel_planning();
         // The decision reads `name`'s own body, whatever called it: a body a
         // kernel cannot carry is walked by the host interpreter (chelis#2405).
-        let kernel = host_def_kernel(session, name)
+        let (kernel, inline_depth) =
+            chelis_ir::lower::recording_inline_depth(|| host_def_kernel(session, name));
+        let kernel = kernel
             .map_err(|diagnostic| diagnostic.to_string())?
             .map(Arc::new);
-        self.def_kernels.insert(name.to_string(), kernel.clone());
+        self.def_kernels.insert(
+            name.to_string(),
+            kernel.clone().map(|kernel| (kernel, inline_depth)),
+        );
         Ok(kernel)
+    }
+
+    /// The deepest nesting of applications the lowering of def `name`'s
+    /// kernel inlined: the levels beyond its own a kernel application holds.
+    fn def_kernel_inline_depth(&self, name: &str) -> usize {
+        match self.def_kernels.get(name) {
+            Some(Some((_, inline_depth))) => *inline_depth,
+            Some(None) | None => unreachable!("a kernel is planned before it is applied"),
+        }
     }
 
     /// spec/03 §4.4: a binding's initializer is evaluated whether or not the
@@ -2026,10 +2041,8 @@ impl<'a> EvalContext<'a> {
             return self.apply_staged_host_plan(name, plan, params, args);
         }
         // The kernel runs every function its body applies inside one DAG;
-        // charge the chain beyond the application already entered.
-        let _inlined = EvalCallStackFrame::enter_weighted(
-            self.program.application_depth(name).saturating_sub(1),
-        )?;
+        // charge the nesting beyond the application already entered.
+        let _inlined = EvalCallStackFrame::enter_weighted(self.def_kernel_inline_depth(name))?;
         if params.len() != args.len() {
             return Err(format!(
                 "closure expected {} args, got {}",
@@ -2224,9 +2237,8 @@ impl<'a> EvalContext<'a> {
                     // A kernel stage runs inlined functions as one DAG; a
                     // source stage above is interpreted and counts its own
                     // applications.
-                    let _inlined = EvalCallStackFrame::enter_weighted(
-                        self.program.application_depth(name).saturating_sub(1),
-                    )?;
+                    let _inlined =
+                        EvalCallStackFrame::enter_weighted(self.def_kernel_inline_depth(name))?;
                     let mut inputs = UnordMap::new();
                     for node in dag.nodes() {
                         if let RiscOp::Load { name: input } = &node.op {

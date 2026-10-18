@@ -265,11 +265,6 @@ impl<'a> EvalContext<'a> {
         // DAG never demands them.
         let reached = self.program.reached_by_call(resolved_name);
         self.initialize_reached_values(&reached)?;
-        // The routed call runs as one DAG, the routed function and every
-        // function it applies included.
-        let _routed = super::eval::EvalCallStackFrame::enter_weighted(
-            self.program.application_depth(resolved_name),
-        )?;
         // Source actuals and their checked types were prepared in the caller
         // above. Free loads in the named body belong to declaration scope.
         let saved = std::mem::take(&mut self.bindings);
@@ -328,17 +323,22 @@ impl<'a> EvalContext<'a> {
         let lowering_context = self
             .program
             .routing_lowering_context(checked.program(), &self.declared_signatures);
-        let dag = chelis_ir::lower::try_lower_subexpr_program_with_context(
-            routed_expr,
-            scoped_types,
-            &lowering_context,
-        )
-        .map_err(|diagnostic| {
+        let (dag, inline_depth) = chelis_ir::lower::recording_inline_depth(|| {
+            chelis_ir::lower::try_lower_subexpr_program_with_context(
+                routed_expr,
+                scoped_types,
+                &lowering_context,
+            )
+        });
+        let dag = dag.map_err(|diagnostic| {
             NamedAxisRouteError::NotLowerable(format!(
                 "host runtime could not lower the named-axis `{context_label}` call for \
                  evaluation (chelis#338): {diagnostic}"
             ))
         })?;
+        // The routed call runs as one DAG; charge the applications it inlined.
+        let _routed = super::eval::EvalCallStackFrame::enter_weighted(inline_depth)
+            .map_err(NamedAxisRouteError::Fatal)?;
         let roots: Vec<NodeId> = dag.roots().to_vec();
         if roots.is_empty() {
             return Err(NamedAxisRouteError::Fatal(format!(

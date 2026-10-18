@@ -1458,8 +1458,9 @@ struct EvalContext<'a> {
     /// runtime obligation.
     active_declaration_names: Vec<String>,
     /// Per-def kernel decision: `None` is the host lane, `Some` a kernel
-    /// reused across applications (see `EvalContext::def_kernel`).
-    def_kernels: UnordMap<String, Option<std::sync::Arc<chelis_ir::host::HostDefKernel>>>,
+    /// reused across applications, with the deepest nesting of applications
+    /// its lowering inlined (see `EvalContext::def_kernel`).
+    def_kernels: UnordMap<String, Option<(std::sync::Arc<chelis_ir::host::HostDefKernel>, usize)>>,
     /// The claim pattern of each authored claim-source type that nests
     /// tensors in an aggregate or nominal value (runtime_extents.md C6.5),
     /// keyed by the type's spelling; `None` owes nothing beyond a top-level
