@@ -267,8 +267,9 @@ with the minimal profile (rustc, cargo, and rust-std) of the Rust version in
 
 The workspace crates build with the codegen units of the Cargo release
 profile, 16 when `Cargo.toml` sets no value, as `cargo build --release` does.
-The third-party crates keep the one codegen unit of `buildRustCrate`. Their
-derivations change only with `Cargo.lock`, so the cache keeps their outputs.
+The third-party crates keep the one codegen unit of `buildRustCrate`. An edit
+of workspace source changes no third-party crate derivation, so the cache keeps
+their outputs.
 
 ## Optional Devenv shell
 

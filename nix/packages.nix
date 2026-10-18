@@ -111,10 +111,9 @@ let
   # `cargo build --release` gives each crate the codegen units of the release
   # profile, 16 when Cargo.toml sets no value. buildRustCrate uses one codegen
   # unit by default, which makes each long workspace crate compile serially.
-  # Only the workspace crates get this value. The third-party crate
-  # derivations stay the same, so their cached outputs stay valid. They
-  # change only with Cargo.lock, but the workspace crates rebuild after each
-  # source edit.
+  # Only the workspace crates get this value. Thus the third-party crate
+  # derivations stay the same, and their cached outputs stay valid. An edit
+  # of workspace source rebuilds workspace crates only.
   releaseCodegenUnits = manifest.profile.release.codegen-units or 16;
   buildRustCrateForPkgs =
     cratePkgs:
