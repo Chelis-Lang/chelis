@@ -201,9 +201,10 @@ builds for each release:
 - substituter: `https://chelis-lang.cachix.org`
 - public key: `chelis-lang.cachix.org-1:F4W65FQ7sunLoF2q6rzkWNTIBd3P/tJ/NFcv12OS9v8=`
 
-The cache holds each release tag and the `main` head of the last nightly
-build. Thus Nix builds an unpinned reference or a newer commit from source.
-Use a release tag, as in the commands above.
+The cache holds the packages of each release tag and of a recent `main`
+commit. For another commit, Nix downloads the cvc5 tree and the unchanged
+crate builds, and compiles the crates that changed. Use a release tag, as in
+the commands above, to download the packages without a compile.
 
 The flake names this cache, but Nix uses the cache settings of a flake only
 for a trusted user. A trusted user is `root`, a user in `trusted-users`, or
