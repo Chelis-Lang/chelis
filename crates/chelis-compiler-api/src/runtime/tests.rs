@@ -6481,21 +6481,24 @@ fn issue_3778_equal_formal_types_at_different_addresses_agree() {
 /// through `runtime::charged_lowering`, which records the unit's inline depth
 /// so the recursion budget can charge it.
 ///
-/// The lock is a scan of the runtime sources, `runtime/` and every
-/// directory below it, outside that module and the test files. It rejects,
-/// in code (comments and literals removed): a path through `chelis_ir`'s
-/// `lower` or `host` module that names a function whose name has the word
-/// `lower` (`try_lower_subexpr_program_with_context`,
-/// `lower_named_tensor_entry_dags`), whether called by path or imported by a
-/// `use` list; a glob or module import of either module, which would hide
-/// such a name; and `host_def_kernel` or `recording_inline_depth` anywhere.
-/// It recognizes calls by those spellings only; a function reached another
-/// way is outside what it checks.
+/// The lock parses every runtime source, `runtime/` and every directory
+/// below it outside that module and the test files, and resolves each path
+/// expression through the file's `use` declarations (groups, `self`,
+/// renames, a crate alias, a crate-root path) to the path it names. It
+/// rejects any path the parser resolves to `chelis_ir`'s crate root or its
+/// `lower` or `host` modules whose last segment is a function with the word
+/// `lower` in its name
+/// (`try_lower_subexpr_program_with_context`, `lower_named_tensor_entry_dags`)
+/// or is `host_def_kernel` or `recording_inline_depth`, and any glob import
+/// of `chelis_ir` or of its `lower` or `host` modules, which would make such
+/// a call unresolvable. `chelis_ir::tier2`'s `lower_*` functions are not
+/// rejected: each builds the graph of one built-in operation and inlines no
+/// function. Paths inside macro invocations are outside what it checks.
 ///
 /// Evidentiary status: a structural lock. Before the module existed, a
 /// checked local-ascription region lowered its DAG directly and a 402-level
-/// unrolled recursion inside it was charged one level. The negative
-/// controls below show each spelling the scan must flag is flagged.
+/// unrolled recursion inside it was charged one level. The controls below
+/// show each import and call form the scan must flag is flagged.
 #[test]
 fn every_unit_lowering_is_charged() {
     let runtime = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/runtime");
@@ -6506,53 +6509,109 @@ fn every_unit_lowering_is_charged() {
         "#3842: the scan must see the helper's own lowering calls, or it checks nothing"
     );
     for (fixture, flagged) in [
-        // A lowering API outside any fixed name list.
+        // Fully qualified calls, a function outside any fixed name list among
+        // them, and literals that look like comments.
         (
-            "let d = chelis_ir::host::lower_named_tensor_entry_dags(&x);",
+            "fn f() { chelis_ir::host::lower_named_tensor_entry_dags(&x); }",
             true,
         ),
         (
-            "let d = chelis_ir :: lower :: try_lower_subexpr_program(e);",
-            true,
-        ),
-        // A `//` inside a literal does not start a comment.
-        (
-            "let s = \"a//b\"; let d = chelis_ir::lower::try_lower_subexpr_program_with_context(e);",
+            "fn f() { chelis_ir :: lower :: try_lower_subexpr_program(e); }",
             true,
         ),
         (
-            "let s = r#\"a \" // b\"#; let d = chelis_ir::host::host_def_kernel(s, n);",
+            "fn f() { let s = \"a//b\"; chelis_ir::lower::try_lower_subexpr_program_with_context(e); }",
             true,
         ),
         (
-            "let c = '\"'; let d = chelis_ir::lower::try_lower_staged(e);",
+            "fn f() { let s = r#\"a \" // b\"#; chelis_ir::host::host_def_kernel(s, n); }",
             true,
         ),
-        // Imports that bring a lowering name, or every name, into scope.
         (
-            "use chelis_ir::lower::{SubexprLoweringContext, try_lower_subexpr_program as l};",
+            "fn f() { let c = '\"'; chelis_ir::lower::try_lower_staged(e); }",
             true,
         ),
-        ("use chelis_ir::host::{staged::{lower_stage}};", true),
-        ("use chelis_ir::host::*;", true),
-        ("use chelis_ir::lower as l;", true),
-        ("let (r, d) = recording_inline_depth(|| f());", true),
-        // Not a lowering: a comment, a literal, a type, a classification.
-        ("// chelis_ir::lower::try_lower_subexpr_program(e)", false),
+        // The crate root re-exports lowering functions.
+        ("fn f() { chelis_ir::try_lower_subexpr_program(e); }", true),
+        // Imported names, through every `use` form.
         (
-            "/* chelis_ir::host::host_def_kernel(s, n) */ let x = 1;",
+            "use chelis_ir::lower::{SubexprLoweringContext, try_lower_subexpr_program as l};\n\
+             fn f() { l(e); }",
+            true,
+        ),
+        (
+            "use chelis_ir::host::{staged::{lower_stage}};\nfn f() { lower_stage(); }",
+            true,
+        ),
+        (
+            "use chelis_ir::{dag::Dag, lower::try_lower_subexpr_program};\n\
+             fn f() { try_lower_subexpr_program(e); }",
+            true,
+        ),
+        (
+            "use chelis_ir::lower_subexpr_program;\nfn f() { lower_subexpr_program(e); }",
+            true,
+        ),
+        (
+            "use chelis_ir::lower::{self, SubexprLoweringContext};\n\
+             fn f() { lower::try_lower_subexpr_program(e); }",
+            true,
+        ),
+        (
+            "use chelis_ir::lower as l;\nfn f() { l::try_lower_subexpr_program(e); }",
+            true,
+        ),
+        (
+            "use chelis_ir as ir;\nfn f() { ir::lower::try_lower_subexpr_program(e); }",
+            true,
+        ),
+        (
+            "fn f() { use chelis_ir::host::host_def_kernel as plan; plan(s, n); }",
+            true,
+        ),
+        (
+            "use chelis_ir::lower::recording_inline_depth;\n\
+             fn f() { recording_inline_depth(|| g()); }",
+            true,
+        ),
+        // A glob makes every bare call unresolvable.
+        ("use chelis_ir::*;\nfn f() {}", true),
+        ("use chelis_ir::host::*;\nfn f() {}", true),
+        ("use chelis_ir::lower::*;\nfn f() {}", true),
+        // Not a lowering: a comment, a literal, a type, other functions, a
+        // local function of a lowering-like name, an unrelated glob.
+        (
+            "// chelis_ir::lower::try_lower_subexpr_program(e)\nfn f() {}",
             false,
         ),
         (
-            "let s = \"chelis_ir::lower::try_lower_subexpr_program\";",
+            "/* chelis_ir::host::host_def_kernel(s, n) */ fn f() {}",
             false,
         ),
-        ("use chelis_ir::lower::SubexprLoweringContext;", false),
         (
-            "let m = chelis_ir::lower::top_level_lowering_map(e, t);",
+            "fn f() { let s = \"chelis_ir::lower::try_lower_subexpr_program\"; }",
             false,
         ),
-        ("use chelis_ir::host_type_state::HostTypeTerm;", false),
+        (
+            "use chelis_ir::lower::SubexprLoweringContext;\nfn f() {}",
+            false,
+        ),
+        (
+            "fn f() { chelis_ir::lower::top_level_lowering_map(e, t); }",
+            false,
+        ),
+        (
+            "fn f() { chelis_ir::lower::extent_binder_label(x); }",
+            false,
+        ),
+        (
+            "use chelis_ir::host_type_state::HostTypeTerm;\nfn f() {}",
+            false,
+        ),
+        ("fn f() { lower_something(e); }", false),
+        ("use chelis_ir::eval::*;\nfn f() {}", false),
+        // `tier2` builds one built-in operation's graph.
+        ("fn f() { chelis_ir::tier2::lower_softmax(x); }", false),
     ] {
         assert_eq!(
             !unit_lowering_calls(fixture).is_empty(),
@@ -6595,8 +6654,8 @@ fn every_unit_lowering_is_charged() {
     );
 }
 
-/// Every unit-lowering spelling in the runtime sources below `root`, outside
-/// `charged_lowering.rs` and the test files, as `path: name`.
+/// Every unit lowering in the runtime sources below `root`, outside
+/// `charged_lowering.rs` and the test files, as `path: lowering`.
 fn runtime_unit_lowering_offenders(root: &std::path::Path) -> Vec<String> {
     let mut pending = vec![root.to_path_buf()];
     let mut files = Vec::new();
@@ -6633,165 +6692,144 @@ fn runtime_unit_lowering_offenders(root: &std::path::Path) -> Vec<String> {
     offenders
 }
 
-/// The unit-lowering spellings in `source`'s code.
+/// The unit lowerings `source` names: every path expression the parser
+/// resolves into `chelis_ir` whose function is a lowering, and every glob
+/// import that would hide one.
 fn unit_lowering_calls(source: &str) -> Vec<String> {
-    let tokens = rust_code_tokens(source);
-    let names_lower = |name: &str| name.split('_').any(|word| word == "lower");
-    let mut found = Vec::new();
-    for (index, token) in tokens.iter().enumerate() {
-        if token == "host_def_kernel" || token == "recording_inline_depth" {
-            found.push(token.clone());
-        }
-        let module = match (
-            tokens.get(index + 1),
-            tokens.get(index + 2),
-            tokens.get(index + 3),
-        ) {
-            (Some(colon), Some(colon2), Some(module))
-                if token == "chelis_ir"
-                    && colon == ":"
-                    && colon2 == ":"
-                    && (module == "lower" || module == "host") =>
-            {
-                module
-            }
-            _ => continue,
-        };
-        let mut cursor = index + 4;
-        if tokens.get(cursor).map(String::as_str) != Some(":")
-            || tokens.get(cursor + 1).map(String::as_str) != Some(":")
-        {
-            found.push(format!("chelis_ir::{module} imported as a module"));
-            continue;
-        }
-        cursor += 2;
-        // A path, or a `use` list whose braces may nest.
-        let mut depth = 0usize;
-        while let Some(next) = tokens.get(cursor) {
-            match next.as_str() {
-                "{" => depth += 1,
-                "}" if depth > 0 => {
-                    depth -= 1;
-                    if depth == 0 {
-                        break;
-                    }
-                }
-                "*" => found.push(format!("chelis_ir::{module}::* glob import")),
-                ":" | "," | "as" => {}
-                name if name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') => {
-                    if names_lower(name) {
-                        found.push(format!("chelis_ir::{module}::{name}"));
-                    }
-                    let continues = tokens.get(cursor + 1).map(String::as_str) == Some(":");
-                    if depth == 0 && !continues {
-                        break;
-                    }
-                }
-                _ if depth == 0 => break,
-                _ => {}
-            }
-            cursor += 1;
-        }
-    }
-    found
-}
+    use syn::visit::Visit;
 
-/// `source`'s code tokens: identifiers and single punctuation characters,
-/// with comments, string, raw string and character literals removed.
-fn rust_code_tokens(source: &str) -> Vec<String> {
-    let chars: Vec<char> = source.chars().collect();
-    let mut tokens = Vec::new();
-    let mut index = 0;
-    while index < chars.len() {
-        let c = chars[index];
-        let next = chars.get(index + 1).copied();
-        if c == '/' && next == Some('/') {
-            while index < chars.len() && chars[index] != '\n' {
-                index += 1;
-            }
-        } else if c == '/' && next == Some('*') {
-            let mut depth = 0usize;
-            while index < chars.len() {
-                if chars[index] == '/' && chars.get(index + 1) == Some(&'*') {
-                    depth += 1;
-                    index += 2;
-                } else if chars[index] == '*' && chars.get(index + 1) == Some(&'/') {
-                    depth -= 1;
-                    index += 2;
-                    if depth == 0 {
-                        break;
-                    }
-                } else {
-                    index += 1;
-                }
-            }
-        } else if c == '"' {
-            index += 1;
-            while index < chars.len() && chars[index] != '"' {
-                index += if chars[index] == '\\' { 2 } else { 1 };
-            }
-            index += 1;
-        } else if (c == 'r' || c == 'b')
-            && (index == 0
-                || !(chars[index - 1].is_ascii_alphanumeric() || chars[index - 1] == '_'))
-            && raw_string_hashes(&chars, index).is_some()
-        {
-            let (start, hashes) = raw_string_hashes(&chars, index).expect("checked above");
-            index = start;
-            loop {
-                if index >= chars.len() {
-                    break;
-                }
-                if chars[index] == '"'
-                    && (1..=hashes).all(|offset| chars.get(index + offset) == Some(&'#'))
-                {
-                    index += 1 + hashes;
-                    break;
-                }
-                index += 1;
-            }
-        } else if c == '\'' {
-            // A character literal closes within a few characters; a lifetime
-            // does not.
-            let close = if next == Some('\\') {
-                (index + 2..chars.len().min(index + 12)).find(|&at| chars[at] == '\'')
-            } else {
-                (chars.get(index + 2) == Some(&'\'')).then_some(index + 2)
+    /// The `use` declarations of one file: each local name with the path
+    /// it imports, and every glob import's path.
+    #[derive(Default)]
+    struct Imports {
+        names: Vec<(String, Vec<String>)>,
+        globs: Vec<Vec<String>>,
+    }
+
+    impl Imports {
+        fn add(&mut self, tree: &syn::UseTree, prefix: &[String]) {
+            let extend = |segment: &syn::Ident| {
+                let mut path = prefix.to_vec();
+                path.push(segment.to_string());
+                path
             };
-            match close {
-                Some(close) => index = close + 1,
-                None => index += 1,
+            match tree {
+                syn::UseTree::Path(path) => self.add(&path.tree, &extend(&path.ident)),
+                syn::UseTree::Name(name) if name.ident == "self" => {
+                    if let Some(last) = prefix.last() {
+                        self.names.push((last.clone(), prefix.to_vec()));
+                    }
+                }
+                syn::UseTree::Name(name) => {
+                    self.names
+                        .push((name.ident.to_string(), extend(&name.ident)));
+                }
+                syn::UseTree::Rename(rename) => {
+                    let path = if rename.ident == "self" {
+                        prefix.to_vec()
+                    } else {
+                        extend(&rename.ident)
+                    };
+                    self.names.push((rename.rename.to_string(), path));
+                }
+                syn::UseTree::Glob(_) => self.globs.push(prefix.to_vec()),
+                syn::UseTree::Group(group) => {
+                    for item in &group.items {
+                        self.add(item, prefix);
+                    }
+                }
             }
-        } else if c.is_ascii_alphanumeric() || c == '_' {
-            let start = index;
-            while index < chars.len()
-                && (chars[index].is_ascii_alphanumeric() || chars[index] == '_')
-            {
-                index += 1;
+        }
+
+        /// `path` with its first segment replaced by what it imports,
+        /// followed through further imports.
+        fn resolve(&self, path: &[String]) -> Vec<String> {
+            let mut resolved = path.to_vec();
+            for _ in 0..=self.names.len() {
+                let Some(first) = resolved.first() else {
+                    break;
+                };
+                let Some((_, target)) = self
+                    .names
+                    .iter()
+                    .find(|(local, target)| local == first && target.first() != Some(first))
+                else {
+                    break;
+                };
+                let mut next = target.clone();
+                next.extend(resolved[1..].iter().cloned());
+                resolved = next;
             }
-            tokens.push(chars[start..index].iter().collect());
-        } else {
-            if !c.is_whitespace() {
-                tokens.push(c.to_string());
-            }
-            index += 1;
+            resolved
         }
     }
-    tokens
-}
 
-/// The index after the opening quote of a raw string starting at `start`
-/// (`r"`, `r#"`, `br##"`), and its hash count.
-fn raw_string_hashes(chars: &[char], start: usize) -> Option<(usize, usize)> {
-    let mut index = start;
-    if chars.get(index) == Some(&'b') {
-        index += 1;
+    #[derive(Default)]
+    struct UseCollector(Imports);
+
+    impl<'ast> Visit<'ast> for UseCollector {
+        fn visit_item_use(&mut self, item: &'ast syn::ItemUse) {
+            self.0.add(&item.tree, &[]);
+        }
     }
-    if chars.get(index) != Some(&'r') {
-        return None;
+
+    struct PathCollector<'imports> {
+        imports: &'imports Imports,
+        found: Vec<String>,
     }
-    index += 1;
-    let hashes = chars[index..].iter().take_while(|&&c| c == '#').count();
-    index += hashes;
-    (chars.get(index) == Some(&'"')).then_some((index + 1, hashes))
+
+    impl<'ast> Visit<'ast> for PathCollector<'_> {
+        fn visit_expr_path(&mut self, expr: &'ast syn::ExprPath) {
+            let path: Vec<String> = expr
+                .path
+                .segments
+                .iter()
+                .map(|segment| segment.ident.to_string())
+                .collect();
+            let resolved = self.imports.resolve(&path);
+            // The crate root re-exports lowering functions; `lower` and
+            // `host` lower authored code. `tier2` builds the graph of one
+            // built-in operation, which inlines no function.
+            let lowers_code = match resolved.as_slice() {
+                [krate, _] => krate == "chelis_ir",
+                [krate, module, ..] => {
+                    krate == "chelis_ir" && (module == "lower" || module == "host")
+                }
+                _ => false,
+            };
+            if lowers_code
+                && let Some(function) = resolved.last()
+                && (function.split('_').any(|word| word == "lower")
+                    || function == "host_def_kernel"
+                    || function == "recording_inline_depth")
+            {
+                self.found.push(resolved.join("::"));
+            }
+            syn::visit::visit_expr_path(self, expr);
+        }
+    }
+
+    let file = syn::parse_file(source).expect("a runtime source parses");
+    let mut uses = UseCollector::default();
+    uses.visit_file(&file);
+    let imports = uses.0;
+    let mut found: Vec<String> = imports
+        .globs
+        .iter()
+        .map(|glob| imports.resolve(glob))
+        .filter(|glob| {
+            glob.first().map(String::as_str) == Some("chelis_ir")
+                && glob
+                    .get(1)
+                    .is_none_or(|module| module == "lower" || module == "host")
+        })
+        .map(|glob| format!("{}::* glob import", glob.join("::")))
+        .collect();
+    let mut paths = PathCollector {
+        imports: &imports,
+        found: Vec::new(),
+    };
+    paths.visit_file(&file);
+    found.extend(paths.found);
+    found
 }
