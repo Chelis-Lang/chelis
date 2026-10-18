@@ -870,6 +870,7 @@ fn run_tier_c(
     }
 
     let module_source = chelis_deep::printer::print_canonical(exprs);
+    let route = ProducerRoute::for_kinds(&kinds);
     let mut rng = Lcg::new(seed);
     let gen_budget = options.samples.saturating_mul(100).max(200);
     for n in 0..options.samples {
@@ -884,6 +885,7 @@ fn run_tier_c(
                         expr: scalar_lit(prim, value),
                         json: scalar_json(value),
                         name: name.clone(),
+                        input: ArgInput::Scalar(value),
                     });
                 }
                 ArgKind::Tensor { dims, precision } => {
@@ -915,6 +917,7 @@ fn run_tier_c(
                                 expr: binder.value_expr,
                                 json,
                                 name: name.clone(),
+                                input: ArgInput::Opaque,
                             });
                         }
                         Err(crate::opaque::GenerationFailure::ProbeRejected(reason)) => {
@@ -959,7 +962,15 @@ fn run_tier_c(
                 }
             }
         }
-        match eval_obligation_body_values(exprs, inv, ob, &arg_values, consts, options.runtime) {
+        match eval_obligation_body_values(
+            exprs,
+            inv,
+            ob,
+            &arg_values,
+            consts,
+            options.runtime,
+            &route,
+        ) {
             Ok(true) => {}
             Ok(false) => {
                 let (shrunk, shrink_steps) = shrink_obligation_counterexample(
@@ -970,6 +981,7 @@ fn run_tier_c(
                     consts,
                     arg_values,
                     options.runtime,
+                    &route,
                 );
                 let cx = obligation_counterexample(&shrunk);
                 return outcome(
@@ -1022,6 +1034,22 @@ struct ArgValue {
     expr: Expr,
     json: serde_json::Value,
     name: String,
+    input: ArgInput,
+}
+
+/// A sampled producer argument's value, as a call of the producer receives
+/// it (chelis#3800): the same tagged scalar or tensor elements its literal
+/// `expr` spells.
+#[derive(Clone)]
+enum ArgInput {
+    Scalar(ScalarValue),
+    Tensor {
+        dims: Vec<usize>,
+        prim: Prim,
+        values: Vec<ScalarValue>,
+    },
+    /// A generated opaque record. Its obligation evaluates per sample.
+    Opaque,
 }
 
 const MAX_OBLIGATION_SHRINK_STEPS: usize = 64;
@@ -1032,6 +1060,7 @@ fn obligation_counterexample(args: &[ArgValue]) -> serde_json::Map<String, serde
         .collect()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn shrink_obligation_counterexample(
     exprs: &[Expr],
     inv: &OpaqueInvariant,
@@ -1040,6 +1069,7 @@ fn shrink_obligation_counterexample(
     consts: &ConstEnv,
     mut args: Vec<ArgValue>,
     runtime: &'static chelis_reef::EmbeddedRuntime,
+    route: &ProducerRoute,
 ) -> (Vec<ArgValue>, usize) {
     let mut steps = 0usize;
     while steps < MAX_OBLIGATION_SHRINK_STEPS {
@@ -1055,7 +1085,7 @@ fn shrink_obligation_counterexample(
                 let mut trial = args.clone();
                 trial[index] = candidate;
                 if matches!(
-                    eval_obligation_body_values(exprs, inv, ob, &trial, consts, runtime),
+                    eval_obligation_body_values(exprs, inv, ob, &trial, consts, runtime, route),
                     Ok(false)
                 ) {
                     args = trial;
@@ -1082,14 +1112,15 @@ fn obligation_shrink_candidates(value: &ArgValue, kind: &ArgKind) -> Vec<ArgValu
             .as_bool()
             .or_else(|| value.json.as_f64().map(|current| current != 0.0))
             .and_then(|current| {
-                current.then(|| ArgValue {
-                    expr: scalar_lit(
-                        prim,
-                        scalar_from_i64("prove-shrink", Prim::Bool, 0)
-                            .expect("false is a valid bool"),
-                    ),
-                    json: serde_json::json!(false),
-                    name: value.name.clone(),
+                current.then(|| {
+                    let falsity = scalar_from_i64("prove-shrink", Prim::Bool, 0)
+                        .expect("false is a valid bool");
+                    ArgValue {
+                        expr: scalar_lit(prim, falsity),
+                        json: serde_json::json!(false),
+                        name: value.name.clone(),
+                        input: ArgInput::Scalar(falsity),
+                    }
                 })
             })
             .into_iter()
@@ -1201,18 +1232,17 @@ fn push_unique_obligation_int_candidate(
     {
         return;
     }
+    let scalar = scalar_from_i64(
+        "prove-shrink",
+        Prim::parse_name(prim).expect("integer candidate has an integer Prim"),
+        candidate,
+    )
+    .expect("shrink candidate is clamped to its dtype");
     candidates.push(ArgValue {
-        expr: scalar_lit(
-            prim,
-            scalar_from_i64(
-                "prove-shrink",
-                Prim::parse_name(prim).expect("integer candidate has an integer Prim"),
-                candidate,
-            )
-            .expect("shrink candidate is clamped to its dtype"),
-        ),
+        expr: scalar_lit(prim, scalar),
         json: serde_json::json!(candidate),
         name: value.name.clone(),
+        input: ArgInput::Scalar(scalar),
     });
 }
 
@@ -1232,18 +1262,17 @@ fn push_unique_obligation_float_candidate(
     {
         return;
     }
+    let scalar = scalar_from_f64(
+        "prove-shrink",
+        Prim::parse_name(prim).expect("float shrink dtype is classified"),
+        candidate,
+    )
+    .expect("float shrink candidate is valid at its dtype");
     candidates.push(ArgValue {
-        expr: scalar_lit(
-            prim,
-            scalar_from_f64(
-                "prove-shrink",
-                Prim::parse_name(prim).expect("float shrink dtype is classified"),
-                candidate,
-            )
-            .expect("float shrink candidate is valid at its dtype"),
-        ),
+        expr: scalar_lit(prim, scalar),
         json: serde_json::json!(candidate),
         name: value.name.clone(),
+        input: ArgInput::Scalar(scalar),
     });
 }
 
@@ -1257,6 +1286,11 @@ fn obligation_tensor_arg(
         expr: crate::opaque::tensor_value_expr_typed(dims, precision, values),
         json: crate::opaque::scalar_values_json(values),
         name: name.to_string(),
+        input: ArgInput::Tensor {
+            dims: dims.to_vec(),
+            prim: Prim::parse_name(precision).expect("tensor argument dtype is classified"),
+            values: values.to_vec(),
+        },
     }
 }
 
@@ -1876,18 +1910,8 @@ fn eval_obligation_body_values(
     args: &[ArgValue],
     consts: &ConstEnv,
     runtime: &'static chelis_reef::EmbeddedRuntime,
+    route: &ProducerRoute,
 ) -> Result<bool, String> {
-    let call = {
-        let mut app = vec![deep_var(&ob.producer)];
-        for a in args {
-            app.push(a.expr.clone());
-        }
-        deep_node("app", app)
-    };
-
-    let predicate = crate::opaque::lower_predicate_flattened(inv, &inv.binder, consts, exprs)
-        .ok_or_else(|| "invariant predicate does not lower for validation".to_string())?;
-    let module_source = chelis_deep::printer::print_canonical(exprs);
     // Evaluate the producer ONCE and validate the produced value's
     // representation structurally against the position + invariant
     // (CR-1 / CR-4 / CR-6): the structured ExecutionValue already
@@ -1895,8 +1919,216 @@ fn eval_obligation_body_values(
     // records as `Adt{ctor, fields}`, so the inner position is applied
     // recursively and None is a real discriminant -- no NaN sentinel and
     // no spurious record-read off a tuple.
-    let value = eval_producer_value(&module_source, inv, call)?;
-    validate_value(&value, &ob.position, inv, &predicate, runtime)
+    match route {
+        ProducerRoute::Call(program) => {
+            let program = program
+                .get_or_init(|| ProducerCall::compile(exprs, inv, ob, consts))
+                .as_ref()
+                .map_err(Clone::clone)?;
+            let value = program.call(args)?;
+            validate_value(&value, &ob.position, inv, &program.predicate, runtime)
+        }
+        ProducerRoute::PerSample => {
+            let call = {
+                let mut app = vec![deep_var(&ob.producer)];
+                for a in args {
+                    app.push(a.expr.clone());
+                }
+                deep_node("app", app)
+            };
+            let predicate = lower_validation_predicate(inv, consts, exprs)?;
+            let module_source = chelis_deep::printer::print_canonical(exprs);
+            let value = eval_producer_value(&module_source, inv, call)?;
+            validate_value(&value, &ob.position, inv, &predicate, runtime)
+        }
+    }
+}
+
+fn lower_validation_predicate(
+    inv: &OpaqueInvariant,
+    consts: &ConstEnv,
+    exprs: &[Expr],
+) -> Result<crate::solver::SmtExpr, String> {
+    crate::opaque::lower_predicate_flattened(inv, &inv.binder, consts, exprs)
+        .ok_or_else(|| "invariant predicate does not lower for validation".to_string())
+}
+
+/// How an obligation's producer is evaluated, decided from its parameter
+/// kinds before any sample runs (chelis#3800). A producer whose inputs are
+/// all scalars and literal-shape tensors is compiled once, as a probe
+/// function of its parameters, and every sample and shrink trial is one call
+/// of it. A producer that takes an opaque record evaluates a probe program
+/// per sample, because a record call argument is #3804's open work.
+enum ProducerRoute {
+    Call(std::cell::OnceCell<Result<ProducerCall, String>>),
+    PerSample,
+}
+
+impl ProducerRoute {
+    fn for_kinds(kinds: &[ArgKind]) -> Self {
+        if kinds
+            .iter()
+            .all(|kind| matches!(kind, ArgKind::Scalar(_) | ArgKind::Tensor { .. }))
+        {
+            Self::Call(std::cell::OnceCell::new())
+        } else {
+            Self::PerSample
+        }
+    }
+}
+
+/// An obligation's producer compiled once as a probe function of its
+/// parameters, declared where [`eval_producer_value`] declares its probe: in
+/// the defining module of the stripped program.
+struct ProducerCall {
+    /// The invariant predicate each produced value is validated against.
+    predicate: crate::solver::SmtExpr,
+    prepared: chelis_compiler_api::compiler::PreparedEval,
+    probe: String,
+    /// The producer takes no parameters, so its probe is a value root.
+    nullary: bool,
+}
+
+impl ProducerCall {
+    /// The probe program for `ob`'s producer. It is the program a per-sample
+    /// probe reads, with a probe function in place of the per-sample probe,
+    /// so a compile failure here is an internal defect of the probe, reported
+    /// as one.
+    fn compile(
+        module: &[Expr],
+        inv: &OpaqueInvariant,
+        ob: &ObligationProperty,
+        consts: &ConstEnv,
+    ) -> Result<Self, String> {
+        // The per-sample route lowers the predicate before it evaluates the
+        // producer, so a predicate that does not lower is that error here too.
+        let predicate = lower_validation_predicate(inv, consts, module)?;
+        let module_source = chelis_deep::printer::print_canonical(module);
+        let internal = |reason: String| {
+            format!(
+                "internal error: the call program for producer `{}` does not compile: {reason}",
+                ob.producer
+            )
+        };
+        let exprs = chelis_deep::parse_and_stamp_file(&module_source)
+            .map_err(|error| internal(format!("reparse module: {error}")))?;
+        let stripped: Vec<Expr> = exprs.iter().map(strip_invariant_meta).collect();
+        let probe = fresh_root_name(&stripped, "__chelis_value_probe");
+        let Some(Expr::Node(function, _)) = producer_function(&stripped, &ob.producer) else {
+            return Err(internal("the producer has no `fn` definition".to_string()));
+        };
+        let params = function
+            .children_slice()
+            .first()
+            .cloned()
+            .ok_or_else(|| internal("the producer has no parameter list".to_string()))?;
+        let names = producer_param_names(&stripped, &ob.producer);
+        let mut call = vec![deep_var(&ob.producer)];
+        call.extend(names.iter().map(|name| deep_var(name)));
+        // A producer with no parameters is probed by today's value probe,
+        // `probe = producer()`, compiled once and evaluated per sample; one
+        // with parameters by a probe function of them.
+        let nullary = names.is_empty();
+        let body = if nullary {
+            deep_node("app", call)
+        } else {
+            Expr::node(
+                DeepTag::Fn,
+                function.meta().clone(),
+                vec![params, deep_node("app", call)],
+                Span::new(0, 0),
+            )
+        };
+        let program =
+            inject_into_defining_module(&stripped, &inv.type_name, vec![node_def(&probe, body)]);
+        #[allow(deprecated)]
+        let prepared = chelis_compiler_api::compiler::prepare_eval(EvalRequest {
+            source_kind: SourceKind::Deep,
+            source: chelis_deep::printer::print_canonical(&program),
+            bindings: Default::default(),
+        })
+        .map_err(|error| internal(compiler_messages(&error)))?;
+        Ok(Self {
+            predicate,
+            prepared,
+            probe,
+            nullary,
+        })
+    }
+
+    /// Call the producer with one sample's arguments and return its value, or
+    /// the evaluation's error as [`eval_producer_value`] words it.
+    fn call(&self, args: &[ArgValue]) -> Result<ExecutionValue, String> {
+        let mut arguments = BTreeMap::new();
+        let mut bindings = BTreeMap::new();
+        for arg in args {
+            match &arg.input {
+                ArgInput::Scalar(value) => {
+                    let value = if value.prim() == Prim::Bool {
+                        ExecutionValue::Bool {
+                            value: value.as_bool_exact().expect("a bool sample stays exact"),
+                        }
+                    } else {
+                        ExecutionValue::Scalar {
+                            value: (*value)
+                                .try_into()
+                                .expect("a numeric sample is a numeric scalar"),
+                        }
+                    };
+                    arguments.insert(arg.name.clone(), value);
+                }
+                ArgInput::Tensor { dims, prim, values } => {
+                    bindings.insert(
+                        arg.name.clone(),
+                        chelis_compiler_api::schema::TensorValue {
+                            shape: dims
+                                .iter()
+                                .map(|dim| i64::try_from(*dim).expect("a sampled extent fits i64"))
+                                .collect(),
+                            data: chelis_types::tensor_from_scalars(*prim, values),
+                        },
+                    );
+                }
+                ArgInput::Opaque => unreachable!("an opaque-input producer routes per sample"),
+            }
+        }
+        let result = if self.nullary {
+            self.prepared.eval_root(bindings, &self.probe)
+        } else {
+            self.prepared.call_root(&self.probe, arguments, bindings)
+        }
+        .map_err(|error| compiler_messages(&error))?;
+        match result.roots.as_slice() {
+            [root] => Ok(root.value.clone()),
+            _ => Err("producer value probe did not return one root".to_string()),
+        }
+    }
+}
+
+fn compiler_messages(error: &chelis_compiler_api::compiler::CompilerError) -> String {
+    error
+        .errors
+        .iter()
+        .map(|d| d.message.clone())
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+/// The `fn` a top-level or module-level `def` of `producer` binds.
+fn producer_function<'a>(exprs: &'a [Expr], producer: &str) -> Option<&'a Expr> {
+    for expr in exprs {
+        if list_tag(expr) == Some(DeepTag::Def)
+            && node_children(expr).first().and_then(sym_text) == Some(producer)
+            && let Some(fn_node) = node_children(expr).get(1)
+            && list_tag(fn_node) == Some(DeepTag::Fn)
+        {
+            return Some(fn_node);
+        }
+        if let Some(found) = producer_function(node_children(expr), producer) {
+            return Some(found);
+        }
+    }
+    None
 }
 
 /// Evaluate the producer call inside the defining module (invariant
@@ -1918,13 +2150,7 @@ fn eval_producer_value(
         },
         &[probe],
     )
-    .map_err(|e| {
-        e.errors
-            .iter()
-            .map(|d| d.message.clone())
-            .collect::<Vec<_>>()
-            .join("; ")
-    })?;
+    .map_err(|error| compiler_messages(&error))?;
     match result.roots.as_slice() {
         [root] => Ok(root.value.clone()),
         _ => Err("producer value probe did not return one root".to_string()),

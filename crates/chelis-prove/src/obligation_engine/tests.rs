@@ -513,3 +513,94 @@ fn chelis_3267_value_probe_avoids_a_module_definition_of_its_spelling() {
     assert_eq!(wrap.status, ObligationStatus::Failed, "{wrap:#?}");
     assert!(wrap.counterexample.is_some(), "{wrap:#?}");
 }
+
+const CLAMP: &str = "module Stats.Prob
+export (make)
+@opaque
+@invariant(p) ((p.value >= 0.0) && (p.value <= 1.0))
+type Probability =
+  | Probability { value: f32 }
+def make(x: f32) -> Probability = Probability { value: if (x >= 0.0) then if (x <= 1.0) then x else 1.0 else 0.0 }
+";
+
+fn clamp_module() -> (Vec<Expr>, OpaqueInvariant, ConstEnv) {
+    let declarations = chelis_surf::parser::parse_str(CLAMP).expect("parse module");
+    let exprs = chelis_surf::desugar::desugar_program(&declarations).expect("desugar module");
+    let invariants = crate::opaque::collect_opaque_invariants(&exprs);
+    let consts = resolve_module_constants(&exprs, &invariants);
+    (exprs, invariants[0].clone(), consts)
+}
+
+fn f32_arg(value: f64) -> ArgValue {
+    let scalar = scalar_from_f64("test sample", Prim::F32, value).expect("f32 sample");
+    ArgValue {
+        expr: scalar_lit("f32", scalar),
+        json: scalar_json(scalar),
+        name: "x".to_string(),
+        input: ArgInput::Scalar(scalar),
+    }
+}
+
+#[test]
+fn chelis_3800_route_is_decided_from_parameter_kinds() {
+    let (_, inv, _) = clamp_module();
+    let scalar = ArgKind::Scalar("f32".to_string());
+    let tensor = ArgKind::Tensor {
+        dims: vec![2],
+        precision: "f32".to_string(),
+    };
+    for kinds in [vec![], vec![scalar.clone()], vec![scalar.clone(), tensor]] {
+        assert!(matches!(
+            ProducerRoute::for_kinds(&kinds),
+            ProducerRoute::Call(_)
+        ));
+    }
+    assert!(matches!(
+        ProducerRoute::for_kinds(&[scalar, ArgKind::Opaque(inv)]),
+        ProducerRoute::PerSample
+    ));
+}
+
+#[test]
+fn chelis_3800_a_failed_call_program_is_the_verdict_never_a_fallback() {
+    let (exprs, inv, consts) = clamp_module();
+    let ob = synthetic_obligation();
+    let runtime = &chelis_std_bundle::EMBEDDED_RUNTIME;
+    let args = [f32_arg(0.5)];
+    // The sample passes on either route when the call program compiles.
+    for route in [
+        ProducerRoute::for_kinds(&[ArgKind::Scalar("f32".to_string())]),
+        ProducerRoute::PerSample,
+    ] {
+        assert_eq!(
+            eval_obligation_body_values(&exprs, &inv, &ob, &args, &consts, runtime, &route),
+            Ok(true)
+        );
+    }
+    // A call program that did not compile answers every sample with its
+    // error; the per-sample probe, which would pass, never runs.
+    let failed = std::cell::OnceCell::new();
+    let _ = failed.set(Err("internal error: sentinel".to_string()));
+    let route = ProducerRoute::Call(failed);
+    for _ in 0..2 {
+        assert_eq!(
+            eval_obligation_body_values(&exprs, &inv, &ob, &args, &consts, runtime, &route),
+            Err("internal error: sentinel".to_string())
+        );
+    }
+}
+
+#[test]
+fn chelis_3800_a_call_program_that_does_not_compile_is_a_loud_internal_error() {
+    let (exprs, inv, consts) = clamp_module();
+    let mut ob = synthetic_obligation();
+    ob.producer = "absent".to_string();
+    let Err(reason) = ProducerCall::compile(&exprs, &inv, &ob, &consts) else {
+        panic!("a producer with no definition has no call program");
+    };
+    assert_eq!(
+        reason,
+        "internal error: the call program for producer `absent` does not compile: \
+         the producer has no `fn` definition"
+    );
+}
