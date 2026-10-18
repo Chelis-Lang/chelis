@@ -22,6 +22,16 @@ pub struct ExtensionData {
 }
 
 impl ExtensionData {
+    /// Data with exactly this spelling, which parsing may not produce, so
+    /// the printer's tests can reach every leaf spelling.
+    #[cfg(test)]
+    pub(crate) fn with_spelling_for_tests(syntax: &str) -> Self {
+        Self {
+            syntax: syntax.to_string(),
+            span: Span::new(0, 0),
+        }
+    }
+
     /// Explicit producer conversion of raw syntax into data, without stamping.
     pub fn from_raw(raw: &crate::RawExpr) -> Result<Self, ParseError> {
         enum Task<'a> {
