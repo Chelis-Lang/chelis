@@ -78,8 +78,8 @@ pub struct CEmitter {
     /// ([`chelis_ir::fuse::InlinedProduct`]). Their `Mul` and widenings emit
     /// nothing and their expansions emit only their checked plans.
     inlined_products: BTreeMap<usize, chelis_ir::fuse::InlinedProduct>,
-    /// For each inlined sum its narrowing stores in its place, the first
-    /// expansion and the summed axis: its extents are that expansion's
+    /// For each inlined sum or narrowing a later node stores in its place, the
+    /// first expansion and the summed axis: its extents are that expansion's
     /// without the axis.
     unstored_sums: BTreeMap<usize, (usize, usize)>,
     /// Additional recipes preserve the specialized forward-product path.
@@ -1091,10 +1091,16 @@ impl CEmitter {
                 .collect(),
             unstored_sums: inlined_products
                 .iter()
-                .filter(|inlined| inlined.narrowing.is_some())
+                .filter(|inlined| inlined.output() != inlined.sum)
                 .filter_map(|inlined| match dag.get(inlined.sum)?.op {
-                    RiscOp::Sum { axis, .. } => Some((inlined.sum.0, (inlined.views[0].0, axis))),
+                    RiscOp::Sum { axis, .. } => Some((inlined, (inlined.views[0].0, axis))),
                     _ => None,
+                })
+                .flat_map(|(inlined, extents)| {
+                    let narrowed = inlined.narrowing.filter(|_| inlined.reshaped.is_some());
+                    std::iter::once(inlined.sum)
+                        .chain(narrowed)
+                        .map(move |node| (node.0, extents))
                 })
                 .collect(),
             deferred_views,
@@ -1376,7 +1382,7 @@ impl CEmitter {
                     e.line(&format!(
                         "chelis_movement_check_product(t{lhs}_movement, t{rhs}_movement, {context});"
                     ));
-                } else if node.id == inlined.sum {
+                } else if node.id == inlined.sum || inlined.narrowing == Some(node.id) {
                     let extents = (0..node.output_type.dims.len())
                         .map(|axis| (axis, e.tensor_extent(node.id, axis)))
                         .collect::<Vec<_>>();
@@ -2542,7 +2548,15 @@ impl CEmitter {
                 self.emit_reduce_argcmp(id, *axis, &node.inputs, &node.output_type, dag, false)?;
             }
             RiscOp::Reshape { new_shape } => {
-                self.emit_reshape(id, new_shape, &node.inputs, &node.output_type, dag);
+                if let Some(inlined) = self.inlined_products.get(&id).copied() {
+                    let sum = dag.get(inlined.sum).expect("verified inlined sum");
+                    let RiscOp::Sum { axis, .. } = sum.op else {
+                        unreachable!("an inlined product ends in its sum");
+                    };
+                    self.emit_inlined_product_sum(id, axis, inlined, &node.output_type, dag);
+                } else {
+                    self.emit_reshape(id, new_shape, &node.inputs, &node.output_type, dag);
+                }
             }
             RiscOp::Permute { axes } => {
                 self.emit_permute(id, axes, &node.inputs, &node.output_type, dag);
@@ -8363,7 +8377,10 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
     /// An operand widening converts each element as the leaf reads it, and a
     /// narrowing converts each finalized total as it is stored through the
     /// checked float cast the materialized `Cast` applies; `id` is then the
-    /// narrowing `Cast`, whose slot holds the result (chelis#3783).
+    /// narrowing `Cast`, whose slot holds the result (chelis#3783). With a
+    /// trailing reshape, `id` is the reshape, which checks its target against
+    /// the total's elements after the reduction plan, and whose slot holds
+    /// each total at its own flat position (chelis#3802).
     fn emit_inlined_product_sum(
         &mut self,
         id: usize,
@@ -8381,10 +8398,33 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         self.nan_finalization = crate::fp_env::risc_nan_finalization(&sum.op);
         let sum_ty = &sum.output_type;
         let stored = inlined.narrowing.map(|_| ty.precision);
+        // With a trailing reshape, the reduction is planned under the total's
+        // node and the total is stored in the reshape's slot.
+        let plan = if inlined.reshaped.is_some() {
+            inlined.total().0
+        } else {
+            id
+        };
         let [lhs, rhs] = inlined.views.map(|view| view.0);
         let [lhs_source, rhs_source] = inlined
             .views
             .map(|view| dag.get(view).expect("verified expansion").inputs[0].0);
+        // An expansion's deferred reshape is a view of its dense operand,
+        // which holds the same elements in the same order (chelis#3802).
+        let dense_base = |mut source: usize| {
+            while self.deferred_views.is_deferred(NodeId(source)) {
+                let node = dag.get(NodeId(source)).expect("verified recipe source");
+                assert!(
+                    matches!(node.op, RiscOp::Reshape { .. }),
+                    "an inlined product reads only a reshape view in place"
+                );
+                source = node.inputs[0].0;
+            }
+            source
+        };
+        let [lhs_base, rhs_base] = [dense_base(lhs_source), dense_base(rhs_source)];
+        let pinned = [lhs_base, rhs_base]
+            .map(|base| self.deferred_views.base_last_read(NodeId(base)).is_some());
         let rank = product_ty.dims.len();
         let blocked = rank >= 3
             && axis == rank - 2
@@ -8403,13 +8443,36 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
                 .precision
         });
         self.emit_reduction_plan(
-            id,
+            plan,
             ReductionInput::StaticShape,
             product_ty,
             &[axis],
             sum_ty,
             "CHELIS_REDUCE_SUM",
         );
+        if inlined.reshaped.is_some() {
+            // The reshape's own element-count check, after the reduction
+            // plan's and before its allocation, as the materialized graph
+            // orders them.
+            let total_ty = &dag
+                .get(inlined.total())
+                .expect("verified inlined total")
+                .output_type;
+            let dtype = Self::dtype_macro(total_ty);
+            self.line(&format!(
+                "chelis_metadata_plan *t{id}_reshape_source = chelis_metadata_plan_new(chelis_scalar_from_bits(CHELIS_DTYPE_I64, {}), {}, chelis_scalar_from_bits({dtype}, UINT64_C(0)));",
+                Self::ndim(total_ty),
+                Self::tagged_shape_literal(total_ty),
+            ));
+            self.line(&format!(
+                "chelis_metadata_plan_release(chelis_metadata_plan_reshape(t{id}_reshape_source, chelis_scalar_from_bits(CHELIS_DTYPE_I64, {}), {}));",
+                Self::ndim(ty),
+                Self::tagged_shape_literal(ty),
+            ));
+            self.line(&format!(
+                "chelis_metadata_plan_release(t{id}_reshape_source);"
+            ));
+        }
         self.emit_slot_wrapper(id, ty);
         if blocked {
             self.line(&format!(
@@ -8451,7 +8514,7 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         let tree = Self::sum_tree(id, sum_ty.precision, blocked.then_some(lanes.as_str()));
         self.emit_carry_tree_open(&tree);
         self.line(&format!(
-            "for ({index_type} __reduce_i = 0; __reduce_i < t{id}_leaf_count; __reduce_i++) {{"
+            "for ({index_type} __reduce_i = 0; __reduce_i < t{plan}_leaf_count; __reduce_i++) {{"
         ));
         self.indent += 1;
         if blocked {
@@ -8463,16 +8526,19 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
             ));
             self.indent += 1;
         }
-        let read = |source: usize, side: &str, view: usize, stored: Prim| {
+        let read = |source: usize, pinned: bool, side: &str, view: usize, stored: Prim| {
             let lane = if blocked && side == "rhs" {
                 " + __sum_lane"
             } else {
                 ""
             };
             let stored_et = Self::prim_elem_type(stored);
-            let element = format!(
-                "((const {stored_et}*)t{source}_data)[__{side}_{id} + __reduce_i * t{view}_scale{axis}{lane}]"
-            );
+            let data = if pinned {
+                format!("t{source}_deferred_data")
+            } else {
+                format!("((const {stored_et}*)t{source}_data)")
+            };
+            let element = format!("{data}[__{side}_{id} + __reduce_i * t{view}_scale{axis}{lane}]");
             // The widening is exact, so the converted value is the stored
             // one. The materialized `Cast` also canonicalizes a NaN, but the
             // product's own finalization canonicalizes every NaN product, so
@@ -8493,8 +8559,8 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
             }
         };
         let (lhs_read, rhs_read) = (
-            read(lhs_source, "lhs", lhs, lhs_read_ty),
-            read(rhs_source, "rhs", rhs, rhs_read_ty),
+            read(lhs_base, pinned[0], "lhs", lhs, lhs_read_ty),
+            read(rhs_base, pinned[1], "rhs", rhs, rhs_read_ty),
         );
         // The leaf the materialized `Mul` stores, as the `Sum` loads it
         // (`emit_binary`, `emit_binary_reduced_f`, `emit_reduce_sum_general`).
@@ -8523,7 +8589,9 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         self.line("}");
         self.emit_sum_store(id, &tree, sum_ty.precision, CarriedLeaf::Finalized, stored);
         self.close_element_loop();
-        self.line(&format!("chelis_reduction_plan_release(t{id}_reduction);"));
+        self.line(&format!(
+            "chelis_reduction_plan_release(t{plan}_reduction);"
+        ));
         for view in [lhs, rhs] {
             self.line(&format!("chelis_movement_plan_release(t{view}_movement);"));
         }
@@ -10520,7 +10588,8 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
             .find(|inlined| {
                 inlined.product == node
                     || inlined.casts.contains(&Some(node))
-                    || (inlined.narrowing.is_some() && inlined.sum == node)
+                    || (inlined.output() != inlined.sum && inlined.sum == node)
+                    || (inlined.reshaped.is_some() && inlined.narrowing == Some(node))
             })
             .copied()
     }
@@ -11375,6 +11444,278 @@ mod tests {
         let verified = crate::testing::verified_dag(dag, crate::CodegenOptions::default())
             .expect("C emitter unit-test DAG must verify ownership");
         CEmitter::emit_dag(verified, name)
+    }
+
+    /// chelis#3802: every node an inlined product claims has exactly one
+    /// storage decision. Over routed contractions at f32 and f16, with static
+    /// and runtime rows, each read whole or through a sum, a product then
+    /// sum, an insertion then sum, or a reshape then sum (`matmul`'s
+    /// `reshape(matmul(x, w), [n])`), the C storage plan builds, every
+    /// kernel output owns a slot, every component is skipped, and the
+    /// program emits.
+    #[test]
+    fn inlined_product_storage_decisions_are_exclusive_and_emit() {
+        use chelis_ir::dag::{NodeId, Owner};
+        use chelis_ir::ownership::StoragePlacement;
+        let lit = |dims: &[usize]| dims.iter().map(|&n| DimInfo::Lit(n)).collect::<Vec<_>>();
+        let runtime = |name: &str| DimInfo::Named(name.into(), None);
+        let mut emitted = 0usize;
+        for (equation, a, b) in [
+            ("mk,kn->mn", lit(&[6, 8]), lit(&[8, 4])),
+            ("amk,kn->amn", lit(&[2, 3, 8]), lit(&[8, 4])),
+            (
+                "amk,kn->amn",
+                vec![runtime("a"), DimInfo::Lit(1), DimInfo::Lit(8)],
+                lit(&[8, 4]),
+            ),
+            (
+                "amk,kn->amn",
+                vec![DimInfo::Lit(1), runtime("s"), DimInfo::Lit(8)],
+                lit(&[8, 4]),
+            ),
+            ("mak,kn->amn", lit(&[3, 2, 8]), lit(&[8, 4])),
+            ("bmk,bkn->bmn", lit(&[2, 3, 8]), lit(&[2, 8, 4])),
+            ("nk,mk->mn", lit(&[4, 8]), lit(&[6, 8])),
+        ] {
+            for p in [Prim::F32, Prim::F16] {
+                for consumer in ["root", "sum", "mul-sum", "insert-sum", "reshape-sum"] {
+                    let ty = |dims: &[DimInfo]| TensorType {
+                        dims: dims.to_vec(),
+                        precision: p,
+                    };
+                    let contraction = chelis_ir::tier2_ordered::einsum_contraction(
+                        equation,
+                        &ty(&a),
+                        &ty(&b),
+                        None,
+                    )
+                    .expect("contraction form");
+                    let mut dag = Dag::new();
+                    let owner = Owner::from(dag.declare("probe"));
+                    let x = dag.add_node(
+                        owner,
+                        RiscOp::Load { name: "x".into() },
+                        vec![],
+                        ty(&a),
+                        None,
+                    );
+                    let y = dag.add_node(
+                        owner,
+                        RiscOp::Load { name: "y".into() },
+                        vec![],
+                        ty(&b),
+                        None,
+                    );
+                    let out = chelis_ir::tier2_ordered::lower_einsum_contraction(
+                        owner,
+                        &mut dag,
+                        &contraction,
+                        [(x, &ty(&a)), (y, &ty(&b))],
+                        None,
+                    )
+                    .expect("contraction lowers");
+                    let out_ty = dag.get(out).unwrap().output_type.clone();
+                    let rank = out_ty.dims.len();
+                    let sum = |dag: &mut Dag, input: NodeId, axis: usize| {
+                        let input_ty = dag.get(input).unwrap().output_type.clone();
+                        let accumulator = if p == Prim::F16 { Prim::F32 } else { p };
+                        let mut dims = input_ty.dims.clone();
+                        dims.remove(axis);
+                        dag.add_node(
+                            owner,
+                            RiscOp::Sum { axis, accumulator },
+                            vec![input],
+                            TensorType {
+                                dims,
+                                precision: accumulator,
+                            },
+                            None,
+                        )
+                    };
+                    let root = match consumer {
+                        "root" => out,
+                        "sum" => sum(&mut dag, out, rank - 1),
+                        "mul-sum" => {
+                            let v = dag.add_node(
+                                owner,
+                                RiscOp::Load { name: "v".into() },
+                                vec![],
+                                out_ty.clone(),
+                                None,
+                            );
+                            let product = dag.add_node(
+                                owner,
+                                RiscOp::Mul,
+                                vec![out, v],
+                                out_ty.clone(),
+                                None,
+                            );
+                            sum(&mut dag, product, rank - 1)
+                        }
+                        "insert-sum" => {
+                            let mut dims = vec![DimInfo::Lit(2)];
+                            dims.extend(out_ty.dims.clone());
+                            let inserted = dag.add_node(
+                                owner,
+                                RiscOp::Expand {
+                                    axis: 0,
+                                    size: RtDim::Lit(2),
+                                },
+                                vec![out],
+                                TensorType { dims, precision: p },
+                                None,
+                            );
+                            sum(&mut dag, inserted, 0)
+                        }
+                        _ => {
+                            let static_count: Option<usize> = out_ty
+                                .dims
+                                .iter()
+                                .map(|dim| match dim {
+                                    DimInfo::Lit(n) => Some(*n),
+                                    _ => None,
+                                })
+                                .product();
+                            let Some(count) = static_count else {
+                                continue;
+                            };
+                            let flat = dag.add_node(
+                                owner,
+                                RiscOp::Reshape {
+                                    new_shape: vec![RtDim::Lit(count)],
+                                },
+                                vec![out],
+                                TensorType {
+                                    dims: vec![DimInfo::Lit(count)],
+                                    precision: p,
+                                },
+                                None,
+                            );
+                            sum(&mut dag, flat, 0)
+                        }
+                    };
+                    dag.set_roots(vec![root]);
+                    let verified =
+                        crate::testing::verified_dag(&dag, crate::CodegenOptions::default())
+                            .expect("probe DAG verifies ownership");
+                    let emission = verified.emission();
+                    let plan = chelis_ir::ownership::plan_c_storage_layout(emission)
+                        .unwrap_or_else(|error| panic!("`{equation}` {p:?} {consumer}: {error}"));
+                    for product in emission.reduction_inlined_products() {
+                        assert!(
+                            plan.placements()[product.output().0].slot().is_some(),
+                            "`{equation}` {p:?} {consumer}: the kernel output owns no slot"
+                        );
+                        for node in product.skipped() {
+                            assert!(
+                                matches!(plan.placements()[node.0], StoragePlacement::Skipped),
+                                "`{equation}` {p:?} {consumer}: component n{} is stored",
+                                node.0
+                            );
+                        }
+                    }
+                    emit_test_dag(&dag, "probe")
+                        .unwrap_or_else(|error| panic!("`{equation}` {p:?} {consumer}: {error:?}"));
+                    emitted += 1;
+                }
+            }
+        }
+        assert!(emitted >= 60, "{emitted} programs emitted");
+        // Chained products: one kernel's total, reshaped, is the next
+        // kernel's operand, so the reshape is the first product's absorbed
+        // output and the second product reads it in place.
+        for p in [Prim::F32, Prim::F16] {
+            for runtime_rows in [false, true] {
+                let ty = |dims: &[DimInfo]| TensorType {
+                    dims: dims.to_vec(),
+                    precision: p,
+                };
+                let (first_eq, first_x, mid, second_eq) = if runtime_rows {
+                    (
+                        "amk,kn->amn",
+                        vec![DimInfo::Lit(1), runtime("s"), DimInfo::Lit(4)],
+                        vec![DimInfo::Lit(1), runtime("s"), DimInfo::Lit(4)],
+                        "amk,kn->amn",
+                    )
+                } else {
+                    ("mk,kn->mn", lit(&[6, 4]), lit(&[3, 8]), "mk,kn->mn")
+                };
+                let first_w = lit(&[4, 4]);
+                let second_w = if runtime_rows {
+                    lit(&[4, 5])
+                } else {
+                    lit(&[8, 5])
+                };
+                let mut dag = Dag::new();
+                let owner = Owner::from(dag.declare("probe"));
+                let load = |dag: &mut Dag, name: &str, dims: &[DimInfo]| {
+                    dag.add_node(
+                        owner,
+                        RiscOp::Load { name: name.into() },
+                        vec![],
+                        ty(dims),
+                        None,
+                    )
+                };
+                let x = load(&mut dag, "x", &first_x);
+                let w = load(&mut dag, "w", &first_w);
+                let v = load(&mut dag, "v", &second_w);
+                let lower = |dag: &mut Dag,
+                             equation: &str,
+                             a: (NodeId, &TensorType),
+                             b: (NodeId, &TensorType)| {
+                    let contraction =
+                        chelis_ir::tier2_ordered::einsum_contraction(equation, a.1, b.1, None)
+                            .unwrap_or_else(|| panic!("`{equation}` contraction form"));
+                    chelis_ir::tier2_ordered::lower_einsum_contraction(
+                        owner,
+                        dag,
+                        &contraction,
+                        [a, b],
+                        None,
+                    )
+                    .expect("contraction lowers")
+                };
+                let first = lower(&mut dag, first_eq, (x, &ty(&first_x)), (w, &ty(&first_w)));
+                let between = if runtime_rows {
+                    first
+                } else {
+                    dag.add_node(
+                        owner,
+                        RiscOp::Reshape {
+                            new_shape: vec![RtDim::Lit(3), RtDim::Lit(8)],
+                        },
+                        vec![first],
+                        ty(&mid),
+                        None,
+                    )
+                };
+                let root = lower(
+                    &mut dag,
+                    second_eq,
+                    (between, &ty(&mid)),
+                    (v, &ty(&second_w)),
+                );
+                dag.set_roots(vec![root]);
+                let verified = crate::testing::verified_dag(&dag, crate::CodegenOptions::default())
+                    .expect("chained DAG verifies ownership");
+                let emission = verified.emission();
+                let plan =
+                    chelis_ir::ownership::plan_c_storage_layout(emission).unwrap_or_else(|error| {
+                        panic!("chained {p:?} runtime={runtime_rows}: {error}")
+                    });
+                assert_eq!(emission.reduction_inlined_products().len(), 2);
+                for product in emission.reduction_inlined_products() {
+                    assert!(
+                        plan.placements()[product.output().0].slot().is_some(),
+                        "chained {p:?} runtime={runtime_rows}: a kernel output owns no slot"
+                    );
+                }
+                emit_test_dag(&dag, "probe").unwrap_or_else(|error| {
+                    panic!("chained {p:?} runtime={runtime_rows}: {error:?}")
+                });
+            }
+        }
     }
 
     /// `x: [name]` doubled, with `span` on the addition.

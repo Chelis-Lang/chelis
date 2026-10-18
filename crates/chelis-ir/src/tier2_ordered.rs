@@ -1055,8 +1055,10 @@ mod einsum_contraction_tests {
                 lit(&[8, 5]),
             ),
             // A runtime row beside a static row above one, whose product
-            // needs a copying reshape (chelis#3781, #3802), and two runtime
-            // rows, which also bound nothing when either is zero.
+            // the route would compute in a consumer helper that keeps its
+            // operand alive past the runtime kernel's release (chelis#3781),
+            // and two runtime rows, which also bound nothing when either is
+            // zero.
             (
                 "amk,kn->amn",
                 vec![runtime("a"), DimInfo::Lit(3), DimInfo::Lit(8)],
@@ -1419,13 +1421,20 @@ mod einsum_contraction_tests {
     /// has the product of its factors, whatever its declared dimension says.
     /// Magnitudes are `f64`, exact for the extents the oracles draw.
     fn concrete_shapes(dag: &Dag, binding: &dyn Fn(&str) -> f64) -> (Vec<Vec<f64>>, Vec<f64>) {
-        let mut shapes: Vec<Vec<f64>> = Vec::with_capacity(dag.len());
-        let mut scalars: Vec<Option<f64>> = Vec::with_capacity(dag.len());
+        concrete_node_shapes(dag.nodes(), binding)
+    }
+
+    fn concrete_node_shapes(
+        nodes: &[crate::dag::DagNode],
+        binding: &dyn Fn(&str) -> f64,
+    ) -> (Vec<Vec<f64>>, Vec<f64>) {
+        let mut shapes: Vec<Vec<f64>> = Vec::with_capacity(nodes.len());
+        let mut scalars: Vec<Option<f64>> = Vec::with_capacity(nodes.len());
         let extent = |dim: &DimInfo| match dim {
             DimInfo::Named(name, None) => binding(name),
             other => static_extent(other).expect("static extent") as f64,
         };
-        for node in dag.nodes() {
+        for node in nodes {
             let input = |slot: usize| node.inputs[slot].0;
             let bound = |dim: &RtDim, shapes: &[Vec<f64>], scalars: &[Option<f64>]| match dim {
                 RtDim::Lit(n) => *n as f64,
@@ -1465,7 +1474,9 @@ mod einsum_contraction_tests {
                     Vec::new(),
                     Some(scalars[input(0)].unwrap() * scalars[input(1)].unwrap()),
                 ),
-                RiscOp::Mul | RiscOp::Cast { .. } => (shapes[input(0)].clone(), None),
+                RiscOp::Mul | RiscOp::Cast { .. } | RiscOp::Drop => {
+                    (shapes[input(0)].clone(), None)
+                }
                 other => panic!("the contraction graph has no {other:?}"),
             };
             shapes.push(shape);
@@ -1473,6 +1484,195 @@ mod einsum_contraction_tests {
         }
         let scalars = scalars.into_iter().flatten().collect();
         (shapes, scalars)
+    }
+
+    /// The bytes the C lane's verified storage plan holds for the lowered
+    /// contraction, every slot at its largest owner, with each runtime
+    /// extent at `binding`, and the bound the runtime kernel sets: the result,
+    /// plus each operand the graph must permute (chelis#3802).
+    /// `dag` with its root `root` read by `consumer`: a sum over the last
+    /// axis, a product with a loaded tensor then that sum, an inserted axis
+    /// then a sum over it, or a flattening reshape then a sum. Each keeps the
+    /// contraction's output a private input of another node, which an inlined
+    /// product may claim.
+    fn with_consumer(dag: &Dag, root: NodeId, consumer: &str) -> Dag {
+        let mut dag = dag.clone();
+        let owner = dag.get(root).unwrap().owner;
+        let out = dag.get(root).unwrap().output_type.clone();
+        let rank = out.dims.len();
+        let accumulator = out.precision.default_reduce_sum_accumulator().unwrap();
+        let sum = |dag: &mut Dag, input: NodeId, axis: usize| {
+            let mut dims = dag.get(input).unwrap().output_type.dims.clone();
+            dims.remove(axis);
+            dag.add_node(
+                owner,
+                RiscOp::Sum { axis, accumulator },
+                vec![input],
+                ty(&dims, accumulator),
+                None,
+            )
+        };
+        let top = match consumer {
+            "sum" => sum(&mut dag, root, rank - 1),
+            "mul-sum" => {
+                let v = dag.add_node(
+                    owner,
+                    RiscOp::Load { name: "v".into() },
+                    vec![],
+                    out.clone(),
+                    None,
+                );
+                let product = dag.add_node(owner, RiscOp::Mul, vec![root, v], out.clone(), None);
+                sum(&mut dag, product, rank - 1)
+            }
+            "insert-sum" => {
+                let mut dims = vec![DimInfo::Lit(2)];
+                dims.extend(out.dims.clone());
+                let inserted = dag.add_node(
+                    owner,
+                    RiscOp::Expand {
+                        axis: 0,
+                        size: RtDim::Lit(2),
+                    },
+                    vec![root],
+                    ty(&dims, out.precision),
+                    None,
+                );
+                sum(&mut dag, inserted, 0)
+            }
+            _ => {
+                let flat = DimInfo::Named("flat".into(), None);
+                let reshaped = dag.add_node(
+                    owner,
+                    RiscOp::Reshape {
+                        new_shape: vec![RtDim::Sym("flat".into())],
+                    },
+                    vec![root],
+                    ty(&[flat], out.precision),
+                    None,
+                );
+                sum(&mut dag, reshaped, 0)
+            }
+        };
+        dag.set_roots(vec![top]);
+        dag
+    }
+
+    /// The C storage plan of `dag` builds, so every node an inlined product
+    /// claims has exactly one storage decision (chelis#3802).
+    fn assert_c_storage_plans(dag: &Dag, context: &str) {
+        let program = crate::ownership::verify_ownership(
+            crate::ownership::lower_dag_ownership(dag.clone()).expect("consumer lowers"),
+        )
+        .expect("consumer ownership verifies");
+        if let Err(error) = crate::ownership::plan_c_storage(program) {
+            panic!("{context}: {error}");
+        }
+    }
+
+    fn c_storage_bytes(dag: &Dag, binding: f64) -> StorageBytes {
+        let program = crate::ownership::verify_ownership(
+            crate::ownership::lower_dag_ownership(dag.clone()).expect("contraction lowers"),
+        )
+        .expect("contraction ownership verifies");
+        let plan = crate::ownership::plan_c_storage(program).expect("C storage plan");
+        let nodes = plan.emission().nodes();
+        let (shapes, _) = concrete_node_shapes(nodes, &|_| binding);
+        let bytes = |node: &crate::dag::DagNode| -> f64 {
+            let width = node
+                .output_type
+                .precision
+                .runtime_dtype()
+                .unwrap()
+                .byte_width();
+            shapes[node.id.0].iter().product::<f64>() * width as f64
+        };
+        let mut slots = std::collections::BTreeMap::new();
+        // A computed row extent's rank-zero scalars are metadata, not data.
+        for node in nodes
+            .iter()
+            .filter(|node| !node.output_type.dims.is_empty())
+        {
+            if let Some(slot) = plan.slot_for_node(node.id) {
+                let held = slots.entry(slot).or_insert(0f64);
+                *held = held.max(bytes(node));
+            }
+        }
+        let root = nodes
+            .iter()
+            .find(|node| plan.emission().roots().contains(&node.id))
+            .expect("root");
+        // `chelis_tensor_einsum` allocates its result and, for a nonempty
+        // result, one accumulator per product of an output's reduction.
+        let sum = nodes
+            .iter()
+            .find(|node| matches!(node.op, RiscOp::Sum { .. }))
+            .expect("product sum");
+        let RiscOp::Sum { axis, .. } = sum.op else {
+            unreachable!()
+        };
+        let reduction = shapes[sum.inputs[0].0][axis];
+        let accumulator = sum
+            .output_type
+            .precision
+            .runtime_dtype()
+            .unwrap()
+            .byte_width() as f64;
+        let result = bytes(root);
+        let kernel = if result > 0.0 {
+            result + reduction * accumulator
+        } else {
+            0.0
+        };
+        let permuted: f64 = nodes
+            .iter()
+            .filter(|node| matches!(node.op, RiscOp::Permute { .. }))
+            .map(bytes)
+            .sum();
+        StorageBytes {
+            held: slots.values().sum(),
+            kernel,
+            permuted,
+            computed_rows: nodes
+                .iter()
+                .any(|node| matches!(node.op, RiscOp::Shape { .. })),
+        }
+    }
+
+    /// What the C lane holds for a lowered contraction, and what the runtime
+    /// kernel would hold for the same case.
+    struct StorageBytes {
+        held: f64,
+        kernel: f64,
+        permuted: f64,
+        computed_rows: bool,
+    }
+
+    impl StorageBytes {
+        /// The route holds no more than the runtime kernel. A permuted
+        /// operand's copy is admitted only on forms routed before chelis#3781
+        /// (static rows or one runtime row beside extents of one), and a
+        /// computed row product permutes nothing (chelis#3832 round 1).
+        fn check(&self, context: &str) {
+            assert!(
+                !(self.computed_rows && self.permuted > 0.0),
+                "{context}: a computed row product permutes {} bytes",
+                self.permuted
+            );
+            let bound = self.kernel
+                + if self.computed_rows {
+                    0.0
+                } else {
+                    self.permuted
+                };
+            assert!(
+                self.held <= bound,
+                "{context}: the C lane holds {} bytes, over the runtime kernel's {} (+{} permuted)",
+                self.held,
+                self.kernel,
+                self.permuted
+            );
+        }
     }
 
     /// Whether the runtime would allocate `shape` at `precision`: its
@@ -1565,9 +1765,9 @@ mod einsum_contraction_tests {
     /// The flattened-row class over five labels, which [`equations`] cannot
     /// reach: up to three row factors, each drawn from zero, one, three, a
     /// runtime extent and a large one, beside a static or runtime column.
-    /// Every accepted case plans no trap for operands that exist, and rows
-    /// whose runtime factor sits beside a factor above one, or with two
-    /// runtime factors, keep the runtime kernel (#3781, #3802).
+    /// Every accepted case plans no trap for operands that exist and holds no
+    /// more C storage than the runtime kernel, and rows with two runtime
+    /// factors keep the runtime kernel.
     #[test]
     fn every_flattened_row_plans_no_trap_for_operands_that_exist() {
         let extents = [
@@ -1578,6 +1778,7 @@ mod einsum_contraction_tests {
             DimInfo::Lit(LARGE),
         ];
         let (mut accepted, mut assignments, mut refused) = (0usize, 0usize, 0usize);
+        let mut consumed = 0usize;
         for equation in [
             "abmk,kn->abmn",
             "bamk,kn->abmn",
@@ -1630,11 +1831,29 @@ mod einsum_contraction_tests {
                     assignments += assert_existing_operands_plan_no_trap(
                         equation, &a, &b, p, None, &dag, root,
                     );
+                    for consumer in ["sum", "mul-sum", "insert-sum", "reshape-sum"] {
+                        assert_c_storage_plans(
+                            &with_consumer(&dag, root, consumer),
+                            &format!("`{equation}` {a:?} {b:?} {p:?} under {consumer}"),
+                        );
+                        consumed += 1;
+                    }
+                    for binding in [0.0f64, 7.0] {
+                        let shape = |dims: &[DimInfo]| -> Vec<f64> {
+                            dims.iter()
+                                .map(|dim| static_extent(dim).map_or(binding, |n| n as f64))
+                                .collect()
+                        };
+                        if allocatable(&shape(&a), p) && allocatable(&shape(&b), p) {
+                            c_storage_bytes(&dag, binding)
+                                .check(&format!("`{equation}` {a:?} {b:?} {p:?} at {binding}"));
+                        }
+                    }
                 }
             }
         }
         assert!(
-            accepted > 1000 && assignments > 1000 && refused > 1000,
+            accepted > 1000 && assignments > 1000 && refused > 1000 && consumed > 4000,
             "{accepted} accepted, {assignments} assignments, {refused} computed-row refusals"
         );
     }
@@ -1672,6 +1891,7 @@ mod einsum_contraction_tests {
         let mut state = 0x3777_u64;
         let mut accepted = 0usize;
         let mut converted = 0usize;
+        let mut peak_checked = 0usize;
         for equation in equations() {
             let (inputs, output) = equation.split_once("->").unwrap();
             let (la, lb) = inputs.split_once(',').unwrap();
@@ -1769,6 +1989,31 @@ mod einsum_contraction_tests {
                         &dag,
                         root,
                     );
+                    // The C lane holds no more than the runtime kernel: the
+                    // row operand's flattening reshape is a view and the
+                    // output reshape holds the total directly.
+                    let exists = |dims: &[DimInfo], binding: f64| {
+                        let shape: Vec<f64> = dims
+                            .iter()
+                            .map(|dim| static_extent(dim).map_or(binding, |n| n as f64))
+                            .collect();
+                        allocatable(&shape, p)
+                    };
+                    // Storage depends on dtype only through widths, so one
+                    // reduced, one native and one widened pair suffice.
+                    let representative = matches!(
+                        (p, accumulator),
+                        (Prim::F16, None) | (Prim::F32, None) | (Prim::F32, Some(Prim::F64))
+                    );
+                    for binding in [0.0f64, 7.0] {
+                        if !representative || !exists(&a, binding) || !exists(&b, binding) {
+                            continue;
+                        }
+                        peak_checked += 1;
+                        c_storage_bytes(&dag, binding).check(&format!(
+                            "`{equation}` {a:?} {b:?} {p:?}/{accumulator:?} at {binding}"
+                        ));
+                    }
                     // Without a static zero, the operands' existence in memory
                     // bounds every runtime extent. A static zero removes that
                     // bound, so then every planned shape's strides must fit
@@ -1791,8 +2036,8 @@ mod einsum_contraction_tests {
             }
         }
         assert!(
-            converted > 10_000,
-            "the oracle reached {converted} conversions"
+            converted > 10_000 && peak_checked > 10_000,
+            "the oracle reached {converted} conversions and {peak_checked} storage plans"
         );
         assert!(
             accepted > 1000,
