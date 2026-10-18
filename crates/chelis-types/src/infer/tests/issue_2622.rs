@@ -108,9 +108,12 @@ fn issue_2622_the_detector_rejects_a_semantic_view_that_reapplies_per_level() {
             other => other,
         }
     }
+    // Each level holds a free variable: applying returns a ground child
+    // without walking it (chelis#3819), so a ground chain would not show
+    // the per-level cost.
     fn nested(depth: usize) -> Type {
-        (0..depth).fold(Type::Prim(Prim::Int32), |inner, _| {
-            Type::tuple(vec![Type::Prim(Prim::Int32), inner])
+        (0..depth).fold(Type::Prim(Prim::Int32), |inner, level| {
+            Type::tuple(vec![Type::Var(TypeVar(level as u32)), inner])
         })
     }
     let subst = Subst::new();

@@ -54,7 +54,125 @@ pub(crate) struct ApplyMemo {
 }
 
 /// Original and applied form of each shared child, by allocation address.
-type AppliedShared<T> = UnordMap<usize, (Arc<T>, Arc<T>)>;
+type AppliedShared<T> = UnordMap<usize, (Arc<T>, Arc<T>, Applied)>;
+
+/// What applying the substitution to one type established about the result.
+#[derive(Debug, Clone, Copy)]
+struct Applied {
+    /// The result holds no type, dimension, rank or precision variable.
+    ground: bool,
+    /// The result is the type that was applied to, unchanged.
+    same: bool,
+}
+
+impl Applied {
+    const GROUND: Self = Self {
+        ground: true,
+        same: true,
+    };
+
+    fn and(self, other: Self) -> Self {
+        Self {
+            ground: self.ground && other.ground,
+            same: self.same && other.same,
+        }
+    }
+
+    fn changed(self) -> Self {
+        Self {
+            same: false,
+            ..self
+        }
+    }
+}
+
+/// A dimension the substitution cannot change: no variable of either kind.
+fn dim_is_ground(dim: &Dim) -> bool {
+    matches!(dim, Dim::Name(_) | Dim::Lit(_) | Dim::Wildcard)
+}
+
+/// Shared children that applying found ground, by allocation address
+/// (chelis#3819).
+///
+/// Applying a substitution to a ground type returns an equal type and
+/// touches no binding: there is no variable to resolve, so there is no chain
+/// to compress. [`Subst::apply`] therefore returns a recorded child as it
+/// stands instead of walking it. Without that, a checker that applies the
+/// substitution to a type at each of the levels that build it walks every
+/// finished subtree again at each level, which is quadratic in the depth.
+///
+/// Whether a type is ground does not depend on the substitution, so every
+/// copy of a substitution shares one store. Each entry holds its child, so
+/// its address cannot be freed and reused while it is recorded. The store
+/// sweeps the children only it still holds whenever it has doubled since
+/// the last sweep, so it stays within a constant factor of the ground
+/// children that are live. It is only ever looked up, never iterated, apart
+/// from that sweep, whose outcome does not depend on its order.
+#[derive(Clone, Default)]
+struct GroundTypes(Arc<Mutex<GroundStore>>);
+
+impl std::fmt::Debug for GroundTypes {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("GroundTypes")
+    }
+}
+
+#[derive(Default)]
+struct GroundStore {
+    addresses: UnordSet<usize>,
+    held: Vec<GroundShared>,
+    sweep_at: usize,
+}
+
+/// The smallest store that is swept.
+const GROUND_SWEEP_FLOOR: usize = 4096;
+
+enum GroundShared {
+    Child(Arc<Type>),
+    List(Arc<[Type]>),
+    Arguments(Arc<[NominalArg]>),
+}
+
+impl GroundShared {
+    fn address(&self) -> usize {
+        match self {
+            Self::Child(child) => Arc::as_ptr(child).addr(),
+            Self::List(items) => Arc::as_ptr(items).cast::<Type>().addr(),
+            Self::Arguments(arguments) => Arc::as_ptr(arguments).cast::<NominalArg>().addr(),
+        }
+    }
+
+    fn held_elsewhere(&self) -> bool {
+        match self {
+            Self::Child(child) => Arc::strong_count(child) > 1,
+            Self::List(items) => Arc::strong_count(items) > 1,
+            Self::Arguments(arguments) => Arc::strong_count(arguments) > 1,
+        }
+    }
+}
+
+impl GroundTypes {
+    fn holds(&self, address: usize) -> bool {
+        self.0
+            .lock()
+            .expect("subst.ground_types poisoned")
+            .addresses
+            .contains(&address)
+    }
+
+    fn record(&self, shared: GroundShared) {
+        let mut store = self.0.lock().expect("subst.ground_types poisoned");
+        if !store.addresses.insert(shared.address()) {
+            return;
+        }
+        store.held.push(shared);
+        if store.held.len() >= store.sweep_at.max(GROUND_SWEEP_FLOOR) {
+            store.held.retain(GroundShared::held_elsewhere);
+            store.addresses = store.held.iter().map(GroundShared::address).collect();
+            store.sweep_at = 2 * store.held.len();
+        }
+    }
+}
 
 const INTERNAL_VMAP_AXIS_PREFIX: &str = "\0vmap-axis:";
 
@@ -455,6 +573,11 @@ pub struct Subst {
     /// Not serialized: transient per-pass bookkeeping.
     #[serde(skip)]
     deferred_tensor_operands: Mutex<Vec<(TypeVar, DeferredOperandGate)>>,
+    /// Shared children known to be ground, which applying returns without
+    /// walking them. Shared by every copy of this substitution and not
+    /// serialized; see [`GroundTypes`].
+    #[serde(skip)]
+    ground_types: GroundTypes,
     /// Verdicts from suspended operand constraints that discharged badly
     /// (chelis#1489).
     ///
@@ -1238,6 +1361,7 @@ impl Clone for Subst {
             lowered_dvar_levels: self.lowered_dvar_levels.clone(),
             lowered_rvar_levels: self.lowered_rvar_levels.clone(),
             resume_floors: self.resume_floors,
+            ground_types: self.ground_types.clone(),
         }
     }
 }
@@ -2621,79 +2745,186 @@ impl Subst {
         self.apply_with(ty, Some(memo))
     }
 
-    fn apply_with(&self, ty: &Type, mut memo: Option<&mut ApplyMemo>) -> Type {
+    fn apply_with(&self, ty: &Type, memo: Option<&mut ApplyMemo>) -> Type {
+        self.apply_tracked(ty, memo).0
+    }
+
+    /// Apply to `ty`, and say whether the result is ground and whether it is
+    /// `ty` itself, so a shared child that applying leaves as it was can be
+    /// returned rather than copied.
+    fn apply_tracked(&self, ty: &Type, mut memo: Option<&mut ApplyMemo>) -> (Type, Applied) {
         #[cfg(test)]
         APPLY_VISITS.with(|visits| visits.set(visits.get() + 1));
         match ty {
             Type::Var(v) => match self.resolve_tvar(*v) {
-                Type::Var(variable) => Type::Var(variable),
-                bound => self.apply_with(&bound, memo),
+                Type::Var(variable) => (
+                    Type::Var(variable),
+                    Applied {
+                        ground: false,
+                        same: variable == *v,
+                    },
+                ),
+                bound => {
+                    let (applied, outcome) = self.apply_tracked(&bound, memo);
+                    (applied, outcome.changed())
+                }
             },
             Type::Fn(args, ret) => {
-                let args = self.apply_list(args, memo.as_deref_mut());
-                Type::Fn(args, self.apply_child(ret, memo))
+                let (args, args_outcome) = self.apply_list(args, memo.as_deref_mut());
+                let (ret, ret_outcome) = self.apply_child(ret, memo);
+                (Type::Fn(args, ret), args_outcome.and(ret_outcome))
             }
-            Type::Ref(inner) => Type::Ref(self.apply_child(inner, memo)),
+            Type::Ref(inner) => {
+                let (inner, outcome) = self.apply_child(inner, memo);
+                (Type::Ref(inner), outcome)
+            }
             Type::Tensor(dims, prec) => {
-                Type::Tensor(self.apply_tensor_dims(dims), self.apply_tensor_prec(prec))
+                let applied_dims = self.apply_tensor_dims(dims);
+                let applied_prec = self.apply_tensor_prec(prec);
+                let outcome = Applied {
+                    ground: applied_dims.iter().all(dim_is_ground)
+                        && matches!(applied_prec, TensorPrec::Concrete(_)),
+                    same: applied_dims == *dims && applied_prec == *prec,
+                };
+                (Type::Tensor(applied_dims, applied_prec), outcome)
             }
-            Type::Adt(name, args) => Type::Adt(name.clone(), self.apply_list(args, memo)),
+            Type::Adt(name, args) => {
+                let (args, outcome) = self.apply_list(args, memo);
+                (Type::Adt(name.clone(), args), outcome)
+            }
             Type::KindedAdt(name, args) => {
-                Type::KindedAdt(name.clone(), self.apply_arguments(args, memo))
+                let (args, outcome) = self.apply_arguments(args, memo);
+                (Type::KindedAdt(name.clone(), args), outcome)
             }
-            Type::Tuple(ts) => Type::Tuple(self.apply_list(ts, memo)),
-            Type::Prim(_) | Type::Unit | Type::Error(_) => ty.clone(),
+            Type::Tuple(ts) => {
+                let (ts, outcome) = self.apply_list(ts, memo);
+                (Type::Tuple(ts), outcome)
+            }
+            Type::Prim(_) | Type::Unit | Type::Error(_) => (ty.clone(), Applied::GROUND),
         }
     }
 
-    fn apply_child(&self, child: &Arc<Type>, mut memo: Option<&mut ApplyMemo>) -> Arc<Type> {
+    fn apply_child(
+        &self,
+        child: &Arc<Type>,
+        mut memo: Option<&mut ApplyMemo>,
+    ) -> (Arc<Type>, Applied) {
+        if self.ground_types.holds(Arc::as_ptr(child).addr()) {
+            return (child.clone(), Applied::GROUND);
+        }
         let key = Arc::as_ptr(child).addr();
-        if let Some((_, applied)) = memo.as_deref().and_then(|memo| memo.children.get(&key)) {
-            return applied.clone();
+        if let Some((_, applied, outcome)) =
+            memo.as_deref().and_then(|memo| memo.children.get(&key))
+        {
+            return (applied.clone(), *outcome);
         }
-        let applied = Arc::new(self.apply_with(child, memo.as_deref_mut()));
+        let (applied, outcome) = self.apply_tracked(child, memo.as_deref_mut());
+        let applied = if outcome.same {
+            child.clone()
+        } else {
+            Arc::new(applied)
+        };
+        if outcome.ground {
+            self.ground_types
+                .record(GroundShared::Child(applied.clone()));
+        }
         if let Some(memo) = memo {
-            memo.children.insert(key, (child.clone(), applied.clone()));
+            memo.children
+                .insert(key, (child.clone(), applied.clone(), outcome));
         }
-        applied
+        (applied, outcome)
     }
 
-    fn apply_list(&self, items: &Arc<[Type]>, mut memo: Option<&mut ApplyMemo>) -> Arc<[Type]> {
+    fn apply_list(
+        &self,
+        items: &Arc<[Type]>,
+        mut memo: Option<&mut ApplyMemo>,
+    ) -> (Arc<[Type]>, Applied) {
+        if self
+            .ground_types
+            .holds(Arc::as_ptr(items).cast::<Type>().addr())
+        {
+            return (items.clone(), Applied::GROUND);
+        }
         let key = Arc::as_ptr(items).cast::<Type>().addr();
-        if let Some((_, applied)) = memo.as_deref().and_then(|memo| memo.lists.get(&key)) {
-            return applied.clone();
+        if let Some((_, applied, outcome)) = memo.as_deref().and_then(|memo| memo.lists.get(&key)) {
+            return (applied.clone(), *outcome);
         }
-        let applied = items
+        let mut outcome = Applied::GROUND;
+        let applied_items = items
             .iter()
-            .map(|item| self.apply_with(item, memo.as_deref_mut()))
-            .collect::<Arc<[Type]>>();
-        if let Some(memo) = memo {
-            memo.lists.insert(key, (items.clone(), applied.clone()));
+            .map(|item| {
+                let (applied, item_outcome) = self.apply_tracked(item, memo.as_deref_mut());
+                outcome = outcome.and(item_outcome);
+                applied
+            })
+            .collect::<Vec<_>>();
+        let applied = if outcome.same {
+            items.clone()
+        } else {
+            Arc::from(applied_items)
+        };
+        if outcome.ground {
+            self.ground_types
+                .record(GroundShared::List(applied.clone()));
         }
-        applied
+        if let Some(memo) = memo {
+            memo.lists
+                .insert(key, (items.clone(), applied.clone(), outcome));
+        }
+        (applied, outcome)
     }
 
     fn apply_arguments(
         &self,
         arguments: &Arc<[NominalArg]>,
         mut memo: Option<&mut ApplyMemo>,
-    ) -> Arc<[NominalArg]> {
-        let key = Arc::as_ptr(arguments).cast::<NominalArg>().addr();
-        if let Some((_, applied)) = memo.as_deref().and_then(|memo| memo.arguments.get(&key)) {
-            return applied.clone();
+    ) -> (Arc<[NominalArg]>, Applied) {
+        if self
+            .ground_types
+            .holds(Arc::as_ptr(arguments).cast::<NominalArg>().addr())
+        {
+            return (arguments.clone(), Applied::GROUND);
         }
-        let applied = arguments
+        let key = Arc::as_ptr(arguments).cast::<NominalArg>().addr();
+        if let Some((_, applied, outcome)) =
+            memo.as_deref().and_then(|memo| memo.arguments.get(&key))
+        {
+            return (applied.clone(), *outcome);
+        }
+        let mut outcome = Applied::GROUND;
+        let applied_arguments = arguments
             .iter()
             .map(|argument| match argument {
-                NominalArg::Type(ty) => NominalArg::Type(self.apply_with(ty, memo.as_deref_mut())),
-                NominalArg::Dimension(dim) => NominalArg::Dimension(self.apply_dim(dim)),
+                NominalArg::Type(ty) => {
+                    let (applied, argument_outcome) = self.apply_tracked(ty, memo.as_deref_mut());
+                    outcome = outcome.and(argument_outcome);
+                    NominalArg::Type(applied)
+                }
+                NominalArg::Dimension(dim) => {
+                    let applied = self.apply_dim(dim);
+                    outcome = outcome.and(Applied {
+                        ground: dim_is_ground(&applied),
+                        same: applied == *dim,
+                    });
+                    NominalArg::Dimension(applied)
+                }
             })
-            .collect::<Arc<[NominalArg]>>();
+            .collect::<Vec<_>>();
+        let applied = if outcome.same {
+            arguments.clone()
+        } else {
+            Arc::from(applied_arguments)
+        };
+        if outcome.ground {
+            self.ground_types
+                .record(GroundShared::Arguments(applied.clone()));
+        }
         if let Some(memo) = memo {
             memo.arguments
-                .insert(key, (arguments.clone(), applied.clone()));
+                .insert(key, (arguments.clone(), applied.clone(), outcome));
         }
-        applied
+        (applied, outcome)
     }
 
     /// Apply this substitution to a scheme body without substituting through
@@ -4751,27 +4982,42 @@ fn bind_rvar(r: RankVar, dims: &[Dim], subst: &mut Subst) -> Result<(), TypeErro
     Ok(())
 }
 
+/// Does `v` occur in `ty` once the substitution is applied?
+///
+/// The substitution is applied once, to the whole type, and the result is
+/// walked as it stands: every variable left in an applied type is unbound,
+/// so applying again at each level of the walk would find nothing new and
+/// would cost the size of each subtree once per enclosing level, which is
+/// cubic over a chain of bindings (chelis#3819).
 fn occurs_in(v: TypeVar, ty: &Type, subst: &Subst) -> bool {
     let ty = subst.apply(ty);
-    match &ty {
+    occurs_in_applied(v, &ty, subst)
+}
+
+fn occurs_in_applied(v: TypeVar, ty: &Type, subst: &Subst) -> bool {
+    match ty {
         Type::Var(v2) => *v2 == v,
         Type::Fn(args, ret) => {
-            args.iter().any(|a| occurs_in(v, a, subst)) || occurs_in(v, ret, subst)
+            args.iter().any(|a| occurs_in_applied(v, a, subst)) || occurs_in_applied(v, ret, subst)
         }
-        Type::Ref(inner) => occurs_in(v, inner, subst),
+        Type::Ref(inner) => occurs_in_applied(v, inner, subst),
         Type::Tensor(_, prec) => match prec {
             // Dims do not carry type vars (they have their own DimVar lane).
             // Precision slot CAN carry a TypeVar (WS-A5 precision polymorphism);
             // include it in the occurs check so an attempt to unify
             // ?v with `tensor[..., ?v]` is caught as an infinite type.
             TensorPrec::Concrete(_) => false,
+            // Applying keeps a precision variable bound to a non-primitive
+            // type as it is, so this one is resolved where it stands.
             TensorPrec::Var(v2) => occurs_in(v, &Type::Var(*v2), subst),
         },
-        Type::Adt(_, args) => args.iter().any(|a| occurs_in(v, a, subst)),
-        Type::KindedAdt(_, args) => args
-            .iter()
-            .any(|argument| argument.as_type().is_some_and(|ty| occurs_in(v, ty, subst))),
-        Type::Tuple(ts) => ts.iter().any(|t| occurs_in(v, t, subst)),
+        Type::Adt(_, args) => args.iter().any(|a| occurs_in_applied(v, a, subst)),
+        Type::KindedAdt(_, args) => args.iter().any(|argument| {
+            argument
+                .as_type()
+                .is_some_and(|ty| occurs_in_applied(v, ty, subst))
+        }),
+        Type::Tuple(ts) => ts.iter().any(|t| occurs_in_applied(v, t, subst)),
         Type::Prim(_) | Type::Unit | Type::Error(_) => false,
     }
 }

@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+use std::sync::OnceLock;
 
 use chelis_deep::Expr as DeepExpr;
 use chelis_ir::Dag;
@@ -527,10 +528,32 @@ pub struct CheckedCompilation {
     pub(crate) expanded_deep: Vec<DeepExpr>,
     pub(crate) fitness: FitnessReport,
     pub(crate) program: CheckedProgram,
-    pub(crate) root_metadata: RootMetadata,
+    /// Derived from `program` when it is first read. `check` never reads it,
+    /// and a declaration whose result is a tuple nested `n` deep names its
+    /// leaves with dotted paths about `n^2` bytes long in all (chelis#3820).
+    pub(crate) root_metadata: OnceLock<RootMetadata>,
 }
 
 impl CheckedCompilation {
+    pub(crate) fn new(
+        expanded_deep: Vec<DeepExpr>,
+        fitness: FitnessReport,
+        program: CheckedProgram,
+    ) -> Self {
+        Self {
+            expanded_deep,
+            fitness,
+            program,
+            root_metadata: OnceLock::new(),
+        }
+    }
+
+    /// Replace the derived root metadata, for a lowering that names its
+    /// roots against a library.
+    pub(crate) fn set_root_metadata(&mut self, root_metadata: RootMetadata) {
+        self.root_metadata = OnceLock::from(root_metadata);
+    }
+
     pub fn expanded_deep(&self) -> &[DeepExpr] {
         &self.expanded_deep
     }
@@ -544,15 +567,28 @@ impl CheckedCompilation {
     }
 
     pub fn root_metadata(&self) -> &RootMetadata {
-        &self.root_metadata
+        self.root_metadata
+            .get_or_init(|| crate::roots::root_metadata(&self.program, None))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn root_metadata_mut(&mut self) -> &mut RootMetadata {
+        self.root_metadata();
+        self.root_metadata
+            .get_mut()
+            .expect("root metadata was derived above")
     }
 
     pub fn into_parts(self) -> (Vec<DeepExpr>, FitnessReport, CheckedProgram, RootMetadata) {
+        let root_metadata = match self.root_metadata.into_inner() {
+            Some(root_metadata) => root_metadata,
+            None => crate::roots::root_metadata(&self.program, None),
+        };
         (
             self.expanded_deep,
             self.fitness,
             self.program,
-            self.root_metadata,
+            root_metadata,
         )
     }
 }

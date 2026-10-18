@@ -178,7 +178,7 @@ fn finish_isolated_lowering(
         Err(diagnostic)
             if mode == LoweringMode::AllowHostOnly
                 && !diagnostic.fatal
-                && checked.root_metadata.tensor_names.is_empty() =>
+                && checked.root_metadata().tensor_names.is_empty() =>
         {
             (
                 LoweredProgram::default(),
@@ -221,8 +221,8 @@ pub fn lower_checked_with_context(
         checked.program.exprs(),
         checked.program.type_env(),
     );
-    checked.root_metadata = root_metadata(&checked.program, Some(&lowered_map));
-    let tensor_names = checked.root_metadata.tensor_names.clone();
+    checked.set_root_metadata(root_metadata(&checked.program, Some(&lowered_map)));
+    let tensor_names = checked.root_metadata().tensor_names.clone();
 
     let lower_result =
         chelis_ir::lower::try_lower_program_with_context(library.raw(), &checked.program)
@@ -296,7 +296,7 @@ fn finish_lowering(
     let LoweredProgram { dag, rootless_defs } = lowered;
     let named_roots = match root_binding_mode {
         RootBindingMode::Exact => NamedRoots::aligned(
-            &checked.root_metadata.tensor_names.without(&rootless_defs),
+            &checked.root_metadata().tensor_names.without(&rootless_defs),
             dag.roots(),
             root_context,
         )?,
@@ -382,7 +382,7 @@ mod tests {
             assert_eq!(actual.dag().roots(), ordinary.dag().roots());
             let mut malformed = checked.clone();
             malformed
-                .root_metadata
+                .root_metadata_mut()
                 .tensor_names
                 .0
                 .push(IrName::new("phantom"));
