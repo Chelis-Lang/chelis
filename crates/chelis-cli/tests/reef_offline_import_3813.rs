@@ -383,6 +383,58 @@ fn fetch_plan_rejects_an_entry_without_origin() {
     assert!(output.stdout.is_empty(), "no partial plan on stdout");
 }
 
+/// chelis#3891: a `binary` entry whose `asset` or `name` is not a bare,
+/// URL-safe file name has no safe `file` or `url`, so the plan fails and
+/// names the entry. A plan consumer that writes `<dir>/<file>` cannot
+/// leave its directory, and the asset cannot change the URL path.
+#[test]
+fn fetch_plan_rejects_an_unsafe_binary_asset_or_name() {
+    let sandbox = Sandbox::new();
+    let release = Release::new();
+    let root = locked_package(
+        &sandbox.dir,
+        &release,
+        &format!("remote_origin = \"{ORIGIN}\""),
+    );
+    let valid = fs::read_to_string(root.join("reef.lock")).expect("read reef.lock");
+    let asset_line = format!(r#"asset = "{}""#, binary_asset_name());
+    let name_line = format!(r#"name = "{BINARY_NAME}""#);
+    assert_eq!(valid.matches(&asset_line).count(), 1);
+    assert_eq!(valid.matches(&name_line).count(), 1);
+
+    let cases = [
+        ("../x", valid.replace(&asset_line, r#"asset = "../x""#)),
+        ("a?b", valid.replace(&asset_line, r#"asset = "a?b""#)),
+        ("a/b", valid.replace(&asset_line, r#"asset = "a/b""#)),
+        ("a#b", valid.replace(&asset_line, r#"asset = "a#b""#)),
+        ("name ../x", valid.replace(&name_line, r#"name = "../x""#)),
+    ];
+    for (label, lock) in cases {
+        fs::write(root.join("reef.lock"), lock).expect("write reef.lock");
+        let output = sandbox
+            .chelis()
+            .args(["reef", "fetch-plan", "--package-root"])
+            .arg(&root)
+            .output()
+            .expect("run fetch-plan");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !output.status.success(),
+            "fetch-plan must fail for {label}: {stderr}"
+        );
+        assert!(
+            stderr.contains("lockfile entry `")
+                && stderr.contains("v1.0.0: refusing to plan binary `"),
+            "{label}: {stderr}"
+        );
+        assert!(
+            output.stdout.is_empty(),
+            "{label}: no partial plan on stdout"
+        );
+    }
+    sandbox.assert_no_network();
+}
+
 /// The import places the fetched pair in the registry with the locked
 /// origin, and the binary under `$CHELIS_HOME/bin`. The mock server sees
 /// no request.
