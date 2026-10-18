@@ -26,8 +26,8 @@ thread_local! {
     /// unwinds into structured diagnostics. The panic hook stays quiet in
     /// that scope so users see only the returned diagnostic.
     static SUPPRESS_LOWERING_PANIC_OUTPUT: Cell<bool> = const { Cell::new(false) };
-    /// Function bodies inlined while a recursion unrolls, against
-    /// [`MAX_UNROLLED_BODIES`]; `None` outside every lowering entry. Every
+    /// Recursive calls the current unroll has inlined, against
+    /// [`MAX_UNROLLED_BODIES`]; `None` outside every lowering boundary. Every
     /// lowering context draws on the one count, and it returns to zero when
     /// no name is recursing any more, so it measures one unroll at a time
     /// (chelis#3864).
@@ -36,8 +36,8 @@ thread_local! {
     /// context on this thread: a recursion is unrolling while this is
     /// nonzero.
     static RECURSING_NAMES: Cell<usize> = const { Cell::new(0) };
-    /// Whether the current unroll inlined a body inside an arm of a runtime
-    /// `if`, which lowers every arm.
+    /// Whether the current unroll inlined a recursive call inside an arm of
+    /// a runtime `if`, which lowers every arm.
     static UNROLL_BRANCHED: Cell<bool> = const { Cell::new(false) };
     /// Set while [`catch_lowering_diagnostic`] encloses a post-lowering pass.
     /// The hook stays quiet only for a lowering diagnostic's own unwind; any
@@ -736,17 +736,33 @@ fn panic_payload_to_lower_diagnostic(payload: &(dyn Any + Send)) -> LowerDiagnos
 /// segment size.
 const LOWERING_GROW_SEGMENT_BYTES: usize = 512 * 1024 * 1024;
 
-/// Restores, when a lowering boundary exits, the recursions active when it
-/// was entered: lowering that raised abandoned its context without
-/// unwinding its inline levels.
-struct RestoreRecursions(usize);
+/// The unroll state of one lowering boundary. Each boundary starts its own
+/// count and restores the enclosing one's on exit, so lowering inside a
+/// nested boundary, a scratch probe whose failure becomes a verdict among
+/// them, neither consumes nor trips the enclosing unroll's budget, and a
+/// boundary that raised, abandoning its context without unwinding its inline
+/// levels, leaves no recursion behind.
+struct UnrollScope {
+    count: Option<usize>,
+    recursing: usize,
+    branched: bool,
+}
 
-impl Drop for RestoreRecursions {
-    fn drop(&mut self) {
-        RECURSING_NAMES.with(|names| names.set(self.0));
-        if self.0 == 0 {
-            end_unroll();
+impl UnrollScope {
+    fn enter() -> Self {
+        Self {
+            count: UNROLLED_BODIES.with(|count| count.replace(Some(0))),
+            recursing: RECURSING_NAMES.with(|names| names.replace(0)),
+            branched: UNROLL_BRANCHED.with(|branched| branched.replace(false)),
         }
+    }
+}
+
+impl Drop for UnrollScope {
+    fn drop(&mut self) {
+        UNROLLED_BODIES.with(|count| count.set(self.count));
+        RECURSING_NAMES.with(|names| names.set(self.recursing));
+        UNROLL_BRANCHED.with(|branched| branched.set(self.branched));
     }
 }
 
@@ -775,33 +791,10 @@ fn catch_lowering<R>(f: impl FnOnce() -> R + std::panic::UnwindSafe) -> Result<R
             SUPPRESS_LOWERING_PANIC_OUTPUT.with(|cell| cell.set(false));
         }
     }
-    /// The outermost entry opens the unroll count and closes it on exit; a
-    /// nested entry draws on the enclosing one's.
-    struct Budget {
-        outermost: bool,
-        _recursions: RestoreRecursions,
-    }
-    impl Drop for Budget {
-        fn drop(&mut self) {
-            if self.outermost {
-                UNROLLED_BODIES.with(|count| count.set(None));
-            }
-        }
-    }
-
     install_chelis_panic_hook();
     SUPPRESS_LOWERING_PANIC_OUTPUT.with(|cell| cell.set(true));
     let _guard = Guard;
-    let _budget = Budget {
-        outermost: UNROLLED_BODIES.with(|count| {
-            let outermost = count.get().is_none();
-            if outermost {
-                count.set(Some(0));
-            }
-            outermost
-        }),
-        _recursions: RestoreRecursions(RECURSING_NAMES.with(Cell::get)),
-    };
+    let _unroll = UnrollScope::enter();
     std::panic::catch_unwind(|| stacker::grow(LOWERING_GROW_SEGMENT_BYTES, f))
         .map_err(|payload| panic_payload_to_lower_diagnostic(&*payload))
 }
@@ -841,7 +834,7 @@ pub(crate) fn catch_lowering_diagnostic<R>(
 
     install_chelis_panic_hook();
     let _restore = Restore(SUPPRESS_DIAGNOSTIC_PANIC_OUTPUT.with(|cell| cell.replace(true)));
-    let _recursions = RestoreRecursions(RECURSING_NAMES.with(Cell::get));
+    let _unroll = UnrollScope::enter();
     match std::panic::catch_unwind(f) {
         Ok(value) => Ok(value),
         Err(payload) if payload.is::<LowerDiagnostic>() || payload.is::<UnrepresentableDag>() => {
@@ -8008,13 +8001,14 @@ fn extract_cons_chain_tensor(expr: &Expr) -> Option<LiteralToTensor> {
 /// runtime-bounded recursion hits the cap in milliseconds and errors loudly
 /// instead of hanging.
 const MAX_STATIC_RECURSION_DEPTH: usize = 512;
-/// Limit on the function bodies one recursion's unroll inlines, counted from
-/// the first re-entry of a name until no name is recursing, across every
-/// lowering context (chelis#3864). The depth caps above bound how deep an
-/// unroll goes, not how wide: a recursion whose runtime-only condition
-/// selects between two recursive calls lowers both, so its unroll is a binary
-/// tree that stays under every depth cap while doubling at each level.
-/// Inlining a helper outside any recursion never counts. The budget is a
+/// Limit on the recursive calls one recursion's unroll inlines: re-entries
+/// of a name already active, counted from the first until no name is
+/// recursing, across every lowering context of one lowering boundary
+/// (chelis#3864). The depth caps above bound how deep an unroll goes, not how
+/// wide: a recursion whose runtime-only condition selects between two
+/// recursive calls lowers both, so its unroll is a binary tree that stays
+/// under every depth cap while its calls double at each level. A
+/// non-recursive helper's body never counts, however large. The budget is a
 /// count, so it depends only on the program, and an unroll that exceeds it is
 /// rejected loudly like the depth caps.
 const MAX_UNROLLED_BODIES: usize = 1 << 15;
@@ -8025,8 +8019,8 @@ const MAX_UNROLLED_BODIES: usize = 1 << 15;
 const MAX_TOTAL_INLINE_DEPTH: usize = 1024;
 
 impl LowerCtx<'_> {
-    /// Count one body inlined while a recursion unrolls, and reject the
-    /// unroll once it passes the budget.
+    /// Count one recursive call the unroll inlines, and reject the unroll
+    /// once it passes the budget.
     fn count_unrolled_body(&mut self, fn_expr: &Expr, callee: Option<&str>) {
         let Some(unrolled) = UNROLLED_BODIES.with(|count| {
             let unrolled = count.get().map(|unrolled| unrolled + 1);
@@ -8073,7 +8067,7 @@ impl LowerCtx<'_> {
             "the recursion's base case does not resolve statically within the budget"
         };
         let message = format!(
-            "recursive inlining of `{name}` exceeded the budget of {budget} function bodies \
+            "recursive inlining of `{name}` exceeded the budget of {budget} recursive calls \
              for one unroll: recursion lowers by bounded static unrolling, and {reason} \
              (chelis#620, chelis#3864)"
         );
@@ -16057,8 +16051,16 @@ impl<'program> LowerCtx<'program> {
         {
             RECURSING_NAMES.with(|names| names.set(names.get() + 1));
         }
-        if RECURSING_NAMES.with(Cell::get) > 0 {
-            self.count_unrolled_body(fn_expr, inlining_name.as_deref());
+        // Only a recursive call counts: a helper's body, however large,
+        // costs its size once per call, while a recursion that branches at
+        // runtime doubles its calls at each level.
+        if let Some(name) = &inlining_name
+            && self
+                .inlining_depths
+                .get(name)
+                .is_some_and(|depth| *depth > 1)
+        {
+            self.count_unrolled_body(fn_expr, Some(name));
         }
         if self.inlining_active > MAX_TOTAL_INLINE_DEPTH {
             self.reject_lowering_slice(
@@ -16219,9 +16221,10 @@ impl<'program> LowerCtx<'program> {
             && let Some(depth) = self.inlining_depths.get_mut(name)
         {
             if *depth == 2 {
-                // This name's re-entry counted it as recursing.
+                // This name's re-entry counted it as recursing; the floor
+                // keeps a boundary's fresh zero from wrapping.
                 let recursing = RECURSING_NAMES.with(|names| {
-                    names.set(names.get() - 1);
+                    names.set(names.get().max(1) - 1);
                     names.get()
                 });
                 if recursing == 0 {
@@ -35771,7 +35774,7 @@ def example() -> f32 = bisection(erf_projectile, cast(0.1, f32), cast(0.7, f32),
         let message = rejection.expect("the budget rejected the entry");
         assert!(
             message.starts_with(&format!(
-                "recursive inlining of `bisection_rec` exceeded the budget of {TEST_BUDGET} function bodies for one unroll"
+                "recursive inlining of `bisection_rec` exceeded the budget of {TEST_BUDGET} recursive calls for one unroll"
             )) && message.contains("known only at runtime unrolls every arm")
                 && message.contains("chelis#620"),
             "the rejection names the recursion, the budget and the runtime branch: {message}"
@@ -35872,5 +35875,81 @@ def example() -> f32 = bisection(erf_projectile, cast(0.1, f32), cast(0.7, f32),
         });
         assert_eq!(lowered, [false, true]);
         assert_eq!(counted, 101, "only the rejected unroll counted");
+    }
+
+    /// `hN` inlines 2^(N+1) - 1 bodies and recurses nowhere.
+    fn helper_tree(width: &str) -> String {
+        let mut source = format!("def h0(x: {width}) -> {width} = mul(x, x)\n");
+        for level in 1..=7 {
+            let below = level - 1;
+            source.push_str(&format!(
+                "def h{level}(x: {width}) -> {width} = h{below}(h{below}(x))\n"
+            ));
+        }
+        source
+    }
+
+    #[test]
+    fn a_linear_loop_counts_one_call_per_iteration() {
+        // chelis#3864 round 2: iterations that each inline a 31-body helper
+        // count one recursive call each, not 31 bodies. 32 iterations inline
+        // 992 helper bodies under a budget of 40.
+        let source = format!(
+            "{}def step(x: tensor[3, f32], i: i64) -> tensor[3, f32] = if gte(i, cast(32, i64)) then x else step(h5(x), add(i, cast(1, i64)))\ndef example(seed: tensor[3, f32]) -> tensor[3, f32] = step(seed, cast(0, i64))\n",
+            helper_tree("tensor[3, f32]")
+        );
+        let (lowered, counted, rejection) = lower_example(source, 40);
+        assert!(lowered, "the loop lowers: {rejection:?}");
+        assert_eq!(counted, 32, "one count per recursive call");
+    }
+
+    #[test]
+    fn a_nested_boundary_has_its_own_budget() {
+        // chelis#3864 round 2: a scratch probe lowers under its own catch,
+        // whose failure is a verdict rather than a rejection. It must start
+        // its own count, so it can neither consume nor trip the enclosing
+        // unroll's budget, and it must restore the enclosing unroll's state
+        // whether it returns or raises.
+        let state = || {
+            (
+                UNROLLED_BODIES.with(Cell::get),
+                RECURSING_NAMES.with(Cell::get),
+                UNROLL_BRANCHED.with(Cell::get),
+            )
+        };
+        UNROLLED_BODIES.with(|count| count.set(Some(390)));
+        RECURSING_NAMES.with(|names| names.set(2));
+        UNROLL_BRANCHED.with(|branched| branched.set(true));
+        let inner = catch_lowering(state).expect("the probe returns");
+        assert_eq!(inner, (Some(0), 0, false), "the probe starts its own count");
+        assert_eq!(
+            state(),
+            (Some(390), 2, true),
+            "a returning probe restores the unroll"
+        );
+        let raised = catch_lowering(|| {
+            UNROLLED_BODIES.with(|count| count.set(Some(7)));
+            RECURSING_NAMES.with(|names| names.set(3));
+            raise_lowering_error("probe failure", None, None)
+        });
+        assert!(raised.is_err());
+        assert_eq!(
+            state(),
+            (Some(390), 2, true),
+            "a raising probe restores the unroll"
+        );
+        let diagnosed = catch_lowering_diagnostic(|| {
+            RECURSING_NAMES.with(|names| names.set(4));
+            raise_lowering_error("pass failure", None, None)
+        });
+        assert!(diagnosed.is_err());
+        assert_eq!(
+            state(),
+            (Some(390), 2, true),
+            "a post-lowering pass restores the unroll"
+        );
+        UNROLLED_BODIES.with(|count| count.set(None));
+        RECURSING_NAMES.with(|names| names.set(0));
+        UNROLL_BRANCHED.with(|branched| branched.set(false));
     }
 }
