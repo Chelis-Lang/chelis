@@ -771,6 +771,10 @@ struct UnrollScope {
 
 impl UnrollScope {
     fn enter(budget: UnrollBudget) -> Self {
+        #[cfg(test)]
+        if budget == UnrollBudget::Enforced || UNROLL_ENFORCED.with(Cell::get) {
+            ENFORCING_SCOPES_ENTERED.with(|entered| entered.set(entered.get() + 1));
+        }
         Self {
             enforced: UNROLL_ENFORCED.with(|enforced| {
                 enforced.replace(enforced.get() || budget == UnrollBudget::Enforced)
@@ -806,6 +810,9 @@ fn end_unroll() {
 
 #[cfg(test)]
 thread_local! {
+    /// Lowering boundaries entered that enforce the budget, for a test that
+    /// checks which entries enforce it.
+    static ENFORCING_SCOPES_ENTERED: Cell<usize> = const { Cell::new(0) };
     /// A test's replacement for [`MAX_UNROLLED_BODIES`], the bodies counted
     /// against it, and the last rejection's message.
     static UNROLL_BUDGET_PROBE: std::cell::RefCell<Option<(usize, usize, Option<String>)>> =
@@ -36218,6 +36225,39 @@ def example() -> f32 = bisection(erf_projectile, cast(0.1, f32), cast(0.7, f32),
             "the same entry lowering outside cost is unbounded: {rejection:?}"
         );
         assert_eq!(counted, 0);
+        // The sub-expression entry eval's `vmap` and `grad` lower through,
+        // over the same checked program.
+        let controls_program = checked(&source);
+        let (controls, counted, rejection) = with_budget(100, move || {
+            let defs = collect_top_level_defs(controls_program.exprs());
+            let sigs = collect_top_level_sigs(controls_program.exprs());
+            let context = SubexprLoweringContext::from_checked_program(
+                &controls_program,
+                defs.into_iter().collect(),
+                sigs.into_iter().collect(),
+            );
+            let call = chelis_deep::parser::parse_str(
+                "(app {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))} (var {} example) (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))} seed))",
+            )
+            .expect("the call parses")
+            .remove(0);
+            let seed = TensorType {
+                dims: vec![DimInfo::Lit(3)],
+                precision: Prim::F32,
+            };
+            try_lower_subexpr_program_with_context_and_controls(
+                &call,
+                UnordMap::from([("seed".to_string(), seed)]),
+                &context,
+            )
+            .map(|lowered| lowered.dag.nodes().len())
+        });
+        assert!(
+            controls.is_ok(),
+            "the vmap and grad entry is unbounded: {:?} {rejection:?}",
+            controls.err()
+        );
+        assert_eq!(counted, 0);
     }
 
     #[test]
@@ -36238,5 +36278,32 @@ def example() -> f32 = bisection(erf_projectile, cast(0.1, f32), cast(0.7, f32),
             message.starts_with("recursive inlining of `tree`"),
             "{message}"
         );
+    }
+
+    #[test]
+    fn no_public_lowering_entry_but_cost_enforces_the_budget() {
+        // chelis#3864 round 3: the whole-program entry, which eval, build and
+        // library lowering use, opens only unbounded boundaries; the cost
+        // entry opens an enforcing one. Counted by the boundaries entered, so
+        // it holds whatever the program lowers to.
+        let entered = |work: Box<dyn FnOnce()>| {
+            ENFORCING_SCOPES_ENTERED.with(|entered| entered.set(0));
+            work();
+            ENFORCING_SCOPES_ENTERED.with(Cell::get)
+        };
+        let source = format!(
+            "{}def example(seed: tensor[3, f32]) -> tensor[3, f32] = h7(seed)\nout = h7(to_tensor([1.0f32, 2.0f32, 3.0f32]))\n",
+            helper_tree("tensor[3, f32]")
+        );
+        let program = checked(&source);
+        let whole = entered(Box::new(|| {
+            crate::lower::try_lower_program_to_library(&program).expect("the program lowers");
+        }));
+        assert_eq!(whole, 0, "the whole-program entry enforces nothing");
+        let cost = entered(Box::new(|| {
+            let _ = crate::host::lower_named_tensor_entry_dags(&program, &["example".to_string()])
+                .collect::<Vec<_>>();
+        }));
+        assert!(cost > 0, "the cost entry enforces the budget");
     }
 }
