@@ -18,7 +18,8 @@ use std::cell::Cell;
 use std::collections::BTreeMap;
 
 use super::ir::{
-    Block, BlockId, Edge, EdgeId, EdgeTerminal, OpId, Operation, OwnershipProgram, Terminator, Unit,
+    Block, BlockId, Edge, EdgeId, EdgeTerminal, HostSiteMap, OpId, Operation, OwnershipProgram,
+    Terminator, Unit,
 };
 
 thread_local! {
@@ -208,5 +209,31 @@ fn edge_at(terminator: &Terminator, position: usize) -> Option<&Edge> {
         ) => Some(else_edge),
         (Terminator::Match { arms, .. }, position) => arms.get(position),
         _ => None,
+    }
+}
+
+/// The positions of each unit's records in a host-site map, in map order.
+///
+/// A function's emission view reads its own sites from here instead of
+/// filtering every record of the program, which made projecting `n`
+/// functions cost `n` times the program's sites (chelis#3847).
+#[derive(Debug, Default)]
+pub(super) struct SitesByUnit {
+    units: BTreeMap<usize, Vec<usize>>,
+}
+
+impl SitesByUnit {
+    pub(super) fn new(sites: &HostSiteMap) -> Self {
+        let mut units = BTreeMap::<usize, Vec<usize>>::new();
+        for (position, record) in sites.records().enumerate() {
+            units.entry(record.unit).or_default().push(position);
+        }
+        Self { units }
+    }
+
+    /// The positions of `unit`'s records, ascending.
+    pub(super) fn of(&self, unit: usize) -> &[usize] {
+        note_site_lookup_entries(1);
+        self.units.get(&unit).map_or(&[], Vec::as_slice)
     }
 }

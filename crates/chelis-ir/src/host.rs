@@ -65,6 +65,10 @@ thread_local! {
     /// counts them, so it can bound refinement's work by the body's size
     /// (chelis#3797). `None` when nothing counts.
     static REFINE_SCOPE_ENTRIES: Cell<Option<u64>> = const { Cell::new(None) };
+    /// Names host lowering compared or looked up by their last `__` or `.`
+    /// segment while a test counts them, so it can bound name resolution by
+    /// the program's size (chelis#3854). `None` when nothing counts.
+    static TERMINAL_NAME_COMPARISONS: Cell<Option<u64>> = const { Cell::new(None) };
     /// Fallback for platforms where native stack headroom cannot be measured.
     static HOST_LOWER_DEPTH: Cell<usize> = const { Cell::new(0) };
     /// Reserve chosen from the stack available at the outermost host-lowering
@@ -633,6 +637,13 @@ pub struct HostLoweringSession<'program> {
 struct TopLevelNameIndex {
     defs: NameTable,
     defsigs: NameTable,
+    /// The functions whose signature inference records an authored
+    /// signature, by terminal segment, in the inference map's key order
+    /// (chelis#3854).
+    authored_signatures: UnordMap<String, Vec<String>>,
+    /// The type environment's keys by terminal segment, in key order
+    /// (chelis#3854).
+    type_env: UnordMap<String, Vec<String>>,
 }
 
 /// A top-level item's position: an index into the program's expressions,
@@ -750,6 +761,24 @@ impl<'program> HostLoweringSession<'program> {
                 path.push(position);
                 index_top_level_items(expr, &mut path, &mut index);
                 path.pop();
+            }
+            for (name, inference) in &self.program.signature_inference().functions {
+                note_terminal_name_comparisons(1);
+                if inference.authored_signature {
+                    index
+                        .authored_signatures
+                        .entry(terminal_name(name).to_owned())
+                        .or_default()
+                        .push(name.clone());
+                }
+            }
+            for name in self.program.type_env().keys() {
+                note_terminal_name_comparisons(1);
+                index
+                    .type_env
+                    .entry(terminal_name(name).to_owned())
+                    .or_default()
+                    .push(name.clone());
             }
             index
         };
@@ -918,6 +947,34 @@ pub fn counting_refine_scope_entries<R>(work: impl FnOnce() -> R) -> (R, u64) {
         .expect("the count stays armed while the work runs");
     drop(restore);
     (result, counted)
+}
+
+/// Run `work`, counting the names host lowering compares or looks up by
+/// their terminal segment on this thread meanwhile.
+#[doc(hidden)]
+pub fn counting_terminal_name_comparisons<R>(work: impl FnOnce() -> R) -> (R, u64) {
+    struct Restore(Option<u64>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            TERMINAL_NAME_COMPARISONS.with(|count| count.set(self.0));
+        }
+    }
+    let restore = Restore(TERMINAL_NAME_COMPARISONS.with(|count| count.replace(Some(0))));
+    let result = work();
+    let counted = TERMINAL_NAME_COMPARISONS
+        .with(Cell::get)
+        .expect("the count stays armed while the work runs");
+    drop(restore);
+    (result, counted)
+}
+
+/// Add `entries` to the terminal-name count while a test counts.
+fn note_terminal_name_comparisons(entries: usize) {
+    TERMINAL_NAME_COMPARISONS.with(|count| {
+        if let Some(counted) = count.get() {
+            count.set(Some(counted + entries as u64));
+        }
+    });
 }
 
 /// Add `entries` to the refinement count while a test counts.
@@ -20983,6 +21040,46 @@ fn checked_authored_function_signature<'a>(
     if program.declares_exactly(name) {
         return None;
     }
+    // An authored signature answers for `name` when it is the only one whose
+    // terminal segment matches; an exact match would have answered above.
+    let candidates = program
+        .names()
+        .authored_signatures
+        .get(terminal_name(name))
+        .map_or(&[][..], Vec::as_slice);
+    note_terminal_name_comparisons(candidates.len().max(1));
+    let [candidate] = candidates else {
+        return None;
+    };
+    let inference = program.signature_inference().functions.get(candidate)?;
+    Some(
+        inference
+            .authored_signature_type
+            .as_ref()
+            .unwrap_or(&inference.checked_signature),
+    )
+}
+
+/// The linear signature scan the session's name index replaced
+/// (chelis#3854), kept as the reference the index is tested against.
+#[cfg(test)]
+fn scan_checked_authored_function_signature<'a>(
+    program: &'a HostLoweringSession<'a>,
+    name: &str,
+) -> Option<&'a Type> {
+    if let Some(inference) = program.signature_inference().functions.get(name)
+        && inference.authored_signature
+    {
+        return Some(
+            inference
+                .authored_signature_type
+                .as_ref()
+                .unwrap_or(&inference.checked_signature),
+        );
+    }
+    if program.declares_exactly(name) {
+        return None;
+    }
     let mut matches = program
         .signature_inference()
         .functions
@@ -24172,6 +24269,9 @@ fn reduce_axis_tensor_type(tensor_ty: &TensorType, axis: usize) -> TensorType {
     }
 }
 
+/// The linear type-environment scan [`lookup_session_type_expr`] replaced
+/// (chelis#3854), kept as the reference it is tested against.
+#[cfg(test)]
 fn lookup_type_expr<'a>(type_env: &'a BTreeMap<String, Expr>, name: &str) -> Option<&'a Expr> {
     type_env.get(name).or_else(|| {
         let mut matches = type_env
@@ -24211,6 +24311,27 @@ fn scan_authored_defsig_type_expr(exprs: &[Expr], name: &str) -> Option<Expr> {
     })
 }
 
+/// The type-environment entry for `name`: its exact key, or else the only
+/// key whose terminal segment matches.
+fn lookup_session_type_expr<'a>(
+    program: &'a HostLoweringSession<'a>,
+    name: &str,
+) -> Option<&'a Expr> {
+    let type_env = program.type_env();
+    type_env.get(name).or_else(|| {
+        let candidates = program
+            .names()
+            .type_env
+            .get(terminal_name(name))
+            .map_or(&[][..], Vec::as_slice);
+        note_terminal_name_comparisons(candidates.len().max(1));
+        let [candidate] = candidates else {
+            return None;
+        };
+        type_env.get(candidate)
+    })
+}
+
 fn lookup_authored_defsig_type_expr(program: &HostLoweringSession<'_>, name: &str) -> Option<Expr> {
     program.defsig_named(name).cloned()
 }
@@ -24222,7 +24343,7 @@ fn lookup_declared_type_expr(program: &HostLoweringSession<'_>, name: &str) -> O
             if program.declares_exactly(name) {
                 program.type_env().get(name).cloned()
             } else {
-                lookup_type_expr(program.type_env(), name).cloned()
+                lookup_session_type_expr(program, name).cloned()
             }
         })
 }
@@ -24263,10 +24384,15 @@ fn lookup_program_def<'a>(defs: &'a BTreeMap<String, Expr>, name: &str) -> Optio
 }
 
 fn terminal_name_matches(full_name: &str, short_name: &str) -> bool {
+    note_terminal_name_comparisons(1);
     full_name == short_name || terminal_name(full_name) == terminal_name(short_name)
 }
 
+/// Every terminal-segment comparison and table key goes through here, so a
+/// scan that resolves names by segment is visible to the counted oracle
+/// however it is written (chelis#3854).
 fn terminal_name(name: &str) -> &str {
+    note_terminal_name_comparisons(1);
     name.rsplit_once("__")
         .map(|(_, tail)| tail)
         .or_else(|| name.rsplit_once('.').map(|(_, tail)| tail))
@@ -31233,6 +31359,16 @@ def main(x: tensor[4, f32], rate: f32) -> tensor[4, f32] =
              (def {} B.twin (fn {} (params {} (x {type: (t-prim {} i32)})) (var {} x)))\n\
              (def {} C__solo (fn {} (params {} (x {type: (t-prim {} i32)})) (var {} x)))\n",
         ));
+        // chelis#3854: an authored signature whose terminal segment is a
+        // builtin's name, and two authored signatures sharing a terminal.
+        programs.push(parse_and_check(
+            "(defsig {} M__add (t-fn {} (t-prim {} i32) (t-prim {} i32)))\n\
+             (def {} M__add (fn {} (params {} (x {type: (t-prim {} i32)})) (var {} x)))\n\
+             (defsig {} A__pair (t-fn {} (t-prim {} i32) (t-prim {} i32)))\n\
+             (def {} A__pair (fn {} (params {} (x {type: (t-prim {} i32)})) (var {} x)))\n\
+             (defsig {} B.pair (t-fn {} (t-prim {} i32) (t-prim {} i32)))\n\
+             (def {} B.pair (fn {} (params {} (x {type: (t-prim {} i32)})) (var {} x)))\n",
+        ));
         let mut compared = 0usize;
         for checked in &programs {
             let session = HostLoweringSession::new(checked);
@@ -31250,8 +31386,35 @@ def main(x: tensor[4, f32], rate: f32) -> tensor[4, f32] =
                 names.push(format!("Q.{terminal}"));
                 names.push(terminal);
             }
+            // The signature and type-environment keys too, builtins included.
+            let mut keyed = checked
+                .signature_inference()
+                .functions
+                .keys()
+                .chain(checked.type_env().keys())
+                .cloned()
+                .collect::<Vec<_>>();
+            for name in keyed.clone() {
+                let terminal = terminal_name(&name).to_owned();
+                keyed.push(format!("Q__{terminal}"));
+                keyed.push(terminal);
+            }
+            names.extend(keyed);
             names.push("definitely_missing".into());
             for name in &names {
+                assert_eq!(
+                    checked_authored_function_signature(&session, name).map(std::ptr::from_ref),
+                    scan_checked_authored_function_signature(&session, name)
+                        .map(std::ptr::from_ref),
+                    "authored signature resolution of `{name}`"
+                );
+                if !session.declares_exactly(name) {
+                    assert_eq!(
+                        lookup_session_type_expr(&session, name).map(std::ptr::from_ref),
+                        lookup_type_expr(checked.type_env(), name).map(std::ptr::from_ref),
+                        "type-environment resolution of `{name}`"
+                    );
+                }
                 let indexed = session.def_named(name);
                 let scanned = find_top_level_def_named(checked.exprs(), name);
                 assert_eq!(
@@ -31274,7 +31437,18 @@ def main(x: tensor[4, f32], rate: f32) -> tensor[4, f32] =
             programs.len()
         );
         assert!(compared > 1_000, "compared only {compared} spellings");
-        let collisions = programs.last().expect("handcrafted program");
+        let shadows = programs.last().expect("handcrafted terminal collisions");
+        let session = HostLoweringSession::new(shadows);
+        assert!(
+            checked_authored_function_signature(&session, "Z__add").is_some(),
+            "`M__add` is the only authored `add`"
+        );
+        assert!(
+            checked_authored_function_signature(&session, "pair").is_none(),
+            "`pair` is ambiguous between `A__pair` and `B.pair`"
+        );
+        take_top_level_name_index_builds();
+        let collisions = &programs[programs.len() - 2];
         let session = HostLoweringSession::new(collisions);
         assert_eq!(session.def_named("twin"), None, "`twin` is ambiguous");
         assert_eq!(

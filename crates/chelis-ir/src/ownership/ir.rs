@@ -563,7 +563,63 @@ pub(crate) struct HostSiteRecord {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct HostSiteMap {
-    pub(crate) records: Vec<HostSiteRecord>,
+    /// Private, so every read of a record goes through an accessor that
+    /// counts the records it yields. A scan of the whole map per query is
+    /// then visible to the site-lookup oracle however it is spelled
+    /// (chelis#3847).
+    records: Vec<HostSiteRecord>,
+}
+
+impl HostSiteMap {
+    pub(crate) fn len(&self) -> usize {
+        self.records.len()
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.records.is_empty()
+    }
+
+    /// Every record in map order, each counted as it is yielded.
+    pub(crate) fn records(&self) -> impl ExactSizeIterator<Item = &HostSiteRecord> + Clone {
+        self.records
+            .iter()
+            .inspect(|_| super::locations::note_site_lookup_entries(1))
+    }
+
+    /// The record at `index`, counted.
+    pub(crate) fn record(&self, index: usize) -> Option<&HostSiteRecord> {
+        super::locations::note_site_lookup_entries(1);
+        self.records.get(index)
+    }
+
+    /// Every record in map order, mutably, each counted as it is yielded.
+    pub(crate) fn records_mut(&mut self) -> impl ExactSizeIterator<Item = &mut HostSiteRecord> {
+        self.records
+            .iter_mut()
+            .inspect(|_| super::locations::note_site_lookup_entries(1))
+    }
+
+    /// The record at `index`, mutably, counted.
+    pub(crate) fn record_mut(&mut self, index: usize) -> Option<&mut HostSiteRecord> {
+        super::locations::note_site_lookup_entries(1);
+        self.records.get_mut(index)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_records(records: Vec<HostSiteRecord>) -> Self {
+        Self { records }
+    }
+
+    /// The records for a test to build or corrupt a map directly, uncounted.
+    #[cfg(test)]
+    pub(crate) fn raw_records(&self) -> &Vec<HostSiteRecord> {
+        &self.records
+    }
+
+    #[cfg(test)]
+    pub(crate) fn raw_records_mut(&mut self) -> &mut Vec<HostSiteRecord> {
+        &mut self.records
+    }
 }
 
 #[derive(Debug, Default)]

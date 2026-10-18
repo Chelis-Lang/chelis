@@ -361,7 +361,7 @@ fn upgrade_container_last_use_moves(
                 }
                 block.ops.remove(terminal_index);
                 let block_id = block.id;
-                for record in &mut sites.records {
+                for record in sites.records_mut() {
                     record.actions.retain(|action| {
                         !matches!(
                             action,
@@ -440,7 +440,7 @@ fn upgrade_copy_last_use_moves(
         }
     }
     if !removed.is_empty() {
-        for record in &mut sites.records {
+        for record in sites.records_mut() {
             record.actions.retain(|action| match action {
                 HostSiteAction::Operation {
                     unit,
@@ -1212,7 +1212,7 @@ fn rebuild_host_sites(
     sites: &mut HostSiteMap,
     placed: &[(usize, Vec<Placed>)],
 ) -> Result<(), OwnershipError> {
-    if sites.records.is_empty() {
+    if sites.is_empty() {
         return Ok(());
     }
     #[cfg(test)]
@@ -1239,7 +1239,7 @@ fn rebuild_host_sites_indexed(
         .iter()
         .flat_map(|(unit, terminals)| terminals.iter().map(move |terminal| (*unit, terminal.id)))
         .collect::<BTreeSet<_>>();
-    for record in &mut sites.records {
+    for record in sites.records_mut() {
         lookup_visited(record.actions.len());
         record.actions.retain(|action| {
             !matches!(
@@ -1342,7 +1342,7 @@ fn rebuild_host_sites_indexed(
     for (site_index, mut inserted) in insertions {
         // Stable: terminals sharing a slot keep their placement order.
         inserted.sort_by_key(|(slot, _)| *slot);
-        let record = &mut sites.records[site_index];
+        let record = sites.record_mut(site_index).expect("collected site index");
         let original = std::mem::take(&mut record.actions);
         lookup_visited(original.len() + inserted.len());
         let mut inserted = inserted.into_iter().peekable();
@@ -1380,7 +1380,7 @@ impl SiteAnchors {
             terminator: BTreeMap::new(),
             function_entry: BTreeMap::new(),
         };
-        for (index, record) in sites.records.iter().enumerate() {
+        for (index, record) in sites.records().enumerate() {
             lookup_visited(record.actions.len());
             if record.kind == super::ir::HostSiteKind::FunctionEntry {
                 anchors.function_entry.entry(record.unit).or_insert(index);

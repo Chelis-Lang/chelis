@@ -1267,13 +1267,13 @@ impl<'a> VerifiedHostFunctionView<'a> {
     pub fn sites(self) -> impl Iterator<Item = VerifiedHostSiteView<'a>> + 'a {
         let unit = self.index + 1;
         let program = self.emission.ownership_program();
+        let records = self.emission.sites;
         self.emission
-            .sites
-            .records
+            .sites_by_unit
+            .of(unit)
             .iter()
-            .filter(move |record| record.unit == unit)
-            .map(move |record| VerifiedHostSiteView {
-                record,
+            .map(move |&position| VerifiedHostSiteView {
+                record: records.record(position).expect("indexed site record"),
                 program,
                 verification: self.emission.verification,
             })
@@ -1288,6 +1288,7 @@ pub struct VerifiedHostEmission<'a> {
     program: &'a ir::OwnershipProgram,
     verification: &'a verify::HostVerification,
     sites: &'a ir::HostSiteMap,
+    sites_by_unit: &'a locations::SitesByUnit,
     nested_dags: &'a [NestedDagProof],
 }
 
@@ -1357,8 +1358,7 @@ impl<'a> VerifiedHostEmission<'a> {
     pub fn sites(self) -> impl ExactSizeIterator<Item = VerifiedHostSiteView<'a>> + 'a {
         let program = self.ownership_program();
         self.sites
-            .records
-            .iter()
+            .records()
             .map(move |record| VerifiedHostSiteView {
                 record,
                 program,
@@ -1368,12 +1368,12 @@ impl<'a> VerifiedHostEmission<'a> {
 
     pub fn root_sites(self) -> impl Iterator<Item = VerifiedHostSiteView<'a>> + 'a {
         let program = self.ownership_program();
-        self.sites
-            .records
+        let records = self.sites;
+        self.sites_by_unit
+            .of(0)
             .iter()
-            .filter(|record| record.unit == 0)
-            .map(move |record| VerifiedHostSiteView {
-                record,
+            .map(move |&position| VerifiedHostSiteView {
+                record: records.record(position).expect("indexed site record"),
                 program,
                 verification: self.verification,
             })
@@ -1516,7 +1516,9 @@ pub struct VerifiedOwnershipProgram<P: EmissionPayload>(OwnershipProgram<P>, Ver
 /// [`verify::HostVerification`] travels in its [`OwnershipProof::Host`].
 #[derive(Debug)]
 enum VerificationProof {
-    Host,
+    /// The verified site map's records, indexed by unit for the emission
+    /// views.
+    Host(locations::SitesByUnit),
     Dag,
 }
 
@@ -1601,7 +1603,7 @@ pub fn verify_ownership<P: EmissionPayload>(
             verify::verify_host_sites(&payload.program, &payload.manifest, ir_program, sites)?;
             verify_manifest_sinks(payload, ir_program, sites)?;
             verify_nested_dags(&program, nested_dags)?;
-            VerificationProof::Host
+            VerificationProof::Host(locations::SitesByUnit::new(sites))
         }
         (OwnershipProof::Dag(plan), PayloadKind::Dag) => {
             let dag = dag_payload(&program)?;
@@ -1632,8 +1634,7 @@ fn verify_manifest_sinks(
         .map(|entry| entry.name.as_str())
         .collect::<Vec<_>>();
     let actual = sites
-        .records
-        .iter()
+        .records()
         .filter(|site| {
             site.actions.iter().any(|action| {
                 matches!(
@@ -1690,7 +1691,7 @@ impl VerifiedHostProgram {
         let payload = (&self.0.payload as &dyn std::any::Any)
             .downcast_ref::<HostEmissionPayload>()
             .expect("sealed host payload specialization");
-        let VerificationProof::Host = &self.1 else {
+        let VerificationProof::Host(sites_by_unit) = &self.1 else {
             unreachable!("sealed host verification specialization")
         };
         VerifiedHostEmission {
@@ -1698,12 +1699,13 @@ impl VerifiedHostProgram {
             program,
             verification,
             sites,
+            sites_by_unit,
             nested_dags,
         }
     }
 
     pub fn live_set_bound(&self) -> &VerifiedLiveSetBound {
-        let (OwnershipProof::Host { verification, .. }, VerificationProof::Host) =
+        let (OwnershipProof::Host { verification, .. }, VerificationProof::Host(_)) =
             (&self.0.proof, &self.1)
         else {
             unreachable!("sealed host verification specialization")

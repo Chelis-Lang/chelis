@@ -347,51 +347,49 @@ fn stable_operation_ids_survive_reordering_and_duplicates_are_rejected() {
         kind: HostSiteKind::Expression,
         actions: vec![action],
     };
-    let sites = HostSiteMap {
-        records: vec![
-            record(
-                0,
-                HostSiteAction::Operation {
-                    unit: 0,
-                    block: BlockId(0),
-                    operation: OpId(0),
-                },
-            ),
-            record(
-                1,
-                HostSiteAction::Operation {
-                    unit: 0,
-                    block: BlockId(0),
-                    operation: OpId(1),
-                },
-            ),
-            record(
-                2,
-                HostSiteAction::Operation {
-                    unit: 0,
-                    block: BlockId(0),
-                    operation: OpId(2),
-                },
-            ),
-            record(
-                3,
-                HostSiteAction::Operation {
-                    unit: 0,
-                    block: BlockId(0),
-                    operation: OpId(3),
-                },
-            ),
-            HostSiteRecord {
-                id: HostSiteId::from_index(4),
+    let sites = HostSiteMap::from_records(vec![
+        record(
+            0,
+            HostSiteAction::Operation {
                 unit: 0,
-                kind: HostSiteKind::FunctionReturn,
-                actions: vec![HostSiteAction::Terminator {
-                    unit: 0,
-                    block: BlockId(0),
-                }],
+                block: BlockId(0),
+                operation: OpId(0),
             },
-        ],
-    };
+        ),
+        record(
+            1,
+            HostSiteAction::Operation {
+                unit: 0,
+                block: BlockId(0),
+                operation: OpId(1),
+            },
+        ),
+        record(
+            2,
+            HostSiteAction::Operation {
+                unit: 0,
+                block: BlockId(0),
+                operation: OpId(2),
+            },
+        ),
+        record(
+            3,
+            HostSiteAction::Operation {
+                unit: 0,
+                block: BlockId(0),
+                operation: OpId(3),
+            },
+        ),
+        HostSiteRecord {
+            id: HostSiteId::from_index(4),
+            unit: 0,
+            kind: HostSiteKind::FunctionReturn,
+            actions: vec![HostSiteAction::Terminator {
+                unit: 0,
+                block: BlockId(0),
+            }],
+        },
+    ]);
     super::verify::verify_host_actions(&program, &RootManifest { entries: vec![] }, &sites)
         .unwrap();
 
@@ -413,7 +411,8 @@ fn stable_operation_ids_survive_reordering_and_duplicates_are_rejected() {
     super::verify::verify_host_actions(&program, &RootManifest { entries: vec![] }, &sites)
         .unwrap();
     let action =
-        super::verified_host_action(&program, &verification, &sites.records[0].actions[0]).unwrap();
+        super::verified_host_action(&program, &verification, &sites.raw_records()[0].actions[0])
+            .unwrap();
     assert!(matches!(
         action,
         super::VerifiedHostAction::Operation(super::VerifiedHostOperation::Define {
@@ -1952,48 +1951,46 @@ fn host_payload_site_and_directive_universes_are_bijective() {
         kind,
         actions,
     };
-    let valid = HostSiteMap {
-        records: vec![
-            record(0, HostSiteKind::Binding, vec![]),
-            record(
-                1,
-                HostSiteKind::Expression,
-                vec![HostSiteAction::Operation {
+    let valid = HostSiteMap::from_records(vec![
+        record(0, HostSiteKind::Binding, vec![]),
+        record(
+            1,
+            HostSiteKind::Expression,
+            vec![HostSiteAction::Operation {
+                unit: 0,
+                block: BlockId(0),
+                operation: OpId(0),
+            }],
+        ),
+        record(
+            2,
+            HostSiteKind::ManifestRoot,
+            vec![
+                HostSiteAction::Root {
+                    unit: 0,
+                    manifest_index: Some(0),
+                    owner: OwnerId(0),
+                },
+                HostSiteAction::Operation {
                     unit: 0,
                     block: BlockId(0),
-                    operation: OpId(0),
-                }],
-            ),
-            record(
-                2,
-                HostSiteKind::ManifestRoot,
-                vec![
-                    HostSiteAction::Root {
-                        unit: 0,
-                        manifest_index: Some(0),
-                        owner: OwnerId(0),
-                    },
-                    HostSiteAction::Operation {
-                        unit: 0,
-                        block: BlockId(0),
-                        operation: OpId(1),
-                    },
-                ],
-            ),
-            record(
-                3,
-                HostSiteKind::FunctionReturn,
-                vec![HostSiteAction::Terminator {
-                    unit: 0,
-                    block: BlockId(0),
-                }],
-            ),
-        ],
-    };
+                    operation: OpId(1),
+                },
+            ],
+        ),
+        record(
+            3,
+            HostSiteKind::FunctionReturn,
+            vec![HostSiteAction::Terminator {
+                unit: 0,
+                block: BlockId(0),
+            }],
+        ),
+    ]);
     super::verify::verify_host_sites(&host, &manifest, &program, &valid).unwrap();
 
     let mut missing = valid.clone();
-    missing.records[2]
+    missing.raw_records_mut()[2]
         .actions
         .retain(|action| !matches!(action, HostSiteAction::Operation { .. }));
     assert!(matches!(
@@ -2002,7 +1999,7 @@ fn host_payload_site_and_directive_universes_are_bijective() {
     ));
 
     let mut missing_root = valid.clone();
-    missing_root.records[2]
+    missing_root.raw_records_mut()[2]
         .actions
         .retain(|action| !matches!(action, HostSiteAction::Root { .. }));
     assert!(matches!(
@@ -2011,7 +2008,7 @@ fn host_payload_site_and_directive_universes_are_bijective() {
     ));
 
     let mut duplicate_root = valid.clone();
-    duplicate_root.records[2]
+    duplicate_root.raw_records_mut()[2]
         .actions
         .push(HostSiteAction::Root {
             unit: 0,
@@ -2024,18 +2021,20 @@ fn host_payload_site_and_directive_universes_are_bijective() {
     ));
 
     let mut extra = valid.clone();
-    extra.records[3].actions.push(HostSiteAction::Operation {
-        unit: 0,
-        block: BlockId(0),
-        operation: OpId(1),
-    });
+    extra.raw_records_mut()[3]
+        .actions
+        .push(HostSiteAction::Operation {
+            unit: 0,
+            block: BlockId(0),
+            operation: OpId(1),
+        });
     assert!(matches!(
         super::verify::verify_host_sites(&host, &manifest, &program, &extra),
         Err(OwnershipError::HostSiteMap { .. })
     ));
 
     let mut mismatched = valid;
-    mismatched.records.swap(0, 1);
+    mismatched.raw_records_mut().swap(0, 1);
     assert!(matches!(
         super::verify::verify_host_sites(&host, &manifest, &program, &mismatched),
         Err(OwnershipError::HostSiteMap { .. })
@@ -2089,12 +2088,12 @@ fn payload_census_rejects_a_missing_match_option_binding_and_wrong_kind() {
             actions: Vec::new(),
         })
         .collect::<Vec<_>>();
-    let valid = HostSiteMap { records };
+    let valid = HostSiteMap::from_records(records);
     super::verify::verify_host_payload_sites(&host, &manifest, &valid).unwrap();
 
     let mut missing_binding = valid.clone();
-    missing_binding.records.remove(5);
-    for (index, record) in missing_binding.records.iter_mut().enumerate() {
+    missing_binding.raw_records_mut().remove(5);
+    for (index, record) in missing_binding.raw_records_mut().iter_mut().enumerate() {
         record.id = HostSiteId::from_index(index);
     }
     assert!(matches!(
@@ -2103,7 +2102,7 @@ fn payload_census_rejects_a_missing_match_option_binding_and_wrong_kind() {
     ));
 
     let mut wrong_kind = valid;
-    wrong_kind.records[5].kind = HostSiteKind::Argument;
+    wrong_kind.raw_records_mut()[5].kind = HostSiteKind::Argument;
     assert!(matches!(
         super::verify::verify_host_payload_sites(&host, &manifest, &wrong_kind),
         Err(OwnershipError::HostSiteMap { .. })
@@ -2136,18 +2135,16 @@ fn host_payload_sites_and_actions_are_bound_to_their_structural_unit() {
         kind,
         actions,
     };
-    let structural = HostSiteMap {
-        records: vec![
-            record(0, 0, HostSiteKind::FunctionReturn, vec![]),
-            record(1, 1, HostSiteKind::FunctionEntry, vec![]),
-            record(2, 1, HostSiteKind::FunctionReturn, vec![]),
-            record(3, 1, HostSiteKind::Expression, vec![]),
-        ],
-    };
+    let structural = HostSiteMap::from_records(vec![
+        record(0, 0, HostSiteKind::FunctionReturn, vec![]),
+        record(1, 1, HostSiteKind::FunctionEntry, vec![]),
+        record(2, 1, HostSiteKind::FunctionReturn, vec![]),
+        record(3, 1, HostSiteKind::Expression, vec![]),
+    ]);
     super::verify::verify_host_payload_sites(&host, &manifest, &structural).unwrap();
 
     let mut wrong_payload_unit = structural;
-    wrong_payload_unit.records[3].unit = 0;
+    wrong_payload_unit.raw_records_mut()[3].unit = 0;
     assert!(matches!(
         super::verify::verify_host_payload_sites(&host, &manifest, &wrong_payload_unit),
         Err(OwnershipError::HostSiteMap { .. })
@@ -2179,32 +2176,30 @@ fn host_payload_sites_and_actions_are_bound_to_their_structural_unit() {
             },
         ],
     };
-    let actions = HostSiteMap {
-        records: vec![
-            record(
-                0,
-                0,
-                HostSiteKind::Expression,
-                vec![HostSiteAction::Terminator {
-                    unit: 0,
-                    block: BlockId(0),
-                }],
-            ),
-            record(
-                1,
-                1,
-                HostSiteKind::Expression,
-                vec![HostSiteAction::Terminator {
-                    unit: 1,
-                    block: BlockId(0),
-                }],
-            ),
-        ],
-    };
+    let actions = HostSiteMap::from_records(vec![
+        record(
+            0,
+            0,
+            HostSiteKind::Expression,
+            vec![HostSiteAction::Terminator {
+                unit: 0,
+                block: BlockId(0),
+            }],
+        ),
+        record(
+            1,
+            1,
+            HostSiteKind::Expression,
+            vec![HostSiteAction::Terminator {
+                unit: 1,
+                block: BlockId(0),
+            }],
+        ),
+    ]);
     super::verify::verify_host_actions(&program, &manifest, &actions).unwrap();
 
     let mut wrong_action_unit = actions;
-    wrong_action_unit.records[1].unit = 0;
+    wrong_action_unit.raw_records_mut()[1].unit = 0;
     assert!(matches!(
         super::verify::verify_host_actions(&program, &manifest, &wrong_action_unit),
         Err(OwnershipError::HostSiteMap { .. })
@@ -2246,73 +2241,71 @@ fn control_and_root_actions_are_complete_unique_and_kind_checked() {
         kind,
         actions,
     };
-    let controls = HostSiteMap {
-        records: vec![
-            record(
-                0,
-                HostSiteKind::Expression,
-                vec![HostSiteAction::Terminator {
-                    unit: 0,
-                    block: BlockId(0),
-                }],
-            ),
-            record(
-                1,
-                HostSiteKind::BranchEdge,
-                vec![HostSiteAction::ControlEdge {
-                    unit: 0,
-                    edge: EdgeId(0),
-                    source: BlockId(0),
-                    target: BlockId(1),
-                }],
-            ),
-            record(
-                2,
-                HostSiteKind::BranchEdge,
-                vec![HostSiteAction::ControlEdge {
-                    unit: 0,
-                    edge: EdgeId(1),
-                    source: BlockId(0),
-                    target: BlockId(2),
-                }],
-            ),
-            record(
-                3,
-                HostSiteKind::Expression,
-                vec![HostSiteAction::Terminator {
-                    unit: 0,
-                    block: BlockId(1),
-                }],
-            ),
-            record(
-                4,
-                HostSiteKind::Expression,
-                vec![HostSiteAction::Terminator {
-                    unit: 0,
-                    block: BlockId(2),
-                }],
-            ),
-        ],
-    };
+    let controls = HostSiteMap::from_records(vec![
+        record(
+            0,
+            HostSiteKind::Expression,
+            vec![HostSiteAction::Terminator {
+                unit: 0,
+                block: BlockId(0),
+            }],
+        ),
+        record(
+            1,
+            HostSiteKind::BranchEdge,
+            vec![HostSiteAction::ControlEdge {
+                unit: 0,
+                edge: EdgeId(0),
+                source: BlockId(0),
+                target: BlockId(1),
+            }],
+        ),
+        record(
+            2,
+            HostSiteKind::BranchEdge,
+            vec![HostSiteAction::ControlEdge {
+                unit: 0,
+                edge: EdgeId(1),
+                source: BlockId(0),
+                target: BlockId(2),
+            }],
+        ),
+        record(
+            3,
+            HostSiteKind::Expression,
+            vec![HostSiteAction::Terminator {
+                unit: 0,
+                block: BlockId(1),
+            }],
+        ),
+        record(
+            4,
+            HostSiteKind::Expression,
+            vec![HostSiteAction::Terminator {
+                unit: 0,
+                block: BlockId(2),
+            }],
+        ),
+    ]);
     super::verify::verify_host_actions(&branch, &RootManifest { entries: vec![] }, &controls)
         .unwrap();
 
     let mut missing = controls.clone();
-    missing.records[1].actions.clear();
+    missing.raw_records_mut()[1].actions.clear();
     assert!(
         super::verify::verify_host_actions(&branch, &RootManifest { entries: vec![] }, &missing,)
             .is_err()
     );
 
     let mut duplicate = controls.clone();
-    duplicate.records[2].actions = duplicate.records[1].actions.clone();
+    duplicate.raw_records_mut()[2].actions = duplicate.raw_records_mut()[1].actions.clone();
     assert!(
         super::verify::verify_host_actions(&branch, &RootManifest { entries: vec![] }, &duplicate,)
             .is_err()
     );
 
     let mut wrong_kind = controls;
-    wrong_kind.records[1].kind = HostSiteKind::Expression;
+    wrong_kind.raw_records_mut()[1].kind = HostSiteKind::Expression;
     assert!(super::verify::verify_host_actions(
         &branch,
         &RootManifest { entries: vec![] },
@@ -2508,12 +2501,7 @@ fn store_terminal_can_be_an_exported_root_but_drop_cannot() {
 }
 
 fn schedule(program: &mut RawProgram) -> Result<super::last_use::ScheduleFacts, OwnershipError> {
-    super::last_use::schedule(
-        program,
-        &mut HostSiteMap {
-            records: Vec::new(),
-        },
-    )
+    super::last_use::schedule(program, &mut HostSiteMap::from_records(Vec::new()))
 }
 
 fn scheduled_block_terminal(block: &Block, owner: u32) -> Option<usize> {
@@ -3441,44 +3429,42 @@ fn scheduler_rebuilds_host_sites_from_stable_operation_and_edge_identities() {
         kind,
         actions,
     };
-    let mut sites = HostSiteMap {
-        records: vec![
-            record(
-                0,
-                HostSiteKind::Expression,
-                vec![HostSiteAction::Operation {
-                    unit: 0,
-                    block: BlockId(3),
-                    operation: OpId(90),
-                }],
-            ),
-            record(
-                1,
-                HostSiteKind::Expression,
-                vec![HostSiteAction::Operation {
-                    unit: 0,
-                    block: BlockId(1),
-                    operation: OpId(1 << 16),
-                }],
-            ),
-            record(
-                2,
-                HostSiteKind::BranchEdge,
-                vec![HostSiteAction::ControlEdge {
-                    unit: 0,
-                    edge: EdgeId(11),
-                    source: BlockId(0),
-                    target: BlockId(2),
-                }],
-            ),
-        ],
-    };
+    let mut sites = HostSiteMap::from_records(vec![
+        record(
+            0,
+            HostSiteKind::Expression,
+            vec![HostSiteAction::Operation {
+                unit: 0,
+                block: BlockId(3),
+                operation: OpId(90),
+            }],
+        ),
+        record(
+            1,
+            HostSiteKind::Expression,
+            vec![HostSiteAction::Operation {
+                unit: 0,
+                block: BlockId(1),
+                operation: OpId(1 << 16),
+            }],
+        ),
+        record(
+            2,
+            HostSiteKind::BranchEdge,
+            vec![HostSiteAction::ControlEdge {
+                unit: 0,
+                edge: EdgeId(11),
+                source: BlockId(0),
+                target: BlockId(2),
+            }],
+        ),
+    ]);
 
     super::last_use::schedule(&mut program, &mut sites).unwrap();
-    assert!(sites.records[0].actions.is_empty());
-    assert_eq!(sites.records[1].actions.len(), 2);
+    assert!(sites.raw_records_mut()[0].actions.is_empty());
+    assert_eq!(sites.raw_records_mut()[1].actions.len(), 2);
     assert!(matches!(
-        sites.records[1].actions[1],
+        sites.raw_records_mut()[1].actions[1],
         HostSiteAction::Operation {
             block: BlockId(1),
             operation: OpId(90),
@@ -3493,7 +3479,7 @@ fn scheduler_rebuilds_host_sites_from_stable_operation_and_edge_identities() {
         .terminals[0]
         .id;
     assert!(matches!(
-        sites.records[2].actions.as_slice(),
+        sites.raw_records_mut()[2].actions.as_slice(),
         [
             HostSiteAction::ControlEdge {
                 edge: EdgeId(11),
@@ -3524,41 +3510,39 @@ fn scheduler_rebuilds_a_tail_terminal_before_the_direct_call_action() {
     program.units[1].blocks[1]
         .ops
         .push(provisional(90, 2, true));
-    let mut sites = HostSiteMap {
-        records: vec![
-            HostSiteRecord {
-                id: HostSiteId::from_index(0),
-                unit: 1,
-                kind: HostSiteKind::Expression,
-                actions: vec![
-                    HostSiteAction::Operation {
-                        unit: 1,
-                        block: BlockId(0),
-                        operation: OpId(20),
-                    },
-                    HostSiteAction::Operation {
-                        unit: 1,
-                        block: BlockId(0),
-                        operation: OpId(0),
-                    },
-                ],
-            },
-            HostSiteRecord {
-                id: HostSiteId::from_index(1),
-                unit: 1,
-                kind: HostSiteKind::FunctionReturn,
-                actions: vec![HostSiteAction::Operation {
+    let mut sites = HostSiteMap::from_records(vec![
+        HostSiteRecord {
+            id: HostSiteId::from_index(0),
+            unit: 1,
+            kind: HostSiteKind::Expression,
+            actions: vec![
+                HostSiteAction::Operation {
                     unit: 1,
-                    block: BlockId(1),
-                    operation: OpId(90),
-                }],
-            },
-        ],
-    };
+                    block: BlockId(0),
+                    operation: OpId(20),
+                },
+                HostSiteAction::Operation {
+                    unit: 1,
+                    block: BlockId(0),
+                    operation: OpId(0),
+                },
+            ],
+        },
+        HostSiteRecord {
+            id: HostSiteId::from_index(1),
+            unit: 1,
+            kind: HostSiteKind::FunctionReturn,
+            actions: vec![HostSiteAction::Operation {
+                unit: 1,
+                block: BlockId(1),
+                operation: OpId(90),
+            }],
+        },
+    ]);
 
     super::last_use::schedule(&mut program, &mut sites).unwrap();
     assert!(matches!(
-        sites.records[0].actions.as_slice(),
+        sites.raw_records_mut()[0].actions.as_slice(),
         [
             HostSiteAction::Operation {
                 operation: OpId(20),
@@ -3574,7 +3558,7 @@ fn scheduler_rebuilds_a_tail_terminal_before_the_direct_call_action() {
             }
         ]
     ));
-    assert!(sites.records[1].actions.is_empty());
+    assert!(sites.raw_records_mut()[1].actions.is_empty());
 }
 
 #[test]
@@ -3615,21 +3599,19 @@ fn host_site_rebuild_qualifies_equal_operation_ids_by_unit() {
             operation,
         }],
     };
-    let mut sites = HostSiteMap {
-        records: vec![
-            record(0, 0, OpId(90)),
-            record(1, 0, OpId(0)),
-            record(2, 1, OpId(90)),
-        ],
-    };
+    let mut sites = HostSiteMap::from_records(vec![
+        record(0, 0, OpId(90)),
+        record(1, 0, OpId(0)),
+        record(2, 1, OpId(90)),
+    ]);
 
     super::last_use::schedule(&mut program, &mut sites).unwrap();
     assert!(
-        sites.records[0].actions.is_empty(),
+        sites.raw_records_mut()[0].actions.is_empty(),
         "the roots unit's provisional o90 must be removed"
     );
     assert!(matches!(
-        sites.records[1].actions.as_slice(),
+        sites.raw_records_mut()[1].actions.as_slice(),
         [
             HostSiteAction::Operation {
                 unit: 0,
@@ -3644,7 +3626,7 @@ fn host_site_rebuild_qualifies_equal_operation_ids_by_unit() {
         ]
     ));
     assert!(matches!(
-        sites.records[2].actions.as_slice(),
+        sites.raw_records_mut()[2].actions.as_slice(),
         [HostSiteAction::Operation {
             unit: 1,
             operation: OpId(90),
@@ -3690,38 +3672,36 @@ fn unused_owned_block_parameter_dies_after_incoming_transfer_at_its_exact_site()
         kind: HostSiteKind::Expression,
         actions,
     };
-    let mut sites = HostSiteMap {
-        records: vec![
-            record(
-                0,
-                vec![
-                    HostSiteAction::Operation {
-                        unit: 0,
-                        block: BlockId(0),
-                        operation: OpId(0),
-                    },
-                    HostSiteAction::Terminator {
-                        unit: 0,
-                        block: BlockId(0),
-                    },
-                ],
-            ),
-            record(
-                1,
-                vec![
-                    HostSiteAction::Terminator {
-                        unit: 0,
-                        block: BlockId(1),
-                    },
-                    HostSiteAction::Operation {
-                        unit: 0,
-                        block: BlockId(1),
-                        operation: OpId(90),
-                    },
-                ],
-            ),
-        ],
-    };
+    let mut sites = HostSiteMap::from_records(vec![
+        record(
+            0,
+            vec![
+                HostSiteAction::Operation {
+                    unit: 0,
+                    block: BlockId(0),
+                    operation: OpId(0),
+                },
+                HostSiteAction::Terminator {
+                    unit: 0,
+                    block: BlockId(0),
+                },
+            ],
+        ),
+        record(
+            1,
+            vec![
+                HostSiteAction::Terminator {
+                    unit: 0,
+                    block: BlockId(1),
+                },
+                HostSiteAction::Operation {
+                    unit: 0,
+                    block: BlockId(1),
+                    operation: OpId(90),
+                },
+            ],
+        ),
+    ]);
 
     super::last_use::schedule(&mut program, &mut sites).unwrap();
     assert!(program.units[0].blocks[1].ops.is_empty());
@@ -3735,7 +3715,7 @@ fn unused_owned_block_parameter_dies_after_incoming_transfer_at_its_exact_site()
         vec![edge_terminal(90, Terminal::Drop(OwnerId(1)))]
     );
     assert!(matches!(
-        sites.records[0].actions.as_slice(),
+        sites.raw_records_mut()[0].actions.as_slice(),
         [
             HostSiteAction::Operation {
                 operation: OpId(0),
@@ -3761,7 +3741,7 @@ fn unused_owned_block_parameter_dies_after_incoming_transfer_at_its_exact_site()
     .unwrap();
 
     let mut before_transfer = sites;
-    before_transfer.records[0].actions.swap(1, 2);
+    before_transfer.raw_records_mut()[0].actions.swap(1, 2);
     assert!(matches!(
         super::verify::verify_host_actions(
             &program,
