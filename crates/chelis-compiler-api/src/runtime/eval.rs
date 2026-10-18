@@ -9,7 +9,7 @@ use chelis_deep::cons_spine::{ConsSpine, ConsSpineTail};
 use chelis_ir::claim_pattern::{ClaimNode, ClaimNodeId, ClaimPattern, ClaimStep};
 use chelis_ir::dag::{Dag, DimInfo, NodeId, RiscOp, TensorType};
 use chelis_ir::eval::TensorValue as IrTensorValue;
-use chelis_ir::host::{EntryPattern, HostDefKernel};
+use chelis_ir::host::{EntryPattern, HostDefKernel, host_def_kernel};
 use chelis_ir::tier2;
 use chelis_types::{
     CompareOp, ElementRef, FloatBinOp, FloatUnOp, IntBinOp, IntUnOp, StorageView, types::Prim,
@@ -54,11 +54,9 @@ pub(super) const EVAL_MAX_NESTED_APPLICATIONS: usize = 10_000;
 /// The stack segment evaluation runs on. It holds
 /// [`EVAL_MAX_NESTED_APPLICATIONS`] levels of an ordinary body before the
 /// native-stack backstop fires, so the budget, not the stack, ends a deep
-/// recursion. Each expression a recursive call sits inside adds stack to
-/// every level: measured at the budget, a call nested up to 16 expressions
-/// deep reaches it in an optimized build, which meets the backstop first
-/// from about 24, and up to 6 deep in an unoptimized one, where 7 peaks at
-/// about 1.9 GB. A recursion through a `fold` callback takes up to about
+/// recursion. The largest levels measured are a body nested 64 expressions
+/// deep, about 10 KB of stack in an optimized build and 64 KB in an
+/// unoptimized one, and a recursion through a `fold` callback, up to about
 /// 135 KB a level unoptimized. The segment is reserved address space: only
 /// the pages a recursion touches become resident.
 pub(super) const EVAL_SEGMENT_BYTES: usize = if cfg!(debug_assertions) {
@@ -72,31 +70,21 @@ pub(super) const EVAL_SEGMENT_BYTES: usize = if cfg!(debug_assertions) {
 const EVAL_STACK_RED_ZONE_BYTES: usize = 512 * 1024;
 const EVAL_FALLBACK_MAX_CALL_DEPTH: usize = 8;
 
-/// Function applications in progress, charged to the recursion budget.
-/// Tracks calls rather than expression visits: each recursive user function
-/// crosses the callable boundary, while ordinary expression evaluation stays
-/// off this hot-path budget check.
-pub(super) struct EvalCallStackFrame {
-    levels: usize,
-}
+/// One function application in progress. Tracks calls rather than
+/// expression visits: each recursive user function crosses the callable
+/// boundary, while ordinary expression evaluation stays off this hot-path
+/// budget check.
+struct EvalCallStackFrame;
 
 impl EvalCallStackFrame {
     /// Begin an application, or report why it cannot be entered: it would
     /// exceed the recursion budget, or the native stack is nearly exhausted.
     fn enter() -> Result<Self, String> {
-        Self::enter_weighted(1)
-    }
-
-    /// Charge `levels` applications for as long as the frame lives: an
-    /// application evaluated as a single unit holds the deepest nesting of
-    /// applications its lowering inlined
-    /// ([`chelis_ir::lower::recording_inline_depth`]).
-    pub(super) fn enter_weighted(levels: usize) -> Result<Self, String> {
         let depth = EVAL_CALL_DEPTH.with(|depth| {
-            depth.set(depth.get() + levels);
+            depth.set(depth.get() + 1);
             depth.get()
         });
-        let frame = Self { levels };
+        let frame = Self;
         if depth > EVAL_MAX_NESTED_APPLICATIONS {
             return Err(format!(
                 "evaluation recursion budget exhausted: more than \
@@ -119,7 +107,7 @@ impl EvalCallStackFrame {
 
 impl Drop for EvalCallStackFrame {
     fn drop(&mut self) {
-        EVAL_CALL_DEPTH.with(|depth| depth.set(depth.get() - self.levels));
+        EVAL_CALL_DEPTH.with(|depth| depth.set(depth.get() - 1));
     }
 }
 
@@ -1975,7 +1963,7 @@ impl<'a> EvalContext<'a> {
     /// fall-through is chelis#1515 and is not inherited here).
     pub(super) fn def_kernel(&mut self, name: &str) -> Result<Option<Arc<HostDefKernel>>, String> {
         if let Some(cached) = self.def_kernels.get(name) {
-            return Ok(cached.as_ref().map(|(kernel, _)| kernel.clone()));
+            return Ok(cached.clone());
         }
         let Some(session) = self.session.as_ref() else {
             return Ok(None);
@@ -1983,24 +1971,11 @@ impl<'a> EvalContext<'a> {
         record_def_kernel_planning();
         // The decision reads `name`'s own body, whatever called it: a body a
         // kernel cannot carry is walked by the host interpreter (chelis#2405).
-        let (kernel, inline_depth) = super::charged_lowering::def_kernel(session, name);
-        let kernel = kernel
+        let kernel = host_def_kernel(session, name)
             .map_err(|diagnostic| diagnostic.to_string())?
             .map(Arc::new);
-        self.def_kernels.insert(
-            name.to_string(),
-            kernel.clone().map(|kernel| (kernel, inline_depth)),
-        );
+        self.def_kernels.insert(name.to_string(), kernel.clone());
         Ok(kernel)
-    }
-
-    /// The deepest nesting of applications the lowering of def `name`'s
-    /// kernel inlined: the levels beyond its own a kernel application holds.
-    fn def_kernel_inline_depth(&self, name: &str) -> super::charged_lowering::UnitDepth {
-        match self.def_kernels.get(name) {
-            Some(Some((_, inline_depth))) => *inline_depth,
-            Some(None) | None => unreachable!("a kernel is planned before it is applied"),
-        }
     }
 
     /// spec/03 §4.4: a binding's initializer is evaluated whether or not the
@@ -2039,9 +2014,6 @@ impl<'a> EvalContext<'a> {
         if let Some(plan) = &kernel.staged {
             return self.apply_staged_host_plan(name, plan, params, args);
         }
-        // The kernel runs every function its body applies inside one DAG;
-        // charge the nesting beyond the application already entered.
-        let _inlined = self.def_kernel_inline_depth(name).charge()?;
         if params.len() != args.len() {
             return Err(format!(
                 "closure expected {} args, got {}",
@@ -2233,10 +2205,6 @@ impl<'a> EvalContext<'a> {
                     }
                 }
                 HostStage::Kernel { dag, outputs } => {
-                    // A kernel stage runs inlined functions as one DAG; a
-                    // source stage above is interpreted and counts its own
-                    // applications.
-                    let _inlined = self.def_kernel_inline_depth(name).charge()?;
                     let mut inputs = UnordMap::new();
                     for node in dag.nodes() {
                         if let RiscOp::Load { name: input } = &node.op {
@@ -3991,16 +3959,17 @@ impl<'a> EvalContext<'a> {
             staged_inputs.insert(name.clone(), input);
         }
 
-        let (dag, inline_depth) =
-            super::charged_lowering::subexpr(region.expression(), scoped_types, &lowering);
-        let dag = dag.map_err(|diagnostic| {
+        let dag = chelis_ir::lower::try_lower_subexpr_program_with_context(
+            region.expression(),
+            scoped_types,
+            &lowering,
+        )
+        .map_err(|diagnostic| {
             format!(
                 "host runtime could not lower a checked local tensor ascription \
                  for evaluation: {diagnostic}"
             )
         })?;
-        // The region runs as one DAG; charge the applications it inlined.
-        let _inlined = inline_depth.charge()?;
         let dag = &dag;
         let roots = dag.roots().to_vec();
         if roots.is_empty() {

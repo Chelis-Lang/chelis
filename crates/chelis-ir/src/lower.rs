@@ -2776,7 +2776,6 @@ pub(crate) fn try_lower_staged_host_region(
         .unwrap_or_else(|error| {
             raise_lowering_error(error, Some(expr.span()), expr.span_id().map(str::to_owned))
         });
-        publish_inline_depth(ctx.max_inlining_active);
         Some((ctx.dag, plan))
     }));
     match (result, status.get()) {
@@ -3027,7 +3026,6 @@ fn lower_subexpr_program_inner_impl(
             list_checks.push(descriptor);
         }
     }
-    publish_inline_depth(ctx.max_inlining_active);
     #[cfg(feature = "lowering-trace")]
     let before_dce = trace.as_ref().map(|_| ctx.dag.clone());
     let (dce_dag, dce_remap) = crate::optimize::dead_code_eliminate_with_remap(&ctx.dag);
@@ -7933,54 +7931,6 @@ fn extract_cons_chain_tensor(expr: &Expr) -> Option<LiteralToTensor> {
     Some(LiteralToTensor { shape, data })
 }
 
-thread_local! {
-    /// The deepest inline nesting the subexpression lowerings inside the
-    /// innermost [`recording_inline_depth`] built, or `None` outside one.
-    static INLINE_DEPTH_RECORD: std::cell::Cell<Option<usize>> =
-        const { std::cell::Cell::new(None) };
-}
-
-/// Restores the enclosing recording when a recorded lowering returns or
-/// unwinds, folding this one's depth into it.
-struct InlineDepthRecording {
-    outer: Option<usize>,
-}
-
-impl Drop for InlineDepthRecording {
-    fn drop(&mut self) {
-        let recorded = INLINE_DEPTH_RECORD.with(|record| record.replace(self.outer));
-        if let (Some(outer), Some(recorded)) = (self.outer, recorded) {
-            INLINE_DEPTH_RECORD.with(|record| record.set(Some(outer.max(recorded))));
-        }
-    }
-}
-
-/// Run `lower` and return, with its result, the deepest nesting of inlined
-/// applications any tensor-DAG lowering inside it built: the most function
-/// bodies one path through the graph applies inside one another. A host
-/// evaluator that runs the graph as one unit charges that many levels to
-/// its recursion budget (spec/08-backends.md section 1.1).
-pub fn recording_inline_depth<R>(lower: impl FnOnce() -> R) -> (R, usize) {
-    let recording = InlineDepthRecording {
-        outer: INLINE_DEPTH_RECORD.with(|record| record.replace(Some(0))),
-    };
-    let result = lower();
-    let depth = INLINE_DEPTH_RECORD.with(std::cell::Cell::get);
-    drop(recording);
-    match depth {
-        Some(depth) => (result, depth),
-        None => unreachable!("a recording is open while it runs"),
-    }
-}
-
-fn publish_inline_depth(depth: usize) {
-    INLINE_DEPTH_RECORD.with(|record| {
-        if let Some(recorded) = record.get() {
-            record.set(Some(recorded.max(depth)));
-        }
-    });
-}
-
 /// chelis#620: recursion lowers by unrolling, and these caps bound it.
 /// Per-name limit on active inline levels for one callee. 512 covers an
 /// im2col-style unroll at a 22x22 kernel (484 levels) with margin; School's
@@ -9949,12 +9899,6 @@ struct LowerCtx<'program> {
     /// (each level is roughly ten lowering frames) for deep or mutually
     /// recursive chains that stay under every per-name cap.
     inlining_active: usize,
-    /// The deepest nesting of inlined applications this lowering built:
-    /// the most bodies [`Self::inlining_active`] held at once, with a
-    /// transform's or recurrence's sub-lowering folded in at the depth it
-    /// ran ([`Self::absorb_inline_depth`]). A host evaluation of the graph
-    /// charges it to the recursion budget ([`recording_inline_depth`]).
-    max_inlining_active: usize,
     /// Set by a definition's own kernel or staged-region lowering for its root
     /// result claim, and consumed by the first `lower_expr_with_claim`. Only
     /// that claim may own an unwitnessed input pass-through as an entry guard:
@@ -10145,7 +10089,6 @@ impl<'program> LowerCtx<'program> {
             linearity,
             inlining_depths: UnordMap::new(),
             inlining_active: 0,
-            max_inlining_active: 0,
             declaration_root_claim: false,
             fn_typed_params: PersistentSet::new(),
             callable_dependency_state: CallableDependencyState::default(),
@@ -15159,7 +15102,6 @@ impl<'program> LowerCtx<'program> {
         }
         let wrt: Vec<_> = targets.iter().map(|target| target.formal).collect();
         let lowered_output = subctx.lower_resolved_body(fn_expr, &param_names, body);
-        self.absorb_inline_depth(&subctx);
         // chelis#2371: checked HERE, immediately after the body is lowered and
         // before any early return, because one stands between this point and the
         // transform's real work: `output_depends_on_unresolved` returns the
@@ -15675,15 +15617,6 @@ impl<'program> LowerCtx<'program> {
         result
     }
 
-    /// Fold a sub-lowering's deepest inline nesting into this one's: the
-    /// sub-lowering applied its target or callback, one level, at this
-    /// lowering's current depth.
-    fn absorb_inline_depth(&mut self, sub: &LowerCtx<'_>) {
-        self.max_inlining_active = self
-            .max_inlining_active
-            .max(self.inlining_active + 1 + sub.max_inlining_active);
-    }
-
     fn lower_plain_callable_app(
         &mut self,
         fn_expr: &ResolvedFunction,
@@ -15974,7 +15907,6 @@ impl<'program> LowerCtx<'program> {
         // Decrements are skipped on raise: every lowering error unwinds
         // through the per-entry `catch_lowering` and the ctx is abandoned.
         self.inlining_active += 1;
-        self.max_inlining_active = self.max_inlining_active.max(self.inlining_active);
         if let Some(name) = &inlining_name {
             *self.inlining_depths.entry(name.clone()).or_insert(0) += 1;
         }
@@ -17018,7 +16950,6 @@ impl<'program> LowerCtx<'program> {
                 )
             }
         };
-        self.absorb_inline_depth(&subctx);
         for root in root_value.flatten_nodes() {
             subctx.dag.add_root(root);
         }
@@ -17358,7 +17289,6 @@ impl<'program> LowerCtx<'program> {
         );
 
         let lowered_output = subctx.lower_resolved_body(fn_expr, &param_names, body);
-        self.absorb_inline_depth(&subctx);
         // chelis#2371: checked HERE, immediately after the body is lowered and
         // before any early return, because one stands between this point and the
         // transform's real work: `output_depends_on_unresolved` returns the
@@ -21719,7 +21649,6 @@ impl<'program> LowerCtx<'program> {
         let result = subctx
             .lower_resolved_body(callback, &params, body)
             .as_single_node()?;
-        self.absorb_inline_depth(&subctx);
         subctx.dag.add_root(result);
         for load in subctx
             .dag
@@ -21930,7 +21859,6 @@ impl<'program> LowerCtx<'program> {
         let result = subctx
             .lower_resolved_body(callback, &params, body)
             .as_single_node()?;
-        self.absorb_inline_depth(&subctx);
         subctx.dag.add_root(result);
         for load in subctx
             .dag

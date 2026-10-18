@@ -323,16 +323,17 @@ impl<'a> EvalContext<'a> {
         let lowering_context = self
             .program
             .routing_lowering_context(checked.program(), &self.declared_signatures);
-        let (dag, inline_depth) =
-            super::charged_lowering::subexpr(routed_expr, scoped_types, &lowering_context);
-        let dag = dag.map_err(|diagnostic| {
+        let dag = chelis_ir::lower::try_lower_subexpr_program_with_context(
+            routed_expr,
+            scoped_types,
+            &lowering_context,
+        )
+        .map_err(|diagnostic| {
             NamedAxisRouteError::NotLowerable(format!(
                 "host runtime could not lower the named-axis `{context_label}` call for \
                  evaluation (chelis#338): {diagnostic}"
             ))
         })?;
-        // The routed call runs as one DAG; charge the applications it inlined.
-        let _routed = inline_depth.charge().map_err(NamedAxisRouteError::Fatal)?;
         let roots: Vec<NodeId> = dag.roots().to_vec();
         if roots.is_empty() {
             return Err(NamedAxisRouteError::Fatal(format!(
