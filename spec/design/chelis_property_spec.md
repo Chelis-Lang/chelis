@@ -438,9 +438,10 @@ were already nearly worthless**: they draw uniformly over the narrow proposal
 window (chelis#644 owns its width), which is exactly the draw chelis#3636
 exists because it refutes so little. Those are the attempts the pairing takes.
 
-The phase applies only to a property with **no order guard between its
-binders**. Where one binder's admissible range is resolved from another's
-value, this lane has **no stable per-binder diagonal**:
+In the **constraint-directed lane** the phase applies only to a property with
+**no order guard between its binders**. Where that lane resolves one binder's
+admissible range from another's value, it has **no stable per-binder
+diagonal**:
 `float_edge_candidates` is recomputed inside the attempt from the
 predecessors already drawn, so `Diagonal(i)` does not name a fixed value --
 it names entry `i` of a list whose contents depend on what the predecessor
@@ -451,9 +452,18 @@ predecessors, and it is not hypothetical: over thirty seeds,
 `forall(x: f64, y: f64) where y > x, <twenty `!=` exclusions on y>:
 (y != -1.0e-323f64)` refuted 18 times under the pre-phase schedule, 0 times
 with cells everywhere, and 11 with cells withheld from predecessors alone.
-An order-guarded property therefore keeps chelis#3636's schedule unchanged
-and gets no pairing. That is a real limit on the phase's reach, and it is
-the one the dependency structure permits.
+An order-guarded property therefore keeps chelis#3636's schedule unchanged in
+that lane and gets no pairing. That is a real limit on the phase's reach, and
+it is the one the dependency structure permits.
+
+The exemption belongs to the lane, not to the order guard. The
+typed-generator lane draws each binder from its whole dtype and accumulates no
+values, so no binder's candidates can depend on another's draw and the
+mechanism is structurally absent there. An order-guarded property the
+constraint-directed lane refuses — one with a non-float binder, say — reaches
+that lane and is paired normally, with the order guard acting as a
+precondition filter. Attributing the exemption to the guard rather than to the
+lane would understate what the tier does for a whole class of properties.
 
 For a property with **two or more scheduled binders and no order guard**:
 

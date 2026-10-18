@@ -731,4 +731,39 @@ fn issue_3697_the_order_guard_is_what_gives_up_the_pairing() {
         "with an order guard there are no cells, so this pair is unreachable; \
          if this now refutes, a cell reached the chained lane: {record:#}"
     );
+    // `code == 0` alone cannot separate "no cells" from "never sampled", so
+    // pin that it really drew its full budget through the lane in question.
+    assert_eq!(record["accepted_samples"], 200, "{record:#}");
+    assert_eq!(
+        record["sampling_method"], "constraint_directed",
+        "the exemption under test is the constraint-directed lane's: {record:#}"
+    );
+}
+
+/// The exemption belongs to the **lane**, not to the order guard. An
+/// order-guarded property the constraint-directed lane refuses — here because
+/// a `bool` binder makes it ineligible — reaches the typed-generator lane,
+/// where each binder is drawn from its whole dtype with no accumulated
+/// values. No binder's candidates can depend on another's draw there, so the
+/// re-indexing mechanism is structurally absent and the pairing is both sound
+/// and wanted.
+///
+/// Without this, the exemption's own documentation would understate the tier:
+/// a reader with an order-guarded property would be told they get no pairing
+/// when a whole class of them does.
+#[test]
+fn issue_3697_an_order_guard_outside_the_constraint_lane_is_still_paired() {
+    let source = "module Pair.OrderedRejection
+@property p forall(x: f64, y: f64, b: bool)
+where y > x:
+  ((x != -1.7976931348623157e308f64) || (y != 1.0f64))
+";
+    let (code, record) = prove(source, "200", "0");
+    assert_eq!(code, 1, "{record:#}");
+    assert_eq!(
+        record["sampling_method"], "uniform_rejection",
+        "the `bool` binder must push this out of the constraint lane: {record:#}"
+    );
+    assert_eq!(witness(&record, "x"), -f64::MAX, "{record:#}");
+    assert_eq!(witness(&record, "y"), 1.0, "{record:#}");
 }
