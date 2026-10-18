@@ -518,7 +518,7 @@ def _nix_workflow_events(workflow: str) -> dict[str, dict[str, str]]:
 
 
 _NIX_REVIEWED_WORKFLOW_SHA256 = (
-    "2b936286b387e75b77e2664651a43544065c5a3bf868b1e0bed684238e9d680e"
+    "9f9a64c4e439aa022adee4e428fa3afb837ff532610168653241f53aa52d8f90"
 )
 _NIX_REVIEWED_SCHEDULE = "'37 2 * * *'"
 _NIX_NATIVE_JOBS = ("nix-linux-x86-64", "nix-linux-arm64", "nix-darwin-arm64")
@@ -559,7 +559,7 @@ def _assert_nix_workflow_matches_reviewed_recipe(workflow: str) -> None:
 def _assert_nix_schedule_cache_gate(workflow: str) -> None:
     """A scheduled run skips the native jobs only when the cache is complete.
 
-    Manual dispatches and releases always run both native jobs. A failed
+    Manual dispatches and releases always run every native job. A failed
     cache report leaves the output empty, so a scheduled run builds.
     """
     blocks = _workflow_job_blocks(workflow)

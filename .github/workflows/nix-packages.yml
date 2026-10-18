@@ -135,7 +135,7 @@ jobs:
     name: Nix Packages (aarch64-darwin)
     needs: [cache-status]
     if: ${{ !cancelled() && (github.event_name != 'schedule' || needs.cache-status.outputs.complete != 'true') }}
-    # Keep release, scheduled, and manual coverage native on both systems.
+    # Keep release, scheduled, and manual coverage native on each system.
     runs-on: macos-latest
     timeout-minutes: 145
     env:

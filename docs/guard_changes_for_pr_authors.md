@@ -368,7 +368,7 @@ report.
 The temporary event restrictions and byte freeze still apply. A recipe change
 needs an explicit reviewed freeze update. Removing the freeze belongs in the
 reviewed replacement-policy change, after its event/recipe controls and complete
-native flake and Devenv smoke checks pass on both supported systems. Evaluation
+native flake and Devenv smoke checks pass on each supported system. Evaluation
 alone does not meet that condition.
 
 [The assessment](../spec/design/guard_artifact_proposal_assessment.md) records

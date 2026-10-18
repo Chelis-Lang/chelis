@@ -30,7 +30,9 @@ Ordinary PRs and main pushes use Linux. Passing required PR checks is **not a ph
 
 Migrated Devenv-backed jobs reserve cold setup headroom without a change to execution commands or script deadlines. The total job timeout starts at job launch and includes setup, execution and artifact upload. It is not a separate script execution deadline. Thus `ci-fast` keeps its earlier 30-minute budget within a 55-minute job timeout. The mandatory change-owned shards keep their earlier 60-minute budget within an 85-minute job timeout.
 
-Native Nix validation has total job timeouts of 135 minutes on Linux and 145 minutes on Darwin. Its manual, scheduled, and published-release jobs use native GitHub-hosted builders on both systems, also on `main`. The complete sandboxed flake check set, Devenv smoke, and package correspondence commands stay mandatory. Protected-runner availability is not a prerequisite for this package acceptance lane. The manual package-expansion lane is separate. Its executor's 80-minute deadline starts at `run-shard`, inside the unchanged 90-minute total job timeout.
+Native Nix validation has total job timeouts of 135 minutes on Linux and 145 minutes on Darwin. Its manual, scheduled, and published-release jobs use native GitHub-hosted builders on each supported system, also on `main`. The complete sandboxed flake check set, Devenv smoke, and package correspondence commands stay mandatory. Protected-runner availability is not a prerequisite for this package acceptance lane.
+
+The manual package-expansion lane is separate. Its executor's 80-minute deadline starts at `run-shard`, inside the unchanged 90-minute total job timeout.
 
 GitHub starts no workflow for a release that `GITHUB_TOKEN` publishes, so the `release` event never starts `nix-packages.yml`. After `release.yml` publishes a release, its `dispatch-nix-packages` job dispatches `nix-packages.yml` on the release tag. A daily schedule at 02:37 UTC runs `nix-packages.yml` on `main`, and a maintainer can also dispatch it on `main`. Only a run on `main` or on a `v*` tag pushes to the `chelis-lang` Cachix cache. It pushes the package outputs, the cvc5 tree, the Rust crate builds, and the closure of the Devenv shell root and profile. Every run lists these paths with `--dry-run`, but a dispatch on another branch pushes nothing.
 
@@ -58,7 +60,9 @@ Self-hosted Linux C dependencies use the Nix GCC provider in GNU C17 mode with P
 
 `.github/actions/vendor/ci/` holds byte-for-byte copies of six `Chelis-Lang/ci` actions at `f9a932f7e07de92000bb4dd2c1e87482d15ca604`. A public repository cannot use actions from a private one (chelis#2867). The workflows call `setup-devenv`, `reclaim-ubuntu-runner-disk`, `openspec-store`, `restore-build-cache`, `publish-build-cache`, and `check-cargo-nix`. The copy keeps the layout of that repository.
 
-That revision installs Devenv 2.4.0 on `x86_64-linux`, `aarch64-linux`, and `aarch64-darwin`, so the root `devenv.yaml` pins the same release. Its portable base shell has no Nix C compiler (Chelis-Lang/ci#125). No Chelis step compiles C in that unprofiled `devenv-ci` shell. The only unprofiled steps run `scripts/ci_devenv.py` and the store and Cargo.nix actions. Each compiling step runs in `chelis-ci-shell`, which is the project environment that `devenv.nix` declares.
+That revision installs Devenv 2.4.0 on `x86_64-linux`, `aarch64-linux`, and `aarch64-darwin`, so the root `devenv.yaml` pins the same release. Its portable base shell has no Nix C compiler (Chelis-Lang/ci#125).
+
+No Chelis step compiles C in that unprofiled `devenv-ci` shell. The unprofiled steps are `scripts/ci_devenv.py` and the store, restore-build-cache, and publish-build-cache actions. `check-cargo-nix` enters its own reviewed profile. Each compiling step runs in `chelis-ci-shell`, which is the project environment that `devenv.nix` declares.
 
 The actions also read paths outside their own directories. The copy includes them: `devenv/shared/`, `devenv-toolchain.toml`, `actions/profile_contract.py`, the `actions/openspec-governance/` npm lock, and the `tools/` build-cache scripts. Their tests stay in `Chelis-Lang/ci`, and `chelis-lint.toml` excludes the copy as a vendored dependency because the `setup-devenv` bootstrap is shell. To update the copy, replace the same paths from a newer reviewed revision and record it here.
 

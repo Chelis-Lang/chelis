@@ -355,7 +355,7 @@ class FlakeCacheContractTests(unittest.TestCase):
     def test_each_native_job_reads_the_cache_that_the_flake_trusts(self) -> None:
         # A job with an old key refuses the cache's signatures and builds each
         # path from source again, and no step fails.
-        for job in ("nix-linux-x86-64", "nix-darwin-arm64"):
+        for job in ("nix-linux-x86-64", "nix-linux-arm64", "nix-darwin-arm64"):
             with self.subTest(job=job):
                 settings = self.nix_config(job)
                 for setting in ("extra-substituters", "extra-trusted-public-keys"):
