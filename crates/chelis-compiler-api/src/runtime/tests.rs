@@ -6476,3 +6476,67 @@ fn issue_3778_equal_formal_types_at_different_addresses_agree() {
         "#3778: equal formal types reach equal results"
     );
 }
+
+/// chelis#3842: every tensor DAG the evaluator runs as one unit is lowered
+/// through `runtime::charged_lowering`, which records the unit's inline depth
+/// so the recursion budget can charge it. A lowering called anywhere else in
+/// the runtime would run a unit uncharged, so the evaluator sources must not
+/// name one outside that module.
+///
+/// Evidentiary status: a structural lock. Before the module existed, a
+/// checked local-ascription region lowered its DAG directly and a 402-level
+/// unrolled recursion inside it was charged one level.
+#[test]
+fn every_unit_lowering_is_charged() {
+    fn lowering_calls(source: &str) -> Vec<String> {
+        source
+            .lines()
+            .map(|line| line.split("//").next().unwrap_or_default())
+            .flat_map(|code| code.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_')))
+            .filter(|token| {
+                token.starts_with("try_lower")
+                    || token.starts_with("lower_subexpr_program")
+                    || token.starts_with("lower_program")
+                    || *token == "host_def_kernel"
+                    || *token == "recording_inline_depth"
+            })
+            .map(str::to_owned)
+            .collect()
+    }
+    let runtime = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/runtime");
+    let helper = std::fs::read_to_string(runtime.join("charged_lowering.rs"))
+        .expect("the charged lowering module is readable");
+    assert!(
+        !lowering_calls(&helper).is_empty(),
+        "#3842: the scan must see the helper's own lowering calls, or it checks nothing"
+    );
+    let mut offenders = Vec::new();
+    let mut entries: Vec<_> = std::fs::read_dir(&runtime)
+        .expect("the runtime directory is readable")
+        .map(|entry| entry.expect("a runtime directory entry").path())
+        .collect();
+    entries.sort();
+    for path in entries {
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default();
+        if !name.ends_with(".rs")
+            || name == "charged_lowering.rs"
+            || name == "tests.rs"
+            || name.ends_with("_tests.rs")
+        {
+            continue;
+        }
+        let source = std::fs::read_to_string(&path).expect("a runtime source is readable");
+        for call in lowering_calls(&source) {
+            offenders.push(format!("{name}: {call}"));
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "#3842: lower a unit the evaluator runs through runtime::charged_lowering, which \
+         charges its inline depth to the recursion budget: {}",
+        offenders.join(", ")
+    );
+}

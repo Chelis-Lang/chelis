@@ -178,6 +178,12 @@ def loss(x: tensor[2, f32]) -> tensor[f32] = sum(cu(x, cast(0, i64)), 0i32)
 def cus(x: tensor[f32], k: i64) -> tensor[f32] = if gte(k, cast(300, i64)) then x else cus(add(x, x), add(k, cast(1, i64)))
 def one(x: tensor[f32]) -> tensor[f32] = cus(x, cast(0, i64))
 def kfold(x: tensor[2, f32]) -> tensor[2, f32] = fold(fn (acc: tensor[2, f32], v: i64) -> h2(acc), x, [1i64, 2i64])
+def cua(x: tensor[*, f32], k: i64) -> tensor[*, f32] = if gte(k, cast(400, i64)) then x else cua(add(x, x), add(k, cast(1, i64)))
+def ascribed(x: tensor[*, f32]) -> tensor[f32] = {
+  _ = print(\"in\")
+  y: tensor[2, f32] = cua(x, cast(0, i64))
+  sum(y, 0i32)
+}
 ";
 
 /// `padder` nests `levels - charge` applications and then evaluates `unit`,
@@ -293,4 +299,26 @@ fn a_unit_is_charged_its_deeper_arm_even_when_it_is_not_taken() {
         "untaken arm, 10,001 charged levels",
         eval(request(charged_source(LEVELS + 1, unit, 6))),
     );
+}
+
+/// A checked local ascription in an interpreted body runs its initializer as
+/// one DAG: `ascribed` prints, so it is interpreted, and the region inlines
+/// 401 levels of `cua`, so a call of it holds 402. Its print runs before the
+/// region is entered, on both sides of the boundary.
+#[test]
+fn a_local_ascription_region_is_charged_its_inline_depth() {
+    let unit = "numel(ascribed(to_tensor([1.0f32, 2.0f32])))";
+    let result = eval(request(charged_source(LEVELS, unit, 402)))
+        .unwrap_or_else(|error| panic!("10,000 levels evaluates: {:?}", error.errors));
+    assert_eq!(result.transcript, ["before", "in", "after"]);
+    assert_eq!(result.roots[0].display.as_deref(), Some("1"));
+    let error = eval(request(charged_source(LEVELS + 1, unit, 402)))
+        .expect_err("10,001 levels exhausts the budget");
+    assert_eq!(error.transcript, ["before", "in"]);
+    let messages: Vec<&str> = error
+        .errors
+        .iter()
+        .map(|diagnostic| diagnostic.message.as_str())
+        .collect();
+    assert_eq!(messages, [BUDGET_MESSAGE], "{:?}", error.errors);
 }

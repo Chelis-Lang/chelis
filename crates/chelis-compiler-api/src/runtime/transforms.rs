@@ -690,13 +690,8 @@ impl<'a> EvalContext<'a> {
             }
         });
         let lowering = lowering.with_runtime_builtin_values(builtin_values)?;
-        let (lower_result, inline_depth) = chelis_ir::lower::recording_inline_depth(|| {
-            chelis_ir::lower::try_lower_subexpr_program_with_context_and_controls(
-                &app_expr,
-                scoped_types,
-                &lowering,
-            )
-        });
+        let (lower_result, inline_depth) =
+            super::charged_lowering::subexpr_with_controls(&app_expr, scoped_types, &lowering);
         let lowered = match lower_result {
             Ok(result) => result,
             Err(diagnostic) => {
@@ -821,7 +816,7 @@ impl<'a> EvalContext<'a> {
         }
         // The transform runs its target as one DAG; charge the applications
         // that DAG inlined, the target's own included.
-        let _inlined = super::eval::EvalCallStackFrame::enter_weighted(inline_depth)?;
+        let _inlined = inline_depth.charge()?;
         let mut provider_failed = false;
         let prepare_input = |name: &str, demand: TensorInputDemand| {
             let top_level_source = chelis_ir::LoadStoreName::top_level_source_for_label(name)?;

@@ -9,7 +9,7 @@ use chelis_deep::cons_spine::{ConsSpine, ConsSpineTail};
 use chelis_ir::claim_pattern::{ClaimNode, ClaimNodeId, ClaimPattern, ClaimStep};
 use chelis_ir::dag::{Dag, DimInfo, NodeId, RiscOp, TensorType};
 use chelis_ir::eval::TensorValue as IrTensorValue;
-use chelis_ir::host::{EntryPattern, HostDefKernel, host_def_kernel};
+use chelis_ir::host::{EntryPattern, HostDefKernel};
 use chelis_ir::tier2;
 use chelis_types::{
     CompareOp, ElementRef, FloatBinOp, FloatUnOp, IntBinOp, IntUnOp, StorageView, types::Prim,
@@ -1983,8 +1983,7 @@ impl<'a> EvalContext<'a> {
         record_def_kernel_planning();
         // The decision reads `name`'s own body, whatever called it: a body a
         // kernel cannot carry is walked by the host interpreter (chelis#2405).
-        let (kernel, inline_depth) =
-            chelis_ir::lower::recording_inline_depth(|| host_def_kernel(session, name));
+        let (kernel, inline_depth) = super::charged_lowering::def_kernel(session, name);
         let kernel = kernel
             .map_err(|diagnostic| diagnostic.to_string())?
             .map(Arc::new);
@@ -1997,7 +1996,7 @@ impl<'a> EvalContext<'a> {
 
     /// The deepest nesting of applications the lowering of def `name`'s
     /// kernel inlined: the levels beyond its own a kernel application holds.
-    fn def_kernel_inline_depth(&self, name: &str) -> usize {
+    fn def_kernel_inline_depth(&self, name: &str) -> super::charged_lowering::UnitDepth {
         match self.def_kernels.get(name) {
             Some(Some((_, inline_depth))) => *inline_depth,
             Some(None) | None => unreachable!("a kernel is planned before it is applied"),
@@ -2042,7 +2041,7 @@ impl<'a> EvalContext<'a> {
         }
         // The kernel runs every function its body applies inside one DAG;
         // charge the nesting beyond the application already entered.
-        let _inlined = EvalCallStackFrame::enter_weighted(self.def_kernel_inline_depth(name))?;
+        let _inlined = self.def_kernel_inline_depth(name).charge()?;
         if params.len() != args.len() {
             return Err(format!(
                 "closure expected {} args, got {}",
@@ -2237,8 +2236,7 @@ impl<'a> EvalContext<'a> {
                     // A kernel stage runs inlined functions as one DAG; a
                     // source stage above is interpreted and counts its own
                     // applications.
-                    let _inlined =
-                        EvalCallStackFrame::enter_weighted(self.def_kernel_inline_depth(name))?;
+                    let _inlined = self.def_kernel_inline_depth(name).charge()?;
                     let mut inputs = UnordMap::new();
                     for node in dag.nodes() {
                         if let RiscOp::Load { name: input } = &node.op {
@@ -3993,17 +3991,16 @@ impl<'a> EvalContext<'a> {
             staged_inputs.insert(name.clone(), input);
         }
 
-        let dag = chelis_ir::lower::try_lower_subexpr_program_with_context(
-            region.expression(),
-            scoped_types,
-            &lowering,
-        )
-        .map_err(|diagnostic| {
+        let (dag, inline_depth) =
+            super::charged_lowering::subexpr(region.expression(), scoped_types, &lowering);
+        let dag = dag.map_err(|diagnostic| {
             format!(
                 "host runtime could not lower a checked local tensor ascription \
                  for evaluation: {diagnostic}"
             )
         })?;
+        // The region runs as one DAG; charge the applications it inlined.
+        let _inlined = inline_depth.charge()?;
         let dag = &dag;
         let roots = dag.roots().to_vec();
         if roots.is_empty() {
