@@ -9346,25 +9346,11 @@ impl<'a> HostEmitter<'a> {
             && let [arg] = args
             && let HostExprKind::Float(value) = &arg.kind
         {
-            let assignment = match ty {
-                HostType::Float64 => Some(format!(
-                    "chelis_f64_from_bits(UINT64_C(0x{:016x}))",
-                    value.to_bits()
-                )),
-                HostType::Float32 => Some(format!(
-                    "chelis_f32_from_bits(UINT32_C(0x{:08x}))",
-                    (*value as f32).to_bits()
-                )),
-                HostType::Float16 => Some(format!(
-                    "UINT16_C(0x{:04x})",
-                    chelis_types::f16_from_f64_rne(*value).to_bits()
-                )),
-                HostType::BFloat16 => Some(format!(
-                    "UINT16_C(0x{:04x})",
-                    chelis_types::bf16_from_f64_rne(*value).to_bits()
-                )),
-                _ => None,
-            };
+            let assignment = folded_float_literal_bits(*value, ty).map(|bits| match ty {
+                HostType::Float64 => format!("chelis_f64_from_bits(UINT64_C(0x{bits:016x}))"),
+                HostType::Float32 => format!("chelis_f32_from_bits(UINT32_C(0x{bits:08x}))"),
+                _ => format!("UINT16_C(0x{bits:04x})"),
+            });
             if let Some(assignment) = assignment {
                 // The scalar literal is folded into its checked cast without
                 // a temporary, but it remains an exact verified expression
@@ -13500,6 +13486,9 @@ impl<'a> HostEmitter<'a> {
                 .push(format!("{}{target} = chelis_list_empty();", self.indent));
             return Ok(());
         }
+        if let Some(entries) = self.float_literal_table(item_ty, items) {
+            return self.assign_float_literal_table(target, item_ty, &entries);
+        }
         let values_name = self.next_temp("list_values");
         self.lines.push(format!(
             "{}chelis_value {}[{}];",
@@ -13534,6 +13523,149 @@ impl<'a> HostEmitter<'a> {
             ));
         }
         self.assign_aggregate_result_origin(target, &item_vars);
+        Ok(())
+    }
+
+    /// The table entries of a list literal whose every element is a float
+    /// literal at the list's element type, either checker-stamped (a cast
+    /// around its lexical `f64` image, which `assign_builtin` folds) or a
+    /// bare `f64` literal, and whose elements' verified sites only define,
+    /// apply, drop and discard non-heap scalars. Element-by-element emission
+    /// gives such a list two locals, an origin slot and a box statement per
+    /// element in one basic block, which C compilers handle in superlinear
+    /// time (chelis#3861); [`Self::assign_float_literal_table`] emits it as
+    /// one static table and two loops instead.
+    fn float_literal_table<'e>(
+        &self,
+        item_ty: &HostType,
+        items: &'e [HostExpr],
+    ) -> Option<Vec<FloatLiteralEntry<'e>>> {
+        let mut entries = Vec::with_capacity(items.len());
+        let mut site = self.expression_site_index;
+        for item in items {
+            let (bits, cast_arg) = match &item.kind {
+                HostExprKind::Builtin { name, args, ty } if name == "cast" && ty == item_ty => {
+                    match args.as_slice() {
+                        [
+                            arg @ HostExpr {
+                                kind: HostExprKind::Float(value),
+                                ..
+                            },
+                        ] => (folded_float_literal_bits(*value, ty)?, Some(arg)),
+                        _ => return None,
+                    }
+                }
+                HostExprKind::Float(value) if *item_ty == HostType::Float64 => {
+                    (value.to_bits(), None)
+                }
+                _ => return None,
+            };
+            // A folded cast owns its expression's site and its literal's.
+            let owned = if cast_arg.is_some() { 2 } else { 1 };
+            let sites = self.expression_sites.get(site..site + owned)?;
+            if !sites
+                .iter()
+                .all(|site| site.directives.iter().all(inert_scalar_action))
+            {
+                return None;
+            }
+            site += owned;
+            entries.push(FloatLiteralEntry {
+                item,
+                cast_arg,
+                bits,
+            });
+        }
+        Some(entries)
+    }
+
+    /// Emit a list literal of float literals as a function-local static
+    /// table of tagged scalars. The runtime calls are the element-by-element
+    /// emission's, in its order: one box per element, the list construction,
+    /// then one release per element. Each element's comments stay beside its
+    /// table entry, its verified sites are emitted in the element-by-element
+    /// order with its owners bound to its table entry, and the list's origin
+    /// is the `NULL` aggregate of its elements' `NULL` origins.
+    fn assign_float_literal_table(
+        &mut self,
+        target: &str,
+        item_ty: &HostType,
+        entries: &[FloatLiteralEntry<'_>],
+    ) -> Result<(), Unsupported> {
+        let dtype = scalar_dtype_macro(item_ty)?;
+        let plan = CheckedCastPlan::new(Prim::F64, checked_cast_abi_scalar_prim(item_ty)?)
+            .map_err(|error| checked_cast_plan_error(error.to_string()))?;
+        let count = entries.len();
+        let values = self.next_temp("list_values");
+        let table = self.next_temp("list_table");
+        let index = self.next_temp("list_index");
+        self.lines
+            .push(format!("{}chelis_value {values}[{count}];", self.indent));
+        self.lines.push(format!("{}{{", self.indent));
+        let outer = format!("{}    ", self.indent);
+        let previous = std::mem::replace(&mut self.indent, outer.clone());
+        self.lines.push(format!(
+            "{}static const chelis_scalar {table}[{count}] = {{",
+            self.indent
+        ));
+        self.indent = format!("{outer}    ");
+        for (element, entry) in entries.iter().enumerate() {
+            let slot = format!("{table}[{element}]");
+            // Element-by-element order: the expression's site is taken, the
+            // folded literal's site is taken and emitted, then the
+            // expression's site is emitted.
+            let site = self.next_expression_site()?;
+            self.emit_span_comments(entry.item);
+            if let Some(arg) = entry.cast_arg {
+                let literal_site = self.next_expression_site()?;
+                self.emit_expression_site(&literal_site, &slot)?;
+                self.emit_span_comments(arg);
+                self.lines.push(format!(
+                    "{}/* checked cast plan: {} -> {} */",
+                    self.indent,
+                    plan.source().name(),
+                    plan.target().name()
+                ));
+                if plan.kind() == CheckedCastKind::Identity {
+                    self.lines
+                        .push(format!("{}/* checked cast identity */", self.indent));
+                }
+            }
+            self.emit_expression_site(&site, &slot)?;
+            self.lines.push(format!(
+                "{}{{ .dtype = {dtype}, .reserved = {{0}}, .bits = UINT64_C(0x{:016x}) }},",
+                self.indent, entry.bits
+            ));
+        }
+        // The first element's expression would have taken the spine flag.
+        self.claim_on_spine = false;
+        self.indent = outer;
+        self.lines.push(format!("{}}};", self.indent));
+        self.lines.push(format!(
+            "{}for (size_t {index} = 0; {index} < {count}; {index}++) {{",
+            self.indent
+        ));
+        self.lines.push(format!(
+            "{}    {values}[{index}] = chelis_value_box_scalar(chelis_scalar_from_bits({table}[{index}].dtype, {table}[{index}].bits));",
+            self.indent
+        ));
+        self.lines.push(format!("{}}}", self.indent));
+        self.indent = previous;
+        self.lines.push(format!("{}}}", self.indent));
+        self.lines.push(format!(
+            "{}{target} = chelis_list_from_values({values}, {count});",
+            self.indent
+        ));
+        self.lines.push(format!(
+            "{}for (size_t {index} = 0; {index} < {count}; {index}++) {{",
+            self.indent
+        ));
+        self.lines.push(format!(
+            "{}    chelis_value_release({values}[{index}]);",
+            self.indent
+        ));
+        self.lines.push(format!("{}}}", self.indent));
+        self.assign_aggregate_result_origin(target, &[]);
         Ok(())
     }
 
@@ -15497,6 +15629,51 @@ fn require_same_abi_type(
             format!("expected ABI type `{expected:?}`, found `{actual:?}`"),
             context,
         ))
+    }
+}
+
+/// One element of a list literal emitted as a static table.
+struct FloatLiteralEntry<'e> {
+    item: &'e HostExpr,
+    /// The lexical literal under a checker-stamped cast, which owns a site.
+    cast_arg: Option<&'e HostExpr>,
+    bits: u64,
+}
+
+/// Whether a verified site action of a table element emits nothing: it
+/// defines, applies, drops or discards non-heap scalars only, so it binds
+/// owners and releases nothing.
+fn inert_scalar_action(action: &VerifiedHostAction<'_>) -> bool {
+    match action {
+        VerifiedHostAction::Operation(VerifiedHostOperation::Define { dest, .. }) => {
+            !dest.is_heap()
+        }
+        VerifiedHostAction::Operation(VerifiedHostOperation::Apply {
+            dest: Some(dest),
+            binding_name: None,
+            args,
+            ..
+        }) => !dest.is_heap() && args.iter().all(|arg| !arg.owner().is_heap()),
+        VerifiedHostAction::Operation(VerifiedHostOperation::Drop { owner, .. }) => {
+            !owner.owner().is_heap()
+        }
+        VerifiedHostAction::Operation(VerifiedHostOperation::Discard { owner, .. }) => {
+            !owner.is_heap()
+        }
+        _ => false,
+    }
+}
+
+/// The bit image a checker-stamped float literal folds to at its declared
+/// float width, rounding its lexical `f64` image once; `None` for any other
+/// type.
+fn folded_float_literal_bits(value: f64, ty: &HostType) -> Option<u64> {
+    match ty {
+        HostType::Float64 => Some(value.to_bits()),
+        HostType::Float32 => Some(u64::from((value as f32).to_bits())),
+        HostType::Float16 => Some(u64::from(chelis_types::f16_from_f64_rne(value).to_bits())),
+        HostType::BFloat16 => Some(u64::from(chelis_types::bf16_from_f64_rne(value).to_bits())),
+        _ => None,
     }
 }
 
