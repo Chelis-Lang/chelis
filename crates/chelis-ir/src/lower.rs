@@ -26,6 +26,17 @@ thread_local! {
     /// unwinds into structured diagnostics. The panic hook stays quiet in
     /// that scope so users see only the returned diagnostic.
     static SUPPRESS_LOWERING_PANIC_OUTPUT: Cell<bool> = const { Cell::new(false) };
+    /// Function bodies inlined so far by the outermost lowering entry on this
+    /// thread, against [`MAX_TOTAL_INLINED_BODIES`]; `None` outside every
+    /// entry. Every lowering context an entry creates, sub-contexts included,
+    /// draws on the one count, so the budget bounds the entry's whole unroll
+    /// (chelis#3864).
+    static INLINED_BODIES: Cell<Option<usize>> = const { Cell::new(None) };
+    /// A test's replacement for [`MAX_TOTAL_INLINED_BODIES`], and the bodies
+    /// inlined across every entry while it counts.
+    static INLINE_BUDGET_PROBE: Cell<Option<(usize, usize)>> = const { Cell::new(None) };
+    /// The last budget rejection's message while a test counts.
+    static INLINE_BUDGET_REJECTION: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
     /// Set while [`catch_lowering_diagnostic`] encloses a post-lowering pass.
     /// The hook stays quiet only for a lowering diagnostic's own unwind; any
     /// other panic in that scope still prints, since it is resumed.
@@ -723,6 +734,41 @@ fn panic_payload_to_lower_diagnostic(payload: &(dyn Any + Send)) -> LowerDiagnos
 /// segment size.
 const LOWERING_GROW_SEGMENT_BYTES: usize = 512 * 1024 * 1024;
 
+/// What [`with_inline_budget`] observed.
+#[doc(hidden)]
+#[derive(Debug)]
+pub struct InlineBudgetProbe {
+    /// Function bodies inlined across every lowering entry.
+    pub inlined: usize,
+    /// The last budget rejection's message, when the budget tripped.
+    pub rejection: Option<String>,
+}
+
+/// Run `work` with the inlining budget replaced by `budget`, counting the
+/// function bodies every lowering entry inlines meanwhile on this thread.
+/// For tests, which cannot afford to unroll past the real budget.
+#[doc(hidden)]
+pub fn with_inline_budget<R>(budget: usize, work: impl FnOnce() -> R) -> (R, InlineBudgetProbe) {
+    struct Restore(Option<(usize, usize)>, Option<String>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            INLINE_BUDGET_PROBE.with(|probe| probe.set(self.0));
+            INLINE_BUDGET_REJECTION.with(|rejection| *rejection.borrow_mut() = self.1.take());
+        }
+    }
+    let restore = Restore(
+        INLINE_BUDGET_PROBE.with(|probe| probe.replace(Some((budget, 0)))),
+        INLINE_BUDGET_REJECTION.with(|rejection| rejection.borrow_mut().take()),
+    );
+    let result = work();
+    let (_, inlined) = INLINE_BUDGET_PROBE
+        .with(Cell::get)
+        .expect("the probe stays armed while the work runs");
+    let rejection = INLINE_BUDGET_REJECTION.with(|rejection| rejection.borrow_mut().take());
+    drop(restore);
+    (result, InlineBudgetProbe { inlined, rejection })
+}
+
 fn catch_lowering<R>(f: impl FnOnce() -> R + std::panic::UnwindSafe) -> Result<R, LowerDiagnostic> {
     struct Guard;
     impl Drop for Guard {
@@ -730,10 +776,27 @@ fn catch_lowering<R>(f: impl FnOnce() -> R + std::panic::UnwindSafe) -> Result<R
             SUPPRESS_LOWERING_PANIC_OUTPUT.with(|cell| cell.set(false));
         }
     }
+    /// The outermost entry opens the inlining budget and closes it on exit;
+    /// a nested entry draws on the enclosing one's.
+    struct Budget(bool);
+    impl Drop for Budget {
+        fn drop(&mut self) {
+            if self.0 {
+                INLINED_BODIES.with(|count| count.set(None));
+            }
+        }
+    }
 
     install_chelis_panic_hook();
     SUPPRESS_LOWERING_PANIC_OUTPUT.with(|cell| cell.set(true));
     let _guard = Guard;
+    let _budget = Budget(INLINED_BODIES.with(|count| {
+        let outermost = count.get().is_none();
+        if outermost {
+            count.set(Some(0));
+        }
+        outermost
+    }));
     std::panic::catch_unwind(|| stacker::grow(LOWERING_GROW_SEGMENT_BYTES, f))
         .map_err(|payload| panic_payload_to_lower_diagnostic(&*payload))
 }
@@ -7939,6 +8002,17 @@ fn extract_cons_chain_tensor(expr: &Expr) -> Option<LiteralToTensor> {
 /// runtime-bounded recursion hits the cap in milliseconds and errors loudly
 /// instead of hanging.
 const MAX_STATIC_RECURSION_DEPTH: usize = 512;
+/// Total limit on the function bodies one lowering entry inlines, across
+/// every name and every lowering context the entry creates (chelis#3864).
+/// The depth caps above bound how deep an unroll goes, not how wide: a
+/// recursion whose runtime-only condition selects between two recursive
+/// calls lowers both, so its unroll is a binary tree that stays under every
+/// depth cap while doubling at each level. The budget is a count of inlined
+/// bodies, so it depends only on the program, and an entry that exceeds it is
+/// rejected loudly like the depth caps. The largest entry in the repo and
+/// nautilus corpora inlines 19,463 bodies; past about 2^15 a doubling unroll
+/// costs seconds per entry.
+const MAX_TOTAL_INLINED_BODIES: usize = 1 << 15;
 /// Total limit on simultaneously active inlined bodies across all names.
 /// Each level costs roughly ten lowering frames (a few KB of Rust stack), so
 /// this cap, not the per-name one, is what bounds the stack for mutually
@@ -15909,6 +15983,47 @@ impl<'program> LowerCtx<'program> {
         self.inlining_active += 1;
         if let Some(name) = &inlining_name {
             *self.inlining_depths.entry(name.clone()).or_insert(0) += 1;
+        }
+        let inlined = INLINED_BODIES.with(|count| {
+            let inlined = count.get().map(|inlined| inlined + 1);
+            if inlined.is_some() {
+                count.set(inlined);
+            }
+            inlined
+        });
+        let budget = INLINE_BUDGET_PROBE.with(|probe| match probe.get() {
+            Some((budget, counted)) => {
+                probe.set(Some((budget, counted + 1)));
+                budget
+            }
+            None => MAX_TOTAL_INLINED_BODIES,
+        });
+        if inlined.is_some_and(|inlined| inlined > budget) {
+            // Name the recursion whose unroll is growing, not the helper
+            // that happened to cross the budget: the deepest active name,
+            // ties broken by the sorted order so the text is deterministic.
+            let mut deepest: Option<(&String, usize)> = None;
+            for (name, depth) in self.inlining_depths.to_sorted() {
+                if *depth > 1 && deepest.is_none_or(|(_, deepest)| *depth > deepest) {
+                    deepest = Some((name, *depth));
+                }
+            }
+            let site = match (deepest, inlining_name.as_deref()) {
+                (Some((name, _)), _) => format!("while unrolling the recursion of `{name}`"),
+                (None, Some(callee)) => format!("while inlining `{callee}`"),
+                (None, None) => "while inlining an anonymous function".to_string(),
+            };
+            let message = format!(
+                "call inlining exceeded the budget of {budget} inlined function bodies \
+                     {site}: recursion lowers by bounded static unrolling, and a call chain \
+                     that branches on a condition known only at runtime unrolls every branch, \
+                     so its unroll grows with each level (chelis#620, chelis#3864)"
+            );
+            if INLINE_BUDGET_PROBE.with(Cell::get).is_some() {
+                INLINE_BUDGET_REJECTION
+                    .with(|rejection| *rejection.borrow_mut() = Some(message.clone()));
+            }
+            self.reject_lowering_slice(Some(fn_expr), message);
         }
         if self.inlining_active > MAX_TOTAL_INLINE_DEPTH {
             self.reject_lowering_slice(
