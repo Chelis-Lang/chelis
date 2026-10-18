@@ -507,7 +507,8 @@ int main() {{
     write("main.c", &main_c);
     let bin_path = tmp.path().join("test_bin");
 
-    let toolchain = chelis_backend_c::toolchain::runtime_toolchain(result.requirements);
+    let toolchain = chelis_backend_c::toolchain::runtime_toolchain(result.requirements)
+        .expect("declared C directories");
     let mut cmd = Command::new(&toolchain.compiler);
     cmd.args(["-O2", "-Wall"]);
     cmd.args(&toolchain.compile_flags);

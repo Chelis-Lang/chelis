@@ -142,6 +142,23 @@ The `chelis` package carries a C compiler and binutils from Nix. Its
 compiler or `ar`. `CHELIS_CC` and `CHELIS_AR` still select another
 toolchain. See [Build programs](backends.md) for these overrides.
 
+On Linux, `bin/chelis` also declares the OpenBLAS headers and libraries
+through `CHELIS_C_INCLUDE_PATH` and `CHELIS_C_LIBRARY_PATH`. Thus a program
+that calls BLAS builds and runs without other setup. Directories that you
+declare in these variables come after the OpenBLAS directories.
+
+To let the `chelis` shim of `chelisup` run a Nix-built compiler, register the
+package with `chelisup link`:
+
+```sh
+chelisup link "$(nix build --no-link --print-out-paths github:Chelis-Lang/chelis/vX.Y.Z#chelis)"
+```
+
+The command registers the compiler under the version that its
+`bin/chelis --version` reports. The `chelisup` of the flake keeps a Nix
+garbage-collector root for a linked store path. `chelisup uninstall X.Y.Z`
+removes the link and the root, and keeps the store path.
+
 To add the packages to your own Nix package set, use the overlay of the flake.
 It adds `chelis`, `chelis-runtime`, and `chelisup` for a system that the flake
 supports:

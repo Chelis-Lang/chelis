@@ -88,7 +88,8 @@ fn run_driver(out_dir: &Path, stem: &str, driver: &str, args: &[&str]) -> Output
             wants_openmp: true,
             needs_blas: common::generated_source_needs_blas(out_dir, &format!("{stem}.c")),
         },
-    );
+    )
+    .expect("declared C directories");
     let status = StdCommand::new(&toolchain.compiler)
         .current_dir(out_dir)
         .arg("-O2")

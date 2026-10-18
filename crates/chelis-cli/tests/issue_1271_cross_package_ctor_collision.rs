@@ -117,7 +117,8 @@ impl Built {
                 wants_openmp: true,
                 needs_blas: source.contains("cblas_sgemm(") || source.contains("\"chelis_blas.h\""),
             },
-        );
+        )
+        .expect("declared C directories");
         if !host_compiler_available(&toolchain.compiler) {
             return None;
         }

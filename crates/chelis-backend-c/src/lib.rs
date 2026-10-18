@@ -536,6 +536,7 @@ mod tests {
         cmd.arg(dir.join(chelis_runtime_bundle::ARCHIVE_FILE_NAME));
         cmd.args(
             crate::toolchain::runtime_toolchain(crate::toolchain::CodegenRequirements::default())
+                .expect("declared C directories")
                 .link_flags,
         );
     }

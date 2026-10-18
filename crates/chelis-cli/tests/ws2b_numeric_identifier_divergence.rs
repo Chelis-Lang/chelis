@@ -89,7 +89,8 @@ fn compile_emitted(build_dir: &Path, kernel_c: &Path) -> (std::process::Output, 
             wants_openmp: true,
             needs_blas,
         },
-    );
+    )
+    .expect("declared C directories");
 
     let bin = build_dir.join("ws2b_bin");
     let mut cmd = StdCommand::new(&toolchain.compiler);

@@ -504,6 +504,21 @@ rounded kernels of [05-OP-46], never with the host math library, a vendor vector
 library, or a compiler built-in. Executable
 linking SHALL name the carried staged runtime archive by path (§2.1).
 
+Two declared variables give the C compile and link the directories of external
+C headers and libraries, such as a BLAS provider: `CHELIS_C_INCLUDE_PATH` and
+`CHELIS_C_LIBRARY_PATH`. Each is a colon-separated list of absolute
+directories. An unset or empty variable, and an empty entry, declare no
+directory. Each include
+directory, in list order, SHALL add `-isystem <dir>` to every C compile. Each
+library directory, in list order, SHALL add `-L<dir>` and a run-time search path
+for `<dir>` to every C link.
+
+These flags are part of the profile. The compiler check and its floating-point
+canary SHALL use them. Every C compile of a build or a binding SHALL use them.
+A relative entry SHALL fail the build with a diagnostic that names the
+variable and the entry. So SHALL an entry that the linker flag syntax cannot
+carry, such as one with a comma. No other ambient variable adds a C directory.
+
 Every entry point through which other code runs compiled Chelis code, namely an
 executable's process entry, an exported static-library function, and a binding
 call, SHALL establish round-to-nearest-even with flush-to-zero and

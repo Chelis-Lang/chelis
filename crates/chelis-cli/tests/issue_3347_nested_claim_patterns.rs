@@ -992,7 +992,8 @@ fn host_as_cxx(program: &str) -> String {
             wants_openmp: false,
             needs_blas: false,
         },
-    );
+    )
+    .expect("declared C directories");
     let linked = std::process::Command::new(&compiler)
         .current_dir(&out_dir)
         .arg("host.o")

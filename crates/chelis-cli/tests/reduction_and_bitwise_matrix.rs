@@ -137,7 +137,8 @@ fn c_ubsan_run(program: &str, name: &str) -> std::process::Output {
             wants_openmp: false,
             needs_blas: false,
         },
-    );
+    )
+    .expect("declared C directories");
     // Prefer clang's compiler-rt UBSan when available. Some GCC
     // installations provide the compiler but omit the separately packaged
     // libubsan shared object; that is an environment gap, not a reason to

@@ -264,7 +264,8 @@ fn exported_recursion_uses_the_calling_worker_threads_stack() {
          }\n",
     )
     .expect("write C driver");
-    let toolchain = chelis_backend_c::toolchain::runtime_toolchain(Default::default());
+    let toolchain = chelis_backend_c::toolchain::runtime_toolchain(Default::default())
+        .expect("declared C directories");
     let compiled = Process::new(&toolchain.compiler)
         .args(&toolchain.compile_flags)
         .arg(&driver)
@@ -338,7 +339,8 @@ fn shadowed_function_name_does_not_create_a_recursive_call_cycle() {
          }\n",
     )
     .expect("write small-stack driver");
-    let toolchain = chelis_backend_c::toolchain::runtime_toolchain(Default::default());
+    let toolchain = chelis_backend_c::toolchain::runtime_toolchain(Default::default())
+        .expect("declared C directories");
     let compiled = Process::new(&toolchain.compiler)
         .args(&toolchain.compile_flags)
         .arg(&driver)
@@ -370,7 +372,8 @@ fn a_failed_stack_bound_query_reports_a_located_runtime_error() {
     let faulted_path = out.join("bound_failure.c");
     fs::write(&faulted_path, faulted).expect("inject failed platform query");
 
-    let toolchain = chelis_backend_c::toolchain::runtime_toolchain(Default::default());
+    let toolchain = chelis_backend_c::toolchain::runtime_toolchain(Default::default())
+        .expect("declared C directories");
     let faulted_binary = out.join("bound_failure");
     let compiled = Process::new(&toolchain.compiler)
         .args(&toolchain.compile_flags)

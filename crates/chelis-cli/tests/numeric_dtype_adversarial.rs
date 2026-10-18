@@ -126,7 +126,8 @@ fn compile_and_run(work_dir: &Path, c_file: &str, bin_name: &str) -> Option<Stri
             wants_openmp: true,
             needs_blas,
         },
-    );
+    )
+    .expect("declared C directories");
     let mut cmd = StdCommand::new(&toolchain.compiler);
     cmd.current_dir(work_dir).arg("-O2");
     cmd.args(&toolchain.compile_flags);

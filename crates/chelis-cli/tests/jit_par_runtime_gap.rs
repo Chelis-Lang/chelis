@@ -218,7 +218,8 @@ fn build_c_and_run(out_dir: &Path, src_path: &Path) -> String {
             wants_openmp: true,
             needs_blas,
         },
-    );
+    )
+    .expect("declared C directories");
     let mut cmd = StdCommand::new(&toolchain.compiler);
     cmd.current_dir(out_dir);
     cmd.arg("-O2");

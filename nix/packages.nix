@@ -371,6 +371,11 @@ let
   # a build needs no host toolchain. The wrapper gives the compiler its
   # libexec path as argv[0]. The compiler identifies its image without
   # argv[0] (chelis#3649), so the wrapper needs no --argv0.
+  # On Linux, a program whose C includes chelis_blas.h links OpenBLAS. The
+  # compiler clears the C compiler environment. Thus the wrapper declares the
+  # OpenBLAS directories through the two declared variables of
+  # spec/08-backends.md section 7. The OpenBLAS directories come before the
+  # directories that the user declares.
   chelisWrapperArgs = [
     "--prefix"
     "PATH"
@@ -379,6 +384,16 @@ let
       pkgs.stdenv.cc
       pkgs.stdenv.cc.bintools
     ])
+  ]
+  ++ lib.optionals pkgs.stdenv.hostPlatform.isLinux [
+    "--prefix"
+    "CHELIS_C_INCLUDE_PATH"
+    ":"
+    "${lib.getDev pkgs.openblas}/include"
+    "--prefix"
+    "CHELIS_C_LIBRARY_PATH"
+    ":"
+    "${lib.getLib pkgs.openblas}/lib"
   ];
   chelis =
     pkgs.runCommand "chelis-${version}"

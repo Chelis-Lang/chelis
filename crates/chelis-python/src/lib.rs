@@ -1279,7 +1279,7 @@ fn compile_shared_library_inner(
         .and_then(|stem| stem.to_str())
         .unwrap_or("model");
     let lib_path = root.join(format!("{stem}.so"));
-    let compiler = native_compiler_path(artifact.compile_result.target);
+    let compiler = native_compiler_path(artifact.compile_result.target)?;
 
     // #817/#818: this artifact is dlopen'd and called IN-PROCESS (see
     // `load_artifact` / `call_host`), unlike the `chelis build` product,
@@ -1380,12 +1380,12 @@ fn compile_shared_library_inner(
     Ok(lib_path)
 }
 
-fn native_compiler_path(target: CompileTarget) -> PathBuf {
-    match target {
+fn native_compiler_path(target: CompileTarget) -> Result<PathBuf, String> {
+    Ok(match target {
         CompileTarget::C => PathBuf::from(
             chelis_backend_c::toolchain::runtime_toolchain(
                 chelis_backend_c::toolchain::CodegenRequirements::default(),
-            )
+            )?
             .compiler,
         ),
         CompileTarget::Hip => std::env::var_os("CHELIS_HIPCC")
@@ -1396,7 +1396,7 @@ fn native_compiler_path(target: CompileTarget) -> PathBuf {
                 path.exists().then_some(path)
             })
             .unwrap_or_else(|| PathBuf::from("hipcc")),
-    }
+    })
 }
 
 fn write_manifest_inner(path: &Path, manifest: &ArtifactManifest) -> Result<(), String> {
@@ -2571,7 +2571,8 @@ loss = (mean(x, 0) : tensor[f32])
         let dir = tempdir().expect("tempdir");
         if std::env::var_os("CHELIS_PYTHON_WRAPPER_CHILD").is_none() {
             use std::os::unix::fs::PermissionsExt;
-            let toolchain = chelis_backend_c::toolchain::runtime_toolchain(Default::default());
+            let toolchain = chelis_backend_c::toolchain::runtime_toolchain(Default::default())
+                .expect("declared C directories");
             let real = chelis_backend_c::toolchain::verify_compiler(
                 &toolchain.compiler,
                 &toolchain.compile_flags,
@@ -2640,7 +2641,8 @@ loss = (mean(x, 0) : tensor[f32])
         let dir = tempdir().expect("tempdir");
         let Some(case) = std::env::var_os("CHELIS_PYTHON_WRAPPER_CHILD") else {
             use std::os::unix::fs::PermissionsExt;
-            let toolchain = chelis_backend_c::toolchain::runtime_toolchain(Default::default());
+            let toolchain = chelis_backend_c::toolchain::runtime_toolchain(Default::default())
+                .expect("declared C directories");
             let real = chelis_backend_c::toolchain::verify_compiler(
                 &toolchain.compiler,
                 &toolchain.compile_flags,
@@ -2711,6 +2713,112 @@ loss = (mean(x, 0) : tensor[f32])
                 "{model}: expected refused {refused}, got {:?}",
                 result.err()
             ),
+        }
+    }
+
+    /// spec/08-backends.md §7: the binding compile uses the declared C
+    /// directories, in its compiler check and in its shared-library compile,
+    /// and refuses a relative entry. A logging wrapper records every compiler
+    /// command. The variables are process state, so each case runs in a child
+    /// test process.
+    #[cfg(unix)]
+    #[test]
+    fn compile_and_load_job_uses_the_declared_c_directories() {
+        const TEST: &str = "tests::compile_and_load_job_uses_the_declared_c_directories";
+        let dir = tempdir().expect("tempdir");
+        let Some(case) = std::env::var_os("CHELIS_PYTHON_WRAPPER_CHILD") else {
+            use std::os::unix::fs::PermissionsExt;
+            let toolchain = chelis_backend_c::toolchain::runtime_toolchain(Default::default())
+                .expect("declared C directories");
+            let real = chelis_backend_c::toolchain::verify_compiler(
+                &toolchain.compiler,
+                &toolchain.compile_flags,
+                &toolchain.link_flags,
+                &[],
+            )
+            .unwrap_or_else(|error| panic!("{error}"))
+            .path;
+            let log = dir.path().join("commands.log");
+            let wrapper = dir.path().join("logging-cc");
+            fs::write(
+                &wrapper,
+                format!(
+                    "#!/bin/sh\necho \"$*\" >> '{}'\nexec '{}' \"$@\"\n",
+                    log.display(),
+                    real.display()
+                ),
+            )
+            .expect("write wrapper");
+            fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755))
+                .expect("chmod wrapper");
+            let include = dir.path().join("include");
+            let library = dir.path().join("lib");
+            fs::create_dir_all(&include).expect("include dir");
+            fs::create_dir_all(&library).expect("library dir");
+            for (case, include_value, library_value) in [
+                ("declared", include.as_os_str(), library.as_os_str()),
+                (
+                    "relative",
+                    std::ffi::OsStr::new("include"),
+                    library.as_os_str(),
+                ),
+            ] {
+                let _ = fs::remove_file(&log);
+                let status =
+                    std::process::Command::new(std::env::current_exe().expect("test binary"))
+                        .args(["--exact", TEST])
+                        .env("CHELIS_PYTHON_WRAPPER_CHILD", case)
+                        .env("CHELIS_CC", &wrapper)
+                        .env("CHELIS_C_INCLUDE_PATH", include_value)
+                        .env("CHELIS_C_LIBRARY_PATH", library_value)
+                        .status()
+                        .expect("run child");
+                assert!(status.success(), "{TEST} failed in the child: {case}");
+                let commands = fs::read_to_string(&log).unwrap_or_default();
+                if case == "declared" {
+                    let isystem = format!("-isystem{}", include.display());
+                    let rpath = format!("-Wl,-rpath,{}", library.display());
+                    for (what, marker) in
+                        [("canary", "chelis-compiler-canary"), ("shared", "-shared")]
+                    {
+                        assert!(
+                            commands.lines().any(|line| line.contains(marker)
+                                && line.contains(&isystem)
+                                && line.contains(&rpath)),
+                            "the {what} command lacks the declared directories: {commands}"
+                        );
+                    }
+                } else {
+                    assert!(
+                        commands.is_empty(),
+                        "a refused job ran the compiler: {commands}"
+                    );
+                }
+            }
+            return;
+        };
+        let source_path = dir.path().join("model.ch");
+        fs::write(&source_path, RELU4_SOURCE).expect("write source");
+        let result = run_compile_and_load_job(CompileAndLoadJob {
+            source_path,
+            source_kind: SourceKind::Surf,
+            target: CompileTarget::C,
+            entry_name: None,
+            artifact_dir: Some(PathBuf::from(dir.path())),
+            project_root: None,
+            force_bare: false,
+        });
+        match (result, case.to_str()) {
+            (Ok(_), Some("declared")) => {}
+            (Err(error), Some("relative")) => {
+                let message = format!("{error:?}");
+                assert!(
+                    message.contains("CHELIS_C_INCLUDE_PATH")
+                        && message.contains("\\\"include\\\""),
+                    "{message}"
+                );
+            }
+            (result, case) => panic!("{case:?}: unexpected result {:?}", result.err()),
         }
     }
 

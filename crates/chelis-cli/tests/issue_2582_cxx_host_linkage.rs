@@ -97,7 +97,8 @@ fn link_and_run_as_cxx(compiler: &str, out_dir: &Path, source: &str) -> String {
             wants_openmp: false,
             needs_blas: false,
         },
-    );
+    )
+    .expect("declared C directories");
     let binary = out_dir.join("host");
     let linked = StdCommand::new(compiler)
         .current_dir(out_dir)

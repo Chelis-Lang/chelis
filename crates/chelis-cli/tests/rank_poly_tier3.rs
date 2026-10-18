@@ -1360,7 +1360,8 @@ fn build_compile_run(source: &str, name: &str) -> String {
             wants_openmp: true,
             needs_blas,
         },
-    );
+    )
+    .expect("declared C directories");
     let bin = out_dir.join(name);
     let mut cc = StdCommand::new(&toolchain.compiler);
     cc.current_dir(&out_dir)

@@ -11581,7 +11581,7 @@ fn cmd_build_c_result(
         println!("Symbolic dims: {}", symbolic_dims.join(", "));
     }
     let (toolchain, version_probe) =
-        chelis_backend_c::toolchain::runtime_toolchain_probed(result.requirements);
+        chelis_backend_c::toolchain::runtime_toolchain_probed(result.requirements)?;
     native_build::NativeBuild {
         target: "c",
         compiler: toolchain.compiler.into(),
@@ -11649,7 +11649,7 @@ fn cmd_build_hip_host(
     );
     print_staged_runtime(&staged);
 
-    let cpu_toolchain = chelis_backend_c::toolchain::runtime_toolchain(result.host.requirements);
+    let cpu_toolchain = chelis_backend_c::toolchain::runtime_toolchain(result.host.requirements)?;
     let mut compile_flags = cpu_toolchain.compile_flags;
     compile_flags.retain(|flag| flag != "-fopenmp");
     let mut link_flags = cpu_toolchain.link_flags;
@@ -11734,7 +11734,7 @@ fn cmd_build_metal_host(
     );
     print_staged_runtime(&staged);
 
-    let cpu_toolchain = chelis_backend_c::toolchain::runtime_toolchain(result.host.requirements);
+    let cpu_toolchain = chelis_backend_c::toolchain::runtime_toolchain(result.host.requirements)?;
     let mut compile_flags = cpu_toolchain.compile_flags;
     compile_flags.retain(|flag| flag != "-fopenmp");
     let mut link_flags = cpu_toolchain.link_flags;

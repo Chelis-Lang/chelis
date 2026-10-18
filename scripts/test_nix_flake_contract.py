@@ -221,6 +221,28 @@ class NixFlakeContractTests(unittest.TestCase):
         )
 
     @REQUIRES_NIX
+    def test_linux_wrapper_declares_the_openblas_directories(self) -> None:
+        for system in EXPECTED_SYSTEMS:
+            with self.subTest(system=system):
+                command = nix_raw(
+                    "eval", "--raw", f".#packages.{system}.chelis.buildCommand"
+                )
+                include = re.search(
+                    r"--prefix CHELIS_C_INCLUDE_PATH : (\S+)-openblas-[^/\s]+-dev/include\b",
+                    command,
+                )
+                library = re.search(
+                    r"--prefix CHELIS_C_LIBRARY_PATH : (\S+)-openblas-[^/\s]+/lib\b",
+                    command,
+                )
+                if system.endswith("-linux"):
+                    self.assertIsNotNone(include, command)
+                    self.assertIsNotNone(library, command)
+                else:
+                    self.assertNotIn("CHELIS_C_INCLUDE_PATH", command)
+                    self.assertNotIn("CHELIS_C_LIBRARY_PATH", command)
+
+    @REQUIRES_NIX
     def test_package_names_are_exact_on_each_system(self) -> None:
         for system in EXPECTED_SYSTEMS:
             with self.subTest(system=system):

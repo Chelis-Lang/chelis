@@ -56,7 +56,8 @@ fn exact_nullary_generic_reproducer_c_compiles() {
             wants_openmp: true,
             needs_blas: false,
         },
-    );
+    )
+    .expect("declared C directories");
     let output = StdCommand::new(&toolchain.compiler)
         .current_dir(&out_dir)
         .args(&toolchain.compile_flags)
@@ -88,7 +89,8 @@ def main() -> Box[f32] = choose(true)
             wants_openmp: true,
             needs_blas: false,
         },
-    );
+    )
+    .expect("declared C directories");
     let output = StdCommand::new(&toolchain.compiler)
         .current_dir(&out_dir)
         .args(&toolchain.compile_flags)
@@ -123,7 +125,8 @@ def main() -> bool = is_empty(concrete())
             wants_openmp: true,
             needs_blas: false,
         },
-    );
+    )
+    .expect("declared C directories");
     let output = StdCommand::new(&toolchain.compiler)
         .current_dir(&out_dir)
         .args(&toolchain.compile_flags)
@@ -157,7 +160,8 @@ def main() -> List[i64] = keep_unmasked([false], [cast(0, i64)])
             wants_openmp: true,
             needs_blas: false,
         },
-    );
+    )
+    .expect("declared C directories");
     let output = StdCommand::new(&toolchain.compiler)
         .current_dir(&out_dir)
         .args(&toolchain.compile_flags)
@@ -341,7 +345,8 @@ def main() -> bool = loop(Full { value: cast(1.0, f32) })
             wants_openmp: true,
             needs_blas: false,
         },
-    );
+    )
+    .expect("declared C directories");
     let output = StdCommand::new(&toolchain.compiler)
         .current_dir(&out_dir)
         .args(&toolchain.compile_flags)
@@ -373,7 +378,8 @@ def main() -> bool = ping(Full { value: cast(1.0, f32) }, true)
             wants_openmp: true,
             needs_blas: false,
         },
-    );
+    )
+    .expect("declared C directories");
     let output = StdCommand::new(&toolchain.compiler)
         .current_dir(&out_dir)
         .args(&toolchain.compile_flags)

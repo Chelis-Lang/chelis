@@ -421,12 +421,14 @@ let
         fileset = lib.fileset.unions [
           ../examples/hello_tensor.ch
           ../examples/native_library.ch
+          ../examples/recurrence_extent_scope.ch
         ];
       };
       bare = "env -i PATH=/var/empty HOME=$TMPDIR TMPDIR=$TMPDIR";
     in
     pkgs.runCommand "chelis-wrapped-build" { } ''
-      cp ${examples}/hello_tensor.ch ${examples}/native_library.ch "$TMPDIR/"
+      cp ${examples}/hello_tensor.ch ${examples}/native_library.ch \
+        ${examples}/recurrence_extent_scope.ch "$TMPDIR/"
       chmod u+w "$TMPDIR"/*.ch
       cd "$TMPDIR"
 
@@ -436,6 +438,19 @@ let
       if [ "$actual" != "$expected" ]; then
         echo "unexpected output of the wrapped build" >&2
         printf 'expected: %s\nactual: %s\n' "$expected" "$actual" >&2
+        exit 1
+      fi
+
+      # The C of this program includes chelis_blas.h, so the build links the
+      # BLAS provider. On Linux that is OpenBLAS, which the wrapper declares.
+      # The program runs without a library search path in its environment.
+      ${bare} ${packages.chelis}/bin/chelis build recurrence_extent_scope.ch -o blas
+      grep -q '#include "chelis_blas.h"' blas/recurrence_extent_scope.c
+      blas_actual="$(${bare} ./blas/recurrence_extent_scope)"
+      blas_expected="$(printf 'main.0 = 40.0\nmain.1 = Model([5.0, 5.0])')"
+      if [ "$blas_actual" != "$blas_expected" ]; then
+        echo "unexpected output of the wrapped BLAS build" >&2
+        printf 'expected: %s\nactual: %s\n' "$blas_expected" "$blas_actual" >&2
         exit 1
       fi
 

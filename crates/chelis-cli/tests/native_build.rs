@@ -51,7 +51,8 @@ fn cpu_library_has_no_entry_and_can_be_linked() {
     assert!(out.join("libfunctions.a").exists());
     let driver = out.join("driver.c");
     fs::write(&driver, "#include \"chelis_runtime.h\"\n#include \"functions.h\"\nint main(void) { return chelis_fn_7477696365(21) == 42 ? 0 : 1; }\n").unwrap();
-    let toolchain = chelis_backend_c::toolchain::runtime_toolchain(Default::default());
+    let toolchain = chelis_backend_c::toolchain::runtime_toolchain(Default::default())
+        .expect("declared C directories");
     let status = Process::new(toolchain.compiler)
         .arg(&driver)
         .arg(out.join("libfunctions.a"))
@@ -200,7 +201,8 @@ fn compiler_failure_and_missing_product_preserve_previous_artifact() {
     // floating-point canary before compiling, so the broken compiler hands
     // those probes to a real one and breaks only the compile itself. The last
     // case refuses the probe too.
-    let toolchain = chelis_backend_c::toolchain::runtime_toolchain(Default::default());
+    let toolchain = chelis_backend_c::toolchain::runtime_toolchain(Default::default())
+        .expect("declared C directories");
     let real = chelis_backend_c::toolchain::verify_compiler(
         &toolchain.compiler,
         &toolchain.compile_flags,
@@ -604,7 +606,8 @@ fn c_build_ignores_compiler_environment_and_refuses_profile_changing_wrapper() {
         .success();
     assert_eq!(run(&clean), run(&hostile));
 
-    let toolchain = chelis_backend_c::toolchain::runtime_toolchain(Default::default());
+    let toolchain = chelis_backend_c::toolchain::runtime_toolchain(Default::default())
+        .expect("declared C directories");
     let real = chelis_backend_c::toolchain::verify_compiler(
         &toolchain.compiler,
         &toolchain.compile_flags,
@@ -644,7 +647,8 @@ fn c_build_ignores_compiler_environment_and_refuses_profile_changing_wrapper() {
 /// scripts that hand their arguments to it.
 #[cfg(unix)]
 fn real_compiler() -> std::path::PathBuf {
-    let toolchain = chelis_backend_c::toolchain::runtime_toolchain(Default::default());
+    let toolchain = chelis_backend_c::toolchain::runtime_toolchain(Default::default())
+        .expect("declared C directories");
     chelis_backend_c::toolchain::verify_compiler(
         &toolchain.compiler,
         &toolchain.compile_flags,
@@ -915,7 +919,8 @@ fn link_static_library_driver(out: &Path, library: &str, needs_blas: bool) -> bo
             wants_openmp: true,
             needs_blas,
         },
-    );
+    )
+    .expect("declared C directories");
     let driver = out.join("driver.c");
     let library = out.join(library);
     let runtime = out.join("libchelis_runtime.a");

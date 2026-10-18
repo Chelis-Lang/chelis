@@ -37,13 +37,15 @@ pub fn c_compiler() -> String {
     test_toolchain(CodegenRequirements::default()).compiler
 }
 
-/// The `chelis build` toolchain: the pinned profile (see [`pinned_toolchain`])
-/// for the compiler `CHELIS_CC` names, or else the first platform compiler
-/// that runs. The compiler is a declared input of the build, not part of the
-/// profile: [`verify_compiler`] records its identity and refuses one that does
-/// not apply the profile's floating-point flags.
-pub fn runtime_toolchain(requirements: CodegenRequirements) -> NativeToolchain {
-    resolve_toolchain(requirements, &["CHELIS_CC"])
+/// The `chelis build` toolchain. It is the pinned profile (see
+/// [`pinned_toolchain`]) for the compiler that `CHELIS_CC` names, or else for
+/// the first platform compiler that runs. It adds the flags of the declared C
+/// directories ([`DeclaredCDirectories`]). The compiler is a declared input of
+/// the build, not part of the profile. [`verify_compiler`] records its identity
+/// and refuses one that does not apply the profile's floating-point flags. An
+/// error names a malformed directory declaration.
+pub fn runtime_toolchain(requirements: CodegenRequirements) -> Result<NativeToolchain, String> {
+    runtime_toolchain_probed(requirements).map(|(toolchain, _)| toolchain)
 }
 
 /// [`runtime_toolchain`], and the compiler's `--version` read that it took to
@@ -51,8 +53,107 @@ pub fn runtime_toolchain(requirements: CodegenRequirements) -> NativeToolchain {
 /// [`verify_compiler_during`], so one build runs `--version` once.
 pub fn runtime_toolchain_probed(
     requirements: CodegenRequirements,
-) -> (NativeToolchain, Option<VersionProbe>) {
-    resolve_toolchain_probed(requirements, &["CHELIS_CC"])
+) -> Result<(NativeToolchain, Option<VersionProbe>), String> {
+    let declared = DeclaredCDirectories::from_env()?;
+    let (mut toolchain, probe) = resolve_toolchain_probed(requirements, &["CHELIS_CC"]);
+    declared.add_flags(&mut toolchain);
+    Ok((toolchain, probe))
+}
+
+/// The variable that declares C include directories (spec/08-backends.md §7).
+pub const C_INCLUDE_PATH_VARIABLE: &str = "CHELIS_C_INCLUDE_PATH";
+/// The variable that declares C library directories (spec/08-backends.md §7).
+pub const C_LIBRARY_PATH_VARIABLE: &str = "CHELIS_C_LIBRARY_PATH";
+
+/// The directories of external C headers and libraries that
+/// [`C_INCLUDE_PATH_VARIABLE`] and [`C_LIBRARY_PATH_VARIABLE`] declare. Each
+/// variable is a colon-separated list of absolute directories. They are the
+/// only ambient input that adds a C directory, because [`tool_command`] clears
+/// `CPATH`, `LIBRARY_PATH` and the rest. Their flags join the profile, so the
+/// compiler check and its canary see them.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DeclaredCDirectories {
+    pub include: Vec<String>,
+    pub library: Vec<String>,
+}
+
+impl DeclaredCDirectories {
+    /// Read both variables from the process environment.
+    pub fn from_env() -> Result<Self, String> {
+        Self::parse(
+            std::env::var_os(C_INCLUDE_PATH_VARIABLE).as_deref(),
+            std::env::var_os(C_LIBRARY_PATH_VARIABLE).as_deref(),
+        )
+    }
+
+    /// Parse the two variable values. An unset or empty value, and an empty
+    /// entry, declare no directory. A wrapper that prefixes a directory to an
+    /// empty value makes such an entry. A relative or non-UTF-8 entry is an
+    /// error. So is a library entry with a comma, which `-Wl,-rpath,<dir>`
+    /// cannot carry.
+    pub fn parse(include: Option<&OsStr>, library: Option<&OsStr>) -> Result<Self, String> {
+        Ok(Self {
+            include: parse_directory_list(C_INCLUDE_PATH_VARIABLE, include, false)?,
+            library: parse_directory_list(C_LIBRARY_PATH_VARIABLE, library, true)?,
+        })
+    }
+
+    /// The compile flags: `-isystem<dir>` for each include directory.
+    pub fn compile_flags(&self) -> Vec<String> {
+        self.include
+            .iter()
+            .map(|dir| format!("-isystem{dir}"))
+            .collect()
+    }
+
+    /// The link flags: `-L<dir>` and the run-time search path
+    /// `-Wl,-rpath,<dir>` for each library directory.
+    pub fn link_flags(&self) -> Vec<String> {
+        self.library
+            .iter()
+            .flat_map(|dir| [format!("-L{dir}"), format!("-Wl,-rpath,{dir}")])
+            .collect()
+    }
+
+    /// Add [`Self::compile_flags`] after the profile's compile flags, and
+    /// [`Self::link_flags`] before the profile's link flags, so the library
+    /// directories come before every `-l` flag.
+    pub fn add_flags(&self, toolchain: &mut NativeToolchain) {
+        toolchain.compile_flags.extend(self.compile_flags());
+        let mut link_flags = self.link_flags();
+        link_flags.append(&mut toolchain.link_flags);
+        toolchain.link_flags = link_flags;
+    }
+}
+
+fn parse_directory_list(
+    variable: &str,
+    value: Option<&OsStr>,
+    link: bool,
+) -> Result<Vec<String>, String> {
+    let Some(value) = value.filter(|value| !value.is_empty()) else {
+        return Ok(Vec::new());
+    };
+    let value = value
+        .to_str()
+        .ok_or_else(|| format!("{variable} is not valid UTF-8: {}", value.to_string_lossy()))?;
+    value
+        .split(':')
+        .filter(|entry| !entry.is_empty())
+        .map(|entry| {
+            if !Path::new(entry).is_absolute() {
+                Err(format!(
+                    "{variable} entry {entry:?} is not an absolute directory: each entry must be an absolute directory"
+                ))
+            } else if link && entry.contains(',') {
+                Err(format!(
+                    "{variable} entry {entry:?} contains a comma, which the run-time search path flag -Wl,-rpath cannot carry"
+                ))
+            } else {
+                Ok(entry.to_string())
+            }
+        })
+        .collect()
 }
 
 /// Reference profile for a caller-selected compiler: the pinned profile with
@@ -1116,7 +1217,7 @@ mod tests {
                 wants_openmp: false,
                 needs_blas,
             };
-            let runtime = runtime_toolchain(requirements);
+            let runtime = runtime_toolchain(requirements).expect("declared C directories");
             let strict = strict_reference_toolchain(runtime.compiler.clone(), requirements);
             assert_eq!(runtime, strict);
             assert!(
@@ -1130,7 +1231,7 @@ mod tests {
             wants_openmp: true,
             needs_blas: false,
         };
-        let runtime = runtime_toolchain(requirements);
+        let runtime = runtime_toolchain(requirements).expect("declared C directories");
         let strict = strict_reference_toolchain(runtime.compiler.clone(), requirements);
         let without_openmp = |flags: &[String]| {
             flags
@@ -1866,6 +1967,226 @@ mod tests {
         }
     }
 
+    #[test]
+    fn declared_c_directories_parse_absolute_lists_in_order() {
+        let declared = DeclaredCDirectories::parse(
+            Some(OsStr::new("/opt/a/include:/opt/b,c/include")),
+            Some(OsStr::new("/opt/a/lib:/opt/b/lib")),
+        )
+        .unwrap();
+        assert_eq!(declared.include, ["/opt/a/include", "/opt/b,c/include"]);
+        assert_eq!(declared.library, ["/opt/a/lib", "/opt/b/lib"]);
+        assert_eq!(
+            declared.compile_flags(),
+            ["-isystem/opt/a/include", "-isystem/opt/b,c/include"]
+        );
+        assert_eq!(
+            declared.link_flags(),
+            [
+                "-L/opt/a/lib",
+                "-Wl,-rpath,/opt/a/lib",
+                "-L/opt/b/lib",
+                "-Wl,-rpath,/opt/b/lib"
+            ]
+        );
+        for (include, library) in [(None, None), (Some(""), Some("")), (Some(":"), Some("::"))] {
+            assert_eq!(
+                DeclaredCDirectories::parse(include.map(OsStr::new), library.map(OsStr::new)),
+                Ok(DeclaredCDirectories::default())
+            );
+        }
+        // An empty entry declares nothing. A wrapper that prefixes a directory
+        // to an exported empty value makes a trailing one.
+        let prefixed = DeclaredCDirectories::parse(
+            Some(OsStr::new("/nix/include:")),
+            Some(OsStr::new(":/a/lib::/b/lib")),
+        )
+        .unwrap();
+        assert_eq!(prefixed.include, ["/nix/include"]);
+        assert_eq!(prefixed.library, ["/a/lib", "/b/lib"]);
+    }
+
+    #[test]
+    fn declared_c_directories_reject_each_malformed_entry() {
+        for (include, library, variable, entry) in [
+            ("include", "", C_INCLUDE_PATH_VARIABLE, "\"include\""),
+            ("/a:./b", "", C_INCLUDE_PATH_VARIABLE, "\"./b\""),
+            ("/a::./b", "", C_INCLUDE_PATH_VARIABLE, "\"./b\""),
+            ("/a:.", "", C_INCLUDE_PATH_VARIABLE, "\".\""),
+            ("", "lib", C_LIBRARY_PATH_VARIABLE, "\"lib\""),
+            ("", "~/lib", C_LIBRARY_PATH_VARIABLE, "\"~/lib\""),
+            ("", ":lib:", C_LIBRARY_PATH_VARIABLE, "\"lib\""),
+            ("", "/opt/a,b/lib", C_LIBRARY_PATH_VARIABLE, "comma"),
+        ] {
+            let error =
+                DeclaredCDirectories::parse(Some(OsStr::new(include)), Some(OsStr::new(library)))
+                    .unwrap_err();
+            assert!(
+                error.contains(variable) && error.contains(entry),
+                "{include:?} {library:?}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn declared_c_directories_join_the_profile() {
+        let mut toolchain = pinned_toolchain(
+            "cc".to_string(),
+            CodegenRequirements {
+                wants_openmp: false,
+                needs_blas: true,
+            },
+            false,
+        );
+        let profile = toolchain.clone();
+        DeclaredCDirectories::parse(Some(OsStr::new("/inc")), Some(OsStr::new("/lib")))
+            .unwrap()
+            .add_flags(&mut toolchain);
+        assert_eq!(
+            toolchain.compile_flags,
+            [
+                profile.compile_flags.clone(),
+                vec!["-isystem/inc".to_string()]
+            ]
+            .concat()
+        );
+        // The library directories come before every `-l` flag.
+        assert_eq!(
+            toolchain.link_flags,
+            [
+                vec!["-L/lib".to_string(), "-Wl,-rpath,/lib".to_string()],
+                profile.link_flags.clone()
+            ]
+            .concat()
+        );
+    }
+
+    /// `runtime_toolchain` reads both variables. A child test process carries
+    /// them, so other parallel tests never observe them.
+    #[test]
+    fn runtime_toolchain_reads_the_declared_c_directories() {
+        if std::env::var_os("CHELIS_TOOLCHAIN_DECLARED_CHILD").is_none() {
+            for (include, library, ok) in [
+                ("/declared/include", "/declared/lib", true),
+                ("declared/include", "/declared/lib", false),
+                ("/declared/include", "declared/lib", false),
+            ] {
+                let status = Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        "--exact",
+                        "toolchain::tests::runtime_toolchain_reads_the_declared_c_directories",
+                    ])
+                    .env(
+                        "CHELIS_TOOLCHAIN_DECLARED_CHILD",
+                        if ok { "ok" } else { "error" },
+                    )
+                    .env(C_INCLUDE_PATH_VARIABLE, include)
+                    .env(C_LIBRARY_PATH_VARIABLE, library)
+                    .status()
+                    .unwrap();
+                assert!(
+                    status.success(),
+                    "{include:?} {library:?} failed in the child"
+                );
+            }
+            return;
+        }
+        let requirements = CodegenRequirements::default();
+        if std::env::var("CHELIS_TOOLCHAIN_DECLARED_CHILD").as_deref() == Ok("error") {
+            let error = runtime_toolchain(requirements).unwrap_err();
+            assert!(error.contains("declared/"), "{error}");
+            assert!(runtime_toolchain_probed(requirements).is_err());
+            return;
+        }
+        let toolchain = runtime_toolchain(requirements).unwrap();
+        assert!(
+            toolchain
+                .compile_flags
+                .contains(&"-isystem/declared/include".to_string()),
+            "{toolchain:?}"
+        );
+        assert_eq!(
+            toolchain.link_flags[..2],
+            ["-L/declared/lib", "-Wl,-rpath,/declared/lib"]
+        );
+        // The reference profile reads no environment.
+        let reference = strict_reference_toolchain(String::new(), requirements);
+        assert!(
+            !reference
+                .compile_flags
+                .iter()
+                .any(|flag| flag.starts_with("-isystem"))
+        );
+    }
+
+    /// The declared directories are part of the key under which a process
+    /// remembers an accepted compiler. A check with other directories runs
+    /// the canary again, and that canary compiles with those directories.
+    #[cfg(unix)]
+    #[test]
+    fn declared_c_directories_change_the_canary_key() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let include = dir.path().join("include");
+        let library = dir.path().join("lib");
+        std::fs::create_dir_all(&include).unwrap();
+        std::fs::create_dir_all(&library).unwrap();
+        let reference = strict_reference_toolchain(String::new(), CodegenRequirements::default());
+        let compiler = test_toolchain(CodegenRequirements::default()).compiler;
+        let real = resolve_executable(&compiler).expect("a C compiler on PATH");
+        let log = dir.path().join("canary-commands.log");
+        let logging = dir.path().join("logging-cc");
+        std::fs::write(
+            &logging,
+            format!(
+                "#!/bin/sh\ncase \" $* \" in *chelis-compiler-canary*) echo \"$*\" >> '{}';; esac\nexec '{}' \"$@\"\n",
+                log.display(),
+                real.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&logging, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // Every read follows the first check, whose canary creates the log.
+        let commands = || -> Vec<String> {
+            std::fs::read_to_string(&log)
+                .expect("the wrapper logs each canary command")
+                .lines()
+                .map(str::to_string)
+                .collect()
+        };
+        let declared =
+            DeclaredCDirectories::parse(Some(include.as_os_str()), Some(library.as_os_str()))
+                .unwrap();
+        let mut with_directories = reference.clone();
+        declared.add_flags(&mut with_directories);
+
+        let mut seen = 0;
+        for (toolchain, canary) in [
+            (&reference, true),
+            (&reference, false),
+            (&with_directories, true),
+            (&with_directories, false),
+        ] {
+            verify_compiler(
+                logging.to_str().unwrap(),
+                &toolchain.compile_flags,
+                &toolchain.link_flags,
+                &[],
+            )
+            .unwrap_or_else(|error| panic!("{error}"));
+            let now = commands();
+            assert_eq!(now.len() > seen, canary, "{:?}", toolchain.compile_flags);
+            if canary && toolchain == &with_directories {
+                let new = &now[seen..];
+                let isystem = format!("-isystem{}", include.display());
+                let rpath = format!("-Wl,-rpath,{}", library.display());
+                assert!(new.iter().any(|line| line.contains(&isystem)), "{new:?}");
+                assert!(new.iter().any(|line| line.contains(&rpath)), "{new:?}");
+            }
+            seen = now.len();
+        }
+    }
+
     /// `verify_compiler_during` starts `work` only once the identity, the macro
     /// check, and the C library check accept the compiler. `work` then runs beside
     /// the canary, and a canary refusal drops its result.
@@ -2004,7 +2325,7 @@ mod tests {
             wants_openmp: true,
             needs_blas: false,
         };
-        let runtime = runtime_toolchain(requirements);
+        let runtime = runtime_toolchain(requirements).expect("declared C directories");
         assert_eq!(runtime.compiler, "hostile-cc");
         assert!(
             !runtime

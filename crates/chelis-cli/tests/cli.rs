@@ -374,6 +374,7 @@ fn cpu_toolchain_for_sources(
             needs_blas: generated_source_needs_blas(out_dir, sources),
         },
     )
+    .expect("declared C directories")
 }
 
 fn gcc_link_generated(out_dir: &Path, source: &str, binary: &str) -> std::process::ExitStatus {

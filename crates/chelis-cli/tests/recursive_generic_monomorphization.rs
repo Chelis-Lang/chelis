@@ -414,7 +414,8 @@ fn compile_generated_object(out_dir: &std::path::Path, stem: &str) -> PathBuf {
             wants_openmp: true,
             needs_blas: false,
         },
-    );
+    )
+    .expect("declared C directories");
     let object = out_dir.join(format!("{stem}.o"));
     let isolated_main = format!("{stem}__manifest_main");
     let output = StdCommand::new(&toolchain.compiler)
@@ -771,7 +772,8 @@ fn issue_941_minimized_reproducer_compiles() {
             wants_openmp: true,
             needs_blas: false,
         },
-    );
+    )
+    .expect("declared C directories");
     let output = StdCommand::new(&toolchain.compiler)
         .current_dir(&out_dir)
         .args(&toolchain.compile_flags)
@@ -881,7 +883,8 @@ def entry_b() -> i32 = loop(Full { value: cast(1, i32) }, 3)
             wants_openmp: true,
             needs_blas: false,
         },
-    );
+    )
+    .expect("declared C directories");
     let output = StdCommand::new(&toolchain.compiler)
         .args(["-r"])
         .arg(&object_a)
