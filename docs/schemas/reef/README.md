@@ -6,6 +6,11 @@ They do not verify paths, package identity, compiler compatibility, network sour
 
 Reef parsing remains the validation authority. Editor validation is advisory.
 
+Lock schema 1 uses the existing `dependencies` array for all binary platforms.
+Binary identity uses `(name, source.platform)`, not name alone.
+
+Reef rejects duplicate identities. Editor schemas do not check this rule.
+
 ## Taplo example
 
 Add the applicable directive as the first comment in an editor-only document or template:

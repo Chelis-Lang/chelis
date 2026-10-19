@@ -300,11 +300,12 @@ pub enum LockSource {
     /// - `remote_origin` is the `github://<org>/<repo>@<tag>` URI the
     ///   asset was fetched from (same scheme-tagged form as
     ///   [`LockSource::LocalRegistry`]).
-    /// - `platform` is the resolved host-platform slug (e.g.
-    ///   `linux-x86_64`). A binary lock entry is inherently single-
-    ///   platform — the variant records exactly which host it was
-    ///   resolved for, so `--from-lockfile` re-fetches the matching asset
-    ///   and skips entries for a foreign host.
+    /// - `platform` identifies one declared build-platform slug.
+    ///   Binary identities use `(name, platform)`.
+    ///
+    /// A lock retains every declared platform.
+    /// Install selects the host. Fetch plans can select another platform.
+    ///
     /// - `asset` is the release asset filename.
     /// - `sha256` is the pinned lowercase-hex SHA-256 of the asset bytes.
     ///
@@ -2598,7 +2599,7 @@ pub fn prepare_program_for_file(
                     project_lock_held: false,
                 },
             )?;
-            write_lockfile(&lock_path, &build_lockfile(&loaded, runtime))?;
+            write_lockfile(&lock_path, &build_lockfile(&loaded, runtime)?)?;
             prepare_graph_from_loaded(root.clone(), loaded, &BTreeSet::new(), runtime)?
         }
     };
@@ -2610,7 +2611,7 @@ pub fn prepare_program_for_file(
     if lock_path.exists() {
         read_lockfile(&lock_path)?;
     } else if repair_missing_lock()? {
-        write_lockfile(&lock_path, &build_lockfile(&graph.graph, runtime))?;
+        write_lockfile(&lock_path, &build_lockfile(&graph.graph, runtime)?)?;
     }
     let root_package = graph
         .graph
@@ -4038,7 +4039,7 @@ pub fn build_package_with_options(
     )?;
     document_schema::ensure_project_lock_ignore(&root)?;
     if !reused_lock {
-        let lock = build_lockfile(&graph, runtime);
+        let lock = build_lockfile(&graph, runtime)?;
         write_lockfile_unlocked(&root.join("reef.lock"), &lock)?;
     }
 
@@ -6097,8 +6098,8 @@ pub enum PlannedDownloadKind {
     Binary,
 }
 
-/// The download URL and pinned SHA-256 of each artifact that a package's
-/// `reef.lock` locks (chelis#3813). `chelis reef fetch-plan` prints it.
+/// The download URL and pinned SHA-256 of each selected locked artifact.
+/// `chelis reef fetch-plan` prints this object.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct FetchPlan {
     pub format_version: u32,
@@ -6110,13 +6111,19 @@ pub struct FetchPlan {
 pub const FETCH_PLAN_FORMAT_VERSION: u32 = 1;
 
 /// Plan the downloads of `<package_root>/reef.lock` without network
-/// access. A `local_registry` entry gives its archive and its shell, and a
-/// `binary` entry gives its asset. `path` and `bundled` entries, and a
-/// legacy `local_registry` entry for `chelis-std`, give nothing. An entry
+/// access. A `local_registry` entry gives its archive and its shell.
+/// A binary gives its asset only if its platform matches `platform`.
+/// `None` selects no binaries.
+///
+/// `path` and `bundled` entries, and a legacy `local_registry` entry for
+/// `chelis-std`, give nothing. An entry
 /// with no origin, or with an origin that does not parse, is an error. A
 /// `binary` entry whose `name` is not [`is_safe_artifact_name`], or whose
 /// `asset` is not [`is_url_safe_asset_name`], is an error (chelis#3891).
-pub fn lockfile_fetch_plan(package_root: &Path) -> Result<FetchPlan, LockfileInstallError> {
+pub fn lockfile_fetch_plan(
+    package_root: &Path,
+    selected_platform: Option<&str>,
+) -> Result<FetchPlan, LockfileInstallError> {
     let (_, lock) = read_install_lock(package_root)?;
     let mut artifacts = Vec::new();
     for dep in &lock.dependencies {
@@ -6175,6 +6182,9 @@ pub fn lockfile_fetch_plan(package_root: &Path) -> Result<FetchPlan, LockfileIns
                 asset,
                 sha256,
             } => {
+                if Some(platform.as_str()) != selected_platform {
+                    continue;
+                }
                 if !is_safe_artifact_name(&dep.name) || !is_url_safe_asset_name(asset) {
                     return Err(LockfileInstallError::UnsafeBinaryName {
                         name: dep.name.clone(),
@@ -6541,9 +6551,7 @@ fn install_lockfile_entries(
                 asset,
                 sha256,
             } => {
-                // Item 11: binary lock entries are host-specific. Skip an
-                // entry written for a different host — we cannot run a
-                // foreign-platform binary, and its asset may not exist.
+                // Select the host identity from the platform entries.
                 let host = host_platform_slug();
                 if host != Some(platform.as_str()) {
                     results.push(LockfileInstallEntry::SkippedForeignPlatform {
@@ -7445,7 +7453,7 @@ pub fn package_schema(
         },
     )?;
     if !reused_lock {
-        let lock = build_lockfile(&graph, runtime);
+        let lock = build_lockfile(&graph, runtime)?;
         write_lockfile(&root.join("reef.lock"), &lock)?;
     }
 
@@ -9490,7 +9498,10 @@ fn read_registry_index(registry_root: &Path) -> Result<LocalRegistryIndex, Strin
     Ok(index)
 }
 
-fn build_lockfile(graph: &PackageGraph, runtime: &'static EmbeddedRuntime) -> ReefLock {
+fn build_lockfile(
+    graph: &PackageGraph,
+    runtime: &'static EmbeddedRuntime,
+) -> Result<ReefLock, String> {
     let root = graph
         .packages
         .get(&graph.root_package)
@@ -9593,43 +9604,24 @@ fn build_lockfile(graph: &PackageGraph, runtime: &'static EmbeddedRuntime) -> Re
         });
     }
 
-    // Item 11 (chelis#468): lock every binary artifact declared across
-    // the graph, resolved to the host platform. The `LockSource::Binary`
-    // variant records the platform, so a binary lock entry is inherently
-    // host-specific; an artifact that declares no asset for the host
-    // platform is skipped here and surfaces at install time instead. The
-    // graph iterates in sorted name order (BTreeMap), and a `seen` set
-    // dedupes artifacts declared by more than one package, so the output
-    // is deterministic.
-    if let Some(platform) = host_platform_slug() {
-        let mut seen: BTreeSet<String> = BTreeSet::new();
-        for package in graph.packages.values() {
-            for (artifact_name, spec) in &package.manifest.artifacts {
-                if !seen.insert(artifact_name.clone()) {
-                    continue;
-                }
-                if let Some(entry) = binary_lock_entry(
-                    artifact_name,
-                    spec,
-                    platform,
-                    &package.manifest.package.compiler,
-                ) {
-                    dependencies.push(entry);
-                }
-            }
-        }
-    }
+    dependencies.extend(binary_lock_entries(graph.packages.values().map(
+        |package| {
+            (
+                &package.manifest.artifacts,
+                package.manifest.package.compiler.as_str(),
+            )
+        },
+    ))?);
 
-    dependencies.sort_by(|a, b| a.name.cmp(&b.name));
-    ReefLock {
+    sort_lock_dependencies(&mut dependencies);
+    Ok(ReefLock {
         package: root.id.clone(),
         dependencies,
-    }
+    })
 }
 
-/// Item 11 (chelis#468): build a `LockSource::Binary` lock entry for one
-/// artifact resolved to `platform`, or `None` when the artifact declares
-/// no asset for that platform (binary lock entries are host-specific).
+/// Build one binary identity for a declared platform.
+///
 /// The lockfile version is the tag with one leading `v` stripped, matching
 /// [`GitHubReleaseSpec`]. The pinned `sha256` is mirrored into
 /// `archive_sha256` (the lock schema's content-hash slot); `shell_sha256`
@@ -9656,6 +9648,45 @@ fn binary_lock_entry(
         archive_sha256: entry.sha256.clone(),
         shell_sha256: String::new(),
     })
+}
+
+fn binary_lock_entries<'a>(
+    declarations: impl IntoIterator<Item = (&'a BTreeMap<String, ArtifactSpec>, &'a str)>,
+) -> Result<Vec<LockedDependency>, String> {
+    let mut entries = BTreeMap::new();
+    for (artifacts, compiler) in declarations {
+        for (name, spec) in artifacts {
+            for platform in spec.platforms.keys() {
+                let entry = binary_lock_entry(name, spec, platform, compiler)
+                    .ok_or_else(|| format!("invalid binary declaration `{name}`"))?;
+                let identity = (name.clone(), platform.clone());
+                if let Some(previous) = entries.get(&identity) {
+                    if previous != &entry {
+                        return Err(format!(
+                            "conflicting binary identity `{name}` for platform `{platform}`"
+                        ));
+                    }
+                } else {
+                    entries.insert(identity, entry);
+                }
+            }
+        }
+    }
+    Ok(entries.into_values().collect())
+}
+
+fn sort_lock_dependencies(dependencies: &mut [LockedDependency]) {
+    fn platform(dependency: &LockedDependency) -> Option<&str> {
+        match &dependency.source {
+            LockSource::Binary { platform, .. } => Some(platform.as_str()),
+            _ => None,
+        }
+    }
+    dependencies.sort_by(|left, right| {
+        left.name
+            .cmp(&right.name)
+            .then_with(|| platform(left).cmp(&platform(right)))
+    });
 }
 
 /// The declared source roots of a package, relative to its root: `src`
@@ -12945,7 +12976,7 @@ mod tests {
         .expect("resolve the package");
         write_lockfile(
             &root.join("reef.lock"),
-            &build_lockfile(&graph, test_runtime()),
+            &build_lockfile(&graph, test_runtime()).expect("build the lock"),
         )
         .expect("write the lock");
         (dir, root)
@@ -13678,6 +13709,164 @@ platforms.darwin-arm64 = {{ asset = "octant-translator-darwin-arm64.tar.gz", sha
             binary_lock_entry("tool", &spec, "darwin-arm64", CURRENT_COMPILER_VERSION).is_none(),
             "undeclared platform must not produce a lock entry"
         );
+    }
+
+    #[test]
+    fn binary_lock_entries_retain_platform_pins_and_reject_conflicts() {
+        let mut artifacts = BTreeMap::from([(
+            "tool".to_string(),
+            ArtifactSpec {
+                repo: "Chelis-Lang/octant".to_string(),
+                tag: "v1.0.0".to_string(),
+                platforms: BTreeMap::from([
+                    (
+                        "darwin-arm64".to_string(),
+                        ArtifactPlatform {
+                            asset: "tool-darwin.tar.zst".to_string(),
+                            sha256: "a".repeat(64),
+                        },
+                    ),
+                    (
+                        "linux-x86_64".to_string(),
+                        ArtifactPlatform {
+                            asset: "tool-linux.tar.zst".to_string(),
+                            sha256: "b".repeat(64),
+                        },
+                    ),
+                ]),
+            },
+        )]);
+        let entries = binary_lock_entries([
+            (&artifacts, CURRENT_COMPILER_VERSION),
+            (&artifacts, CURRENT_COMPILER_VERSION),
+        ])
+        .expect("identical declarations share identities");
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].archive_sha256, "a".repeat(64));
+        assert_eq!(entries[1].archive_sha256, "b".repeat(64));
+        let lock = ReefLock {
+            package: PackageId {
+                name: "consumer".to_string(),
+                version: "0.1.0".to_string(),
+            },
+            dependencies: entries,
+        };
+        let bytes = document_schema::serialize_lock_v1(&lock).expect("serialize");
+        let parsed = document_schema::parse_lock_text(
+            std::str::from_utf8(&bytes).expect("UTF-8"),
+            Path::new("reef.lock"),
+            false,
+        )
+        .expect("parse both platform identities");
+        assert_eq!(parsed, lock);
+        let mut conflict = artifacts.clone();
+        conflict
+            .get_mut("tool")
+            .unwrap()
+            .platforms
+            .get_mut("linux-x86_64")
+            .unwrap()
+            .sha256 = "c".repeat(64);
+        assert!(
+            binary_lock_entries([
+                (&artifacts, CURRENT_COMPILER_VERSION),
+                (&conflict, CURRENT_COMPILER_VERSION),
+            ])
+            .unwrap_err()
+            .contains("conflicting binary identity")
+        );
+        artifacts
+            .get_mut("tool")
+            .unwrap()
+            .platforms
+            .remove("linux-x86_64");
+        assert_eq!(
+            binary_lock_entries([
+                (&artifacts, CURRENT_COMPILER_VERSION),
+                (&conflict, CURRENT_COMPILER_VERSION),
+            ])
+            .expect("disjoint identities merge")
+            .len(),
+            2
+        );
+    }
+
+    #[test]
+    fn binary_platform_lock_writers_cover_both_resolvers() {
+        let _guard = lock_reef_home_env();
+        for resolver in ["1", "2"] {
+            let resolver_field = if resolver == "2" {
+                "resolver = \"2\"\n"
+            } else {
+                ""
+            };
+            let directory = tempdir().unwrap();
+            unsafe {
+                std::env::set_var("CHELIS_REEF_HOME", directory.path().join("reef-home"));
+            }
+            let root = directory.path().join("consumer");
+            let artifacts = format!(
+                "\n[artifacts.tool]\nrepo = \"Chelis-Lang/octant\"\ntag = \"v1.0.0\"\n\
+                 platforms.darwin-arm64 = {{ asset = \"tool-darwin.tar.zst\", sha256 = \"{}\" }}\n\
+                 platforms.linux-x86_64 = {{ asset = \"tool-linux.tar.zst\", sha256 = \"{}\" }}\n",
+                "a".repeat(64),
+                "b".repeat(64),
+            );
+            write(
+                &root.join("reef.toml"),
+                &format!(
+                    "schema = \"{resolver}\"\n[package]\nname = \"consumer\"\nversion = \"0.1.0\"\n\
+                 compiler = \"{CURRENT_COMPILER_VERSION}\"\nmodule_prefix = \"Consumer\"\n\
+                 {resolver_field}[dependencies.helper]\npath = \"helper\"\n{artifacts}"
+                ),
+            );
+            write(
+                &root.join("src/main.ch"),
+                "module Consumer.Main\n\ndef main() -> i32 = 1\n",
+            );
+            write(
+                &root.join("helper/reef.toml"),
+                &format!(
+                    "schema = \"{resolver}\"\n[package]\nname = \"helper\"\nversion = \"0.1.0\"\n\
+                 compiler = \"{CURRENT_COMPILER_VERSION}\"\nmodule_prefix = \"Helper\"\n\
+                 {resolver_field}{artifacts}"
+                ),
+            );
+            write(
+                &root.join("helper/src/main.ch"),
+                "module Helper.Main\n\ndef value() -> i32 = 1\n",
+            );
+            let (graph, _) = load_package_graph_with_lock_preference(
+                &root,
+                runtime_load_options(),
+                remote_discovery::LockPublication::Project {
+                    project_lock_held: false,
+                },
+            )
+            .expect("resolve without the network");
+            let binaries = |lock: &ReefLock| {
+                lock.dependencies
+                    .iter()
+                    .filter(|entry| matches!(entry.source, LockSource::Binary { .. }))
+                    .cloned()
+                    .collect::<Vec<_>>()
+            };
+            let lock = build_lockfile(&graph, test_runtime()).expect("build all platform entries");
+            assert_eq!(binaries(&lock).len(), 2, "resolver {resolver}");
+            if resolver == "2" {
+                let resolved = read_lockfile(&root.join("reef.lock")).unwrap();
+                assert_eq!(binaries(&resolved.raw), binaries(&lock));
+                remote_discovery::update_project(&root, None, false, test_runtime())
+                    .expect("refresh retains all platform pins");
+                let refreshed = read_lockfile(&root.join("reef.lock")).unwrap();
+                assert_eq!(binaries(&refreshed.raw), binaries(&lock));
+            }
+            write_lockfile(&root.join("reef.lock"), &lock).unwrap();
+            assert_eq!(
+                binaries(&read_lockfile(&root.join("reef.lock")).unwrap().raw),
+                binaries(&lock)
+            );
+        }
     }
 
     /// The full extract-and-place path: a `.tar.gz` asset containing a
@@ -16464,7 +16653,7 @@ module_prefix = "RegistryLib"
             },
         )
         .expect("manifest");
-        let lock = build_lockfile(&from_manifest, test_runtime());
+        let lock = build_lockfile(&from_manifest, test_runtime()).expect("build the lock");
         let from_lock = reconstruct_graph_from_lockfile(
             &root,
             &lock,

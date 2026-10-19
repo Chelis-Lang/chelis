@@ -738,8 +738,9 @@ enum ReefCommand {
         #[arg(value_name = "NAME[=VERSION]")]
         packages: Vec<String>,
     },
-    /// Print the download URL and SHA-256 of each artifact that
-    /// `reef.lock` locks, as JSON.
+    /// Print the download URL and SHA-256 of each selected locked artifact as JSON.
+    ///
+    /// Binary entries match the selected build platform.
     ///
     /// Reads only the project's `reef.lock` and makes no network
     /// request. Each element of `artifacts` names the package and the
@@ -753,6 +754,9 @@ enum ReefCommand {
         /// current directory.
         #[arg(long, value_name = "PATH")]
         package_root: Option<PathBuf>,
+        /// Binary build-platform slug. Defaults to the compiler host.
+        #[arg(long, value_name = "SLUG")]
+        platform: Option<String>,
     },
     /// Export a hermetic bundle of pinned dependencies for agent sandboxes.
     ///
@@ -5506,9 +5510,15 @@ fn cmd_reef(command: ReefCommand) -> Result<(), Box<dyn std::error::Error>> {
             println!("Shell: {}", artifacts.shell_path.display());
             println!("Archive: {}", artifacts.archive_path.display());
         }
-        ReefCommand::FetchPlan { package_root } => {
+        ReefCommand::FetchPlan {
+            package_root,
+            platform,
+        } => {
             let root = package_root.unwrap_or_else(|| PathBuf::from("."));
-            let plan = chelis_reef::lockfile_fetch_plan(&root)?;
+            let plan = chelis_reef::lockfile_fetch_plan(
+                &root,
+                platform.as_deref().or(chelis_reef::host_platform_slug()),
+            )?;
             println!("{}", serde_json::to_string_pretty(&plan)?);
         }
         ReefCommand::Install {

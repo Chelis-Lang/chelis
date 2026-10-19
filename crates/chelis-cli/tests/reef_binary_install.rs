@@ -212,6 +212,22 @@ fn binary_install_from_lockfile_places_and_verifies() {
     let chelis_home = dir.path().join("chelis-home");
     let reef_home = dir.path().join("reef-home");
     write_binary_lockfile(&package_root, platform, &asset, &sha);
+    let foreign = if platform == "linux-x86_64" {
+        "darwin-arm64"
+    } else {
+        "linux-x86_64"
+    };
+    let lock_path = package_root.join("reef.lock");
+    let mut lock: toml::Value =
+        toml::from_str(&std::fs::read_to_string(&lock_path).unwrap()).unwrap();
+    let dependencies = lock["dependencies"].as_array_mut().unwrap();
+    let mut other = dependencies[0].clone();
+    other["source"]["platform"] = foreign.into();
+    other["source"]["asset"] = asset_name(foreign).into();
+    other["source"]["sha256"] = "f".repeat(64).into();
+    other["archive_sha256"] = "f".repeat(64).into();
+    dependencies.push(other);
+    std::fs::write(lock_path, toml::to_string(&lock).unwrap()).unwrap();
 
     run_install(&package_root, &chelis_home, &reef_home, &harness.uri())
         .success()
@@ -327,18 +343,15 @@ fn binary_install_sha_mismatch_aborts_fail_closed() {
     let chelis_home = dir.path().join("chelis-home");
     let reef_home = dir.path().join("reef-home");
     write_binary_lockfile(&package_root, platform, &asset, &wrong_sha);
+    let placed = chelis_home.join("bin").join(ARTIFACT_NAME);
+    std::fs::create_dir_all(placed.parent().unwrap()).unwrap();
+    std::fs::write(&placed, b"installed bytes").unwrap();
 
     run_install(&package_root, &chelis_home, &reef_home, &harness.uri())
         .failure()
         .stderr(predicate::str::contains("SHA-256 mismatch"));
 
-    // Fail-closed: nothing placed under $CHELIS_HOME/bin/.
-    let placed = chelis_home.join("bin").join(ARTIFACT_NAME);
-    assert!(
-        !placed.exists(),
-        "no binary must be placed on a SHA mismatch, found {}",
-        placed.display()
-    );
+    assert_eq!(std::fs::read(&placed).unwrap(), b"installed bytes");
 }
 
 #[test]

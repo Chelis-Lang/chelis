@@ -158,9 +158,8 @@ declaration list. Property discovery on an empty library emits no property recor
   runtime rather than a bootstrap target.
 - `chelis reef install --from-lockfile` re-fetches lockfile dependencies from their
   recorded `remote_origin` and verifies bytes against the lockfile hashes.
-- `chelis reef fetch-plan [--package-root <path>]` prints, as JSON, the public download
-  URL and the pinned SHA-256 of each artifact that `reef.lock` locks. It reads only
-  `reef.lock` and makes no network request.
+- `chelis reef fetch-plan [--package-root <path>] [--platform <slug>]` prints the selected artifacts as JSON.
+  It gives each public download URL and pinned SHA-256. It reads only `reef.lock` and makes no network request.
 - `chelis reef install --from-lockfile --artifact-dir <dir>` imports the files that
   `fetch-plan` names from `<dir>`. It makes no network request. It verifies each file
   against the `reef.lock` hashes, and it records the locked `remote_origin`.
@@ -214,11 +213,11 @@ fields:
   `github://<org>/<repo>@<tag>` origin.
 - `sha256`: the lowercase hex SHA-256 that `reef.lock` pins.
 - `remote_origin`: the locked origin.
-- `platform`: present only for `binary`, the host platform of the locked binary.
+- `platform`: present only for `binary`, the selected build-platform slug.
 
 A `local_registry` entry gives two elements. The `archive` file is
 `<repo>-<version>.tar.zst` and the `shell` file is `<repo>-<version>.chb`, where
-`<version>` is the tag without one leading `v`. A `binary` entry gives one element
+`<version>` is the tag without one leading `v`. A selected `binary` entry gives one element
 whose `file` is its locked `asset`. `path` and `bundled` entries, and a legacy
 `local_registry` entry for `chelis-std`, give no element. A `local_registry` entry
 with no `remote_origin`, or with an origin that does not parse, makes the command
@@ -226,6 +225,10 @@ fail. A `binary` entry also makes the command fail when its `name` is not a bare
 name, or when its `asset` is not a bare file name of ASCII letters, digits, `.`, `-`,
 `_`, or `~` (chelis#3891). The diagnostic names the lock entry. The public URL serves
 public releases only.
+
+A binary entry appears only when its platform matches the selected build platform.
+The default platform is the compiler host.
+`--platform <slug>` selects another build platform without a download or execution.
 
 The import walks the entries of `reef.lock` as `--from-lockfile` does. For each
 element it reads `<dir>/<file>` and compares the file SHA-256 with the lock before any
@@ -700,13 +703,27 @@ aborts before any placement — extracts, and places a runnable binary at
 `~/.chelis/bin/<name>`. A new `chelis reef which <artifact>` prints the resolved
 path so consumers point at it with no out-of-band knowledge.
 
-**Lockfile.** A new `LockSource::Binary { remote_origin, platform, asset,
-sha256 }` variant on `LockedDependency`. Per the lockfile-ownership rule
-([`chelis_packaging_and_install.md`](chelis_packaging_and_install.md) §3),
-binaries *belong* in `reef.lock`: reef fetches them, their integrity primitive
-is a content hash, and nothing else records them. Threads through
-`build_lockfile` and `install_from_lockfile`, so `--from-lockfile` re-fetches
-and re-verifies a binary exactly as it does a source package.
+**Lockfile.** Schema 1 retains the `[[dependencies]]` array and all current fields.
+
+Each binary identity uses `(name, source.platform)`.
+A writer records every declared platform, independent of the writer host.
+
+Each entry retains the version, compiler pin, origin, asset, and SHA-256.
+
+The `source.sha256` and `archive_sha256` pins must agree.
+`shell_sha256` must be empty.
+
+Reef rejects duplicate binary identities before a fetch or an install.
+Identical manifest declarations share one entry.
+Conflicting declarations for the same identity fail.
+
+The normal install and the offline import select only the compiler host entry.
+Other platform entries remain in the lock.
+
+Reef maps macOS arm64 to `darwin-arm64` and macOS x86_64 to `darwin-x86_64`.
+It maps Linux x86_64 to `linux-x86_64` and Linux arm64 to `linux-arm64`.
+These artifact platforms do not depend on compiler-release availability.
+The lock fields do not change, so the lock schema remains 1.
 
 **Reuse.** `install_validated_artifact_pair` (validation + placement); the
 shipped SHA-256 helpers; `install_from_github` (REST asset fetch);
