@@ -600,25 +600,26 @@ the six — and the trade was made against the table above. An order-guarded
 property gets no pairing at all, so chelis#3697's class remains open for that
 shape.
 
-**Once two binders' schedule lengths differ by as much as the cell count,
-their cell windows are disjoint and no pairing happens at all.** Each
-binder's window begins at its own `max(44, L)` and is as wide as the cell
-count, so they overlap only while the difference stays under it. At two
-binders there are four cells and each `!=` exclusion adds two candidates, so
-two exclusions on one binder is the whole bar: `L = 48` against `L = 44`
-gives `[48, 52)` and `[44, 48)`, which touch without overlapping. One
-exclusion is harmless, and the loss does not recover at a larger budget,
-because the grid caps the cell count at four for two binders however much
-budget there is. Binders of one dtype under the same guards have equal
-lengths, which is the ordinary case and the one the pairing serves; a
-schedule *shorter* than the span is safe, because every window still floors
-at 44. This is not a regression against a run with no phase,
+A third cost existed and is closed. **The cell window opens at one boundary
+shared by the whole property** — `max(44, L_0, ..., L_n)` over the binders'
+own schedule lengths — rather than at each binder's own `max(44, L)`. A
+per-binder window was as wide as the cell count and therefore disjoint
+between binders whose lengths differed by that much: at two binders, four
+cells and two candidates per `!=` exclusion made **two exclusions on one
+binder** enough to lose every pairing, at 500, 2000 and 20000 samples alike.
+Sharing the boundary makes that unreachable rather than unlikely, and costs
+nothing measurable: the corner is cell 2 of the shared window, so it is
+reached at attempt `47 + 2E` for `E` exclusions, and the deliverable, the
+long-schedule shape and the order-guarded chain are unchanged attempt for
+attempt. A binder whose own schedule is shorter than the boundary spends the
+gap on uniform draws, exactly as it did before the phase existed. This is not a regression against a run with no phase,
 which reaches none of these corners. Aligning every binder's window on one
 shared boundary would fix it structurally; that is not in this change.
 
-All three costs are asserted as tests that a property is *not* refuted, so a
-future policy that reaches any of them has to change them deliberately and
-re-measure the displaced-draw rates.
+Both remaining costs are asserted as tests that a property is *not* refuted,
+so a future policy that reaches either has to change them deliberately and
+re-measure the displaced-draw rates. The closed one is asserted the other way
+round, as a pairing that must happen at every offset.
 
 A binder whose schedule is longer than the span keeps the diagonal until that
 schedule is spent, which is what `max(S, L)` is for: a boundary fixed at 44
@@ -655,7 +656,8 @@ The chelis#3697 extremal-pairing oracle is:
 cargo nextest run -p chelis-cli --test issue_3697_extremal_pairing
 ```
 
-It pins the pairing itself, the three costs above, and the measurements that
+It pins the pairing itself, the two costs above, the retirement of the third,
+and the measurements that
 chose the policy: the post-diagonal draws' yield at arities one to eight, the
 same yield at a 72-candidate schedule, a long schedule's tail, the low-order
 corner's reach at every arity, and the rejection lane's accepted count. The chelis#3636
