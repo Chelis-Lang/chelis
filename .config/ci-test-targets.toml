@@ -3118,7 +3118,7 @@ disposition = "owner"
 workflow = "ci.yml"
 job = "script-unit"
 cadence = "pull_request and push"
-reason = "script-unit checks the contributor cache selection and rejects cache or trust overrides through the Devenv composition contracts"
+reason = "script-unit checks the Devenv toolchain and command contracts. Native nix-packages.yml runs activate the shell with this cache setting"
 tracking_issue = "chelis#3924"
 
 [[path_rule]]

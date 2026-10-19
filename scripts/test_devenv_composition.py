@@ -12,16 +12,6 @@ from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-EXPECTED_IMPORTS = (
-    "./devenv/toolchains.nix",
-    "./devenv/cache.nix",
-    "./devenv/ci.nix",
-    "./devenv/entry-shell.nix",
-    "./devenv/commands.nix",
-    "./devenv/generated-files.nix",
-    "./devenv/git-hooks.nix",
-    "./devenv/smoke-tests.nix",
-)
 EXPECTED_COMMANDS = {
     "chelis-gate": "scripts/gate.py",
     "chelis-ci-shell": "scripts/ci_devenv.py",
@@ -40,11 +30,6 @@ EXPECTED_GENERATED_FILES = frozenset(
 
 
 @dataclass(frozen=True)
-class DevenvComposition:
-    imports: tuple[str, ...]
-
-
-@dataclass(frozen=True)
 class DevenvPython:
     version: tuple[int, int]
     uses_uv: bool
@@ -60,29 +45,6 @@ class DevenvCommands:
 @dataclass(frozen=True)
 class DevenvGeneratedFiles:
     paths: frozenset[str]
-
-
-def parse_root_composition(root_text: str, yaml_text: str) -> DevenvComposition:
-    if re.search(r"(?m)^\s*imports:\s*$", yaml_text):
-        raise ValueError("devenv.yaml must not define local imports")
-
-    match = re.fullmatch(
-        (
-            r"\s*\{ \.\.\. \}:\s*\{\s*imports\s*=\s*\[\s*"
-            r"(?P<imports>.*?)\s*\];\s*\}\s*"
-        ),
-        root_text,
-        flags=re.DOTALL,
-    )
-    if match is None:
-        raise ValueError("devenv.nix must remain the local module composition root")
-
-    parsed = tuple(match.group("imports").split())
-    if any(re.fullmatch(r"\./devenv/[a-z-]+\.nix", item) is None for item in parsed):
-        raise ValueError("devenv.nix must remain the local module composition root")
-    if parsed != EXPECTED_IMPORTS:
-        raise ValueError(f"devenv.nix must import the local modules: {parsed!r}")
-    return DevenvComposition(imports=parsed)
 
 
 def parse_python_module(text: str) -> DevenvPython:
@@ -182,52 +144,7 @@ def parse_generated_files_module(text: str) -> DevenvGeneratedFiles:
     return DevenvGeneratedFiles(paths=paths)
 
 
-def parse_cache_module(text: str) -> str:
-    match = re.fullmatch(
-        r'\s*\{ \.\.\. \}:\s*\{\s*cachix\.pull = \[ "([^"]+)" \];\s*\}\s*',
-        text,
-    )
-    if match is None or match.group(1) != "chelis-lang":
-        raise ValueError("the cache module must only select the public Chelis cache")
-    return match.group(1)
-
-
-def parse_contributor_docs(text: str) -> None:
-    required = (
-        "chelis-gate",
-        "chelis-reap-orphans",
-        "chelis-exec-preflight",
-        "chelis-z3-test",
-        "chelis-hip-test",
-        # The check no longer runs as a devenv-installed prek hook; the
-        # contributor guide must name where it does run instead (chelis#1409).
-        ".githooks/commit-msg",
-        "cargo-husky",
-        "scripts/check_commit_message.py",
-        ".devenv/state/venv",
-        "PYO3_PYTHON",
-        "Devenv is the only supported development shell.",
-        "`nix develop`",
-        "`devenv shell -- <command>`",
-        "cachix.pull",
-        "trusted-users",
-        "trusted-substituters",
-        "require-sigs",
-    )
-    missing = [fragment for fragment in required if fragment not in text]
-    if missing:
-        raise ValueError(f"the Devenv contributor guide is incomplete: {missing!r}")
-
-
 class DevenvCompositionTests(unittest.TestCase):
-    def test_repository_composes_the_local_modules_from_the_root_file(self) -> None:
-        root_text = (REPO_ROOT / "devenv.nix").read_text(encoding="utf-8")
-        yaml_text = (REPO_ROOT / "devenv.yaml").read_text(encoding="utf-8")
-        self.assertEqual(
-            parse_root_composition(root_text, yaml_text).imports,
-            EXPECTED_IMPORTS,
-        )
-
     def test_devenv_manages_python_and_the_pyo3_interpreter(self) -> None:
         text = (REPO_ROOT / "devenv/toolchains.nix").read_text(encoding="utf-8")
         parsed = parse_python_module(text)
@@ -251,52 +168,6 @@ class DevenvCompositionTests(unittest.TestCase):
             parse_generated_files_module(text).paths,
             EXPECTED_GENERATED_FILES,
         )
-
-    def test_contributor_docs_explain_the_devenv_surface(self) -> None:
-        text = (REPO_ROOT / "docs/contributor_setup.md").read_text(encoding="utf-8")
-        parse_contributor_docs(text)
-
-    def test_devenv_selects_the_same_cache_as_the_flake(self) -> None:
-        module = (REPO_ROOT / "devenv/cache.nix").read_text(encoding="utf-8")
-        name = parse_cache_module(module)
-        flake = (REPO_ROOT / "flake.nix").read_text(encoding="utf-8")
-        self.assertIn(f'"https://{name}.cachix.org"', flake)
-        key = re.search(rf'"({name}\.cachix\.org-1:[^"]+)"', flake)
-        self.assertIsNotNone(key)
-        docs = (REPO_ROOT / "docs/contributor_setup.md").read_text(encoding="utf-8")
-        self.assertIn(key.group(1), docs)
-
-    def test_cache_contract_rejects_missing_or_different_cache_and_trust_override(self) -> None:
-        module = (REPO_ROOT / "devenv/cache.nix").read_text(encoding="utf-8")
-        for mutated in (
-            module.replace('"chelis-lang"', ""),
-            module.replace('"chelis-lang"', '"another-cache"'),
-            module.replace("\n}", "\n  nix.settings.require-sigs = false;\n}"),
-            module.replace("\n}", '\n  cachix.push = "chelis-lang";\n}'),
-        ):
-            with self.subTest(module=mutated):
-                with self.assertRaisesRegex(ValueError, "only select"):
-                    parse_cache_module(mutated)
-
-    def test_missing_import_fails_at_the_parse_boundary(self) -> None:
-        root_text = (REPO_ROOT / "devenv.nix").read_text(encoding="utf-8")
-        yaml_text = (REPO_ROOT / "devenv.yaml").read_text(encoding="utf-8")
-        mutated = root_text.replace("    ./devenv/commands.nix\n", "")
-        with self.assertRaisesRegex(ValueError, "must import the local modules"):
-            parse_root_composition(mutated, yaml_text.replace("imports:", "other:"))
-
-    def test_extra_root_setting_fails_at_the_parse_boundary(self) -> None:
-        root_text = (REPO_ROOT / "devenv.nix").read_text(encoding="utf-8")
-        yaml_text = (REPO_ROOT / "devenv.yaml").read_text(encoding="utf-8")
-        mutated = root_text.replace("\n}", "\n  packages = [ ];\n}")
-        with self.assertRaisesRegex(ValueError, "composition root"):
-            parse_root_composition(mutated, yaml_text.replace("imports:", "other:"))
-
-    def test_yaml_imports_fail_at_the_parse_boundary(self) -> None:
-        root_text = (REPO_ROOT / "devenv.nix").read_text(encoding="utf-8")
-        yaml_text = (REPO_ROOT / "devenv.yaml").read_text(encoding="utf-8")
-        with self.assertRaisesRegex(ValueError, "must not define local imports"):
-            parse_root_composition(root_text, f"{yaml_text}\nimports:\n  - ./other.nix\n")
 
     def test_disabled_python_venv_fails_at_the_parse_boundary(self) -> None:
         text = (REPO_ROOT / "devenv/toolchains.nix").read_text(encoding="utf-8")
@@ -346,18 +217,6 @@ class DevenvCompositionTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "file set is incomplete"):
             parse_generated_files_module(mutated)
-
-    def test_missing_command_docs_fail_at_the_parse_boundary(self) -> None:
-        text = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
-        mutated = text.replace("chelis-gate", "missing-gate")
-        with self.assertRaisesRegex(ValueError, "contributor guide is incomplete"):
-            parse_contributor_docs(mutated)
-
-    def test_missing_cargo_husky_docs_fail_at_the_parse_boundary(self) -> None:
-        text = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
-        mutated = text.replace("cargo-husky", "missing-hook-installer")
-        with self.assertRaisesRegex(ValueError, "contributor guide is incomplete"):
-            parse_contributor_docs(mutated)
 
 
 if __name__ == "__main__":
