@@ -50,10 +50,6 @@ steps and the native C compiler `chelis build` needs on each platform.
 Nix users can build the compiler from the flake of this repository. The
 [Nix section](https://chelis.ch/docs/chelis/install/#install-with-nix) of the
 install guide has the commands and the binary cache settings.
-For compiler development, use `devenv shell` from the checkout root.
-Devenv is the only supported development shell. The flake does not supply
-tools through `nix develop`. The [contributor guide](docs/contributor_setup.md#optional-devenv-shell)
-explains shell setup and project cache trust.
 
 ## Documentation
 
