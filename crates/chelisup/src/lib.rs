@@ -57,14 +57,29 @@ pub mod runtime_check;
 pub mod shim;
 pub mod version;
 
+use std::borrow::Cow;
 use std::ffi::OsString;
 use std::path::Path;
 
 /// How to get the latest chelisup while it cannot update itself. `chelisup
 /// update` prints it, and so does the refusal of a release newer than the
-/// running chelisup.
+/// running chelisup. [`UPGRADE_ADVICE_VAR`] replaces it.
 pub(crate) const UPGRADE_ADVICE: &str =
     "re-run the bootstrap installer (the published `chelisup` one-liner)";
+
+/// The environment variable that replaces [`UPGRADE_ADVICE`].
+/// The Nix launcher sets this phrase because the bootstrap installer replaces it.
+/// Unset, blank, or non-UTF-8 values retain the bootstrap advice.
+/// The variable changes only the advice text.
+pub(crate) const UPGRADE_ADVICE_VAR: &str = "CHELISUP_UPGRADE_ADVICE";
+
+/// The configured upgrade advice, or the bootstrap advice.
+pub(crate) fn upgrade_advice() -> Cow<'static, str> {
+    std::env::var(UPGRADE_ADVICE_VAR)
+        .ok()
+        .filter(|advice| !advice.trim().is_empty())
+        .map_or(Cow::Borrowed(UPGRADE_ADVICE), Cow::Owned)
+}
 
 /// How to use a toolchain that the Chelis flake builds where no release
 /// toolchain runs: on a host that no release build supports, and on NixOS

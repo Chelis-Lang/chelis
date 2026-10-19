@@ -426,24 +426,70 @@ fn releases_before_the_export_install_unchecked_with_a_warning() {
 }
 
 #[test]
-fn a_refused_release_newer_than_chelisup_says_how_to_get_the_latest() {
+fn a_set_upgrade_advice_replaces_the_bootstrap_advice() {
+    // chelis#3942: launcher advice must replace the bootstrap route.
+    // A direct invocation and blank settings retain the bootstrap route.
+    let advice = "run alternate-chelisup install";
     let version = newer_than_chelisup();
     let home = tempfile::tempdir().unwrap();
     let release = tempfile::tempdir().unwrap();
     let mut runtime = ReleaseRuntime::matching(&version);
     runtime.receipt["schema"] = "chelis-runtime-staging/2".into();
     build_release_tarball(release.path(), &version, &build(&version), &runtime);
-
-    let out = install(home.path(), release.path(), &version);
-    assert!(!out.status.success(), "stdout: {}", stdout(&out));
-    let expected = format!(
-        "records schema \"chelis-runtime-staging/2\", not \"chelis-runtime-staging/1\". \
-         This chelisup ({}) is older than the {version} release, which may use a format it \
-         does not know; to get the latest chelisup, re-run the bootstrap installer",
-        env!("CARGO_PKG_VERSION")
+    let release_base = ("CHELISUP_RELEASE_BASE", release.path().to_str().unwrap());
+    let direct = run_cli(
+        home.path(),
+        home.path(),
+        &["install", &version],
+        &[release_base],
     );
-    assert!(stderr(&out).contains(&expected), "stderr: {}", stderr(&out));
+    assert!(!direct.status.success());
+    assert!(
+        stderr(&direct).contains("bootstrap installer"),
+        "{}",
+        stderr(&direct)
+    );
+    assert!(!stderr(&direct).contains(advice), "{}", stderr(&direct));
     assert_store_untouched(home.path(), &version);
+
+    for (value, expected_advice) in [
+        (advice, advice),
+        ("", "bootstrap installer"),
+        (" \t", "bootstrap installer"),
+    ] {
+        let setting = ("CHELISUP_UPGRADE_ADVICE", value);
+        let refused = run_cli(
+            home.path(),
+            home.path(),
+            &["install", &version],
+            &[release_base, setting],
+        );
+        assert!(!refused.status.success(), "stdout: {}", stdout(&refused));
+        assert!(
+            stderr(&refused).contains(expected_advice),
+            "stderr: {}",
+            stderr(&refused)
+        );
+        assert_eq!(
+            stderr(&refused).contains("bootstrap installer"),
+            value != advice
+        );
+        assert_store_untouched(home.path(), &version);
+
+        for command in [&["update"][..], &["self", "update"]] {
+            let updated = run_cli(home.path(), home.path(), command, &[setting]);
+            assert!(updated.status.success(), "stderr: {}", stderr(&updated));
+            assert!(
+                stderr(&updated).contains(expected_advice),
+                "{}",
+                stderr(&updated)
+            );
+            assert_eq!(
+                stderr(&updated).contains("bootstrap installer"),
+                value != advice
+            );
+        }
+    }
 }
 
 #[test]

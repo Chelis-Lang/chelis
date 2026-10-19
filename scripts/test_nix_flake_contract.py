@@ -159,8 +159,20 @@ def chelisup_release_build() -> str | None:
     }.get((platform.system(), platform.machine()))
 
 
-def write_release_asset(release: Path, build: str, dangling_compiler: bool = False) -> None:
-    """Write the chelis 0.0.7 release asset for `build` below `release`.
+def newer_release_build() -> str | None:
+    """The build that chelisup installs for a release after 0.7.24 on this host, if any.
+
+    From 0.7.24, chelisup on Linux takes the glibc-2.31 build when a release
+    has no static or musl build.
+    """
+    build = chelisup_release_build()
+    return "linux-x86_64-glibc2.31" if build == "linux-x86_64" else build
+
+
+def write_release_asset(
+    release: Path, build: str, dangling_compiler: bool = False, version: str = "0.0.7"
+) -> None:
+    """Write the chelis `version` release asset for `build` below `release`.
 
     With `dangling_compiler`, bin/chelis is a relative link to a file beside
     the release directory in the archive. The link resolves after the
@@ -168,15 +180,15 @@ def write_release_asset(release: Path, build: str, dangling_compiler: bool = Fal
     into toolchains/, so the post-install check of the installer fails.
     """
     content = release / "content"
-    top = content / f"chelis-v0.0.7-{build}"
+    top = content / f"chelis-v{version}-{build}"
     compiler = top / "bin" / "chelis"
     compiler.parent.mkdir(parents=True)
     program = content / "compiler" if dangling_compiler else compiler
-    program.write_text("#!/bin/sh\nprintf 'chelis 0.0.7\\n'\n", encoding="utf-8")
+    program.write_text(f"#!/bin/sh\nprintf 'chelis {version}\\n'\n", encoding="utf-8")
     program.chmod(0o755)
     if dangling_compiler:
         compiler.symlink_to(Path("..") / ".." / "compiler")
-    with tarfile.open(release / f"chelis-v0.0.7-{build}.tar.gz", "w:gz") as archive:
+    with tarfile.open(release / f"chelis-v{version}-{build}.tar.gz", "w:gz") as archive:
         for member in sorted(content.iterdir()):
             archive.add(member, arcname=member.name)
 
@@ -1285,10 +1297,12 @@ class NixFlakeContractTests(unittest.TestCase):
     def test_chelisup_update_gives_nix_advice_and_changes_no_file(self) -> None:
         # chelis#3913: the bootstrap installer that the real `update` advises
         # replaces the launcher. Through the launcher, `update` and
-        # `self update` name the Nix commands instead.
+        # `self update` name the Nix commands instead. With "--", the
+        # launcher runs the real `update`, which prints the advice that the
+        # launcher sets (chelis#3942).
         _package, home, _version, environment = self.install_nix_launcher()
         before = tree_snapshot(home)
-        for command in (["update"], ["self", "update"]):
+        for command in (["update"], ["self", "update"], ["update", "--"], ["self", "update", "--"]):
             with self.subTest(command=command):
                 updated = subprocess.run(
                     [home / "bin" / "chelisup", *command],
@@ -1306,6 +1320,196 @@ class NixFlakeContractTests(unittest.TestCase):
                 )
                 self.assertNotIn("re-run the bootstrap installer", updated.stderr)
                 self.assertEqual(tree_snapshot(home), before)
+
+    @REQUIRES_NIX
+    def test_chelisup_refusal_of_a_newer_release_gives_nix_advice(self) -> None:
+        # chelis#3942: the refusal of a release that is newer than the running
+        # chelisup advises the bootstrap installer, which replaces the
+        # launcher. Through the launcher, it names the Nix route instead. A
+        # direct run of the real installer keeps the bootstrap advice.
+        build = newer_release_build()
+        if build is None:
+            self.skipTest("chelisup installs no release build on this host")
+        package = Path(
+            nix_raw("build", "--no-link", "--print-out-paths", ".#chelisup")
+        )
+        scratch = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        release = scratch / "release"
+        release.mkdir()
+        # The fake chelis of this release writes no runtime export, so the
+        # runtime check of the installer refuses the release.
+        write_release_asset(release, build, version="99.0.0")
+        home = scratch / "home"
+        environment = os.environ.copy()
+        environment.pop("CHELISUP_UPGRADE_ADVICE", None)
+        environment["CHELIS_HOME"] = str(home)
+        environment["CHELISUP_RELEASE_BASE"] = str(release)
+        environment["PATH"] = ""
+        for program, through_launcher in (
+            (package / "bin" / "chelisup", True),
+            (package / "libexec" / "chelisup", False),
+        ):
+            with self.subTest(through_launcher=through_launcher):
+                refused = subprocess.run(
+                    [program, "install", "99.0.0"],
+                    cwd=REPO_ROOT,
+                    env=environment,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    check=False,
+                )
+                self.assertNotEqual(refused.returncode, 0, refused.stdout)
+                if through_launcher:
+                    self.assertIn(
+                        "nix run github:Chelis-Lang/chelis/vX.Y.Z#chelisup -- install X.Y.Z",
+                        refused.stderr,
+                    )
+                    self.assertNotIn("bootstrap", refused.stderr)
+                else:
+                    self.assertIn("re-run the bootstrap installer", refused.stderr)
+                    self.assertNotIn("nix run", refused.stderr)
+                self.assertFalse((home / "toolchains" / "99.0.0").exists())
+
+    @REQUIRES_NIX
+    def test_chelisup_help_and_a_missing_operand_change_no_root(self) -> None:
+        # chelis#3957 F2: a help request and a command without its operand
+        # run no command of the real installer. The launcher passes them
+        # through, so they need no nix-store and change no root.
+        package = Path(
+            nix_raw("build", "--no-link", "--print-out-paths", ".#chelisup")
+        )
+        # Upstream Nix rejects a link below a symbolic link, and the macOS
+        # temporary directory is below /var, a symbolic link.
+        scratch = Path(self.enterContext(tempfile.TemporaryDirectory())).resolve()
+        launcher, _ = relocate_system_nix_profiles(package, scratch)
+        home = scratch / "home"
+        home.mkdir()
+        chelis_home = scratch / "chelis-home"
+        root_dir = chelis_home / "nix-gcroots"
+        root_dir.mkdir(parents=True)
+        (root_dir / "chelisup").symlink_to(package)
+        (root_dir / "chelisup.next").symlink_to(package)
+        (root_dir / "chelisup.partial").symlink_to(package / "libexec" / "chelisup")
+        before = gc_root_snapshot(root_dir)
+        environment = {
+            name: value
+            for name, value in os.environ.items()
+            if name not in ("PATH", "XDG_STATE_HOME")
+        }
+        environment["HOME"] = str(home)
+        environment["CHELIS_HOME"] = str(chelis_home)
+        environment["PATH"] = ""
+        help_requests = (
+            ["install", "--help"],
+            ["install", "-h"],
+            ["install", "1.0.0", "--help"],
+            ["default", "--help"],
+            ["default", "-h"],
+            ["link", "--help"],
+            ["uninstall", "-h"],
+            ["self", "uninstall", "--help"],
+            ["self", "-h", "uninstall"],
+        )
+        missing_operands = (
+            ["install"],
+            ["install", "--"],
+            ["default"],
+            ["default", "--"],
+            ["link"],
+            ["uninstall"],
+        )
+        for command in (*help_requests, *missing_operands):
+            with self.subTest(command=command):
+                ran = subprocess.run(
+                    [launcher, *command],
+                    cwd=scratch,
+                    env=environment,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    check=False,
+                )
+                if command in help_requests:
+                    self.assertEqual(ran.returncode, 0, ran.stderr)
+                    self.assertIn("Usage: chelisup", ran.stdout)
+                else:
+                    self.assertEqual(ran.returncode, 2, ran.stderr)
+                    self.assertIn("required arguments were not provided", ran.stderr)
+                self.assertNotIn("nix-store", ran.stderr)
+                self.assertEqual(gc_root_snapshot(root_dir), before)
+                self.assertEqual(sorted(path.name for path in chelis_home.iterdir()), ["nix-gcroots"])
+
+    @REQUIRES_NIX
+    def test_failed_chelisup_default_or_install_keeps_no_duplicate_partial_root(self) -> None:
+        # chelis#3957 F3: after a failed `default` or `install`, the copies
+        # of the installer match the package of the stable root. A partial
+        # root for that package keeps nothing more, so the launcher keeps no
+        # partial root that equals the stable root.
+        package, home, version, environment = self.install_nix_launcher()
+        roots = home / "nix-gcroots"
+        stable_root = roots / "chelisup"
+        partial_root = roots / "chelisup.partial"
+        self.assertEqual(os.readlink(stable_root), str(package))
+
+        def chelisup(*args: object) -> subprocess.CompletedProcess[str]:
+            return subprocess.run(
+                [home / "bin" / "chelisup", *args],
+                cwd=REPO_ROOT,
+                env=environment,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+
+        for command in (["default", "9.9.9"], ["install", "invalid-version"]):
+            for earlier_partial in (False, True):
+                with self.subTest(command=command, earlier_partial=earlier_partial):
+                    if earlier_partial:
+                        # A partial root that an earlier launcher left.
+                        partial_root.unlink(missing_ok=True)
+                        partial_root.symlink_to(package)
+                    failed = chelisup(*command)
+                    self.assertNotEqual(failed.returncode, 0, failed.stdout)
+                    self.assertEqual(os.readlink(stable_root), str(package))
+                    self.assertFalse(
+                        partial_root.is_symlink(), "a partial root equals the stable root"
+                    )
+                    self.assertFalse((roots / "chelisup.next").is_symlink())
+        self.assertEqual(
+            (home / "bin" / "chelisup").read_bytes(), (package / "bin" / "chelisup").read_bytes()
+        )
+        self.assertTrue((home / "toolchains" / version).is_dir())
+
+    @REQUIRES_NIX
+    def test_chelisup_names_the_launcher_file_that_it_cannot_put_back(self) -> None:
+        # chelis#3957 F4: when the bin directory is read-only, the real
+        # `default` cannot refresh its copies and still exits 0. Then the
+        # launcher cannot put itself back, and it must say so.
+        package, home, version, environment = self.install_nix_launcher()
+        bin_dir = home / "bin"
+        launcher = bin_dir / "chelisup"
+        bin_dir.chmod(0o555)
+        try:
+            defaulted = subprocess.run(
+                [launcher, "default", version],
+                cwd=REPO_ROOT,
+                env=environment,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+        finally:
+            bin_dir.chmod(0o755)
+        self.assertNotEqual(defaulted.returncode, 0, defaulted.stdout)
+        self.assertIn(
+            f"chelisup: cannot put the Nix chelisup launcher back at {launcher}",
+            defaulted.stderr,
+        )
+        self.assertEqual(launcher.read_bytes(), (package / "bin" / "chelisup").read_bytes())
+        self.assertEqual(os.readlink(home / "nix-gcroots" / "chelisup"), str(package))
 
     @REQUIRES_NIX
     def test_chelisup_brings_no_nix_of_its_own(self) -> None:

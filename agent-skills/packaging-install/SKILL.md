@@ -56,12 +56,20 @@ shim/default, and the binary-artifact dir at once.
 ## Nix `chelisup` Closure
 
 The Nix package uses `bin/chelisup` as a wrapper around `libexec/chelisup`.
-Before `install`, the wrapper creates `$CHELIS_HOME/nix-gcroots/chelisup.next`.
+Before `install` or `default`, the wrapper creates
+`$CHELIS_HOME/nix-gcroots/chelisup.next`.
 After success, it promotes `$CHELIS_HOME/nix-gcroots/chelisup` and removes the
-staging root. A failed install preserves the prior root. If the install copied
-a new binary, the wrapper promotes `$CHELIS_HOME/nix-gcroots/chelisup.partial`.
+staging root. A failed install preserves the stable root.
+
+If the install copied a new binary, the wrapper promotes
+`$CHELIS_HOME/nix-gcroots/chelisup.partial`.
+It removes a partial root that points to the same package as the stable root.
 A new attempt recovers a stale staging root before it changes that root.
+
 After success, the Nix wrapper restores itself at `$CHELIS_HOME/bin/chelisup`.
+If restoration fails, the wrapper names the destination file and returns failure.
+Help and missing-operand requests change no root and need no `nix-store`.
+
 The generic Rust installer contains no Nix root path or cleanup logic. The
 installed Nix wrapper removes all three roots after the real `self uninstall`
 command succeeds. It also intercepts `link` and `uninstall <ver>`. A link to
@@ -74,6 +82,10 @@ A failed install keeps every toolchain root.
 The wrapper, package inventory, self-uninstall behavior, Nix contract test,
 and native Nix workflows form one contract. A direct Nix-built executable
 copy is invalid because external copies do not become Nix GC roots.
+
+The wrapper sets `CHELISUP_UPGRADE_ADVICE`, which changes only advice text.
+A refusal of a newer release then names the Nix upgrade command, not the
+bootstrap installer. An unset or blank setting retains the bootstrap advice.
 
 ## The Embedded chelis-std Runtime
 

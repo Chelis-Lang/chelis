@@ -6,12 +6,12 @@
 
 use clap::{Parser, Subcommand};
 
-use crate::UPGRADE_ADVICE;
 use crate::install;
 use crate::link;
 use crate::paths::Store;
 use crate::resolve::{Resolution, ResolveInput, resolve};
 use crate::runtime_check::RuntimeCheck;
+use crate::upgrade_advice;
 use crate::version::{is_safe_path_component, validate_install_version};
 
 #[derive(Parser)]
@@ -311,11 +311,9 @@ fn cmd_self_uninstall(store: &Store) -> i32 {
 }
 
 fn cmd_update() -> i32 {
-    // Documented stub. Self-update is not implemented yet; re-running the
-    // bootstrap is the supported upgrade path until it is.
     eprintln!(
-        "chelisup: self-update is not implemented yet. To upgrade, {UPGRADE_ADVICE}, which \
-         drops the latest binary at ~/.chelis/bin/chelisup."
+        "chelisup: self-update is not implemented yet. To upgrade, {}.",
+        upgrade_advice()
     );
     0
 }
