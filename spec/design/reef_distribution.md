@@ -108,6 +108,10 @@ Reef completes all snapshots before final archive replacement. A snapshot failur
 
 ### Source checking and library modules
 
+Package discovery selects the nearest ancestor with `reef.toml`. It inspects the
+temporary directory from `TMPDIR`, but never crosses that boundary.
+A package below this directory keeps its own root.
+
 `chelis check` accepts a named Surf module with an empty member list, both
 inside and outside a Reef package. Module identity and imports pass
 through the same package preparation and validation as other library modules.

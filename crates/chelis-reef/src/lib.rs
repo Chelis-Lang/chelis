@@ -2507,22 +2507,17 @@ pub fn find_package_root_for_dir(dir: &Path) -> Result<Option<PathBuf>, String> 
 
 fn find_package_root_from_dir(mut dir: PathBuf) -> Result<Option<PathBuf>, String> {
     let home = env::var_os("HOME").map(PathBuf::from);
-    // Stop the ancestor walk when we hit the OS temp-dir boundary. Without
-    // this, a `tempdir()`-rooted lookup (`/tmp/.tmpXXXX/...`) walks into
-    // `/tmp` itself and finds whatever stray `reef.toml` another process or
-    // test left there — leaking that foreign package into otherwise-isolated
-    // test runs (e.g. an Octant-prefixed manifest causing module-prefix
-    // mismatches in unrelated tests). A package may live *inside* a temp
-    // dir, but never spans the temp-dir boundary into shared scratch space.
+    // Inspect the temp root itself, but never inspect its parent.
+    // A nearer package manifest still owns sources below this boundary.
     let temp_root = env::temp_dir().canonicalize().ok();
 
     loop {
-        if temp_root.as_ref().is_some_and(|tmp| *tmp == dir) {
-            return Ok(None);
-        }
         let manifest = dir.join("reef.toml");
         if manifest.exists() {
             return Ok(Some(dir));
+        }
+        if temp_root.as_ref().is_some_and(|tmp| *tmp == dir) {
+            return Ok(None);
         }
         if dir.join(".git").exists() {
             return Ok(None);
@@ -16021,58 +16016,53 @@ version = "0.1.0"
         );
     }
 
-    /// Regression: a stray `reef.toml` directly in the OS temp dir
-    /// (e.g. `/tmp/reef.toml`, left by some unrelated tool or
-    /// developer experiment) must NOT be picked up as the package root
-    /// for a `tempdir()`-rooted lookup. The ancestor walk has to stop at
-    /// the temp-dir boundary; otherwise a single foreign manifest with a
-    /// non-matching `module_prefix` poisons every test that runs from a
-    /// temp dir, which is most of them.
+    /// The temp root can own a package, but its parent cannot own a lookup below it.
     #[test]
     fn ancestor_walk_stops_at_os_temp_dir_boundary() {
-        // Create a stray reef.toml directly in the OS temp root, mimicking
-        // the Octant manifest that was found there in the wild.
-        let temp_root = std::env::temp_dir();
-        let stray = temp_root.join("reef.toml");
-        // Only plant the stray manifest if the temp root is writeable AND
-        // there isn't already one there (we don't want to clobber a real
-        // user file). If a stray already exists, the test still validates
-        // the fix because the lookup below must STILL return None.
-        let planted = if !stray.exists() {
-            std::fs::write(
-                &stray,
-                r#"[package]
-name = "stray"
-version = "0.0.0"
-compiler = "=0.0.0"
-module_prefix = "Stray"
-"#,
-            )
-            .is_ok()
-        } else {
-            false
-        };
-
-        let dir = tempdir().expect("tempdir");
-        let result = find_package_root_for_dir(dir.path());
-
-        // Clean up the planted file before asserting so a failed assertion
-        // doesn't leave litter behind.
-        if planted {
-            let _ = std::fs::remove_file(&stray);
+        const CHILD: &str = "CHELIS_TEST_TEMP_BOUNDARY";
+        if env::var_os(CHILD).is_none() {
+            let outer = tempdir().expect("private ancestor");
+            let boundary = outer.path().join("tmp");
+            fs::create_dir_all(boundary.join("nested")).expect("private temp root");
+            fs::write(outer.path().join("reef.toml"), "").expect("ancestor manifest");
+            let output = std::process::Command::new(env::current_exe().expect("test executable"))
+                .args([
+                    "--exact",
+                    "tests::ancestor_walk_stops_at_os_temp_dir_boundary",
+                    "--nocapture",
+                ])
+                .env("TMPDIR", &boundary)
+                .env(CHILD, "1")
+                .output()
+                .expect("isolated boundary test");
+            assert!(
+                output.status.success(),
+                "stdout: {}\nstderr: {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
         }
 
-        // The walk must not escape the per-test tempdir into the shared
-        // OS temp root, so it must return Ok(None) — not Ok(Some(/tmp)).
-        match result {
-            Ok(None) => {}
-            Ok(Some(found)) => panic!(
-                "ancestor walk leaked into shared temp space: found `{}` from tempdir `{}`",
-                found.display(),
-                dir.path().display()
-            ),
-            Err(e) => panic!("unexpected error from ancestor walk: {e}"),
+        let boundary = env::temp_dir().canonicalize().expect("temp root");
+        let nested = boundary.join("nested");
+        for start in [&boundary, &nested] {
+            assert_eq!(find_package_root_for_dir(start).expect("lookup"), None);
         }
+
+        fs::write(boundary.join("reef.toml"), "").expect("boundary manifest");
+        for start in [&boundary, &nested] {
+            assert_eq!(
+                find_package_root_for_dir(start).expect("boundary lookup"),
+                Some(boundary.clone())
+            );
+        }
+
+        fs::write(nested.join("reef.toml"), "").expect("nearer manifest");
+        assert_eq!(
+            find_package_root_for_dir(&nested).expect("nearer lookup"),
+            Some(nested)
+        );
     }
 
     /// Phase B prerequisite: `source_digests` walks every backed source

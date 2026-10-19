@@ -719,3 +719,65 @@ fn cmd_eval_host_arrow_consumed_pure_root_realizes_concrete_value() {
         "a consumed pure nullary root must surface its concrete result; got roots: {roots:?}"
     );
 }
+
+#[test]
+fn cmd_eval_package_root_at_tmpdir_3920() {
+    let (_dir, root) = path_dep_package();
+    let entry = root.join("src/probe.ch");
+    write_file(
+        &entry,
+        "module App.Probe\nimport Mylib.Math (add)\nanswer: i32 = add(20, 22)\n",
+    );
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("TMPDIR", &root)
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .current_dir(&root)
+        .args(["eval", "--file"])
+        .arg(&entry)
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("42"));
+}
+
+#[test]
+fn cmd_eval_does_not_cross_tmpdir_boundary_3920() {
+    let (_dir, root) = path_dep_package();
+    let boundary = root.join("scratch");
+    let entry = boundary.join("nested/probe.ch");
+    write_file(
+        &entry,
+        "module App.Probe\nimport Mylib.Math (add)\nanswer: i32 = add(20, 22)\n",
+    );
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("TMPDIR", &boundary)
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .current_dir(&boundary)
+        .args(["eval", "--file"])
+        .arg(&entry)
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("Mylib"));
+}
+
+#[test]
+fn cmd_eval_package_below_tmpdir_keeps_its_own_root_3920() {
+    let (dir, root) = path_dep_package();
+    write_file(&dir.path().join("reef.toml"), "invalid manifest\n");
+    let entry = root.join("src/probe.ch");
+    write_file(
+        &entry,
+        "module App.Probe\nimport Mylib.Math (double)\nanswer: i32 = double(21)\n",
+    );
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("TMPDIR", dir.path())
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .current_dir(&root)
+        .args(["eval", "--file"])
+        .arg(&entry)
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("42"));
+}
