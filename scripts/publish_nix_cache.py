@@ -8,10 +8,11 @@ does not hold the packages, and a maintainer can dispatch it on `main`.
 
 The script gives four groups of paths to `cachix push`:
 
-- The outputs of `packages.<system>.chelis`, `chelis-runtime`, and `chelisup`.
+- The outputs of `packages.<system>.chelis`, `chelis-runtime`,
+  `chelis-unwrapped`, and `chelisup`.
 - The cvc5 tree that the `cvc5-sys` crate links, which the flake exposes as
   `legacyPackages.<system>.cvc5-dir`.
-- Each Rust crate build in the build closure of the three packages.
+- Each Rust crate build in the build closure of the four packages.
   `buildRustCrate` names each crate derivation `rust_<crate>-<version>`.
 - The Devenv shell roots under `$DEVENV_DOTFILE/gc/` and the `$DEVENV_PROFILE`
   profile. `scripts/ci_devenv.py` keeps `activated-shell`, the shell that
@@ -52,7 +53,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 CACHE_NAME = "chelis-lang"
 TOKEN_VARIABLE = "CACHIX_AUTH_TOKEN"
-PACKAGES = ("chelis", "chelis-runtime", "chelisup")
+PACKAGES = ("chelis", "chelis-runtime", "chelis-unwrapped", "chelisup")
 # The prebuilt cvc5 tree that the cvc5-sys crate links.
 CVC5_TREE = "cvc5-dir"
 # buildRustCrate names each crate derivation `rust_<crate>-<version>`.
@@ -101,7 +102,7 @@ def package_installables(system: str) -> list[str]:
 
 
 def built_outputs(system: str, run: Runner) -> list[str]:
-    """The output paths of the three packages and the cvc5 tree."""
+    """The output paths of the four packages and the cvc5 tree."""
     printed = run(
         [
             "nix",
@@ -120,7 +121,7 @@ def built_outputs(system: str, run: Runner) -> list[str]:
 
 
 def crate_builds(system: str, run: Runner) -> list[str]:
-    """The Rust crate builds in the build closure of the three packages."""
+    """The Rust crate builds in the build closure of the four packages."""
     derivations = run(
         ["nix", "path-info", "--derivation", *package_installables(system)], None
     ).split()

@@ -24,11 +24,13 @@ PATHS = {
     "aarch64-darwin": [
         "/nix/store/aaaa-chelis-0.20.0",
         "/nix/store/bbbb-chelis-runtime-0.20.0",
+        "/nix/store/gggg-chelis-unwrapped-0.20.0",
         "/nix/store/cccc-chelisup-0.20.0",
     ],
     "x86_64-linux": [
         "/nix/store/dddd-chelis-0.20.0",
         "/nix/store/eeee-chelis-runtime-0.20.0",
+        "/nix/store/hhhh-chelis-unwrapped-0.20.0",
         "/nix/store/ffff-chelisup-0.20.0",
     ],
 }
@@ -96,7 +98,7 @@ class NixCacheStatusTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(self.output.read_text(encoding="utf-8"), "complete=true\n")
         self.assertEqual(sorted(nix.queried()), sorted(ALL_PATHS))
-        self.assertIn("holds 6 of 6 package path(s)", stdout)
+        self.assertIn("holds 8 of 8 package path(s)", stdout)
 
     def test_one_missing_path_makes_the_cache_incomplete(self) -> None:
         missing = PATHS["x86_64-linux"][0]
@@ -104,7 +106,7 @@ class NixCacheStatusTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(self.output.read_text(encoding="utf-8"), "complete=false\n")
         self.assertIn(f"does not hold {missing} (x86_64-linux)", stdout)
-        self.assertIn("holds 5 of 6 package path(s)", stdout)
+        self.assertIn("holds 7 of 8 package path(s)", stdout)
 
     def test_each_query_names_the_published_cache(self) -> None:
         nix = FakeNix()
@@ -133,7 +135,7 @@ class NixCacheStatusTests(unittest.TestCase):
     def test_without_an_output_file_the_report_still_prints(self) -> None:
         code, stdout, _ = run_main(FakeNix())
         self.assertEqual(code, 0)
-        self.assertIn("holds 6 of 6", stdout)
+        self.assertIn("holds 8 of 8", stdout)
 
     def test_unknown_query_failure_is_an_error_not_a_missing_path(self) -> None:
         broken = PATHS["aarch64-darwin"][1]

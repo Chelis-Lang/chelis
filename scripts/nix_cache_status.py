@@ -2,8 +2,8 @@
 """Report whether the chelis-lang cache holds the Nix packages of this revision.
 
 The first job of `nix-packages.yml` runs this script. It evaluates the output
-paths of `packages.<system>.chelis`, `chelis-runtime`, and `chelisup` for each
-supported system. Evaluation disables import from derivation, so one host gives
+paths of `packages.<system>.chelis`, `chelis-runtime`, `chelis-unwrapped`, and
+`chelisup` for each supported system. Evaluation disables import from derivation, so one host gives
 the paths of every system without a builder for that system.
 
 Then the script asks the cache for each path with
@@ -77,7 +77,7 @@ def package_expression() -> str:
 
 
 def package_paths(run: Runner) -> dict[str, list[str]]:
-    """The output paths of the three packages, by supported system."""
+    """The output paths of the four packages, by supported system."""
     argv = [
         "nix",
         "eval",

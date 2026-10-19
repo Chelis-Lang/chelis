@@ -22,11 +22,13 @@ import publish_nix_cache  # noqa: E402
 SYSTEM = "aarch64-darwin"
 CHELIS = "/nix/store/aaaa-chelis-0.19.4"
 RUNTIME = "/nix/store/bbbb-chelis-runtime-0.19.4"
+UNWRAPPED = "/nix/store/rrrr-chelis-unwrapped-0.19.4"
 CHELISUP = "/nix/store/cccc-chelisup-0.19.4"
 TREE = "/nix/store/dddd-cvc5-1.3.1-prebuilt-tree"
 DERIVATIONS = [
     "/nix/store/eeee-chelis-0.19.4.drv",
     "/nix/store/ffff-chelis-runtime-0.19.4.drv",
+    "/nix/store/ssss-chelis-unwrapped-0.19.4.drv",
     "/nix/store/gggg-chelisup-0.19.4.drv",
 ]
 CRATE_LIB = "/nix/store/hhhh-rust_serde-1.0.228-lib"
@@ -59,7 +61,7 @@ RESOLVED = {
 }
 DEVENV = {"DEVENV_DOTFILE": DOTFILE, "DEVENV_PROFILE": PROFILE}
 PUSHED = sorted(
-    [CHELIS, RUNTIME, CHELISUP, TREE, CRATE_LIB, CRATE_OUT, SHELL, ACTIVATED_SHELL, ACTIVATED_ENVIRONMENT, PROFILE]
+    [CHELIS, RUNTIME, UNWRAPPED, CHELISUP, TREE, CRATE_LIB, CRATE_OUT, SHELL, ACTIVATED_SHELL, ACTIVATED_ENVIRONMENT, PROFILE]
 )
 TOKEN = {publish_nix_cache.TOKEN_VARIABLE: "token", **DEVENV}
 RELEASE_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "release.yml"
@@ -89,7 +91,7 @@ class FakeNix:
         if command == "eval":
             return f"{SYSTEM}\n"
         if command == "build":
-            return f"{CHELIS}\n{RUNTIME}\n{CHELISUP}\n{TREE}\n"
+            return f"{CHELIS}\n{RUNTIME}\n{UNWRAPPED}\n{CHELISUP}\n{TREE}\n"
         if command == "path-info":
             return "".join(f"{path}\n" for path in DERIVATIONS)
         if command == "nix-store":
@@ -187,8 +189,8 @@ class PublishNixCacheTests(unittest.TestCase):
         code, stdout, _ = run_main(nix)
         self.assertEqual(code, 0)
         self.assertIn(f"pushed {len(PUSHED)} {SYSTEM} path(s)", stdout)
-        packages = [f".#packages.{SYSTEM}.{name}" for name in ("chelis", "chelis-runtime", "chelisup")]
-        self.assertEqual(nix.command("build")[-4:], [*packages, f".#legacyPackages.{SYSTEM}.cvc5-dir"])
+        packages = [f".#packages.{SYSTEM}.{name}" for name in ("chelis", "chelis-runtime", "chelis-unwrapped", "chelisup")]
+        self.assertEqual(nix.command("build")[-5:], [*packages, f".#legacyPackages.{SYSTEM}.cvc5-dir"])
         self.assertEqual(nix.command("path-info")[2:], ["--derivation", *packages])
         self.assertEqual(
             nix.command("nix-store"),

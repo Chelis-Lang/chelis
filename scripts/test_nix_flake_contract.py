@@ -20,7 +20,7 @@ NIX = shutil.which("nix")
 REQUIRES_NIX = unittest.skipUnless(NIX, "Nix is not installed")
 EXPECTED_SYSTEMS = ["aarch64-darwin", "aarch64-linux", "x86_64-linux"]
 LINUX_SYSTEMS = ["aarch64-linux", "x86_64-linux"]
-EXPECTED_PACKAGES = ["chelis", "chelis-runtime", "chelisup", "default"]
+EXPECTED_PACKAGES = ["chelis", "chelis-runtime", "chelis-unwrapped", "chelisup", "default"]
 EXPECTED_APPS = ["chelis", "chelisup", "default"]
 EXPECTED_HEADERS = [
     "chelis_runtime.h",
@@ -417,6 +417,28 @@ class NixFlakeContractTests(unittest.TestCase):
                     self.assertNotIn("CHELIS_C_LIBRARY_PATH", command)
 
     @REQUIRES_NIX
+    def test_unwrapped_package_builds_without_the_c_toolchain(self) -> None:
+        for system in EXPECTED_SYSTEMS:
+            with self.subTest(system=system):
+                cc = nix_raw(
+                    "eval",
+                    "--impure",
+                    "--raw",
+                    "--expr",
+                    f"(import (builtins.getFlake {json.dumps(str(REPO_ROOT))}).inputs.nixpkgs "
+                    f"{{ system = {json.dumps(system)}; }}).stdenv.cc.outPath",
+                )
+                wrapped = nix_raw("eval", "--raw", f".#packages.{system}.chelis.buildCommand")
+                unwrapped = nix_raw(
+                    "eval", "--raw", f".#packages.{system}.chelis-unwrapped.buildCommand"
+                )
+                # Control: the wrapper of `chelis` names the stdenv C compiler.
+                self.assertIn(cc, wrapped)
+                self.assertNotIn(cc, unwrapped)
+                self.assertNotIn("openblas", unwrapped)
+                self.assertNotIn("makeBinaryWrapper", unwrapped)
+
+    @REQUIRES_NIX
     def test_package_names_are_exact_on_each_system(self) -> None:
         for system in EXPECTED_SYSTEMS:
             with self.subTest(system=system):
@@ -580,13 +602,31 @@ class NixFlakeContractTests(unittest.TestCase):
             shapes["chelisup"]["inventory"],
             ["bin", "libexec", "bin/chelisup", "libexec/chelisup"],
         )
+        # The unwrapped package has the layout of the release tarball:
+        # bin/chelis is the compiler itself, and no libexec/ exists.
+        self.assertEqual(
+            shapes["chelis-unwrapped"]["required"],
+            ["bin/chelis", *shapes["chelis-runtime"]["required"]],
+        )
+        self.assertEqual(shapes["chelis-unwrapped"]["allowedProductExecutables"], ["bin/chelis"])
+        self.assertEqual(shapes["chelis-unwrapped"]["forbidden"], ["bin/chelisup", "libexec"])
+        self.assertEqual(
+            shapes["chelis-unwrapped"]["inventory"],
+            ["bin", "include", "lib", *shapes["chelis-unwrapped"]["required"]],
+        )
         for header in EXPECTED_HEADERS:
             self.assertIn(f"include/{header}", shapes["chelis"]["required"])
             self.assertIn(f"include/{header}", shapes["chelis-runtime"]["required"])
+            self.assertIn(f"include/{header}", shapes["chelis-unwrapped"]["required"])
 
     @REQUIRES_NIX
     def test_packages_and_apps_carry_metadata(self) -> None:
-        main_programs = {"chelis": "chelis", "chelis-runtime": None, "chelisup": "chelisup"}
+        main_programs = {
+            "chelis": "chelis",
+            "chelis-runtime": None,
+            "chelis-unwrapped": "chelis",
+            "chelisup": "chelisup",
+        }
         for system in EXPECTED_SYSTEMS:
             for name, main_program in main_programs.items():
                 with self.subTest(system=system, package=name):
@@ -620,7 +660,7 @@ class NixFlakeContractTests(unittest.TestCase):
             "eval", "--impure", "--raw", "--expr", "builtins.currentSystem"
         )
         flake = f"builtins.getFlake {json.dumps(str(REPO_ROOT))}"
-        names = ["chelis", "chelis-runtime", "chelisup"]
+        names = ["chelis", "chelis-runtime", "chelis-unwrapped", "chelisup"]
         overlaid = nix_json(
             "eval",
             "--impure",
@@ -755,7 +795,7 @@ class NixFlakeContractTests(unittest.TestCase):
             self.assertEqual(derivations(flake), before)
 
             # Negative control: an edit of a script that the packages run
-            # changes the two packages that run it, and only those.
+            # changes the packages that run it, and only those.
             script = flake / "scripts" / "verify_runtime_package.py"
             script.write_text(
                 script.read_text(encoding="utf-8") + "\n# A script edit.\n",
@@ -769,7 +809,9 @@ class NixFlakeContractTests(unittest.TestCase):
                         for name in before[system]
                         if before[system][name] != after[system][name]
                     )
-                    self.assertEqual(changed, ["chelis", "chelis-runtime", "default"])
+                    self.assertEqual(
+                        changed, ["chelis", "chelis-runtime", "chelis-unwrapped", "default"]
+                    )
 
     @REQUIRES_NIX
     def test_documentation_edit_keeps_every_check_derivation(self) -> None:

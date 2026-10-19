@@ -1111,10 +1111,12 @@ REVIEWED: tuple[Row, ...] = (
             '"lib/libchelis_runtime.a"',
             '"lib/libchelis_runtime.a"',
             '"lib/libchelis_runtime.a"',
+            '"lib/libchelis_runtime.a"',
+            '"lib/libchelis_runtime.a"',
         ),
         disposition="not-lookup",
         reason=(
-            "lists the archive among the files the Nix toolchain and runtime packages must ship"
+            "lists the archive among the files the Nix toolchain, unwrapped compiler, and runtime packages must ship"
         ),
     ),
     Row(
@@ -1123,10 +1125,11 @@ REVIEWED: tuple[Row, ...] = (
         lines=(
             'install -Dm444 "$export_dir/libchelis_runtime.a" $out/lib/libchelis_runtime.a',
             "cp ${runtime}/lib/libchelis_runtime.a $out/lib/libchelis_runtime.a",
+            "cp ${runtime}/lib/libchelis_runtime.a $out/lib/libchelis_runtime.a",
         ),
         disposition="not-lookup",
         reason=(
-            "installs the archive from this compiler's exact export and copies it into the combined Nix package; both outputs verify the archive and six headers against their compiler exports"
+            "installs the archive from this compiler's exact export and copies it into the combined and the unwrapped Nix packages; each output verifies the archive and six headers against its compiler's export"
         ),
     ),
     Row(

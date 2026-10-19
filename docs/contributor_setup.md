@@ -158,8 +158,8 @@ tree. The [SMT build guide](smt_build_setup.md) has the prerequisites.
 ## Nix source packages
 
 From the checkout root, Nix provides source builds of `chelis`,
-`chelis-runtime`, and `chelisup` on `x86_64-linux`, `aarch64-linux`, and
-`aarch64-darwin`. Each system has a native CI job that runs the complete check
+`chelis-unwrapped`, `chelis-runtime`, and `chelisup` on `x86_64-linux`,
+`aarch64-linux`, and `aarch64-darwin`. Each system has a native CI job that runs the complete check
 set, and `checks.<system>.lane-check` exists on both Linux systems.
 
 `x86_64-darwin` (Intel macOS) is not supported. nixpkgs removes that system for
@@ -192,12 +192,24 @@ wrapper declares. The check has two negative controls:
   `CHELIS_C_INCLUDE_PATH` and `CHELIS_C_LIBRARY_PATH`. The build must fail, and
   its error must name `cblas.h` or `-lopenblas`.
 
-Both `chelis` and `chelis-runtime` verify their copied archive and all six
-public headers against the sealed compiler's export. `nix flake check`
-rechecks both outputs against the compiler of the combined package. Then it
-links and runs a native C consumer separately with the include directory and
-archive path of each output. Rebuild both outputs from the same compiler
-revision. Never mix an archive or header from another derivation. A failed
+`chelis-unwrapped` has the layout of a release toolchain: `bin/chelis` is the
+compiler itself, beside the runtime archive and the six headers. Its
+`bin/chelis` and `libexec/chelis` of `chelis` are links to one binary of the
+compiler crate, and the `sharedCompiler` check compares them.
+
+The `unwrappedClosure` check fails when the closure of `chelis-unwrapped` holds
+the `stdenv` C compiler, its wrapper, an output of its binutils, or an output of
+OpenBLAS. The library outputs of the C compiler, such as `libstdc++` and
+`libgcc_s` on Linux, can stay. The check prints the closure size of both
+compiler packages and the closure of `chelis-unwrapped`. As a control, the
+closure of `chelis` must hold the `stdenv` C compiler.
+
+The `chelis`, `chelis-unwrapped`, and `chelis-runtime` packages verify their
+copied archive and all six public headers against the sealed compiler's export.
+`nix flake check` rechecks the three outputs against the compiler of the
+combined package. Then it links and runs a native C consumer separately with
+the include directory and archive path of each output. Rebuild the outputs from
+the same compiler revision. Never mix an archive or header from another derivation. A failed
 Nix-wrapper installation leaves its previous stable GC root and selected
 toolchain untouched.
 
@@ -216,14 +228,14 @@ On Linux, `nix flake check` also checks that `libexec/chelis` carries a
 GNU build id. The compiler identifies its own build by that id. Without it,
 each `chelis` process computes SHA-256 over the whole executable.
 
-The flake also has `overlays.default`, which adds the three packages for the
+The flake also has `overlays.default`, which adds the four packages for the
 system of the consumer, and `formatter.<system>`. `nix fmt` formats each
 tracked `.nix` file except `Cargo.nix`, and `nix fmt -- --check` only checks
 them. The `nixFormat` check uses the same nixfmt and the same files.
 
 A run of `nix-packages.yml` on `main` or on a release tag pushes to the
-`chelis-lang` Cachix cache. It pushes the `chelis`, `chelis-runtime`, and
-`chelisup` outputs, the cvc5 tree, the Rust crate builds, and the Devenv
+`chelis-lang` Cachix cache. It pushes the `chelis`, `chelis-runtime`,
+`chelis-unwrapped`, and `chelisup` outputs, the cvc5 tree, the Rust crate builds, and the Devenv
 shell closure. A daily schedule
 runs the workflow on `main`. That run skips its native builds when the cache
 already holds the packages of the `main` revision.
