@@ -180,8 +180,14 @@ or folded into the chelisup work).
 
 ### 4.1 Registry and cache resolution
 
-One resolver in `chelis-reef` gives the Chelis home, the registry root, and the
-directory of each on-disk compiler cache. An empty variable counts as unset.
+One resolver in `chelis-reef` (`crates/chelis-reef/src/home.rs`) gives the
+registry root and the directory of each on-disk compiler cache. It also gives
+the Chelis home of the compiler. An empty variable counts as unset.
+
+Three other readers resolve the Chelis home with the same rule. They are
+`chelisup` (`resolve_home`), the default root of the source-crate store
+(`chelis_src::default_store_root`), and the Nix `chelisup` launcher.
+`chelisup` does not depend on `chelis-reef`, and the launcher is a shell script.
 
 | State | Resolution order |
 |---|---|

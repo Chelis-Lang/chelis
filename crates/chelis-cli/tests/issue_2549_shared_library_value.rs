@@ -79,12 +79,20 @@ fn importer(module: &str) -> String {
     )
 }
 
+/// Run `chelis` in `root` with the compiler caches in `cache`. The command
+/// sets or clears each variable that the registry and cache resolver reads
+/// (`crates/chelis-reef/src/home.rs`), so the environment of the caller
+/// cannot move the caches. `HOME` is a directory beside `cache`.
 fn chelis(root: &Path, cache: &Path, args: &[&str]) -> (bool, String, String) {
+    let home = cache.with_file_name("home");
     let output = Command::cargo_bin("chelis")
         .expect("chelis binary")
         .current_dir(root)
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .env_remove("CHELIS_REEF_HOME")
+        .env_remove("CHELIS_HOME")
         .env("XDG_CACHE_HOME", cache)
+        .env("HOME", &home)
         .args(args)
         .output()
         .expect("run chelis");
@@ -111,6 +119,15 @@ fn two_importing_modules_evaluate_the_shared_library_value() {
             stdout, "main = tensor(shape=[2], data=[1.0, 1.0])\n",
             "eval {entry}"
         );
+    }
+    // chelis#3949: the caches of the runs are in the isolated cache
+    // directory, whatever the environment of the test process holds.
+    for name in ["prepared-graphs", "compiled"] {
+        let dir = cache.join("chelis").join(name);
+        let entries = fs::read_dir(&dir)
+            .unwrap_or_else(|error| panic!("read {}: {error}", dir.display()))
+            .count();
+        assert!(entries > 0, "{} must hold a cache entry", dir.display());
     }
 }
 
