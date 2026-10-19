@@ -163,6 +163,19 @@ fn install_trusts_the_root_that_ssl_cert_file_names() {
     assert!(!home.path().join("toolchains/0.1.0").exists());
     assert!(server.answered().is_empty(), "{:?}", server.answered());
 
+    // A file that does not exist stops the client build, and the error names
+    // the variable and the file.
+    let missing_file = scratch.path().join("missing.pem");
+    let missing = install(home.path(), &base, Some(&missing_file));
+    let stderr = String::from_utf8_lossy(&missing.stderr);
+    assert!(!missing.status.success(), "stderr: {stderr}");
+    assert!(
+        stderr.contains("could not build the HTTP client")
+            && stderr.contains(&format!("SSL_CERT_FILE={}", missing_file.display())),
+        "stderr: {stderr}"
+    );
+    assert!(server.answered().is_empty(), "{:?}", server.answered());
+
     let trusted = install(home.path(), &base, Some(&root_file));
     assert!(
         trusted.status.success(),

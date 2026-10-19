@@ -274,10 +274,7 @@ fn fetch_from_github(version: &str, assets: &[String], dir: &Path) -> Result<usi
     let repo = github_repo();
     let tag = format!("v{version}");
 
-    let client = reqwest::blocking::Client::builder()
-        .connect_timeout(Duration::from_secs(15))
-        .build()
-        .map_err(|e| format!("could not build the HTTP client: {e}"))?;
+    let client = http_client()?;
 
     // Step 1: release metadata -> asset id.
     let meta_url = format!(
@@ -436,6 +433,22 @@ impl GetError {
     }
 }
 
+/// The HTTP client of every download. The client reads the file that
+/// `SSL_CERT_FILE` names, and a file it cannot read stops the build. Thus the
+/// error names the variable and its value when it is set.
+fn http_client() -> Result<reqwest::blocking::Client, String> {
+    reqwest::blocking::Client::builder()
+        .connect_timeout(Duration::from_secs(15))
+        .build()
+        .map_err(|e| match std::env::var_os("SSL_CERT_FILE") {
+            Some(path) => format!(
+                "could not build the HTTP client: {e} (SSL_CERT_FILE={})",
+                Path::new(&path).display()
+            ),
+            None => format!("could not build the HTTP client: {e}"),
+        })
+}
+
 /// Optional GitHub auth context for [`http_get_to_file`].
 struct GithubAuth<'a> {
     client: &'a reqwest::blocking::Client,
@@ -464,10 +477,7 @@ fn http_get_to_file(url: &str, target: &Path, auth: Option<GithubAuth>) -> Resul
             (a.client, builder)
         }
         None => {
-            owned_client = reqwest::blocking::Client::builder()
-                .connect_timeout(Duration::from_secs(15))
-                .build()
-                .map_err(|e| GetError::Failed(format!("could not build the HTTP client: {e}")))?;
+            owned_client = http_client().map_err(GetError::Failed)?;
             let b = owned_client.get(url).header("User-Agent", "chelisup");
             (&owned_client, b)
         }

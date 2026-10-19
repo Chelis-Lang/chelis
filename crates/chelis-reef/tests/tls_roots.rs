@@ -145,6 +145,24 @@ fn github_fetch_trusts_the_root_that_ssl_cert_file_names() {
     }
     assert!(server.answered().is_empty(), "{:?}", server.answered());
 
+    // A file that does not exist stops the client build, and the error names
+    // the variable and the file.
+    let missing_file = dir.path().join("missing.pem");
+    // SAFETY: as above.
+    unsafe {
+        std::env::set_var("SSL_CERT_FILE", &missing_file);
+    }
+    let missing = install_from_github("chelis-lang/tls-probe@v0.1.0", &registry);
+    match &missing {
+        Err(GitHubFetchError::Io { message }) => assert!(
+            message.starts_with("build http client: ")
+                && message.contains(&format!("SSL_CERT_FILE={}", missing_file.display())),
+            "{message}"
+        ),
+        other => panic!("a missing SSL_CERT_FILE must stop the client build, got: {other:?}"),
+    }
+    assert!(server.answered().is_empty(), "{:?}", server.answered());
+
     // SAFETY: as above.
     unsafe {
         std::env::set_var("SSL_CERT_FILE", &root_file);
