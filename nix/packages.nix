@@ -330,6 +330,21 @@ let
       done
     }
 
+    # The real "update" advises the bootstrap installer, which replaces this
+    # launcher at \$CHELIS_HOME/bin/chelisup. A newer Nix chelisup comes from a
+    # newer release of the flake.
+    if { [ "\$#" -eq 1 ] && [ "\$1" = "update" ]; } \
+      || { [ "\$#" -eq 2 ] && [ "\$1" = "self" ] && [ "\$2" = "update" ]; }; then
+      printf '%s\n' \
+        'chelisup: this chelisup comes from the Chelis Nix flake. To get a newer chelisup, run the chelisup of a newer release:' \
+        '  nix run github:Chelis-Lang/chelis/vX.Y.Z#chelisup -- install X.Y.Z' \
+        'That command installs chelis X.Y.Z and puts that chelisup in the bin directory of CHELIS_HOME.' \
+        'For the chelisup of your Nix profile, install the newer release there:' \
+        '  nix profile install github:Chelis-Lang/chelis/vX.Y.Z#chelisup' \
+        'Replace X.Y.Z with a release version. Do not run the bootstrap installer, because it replaces this chelisup.' >&2
+      exit 0
+    fi
+
     if [ "\''${1:-}" = "self" ] && [ "\''${2:-}" = "uninstall" ]; then
       resolve_chelis_home
       set_gc_root_paths
@@ -342,7 +357,10 @@ let
       exit 0
     fi
 
-    if [ "\''${1:-}" = "install" ]; then
+    # The real "install" and "default" copy the installer over
+    # \$CHELIS_HOME/bin/chelisup. Around both, the launcher stages and promotes
+    # its GC root and puts itself back after the copy.
+    if [ "\''${1:-}" = "install" ] || [ "\''${1:-}" = "default" ]; then
       resolve_chelis_home
       set_gc_root_paths
       require_nix_store "\$gc_root"

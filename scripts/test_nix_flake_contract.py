@@ -236,6 +236,20 @@ NIX_GC_ROOT_LOGIC = re.compile(
 )
 
 
+def tree_snapshot(root: Path) -> dict[str, str | bytes]:
+    """Each path below `root` and its link target, its bytes, or "directory"."""
+    snapshot: dict[str, str | bytes] = {}
+    for path in sorted(root.rglob("*")):
+        name = str(path.relative_to(root))
+        if path.is_symlink():
+            snapshot[name] = os.readlink(path)
+        elif path.is_dir():
+            snapshot[name] = "directory"
+        else:
+            snapshot[name] = path.read_bytes()
+    return snapshot
+
+
 def read_contract_inputs() -> dict[str, str | None]:
     cargo_nix = REPO_ROOT / "Cargo.nix"
     return {
@@ -1183,6 +1197,120 @@ class NixFlakeContractTests(unittest.TestCase):
             self.assertFalse(staging_root.exists())
             self.assertFalse(staging_root.is_symlink())
 
+    def install_nix_launcher(self) -> tuple[Path, Path, str, dict[str, str]]:
+        """Install chelisup through the launcher into a new CHELIS_HOME.
+
+        Returns the package, the CHELIS_HOME, the workspace version, and the
+        environment of the launcher. Each test of the copied launcher starts
+        from this state.
+        """
+        package = Path(
+            nix_raw("build", "--no-link", "--print-out-paths", ".#chelisup")
+        )
+        manifest = tomllib.loads((REPO_ROOT / "Cargo.toml").read_text(encoding="utf-8"))
+        version = manifest["workspace"]["package"]["version"]
+        home = Path(self.enterContext(tempfile.TemporaryDirectory())) / "home"
+        toolchain = home / "toolchains" / version / "bin" / "chelis"
+        toolchain.parent.mkdir(parents=True)
+        toolchain.write_text("placeholder toolchain\n", encoding="utf-8")
+        environment = os.environ.copy()
+        environment["CHELIS_HOME"] = str(home)
+        environment["PATH"] = ""
+        installed = subprocess.run(
+            [package / "bin" / "chelisup", "install", version],
+            cwd=REPO_ROOT,
+            env=environment,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        self.assertEqual(installed.returncode, 0, installed.stderr)
+        self.assertEqual(
+            (home / "bin" / "chelisup").read_bytes(),
+            (package / "bin" / "chelisup").read_bytes(),
+        )
+        return package, home, version, environment
+
+    @REQUIRES_NIX
+    def test_chelisup_default_keeps_the_launcher_and_its_gc_root(self) -> None:
+        # chelis#3913: the real `default` copies the installer over
+        # bin/chelisup. The launcher must put itself back, so that a later
+        # link of a store toolchain still adds the GC root.
+        package, home, version, environment = self.install_nix_launcher()
+        installed_binary = home / "bin" / "chelisup"
+        roots = home / "nix-gcroots"
+        scratch = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        store_toolchain = add_store_toolchain(scratch)
+
+        def chelisup(*args: object) -> subprocess.CompletedProcess[str]:
+            return subprocess.run(
+                [installed_binary, *args],
+                cwd=REPO_ROOT,
+                env=environment,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+
+        defaulted = chelisup("default", version)
+        self.assertEqual(defaulted.returncode, 0, defaulted.stderr)
+        self.assertIn(f"default toolchain set to {version}", defaulted.stdout)
+        self.assertEqual(installed_binary.read_bytes(), (package / "bin" / "chelisup").read_bytes())
+        self.assertEqual(
+            (home / "bin" / "chelis").read_bytes(),
+            (package / "libexec" / "chelisup").read_bytes(),
+        )
+        self.assertEqual((roots / "chelisup").resolve(), package.resolve())
+        for name in ("chelisup.next", "chelisup.partial"):
+            self.assertFalse((roots / name).is_symlink(), name)
+
+        linked = chelisup("link", store_toolchain)
+        self.assertEqual(linked.returncode, 0, linked.stderr)
+        toolchain_root = roots / "toolchain-0.0.7"
+        self.assertTrue(toolchain_root.is_symlink(), f"missing Nix GC root: {toolchain_root}")
+        self.assertEqual(toolchain_root.resolve(), store_toolchain.resolve())
+
+        # A failed default keeps the stable root and the toolchain root.
+        failed = chelisup("default", "9.9.9")
+        self.assertNotEqual(failed.returncode, 0, failed.stdout)
+        self.assertIn("cannot set default to 9.9.9", failed.stderr)
+        self.assertEqual((roots / "chelisup").resolve(), package.resolve())
+        self.assertEqual(toolchain_root.resolve(), store_toolchain.resolve())
+        self.assertFalse((roots / "chelisup.next").is_symlink())
+        self.assertEqual(installed_binary.read_bytes(), (package / "bin" / "chelisup").read_bytes())
+
+    @REQUIRES_NIX
+    def test_chelisup_update_gives_nix_advice_and_changes_no_file(self) -> None:
+        # chelis#3913: the bootstrap installer that the real `update` advises
+        # replaces the launcher. Through the launcher, `update` and
+        # `self update` name the Nix commands instead.
+        _package, home, _version, environment = self.install_nix_launcher()
+        before = tree_snapshot(home)
+        for command in (["update"], ["self", "update"]):
+            with self.subTest(command=command):
+                updated = subprocess.run(
+                    [home / "bin" / "chelisup", *command],
+                    cwd=REPO_ROOT,
+                    env=environment,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    check=False,
+                )
+                self.assertEqual(updated.returncode, 0, updated.stderr)
+                self.assertIn(
+                    "nix run github:Chelis-Lang/chelis/vX.Y.Z#chelisup -- install X.Y.Z",
+                    updated.stderr,
+                )
+                self.assertIn(
+                    "nix profile install github:Chelis-Lang/chelis/vX.Y.Z#chelisup",
+                    updated.stderr,
+                )
+                self.assertNotIn("re-run the bootstrap installer", updated.stderr)
+                self.assertEqual(tree_snapshot(home), before)
+
     @REQUIRES_NIX
     def test_chelisup_brings_no_nix_of_its_own(self) -> None:
         # The launcher uses the nix-store of the Nix installation of the user
@@ -1296,6 +1424,18 @@ class NixFlakeContractTests(unittest.TestCase):
                 self.assertEqual(gc_root_snapshot(root_dir), before)
                 # The installer did not run, so it copied no program.
                 self.assertFalse((chelis_home / "bin").exists())
+
+            with self.subTest(command="default", path=path):
+                defaulted = chelisup("default", version)
+                self.assertNotEqual(defaulted.returncode, 0, defaulted.stdout)
+                self.assertIn(
+                    f"chelisup: cannot add the Nix GC root {root_dir / 'chelisup'}: "
+                    "nix-store is not on PATH or in a standard Nix profile",
+                    defaulted.stderr,
+                )
+                self.assertEqual(gc_root_snapshot(root_dir), before)
+                self.assertFalse((chelis_home / "bin").exists())
+                self.assertFalse((chelis_home / "default").exists())
 
             with self.subTest(command="link", path=path):
                 linked = chelisup("link", store_toolchain)
