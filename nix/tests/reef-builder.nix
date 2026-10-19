@@ -84,6 +84,13 @@ let
     src = pkgs.writeTextDir "src/main$tag.ch" "main = 43\n";
     entryPoint = "src/main$tag.ch";
   };
+  deepProgram = buildChelisPackage {
+    inherit pkgs chelis;
+    pname = "nix-builder-deep-entry";
+    version = "0.1.0";
+    src = pkgs.writeTextDir "src/main.ch.dp" "(def {} main (lit {type: (t-prim {} i32)} 47))\n";
+    entryPoint = "src/main.ch.dp";
+  };
 in
 pkgs.runCommand "chelis-reef-builder" { passthru = { inherit library program; }; } ''
   actual="$(${lib.escapeShellArg program}/bin/nix-builder-program)"
@@ -93,6 +100,7 @@ pkgs.runCommand "chelis-reef-builder" { passthru = { inherit library program; };
   fi
 
   test "$(${literalProgram}/bin/nix-builder-literal-entry)" = 'main = 43'
+  test "$(${deepProgram}/bin/nix-builder-deep-entry)" = 'main = 47'
 
   ${pkgs.zstd}/bin/zstd --decompress --stdout \
     ${library}/share/reef/nix-builder-library-0.1.0.tar.zst > "$TMPDIR/library.tar"

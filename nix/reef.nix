@@ -85,7 +85,10 @@ let
       files = lib.foldl' (
         result: item:
         if result ? ${item.file} then
-          fail "two locked downloads use the file name ${item.file}"
+          if result.${item.file}.url == item.url && result.${item.file}.sha256 == item.sha256 then
+            result
+          else
+            fail "conflicting locked downloads use the file name ${item.file}"
         else
           result // { ${item.file} = item; }
       ) { } downloads;
@@ -123,7 +126,9 @@ let
       ...
     }@args:
     let
-      program = lib.removeSuffix ".ch" (baseNameOf entryPoint);
+      sourceName = baseNameOf entryPoint;
+      stem = builtins.match "(.+)[.][^.]*" sourceName;
+      program = if stem == null then sourceName else builtins.head stem;
       remaining = builtins.removeAttrs args [
         "pkgs"
         "chelis"

@@ -273,12 +273,15 @@ A Reef project also needs its manifest.
 The default entry point is `src/main.ch`.
 The builder installs its executable as `$out/bin/demo`.
 Set `entryPoint` to select another source file.
+The builder accepts Surf (`.ch`) and Deep (`.dp`) entry points.
 
 `lockFile` selects a `reef.lock` file during Nix evaluation.
 `fetchReefLock` reads it with `builtins.fromTOML` and creates SHA-256-pinned downloads.
 It fetches source archives, compiled shells, and binary entries for the selected system.
 Path dependencies must exist in `src`.
 Bundled runtime entries need no download.
+Identical download URLs and pins share one file.
+Conflicting URLs or pins for the same file name cause an error.
 
 You can also call the fetch helper separately:
 
@@ -303,7 +306,7 @@ Set another value only when the package release uses that epoch.
 
 `checks.<system>.reefBuilder` builds a Reef library and a program that imports it.
 It imports the library from local artifacts, then runs the installed program and checks `main = 42`.
-It also checks a source file name that contains `$`.
+It also checks a source file name that contains `$` and a Deep entry point.
 The native check set includes this check on all three supported systems.
 
 
