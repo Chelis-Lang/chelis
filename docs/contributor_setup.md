@@ -129,6 +129,27 @@ a commit stages a leg's input or output, and pre-push prints a notice and lets t
 through. `git commit --no-verify` and `git push --no-verify` are the only
 bypass.
 
+## Resolve packages offline
+
+Set `CHELIS_OFFLINE=1` for package commands in an offline build:
+
+```sh
+CHELIS_OFFLINE=1 chelis build src/main.ch
+CHELIS_OFFLINE=1 chelis check src/main.ch
+CHELIS_OFFLINE=1 chelis test
+CHELIS_OFFLINE=1 chelis prove src/main.ch
+```
+
+This process control also covers `eval`, `reef build`, and package graph cache
+misses. Reef uses installed packages, path dependencies, and the bundled runtime.
+These graph loads make no network request and execute no `gh` subprocess.
+A missing registry dependency names `chelis reef install --from-lockfile --artifact-dir <dir>`.
+Prepare the lockfile and import its artifacts before the offline build.
+
+Only the exact value `1` enables offline resolution.
+It overrides automatic fetch defaults, but does not enable fetch when you pass
+`reef build --no-auto-fetch`.
+
 ## Build the Python distribution wheel
 
 With the prerequisites above installed, run this from the checkout root:
