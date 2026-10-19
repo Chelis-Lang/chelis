@@ -477,14 +477,23 @@ fn issue_3697_a_low_order_corner_is_reached_at_every_arity() {
     }
 }
 
-/// **The third declared cost: binders whose schedules differ in length may
-/// never be in a cell at the same attempt, and then no pairing happens.**
+/// **The third declared cost: once two binders' schedule lengths differ by as
+/// much as the cell count, their cell windows are disjoint and no pairing
+/// happens at all.**
 ///
-/// Each binder's cell window begins at its own `max(44, L)`. With `L = 52`
-/// and `L = 44` those windows are `[52, 56)` and `[44, 48)` — disjoint — so
-/// the corner is unreachable at any budget. The two controls below show the
-/// witness is real and the pairing works as soon as the lengths agree, which
-/// makes this a window-alignment cost and not a magnitude-reach one.
+/// Each binder's window begins at its own `max(44, L)` and is `cells` wide,
+/// so the windows overlap only while the difference in lengths stays under
+/// `cells`. At arity two there are four cells and each `!=` exclusion adds
+/// two candidates, so **two exclusions on one binder is the whole bar**:
+/// `L = 48` against `L = 44` gives `[48, 52)` and `[44, 48)`, which touch
+/// without overlapping. One exclusion is harmless — `[46, 50)` against
+/// `[44, 48)` still shares attempts 46 and 47, and the corner is reached at
+/// 47 as usual — and the three controls below pin both sides of that
+/// threshold.
+///
+/// The loss does not recover at a larger budget, because at arity two the
+/// grid caps the cell count at four however much budget there is: measured
+/// `passed` at 500, 2000 and 20000 samples.
 ///
 /// This is not a regression against `main`, which reaches none of these
 /// corners. Aligning every binder's cell window on one shared boundary would
@@ -519,7 +528,22 @@ where {four}, y != 11.0f64, y != 12.0f64, y != 13.0f64, y != 14.0f64:
     );
     let (code, record) = prove(&both, "500", "0");
     assert_eq!(code, 1, "equal lengths pair: {record:#}");
-    // Control two: and with both at 44.
+    // Control two: an offset *under* the cell count still pairs, which is
+    // what makes the threshold the cell count rather than mere inequality.
+    let one = format!(
+        "module Pairing.OneShort
+@property corner forall(x: f64, y: f64)
+where x != 11.0f64:
+  {corner}
+"
+    );
+    let (code, record) = prove(&one, "500", "0");
+    assert_eq!(
+        code, 1,
+        "`L = 46` against `L = 44` still shares attempts 46 and 47: {record:#}"
+    );
+    assert_eq!(record["attempted_samples"], 47, "{record:#}");
+    // Control three: and with both at 44.
     let neither = format!(
         "module Pairing.Neither
 @property corner forall(x: f64, y: f64):

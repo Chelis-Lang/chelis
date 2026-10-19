@@ -600,14 +600,19 @@ the six — and the trade was made against the table above. An order-guarded
 property gets no pairing at all, so chelis#3697's class remains open for that
 shape.
 
-**Binders whose schedules differ in length may never be in a cell at the same
-attempt.** Each binder's window begins at its own `max(44, L)`, so with
-`L = 52` and `L = 44` the windows are `[52, 56)` and `[44, 48)` — disjoint,
-and the corner is then unreachable at any budget. Binders of one dtype under
-the same guards have equal lengths, which is the ordinary case and the one
-the pairing serves; an `!=` exclusion on one binder only is enough to lose
-it. A schedule *shorter* than the span is safe, because every binder's window
-still floors at 44. This is not a regression against a run with no phase,
+**Once two binders' schedule lengths differ by as much as the cell count,
+their cell windows are disjoint and no pairing happens at all.** Each
+binder's window begins at its own `max(44, L)` and is as wide as the cell
+count, so they overlap only while the difference stays under it. At two
+binders there are four cells and each `!=` exclusion adds two candidates, so
+two exclusions on one binder is the whole bar: `L = 48` against `L = 44`
+gives `[48, 52)` and `[44, 48)`, which touch without overlapping. One
+exclusion is harmless, and the loss does not recover at a larger budget,
+because the grid caps the cell count at four for two binders however much
+budget there is. Binders of one dtype under the same guards have equal
+lengths, which is the ordinary case and the one the pairing serves; a
+schedule *shorter* than the span is safe, because every window still floors
+at 44. This is not a regression against a run with no phase,
 which reaches none of these corners. Aligning every binder's window on one
 shared boundary would fix it structurally; that is not in this change.
 
