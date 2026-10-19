@@ -4,6 +4,903 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.21.0] - 2026-10-19
+
+### Added
+
+- The checker admits rank-polymorphic helper composition from declaration-owned
+  body evidence, including jointly checked recursion and imported helpers, while
+  preserving ordered dimensions, dtype bounds, effects, ownership, and independent
+  input/result claims. Cached evidence binds its complete checked dependency owners.
+  Rejected inference preserves its owning diagnostics without synthesizing body
+  evidence or demanding stamps from a partial inference product.
+
+- `chelis reef fetch-plan` prints, as JSON, the public download URL and the pinned
+  SHA-256 of each archive, shell, and binary that `reef.lock` locks.
+  `chelis reef install --from-lockfile --artifact-dir <DIR>` imports those files
+  from a directory with no network request. It checks each file against
+  `reef.lock` before any registry write and keeps the locked `remote_origin`.
+  A tool such as Nix can thus fetch locked packages itself and give them to
+  Reef. See [#3813](https://github.com/Chelis-Lang/chelis/issues/3813).
+
+- `CHELIS_C_INCLUDE_PATH` and `CHELIS_C_LIBRARY_PATH` declare the directories
+  of external C headers and libraries, such as OpenBLAS. Each is a
+  colon-separated list of absolute directories. Each include directory adds
+  `-isystemDIR` to the C compile. Each library directory adds `-LDIR` and
+  `-Wl,-rpath,DIR` to the C link.
+
+  The C builds of `chelis build`, the compiler check and the C compile of the
+  Python bindings use these flags. So does the host program of a HIP or Metal
+  build. A device-only HIP or Metal build or HIP binding compiles no C source and
+  does not use them. A relative entry fails a build or a binding that uses them.
+  On Linux, the `chelis` Nix package declares the OpenBLAS directories,
+  so a program that calls BLAS builds and runs. See
+  [#3814](https://github.com/Chelis-Lang/chelis/issues/3814) and
+  [#3893](https://github.com/Chelis-Lang/chelis/issues/3893).
+
+- `chelisup link <dir>` registers an external toolchain directory that contains
+  `bin/chelis`. It uses the version that `bin/chelis --version` reports, and the
+  `chelis` shim then runs that toolchain like an installed one. `chelisup
+  uninstall <version>` removes only the link, and it now rejects a version that
+  is not an exact `X.Y.Z`. The Nix `chelisup` package keeps a garbage-collector
+  root for a linked store path and removes it on uninstall. See
+  [#3815](https://github.com/Chelis-Lang/chelis/issues/3815).
+
+- A daily scheduled run of the Nix package workflow builds `main` and pushes the
+  packages to the `chelis-lang` Cachix cache. The run skips its native builds when
+  the cache already holds the `chelis`, `chelis-runtime`, and `chelisup` outputs of
+  that revision. Each pull request now runs the `Nix flake evaluation` check. It
+  evaluates the flake for every supported system with no builds and no import from
+  derivation, and it checks the format of the Nix files. See
+  [#3816](https://github.com/Chelis-Lang/chelis/issues/3816) and
+  [#1441](https://github.com/Chelis-Lang/chelis/issues/1441).
+
+- The Nix flake supports `aarch64-linux` in addition to `x86_64-linux` and
+  `aarch64-darwin`. `checks.aarch64-linux.lane-check` produces a native gate
+  verdict on arm64 Linux, and a native CI job on `ubuntu-24.04-arm` runs the
+  complete check set. `x86_64-darwin` is not supported, because nixpkgs removes
+  that system for 26.11 and Devenv publishes no build for it. See
+  [#3818](https://github.com/Chelis-Lang/chelis/issues/3818).
+
+- The flake exports a `chelis-unwrapped` package and the overlay adds it. It holds
+  the compiler, the runtime archive, and the six runtime headers in the layout of a
+  release toolchain. It has no C compiler, binutils, or OpenBLAS. Use it when the
+  host supplies the C toolchain. It runs the same compiler binary as the `chelis`
+  package. See [#3911](https://github.com/Chelis-Lang/chelis/issues/3911).
+
+- The compiler API can call a selected parameterized definition with typed
+  argument values. `PreparedEval::call_root` takes each numeric scalar, boolean or
+  string parameter as an `ExecutionValue` of exactly its declared dtype, with
+  nothing promoted or narrowed. A tensor parameter's binding must have exactly
+  the declared dtype and literal extents; a binding of another dtype is rejected,
+  never cast or rounded. A live tensor parameter is required, and a dead one need
+  not be bound. A call that supplies an argument runs on the Host lane, a
+  definition whose parameters are all tensors keeps its own lane, and every call
+  produces its result root. A missing, extra or mistyped argument, and a call
+  whose live tensor parameter has no binding, is rejected before evaluation, and
+  the rejection names the parameter. Parameters of other types (keys, tuples,
+  lists, dicts, records, variants), and tensor parameters whose precision or
+  extents are not literal, are not yet admitted (#3804).
+  `spec/05-risc-primitives.md` [05-OBS-9] states the rule. See
+  [#3801](https://github.com/Chelis-Lang/chelis/issues/3801).
+
+### Changed
+
+- **BREAKING:** `chelis eval` stops a recursion at 10,000 nested function applications.
+  Each application of a `def` or of a function value counts one level while it
+  runs, a callback that `fold`, `map` or `scan` applies included, and the
+  application that would begin level 10,001 reports `evaluation recursion budget
+  exhausted: more than 10000 nested function applications`, keeping the output
+  printed before it. The limit used to be wherever the native stack ran out:
+  about 68,000 levels for a simple recursion in a release build, about 11,000 in
+  a debug build, and less for wider bodies. It is now the same 10,000 in every
+  build and on every thread, so a recursion between 10,000 and 68,000 levels
+  deep that used to evaluate in a release build now fails. A runaway recursion
+  also stops with far less memory: about 108 MiB instead of 637 MiB for a
+  `List` recursion and 115 MiB instead of 672 MiB for a tensor one. A call the
+  evaluator runs as one compiled unit, such as a kernel, a routed named-axis
+  call of a def or a `grad` or `vmap` target, counts one level like any other
+  call; the functions compiled into it are not counted, and the compiler's own
+  inlining limits bound them instead. The native stack check remains for
+  recursive calls that sit inside deeply nested expressions: calls nested up to
+  6 expressions deep reach the 10,000 limit in every build, and up to 16 in a
+  release build. See [#3842](https://github.com/Chelis-Lang/chelis/issues/3842).
+
+- Type checking a program with deeply nested types, such as a chain of nested tuples, no longer copies each node's type. Its time now grows linearly with the nesting depth instead of quadratically, and the checker's own allocation is linear too. A tuple chain 4,000 deep took 22.4G instructions to check and now takes 2.6G, and its peak memory fell from about 1 GB to 156 MB. Whole-process peak memory still grows faster than linearly at larger depths, because of the root names given to a nested tuple result's leaves ([#3820](https://github.com/Chelis-Lang/chelis/issues/3820)). Checker output is unchanged. See [#2622](https://github.com/Chelis-Lang/chelis/issues/2622).
+
+- Compiled programs move a heap value into the call that is its last use instead
+  of retaining it and releasing it right after, wherever the call stands. Before,
+  only a call in tail position moved; a let-bound call, a call nested in another
+  call's arguments, or a join arm paid a retain and a release. A list whose last
+  use is `take` is now truncated in place when nothing else holds it, so a cursor
+  that trims its last element with `take(xs, len(xs) - 1)` is linear rather than
+  quadratic (40,000 steps: 55 million instructions, previously 169 billion). See
+  [#2206](https://github.com/Chelis-Lang/chelis/issues/2206) and
+  [#3724](https://github.com/Chelis-Lang/chelis/issues/3724).
+
+- Compiled reductions no longer allocate per output. Every C `sum` (including
+  `mean`, `matmul` and `einsum` contractions and fused elementwise sums), `count`,
+  and windowed sums and their adjoints now stream the canonical adjacent-pair tree
+  through local carries instead of allocating a runtime scratch tensor for each
+  output, and the runtime's `einsum`, `trace` and additive `scatter` fold that tree
+  within one reused buffer. Tensor allocation also stops formatting ownership-ledger
+  text when the ledger is compiled out. Results are bit-identical. A compiled
+  4-element row sum over a million rows drops from about 6.8e9 to 0.17e9
+  instructions. See [#3752](https://github.com/Chelis-Lang/chelis/pull/3752), [#3700](https://github.com/Chelis-Lang/chelis/issues/3700),
+  [#3701](https://github.com/Chelis-Lang/chelis/issues/3701),
+  [#3734](https://github.com/Chelis-Lang/chelis/issues/3734) and
+  [#3737](https://github.com/Chelis-Lang/chelis/issues/3737).
+
+- A warm `chelis build` or `chelis check` in a package with dependencies no longer
+  reruns the effect and linearity checkers over the whole cached dependency
+  library. The dependency typecheck cache now stores a lowering of the library
+  and, on a hit, re-derives and compares it, as the chelis-std cache already did.
+  A warm build against a 250-definition dependency that imports the standard
+  library retires about 27% fewer instructions. The cache entry is about 1.8 times
+  larger, a library that does not lower standalone keeps the checker reruns, and
+  entries written by earlier compilers are rebuilt once.
+  See [#3729](https://github.com/Chelis-Lang/chelis/issues/3729).
+
+- Compiled C host programs no longer carry result-origin bookkeeping that cannot
+  matter at run time. A binding whose origin can never be set no longer registers
+  an arena root, and an origin scope inside which nothing can register a root or a
+  claim is no longer opened and closed. The generated C for the Hydronnx MiniLM
+  program is about 20% smaller and clang compiles it with about 31% fewer
+  instructions; program results and diagnostics are unchanged. See
+  [#3692](https://github.com/Chelis-Lang/chelis/issues/3692).
+
+- Compiled `einsum` runs much faster. An f32 or f64 `einsum` at its own
+  accumulator (the default) now compiles to the same emitted product-sum kernel as
+  `matmul` when it has:
+
+  - one reduction label shared by both operands;
+  - an output ending in a row of one operand and a column of the other;
+  - earlier output labels that both operands carry, then labels only the row
+    operand carries;
+  - no repeated label;
+  - static extents on every label both operands carry;
+  - planned shapes that fit i64, with no runtime extent beside a static zero.
+
+  Examples are `amk,kn->amn`, `mk,nk->mn`, and `bqd,bkd->bqk` when `b` is
+  static. The row operand's leading labels flatten into rows, so no operand is
+  copied along a label it lacks.
+
+  This change routed no integer contraction. The runtime kernel now computes each
+  operand's offsets from per-label strides, checking the largest offset once per
+  call instead of an index per product.
+
+  Results are bit-identical, in the canonical product and reduction order. At
+  `[1,1024,256] x [256,256]`, a compiled `amk,kn->amn` drops from about 19.3e9 to
+  1.1e9 instructions. The same contraction with runtime contraction extents,
+  which stays on the runtime kernel, drops to 1.5e9. See
+  [#3736](https://github.com/Chelis-Lang/chelis/issues/3736),
+  [#3703](https://github.com/Chelis-Lang/chelis/issues/3703) and
+  [#3702](https://github.com/Chelis-Lang/chelis/issues/3702).
+
+- A compiled `einsum` that is not a single matrix-shaped contraction no longer
+  stores every product of an output before summing them, so its memory no longer
+  grows with the number of products it reduces: `einsum("i,j->", x, y)` over two
+  8192-element `i64` vectors peaks at about 3 MB instead of 539 MB. Results are
+  bit-for-bit unchanged, and an integer overflow reports the same trap line as
+  before. [05-OP-33] now states that an integer einsum's trap does not depend on
+  the order in which its multiplies and additions run. See
+  [#3782](https://github.com/Chelis-Lang/chelis/issues/3782).
+
+- The Nix `chelis` package carries a C compiler and binutils from Nix. Its `bin/chelis` is a wrapper that puts them first on `PATH`, and the compiler is `libexec/chelis`. Thus `chelis build` runs without a host C toolchain.
+
+  The flake also has `overlays.default`, `formatter.<system>`, and package metadata. A documentation edit no longer changes a package derivation. The install guide has a Nix section with the binary cache settings. See [#3809](https://github.com/Chelis-Lang/chelis/issues/3809).
+
+- Each Nix crate build gets only its own directory and the paths that its compile
+  reads, without `tests/`, `benches/`, and `examples/`. An edit to `chelis-cli`
+  now changes 1 crate derivation, not 8, and a test-only edit changes none. The
+  Nix package toolchain is the minimal profile of the pinned Rust version, so a
+  builder no longer downloads rust-docs, rustfmt, clippy, or rustc-dev. See
+  [#3810](https://github.com/Chelis-Lang/chelis/issues/3810).
+
+- Runs of the Nix package workflow on `main` and on release tags now push the
+  Devenv shell closure to the `chelis-lang` Cachix cache. That closure holds Kache,
+  the Rust toolchain, and the shell profile. A later run on an unchanged shell
+  downloads these paths instead of a new build. The base Devenv shell no longer
+  builds the legacy schema-27 Kache fixture. Only the new `kache-regression`
+  profile builds it, for the Kache executable cache manual gate. See
+  [#3817](https://github.com/Chelis-Lang/chelis/issues/3817) and
+  [#3714](https://github.com/Chelis-Lang/chelis/issues/3714).
+
+- Ownership verification and the C host-ABI projection now find each host-site action's block, operation and edge in per-unit position tables instead of scanning the block, so their work grows linearly with a function body's length. A `let` chain puts every binding's operation in one block, and these lookups were quadratic in the chain's length. Emitted C is unchanged. See [#3825](https://github.com/Chelis-Lang/chelis/issues/3825).
+
+- `chelis fmt` on Deep (`.dp`) files, and `chelis deep` output, cost time in
+  proportion to the printed text on deep nesting. The printer copied every
+  nested line once per enclosing level and rendered each node's whole subtree
+  to measure its width, which was cubic in the depth: `fmt --check` on a tuple
+  nested 2,000 deep took 22 G instructions and 643 MB, and the style gate that
+  `check` and `build` run paid the same. It now takes 0.24 G and 33 MB, and a
+  16,000-deep tuple formats in 5.9 G. The printed text is unchanged except
+  where a string holds a raw control character
+  ([#3852](https://github.com/Chelis-Lang/chelis/issues/3852)).
+
+- Host lowering now resolves names it does not find exactly, such as builtin calls, from per-session tables keyed by the name's last segment, instead of comparing each name against every function signature and type-environment entry. The C projection reads each function's sites from a per-unit index. A program of 2,000 one-line definitions that call builtins took 145.3G instructions to build to C and now takes 45.2G. Emitted C is unchanged. See [#3854](https://github.com/Chelis-Lang/chelis/issues/3854) and [#3847](https://github.com/Chelis-Lang/chelis/issues/3847).
+
+- `chelis build` emits a list or tensor literal of float literals as one static table of tagged scalars, boxed and released in two loops, instead of a block of statements per element. The C compiler's time is now linear in the literal's size: a 4,096-element `f16` literal compiles in about 0.1 s under `clang -O2`, where it took 11 s, and a 15,876-element one in about 0.1 s, where it did not finish in 5 minutes. The literal's values, its runtime calls and their order are unchanged.
+
+- The Nix builds of the workspace crates use the codegen units of the Cargo release profile (16) instead of one, as `cargo build --release` does. The Nix `chelis` package links `libexec/chelis` to the binary of the `chelis-cli` crate build, so the store holds one copy of the compiler. See [#3904](https://github.com/Chelis-Lang/chelis/issues/3904) and [#3912](https://github.com/Chelis-Lang/chelis/issues/3912).
+
+- The release workflow now starts the Nix package checks of a release tag right
+  after its release notes preflight, beside the release builds. Before, it started
+  them only after it published the release. So the `chelis-lang` Cachix cache can
+  hold the Nix packages of a release when the release becomes public. Thus `nix run`
+  on a new tag builds less from source. The evaluation-only Nix jobs install Nix
+  without Devenv, and the CaDiCaL build of the cvc5 tree no longer runs its test
+  suites. See [#3905](https://github.com/Chelis-Lang/chelis/issues/3905),
+  [#3907](https://github.com/Chelis-Lang/chelis/issues/3907), and
+  [#3908](https://github.com/Chelis-Lang/chelis/issues/3908).
+
+- The Nix flake checks `lockParity`, `crate2nixGraph`, `compilerBehavior`, and
+  `lane-check` now read source views with only the files that they use. Before,
+  they read the full flake source, 74 MB with the documentation. So a
+  documentation edit no longer changes a check derivation. See [#3909](https://github.com/Chelis-Lang/chelis/issues/3909).
+
+- The Nix `chelisup` package no longer brings its own Nix. Its launcher adds
+  garbage-collector roots with the `nix-store` of the Nix installation of the
+  user. It looks on `PATH` first and then in the standard Nix profile
+  directories. Thus the `chelisup` closure no longer holds Nix 2.34.7 and its
+  libraries. If the launcher finds no `nix-store`, `chelisup install` and
+  `chelisup link` of a store path stop with a message before they change a root.
+  See [#3910](https://github.com/Chelis-Lang/chelis/issues/3910).
+
+- On `aarch64-linux`, where no release toolchain exists, `chelisup install` now
+  names the Nix route: `chelisup link` of the `chelis` package of the Chelis
+  flake, for example
+  `chelisup link "$(nix build --no-link --print-out-paths github:Chelis-Lang/chelis/vX.Y.Z#chelis)"`.
+  The flake builds `aarch64-linux` packages from the first release after 0.20.0.
+  On NixOS without nix-ld, a dynamic release build cannot start. The error then
+  names `programs.nix-ld.enable = true` and the same `chelisup link` route, and
+  no longer names Alpine. chelisup takes the file `/etc/NIXOS` as the NixOS
+  signal. See [#3915](https://github.com/Chelis-Lang/chelis/issues/3915).
+
+- `chelis check` no longer copies module-sized or scope-sized state once per
+  item. Signature-metadata inference runs one sweep over the function
+  declarations instead of one per declaration. Each linearity declaration reads
+  a shared frozen program scope instead of a private copy of it. Validation and
+  effect annotation keep one environment with nested scopes instead of copying
+  it at every `let`, function, and match arm. The style gate and the advisory
+  lint pass no longer spawn `cargo locate-project` unless a lint exception could
+  apply. Results and diagnostics are unchanged. On a file of 1,600 one-line
+  definitions, `check` drops from about 145 G to 17 G instructions. See
+  [#3717](https://github.com/Chelis-Lang/chelis/issues/3717),
+  [#3719](https://github.com/Chelis-Lang/chelis/issues/3719),
+  [#3740](https://github.com/Chelis-Lang/chelis/issues/3740) and
+  [#1329](https://github.com/Chelis-Lang/chelis/issues/1329).
+
+- `chelis check` and the C host lane no longer redo module-sized work for every
+  definition. The checker shares its substitution with the speculative
+  unifications it may discard, instead of copying it for each annotated result
+  and each route a binder-suspended call is replayed under. Host lowering
+  derives its call-graph facts and its index of definition bodies once per
+  program, instead of once per definition, and the record-projection hoist
+  rebuilds each node from its parts instead of copying the subtree beneath it.
+  Results, diagnostics and emitted C are unchanged. Checking 2,000 annotated
+  definitions drops from about 51 G to 20 G instructions, checking 1,600
+  definitions that call `range` on binder-typed operands from 37 G to 7 G, and
+  checking every file of a large numerical library by about 26 percent in
+  total. Emitting C for a definition whose body chains 2,000 bindings drops
+  from about 147 G to 24 G instructions. See
+  [#3784](https://github.com/Chelis-Lang/chelis/issues/3784),
+  [#2536](https://github.com/Chelis-Lang/chelis/issues/2536),
+  [#3785](https://github.com/Chelis-Lang/chelis/issues/3785) and
+  [#3793](https://github.com/Chelis-Lang/chelis/issues/3793).
+
+- Checking deep nesting costs time and memory linear in the depth in three more
+  places. Macro expansion no longer copies the names bound so far at every
+  `let`, `fn`, `match` arm and pattern, so a block of 16,000 bindings checks in
+  about a third of the instructions and memory
+  ([#3837](https://github.com/Chelis-Lang/chelis/issues/3837)). The type
+  checker's occurs check applies the substitution once instead of at every level
+  of the type it searches, and applying the substitution no longer walks a
+  subtree it has already found to be free of variables, so nested constructor
+  applications such as `Some(Some(...))` are no longer cubic in their depth
+  ([#3819](https://github.com/Chelis-Lang/chelis/issues/3819)). `chelis check`
+  no longer derives the root names of a declaration's nested tuple result,
+  which only lowering reads and whose dotted paths grow quadratically with the
+  nesting ([#3820](https://github.com/Chelis-Lang/chelis/issues/3820)).
+  Diagnostics, checked artifacts and emitted code are unchanged.
+
+- The floating-point canary of `chelis build` now checks only the correctly rounded
+  kernels that the program's generated C carries, plus one sentinel kernel. It still
+  runs every arithmetic, comparison, conversion, and expression-shape row. With GCC 16
+  on aarch64-linux, a build of a program without kernels took 311 ms instead of 873 ms.
+  With Apple clang on macOS, it took 429 ms instead of 556 ms. See
+  [#3712](https://github.com/Chelis-Lang/chelis/issues/3712).
+
+- `chelis build` checks the C compiler in less time. The floating-point canary now compiles as five units in parallel, the program compiles while the canary runs, and a build reads the compiler's `--version` once. The check itself is unchanged. On aarch64-linux with GCC, a small build took 0.67 s instead of 2.0 s. See [#3689](https://github.com/Chelis-Lang/chelis/issues/3689).
+
+- More compiled `einsum` contractions run on the emitted product-sum kernel
+  instead of the runtime kernel: f16 and bf16 operands at their default f32
+  accumulator, and any float operand at an explicit `accumulator=f64`. The kernel
+  converts each operand element as it reads it and rounds each total once to the
+  result dtype as it stores it, so it allocates no accumulator-width copy of an
+  operand or of the result. The same store applies wherever a compiled product
+  sum feeds a float `cast`, so compiled f16 and bf16 `matmul` and `conv`,
+  `cast(matmul(x, w), t)`, and a hand-written `sum(mul(cast(..), cast(..)))`
+  store the converted total directly instead of materializing the sum, with the
+  same bits and equal or lower peak memory.
+
+  Results are bit-identical to `chelis eval`. A bf16 `amk,kn->amn` at
+  `[1,64,4096] x [4096,4096]` drops from about 32.3e9 to 14.3e9 instructions with
+  the same peak memory. When the row operand has leading row labels to flatten,
+  the route's peak can exceed the runtime kernel's by one extra buffer of the
+  result's size (the output reshape's copy,
+  [#3802](https://github.com/Chelis-Lang/chelis/issues/3802)). See
+  [#3783](https://github.com/Chelis-Lang/chelis/issues/3783).
+
+- `chelis eval` and `chelis test` no longer copy a List or Dict that `append`,
+  `concat`, `dict_insert` or `dict_merge` receives from a variable read for the
+  last time; the write changes it in place. A `fold` or recursion that grows a
+  container one element per step used to copy the whole container at every step.
+  It now copies each element at most a constant number of times. A container that
+  is read again after the write is still copied, so every program computes what
+  it did before. Folds that append tensors to a `List[tensor[...]]` now cost time
+  linear in their length. Folds and recursions over a `List[i64]` copy nothing
+  per step, but each step still costs time that grows with the length of the
+  list (#3761). See [#3720](https://github.com/Chelis-Lang/chelis/issues/3720).
+
+  Applying a function value passed through a function-typed parameter no longer
+  normalizes that parameter's signature again on every call, and copying the
+  function value no longer copies those signatures. On the Nautilus `ode` and
+  `curvefit` test files, interpretation now costs 16% and 9% fewer instructions.
+  That recovers the slowdown #3629 introduced on these files. See
+  [#3741](https://github.com/Chelis-Lang/chelis/issues/3741).
+
+- `chelis eval`'s einsum now feeds each output's products into the
+  adjacent-pair sum tree as it forms them, as compiled code does, instead of
+  storing every product of the output first. Memory no longer grows with the
+  reduction: `einsum("i,j->", x, y)` over two 4096-element `i64` vectors drops
+  from about 529 MB peak RSS to 17 MB. An output no longer reserves a buffer
+  the size of its reduction, so a reduction too large to store is computed
+  rather than refused. Results are bit-identical, and an integer overflow still
+  reports `overflow in einsum` at the accumulator dtype. See
+  [#3807](https://github.com/Chelis-Lang/chelis/issues/3807).
+
+- `chelis eval` keeps less heap for each live function call in a deep
+  recursion, and evaluates blocks with many local bindings faster. A call
+  frame's bindings no longer reserve a full ordered-map node of unboxed values,
+  a call drops its entry checks' working state before its body runs, a static
+  type read shares its declaration's type rather than copying it, and a call no
+  longer keeps its caller's claim list alive beside its own. A recursion level
+  now keeps about 1.24 KB (an `i64` argument), 1.31 KB (`List[i64]`) or
+  1.86 KB (`tensor[2, f32]`) of heap, down from about 3.0, 3.36 and 6.15 KB. A
+  `let` or `match` arm now shares the bindings it saves instead of copying
+  them, so a function whose body binds 40 locals in sequence takes about 23%
+  fewer instructions per call, and one that binds 100 about 33% fewer. In a
+  release build a runaway recursion trips the stack budget about 2% deeper,
+  with the same message, `evaluation stack budget exhausted during a function
+  call`, and uses less memory on the way: about 637 MB instead of 788 MB for a
+  `List` recursion and 672 MB instead of 1,001 MB for a tensor one. See
+  [#3842](https://github.com/Chelis-Lang/chelis/issues/3842).
+
+- `chelis eval` no longer repeats per-call work that depends only on a closure's
+  source. Applying a closure, such as a `fold`, `map` or `scan` callback, no
+  longer copies its syntax or re-normalizes its parameter and result types, and
+  evaluating a block no longer copies its bindings. A 1000-element
+  `Std.Tensor.Construct.linspace` now costs 17.9e9 instructions, down from 78e9.
+  A `List` argument whose elements hold no tensor is no longer walked element by
+  element at each application, so a `fold` that grows a `List[i64]` is linear
+  rather than quadratic. A recursive higher-order function that passes its
+  function argument back through the same parameter now checks a bounded number
+  of retained contracts per application instead of one per recursion level, so
+  it is linear in depth rather than quadratic. Results and diagnostics are
+  unchanged. See [#3778](https://github.com/Chelis-Lang/chelis/issues/3778),
+  [#3761](https://github.com/Chelis-Lang/chelis/issues/3761) and
+  [#3758](https://github.com/Chelis-Lang/chelis/issues/3758).
+
+- `chelis eval` no longer copies the type syntax its bindings carry each time
+  it applies a function. Each call shares the declared types of its
+  parameters and arguments rather than copying them, keeps its per-binding type
+  scope in a structure whose snapshot at each `let` is constant-time, derives
+  a closure's nested claim patterns once instead of at every application, and
+  reads a definition's body without copying it. A fold step's allocations no
+  longer grow with the size of its parameter types: a 64-component tuple
+  accumulator drops from 1,161 allocations per step to 28. `linspace` over 1,000
+  elements drops from about 18.0 G to 9.2 G instructions. Results and
+  diagnostics are unchanged. See
+  [#3778](https://github.com/Chelis-Lang/chelis/issues/3778).
+
+- Compiled `gather` and `scatter` loops compare each selected index with the
+  axis extent inline. Only an index outside the axis calls the runtime index
+  check, and the trap and its message do not change. A program that gathers 16.8
+  million elements retired 0.93G instructions instead of 2.42G. See
+  [#3735](https://github.com/Chelis-Lang/chelis/issues/3735).
+
+- C emission no longer rebuilds the interface-input list for each extent check of a
+  function with runtime-extent tensor inputs. With 256 such inputs,
+  `chelis build --emit-c` took 2.6 CPU s instead of 14.2 CPU s, and the emitted C
+  did not change. See [#3726](https://github.com/Chelis-Lang/chelis/issues/3726).
+
+- `chelis build` spends less time placing and checking scope-exit drops. The
+  last-use scheduler and its canonical re-check now answer each owner's
+  questions (where it is defined, which operations, terminators and edges use
+  it, which edges enter a block, which operation a drop follows) from tables
+  built once per function body, answer post-dominance from a post-dominator tree
+  instead of a search per owner, and re-anchor scheduled drops in the host-site
+  map from one index instead of a scan of the map per drop. A body with 2,000
+  bindings read by one final list retires about 30% fewer instructions, and the
+  ownership scheduler drops from about a quarter of that build's samples to
+  under 1%. Programs, diagnostics and emitted C are unchanged. See
+  [#3755](https://github.com/Chelis-Lang/chelis/issues/3755).
+
+- `chelis check` and the C lane of `chelis build` no longer do work at each
+  `let` binding for every binding around it. Several lexical walks kept one table
+  of bound names per enclosing binding and now keep a single table: the walks
+  that find a body's free variables (in host lowering and the linearity check),
+  realizability's top-level dependency walk, and the checker's declaration-graph
+  and parameter-use walks. When host lowering renames a body's top-level reads,
+  it no longer copies the rest of the body at each binding. Host type refinement
+  now shares its type scope with each nested binding instead of copying it.
+  Results, diagnostics and emitted C are unchanged. For a definition whose body
+  chains 4,000 bindings, host lowering drops from about 12.6 G to 2.4 G
+  instructions, and from about 433 G to 2.7 G when the bindings read a top-level
+  value. `chelis check` drops from about 19.8 G to 13.9 G, and
+  `chelis build --emit-c` from about 68.5 G to 47.7 G. See
+  [#3797](https://github.com/Chelis-Lang/chelis/issues/3797).
+
+- `chelis check` and lowering no longer copy a lexical scope at every binder.
+  Type inference shares its environment's name maps between a scope and the
+  nested scopes it snapshots instead of copying them at every `let`. Lowering
+  shares its value scope and local callables between a function form and its
+  caller, and the lowerability walk shares its name sets between a `let` and
+  its body. Each binder now costs the names it adds, not the scope it enters.
+  Results, diagnostics and emitted C are unchanged. Checking a 4,096-binding
+  `let` chain drops from about 35 G to 15 G instructions and from 3.0 GB to
+  760 MB of memory, and emitting C for a 2,000-binding chain drops from 43 G to
+  19 G instructions and from 2.4 GB to 450 MB. See
+  [#3750](https://github.com/Chelis-Lang/chelis/issues/3750),
+  [#3763](https://github.com/Chelis-Lang/chelis/issues/3763) and
+  [#3774](https://github.com/Chelis-Lang/chelis/issues/3774).
+
+- `chelis check`, `build` and `eval` classify each definition's lane by walking a
+  called declaration's body once per distinct callable facts its calls supply,
+  instead of once per call site. A chain of 20 declarations that each call the
+  previous one twice took about 100 billion instructions to check, whether the
+  calls forwarded a callable parameter or a precision-polymorphic one; it now
+  takes about 0.3 billion. `chelis cost` lowers every named entry of a program
+  through one host-lowering session, and an evaluation that selects several
+  parameterized host declarations asks their kernel input demand through one
+  session over the prepared program. On 800 independent definitions,
+  `chelis cost` took 65 billion instructions instead of 99 billion. See
+  [#3707](https://github.com/Chelis-Lang/chelis/issues/3707),
+  [#3727](https://github.com/Chelis-Lang/chelis/issues/3727) and
+  [#3728](https://github.com/Chelis-Lang/chelis/issues/3728).
+
+- Compiled C host programs keep their result-origin bookkeeping helpers out of
+  line. The generated-artifact seal now admits exactly one compiler extension,
+  `__attribute__((noinline))` on a translation-unit-private `static` function
+  definition, and the compiler marks its seven origin helpers with it so the C
+  compiler no longer inlines them at every root, scope and assignment. Clang
+  compiles the generated C for the Hydronnx MiniLM program with about 26% fewer
+  instructions, and about 41% fewer together with the elided bookkeeping of
+  [#3773](https://github.com/Chelis-Lang/chelis/pull/3773); program results and
+  diagnostics are unchanged. Every other attribute, `__declspec`, `asm` and
+  `_Pragma` is still rejected. See
+  [#3692](https://github.com/Chelis-Lang/chelis/issues/3692).
+
+- `chelis build` spends less time in ownership verification. Each operation's
+  live-set bounds are kept as running totals instead of a rescan of the whole
+  live set, call-graph components are found in one linear pass instead of by
+  pairwise reachability, and the scheduled program is verified once instead of
+  twice. A nested 1280-operation program retires a third fewer instructions and
+  an 800-function recursive call chain about 2.8 times fewer. Programs,
+  diagnostics and emitted C are unchanged. See
+  [#2330](https://github.com/Chelis-Lang/chelis/issues/2330),
+  [#3723](https://github.com/Chelis-Lang/chelis/issues/3723) and
+  [#3730](https://github.com/Chelis-Lang/chelis/issues/3730).
+
+- `chelis prove`'s fuzz tier compiles a property whose binders are scalars,
+  booleans or strings once, as functions of its binders, and evaluates every
+  sample, guard and shrink trial as one call of them. Verdicts, counterexamples,
+  shrink steps, seeds and error messages are unchanged. Properties with a tensor
+  or opaque-invariant binder keep the chunked compile. See
+  [#3801](https://github.com/Chelis-Lang/chelis/issues/3801).
+
+- `chelis prove`'s fuzz tier compiles one program per chunk of samples instead
+  of one per evaluation. The guard and predicate probes of every sample in a
+  chunk of attempts, or of a chunk of one shrink step's trials, are declared in
+  one program that is checked and lowered once, in the Surf, Deep and
+  assumption-injection lanes alike; chunks grow from one sample to 64. Verdicts,
+  counterexamples, shrink steps, seeds and error messages are unchanged. See
+  [#3117](https://github.com/Chelis-Lang/chelis/issues/3117).
+
+- `chelis prove`'s fuzz check of an opaque type's invariant compiles each
+  producer whose parameters are scalars, booleans or literal-shape tensors once,
+  as a function of its parameters, and evaluates every sample and shrink trial as
+  one call of it. For every producer the per-sample probe could evaluate,
+  verdicts, counterexamples, shrink steps, seeds and error messages are
+  unchanged. Some producers it could not evaluate now check. A rank-0 tensor
+  input, for example, used to error on every sample (with messages such as
+  "expected rank-0 tensor, got rank-1 tensor"), and it now reaches a verdict.
+  An input the old path rejected may still be rejected, with a different
+  message. A producer that takes an opaque-invariant value keeps the per-sample
+  evaluation. See [#3800](https://github.com/Chelis-Lang/chelis/issues/3800).
+
+- A compiled product-sum kernel no longer copies its operands or its result at
+  the reshapes around it. When an `einsum` contraction flattens row labels, the
+  kernel reads the row operand in place through the flattening reshape and
+  stores each total directly in the output reshape's buffer. The same store
+  applies to any compiled `matmul` or product sum whose result is reshaped in the
+  same compiled function. A reshape's element-count check and its trap order are
+  unchanged, and results are bit-identical.
+
+  A compiled f32 `amk,kn->amn` over `x: tensor[16384, 3, 256]` now peaks at
+  97.8 MiB instead of 145.8 MiB, and an f16 one over `tensor[65536, 3, 64]` at
+  354.1 MB instead of 379.3 MB. `einsum` rows whose flattened extent is a
+  runtime extent beside a static one still use the runtime kernel. See
+  [#3802](https://github.com/Chelis-Lang/chelis/issues/3802).
+
+- Compiled dictionaries find keys through an index instead of scanning every
+  entry, and compare stored keys without revalidating them, so `dict_of`,
+  `dict_get`, `dict_contains`, and `dict_insert` or `dict_remove` accumulators
+  cost linear rather than quadratic time: `dict_of` over 16,000 string keys
+  drops from 20.6 to 0.1 billion instructions. Compiled `string_slice` on
+  non-ASCII text starts from a nearby character checkpoint instead of the start
+  of the string, so a character-at-a-time scanner is linear, at about the ASCII
+  cost. Results, entry order and failure messages are unchanged. See
+  [#2301](https://github.com/Chelis-Lang/chelis/issues/2301),
+  [#3733](https://github.com/Chelis-Lang/chelis/issues/3733) and
+  [#3725](https://github.com/Chelis-Lang/chelis/issues/3725).
+
+- `chelis build` now parses the generated C of a unit once when it seals the
+  unit. Before this change, the seal parsed the same C twice. The emitted C does
+  not change. For `examples/mnist.ch`, `chelis build --emit-c` retired 1.42G
+  instructions instead of 1.68G. See
+  [#3722](https://github.com/Chelis-Lang/chelis/issues/3722).
+
+- Generated C includes `chelis_simd.h` only in a unit that calls one of its
+  helpers, and `chelis_runtime.h` no longer includes it. On aarch64, that header
+  includes `arm_neon.h`. With GCC 16 on aarch64-linux, the C unit of a small
+  integer program now compiles in 39 ms instead of 136 ms. With Apple clang, it
+  compiles in 39 ms instead of 77 ms.
+
+  `chelis build` compiles the unit while the compiler canary runs, so its wall
+  time changes only where the unit takes longer than the canary. A C program that
+  calls these helpers must now include `chelis_simd.h` itself. See
+  [#3704](https://github.com/Chelis-Lang/chelis/issues/3704).
+
+- Compiling against a library no longer costs time quadratic in the library's
+  size, and checking a long list literal no longer costs time quadratic in its
+  length. Desugaring copied the whole table of library callables once per library
+  definition and once per nested scope; it now shares that table. Macro expansion
+  copied every call's arguments before testing whether the call was a macro; it
+  now tests first. `chelis test` workers, `chelis prove` fuzz samples, `chelis eval`
+  inside a package, and layered library builds all compile against a library. On
+  a 1,000-definition file each `chelis prove` fuzz evaluation costs about a third
+  of what it did, and `chelis check` of one 8,000-element literal takes about a
+  twentieth of the time. Results and diagnostics are unchanged. See
+  [#3739](https://github.com/Chelis-Lang/chelis/issues/3739) and
+  [#3721](https://github.com/Chelis-Lang/chelis/issues/3721).
+
+- `chelis test` and `chelis prove` stop redoing per-worker and per-property work.
+  `chelis test --batch-mode auto` no longer moves a test file out of its batch
+  because another file declares or imports the same name: each batched file
+  already compiles as its own module, so suites whose files reuse a test or helper
+  name (for example a generated `test_probe` in every file) now batch, where they
+  used to run one worker per file. A warm `chelis test` hands its workers the
+  verified cache bytes instead of encoding the context again, and the workers no
+  longer decode the lowered library they re-derive. `chelis prove` checks and
+  lowers a file's declarations once per file rather than once per property. Test
+  rows and machine-readable output keep their format. See
+  [#3744](https://github.com/Chelis-Lang/chelis/issues/3744),
+  [#2256](https://github.com/Chelis-Lang/chelis/issues/2256),
+  [#3746](https://github.com/Chelis-Lang/chelis/issues/3746) and
+  [#3745](https://github.com/Chelis-Lang/chelis/issues/3745).
+
+- `WireDag` admission (`WireDag::from_validated_json`, and the validation that
+  `Serialize` and the compiler's own WireDag production run) resolves the inputs of
+  Cumsum, FloatClassify, Mod, Bitwise, ReLU, ReLU-adjoint and Count nodes, and every
+  runtime-dimension input slot, by position instead of searching the earlier nodes.
+  Admitting a long chain of such nodes now costs time linear in its length: a
+  40,000-node ReLU chain took 22.0 G instructions and now takes 2.8 G, the same as a
+  chain of Exp nodes. Admitted graphs and rejection messages are unchanged. See
+  [#3747](https://github.com/Chelis-Lang/chelis/issues/3747).
+
+### Fixed
+
+- Tensor-returning functions that select a callable at runtime use the shared host execution decision before tensor-DAG lowering, preserving callable result evidence through sequential bindings and block tails. Evaluation retains independently authored whole-choice and branch invocation contracts through aliases and copies, preserving independently authored Copy adapter boundaries during normalization; unsupported C function values retain the target-specific rejection. Deep-authored callable metadata and explicit Surf bindings share one checked source-owner ledger, which survives cached-library composition and attaches each invocation contract once at its binding. Numeric binding formation uses the same checked-owner resolver as host and interpreted execution, retaining Deep-authored input and result contracts without a Surf marker. Closed builtin copies retain their physical descriptors separately from logical invocation contracts; native float-classification copies and compatible closed joins preserve guards through the whole-value carrier. Independently adapted branch authorities retain the typed target rejection. Static host-only callable copies retain their execution lane when invoked, while unused templates create no invocation guards. Existing numeric shape, scalar-conversion, static concat and explicit drop lowering retain their DAG owners. Tuple projections and block results preserve complete builtin values and select the shared host invocation owner in Eval and C, including through a declaration's callable formal and a transform, and forwarded callbacks retain checked signatures and invocation contracts. Product joins of distinct operations retain the typed C capability rejection however their leaves are spelled. Observable returned function values receive the typed C capability rejection before ownership validation. Closed List calls preserve inferred result types and reject conflicting argument geometry before execution.
+
+- `vmap` lowers registry-admitted builtin values through existing numeric row-DAG
+  owners, including `neg`, `abs`, `add`, `key_from_seed`, and Float classifiers.
+  Static aliases and lexical captures preserve operation identity and authored
+  literal-extent callback contracts; Bool results and nonzero mapped axes retain
+  their types.
+  Mapped row entry guards compare physical input dimensions with authored formals,
+  including supplied builtin values and typed lambdas, before row arithmetic.
+  Explicit local function ascriptions retain their concrete callable representation
+  and lexical alias route for direct calls and collection callbacks.
+  Local callable literal-extent input and result obligations travel independently
+  of operation identity through aliases, captures and named type aliases. Mapped
+  input guards run before row arithmetic and later effects. Retaining an enclosing
+  dimension's witness in a callable contract remains separate pending work under
+  chelis#3517. Independent literal result obligations use the shared producer-claim
+  owner, retaining physical output axes and checking the result before later
+  effects even when the callable input is wildcard. Fused gradients retain their
+  own live-output completeness check for unresolved calls.
+  Static builtin values retain complete normalized invocation contracts through
+  global alias chains, Copy, captures and forwarded higher-order formals. A
+  result-only formal keeps its producer obligation even when it has no input
+  entry guard; lexical helpers consume the whole resolved value rather than
+  reconstructing a contract-free operation descriptor.
+  Complete callable frames actualize executable precision and rank metadata per
+  call site while preserving authored borrow, effect and source annotations.
+  Static transform callers use their supplied target's lane evidence rather than
+  inheriting an unresolved template's standalone exclusion.
+
+  Compiled named calls retain the actual definition's complete entry and result
+  contract when a tensor helper cannot lower the whole call. Pass-through bodies
+  preserve shared rank-row checks on unused arguments before later effects.
+
+  C builds keep closed List actuals' formed constructor geometry through the
+  complete named call and reject contradictory literal operand extents before
+  emitting artifacts or executing the program. Typed numeric leaves, discarded
+  traps and runtime List controls retain their existing execution owners; opaque
+  and effectful producers keep the complete host call. Eval's pre-execution
+  literal-refutation gap remains separate under chelis#3115.
+
+  Host-only builtin invocation retains nested entry and result contracts through
+  the shared callable owner. Host numeric result extents precede element traps
+  after operand agreement and operation controls; builtin selection preserves
+  the selected value's original producer.
+  Tuple-bound aliases retain whole callable values through nested construction,
+  copying and projection; typed builtin formals remain executable collection callbacks.
+  Independent result frames check in nested invocation return order on Eval and C.
+  Sequential host bindings avoid a lowering call frame per binding while retaining
+  their source scope and result boundaries.
+  Recursive alias normalization retains finite productive edges while rejecting
+  alias-only cycles. Direct and aliased builtins share execution-lane ownership;
+  static callable admission preserves independent host-control requirements.
+  Mapped rows retain authored axis identity independently of physical extents,
+  and repeated branch identities retain their complete invocation frames.
+  Retained calls evaluate complete static callable producers once in written
+  argument order, including effects and traps in unused actuals. Mapped parameter
+  axis views preserve operand-bound primitives' physical type agreement when
+  splicing supplied rows.
+  Ordinary mapped argument layouts retain physical observation sources and transport checked
+  unit refinements with their own witnesses before restoring parameter axis views.
+
+- `chelis prove --tier auto` checks a solver proof in machine arithmetic instead of
+  stopping at it. A Tier B decision is made over the reals, so it rules out no
+  counterexample that exists only in floating point; `auto` now samples the same
+  `@property` or derived producer obligation afterwards, looking for one. A concrete
+  machine counterexample replaces the proof with a definite failure that names the verdict
+  it displaced; a clean search is reported as corroborated without strengthening the proof,
+  which keeps its `real_arithmetic` qualifier because sampling is not exhaustive; a search
+  that cannot sample leaves the proof untouched with its reason. The additive
+  `machine_arithmetic` record field carries that outcome on the CLI and Tide surfaces, and
+  plain text prints the disclosure in place of the `0/0 passed` ratio a proof does not
+  have. An explicitly selected tier runs no such check, and neither does a green
+  conditional on an asserted axiom, whose assumption the concrete evaluator does not
+  honor. A counterexample sampling would find can therefore no longer be hidden by a
+  solver proof, so `auto` reports no such pass where `--tier fuzz-only` reports a
+  failure. Checking the proof spends the sample budget, so `auto` on a module whose
+  properties all pass now costs about as much as the solver and the sampler together;
+  `--tier smt-only` pays for the solver alone and reports the machine-arithmetic
+  question as unchecked
+  ([#3634](https://github.com/Chelis-Lang/chelis/issues/3634)).
+
+  Tier C validation lowers an `@invariant` predicate from its defining program, so an
+  integer-typed module constant keeps its declared type. It previously lowered as a real
+  and compared against an integer-sorted field as false for every value, so a derived
+  obligation whose invariant did integer arithmetic on a module constant was reported
+  failed with a counterexample that satisfies it
+  ([#3651](https://github.com/Chelis-Lang/chelis/issues/3651)).
+
+- `chelis prove`'s fuzz tier proposes a fixed set of edge inputs before it draws
+  any random sample, so it no longer reports a passing empirical verdict for a
+  property that fails at an ordinary representable input inside its own guards.
+  Each binder contributes its interval endpoints and their adjacent
+  representable neighbours, the neighbours of a `!=` guard's excluded value,
+  both signed zeros, the smallest positive subnormals, the dtype's finite
+  extremes, small integers, and a ladder of decade magnitudes. These inputs do
+  not depend on the seed, so a property refuted at one is refuted under every
+  seed, and they are drawn from the guards rather than from the random proposal
+  window, so an unguarded binder reaches the dtype's extremes. Guards still
+  filter every input, edge or random, and the reported sample accounting is
+  unchanged.
+
+  `where` clauses now accept `binder != literal`, which previously reported an
+  unsupported guard shape. The guard keeps the binder's interval and excludes
+  that value; a draw landing on it moves to the nearest admissible neighbour,
+  and an exclusion that leaves the interval empty fails closed before any
+  sample. `!=` between two binders remains unsupported.
+  See [#3636](https://github.com/Chelis-Lang/chelis/issues/3636).
+
+- `chelis prove --tier fuzz-only` now pairs each scheduled binder's largest and
+  smallest admissible edge candidates off the diagonal, so a multi-binder
+  counterexample at a corner of the edge grid is refuted instead of reported
+  `fuzz_validated`. The per-binder diagonal runs first and unchanged; the cell
+  phase takes the attempts that follow it and is skipped for a property whose
+  binders are order-guarded (chelis#3697).
+
+- `chelis build` accepts a `List`, `string` or other heap value passed to two or
+  more owned parameters of one call, such as `f(x, x)`, as `chelis check` and
+  `chelis eval` already did. The compiled lane inserts one copy per extra slot,
+  as spec/04 prescribes for ordinary consuming fan-out. Previously a call in tail
+  position failed to build with `owner %N is not live`. See
+  [#3716](https://github.com/Chelis-Lang/chelis/issues/3716).
+
+- A compiled `einsum` with an empty output no longer fails with `Overflow: einsum
+  reduction buffer byte size exceeds i64` when its reduction extent is very large,
+  for example `einsum("bkn,bmk->bmn", p, q, accumulator=f64)` with `b = 0` and
+  `k = 2^61`. It returns the empty tensor, as `chelis eval` already did. See
+  [#3805](https://github.com/Chelis-Lang/chelis/issues/3805).
+
+- The Nix flake builds cvc5 with the configuration of a release build: LibPoly on,
+  the Production build type, and GPL off. Before, the flake built cvc5 without
+  LibPoly, and SMT results could differ from a release build. The cvc5 metadata now
+  names the BSD 3-clause license of this build. See
+  [#3811](https://github.com/Chelis-Lang/chelis/issues/3811).
+
+- `chelis build`, `check`, `cost`, and `prove` accept a package with no
+  `reef.lock` in a root that the process cannot write. A source in a read-only Nix
+  store is an example. The commands resolve the dependency graph in memory and
+  write no `reef.lock`, `.reef-write.lock`, or `.gitignore` into that root.
+  Previously they stopped with `Permission denied` on the project write lock. A
+  writable root still receives the repaired `reef.lock`. See
+  [#3812](https://github.com/Chelis-Lang/chelis/issues/3812).
+
+- `chelis build` no longer panics with "verified capture names exactly one retained global" on a function that reads a top-level value and binds a local alias of it under a top-level spelling, for example a local `a = y` after `y = a`, or `b = a` beside a top-level `b`. The checker accepted these programs, and they now build and print what `chelis eval` prints. See [#3839](https://github.com/Chelis-Lang/chelis/issues/3839).
+
+- A recursive macro set whose argument grows by a bounded amount at each
+  expansion is now rejected with the expansion-limit diagnostic instead of
+  exhausting memory. The `source` provenance recorded on every expanded node
+  copied the previous expansions' records, about four times over per
+  expansion, so `chelis check` passed 2 GB within ten expansions and never
+  reached the limit. When the program's macros might recur, expansion now
+  finds the limit without building provenance first. A program that finishes
+  expanding is expanded and recorded exactly as before. A macro set that
+  cannot recur expands exactly as before even when it exceeds the limit, and
+  a template that duplicates its argument, such as `rec(x) = rec(add(x, x))`,
+  still builds a program that doubles at each expansion; both belong to
+  [#3857](https://github.com/Chelis-Lang/chelis/issues/3857)
+  ([#3853](https://github.com/Chelis-Lang/chelis/issues/3853)).
+
+- `chelis fmt` no longer changes extension data, and canonical Deep spells
+  every control character in a string with its canonical escape. A raw control
+  character inside an extension-data string, or in a string literal, now prints
+  as its named escape (`\n`, `\t`, `\r`, `\0`) or, for the others, minimal
+  lowercase `\u{h}`, at every layout position. The Deep reader accepts `\u{h}`,
+  with one to six hexadecimal digits in any case or padding. Previously a
+  carriage return before a line feed in extension data was silently dropped
+  wherever an enclosing form broke across lines, so formatting and re-parsing
+  gave different data, and a raw carriage return made the file fail the
+  `fmt --check` style gate. Decoded values are unchanged
+  ([#3863](https://github.com/Chelis-Lang/chelis/issues/3863)).
+
+- `chelis cost` no longer runs out of memory on a recursion that calls itself in both arms of a branch whose condition is known only at runtime, such as a bisection root finder. Its per-entry tensor-DAG lowering now rejects an entry once one of its unrolls has a frame that makes more than one recursive call back into its own recursion and has inlined 32,768 function bodies, and `cost` omits that entry, as it does for an entry that exceeds the existing unroll depth limits. A chain-shaped unroll is never limited. Every other lowering, `chelis eval` and `chelis build` included, is unbounded exactly as before.
+
+- The install guide lists the three Nix flake systems `x86_64-linux`,
+  `aarch64-linux`, and `aarch64-darwin`. It also says that `x86_64-darwin` is not
+  supported. The flake contract suite now fails when the guide omits one of these
+  statements. New negative checks cover three more cases. These are a Linux BLAS
+  build without the OpenBLAS variables, a failed `chelisup uninstall` of a linked
+  toolchain, and a crate build without a declared external file. See
+  [#3867](https://github.com/Chelis-Lang/chelis/issues/3867).
+
+- Runs of the Nix package workflow on `main` and on release tags now push the
+  activated Devenv shell and its shell environment to the `chelis-lang` Cachix
+  cache. Before this change, they pushed the shell of the `devenv test` smoke step
+  in place of the activated shell. Thus each run built six small shell derivations
+  again during activation.
+  `scripts/ci_devenv.py` now keeps the `.devenv/gc/activated-shell` and
+  `.devenv/gc/activated-shell-env` roots. See
+  [#3868](https://github.com/Chelis-Lang/chelis/issues/3868).
+
+- `chelis reef fetch-plan` rejects an unsafe `binary` lock entry. The `name` must be a
+  bare file name. The `asset` must be a bare file name of ASCII letters, digits, `.`,
+  `-`, `_`, or `~`. The diagnostic names the lock entry. Previously the command copied
+  an `asset` such as `../x` or `a?b` into `file` and into the download URL. See
+  [#3891](https://github.com/Chelis-Lang/chelis/issues/3891).
+
+- Reef fetches and `chelisup install` trust the system certificate roots as well
+  as the bundled webpki roots. When `SSL_CERT_FILE` names a PEM file, its
+  certificates replace the system roots. Thus a TLS proxy, a private certificate
+  authority, and NixOS `security.pki` work. Previously both programs trusted only
+  the roots in the binary.
+
+  When `SSL_CERT_FILE` names a file that does not exist, the fetch stops, and
+  the error names the variable and the file. A pure Nix shell without `cacert`
+  sets `SSL_CERT_FILE=/no-cert-file.crt`. There, unset the variable or set it to
+  a CA bundle. See [#3914](https://github.com/Chelis-Lang/chelis/issues/3914).
+
+- `CHELIS_HOME` now moves the Reef registry and the compiler caches. Without
+  `CHELIS_REEF_HOME`, the registry is at `$CHELIS_HOME/reef` and the caches are
+  at `$CHELIS_HOME/reef/.cache`. Previously a build that set only `CHELIS_HOME`
+  wrote them under `HOME`, and in a Nix build it failed to write the registry.
+  See [#3917](https://github.com/Chelis-Lang/chelis/issues/3917).
+
+  An empty `CHELIS_REEF_HOME`, `CHELIS_HOME`, or `XDG_CACHE_HOME` now counts as
+  unset in every reader. Previously an empty `CHELIS_REEF_HOME` put the registry
+  and the prepared-graph cache in the working directory. The layout without these
+  variables does not change. If you set `CHELIS_HOME` and keep packages in
+  `~/.chelis/reef`, move them to `$CHELIS_HOME/reef` or set `CHELIS_REEF_HOME`.
+
+- On macOS, `chelis build` no longer runs `/usr/bin/xcrun` or sets `SDKROOT` for
+  a C compiler or `ar` of a Nix cc or binutils wrapper. The Nix `chelis` package
+  puts such a clang on `PATH`, and that compiler uses the SDK of its Nix wrapper.
+  Previously the lines that `--emit-c` prints named the Xcode SDK, but the
+  compile used the Nix SDK. See [#3918](https://github.com/Chelis-Lang/chelis/issues/3918).
+
+  An unwrapped compiler in the Nix store, named in `CHELIS_CC`, and a host
+  compiler such as `/usr/bin/cc` still get the SDK of the `xcode-select` default.
+  See [#3948](https://github.com/Chelis-Lang/chelis/issues/3948).
+
+- Restore native compilation of recursive helpers whose checked formals determine argument layouts without stored type-variable substitutions, and preserve residual dimension binders inside checker-authored generic type substitutions, including Coral Frame row selection and ordering. Logical dimension identities, literal extents, stored dtypes, and runtime entry/result claims remain checked; unknown stored types retain their rejection.
+
+- Preserve package-frontier applicability during targeted CI rebases: unchanged
+  inactive integration targets are explicitly inspected without being counted as
+  executed tests, while directly changed and explicitly required targets retain
+  their fail-closed coverage checks.
+
+- The c-earchin ecosystem canary runs its native Surf provenance and implementation
+  mutation matrix against an explicitly selected HEAD compiler. The staged HEAD
+  toolchain uses the release's distribution feature bundle and requires SMT
+  capability, real cvc5 discharge, verified Surf attribution, stale-source rejection,
+  and native Clarabel checks before downstream checks run. The c-earchin lane
+  uses its locked uv environment, refreshes bundled runtime locks through the
+  offline resolver, and regenerates compiler-bound golden manifests in its
+  throwaway checkout.
+
+- Derive the carried Clarabel provider's package version, native operation identity,
+  and proof evidence identity from its Reef manifest; carry package version 0.1.1
+  while retaining exact dependency ownership and source validation.
+
+- A compiled f16 or bf16 `einsum` contraction with an empty output and an
+  enormous reduction, for example `mk,nk->mn` over `[0, 2^62] x [0, 2^62]`, now
+  returns the empty tensor as `chelis eval` does. It previously trapped with
+  `Overflow: einsum reduction buffer byte size exceeds i64`. See
+  [#3783](https://github.com/Chelis-Lang/chelis/issues/3783).
+
+- `chelis eval --file` no longer uses memory quadratic in recursion depth when
+  a recursive function carries a tensor. Each call re-declared its result
+  claim and also inherited an equal copy from every enclosing call, so a call
+  at depth `d` held `d` claims. Equal claims are now kept once. A bounded
+  3,000-deep recursion over a `tensor[2, f32]` drops from about 2 GB peak RSS
+  to 66 MB, the same as the `i64` form. A recursion that never terminates now
+  stops with `evaluation stack budget exhausted during a function call`, as
+  the `List` form does, instead of growing the heap until the process is
+  killed. Results and diagnostics are otherwise unchanged. See
+  [#3838](https://github.com/Chelis-Lang/chelis/issues/3838).
+
+- `chelis prove` reports a property whose `sqrt` domain obligation is false as
+  `failed`, with the counterexample the solver located. Previously it reported
+  `unsupported` and discarded the witness, so `--tier smt-only` said nothing
+  actionable about a defect the solver had already found, and `--tier auto`
+  reported it only when sampling happened to hit it.
+
+  The witness is a candidate, not a verdict: the domain proof may use only part of
+  the property's preconditions and decides over real arithmetic. So the witness is
+  rounded once to each parameter's declared width and evaluated concretely, exactly
+  as a sampled counterexample is. A witness every precondition admits and at which
+  the body is false is a definite `failed` with no `real_arithmetic` qualifier; a
+  witness the evaluation rejects keeps the `unsupported` result, which now names
+  why. `unsupported` stays reserved for an obligation nothing decided.
+
+  An integer binder's witness is bounded by its declared width's representable
+  range rather than by the fuzz sampler's `[-1000, 1000]` window, so a guard
+  admitting `n > 4000i32` confirms at 4001 instead of reporting it unrepresentable.
+  See [#3635](https://github.com/Chelis-Lang/chelis/issues/3635).
+
+- The `chelisup` of the Nix flake now removes the Nix garbage-collector root of a
+  linked store toolchain when `chelisup install` replaces that link with a release
+  toolchain. Previously the root stayed until `chelisup uninstall`, and it kept the
+  old store closure alive. A failed install keeps the root. The install guide now
+  says that `CHELIS_CC` and `CHELIS_AR` need a path to select a host tool with the
+  Nix `chelis` package. See
+  [#3890](https://github.com/Chelis-Lang/chelis/issues/3890) and
+  [#3894](https://github.com/Chelis-Lang/chelis/issues/3894).
+
+- `chelis test` reaches the same recursion depth as `chelis eval --file`. Each
+  test was evaluated on a fixed 32 MiB worker thread, which held about a tenth of
+  the recursion `chelis eval` allows, so a recursive test that passed under
+  `chelis eval` could fail with "evaluation stack budget exhausted during a
+  function call". See [#3742](https://github.com/Chelis-Lang/chelis/issues/3742).
+
 ## [0.20.0] - 2026-10-16
 
 ### Added
