@@ -414,10 +414,10 @@ binder, with `L` its own schedule length and `S = 44` the span:
 
 1. **Diagonal**, for `attempt < max(S, L)`: candidate `attempt` of this
    binder's own schedule, exactly as before and at the same one-for-one rate.
-2. **Cell**, for the next `min(2^n, 256)` attempts at arity `n`: a mixed-radix
-   odometer over **two** classes per binder — its largest and its smallest
-   admissible candidate, by `total_cmp`. Cell `c` gives binder `j` digit
-   `(c / 2^j) % 2`, digit 0 being the largest.
+2. **Cell**, for the next `min(2^n, (samples - 44) / 2)` attempts at arity
+   `n`: a mixed-radix odometer over **two** classes per binder — its largest
+   and its smallest admissible candidate, by `total_cmp`. Cell `c` gives
+   binder `j` digit `(c / 2^j) % 2`, digit 0 being the largest.
 3. **Uniform**, thereafter: unchanged.
 
 The phase is skipped entirely for a property with fewer than two scheduled
@@ -491,13 +491,45 @@ in magnitude — needs `6^n >= 216` attempts at three binders, which exceeds the
 post-diagonal attempt becomes a cell and the uniform generator never runs; the
 loss is total and seed-independent rather than a reduced chance. Two classes
 need 4, 8 and 16 cells at two, three and four binders, which fit inside those
-56 with the generator still reachable. The `256` cap is therefore slack at
-every arity a property plausibly has — `2^8` is the first to reach it — and is
-retained as a bound rather than as a working limit.
+56 with the generator still reachable.
 
-A policy that widens the class set owes this table a re-measurement at the
-arity it targets, and a negative control that a window-interior refutation
-still happens there.
+**Two classes alone do not bound this, and a fixed cap cannot either.** `2^n`
+outgrows any constant, so for every allowance there is an arity at which the
+cells take every post-diagonal attempt — a cap of 256 reproduced the
+six-class failure exactly, relocated from three binders to six, where
+`2^6 = 64 > 56`. The quantity the allowance has to stay below is the budget,
+which a constant does not know, so the allowance **is** a share of the
+budget: `(samples - 44) / 2`. The uniform draw then keeps at least half of
+the attempts the diagonal did not take, at every arity and every budget, and
+the grid is covered to whatever depth the other half allows.
+
+Extending the same measurement past the published four rows, seeds 0–29 at
+the default budget:
+
+| scheduled binders | no cell phase | budget share (shipped) | fixed 256-cell cap |
+|---|---|---|---|
+| 5 | 21/30 | 11/30 | 9/30 |
+| 6 | 23/30 | 15/30 | **0/30** |
+| 7 | 23/30 | 11/30 | **0/30** |
+| 8 | 23/30 | 19/30 | **0/30** |
+
+The share does not restore the no-phase rate above four binders — half the
+post-diagonal attempts are spent on cells by design — but the loss is a
+reduced chance rather than the total, seed-independent loss a fixed cap
+produced. The same holds in the constraint-directed lane, seeds 0–19 at
+arities 5/6/7: 15/18/16 with no phase, 9/17/14 with the share, 9/9/5 with the
+fixed cap.
+
+**The share costs little pairing**, because the corners worth proposing sit
+at low cell indices: a pair of opposite extremes on the first two binders is
+cell 2 whatever the arity, so it is reached at attempt 47 at every arity from
+two to eight while a run without the phase passes its whole budget. What the
+share gives up is a corner on a *high-order* binder, since `2^5 = 32` exceeds
+the 28 cells the default budget allows.
+
+A policy that widens the class set, or the share, owes these tables a
+re-measurement at the arity it targets, and a negative control that a
+window-interior refutation still happens there.
 
 #### The constraint-directed lane has no stable per-binder diagonal
 

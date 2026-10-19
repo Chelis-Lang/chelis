@@ -3359,20 +3359,31 @@ enum ScheduleSlot {
 /// binders the diagonal is complete before a cell is ever proposed.
 const DIAGONAL_SPAN: usize = 44;
 
-/// The most attempts the off-diagonal phase may claim, whatever the arity
-/// (chelis#3697).
+/// The share of a property's post-diagonal sample budget the off-diagonal
+/// phase may claim (chelis#3697).
 ///
-/// `EXTREMAL_CLASSES.pow(arity)` grows past any budget — `6^5` is 7776 — and
-/// an attempt spent on a cell is an attempt not spent on the uniform draw.
-/// For a property whose precondition rejects every extremal representative,
-/// an unbounded cell phase therefore converts a run that collected its
-/// samples into an exhausted generator. The cap bounds that cost: beyond it
-/// the phase yields, and a high-arity property covers a prefix of its grid.
-const MAX_CELLS: usize = 256;
+/// `EXTREMAL_CLASSES.pow(arity)` grows past any fixed budget, and an attempt
+/// spent on a cell is an attempt not spent on the uniform draw — which is the
+/// only thing that reaches a counterexample in the interior of the proposal
+/// window. A phase sized by arity alone therefore converts, at some arity,
+/// every post-diagonal attempt into a cell and starves the generator
+/// completely: at the default 100 samples only 56 attempts follow the
+/// diagonal, so `2^6 = 64` already consumed all of them.
+///
+/// Dividing the remaining budget instead makes that outcome unreachable at
+/// every arity and every budget: the uniform draw keeps at least half of the
+/// attempts the diagonal did not take, and the grid is covered to whatever
+/// depth the other half allows. A *fixed* cap cannot give that guarantee,
+/// because the quantity it has to stay below is the budget, which it does not
+/// know.
+const CELL_BUDGET_DIVISOR: usize = 2;
 
 /// Decide what attempt `attempt` proposes for the binder at `position` of a
 /// property with `arity` *scheduled* binders, whose own schedule holds
 /// `schedule_len` candidates (chelis#3697).
+///
+/// `budget` is the property's sample count, which bounds how many attempts
+/// the phase may take: see [`CELL_BUDGET_DIVISOR`].
 ///
 /// The diagonal comes first and **keeps chelis#3636's one-for-one rate**:
 /// attempt `i` proposes candidate `i` until the binder's schedule is spent.
@@ -3389,12 +3400,16 @@ const MAX_CELLS: usize = 256;
 /// 52. Relocating chelis#3697's own defect onto the long-schedule axis is not
 /// a fix for it, so the diagonal is no longer rationed.
 ///
-/// A binder whose schedule outruns `DIAGONAL_SPAN` keeps walking it and so
-/// enters the cell phase later than a shorter-scheduled sibling. Their cells
-/// are then offset relative to each other, which costs some pairs and loses
-/// nothing: every binder still proposes its whole schedule, and binders with
+/// Each binder's cell window therefore begins at its own
+/// `max(DIAGONAL_SPAN, schedule_len)`. **When two binders' schedules differ
+/// in length their windows can be disjoint, and then no pairing happens at
+/// all** — at arity two with lengths 52 and 44 the windows are `[52, 56)` and
+/// `[44, 48)`, so the two binders are never simultaneously in a cell at any
+/// budget. Every binder still proposes its whole schedule, and binders with
 /// equal-length schedules — the ordinary case, including every binder of one
-/// dtype under the same guards — stay aligned.
+/// dtype under the same guards — stay aligned, which is why the phase is
+/// useful at all. Aligning the windows on a shared boundary would fix it and
+/// is tracked separately; `issue_3697_extremal_pairing.rs` pins the cost.
 ///
 /// A single-binder property takes no cell at all: an odometer over one
 /// binder's own classes *is* the diagonal.
@@ -3403,6 +3418,7 @@ fn schedule_slot(
     arity: usize,
     position: usize,
     schedule_len: usize,
+    budget: usize,
 ) -> ScheduleSlot {
     if arity < 2 || attempt < DIAGONAL_SPAN || attempt < schedule_len {
         return ScheduleSlot::Diagonal(attempt);
@@ -3410,7 +3426,7 @@ fn schedule_slot(
     let cells = EXTREMAL_CLASSES
         .checked_pow(u32::try_from(arity).unwrap_or(u32::MAX))
         .unwrap_or(usize::MAX)
-        .min(MAX_CELLS);
+        .min(budget.saturating_sub(DIAGONAL_SPAN) / CELL_BUDGET_DIVISOR);
     let cell = attempt - DIAGONAL_SPAN.max(schedule_len);
     if cell >= cells {
         return ScheduleSlot::Random;
@@ -3799,6 +3815,7 @@ impl ConstraintSamplingPlan {
         &self,
         rng: &mut Lcg,
         attempt: usize,
+        budget: usize,
     ) -> Result<BTreeMap<String, f64>, SamplingError> {
         let mut values = BTreeMap::new();
         let arity = self.topo.len();
@@ -3828,7 +3845,7 @@ impl ConstraintSamplingPlan {
             let slot = if chained {
                 ScheduleSlot::Diagonal(attempt)
             } else {
-                schedule_slot(attempt, arity, position, candidates.len())
+                schedule_slot(attempt, arity, position, candidates.len(), budget)
             };
             // Once both schedules are spent the draw is a random one,
             // preferring the narrower proposal window (chelis#644 owns its
@@ -4101,8 +4118,10 @@ fn prove_surf_property_fuzz(
     let mut draws = sample_batch::AttemptDraws::new(&lane, max_attempts);
     let mut draw = |attempt: usize| {
         draw_attempt(match &constraint_plan {
-            Some(plan) => sample_property_with_constraints(property, plan, &mut rng, attempt),
-            None => sample_property(property, &mut rng, attempt),
+            Some(plan) => {
+                sample_property_with_constraints(property, plan, &mut rng, attempt, samples_needed)
+            }
+            None => sample_property(property, &mut rng, attempt, samples_needed),
         })
     };
     let mut accepted = 0usize;
@@ -4582,6 +4601,7 @@ fn sample_property(
     property: &Property,
     rng: &mut Lcg,
     attempt: usize,
+    budget: usize,
 ) -> Result<Sample, SamplingError> {
     let mut values = Vec::new();
     let types = property
@@ -4598,7 +4618,7 @@ fn sample_property(
         // off-diagonal phase on nor consumes an odometer digit; its arm
         // ignores the seat and draws at random.
         let seat = position.map(|position| (position, arity));
-        values.push(sample_value(&param.name, ty, rng, attempt, seat)?);
+        values.push(sample_value(&param.name, ty, rng, attempt, seat, budget)?);
     }
     Ok(Sample { values })
 }
@@ -4657,8 +4677,9 @@ fn sample_property_with_constraints(
     plan: &ConstraintSamplingPlan,
     rng: &mut Lcg,
     attempt: usize,
+    budget: usize,
 ) -> Result<Sample, SamplingError> {
-    let values = plan.sample(rng, attempt)?;
+    let values = plan.sample(rng, attempt, budget)?;
     let mut sampled = Vec::with_capacity(property.params.len());
     for param in &property.params {
         let TypeExpr::Named(type_name, _) = param.ty.as_ref().expect("plan requires typed params")
@@ -4697,9 +4718,10 @@ fn sample_value(
     rng: &mut Lcg,
     attempt: usize,
     seat: Option<(usize, usize)>,
+    budget: usize,
 ) -> Result<SampleValue, SamplingError> {
     let slot = |schedule_len: usize| match seat {
-        Some((position, arity)) => schedule_slot(attempt, arity, position, schedule_len),
+        Some((position, arity)) => schedule_slot(attempt, arity, position, schedule_len, budget),
         None => ScheduleSlot::Random,
     };
     let sp = chelis_deep::Span::new(0, 0);
@@ -5839,8 +5861,14 @@ fn prove_deep_property_fuzz(
     let mut draws = sample_batch::AttemptDraws::new(&lane, max_attempts);
     let mut draw = |attempt: usize| {
         draw_attempt(match &constraint_plan {
-            Some(plan) => sample_deep_property_with_constraints(property, plan, &mut rng, attempt),
-            None => sample_deep_property(property, &mut rng, attempt),
+            Some(plan) => sample_deep_property_with_constraints(
+                property,
+                plan,
+                &mut rng,
+                attempt,
+                samples_needed,
+            ),
+            None => sample_deep_property(property, &mut rng, attempt, samples_needed),
         })
     };
 
@@ -6209,6 +6237,7 @@ fn sample_deep_property(
     property: &DeepProperty,
     rng: &mut Lcg,
     attempt: usize,
+    budget: usize,
 ) -> Result<Sample, SamplingError> {
     let mut values = Vec::new();
     let types = property
@@ -6225,7 +6254,7 @@ fn sample_deep_property(
         // off-diagonal phase on nor consumes an odometer digit; its arm
         // ignores the seat and draws at random.
         let seat = position.map(|position| (position, arity));
-        values.push(sample_value(&param.name, ty, rng, attempt, seat)?);
+        values.push(sample_value(&param.name, ty, rng, attempt, seat, budget)?);
     }
     Ok(Sample { values })
 }
@@ -6275,8 +6304,9 @@ fn sample_deep_property_with_constraints(
     plan: &ConstraintSamplingPlan,
     rng: &mut Lcg,
     attempt: usize,
+    budget: usize,
 ) -> Result<Sample, SamplingError> {
-    let values = plan.sample(rng, attempt)?;
+    let values = plan.sample(rng, attempt, budget)?;
     let mut sampled = Vec::with_capacity(property.params.len());
     for param in &property.params {
         let TypeExpr::Named(type_name, _) = param.ty.as_ref().expect("plan requires typed params")

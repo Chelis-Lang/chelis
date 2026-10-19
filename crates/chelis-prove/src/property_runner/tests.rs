@@ -69,7 +69,7 @@ fn prepared_surf_samples_preserve_monolithic_guards_predicates_and_shrinking() {
         };
         let mut rng = Lcg::new(0);
         let samples = (0..8)
-            .map(|attempt| sample_property(&property, &mut rng, attempt).unwrap())
+            .map(|attempt| sample_property(&property, &mut rng, attempt, 100).unwrap())
             .collect::<Vec<_>>();
         // One compile holds every sample's probes; each answers as the
         // sample's own whole program does.
@@ -2267,7 +2267,7 @@ fn issue_3636_post_schedule_draw_stays_inside_the_proposal_window() {
     let mut rng = Lcg::new(7);
     for attempt in schedule.len()..schedule.len() + 64 {
         let drawn = plan
-            .sample(&mut rng, attempt)
+            .sample(&mut rng, attempt, 100)
             .expect("the guard admits samples")["x"];
         assert!(
             drawn > 0.0 && drawn <= 20.0,
@@ -2295,7 +2295,7 @@ fn issue_3636_scheduled_attempts_may_leave_the_proposal_window() {
 
     let mut rng = Lcg::new(7);
     let outside = (0..48)
-        .filter_map(|attempt| plan.sample(&mut rng, attempt).ok())
+        .filter_map(|attempt| plan.sample(&mut rng, attempt, 100).ok())
         .filter(|values| values["x"] > 20.0)
         .count();
     assert!(
@@ -2397,7 +2397,7 @@ fn issue_3697_a_positive_guard_makes_the_smallest_a_subnormal() {
 fn issue_3697_arity_one_takes_no_cell() {
     for attempt in 0..128 {
         assert_eq!(
-            schedule_slot(attempt, 1, 0, 44),
+            schedule_slot(attempt, 1, 0, 44, 100),
             ScheduleSlot::Diagonal(attempt),
             "attempt {attempt}"
         );
@@ -2418,24 +2418,24 @@ fn issue_3697_the_diagonal_completes_before_any_cell() {
     for attempt in 0..DIAGONAL_SPAN {
         for position in 0..2 {
             assert_eq!(
-                schedule_slot(attempt, 2, position, 44),
+                schedule_slot(attempt, 2, position, 44, 100),
                 ScheduleSlot::Diagonal(attempt),
                 "attempt {attempt}, position {position}"
             );
         }
     }
     assert_eq!(
-        schedule_slot(DIAGONAL_SPAN, 2, 0, 44),
+        schedule_slot(DIAGONAL_SPAN, 2, 0, 44, 100),
         ScheduleSlot::Cell(0)
     );
     // Cell 2: digit 0 of binder 0 (its largest), digit 1 of binder 1 (its
     // smallest) -- the reproduction's pairing.
     assert_eq!(
-        schedule_slot(DIAGONAL_SPAN + 2, 2, 0, 44),
+        schedule_slot(DIAGONAL_SPAN + 2, 2, 0, 44, 100),
         ScheduleSlot::Cell(0)
     );
     assert_eq!(
-        schedule_slot(DIAGONAL_SPAN + 2, 2, 1, 44),
+        schedule_slot(DIAGONAL_SPAN + 2, 2, 1, 44, 100),
         ScheduleSlot::Cell(1)
     );
 }
@@ -2453,13 +2453,13 @@ fn issue_3697_a_long_schedule_keeps_its_diagonal() {
     let long = 52;
     for attempt in 0..long {
         assert_eq!(
-            schedule_slot(attempt, 2, 0, long),
+            schedule_slot(attempt, 2, 0, long, 100),
             ScheduleSlot::Diagonal(attempt),
             "attempt {attempt} of a {long}-candidate schedule"
         );
     }
     // Its cells begin where its own schedule ends, not where the span does.
-    assert_eq!(schedule_slot(long, 2, 0, long), ScheduleSlot::Cell(0));
+    assert_eq!(schedule_slot(long, 2, 0, long, 100), ScheduleSlot::Cell(0));
 }
 
 /// The cells run out, so a run longer than the grid regains the uniform
@@ -2468,47 +2468,96 @@ fn issue_3697_a_long_schedule_keeps_its_diagonal() {
 #[test]
 fn issue_3697_cells_exhaust_and_yield_back_to_the_uniform_draw() {
     let cells = EXTREMAL_CLASSES * EXTREMAL_CLASSES;
-    assert!(cells < MAX_CELLS, "two binders are under the cap");
+    assert!(
+        cells < (100 - DIAGONAL_SPAN) / CELL_BUDGET_DIVISOR,
+        "two binders fit inside the default budget's share"
+    );
     assert!(matches!(
-        schedule_slot(DIAGONAL_SPAN + cells - 1, 2, 0, 44),
+        schedule_slot(DIAGONAL_SPAN + cells - 1, 2, 0, 44, 100),
         ScheduleSlot::Cell(_)
     ));
     assert_eq!(
-        schedule_slot(DIAGONAL_SPAN + cells, 2, 0, 44),
+        schedule_slot(DIAGONAL_SPAN + cells, 2, 0, 44, 100),
         ScheduleSlot::Random
     );
 }
 
-/// The cap bounds the cell phase whatever the arity. At radix two it is
-/// slack for every arity a property plausibly has -- `2^8` only reaches it --
-/// so it is defensive rather than load-bearing, which is the point: the
-/// six-class set needed it to stop `6^5 = 7776` cells starving the uniform
-/// draw, and two classes do not.
+/// **The phase can never take more than its share of the post-diagonal
+/// budget, at any arity.** This is the assertion a fixed cap could not make,
+/// and its absence was a default-budget false pass: at 100 samples only 56
+/// attempts follow the diagonal, `2^6 = 64` exceeded them, and a six-binder
+/// property proposed no uniform draw at all — the same total starvation that
+/// the six-class set caused at arity three.
+///
+/// The invariant is that the uniform draw keeps at least as many of those
+/// attempts as the cells take, which is checked here against the arity axis
+/// directly rather than inferred from the cap's value.
 #[test]
-fn issue_3697_the_cell_phase_is_capped_whatever_the_arity() {
-    // Slack at every ordinary arity: the grid is smaller than the cap.
-    for arity in 2..=8 {
-        let cells = EXTREMAL_CLASSES.pow(u32::try_from(arity).expect("small arity"));
-        assert!(cells <= MAX_CELLS, "arity {arity}: {cells} cells");
-        assert_eq!(
-            schedule_slot(DIAGONAL_SPAN + cells, arity, 0, 44),
-            ScheduleSlot::Random,
-            "arity {arity}: the grid is spent, so the uniform draw resumes"
-        );
+fn issue_3697_the_phase_never_outgrows_its_share_of_the_budget() {
+    for budget in [46usize, 50, 60, 100, 200, 1000] {
+        let post_diagonal = budget - DIAGONAL_SPAN;
+        let share = post_diagonal / CELL_BUDGET_DIVISOR;
+        for arity in [2usize, 3, 4, 5, 6, 8, 12, 25, 64, usize::MAX] {
+            // The first attempt past the share must not be a cell, whatever
+            // the arity: that is what leaves the generator reachable.
+            let first_free = DIAGONAL_SPAN + share;
+            assert_eq!(
+                schedule_slot(first_free, arity, 0, 44, budget),
+                ScheduleSlot::Random,
+                "budget {budget}, arity {arity}: the cells must yield by \
+                 attempt {first_free}, leaving at least {} of {post_diagonal} \
+                 post-diagonal attempts to the uniform draw",
+                post_diagonal - share
+            );
+        }
     }
-    // Binding at an arity no property has, which is what it is there for.
-    for arity in [64usize, 1024, usize::MAX] {
+}
+
+/// The share does not cost anything at the arities the published table
+/// measures: `2^n` is smaller than half the default budget's post-diagonal
+/// attempts up to four binders, so those runs are bit-identical to an
+/// uncapped phase and the table's figures stand.
+#[test]
+fn issue_3697_the_share_is_slack_up_to_four_binders() {
+    let share = (100 - DIAGONAL_SPAN) / CELL_BUDGET_DIVISOR;
+    for arity in 2..=4 {
+        let cells = EXTREMAL_CLASSES.pow(u32::try_from(arity).expect("small arity"));
+        assert!(
+            cells <= share,
+            "arity {arity}: {cells} cells must fit in the {share} the budget allows"
+        );
         assert!(
             matches!(
-                schedule_slot(DIAGONAL_SPAN + MAX_CELLS - 1, arity, 0, 44),
+                schedule_slot(DIAGONAL_SPAN + cells - 1, arity, 0, 44, 100),
                 ScheduleSlot::Cell(_)
             ),
-            "arity {arity}"
+            "arity {arity}: the whole grid is still reachable"
         );
         assert_eq!(
-            schedule_slot(DIAGONAL_SPAN + MAX_CELLS, arity, 0, 44),
+            schedule_slot(DIAGONAL_SPAN + cells, arity, 0, 44, 100),
             ScheduleSlot::Random,
-            "arity {arity}: the cap must bound the phase"
+            "arity {arity}: and the grid, not the share, is what ends it"
+        );
+    }
+    // From five binders the share binds instead of the grid, which is the
+    // trade: a prefix of the grid, and the generator still runs.
+    let cells = EXTREMAL_CLASSES.pow(5);
+    assert!(cells > share, "{cells} cells exceed the {share} allowed");
+    assert_eq!(
+        schedule_slot(DIAGONAL_SPAN + share, 5, 0, 44, 100),
+        ScheduleSlot::Random
+    );
+}
+
+/// A budget that leaves no room for a cell gets no cell phase, rather than a
+/// division by zero or a phase that outlives the run.
+#[test]
+fn issue_3697_a_budget_at_the_span_takes_no_cell() {
+    for budget in [0usize, 1, DIAGONAL_SPAN, DIAGONAL_SPAN + 1] {
+        assert_eq!(
+            schedule_slot(DIAGONAL_SPAN, 3, 0, 44, budget),
+            ScheduleSlot::Random,
+            "budget {budget}"
         );
     }
 }
@@ -2520,11 +2569,11 @@ fn issue_3697_the_cell_phase_is_capped_whatever_the_arity() {
 #[test]
 fn issue_3697_an_absurd_arity_does_not_overflow() {
     for arity in [25usize, 64, 1024, usize::MAX] {
-        let slot = schedule_slot(DIAGONAL_SPAN + 7, arity, 0, 44);
+        let slot = schedule_slot(DIAGONAL_SPAN + 7, arity, 0, 44, 100);
         assert!(matches!(slot, ScheduleSlot::Cell(_)), "arity {arity}");
         // A high-order digit is simply zero: the odometer has not reached it.
         assert_eq!(
-            schedule_slot(DIAGONAL_SPAN + 7, arity, 24, 44),
+            schedule_slot(DIAGONAL_SPAN + 7, arity, 24, 44, 100),
             ScheduleSlot::Cell(0),
             "arity {arity}"
         );
@@ -2601,7 +2650,7 @@ fn issue_3697_schedule_participation_matches_the_sampler() {
 
         let draw = |attempt| {
             let mut rng = Lcg::new(7);
-            sample_value("v", &ty, &mut rng, attempt, Some((0, 2))).map(|value| value.json)
+            sample_value("v", &ty, &mut rng, attempt, Some((0, 2)), 100).map(|value| value.json)
         };
         let first = draw(0).unwrap_or_else(|error| panic!("`{spelling}` must sample: {error:?}"));
         let second = draw(1).unwrap_or_else(|error| panic!("`{spelling}` must sample: {error:?}"));

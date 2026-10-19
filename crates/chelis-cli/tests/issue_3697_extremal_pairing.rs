@@ -10,14 +10,17 @@
 //! largest and smallest admissible candidate -- and then resume the uniform
 //! draw.
 //!
-//! **Two classes, and the cells placed after the diagonal, are both load
-//! bearing, and each is pinned below by the measurement that chose it.** An
-//! earlier attempt used six classes and took attempts from the front: at
-//! three binders `6^3 = 216` cells consumed every post-diagonal attempt in
-//! the default budget, and the uniform draws they displaced were carrying
-//! most of the refutations rather than being the spare budget that attempt
-//! assumed. `spec/design/chelis_property_spec.md` § "Pairing the extremal
-//! classes" carries the arithmetic and the tables.
+//! **Three things are load bearing, and each is pinned below by the
+//! measurement that chose it: two classes, the placement after the diagonal,
+//! and the cap on how much of the post-diagonal budget the cells may take.**
+//! The cells and the uniform draw compete for the same attempts, and
+//! `2^n` outgrows any fixed allowance — so the allowance is a share of the
+//! budget, which bounds the competition at every arity. A six-class set took
+//! every post-diagonal attempt at three binders; a fixed cap of 256 took
+//! every one at six. Both were total starvation of the generator, and the
+//! draws they displaced were carrying most of the refutations.
+//! `spec/design/chelis_property_spec.md` § "Pairing the extremal classes"
+//! carries the arithmetic and the tables.
 //!
 //! The deliberate costs are pinned too, as tests that assert a property is
 //! *not* refuted: a pairing of an extreme with a moderate value, and any
@@ -154,9 +157,9 @@ where x > 0.0f64, y > 0.0f64:
 /// control that says so.** They are the only thing that reaches a
 /// counterexample in the *interior* of the proposal window, where no edge
 /// candidate and no extremal representative lands. The cell phase is funded
-/// from them, so its width is the whole of what two classes buys over six:
-/// `2^n` cells leave the uniform generator reachable at every arity a
-/// property plausibly has, and `6^n` did not.
+/// from them, so what bounds its width is what keeps the generator alive.
+/// Two classes make the grid small enough to fit at the arities below; the
+/// budget share is what keeps it reachable above them.
 ///
 /// The band `(-7.5, -7.0)` is 2.5% of the `[-10, 10]` window and contains no
 /// candidate of any schedule. The refutation is therefore seed-dependent --
@@ -165,13 +168,16 @@ where x > 0.0f64, y > 0.0f64:
 /// with no cell phase at all -- so this fixes one seed that refutes at every
 /// arity rather than asserting a rate. Arity one is the control within the
 /// control: a single binder takes no cell, so its rate is unchanged by
-/// construction.
+/// construction. `issue_3697_a_high_arity_property_still_draws_uniformly`
+/// covers the arities above four, where the share binds instead of the grid.
 ///
 /// Each refutation arrives **after attempt 44**, where the unguarded `f64`
 /// schedule is spent. That is the assertion that makes this a measurement of
 /// the post-diagonal draws specifically, and not of sampling in general. A
-/// policy that widens the cell phase has to re-measure these four rates; with
-/// six classes they were 20/11/0/0.
+/// policy that widens the cell phase has to re-measure these rates; with six
+/// classes they were 20/11/0/0, and with a fixed 256-cell cap instead of a
+/// budget share they were 20/23/24/21 here but 9/0/0/0 at arities five to
+/// eight.
 #[test]
 fn issue_3697_post_diagonal_uniform_draws_carry_refutations() {
     for arity in 1..=4 {
@@ -361,4 +367,152 @@ where a > 1.1f64, a < 9.7f64, b > 1.1f64, b < 9.7f64, c > 1.1f64, c < 9.7f64,
             "seed {seed}: {record:#}"
         );
     }
+}
+
+/// **The cells may never take so much of the budget that the uniform draw
+/// stops happening.** This is the arity axis the published four-row table
+/// does not cover, and its absence was a default-budget false pass: a
+/// contiguous `min(2^n, 256)` block consumed all 56 post-diagonal attempts
+/// from six binders, so a six-binder property proposed no uniform draw at
+/// all and the window interior became unreachable.
+///
+/// Measured over seeds 0–29 at the default 100 samples, refutations of the
+/// window-interior band: `main` 21/23/23/23 at arities five to eight, a
+/// 256-cell cap 9/0/0/0, and the budget share 11/15/11/19. The share never
+/// restores `main`'s rate — half the post-diagonal attempts are spent on
+/// cells by design — but the loss is a reduced chance rather than the total,
+/// seed-independent loss a fixed cap produced.
+///
+/// Seed 7 refutes at all four arities, so this fixes one seed rather than
+/// asserting a rate, exactly as the arity 1-4 control does with seed 1. The
+/// rates are in the design doc.
+#[test]
+fn issue_3697_a_high_arity_property_still_draws_uniformly() {
+    for arity in [5usize, 6, 7, 8] {
+        let seed = "7";
+        let binders = (0..arity)
+            .map(|index| format!("v{index}: f64"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let source = format!(
+            "module Pairing.HighArity
+@property outside_band forall({binders}):
+  ((v0 <= -7.5f64) || (v0 >= -7.0f64))
+"
+        );
+        let (code, record) = prove(&source, "100", seed);
+        assert_eq!(
+            code, 1,
+            "arity {arity}: the band is reachable only by a uniform draw, so \
+             a cell phase that claims every post-diagonal attempt loses it \
+             entirely: {record:#}"
+        );
+        let witness = record["counterexample"]["v0"]
+            .as_f64()
+            .unwrap_or_else(|| panic!("arity {arity}: witness: {record:#}"));
+        assert!(
+            witness > -7.5 && witness < -7.0,
+            "arity {arity}: got {witness}: {record:#}"
+        );
+        let attempts = record["attempted_samples"]
+            .as_u64()
+            .unwrap_or_else(|| panic!("arity {arity}: attempts: {record:#}"));
+        assert!(
+            attempts > 44,
+            "arity {arity}: must arrive after the diagonal: {attempts}: {record:#}"
+        );
+    }
+}
+
+/// The benefit side of the same axis: capping the cells at a share of the
+/// budget costs almost no pairing, because **the corners worth proposing sit
+/// at low cell indices.** A pair of opposite extremes on the first two
+/// binders is cell 2 whatever the arity, so it is reached at attempt 47 at
+/// every arity measured, while `main` passes its whole budget.
+///
+/// That is what makes the share a cheap bound rather than a retreat: the
+/// attempts it gives back to the generator buy a prefix of the grid that
+/// already contains the pairings the issue is about. Above four binders the
+/// grid is covered only to that prefix — `2^5 = 32` exceeds the 28 the
+/// default budget allows — so a corner on a high-order binder is not
+/// reached, which is the declared cost.
+#[test]
+fn issue_3697_a_low_order_corner_is_reached_at_every_arity() {
+    for arity in [2usize, 4, 5, 6, 8] {
+        let binders = (0..arity)
+            .map(|index| format!("v{index}: f64"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let source = format!(
+            "module Pairing.Corner
+@property corner forall({binders}):
+  ((v0 != 1.7976931348623157e308f64) || (v1 != -1.7976931348623157e308f64))
+"
+        );
+        let (code, record) = prove(&source, "100", "0");
+        assert_eq!(
+            code, 1,
+            "arity {arity}: cell 2 pairs v0's largest with v1's smallest at \
+             every arity: {record:#}"
+        );
+        assert_eq!(
+            record["attempted_samples"], 47,
+            "arity {arity}: and it is the same attempt at every arity, \
+             because the cell index does not depend on the arity: {record:#}"
+        );
+    }
+}
+
+/// **The third declared cost: binders whose schedules differ in length may
+/// never be in a cell at the same attempt, and then no pairing happens.**
+///
+/// Each binder's cell window begins at its own `max(44, L)`. With `L = 52`
+/// and `L = 44` those windows are `[52, 56)` and `[44, 48)` — disjoint — so
+/// the corner is unreachable at any budget. The two controls below show the
+/// witness is real and the pairing works as soon as the lengths agree, which
+/// makes this a window-alignment cost and not a magnitude-reach one.
+///
+/// This is not a regression against `main`, which reaches none of these
+/// corners. Aligning every binder's cell window on one shared boundary would
+/// fix it and is tracked separately.
+#[test]
+fn issue_3697_unequal_schedule_lengths_lose_the_pairing() {
+    let corner = "((x != 1.7976931348623157e308f64) || (y != -1.7976931348623157e308f64))";
+    let four = "x != 11.0f64, x != 12.0f64, x != 13.0f64, x != 14.0f64";
+    let unequal = format!(
+        "module Pairing.Unequal
+@property corner forall(x: f64, y: f64)
+where {four}:
+  {corner}
+"
+    );
+    for seed in ["0", "1", "7", "99"] {
+        let (code, record) = prove(&unequal, "500", seed);
+        assert_eq!(
+            code, 0,
+            "seed {seed}: x's window is [52, 56) and y's is [44, 48), so they \
+             are never both in a cell; if this now refutes, the windows were \
+             aligned and this cost is retired: {record:#}"
+        );
+    }
+    // Control one: the same corner with both schedules at 52 pairs normally.
+    let both = format!(
+        "module Pairing.Both
+@property corner forall(x: f64, y: f64)
+where {four}, y != 11.0f64, y != 12.0f64, y != 13.0f64, y != 14.0f64:
+  {corner}
+"
+    );
+    let (code, record) = prove(&both, "500", "0");
+    assert_eq!(code, 1, "equal lengths pair: {record:#}");
+    // Control two: and with both at 44.
+    let neither = format!(
+        "module Pairing.Neither
+@property corner forall(x: f64, y: f64):
+  {corner}
+"
+    );
+    let (code, record) = prove(&neither, "500", "0");
+    assert_eq!(code, 1, "no exclusions at all: {record:#}");
+    assert_eq!(record["attempted_samples"], 47, "{record:#}");
 }
