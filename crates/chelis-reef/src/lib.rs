@@ -9420,6 +9420,8 @@ fn offline_mode() -> bool {
 
 fn offline_import_hint() -> &'static str {
     ". CHELIS_OFFLINE=1 disables remote dependency resolution. \
+     Before import, prepare a reef.lock with a valid `remote_origin` \
+     for every registry dependency. \
      Import locked artifacts with \
      `chelis reef install --from-lockfile --artifact-dir <dir>`."
 }

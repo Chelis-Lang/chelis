@@ -143,7 +143,10 @@ CHELIS_OFFLINE=1 chelis prove src/main.ch
 This process control also covers `eval`, `reef build`, and package graph cache
 misses. Reef uses installed packages, path dependencies, and the bundled runtime.
 These graph loads make no network request and execute no `gh` subprocess.
-A missing registry dependency names `chelis reef install --from-lockfile --artifact-dir <dir>`.
+A missing registry dependency first names the import prerequisite.
+The lockfile must record a valid `remote_origin` for every registry dependency.
+Then the diagnostic names `chelis reef install --from-lockfile --artifact-dir <dir>`.
+An originless lock still fails import. Supply an origin-bearing lockfile before import.
 Prepare the lockfile and import its artifacts before the offline build.
 
 Only the exact value `1` enables offline resolution.

@@ -212,9 +212,12 @@ Only the exact value `1` enables this policy. It overrides auto-fetch defaults a
 `BuildOptions.auto_fetch = true`.
 
 `reef build --no-auto-fetch` still disables auto-fetch when the variable is absent
-or has another value. For a missing registry dependency, the offline diagnostic names
+or has another value. For a missing registry dependency, the offline diagnostic first
+states the import prerequisite: `reef.lock` must record a valid `remote_origin`
+for every registry dependency. Then it names
 `chelis reef install --from-lockfile --artifact-dir <dir>`.
-Prepare `reef.lock` and its pinned artifacts before the offline build.
+An originless lock still fails import. Supply an origin-bearing lockfile before import.
+Prepare the lockfile and its pinned artifacts before the offline build.
 
 `fetch-plan` output is one JSON object with `format_version` 1, the root `package`
 (`name`, `version`), and an `artifacts` array in lock order. Each element has these

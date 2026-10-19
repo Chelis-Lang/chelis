@@ -1523,3 +1523,116 @@ fn offline_3921_control_appears_in_help() {
         .success()
         .stdout(predicate::str::contains("CHELIS_OFFLINE=1"));
 }
+
+#[test]
+fn offline_3921_recovery_requires_origins_before_artifact_import() {
+    let _g = file_lock();
+    let harness = WiremockHarness::new();
+    let (archive, shell) = synthetic_nautilus_artifacts();
+    harness.mount_all(canonical_api_mocks(archive.clone(), shell.clone()));
+    for resolver in [1, 2] {
+        let outer = tempdir().expect("tempdir");
+        let app = stage_offline_project(outer.path());
+        if resolver == 2 {
+            let manifest = fs::read_to_string(app.join("reef.toml")).expect("manifest");
+            fs::write(
+                app.join("reef.toml"),
+                format!(
+                    "schema = \"2\"\n{}",
+                    manifest.replace("[dependencies]", "resolver = \"2\"\n\n[dependencies]")
+                ),
+            )
+            .expect("resolver 2 manifest");
+        }
+        let reef_home = outer.path().join("reef-home");
+        let artifacts = outer.path().join("artifacts");
+        fs::create_dir_all(&artifacts).expect("artifact directory");
+        fs::write(artifacts.join("nautilus-0.2.0.tar.zst"), &archive).expect("archive");
+        fs::write(artifacts.join("nautilus-0.2.0.chb"), &shell).expect("shell");
+        let command = |args: &[&str]| {
+            let mut command = Command::cargo_bin("chelis").expect("binary");
+            command
+                .current_dir(&app)
+                .env("CHELIS_STYLE_GATE_DISABLE", "1")
+                .env("CHELIS_REEF_HOME", &reef_home)
+                .env("CHELIS_REEF_GITHUB_BASE_API", harness.uri())
+                .env("GITHUB_TOKEN", "unit-test-token")
+                .env("CHELIS_OFFLINE", "1")
+                .env("PATH", "")
+                .args(args);
+            command
+        };
+        command(&[
+            "reef",
+            "install",
+            "--from-github",
+            "chelis-lang/nautilus@v0.2.0",
+        ])
+        .env("CHELIS_OFFLINE", "0")
+        .assert()
+        .success();
+        command(&["reef", "build"]).assert().success();
+        let requests = harness
+            .rt
+            .block_on(harness.server.received_requests())
+            .unwrap()
+            .len();
+        let lock = fs::read_to_string(app.join("reef.lock")).expect("lock");
+        let originless = lock.replace(
+            "remote_origin = \"github://chelis-lang/nautilus@v0.2.0\"\n",
+            "",
+        );
+        assert_ne!(lock, originless, "the fixture must record the origin");
+        fs::remove_dir_all(reef_home.join("packages/nautilus")).expect("remove dependency");
+        fs::remove_dir_all(reef_home.join("cache")).expect("remove extracted dependency");
+        for with_origin in [false, true] {
+            fs::write(
+                app.join("reef.lock"),
+                if with_origin { &lock } else { &originless },
+            )
+            .expect("recovery lock");
+            let output = command(&["check", "src/main.ch"])
+                .output()
+                .expect("offline check");
+            let text = format!(
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(!output.status.success(), "{resolver}: {text}");
+            let prerequisite = text
+                .find("valid `remote_origin`")
+                .unwrap_or_else(|| panic!("missing origin prerequisite: {text}"));
+            let import = text
+                .find("chelis reef install --from-lockfile --artifact-dir <dir>")
+                .unwrap_or_else(|| panic!("missing import command: {text}"));
+            assert!(prerequisite < import, "{text}");
+            let mut import = command(&[
+                "reef",
+                "install",
+                "--from-lockfile",
+                "--artifact-dir",
+                artifacts.to_str().expect("artifact path"),
+            ]);
+            if with_origin {
+                import.assert().success();
+                command(&["check", "src/main.ch"]).assert().success();
+            } else {
+                import
+                    .assert()
+                    .failure()
+                    .stderr(predicate::str::contains("no remote_origin"));
+                assert!(!reef_home.join("packages/nautilus").exists());
+                command(&["check", "src/main.ch"]).assert().failure();
+            }
+        }
+        assert_eq!(
+            harness
+                .rt
+                .block_on(harness.server.received_requests())
+                .unwrap()
+                .len(),
+            requests
+        );
+    }
+}
