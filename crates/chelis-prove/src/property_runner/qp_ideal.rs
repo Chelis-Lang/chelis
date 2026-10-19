@@ -1651,7 +1651,7 @@ pub(super) fn prove(
                     serde_json::json!({
                         "status": "asserted",
                         "arith_model": "real",
-                        "provider": "chelis-clarabel/0.1.0",
+                        "provider": binding.package_identity,
                         "call": binding.solve_symbol,
                         "abi_version": binding.abi_version,
                         "provider_archive_sha256": binding.archive_sha256,
@@ -1708,7 +1708,7 @@ pub(super) fn prove(
                             serde_json::json!({
                                 "status": "asserted",
                                 "arith_model": "real",
-                                "provider": "chelis-clarabel/0.1.0",
+                                "provider": binding.package_identity,
                                 "call": binding.solve_symbol,
                                 "abi_version": binding.abi_version,
                                 "provider_archive_sha256": binding.archive_sha256,

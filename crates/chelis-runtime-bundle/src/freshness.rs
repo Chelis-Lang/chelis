@@ -266,6 +266,32 @@ mod tests {
         check_sources(copy.path(), SOURCES).expect("the copy holds exactly the recorded files");
     }
 
+    #[cfg(feature = "clarabel-provider")]
+    #[test]
+    fn a_changed_provider_package_version_requires_a_fresh_runtime() {
+        let copy = fixture();
+        let manifest = "packages/chelis-clarabel/reef.toml";
+        let path = copy.path().join(manifest);
+        let original = fs::read_to_string(&path).expect("provider manifest is recorded");
+        let changed = original
+            .lines()
+            .map(|line| {
+                if line.starts_with("version = ") {
+                    "version = \"999.0.0\""
+                } else {
+                    line
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_ne!(original, changed);
+        fs::write(path, changed).unwrap();
+        assert_eq!(
+            stale(check_sources(copy.path(), SOURCES)).changed,
+            [manifest]
+        );
+    }
+
     #[test]
     fn an_edited_file_in_any_declared_root_fails_with_its_path() {
         for (root, file) in roots() {

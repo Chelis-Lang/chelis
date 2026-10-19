@@ -58,6 +58,7 @@ let
   # and files under tests/ that non-test code embeds. A crate without an
   # entry builds from its own directory only.
   crateBuildReads = {
+    "chelis-clarabel-provider" = [ "packages/chelis-clarabel/reef.toml" ];
     "chelis-cli" = hipRuntimeSources ++ [
       "crates/chelis-backend-metal/runtime/chelis_metal_runtime.h"
     ];

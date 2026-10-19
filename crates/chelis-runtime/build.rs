@@ -5,9 +5,12 @@
 //! checkout before it stages the runtime it carries (`chelis-runtime-bundle`),
 //! so it never stages a runtime older than its sources. The declared inputs
 //! are, for this crate and for each workspace crate it depends on
-//! (`chelis-abi`, `chelis-vocab`, and `chelis-unord` with `ownership-ledger`):
+//! (`chelis-abi`, `chelis-vocab`, `chelis-unord` with `ownership-ledger`, and
+//! `chelis-clarabel-provider` with `clarabel-provider`):
 //! `Cargo.toml`, `build.rs` and `include/` when present, and every file under
-//! `src/`; plus the workspace `Cargo.lock`. Names beginning with `.` are not
+//! `src/`; plus the workspace `Cargo.lock`. The Clarabel configuration records
+//! its owned Reef manifest,
+//! which supplies its operation identity. Names beginning with `.` are not
 //! inputs. Paths are relative to the workspace root, so the record carries no
 //! build path and is the same in every checkout of the same sources.
 //!
@@ -43,6 +46,7 @@ use std::path::{Path, PathBuf};
 const RUNTIME_CRATE: &str = "crates/chelis-runtime";
 /// The workspace root, relative to this crate's directory.
 const TO_WORKSPACE_ROOT: &str = "../..";
+const CLARABEL_MANIFEST: &str = "packages/chelis-clarabel/reef.toml";
 
 fn main() {
     let manifest_dir =
@@ -53,7 +57,15 @@ fn main() {
         crates.push("crates/chelis-unord");
     }
 
-    let required = required_roots(&crates);
+    let clarabel = env::var_os("CARGO_FEATURE_CLARABEL_PROVIDER").is_some();
+    if clarabel {
+        crates.push("crates/chelis-clarabel-provider");
+    }
+
+    let mut required = required_roots(&crates);
+    if clarabel {
+        required.push(CLARABEL_MANIFEST.to_owned());
+    }
     let record = match workspace_root(&manifest_dir) {
         Some(root) => {
             let missing = required
@@ -62,7 +74,7 @@ fn main() {
                 .cloned()
                 .collect::<Vec<_>>();
             if missing.is_empty() {
-                available(root, &crates)
+                available(root, &crates, clarabel)
             } else {
                 unavailable(&required, &missing)
             }
@@ -110,7 +122,7 @@ fn unavailable(required: &[String], missing: &[String]) -> String {
     record
 }
 
-fn available(root: &Path, crates: &[&str]) -> String {
+fn available(root: &Path, crates: &[&str], clarabel: bool) -> String {
     declare("Cargo.lock");
     for krate in crates {
         declare(krate);
@@ -119,6 +131,10 @@ fn available(root: &Path, crates: &[&str]) -> String {
     let mut directories = Vec::new();
     let mut files = BTreeMap::new();
     record_file(root, "Cargo.lock", &mut files);
+    if clarabel {
+        declare(CLARABEL_MANIFEST);
+        record_file(root, CLARABEL_MANIFEST, &mut files);
+    }
     for krate in crates {
         record_file(root, &format!("{krate}/Cargo.toml"), &mut files);
         let build_script = format!("{krate}/build.rs");

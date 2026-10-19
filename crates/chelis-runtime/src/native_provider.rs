@@ -4,7 +4,7 @@
 use super::*;
 use chelis_clarabel_provider::{solve, Cone, DenseMatrix, DenseVector, Problem, Settings, Status};
 
-const QP_SOLVE: &str = "chelis-clarabel/0.1.0/Clarabel.Qp.solve";
+const QP_SOLVE: &str = chelis_clarabel_provider::QP_SOLVE_OPERATION;
 
 fn invalid(message: impl Into<String>) -> String {
     format!("Clarabel native provider: {}", message.into())
