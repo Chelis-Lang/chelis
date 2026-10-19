@@ -772,7 +772,7 @@ impl GitHubReleaseProvider {
             .build()
             .map_err(|error| DiscoveryError::Io {
                 operation: "construct GitHub discovery client".to_string(),
-                message: error.to_string(),
+                message: crate::http_client_error(&error),
             })?;
         Ok(Self {
             client,

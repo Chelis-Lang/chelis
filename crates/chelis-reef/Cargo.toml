@@ -24,7 +24,10 @@ unicode-normalization.workspace = true
 url.workspace = true
 bincode = "1"
 schemars = "0.8"
-reqwest = { version = "0.11", default-features = false, features = ["blocking", "rustls-tls"] }
+# `rustls-tls` keeps the bundled webpki roots, so a host with no CA bundle
+# still reaches GitHub. `rustls-tls-native-roots` adds the system roots and
+# `SSL_CERT_FILE`, for TLS proxies and private certificate authorities.
+reqwest = { version = "0.11", default-features = false, features = ["blocking", "rustls-tls", "rustls-tls-native-roots"] }
 # Item 8: process-level advisory lock (`flock(2)`) on
 # `$CHELIS_REEF_HOME/.reef-lock` around the auto-fetch + install + index
 # update critical section. `rustix` is already in the dep graph as a
@@ -48,6 +51,10 @@ zstd = "0.13"
 flate2 = "1"
 
 [dev-dependencies]
+# tests/tls_roots.rs: a local TLS server whose certificate only a generated
+# root trusts. `rustls` is the version reqwest 0.11 already links.
+rcgen = "0.14"
+rustls = "0.21"
 # Tests link the embedded runtime. This edge is test-only: the bundle crate
 # build-depends on chelis-reef, and the library never depends on the bundle.
 chelis-std-bundle.workspace = true

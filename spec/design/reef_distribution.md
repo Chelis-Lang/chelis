@@ -377,7 +377,7 @@ Multiple `--from-github` flags are independent installs.
   thin — the HTTP layer lives in `chelis-reef` per the locked layering
   decision in this document. ~100 lines.
 - `crates/chelis-reef/Cargo.toml` adds
-  `reqwest = { version = "0.11", default-features = false, features = ["blocking", "rustls-tls"] }`.
+  `reqwest = { version = "0.11", default-features = false, features = ["blocking", "rustls-tls", "rustls-tls-native-roots"] }`.
 
 ---
 

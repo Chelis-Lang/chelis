@@ -5255,6 +5255,16 @@ pub fn try_github_token() -> Option<String> {
     resolve_github_token().ok()
 }
 
+/// The text of a failed HTTP client build. The client reads the file that
+/// `SSL_CERT_FILE` names, and a file it cannot read stops the build. Thus the
+/// text names the variable and its value when it is set.
+pub(crate) fn http_client_error(error: &reqwest::Error) -> String {
+    match env::var_os("SSL_CERT_FILE") {
+        Some(path) => format!("{error} (SSL_CERT_FILE={})", Path::new(&path).display()),
+        None => error.to_string(),
+    }
+}
+
 /// Read `CHELIS_REEF_GITHUB_BASE_API` or fall back to the canonical
 /// `https://api.github.com`. This is the test-injection seam for the
 /// GitHub API endpoints (release metadata + asset bytes). Tests can
@@ -5549,7 +5559,7 @@ pub fn install_from_github(
         .connect_timeout(Duration::from_secs(15))
         .build()
         .map_err(|e| GitHubFetchError::Io {
-            message: format!("build http client: {e}"),
+            message: format!("build http client: {}", http_client_error(&e)),
         })?;
 
     // Step 1: fetch release metadata, extract asset ids.
@@ -5713,7 +5723,7 @@ pub fn install_binary_artifact(
         .connect_timeout(Duration::from_secs(15))
         .build()
         .map_err(|e| GitHubFetchError::Io {
-            message: format!("build http client: {e}"),
+            message: format!("build http client: {}", http_client_error(&e)),
         })?;
 
     // Step 1: release metadata -> asset id.
@@ -6786,7 +6796,7 @@ fn fetch_manifest_only(spec: &GitHubReleaseSpec) -> Result<ParsedManifest, Boots
         .build()
         .map_err(|e| {
             BootstrapError::Fetch(GitHubFetchError::Io {
-                message: format!("build http client: {e}"),
+                message: format!("build http client: {}", http_client_error(&e)),
             })
         })?;
 
