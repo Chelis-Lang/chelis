@@ -69,7 +69,7 @@ fn prepared_surf_samples_preserve_monolithic_guards_predicates_and_shrinking() {
         };
         let mut rng = Lcg::new(0);
         let samples = (0..8)
-            .map(|attempt| sample_property(&property, &mut rng, attempt).unwrap())
+            .map(|attempt| sample_property(&property, &mut rng, attempt, 100).unwrap())
             .collect::<Vec<_>>();
         // One compile holds every sample's probes; each answers as the
         // sample's own whole program does.
@@ -2267,7 +2267,7 @@ fn issue_3636_post_schedule_draw_stays_inside_the_proposal_window() {
     let mut rng = Lcg::new(7);
     for attempt in schedule.len()..schedule.len() + 64 {
         let drawn = plan
-            .sample(&mut rng, attempt)
+            .sample(&mut rng, attempt, 100)
             .expect("the guard admits samples")["x"];
         assert!(
             drawn > 0.0 && drawn <= 20.0,
@@ -2295,11 +2295,423 @@ fn issue_3636_scheduled_attempts_may_leave_the_proposal_window() {
 
     let mut rng = Lcg::new(7);
     let outside = (0..48)
-        .filter_map(|attempt| plan.sample(&mut rng, attempt).ok())
+        .filter_map(|attempt| plan.sample(&mut rng, attempt, 100).ok())
         .filter(|values| values["x"] > 20.0)
         .count();
     assert!(
         outside > 0,
         "the schedule must propose magnitudes the window cannot reach"
     );
+}
+
+// --- chelis#3697: the off-diagonal phase's exact contract ----------------
+//
+// Three properties of the pairing decide whether it is safe, and none is
+// observable through a CLI property: that a representative is always a value
+// the diagonal already proposes, that the cells leave arity one alone,
+// and that the cells run out so a long run regains its uniform draws.
+
+/// Every representative comes from the binder's own candidate list, there are
+/// at most `EXTREMAL_CLASSES` of them, and they are distinct by bit pattern.
+///
+/// The first of those is the safety property: a representative is in the
+/// binder's resolved range by construction, so a cell can no more escape a
+/// guard — or propose a value the diagonal would not — than the diagonal can.
+#[test]
+fn issue_3697_representatives_are_a_deduplicated_subset_of_the_schedule() {
+    for (lower, upper) in [
+        (-f64::MAX, f64::MAX),
+        (f64::from_bits(1), f64::MAX),
+        (1.0, 2.0),
+        (-1.0, 1.0),
+        (-3.0, -1.0),
+        (0.0, 0.0),
+    ] {
+        let candidates = float_edge_candidates(FloatKind::F64, lower, upper, &[]);
+        let reps = extremal_class_representatives(&candidates);
+        assert!(
+            reps.len() <= EXTREMAL_CLASSES,
+            "[{lower}, {upper}] produced {} representatives",
+            reps.len()
+        );
+        assert!(!reps.is_empty(), "[{lower}, {upper}] produced none");
+        for value in &reps {
+            assert!(
+                candidates.iter().any(|c| c.to_bits() == value.to_bits()),
+                "[{lower}, {upper}] invented {value}, which is not a candidate"
+            );
+        }
+        let distinct = reps
+            .iter()
+            .map(|value| value.to_bits())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(distinct.len(), reps.len(), "[{lower}, {upper}]: {reps:?}");
+    }
+    // The comparator choice is observable in exactly one place: a range whose
+    // only candidates are the two zeros, where `total_cmp` orders `-0.0`
+    // below `+0.0` and so decides which zero is digit 0. `f64::max`/`min`
+    // leave that unspecified, which is why the selection does not use them,
+    // and asserting only subset/dedup above would not notice.
+    let zeros = float_edge_candidates(FloatKind::F64, 0.0, 0.0, &[]);
+    assert_eq!(
+        zeros.len(),
+        2,
+        "both signed zeros are candidates: {zeros:?}"
+    );
+    let reps = extremal_class_representatives(&zeros);
+    assert_eq!(reps.len(), 2, "{reps:?}");
+    assert!(
+        reps[0].is_sign_positive() && reps[1].is_sign_negative(),
+        "`total_cmp` puts `+0.0` first, so it is digit 0: {reps:?}"
+    );
+}
+
+/// The two roles, named. An unguarded `f64` binder's extremes are the finite
+/// extrema, and `total_cmp` decides the order deterministically where
+/// `f64::max`/`min` would not.
+#[test]
+fn issue_3697_unguarded_binder_takes_the_two_extremes() {
+    let candidates = float_edge_candidates(FloatKind::F64, -f64::MAX, f64::MAX, &[]);
+    let reps = extremal_class_representatives(&candidates);
+    assert_eq!(reps, vec![f64::MAX, -f64::MAX], "{reps:?}");
+}
+
+/// Under a guard that admits no negative value the smallest candidate *is*
+/// the smallest positive one, which is why chelis#3697's own reproduction —
+/// a large `x` over a subnormal `y` — is reachable from two classes.
+#[test]
+fn issue_3697_a_positive_guard_makes_the_smallest_a_subnormal() {
+    let lower = FloatKind::F64.next_up(0.0);
+    let candidates = float_edge_candidates(FloatKind::F64, lower, f64::MAX, &[]);
+    let reps = extremal_class_representatives(&candidates);
+    assert_eq!(reps, vec![f64::MAX, f64::from_bits(1)], "{reps:?}");
+    assert!(
+        reps.iter().all(|value| *value > 0.0),
+        "`x > 0.0` admits nothing else: {reps:?}"
+    );
+}
+
+/// A single-binder property takes no cell: its attempt ordinal indexes the
+/// schedule one-for-one, which is chelis#3636's behaviour unchanged.
+#[test]
+fn issue_3697_arity_one_takes_no_cell() {
+    for attempt in 0..128 {
+        assert_eq!(
+            schedule_slot(attempt, 1, 0, 44, 100),
+            ScheduleSlot::Diagonal(attempt),
+            "attempt {attempt}"
+        );
+    }
+}
+
+/// The diagonal completes at its original one-for-one rate before any cell is
+/// proposed, and the cells then take the attempts that would have been
+/// uniform draws.
+///
+/// At radix two and arity two there are `2^2 = 4` cells, so they occupy
+/// attempts 44 to 47 and attempt 48 is a uniform draw again. Cell 2 pairs the
+/// first binder's largest candidate with the second's smallest — digits 0 and
+/// 1 — which is chelis#3697's own reproduction, and so attempt 46, the
+/// forty-seventh.
+#[test]
+fn issue_3697_the_diagonal_completes_before_any_cell() {
+    for attempt in 0..DIAGONAL_SPAN {
+        for position in 0..2 {
+            assert_eq!(
+                schedule_slot(attempt, 2, position, 44, 100),
+                ScheduleSlot::Diagonal(attempt),
+                "attempt {attempt}, position {position}"
+            );
+        }
+    }
+    assert_eq!(
+        schedule_slot(DIAGONAL_SPAN, 2, 0, 44, 100),
+        ScheduleSlot::Cell(0)
+    );
+    // Cell 2: digit 0 of binder 0 (its largest), digit 1 of binder 1 (its
+    // smallest) -- the reproduction's pairing.
+    assert_eq!(
+        schedule_slot(DIAGONAL_SPAN + 2, 2, 0, 44, 100),
+        ScheduleSlot::Cell(0)
+    );
+    assert_eq!(
+        schedule_slot(DIAGONAL_SPAN + 2, 2, 1, 44, 100),
+        ScheduleSlot::Cell(1)
+    );
+}
+
+/// A schedule longer than the span keeps the diagonal until it is spent, so
+/// its tail is never displaced past the budget.
+///
+/// This is the exact defect round 2 measured: each `!=` exclusion adds two
+/// candidates, and under the interleaved revision a two-binder property with
+/// four exclusions per binder (52 candidates) reached its last candidate only
+/// at attempt 103, so it reported `fuzz_validated` at the default budget of
+/// 100 where it had refuted at 52.
+#[test]
+fn issue_3697_a_long_schedule_keeps_its_diagonal() {
+    let long = 52;
+    for attempt in 0..long {
+        assert_eq!(
+            schedule_slot(attempt, 2, 0, long, 100),
+            ScheduleSlot::Diagonal(attempt),
+            "attempt {attempt} of a {long}-candidate schedule"
+        );
+    }
+    // Its cells begin where its own schedule ends, not where the span does.
+    assert_eq!(schedule_slot(long, 2, 0, long, 100), ScheduleSlot::Cell(0));
+}
+
+/// The cells run out, so a run longer than the grid regains the uniform
+/// draws they displaced. Without this the window would never be sampled again
+/// at any budget.
+#[test]
+fn issue_3697_cells_exhaust_and_yield_back_to_the_uniform_draw() {
+    let cells = EXTREMAL_CLASSES * EXTREMAL_CLASSES;
+    assert!(
+        cells < (100 - DIAGONAL_SPAN) / CELL_BUDGET_DIVISOR,
+        "two binders fit inside the default budget's share"
+    );
+    assert!(matches!(
+        schedule_slot(DIAGONAL_SPAN + cells - 1, 2, 0, 44, 100),
+        ScheduleSlot::Cell(_)
+    ));
+    assert_eq!(
+        schedule_slot(DIAGONAL_SPAN + cells, 2, 0, 44, 100),
+        ScheduleSlot::Random
+    );
+}
+
+/// **The phase can never take more than its share of the attempts the
+/// diagonal left, at any arity, any budget, and any schedule length.** This
+/// is the assertion a fixed cap could not make, and its absence was a
+/// default-budget false pass: at 100 samples only 56 attempts follow a
+/// 44-candidate diagonal, `2^6 = 64` exceeded them, and a six-binder
+/// property proposed no uniform draw at all.
+///
+/// **`schedule_len` is an axis here because holding it at 44 is what hid the
+/// second instance of the same defect.** The share is divided out of
+/// `budget - max(DIAGONAL_SPAN, schedule_len)`, and a revision that divided
+/// `budget - DIAGONAL_SPAN` instead passed this test at every budget and
+/// arity while starving the generator completely for `L = 72`: 28 cells over
+/// the window `[72, 100)` is every attempt there was. A grid that varies one
+/// parameter of a claim and fixes another cannot falsify the claim.
+#[test]
+fn issue_3697_the_phase_never_outgrows_its_share_of_the_budget() {
+    for budget in [46usize, 50, 60, 100, 160, 200, 1000] {
+        for schedule_len in [0usize, 20, 44, 45, 52, 72, 90, 150] {
+            let window_start = DIAGONAL_SPAN.max(schedule_len);
+            let left = budget.saturating_sub(window_start);
+            let share = left / CELL_BUDGET_DIVISOR;
+            for arity in [2usize, 3, 4, 5, 6, 8, 12, 25, 64, usize::MAX] {
+                let grid = EXTREMAL_CLASSES
+                    .checked_pow(u32::try_from(arity).unwrap_or(u32::MAX))
+                    .unwrap_or(usize::MAX);
+                let cells = grid.min(share);
+                // Whatever ends the phase -- the grid or the share -- the
+                // attempt after it is a uniform draw.
+                assert_eq!(
+                    schedule_slot(window_start + cells, arity, 0, schedule_len, budget),
+                    ScheduleSlot::Random,
+                    "budget {budget}, L {schedule_len}, arity {arity}: the cells \
+                     must yield by attempt {}, leaving {} of the {left} attempts \
+                     the diagonal left to the uniform draw",
+                    window_start + cells,
+                    left - cells
+                );
+                // And the uniform draw keeps at least half of them.
+                assert!(
+                    left - cells >= left / CELL_BUDGET_DIVISOR,
+                    "budget {budget}, L {schedule_len}, arity {arity}: {cells} \
+                     cells of {left} attempts leaves the generator too little"
+                );
+            }
+        }
+    }
+}
+
+/// The share does not cost anything at the arities the published table
+/// measures: `2^n` is smaller than half the default budget's post-diagonal
+/// attempts up to four binders, so those runs are bit-identical to an
+/// uncapped phase and the table's figures stand.
+#[test]
+fn issue_3697_the_share_is_slack_up_to_four_binders() {
+    let share = (100 - DIAGONAL_SPAN) / CELL_BUDGET_DIVISOR;
+    for arity in 2..=4 {
+        let cells = EXTREMAL_CLASSES.pow(u32::try_from(arity).expect("small arity"));
+        assert!(
+            cells <= share,
+            "arity {arity}: {cells} cells must fit in the {share} the budget allows"
+        );
+        assert!(
+            matches!(
+                schedule_slot(DIAGONAL_SPAN + cells - 1, arity, 0, 44, 100),
+                ScheduleSlot::Cell(_)
+            ),
+            "arity {arity}: the whole grid is still reachable"
+        );
+        assert_eq!(
+            schedule_slot(DIAGONAL_SPAN + cells, arity, 0, 44, 100),
+            ScheduleSlot::Random,
+            "arity {arity}: and the grid, not the share, is what ends it"
+        );
+    }
+    // From five binders the share binds instead of the grid, which is the
+    // trade: a prefix of the grid, and the generator still runs.
+    let cells = EXTREMAL_CLASSES.pow(5);
+    assert!(cells > share, "{cells} cells exceed the {share} allowed");
+    assert_eq!(
+        schedule_slot(DIAGONAL_SPAN + share, 5, 0, 44, 100),
+        ScheduleSlot::Random
+    );
+}
+
+/// A budget that leaves no room for a cell gets no cell phase, rather than a
+/// division by zero or a phase that outlives the run.
+#[test]
+fn issue_3697_a_budget_at_the_span_takes_no_cell() {
+    for budget in [0usize, 1, DIAGONAL_SPAN, DIAGONAL_SPAN + 1] {
+        assert_eq!(
+            schedule_slot(DIAGONAL_SPAN, 3, 0, 44, budget),
+            ScheduleSlot::Random,
+            "budget {budget}"
+        );
+    }
+}
+
+/// An absurd arity must not panic. `EXTREMAL_CLASSES.pow(arity)` overflows
+/// well before `usize::MAX` binders, and `EXTREMAL_CLASSES.pow(position)`
+/// overflows at the same point, so neither the cap nor the digit may be
+/// computed that way.
+#[test]
+fn issue_3697_an_absurd_arity_does_not_overflow() {
+    for arity in [25usize, 64, 1024, usize::MAX] {
+        let slot = schedule_slot(DIAGONAL_SPAN + 7, arity, 0, 44, 100);
+        assert!(matches!(slot, ScheduleSlot::Cell(_)), "arity {arity}");
+        // A high-order digit is simply zero: the odometer has not reached it.
+        assert_eq!(
+            schedule_slot(DIAGONAL_SPAN + 7, arity, 24, 44, 100),
+            ScheduleSlot::Cell(0),
+            "arity {arity}"
+        );
+    }
+}
+
+/// The integer schedule's prefix is its class set, and it is a prefix of the
+/// same list the diagonal walks rather than a separate construction.
+#[test]
+fn issue_3697_integer_representatives_are_the_schedules_prefix() {
+    let candidates = int_edge_candidates(-1000, 1000);
+    assert!(candidates.len() > EXTREMAL_CLASSES, "{candidates:?}");
+    for digit in 0..EXTREMAL_CLASSES {
+        assert_eq!(
+            scheduled_int(ScheduleSlot::Cell(digit), &candidates),
+            Some(candidates[digit]),
+            "digit {digit} of {candidates:?}"
+        );
+    }
+    // A shorter list wraps rather than indexing past its end.
+    let narrow = int_edge_candidates(0, 1);
+    assert_eq!(narrow, vec![0, 1], "{narrow:?}");
+    assert_eq!(
+        scheduled_int(ScheduleSlot::Cell(5), &narrow),
+        Some(narrow[5 % narrow.len()])
+    );
+}
+
+/// The anti-drift guard for chelis#3697's P1: `takes_schedule_slot` and
+/// `sample_value` must agree about which binders read the schedule.
+///
+/// They are two places stating one fact, and when they disagreed the cost was
+/// not a crash but a silent loss of the feature: a `bool` binder switched the
+/// odometer on while ignoring its own slot, so a property with one
+/// *scheduled* binder beside it paid the halved diagonal rate for no pairing
+/// benefit, and a `bool` declared first consumed digit 0 and multiplied every
+/// useful cell index by the radix -- which pushed a two-float-binder
+/// refutation from attempt 62 to attempt 362, past the default budget.
+///
+/// So the agreement is checked by *observation* rather than by reading the
+/// match arms: for every type the sampler supports, draw twice from an
+/// identically seeded generator at two different slots and see whether the
+/// value actually moved. The types are parsed from Surf rather than
+/// constructed, so the spellings under test are the ones a property can
+/// actually declare.
+#[test]
+fn issue_3697_schedule_participation_matches_the_sampler() {
+    let spellings = [
+        "bool",
+        "string",
+        "i8",
+        "i16",
+        "i32",
+        "i64",
+        "f32",
+        "f64",
+        "tensor[2, f32]",
+        "tensor[2, 2, f32]",
+    ];
+    for spelling in spellings {
+        let source =
+            format!("module T.Probe\n@property p forall(v: {spelling}):\n  (1.0f64 == 1.0f64)\n");
+        let decls = chelis_surf::parser::parse_str(&source)
+            .unwrap_or_else(|error| panic!("`{spelling}` must parse: {error}"));
+        let mut found = Vec::new();
+        collect_property_decls(&decls, None, &mut Vec::new(), &mut found);
+        let ty = found
+            .first()
+            .and_then(|(_, decl)| match decl {
+                Decl::Property { params, .. } => params.first()?.ty.clone(),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("`{spelling}` must yield a typed binder"));
+
+        let draw = |attempt| {
+            let mut rng = Lcg::new(7);
+            sample_value("v", &ty, &mut rng, attempt, Some((0, 2)), 100).map(|value| value.json)
+        };
+        let first = draw(0).unwrap_or_else(|error| panic!("`{spelling}` must sample: {error:?}"));
+        let second = draw(1).unwrap_or_else(|error| panic!("`{spelling}` must sample: {error:?}"));
+        let moved = first != second;
+        let scheduled = takes_schedule_slot(&ty);
+        assert_eq!(
+            moved,
+            scheduled,
+            "`{spelling}`: takes_schedule_slot says {scheduled}, but the drawn value {} with \
+             the slot ({first} vs {second}). The two must agree, or a binder that ignores its \
+             slot still consumes an odometer digit.",
+            if moved { "moved" } else { "did not move" },
+        );
+    }
+}
+
+/// The odometer's arity and digit positions count only the scheduled binders,
+/// so an unscheduled one neither switches the odometer on nor takes a digit.
+#[test]
+fn issue_3697_unscheduled_binders_take_no_digit() {
+    let sp = chelis_deep::Span::new(0, 0);
+    let f64_ty = TypeExpr::Named("f64".to_string(), sp);
+    let bool_ty = TypeExpr::Named("bool".to_string(), sp);
+
+    // One scheduled binder beside a `bool` is still arity one, so it keeps the
+    // carve-out and walks its schedule one attempt at a time.
+    let (arity, positions) = arity_and_positions(&[Some(&f64_ty), Some(&bool_ty)]);
+    assert_eq!(
+        arity, 1,
+        "a `bool` must not make this a two-binder odometer"
+    );
+    assert_eq!(positions, vec![Some(0), None]);
+
+    // A `bool` declared first must not occupy digit 0.
+    let (arity, positions) = arity_and_positions(&[Some(&bool_ty), Some(&f64_ty), Some(&f64_ty)]);
+    assert_eq!(arity, 2, "only the two floats are scheduled");
+    assert_eq!(
+        positions,
+        vec![None, Some(0), Some(1)],
+        "the floats take digits 0 and 1, not 1 and 2"
+    );
+
+    // A missing type is not scheduled either; it errors in the sampler.
+    let (arity, positions) = arity_and_positions(&[None, Some(&f64_ty)]);
+    assert_eq!(arity, 1);
+    assert_eq!(positions, vec![None, Some(0)]);
 }
