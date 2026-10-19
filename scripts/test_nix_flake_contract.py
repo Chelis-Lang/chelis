@@ -230,7 +230,9 @@ def gc_root_snapshot(root_dir: Path) -> dict[str, str] | None:
 # A path, a name, or a command of Nix GC root management. The real chelisup
 # installer must hold none of them.
 NIX_GC_ROOT_LOGIC = re.compile(
-    r"nix-gcroots|nix_gc|gc[ _-]?roots?\b|nix-store|--add-root|--realise", re.IGNORECASE
+    r"nix-gcroots|nix_gc|gc[ _-]?roots?\b|nix-store|add-root|--indirect|--reali[sz]e"
+    r"|--out-link|nix-collect-garbage|nix store (?:gc|delete)",
+    re.IGNORECASE,
 )
 
 
@@ -1837,11 +1839,19 @@ class NixSourceContractTests(unittest.TestCase):
             '"nix-gcroots"',
             "nix_gc_root",
             "gcroots",
+            "/nix/var/nix/gcroots",
             "GC root",
             "gc_root",
             "nix-store",
             "--add-root",
+            "nix store add-root",
+            "--indirect",
             "--realise",
+            "--realize",
+            "--out-link",
+            "nix-collect-garbage",
+            "nix store gc",
+            "nix store delete",
         ):
             with self.subTest(sample=sample):
                 self.assertRegex(sample, NIX_GC_ROOT_LOGIC)

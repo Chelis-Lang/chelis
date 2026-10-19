@@ -75,7 +75,10 @@ fn release_slug(os: &str, arch: &str) -> Result<&'static str, String> {
             );
             // The Chelis flake builds for aarch64-linux, which no release does.
             Err(if (os, arch) == ("linux", "aarch64") {
-                format!("{unsupported}. On this host, {NIX_LINK_ADVICE}")
+                format!(
+                    "{unsupported}. On this host, {NIX_LINK_ADVICE}. The flake builds \
+                     aarch64-linux packages from the first release after 0.20.0"
+                )
             } else {
                 unsupported
             })
@@ -988,6 +991,13 @@ mod tests {
             error.contains(
                 "chelisup link \"$(nix build --no-link --print-out-paths \
                  github:Chelis-Lang/chelis/vX.Y.Z#chelis)\""
+            ),
+            "{error}"
+        );
+        // No release up to 0.20.0 has aarch64-linux flake packages.
+        assert!(
+            error.ends_with(
+                "The flake builds aarch64-linux packages from the first release after 0.20.0"
             ),
             "{error}"
         );
