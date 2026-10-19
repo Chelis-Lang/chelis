@@ -3377,9 +3377,12 @@ const DIAGONAL_SPAN: usize = 44;
 /// because the quantity it has to stay below is the budget, which it does not
 /// know.
 ///
-/// The divided quantity is `budget - max(DIAGONAL_SPAN, schedule_len)`, the
+/// **This is the one place the share's arithmetic is written down.** The
+/// divided quantity is `budget - max(DIAGONAL_SPAN, schedule_len)`, the
 /// attempts that remain once **this binder's** diagonal ends — not
-/// `budget - DIAGONAL_SPAN`. The two differ exactly when a binder's schedule
+/// `budget - DIAGONAL_SPAN`. `spec/design/chelis_property_spec.md` names the
+/// quantity in words and points here rather than repeating the formula,
+/// because a formula kept in two places was wrong in one of them twice. The two differ exactly when a binder's schedule
 /// outruns the span, and the difference is the whole guarantee: at `L = 72`
 /// and the default budget, `(100 - 44) / 2` is 28 cells over the window
 /// `[72, 100)`, which is every attempt the diagonal left and leaves the
@@ -3392,8 +3395,10 @@ const CELL_BUDGET_DIVISOR: usize = 2;
 /// property with `arity` *scheduled* binders, whose own schedule holds
 /// `schedule_len` candidates (chelis#3697).
 ///
-/// `budget` is the property's sample count, which bounds how many attempts
-/// the phase may take: see [`CELL_BUDGET_DIVISOR`].
+/// `budget` is the attempts this run may still make — the lesser of the
+/// property's sample count and its attempt ceiling, which the caller computes
+/// once as `cell_budget`. It bounds how many attempts the phase may take, and
+/// [`CELL_BUDGET_DIVISOR`] is where that bound is stated.
 ///
 /// The diagonal comes first and **keeps chelis#3636's one-for-one rate**:
 /// attempt `i` proposes candidate `i` until the binder's schedule is spent.
@@ -3418,8 +3423,9 @@ const CELL_BUDGET_DIVISOR: usize = 2;
 /// budget. Every binder still proposes its whole schedule, and binders with
 /// equal-length schedules — the ordinary case, including every binder of one
 /// dtype under the same guards — stay aligned, which is why the phase is
-/// useful at all. Aligning the windows on a shared boundary would fix it and
-/// is tracked separately; `issue_3697_extremal_pairing.rs` pins the cost.
+/// useful at all. Aligning the windows on a shared boundary would fix it
+/// structurally; that is not in this change, and
+/// `issue_3697_extremal_pairing.rs` pins the cost.
 ///
 /// A single-binder property takes no cell at all: an odometer over one
 /// binder's own classes *is* the diagonal.

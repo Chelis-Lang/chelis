@@ -22,9 +22,10 @@
 //! `spec/design/chelis_property_spec.md` § "Pairing the extremal classes"
 //! carries the arithmetic and the tables.
 //!
-//! The deliberate costs are pinned too, as tests that assert a property is
-//! *not* refuted: a pairing of an extreme with a moderate value, and any
-//! pairing at all for an order-guarded property.
+//! The three deliberate costs are pinned too, as tests that assert a property
+//! is *not* refuted: a pairing of an extreme with a moderate value, any
+//! pairing at all for an order-guarded property, and any pairing between
+//! binders whose schedules differ in length.
 
 use assert_cmd::Command;
 use serde_json::Value;
@@ -33,25 +34,36 @@ use tempfile::tempdir;
 /// Run `prove --tier fuzz-only` over `source` and return the exit code with
 /// the single property record.
 fn prove(source: &str, samples: &str, seed: &str) -> (i32, Value) {
+    prove_bounded(source, samples, seed, None)
+}
+
+/// [`prove`] with an explicit `--max-attempts`, which is the only way to make
+/// the attempt ceiling bind below the sample budget.
+fn prove_bounded(
+    source: &str,
+    samples: &str,
+    seed: &str,
+    max_attempts: Option<&str>,
+) -> (i32, Value) {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("hazard.ch");
     std::fs::write(&path, source).expect("write fixture");
-    let output = Command::cargo_bin("chelis")
-        .expect("chelis binary")
-        .env("CHELIS_STYLE_GATE_DISABLE", "1")
-        .args([
-            "prove",
-            path.to_str().expect("utf-8 path"),
-            "--json",
-            "--tier",
-            "fuzz-only",
-            "--samples",
-            samples,
-            "--seed",
-            seed,
-        ])
-        .output()
-        .expect("run prove");
+    let mut command = Command::cargo_bin("chelis").expect("chelis binary");
+    command.env("CHELIS_STYLE_GATE_DISABLE", "1").args([
+        "prove",
+        path.to_str().expect("utf-8 path"),
+        "--json",
+        "--tier",
+        "fuzz-only",
+        "--samples",
+        samples,
+        "--seed",
+        seed,
+    ]);
+    if let Some(ceiling) = max_attempts {
+        command.args(["--max-attempts", ceiling]);
+    }
+    let output = command.output().expect("run prove");
     let record = String::from_utf8_lossy(&output.stdout)
         .lines()
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
@@ -476,7 +488,7 @@ fn issue_3697_a_low_order_corner_is_reached_at_every_arity() {
 ///
 /// This is not a regression against `main`, which reaches none of these
 /// corners. Aligning every binder's cell window on one shared boundary would
-/// fix it and is tracked separately.
+/// fix it structurally; that is not in this change.
 #[test]
 fn issue_3697_unequal_schedule_lengths_lose_the_pairing() {
     let corner = "((x != 1.7976931348623157e308f64) || (y != -1.7976931348623157e308f64))";
@@ -649,4 +661,48 @@ fn issue_3697_integer_and_mixed_dtype_binders_pair() {
             "seed {seed}: {record:#}"
         );
     }
+}
+
+/// **The attempt ceiling bounds the share too.** The budget the phase divides
+/// is `min(samples, max_attempts)`, because an explicit `--max-attempts`
+/// below the sample count would otherwise leave the cells dividing a budget
+/// the run will never reach, and claiming every attempt the diagonal left.
+///
+/// At `--samples 200 --max-attempts 60` the window is `[44, 52)` — eight
+/// cells out of the sixteen attempts the ceiling leaves — so attempts 52 to
+/// 59 are uniform draws. Dividing `samples` alone would give 78 cells and
+/// consume all sixteen. Measured over seeds 0–19: dividing `samples` alone
+/// refutes **0/20** and reports `generator exhausted` at every seed, while
+/// this head refutes 3/20, at seeds 1, 7 and 16.
+///
+/// This cannot produce a false *pass* — a passing verdict needs
+/// `accepted == samples`, hence `attempts >= samples`, hence
+/// `max_attempts >= samples`, where the bound is inert — so the symptom is a
+/// lost refutation reported as a loud error. That is why it is pinned by a
+/// refutation that must survive, not by a verdict that must not appear.
+#[test]
+fn issue_3697_the_attempt_ceiling_bounds_the_share() {
+    let source = "module Pairing.Ceiling
+@property outside_band forall(v0: f64, v1: f64, v2: f64, v3: f64, v4: f64):
+  ((v0 <= -7.5f64) || (v0 >= -7.0f64))
+";
+    let (code, record) = prove_bounded(source, "200", "7", Some("60"));
+    assert_eq!(
+        code, 1,
+        "dividing the sample budget rather than the attempt ceiling gives 78 \
+         cells over the 16 attempts the ceiling leaves, so the band becomes \
+         unreachable and the run reports `generator exhausted`: {record:#}"
+    );
+    let witness = record["counterexample"]["v0"]
+        .as_f64()
+        .unwrap_or_else(|| panic!("witness: {record:#}"));
+    assert!(
+        witness > -7.5 && witness < -7.0,
+        "got {witness}: {record:#}"
+    );
+    assert_eq!(
+        record["attempted_samples"], 53,
+        "the refutation arrives from a uniform draw past the window's end at \
+         52; a different count means the ceiling's share moved: {record:#}"
+    );
 }

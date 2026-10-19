@@ -509,17 +509,23 @@ six-class failure exactly, relocated from three binders to six, where
 which a constant does not know, so the allowance **is** a share of the
 budget.
 
-The divided quantity is the attempts that remain once **this binder's own**
-diagonal ends — `samples - max(44, L)`, not `samples - 44`. Those differ
-exactly when a binder's schedule outruns the span, and the difference is the
-whole guarantee: at `L = 72` and the default budget, `(100 - 44) / 2` is 28
-cells over the window `[72, 100)`, which is every attempt the diagonal left,
-so the generator gets nothing. Fourteen `!=` exclusions on each binder reach
-that at the default budget and four reach it at `--samples 60`, so it is not
-a corner case. With the right quantity divided, the uniform draw keeps at
-least half of the attempts the diagonal left, at every arity, every budget
-**and every schedule length**, and the grid is covered to whatever depth the
-other half allows.
+The quantity that gets divided is **the attempts this run may still make
+once this binder's own diagonal ends** — bounded below by the attempt ceiling
+as well as the sample count, and measured from where that binder's schedule
+actually runs out rather than from the span. `CELL_BUDGET_DIVISOR` in
+`crates/chelis-prove/src/property_runner.rs` states the arithmetic, and is
+the only place that does: this document names the quantity and points there,
+because a formula kept in two places was wrong in one of them twice.
+
+Each of those two refinements was a false pass of chelis#3697's own class.
+Measuring from the span rather than from the binder's own diagonal end
+starved the generator completely for a 72-candidate schedule at the default
+budget — fourteen `!=` exclusions on each binder reach that, and four reach
+it at `--samples 60`, so it is not a corner case. Ignoring the attempt
+ceiling did the same whenever `--max-attempts` fell below the sample count.
+With the right quantity divided, the uniform draw keeps at least half of the
+attempts the diagonal left, at every arity, every budget and every schedule
+length, and the grid is covered to whatever depth the other half allows.
 
 Extending the same measurement past the published four rows, seeds 0–29 at
 the default budget:
