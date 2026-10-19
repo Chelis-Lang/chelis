@@ -1088,6 +1088,13 @@ caller slot i on the same def) while keeping derived — possibly permuted —
 slots, so every renaming-orbit member gets its own specialized symbol.
 Missing argument or result layouts are completed from the checker's alias-resolved
 signature, including closed formals that need no stored type-variable substitution.
+Ownership call checks derive residual dimension patterns inside specialized generic
+type slots from the checker's preserved authored signature. A formal-identical
+lowering metadata slot supplies no caller binding; each actual owner supplies one
+consistent binding, preserving both nominal identity and every known extent.
+Anonymous extents remain independent, while literal axes, stored dtypes, tensor
+rank, and nominal type identities remain exact. Checked logical dimension terms
+survive specialization; entry and result extent claims retain their guards.
 Dimension erasure follows the checked ADT registry; it does not resolve an unknown
 stored type or remove a nominal extent claim. Two checker-admitted shapes remain on the loud, artifact-free boundary, citing
 chelis#1158: an outer call whose type application never resolves concrete,

@@ -67,19 +67,38 @@ enum FormalTypePattern {
 #[derive(Clone)]
 enum FormalDimension {
     Quantified(String),
+    Substituted(String),
     Nominal,
 }
 
 impl FormalTypePattern {
     fn from_checked(formal: &ConcreteHostType, checked: &Expr) -> Self {
+        Self::from_checked_instantiation(formal, checked, false)
+    }
+
+    fn from_specialized_checked(formal: &ConcreteHostType, checked: &Expr) -> Self {
+        Self::from_checked_instantiation(formal, checked, true)
+    }
+
+    fn from_checked_instantiation(
+        formal: &ConcreteHostType,
+        checked: &Expr,
+        specialized: bool,
+    ) -> Self {
         let Some((tag, children)) = tag_and_children(checked) else {
             return Self::nominal(formal);
         };
         if tag == DeepTag::TRef {
             return children
                 .first()
-                .map(|inner| Self::from_checked(formal, inner))
+                .map(|inner| Self::from_checked_instantiation(formal, inner, specialized))
                 .unwrap_or_else(|| Self::nominal(formal));
+        }
+        if specialized
+            && tag == DeepTag::TVar
+            && let Some(Expr::Atom(Atom::Name(variable), _)) = children.first().map(strip_meta)
+        {
+            return Self::substituted_type(formal, variable);
         }
         match (formal, tag) {
             (
@@ -87,6 +106,7 @@ impl FormalTypePattern {
                 DeepTag::DVar | DeepTag::DName | DeepTag::DLit,
             ) => Self::Dimension(
                 dimension_variable_key(checked)
+                    .filter(|_| !specialized)
                     .map(FormalDimension::Quantified)
                     .unwrap_or(FormalDimension::Nominal),
             ),
@@ -101,9 +121,15 @@ impl FormalTypePattern {
                     params
                         .iter()
                         .zip(checked_params)
-                        .map(|(formal, checked)| Self::from_checked(formal, checked))
+                        .map(|(formal, checked)| {
+                            Self::from_checked_instantiation(formal, checked, specialized)
+                        })
                         .collect(),
-                    Box::new(Self::from_checked(ret, checked_ret)),
+                    Box::new(Self::from_checked_instantiation(
+                        ret,
+                        checked_ret,
+                        specialized,
+                    )),
                 )
             }
             (ConcreteHostType::Adt(_, args), DeepTag::TAdt) => {
@@ -116,7 +142,9 @@ impl FormalTypePattern {
                 Self::Adt(
                     args.iter()
                         .zip(checked_args)
-                        .map(|(formal, checked)| Self::from_checked(formal, checked))
+                        .map(|(formal, checked)| {
+                            Self::from_checked_instantiation(formal, checked, specialized)
+                        })
                         .collect(),
                 )
             }
@@ -124,7 +152,11 @@ impl FormalTypePattern {
             | (ConcreteHostType::Option(inner), DeepTag::TAdt) => children
                 .get(1)
                 .map(|checked| {
-                    let inner = Box::new(Self::from_checked(inner, checked));
+                    let inner = Box::new(Self::from_checked_instantiation(
+                        inner,
+                        checked,
+                        specialized,
+                    ));
                     if matches!(formal, ConcreteHostType::List(_)) {
                         Self::List(inner)
                     } else {
@@ -135,8 +167,16 @@ impl FormalTypePattern {
             (ConcreteHostType::Dict(key, value), DeepTag::TAdt) => {
                 match (children.get(1), children.get(2)) {
                     (Some(checked_key), Some(checked_value)) => Self::Dict(
-                        Box::new(Self::from_checked(key, checked_key)),
-                        Box::new(Self::from_checked(value, checked_value)),
+                        Box::new(Self::from_checked_instantiation(
+                            key,
+                            checked_key,
+                            specialized,
+                        )),
+                        Box::new(Self::from_checked_instantiation(
+                            value,
+                            checked_value,
+                            specialized,
+                        )),
                     ),
                     _ => Self::nominal(formal),
                 }
@@ -146,11 +186,16 @@ impl FormalTypePattern {
                     items
                         .iter()
                         .zip(children)
-                        .map(|(formal, checked)| Self::from_checked(formal, checked))
+                        .map(|(formal, checked)| {
+                            Self::from_checked_instantiation(formal, checked, specialized)
+                        })
                         .collect(),
                 )
             }
             (ConcreteHostType::Tensor(tensor), DeepTag::TTensor) => {
+                if specialized {
+                    return Self::nominal(formal);
+                }
                 let Some((_, checked_dims)) = children.split_last() else {
                     return Self::nominal(formal);
                 };
@@ -169,6 +214,54 @@ impl FormalTypePattern {
                 )
             }
             _ => Self::nominal(formal),
+        }
+    }
+
+    /// A checked generic type slot is specialized for stored layout, while
+    /// symbolic extents nested in that slot remain universally quantified.
+    /// Literal axes and every stored scalar, nominal identity and rank remain
+    /// exact. The same residual binder is shared across all argument slots.
+    fn substituted_type(formal: &ConcreteHostType, variable: &str) -> Self {
+        let dimension = |dim: &DimInfo| match dim {
+            DimInfo::Named(name, None) if !is_anonymous(name) => {
+                FormalDimension::Substituted(format!("{variable}:{name}"))
+            }
+            DimInfo::Lit(_) | DimInfo::Named(_, _) => FormalDimension::Nominal,
+        };
+        match formal {
+            ConcreteHostType::Dimension(HostShapeSlot::Dim(dim)) => Self::Dimension(dimension(dim)),
+            ConcreteHostType::Tensor(tensor) => {
+                Self::Tensor(tensor.dims.iter().map(dimension).collect())
+            }
+            ConcreteHostType::Function(params, ret) => Self::Function(
+                params
+                    .iter()
+                    .map(|param| Self::substituted_type(param, variable))
+                    .collect(),
+                Box::new(Self::substituted_type(ret, variable)),
+            ),
+            ConcreteHostType::Adt(_, args) => Self::Adt(
+                args.iter()
+                    .map(|arg| Self::substituted_type(arg, variable))
+                    .collect(),
+            ),
+            ConcreteHostType::List(inner) => {
+                Self::List(Box::new(Self::substituted_type(inner, variable)))
+            }
+            ConcreteHostType::Option(inner) => {
+                Self::Option(Box::new(Self::substituted_type(inner, variable)))
+            }
+            ConcreteHostType::Dict(key, value) => Self::Dict(
+                Box::new(Self::substituted_type(key, variable)),
+                Box::new(Self::substituted_type(value, variable)),
+            ),
+            ConcreteHostType::Tuple(items) => Self::Tuple(
+                items
+                    .iter()
+                    .map(|item| Self::substituted_type(item, variable))
+                    .collect(),
+            ),
+            _ => Self::Exact,
         }
     }
 
@@ -239,13 +332,34 @@ impl CallTypeInstantiation {
         formal: &ConcreteHostType,
         actual: &ConcreteHostType,
     ) -> bool {
+        self.admits_with_slot(pattern, formal, actual, false)
+    }
+
+    /// A lowering-generated slot that still spells the formal is not an
+    /// observation of a caller value. Concrete slot evidence remains binding.
+    fn admits_call_slot(
+        &mut self,
+        pattern: &FormalTypePattern,
+        formal: &ConcreteHostType,
+        actual: &ConcreteHostType,
+    ) -> bool {
+        self.admits_with_slot(pattern, formal, actual, true)
+    }
+
+    fn admits_with_slot(
+        &mut self,
+        pattern: &FormalTypePattern,
+        formal: &ConcreteHostType,
+        actual: &ConcreteHostType,
+        call_slot: bool,
+    ) -> bool {
         match (pattern, formal, actual) {
             (FormalTypePattern::Exact, _, _) => formal == actual,
             (
                 FormalTypePattern::Dimension(pattern),
                 ConcreteHostType::Dimension(HostShapeSlot::Dim(formal)),
                 ConcreteHostType::Dimension(HostShapeSlot::Dim(actual)),
-            ) => self.admits_dimension(pattern, formal, actual),
+            ) => self.admits_dimension(pattern, formal, actual, call_slot),
             (
                 FormalTypePattern::Function(pattern_params, pattern_ret),
                 ConcreteHostType::Function(formal_params, formal_ret),
@@ -257,8 +371,10 @@ impl CallTypeInstantiation {
                         .iter()
                         .zip(formal_params)
                         .zip(actual_params)
-                        .all(|((pattern, formal), actual)| self.admits(pattern, formal, actual))
-                    && self.admits(pattern_ret, formal_ret, actual_ret)
+                        .all(|((pattern, formal), actual)| {
+                            self.admits_with_slot(pattern, formal, actual, call_slot)
+                        })
+                    && self.admits_with_slot(pattern_ret, formal_ret, actual_ret, call_slot)
             }
             (
                 FormalTypePattern::Adt(pattern_args),
@@ -268,11 +384,11 @@ impl CallTypeInstantiation {
                 formal_name == actual_name
                     && pattern_args.len() == formal_args.len()
                     && formal_args.len() == actual_args.len()
-                    && pattern_args
-                        .iter()
-                        .zip(formal_args)
-                        .zip(actual_args)
-                        .all(|((pattern, formal), actual)| self.admits(pattern, formal, actual))
+                    && pattern_args.iter().zip(formal_args).zip(actual_args).all(
+                        |((pattern, formal), actual)| {
+                            self.admits_with_slot(pattern, formal, actual, call_slot)
+                        },
+                    )
             }
             (
                 FormalTypePattern::List(pattern),
@@ -283,14 +399,14 @@ impl CallTypeInstantiation {
                 FormalTypePattern::Option(pattern),
                 ConcreteHostType::Option(formal),
                 ConcreteHostType::Option(actual),
-            ) => self.admits(pattern, formal, actual),
+            ) => self.admits_with_slot(pattern, formal, actual, call_slot),
             (
                 FormalTypePattern::Dict(key_pattern, value_pattern),
                 ConcreteHostType::Dict(formal_key, formal_value),
                 ConcreteHostType::Dict(actual_key, actual_value),
             ) => {
-                self.admits(key_pattern, formal_key, actual_key)
-                    && self.admits(value_pattern, formal_value, actual_value)
+                self.admits_with_slot(key_pattern, formal_key, actual_key, call_slot)
+                    && self.admits_with_slot(value_pattern, formal_value, actual_value, call_slot)
             }
             (
                 FormalTypePattern::Tuple(patterns),
@@ -303,13 +419,15 @@ impl CallTypeInstantiation {
                         .iter()
                         .zip(formal)
                         .zip(actual)
-                        .all(|((pattern, formal), actual)| self.admits(pattern, formal, actual))
+                        .all(|((pattern, formal), actual)| {
+                            self.admits_with_slot(pattern, formal, actual, call_slot)
+                        })
             }
             (
                 FormalTypePattern::Tensor(dimensions),
                 ConcreteHostType::Tensor(formal),
                 ConcreteHostType::Tensor(actual),
-            ) => self.admits_tensor(dimensions, formal, actual),
+            ) => self.admits_tensor(dimensions, formal, actual, call_slot),
             _ => false,
         }
     }
@@ -319,15 +437,16 @@ impl CallTypeInstantiation {
         dimensions: &[FormalDimension],
         formal: &TensorType,
         actual: &TensorType,
+        call_slot: bool,
     ) -> bool {
         formal.precision == actual.precision
             && dimensions.len() == formal.dims.len()
             && formal.dims.len() == actual.dims.len()
-            && dimensions
-                .iter()
-                .zip(&formal.dims)
-                .zip(&actual.dims)
-                .all(|((pattern, formal), actual)| self.admits_dimension(pattern, formal, actual))
+            && dimensions.iter().zip(&formal.dims).zip(&actual.dims).all(
+                |((pattern, formal), actual)| {
+                    self.admits_dimension(pattern, formal, actual, call_slot)
+                },
+            )
     }
 
     fn admits_dimension(
@@ -335,28 +454,52 @@ impl CallTypeInstantiation {
         pattern: &FormalDimension,
         formal: &DimInfo,
         actual: &DimInfo,
+        call_slot: bool,
     ) -> bool {
         match pattern {
             FormalDimension::Quantified(key) => {
                 if formal == actual {
                     return true;
                 }
-                match self.dimensions.get(key) {
-                    // A binder bound only to an anonymous runtime extent
-                    // takes the first concrete dimension it later meets, so
-                    // two distinct names after it disagree in either order.
-                    Some(DimInfo::Named(bound, None)) if is_anonymous(bound) => {
-                        self.dimensions.insert(key.clone(), actual.clone());
-                        true
-                    }
-                    Some(bound) => dimensions_compatible(bound, actual),
-                    None => {
-                        self.dimensions.insert(key.clone(), actual.clone());
-                        true
-                    }
-                }
+                self.bind_dimension(key, actual)
             }
+            FormalDimension::Substituted(_) if call_slot && formal == actual => true,
+            FormalDimension::Substituted(key) => self.bind_dimension(key, actual),
             FormalDimension::Nominal => dimensions_compatible(formal, actual),
+        }
+    }
+
+    fn bind_dimension(&mut self, key: &str, actual: &DimInfo) -> bool {
+        match self.dimensions.get(key) {
+            Some(DimInfo::Named(bound, None)) if is_anonymous(bound) => {
+                self.dimensions.insert(key.to_owned(), actual.clone());
+                true
+            }
+            Some(bound) => {
+                if !dimensions_compatible(bound, actual) {
+                    return false;
+                }
+                // Keep both the nominal identity and every known extent.
+                // A named unknown followed by 4 must still reject a later 5.
+                let refined = match (bound, actual) {
+                    (DimInfo::Named(name, None), DimInfo::Lit(size))
+                    | (DimInfo::Lit(size), DimInfo::Named(name, None))
+                        if !is_anonymous(name) =>
+                    {
+                        Some(DimInfo::Named(name.clone(), Some(*size)))
+                    }
+                    (DimInfo::Named(_, None), DimInfo::Named(_, Some(_))) => Some(actual.clone()),
+                    _ => None,
+                };
+                if let Some(refined) = refined {
+                    self.dimensions.insert(key.to_owned(), refined);
+                }
+                true
+            }
+            None => {
+                self.dimensions.insert(key.to_owned(), actual.clone());
+                true
+            }
         }
     }
 }
@@ -435,6 +578,24 @@ fn build_signatures(
 ) -> Result<BTreeMap<String, Signature>, OwnershipError> {
     let mut signatures = BTreeMap::new();
     for function in &host.functions {
+        let specialized_signature = (function.origin == HostFunctionOrigin::Monomorphized)
+            .then(|| function.name.rsplit_once("__mono_").map(|(name, _)| name))
+            .flatten()
+            .and_then(|name| checked.signature_inference().functions.get(name))
+            .filter(|inference| inference.authored_signature)
+            .map(|inference| {
+                chelis_types::infer::type_to_deep_expr(
+                    inference
+                        .authored_signature_type
+                        .as_ref()
+                        .unwrap_or(&inference.checked_signature),
+                )
+            });
+        let specialized_params = specialized_signature
+            .as_ref()
+            .and_then(|signature| declared_params_from_signature(signature, function.params.len()));
+        // Ownership modes retain their existing checked contract; only the
+        // specialization's pattern reads the preserved generic provenance.
         let declarations = declared_params(checked, &function.name, function.params.len())
             .ok_or_else(|| OwnershipError::MissingSignature {
                 function: function.name.clone(),
@@ -443,12 +604,20 @@ fn build_signatures(
             .params
             .iter()
             .zip(declarations)
-            .map(|(param, declared)| ParamSpec {
+            .enumerate()
+            .map(|(index, (param, declared))| ParamSpec {
                 mode: declared.mode,
                 ty: param.ty.clone(),
                 type_pattern: if function.origin == HostFunctionOrigin::Authored {
                     FormalTypePattern::from_checked(&param.ty, declared.checked_type)
+                } else if let Some(specialized) = specialized_params
+                    .as_ref()
+                    .and_then(|params| params.get(index))
+                {
+                    FormalTypePattern::from_specialized_checked(&param.ty, specialized.checked_type)
                 } else {
+                    // No checked generic provenance grants no residual
+                    // polymorphism, even if a symbol resembles a specialization.
                     FormalTypePattern::nominal(&param.ty)
                 },
                 callback_modes: declared.callback_modes,
@@ -475,6 +644,10 @@ fn declared_params<'a>(
         .type_env()
         .get(name)
         .or_else(|| checked.type_env().get(generic_name))?;
+    declared_params_from_signature(ty, arity)
+}
+
+fn declared_params_from_signature(ty: &Expr, arity: usize) -> Option<Vec<DeclaredParam<'_>>> {
     let (params, _) = fn_type_parts(ty)?;
     if params.len() != arity {
         return None;
@@ -1252,7 +1425,7 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
                     for (index, ((arg, arg_ty), spec)) in
                         args.iter().zip(arg_tys).zip(&specs).enumerate()
                     {
-                        if !instantiation.admits(&spec.type_pattern, &spec.ty, arg_ty) {
+                        if !instantiation.admits_call_slot(&spec.type_pattern, &spec.ty, arg_ty) {
                             return Err(OwnershipError::CallArgumentType {
                                 unit: self.unit_name.clone(),
                                 callee: function.clone(),
@@ -3246,8 +3419,200 @@ fn lower_function(
 mod call_type_instantiation_tests {
     use super::*;
 
+    // [04-ADT-1/2]: specializing a stored generic type preserves its
+    // representation-erased dimension binders, without changing its layout.
+    #[test]
+    fn specialized_type_slots_keep_consistent_residual_dimensions() {
+        let checked = chelis_deep::parser::parse_str("(t-var {} a)")
+            .unwrap()
+            .remove(0);
+        let column = |name: &str, precision| {
+            ConcreteHostType::Adt(
+                "Column".into(),
+                vec![
+                    ConcreteHostType::Dimension(HostShapeSlot::Dim(DimInfo::Named(
+                        name.into(),
+                        None,
+                    ))),
+                    ConcreteHostType::Scalar(precision),
+                ],
+            )
+        };
+        let formal = column("n", Prim::F32);
+        let pattern = FormalTypePattern::from_specialized_checked(&formal, &checked);
+        let mut staged_call = CallTypeInstantiation::default();
+        assert!(staged_call.admits_call_slot(&pattern, &formal, &formal));
+        assert!(staged_call.admits(&pattern, &formal, &column("d83", Prim::F32)));
+        assert!(staged_call.admits_call_slot(&pattern, &formal, &formal));
+        assert!(!staged_call.admits(&pattern, &formal, &column("d84", Prim::F32)));
+        let mut instantiation = CallTypeInstantiation::default();
+        assert!(instantiation.admits(&pattern, &formal, &column("d83", Prim::F32)));
+        assert!(instantiation.admits(&pattern, &formal, &column("d83", Prim::F32)));
+        assert!(!instantiation.admits(&pattern, &formal, &column("d84", Prim::F32)));
+        assert!(!CallTypeInstantiation::default().admits(
+            &pattern,
+            &formal,
+            &column("d83", Prim::F64)
+        ));
+        assert!(!CallTypeInstantiation::default().admits(
+            &FormalTypePattern::nominal(&formal),
+            &formal,
+            &column("d83", Prim::F32)
+        ));
+        for actuals in [
+            [column("n", Prim::F32), column("d83", Prim::F32)],
+            [column("d83", Prim::F32), column("n", Prim::F32)],
+        ] {
+            let mut call = CallTypeInstantiation::default();
+            assert!(call.admits(&pattern, &formal, &actuals[0]));
+            assert!(!call.admits(&pattern, &formal, &actuals[1]));
+        }
+        let other_checked = chelis_deep::parser::parse_str("(t-var {} b)")
+            .unwrap()
+            .remove(0);
+        let other = FormalTypePattern::from_specialized_checked(&formal, &other_checked);
+        let mut call = CallTypeInstantiation::default();
+        assert!(call.admits(&pattern, &formal, &column("d83", Prim::F32)));
+        assert!(call.admits(&other, &formal, &column("d84", Prim::F32)));
+        let literal = ConcreteHostType::Adt(
+            "Column".into(),
+            vec![ConcreteHostType::Dimension(HostShapeSlot::Dim(
+                DimInfo::Lit(3),
+            ))],
+        );
+        let wrong = ConcreteHostType::Adt(
+            "Column".into(),
+            vec![ConcreteHostType::Dimension(HostShapeSlot::Dim(
+                DimInfo::Lit(4),
+            ))],
+        );
+        let pattern = FormalTypePattern::from_specialized_checked(&literal, &checked);
+        assert!(CallTypeInstantiation::default().admits(&pattern, &literal, &literal));
+        assert!(!CallTypeInstantiation::default().admits(&pattern, &literal, &wrong));
+        let formal = ConcreteHostType::Adt(
+            "Column".into(),
+            vec![ConcreteHostType::Dimension(HostShapeSlot::Dim(
+                DimInfo::Named("n".into(), None),
+            ))],
+        );
+        let pattern = FormalTypePattern::from_specialized_checked(&formal, &checked);
+        let mut call = CallTypeInstantiation::default();
+        assert!(call.admits_call_slot(&pattern, &formal, &literal));
+        assert!(!call.admits(&pattern, &formal, &wrong));
+        let mut call = CallTypeInstantiation::default();
+        assert!(call.admits(&pattern, &formal, &formal));
+        assert!(call.admits(&pattern, &formal, &literal));
+        assert!(!call.admits(&pattern, &formal, &wrong));
+        let five = ConcreteHostType::Adt(
+            "Column".into(),
+            vec![ConcreteHostType::Dimension(HostShapeSlot::Dim(
+                DimInfo::Lit(5),
+            ))],
+        );
+        let mut call = CallTypeInstantiation::default();
+        assert!(call.admits(&pattern, &formal, &formal));
+        assert!(call.admits(&pattern, &formal, &wrong));
+        assert!(!call.admits(&pattern, &formal, &five));
+        let named = |name: &str| {
+            ConcreteHostType::Adt(
+                "Column".into(),
+                vec![ConcreteHostType::Dimension(HostShapeSlot::Dim(
+                    DimInfo::Named(name.into(), None),
+                ))],
+            )
+        };
+        for names in [["n", "m"], ["m", "n"]] {
+            let mut call = CallTypeInstantiation::default();
+            assert!(call.admits_call_slot(&pattern, &formal, &wrong));
+            assert!(call.admits(&pattern, &formal, &named(names[0])));
+            assert!(!call.admits(&pattern, &formal, &named(names[1])));
+        }
+        let mut call = CallTypeInstantiation::default();
+        assert!(call.admits(&pattern, &formal, &wrong));
+        assert!(call.admits(&pattern, &formal, &named("n")));
+        assert!(!call.admits(&pattern, &formal, &named("m")));
+    }
+
     fn tensor(dims: Vec<DimInfo>, precision: Prim) -> ConcreteHostType {
         ConcreteHostType::Tensor(TensorType { dims, precision })
+    }
+
+    #[test]
+    fn residual_dimensions_are_limited_to_checked_type_substitution_slots() {
+        let parse = |source| chelis_deep::parser::parse_str(source).unwrap().remove(0);
+        let formal = tensor(vec![DimInfo::Named("n".into(), None)], Prim::F32);
+        let actual = tensor(vec![DimInfo::Named("d83".into(), None)], Prim::F32);
+        let checked = parse("(t-tensor {} (d-var {} d0) (t-prim {} f32))");
+        let nominal = FormalTypePattern::from_specialized_checked(&formal, &checked);
+        assert!(!CallTypeInstantiation::default().admits(&nominal, &formal, &actual));
+        let generic = parse("(t-var {} a)");
+        let residual = FormalTypePattern::from_specialized_checked(&formal, &generic);
+        assert!(CallTypeInstantiation::default().admits(&residual, &formal, &actual));
+        for wrong in [
+            tensor(vec![DimInfo::Named("d83".into(), None)], Prim::F64),
+            tensor(vec![DimInfo::Named("d83".into(), None); 2], Prim::F32),
+        ] {
+            assert!(!CallTypeInstantiation::default().admits(&residual, &formal, &wrong));
+        }
+        for name in ["*", ""] {
+            let wildcard = tensor(vec![DimInfo::Named(name.into(), None)], Prim::F32);
+            let pattern = FormalTypePattern::from_specialized_checked(&wildcard, &generic);
+            let mut call = CallTypeInstantiation::default();
+            assert!(call.admits(
+                &pattern,
+                &wildcard,
+                &tensor(vec![DimInfo::Lit(3)], Prim::F32)
+            ));
+            assert!(call.admits(
+                &pattern,
+                &wildcard,
+                &tensor(vec![DimInfo::Lit(4)], Prim::F32)
+            ));
+        }
+        let checked = parse("(t-adt {} Column (d-var {} d0))");
+        let formal = ConcreteHostType::Adt(
+            "Column".into(),
+            vec![ConcreteHostType::Dimension(HostShapeSlot::Dim(
+                DimInfo::Named("n".into(), None),
+            ))],
+        );
+        let actual = ConcreteHostType::Adt(
+            "Column".into(),
+            vec![ConcreteHostType::Dimension(HostShapeSlot::Dim(
+                DimInfo::Named("d83".into(), None),
+            ))],
+        );
+        let nominal = FormalTypePattern::from_specialized_checked(&formal, &checked);
+        assert!(!CallTypeInstantiation::default().admits(&nominal, &formal, &actual));
+    }
+
+    #[test]
+    fn call_slot_placeholders_remain_nonbinding_inside_partial_instantiations() {
+        let checked = chelis_deep::parser::parse_str("(t-tuple {} (t-var {} a) (t-var {} b))")
+            .unwrap()
+            .remove(0);
+        let axis = |dim| tensor(vec![dim], Prim::F32);
+        let formal = ConcreteHostType::Tuple(vec![
+            axis(DimInfo::Named("n".into(), None)),
+            axis(DimInfo::Named("m".into(), None)),
+        ]);
+        let slot = ConcreteHostType::Tuple(vec![
+            axis(DimInfo::Named("n".into(), None)),
+            axis(DimInfo::Lit(4)),
+        ]);
+        let actual = ConcreteHostType::Tuple(vec![
+            axis(DimInfo::Named("d83".into(), None)),
+            axis(DimInfo::Lit(4)),
+        ]);
+        let wrong = ConcreteHostType::Tuple(vec![
+            axis(DimInfo::Named("d83".into(), None)),
+            axis(DimInfo::Lit(5)),
+        ]);
+        let pattern = FormalTypePattern::from_specialized_checked(&formal, &checked);
+        let mut call = CallTypeInstantiation::default();
+        assert!(call.admits_call_slot(&pattern, &formal, &slot));
+        assert!(call.admits(&pattern, &formal, &actual));
+        assert!(!call.admits(&pattern, &formal, &wrong));
     }
 
     #[test]

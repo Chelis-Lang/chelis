@@ -1145,3 +1145,132 @@ fn recursive_checked_formal_completion_preserves_dimension_errors() {
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("DimensionMismatch"));
 }
+
+// [04-ADT-1/2], section 4.7: a retained dimension-generic Frame
+// interface passes a caller-scoped Column into a stored-generic builder.
+// The metadata formal and the actual owner have distinct activation names.
+const RETAINED_FRAME_GENERIC_SLOT: &str = r#"type Column[n] =
+  | FloatCol(tensor[n, f32])
+  | BoolCol(tensor[n, bool])
+def join_pairs[n](xs: List[(string, Column[n])], ys: List[(string, Column[n])]) -> List[(string, Column[n])] = if eq(len(ys), 0i64) then xs else join_pairs(append(xs, index(ys, 0i64)), skip(ys, 1i64))
+def extract[n](pairs: List[(string, Column[n])], target: string, acc: List[(string, Column[n])]) -> (Column[n], List[(string, Column[n])]) =
+  if eq(len(pairs), 0i64) then fail("missing") else {
+    hp = index(pairs, 0i64)
+    if eq(hp.0, target) then (hp.1, join_pairs(acc, skip(pairs, 1i64))) else extract(skip(pairs, 1i64), target, append(acc, hp))
+  }
+def reorder[n](pairs: List[(string, Column[n])], order: List[string], acc: List[(string, Column[n])]) -> List[(string, Column[n])] =
+  if eq(len(order), 0i64) then acc else {
+    name = index(order, 0i64)
+    matched = extract(pairs, name, [])
+    reorder(matched.1, skip(order, 1i64), append(acc, (name, matched.0)))
+  }
+type Hamt[a] =
+  | Empty
+  | Leaf { key: string, value: a, next: Hamt[a] }
+def hamt_from_pairs[a](pairs: List[(string, a)]) -> Hamt[a] = from_pairs_rec(pairs, Empty)
+def from_pairs_rec[a](pairs: List[(string, a)], acc: Hamt[a]) -> Hamt[a] =
+  if eq(len(pairs), 0i64) then acc else {
+    pair = index(pairs, 0i64)
+    from_pairs_rec(skip(pairs, 1i64), Leaf { key: pair.0, value: pair.1, next: acc })
+  }
+def hamt_entries[a](node: Hamt[a]) -> List[(string, a)] =
+  match node with {
+    | Empty => []
+    | Leaf { key, value, next } => append(hamt_entries(next), (key, value))
+  }
+def clip[n, k](col: Column[n], end: i64) -> Column[k] =
+  match col with {
+    | FloatCol(xs) => if lte(end, 0i64) then FloatCol(to_tensor([])) else FloatCol(gather(xs, to_tensor(range(0i64, end)), 0i32))
+    | BoolCol(xs) => if lte(end, 0i64) then BoolCol(to_tensor([])) else BoolCol(gather(xs, to_tensor(range(0i64, end)), 0i32))
+  }
+type Frame[n] =
+  | Frame { cols: Hamt[Column[n]], col_order: List[string] }
+def from_pairs[n](pairs: List[(string, Column[n])]) -> Frame[n] = Frame { cols: hamt_from_pairs(pairs), col_order: map(fn (pair: (string, Column[n])) -> pair.0, pairs) }
+def cut[n, k](df: Frame[n], end: i64) -> Frame[k] =
+  match df with {
+    | Frame { cols, col_order } => {
+    pairs = hamt_entries(cols)
+    clipped = map(fn (pair: (string, Column[n])) -> (pair.0, clip(pair.1, end)), pairs)
+    from_pairs(reorder(clipped, col_order, []))
+  }
+  }
+def result() -> i64 = {
+  packed = cut(from_pairs([("a", FloatCol(to_tensor([1.0f32, 2.0f32, 3.0f32])))]), 2i64)
+  match packed with {
+    | Frame { cols, col_order } => match index(hamt_entries(cols), 0i64).1 with {
+    | FloatCol(xs) => add(mul(numel(xs), 100i64), cast(index(to_list(xs), 1i64), i64))
+    | BoolCol(xs) => if index(to_list(xs), 0i64) then 1i64 else 0i64
+  }
+  }
+}
+out = print(result())
+"#;
+
+#[test]
+fn retained_frame_generic_slots_preserve_named_dimension_instantiation() {
+    for dtype in ["f32", "f64"] {
+        let source = RETAINED_FRAME_GENERIC_SLOT.replace("f32", dtype);
+        let stem = format!("retained_frame_{dtype}");
+        let evaluated = eval_first_line(&source, &stem);
+        assert_eq!(evaluated, "202");
+        let (_dir, out) = build_ok(&source, &stem);
+        assert_eq!(run_first_line(&out, &stem), evaluated);
+    }
+}
+
+#[test]
+fn retained_frame_generic_slots_preserve_static_and_runtime_dimension_claims() {
+    const INPUT: &str = "[(\"a\", FloatCol(to_tensor([1.0f32, 2.0f32, 3.0f32])))]";
+    let mismatched = RETAINED_FRAME_GENERIC_SLOT.replace(INPUT,
+        "[(\"a\", FloatCol(to_tensor([1.0f32, 2.0f32, 3.0f32]))), (\"b\", FloatCol(to_tensor([4.0f32, 5.0f32])))]");
+    let (_dir, artifact, error) = build_err(&mismatched, "retained_frame_literal_mismatch");
+    assert!(error.contains("DimensionMismatch"), "{error}");
+    assert!(!artifact.exists());
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("retained_frame_literal_mismatch.ch");
+    write_file(&path, &mismatched);
+    let result = chelis()
+        .args(["eval", "--file"])
+        .arg(&path)
+        .output()
+        .unwrap();
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("DimensionMismatch"));
+
+    let dynamic = format!(
+        "def dynamic_column[n](count: i64) -> Column[n] = FloatCol(insert(scalar_to_tensor(1.0f32), 0i32, count))\n{}",
+        RETAINED_FRAME_GENERIC_SLOT.replace(
+            INPUT,
+            "[(\"a\", dynamic_column(3i64)), (\"b\", dynamic_column(4i64))]"
+        )
+    );
+    let matching = dynamic.replace("dynamic_column(4i64)", "dynamic_column(3i64)");
+    assert_eq!(
+        eval_first_line(&matching, "retained_frame_runtime_match"),
+        "201"
+    );
+    let (_matching_dir, out) = build_ok(&matching, "retained_frame_runtime_match");
+    assert_eq!(run_first_line(&out, "retained_frame_runtime_match"), "201");
+    let path = dir.path().join("retained_frame_runtime_mismatch.ch");
+    write_file(&path, &dynamic);
+    let result = chelis()
+        .args(["eval", "--file"])
+        .arg(&path)
+        .output()
+        .unwrap();
+    assert!(!result.status.success());
+    let error = String::from_utf8_lossy(&result.stderr);
+    assert!(
+        error.contains("extent `n`") && error.contains("numeric trap: domain"),
+        "{error}"
+    );
+    let (_dir, out) = build_ok(&dynamic, "retained_frame_runtime_mismatch");
+    assert!(link_generated(&out, "retained_frame_runtime_mismatch.c", "run").success());
+    let result = StdCommand::new(out.join("run")).output().unwrap();
+    assert!(!result.status.success());
+    let error = String::from_utf8_lossy(&result.stderr);
+    assert!(
+        error.contains("extent `n`") && error.contains("numeric trap: domain"),
+        "{error}"
+    );
+}
