@@ -11,7 +11,6 @@ use dlpack::{
 use native_tensor::{CompiledInputs, CompiledTensorResults, ValidatedTensor, execute_checked};
 use source_json::SourceJson;
 use std::collections::{BTreeMap, BTreeSet};
-use std::env;
 use std::ffi::{c_char, c_int, c_void};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -863,16 +862,6 @@ fn runtime_error(err: chelis_runtime_bundle::RuntimeError) -> CompileAndLoadErro
     CompileAndLoadError::Message(err.to_string())
 }
 
-/// `reef_home` sourced exactly as the CLI does at its
-/// `load_or_compile_for_package` call site (`run_eval_in_context` in
-/// crates/chelis-cli/src/main.rs): `CHELIS_REEF_HOME` if set, else an empty
-/// path so `load_or_compile_for_package` resolves the XDG cache fallback.
-fn reef_home_from_env() -> PathBuf {
-    env::var_os("CHELIS_REEF_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(""))
-}
-
 /// Reject an empty / whitespace-only `project_root=` explicitly (#822 review,
 /// Fix C). Python `project_root=""` reaches Rust as `PathBuf::from("")`, and
 /// the `reef.toml` probe would then resolve against the process CWD —
@@ -909,7 +898,9 @@ fn load_reef_context(
             root.display()
         )));
     }
-    let reef_home = reef_home_from_env();
+    // The empty `reef_home` makes the cache resolve its directory through
+    // the shared resolver (`chelis_reef::cache_dir_for`), as the CLI does.
+    let reef_home = PathBuf::new();
     // The LocalRegistry hash-gap fallback (cache probe errors on a
     // LocalRegistry dep such as `chelis-std` → uncached `compile_reef_context`)
     // lives in the shared compiler-api helper; see its doc for the precedent
@@ -2067,6 +2058,7 @@ mod native_dlpack_owner_tests;
 mod tests {
     use super::*;
     use pyo3::types::{IntoPyDict, PyModule};
+    use std::env;
     use std::fs;
     use std::path::PathBuf;
     use tempfile::tempdir;

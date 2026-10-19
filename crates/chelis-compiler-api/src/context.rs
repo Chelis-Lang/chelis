@@ -829,16 +829,14 @@ pub fn load_or_compile_package_context(
     runtime: &'static EmbeddedRuntime,
 ) -> Result<LoadedContext, CompilerError> {
     let _fp_env = chelis_runtime::FpEnvGuard::enter();
-    // Resolve the compiled-context cache directory. When `CHELIS_REEF_HOME`
-    // is set, `reef_home` is non-empty and the cache lives at
-    // `<reef_home>/.cache/compiled/`. When it is unset, `reef_home` is
-    // empty and a bare `<reef_home>/.cache/compiled/...` join would land
-    // at a relative path in CWD, leaking artifacts into the working tree
-    // — so resolve the XDG fallback (`$XDG_CACHE_HOME/chelis/compiled/`
-    // -> `~/.cache/chelis/compiled/`) instead. This is the same fallback
-    // the chelis-std typecheck cache uses; it un-gates the disk cache for
-    // the no-`CHELIS_REEF_HOME` test-worker workload. Only when none of
-    // the three roots resolves do we fall through to an uncached compile.
+    // Resolve the compiled-context cache directory. A non-empty
+    // `reef_home` names the cache root explicitly:
+    // `<reef_home>/.cache/compiled/`. An empty `reef_home` asks for the
+    // shared resolver `cache_dir_for("compiled")`, which reads
+    // `CHELIS_REEF_HOME`, `CHELIS_HOME`, `XDG_CACHE_HOME`, and `HOME` in
+    // that order. A bare join of the empty path would land at a relative
+    // path in CWD and leak artifacts into the working tree. Only when no
+    // root resolves do we fall through to an uncached compile.
     let cache_dir = if reef_home.as_os_str().is_empty() {
         match crate::stdlib_cache::cache_dir_for("compiled") {
             Some(dir) => dir,

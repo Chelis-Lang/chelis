@@ -1161,6 +1161,101 @@ fn locked_github_origin_autofetches_into_cold_registry() {
     assert_nautilus_installed(&reef_home);
 }
 
+/// Run `chelis build --emit-c` for the entry of the staged downstream
+/// project with `CHELIS_HOME` as the only home variable and an unwritable
+/// `HOME`. The build fetches `nautilus` into the registry and fills the
+/// compiler caches. `extra` adds variables to that environment. Returns
+/// the stderr text.
+fn reef_build_under_chelis_home_only(
+    app: &Path,
+    chelis_home: &Path,
+    unwritable_home: &Path,
+    api_base: &str,
+    extra: &[(&str, &str)],
+) -> String {
+    let mut command = Command::cargo_bin("chelis").expect("chelis binary");
+    command
+        .env_remove("CHELIS_REEF_HOME")
+        .env_remove("XDG_CACHE_HOME")
+        .env("CHELIS_HOME", chelis_home)
+        .env("HOME", unwritable_home)
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .env("CHELIS_REEF_GITHUB_BASE_API", api_base)
+        .env("GITHUB_TOKEN", "unit-test-token")
+        .env("PATH", "")
+        .current_dir(app)
+        .args(["build", "--emit-c", "src/main.ch"]);
+    for (key, value) in extra {
+        command.env(key, value);
+    }
+    let output = command.output().expect("run chelis build");
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert!(
+        output.status.success(),
+        "chelis build under CHELIS_HOME failed\nstdout:\n{}\nstderr:\n{stderr}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    stderr
+}
+
+/// Assert that the registry and the compiler caches of one build are
+/// under `$CHELIS_HOME/reef`, and that the build printed no cache warning.
+fn assert_state_under_chelis_home(chelis_home: &Path, stderr: &str) {
+    assert!(
+        !stderr.contains("warning: failed to") && !stderr.contains("cache at"),
+        "a build with only CHELIS_HOME set must print no cache warning, got:\n{stderr}"
+    );
+    assert_nautilus_installed(&chelis_home.join("reef"));
+    let cache_root = chelis_home.join("reef").join(".cache");
+    for cache in ["prepared-graphs", "typecheck"] {
+        let dir = cache_root.join(cache);
+        let entries = fs::read_dir(&dir)
+            .unwrap_or_else(|error| panic!("read {}: {error}", dir.display()))
+            .count();
+        assert!(entries > 0, "{} must hold a cache entry", dir.display());
+    }
+}
+
+/// chelis#3917: a build that sets only `CHELIS_HOME` keeps the Reef
+/// registry and every compiler cache under `$CHELIS_HOME`, the layout of
+/// `spec/design/chelis_packaging_and_install.md` section 4. `HOME` names
+/// a regular file, so any write under `HOME` fails, even for root. An
+/// empty `CHELIS_REEF_HOME` counts as unset in the second build.
+#[test]
+fn chelis_home_only_build_keeps_registry_and_caches_under_chelis_home() {
+    let _g = file_lock();
+
+    let (archive_bytes, shell_bytes) = synthetic_nautilus_artifacts();
+    let harness = WiremockHarness::new();
+    harness.mount_all(canonical_api_mocks(archive_bytes, shell_bytes));
+    let api_base = harness.uri();
+
+    let outer = tempdir().expect("tempdir");
+    let unwritable_home = outer.path().join("home-is-a-file");
+    fs::write(&unwritable_home, b"not a directory").expect("write HOME file");
+
+    let chelis_home = outer.path().join("chelis-home");
+    let app = stage_downstream_project(outer.path());
+    let stderr =
+        reef_build_under_chelis_home_only(&app, &chelis_home, &unwritable_home, &api_base, &[]);
+    assert_state_under_chelis_home(&chelis_home, &stderr);
+
+    let empty_reef_home = outer.path().join("chelis-home-empty-reef-home");
+    let app = stage_downstream_project(outer.path());
+    let stderr = reef_build_under_chelis_home_only(
+        &app,
+        &empty_reef_home,
+        &unwritable_home,
+        &api_base,
+        &[("CHELIS_REEF_HOME", "")],
+    );
+    assert_state_under_chelis_home(&empty_reef_home, &stderr);
+    assert!(
+        !app.join(".cache").exists() && !app.join("index.json").exists(),
+        "an empty CHELIS_REEF_HOME must not resolve to the working directory"
+    );
+}
+
 // ============================================================
 // Manual gate (real network). Documented invocation:
 //

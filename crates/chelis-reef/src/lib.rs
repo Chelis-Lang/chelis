@@ -33,6 +33,9 @@ pub mod chelis_src;
 pub mod declared_surface;
 mod document_schema;
 mod embedded_runtime;
+/// Resolution of the Chelis home, the Reef registry root, and the cache
+/// directories.
+mod home;
 /// Typed package identities and deterministic bounded local resolution.
 mod package_metadata;
 #[doc(hidden)]
@@ -52,6 +55,7 @@ pub use remote_discovery::{
 };
 
 pub use embedded_runtime::EmbeddedRuntime;
+pub use home::cache_dir_for;
 pub use source_names::{DiagnosticNames, LinkedSourceNames};
 
 pub use document_schema::{
@@ -3116,18 +3120,7 @@ fn prepare_reef_graph_consistently(
 }
 
 fn prepared_graph_cache_path(root: &Path) -> Option<PathBuf> {
-    let cache_dir = if let Some(reef_home) = env::var_os("CHELIS_REEF_HOME") {
-        PathBuf::from(reef_home)
-            .join(".cache")
-            .join("prepared-graphs")
-    } else if let Some(xdg) = env::var_os("XDG_CACHE_HOME") {
-        PathBuf::from(xdg).join("chelis").join("prepared-graphs")
-    } else {
-        PathBuf::from(env::var_os("HOME")?)
-            .join(".cache")
-            .join("chelis")
-            .join("prepared-graphs")
-    };
+    let cache_dir = cache_dir_for("prepared-graphs")?;
     let inputs = prepared_graph_cache_key_input_bytes(root).ok()?;
     let identity: [u8; 32] = Sha256::digest(inputs).into();
     let identity_hex = identity[..16]
@@ -7575,16 +7568,13 @@ fn canonical_root(root: &Path) -> Result<PathBuf, String> {
 }
 
 fn registry_root() -> Result<PathBuf, String> {
-    if let Some(path) = env::var_os("CHELIS_REEF_HOME") {
-        return Ok(PathBuf::from(path));
-    }
-    let home = env::var_os("HOME").ok_or_else(|| "HOME is not set".to_string())?;
-    Ok(PathBuf::from(home).join(".chelis/reef"))
+    home::HomeEnv::from_process().registry_root()
 }
 
 /// Public accessor for the local Reef registry root used by external
 /// callers (the CLI's `--from-github` handler in particular). Returns
-/// `$CHELIS_REEF_HOME` if set, else `$HOME/.chelis/reef`. The directory
+/// `$CHELIS_REEF_HOME`, else `$CHELIS_HOME/reef`, else `$HOME/.chelis/reef`.
+/// Empty values count as unset. The directory
 /// is **not** created here; callers that intend to write should rely on
 /// the install helpers, which do `fs::create_dir_all`.
 pub fn registry_home() -> Result<PathBuf, String> {
@@ -7617,15 +7607,7 @@ pub fn host_platform_slug() -> Option<&'static str> {
 /// The directory is not created here; the install path creates
 /// `<home>/bin/` on demand.
 pub fn chelis_home() -> Result<PathBuf, String> {
-    if let Some(p) = env::var_os("CHELIS_HOME")
-        && !p.is_empty()
-    {
-        return Ok(PathBuf::from(p));
-    }
-    match env::var_os("HOME") {
-        Some(h) if !h.is_empty() => Ok(PathBuf::from(h).join(".chelis")),
-        _ => Err("HOME is not set".to_string()),
-    }
+    home::HomeEnv::from_process().chelis_home()
 }
 
 /// Item 11 (chelis#468): the directory where installed binary artifacts

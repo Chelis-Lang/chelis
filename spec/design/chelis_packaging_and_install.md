@@ -178,6 +178,29 @@ overrides remain for back-compat. **Decision:** the `default_store_root` change
 should precede any shell adopting `reef src` (a small follow-up to chelis#571,
 or folded into the chelisup work).
 
+### 4.1 Registry and cache resolution
+
+One resolver in `chelis-reef` gives the Chelis home, the registry root, and the
+directory of each on-disk compiler cache. An empty variable counts as unset.
+
+| State | Resolution order |
+|---|---|
+| Chelis home | `$CHELIS_HOME`, else `$HOME/.chelis` |
+| reef registry | `$CHELIS_REEF_HOME`, else `$CHELIS_HOME/reef`, else `$HOME/.chelis/reef` |
+| cache `<name>` | `$CHELIS_REEF_HOME/.cache/<name>`, else `$CHELIS_HOME/reef/.cache/<name>`, else `$XDG_CACHE_HOME/chelis/<name>`, else `$HOME/.cache/chelis/<name>` |
+
+The caches are the prepared-graph cache (`prepared-graphs`), the typecheck
+caches (`typecheck`), and the compiled-context cache (`compiled`).
+
+When `CHELIS_REEF_HOME` or `CHELIS_HOME` chooses the registry root, the caches
+go in `<registry>/.cache`. Thus a user or a build sandbox that sets one Chelis
+variable keeps all writable Chelis state under that directory. A Nix build sets
+`HOME` to a directory that does not exist, so it needs this rule. The Chelis
+variables come before `XDG_CACHE_HOME` because they apply only to Chelis.
+`XDG_CACHE_HOME` applies to all programs of the user. Without the two Chelis
+variables, the caches stay in the XDG cache directory, and the default layout
+does not change.
+
 ## 5. Layer 0 — `chelisup` (chelis#164)
 
 A first-party single-binary, rustup-style toolchain installer. It is the

@@ -110,7 +110,7 @@ pub struct SyncOutcome {
 /// Resolve the default source-crate store root under the consolidated
 /// chelis home: `$CHELIS_SRC_HOME` (explicit override, back-compat), else
 /// `$CHELIS_HOME/src`, else `~/.chelis/src`. Empty values count as unset. The `~/.chelis/` home is
-/// shared with the reef registry (`$CHELIS_REEF_HOME`/`~/.chelis/reef`),
+/// shared with the reef registry (`$CHELIS_REEF_HOME`, else `$CHELIS_HOME/reef`),
 /// the toolchain store, and the binary-artifact `bin/` dir, so all chelis
 /// state lives under one root. The store *operations* take an explicit
 /// root; this is only the production default the CLI passes.

@@ -68,7 +68,8 @@
 //! prefix" is the developer's own non-entry modules. So every save of a
 //! sibling module mints a new multi-MiB `chelis-lib-*.tc`, and nothing reclaims
 //! it (the only `remove_file` in the cache path is tempfile cleanup). The cache
-//! lives at `$CHELIS_REEF_HOME/.cache/typecheck` (or the XDG fallback
+//! lives in the `typecheck` directory of [`crate::stdlib_cache::cache_dir_for`]
+//! (for example `$CHELIS_HOME/reef/.cache/typecheck` or the XDG fallback
 //! `~/.cache/chelis/typecheck`) and is **unbounded in user edits** until
 //! chelis#1183 (a size/age bound or a `chelis cache clear`) lands.
 //!
