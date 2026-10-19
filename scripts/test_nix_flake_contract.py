@@ -44,6 +44,28 @@ def nix_json(*args: str) -> object:
     return json.loads(completed.stdout)
 
 
+def copy_tracked_flake(directory: Path) -> Path:
+    """Copy each tracked file to `directory/flake` and return that flake path."""
+    tracked = subprocess.run(
+        ["git", "ls-files", "-z"],
+        cwd=REPO_ROOT,
+        stdout=subprocess.PIPE,
+        check=True,
+    ).stdout.split(b"\0")
+    # Upstream Nix rejects a `path:` flake below a symbolic link, and the
+    # macOS temporary directory is below /var, a symbolic link.
+    flake = directory.resolve() / "flake"
+    for name in tracked:
+        if not name:
+            continue
+        source = REPO_ROOT / os.fsdecode(name)
+        if source.is_symlink() or source.is_file():
+            target = flake / os.fsdecode(name)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target, follow_symlinks=False)
+    return flake
+
+
 def nix_raw(*args: str) -> str:
     completed = subprocess.run(
         [NIX, *args],
@@ -720,24 +742,8 @@ class NixFlakeContractTests(unittest.TestCase):
                 "(_name: package: package.drvPath))",
             )
 
-        tracked = subprocess.run(
-            ["git", "ls-files", "-z"],
-            cwd=REPO_ROOT,
-            stdout=subprocess.PIPE,
-            check=True,
-        ).stdout.split(b"\0")
         with tempfile.TemporaryDirectory() as raw:
-            # Upstream Nix rejects a `path:` flake below a symbolic link, and
-            # the macOS temporary directory is below /var, a symbolic link.
-            flake = Path(raw).resolve() / "flake"
-            for name in tracked:
-                if not name:
-                    continue
-                source = REPO_ROOT / os.fsdecode(name)
-                if source.is_symlink() or source.is_file():
-                    target = flake / os.fsdecode(name)
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(source, target, follow_symlinks=False)
+            flake = copy_tracked_flake(Path(raw))
             before = derivations(flake)
             self.assertEqual(sorted(before), EXPECTED_SYSTEMS)
 
@@ -764,6 +770,65 @@ class NixFlakeContractTests(unittest.TestCase):
                         if before[system][name] != after[system][name]
                     )
                     self.assertEqual(changed, ["chelis", "chelis-runtime", "default"])
+
+    @REQUIRES_NIX
+    def test_documentation_edit_keeps_every_check_derivation(self) -> None:
+        # chelis#3909: each check reads a source view with only the files that
+        # it uses, so a documentation edit gives no check a new derivation.
+        def derivations(flake: Path) -> dict[str, dict[str, str]]:
+            return nix_json(
+                "eval",
+                "--json",
+                f"path:{flake}#checks",
+                "--apply",
+                "builtins.mapAttrs (_system: builtins.mapAttrs "
+                "(_name: check: check.drvPath))",
+            )
+
+        def changed(before: dict[str, dict[str, str]], after: dict[str, dict[str, str]]) -> dict[str, list[str]]:
+            return {
+                system: sorted(name for name in before[system] if before[system][name] != after[system][name])
+                for system in EXPECTED_SYSTEMS
+            }
+
+        def append(path: Path, text: str) -> None:
+            path.write_text(path.read_text(encoding="utf-8") + text, encoding="utf-8")
+
+        with tempfile.TemporaryDirectory() as raw:
+            flake = copy_tracked_flake(Path(raw))
+            before = derivations(flake)
+            self.assertEqual(sorted(before), EXPECTED_SYSTEMS)
+
+            for document in (
+                "README.md",
+                "CHANGELOG.md",
+                "docs/ci_validation.md",
+                "spec/08-backends.md",
+                "packages/chelis-clarabel/README.md",
+            ):
+                append(flake / document, "\nA documentation edit.\n")
+            after = derivations(flake)
+            self.assertEqual(changed(before, after), {system: [] for system in EXPECTED_SYSTEMS})
+
+            # Negative controls: an edit of a file that one check reads changes
+            # that check and the aggregate `native` check, and no other check.
+            linux = ("aarch64-linux", "x86_64-linux")
+            for path, expected in (
+                ("scripts/check_nix_lock_parity.py", {system: ["lockParity", "native"] for system in EXPECTED_SYSTEMS}),
+                (
+                    "scripts/lane_check_scope.py",
+                    {system: ["lane-check", "native"] if system in linux else [] for system in EXPECTED_SYSTEMS},
+                ),
+                (
+                    ".github/scripts/verify_release_smt.py",
+                    {system: ["compilerBehavior", "native"] for system in EXPECTED_SYSTEMS},
+                ),
+            ):
+                with self.subTest(path=path):
+                    append(flake / path, "\n# A script edit.\n")
+                    edited = derivations(flake)
+                    self.assertEqual(changed(after, edited), expected)
+                    after = edited
 
     @REQUIRES_NIX
     def test_chelisup_install_roots_the_nix_closure_and_self_uninstall_removes_it(self) -> None:
@@ -1753,7 +1818,8 @@ class NixSourceContractTests(unittest.TestCase):
         self.assertIn("built.cargoGraph.workspaceMembers", graph)
         self.assertIn("built.crate2nixVersion", graph)
         self.assertIn("built.crate2nixCommand", graph)
-        self.assertIn("${root}/Cargo.nix", graph)
+        self.assertIn("checkSources [ ../Cargo.nix ]", checks)
+        self.assertIn("${crate2nixGraphSources}/Cargo.nix", graph)
         self.assertNotIn("generatedCargoNix", checks)
         self.assertNotIn("crate2nixGraphSync", checks)
         self.assertNotIn("crate2nixRegeneration", checks)
@@ -1765,6 +1831,12 @@ class NixSourceContractTests(unittest.TestCase):
         packages = (REPO_ROOT / "nix" / "packages.nix").read_text(encoding="utf-8")
         self.assertNotIn("${root}", packages)
         self.assertIn("python3 ${packageScripts}/verify_runtime_package.py", packages)
+
+    def test_checks_do_not_interpolate_the_flake_source(self) -> None:
+        # The Nix test of a documentation edit proves the result. This rule
+        # finds the cause of a failure without Nix.
+        checks = (REPO_ROOT / "nix" / "checks.nix").read_text(encoding="utf-8")
+        self.assertNotIn("${root}", checks)
 
     def test_format_check_derives_its_file_set(self) -> None:
         checks = (REPO_ROOT / "nix" / "checks.nix").read_text(encoding="utf-8")
