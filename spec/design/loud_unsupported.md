@@ -1085,8 +1085,11 @@ reference to an omitted generic symbol and never expands recursive source
 without a bound. A self-recursive edge completes unconstrained argument
 slots from the caller's own instantiation (callee slot i corresponds to
 caller slot i on the same def) while keeping derived — possibly permuted —
-slots, so every renaming-orbit member gets its own specialized symbol. Two
-checker-admitted shapes remain on the loud, artifact-free boundary, citing
+slots, so every renaming-orbit member gets its own specialized symbol.
+Missing argument or result layouts are completed from the checker's alias-resolved
+signature, including closed formals that need no stored type-variable substitution.
+Dimension erasure follows the checked ADT registry; it does not resolve an unknown
+stored type or remove a nominal extent claim. Two checker-admitted shapes remain on the loud, artifact-free boundary, citing
 chelis#1158: an outer call whose type application never resolves concrete,
 and a mutually recursive cross-member edge whose argument leaves the callee
 parameter unconstrained (host lowering has no positional correspondence

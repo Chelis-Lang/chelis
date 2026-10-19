@@ -18921,70 +18921,48 @@ fn lower_recursive_generic_call(
         }
     }
 
-    // chelis#1201: a NON-recursive generic call has no in-progress
-    // specialization to complete from, so the block above cannot reach it.
-    // The information it needs is still available: the callee's declared
-    // parameter types. Decode those, solve the call site's type variables
-    // against the slots that DID resolve, then re-decode the unresolved
-    // slots under that substitution. This is what value-level inlining used
-    // to discard by substituting the argument expression over the parameter
-    // name and dropping the parameter's declared type.
-    if param_tys.iter().any(HostTypeTerm::is_unresolved) || ret_ty.is_unresolved() {
-        // A def with no `params` list contributes no declared types to solve
-        // against. Spelled out rather than defaulted, so the empty case is a
-        // stated outcome and not a swallowed one: those slots simply stay
-        // unresolved and reach the residue below
-        // (spec/design/loud_unsupported.md C4.3).
-        let declared: Vec<Option<Expr>> = match params_list_of(&def_body) {
-            Some(params) => params
-                .children_slice()
-                .iter()
-                .map(param_declared_type_expr)
-                .collect::<Vec<_>>(),
-            None => Vec::new(),
-        };
-        let mut subst: UnordMap<String, HostTypeTerm> = UnordMap::new();
-        for (slot, declared_expr) in declared.iter().enumerate() {
-            if let Some(declared_expr) = declared_expr
-                && let Some(actual) = param_tys.get(slot)
-                && !actual.is_unresolved()
-            {
-                let declared_term = decode_host_type_or_raise(declared_expr, &UnordMap::new());
-                solve_host_type_vars(&declared_term, actual, &mut subst);
+    // Complete missing call-site evidence from the checker's alias-resolved
+    // authored signature ([04-ADT-1]). A closed formal supplies its layout
+    // even when there are no stored type variables to solve: tuple projections
+    // in a retained recursive body can lack their own structural type stamp.
+    // Erased dimensions need no type substitution; unresolved stored fields do.
+    if (param_tys.iter().any(HostTypeTerm::is_unresolved) || ret_ty.is_unresolved())
+        && let Some(signature) = checked_authored_function_signature(program, &canonical_name)
+        && let Some((declared_params, declared_ret)) =
+            parse_fn_type_expr_parts(&type_to_deep_expr(signature))
+    {
+        let declared_param_types = declared_params
+            .iter()
+            .map(|declared| decode_host_type_or_raise(declared, &UnordMap::new()))
+            .collect::<Vec<_>>();
+        let declared_ret_type = decode_host_type_or_raise(&declared_ret, &UnordMap::new());
+        let mut subst = UnordMap::new();
+        for (declared, actual) in declared_param_types.iter().zip(&param_tys) {
+            if !actual.is_unresolved() {
+                solve_host_type_vars(declared, actual, &mut subst);
             }
         }
-        // The RETURN type is a binding source too, and often the only one:
-        // `hamt_from_pairs[a](pairs: List[(string, a)]) -> Hamt[a]` called
-        // with an unresolved `pairs` still has a concrete checked result
-        // (`Hamt[Column[...]]`), which pins `a` and thereby completes the
-        // argument slot. Solving from arguments alone leaves the
-        // substitution empty here and the call falls to the [05-UNS-1]
-        // residue (chelis#1201, coral#26's `from_pairs` shape).
-        if !ret_ty.is_unresolved()
-            && let Some(declared_ret) = declared_return_type_expr(program.exprs(), &canonical_name)
-        {
-            let declared_ret_term = decode_host_type_or_raise(&declared_ret, &UnordMap::new());
-            solve_host_type_vars(&declared_ret_term, &ret_ty, &mut subst);
+        if !ret_ty.is_unresolved() {
+            solve_host_type_vars(&declared_ret_type, &ret_ty, &mut subst);
         }
-        if !subst.is_empty() {
-            for (slot, param_ty) in param_tys.iter_mut().enumerate() {
-                if param_ty.is_unresolved()
-                    && let Some(Some(declared_expr)) = declared.get(slot)
-                {
-                    let completed = decode_host_type_or_raise(declared_expr, &subst);
-                    if !completed.is_unresolved() {
-                        *param_ty = completed;
-                    }
-                }
-            }
-            if ret_ty.is_unresolved()
-                && let Some(declared_ret) =
-                    declared_return_type_expr(program.exprs(), &canonical_name)
-            {
-                let completed = decode_host_type_or_raise(&declared_ret, &subst);
+        for (actual, declared) in param_tys.iter_mut().zip(&declared_params) {
+            if actual.is_unresolved() {
+                let completed = canonicalize_representation_erased_adt_args(
+                    decode_host_type_or_raise(declared, &subst),
+                    &definitions,
+                );
                 if !completed.is_unresolved() {
-                    ret_ty = completed;
+                    *actual = completed;
                 }
+            }
+        }
+        if ret_ty.is_unresolved() {
+            let completed = canonicalize_representation_erased_adt_args(
+                decode_host_type_or_raise(&declared_ret, &subst),
+                &definitions,
+            );
+            if !completed.is_unresolved() {
+                ret_ty = completed;
             }
         }
     }
@@ -27519,17 +27497,6 @@ impl Drop for ActiveTypeSubstGuard {
     }
 }
 
-/// The `params` list of a top-level `fn` body (chelis#1201).
-fn params_list_of(fn_expr: &Expr) -> Option<&Node> {
-    let Some((DeepTag::Fn, _, fn_kids)) = stamped_parts(fn_expr) else {
-        return None;
-    };
-    fn_kids
-        .first()
-        .and_then(as_node)
-        .filter(|params| params.tag() == DeepTag::Params)
-}
-
 /// The declared type on a `params` entry: `(name {type: T})` (chelis#1201).
 fn param_declared_type_expr(param: &Expr) -> Option<Expr> {
     let meta = match param {
@@ -27541,45 +27508,6 @@ fn param_declared_type_expr(param: &Expr) -> Option<Expr> {
         _ => return None,
     };
     meta.ty().map(|ty| ty.expression()).cloned()
-}
-
-/// The declared return type of a top-level def, read from its sibling
-/// `defsig`'s `t-fn` (chelis#1201).
-///
-/// A `def`'s own `fn` node carries no signature metadata — the declared
-/// signature is a separate top-level `(defsig {} name (t-fn {} ...))`
-/// item — so this looks the sibling up by the same exact-then-terminal
-/// name rule `find_top_level_def_named` uses.
-fn declared_return_type_expr(exprs: &[Expr], name: &str) -> Option<Expr> {
-    let mut terminal_match: Option<Expr> = None;
-    let mut terminal_is_ambiguous = false;
-    for expr in top_level_items(exprs) {
-        let Some((DeepTag::Defsig, _, kids)) = stamped_parts(expr) else {
-            continue;
-        };
-        let Some(sig_name) = kids.first().and_then(symbol_name) else {
-            continue;
-        };
-        let Some(ret) = kids
-            .last()
-            .and_then(as_node)
-            .filter(|tfn| tfn.tag() == DeepTag::TFn)
-            .and_then(|tfn| tfn.children_slice().last().cloned())
-        else {
-            continue;
-        };
-        if sig_name == name {
-            return Some(ret);
-        }
-        if terminal_name_matches(sig_name, name) {
-            if terminal_match.is_some() {
-                terminal_is_ambiguous = true;
-            } else {
-                terminal_match = Some(ret);
-            }
-        }
-    }
-    (!terminal_is_ambiguous).then_some(terminal_match).flatten()
 }
 
 /// Result evidence for a result-only dtype binder: bind a precision variable,

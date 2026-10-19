@@ -1085,3 +1085,63 @@ fn underconstrained_erased_dim_call_fails_closed() {
         c_artifact.display()
     );
 }
+
+// [04-ADT-1], [04-INF-2]: a recursive edge may use the checked formal
+// layout even when no stored type variable needs substitution. Tuple
+// projections here lose structural type evidence during retained lowering.
+const REORDER_CONTEXTUAL_FORMALS: &str = r#"type Column[n] =
+  | FloatCol(tensor[n, f32])
+  | BoolCol(tensor[n, bool])
+def join_pairs[n](xs: List[(string, Column[n])], ys: List[(string, Column[n])]) -> List[(string, Column[n])] = if eq(len(ys), 0i64) then xs else join_pairs(append(xs, index(ys, 0i64)), skip(ys, 1i64))
+def extract[n](pairs: List[(string, Column[n])], target: string, acc: List[(string, Column[n])]) -> (Column[n], List[(string, Column[n])]) =
+  if eq(len(pairs), 0i64) then fail("missing") else {
+    hp = index(pairs, 0i64)
+    if eq(hp.0, target) then (hp.1, join_pairs(acc, skip(pairs, 1i64))) else extract(skip(pairs, 1i64), target, append(acc, hp))
+  }
+def reorder[n](pairs: List[(string, Column[n])], order: List[string], acc: List[(string, Column[n])]) -> List[(string, Column[n])] =
+  if eq(len(order), 0i64) then acc else {
+    name = index(order, 0i64)
+    matched = extract(pairs, name, [])
+    reorder(matched.1, skip(order, 1i64), append(acc, (name, matched.0)))
+  }
+def first_value[n](col: Column[n]) -> i64 = match col with {
+  | FloatCol(xs) => cast(index(to_list(xs), 0i64), i64)
+  | BoolCol(xs) => if index(to_list(xs), 0i64) then 1i64 else 0i64
+}
+def result() -> i64 = {
+  pairs = [("a", FloatCol(to_tensor([1.0f32, 2.0f32]))), ("b", FloatCol(to_tensor([9.0f32, 8.0f32])))]
+  ordered = reorder(pairs, ["b", "a"], [])
+  add(mul(first_value(index(ordered, 0i64).1), 10i64), first_value(index(ordered, 1i64).1))
+}
+out = print(result())
+"#;
+
+#[test]
+fn recursive_checked_formals_complete_without_type_substitutions() {
+    for dtype in ["f32", "f64"] {
+        let source = REORDER_CONTEXTUAL_FORMALS.replace("f32", dtype);
+        let stem = format!("checked_formals_{dtype}");
+        let evaluated = eval_first_line(&source, &stem);
+        assert_eq!(evaluated, "91");
+        let (_dir, out) = build_ok(&source, &stem);
+        assert_eq!(run_first_line(&out, &stem), evaluated);
+    }
+}
+
+#[test]
+fn recursive_checked_formal_completion_preserves_dimension_errors() {
+    let source = REORDER_CONTEXTUAL_FORMALS.replace("[9.0f32, 8.0f32]", "[9.0f32, 8.0f32, 7.0f32]");
+    let (_dir, artifact, error) = build_err(&source, "checked_formals_wrong_dimension");
+    assert!(error.contains("DimensionMismatch"), "{error}");
+    assert!(!artifact.exists());
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("wrong_dimension.ch");
+    write_file(&path, &source);
+    let output = chelis()
+        .args(["eval", "--file"])
+        .arg(&path)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("DimensionMismatch"));
+}
