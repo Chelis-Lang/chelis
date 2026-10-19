@@ -414,10 +414,18 @@ binder, with `L` its own schedule length and `S = 44` the span:
 
 1. **Diagonal**, for `attempt < max(S, L)`: candidate `attempt` of this
    binder's own schedule, exactly as before and at the same one-for-one rate.
-2. **Cell**, for the next `min(2^n, (samples - 44) / 2)` attempts at arity
-   `n`: a mixed-radix odometer over **two** classes per binder — its largest
-   and its smallest admissible candidate, by `total_cmp`. Cell `c` gives
-   binder `j` digit `(c / 2^j) % 2`, digit 0 being the largest.
+2. **Cell**, for as many of the following attempts as the share below allows
+   — a mixed-radix odometer over **two** classes per binder. For a float
+   binder those are its largest and smallest admissible candidates by
+   `total_cmp`, and digit 0 is the largest; for an integer binder they are
+   the first two entries of its own schedule, which `int_edge_candidates`
+   orders `lower` then `upper`, so digit 0 is the *smallest*. Either way the
+   odometer enumerates the same `2^n` corners. Cell `c` gives binder `j`
+   digit `(c / 2^j) % 2`.
+
+   **The share is stated once, below**, under "the attempts after the
+   schedule is spent are not spare": a published formula that lives in two
+   places has now been wrong in one of them twice.
 3. **Uniform**, thereafter: unchanged.
 
 The phase is skipped entirely for a property with fewer than two scheduled
@@ -636,9 +644,10 @@ The chelis#3697 extremal-pairing oracle is:
 cargo nextest run -p chelis-cli --test issue_3697_extremal_pairing
 ```
 
-It pins the pairing itself, the two costs above, and the three measurements
-that chose the policy: the post-diagonal draws' yield at four arities, a long
-schedule's tail, and the rejection lane's accepted count. The chelis#3636
+It pins the pairing itself, the three costs above, and the measurements that
+chose the policy: the post-diagonal draws' yield at arities one to eight, the
+same yield at a 72-candidate schedule, a long schedule's tail, the low-order
+corner's reach at every arity, and the rejection lane's accepted count. The chelis#3636
 oracle three lines above no longer asserts the diagonal limitation —
 `issue_3636_multi_binder_schedule_visits_only_the_diagonal` asked to be
 deleted when the pairing improved, and was — but it keeps

@@ -4081,6 +4081,13 @@ fn prove_surf_property_fuzz(
     let max_attempts = options
         .max_attempts
         .unwrap_or_else(|| samples_needed.saturating_mul(100).max(samples_needed));
+    // The share the off-diagonal phase may take is a fraction of the attempts
+    // that remain to this property, so it is bounded by whichever ceiling is
+    // lower. `max_attempts` is normally a hundred times the sample budget and
+    // the `min` is then inert, but an explicit `--max-attempts` below the
+    // sample count would otherwise let the cells claim every attempt the
+    // diagonal left (chelis#3697).
+    let cell_budget = samples_needed.min(max_attempts);
     let mut rng = Lcg::new(seed);
 
     if let Some(reason) = unsupported_property_params(&property.params) {
@@ -4129,9 +4136,9 @@ fn prove_surf_property_fuzz(
     let mut draw = |attempt: usize| {
         draw_attempt(match &constraint_plan {
             Some(plan) => {
-                sample_property_with_constraints(property, plan, &mut rng, attempt, samples_needed)
+                sample_property_with_constraints(property, plan, &mut rng, attempt, cell_budget)
             }
-            None => sample_property(property, &mut rng, attempt, samples_needed),
+            None => sample_property(property, &mut rng, attempt, cell_budget),
         })
     };
     let mut accepted = 0usize;
@@ -5835,6 +5842,13 @@ fn prove_deep_property_fuzz(
     let max_attempts = options
         .max_attempts
         .unwrap_or_else(|| samples_needed.saturating_mul(100).max(samples_needed));
+    // The share the off-diagonal phase may take is a fraction of the attempts
+    // that remain to this property, so it is bounded by whichever ceiling is
+    // lower. `max_attempts` is normally a hundred times the sample budget and
+    // the `min` is then inert, but an explicit `--max-attempts` below the
+    // sample count would otherwise let the cells claim every attempt the
+    // diagonal left (chelis#3697).
+    let cell_budget = samples_needed.min(max_attempts);
     let mut rng = Lcg::new(seed);
 
     if let Some(reason) = unsupported_property_params(&property.params) {
@@ -5876,9 +5890,9 @@ fn prove_deep_property_fuzz(
                 plan,
                 &mut rng,
                 attempt,
-                samples_needed,
+                cell_budget,
             ),
-            None => sample_deep_property(property, &mut rng, attempt, samples_needed),
+            None => sample_deep_property(property, &mut rng, attempt, cell_budget),
         })
     };
 

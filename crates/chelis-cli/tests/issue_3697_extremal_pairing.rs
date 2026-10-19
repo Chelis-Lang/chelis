@@ -573,3 +573,80 @@ where {exclusions}:
          diagonal, or it measures something else; got {attempts}: {record:#}"
     );
 }
+
+/// **Non-`f64` binders, end to end, and the digit-to-role mapping that
+/// differs between them.** Every other test here uses `f64`, which left the
+/// dtype axis unexercised at the CLI level.
+///
+/// What this pins is participation and the digit mapping, not the width of a
+/// short schedule's cell window. That width is pinned by
+/// `issue_3697_the_phase_never_outgrows_its_share_of_the_budget` instead,
+/// because it is nearly unobservable from outside: an integer binder's
+/// schedule is nine candidates long, so attempts `[9, 44)` already fall
+/// through to the uniform draw before the cell phase begins, and a property
+/// the window interior can refute is refuted there — measured identically on
+/// this head and on a build with no cell phase at all (attempt 15, `x = 115`
+/// at seed 0). A mutant that over-provisions the window for a short schedule
+/// therefore only shifts a rate, which no single-seed assertion can hold.
+///
+/// Integer bounds are the per-width range clamped to `[-1000, 1000]`
+/// (`Prim::integer_fuzz_bounds`), so an unguarded `i32`'s extremes are those
+/// two values, not the type's. `int_edge_candidates` orders them `lower` then
+/// `upper` and `scheduled_int` takes that prefix as the class set, so for an
+/// integer binder **digit 0 is the smallest** — the opposite of a float
+/// binder, whose digit 0 is its largest by `total_cmp`.
+///
+/// The odometer still enumerates the same `2^n` corners either way, so the
+/// only visible consequence is which cell holds a given pairing: five `i32`
+/// binders put `(lower, upper)` at cell 2 and refute at attempt 47, while
+/// mixing `i32` with `f64` puts `(int lower, float largest)` at cell 0 and
+/// refutes at attempt 45. A run with no cell phase reaches neither.
+#[test]
+fn issue_3697_integer_and_mixed_dtype_binders_pair() {
+    let int_only = "module Pairing.IntFive
+@property corner forall(x: i32, y: i32, z: i32, w: i32, v: i32):
+  ((x != -1000) || (y != 1000))
+";
+    for seed in ["0", "1", "7", "99"] {
+        let (code, record) = prove(int_only, "100", seed);
+        assert_eq!(code, 1, "seed {seed}: {record:#}");
+        assert_eq!(
+            record["attempted_samples"], 47,
+            "seed {seed}: both integer binders take digit from the same \
+             `lower, upper` prefix, so the pairing is cell 2: {record:#}"
+        );
+        assert_eq!(
+            record["counterexample"]["x"], -1000,
+            "seed {seed}: {record:#}"
+        );
+        assert_eq!(
+            record["counterexample"]["y"], 1000,
+            "seed {seed}: {record:#}"
+        );
+    }
+    // Mixed: the int binder's digit 0 is its smallest and the float's is its
+    // largest, so this pairing is cell 0 rather than cell 2.
+    let mixed = "module Pairing.MixedFive
+@property corner forall(x: i32, y: f64, z: i64, w: f32, v: i32):
+  ((x != -1000) || (y != 1.7976931348623157e308f64))
+";
+    for seed in ["0", "1", "7", "99"] {
+        let (code, record) = prove(mixed, "100", seed);
+        assert_eq!(code, 1, "seed {seed}: {record:#}");
+        assert_eq!(
+            record["attempted_samples"], 45,
+            "seed {seed}: cell 0 pairs the integer's lower bound with the \
+             float's largest candidate; a count of 47 would mean the two \
+             dtypes had been given the same digit order: {record:#}"
+        );
+        assert_eq!(
+            record["counterexample"]["x"], -1000,
+            "seed {seed}: {record:#}"
+        );
+        assert_eq!(
+            record["counterexample"]["y"].as_f64(),
+            Some(f64::MAX),
+            "seed {seed}: {record:#}"
+        );
+    }
+}
