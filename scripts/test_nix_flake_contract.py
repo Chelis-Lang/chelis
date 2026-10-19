@@ -227,6 +227,13 @@ def gc_root_snapshot(root_dir: Path) -> dict[str, str] | None:
     }
 
 
+# A path, a name, or a command of Nix GC root management. The real chelisup
+# installer must hold none of them.
+NIX_GC_ROOT_LOGIC = re.compile(
+    r"nix-gcroots|nix_gc|gc[ _-]?roots?\b|nix-store|--add-root|--realise", re.IGNORECASE
+)
+
+
 def read_contract_inputs() -> dict[str, str | None]:
     cargo_nix = REPO_ROOT / "Cargo.nix"
     return {
@@ -1817,12 +1824,27 @@ class NixSourceContractTests(unittest.TestCase):
         self.assertIn("LIBCLANG_PATH", packages)
 
     def test_chelisup_rust_crate_does_not_own_nix_gc_roots(self) -> None:
+        # The real installer holds no path or cleanup logic for Nix GC roots.
+        # Its messages can still name Nix commands, such as the nix build of a
+        # toolchain for `chelisup link` (chelis#3915).
         crate_dir = REPO_ROOT / "crates" / "chelisup"
         rust_sources = sorted(crate_dir.rglob("*.rs"))
         self.assertTrue(rust_sources)
         for path in rust_sources:
             source = path.read_text(encoding="utf-8")
-            self.assertNotRegex(source, r"\b[Nn]ix\b|nix-gcroots|nix_gc", str(path))
+            self.assertNotRegex(source, NIX_GC_ROOT_LOGIC, str(path))
+        for sample in (
+            '"nix-gcroots"',
+            "nix_gc_root",
+            "gcroots",
+            "GC root",
+            "gc_root",
+            "nix-store",
+            "--add-root",
+            "--realise",
+        ):
+            with self.subTest(sample=sample):
+                self.assertRegex(sample, NIX_GC_ROOT_LOGIC)
 
     def test_workspace_source_overrides_preserve_external_compile_assets(self) -> None:
         packages = (REPO_ROOT / "nix" / "packages.nix").read_text(encoding="utf-8")

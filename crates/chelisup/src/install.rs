@@ -31,6 +31,7 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use crate::NIX_LINK_ADVICE;
 use crate::paths::Store;
 use crate::runtime_check::{self, RuntimeCheck};
 use crate::version::{release_triple, validate_install_version};
@@ -54,16 +55,31 @@ pub enum InstallOutcome {
 }
 
 /// Detect the release-asset platform slug for the host. The slugs match
-/// `install_chelis_toolchain.py` exactly.
+/// `install_chelis_toolchain.py` exactly. On aarch64-linux, which no release
+/// builds, the error names [`NIX_LINK_ADVICE`].
 pub fn detect_slug() -> Result<&'static str, String> {
-    match (std::env::consts::OS, std::env::consts::ARCH) {
+    release_slug(std::env::consts::OS, std::env::consts::ARCH)
+}
+
+/// The release-asset platform slug for the operating system `os` and the
+/// architecture `arch`, as `std::env::consts` names them.
+fn release_slug(os: &str, arch: &str) -> Result<&'static str, String> {
+    match (os, arch) {
         ("macos", "aarch64") => Ok("darwin-arm64"),
         ("macos", "x86_64") => Ok("darwin-x86_64"),
         ("linux", "x86_64") => Ok("linux-x86_64"),
-        (os, arch) => Err(format!(
-            "unsupported host platform {os}/{arch}; \
-             chelis releases ship darwin-arm64, darwin-x86_64, and linux-x86_64"
-        )),
+        (os, arch) => {
+            let unsupported = format!(
+                "unsupported host platform {os}/{arch}; \
+                 chelis releases ship darwin-arm64, darwin-x86_64, and linux-x86_64"
+            );
+            // The Chelis flake builds for aarch64-linux, which no release does.
+            Err(if (os, arch) == ("linux", "aarch64") {
+                format!("{unsupported}. On this host, {NIX_LINK_ADVICE}")
+            } else {
+                unsupported
+            })
+        }
     }
 }
 
@@ -948,6 +964,46 @@ mod tests {
     fn detect_slug_is_supported_here() {
         // CI runs on darwin-arm64 / linux-x86_64; both are supported.
         assert!(detect_slug().is_ok());
+    }
+
+    #[test]
+    fn each_release_platform_maps_to_its_slug() {
+        assert_eq!(release_slug("macos", "aarch64"), Ok("darwin-arm64"));
+        assert_eq!(release_slug("macos", "x86_64"), Ok("darwin-x86_64"));
+        assert_eq!(release_slug("linux", "x86_64"), Ok("linux-x86_64"));
+    }
+
+    #[test]
+    fn an_aarch64_linux_host_is_sent_to_a_linked_store_toolchain() {
+        // chelis#3915: no release builds aarch64-linux, but the flake does.
+        let error = release_slug("linux", "aarch64").unwrap_err();
+        assert!(
+            error.starts_with(
+                "unsupported host platform linux/aarch64; chelis releases ship darwin-arm64, \
+                 darwin-x86_64, and linux-x86_64"
+            ),
+            "{error}"
+        );
+        assert!(
+            error.contains(
+                "chelisup link \"$(nix build --no-link --print-out-paths \
+                 github:Chelis-Lang/chelis/vX.Y.Z#chelis)\""
+            ),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_host_that_no_package_supports_gets_no_link_route() {
+        for (os, arch) in [
+            ("windows", "x86_64"),
+            ("linux", "riscv64"),
+            ("freebsd", "x86_64"),
+        ] {
+            let error = release_slug(os, arch).unwrap_err();
+            assert!(error.starts_with(&format!("unsupported host platform {os}/{arch}; ")));
+            assert!(!error.contains("chelisup link"), "{error}");
+        }
     }
 
     #[test]

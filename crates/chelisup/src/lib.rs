@@ -66,6 +66,13 @@ use std::path::Path;
 pub(crate) const UPGRADE_ADVICE: &str =
     "re-run the bootstrap installer (the published `chelisup` one-liner)";
 
+/// How to use a toolchain that the Chelis flake builds where no release
+/// toolchain runs: on a host that no release build supports, and on NixOS
+/// without nix-ld for a dynamic release build.
+pub(crate) const NIX_LINK_ADVICE: &str = "build chelis with Nix and register it with \
+     chelisup link \"$(nix build --no-link --print-out-paths \
+     github:Chelis-Lang/chelis/vX.Y.Z#chelis)\", with a release version for X.Y.Z";
+
 /// Inspect `argv[0]` and route to the shim or the installer CLI.
 ///
 /// Returns the process exit code. The shim path never returns on

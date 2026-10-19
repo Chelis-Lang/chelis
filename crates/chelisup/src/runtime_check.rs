@@ -34,8 +34,8 @@ use serde_json::map::Entry;
 use serde_json::{Map, Number, Value};
 use sha2::{Digest, Sha256};
 
-use crate::UPGRADE_ADVICE;
 use crate::version::{is_safe_path_component, release_triple};
+use crate::{NIX_LINK_ADVICE, UPGRADE_ADVICE};
 
 /// The last release whose `chelis` has no `chelis runtime export`.
 pub const LAST_RELEASE_WITHOUT_EXPORT: &str = "0.18.11";
@@ -88,21 +88,37 @@ pub(crate) fn check(
         // release, not the caller's environment.
         .env_remove("CHELIS_RUNTIME_DIR")
         .output()
-        .map_err(|e| cannot_start(version, &e))?;
+        .map_err(|e| cannot_start(version, &e, host_is_nixos()))?;
     verify(version, &output, exported.path(), unpacked)
         .map(|archive_sha256| RuntimeCheck::Verified { archive_sha256 })
         .map_err(|refusal| advise_upgrade(refusal, version, CHELISUP_VERSION))
 }
 
+/// Whether this host runs NixOS. NixOS creates the file `/etc/NIXOS`.
+fn host_is_nixos() -> bool {
+    host_is_nixos_under(Path::new("/"))
+}
+
+/// Whether the system whose root directory is `root` is NixOS.
+fn host_is_nixos_under(root: &Path) -> bool {
+    root.join("etc").join("NIXOS").exists()
+}
+
 /// The error for a release whose `bin/chelis` the operating system refuses
-/// to execute.
-fn cannot_start(version: &str, error: &io::Error) -> String {
+/// to execute, on a NixOS host when `nixos` is set.
+fn cannot_start(version: &str, error: &io::Error, nixos: bool) -> String {
     // Extraction found `bin/chelis`, so what is missing is a file it names.
-    let cause = if error.kind() == io::ErrorKind::NotFound {
-        ": the file exists, so the loader or interpreter it names is missing, as with a \
-         glibc build on a musl-based system such as Alpine"
-    } else {
-        ""
+    let cause = match (error.kind(), nixos) {
+        // NixOS has no loader at the path that a dynamic glibc build names.
+        (io::ErrorKind::NotFound, true) => format!(
+            ": the file exists, so the loader it names is missing. NixOS supplies that loader \
+             when the system configuration sets programs.nix-ld.enable = true. Otherwise, \
+             {NIX_LINK_ADVICE}"
+        ),
+        (io::ErrorKind::NotFound, false) => ": the file exists, so the loader or interpreter it \
+             names is missing, as with a glibc build on a musl-based system such as Alpine"
+            .to_owned(),
+        _ => String::new(),
     };
     format!("this machine cannot run the chelis {version} release's bin/chelis ({error}){cause}")
 }
@@ -408,6 +424,57 @@ mod tests {
                 "refused"
             );
         }
+    }
+
+    #[test]
+    fn a_missing_loader_on_nixos_names_nix_ld_and_the_link_route() {
+        // chelis#3915: a dynamic release build cannot start on NixOS without
+        // nix-ld, and that host is not musl-based.
+        let missing = io::Error::from(io::ErrorKind::NotFound);
+        let hint = cannot_start("0.18.12", &missing, true);
+        assert!(
+            hint.starts_with("this machine cannot run the chelis 0.18.12 release's bin/chelis ("),
+            "{hint}"
+        );
+        assert!(hint.contains("programs.nix-ld.enable = true"), "{hint}");
+        assert!(
+            hint.contains(
+                "chelisup link \"$(nix build --no-link --print-out-paths \
+                 github:Chelis-Lang/chelis/vX.Y.Z#chelis)\""
+            ),
+            "{hint}"
+        );
+        assert!(!hint.contains("Alpine"), "{hint}");
+        assert!(!hint.contains("musl"), "{hint}");
+    }
+
+    #[test]
+    fn a_missing_loader_elsewhere_keeps_the_musl_hint() {
+        let missing = io::Error::from(io::ErrorKind::NotFound);
+        let hint = cannot_start("0.18.12", &missing, false);
+        assert!(
+            hint.ends_with(
+                ": the file exists, so the loader or interpreter it names is missing, as with a \
+                 glibc build on a musl-based system such as Alpine"
+            ),
+            "{hint}"
+        );
+        assert!(!hint.contains("nix-ld"), "{hint}");
+        // Another refusal names no loader cause on any host.
+        let denied = io::Error::from(io::ErrorKind::PermissionDenied);
+        for nixos in [false, true] {
+            let hint = cannot_start("0.18.12", &denied, nixos);
+            assert!(!hint.contains("loader"), "{hint}");
+        }
+    }
+
+    #[test]
+    fn the_nixos_marker_decides_the_host() {
+        let root = tempfile::tempdir().unwrap();
+        assert!(!host_is_nixos_under(root.path()));
+        fs::create_dir(root.path().join("etc")).unwrap();
+        fs::write(root.path().join("etc").join("NIXOS"), "").unwrap();
+        assert!(host_is_nixos_under(root.path()));
     }
 
     #[test]
