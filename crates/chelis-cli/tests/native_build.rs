@@ -172,30 +172,62 @@ fn emitted_compile_line(dir: &Path, compiler: &Path) -> String {
         .to_string()
 }
 
-/// chelis#3918: the Nix clang wrapper sets its own `SDKROOT`, so the build
-/// gives a compiler in the Nix store none, and the line that `--emit-c`
-/// prints sets none. A host compiler keeps the SDK of the `xcode-select`
-/// default, and its line sets it.
+/// A failing `bin/clang` in the store entry `<root>/nix/store/<entry>`. A
+/// `wrapped` entry holds the SDK script of the Nix wrapper.
 #[cfg(target_os = "macos")]
-#[test]
-fn emit_c_compile_line_sets_the_sdk_only_for_a_host_compiler() {
-    let dir = tempdir().unwrap();
-    let bin = dir
-        .path()
-        .join("nix/store/0c9vbm2f8a5y6hsdkxwk1x6yh0jq3v4a-clang-wrapper-21.1.8/bin");
+fn fake_store_clang(root: &Path, entry: &str, wrapped: bool) -> std::path::PathBuf {
+    let entry = root.join("nix/store").join(entry);
+    let bin = entry.join("bin");
     fs::create_dir_all(&bin).unwrap();
-    let nix_clang = bin.join("clang");
-    fs::write(&nix_clang, "#!/bin/sh\nexit 1\n").unwrap();
+    if wrapped {
+        fs::create_dir_all(entry.join("nix-support")).unwrap();
+        fs::write(
+            entry.join("nix-support/darwin-sdk-setup.bash"),
+            "export SDKROOT=/nix-sdk\n",
+        )
+        .unwrap();
+    }
+    let clang = bin.join("clang");
+    fs::write(&clang, "#!/bin/sh\nexit 1\n").unwrap();
     {
         use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&nix_clang, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::set_permissions(&clang, fs::Permissions::from_mode(0o755)).unwrap();
     }
-    let nix_line = emitted_compile_line(&dir.path().join("nix"), &nix_clang);
-    assert!(
-        nix_line.starts_with(nix_clang.to_str().unwrap()),
-        "{nix_line}"
+    clang
+}
+
+/// chelis#3918 and chelis#3948: the Nix clang wrapper sets its own `SDKROOT`,
+/// so the build gives it none, and the line that `--emit-c` prints sets none.
+/// An unwrapped compiler in the Nix store and a host compiler get the SDK of
+/// the `xcode-select` default, and their lines set it.
+#[cfg(target_os = "macos")]
+#[test]
+fn emit_c_compile_line_sets_the_sdk_except_for_the_nix_wrapper() {
+    let dir = tempdir().unwrap();
+    let wrapper = fake_store_clang(
+        dir.path(),
+        "0c9vbm2f8a5y6hsdkxwk1x6yh0jq3v4a-clang-wrapper-21.1.8",
+        true,
     );
-    assert!(!nix_line.contains("SDKROOT"), "{nix_line}");
+    let wrapper_line = emitted_compile_line(&dir.path().join("nix"), &wrapper);
+    assert!(
+        wrapper_line.starts_with(wrapper.to_str().unwrap()),
+        "{wrapper_line}"
+    );
+    assert!(!wrapper_line.contains("SDKROOT"), "{wrapper_line}");
+
+    let unwrapped = fake_store_clang(
+        dir.path(),
+        "10g0cwy9gcp4b0pw2znpgndbbzwdh1kv-clang-21.1.8",
+        false,
+    );
+    let unwrapped_dir = dir.path().join("unwrapped");
+    fs::create_dir_all(&unwrapped_dir).unwrap();
+    let unwrapped_line = emitted_compile_line(&unwrapped_dir, &unwrapped);
+    assert!(
+        unwrapped_line.starts_with("env SDKROOT="),
+        "{unwrapped_line}"
+    );
 
     let host_dir = dir.path().join("host");
     fs::create_dir_all(&host_dir).unwrap();

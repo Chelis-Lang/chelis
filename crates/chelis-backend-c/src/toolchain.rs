@@ -276,9 +276,10 @@ fn pinned_toolchain(
 /// `xcode-select` default ([`selected_sdk`]), the one the `/usr/bin` shims
 /// choose. A compiler named directly in `CHELIS_CC`, such as another Xcode's
 /// `clang`, has no SDK of its own, so that is how it finds the system headers
-/// and libraries. A tool in the Nix store gets no `SDKROOT` and runs no
-/// `xcrun`: the Nix clang wrapper sets `SDKROOT` to its own SDK, so a value
-/// from the build would not reach the compile.
+/// and libraries. A tool of a Nix cc or binutils wrapper gets no `SDKROOT`
+/// and runs no `xcrun`: the wrapper sets `SDKROOT` to its own SDK, so a value
+/// from the build would not reach the compile. An unwrapped tool in the Nix
+/// store sets no SDK, so it gets the SDK of a host tool.
 pub const TOOL_ENVIRONMENT: &[&str] = &["PATH", "TMPDIR"];
 
 /// A command for a native build tool with the environment cleared except
@@ -305,40 +306,70 @@ fn allowlisted_command(program: impl AsRef<OsStr>) -> Command {
 }
 
 /// The `SDKROOT` that [`tool_command`] gives `program`: on macOS the
-/// [`selected_sdk`], except for a tool in the Nix store
-/// ([`is_nix_store_tool`]), which gets none. The Nix check comes first, so
+/// [`selected_sdk`], except for a tool of a Nix wrapper
+/// ([`is_nix_wrapper_tool`]), which gets none. The Nix check comes first, so
 /// such a tool never makes the build run `xcrun`. `None` elsewhere.
 fn tool_sdk(program: &OsStr) -> Option<&'static OsStr> {
-    if !cfg!(target_os = "macos") || is_nix_store_tool(program) {
+    if !cfg!(target_os = "macos") || is_nix_wrapper_tool(program) {
         return None;
     }
     selected_sdk()
 }
 
 /// Whether `program`, resolved as the spawned tool will see it
-/// ([`resolve_executable`]), is a file in a Nix store. The canonical path
-/// decides, so a profile symlink into the store counts, and a store symlink
-/// to a host tool does not. A store entry is a `nix/store/<hash>-<name>`
-/// directory, where `<hash>` is 32 characters of Nix base32.
-fn is_nix_store_tool(program: &OsStr) -> bool {
-    let Some(path) = program.to_str().and_then(resolve_executable) else {
+/// ([`resolve_executable`]), belongs to a Nix cc or binutils wrapper: the
+/// store entry of some path of its symlink chain, or of its canonical path,
+/// holds [`NIX_WRAPPER_SDK_SCRIPT`]. The `ar` of a wrapper is a symlink to
+/// the unwrapped `ar`, and a profile can link to that symlink, so the chain
+/// is walked link by link.
+fn is_nix_wrapper_tool(program: &OsStr) -> bool {
+    /// More links than any wrapper or profile chain has.
+    const MAX_LINKS: usize = 40;
+    let Some(mut path) = program.to_str().and_then(resolve_executable) else {
         return false;
     };
-    let path = path.canonicalize().unwrap_or(path);
-    is_in_nix_store(&path)
+    let wrapped = |path: &Path| {
+        nix_store_entry(path).is_some_and(|entry| entry.join(NIX_WRAPPER_SDK_SCRIPT).is_file())
+    };
+    for _ in 0..MAX_LINKS {
+        if wrapped(&path) {
+            return true;
+        }
+        let Ok(target) = std::fs::read_link(&path) else {
+            break;
+        };
+        path = match path.parent() {
+            Some(parent) => parent.join(target),
+            None => target,
+        };
+    }
+    path.canonicalize()
+        .is_ok_and(|canonical| wrapped(&canonical))
 }
 
-fn is_in_nix_store(path: &Path) -> bool {
-    let names: Vec<&OsStr> = path
-        .components()
-        .filter_map(|component| match component {
-            std::path::Component::Normal(name) => Some(name),
-            _ => None,
-        })
-        .collect();
-    names.windows(3).any(|window| {
-        window[0] == "nix" && window[1] == "store" && is_nix_store_entry_name(window[2])
-    })
+/// The file of a store entry that marks a Nix cc or binutils wrapper. The
+/// wrapper sources it and sets `SDKROOT` to the SDK of the wrapper.
+const NIX_WRAPPER_SDK_SCRIPT: &str = "nix-support/darwin-sdk-setup.bash";
+
+/// The `.../nix/store/<hash>-<name>` directory that holds `path`, if any. A
+/// store entry name has a hash of 32 characters of Nix base32 and a name.
+fn nix_store_entry(path: &Path) -> Option<PathBuf> {
+    let mut prefix = PathBuf::new();
+    let mut parents: [Option<&OsStr>; 2] = [None, None];
+    for component in path.components() {
+        prefix.push(component);
+        let std::path::Component::Normal(name) = component else {
+            parents = [None, None];
+            continue;
+        };
+        if parents == [Some(OsStr::new("nix")), Some(OsStr::new("store"))]
+            && is_nix_store_entry_name(name)
+        {
+            return Some(prefix);
+        }
+        parents = [parents[1], Some(name)];
+    }
+    None
 }
 
 /// The alphabet of Nix base32, which store path hashes use.
@@ -1357,21 +1388,36 @@ mod tests {
         }
     }
 
-    /// A compiler at a path shaped like a Nix store entry under `root`. It is
-    /// a script that fails, so nothing can compile with it by accident.
-    fn fake_nix_store_compiler(root: &Path) -> PathBuf {
-        let bin = root
-            .join("nix/store/0c9vbm2f8a5y6hsdkxwk1x6yh0jq3v4a-clang-wrapper-21.1.8")
-            .join("bin");
+    /// The tool `bin/<tool>` of the store entry `<root>/nix/store/<entry>`. It
+    /// is a script that fails, so nothing can compile with it by accident.
+    /// A `wrapped` entry holds the SDK script of the Nix wrapper.
+    fn fake_nix_store_tool(root: &Path, entry: &str, tool: &str, wrapped: bool) -> PathBuf {
+        let entry = root.join("nix/store").join(entry);
+        let bin = entry.join("bin");
         std::fs::create_dir_all(&bin).unwrap();
-        let compiler = bin.join("clang");
-        std::fs::write(&compiler, "#!/bin/sh\nexit 1\n").unwrap();
+        if wrapped {
+            let script = entry.join(NIX_WRAPPER_SDK_SCRIPT);
+            std::fs::create_dir_all(script.parent().unwrap()).unwrap();
+            std::fs::write(&script, "export SDKROOT=/nix-sdk\n").unwrap();
+        }
+        let path = bin.join(tool);
+        std::fs::write(&path, "#!/bin/sh\nexit 1\n").unwrap();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&compiler, std::fs::Permissions::from_mode(0o755)).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
-        compiler
+        path
+    }
+
+    /// The `clang` of a fake Nix clang wrapper under `root`.
+    fn fake_nix_store_compiler(root: &Path) -> PathBuf {
+        fake_nix_store_tool(
+            root,
+            "0c9vbm2f8a5y6hsdkxwk1x6yh0jq3v4a-clang-wrapper-21.1.8",
+            "clang",
+            true,
+        )
     }
 
     /// The `SDKROOT` that `command` sets, if any.
@@ -1428,15 +1474,74 @@ mod tests {
         }
     }
 
+    /// chelis#3948: an unwrapped compiler in the Nix store sets no `SDKROOT`
+    /// itself, so it gets the SDK of a host compiler.
+    #[test]
+    fn unwrapped_nix_store_compiler_gets_the_host_sdk() {
+        let dir = tempfile::tempdir().unwrap();
+        let unwrapped = fake_nix_store_tool(
+            dir.path(),
+            "10g0cwy9gcp4b0pw2znpgndbbzwdh1kv-clang-21.1.8",
+            "clang",
+            false,
+        );
+        let command = tool_command(&unwrapped);
+        assert_eq!(sdkroot(&command), selected_sdk(), "{}", unwrapped.display());
+        if cfg!(target_os = "macos") {
+            assert!(sdkroot(&command).is_some(), "xcrun found no SDK");
+        }
+    }
+
+    /// chelis#3948: the `ar` of the Nix binutils wrapper is a symlink to the
+    /// unwrapped cctools `ar`. The wrapper entry, not the link target,
+    /// decides, so it gets no `SDKROOT`. A profile symlink to a wrapper tool
+    /// gets none either, also when that tool is itself a symlink.
+    #[cfg(unix)]
+    #[test]
+    fn binutils_wrapper_symlink_to_an_unwrapped_tool_gets_no_sdk() {
+        let dir = tempfile::tempdir().unwrap();
+        let unwrapped_ar = fake_nix_store_tool(
+            dir.path(),
+            "af2lcmbfgali8g2ywwiixqc4kcsz1wp3-cctools-binutils-darwin-1010.6",
+            "ar",
+            false,
+        );
+        let wrapper_bin = fake_nix_store_tool(
+            dir.path(),
+            "2skl7vw67p05nn884nhgp044aiq3can7-cctools-binutils-darwin-wrapper-1010.6",
+            "ld",
+            true,
+        )
+        .parent()
+        .unwrap()
+        .to_path_buf();
+        let wrapper_ar = wrapper_bin.join("ar");
+        std::os::unix::fs::symlink(&unwrapped_ar, &wrapper_ar).unwrap();
+        assert_eq!(sdkroot(&tool_command(&wrapper_ar)), None);
+
+        let profile = dir.path().join("profile/bin");
+        std::fs::create_dir_all(&profile).unwrap();
+        std::os::unix::fs::symlink(wrapper_bin.join("ld"), profile.join("ld")).unwrap();
+        assert_eq!(sdkroot(&tool_command(profile.join("ld"))), None);
+        std::os::unix::fs::symlink(&wrapper_ar, profile.join("ar")).unwrap();
+        assert_eq!(sdkroot(&tool_command(profile.join("ar"))), None);
+        // A relative link resolves against the directory of the link.
+        let relative = dir.path().join("profile/relative-ar");
+        std::os::unix::fs::symlink("bin/ar", &relative).unwrap();
+        assert_eq!(sdkroot(&tool_command(&relative)), None);
+    }
+
     #[test]
     fn nix_store_entries_need_the_hash_and_a_name() {
         let entry = "0c9vbm2f8a5y6hsdkxwk1x6yh0jq3v4a-clang-wrapper-21.1.8";
-        assert!(is_in_nix_store(
-            &Path::new("/nix/store").join(entry).join("bin/cc")
-        ));
-        assert!(is_in_nix_store(
-            &Path::new("/tmp/x/nix/store").join(entry).join("bin/cc")
-        ));
+        assert_eq!(
+            nix_store_entry(&Path::new("/nix/store").join(entry).join("bin/cc")),
+            Some(Path::new("/nix/store").join(entry))
+        );
+        assert_eq!(
+            nix_store_entry(&Path::new("/tmp/x/nix/store").join(entry).join("bin/cc")),
+            Some(Path::new("/tmp/x/nix/store").join(entry))
+        );
         for path in [
             "/usr/bin/cc",
             "/nix/store/bin/cc",
@@ -1445,7 +1550,7 @@ mod tests {
             "/nix/store/0c9vbm2f8a5y6hsdkxwk1x6yh0jq3v4e-cc/bin/cc",
             "/opt/store/0c9vbm2f8a5y6hsdkxwk1x6yh0jq3v4a-cc/bin/cc",
         ] {
-            assert!(!is_in_nix_store(Path::new(path)), "{path}");
+            assert_eq!(nix_store_entry(Path::new(path)), None, "{path}");
         }
     }
 
