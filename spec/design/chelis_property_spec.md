@@ -433,7 +433,7 @@ A **cell phase** now runs between the diagonal and the uniform draw. With
 3. **Uniform**, thereafter: unchanged.
 
 The phase is skipped entirely for a property with fewer than two scheduled
-binders, and for one whose plan reports `has_order_edges`. A binder that reads
+binders. A binder that reads
 no schedule — `bool`, `string`, a tensor — contributes no digit and consumes
 no position, so it neither enables the phase nor shifts another binder's
 digit.
@@ -569,29 +569,41 @@ window-interior refutation still happens there.
 `float_edge_candidates` **inside the attempt**, from the order predecessors
 already drawn in that attempt. So an index into that list does not name a
 fixed value: it names entry `i` of a list whose contents depend on what the
-predecessor got. Two consequences bind any scheme that proposes new values
-here:
+predecessor got. Changing a predecessor's value re-indexes every successor,
+and entries the schedule proposed at attempt `i` can end up proposed at no
+attempt at all — a predecessor taking its largest candidate pushes `y > x`
+into a non-negative range and deletes every negative candidate from `y`'s
+list.
 
-- Changing a predecessor's value re-indexes every successor, and entries the
-  schedule proposed at attempt `i` can end up proposed at no attempt at all.
-  A predecessor taking its largest candidate pushes `y > x` into a
-  non-negative range and deletes every negative candidate from `y`'s list.
-- The perturbation cannot be confined to predecessors. A proposal anywhere in
-  the property changes how many values the attempt draws from the generator,
-  which shifts every later predecessor's uniform draw and so its successors'
-  ranges.
+**That is a reason to keep the cells clear of every diagonal, not a reason to
+withhold them from the property.** The phase was switched off for an
+order-guarded plan at first, and the measurement that justified it was taken
+under a *per-binder* window: on `forall(x: f64, y: f64) where y > x, <twenty
+`!=` exclusions on y>: (y != -1.0e-323f64)` at the default budget over 30
+seeds, 18/30 refutations with the phase off against 0/30 with cells proposed
+everywhere. The cause was mechanical rather than deep. Twenty exclusions make
+`y`'s schedule 84 candidates long and the refuting one sits at index 75, but
+a per-binder window opened `x`'s cells at attempt 44, which displaced `y`'s
+draw before its diagonal had reached 75.
 
-Measured on `forall(x: f64, y: f64) where y > x, <twenty `!=` exclusions on
-y>: (y != -1.0e-323f64)` at the default budget over 30 seeds: 18/30
-refutations with the phase off, 0/30 with cells proposed everywhere, and 11/30
-with cells withheld from predecessors only. The shipped build measures 18/30
-— identical to current `main`, seed for seed, which is what the exemption is
-supposed to mean; the other two figures are from the six-class build and are
-not re-measurable. **Only switching the phase off for the whole property
-restored 18/30**, which is why the exemption keys on
-`has_order_edges` for the plan rather than on whether a particular seat has a
-successor. Every order graph is a DAG, so a partial exemption always leaves a
-sink taking cells, and that is enough to move its predecessors' draws.
+One shared boundary removes that, because it clears the *longest* schedule in
+the property. A successor's exact length is not derivable at plan-derive time
+— it depends on a value drawn inside the attempt — but its bound is: a
+schedule is the exclusion-free list, at most `S` long, plus at most two
+representable neighbours per `!=` guard, and a boundary larger than a
+binder's real length costs nothing, because the binder runs past the end of
+its list and draws uniformly as a short schedule already does. With the
+boundary clear of `y`'s diagonal the same chain measures **18/30 with the
+phase on, identical to the phase being off, seed for seed and attempt for
+attempt.**
+
+So an order-guarded property now pairs. What it pays is displacement, which
+is the trade the phase makes everywhere, bounded the same way by the share:
+measured over seeds 0–29 at the default budget as a delta against the phase
+being off, nine of ten order shapes lose between 0 and 4 refutations of 30,
+mean −1.9, and the worst is two disjoint edges at arity 4 at 24/30 against
+16/30. That worst case sits inside the envelope already accepted for a
+non-order-guarded property at arity 5, which is 21/30 against 11/30.
 
 #### What the phase costs
 
@@ -601,8 +613,8 @@ paired with a **moderate** value is not reached off the diagonal.
 schedule but not one of its two classes, and no uniform draw over the window
 proposes `1e300`. The six-class set did reach it — "nearest `1.0`" was one of
 the six — and the trade was made against the table above. An order-guarded
-property gets no pairing at all, so chelis#3697's class remains open for that
-shape.
+property pays displacement for its pairing rather than going without, which
+the subsection above measures.
 
 A third cost existed and is closed. **The cell window opens at one boundary
 shared by the whole property** — `max(44, L_0, ..., L_n)` over the binders'

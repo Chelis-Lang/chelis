@@ -22,12 +22,15 @@
 //! `spec/design/chelis_property_spec.md` § "Pairing the extremal classes"
 //! carries the arithmetic and the tables.
 //!
-//! The two deliberate costs are pinned too, as tests that assert a property
-//! is *not* refuted: a pairing of an extreme with a moderate value, and any
-//! pairing at all for an order-guarded property. A third — binders whose
-//! schedule lengths differ — was closed by sharing one cell-window boundary
-//! across the property, and `issue_3697_unequal_lengths_still_pair` now
-//! asserts the pairing instead.
+//! One deliberate cost remains, pinned as a test that asserts a property is
+//! *not* refuted: a pairing of an extreme with a moderate value. Two others
+//! are closed and now asserted the other way round — binders whose schedule
+//! lengths differ (`issue_3697_unequal_lengths_still_pair`, closed by the
+//! shared boundary) and order-guarded properties
+//! (`issue_3697_an_order_guarded_property_pairs`, closed because that
+//! boundary also clears a successor's diagonal). What the pairing costs an
+//! order-guarded property is displacement, bounded and measured, not a class
+//! of counterexample.
 
 use assert_cmd::Command;
 use serde_json::Value;
@@ -230,26 +233,33 @@ fn issue_3697_post_diagonal_uniform_draws_carry_refutations() {
     }
 }
 
-/// **An order-guarded property takes no cell at all**, and this test asserts
-/// the exemption by pinning behaviour identical to the policy's absence.
+/// **An order-guarded chain keeps its diagonal**, which is what makes the
+/// pairing safe to run there at all.
 ///
 /// A successor's candidate list is rebuilt from its predecessor *inside* the
 /// attempt, so an index into that list names entry `i` of a list whose
-/// contents depend on what the predecessor drew. There is no stable
-/// per-binder sequence to pair: proposing a new predecessor value re-indexes
-/// every successor, and an earlier attempt at this silently deleted the
-/// refuting candidate from `y`'s list by pushing `x` non-negative.
-/// `ConstraintSamplingPlan::has_order_edges` therefore gates the phase off
-/// for the whole property rather than for the chained binders, because the
-/// chain is a property of the plan and not of one seat.
+/// contents depend on what the predecessor drew. That is why the phase was
+/// switched off for such a property at first: under a *per-binder* window the
+/// cells began at attempt 44 while a successor's longer diagonal was still
+/// running, and the refuting candidate was never proposed.
+///
+/// One shared boundary removed that. It clears every binder's diagonal —
+/// including a successor's, via the bound
+/// `issue_3697_an_order_successor_contributes_its_bound` pins — so the cells
+/// begin after the chain's refuting candidate rather than on top of it, and
+/// this shape measures identically with the phase on and off.
+///
+/// **This test does not discriminate the exemption**, precisely because the
+/// two now agree here; `issue_3697_an_order_guarded_property_pairs` is the
+/// test that does. What this one pins is the regression: 18 refutations over
+/// seeds 0-29, and the refutation at attempt 77 for the two seeds below.
 ///
 /// Pinned by the one consequence a property can observe: the refutation is
 /// seed-dependent, because it needs the predecessor's uniform draw to be
 /// negative so that `y > x` admits a negative `y` at all. Seeds 1 and 3
-/// refute at attempt 77 and seeds 0 and 4 do not -- the same four verdicts
-/// and the same attempt count as before chelis#3697, which is the assertion.
+/// refute at attempt 77 and seeds 0 and 4 do not.
 #[test]
-fn issue_3697_an_order_guarded_property_takes_no_cell() {
+fn issue_3697_an_order_guarded_chain_keeps_its_diagonal() {
     let exclusions = (20..40)
         .map(|value| format!("y != {value}.0f64"))
         .collect::<Vec<_>>()
@@ -725,4 +735,100 @@ fn issue_3697_the_attempt_ceiling_bounds_the_share() {
         "the refutation arrives from a uniform draw past the window's end at \
          52; a different count means the ceiling's share moved: {record:#}"
     );
+}
+
+/// **An order-guarded property pairs.** This is the discriminating test for
+/// the exemption's removal, and the last shape chelis#3697 reported as
+/// unreachable.
+///
+/// The phase used to be gated off for any plan with an order edge, so an
+/// edge on a binder the predicate never mentions was enough to restore the
+/// issue's own defect: `z > 0.0f64` refuted at attempt 47 and `z > y`
+/// reported `fuzz_validated` at every budget. The difference was a guard on a
+/// third binder.
+///
+/// It is safe to pair now because the shared boundary clears a successor's
+/// diagonal as well as a predecessor's, so the cells no longer land on top of
+/// a chain's refuting candidate —
+/// `issue_3697_an_order_guarded_chain_keeps_its_diagonal` is the regression
+/// control for exactly that, and measures identically either way.
+#[test]
+fn issue_3697_an_order_guarded_property_pairs() {
+    let source = "module Pairing.Ordered
+def subject(x: f64, y: f64) -> f64 = (x / y)
+@property div_finite forall(x: f64, y: f64, z: f64)
+where x > 0.0f64, y > 0.0f64, z > y:
+  ((subject(x, y) <= 1.7976931348623157e308f64) && (subject(x, y) >= -1.7976931348623157e308f64))
+";
+    for seed in ["0", "1", "2", "7", "99"] {
+        let (code, record) = prove(source, "200", seed);
+        assert_eq!(
+            code, 1,
+            "seed {seed}: an order edge on `z`, which the predicate never \
+             mentions, must not switch the pairing off: {record:#}"
+        );
+        assert_eq!(
+            record["attempted_samples"], 47,
+            "seed {seed}: the same cell reaches it as without the edge: {record:#}"
+        );
+        let y = record["counterexample"]["y"]
+            .as_f64()
+            .unwrap_or_else(|| panic!("seed {seed}: y: {record:#}"));
+        assert_eq!(
+            y,
+            f64::from_bits(1),
+            "seed {seed}: `y` takes its smallest admissible candidate: {record:#}"
+        );
+    }
+}
+
+/// **What pairing costs an order-guarded property: displacement.** The cells
+/// take attempts the uniform draw would have had, so a counterexample in the
+/// interior of the proposal window arrives later and, near the end of the
+/// budget, not at all.
+///
+/// This is the same trade the phase already makes everywhere else, and it is
+/// bounded the same way — the cells never take more than half the attempts
+/// the diagonal left. Measured over seeds 0–29 at the default budget, as a
+/// delta against the phase being off: nine of ten order shapes lose between
+/// 0 and 4 refutations of 30, mean −1.9. The worst is two disjoint edges at
+/// arity 4, 24/30 to 16/30, which is the shape below and which sits inside
+/// the envelope already accepted for non-order-guarded properties at arity 5
+/// (21/30 to 11/30).
+///
+/// Seeds 0, 1, 5 and 9 refute, at attempts 66, 61, 94 and 88 — every one past
+/// the 16-cell window, which is what makes this a displacement measurement
+/// rather than a pairing one. Fixed seeds rather than a rate; the rates are in
+/// the design doc, and a policy that widens the cell phase owes them a
+/// re-measurement.
+#[test]
+fn issue_3697_pairing_an_order_guarded_property_costs_displacement() {
+    let source = "module Pairing.Displaced
+@property outside_band forall(v0: f64, v1: f64, v2: f64, v3: f64)
+where v1 > v0, v3 > v2:
+  ((v0 <= -7.5f64) || (v0 >= -7.0f64))
+";
+    for (seed, expected) in [("0", 66), ("1", 61), ("5", 94), ("9", 88)] {
+        let (code, record) = prove(source, "100", seed);
+        assert_eq!(
+            code, 1,
+            "seed {seed}: the band must still be reachable -- the cells take \
+             at most half the attempts the diagonal left, so the uniform draw \
+             always runs: {record:#}"
+        );
+        let witness = record["counterexample"]["v0"]
+            .as_f64()
+            .unwrap_or_else(|| panic!("seed {seed}: witness: {record:#}"));
+        assert!(
+            witness > -7.5 && witness < -7.0,
+            "seed {seed}: got {witness}: {record:#}"
+        );
+        assert_eq!(
+            record["attempted_samples"], expected,
+            "seed {seed}: the refutation arrives from a post-diagonal draw \
+             past the 16-cell window; a smaller count would mean the cells \
+             stopped displacing it, a larger one that they displaced it \
+             further: {record:#}"
+        );
+    }
 }

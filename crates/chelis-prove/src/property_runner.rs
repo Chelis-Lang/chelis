@@ -3538,12 +3538,13 @@ struct ConstraintSamplingPlan {
     /// gap on uniform draws, exactly as it did before any of this: its
     /// `Diagonal` index runs past its candidate list and falls through.
     ///
-    /// Computed once here because it must not vary between attempts. That is
-    /// sound only while no binder's range depends on another's draw, which is
-    /// also exactly when the phase runs at all — see [`Self::has_order_edges`],
-    /// which gates it off otherwise. [`Self::resolve`] ignores its `values`
-    /// argument for a plan with no incoming edges, so the lengths below are
-    /// the lengths every attempt will see.
+    /// Computed once here because it must not vary between attempts. A binder
+    /// with no order predecessor contributes its exact length, which
+    /// [`Self::resolve`] yields without reading any drawn value. A binder
+    /// with one contributes the derivable *bound* on its length instead,
+    /// because its exact length depends on a value drawn inside the attempt;
+    /// a boundary above a binder's real length is harmless, since the binder
+    /// then runs past the end of its list and draws uniformly.
     cell_window_start: usize,
 }
 
@@ -3786,51 +3787,35 @@ impl ConstraintSamplingPlan {
     /// `values[predecessor]`, and there are no predecessor values at derive
     /// time, so reaching it for a plan with edges panics.
     fn derive_cell_window_start(&self) -> usize {
-        if self.has_order_edges() {
-            return DIAGONAL_SPAN;
-        }
         let values = BTreeMap::new();
         self.topo
             .iter()
-            .filter_map(|name| {
-                let (lower, upper) = self.resolve(name, self.ranges[name], &values)?;
-                Some(
-                    float_edge_candidates(self.kinds[name], lower, upper, &self.excluded[name])
-                        .len(),
-                )
+            .map(|name| {
+                // A binder with an order predecessor has no derivable length:
+                // its range, and so its candidate list, is resolved from a
+                // value drawn in the attempt. `resolve` would index an absent
+                // key here. But the *bound* needs no predecessor -- a
+                // schedule is the exclusion-free list, at most
+                // `DIAGONAL_SPAN` long, plus at most two representable
+                // neighbours per `!=` guard -- and a boundary may exceed a
+                // binder's length without harm: the binder simply runs past
+                // the end of its list and draws uniformly, as a short
+                // schedule already does.
+                if self
+                    .incoming
+                    .get(name)
+                    .is_some_and(|edges| !edges.is_empty())
+                {
+                    return DIAGONAL_SPAN + 2 * self.excluded[name].len();
+                }
+                self.resolve(name, self.ranges[name], &values)
+                    .map(|(lower, upper)| {
+                        float_edge_candidates(self.kinds[name], lower, upper, &self.excluded[name])
+                            .len()
+                    })
+                    .unwrap_or(DIAGONAL_SPAN)
             })
             .fold(DIAGONAL_SPAN, usize::max)
-    }
-
-    /// Whether any binder's admissible range is resolved from another
-    /// binder's value drawn in the same attempt (chelis#3697).
-    ///
-    /// When one is, **this lane has no stable per-binder diagonal at all**,
-    /// and the off-diagonal phase is switched off for the whole property.
-    /// `float_edge_candidates` is recomputed inside the attempt from the
-    /// predecessors already drawn, so `ScheduleSlot::Diagonal(i)` does not
-    /// name a fixed value — it names entry `i` of a list whose contents
-    /// depend on what the predecessor got. And a cell proposed for *any*
-    /// binder changes how many values the attempt draws from the generator,
-    /// which shifts every later predecessor's uniform draw, which shifts its
-    /// successors' ranges and so their lists.
-    ///
-    /// So the perturbation cannot be confined to predecessors. Measured on
-    /// `forall(x: f64, y: f64) where y > x, <twenty `!=` exclusions on y>:
-    /// (y != -1.0e-323f64)` at the default budget over thirty seeds: the
-    /// pre-chelis#3697 schedule refutes 18 times, cells everywhere refute 0,
-    /// and cells kept away from predecessors only still refute 11. Switching
-    /// the phase off for the whole property is what restores 18.
-    ///
-    /// The cost is bounded and named: a property with an order guard gets
-    /// chelis#3636's schedule and no pairing. A property without one — the
-    /// shape chelis#3697 reports, and every shape its oracle pins — is
-    /// unaffected, because there each binder's candidates depend only on its
-    /// own guards.
-    fn has_order_edges(&self) -> bool {
-        self.incoming
-            .values()
-            .any(|predecessors| !predecessors.is_empty())
     }
 
     /// Resolve `domain` into the representable `[lower, upper]` this attempt
@@ -3874,9 +3859,9 @@ impl ConstraintSamplingPlan {
     ///
     /// The odometer's digit order is `self.topo`, the order the binders are
     /// drawn in, because a successor's candidates are only known once its
-    /// predecessors have values. For the same reason an order-guarded
-    /// property takes no cell at all — [`has_order_edges`] carries the
-    /// measurement.
+    /// predecessors have values. For the same reason the cells must begin
+    /// after every binder's diagonal, a successor's included — see
+    /// [`Self::cell_window_start`], which is what makes pairing safe here.
     fn sample(
         &self,
         rng: &mut Lcg,
@@ -3885,7 +3870,6 @@ impl ConstraintSamplingPlan {
     ) -> Result<BTreeMap<String, f64>, SamplingError> {
         let mut values = BTreeMap::new();
         let arity = self.topo.len();
-        let chained = self.has_order_edges();
         for (position, name) in self.topo.iter().enumerate() {
             let kind = self.kinds[name];
             let excluded = &self.excluded[name];
@@ -3905,14 +3889,7 @@ impl ConstraintSamplingPlan {
                 .resolve(name, self.ranges[name], &values)
                 .ok_or_else(unresolvable)?;
             let candidates = float_edge_candidates(kind, lower, upper, excluded);
-            // An order-guarded property keeps chelis#3636's draw exactly:
-            // see `has_order_edges` for why a cell anywhere in such a
-            // property re-indexes the dependent binders' schedules.
-            let slot = if chained {
-                ScheduleSlot::Diagonal(attempt)
-            } else {
-                schedule_slot(attempt, arity, position, self.cell_window_start, budget)
-            };
+            let slot = schedule_slot(attempt, arity, position, self.cell_window_start, budget);
             // Once both schedules are spent the draw is a random one,
             // preferring the narrower proposal window (chelis#644 owns its
             // width). The window is only a preference: an order predecessor
