@@ -2604,10 +2604,12 @@ mod cost_entry {
     thread_local! {
         /// Whether the innermost lowering boundary enforces the budget.
         static ENFORCED: Cell<bool> = const { Cell::new(false) };
-        /// The first budget rejection inside the current cost entry. No
-        /// lowering boundary saves or restores it: only the cost entry clears
-        /// it, on entry, and reads it, on exit.
-        static TRIP: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+        /// Inside a cost entry, the first budget rejection in it, if any;
+        /// `None` outside every cost entry. No lowering boundary saves or
+        /// restores it: only the cost entry sets it, on entry, and reads it,
+        /// on exit.
+        static TRIP: std::cell::RefCell<Option<Option<String>>> =
+            const { std::cell::RefCell::new(None) };
     }
 
     /// Whether the innermost lowering boundary enforces the budget.
@@ -2637,9 +2639,8 @@ mod cost_entry {
     /// Record a budget rejection for the enclosing cost entry.
     pub(super) fn record_trip(message: &str) {
         TRIP.with(|trip| {
-            let mut trip = trip.borrow_mut();
-            if trip.is_none() {
-                *trip = Some(message.to_owned());
+            if let Some(first @ None) = &mut *trip.borrow_mut() {
+                *first = Some(message.to_owned());
             }
         });
     }
@@ -2658,7 +2659,7 @@ mod cost_entry {
         result_claim: Option<&TensorType>,
         authored_signature: bool,
     ) -> Result<Dag, LowerDiagnostic> {
-        let enclosing = TRIP.with(|trip| trip.borrow_mut().take());
+        let enclosing = TRIP.with(|trip| trip.borrow_mut().replace(None));
         let lowered = try_lower_subexpr_program_with_ordered_inputs_impl(
             expr,
             scoped_bindings,
@@ -2679,10 +2680,15 @@ mod cost_entry {
         // made of the rejection.
         // A fatal diagnostic keeps precedence, as it does over every other
         // rejection.
-        match (
-            TRIP.with(|trip| std::mem::replace(&mut *trip.borrow_mut(), enclosing)),
-            lowered,
-        ) {
+        // Restoring an enclosing entry's state keeps this entry's trip as
+        // well, so an entry that encloses a tripped entry is rejected too.
+        let tripped = TRIP.with(|trip| {
+            let mut trip = trip.borrow_mut();
+            let inner = trip.take().flatten();
+            *trip = enclosing.map(|outer| outer.or_else(|| inner.clone()));
+            inner
+        });
+        match (tripped, lowered) {
             (_, Err(fatal)) if fatal.fatal => Err(fatal),
             (Some(message), _) => Err(lower_diagnostic_for_expr(message, expr)),
             (None, lowered) => lowered,
