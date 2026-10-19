@@ -440,7 +440,8 @@ install always preserves the prior stable root.
 
 If the failed install copied a new binary, the launcher promotes
 `$CHELIS_HOME/nix-gcroots/chelisup.partial`. This partial root protects that
-binary. The launcher then removes the staging root.
+binary. If it points to the same package as the stable root, the launcher
+removes the duplicate partial root. It then removes the staging root.
 
 If an interrupted install left a staging root, the next attempt compares its
 package with both installed copies. It promotes the partial root only for a
@@ -457,6 +458,16 @@ GC roots around the real command and then puts itself back at
 bootstrap installer, which replaces the launcher. The launcher answers these
 two commands itself and runs no installer. Its advice names the `nix run`
 command for the `chelisup` of a newer release tag `vX.Y.Z` of the flake.
+
+The launcher sets `CHELISUP_UPGRADE_ADVICE` for the real installer. A refusal
+of a newer release then names the same Nix upgrade command instead of the
+bootstrap installer. The setting changes only advice text. An unset, blank,
+or non-UTF-8 value retains the bootstrap advice.
+
+Help requests and commands without their operand pass directly to the real
+installer. They need no `nix-store` and change no GC root. If the launcher
+cannot restore itself after a copy, it names the destination file and returns
+a failure status.
 
 The stable GC root points to the complete Nix package output. It preserves the
 shim dependencies and every store reference in the installed launcher.

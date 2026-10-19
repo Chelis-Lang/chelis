@@ -35,7 +35,7 @@ use serde_json::{Map, Number, Value};
 use sha2::{Digest, Sha256};
 
 use crate::version::{is_safe_path_component, release_triple};
-use crate::{NIX_LINK_ADVICE, UPGRADE_ADVICE};
+use crate::{NIX_LINK_ADVICE, upgrade_advice};
 
 /// The last release whose `chelis` has no `chelis runtime export`.
 pub const LAST_RELEASE_WITHOUT_EXPORT: &str = "0.18.11";
@@ -123,14 +123,13 @@ fn cannot_start(version: &str, error: &io::Error, nixos: bool) -> String {
     format!("this machine cannot run the chelis {version} release's bin/chelis ({error}){cause}")
 }
 
-/// Append how to get the latest chelisup to `refusal` when release `version`
-/// is newer than `chelisup`, the running chelisup's version.
+/// Append upgrade advice only when the release is newer than this chelisup.
 fn advise_upgrade(refusal: String, version: &str, chelisup: &str) -> String {
     match (release_triple(version), release_triple(chelisup)) {
         (Ok(release), Ok(running)) if release > running => format!(
             "{refusal}. This chelisup ({chelisup}) is older than the {version} release, which \
-             may use a format it does not know; to get the latest chelisup, {UPGRADE_ADVICE}, \
-             then retry"
+             may use a format it does not know. To get the latest chelisup, {}, then retry",
+            upgrade_advice()
         ),
         _ => refusal,
     }
@@ -410,15 +409,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn only_a_release_newer_than_chelisup_gets_upgrade_advice() {
-        let advised = advise_upgrade("refused".to_owned(), "0.19.10", "0.19.9");
-        assert!(
-            advised
-                .starts_with("refused. This chelisup (0.19.9) is older than the 0.19.10 release"),
-            "{advised}"
-        );
-        assert!(advised.contains(UPGRADE_ADVICE), "{advised}");
-        for release in ["0.19.9", "0.9.10"] {
+    fn current_older_and_invalid_releases_get_no_upgrade_advice() {
+        for release in ["0.19.9", "0.19.8", "0.9.10", "invalid"] {
             assert_eq!(
                 advise_upgrade("refused".to_owned(), release, "0.19.9"),
                 "refused"

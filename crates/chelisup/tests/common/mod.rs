@@ -323,7 +323,8 @@ pub fn run_cli(
     cmd.args(args)
         .current_dir(cwd)
         .env("CHELIS_HOME", home)
-        .env_remove("CHELIS_TOOLCHAIN");
+        .env_remove("CHELIS_TOOLCHAIN")
+        .env_remove("CHELISUP_UPGRADE_ADVICE");
     for (k, v) in extra_env {
         cmd.env(k, v);
     }

@@ -214,6 +214,10 @@ let
     #!${pkgs.runtimeShell}
     set -eu
 
+    # The real installer gives this advice instead of the bootstrap installer,
+    # which replaces this launcher (chelis#3942).
+    export CHELISUP_UPGRADE_ADVICE='run the chelisup of a newer release from the Chelis Nix flake with nix run github:Chelis-Lang/chelis/vX.Y.Z#chelisup -- install X.Y.Z, with a release version for X.Y.Z'
+
     resolve_chelis_home() {
       if [ -n "\''${CHELIS_HOME:-}" ]; then
         chelis_home="\$CHELIS_HOME"
@@ -253,12 +257,26 @@ let
     }
 
     restore_nix_wrapper() {
+      launcher_copy="\$chelis_home/bin/chelisup"
       wrapper_tmp="\$chelis_home/bin/.chelisup-nix-wrapper.\$\$"
-      ${pkgs.coreutils}/bin/rm -f "\$wrapper_tmp"
-      ${pkgs.coreutils}/bin/install -m755 "$out/bin/chelisup" "\$wrapper_tmp" \
-        || { ${pkgs.coreutils}/bin/rm -f "\$wrapper_tmp"; return 1; }
-      ${pkgs.coreutils}/bin/mv -f "\$wrapper_tmp" "\$chelis_home/bin/chelisup" \
-        || { ${pkgs.coreutils}/bin/rm -f "\$wrapper_tmp"; return 1; }
+      if ${pkgs.coreutils}/bin/rm -f "\$wrapper_tmp" \
+        && ${pkgs.coreutils}/bin/install -m755 "$out/bin/chelisup" "\$wrapper_tmp" \
+        && ${pkgs.coreutils}/bin/mv -f "\$wrapper_tmp" "\$launcher_copy"; then
+        return 0
+      fi
+      printf 'chelisup: cannot put the Nix chelisup launcher back at %s\n' "\$launcher_copy" >&2
+      ${pkgs.coreutils}/bin/rm -f "\$wrapper_tmp" || true
+      return 1
+    }
+
+    # A partial root that names the package of the stable root keeps nothing
+    # that the stable root does not keep (chelis#3957).
+    remove_duplicate_partial_root() {
+      if [ -L "\$partial_root" ] && [ -L "\$gc_root" ] \
+        && [ "\$(${pkgs.coreutils}/bin/readlink "\$partial_root")" \
+          = "\$(${pkgs.coreutils}/bin/readlink "\$gc_root")" ]; then
+        ${pkgs.coreutils}/bin/rm -f "\$partial_root"
+      fi
     }
 
     # The nix-store of the Nix installation of the user. The package brings no
@@ -331,9 +349,25 @@ let
       done
     }
 
-    # The real "update" advises the bootstrap installer, which replaces this
-    # launcher at \$CHELIS_HOME/bin/chelisup. A newer Nix chelisup comes from a
-    # newer release of the flake.
+    # A help request and a command without its operand run no command of the
+    # real installer, so they pass through with no root step (chelis#3957).
+    for argument in "\$@"; do
+      case "\$argument" in
+        --) break ;;
+        -h | --help) exec "$out/libexec/chelisup" "\$@" ;;
+      esac
+    done
+    case "\''${1:-}" in
+      install | default | link | uninstall)
+        if [ "\$#" -eq 1 ] || { [ "\$#" -eq 2 ] && [ "\$2" = "--" ]; }; then
+          exec "$out/libexec/chelisup" "\$@"
+        fi
+        ;;
+    esac
+
+    # The bootstrap installer replaces this launcher at
+    # \$CHELIS_HOME/bin/chelisup. A newer Nix chelisup comes from a newer
+    # release of the flake, and this message gives the full advice.
     if { [ "\$#" -eq 1 ] && [ "\$1" = "update" ]; } \
       || { [ "\$#" -eq 2 ] && [ "\$1" = "self" ] && [ "\$2" = "update" ]; }; then
       printf '%s\n' \
@@ -389,13 +423,16 @@ let
             --realise "$out" >/dev/null
         fi
         if installer_matches_package; then
-          restore_nix_wrapper
+          restore_nix_wrapper || true
         fi
+        remove_duplicate_partial_root
         ${pkgs.coreutils}/bin/rm -f "\$staging_root"
         exit "\$install_status"
       fi
 
-      restore_nix_wrapper
+      if ! restore_nix_wrapper; then
+        exit 1
+      fi
       if ! "\$nix_store" --add-root "\$gc_root" --realise "$out" >/dev/null; then
         printf '%s\n' 'chelisup: failed to promote the Nix GC root' >&2
         exit 1
