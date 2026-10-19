@@ -36456,4 +36456,342 @@ def example() -> f32 = bisection(erf_projectile, cast(0.1, f32), cast(0.7, f32),
             "the entry and the value probe inside it both enforce"
         );
     }
+
+    /// One block of a generated program for the unroll model test.
+    #[derive(Clone)]
+    enum Block {
+        /// A static loop of `n` steps.
+        Chain(usize),
+        /// A static loop whose every step runs `inner` first.
+        ChainWith(usize, Box<Block>),
+        /// A static tree `d` levels deep: two recursive calls per level.
+        Tree(usize),
+        /// Two functions calling each other `n` times, one call per level.
+        Mutual(usize),
+        /// A combinator looping `n` steps over a function literal, whose
+        /// body runs `inner` when there is one.
+        LambdaChain(usize, Option<Box<Block>>),
+        /// A combinator tree `d` levels deep applying a function literal at
+        /// every leaf.
+        LambdaTree(usize),
+        /// `first`, then `second` on its result.
+        Seq(Box<Block>, Box<Block>),
+    }
+
+    /// The model's frame identity: a declaration, or a literal by number.
+    #[derive(Clone, PartialEq)]
+    enum ModelKey {
+        Declaration(String),
+        Literal(usize),
+    }
+
+    /// The unroll rule over a block's inline events, computed from the
+    /// block's structure alone.
+    struct UnrollModel {
+        budget: usize,
+        depth: std::collections::BTreeMap<String, usize>,
+        recursing: usize,
+        frames: Vec<(ModelKey, usize)>,
+        unroll: usize,
+        branched: bool,
+        counted: usize,
+        tripped: bool,
+    }
+
+    impl UnrollModel {
+        fn push(&mut self, binding: &str, key: ModelKey) {
+            if self.tripped {
+                return;
+            }
+            let depth = self.depth.entry(binding.to_string()).or_insert(0);
+            *depth += 1;
+            if *depth == 2 {
+                self.recursing += 1;
+            }
+            if let Some((_, credits)) = self
+                .frames
+                .iter_mut()
+                .rev()
+                .find(|(frame, _)| *frame == key)
+            {
+                *credits += 1;
+                if *credits > 1 {
+                    self.branched = true;
+                }
+            }
+            self.frames.push((key, 0));
+            if self.recursing > 0 {
+                self.counted += 1;
+                self.unroll += 1;
+                if self.unroll > self.budget && self.branched {
+                    self.tripped = true;
+                }
+            }
+        }
+
+        fn pop(&mut self, binding: &str) {
+            if self.tripped {
+                return;
+            }
+            self.frames.pop();
+            let depth = self.depth.get_mut(binding).expect("a pushed binding");
+            if *depth == 2 {
+                self.recursing -= 1;
+                if self.recursing == 0 {
+                    self.unroll = 0;
+                    self.branched = false;
+                }
+            }
+            *depth -= 1;
+        }
+    }
+
+    /// A block's inline events, replayed into the model.
+    type Events = Box<dyn Fn(&mut UnrollModel)>;
+
+    /// The program text and the model's events for one block, numbered so
+    /// every generated function and literal is distinct.
+    struct Generator {
+        defs: String,
+        next: usize,
+    }
+
+    impl Generator {
+        fn fresh(&mut self) -> usize {
+            self.next += 1;
+            self.next
+        }
+
+        /// Emit `block`'s definitions and return its call on `arg`, with a
+        /// closure replaying its inline events into the model.
+        fn emit(&mut self, block: &Block, arg: &str) -> (String, Events) {
+            let id = self.fresh();
+            match block {
+                Block::Chain(n) | Block::ChainWith(n, _) => {
+                    let name = format!("c{id}");
+                    let (step, inner): (String, Option<Events>) = match block {
+                        Block::ChainWith(_, inner) => {
+                            let (call, events) = self.emit(inner, "neg(x)");
+                            (call, Some(events))
+                        }
+                        _ => ("neg(x)".to_string(), None),
+                    };
+                    self.defs.push_str(&format!(
+                        "def {name}(x: f32, k: i64) -> f32 = if gte(k, cast({n}, i64)) then x else {name}({step}, add(k, cast(1, i64)))\n"
+                    ));
+                    let n = *n;
+                    let events = move |model: &mut UnrollModel| {
+                        fn level(
+                            model: &mut UnrollModel,
+                            name: &str,
+                            j: usize,
+                            n: usize,
+                            inner: &Option<Events>,
+                        ) {
+                            model.push(name, ModelKey::Declaration(name.to_string()));
+                            if j < n {
+                                if let Some(inner) = inner {
+                                    inner(model);
+                                }
+                                level(model, name, j + 1, n, inner);
+                            }
+                            model.pop(name);
+                        }
+                        level(model, &name, 0, n, &inner);
+                    };
+                    (format!("c{id}({arg}, cast(0, i64))"), Box::new(events))
+                }
+                Block::Tree(d) => {
+                    let name = format!("t{id}");
+                    self.defs.push_str(&format!(
+                        "def {name}(x: f32, k: i64) -> f32 = if gte(k, cast({d}, i64)) then x else add({name}(x, add(k, cast(1, i64))), {name}(neg(x), add(k, cast(1, i64))))\n"
+                    ));
+                    let d = *d;
+                    let events = move |model: &mut UnrollModel| {
+                        fn level(model: &mut UnrollModel, name: &str, j: usize, d: usize) {
+                            model.push(name, ModelKey::Declaration(name.to_string()));
+                            if j < d {
+                                level(model, name, j + 1, d);
+                                level(model, name, j + 1, d);
+                            }
+                            model.pop(name);
+                        }
+                        level(model, &name, 0, d);
+                    };
+                    (format!("t{id}({arg}, cast(0, i64))"), Box::new(events))
+                }
+                Block::Mutual(n) => {
+                    let (a, b) = (format!("ma{id}"), format!("mb{id}"));
+                    self.defs.push_str(&format!(
+                        "def {a}(x: f32, k: i64) -> f32 = if gte(k, cast({n}, i64)) then x else {b}(neg(x), k)\ndef {b}(x: f32, k: i64) -> f32 = {a}(x, add(k, cast(1, i64)))\n"
+                    ));
+                    let n = *n;
+                    let events = move |model: &mut UnrollModel| {
+                        fn level(model: &mut UnrollModel, a: &str, b: &str, j: usize, n: usize) {
+                            model.push(a, ModelKey::Declaration(a.to_string()));
+                            if j < n {
+                                model.push(b, ModelKey::Declaration(b.to_string()));
+                                level(model, a, b, j + 1, n);
+                                model.pop(b);
+                            }
+                            model.pop(a);
+                        }
+                        level(model, &a, &b, 0, n);
+                    };
+                    (format!("ma{id}({arg}, cast(0, i64))"), Box::new(events))
+                }
+                Block::LambdaChain(n, inner) => {
+                    let name = format!("lc{id}");
+                    let literal = self.fresh();
+                    let (body, inner) = match inner {
+                        Some(inner) => {
+                            let (call, events) = self.emit(inner, "y");
+                            (call, Some(events))
+                        }
+                        None => ("neg(y)".to_string(), None),
+                    };
+                    self.defs.push_str(&format!(
+                        "def {name}(f: f32 -> f32, x: f32, k: i64) -> f32 = if gte(k, cast({n}, i64)) then x else {name}(f, f(x), add(k, cast(1, i64)))\n"
+                    ));
+                    let n = *n;
+                    let events = move |model: &mut UnrollModel| {
+                        fn level(
+                            model: &mut UnrollModel,
+                            name: &str,
+                            literal: usize,
+                            j: usize,
+                            n: usize,
+                            inner: &Option<Events>,
+                        ) {
+                            model.push(name, ModelKey::Declaration(name.to_string()));
+                            if j < n {
+                                model.push("f", ModelKey::Literal(literal));
+                                if let Some(inner) = inner {
+                                    inner(model);
+                                }
+                                model.pop("f");
+                                level(model, name, literal, j + 1, n, inner);
+                            }
+                            model.pop(name);
+                        }
+                        level(model, &name, literal, 0, n, &inner);
+                    };
+                    (
+                        format!("lc{id}(fn (y: f32) -> {body}, {arg}, cast(0, i64))"),
+                        Box::new(events),
+                    )
+                }
+                Block::LambdaTree(d) => {
+                    let name = format!("lt{id}");
+                    let literal = self.fresh();
+                    self.defs.push_str(&format!(
+                        "def {name}(f: f32 -> f32, x: f32, k: i64) -> f32 = if gte(k, cast({d}, i64)) then f(x) else add({name}(f, x, add(k, cast(1, i64))), {name}(f, neg(x), add(k, cast(1, i64))))\n"
+                    ));
+                    let d = *d;
+                    let events = move |model: &mut UnrollModel| {
+                        fn level(
+                            model: &mut UnrollModel,
+                            name: &str,
+                            literal: usize,
+                            j: usize,
+                            d: usize,
+                        ) {
+                            model.push(name, ModelKey::Declaration(name.to_string()));
+                            if j == d {
+                                model.push("f", ModelKey::Literal(literal));
+                                model.pop("f");
+                            } else {
+                                level(model, name, literal, j + 1, d);
+                                level(model, name, literal, j + 1, d);
+                            }
+                            model.pop(name);
+                        }
+                        level(model, &name, literal, 0, d);
+                    };
+                    (
+                        format!("lt{id}(fn (y: f32) -> neg(y), {arg}, cast(0, i64))"),
+                        Box::new(events),
+                    )
+                }
+                Block::Seq(first, second) => {
+                    let (first_call, first_events) = self.emit(first, arg);
+                    let (call, second_events) = self.emit(second, &first_call);
+                    let events = move |model: &mut UnrollModel| {
+                        first_events(model);
+                        second_events(model);
+                    };
+                    (call, Box::new(events))
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn generated_unrolls_count_and_trip_as_the_model_says() {
+        // chelis#3864 round 5: every combination of the block grammar below,
+        // lowered as a cost entry, counts exactly the bodies the unroll rule
+        // predicts from the program's structure, and trips exactly when it
+        // predicts: frames keyed by function or literal identity, a frame
+        // credited twice branching its unroll, and the unroll ending when no
+        // name recurses.
+        use Block::*;
+        let leaves = [
+            Chain(3),
+            Chain(30),
+            Tree(2),
+            Tree(5),
+            Mutual(4),
+            Mutual(25),
+            LambdaChain(20, None),
+            LambdaTree(4),
+            LambdaChain(6, Some(Box::new(LambdaChain(6, None)))),
+            ChainWith(8, Box::new(Chain(6))),
+            ChainWith(4, Box::new(Tree(2))),
+        ];
+        let mut blocks: Vec<Block> = leaves.to_vec();
+        // Both verdicts, and unlimited unrolls past the budget, must occur,
+        // or the comparison proves little.
+        let (mut trips, mut unlimited_past_budget) = (0, 0);
+        for first in &leaves {
+            for second in &leaves {
+                blocks.push(Seq(Box::new(first.clone()), Box::new(second.clone())));
+            }
+        }
+        for block in blocks {
+            for budget in [20, 60] {
+                let mut generator = Generator {
+                    defs: String::new(),
+                    next: 0,
+                };
+                let (call, events) = generator.emit(&block, "cast(1.5, f32)");
+                let source = format!("{}def example() -> f32 = {call}\n", generator.defs);
+                let mut model = UnrollModel {
+                    budget,
+                    depth: Default::default(),
+                    recursing: 0,
+                    frames: Vec::new(),
+                    unroll: 0,
+                    branched: false,
+                    counted: 0,
+                    tripped: false,
+                };
+                events(&mut model);
+                let (lowered, counted, _) = lower_example(source.clone(), budget);
+                assert_eq!(
+                    (counted, !lowered),
+                    (model.counted, model.tripped),
+                    "counted bodies and trip for:\n{source}"
+                );
+                if model.tripped {
+                    trips += 1;
+                } else if model.counted > budget {
+                    unlimited_past_budget += 1;
+                }
+            }
+        }
+        assert!(
+            trips > 0 && unlimited_past_budget > 0,
+            "{trips} {unlimited_past_budget}"
+        );
+    }
 }
