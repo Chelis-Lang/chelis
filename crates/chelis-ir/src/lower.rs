@@ -26,6 +26,23 @@ thread_local! {
     /// unwinds into structured diagnostics. The panic hook stays quiet in
     /// that scope so users see only the returned diagnostic.
     static SUPPRESS_LOWERING_PANIC_OUTPUT: Cell<bool> = const { Cell::new(false) };
+    /// Function bodies the current unroll has inlined, against
+    /// [`MAX_UNROLLED_BODIES`] once the unroll branches; `None` outside every
+    /// lowering boundary. Every lowering context draws on the one count, and
+    /// it returns to zero when no name is recursing any more, so it measures
+    /// one unroll at a time (chelis#3864).
+    static UNROLLED_BODIES: Cell<Option<usize>> = const { Cell::new(None) };
+    /// Names with more than one active inline level, across every lowering
+    /// context on this thread: a recursion is unrolling while this is
+    /// nonzero.
+    static RECURSING_NAMES: Cell<usize> = const { Cell::new(0) };
+    /// Whether a frame of the current unroll has made more than one
+    /// recursive call back into its own recursion.
+    static UNROLL_BRANCHED: Cell<bool> = const { Cell::new(false) };
+    /// The function whose frame first branched in the current unroll, which
+    /// a rejection names.
+    static UNROLL_BRANCHED_AT: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
     /// Set while [`catch_lowering_diagnostic`] encloses a post-lowering pass.
     /// The hook stays quiet only for a lowering diagnostic's own unwind; any
     /// other panic in that scope still prints, since it is resumed.
@@ -723,17 +740,96 @@ fn panic_payload_to_lower_diagnostic(payload: &(dyn Any + Send)) -> LowerDiagnos
 /// segment size.
 const LOWERING_GROW_SEGMENT_BYTES: usize = 512 * 1024 * 1024;
 
-fn catch_lowering<R>(f: impl FnOnce() -> R + std::panic::UnwindSafe) -> Result<R, LowerDiagnostic> {
+/// Whether a lowering boundary enforces [`MAX_UNROLLED_BODIES`]
+/// (chelis#3864). Every boundary states its choice; there is no default.
+/// Only `chelis cost`'s per-entry tensor-DAG lowering enforces the budget,
+/// because its caller omits a rejected entry. Every other lowering, eval and
+/// build included, counts nothing and behaves as it would with no budget. A
+/// boundary nested inside an enforcing one enforces too, so a probe within a
+/// cost entry cannot escape the entry's budget.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum UnrollBudget {
+    /// Only [`cost_entry`] can construct the token.
+    Enforced(cost_entry::CostEntryOnly),
+    Unbounded,
+}
+
+/// The unroll state of one lowering boundary. Each boundary starts its own
+/// count and restores the enclosing one's on exit, so lowering inside a
+/// nested boundary, a scratch probe whose failure becomes a verdict among
+/// them, neither consumes nor trips the enclosing unroll's budget, and a
+/// boundary that raised, abandoning its context without unwinding its inline
+/// levels, leaves no recursion behind.
+struct UnrollScope {
+    count: Option<usize>,
+    recursing: usize,
+    branched: bool,
+    branched_at: Option<String>,
+    _enforcement: cost_entry::Enforcement,
+}
+
+impl UnrollScope {
+    fn enter(budget: UnrollBudget) -> Self {
+        let enforcement = cost_entry::Enforcement::enter(budget);
+        #[cfg(test)]
+        if cost_entry::enforced() {
+            ENFORCING_SCOPES_ENTERED.with(|entered| entered.set(entered.get() + 1));
+        }
+        Self {
+            _enforcement: enforcement,
+            count: UNROLLED_BODIES.with(|count| count.replace(Some(0))),
+            recursing: RECURSING_NAMES.with(|names| names.replace(0)),
+            branched: UNROLL_BRANCHED.with(|branched| branched.replace(false)),
+            branched_at: UNROLL_BRANCHED_AT.with(|at| at.borrow_mut().take()),
+        }
+    }
+}
+
+impl Drop for UnrollScope {
+    fn drop(&mut self) {
+        UNROLLED_BODIES.with(|count| count.set(self.count));
+        RECURSING_NAMES.with(|names| names.set(self.recursing));
+        UNROLL_BRANCHED.with(|branched| branched.set(self.branched));
+        UNROLL_BRANCHED_AT.with(|at| *at.borrow_mut() = self.branched_at.take());
+    }
+}
+
+/// No recursion is unrolling any more: the next one starts its own count.
+fn end_unroll() {
+    UNROLLED_BODIES.with(|count| {
+        if count.get().is_some() {
+            count.set(Some(0));
+        }
+    });
+    UNROLL_BRANCHED.with(|branched| branched.set(false));
+    UNROLL_BRANCHED_AT.with(|at| *at.borrow_mut() = None);
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Lowering boundaries entered that enforce the budget, for a test that
+    /// checks which entries enforce it.
+    static ENFORCING_SCOPES_ENTERED: Cell<usize> = const { Cell::new(0) };
+    /// A test's replacement for [`MAX_UNROLLED_BODIES`], the bodies counted
+    /// against it, and the last rejection's message.
+    static UNROLL_BUDGET_PROBE: std::cell::RefCell<Option<(usize, usize, Option<String>)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+fn catch_lowering<R>(
+    budget: UnrollBudget,
+    f: impl FnOnce() -> R + std::panic::UnwindSafe,
+) -> Result<R, LowerDiagnostic> {
     struct Guard;
     impl Drop for Guard {
         fn drop(&mut self) {
             SUPPRESS_LOWERING_PANIC_OUTPUT.with(|cell| cell.set(false));
         }
     }
-
     install_chelis_panic_hook();
     SUPPRESS_LOWERING_PANIC_OUTPUT.with(|cell| cell.set(true));
     let _guard = Guard;
+    let _unroll = UnrollScope::enter(budget);
     std::panic::catch_unwind(|| stacker::grow(LOWERING_GROW_SEGMENT_BYTES, f))
         .map_err(|payload| panic_payload_to_lower_diagnostic(&*payload))
 }
@@ -745,9 +841,10 @@ fn catch_lowering<R>(f: impl FnOnce() -> R + std::panic::UnwindSafe) -> Result<R
 /// `LowerDiagnostic`. Crate-internal only by design; the build CLI
 /// goes through `host::try_lower_compiled_program` instead.
 pub(crate) fn catch_lowering_external<R>(
+    budget: UnrollBudget,
     f: impl FnOnce() -> R + std::panic::UnwindSafe,
 ) -> Result<R, LowerDiagnostic> {
-    catch_lowering(f)
+    catch_lowering(budget, f)
 }
 
 /// Return the lowering diagnostic a post-lowering pass raises, and nothing
@@ -761,6 +858,7 @@ pub(crate) fn catch_lowering_external<R>(
 /// resumed rather than converted, so an internal fault is not laundered into
 /// a host-fallback diagnostic.
 pub(crate) fn catch_lowering_diagnostic<R>(
+    budget: UnrollBudget,
     f: impl FnOnce() -> R + std::panic::UnwindSafe,
 ) -> Result<R, LowerDiagnostic> {
     struct Restore(bool);
@@ -773,6 +871,7 @@ pub(crate) fn catch_lowering_diagnostic<R>(
 
     install_chelis_panic_hook();
     let _restore = Restore(SUPPRESS_DIAGNOSTIC_PANIC_OUTPUT.with(|cell| cell.replace(true)));
+    let _unroll = UnrollScope::enter(budget);
     match std::panic::catch_unwind(f) {
         Ok(value) => Ok(value),
         Err(payload) if payload.is::<LowerDiagnostic>() || payload.is::<UnrepresentableDag>() => {
@@ -1016,7 +1115,7 @@ pub fn try_lower_program_to_library(
     program: &CheckedProgram,
 ) -> Result<LoweredLibrary, LowerDiagnostic> {
     assert_checked_library_boundary(program);
-    catch_lowering(|| {
+    catch_lowering(UnrollBudget::Unbounded, || {
         lower_program_to_library_inner(
             program,
             #[cfg(feature = "lowering-trace")]
@@ -1041,7 +1140,7 @@ pub(crate) fn try_lower_program_to_library_with_trace(
     assert_checked_library_boundary(program);
     // The collector is created and consumed inside the unwind boundary. A
     // failed lowering discards all partial observations with its contexts.
-    catch_lowering(|| {
+    catch_lowering(UnrollBudget::Unbounded, || {
         let collector = crate::lowering_trace::Collector::new();
         let library = lower_program_to_library_inner(program, Some(collector.clone()));
         (library, collector.finish())
@@ -1444,7 +1543,9 @@ pub fn try_lower_program_with_context(
         "lower_program_with_context: library program_defs",
         &library.program_defs,
     );
-    catch_lowering(|| lower_program_with_context_inner(library, new_program))
+    catch_lowering(UnrollBudget::Unbounded, || {
+        lower_program_with_context_inner(library, new_program)
+    })
 }
 
 fn lower_program_with_context_inner(
@@ -2420,7 +2521,7 @@ pub fn try_lower_subexpr_program_with_context_and_controls(
     context: &SubexprLoweringContext,
 ) -> Result<LoweredSubexprWithControls, LowerDiagnostic> {
     assert_decode_once_at_boundary("lower_subexpr_program: expr", std::slice::from_ref(expr));
-    catch_lowering(|| {
+    catch_lowering(UnrollBudget::Unbounded, || {
         let (dag, value_root_count, list_checks, ordered_list_checks) =
             lower_subexpr_program_inner_impl(
                 expr,
@@ -2487,7 +2588,112 @@ pub(crate) fn try_lower_subexpr_program_with_ordered_inputs(
             #[cfg(feature = "lowering-trace")]
             trace: None,
         },
+        UnrollBudget::Unbounded,
     )
+}
+
+pub(crate) use cost_entry::try_lower_cost_entry_with_ordered_inputs;
+
+/// The one lowering that enforces [`MAX_UNROLLED_BODIES`], and the only code
+/// that can construct [`UnrollBudget::Enforced`] or turn enforcement on: the
+/// token's field and the enforcement flag are private to this module
+/// (chelis#3864).
+mod cost_entry {
+    use super::*;
+
+    thread_local! {
+        /// Whether the innermost lowering boundary enforces the budget.
+        static ENFORCED: Cell<bool> = const { Cell::new(false) };
+        /// Inside a cost entry, the first budget rejection in it, if any;
+        /// `None` outside every cost entry. No lowering boundary saves or
+        /// restores it: only the cost entry sets it, on entry, and reads it,
+        /// on exit.
+        static TRIP: std::cell::RefCell<Option<Option<String>>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    /// Whether the innermost lowering boundary enforces the budget.
+    pub(super) fn enforced() -> bool {
+        ENFORCED.with(Cell::get)
+    }
+
+    /// One boundary's enforcement: an enforcing budget turns it on, any
+    /// boundary inside an enforcing one keeps it, and leaving the boundary
+    /// restores the enclosing state.
+    pub(super) struct Enforcement(bool);
+
+    impl Enforcement {
+        pub(super) fn enter(budget: UnrollBudget) -> Self {
+            Self(ENFORCED.with(|enforced| {
+                enforced.replace(enforced.get() || matches!(budget, UnrollBudget::Enforced(_)))
+            }))
+        }
+    }
+
+    impl Drop for Enforcement {
+        fn drop(&mut self) {
+            ENFORCED.with(|enforced| enforced.set(self.0));
+        }
+    }
+
+    /// Record a budget rejection for the enclosing cost entry.
+    pub(super) fn record_trip(message: &str) {
+        TRIP.with(|trip| {
+            if let Some(first @ None) = &mut *trip.borrow_mut() {
+                *first = Some(message.to_owned());
+            }
+        });
+    }
+
+    /// Proof that a boundary is `chelis cost`'s per-entry lowering.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(crate) struct CostEntryOnly(());
+
+    /// [`try_lower_subexpr_program_with_ordered_inputs`] for one entry of
+    /// `chelis cost`'s per-entry tensor-DAG lowering, whose caller omits an
+    /// entry whose unroll is rejected.
+    pub(crate) fn try_lower_cost_entry_with_ordered_inputs(
+        expr: &Expr,
+        scoped_bindings: Vec<(String, TensorType)>,
+        context: &SubexprLoweringContext,
+        result_claim: Option<&TensorType>,
+        authored_signature: bool,
+    ) -> Result<Dag, LowerDiagnostic> {
+        let enclosing = TRIP.with(|trip| trip.borrow_mut().replace(None));
+        let lowered = try_lower_subexpr_program_with_ordered_inputs_impl(
+            expr,
+            scoped_bindings,
+            context,
+            result_claim,
+            SubexprLoweringOptions {
+                root: SubexprRoot::Expression,
+                root_operation: None,
+                include_list_controls: false,
+                authored_signature,
+                literal_result_claim_ownership: LiteralResultClaimOwnership::Legacy,
+                #[cfg(feature = "lowering-trace")]
+                trace: None,
+            },
+            UnrollBudget::Enforced(CostEntryOnly(())),
+        );
+        // A trip anywhere in the entry rejects it, whatever a nested probe
+        // made of the rejection.
+        // A fatal diagnostic keeps precedence, as it does over every other
+        // rejection.
+        // Restoring an enclosing entry's state keeps this entry's trip as
+        // well, so an entry that encloses a tripped entry is rejected too.
+        let tripped = TRIP.with(|trip| {
+            let mut trip = trip.borrow_mut();
+            let inner = trip.take().flatten();
+            *trip = enclosing.map(|outer| outer.or_else(|| inner.clone()));
+            inner
+        });
+        match (tripped, lowered) {
+            (_, Err(fatal)) if fatal.fatal => Err(fatal),
+            (Some(message), _) => Err(lower_diagnostic_for_expr(message, expr)),
+            (None, lowered) => lowered,
+        }
+    }
 }
 
 /// A complete named invocation lowered over its own once-prepared actuals.
@@ -2530,8 +2736,9 @@ pub(crate) fn try_lower_prepared_named_call(
     #[cfg(not(feature = "lowering-trace"))]
     let _ = collect_trace;
     assert_decode_once_at_boundary("prepared_named_call: expr", std::slice::from_ref(expr));
-    let (dag, value_root_count, list_checks, ordered_list_checks) =
-        catch_lowering(std::panic::AssertUnwindSafe(|| {
+    let (dag, value_root_count, list_checks, ordered_list_checks) = catch_lowering(
+        UnrollBudget::Unbounded,
+        std::panic::AssertUnwindSafe(|| {
             lower_subexpr_program_inner_impl(
                 expr,
                 scoped_bindings,
@@ -2548,7 +2755,8 @@ pub(crate) fn try_lower_prepared_named_call(
                     trace: collector.clone(),
                 },
             )
-        }))?;
+        }),
+    )?;
     Ok(PreparedNamedCallHelper {
         lowered: LoweredSubexprWithControls {
             dag,
@@ -2583,6 +2791,7 @@ pub(crate) fn try_lower_tensor_helper_program_with_ordered_inputs(
             #[cfg(feature = "lowering-trace")]
             trace: None,
         },
+        UnrollBudget::Unbounded,
     )
 }
 
@@ -2608,6 +2817,7 @@ pub(crate) fn try_lower_subexpr_program_with_ordered_inputs_and_trace(
             literal_result_claim_ownership: LiteralResultClaimOwnership::Legacy,
             trace: Some(collector.clone()),
         },
+        UnrollBudget::Unbounded,
     )?;
     Ok((dag, collector.finish_helper()))
 }
@@ -2635,6 +2845,7 @@ pub(crate) fn try_lower_tensor_helper_program_with_ordered_inputs_and_trace(
             literal_result_claim_ownership: LiteralResultClaimOwnership::AuthoredTensorHelper,
             trace: Some(collector.clone()),
         },
+        UnrollBudget::Unbounded,
     )?;
     Ok((dag, collector.finish_helper()))
 }
@@ -2645,14 +2856,23 @@ fn try_lower_subexpr_program_with_ordered_inputs_impl(
     context: &SubexprLoweringContext,
     result_claim: Option<&TensorType>,
     options: SubexprLoweringOptions,
+    budget: UnrollBudget,
 ) -> Result<Dag, LowerDiagnostic> {
     assert_decode_once_at_boundary("lower_subexpr_program: expr", std::slice::from_ref(expr));
     // As above, a failed attempt owns and discards its complete collector.
-    catch_lowering(std::panic::AssertUnwindSafe(|| {
-        let (dag, _, _, _) =
-            lower_subexpr_program_inner_impl(expr, scoped_bindings, context, result_claim, options);
-        dag
-    }))
+    catch_lowering(
+        budget,
+        std::panic::AssertUnwindSafe(|| {
+            let (dag, _, _, _) = lower_subexpr_program_inner_impl(
+                expr,
+                scoped_bindings,
+                context,
+                result_claim,
+                options,
+            );
+            dag
+        }),
+    )
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -2685,99 +2905,102 @@ pub(crate) fn try_lower_staged_host_region(
 > {
     use crate::host::staged::{StagingAttempt, StagingStatus};
     let status = std::rc::Rc::new(Cell::new(StagingStatus::Searching));
-    let result = catch_lowering(std::panic::AssertUnwindSafe(|| {
-        let mut ctx = LowerCtx::new(
-            context.program_types.clone(),
-            context.program_defs.clone(),
-            context.program_signatures.clone(),
-            LinearityInfo::default(),
-        );
-        // The staged region is this graph's only declaration.
-        ctx.decl = Some(ctx.dag.declare(""));
-        ctx.local_ascriptions = context.local_ascriptions.clone();
-        ctx.constructor_layouts = context.constructor_layouts.clone();
-        ctx.resolved_builtin_values = Arc::clone(&context.resolved_builtin_values);
-        ctx.declaration_bodies = Arc::clone(&context.declaration_bodies);
-        ctx.activation_record = context.activation_record;
-        ctx.prec_substitutions = context
-            .tensor_specialization
-            .precision_substitutions
-            .clone();
-        ctx.rank_substitutions = context.tensor_specialization.rank_substitutions.clone();
-        ctx.dim_axis_positions = context.tensor_specialization.dim_axis_positions.clone();
-        ctx.checked_dim_substitutions = context
-            .tensor_specialization
-            .checked_dim_substitutions
-            .clone();
-        ctx.host_program = Some(program);
-        ctx.host_stage_status = status.clone();
-        ctx.literal_result_claim_ownership = options.literal_result_claim_ownership;
-        let mut names = Vec::new();
-        let mut types = Vec::new();
-        for param in params {
-            if let Some(ty) = crate::host::tensor_type_from_host_input(&param.ty) {
-                let load = ctx.dag.add_node(
-                    ctx.owner(),
-                    RiscOp::Load {
-                        name: param.name.as_str().into(),
-                    },
-                    Vec::new(),
-                    ty.clone(),
-                    None,
-                );
-                ctx.interface_loads.insert(param.name.clone());
-                ctx.bindings
-                    .insert(param.name.clone(), LoweredValue::Node(load));
-                ctx.host_value_types.insert(load, param.ty.clone());
-                ctx.host_external_inputs.insert(load, param.name.clone());
-                names.push(param.name.clone());
-                types.push(ty);
-            } else {
-                let id = crate::host::staged::HostValueId(ctx.next_host_value);
-                ctx.next_host_value += 1;
-                ctx.host_parameters
-                    .insert(id, (param.name.clone(), param.ty.clone()));
-                ctx.bindings.insert(
-                    param.name.clone(),
-                    LoweredValue::Host {
-                        id,
-                        ty: param.ty.clone(),
-                    },
-                );
+    let result = catch_lowering(
+        UnrollBudget::Unbounded,
+        std::panic::AssertUnwindSafe(|| {
+            let mut ctx = LowerCtx::new(
+                context.program_types.clone(),
+                context.program_defs.clone(),
+                context.program_signatures.clone(),
+                LinearityInfo::default(),
+            );
+            // The staged region is this graph's only declaration.
+            ctx.decl = Some(ctx.dag.declare(""));
+            ctx.local_ascriptions = context.local_ascriptions.clone();
+            ctx.constructor_layouts = context.constructor_layouts.clone();
+            ctx.resolved_builtin_values = Arc::clone(&context.resolved_builtin_values);
+            ctx.declaration_bodies = Arc::clone(&context.declaration_bodies);
+            ctx.activation_record = context.activation_record;
+            ctx.prec_substitutions = context
+                .tensor_specialization
+                .precision_substitutions
+                .clone();
+            ctx.rank_substitutions = context.tensor_specialization.rank_substitutions.clone();
+            ctx.dim_axis_positions = context.tensor_specialization.dim_axis_positions.clone();
+            ctx.checked_dim_substitutions = context
+                .tensor_specialization
+                .checked_dim_substitutions
+                .clone();
+            ctx.host_program = Some(program);
+            ctx.host_stage_status = status.clone();
+            ctx.literal_result_claim_ownership = options.literal_result_claim_ownership;
+            let mut names = Vec::new();
+            let mut types = Vec::new();
+            for param in params {
+                if let Some(ty) = crate::host::tensor_type_from_host_input(&param.ty) {
+                    let load = ctx.dag.add_node(
+                        ctx.owner(),
+                        RiscOp::Load {
+                            name: param.name.as_str().into(),
+                        },
+                        Vec::new(),
+                        ty.clone(),
+                        None,
+                    );
+                    ctx.interface_loads.insert(param.name.clone());
+                    ctx.bindings
+                        .insert(param.name.clone(), LoweredValue::Node(load));
+                    ctx.host_value_types.insert(load, param.ty.clone());
+                    ctx.host_external_inputs.insert(load, param.name.clone());
+                    names.push(param.name.clone());
+                    types.push(ty);
+                } else {
+                    let id = crate::host::staged::HostValueId(ctx.next_host_value);
+                    ctx.next_host_value += 1;
+                    ctx.host_parameters
+                        .insert(id, (param.name.clone(), param.ty.clone()));
+                    ctx.bindings.insert(
+                        param.name.clone(),
+                        LoweredValue::Host {
+                            id,
+                            ty: param.ty.clone(),
+                        },
+                    );
+                }
             }
-        }
-        // A staged host region's inputs are the partition's, not an author's.
-        ctx.prepare_parameter_witnesses(&names, &types, None, None, false);
-        ctx.bindings.clear_witnesses();
-        ctx.prepare_local_ascription_tokens(expr, None);
-        // Do not infer equality between repeated spellings in the machine-built
-        // parameter list above. The returned result type is nevertheless the
-        // authored declaration's claim, so resolve it against the first exact
-        // parameter witness for each binder and give an eligible same-shape
-        // producer the same ownership it has outside staging.
-        ctx.signature_is_authored = true;
-        ctx.declaration_root_claim = true;
-        let result = ctx.lower_expr_with_claim(expr, Some(result_claim), true);
-        ctx.validate_local_ascription_token_ownership();
-        ctx.preserve_declared_result(&result, result_claim, None);
-        let result = ctx.retain_invocation_witnesses(result, 0);
-        if ctx.host_sources.is_empty() {
-            return None;
-        }
-        let root = result.expect_node("staged host tensor region");
-        ctx.dag.add_root(root);
-        let plan = crate::host::staged::partition(
-            &ctx.dag,
-            &ctx.host_sources,
-            params,
-            &ctx.host_external_inputs,
-            &ctx.host_parameters,
-        )
-        .unwrap_or_else(|error| {
-            raise_lowering_error(error, Some(expr.span()), expr.span_id().map(str::to_owned))
-        });
-        Some((ctx.dag, plan))
-    }));
+            // A staged host region's inputs are the partition's, not an author's.
+            ctx.prepare_parameter_witnesses(&names, &types, None, None, false);
+            ctx.bindings.clear_witnesses();
+            ctx.prepare_local_ascription_tokens(expr, None);
+            // Do not infer equality between repeated spellings in the machine-built
+            // parameter list above. The returned result type is nevertheless the
+            // authored declaration's claim, so resolve it against the first exact
+            // parameter witness for each binder and give an eligible same-shape
+            // producer the same ownership it has outside staging.
+            ctx.signature_is_authored = true;
+            ctx.declaration_root_claim = true;
+            let result = ctx.lower_expr_with_claim(expr, Some(result_claim), true);
+            ctx.validate_local_ascription_token_ownership();
+            ctx.preserve_declared_result(&result, result_claim, None);
+            let result = ctx.retain_invocation_witnesses(result, 0);
+            if ctx.host_sources.is_empty() {
+                return None;
+            }
+            let root = result.expect_node("staged host tensor region");
+            ctx.dag.add_root(root);
+            let plan = crate::host::staged::partition(
+                &ctx.dag,
+                &ctx.host_sources,
+                params,
+                &ctx.host_external_inputs,
+                &ctx.host_parameters,
+            )
+            .unwrap_or_else(|error| {
+                raise_lowering_error(error, Some(expr.span()), expr.span_id().map(str::to_owned))
+            });
+            Some((ctx.dag, plan))
+        }),
+    );
     match (result, status.get()) {
         (Err(_), StagingStatus::HostControlBoundary) => Ok(StagingAttempt::HostControlBoundary),
         (Err(diagnostic), StagingStatus::HasSources) => Err(diagnostic.fatal()),
@@ -7939,11 +8162,77 @@ fn extract_cons_chain_tensor(expr: &Expr) -> Option<LiteralToTensor> {
 /// runtime-bounded recursion hits the cap in milliseconds and errors loudly
 /// instead of hanging.
 const MAX_STATIC_RECURSION_DEPTH: usize = 512;
+/// Limit on the function bodies an unroll inlines once one of its frames makes
+/// more than one recursive call back into its own recursion (chelis#3864). The depth caps above bound how deep an unroll goes, not how
+/// wide: a recursive call in an arm of a runtime `if` is lowered with every
+/// other arm, so a recursion that recurses in two arms unrolls into a binary
+/// tree that stays under every depth cap while it doubles at each level. An
+/// unroll counts every body it inlines, helpers included, from its first
+/// recursive call until no name is recursing, across every lowering context
+/// of one lowering boundary, and the budget applies once some frame of the
+/// unroll has made more than one recursive call back into its own recursion,
+/// which no chain does. A chain-shaped unroll is never limited; the depth caps
+/// bound it. The budget is a count, so it depends only on the program, and an
+/// unroll that exceeds it is rejected loudly like the depth caps.
+const MAX_UNROLLED_BODIES: usize = 1 << 15;
 /// Total limit on simultaneously active inlined bodies across all names.
 /// Each level costs roughly ten lowering frames (a few KB of Rust stack), so
 /// this cap, not the per-name one, is what bounds the stack for mutually
 /// recursive cycles (k names at 512 each would otherwise stack k*512 levels).
 const MAX_TOTAL_INLINE_DEPTH: usize = 1024;
+
+impl LowerCtx<'_> {
+    /// Count one body the unroll inlines, and reject the unroll once a frame
+    /// has branched and the count passes the budget.
+    fn count_unrolled_body(&mut self, fn_expr: &Expr, callee: Option<&str>) {
+        let Some(unrolled) = UNROLLED_BODIES.with(|count| {
+            let unrolled = count.get().map(|unrolled| unrolled + 1);
+            if unrolled.is_some() {
+                count.set(unrolled);
+            }
+            unrolled
+        }) else {
+            return;
+        };
+        #[cfg(test)]
+        let budget = UNROLL_BUDGET_PROBE.with(|probe| match &mut *probe.borrow_mut() {
+            Some((budget, counted, _)) => {
+                *counted += 1;
+                *budget
+            }
+            None => MAX_UNROLLED_BODIES,
+        });
+        #[cfg(not(test))]
+        let budget = MAX_UNROLLED_BODIES;
+        if unrolled <= budget || !UNROLL_BRANCHED.with(Cell::get) {
+            return;
+        }
+        // Name the function whose frame branched, not the helper that
+        // happened to cross the budget nor a chain that encloses the tree.
+        let branched_at = UNROLL_BRANCHED_AT.with(|at| at.borrow().clone());
+        let name = branched_at
+            .as_deref()
+            .or(callee)
+            .unwrap_or("an anonymous function");
+        let message = format!(
+            "recursive inlining of `{name}` exceeded the budget of {budget} function bodies \
+             for an unroll in which a frame makes more than one recursive call back into its \
+             own recursion: recursion lowers by bounded static unrolling, and such a \
+             recursion, as in both arms of a condition known only at runtime, grows with each \
+             level (chelis#620, chelis#3864)"
+        );
+        #[cfg(test)]
+        UNROLL_BUDGET_PROBE.with(|probe| {
+            if let Some((_, _, rejection)) = &mut *probe.borrow_mut() {
+                *rejection = Some(message.clone());
+            }
+        });
+        // The trip stays recorded until the cost entry returns, so a nested
+        // probe that turns this rejection into a verdict cannot hide it.
+        cost_entry::record_trip(&message);
+        self.reject_lowering_slice(Some(fn_expr), message);
+    }
+}
 
 /// Extract and width-finalize a numeric scalar from a checked Deep expression.
 /// Recognizes:
@@ -8176,6 +8465,28 @@ struct ResolvedFunction {
     signature: Option<std::sync::Arc<Expr>>,
     /// The scope the body's free names resolve in, wherever it is inlined.
     scope: CallableScope,
+}
+
+/// The function an inlined frame belongs to: its declaration, or for a
+/// function literal its shared body, compared by identity. Two different
+/// functions reached through the same parameter name are different keys, and
+/// the same function reached through any name is one key (chelis#3864).
+#[derive(Debug, PartialEq, Eq)]
+enum RecursionFrameKey {
+    Declaration(String),
+    Literal(usize),
+}
+
+impl RecursionFrameKey {
+    fn of(function: &ResolvedFunction) -> Self {
+        match &function.declaration_name {
+            Some(name) => Self::Declaration(name.clone()),
+            // The body is shared across lexical scope snapshots, so its
+            // address names the literal while any frame of it is active; it
+            // is compared, never ordered or printed.
+            None => Self::Literal(std::sync::Arc::as_ptr(&function.expression) as usize),
+        }
+    }
 }
 
 /// Where a callable's body resolves its free names (chelis#2588).
@@ -9895,6 +10206,9 @@ struct LowerCtx<'program> {
     /// acceptable because every lowering error unwinds through the per-entry
     /// `catch_lowering` and the ctx is abandoned.
     inlining_depths: UnordMap<String, usize>,
+    /// The active inlined frames, innermost last, each with its function and
+    /// the recursive calls credited to it (chelis#3864).
+    recursion_frames: Vec<(RecursionFrameKey, usize)>,
     /// Total active inlined bodies across all names. Bounds the Rust stack
     /// (each level is roughly ten lowering frames) for deep or mutually
     /// recursive chains that stay under every per-name cap.
@@ -10088,6 +10402,7 @@ impl<'program> LowerCtx<'program> {
             selected_arm_depth: 0,
             linearity,
             inlining_depths: UnordMap::new(),
+            recursion_frames: Vec::new(),
             inlining_active: 0,
             declaration_root_claim: false,
             fn_typed_params: PersistentSet::new(),
@@ -11629,10 +11944,13 @@ impl<'program> LowerCtx<'program> {
         // `catch_lowering` clears the panic-output suppression on exit; an
         // enclosing lowering that set it keeps it.
         let suppressed = SUPPRESS_LOWERING_PANIC_OUTPUT.with(Cell::get);
-        let lowered = catch_lowering(std::panic::AssertUnwindSafe(|| {
-            let value = scratch.lower_initializer(&initializer);
-            (value, scratch.dag, scratch.program_value_verdicts)
-        }));
+        let lowered = catch_lowering(
+            UnrollBudget::Unbounded,
+            std::panic::AssertUnwindSafe(|| {
+                let value = scratch.lower_initializer(&initializer);
+                (value, scratch.dag, scratch.program_value_verdicts)
+            }),
+        );
         SUPPRESS_LOWERING_PANIC_OUTPUT.with(|cell| cell.set(suppressed));
         let Ok((value, lowered, reached)) = lowered else {
             return (None, UnordMap::new());
@@ -15910,6 +16228,38 @@ impl<'program> LowerCtx<'program> {
         if let Some(name) = &inlining_name {
             *self.inlining_depths.entry(name.clone()).or_insert(0) += 1;
         }
+        if let Some(name) = &inlining_name
+            && self.inlining_depths.get(name) == Some(&2)
+        {
+            RECURSING_NAMES.with(|names| names.set(names.get() + 1));
+        }
+        // A recursive call is credited to the most recent active frame of
+        // its callee, the frame whose recursion it extends: directly, or
+        // through the frames of its mutual-recursion group in between. A
+        // chain credits each frame once; a frame credited twice recurses
+        // more than once per level, and its unroll branches. Frames are keyed
+        // by the function being inlined, never by the name it was called
+        // through: two combinators' callbacks may share a parameter name.
+        let frame_key = RecursionFrameKey::of(fn_expr);
+        if let Some((_, credits)) = self
+            .recursion_frames
+            .iter_mut()
+            .rev()
+            .find(|(key, _)| *key == frame_key)
+        {
+            *credits += 1;
+            if *credits > 1 && !UNROLL_BRANCHED.with(|branched| branched.replace(true)) {
+                let name = match &frame_key {
+                    RecursionFrameKey::Declaration(name) => Some(name.clone()),
+                    RecursionFrameKey::Literal(_) => inlining_name.clone(),
+                };
+                UNROLL_BRANCHED_AT.with(|at| *at.borrow_mut() = name);
+            }
+        }
+        self.recursion_frames.push((frame_key, 0));
+        if RECURSING_NAMES.with(Cell::get) > 0 && cost_entry::enforced() {
+            self.count_unrolled_body(fn_expr, inlining_name.as_deref());
+        }
         if self.inlining_active > MAX_TOTAL_INLINE_DEPTH {
             self.reject_lowering_slice(
                 Some(fn_expr),
@@ -16068,11 +16418,24 @@ impl<'program> LowerCtx<'program> {
         if let Some(name) = &inlining_name
             && let Some(depth) = self.inlining_depths.get_mut(name)
         {
+            if *depth == 2 {
+                // This name's re-entry counted it as recursing; the floor
+                // keeps a boundary's fresh zero from wrapping.
+                let recursing = RECURSING_NAMES.with(|names| {
+                    names.set(names.get().max(1) - 1);
+                    names.get()
+                });
+                if recursing == 0 {
+                    end_unroll();
+                }
+            }
             *depth = depth.saturating_sub(1);
             if *depth == 0 {
                 self.inlining_depths.remove(name);
             }
         }
+        // Inline levels nest, so this frame is the innermost one.
+        self.recursion_frames.pop();
         self.bindings = saved;
         self.local_callables = saved_callables;
         self.fn_typed_params = saved_fn_typed_params;
@@ -28995,7 +29358,7 @@ mod tests {
 
     #[test]
     fn gradient_axis_mapping_rejects_missing_sources_before_publication() {
-        let missing = catch_lowering(|| {
+        let missing = catch_lowering(UnrollBudget::Unbounded, || {
             let mut ctx = empty_lower_ctx();
             ctx.zero_tensor_node(
                 &TensorType {
@@ -29011,7 +29374,7 @@ mod tests {
                 .to_string()
                 .contains("no differentiated actual axis source")
         );
-        let stale = catch_lowering(|| {
+        let stale = catch_lowering(UnrollBudget::Unbounded, || {
             let ctx = empty_lower_ctx();
             ctx.verify_gradient_axis_source(NodeId(7));
         })
@@ -29021,7 +29384,7 @@ mod tests {
                 .to_string()
                 .contains("gradient axis source is not live")
         );
-        let remapped = catch_lowering(|| {
+        let remapped = catch_lowering(UnrollBudget::Unbounded, || {
             let mut ctx = empty_lower_ctx();
             let zero = ctx.dag.add_node(
                 ctx.owner(),
@@ -29390,7 +29753,7 @@ mod tests {
                 ],
                 span,
             );
-            let outcome = catch_lowering(move || {
+            let outcome = catch_lowering(UnrollBudget::Unbounded, move || {
                 let mut ctx = empty_lower_ctx();
                 ctx.lower_expr(&function)
             });
@@ -32161,7 +32524,7 @@ mod tests {
             .into_iter()
             .next()
             .expect("one expression");
-        let outcome = catch_lowering(move || {
+        let outcome = catch_lowering(UnrollBudget::Unbounded, move || {
             let mut ctx = LowerCtx::new(
                 BTreeMap::new(),
                 BTreeMap::new(),
@@ -35483,5 +35846,952 @@ mod lowerability_memo_tests {
             .cloned()
             .collect::<Vec<_>>();
         assert_eq!(recursive, ["a1", "b1", "w0"]);
+    }
+}
+
+#[cfg(test)]
+mod unroll_budget_tests {
+    //! chelis#3864: the unroll budget counts the bodies one recursion's
+    //! unroll inlines, and nothing else. Each test replaces the budget with
+    //! a small one, so an exponential unroll is cut early.
+    use super::*;
+
+    const TEST_BUDGET: usize = 2_000;
+
+    /// nautilus's `Nautilus.Roots` bisection and its `examplerootfind`
+    /// caller, with the iteration bound left open.
+    const BISECTION: &str = r#"def r_abs_f32(x: f32) -> f32 = if lt(x, cast(0.0, f32)) then neg(x) else x
+def r_nan_f32() -> f32 = cast(0.0, f32) |> div(cast(0.0, f32))
+def r_is_nan_f32(x: f32) -> bool = neq(x, x)
+def bisection_rec(f: f32 -> f32, lo: f32, hi: f32, flo: f32, tol: f32, iters: i64) -> f32 = {
+  zero_i = cast(0, i64)
+  one_i = cast(1, i64)
+  if lte(iters, zero_i) then r_nan_f32() else {
+    width = sub(hi, lo)
+    if lt(width, tol) then (cast(0.5, f32) |> mul(add(lo, hi))) else {
+      mid = cast(0.5, f32) |> mul(add(lo, hi))
+      if r_is_nan_f32(mid) then r_nan_f32() else if or(eq(mid, lo), eq(mid, hi)) then mid else {
+        fmid = f(mid)
+        if r_is_nan_f32(fmid) then r_nan_f32() else {
+          afmid = r_abs_f32(fmid)
+          if lt(afmid, tol) then mid else {
+            same_sign = flo |> mul(fmid) |> gt(cast(0.0, f32))
+            if same_sign then bisection_rec(f, mid, hi, fmid, tol, sub(iters, one_i)) else bisection_rec(f, lo, mid, flo, tol, sub(iters, one_i))
+          }
+        }
+      }
+    }
+  }
+}
+def bisection(f: f32 -> f32, lo: f32, hi: f32, tol: f32, max_iters: i64) -> f32 = {
+  nan_input = r_is_nan_f32(lo) |> or(r_is_nan_f32(hi)) |> or(r_is_nan_f32(tol))
+  if nan_input then r_nan_f32() else {
+    flo = f(lo)
+    if r_is_nan_f32(flo) then r_nan_f32() else {
+      aflo = r_abs_f32(flo)
+      if lt(aflo, tol) then lo else {
+        fhi = f(hi)
+        if r_is_nan_f32(fhi) then r_nan_f32() else {
+          afhi = r_abs_f32(fhi)
+          if lt(afhi, tol) then hi else {
+            prod = mul(flo, fhi)
+            if gt(prod, cast(0.0, f32)) then r_nan_f32() else bisection_rec(f, lo, hi, flo, tol, max_iters)
+          }
+        }
+      }
+    }
+  }
+}
+def erf_projectile(theta: f32) -> f32 = {
+  two_theta = mul(cast(2.0, f32), theta)
+  s = sin(two_theta)
+  g = cast(9.81, f32)
+  v_sq = mul(cast(20.0, f32), cast(20.0, f32))
+  d = cast(30.0, f32)
+  sub(mul(div(v_sq, g), s), d)
+}
+def example() -> f32 = bisection(erf_projectile, cast(0.1, f32), cast(0.7, f32), cast(1e-8, f32), cast(ITERS, i64))"#;
+
+    /// A recursion whose base case folds: `count_up` unrolls `LEVELS`
+    /// levels, each a literal-rooted `add` chain the condition resolves.
+    fn count_up(name: &str, levels: usize) -> String {
+        format!(
+            "def {name}(x: tensor[3, f32], k: i64) -> tensor[3, f32] = if gte(k, cast({levels}, i64)) then x else {name}(x, add(k, cast(1, i64)))\n"
+        )
+    }
+
+    fn checked(source: &str) -> CheckedProgram {
+        let declarations = chelis_surf::parser::parse_str(source).expect("the probe parses");
+        let checked = chelis_types::check_typed_program(
+            &chelis_surf::desugar::desugar_program(&declarations).expect("the probe desugars"),
+        )
+        .expect("the probe checks");
+        let checked =
+            chelis_effects::check_program(&checked).expect("the probe has no effect errors");
+        chelis_types::check_linearity(&checked).expect("the probe is linear")
+    }
+
+    /// Run `work` under `budget` on a large stack, returning its result, the
+    /// bodies counted against the budget and the last rejection's message.
+    fn with_budget<R: Send + 'static>(
+        budget: usize,
+        work: impl FnOnce() -> R + Send + 'static,
+    ) -> (R, usize, Option<String>) {
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(move || {
+                UNROLL_BUDGET_PROBE.with(|probe| *probe.borrow_mut() = Some((budget, 0, None)));
+                let result = work();
+                let (_, counted, rejection) = UNROLL_BUDGET_PROBE
+                    .with(|probe| probe.borrow_mut().take())
+                    .expect("the probe stays armed");
+                (result, counted, rejection)
+            })
+            .expect("spawn the lowering thread")
+            .join()
+            .expect("the lowering thread finishes")
+    }
+
+    fn lower_example(source: String, budget: usize) -> (bool, usize, Option<String>) {
+        let program = checked(&source);
+        with_budget(budget, move || {
+            crate::host::lower_named_tensor_entry_dags(&program, &["example".to_string()])
+                .map(|dag| dag.is_some())
+                .collect::<Vec<_>>()[0]
+        })
+    }
+
+    #[test]
+    fn an_unroll_that_branches_at_runtime_is_rejected_at_the_budget() {
+        let (lowered, counted, rejection) =
+            lower_example(BISECTION.replace("ITERS", "2"), TEST_BUDGET);
+        assert!(!lowered, "the entry is rejected, not lowered");
+        assert_eq!(
+            counted,
+            TEST_BUDGET + 1,
+            "lowering stopped at the first body past the budget"
+        );
+        let message = rejection.expect("the budget rejected the entry");
+        assert!(
+            message.starts_with(&format!(
+                "recursive inlining of `bisection_rec` exceeded the budget of {TEST_BUDGET} function bodies for an unroll in which a frame makes more than one recursive call"
+            )) && message.contains("both arms of a condition known only at runtime")
+                && message.contains("chelis#620"),
+            "the rejection names the recursion, the budget and the runtime branch: {message}"
+        );
+    }
+
+    #[test]
+    fn the_budget_is_what_stops_it() {
+        // A larger budget lets the same unroll go further: it does not end on
+        // its own within either.
+        let (_, small, _) = lower_example(BISECTION.replace("ITERS", "2"), TEST_BUDGET);
+        let (_, large, _) = lower_example(BISECTION.replace("ITERS", "2"), 2 * TEST_BUDGET);
+        assert_eq!(small, TEST_BUDGET + 1);
+        assert_eq!(large, 2 * TEST_BUDGET + 1);
+    }
+
+    #[test]
+    fn inlining_outside_a_recursion_never_counts() {
+        // chelis#3864 round 1: 130 entries, each inlining a 255-body helper
+        // tree, lower as one program under a budget far below their total.
+        let mut source = String::from("def h0(x: tensor[4, f32]) -> tensor[4, f32] = mul(x, x)\n");
+        for level in 1..=7 {
+            let below = level - 1;
+            source.push_str(&format!(
+                "def h{level}(x: tensor[4, f32]) -> tensor[4, f32] = h{below}(h{below}(x))\n"
+            ));
+        }
+        for entry in 0..130 {
+            source.push_str(&format!(
+                "out{entry} = h7(to_tensor([{entry}.0f32, 1.0f32, 2.0f32, 3.0f32]))\n"
+            ));
+        }
+        let program = checked(&source);
+        let (lowered, counted, rejection) = with_budget(100, move || {
+            crate::lower::try_lower_program(&program).is_ok()
+        });
+        assert!(lowered, "the program lowers: {rejection:?}");
+        assert_eq!(counted, 0, "no body was inlined inside a recursion");
+    }
+
+    /// `hN` inlines 2^(N+1) - 1 bodies and recurses nowhere.
+    fn helper_tree(width: &str) -> String {
+        let mut source = format!("def h0(x: {width}) -> {width} = mul(x, x)\n");
+        for level in 1..=7 {
+            let below = level - 1;
+            source.push_str(&format!(
+                "def h{level}(x: {width}) -> {width} = h{below}(h{below}(x))\n"
+            ));
+        }
+        source
+    }
+
+    /// A recursion `depth` levels deep that recurses in both arms of a
+    /// runtime `if`, applying `helper` on one arm: 2^(depth+1) - 1 calls.
+    fn branched_tree(name: &str, depth: usize, helper: &str) -> String {
+        format!(
+            "def {name}(x: f32, k: i64) -> f32 = if gte(k, cast({depth}, i64)) then x else if gt(sin(x), cast(0.0, f32)) then {name}({helper}(x), add(k, cast(1, i64))) else {name}(neg(x), add(k, cast(1, i64)))\n"
+        )
+    }
+
+    /// Lower `source`'s `example` under `budget`, and check that its unroll
+    /// counted past the budget yet was not limited.
+    fn assert_never_limited(source: String, budget: usize) {
+        let (lowered, counted, rejection) = lower_example(source, budget);
+        assert!(lowered, "the chain lowers: {rejection:?}");
+        assert_eq!(rejection, None);
+        assert!(
+            counted > budget,
+            "the chain inlined past the budget: {counted}"
+        );
+    }
+
+    #[test]
+    fn a_static_loop_with_a_heavy_helper_is_never_limited() {
+        // chelis#3864 rounds 2 and 3: a loop whose base case folds is a chain,
+        // so its bodies, a 31-body helper per iteration among them, never
+        // meet the budget; the depth caps bound it.
+        let source = format!(
+            "{}{}def step(x: tensor[3, f32], i: i64) -> tensor[3, f32] = if gte(i, cast(32, i64)) then x else step(h4(x), add(i, cast(1, i64)))\ndef example(seed: tensor[3, f32]) -> tensor[3, f32] = up(step(seed, cast(0, i64)), cast(0, i64))\n",
+            helper_tree("tensor[3, f32]"),
+            count_up("up", 300)
+        );
+        assert_never_limited(source, 10);
+    }
+
+    #[test]
+    fn an_early_exit_chain_with_a_heavy_helper_is_never_limited() {
+        // chelis#3864 round 4: a static cap, a convergence test decided at
+        // runtime, and the recursive call in one arm only. The call sits in
+        // a runtime arm, but the unroll is a chain.
+        let source = format!(
+            "{}def step(x: f32, i: i64) -> f32 = if gte(i, cast(32, i64)) then x else if lt(sin(x), cast(-2.0, f32)) then x else step(h4(x), add(i, cast(1, i64)))\ndef example() -> f32 = step(cast(1.5, f32), cast(0, i64))\n",
+            helper_tree("f32")
+        );
+        assert_never_limited(source, 10);
+    }
+
+    #[test]
+    fn a_mutual_recursion_chain_is_never_limited() {
+        // `ping` and `pong` call each other once per level: a chain through
+        // two names.
+        let source = format!(
+            "{}def ping(x: f32, k: i64) -> f32 = if gte(k, cast(100, i64)) then x else pong(h3(x), add(k, cast(1, i64)))\ndef pong(x: f32, k: i64) -> f32 = ping(h3(x), add(k, cast(1, i64)))\ndef example() -> f32 = ping(cast(1.5, f32), cast(0, i64))\n",
+            helper_tree("f32")
+        );
+        assert_never_limited(source, 10);
+    }
+
+    #[test]
+    fn a_branched_unroll_with_a_heavy_helper_trips() {
+        // chelis#3864 round 3: a 6-level branched tree makes only 127 calls,
+        // but each call in one arm inlines a 31-body helper, so the unroll
+        // inlines far more than 1,000 bodies.
+        let source = format!(
+            "{}{}def example() -> f32 = tree(cast(1.5, f32), cast(0, i64))\n",
+            helper_tree("f32"),
+            branched_tree("tree", 6, "h4")
+        );
+        let (lowered, counted, rejection) = lower_example(source, 1_000);
+        assert!(!lowered);
+        assert_eq!(counted, 1_001);
+        let message = rejection.expect("the budget rejected the unroll");
+        assert!(
+            message.starts_with(
+                "recursive inlining of `tree` exceeded the budget of 1000 function bodies for an unroll in which a frame makes more than one recursive call"
+            ),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn each_branched_unroll_starts_its_own_count() {
+        // Two 5-level branched trees, 63 calls each, lower one after the
+        // other in one entry under a budget of 100: the count returns to zero
+        // between them, so their bodies never meet one budget.
+        let source = format!(
+            "{}{}def example() -> f32 = tree_a(tree_b(cast(1.5, f32), cast(0, i64)), cast(0, i64))\n",
+            branched_tree("tree_a", 5, ""),
+            branched_tree("tree_b", 5, "")
+        );
+        let (lowered, counted, rejection) = lower_example(source, 100);
+        assert!(lowered, "both trees lower: {rejection:?}");
+        assert!(counted > 100, "both unrolls were counted: {counted}");
+    }
+
+    #[test]
+    fn a_rejected_unroll_leaves_no_recursion_behind() {
+        // The first entry's unroll is rejected mid-recursion, abandoning its
+        // inline levels; the second entry's helper tree must not count.
+        let source = format!(
+            "{}{}def bad() -> f32 = tree(cast(1.5, f32), cast(0, i64))\ndef good(seed: tensor[3, f32]) -> tensor[3, f32] = h7(seed)\n",
+            branched_tree("tree", 10, ""),
+            helper_tree("tensor[3, f32]")
+        );
+        let program = checked(&source);
+        let (lowered, counted, _) = with_budget(100, move || {
+            crate::host::lower_named_tensor_entry_dags(
+                &program,
+                &["bad".to_string(), "good".to_string()],
+            )
+            .map(|dag| dag.is_some())
+            .collect::<Vec<_>>()
+        });
+        assert_eq!(lowered, [false, true]);
+        assert_eq!(counted, 101, "only the rejected unroll counted");
+    }
+
+    #[test]
+    fn a_nested_boundary_has_its_own_budget() {
+        // chelis#3864 round 2: a scratch probe lowers under its own catch,
+        // whose failure is a verdict rather than a rejection. It must start
+        // its own count, so it can neither consume nor trip the enclosing
+        // unroll's budget, and it must restore the enclosing unroll's state
+        // whether it returns or raises.
+        let state = || {
+            (
+                UNROLLED_BODIES.with(Cell::get),
+                RECURSING_NAMES.with(Cell::get),
+                UNROLL_BRANCHED.with(Cell::get),
+            )
+        };
+        UNROLLED_BODIES.with(|count| count.set(Some(390)));
+        RECURSING_NAMES.with(|names| names.set(2));
+        UNROLL_BRANCHED.with(|branched| branched.set(true));
+        let inner = catch_lowering(UnrollBudget::Unbounded, state).expect("the probe returns");
+        assert_eq!(inner, (Some(0), 0, false), "the probe starts its own count");
+        assert_eq!(
+            state(),
+            (Some(390), 2, true),
+            "a returning probe restores the unroll"
+        );
+        let raised = catch_lowering(UnrollBudget::Unbounded, || {
+            UNROLLED_BODIES.with(|count| count.set(Some(7)));
+            RECURSING_NAMES.with(|names| names.set(3));
+            raise_lowering_error("probe failure", None, None)
+        });
+        assert!(raised.is_err());
+        assert_eq!(
+            state(),
+            (Some(390), 2, true),
+            "a raising probe restores the unroll"
+        );
+        let diagnosed = catch_lowering_diagnostic(UnrollBudget::Unbounded, || {
+            RECURSING_NAMES.with(|names| names.set(4));
+            raise_lowering_error("pass failure", None, None)
+        });
+        assert!(diagnosed.is_err());
+        assert_eq!(
+            state(),
+            (Some(390), 2, true),
+            "a post-lowering pass restores the unroll"
+        );
+        UNROLLED_BODIES.with(|count| count.set(None));
+        RECURSING_NAMES.with(|names| names.set(0));
+        UNROLL_BRANCHED.with(|branched| branched.set(false));
+    }
+
+    #[test]
+    fn sequential_and_nested_loops_inside_a_loop_are_never_limited() {
+        // chelis#3864 round 4: `f` runs a complete static `g` loop at each of
+        // its levels, and `g` runs a complete static `i` loop at each of its,
+        // each level inlining a 15-body helper.
+        // Every frame makes one recursive call back into its own recursion,
+        // so the polynomial nest is a set of chains, never a tree.
+        let source = format!(
+            "{}def ib(x: f32, k: i64) -> f32 = if gte(k, cast(6, i64)) then x else ib(h3(x), add(k, cast(1, i64)))\n\
+             def gb(x: f32, k: i64) -> f32 = if gte(k, cast(12, i64)) then x else gb(ib(h3(x), cast(0, i64)), add(k, cast(1, i64)))\n\
+             def fb(x: f32, k: i64) -> f32 = if gte(k, cast(12, i64)) then x else fb(gb(gb(h3(x), cast(0, i64)), cast(0, i64)), add(k, cast(1, i64)))\n\
+             def example() -> f32 = fb(cast(1.5, f32), cast(0, i64))\n",
+            helper_tree("f32")
+        );
+        assert_never_limited(source, 100);
+    }
+
+    #[test]
+    fn a_frame_that_recurses_twice_through_a_helper_trips() {
+        // `fv` calls the non-recursive `via` helper twice per level, and each
+        // call re-enters `fv`: both re-entries extend the same frame of `fv`,
+        // so the unroll is a tree.
+        let source = "def via(x: f32, k: i64) -> f32 = fv(x, k)\n\
+             def fv(x: f32, k: i64) -> f32 = if gte(k, cast(10, i64)) then x else add(via(x, add(k, cast(1, i64))), via(neg(x), add(k, cast(1, i64))))\n\
+             def example() -> f32 = fv(cast(1.5, f32), cast(0, i64))\n"
+            .to_string();
+        let (lowered, counted, rejection) = lower_example(source, 100);
+        assert!(!lowered);
+        assert_eq!(counted, 101);
+        assert!(
+            rejection.is_some_and(|message| message.starts_with("recursive inlining of `fv`")
+                || message.starts_with("recursive inlining of `via`")),
+            "the rejection names the recursion"
+        );
+    }
+
+    /// Two loop combinators that each apply a callback named `f`.
+    fn combinators() -> String {
+        "def it(f: f32 -> f32, x: f32, i: i64, n: i64) -> f32 = if gte(i, n) then x else it(f, f(x), add(i, cast(1, i64)), n)\n\
+         def it2(f: f32 -> f32, x: f32, i: i64, n: i64) -> f32 = if gte(i, n) then x else it2(f, f(x), add(i, cast(1, i64)), n)\n"
+            .to_string()
+    }
+
+    #[test]
+    fn distinct_combinators_sharing_a_callback_name_are_never_limited() {
+        // chelis#3864 round 5: `it2` iterates `row`, which runs a complete
+        // `it` loop over `h4`. Both callbacks are called through a parameter
+        // named `f`, but they are different functions, so each frame is
+        // credited once: two nested chains.
+        let source = format!(
+            "{}{}def row(x: f32) -> f32 = it(h4, x, cast(0, i64), cast(8, i64))\ndef example() -> f32 = it2(row, cast(1.5, f32), cast(0, i64), cast(8, i64))\n",
+            helper_tree("f32"),
+            combinators()
+        );
+        assert_never_limited(source, 100);
+    }
+
+    #[test]
+    fn a_combinator_nested_in_itself_is_one_recursion() {
+        // The same combinator run inside its own callback re-enters the same
+        // function: the inner loop and the outer loop both extend the outer
+        // frame of `it`, so the unroll is a tree, and it is limited.
+        let source = format!(
+            "{}{}def row(x: f32) -> f32 = it(h4, x, cast(0, i64), cast(8, i64))\ndef example() -> f32 = it(row, cast(1.5, f32), cast(0, i64), cast(8, i64))\n",
+            helper_tree("f32"),
+            combinators()
+        );
+        let (lowered, counted, rejection) = lower_example(source, 100);
+        assert!(!lowered, "the nested combinator is limited");
+        // The outer frame's second credit comes after the first inner loop,
+        // and the count accumulated by then applies at once.
+        assert!(counted > 100, "{counted}");
+        assert!(
+            rejection.is_some_and(|message| message.contains("recursive inlining of `it`")),
+            "the rejection names the combinator"
+        );
+    }
+
+    #[test]
+    fn only_cost_entries_enforce_the_budget() {
+        // chelis#3864 round 3: eval, build and every lowering other than
+        // `chelis cost`'s per-entry lowering have no fallback for a rejected
+        // unroll, so they count nothing. The same branched tree that a cost
+        // entry rejects lowers through the very same entry lowering when cost
+        // is not the caller.
+        // A static tree: both calls of every level are lowered, so each
+        // frame is credited twice, with no runtime condition at all.
+        let source = "def tree(x: tensor[3, f32], k: i64) -> tensor[3, f32] = if gte(k, cast(8, i64)) then x else add(tree(x, add(k, cast(1, i64))), tree(neg(x), add(k, cast(1, i64))))\n\
+             def example(seed: tensor[3, f32]) -> tensor[3, f32] = tree(seed, cast(0, i64))\n\
+             out = example(to_tensor([1.0f32, 2.0f32, 3.0f32]))\n"
+            .to_string();
+        let cost_program = checked(&source);
+        let (cost, _, rejection) = with_budget(100, move || {
+            crate::host::lower_named_tensor_entry_dags(&cost_program, &["example".to_string()])
+                .map(|dag| dag.is_some())
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(cost, [false], "the cost entry is rejected");
+        assert!(rejection.is_some());
+        let entry_program = checked(&source);
+        let (entry, counted, rejection) = with_budget(100, move || {
+            crate::host::lower_named_tensor_entry_dag(&entry_program, "example").is_some()
+        });
+        assert!(
+            entry,
+            "the same entry lowering outside cost is unbounded: {rejection:?}"
+        );
+        assert_eq!(counted, 0);
+        // The sub-expression entry eval's `vmap` and `grad` lower through,
+        // over the same checked program.
+        let controls_program = checked(&source);
+        let (controls, counted, rejection) = with_budget(100, move || {
+            let defs = collect_top_level_defs(controls_program.exprs());
+            let sigs = collect_top_level_sigs(controls_program.exprs());
+            let context = SubexprLoweringContext::from_checked_program(
+                &controls_program,
+                defs.into_iter().collect(),
+                sigs.into_iter().collect(),
+            );
+            let call = chelis_deep::parser::parse_str(
+                "(app {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))} (var {} example) (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))} seed))",
+            )
+            .expect("the call parses")
+            .remove(0);
+            let seed = TensorType {
+                dims: vec![DimInfo::Lit(3)],
+                precision: Prim::F32,
+            };
+            try_lower_subexpr_program_with_context_and_controls(
+                &call,
+                UnordMap::from([("seed".to_string(), seed)]),
+                &context,
+            )
+            .map(|lowered| lowered.dag.nodes().len())
+        });
+        assert!(
+            controls.is_ok(),
+            "the vmap and grad entry is unbounded: {:?} {rejection:?}",
+            controls.err()
+        );
+        assert_eq!(counted, 0);
+    }
+
+    #[test]
+    fn the_rejection_names_the_branching_function_not_its_enclosing_chain() {
+        // chelis#3864 round 3: a chain `walk` runs a branched `tree` at each
+        // step. `walk` is the deeper name, but `tree` is the frame that
+        // branched, and the rejection names it.
+        let source = format!(
+            "{}def walk(x: f32, i: i64) -> f32 = if gte(i, cast(20, i64)) then x else walk(tree(x, cast(0, i64)), add(i, cast(1, i64)))\ndef example() -> f32 = walk(cast(1.5, f32), cast(0, i64))\n",
+            branched_tree("tree", 6, "")
+        );
+        // Under a budget of 1,000 the trip comes about eight steps in, when
+        // `walk` is deeper than any level of `tree`.
+        let (lowered, _, rejection) = lower_example(source, 1_000);
+        assert!(!lowered);
+        let message = rejection.expect("the budget rejected the unroll");
+        assert!(
+            message.starts_with("recursive inlining of `tree`"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn no_public_lowering_entry_but_cost_enforces_the_budget() {
+        // chelis#3864 round 3: the whole-program entry, which eval, build and
+        // library lowering use, opens only unbounded boundaries; the cost
+        // entry opens an enforcing one. Counted by the boundaries entered, so
+        // it holds whatever the program lowers to.
+        let entered = |work: Box<dyn FnOnce()>| {
+            ENFORCING_SCOPES_ENTERED.with(|entered| entered.set(0));
+            work();
+            ENFORCING_SCOPES_ENTERED.with(Cell::get)
+        };
+        let source = format!(
+            "{}def example(seed: tensor[3, f32]) -> tensor[3, f32] = h7(seed)\nout = h7(to_tensor([1.0f32, 2.0f32, 3.0f32]))\n",
+            helper_tree("tensor[3, f32]")
+        );
+        let program = checked(&source);
+        let whole = entered(Box::new(|| {
+            crate::lower::try_lower_program_to_library(&program).expect("the program lowers");
+        }));
+        assert_eq!(whole, 0, "the whole-program entry enforces nothing");
+        let cost = entered(Box::new(|| {
+            let _ = crate::host::lower_named_tensor_entry_dags(&program, &["example".to_string()])
+                .collect::<Vec<_>>();
+        }));
+        assert!(cost > 0, "the cost entry enforces the budget");
+    }
+
+    /// A static tree `depth` levels deep: every level's two calls are lowered.
+    fn static_tree(depth: usize) -> String {
+        format!(
+            "def t(x: f32, k: i64) -> f32 = if gte(k, cast({depth}, i64)) then x else add(t(x, add(k, cast(1, i64))), t(neg(x), add(k, cast(1, i64))))\n"
+        )
+    }
+
+    #[test]
+    fn a_trip_inside_a_value_probe_rejects_the_entry() {
+        // chelis#3864 round 4: the cost entry reads a top-level value whose
+        // initializer is a branched tree past the budget. Lowering probes the
+        // initializer under a nested boundary whose failure becomes a
+        // verdict; the trip must still reject the entry, never leave it
+        // costed without the value.
+        let source = format!(
+            "{}big = t(cast(1.5, f32), cast(0, i64))\ndef example(y: f32) -> f32 = add(big, y)\n",
+            static_tree(8)
+        );
+        let (lowered, counted, rejection) = lower_example(source, 100);
+        assert!(!lowered, "the entry is omitted, not costed without `big`");
+        assert!(counted > 100, "{counted}");
+        assert!(rejection.is_some_and(|message| message.starts_with("recursive inlining of `t`")));
+    }
+
+    #[test]
+    fn a_tripped_cost_entry_leaves_later_lowerings_unbounded() {
+        // A cost entry that trips, then the same tree through an unbounded
+        // lowering on the same thread: enforcement ends with the cost entry.
+        let source = format!(
+            "{}def example(y: f32) -> f32 = add(t(y, cast(0, i64)), y)\n",
+            static_tree(8)
+        );
+        let program = checked(&source);
+        let ((cost, after_cost, unbounded), counted, _) = with_budget(100, move || {
+            let cost =
+                crate::host::lower_named_tensor_entry_dags(&program, &["example".to_string()])
+                    .map(|dag| dag.is_some())
+                    .collect::<Vec<_>>();
+            let after_cost = UNROLL_BUDGET_PROBE
+                .with(|probe| probe.borrow().as_ref().map(|(_, counted, _)| *counted));
+            let unbounded =
+                crate::host::lower_named_tensor_entry_dag(&program, "example").is_some();
+            (cost, after_cost, unbounded)
+        });
+        assert_eq!(cost, [false], "the cost entry trips");
+        assert!(unbounded, "the later lowering is unbounded");
+        assert_eq!(
+            Some(counted),
+            after_cost,
+            "the later lowering counts nothing"
+        );
+    }
+
+    #[test]
+    fn a_value_probe_inside_a_cost_entry_enforces_the_budget() {
+        // chelis#3864 round 4: the probe that lowers a top-level value's
+        // initializer runs under its own boundary inside the cost entry, and
+        // inherits the entry's enforcement rather than escaping its budget.
+        let source = format!(
+            "{}small = t(cast(1.5, f32), cast(0, i64))\ndef example(y: f32) -> f32 = add(small, y)\n",
+            static_tree(3)
+        );
+        let program = checked(&source);
+        ENFORCING_SCOPES_ENTERED.with(|entered| entered.set(0));
+        let lowered =
+            crate::host::lower_named_tensor_entry_dags(&program, &["example".to_string()])
+                .map(|dag| dag.is_some())
+                .collect::<Vec<_>>();
+        assert_eq!(lowered, [true]);
+        assert!(
+            ENFORCING_SCOPES_ENTERED.with(Cell::get) >= 2,
+            "the entry and the value probe inside it both enforce"
+        );
+    }
+
+    /// One block of a generated program for the unroll model test.
+    #[derive(Clone)]
+    enum Block {
+        /// A static loop of `n` steps.
+        Chain(usize),
+        /// A static loop whose every step runs `inner` first.
+        ChainWith(usize, Box<Block>),
+        /// A static tree `d` levels deep: two recursive calls per level.
+        Tree(usize),
+        /// Two functions calling each other `n` times, one call per level.
+        Mutual(usize),
+        /// A combinator looping `n` steps over a function literal, whose
+        /// body runs `inner` when there is one.
+        LambdaChain(usize, Option<Box<Block>>),
+        /// A combinator tree `d` levels deep applying a function literal at
+        /// every leaf.
+        LambdaTree(usize),
+        /// `first`, then `second` on its result.
+        Seq(Box<Block>, Box<Block>),
+    }
+
+    /// The model's frame identity: a declaration, or a literal by number.
+    #[derive(Clone, PartialEq)]
+    enum ModelKey {
+        Declaration(String),
+        Literal(usize),
+    }
+
+    /// The unroll rule over a block's inline events, computed from the
+    /// block's structure alone.
+    struct UnrollModel {
+        budget: usize,
+        depth: std::collections::BTreeMap<String, usize>,
+        recursing: usize,
+        frames: Vec<(ModelKey, usize)>,
+        unroll: usize,
+        branched: bool,
+        counted: usize,
+        tripped: bool,
+    }
+
+    impl UnrollModel {
+        fn push(&mut self, binding: &str, key: ModelKey) {
+            if self.tripped {
+                return;
+            }
+            let depth = self.depth.entry(binding.to_string()).or_insert(0);
+            *depth += 1;
+            if *depth == 2 {
+                self.recursing += 1;
+            }
+            if let Some((_, credits)) = self
+                .frames
+                .iter_mut()
+                .rev()
+                .find(|(frame, _)| *frame == key)
+            {
+                *credits += 1;
+                if *credits > 1 {
+                    self.branched = true;
+                }
+            }
+            self.frames.push((key, 0));
+            if self.recursing > 0 {
+                self.counted += 1;
+                self.unroll += 1;
+                if self.unroll > self.budget && self.branched {
+                    self.tripped = true;
+                }
+            }
+        }
+
+        fn pop(&mut self, binding: &str) {
+            if self.tripped {
+                return;
+            }
+            self.frames.pop();
+            let depth = self.depth.get_mut(binding).expect("a pushed binding");
+            if *depth == 2 {
+                self.recursing -= 1;
+                if self.recursing == 0 {
+                    self.unroll = 0;
+                    self.branched = false;
+                }
+            }
+            *depth -= 1;
+        }
+    }
+
+    /// A block's inline events, replayed into the model.
+    type Events = Box<dyn Fn(&mut UnrollModel)>;
+
+    /// The program text and the model's events for one block, numbered so
+    /// every generated function and literal is distinct.
+    struct Generator {
+        defs: String,
+        next: usize,
+    }
+
+    impl Generator {
+        fn fresh(&mut self) -> usize {
+            self.next += 1;
+            self.next
+        }
+
+        /// Emit `block`'s definitions and return its call on `arg`, with a
+        /// closure replaying its inline events into the model.
+        fn emit(&mut self, block: &Block, arg: &str) -> (String, Events) {
+            let id = self.fresh();
+            match block {
+                Block::Chain(n) | Block::ChainWith(n, _) => {
+                    let name = format!("c{id}");
+                    let (step, inner): (String, Option<Events>) = match block {
+                        Block::ChainWith(_, inner) => {
+                            let (call, events) = self.emit(inner, "neg(x)");
+                            (call, Some(events))
+                        }
+                        _ => ("neg(x)".to_string(), None),
+                    };
+                    self.defs.push_str(&format!(
+                        "def {name}(x: f32, k: i64) -> f32 = if gte(k, cast({n}, i64)) then x else {name}({step}, add(k, cast(1, i64)))\n"
+                    ));
+                    let n = *n;
+                    let events = move |model: &mut UnrollModel| {
+                        fn level(
+                            model: &mut UnrollModel,
+                            name: &str,
+                            j: usize,
+                            n: usize,
+                            inner: &Option<Events>,
+                        ) {
+                            model.push(name, ModelKey::Declaration(name.to_string()));
+                            if j < n {
+                                if let Some(inner) = inner {
+                                    inner(model);
+                                }
+                                level(model, name, j + 1, n, inner);
+                            }
+                            model.pop(name);
+                        }
+                        level(model, &name, 0, n, &inner);
+                    };
+                    (format!("c{id}({arg}, cast(0, i64))"), Box::new(events))
+                }
+                Block::Tree(d) => {
+                    let name = format!("t{id}");
+                    self.defs.push_str(&format!(
+                        "def {name}(x: f32, k: i64) -> f32 = if gte(k, cast({d}, i64)) then x else add({name}(x, add(k, cast(1, i64))), {name}(neg(x), add(k, cast(1, i64))))\n"
+                    ));
+                    let d = *d;
+                    let events = move |model: &mut UnrollModel| {
+                        fn level(model: &mut UnrollModel, name: &str, j: usize, d: usize) {
+                            model.push(name, ModelKey::Declaration(name.to_string()));
+                            if j < d {
+                                level(model, name, j + 1, d);
+                                level(model, name, j + 1, d);
+                            }
+                            model.pop(name);
+                        }
+                        level(model, &name, 0, d);
+                    };
+                    (format!("t{id}({arg}, cast(0, i64))"), Box::new(events))
+                }
+                Block::Mutual(n) => {
+                    let (a, b) = (format!("ma{id}"), format!("mb{id}"));
+                    self.defs.push_str(&format!(
+                        "def {a}(x: f32, k: i64) -> f32 = if gte(k, cast({n}, i64)) then x else {b}(neg(x), k)\ndef {b}(x: f32, k: i64) -> f32 = {a}(x, add(k, cast(1, i64)))\n"
+                    ));
+                    let n = *n;
+                    let events = move |model: &mut UnrollModel| {
+                        fn level(model: &mut UnrollModel, a: &str, b: &str, j: usize, n: usize) {
+                            model.push(a, ModelKey::Declaration(a.to_string()));
+                            if j < n {
+                                model.push(b, ModelKey::Declaration(b.to_string()));
+                                level(model, a, b, j + 1, n);
+                                model.pop(b);
+                            }
+                            model.pop(a);
+                        }
+                        level(model, &a, &b, 0, n);
+                    };
+                    (format!("ma{id}({arg}, cast(0, i64))"), Box::new(events))
+                }
+                Block::LambdaChain(n, inner) => {
+                    let name = format!("lc{id}");
+                    let literal = self.fresh();
+                    let (body, inner) = match inner {
+                        Some(inner) => {
+                            let (call, events) = self.emit(inner, "y");
+                            (call, Some(events))
+                        }
+                        None => ("neg(y)".to_string(), None),
+                    };
+                    self.defs.push_str(&format!(
+                        "def {name}(f: f32 -> f32, x: f32, k: i64) -> f32 = if gte(k, cast({n}, i64)) then x else {name}(f, f(x), add(k, cast(1, i64)))\n"
+                    ));
+                    let n = *n;
+                    let events = move |model: &mut UnrollModel| {
+                        fn level(
+                            model: &mut UnrollModel,
+                            name: &str,
+                            literal: usize,
+                            j: usize,
+                            n: usize,
+                            inner: &Option<Events>,
+                        ) {
+                            model.push(name, ModelKey::Declaration(name.to_string()));
+                            if j < n {
+                                model.push("f", ModelKey::Literal(literal));
+                                if let Some(inner) = inner {
+                                    inner(model);
+                                }
+                                model.pop("f");
+                                level(model, name, literal, j + 1, n, inner);
+                            }
+                            model.pop(name);
+                        }
+                        level(model, &name, literal, 0, n, &inner);
+                    };
+                    (
+                        format!("lc{id}(fn (y: f32) -> {body}, {arg}, cast(0, i64))"),
+                        Box::new(events),
+                    )
+                }
+                Block::LambdaTree(d) => {
+                    let name = format!("lt{id}");
+                    let literal = self.fresh();
+                    self.defs.push_str(&format!(
+                        "def {name}(f: f32 -> f32, x: f32, k: i64) -> f32 = if gte(k, cast({d}, i64)) then f(x) else add({name}(f, x, add(k, cast(1, i64))), {name}(f, neg(x), add(k, cast(1, i64))))\n"
+                    ));
+                    let d = *d;
+                    let events = move |model: &mut UnrollModel| {
+                        fn level(
+                            model: &mut UnrollModel,
+                            name: &str,
+                            literal: usize,
+                            j: usize,
+                            d: usize,
+                        ) {
+                            model.push(name, ModelKey::Declaration(name.to_string()));
+                            if j == d {
+                                model.push("f", ModelKey::Literal(literal));
+                                model.pop("f");
+                            } else {
+                                level(model, name, literal, j + 1, d);
+                                level(model, name, literal, j + 1, d);
+                            }
+                            model.pop(name);
+                        }
+                        level(model, &name, literal, 0, d);
+                    };
+                    (
+                        format!("lt{id}(fn (y: f32) -> neg(y), {arg}, cast(0, i64))"),
+                        Box::new(events),
+                    )
+                }
+                Block::Seq(first, second) => {
+                    let (first_call, first_events) = self.emit(first, arg);
+                    let (call, second_events) = self.emit(second, &first_call);
+                    let events = move |model: &mut UnrollModel| {
+                        first_events(model);
+                        second_events(model);
+                    };
+                    (call, Box::new(events))
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn generated_unrolls_count_and_trip_as_the_model_says() {
+        // chelis#3864 round 5: every combination of the block grammar below,
+        // lowered as a cost entry, counts exactly the bodies the unroll rule
+        // predicts from the program's structure, and trips exactly when it
+        // predicts: frames keyed by function or literal identity, a frame
+        // credited twice branching its unroll, and the unroll ending when no
+        // name recurses.
+        use Block::*;
+        let leaves = [
+            Chain(3),
+            Chain(30),
+            Tree(2),
+            Tree(5),
+            Mutual(4),
+            Mutual(25),
+            LambdaChain(20, None),
+            LambdaTree(4),
+            LambdaChain(6, Some(Box::new(LambdaChain(6, None)))),
+            ChainWith(8, Box::new(Chain(6))),
+            ChainWith(4, Box::new(Tree(2))),
+        ];
+        let mut blocks: Vec<Block> = leaves.to_vec();
+        // Both verdicts, and unlimited unrolls past the budget, must occur,
+        // or the comparison proves little.
+        let (mut trips, mut unlimited_past_budget) = (0, 0);
+        for first in &leaves {
+            for second in &leaves {
+                blocks.push(Seq(Box::new(first.clone()), Box::new(second.clone())));
+            }
+        }
+        for block in blocks {
+            for budget in [20, 60] {
+                let mut generator = Generator {
+                    defs: String::new(),
+                    next: 0,
+                };
+                let (call, events) = generator.emit(&block, "cast(1.5, f32)");
+                let source = format!("{}def example() -> f32 = {call}\n", generator.defs);
+                let mut model = UnrollModel {
+                    budget,
+                    depth: Default::default(),
+                    recursing: 0,
+                    frames: Vec::new(),
+                    unroll: 0,
+                    branched: false,
+                    counted: 0,
+                    tripped: false,
+                };
+                events(&mut model);
+                let (lowered, counted, _) = lower_example(source.clone(), budget);
+                assert_eq!(
+                    (counted, !lowered),
+                    (model.counted, model.tripped),
+                    "counted bodies and trip for:\n{source}"
+                );
+                if model.tripped {
+                    trips += 1;
+                } else if model.counted > budget {
+                    unlimited_past_budget += 1;
+                }
+            }
+        }
+        assert!(
+            trips > 0 && unlimited_past_budget > 0,
+            "{trips} {unlimited_past_budget}"
+        );
     }
 }

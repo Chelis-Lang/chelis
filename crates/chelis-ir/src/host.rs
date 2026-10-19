@@ -3142,15 +3142,16 @@ fn try_lower_compiled_program_with_lane_overrides(
             .then_some(owner)
         })
     });
-    let (mut host_terms, execution) = crate::lower::catch_lowering_external(|| {
-        lower_host_program_with_execution(
-            program,
-            &lowered_names,
-            specialized_function_entry,
-            c_execution_lane,
-            collect_trace,
-        )
-    })??;
+    let (mut host_terms, execution) =
+        crate::lower::catch_lowering_external(crate::lower::UnrollBudget::Unbounded, || {
+            lower_host_program_with_execution(
+                program,
+                &lowered_names,
+                specialized_function_entry,
+                c_execution_lane,
+                collect_trace,
+            )
+        })??;
     host_terms.adt_layouts = parameter_adt_layouts(program, &host_terms.functions);
     let host = resolve_host_program(host_terms).map_err(|error| {
         crate::lower::LowerDiagnostic::new(
@@ -3489,6 +3490,19 @@ pub fn lower_named_tensor_entry_dag(program: &CheckedProgram, name: &str) -> Opt
 /// the iterator is consumed, through one session and one lowering context. A
 /// caller asking for many entries of one program derives the program's facts
 /// once rather than once per entry (chelis#3728).
+///
+/// This is `chelis cost`'s per-entry lowering, and the only lowering that
+/// enforces the unroll budget: an entry whose unroll it rejects yields `None`
+/// (chelis#3864). Every other lowering is unbounded, and the choice cannot be
+/// made outside this crate, so no other caller can enforce it:
+///
+/// ```compile_fail
+/// let _ = chelis_ir::lower::UnrollBudget::Unbounded;
+/// ```
+///
+/// ```compile_fail
+/// let _ = chelis_ir::lower::try_lower_cost_entry_with_ordered_inputs;
+/// ```
 pub fn lower_named_tensor_entry_dags<'a>(
     program: &'a CheckedProgram,
     names: &'a [String],
@@ -3500,7 +3514,7 @@ pub fn lower_named_tensor_entry_dags<'a>(
             &session,
             &context,
             name,
-            crate::lower::try_lower_subexpr_program_with_ordered_inputs,
+            crate::lower::try_lower_cost_entry_with_ordered_inputs,
         )
     })
 }
@@ -20427,9 +20441,10 @@ fn top_level_fn_helper_summary_rejects(
     // it must leave no trace on specialization state
     // (harden-bounded-monomorphization D1).
     let probe_guard = MonoProbeGuard::begin();
-    let lowered = crate::lower::catch_lowering_external(|| {
-        lower_host_function(name, body, None, program, false)
-    });
+    let lowered =
+        crate::lower::catch_lowering_external(crate::lower::UnrollBudget::Unbounded, || {
+            lower_host_function(name, body, None, program, false)
+        });
     drop(probe_guard);
     if pushed {
         pop_inlining(name);
@@ -21887,9 +21902,12 @@ fn remap_tensor_helper_dim_symbols(
     scope: &UnordMap<String, HostTypeTerm>,
     expected_output: &TensorType,
 ) -> Result<crate::Dag, crate::lower::LowerDiagnostic> {
-    crate::lower::catch_lowering_diagnostic(std::panic::AssertUnwindSafe(|| {
-        remap_tensor_helper_dim_symbols_raising(dag, scope, expected_output)
-    }))
+    crate::lower::catch_lowering_diagnostic(
+        crate::lower::UnrollBudget::Unbounded,
+        std::panic::AssertUnwindSafe(|| {
+            remap_tensor_helper_dim_symbols_raising(dag, scope, expected_output)
+        }),
+    )
 }
 
 fn remap_tensor_helper_dim_symbols_raising(
@@ -27920,9 +27938,10 @@ mod tests {
             ));
             let session = HostLoweringSession::new(&program);
             let lowered = top_level_lowering_map(program.exprs(), program.type_env());
-            let result = crate::lower::catch_lowering_external(|| {
-                lower_host_program_with_execution(&session, &lowered, None, true, false)
-            })
+            let result = crate::lower::catch_lowering_external(
+                crate::lower::UnrollBudget::Unbounded,
+                || lower_host_program_with_execution(&session, &lowered, None, true, false),
+            )
             .and_then(|result| result);
             if mismatch {
                 let error = match result {
@@ -33217,8 +33236,10 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
             ),
         ]);
         let refused =
-            crate::lower::catch_lowering_external(|| actualize_tensor_helper_types(&dag, &scope))
-                .expect_err("two extents for one checker dimension");
+            crate::lower::catch_lowering_external(crate::lower::UnrollBudget::Unbounded, || {
+                actualize_tensor_helper_types(&dag, &scope)
+            })
+            .expect_err("two extents for one checker dimension");
         assert!(refused.fatal, "{refused:?}");
         assert!(
             refused
