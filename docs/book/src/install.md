@@ -29,7 +29,7 @@ chelis --version
 
 The script installs only `chelisup`; `chelisup install` downloads the compiler.
 The compiler also bundles `chelis-std`. Reef checks a shell's declared runtime
-requirement against that bundled version; the runtime cannot be installed or
+requirement against that bundled version. The runtime cannot be installed or
 replaced independently.
 
 Release tags start with `v`, while `chelisup install` takes a bare `X.Y.Z`
@@ -45,8 +45,9 @@ holds `bin/chelis`, the runtime archive in `lib/`, and its headers in
 
 `chelis build` links your program with the runtime archive and with the C
 library of your system. So the archive must match that C library. The static
-and glibc 2.31 builds carry a glibc archive. On a musl distribution such as
-Alpine, `chelisup` installs the musl build instead
+and glibc 2.31 builds carry a glibc archive.
+
+On a musl distribution such as Alpine, `chelisup` installs the musl build instead
 (`chelis-vX.Y.Z-linux-x86_64-musl.tar.gz`), which carries a musl archive. Each
 build refuses to link with a compiler for the other C library. `chelis check`,
 `eval`, `test` and `prove` work with every build.
