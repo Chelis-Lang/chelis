@@ -339,8 +339,6 @@ let
         'chelisup: this chelisup comes from the Chelis Nix flake. To get a newer chelisup, run the chelisup of a newer release:' \
         '  nix run github:Chelis-Lang/chelis/vX.Y.Z#chelisup -- install X.Y.Z' \
         'That command installs chelis X.Y.Z and puts that chelisup in the bin directory of CHELIS_HOME.' \
-        'For the chelisup of your Nix profile, install the newer release there:' \
-        '  nix profile install github:Chelis-Lang/chelis/vX.Y.Z#chelisup' \
         'Replace X.Y.Z with a release version. Do not run the bootstrap installer, because it replaces this chelisup.' >&2
       exit 0
     fi

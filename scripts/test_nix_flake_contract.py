@@ -1304,10 +1304,6 @@ class NixFlakeContractTests(unittest.TestCase):
                     "nix run github:Chelis-Lang/chelis/vX.Y.Z#chelisup -- install X.Y.Z",
                     updated.stderr,
                 )
-                self.assertIn(
-                    "nix profile install github:Chelis-Lang/chelis/vX.Y.Z#chelisup",
-                    updated.stderr,
-                )
                 self.assertNotIn("re-run the bootstrap installer", updated.stderr)
                 self.assertEqual(tree_snapshot(home), before)
 
