@@ -460,13 +460,17 @@ fn install_says_why_this_machine_cannot_start_a_release() {
     let out = install(home.path(), release.path(), &version);
     assert!(!out.status.success(), "stdout: {}", stdout(&out));
     let stderr = stderr(&out);
+    // On NixOS the cause names nix-ld instead (unit tests in runtime_check).
+    let cause = if std::path::Path::new("/etc/NIXOS").exists() {
+        "): the file exists, so the loader it names is missing. NixOS supplies that loader"
+    } else {
+        "): the file exists, so the loader or interpreter it names is missing, as with a \
+         glibc build on a musl-based system such as Alpine"
+    };
     assert!(
         stderr.contains(&format!(
             "this machine cannot run the chelis {version} release's bin/chelis ("
-        )) && stderr.contains(
-            "): the file exists, so the loader or interpreter it names is missing, as with a \
-             glibc build on a musl-based system such as Alpine"
-        ),
+        )) && stderr.contains(cause),
         "stderr: {stderr}"
     );
     assert!(!stderr.contains("bootstrap"), "stderr: {stderr}");

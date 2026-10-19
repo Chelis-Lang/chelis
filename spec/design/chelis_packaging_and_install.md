@@ -363,6 +363,14 @@ musl when `/bin/sh`'s ELF program interpreter is musl's loader (a file name
 starting `ld-musl-`, such as `/lib/ld-musl-x86_64.so.1`), not when that loader
 merely exists. The installer stays the static glibc `chelisup-linux-x86_64`,
 which runs on musl.
+No release builds for `aarch64-linux`. On that host, `chelisup install` fails
+and names the Nix route: `chelisup link` of the `chelis` package that the flake
+builds (§5.7). The flake builds `aarch64-linux` packages from the first release
+after 0.20.0, and the error says so. On NixOS without nix-ld, a dynamic release
+build cannot start, because the loader path that it names does not exist.
+chelisup takes the file `/etc/NIXOS` as the NixOS signal. There, the start
+error names `programs.nix-ld.enable` and the same `chelisup link` route, and it
+does not name musl. `chelisup install` itself never uses the Nix package.
 The public bootstrap URL serves `chelisup.sh` without a token. The script uses
 an authenticated `gh` when available, or `curl` for public releases. The
 `chelisup install` GitHub REST path likewise sends a token when available and
