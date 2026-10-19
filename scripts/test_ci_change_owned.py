@@ -2826,6 +2826,43 @@ class PlanningTests(unittest.TestCase):
         )
         owned.verify_plan_digest(plan)
 
+    def test_targeted_frontier_applicability_preserves_strict_obligations(self) -> None:
+        sources = fixture_sources()
+        for records, expected in (
+            ([owned.ChangeRecord("M", "crates/p/src/lib.rs"),
+              owned.ChangeRecord("M", "crates/q/src/lib.rs")], ["q::smoke"]),
+            ([owned.ChangeRecord("M", "crates/p/tests/smoke.rs")], []),
+        ):
+            with self.subTest(records=records):
+                plan = owned.make_plan(
+                    mode="targeted_rebase", base_sha="a" * 40,
+                    candidate_sha="b" * 40, event_pr_head="c" * 40,
+                    records=records, base_metadata=fixture_metadata(),
+                    candidate_metadata=fixture_metadata(), config=load_config(),
+                    tracked_paths=set(sources) | {"scripts/tool.py"},
+                    source_reader=sources.__getitem__,
+                )
+                self.assertEqual(sorted(owned.frontier_applicability_targets(plan)), expected)
+                mutated = copy.deepcopy(plan)
+                row = next(row for row in mutated["target_dispositions"]
+                           if row.get("kind") == "targeted_rebase_frontier_applicability")
+                row["identities"] = ["p::gated"]
+                owned.attach_plan_digest(mutated)
+                with self.assertRaisesRegex(ValueError, "frontier applicability"):
+                    owned.verify_plan_digest(mutated)
+
+    def test_required_package_targets_cannot_become_frontier_inapplicable(self) -> None:
+        sources = fixture_sources() | {"crates/p/src/contract.rs": ""}
+        plan = owned.make_plan(
+            mode="targeted_rebase", base_sha="a" * 40,
+            candidate_sha="b" * 40, event_pr_head="c" * 40,
+            records=[owned.ChangeRecord("M", "crates/p/src/contract.rs")],
+            base_metadata=fixture_metadata(), candidate_metadata=fixture_metadata(),
+            config=load_config(config_text(required_package_rule=("crates/p/src/contract.rs", ("p",)))),
+            tracked_paths=set(sources) | {"scripts/tool.py"}, source_reader=sources.__getitem__,
+        )
+        self.assertEqual(owned.frontier_applicability_targets(plan), set())
+
     def test_targeted_rebase_preserves_the_trusted_package_frontier(self) -> None:
         sources = fixture_sources()
         plan = owned.make_plan(
@@ -5048,6 +5085,58 @@ class ShardingAndExecutionTests(unittest.TestCase):
                     [command[1:3] for command in calls[1:]], [["nextest", "list"]]
                 )
 
+    def test_targeted_frontier_empty_listing_is_inspected_without_execution(self) -> None:
+        sources = fixture_sources()
+        for direct, ignored in itertools.product((False, True), (False, True)):
+            with self.subTest(direct=direct, ignored=ignored), tempfile.TemporaryDirectory() as tmp:
+                plan = owned.make_plan(
+                    mode="targeted_rebase", base_sha="a" * 40,
+                    candidate_sha="b" * 40, event_pr_head="c" * 40,
+                    records=[owned.ChangeRecord("M", "crates/q/tests/smoke.rs" if direct else "crates/q/src/lib.rs")],
+                    base_metadata=fixture_metadata(), candidate_metadata=fixture_metadata(),
+                    config=load_config(), tracked_paths=set(sources) | {"scripts/tool.py"}, source_reader=sources.__getitem__,
+                    duration_baseline=duration_baseline(),
+                )
+                root = Path(tmp)
+                calls = []
+                def run(command, **kwargs):
+                    calls.append(command)
+                    if command[1] == "build":
+                        return subprocess.CompletedProcess(command, 0, "", "")
+                    self.assertEqual(command[1:3], ["nextest", "list"])
+                    tests = {"ignored_case": {"ignored": True, "filter-match": {"status": "matches"}}} if ignored else {}
+                    return subprocess.CompletedProcess(command, 0, json.dumps({"rust-suites": {"q::smoke": {"testcases": tests}}}), "")
+                shard = next(shard for shard in owned.SHARDS if "q::smoke" in owned.execution_shards(plan, "change-owned")[str(shard)])
+                with mock.patch.object(owned, "_commit", return_value="b" * 40):
+                    receipt = owned.execute_shard(plan, lane="change-owned", shard=shard,
+                                                  output=root / "receipt", repo=root, runner=run)
+                self.assertEqual(receipt["success"], not direct, receipt["failures"])
+                self.assertEqual(receipt["executed_targets"], [])
+                self.assertEqual(receipt["executed_tests"], [])
+                self.assertEqual(receipt.get("not_applicable_targets", []), [] if direct else ["q::smoke"])
+                self.assertEqual(len(calls), 2)
+                self.assertEqual(owned._load_receipt_at(root / "receipt/receipt.json"), receipt)
+                if not direct:
+                    listing_path = root / "receipt/test-list.json"
+                    listing = json.loads(listing_path.read_text())
+                    listing["not_applicable_targets"] = []
+                    listing_path.write_bytes(owned.canonical_json(listing))
+                    receipt["sidecars"]["test-list.json"] = owned.sha256_file(listing_path)
+                    owned.attach_receipt_digest(receipt)
+                    (root / "receipt/receipt.json").write_bytes(owned.canonical_json(receipt))
+                    with self.assertRaisesRegex(ValueError, "bound listing"):
+                        owned._load_receipt_at(root / "receipt/receipt.json")
+
+    def test_mixed_group_empty_permission_is_per_target(self) -> None:
+        identities = [owned.Identity("p", "frontier"), owned.Identity("p", "direct")]
+        listing = {"rust-suites": {identity.canonical: {"testcases": {}} for identity in identities}}
+        with self.assertRaisesRegex(ValueError, "no active tests: p::direct"):
+            owned._listing_tests_for_group(listing, identities, {},
+                                          allow_empty_targets={"p::frontier"})
+        self.assertEqual(owned._listing_tests_for_group(
+            {"rust-suites": {"p::frontier": listing["rust-suites"]["p::frontier"]}},
+            identities[:1], {}, allow_empty_targets={"p::frontier"}), [])
+
     def test_package_expansion_accepts_an_all_ignored_ordinary_target(
         self,
     ) -> None:
@@ -5698,6 +5787,55 @@ class ReportTests(unittest.TestCase):
             {row["actual_milliseconds"] for row in report["shard_durations"]},
             {1000},
         )
+
+    def test_required_report_separates_frontier_inspection_from_execution(self) -> None:
+        sources = fixture_sources()
+        self.plan = owned.make_plan(
+            mode="targeted_rebase", base_sha="a" * 40, candidate_sha="b" * 40,
+            event_pr_head="c" * 40,
+            records=[owned.ChangeRecord("M", "crates/q/src/lib.rs")],
+            base_metadata=fixture_metadata(), candidate_metadata=fixture_metadata(),
+            config=load_config(), tracked_paths=set(sources) | {"scripts/tool.py"},
+            source_reader=sources.__getitem__, duration_baseline=duration_baseline(),
+        )
+        receipts = self.receipts()
+        inspected = next(receipt for receipt in receipts if receipt["selected_targets"])
+        inspected.update(executed_targets=[], selected_tests=[], executed_tests=[],
+                         not_applicable_targets=["q::smoke"])
+        owned.attach_receipt_digest(inspected)
+        report = owned.validate_change_owned_report(self.plan, receipts)
+        self.assertTrue(report["success"])
+        self.assertEqual(report["covered_targets"], [])
+        self.assertEqual(report["not_applicable_targets"], ["q::smoke"])
+
+        missing_inspection = copy.deepcopy(receipts)
+        row = next(row for row in missing_inspection if row["selected_targets"])
+        del row["not_applicable_targets"]
+        owned.attach_receipt_digest(row)
+        with self.assertRaisesRegex(ValueError, "executed target coverage mismatch"):
+            owned.validate_change_owned_report(self.plan, missing_inspection)
+
+        for mutation in (
+            {"executed_targets": ["q::smoke"]},
+            {"selected_tests": ["q::smoke::active"]},
+            {"not_applicable_targets": ["p::default_gated"]},
+        ):
+            with self.subTest(mutation=mutation):
+                altered = copy.deepcopy(receipts)
+                row = next(row for row in altered if row["selected_targets"])
+                row.update(mutation)
+                owned.attach_receipt_digest(row)
+                with self.assertRaises(ValueError):
+                    owned.validate_change_owned_report(self.plan, altered)
+
+    def test_required_report_rejects_inspection_without_targeted_provenance(self) -> None:
+        receipts = self.receipts()
+        row = next(row for row in receipts if row["selected_targets"])
+        row.update(executed_targets=[], selected_tests=[], executed_tests=[],
+                   not_applicable_targets=list(row["selected_targets"]))
+        owned.attach_receipt_digest(row)
+        with self.assertRaisesRegex(ValueError, "frontier applicability"):
+            owned.validate_change_owned_report(self.plan, receipts, self.standing_coverage())
 
     GATE_ROW = {
         "identity": "q::smoke",
