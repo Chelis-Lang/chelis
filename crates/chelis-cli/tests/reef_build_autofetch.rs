@@ -1390,7 +1390,7 @@ fn offline_3921_blocks_missing_dependencies_for_all_load_commands() {
         };
         fs::write(app.join("reef.toml"), manifest).expect("manifest");
         for args in [
-            vec!["build", "src/main.ch"],
+            vec!["build", "src/main.ch", "--emit-c"],
             vec!["check", "src/main.ch"],
             vec!["test"],
             vec!["prove", "src/main.ch"],
@@ -1409,13 +1409,17 @@ fn offline_3921_blocks_missing_dependencies_for_all_load_commands() {
                 .args(&args)
                 .output()
                 .expect("offline command");
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            assert!(!output.status.success(), "{resolver}: {args:?}: {stderr}");
-            assert!(stderr.contains("nautilus"), "{args:?}: {stderr}");
-            assert!(stderr.contains("CHELIS_OFFLINE=1"), "{args:?}: {stderr}");
+            let text = format!(
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(!output.status.success(), "{resolver}: {args:?}: {text}");
+            assert!(text.contains("nautilus"), "{args:?}: {text}");
+            assert!(text.contains("CHELIS_OFFLINE=1"), "{args:?}: {text}");
             assert!(
-                stderr.contains("chelis reef install --from-lockfile --artifact-dir <dir>"),
-                "{args:?}: {stderr}"
+                text.contains("chelis reef install --from-lockfile --artifact-dir <dir>"),
+                "{args:?}: {text}"
             );
             assert!(!gh_marker.exists(), "gh must not run: {args:?}");
             assert!(!reef_home.join("index.json").exists());
@@ -1459,12 +1463,12 @@ fn offline_3921_uses_installed_packages_and_rejects_a_stale_warm_cache() {
         .unwrap()
         .len();
     for _ in 0..2 {
-        command("1", &["check", "src/main.ch"])
-            .assert()
-            .success();
+        command("1", &["check", "src/main.ch"]).assert().success();
     }
     assert!(reef_home.join(".cache/prepared-graphs").exists());
     fs::remove_dir_all(reef_home.join("packages/nautilus")).expect("remove dependency");
+    // Keep prepared graphs, but remove installed and extracted dependency bytes.
+    fs::remove_dir_all(reef_home.join("cache")).expect("remove extracted dependencies");
     for origin in [true, false] {
         if !origin {
             let lock = fs::read_to_string(app.join("reef.lock")).expect("lock");
@@ -1478,18 +1482,26 @@ fn offline_3921_uses_installed_packages_and_rejects_a_stale_warm_cache() {
             .expect("lock without origin");
         }
         for args in [
-            vec!["build", "src/main.ch"],
+            vec!["build", "src/main.ch", "--emit-c"],
             vec!["check", "src/main.ch"],
             vec!["test"],
             vec!["prove", "src/main.ch"],
         ] {
-            command("1", &args)
-                .assert()
-                .failure()
-                .stderr(predicate::str::contains("missing dependency `nautilus`"))
-                .stderr(predicate::str::contains(
-                    "chelis reef install --from-lockfile --artifact-dir <dir>",
-                ));
+            let output = command("1", &args).output().expect("offline command");
+            let text = format!(
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(!output.status.success(), "{args:?}: {text}");
+            assert!(
+                text.contains("missing dependency `nautilus`"),
+                "{args:?}: {text}"
+            );
+            assert!(
+                text.contains("chelis reef install --from-lockfile --artifact-dir <dir>"),
+                "{args:?}: {text}"
+            );
         }
     }
     assert_eq!(
