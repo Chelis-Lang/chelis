@@ -39,8 +39,6 @@ thread_local! {
     /// Whether a frame of the current unroll has made more than one
     /// recursive call back into its own recursion.
     static UNROLL_BRANCHED: Cell<bool> = const { Cell::new(false) };
-    /// Whether the innermost lowering boundary enforces the unroll budget.
-    static UNROLL_ENFORCED: Cell<bool> = const { Cell::new(false) };
     /// The function whose frame first branched in the current unroll, which
     /// a rejection names.
     static UNROLL_BRANCHED_AT: std::cell::RefCell<Option<String>> =
@@ -767,19 +765,18 @@ struct UnrollScope {
     recursing: usize,
     branched: bool,
     branched_at: Option<String>,
-    enforced: bool,
+    _enforcement: cost_entry::Enforcement,
 }
 
 impl UnrollScope {
     fn enter(budget: UnrollBudget) -> Self {
+        let enforcement = cost_entry::Enforcement::enter(budget);
         #[cfg(test)]
-        if matches!(budget, UnrollBudget::Enforced(_)) || UNROLL_ENFORCED.with(Cell::get) {
+        if cost_entry::enforced() {
             ENFORCING_SCOPES_ENTERED.with(|entered| entered.set(entered.get() + 1));
         }
         Self {
-            enforced: UNROLL_ENFORCED.with(|enforced| {
-                enforced.replace(enforced.get() || matches!(budget, UnrollBudget::Enforced(_)))
-            }),
+            _enforcement: enforcement,
             count: UNROLLED_BODIES.with(|count| count.replace(Some(0))),
             recursing: RECURSING_NAMES.with(|names| names.replace(0)),
             branched: UNROLL_BRANCHED.with(|branched| branched.replace(false)),
@@ -793,7 +790,6 @@ impl Drop for UnrollScope {
         UNROLLED_BODIES.with(|count| count.set(self.count));
         RECURSING_NAMES.with(|names| names.set(self.recursing));
         UNROLL_BRANCHED.with(|branched| branched.set(self.branched));
-        UNROLL_ENFORCED.with(|enforced| enforced.set(self.enforced));
         UNROLL_BRANCHED_AT.with(|at| *at.borrow_mut() = self.branched_at.take());
     }
 }
@@ -2599,10 +2595,54 @@ pub(crate) fn try_lower_subexpr_program_with_ordered_inputs(
 pub(crate) use cost_entry::try_lower_cost_entry_with_ordered_inputs;
 
 /// The one lowering that enforces [`MAX_UNROLLED_BODIES`], and the only code
-/// that can construct [`UnrollBudget::Enforced`]: the token's field is
-/// private to this module (chelis#3864).
+/// that can construct [`UnrollBudget::Enforced`] or turn enforcement on: the
+/// token's field and the enforcement flag are private to this module
+/// (chelis#3864).
 mod cost_entry {
     use super::*;
+
+    thread_local! {
+        /// Whether the innermost lowering boundary enforces the budget.
+        static ENFORCED: Cell<bool> = const { Cell::new(false) };
+        /// The first budget rejection inside the current cost entry. No
+        /// lowering boundary saves or restores it: only the cost entry clears
+        /// it, on entry, and reads it, on exit.
+        static TRIP: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+    }
+
+    /// Whether the innermost lowering boundary enforces the budget.
+    pub(super) fn enforced() -> bool {
+        ENFORCED.with(Cell::get)
+    }
+
+    /// One boundary's enforcement: an enforcing budget turns it on, any
+    /// boundary inside an enforcing one keeps it, and leaving the boundary
+    /// restores the enclosing state.
+    pub(super) struct Enforcement(bool);
+
+    impl Enforcement {
+        pub(super) fn enter(budget: UnrollBudget) -> Self {
+            Self(ENFORCED.with(|enforced| {
+                enforced.replace(enforced.get() || matches!(budget, UnrollBudget::Enforced(_)))
+            }))
+        }
+    }
+
+    impl Drop for Enforcement {
+        fn drop(&mut self) {
+            ENFORCED.with(|enforced| enforced.set(self.0));
+        }
+    }
+
+    /// Record a budget rejection for the enclosing cost entry.
+    pub(super) fn record_trip(message: &str) {
+        TRIP.with(|trip| {
+            let mut trip = trip.borrow_mut();
+            if trip.is_none() {
+                *trip = Some(message.to_owned());
+            }
+        });
+    }
 
     /// Proof that a boundary is `chelis cost`'s per-entry lowering.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2618,7 +2658,8 @@ mod cost_entry {
         result_claim: Option<&TensorType>,
         authored_signature: bool,
     ) -> Result<Dag, LowerDiagnostic> {
-        try_lower_subexpr_program_with_ordered_inputs_impl(
+        let enclosing = TRIP.with(|trip| trip.borrow_mut().take());
+        let lowered = try_lower_subexpr_program_with_ordered_inputs_impl(
             expr,
             scoped_bindings,
             context,
@@ -2633,7 +2674,19 @@ mod cost_entry {
                 trace: None,
             },
             UnrollBudget::Enforced(CostEntryOnly(())),
-        )
+        );
+        // A trip anywhere in the entry rejects it, whatever a nested probe
+        // made of the rejection.
+        // A fatal diagnostic keeps precedence, as it does over every other
+        // rejection.
+        match (
+            TRIP.with(|trip| std::mem::replace(&mut *trip.borrow_mut(), enclosing)),
+            lowered,
+        ) {
+            (_, Err(fatal)) if fatal.fatal => Err(fatal),
+            (Some(message), _) => Err(lower_diagnostic_for_expr(message, expr)),
+            (None, lowered) => lowered,
+        }
     }
 }
 
@@ -8168,6 +8221,9 @@ impl LowerCtx<'_> {
                 *rejection = Some(message.clone());
             }
         });
+        // The trip stays recorded until the cost entry returns, so a nested
+        // probe that turns this rejection into a verdict cannot hide it.
+        cost_entry::record_trip(&message);
         self.reject_lowering_slice(Some(fn_expr), message);
     }
 }
@@ -16195,7 +16251,7 @@ impl<'program> LowerCtx<'program> {
             }
         }
         self.recursion_frames.push((frame_key, 0));
-        if RECURSING_NAMES.with(Cell::get) > 0 && UNROLL_ENFORCED.with(Cell::get) {
+        if RECURSING_NAMES.with(Cell::get) > 0 && cost_entry::enforced() {
             self.count_unrolled_body(fn_expr, inlining_name.as_deref());
         }
         if self.inlining_active > MAX_TOTAL_INLINE_DEPTH {
@@ -36318,5 +36374,80 @@ def example() -> f32 = bisection(erf_projectile, cast(0.1, f32), cast(0.7, f32),
                 .collect::<Vec<_>>();
         }));
         assert!(cost > 0, "the cost entry enforces the budget");
+    }
+
+    /// A static tree `depth` levels deep: every level's two calls are lowered.
+    fn static_tree(depth: usize) -> String {
+        format!(
+            "def t(x: f32, k: i64) -> f32 = if gte(k, cast({depth}, i64)) then x else add(t(x, add(k, cast(1, i64))), t(neg(x), add(k, cast(1, i64))))\n"
+        )
+    }
+
+    #[test]
+    fn a_trip_inside_a_value_probe_rejects_the_entry() {
+        // chelis#3864 round 4: the cost entry reads a top-level value whose
+        // initializer is a branched tree past the budget. Lowering probes the
+        // initializer under a nested boundary whose failure becomes a
+        // verdict; the trip must still reject the entry, never leave it
+        // costed without the value.
+        let source = format!(
+            "{}big = t(cast(1.5, f32), cast(0, i64))\ndef example(y: f32) -> f32 = add(big, y)\n",
+            static_tree(8)
+        );
+        let (lowered, counted, rejection) = lower_example(source, 100);
+        assert!(!lowered, "the entry is omitted, not costed without `big`");
+        assert!(counted > 100, "{counted}");
+        assert!(rejection.is_some_and(|message| message.starts_with("recursive inlining of `t`")));
+    }
+
+    #[test]
+    fn a_tripped_cost_entry_leaves_later_lowerings_unbounded() {
+        // A cost entry that trips, then the same tree through an unbounded
+        // lowering on the same thread: enforcement ends with the cost entry.
+        let source = format!(
+            "{}def example(y: f32) -> f32 = add(t(y, cast(0, i64)), y)\n",
+            static_tree(8)
+        );
+        let program = checked(&source);
+        let ((cost, after_cost, unbounded), counted, _) = with_budget(100, move || {
+            let cost =
+                crate::host::lower_named_tensor_entry_dags(&program, &["example".to_string()])
+                    .map(|dag| dag.is_some())
+                    .collect::<Vec<_>>();
+            let after_cost = UNROLL_BUDGET_PROBE
+                .with(|probe| probe.borrow().as_ref().map(|(_, counted, _)| *counted));
+            let unbounded =
+                crate::host::lower_named_tensor_entry_dag(&program, "example").is_some();
+            (cost, after_cost, unbounded)
+        });
+        assert_eq!(cost, [false], "the cost entry trips");
+        assert!(unbounded, "the later lowering is unbounded");
+        assert_eq!(
+            Some(counted),
+            after_cost,
+            "the later lowering counts nothing"
+        );
+    }
+
+    #[test]
+    fn a_value_probe_inside_a_cost_entry_enforces_the_budget() {
+        // chelis#3864 round 4: the probe that lowers a top-level value's
+        // initializer runs under its own boundary inside the cost entry, and
+        // inherits the entry's enforcement rather than escaping its budget.
+        let source = format!(
+            "{}small = t(cast(1.5, f32), cast(0, i64))\ndef example(y: f32) -> f32 = add(small, y)\n",
+            static_tree(3)
+        );
+        let program = checked(&source);
+        ENFORCING_SCOPES_ENTERED.with(|entered| entered.set(0));
+        let lowered =
+            crate::host::lower_named_tensor_entry_dags(&program, &["example".to_string()])
+                .map(|dag| dag.is_some())
+                .collect::<Vec<_>>();
+        assert_eq!(lowered, [true]);
+        assert!(
+            ENFORCING_SCOPES_ENTERED.with(Cell::get) >= 2,
+            "the entry and the value probe inside it both enforce"
+        );
     }
 }
