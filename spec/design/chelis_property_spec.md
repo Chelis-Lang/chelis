@@ -399,25 +399,43 @@ admits a property only when every binder is `f32`/`f64`, so a property with an
 `i32` binder cannot enter it. Widening that lane to mixed binders would be the
 fix.
 
-### Why the multi-binder diagonal is still open (chelis#3697)
+### Pairing the extremal classes (chelis#3697)
 
 The shared attempt ordinal indexes every binder's schedule, so binders with
-equal ranges take the same candidate at every scheduled attempt and a
-multi-binder property is evaluated only on the **diagonal** of the edge grid.
-`forall(x: f64, y: f64) where x > 0.0f64, y > 0.0f64` never pairs a large `x`
-with a tiny `y`, and `x / y` being finite -- false at exactly such a pair --
-reports `fuzz_validated` at every sample count measured, up to 50000 with
-`accepted == attempted` throughout. The bound is mechanical rather than
-sampled: past attempt 44 the draw falls back to the `[-10, 10]` window, and
-the overflow needs `y` near `1e-309`, which that window cannot reach. That is
-chelis#3636's own
-defect surviving for multi-binder properties, and chelis#3697 owns it.
+equal ranges take the same candidate at every scheduled attempt. On its own
+that evaluates a multi-binder property only on the **diagonal** of the edge
+grid: `forall(x: f64, y: f64) where x > 0.0f64, y > 0.0f64` never paired a
+large `x` with a tiny `y`, and `x / y` being finite — false at exactly such a
+pair — reported `fuzz_validated` at every sample count measured, up to 50000
+with `accepted == attempted` throughout.
 
-**No off-diagonal policy is implemented.** This section records what an
-attempt at one measured, because the measurements constrain the design far
-more than the original issue's option list did. Each figure below was taken
-with `--tier fuzz-only` at the stated budget against a build of this
-tier.
+A **cell phase** now runs between the diagonal and the uniform draw. Per
+binder, with `L` its own schedule length and `S = 44` the span:
+
+1. **Diagonal**, for `attempt < max(S, L)`: candidate `attempt` of this
+   binder's own schedule, exactly as before and at the same one-for-one rate.
+2. **Cell**, for the next `min(2^n, 256)` attempts at arity `n`: a mixed-radix
+   odometer over **two** classes per binder — its largest and its smallest
+   admissible candidate, by `total_cmp`. Cell `c` gives binder `j` digit
+   `(c / 2^j) % 2`, digit 0 being the largest.
+3. **Uniform**, thereafter: unchanged.
+
+The phase is skipped entirely for a property with fewer than two scheduled
+binders, and for one whose plan reports `has_order_edges`. A binder that reads
+no schedule — `bool`, `string`, a tensor — contributes no digit and consumes
+no position, so it neither enables the phase nor shifts another binder's
+digit.
+
+At two binders that gives four cells at attempts 44–47, and cell 2 pairs the
+first binder's largest candidate with the second's smallest. Under `> 0.0`
+those are `f64::MAX` and `5e-324`, so the issue's own property is refuted at
+the forty-seventh attempt under every seed.
+
+Each figure below was taken with `--tier fuzz-only` at the stated budget. They
+are recorded because three of the policy's four choices — two classes, the
+placement after the diagonal rather than before it, and the order-guard
+exemption — were each chosen by a measurement that a plausible alternative
+failed.
 
 #### Reindexing alone cannot pay for it
 
@@ -428,54 +446,58 @@ candidates long, so at the default 100 samples the diagonal gives every binder
 all 44 of its own classes while covering 44 of 1936 pairs, and a full-schedule
 odometer gives the slowest binder 3 of 44 while covering 100 of 1936. Full
 grid coverage needs 1936 attempts, and `44^n` for `n` binders, so **no index
-policy covers the grid within a budget linear in the schedule length.**
+policy covers the grid within a budget linear in the schedule length.** That
+is why the phase pairs two classes rather than reindexing the schedule: the
+choice is which coverage to keep, not whether a pair is reachable.
 
-The weaker claim -- that no index policy reaches *any* off-diagonal pair
-cheaply -- is false, and these figures refute it: a full-schedule odometer
+The weaker claim — that no index policy reaches *any* off-diagonal pair
+cheaply — is false, and these figures refute it: a full-schedule odometer
 reaches the pair (binder 1's candidate `a`, binder 2's candidate `b`) at cell
-`a + 44b`, so the `x / y` counterexample above is its cell 1. What it buys
-that with is the per-binder coverage chelis#3636 exists to provide. The choice
-is which coverage to keep, not whether a pair is reachable.
+`a + 44b`, so the `x / y` counterexample above is its cell 1.
 
 #### The attempts after the schedule is spent are not spare
 
-The obvious place to find a budget is the attempts past the schedule, which
-draw uniformly over the narrow proposal window (chelis#644 owns its width).
-chelis#3636 exists because such a draw rarely finds an IEEE edge case, and it
-is tempting to read that as those attempts being nearly worthless. **They are
-not.** They are the only thing that finds a counterexample in the *interior*
-of the window, where no edge candidate and no magnitude-class representative
-lands.
+The budget comes from the attempts past the schedule, which draw uniformly
+over the narrow proposal window (chelis#644 owns its width). chelis#3636
+exists because such a draw rarely finds an IEEE edge case, and it is tempting
+to read that as those attempts being nearly worthless. **They are not.** They
+are the only thing that finds a counterexample in the *interior* of the
+window, where no edge candidate and no extremal representative lands. That
+sentence was written as a rationale before it was measured, and the
+measurement refuted it.
 
-Measured with a property false on `(-7.5, -7.0)` -- 2.5% of the window,
-containing no candidate of any schedule -- at the default 100 samples over
-seeds 0 to 29, against a build that spent those attempts on a
-magnitude-class odometer instead:
+Measured with a property false on `(-7.5, -7.0)` — 2.5% of the window,
+containing no candidate of any schedule — at the default 100 samples over
+seeds 0 to 29:
 
-| scheduled binders | refutations, uniform draws kept | refutations, attempts spent on pairs |
-|---|---|---|
-| 1 | 20/30 | 20/30 (control: a single binder took no pair) |
-| 2 | 24/30 | 11/30 |
-| 3 | 26/30 | **0/30** |
-| 4 | 23/30 | **0/30** |
+| scheduled binders | no cell phase | two classes (shipped) | six classes |
+|---|---|---|---|
+| 1 | 20/30 | 20/30 | 20/30 |
+| 2 | 24/30 | 23/30 | 11/30 |
+| 3 | 26/30 | 24/30 | **0/30** |
+| 4 | 23/30 | 21/30 | **0/30** |
 
-The attempt that produced the right-hand column grouped each binder's
-candidates into six magnitude classes — its largest and smallest candidates,
-its smallest strictly positive and largest strictly negative ones, a zero
-where the guards admit one, and the candidate nearest `1.0` in magnitude —
-and ran a mixed-radix odometer over them. Four of those six are non-negative,
-which is why a predecessor drawn from them pushes `y > x` into a non-negative
-range in the next subsection. The classes are recorded because the `6` in the
-arithmetic below is otherwise unverifiable: the code that defined them is not
-in the tree.
+Arity 1 is the control: a single binder takes no cell, so an unchanged rate
+there is what isolates the effect to the phase. The first two columns were
+re-measured against the shipped build and current `main`; the third cannot be,
+because the code that defined six classes is not in the tree, and it is
+retained because the `6` in the arithmetic below is otherwise unverifiable.
 
-At three or more binders a `6`-class odometer needs `6^n >= 216` attempts,
-which exceeds the 56 that follow the 44-attempt diagonal at the default
-budget, so **every** post-diagonal attempt becomes a pair and the uniform
-generator never runs. The loss is total and seed-independent, not a reduced
-chance. Any future policy that funds pairing from these attempts owes this
-measurement a bound, and a negative control that a window-interior refutation
-still happens at the arity it targets.
+**This is the measurement that sets the class count at two.** A six-class set
+— largest and smallest, smallest strictly positive and largest strictly
+negative, a zero where the guards admit one, and the candidate nearest `1.0`
+in magnitude — needs `6^n >= 216` attempts at three binders, which exceeds the
+56 that follow the 44-attempt diagonal at the default budget. Every
+post-diagonal attempt becomes a cell and the uniform generator never runs; the
+loss is total and seed-independent rather than a reduced chance. Two classes
+need 4, 8 and 16 cells at two, three and four binders, which fit inside those
+56 with the generator still reachable. The `256` cap is therefore slack at
+every arity a property plausibly has — `2^8` is the first to reach it — and is
+retained as a bound rather than as a working limit.
+
+A policy that widens the class set owes this table a re-measurement at the
+arity it targets, and a negative control that a window-interior refutation
+still happens there.
 
 #### The constraint-directed lane has no stable per-binder diagonal
 
@@ -488,8 +510,7 @@ here:
 
 - Changing a predecessor's value re-indexes every successor, and entries the
   schedule proposed at attempt `i` can end up proposed at no attempt at all.
-  Four of the six magnitude classes listed above are non-negative for an
-  unbounded binder, so a predecessor drawn from them pushes `y > x` into a
+  A predecessor taking its largest candidate pushes `y > x` into a
   non-negative range and deletes every negative candidate from `y`'s list.
 - The perturbation cannot be confined to predecessors. A proposal anywhere in
   the property changes how many values the attempt draws from the generator,
@@ -498,33 +519,40 @@ here:
 
 Measured on `forall(x: f64, y: f64) where y > x, <twenty `!=` exclusions on
 y>: (y != -1.0e-323f64)` at the default budget over 30 seeds: 18/30
-refutations as the tier stands, 0/30 with pairs proposed everywhere, and
-11/30 with pairs withheld from predecessors only. Only switching the scheme
-off for the whole property restored 18/30.
+refutations with the phase off, 0/30 with cells proposed everywhere, and 11/30
+with cells withheld from predecessors only. The shipped build measures 18/30
+— identical to current `main`, seed for seed, which is what the exemption is
+supposed to mean; the other two figures are from the six-class build and are
+not re-measurable. **Only switching the phase off for the whole property
+restored 18/30**, which is why the exemption keys on
+`has_order_edges` for the plan rather than on whether a particular seat has a
+successor. Every order graph is a DAG, so a partial exemption always leaves a
+sink taking cells, and that is enough to move its predecessors' draws.
 
-#### What a future policy has to satisfy
+#### What the phase costs
 
-1. Not fund itself from the post-diagonal uniform draws without bounding the
-   loss above, at the arity it targets.
-2. Not propose values in the constraint-directed lane for a property whose
-   binders are order-guarded, or else make that lane's per-binder sequence
-   independent of the other binders' draws.
-3. Keep every binder's own schedule reachable in the samples it takes today:
-   a schedule longer than the span a policy reserves for it must not have its
-   tail displaced past the budget. An `!=` exclusion adds **at most** two
-   candidates — its two representable neighbours — so `L <= 44 + 2k` for `k`
-   exclusions, and a policy reserving a span must use the bound rather than an
-   equality. It is only a bound because `push` drops a value the exclusion
-   list contains, so an exclusion that is itself a schedule member removes
-   itself first: `x != 1.0f64` measures `L = 45`, not 46, and `x != 0.0f64`
-   measures **42**, because `0.0 == -0.0` in Rust deletes both zeros while the
-   neighbours it would add are already the subnormal candidates.
-4. Leave a single-binder property alone, and leave a binder that reads no
-   schedule -- `bool`, `string`, a tensor -- out of any arity or index
-   arithmetic, so it neither enables a scheme nor consumes a position in it.
+Two classes are the two extremes, so a counterexample needing an extreme
+paired with a **moderate** value is not reached off the diagonal.
+`x >= 1e300` with `y == 1.0` is such a pair: `1.0` is a candidate of `y`'s
+schedule but not one of its two classes, and no uniform draw over the window
+proposes `1e300`. The six-class set did reach it — "nearest `1.0`" was one of
+the six — and the trade was made against the table above. An order-guarded
+property gets no pairing at all, so chelis#3697's class remains open for that
+shape.
 
-Those four are the shapes an attempt broke, each measured, and they are
-recorded here so the next attempt starts from them.
+Both costs are asserted as tests that a property is *not* refuted, so a future
+policy that reaches either has to change them deliberately and re-measure the
+displaced-draw rates.
+
+A binder whose schedule is longer than the span keeps the diagonal until that
+schedule is spent, which is what `max(S, L)` is for: a boundary fixed at 44
+displaced the tail of a long schedule past the budget. An `!=` exclusion adds
+**at most** two candidates — its two representable neighbours — so
+`L <= 44 + 2k` for `k` exclusions. It is only a bound because `push` drops a
+value the exclusion list contains, so an exclusion that is itself a schedule
+member removes itself first: `x != 1.0f64` measures `L = 45`, not 46, and
+`x != 0.0f64` measures **42**, because `0.0 == -0.0` in Rust deletes both
+zeros while the neighbours it would add are already the subnormal candidates.
 
 The shared Tier-C runner is enabled in every normal CLI build, including a
 build without the `smt` feature, and is also the Tide implementation. Solver
@@ -545,19 +573,20 @@ The chelis#3636 edge-schedule oracle is:
 cargo nextest run -p chelis-cli --test issue_3636_edge_sampling
 ```
 
-The chelis#3697 hazard oracle is:
+The chelis#3697 extremal-pairing oracle is:
 
 ```sh
-cargo nextest run -p chelis-cli --test issue_3697_multi_binder_hazards
+cargo nextest run -p chelis-cli --test issue_3697_extremal_pairing
 ```
 
-It pins the two measurements above that no existing test covers: the
-post-diagonal uniform draws' yield, and an order successor's dependence on its
-predecessor. The diagonal limitation itself is pinned by the chelis#3636
-oracle three lines above — `issue_3636_multi_binder_schedule_visits_only_the_diagonal`
-and its narrowed witness — so closing chelis#3697 means deleting assertions
-there, not here. A policy that changes any of them has to change those tests
-deliberately.
+It pins the pairing itself, the two costs above, and the three measurements
+that chose the policy: the post-diagonal draws' yield at four arities, a long
+schedule's tail, and the rejection lane's accepted count. The chelis#3636
+oracle three lines above no longer asserts the diagonal limitation —
+`issue_3636_multi_binder_schedule_visits_only_the_diagonal` asked to be
+deleted when the pairing improved, and was — but it keeps
+`issue_3636_the_diagonal_witness_is_real_when_the_guards_align_it`, which
+separates a pairing regression from a magnitude-reach one.
 
 V1 reports the first deterministic counterexample. Shrinking is deferred.
 

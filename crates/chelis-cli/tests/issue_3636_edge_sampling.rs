@@ -925,38 +925,20 @@ fn issue_3636_strict_chain_without_room_still_fails_closed_before_sampling() {
     }
 }
 
-/// The multi-binder diagonal, pinned as a known limitation rather than left
-/// to be rediscovered. Binders with equal ranges take the same candidate
-/// index at every scheduled attempt, so this property -- false at a pair of
-/// guard-admitted representable values -- is not refuted.
-///
-/// This test asserts the limitation, so it fails if the pairing ever changes.
-/// That is deliberate: the change would be an improvement, and whoever makes
-/// it should have to read the budget analysis in
-/// `spec/design/chelis_property_spec.md` and delete this test on purpose.
-#[test]
-fn issue_3636_multi_binder_schedule_visits_only_the_diagonal() {
-    let source = "module Edge.Diagonal
-def subject(x: f64, y: f64) -> f64 = (x / y)
-@property div_finite forall(x: f64, y: f64)
-where x > 0.0f64, y > 0.0f64:
-  ((subject(x, y) <= 1.7976931348623157e308f64) && (subject(x, y) >= -1.7976931348623157e308f64))
-";
-    for seed in ["0", "1", "7", "99"] {
-        let (code, record) = prove(source, "200", seed);
-        assert_eq!(
-            code, 0,
-            "seed {seed}: the diagonal limitation is expected to leave this unrefuted; \
-             if this now fails, the pairing improved and this test should be deleted: {record:#}"
-        );
-        assert_eq!(record["status"], "passed", "seed {seed}: {record:#}");
-    }
-}
+// `issue_3636_multi_binder_schedule_visits_only_the_diagonal` stood here. It
+// asserted that `forall(x: f64, y: f64) where x > 0, y > 0: x / y is finite`
+// is *not* refuted, because binders with equal ranges took the same candidate
+// index at every scheduled attempt. It also asked, in its own docstring, to be
+// deleted on purpose if the pairing ever improved. chelis#3697 improved it:
+// the property is now refuted at attempt 47 under every seed, and that is
+// asserted in `issue_3697_extremal_pairing.rs` instead.
 
-/// The same property with the guards narrowed so the diagonal lands on the
-/// refuting pair. This proves the witness exists and that the sampler reaches
-/// it when the pairing allows, so the test above records a pairing limit and
-/// not a magnitude-reach limit.
+/// The same property with the guards narrowed so the *diagonal* lands on the
+/// refuting pair, which is how it was reachable before chelis#3697. It stays
+/// because it separates the two reasons a pair can be missed: this one needs
+/// no off-diagonal pairing at all, so it still passes if the cell phase is
+/// ever disabled, and a failure here is a magnitude-reach regression in the
+/// edge schedule rather than a pairing one.
 #[test]
 fn issue_3636_the_diagonal_witness_is_real_when_the_guards_align_it() {
     let source = "module Edge.DiagonalAligned
