@@ -499,9 +499,19 @@ cells take every post-diagonal attempt — a cap of 256 reproduced the
 six-class failure exactly, relocated from three binders to six, where
 `2^6 = 64 > 56`. The quantity the allowance has to stay below is the budget,
 which a constant does not know, so the allowance **is** a share of the
-budget: `(samples - 44) / 2`. The uniform draw then keeps at least half of
-the attempts the diagonal did not take, at every arity and every budget, and
-the grid is covered to whatever depth the other half allows.
+budget.
+
+The divided quantity is the attempts that remain once **this binder's own**
+diagonal ends — `samples - max(44, L)`, not `samples - 44`. Those differ
+exactly when a binder's schedule outruns the span, and the difference is the
+whole guarantee: at `L = 72` and the default budget, `(100 - 44) / 2` is 28
+cells over the window `[72, 100)`, which is every attempt the diagonal left,
+so the generator gets nothing. Fourteen `!=` exclusions on each binder reach
+that at the default budget and four reach it at `--samples 60`, so it is not
+a corner case. With the right quantity divided, the uniform draw keeps at
+least half of the attempts the diagonal left, at every arity, every budget
+**and every schedule length**, and the grid is covered to whatever depth the
+other half allows.
 
 Extending the same measurement past the published four rows, seeds 0–29 at
 the default budget:
@@ -516,16 +526,20 @@ the default budget:
 The share does not restore the no-phase rate above four binders — half the
 post-diagonal attempts are spent on cells by design — but the loss is a
 reduced chance rather than the total, seed-independent loss a fixed cap
-produced. The same holds in the constraint-directed lane, seeds 0–19 at
-arities 5/6/7: 15/18/16 with no phase, 9/17/14 with the share, 9/9/5 with the
-fixed cap.
+produced. The same holds in the constraint-directed lane — the same band property under
+range guards `vi > -10.0f64, vi < 10.0f64` on every binder, which is what
+routes it through `ConstraintSamplingPlan` — seeds 0–19 at arities 5/6/7:
+15/18/16 with no phase, 9/17/14 with the share, 9/9/5 with the fixed cap.
 
 **The share costs little pairing**, because the corners worth proposing sit
 at low cell indices: a pair of opposite extremes on the first two binders is
 cell 2 whatever the arity, so it is reached at attempt 47 at every arity from
 two to eight while a run without the phase passes its whole budget. What the
-share gives up is a corner on a *high-order* binder, since `2^5 = 32` exceeds
-the 28 cells the default budget allows.
+share gives up is the corners that need several binders at once on their low
+digit, since `2^5 = 32` exceeds the 28 cells the default budget allows. Each
+binder's *own* extremal digit is still reached at arity five — cell 16 is
+under 28 — and it is from arity six that a binder's own digit (cell 32) falls
+outside the prefix.
 
 A policy that widens the class set, or the share, owes these tables a
 re-measurement at the arity it targets, and a negative control that a
@@ -572,9 +586,20 @@ the six — and the trade was made against the table above. An order-guarded
 property gets no pairing at all, so chelis#3697's class remains open for that
 shape.
 
-Both costs are asserted as tests that a property is *not* refuted, so a future
-policy that reaches either has to change them deliberately and re-measure the
-displaced-draw rates.
+**Binders whose schedules differ in length may never be in a cell at the same
+attempt.** Each binder's window begins at its own `max(44, L)`, so with
+`L = 52` and `L = 44` the windows are `[52, 56)` and `[44, 48)` — disjoint,
+and the corner is then unreachable at any budget. Binders of one dtype under
+the same guards have equal lengths, which is the ordinary case and the one
+the pairing serves; an `!=` exclusion on one binder only is enough to lose
+it. A schedule *shorter* than the span is safe, because every binder's window
+still floors at 44. This is not a regression against a run with no phase,
+which reaches none of these corners. Aligning every binder's window on one
+shared boundary would fix it structurally; that is not in this change.
+
+All three costs are asserted as tests that a property is *not* refuted, so a
+future policy that reaches any of them has to change them deliberately and
+re-measure the displaced-draw rates.
 
 A binder whose schedule is longer than the span keeps the diagonal until that
 schedule is spent, which is what `max(S, L)` is for: a boundary fixed at 44

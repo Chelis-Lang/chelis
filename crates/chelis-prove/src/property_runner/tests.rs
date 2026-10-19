@@ -2482,33 +2482,50 @@ fn issue_3697_cells_exhaust_and_yield_back_to_the_uniform_draw() {
     );
 }
 
-/// **The phase can never take more than its share of the post-diagonal
-/// budget, at any arity.** This is the assertion a fixed cap could not make,
-/// and its absence was a default-budget false pass: at 100 samples only 56
-/// attempts follow the diagonal, `2^6 = 64` exceeded them, and a six-binder
-/// property proposed no uniform draw at all — the same total starvation that
-/// the six-class set caused at arity three.
+/// **The phase can never take more than its share of the attempts the
+/// diagonal left, at any arity, any budget, and any schedule length.** This
+/// is the assertion a fixed cap could not make, and its absence was a
+/// default-budget false pass: at 100 samples only 56 attempts follow a
+/// 44-candidate diagonal, `2^6 = 64` exceeded them, and a six-binder
+/// property proposed no uniform draw at all.
 ///
-/// The invariant is that the uniform draw keeps at least as many of those
-/// attempts as the cells take, which is checked here against the arity axis
-/// directly rather than inferred from the cap's value.
+/// **`schedule_len` is an axis here because holding it at 44 is what hid the
+/// second instance of the same defect.** The share is divided out of
+/// `budget - max(DIAGONAL_SPAN, schedule_len)`, and a revision that divided
+/// `budget - DIAGONAL_SPAN` instead passed this test at every budget and
+/// arity while starving the generator completely for `L = 72`: 28 cells over
+/// the window `[72, 100)` is every attempt there was. A grid that varies one
+/// parameter of a claim and fixes another cannot falsify the claim.
 #[test]
 fn issue_3697_the_phase_never_outgrows_its_share_of_the_budget() {
-    for budget in [46usize, 50, 60, 100, 200, 1000] {
-        let post_diagonal = budget - DIAGONAL_SPAN;
-        let share = post_diagonal / CELL_BUDGET_DIVISOR;
-        for arity in [2usize, 3, 4, 5, 6, 8, 12, 25, 64, usize::MAX] {
-            // The first attempt past the share must not be a cell, whatever
-            // the arity: that is what leaves the generator reachable.
-            let first_free = DIAGONAL_SPAN + share;
-            assert_eq!(
-                schedule_slot(first_free, arity, 0, 44, budget),
-                ScheduleSlot::Random,
-                "budget {budget}, arity {arity}: the cells must yield by \
-                 attempt {first_free}, leaving at least {} of {post_diagonal} \
-                 post-diagonal attempts to the uniform draw",
-                post_diagonal - share
-            );
+    for budget in [46usize, 50, 60, 100, 160, 200, 1000] {
+        for schedule_len in [0usize, 20, 44, 45, 52, 72, 90, 150] {
+            let window_start = DIAGONAL_SPAN.max(schedule_len);
+            let left = budget.saturating_sub(window_start);
+            let share = left / CELL_BUDGET_DIVISOR;
+            for arity in [2usize, 3, 4, 5, 6, 8, 12, 25, 64, usize::MAX] {
+                let grid = EXTREMAL_CLASSES
+                    .checked_pow(u32::try_from(arity).unwrap_or(u32::MAX))
+                    .unwrap_or(usize::MAX);
+                let cells = grid.min(share);
+                // Whatever ends the phase -- the grid or the share -- the
+                // attempt after it is a uniform draw.
+                assert_eq!(
+                    schedule_slot(window_start + cells, arity, 0, schedule_len, budget),
+                    ScheduleSlot::Random,
+                    "budget {budget}, L {schedule_len}, arity {arity}: the cells \
+                     must yield by attempt {}, leaving {} of the {left} attempts \
+                     the diagonal left to the uniform draw",
+                    window_start + cells,
+                    left - cells
+                );
+                // And the uniform draw keeps at least half of them.
+                assert!(
+                    left - cells >= left / CELL_BUDGET_DIVISOR,
+                    "budget {budget}, L {schedule_len}, arity {arity}: {cells} \
+                     cells of {left} attempts leaves the generator too little"
+                );
+            }
         }
     }
 }

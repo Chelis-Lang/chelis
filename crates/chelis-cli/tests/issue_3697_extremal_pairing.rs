@@ -434,8 +434,10 @@ fn issue_3697_a_high_arity_property_still_draws_uniformly() {
 /// attempts it gives back to the generator buy a prefix of the grid that
 /// already contains the pairings the issue is about. Above four binders the
 /// grid is covered only to that prefix — `2^5 = 32` exceeds the 28 the
-/// default budget allows — so a corner on a high-order binder is not
-/// reached, which is the declared cost.
+/// default budget allows — so the corners needing several binders at once on
+/// their low digit are not reached. Each binder's *own* extremal digit is
+/// still reached at arity five, since cell 16 is under 28; it is from arity
+/// six that a binder's own digit (cell 32) falls outside the prefix.
 #[test]
 fn issue_3697_a_low_order_corner_is_reached_at_every_arity() {
     for arity in [2usize, 4, 5, 6, 8] {
@@ -515,4 +517,59 @@ where {four}, y != 11.0f64, y != 12.0f64, y != 13.0f64, y != 14.0f64:
     let (code, record) = prove(&neither, "500", "0");
     assert_eq!(code, 1, "no exclusions at all: {record:#}");
     assert_eq!(record["attempted_samples"], 47, "{record:#}");
+}
+
+/// **The shipping control for the same guarantee: a long schedule at a high
+/// arity must still draw uniformly.** The unit invariant above is over
+/// `schedule_slot` alone; this is the shape that reaches the sampler.
+///
+/// Fourteen `!=` exclusions per binder give each a 72-candidate schedule, so
+/// the cell window is `[72, 100)` at the default budget — exactly the 28
+/// attempts a share taken from `budget - 44` would have claimed in full,
+/// leaving the generator nothing. Measured over seeds 0–9, `main` refutes
+/// 4/10 at attempts 73 to 100 (seeds 0, 1, 7, 9); a share divided out of
+/// `budget - 44` refuted **0/10**; dividing out `budget - max(44, L)`
+/// restores 2/10 (seeds 1 and 7), which is the declared half-share trade
+/// rather than a loss of the class.
+#[test]
+fn issue_3697_a_long_schedule_at_high_arity_still_draws_uniformly() {
+    let exclusions = (0..5)
+        .flat_map(|binder| (20..34).map(move |value| format!("v{binder} != {value}.0f64")))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let binders = (0..5)
+        .map(|index| format!("v{index}: f64"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let source = format!(
+        "module Pairing.LongHighArity
+@property outside_band forall({binders})
+where {exclusions}:
+  ((v0 <= -7.5f64) || (v0 >= -7.0f64))
+"
+    );
+    // Seeds 1 and 7 refute on this shape; the other eight draw no value in
+    // the band at all, which is what makes the rate 2/10 rather than a pass.
+    let (code, record) = prove(&source, "100", "1");
+    assert_eq!(
+        code, 1,
+        "the cell window is [72, 100) here, so a share taken from \
+         `budget - DIAGONAL_SPAN` claims every attempt the diagonal left and \
+         the band becomes unreachable: {record:#}"
+    );
+    let witness = record["counterexample"]["v0"]
+        .as_f64()
+        .unwrap_or_else(|| panic!("witness: {record:#}"));
+    assert!(
+        witness > -7.5 && witness < -7.0,
+        "got {witness}: {record:#}"
+    );
+    let attempts = record["attempted_samples"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("attempts: {record:#}"));
+    assert!(
+        attempts > 72,
+        "the refutation must arrive after this binder's own 72-candidate \
+         diagonal, or it measures something else; got {attempts}: {record:#}"
+    );
 }

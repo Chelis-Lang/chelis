@@ -3376,6 +3376,16 @@ const DIAGONAL_SPAN: usize = 44;
 /// depth the other half allows. A *fixed* cap cannot give that guarantee,
 /// because the quantity it has to stay below is the budget, which it does not
 /// know.
+///
+/// The divided quantity is `budget - max(DIAGONAL_SPAN, schedule_len)`, the
+/// attempts that remain once **this binder's** diagonal ends — not
+/// `budget - DIAGONAL_SPAN`. The two differ exactly when a binder's schedule
+/// outruns the span, and the difference is the whole guarantee: at `L = 72`
+/// and the default budget, `(100 - 44) / 2` is 28 cells over the window
+/// `[72, 100)`, which is every attempt the diagonal left and leaves the
+/// generator nothing. Each `!=` exclusion adds up to two candidates, so
+/// fourteen of them on each binder reach that at the default budget and four
+/// reach it at `--samples 60`.
 const CELL_BUDGET_DIVISOR: usize = 2;
 
 /// Decide what attempt `attempt` proposes for the binder at `position` of a
@@ -3426,7 +3436,7 @@ fn schedule_slot(
     let cells = EXTREMAL_CLASSES
         .checked_pow(u32::try_from(arity).unwrap_or(u32::MAX))
         .unwrap_or(usize::MAX)
-        .min(budget.saturating_sub(DIAGONAL_SPAN) / CELL_BUDGET_DIVISOR);
+        .min(budget.saturating_sub(DIAGONAL_SPAN.max(schedule_len)) / CELL_BUDGET_DIVISOR);
     let cell = attempt - DIAGONAL_SPAN.max(schedule_len);
     if cell >= cells {
         return ScheduleSlot::Random;
