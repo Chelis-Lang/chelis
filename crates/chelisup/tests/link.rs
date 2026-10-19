@@ -101,6 +101,151 @@ fn link_registers_the_reported_version_and_the_shim_runs_it() {
     assert_eq!(stdout(&pinned), "EXTERNAL pkg check a.ch");
 }
 
+/// A wrapper with its own limit so a broken shim cannot stall the suite.
+fn shim_wrapper(parent: &Path, mode: &str) -> PathBuf {
+    let dir = external_toolchain(parent, mode, "chelis 0.5.0\n");
+    fs::write(
+        dir.join("bin/chelis"),
+        format!(
+            "#!/bin/sh\n\
+             if [ \"$1\" = --version ]; then echo 'chelis 0.5.0'; exit 0; fi\n\
+             count=${{TEST_SHIM_COUNT:-0}}\n\
+             if [ \"$count\" -ge 70 ]; then echo 'fixture recursion limit' >&2; exit 99; fi\n\
+             export TEST_SHIM_COUNT=$((count + 1))\n\
+             {mode} \"$CHELIS_HOME/bin/chelis\" \"$@\"\n\
+             status=$?\n\
+             exit \"$status\"\n"
+        ),
+    )
+    .unwrap();
+    dir
+}
+
+fn install_test_shim(home: &Path) {
+    fs::create_dir_all(home.join("bin")).unwrap();
+    std::os::unix::fs::symlink(chelisup_bin(), home.join("bin/chelis")).unwrap();
+}
+
+fn assert_wrapper_recursion_stops(mode: &str) {
+    let home = tempfile::tempdir().unwrap();
+    let external = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    install_test_shim(home.path());
+    let dir = shim_wrapper(external.path(), mode);
+    let linked = link(home.path(), &dir);
+    assert!(linked.status.success(), "stderr: {}", stderr(&linked));
+
+    let start = std::time::Instant::now();
+    let out = run_shim(home.path(), work.path(), &["check", "main.ch"], &[]);
+    assert!(!out.status.success());
+    assert!(start.elapsed() < std::time::Duration::from_secs(10));
+    let err = stderr(&out);
+    assert!(err.contains("shim recursion"), "stderr: {err}");
+    assert!(
+        err.contains(dir.canonicalize().unwrap().to_str().unwrap()),
+        "stderr: {err}"
+    );
+    assert!(!err.contains("fixture recursion limit"), "stderr: {err}");
+}
+
+#[test]
+fn linked_exec_wrapper_recursion_stops_with_the_linked_directory() {
+    assert_wrapper_recursion_stops("exec");
+}
+
+#[test]
+fn linked_spawn_wrapper_recursion_stops_with_the_linked_directory() {
+    assert_wrapper_recursion_stops("");
+}
+
+#[test]
+fn legitimate_linked_wrapper_preserves_each_argument() {
+    let home = tempfile::tempdir().unwrap();
+    let external = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let dir = external_toolchain(external.path(), "wrapper", "chelis 0.5.0\n");
+    let compiler = dir.join("bin/real-chelis");
+    fs::write(&compiler, "#!/bin/sh\nprintf '<%s>\\n' \"$@\"\n").unwrap();
+    fs::set_permissions(&compiler, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::write(
+        dir.join("bin/chelis"),
+        format!(
+            "#!/bin/sh\n\
+             if [ \"$1\" = --version ]; then echo 'chelis 0.5.0'; exit 0; fi\n\
+             exec '{}' \"$@\"\n",
+            compiler.display()
+        ),
+    )
+    .unwrap();
+    assert!(link(home.path(), &dir).status.success());
+    let out = run_shim(
+        home.path(),
+        work.path(),
+        &["+0.5.0", "check", "two words.ch", "", "--flag"],
+        &[],
+    );
+    assert!(out.status.success(), "stderr: {}", stderr(&out));
+    assert_eq!(stdout(&out), "<check>\n<two words.ch>\n<>\n<--flag>\n");
+}
+
+#[test]
+fn linked_compiler_can_start_normal_shim_subprocesses() {
+    let home = tempfile::tempdir().unwrap();
+    let external = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    install_test_shim(home.path());
+    let dir = external_toolchain(external.path(), "children", "chelis 0.5.0\n");
+    fs::write(
+        dir.join("bin/chelis"),
+        "#!/bin/sh\n\
+         if [ \"$1\" = --version ]; then echo 'chelis 0.5.0'; exit 0; fi\n\
+         unset _CHELISUP_LINKED_ANCESTRY\n\
+         if [ \"$1\" = nested ]; then\n\
+         \x20 if [ \"$2\" -eq 0 ]; then echo nested-ok; exit 0; fi\n\
+         \x20 \"$CHELIS_HOME/bin/chelis\" nested \"$(( $2 - 1 ))\"\n\
+         \x20 exit $?\n\
+         fi\n\
+         if [ \"$1\" = leaf ]; then printf '<%s>\\n' \"$2\"; exit 0; fi\n\
+         if [ \"$1\" = child ]; then\n\
+         \x20 \"$CHELIS_HOME/bin/chelis\" leaf \"$2\"\n\
+         \x20 exit $?\n\
+         fi\n\
+         count=0\n\
+         while [ \"$count\" -lt 80 ]; do\n\
+         \x20 \"$CHELIS_HOME/bin/chelis\" child 'two words' || exit $?\n\
+         \x20 count=$((count + 1))\n\
+         done\n",
+    )
+    .unwrap();
+    assert!(link(home.path(), &dir).status.success());
+    let out = run_shim(home.path(), work.path(), &["parent"], &[]);
+    assert!(out.status.success(), "stderr: {}", stderr(&out));
+    assert_eq!(stdout(&out), "<two words>\n".repeat(80));
+    let nested = run_shim(home.path(), work.path(), &["nested", "80"], &[]);
+    assert!(nested.status.success(), "stderr: {}", stderr(&nested));
+    assert_eq!(stdout(&nested), "nested-ok\n");
+}
+
+#[test]
+fn older_linked_compiler_can_start_direct_children() {
+    let home = tempfile::tempdir().unwrap();
+    let external = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let dir = external_toolchain(external.path(), "older", "chelis 0.5.0\n");
+    fs::write(
+        dir.join("bin/chelis"),
+        "#!/bin/sh\n\
+         if [ \"$1\" = --version ]; then echo 'chelis 0.5.0'; exit 0; fi\n\
+         if [ \"$1\" = child ]; then printf '<%s>\\n' \"$2\"; exit 0; fi\n\
+         \"$0\" child 'two words'\n",
+    )
+    .unwrap();
+    assert!(link(home.path(), &dir).status.success());
+    let out = run_shim(home.path(), work.path(), &["parent"], &[]);
+    assert!(out.status.success(), "stderr: {}", stderr(&out));
+    assert_eq!(stdout(&out), "<two words>\n");
+}
+
 #[test]
 fn link_canonicalizes_a_relative_directory() {
     let home = tempfile::tempdir().unwrap();

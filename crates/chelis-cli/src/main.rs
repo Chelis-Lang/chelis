@@ -1017,6 +1017,8 @@ fn musl_main_stack_bytes() -> usize {
 static ALLOCATOR: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 fn main() {
+    // SAFETY: process startup precedes all compiler threads and environment readers.
+    unsafe { std::env::remove_var(chelisup::shim::SHIM_ANCESTRY_ENV) };
     // The checker and the parser bound their recursion by the stack left on the
     // current thread (`stacker::remaining_stack`). For the main thread musl
     // reports only the part of the stack already mapped, so they would find

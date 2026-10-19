@@ -15,11 +15,16 @@ use crate::paths::Store;
 use crate::resolve::{Resolution, ResolveInput, resolve};
 use crate::version::{is_safe_path_component, validate_install_version};
 
+/// Linked directory identities since the last real compiler entry.
+///
+/// The compiler removes this internal transport variable before it starts threads.
+pub const SHIM_ANCESTRY_ENV: &str = "_CHELISUP_LINKED_ANCESTRY";
+
 /// Run the shim. `argv` is the full process argv (including `argv[0]`).
 /// On success this never returns (it replaces the process image); any
 /// return value is therefore an error exit code.
 pub fn run_shim(argv: &[OsString]) -> i32 {
-    let args: Vec<OsString> = argv.iter().skip(1).cloned().collect();
+    let args = argv.get(1..).unwrap_or_default();
 
     let store = match Store::from_env() {
         Ok(s) => s,
@@ -38,7 +43,7 @@ pub fn run_shim(argv: &[OsString]) -> i32 {
     let env_toolchain = std::env::var("CHELIS_TOOLCHAIN").ok();
 
     let input = ResolveInput {
-        args: &args,
+        args,
         env_toolchain,
         cwd: &cwd,
         store: &store,
@@ -67,7 +72,59 @@ pub fn run_shim(argv: &[OsString]) -> i32 {
         return 1;
     }
 
-    exec_toolchain(&binary, &resolution.forwarded_args)
+    #[cfg(unix)]
+    let ancestry = match linked_dispatch_ancestry(&store, &resolution.version) {
+        Ok(ancestry) => ancestry,
+        Err(error) => {
+            eprintln!("chelis: {error}");
+            return 1;
+        }
+    };
+    #[cfg(not(unix))]
+    let ancestry: Option<String> = None;
+
+    exec_toolchain(&binary, &resolution.forwarded_args, ancestry.as_deref())
+}
+
+#[cfg(unix)]
+fn linked_dispatch_ancestry(store: &Store, version: &str) -> Result<Option<String>, String> {
+    use std::os::unix::fs::MetadataExt;
+
+    let Some(target) = store.linked_target(version) else {
+        return Ok(None);
+    };
+    let metadata = std::fs::metadata(&target).map_err(|error| {
+        format!(
+            "cannot inspect linked toolchain {}: {error}",
+            target.display()
+        )
+    })?;
+    let mut ancestry = std::env::var(SHIM_ANCESTRY_ENV).unwrap_or_default();
+    if !append_linked_ancestor(&mut ancestry, metadata.dev(), metadata.ino()) {
+        return Err(format!(
+            "shim recursion through linked toolchain {}: bin/chelis calls the shim again before a compiler starts",
+            target.display()
+        ));
+    }
+    Ok(Some(ancestry))
+}
+
+#[cfg(unix)]
+fn append_linked_ancestor(ancestry: &mut String, device: u64, inode: u64) -> bool {
+    use std::fmt::Write as _;
+
+    if ancestry.split_whitespace().any(|entry| {
+        entry.split_once(':').is_some_and(|(dev, ino)| {
+            dev.parse::<u64>() == Ok(device) && ino.parse::<u64>() == Ok(inode)
+        })
+    }) {
+        return false;
+    }
+    if !ancestry.is_empty() {
+        ancestry.push(' ');
+    }
+    write!(ancestry, "{device}:{inode}").expect("write to a String");
+    true
 }
 
 /// Loud error for "a version resolved, but it is not installed."
@@ -128,11 +185,14 @@ fn installed_listing(store: &Store) -> String {
 /// Replace this process with the toolchain binary, with argv[0] set to the
 /// versioned binary path.
 #[cfg(unix)]
-fn exec_toolchain(binary: &Path, args: &[OsString]) -> i32 {
+fn exec_toolchain(binary: &Path, args: &[OsString], ancestry: Option<&str>) -> i32 {
     use std::os::unix::process::CommandExt;
     let mut cmd = std::process::Command::new(binary);
     cmd.arg0(binary);
     cmd.args(args);
+    if let Some(ancestry) = ancestry {
+        cmd.env(SHIM_ANCESTRY_ENV, ancestry);
+    }
     // `exec` only returns on failure.
     let err = cmd.exec();
     eprintln!("chelis: failed to exec {}: {err}", binary.display());
@@ -143,7 +203,7 @@ fn exec_toolchain(binary: &Path, args: &[OsString]) -> i32 {
 /// is unix-only in practice (the slugs are darwin/linux), so this exists
 /// to keep the crate buildable, not as a supported path.
 #[cfg(not(unix))]
-fn exec_toolchain(binary: &Path, args: &[OsString]) -> i32 {
+fn exec_toolchain(binary: &Path, args: &[OsString], _ancestry: Option<&str>) -> i32 {
     match std::process::Command::new(binary).args(args).status() {
         Ok(status) => status.code().unwrap_or(1),
         Err(e) => {
@@ -196,5 +256,25 @@ mod tests {
         assert!(msg.contains("no chelis toolchain resolved"), "{msg}");
         assert!(msg.contains("chelisup default"), "{msg}");
         assert!(msg.contains("/work"), "{msg}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn linked_ancestry_rejects_repeated_directory_identity() {
+        let mut ancestry = String::new();
+        assert!(append_linked_ancestor(&mut ancestry, 1, 2));
+        assert!(append_linked_ancestor(&mut ancestry, 1, 3));
+        assert!(!append_linked_ancestor(&mut ancestry, 1, 2));
+        assert_eq!(ancestry, "1:2 1:3");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn linked_ancestry_has_no_depth_limit() {
+        let mut ancestry = String::new();
+        for inode in 0..256 {
+            assert!(append_linked_ancestor(&mut ancestry, 1, inode));
+        }
+        assert!(!append_linked_ancestor(&mut ancestry, 1, 255));
     }
 }
