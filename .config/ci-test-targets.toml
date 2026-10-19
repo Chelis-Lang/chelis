@@ -3131,6 +3131,24 @@ reason = "the nix-eval job evaluates every flake check of every supported system
 tracking_issue = "chelis#3816"
 
 [[path_rule]]
+prefix = "nix/reef.nix"
+disposition = "owner"
+workflow = "ci.yml"
+job = "nix-eval"
+cadence = "pull_request and push"
+reason = "The nix-eval job evaluates the Reef package builder through each supported system's checks. Native Nix jobs build and run its programs."
+tracking_issue = "chelis#3919"
+
+[[path_rule]]
+prefix = "nix/tests/reef-builder.nix"
+disposition = "owner"
+workflow = "ci.yml"
+job = "nix-eval"
+cadence = "pull_request and push"
+reason = "The nix-eval job evaluates this Reef library and program check for every supported system. Native Nix jobs execute it."
+tracking_issue = "chelis#3919"
+
+[[path_rule]]
 prefix = "nix/packages.nix"
 disposition = "owner"
 workflow = "ci.yml"
