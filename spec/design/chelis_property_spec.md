@@ -433,7 +433,7 @@ A **cell phase** now runs between the diagonal and the uniform draw. With
 3. **Uniform**, thereafter: unchanged.
 
 The phase is skipped entirely for a property with fewer than two scheduled
-binders, and for one whose plan reports `has_order_edges`. A binder that reads
+binders. A binder that reads
 no schedule — `bool`, `string`, a tensor — contributes no digit and consumes
 no position, so it neither enables the phase nor shifts another binder's
 digit.
@@ -444,10 +444,13 @@ those are `f64::MAX` and `5e-324`, so the issue's own property is refuted at
 the forty-seventh attempt under every seed.
 
 Each figure below was taken with `--tier fuzz-only` at the stated budget. They
-are recorded because three of the policy's four choices — two classes, the
-placement after the diagonal rather than before it, and the order-guard
-exemption — were each chosen by a measurement that a plausible alternative
-failed.
+are recorded because each of the policy's choices — two classes, the
+placement after the diagonal rather than before it, the share that bounds the
+cell phase, and one boundary shared by the property rather than per binder —
+was chosen by a measurement that a plausible alternative failed. A fifth
+choice, switching the phase off for an order-guarded property, was made the
+same way and later withdrawn when the shared boundary removed the figure that
+justified it.
 
 #### Reindexing alone cannot pay for it
 
@@ -569,29 +572,64 @@ window-interior refutation still happens there.
 `float_edge_candidates` **inside the attempt**, from the order predecessors
 already drawn in that attempt. So an index into that list does not name a
 fixed value: it names entry `i` of a list whose contents depend on what the
-predecessor got. Two consequences bind any scheme that proposes new values
-here:
+predecessor got. Changing a predecessor's value re-indexes every successor,
+and entries the schedule proposed at attempt `i` can end up proposed at no
+attempt at all — a predecessor taking its largest candidate pushes `y > x`
+into a non-negative range and deletes every negative candidate from `y`'s
+list.
 
-- Changing a predecessor's value re-indexes every successor, and entries the
-  schedule proposed at attempt `i` can end up proposed at no attempt at all.
-  A predecessor taking its largest candidate pushes `y > x` into a
-  non-negative range and deletes every negative candidate from `y`'s list.
-- The perturbation cannot be confined to predecessors. A proposal anywhere in
-  the property changes how many values the attempt draws from the generator,
-  which shifts every later predecessor's uniform draw and so its successors'
-  ranges.
+**That is a reason to keep the cells clear of every diagonal, not a reason to
+withhold them from the property.** The phase was switched off for an
+order-guarded plan at first, and the measurement that justified it was taken
+under a *per-binder* window: on `forall(x: f64, y: f64) where y > x, <twenty
+`!=` exclusions on y>: (y != -1.0e-323f64)` at the default budget over 30
+seeds, 18/30 refutations with the phase off against 0/30 with cells proposed
+everywhere — that 0/30 was taken against a six-class build and is not
+re-measurable, and a partial exemption withholding cells from predecessors
+only measured 11/30 under the same build.
 
-Measured on `forall(x: f64, y: f64) where y > x, <twenty `!=` exclusions on
-y>: (y != -1.0e-323f64)` at the default budget over 30 seeds: 18/30
-refutations with the phase off, 0/30 with cells proposed everywhere, and 11/30
-with cells withheld from predecessors only. The shipped build measures 18/30
-— identical to current `main`, seed for seed, which is what the exemption is
-supposed to mean; the other two figures are from the six-class build and are
-not re-measurable. **Only switching the phase off for the whole property
-restored 18/30**, which is why the exemption keys on
-`has_order_edges` for the plan rather than on whether a particular seat has a
-successor. Every order graph is a DAG, so a partial exemption always leaves a
-sink taking cells, and that is enough to move its predecessors' draws.
+The cause was mechanical rather than deep, and the re-measurable part of it
+is this: twenty exclusions make `y`'s schedule 84 candidates long and the
+refuting candidate sits near index 75, but a per-binder window opened `x`'s
+cells at attempt 44, displacing `y`'s draw before its diagonal reached it.
+Reproducing just that — two classes, the current share, a per-binder window
+and no exemption — measures **10/30**, so the window accounts for eight of
+the eighteen lost refutations and the rest belonged to the six-class radix.
+
+One shared boundary removes that, because it clears the *longest* schedule in
+the property. A successor's exact length is not derivable at plan-derive time
+— it depends on a value drawn inside the attempt — but its bound is: a
+schedule is the exclusion-free list, at most `S` long, plus at most two
+representable neighbours per `!=` guard, and a boundary larger than a
+binder's real length costs nothing, because the binder runs past the end of
+its list and draws uniformly as a short schedule already does. With the
+boundary clear of `y`'s diagonal the same chain measures **18/30 with the
+phase on, identical to the phase being off, seed for seed and attempt for
+attempt.**
+
+So an order-guarded property now pairs. What it pays is displacement, which
+is the trade the phase makes everywhere and is bounded the same way: the
+cells take at most half the attempts the diagonal left, and the attempts
+before the boundary are untouched, so the only refutations at risk are the
+ones a run without the phase found in its final `cells` attempts.
+
+**That bound, not a comparison of figures, is why the share is not reduced
+further for an order-guarded property.** The loss is budget-dependent and
+recovers: two disjoint edges at arity 4 measures 24/30 against 16/30 at the
+default 100 samples, and 29/30 against 29/30 at 200 and 30/30 against 30/30
+at 500.
+
+The figures themselves are worth stating carefully, because the obvious
+summary of them is wrong. Over seeds 0–29 at the default budget, ten order
+shapes at arity two to four lose between 0 and 8 refutations of 30, mean
+−1.9. But that sweep stops at arity four, and it does not extend: an arity-5
+single-edge shape measures 24/30 against 11/30, and an arity-6 two-edge shape
+21/30 against 9/30. Nor is a 30-seed delta a rate — the arity-4 worst row is
+77/100 against 61/100 over a hundred seeds, which is −4.8 per 30 rather than
+−8, while an arity-6 chain is −10.5 per 30 and is the worst stable loss
+found. A policy that widens the cell phase owes these figures a
+re-measurement at the arity it targets, over enough seeds to separate a rate
+from an excursion.
 
 #### What the phase costs
 
@@ -601,8 +639,8 @@ paired with a **moderate** value is not reached off the diagonal.
 schedule but not one of its two classes, and no uniform draw over the window
 proposes `1e300`. The six-class set did reach it — "nearest `1.0`" was one of
 the six — and the trade was made against the table above. An order-guarded
-property gets no pairing at all, so chelis#3697's class remains open for that
-shape.
+property pays displacement for its pairing rather than going without, which
+the subsection above measures.
 
 A third cost existed and is closed. **The cell window opens at one boundary
 shared by the whole property** — `max(44, L_0, ..., L_n)` over the binders'
@@ -629,10 +667,11 @@ passes at those budgets too. So the aligned behaviour is the designed one and
 the loss is the accident going away; it is confined to those two budgets and
 to an offset of one, since reaching it needs `2E` under the cell count.
 
-Both remaining costs are asserted as tests that a property is *not* refuted,
-so a future policy that reaches either has to change them deliberately and
-re-measure the displaced-draw rates. The closed one is asserted the other way
-round, as a pairing that must happen at every offset.
+One cost remains, and it is asserted as a test that a property is *not*
+refuted, so a future policy that reaches it has to change that test
+deliberately and re-measure the displaced-draw rates. The two closed ones are
+asserted the other way round: a pairing that must happen at every offset, and
+a pairing that must happen under an order guard.
 
 A binder whose schedule is longer than the span keeps the diagonal until that
 schedule is spent, which is what the `L_i` terms of `W` are for: a boundary
@@ -670,8 +709,8 @@ The chelis#3697 extremal-pairing oracle is:
 cargo nextest run -p chelis-cli --test issue_3697_extremal_pairing
 ```
 
-It pins the pairing itself, the two costs above, the retirement of the third,
-and the measurements that
+It pins the pairing itself, the one cost above, the retirement of the other
+two, and the measurements that
 chose the policy: the post-diagonal draws' yield at arities one to eight, the
 same yield at a 72-candidate schedule, a long schedule's tail, the low-order
 corner's reach at every arity, and the rejection lane's accepted count. The chelis#3636

@@ -2440,6 +2440,73 @@ fn issue_3697_the_diagonal_completes_before_any_cell() {
     );
 }
 
+/// **A binder with an order predecessor contributes a derivable *bound* to
+/// the shared boundary, not an exact length.** Its range, and so its
+/// candidate list, is resolved from a value drawn inside the attempt, which
+/// does not exist at derive time — `resolve` would index an absent key. But
+/// the bound needs no predecessor: a schedule is the exclusion-free list, at
+/// most `DIAGONAL_SPAN` long, plus at most two representable neighbours per
+/// `!=` guard.
+///
+/// A boundary larger than a binder's real length is harmless — the binder
+/// runs past the end of its list and draws uniformly, as a short schedule
+/// already does — so the bound is used directly rather than refined.
+///
+/// This is what lets an order-guarded property take cells at all: the cells
+/// then begin after *every* binder's diagonal, including a successor's, which
+/// is why lifting the exemption leaves the chain's refutation where it was.
+#[test]
+fn issue_3697_an_order_successor_contributes_its_bound() {
+    use crate::solver::{CmpOp, SmtExpr};
+
+    let edge = SmtExpr::Cmp(
+        CmpOp::Gt,
+        Box::new(SmtExpr::Var("y".to_string())),
+        Box::new(SmtExpr::Var("x".to_string())),
+    );
+    let exclusions = (20..26)
+        .map(|value| {
+            SmtExpr::Cmp(
+                CmpOp::Ne,
+                Box::new(SmtExpr::Var("y".to_string())),
+                Box::new(SmtExpr::RealLit(f64::from(value))),
+            )
+        })
+        .collect::<Vec<_>>();
+    let mut preconditions = vec![edge];
+    preconditions.extend(exclusions);
+    let plan = ConstraintSamplingPlan::derive(
+        [
+            ("x".to_string(), FloatKind::F64),
+            ("y".to_string(), FloatKind::F64),
+        ],
+        &preconditions,
+    )
+    .expect("an order edge with exclusions is sampleable");
+
+    assert!(
+        !plan.incoming["y"].is_empty(),
+        "the shape under test must give `y` a predecessor: {:?}",
+        plan.incoming
+    );
+    let excluded = plan.excluded["y"].len();
+    assert_eq!(
+        excluded, 6,
+        "six `!=` guards reach the plan: {:?}",
+        plan.excluded
+    );
+    // `y` is the successor, so it contributes `DIAGONAL_SPAN + 2k`; `x` has no
+    // predecessor and contributes its exact length, which is the span.
+    assert_eq!(
+        plan.cell_window_start,
+        DIAGONAL_SPAN + 2 * excluded,
+        "the boundary must clear the successor's bound, or its diagonal is cut"
+    );
+    // And the derivation must not panic for a chained plan, which is the
+    // reason the bound exists rather than a resolve.
+    assert!(plan.cell_window_start > DIAGONAL_SPAN);
+}
+
 /// **No exclusion-free schedule outruns the span**, which is what lets the
 /// typed-generator lane use `DIAGONAL_SPAN` as its whole cell-window
 /// boundary instead of pricing every binder's candidate list.
