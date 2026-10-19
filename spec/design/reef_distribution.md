@@ -274,6 +274,13 @@ Declared README and license snapshots join the same canonical member map. Reef d
 The CHB continues to embed the SHA-256 of the resulting canonical source
 archive. Changing `SOURCE_DATE_EPOCH` can therefore intentionally change both
 artifacts; keeping it fixed (or absent) makes repeated builds reproducible.
+
+A Nix rebuild of a release that uses the default epoch sets
+`SOURCE_DATE_EPOCH=0` explicitly. It uses the same package inputs and compiler
+version as the release. If the release declares another epoch, the rebuild
+uses that value. The Nix environment's epoch is not an artifact input unless
+the release declares the same value.
+
 The executable contract oracle is:
 
 ```sh

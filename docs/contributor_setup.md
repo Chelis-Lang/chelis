@@ -313,6 +313,32 @@ The third-party crates keep the one codegen unit of `buildRustCrate`. An edit
 of workspace source changes no third-party crate derivation, so the cache keeps
 their outputs.
 
+## Rebuild package artifacts with Nix
+
+Reef uses `SOURCE_DATE_EPOCH` for source archive timestamps. Without that
+variable, it uses `0`. The compiled shell records the archive hash, so a
+different epoch can change both artifact hashes.
+
+To reproduce artifacts from a release that uses the default epoch, set the
+value explicitly:
+
+```sh
+SOURCE_DATE_EPOCH=0 chelis reef build
+```
+
+Use the same compiler version, package source, and lockfile as the release.
+If the release declares another epoch, use that value instead. Do not use
+the source file timestamps as a replacement.
+
+A Nix source unpack can replace `SOURCE_DATE_EPOCH` with a file timestamp.
+Set the release value directly on the Reef command after the unpack phase:
+
+```nix
+buildPhase = ''
+  SOURCE_DATE_EPOCH=0 chelis reef build
+'';
+```
+
 ## Optional Devenv shell
 
 The native path above works without Devenv. The optional shell supplies
