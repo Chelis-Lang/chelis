@@ -644,6 +644,7 @@ struct ProviderListing {
 #[derive(Debug, Clone)]
 struct RemoteMaterial {
     typed: TypedManifest,
+    artifacts: BTreeMap<String, crate::ArtifactSpec>,
     dependencies: Vec<RequestedPackage>,
     locator: SourceLocator,
     tag: String,
@@ -659,11 +660,13 @@ enum CandidateMaterial {
         root: PathBuf,
         lock_path: String,
         typed: TypedManifest,
+        artifacts: BTreeMap<String, crate::ArtifactSpec>,
         dependencies: Vec<RequestedPackage>,
     },
     Local {
         entry: RegistryVersion,
         typed: TypedManifest,
+        artifacts: BTreeMap<String, crate::ArtifactSpec>,
         dependencies: Vec<RequestedPackage>,
     },
     BundledRuntime {
@@ -681,6 +684,14 @@ impl CandidateMaterial {
             | Self::Local { typed, .. }
             | Self::BundledRuntime { typed, .. } => typed,
             Self::Remote(material) => &material.typed,
+        }
+    }
+
+    fn artifacts(&self) -> Option<&BTreeMap<String, crate::ArtifactSpec>> {
+        match self {
+            Self::Path { artifacts, .. } | Self::Local { artifacts, .. } => Some(artifacts),
+            Self::Remote(material) => Some(&material.artifacts),
+            Self::BundledRuntime { .. } => None,
         }
     }
 
@@ -1120,7 +1131,7 @@ impl CandidateProvider for GitHubReleaseProvider {
             },
             budget,
         )?;
-        let (_manifest, typed) =
+        let (manifest, typed) =
             inspect_candidate_archive_typed(&archive_path, package.as_str(), budget)?;
         if typed.package.name != *package || typed.package.version != release.version {
             return Err(DiscoveryError::CandidateManifest {
@@ -1137,6 +1148,7 @@ impl CandidateProvider for GitHubReleaseProvider {
         })?;
         Ok(RemoteMaterial {
             typed,
+            artifacts: manifest.artifacts,
             dependencies: Vec::new(),
             locator: locator.clone(),
             tag: release.tag.clone(),
@@ -1350,6 +1362,9 @@ impl DiscoverySession {
             && let Some(lock) = &project.initial_lock
         {
             for dependency in &lock.dependencies {
+                if matches!(dependency.source, LockSource::Binary { .. }) {
+                    continue;
+                }
                 let name = PackageName::from_str(&dependency.name).map_err(|error| {
                     DiscoveryError::CandidateManifest {
                         package: dependency.name.clone(),
@@ -1528,6 +1543,7 @@ impl DiscoverySession {
                             root: dependency_root,
                             lock_path,
                             typed: parsed.typed,
+                            artifacts: parsed.raw.artifacts,
                             dependencies: child_requests,
                         },
                     )?;
@@ -1760,6 +1776,7 @@ impl DiscoverySession {
                     CandidateMaterial::Local {
                         entry,
                         typed: parsed.typed,
+                        artifacts: parsed.raw.artifacts,
                         dependencies,
                     },
                 )?;
@@ -2422,14 +2439,24 @@ fn lock_for_resolution(
             shell_sha256: session.runtime.shell_sha256().to_string(),
         });
     }
-    for dependency in session.locked.values() {
-        if matches!(dependency.source, LockSource::Binary { .. })
-            && !dependencies.iter().any(|item| item.name == dependency.name)
-        {
-            dependencies.push(dependency.clone());
+    let mut declarations = vec![(
+        &project.manifest.raw.artifacts,
+        project.manifest.raw.package.compiler.as_str(),
+    )];
+    for (candidate, dependency) in resolution.selected.values().zip(&dependencies) {
+        let material = session.material_for(candidate)?;
+        if let Some(artifacts) = material.artifacts() {
+            declarations.push((artifacts, dependency.compiler.as_str()));
         }
     }
-    dependencies.sort_by(|left, right| left.name.cmp(&right.name));
+    let binaries = crate::binary_lock_entries(declarations).map_err(|message| {
+        DiscoveryError::CandidateManifest {
+            package: project.manifest.typed.package.name.to_string(),
+            message,
+        }
+    })?;
+    dependencies.extend(binaries);
+    crate::sort_lock_dependencies(&mut dependencies);
     Ok(ReefLock {
         package: PackageId {
             name: project.manifest.typed.package.name.to_string(),

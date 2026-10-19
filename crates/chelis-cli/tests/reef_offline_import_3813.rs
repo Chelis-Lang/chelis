@@ -178,6 +178,182 @@ compiler_version = "{compiler}"
     root
 }
 
+fn add_binary_platform(root: &Path, platform: &str, sha256: &str) {
+    let path = root.join("reef.lock");
+    let mut lock: toml::Value = toml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    let dependencies = lock["dependencies"].as_array_mut().unwrap();
+    let mut binary = dependencies
+        .iter()
+        .find(|entry| entry["source"]["kind"].as_str() == Some("binary"))
+        .unwrap()
+        .clone();
+    binary["source"]["platform"] = platform.into();
+    binary["source"]["asset"] = format!("{BINARY_NAME}-{platform}.tar.zst").into();
+    binary["source"]["sha256"] = sha256.into();
+    binary["archive_sha256"] = sha256.into();
+    dependencies.push(binary);
+    fs::write(path, toml::to_string(&lock).unwrap()).unwrap();
+}
+
+#[test]
+fn platform_lock_plan_and_import_select_only_the_build_platform() {
+    let sandbox = Sandbox::new();
+    let release = Release::new();
+    let root = locked_package(
+        &sandbox.dir,
+        &release,
+        &format!("remote_origin = \"{ORIGIN}\""),
+    );
+    let foreign = if host() == "linux-x86_64" {
+        "darwin-arm64"
+    } else {
+        "linux-x86_64"
+    };
+    let foreign_sha = "e".repeat(64);
+    add_binary_platform(&root, foreign, &foreign_sha);
+    let plan = sandbox.fetch_plan(&root);
+    let binaries: Vec<_> = plan["artifacts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|artifact| artifact["kind"] == "binary")
+        .collect();
+    assert_eq!(binaries.len(), 1);
+    assert_eq!(binaries[0]["platform"], host());
+    assert_eq!(binaries[0]["sha256"], sha256_bytes(&release.binary));
+    let output = sandbox
+        .chelis()
+        .args(["reef", "fetch-plan", "--package-root"])
+        .arg(&root)
+        .args(["--platform", foreign])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let foreign_plan: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let binaries: Vec<_> = foreign_plan["artifacts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|artifact| artifact["kind"] == "binary")
+        .collect();
+    assert_eq!(binaries.len(), 1);
+    assert_eq!(binaries[0]["platform"], foreign);
+    assert_eq!(binaries[0]["sha256"], foreign_sha);
+    let artifacts = sandbox.dir.join("artifacts");
+    fetch_into(&plan, &release, &artifacts, None);
+    let output = sandbox.import(&root, &artifacts);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        fs::read(sandbox.chelis_home().join("bin").join(BINARY_NAME)).unwrap(),
+        BINARY_PAYLOAD
+    );
+    sandbox.assert_no_network();
+}
+
+#[test]
+fn duplicate_platform_identity_fails_before_binary_replacement() {
+    let foreign = if host() == "linux-x86_64" {
+        "darwin-arm64"
+    } else {
+        "linux-x86_64"
+    };
+    for platform in [host(), foreign] {
+        let sandbox = Sandbox::new();
+        let release = Release::new();
+        let root = locked_package(
+            &sandbox.dir,
+            &release,
+            &format!("remote_origin = \"{ORIGIN}\""),
+        );
+        let plan = sandbox.fetch_plan(&root);
+        let artifacts = sandbox.dir.join("artifacts");
+        fetch_into(&plan, &release, &artifacts, None);
+        let placed = sandbox.chelis_home().join("bin").join(BINARY_NAME);
+        fs::create_dir_all(placed.parent().unwrap()).unwrap();
+        fs::write(&placed, b"installed bytes").unwrap();
+        if platform != host() {
+            add_binary_platform(&root, platform, &sha256_bytes(&release.binary));
+        }
+        add_binary_platform(&root, platform, &sha256_bytes(&release.binary));
+        let output = sandbox.import(&root, &artifacts);
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("duplicate binary identity"));
+        assert_eq!(fs::read(&placed).unwrap(), b"installed bytes");
+        let output = sandbox
+            .chelis()
+            .args(["reef", "fetch-plan", "--package-root"])
+            .arg(&root)
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("duplicate binary identity"));
+        assert!(!sandbox.reef_home().exists());
+        sandbox.assert_no_network();
+    }
+}
+
+#[test]
+fn wrong_binary_hash_does_not_replace_installed_bytes() {
+    let sandbox = Sandbox::new();
+    let release = Release::new();
+    let root = locked_package(
+        &sandbox.dir,
+        &release,
+        &format!("remote_origin = \"{ORIGIN}\""),
+    );
+    let artifacts = sandbox.dir.join("artifacts");
+    fetch_into(&sandbox.fetch_plan(&root), &release, &artifacts, None);
+    fs::write(artifacts.join(binary_asset_name()), b"wrong archive bytes").unwrap();
+    let placed = sandbox.chelis_home().join("bin").join(BINARY_NAME);
+    fs::create_dir_all(placed.parent().unwrap()).unwrap();
+    fs::write(&placed, b"installed bytes").unwrap();
+    let output = sandbox.import(&root, &artifacts);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("SHA-256 mismatch"));
+    assert_eq!(fs::read(&placed).unwrap(), b"installed bytes");
+    sandbox.assert_no_network();
+}
+
+#[test]
+fn inconsistent_binary_hash_pins_fail_before_any_import() {
+    let sandbox = Sandbox::new();
+    let release = Release::new();
+    let root = locked_package(
+        &sandbox.dir,
+        &release,
+        &format!("remote_origin = \"{ORIGIN}\""),
+    );
+    let artifacts = sandbox.dir.join("artifacts");
+    fetch_into(&sandbox.fetch_plan(&root), &release, &artifacts, None);
+    let placed = sandbox.chelis_home().join("bin").join(BINARY_NAME);
+    fs::create_dir_all(placed.parent().unwrap()).unwrap();
+    fs::write(&placed, b"installed bytes").unwrap();
+    let path = root.join("reef.lock");
+    let mut lock: toml::Value = toml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    let binary = lock["dependencies"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|entry| entry["source"]["kind"].as_str() == Some("binary"))
+        .unwrap();
+    binary["archive_sha256"] = "0".repeat(64).into();
+    fs::write(path, toml::to_string(&lock).unwrap()).unwrap();
+    let output = sandbox.import(&root, &artifacts);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("inconsistent hash pins"));
+    assert_eq!(fs::read(&placed).unwrap(), b"installed bytes");
+    assert!(!sandbox.reef_home().exists());
+    sandbox.assert_no_network();
+}
+
 /// A mock GitHub API that must see no request, and the homes that the
 /// commands write.
 struct Sandbox {

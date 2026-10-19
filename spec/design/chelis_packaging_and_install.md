@@ -97,6 +97,14 @@ fetches it, what is its integrity primitive, and who else already records it.*
   `reef.toml [chelis-src]` plus the workflow `CHELIS_PIN_COMMIT` surface. A
   `reef.lock` entry would be a redundant, schema-mismatched second copy.
 
+Binary lock identities use `(name, source.platform)`.
+A lock records each declared platform with all its pins.
+
+Fetch plans select the compiler host by default.
+`reef fetch-plan --platform <slug>` selects another build platform.
+Install and offline import select only the compiler host entry.
+Duplicate binary identities fail before an install can replace bytes.
+
 "Not Chelis source code" is the wrong axis; *who fetches it and what verifies
 it* is the right one. That is why chelis#571 deliberately stayed out of the
 lock and chelis#468 must go in. See

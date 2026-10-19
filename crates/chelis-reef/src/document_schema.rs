@@ -1269,7 +1269,8 @@ pub(crate) fn parse_lock_text(
     path: &Path,
     warn_for_legacy: bool,
 ) -> Result<ReefLock, DocumentUpgradeError> {
-    match parse_schema_header(text, path, DocumentKind::Lock)? {
+    let schema = parse_schema_header(text, path, DocumentKind::Lock)?;
+    let lock = match schema {
         0 => {
             if warn_for_legacy && first_warning_for_path(&WARNED_LEGACY_LOCKS, path) {
                 eprintln!(
@@ -1307,7 +1308,38 @@ pub(crate) fn parse_lock_text(
             schema: Some(schema),
             message: "no parser is registered for this schema".to_string(),
         }),
+    }?;
+    validate_binary_lock_identities(&lock).map_err(|message| DocumentUpgradeError::Schema {
+        document: "lock",
+        path: path.to_path_buf(),
+        schema: Some(schema),
+        message,
+    })?;
+    Ok(lock)
+}
+
+fn validate_binary_lock_identities(lock: &ReefLock) -> Result<(), String> {
+    let mut identities = BTreeSet::new();
+    for dependency in &lock.dependencies {
+        if let LockSource::Binary {
+            platform, sha256, ..
+        } = &dependency.source
+        {
+            if !identities.insert((&dependency.name, platform)) {
+                return Err(format!(
+                    "duplicate binary identity `{}` for platform `{platform}`",
+                    dependency.name
+                ));
+            }
+            if dependency.archive_sha256 != *sha256 || !dependency.shell_sha256.is_empty() {
+                return Err(format!(
+                    "binary identity `{}` for platform `{platform}` has inconsistent hash pins",
+                    dependency.name
+                ));
+            }
+        }
     }
+    Ok(())
 }
 
 pub(crate) fn serialize_manifest_v3(manifest: &ReefManifest) -> Result<Vec<u8>, String> {
@@ -1317,6 +1349,7 @@ pub(crate) fn serialize_manifest_v3(manifest: &ReefManifest) -> Result<Vec<u8>, 
 }
 
 pub(crate) fn serialize_lock_v1(lock: &ReefLock) -> Result<Vec<u8>, String> {
+    validate_binary_lock_identities(lock)?;
     let text = toml::to_string_pretty(&LockWireV1::from(lock))
         .map_err(|error| format!("serialize lock schema 1: {error}"))?;
     Ok(format!("{text}\n").into_bytes())
