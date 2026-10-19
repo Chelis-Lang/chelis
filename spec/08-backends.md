@@ -35,9 +35,32 @@ evaluation obey the same channel rules. Compiler API evaluation errors retain
 the preceding transcript separately from diagnostics so embedders can choose
 their own output sink without rerunning the program.
 
-Recursive user-function evaluation checks the available native stack before
-descending. If its stack budget is exhausted, it reports an evaluation error
-through these channels before another recursive call can abort the process.
+Evaluation bounds how deeply function applications nest. Each application of
+a declared function (`def`) or of a function value, including a callback that
+a list operation such as `fold`, `map` or `scan` applies, counts one level from
+the moment it is entered until it returns. A built-in operation called by name
+is not such an application. An application that evaluation carries out as one
+compiled unit, rather than one nested application at a time, counts one level
+like any other. The applications inside the unit's compiled body are not
+counted: the compiler bounds what it inlines into one unit and rejects a unit
+past that bound with its own diagnostic. A part of a body that evaluation
+carries out as a compiled unit without applying a function adds no level, and
+an application that a compiled unit hands back to evaluation one application at
+a time counts as usual. At most 10,000 levels are in progress at once. An
+application that would take the count past 10,000 is not entered: evaluation
+reports the error `evaluation recursion budget exhausted: more than 10000
+nested function applications` through these channels, and no effect after it
+executes. Whether a program exceeds the bound depends only on the program and
+its inputs.
+
+Separately, while an application is in progress, evaluation checks the
+available native stack before it descends into a nested application or
+expression. This check may stop an evaluation whose recursive calls sit inside
+deeply nested expressions before the bound is reached. It then reports
+`evaluation stack budget exhausted during a function call` through these
+channels before the process can abort. Where this check stops an evaluation
+depends on the implementation as well as on the program, and is not part of
+the bound.
 
 ### 1.2 Executable grammar validation
 

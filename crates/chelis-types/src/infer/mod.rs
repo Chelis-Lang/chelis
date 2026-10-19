@@ -7,7 +7,8 @@ mod stack;
 
 use stack::*;
 pub use stack::{
-    reset_grow_segment_bytes_for_test, run_on_grown_stack, set_grow_segment_bytes_for_test,
+    reset_grow_segment_bytes_for_test, run_on_grown_stack, run_on_grown_stack_of,
+    set_grow_segment_bytes_for_test,
 };
 
 use chelis_unord::{ScopedMap, UnordMap, UnordSet};

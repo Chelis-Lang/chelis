@@ -161,6 +161,18 @@ pub fn run_on_grown_stack<R>(f: impl FnOnce() -> R) -> R {
     with_grown_stack(f)
 }
 
+/// [`run_on_grown_stack`] on a segment of `bytes`, for a caller whose own
+/// recursion needs a different amount of stack than checking does: host
+/// evaluation sizes its segment to its recursion budget. The test override
+/// still wins, so the safety-net tests shrink this segment too.
+pub fn run_on_grown_stack_of<R>(bytes: usize, f: impl FnOnce() -> R) -> R {
+    let bytes = GROW_SEGMENT_OVERRIDE
+        .with(Cell::get)
+        .filter(|&n| n > 0)
+        .unwrap_or(bytes);
+    stacker::grow(bytes, f)
+}
+
 thread_local! {
     /// Current pipeline native-recursion depth on this thread, maintained
     /// by `RecursionDepthGuard`. Only consulted on platforms where
