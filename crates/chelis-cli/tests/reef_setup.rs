@@ -65,6 +65,35 @@ fn setup_succeeds_when_toolchain_present_no_lock_no_src() {
         .stdout(predicate::str::contains("--- doctor ---"));
 }
 
+#[cfg(unix)]
+#[test]
+fn compiler_start_clears_linked_shim_ancestry_before_children() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let shell = tmp.path().join("shell");
+    write_pinned_reef_toml(&shell, "0.9.9", "");
+    let installer = tmp.path().join("chelisup");
+    let observed = tmp.path().join("ancestry");
+    fs::write(
+        &installer,
+        "#!/bin/sh\nprintf '%s' \"${_CHELISUP_LINKED_ANCESTRY-unset}\" > \"$OBSERVED_ANCESTRY\"\nexit 1\n",
+    )
+    .unwrap();
+    fs::set_permissions(&installer, fs::Permissions::from_mode(0o755)).unwrap();
+
+    chelis(&home)
+        .env("CHELISUP_BIN", &installer)
+        .env("_CHELISUP_LINKED_ANCESTRY", "1:2")
+        .env("OBSERVED_ANCESTRY", &observed)
+        .args(["reef", "setup", "--path"])
+        .arg(&shell)
+        .assert()
+        .failure();
+    assert_eq!(fs::read_to_string(observed).unwrap(), "unset");
+}
+
 #[test]
 fn setup_runs_install_section_when_reef_lock_present() {
     let tmp = tempdir().unwrap();

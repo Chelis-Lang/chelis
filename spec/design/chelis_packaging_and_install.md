@@ -283,6 +283,23 @@ makes `link` fail and leaves the store unchanged.
 to the shim. Such a link makes the shim run itself, or ties one store entry to
 another.
 
+Before a real compiler starts, the shim tracks linked directory identities in
+`_CHELISUP_LINKED_ANCESTRY`. Each identity uses the filesystem device and inode,
+so directory aliases share one entry. A repeated identity stops dispatch with
+a nonzero status and a diagnostic that names the linked directory. This rule
+stops both `exec` wrappers and wrappers that start a shim child. The guard
+examines no wrapper source and sets no depth limit.
+
+The real compiler removes this internal variable at the start of `main`,
+before it starts threads. Normal compiler subprocesses thus start a fresh
+dispatch ancestry, at any depth. A linked wrapper must reach the real compiler
+before it routes through the shim to the same linked directory.
+
+Ordinary calls to older linked compilers and their direct compiler children
+remain valid. An older linked compiler without this startup boundary cannot
+route a shim child back to a linked directory in the inherited ancestry.
+The guard treats that handoff as wrapper recursion and names the directory.
+
 A dangling link is a link whose target has no `bin/chelis`. It counts as not
 installed. The shim then names the target and the two remedies, `chelisup
 link` and `chelisup uninstall`. A new `link` or `install` of that version
