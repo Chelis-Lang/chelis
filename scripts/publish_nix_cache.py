@@ -4,7 +4,7 @@
 `nix-packages.yml` runs this script on `main` and on release tags, after the
 complete native flake check set passed on that system. `release.yml` dispatches
 that run on each release tag. A daily schedule runs it on `main` when the cache
-does not hold the packages, and a maintainer can dispatch it on `main`.
+does not hold the packages or activated shell, and a maintainer can dispatch it on `main`.
 
 The script gives four groups of paths to `cachix push`:
 
@@ -44,6 +44,7 @@ missing, 2 the token is missing.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import subprocess
 import sys
@@ -99,6 +100,34 @@ def current_system(run: Runner) -> str:
 
 def package_installables(system: str) -> list[str]:
     return [f".#packages.{system}.{name}" for name in PACKAGES]
+
+
+def activated_shell_path(
+    system: str, run: Runner, environ: Mapping[str, str] = os.environ
+) -> str:
+    """Evaluate the base shell that native activation and publication use."""
+    printed = run(
+        [
+            environ.get("CHELIS_DEVENV_BIN", "devenv"),
+            "--no-tui",
+            "--system",
+            system,
+            "--nix-option",
+            "allow-import-from-derivation",
+            "false",
+            "eval",
+            "shell.outPath",
+        ],
+        None,
+    )
+    try:
+        value = json.loads(printed)
+    except json.JSONDecodeError as error:
+        raise PublishError(f"shell evaluation printed no JSON: {error}") from error
+    path = value.get("shell.outPath") if isinstance(value, dict) else None
+    if not isinstance(path, str) or not path.startswith(STORE_PREFIX):
+        raise PublishError("shell evaluation gave no activated shell store path")
+    return path
 
 
 def built_outputs(system: str, run: Runner) -> list[str]:
@@ -192,6 +221,13 @@ def main(
     try:
         shell_roots = devenv_shell_roots(environ, resolve)
         system = current_system(run)
+        evaluated_shell = activated_shell_path(system, run, environ)
+        activated_root = shell_roots[DEVENV_ROOTS.index("activated-shell")]
+        if evaluated_shell != activated_root:
+            raise PublishError(
+                f"activated shell {activated_root} differs from this revision's "
+                f"base shell {evaluated_shell}"
+            )
         paths = sorted(
             {
                 *built_outputs(system, run),

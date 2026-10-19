@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Report whether the chelis-lang cache holds the Nix packages of this revision.
+"""Report whether the cache holds this revision's packages and activated shell.
 
-The first job of `nix-packages.yml` runs this script. It evaluates the output
-paths of `packages.<system>.chelis`, `chelis-runtime`, `chelis-unwrapped`, and
-`chelisup` for each supported system. Evaluation disables import from derivation, so one host gives
-the paths of every system without a builder for that system.
+The native cache-status jobs of `nix-packages.yml` run this script. It evaluates
+`chelis`, `chelis-runtime`, `chelis-unwrapped`, and `chelisup` for every supported
+system, plus the activated base shell for its native system. Publication and
+this report share the shell resolver. Evaluation disables import from derivation.
 
 Then the script asks the cache for each path with
 `nix path-info --store https://chelis-lang.cachix.org <path>`. A path that the
@@ -13,11 +13,11 @@ because the script cannot know the state of the path.
 
 With `--github-output PATH`, the script appends `complete=true` or
 `complete=false` to that file. On a scheduled run, the native jobs skip when
-the value is `true`, because an earlier run built and pushed the same
-packages. Manual dispatches and releases run the native jobs in all cases.
+the value is `true` on every supported system. Manual dispatches and releases
+run the native jobs in all cases.
 
-The script uses only the Python standard library, so a hosted runner can run
-it with its own `python3` before any project environment exists.
+The script uses only the Python standard library, Nix, and the pinned Devenv
+binary. It evaluates the shell without activation or source builds.
 
 Exit codes: 0 the report is complete (the cache holds all paths or some are
 missing), 1 an evaluation or cache query failed.
@@ -33,13 +33,13 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-# The packages that `scripts/publish_nix_cache.py` pushes for each system.
-from publish_nix_cache import CACHE_NAME, PACKAGES
+# Publication and this report must resolve the same activated shell.
+from publish_nix_cache import (
+    CACHE_NAME, PACKAGES, PublishError, activated_shell_path, current_system,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 CACHE_URL = f"https://{CACHE_NAME}.cachix.org"
-# The text that `nix path-info` prints when the store does not hold a path.
-MISSING_MARKER = "is not valid"
 STORE_PREFIX = "/nix/store/"
 
 
@@ -121,7 +121,7 @@ def cache_holds(path: str, run: Runner) -> bool:
     completed = run(argv)
     if completed.returncode == 0:
         return True
-    if MISSING_MARKER in completed.stderr:
+    if f"error: path '{path}' is not valid" in completed.stderr:
         return False
     raise StatusError(
         f"`{' '.join(argv)}` failed with exit code {completed.returncode}: "
@@ -137,15 +137,29 @@ def main(argv: Sequence[str] | None = None, run: Runner = run_command) -> int:
         help="append complete=true or complete=false to this file",
     )
     args = parser.parse_args(argv)
+
+    def checked_run(command: Sequence[str], stdin: str | None = None) -> str:
+        completed = run(command)
+        if completed.returncode:
+            raise StatusError(
+                f"`{' '.join(command)}` failed with exit code {completed.returncode}: "
+                f"{completed.stderr.strip()}"
+            )
+        return completed.stdout
+
     try:
         paths = package_paths(run)
+        system = current_system(checked_run)
+        if system not in paths:
+            raise StatusError(f"the native system {system} has no package outputs")
+        paths[system].append(activated_shell_path(system, checked_run))
         missing = [
             (system, path)
             for system, outputs in paths.items()
             for path in outputs
             if not cache_holds(path, run)
         ]
-    except StatusError as error:
+    except (StatusError, PublishError) as error:
         print(f"nix_cache_status: {error}", file=sys.stderr)
         return 1
     total = sum(len(outputs) for outputs in paths.values())
@@ -154,7 +168,7 @@ def main(argv: Sequence[str] | None = None, run: Runner = run_command) -> int:
     complete = not missing
     print(
         f"nix_cache_status: {CACHE_URL} holds {total - len(missing)} of {total} "
-        f"package path(s) for {', '.join(paths)}"
+        f"package and shell path(s) for {', '.join(paths)}"
     )
     if args.github_output is not None:
         with args.github_output.open("a", encoding="utf-8") as output:

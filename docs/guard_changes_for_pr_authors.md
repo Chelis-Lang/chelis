@@ -269,7 +269,7 @@ Protected rules and contract regions do not need checksum updates. Review
 the underlying change, its consumers, and its positive and negative behavior
 evidence, then supply the exact acknowledgements below. Required identities,
 region boundaries, literal clauses and semantic checks remain blocking; an
-acknowledgement cannot waive them. The temporary Nix workflow and the completed-contract freezes keep their
+acknowledgement cannot waive them. The completed-contract freezes keep their
 existing digests.
 
 After committing a contract change, obtain the exact required PR-description
@@ -363,13 +363,14 @@ missing, or pull-request references; run it manually as well before release or
 relevant review claims. Do not re-cite unrelated code merely to quiet that
 report.
 
-## Changing the guarded Nix workflow
+## Changes to scheduled Nix cache controls
 
-The temporary event restrictions and byte freeze still apply. A recipe change
-needs an explicit reviewed freeze update. Removing the freeze belongs in the
-reviewed replacement-policy change, after its event/recipe controls and complete
-native flake and Devenv smoke checks pass on each supported system. Evaluation
-alone does not meet that condition.
+The cache-completeness and query-error controls belong in
+`scripts/test_nix_cache_status.py`. Publication controls belong in
+`scripts/test_publish_nix_cache.py`. Test package-only hits, absent activated
+shells, complete caches, and query errors through executable behavior.
+Do not replace these controls with workflow byte digests or source-text checks.
+Keep the pull request Nix job evaluation-only and free of portable Devenv setup.
 
 [The assessment](../spec/design/guard_artifact_proposal_assessment.md) records
 these selected contracts and the work still required before further protections

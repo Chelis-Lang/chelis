@@ -5,7 +5,7 @@ on:
   release:
     types: [published]
   # The nightly run builds and publishes the default branch when the
-  # chelis-lang cache does not hold its packages.
+  # chelis-lang cache lacks its packages or an activated shell.
   schedule:
     - cron: '37 2 * * *'
 
@@ -20,8 +20,8 @@ permissions:
 jobs:
   # Reserve headroom for cold Devenv realization before native checks.
   # A scheduled run skips this job when the cache-status job below finds
-  # every package path in the cache. A failed cache report leaves
-  # `complete` empty, so the job runs.
+  # every package path and activated shell in the cache. An absent path or
+  # failed report makes the aggregate verdict false, so the native job runs.
   nix-linux-x86-64:
     name: Nix Packages (x86_64-linux)
     needs: [cache-status]
@@ -176,28 +176,85 @@ jobs:
           CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_DEPLOY }}
         run: python scripts/publish_nix_cache.py
 
-  # Evaluate the package output paths of each supported system and ask the
-  # chelis-lang cache for each one. A scheduled run skips the native jobs
-  # when the cache holds every path. Manual and release runs always run the
-  # native jobs, so they skip this job and the native jobs start at once.
-  # The `!cancelled()` condition of each native job runs it after a skipped
-  # report. The job uses only nix and python3, so it installs Nix without
-  # Devenv.
-  cache-status:
-    name: Nix cache status
+  # Devenv shell paths include the checkout and runtime directories. Evaluate
+  # each shell in the same native runner context as activation and publication.
+  # These jobs evaluate paths only. They do not activate or build the shell.
+  cache-status-linux-x86-64:
+    name: Nix cache status (x86_64-linux)
     if: github.event_name == 'schedule'
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    env:
+      NIX_CONFIG: |
+        require-sigs = true
     outputs:
       complete: ${{ steps.status.outputs.complete }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Install Nix
-        uses: cachix/install-nix-action@630ae543ea3a38a9a4166f03376c02c50f408342 # v31.11.0
-        with:
-          install_url: https://releases.nixos.org/nix/nix-2.34.4/install
-      - name: Check the chelis-lang cache for the package outputs
+      - name: Install portable Devenv
+        uses: ./.github/actions/vendor/ci/actions/setup-devenv
+      - name: Check package outputs and the activated shell
         id: status
-        run: python3 scripts/nix_cache_status.py --github-output "$GITHUB_OUTPUT"
+        shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
+        run: python scripts/nix_cache_status.py --github-output "$GITHUB_OUTPUT"
+
+  cache-status-linux-arm64:
+    name: Nix cache status (aarch64-linux)
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 20
+    env:
+      NIX_CONFIG: |
+        require-sigs = true
+    outputs:
+      complete: ${{ steps.status.outputs.complete }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install portable Devenv
+        uses: ./.github/actions/vendor/ci/actions/setup-devenv
+      - name: Check package outputs and the activated shell
+        id: status
+        shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
+        run: python scripts/nix_cache_status.py --github-output "$GITHUB_OUTPUT"
+
+  cache-status-darwin-arm64:
+    name: Nix cache status (aarch64-darwin)
+    if: github.event_name == 'schedule'
+    runs-on: macos-latest
+    timeout-minutes: 20
+    env:
+      NIX_CONFIG: |
+        require-sigs = true
+    outputs:
+      complete: ${{ steps.status.outputs.complete }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install portable Devenv
+        uses: ./.github/actions/vendor/ci/actions/setup-devenv
+      - name: Check package outputs and the activated shell
+        id: status
+        shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
+        run: python scripts/nix_cache_status.py --github-output "$GITHUB_OUTPUT"
+
+  # A failed report stays failed. Its empty output cannot authorize a skip.
+  # Manual and release runs skip the reports and start every native job.
+  cache-status:
+    name: Nix cache status
+    needs: [cache-status-linux-x86-64, cache-status-linux-arm64, cache-status-darwin-arm64]
+    if: ${{ !cancelled() && github.event_name == 'schedule' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      complete: ${{ steps.verdict.outputs.complete }}
+    steps:
+      - name: Combine native cache reports
+        id: verdict
+        env:
+          COMPLETE: ${{ needs.cache-status-linux-x86-64.result == 'success' && needs.cache-status-linux-x86-64.outputs.complete == 'true' && needs.cache-status-linux-arm64.result == 'success' && needs.cache-status-linux-arm64.outputs.complete == 'true' && needs.cache-status-darwin-arm64.result == 'success' && needs.cache-status-darwin-arm64.outputs.complete == 'true' }}
+        run: echo "complete=$COMPLETE" >> "$GITHUB_OUTPUT"
