@@ -10,10 +10,10 @@ build and on every thread, so a recursion between 10,000 and 68,000 levels
 deep that used to evaluate in a release build now fails. A runaway recursion
 also stops with far less memory: about 108 MiB instead of 637 MiB for a
 `List` recursion and 115 MiB instead of 672 MiB for a tensor one. A call the
-evaluator runs as one compiled unit, such as a kernel, a named-axis reduction
-or a `grad` or `vmap` target, counts one level like any other call; the
-functions compiled into it are not counted, and the compiler's own inlining
-limits bound them instead. The native stack check remains for recursive calls that sit inside deeply nested
-expressions: calls nested up to 6 expressions deep reach the 10,000 limit in
-every build, and up to 16 in a release build. See
-[#3842](https://github.com/Chelis-Lang/chelis/issues/3842).
+evaluator runs as one compiled unit, such as a kernel, a routed named-axis
+call of a def or a `grad` or `vmap` target, counts one level like any other
+call; the functions compiled into it are not counted, and the compiler's own
+inlining limits bound them instead. The native stack check remains for
+recursive calls that sit inside deeply nested expressions: calls nested up to
+6 expressions deep reach the 10,000 limit in every build, and up to 16 in a
+release build. See [#3842](https://github.com/Chelis-Lang/chelis/issues/3842).

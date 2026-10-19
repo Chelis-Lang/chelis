@@ -130,6 +130,67 @@ fn nested_applications_stop_at_the_recursion_budget() {
         "nested body, 10,001 levels",
         eval(request(source(LEVELS + 1, &nested))),
     );
+
+    // A callback a list operation applies with a loop-entry receipt (its
+    // accumulator crosses a declared tensor formal): the callback, `step`,
+    // and the `produce` it applies, three levels.
+    let receipt = "def produce(size: i64) -> tensor[*, f32] = insert(scalar_to_tensor(0.0f32), 0i32, size)\n\
+                   def step(acc: List[tensor[3, f32]], i: i64) -> List[tensor[*, f32]] = append(acc, produce(3i64))\n";
+    let seed = "map(fn (i: i64) -> produce(3i64), range(0i64, 1i64))";
+    for operation in ["fold", "scan"] {
+        let leaf = format!(
+            "len({operation}(fn (acc: List[tensor[*, f32]], i: i64) -> step(acc, i), {seed}, \
+             range(0i64, 1i64)))"
+        );
+        assert_counted(
+            &format!("{operation} callback with a receipt"),
+            receipt,
+            &leaf,
+            3,
+        );
+    }
+
+    // A built-in named-axis reduction is no application. `reduce` applied
+    // through `apply`'s function parameter is interpreted, so `apply` and
+    // `reduce` count two levels and their `sum(x, seq)` none.
+    let reduce = "def apply(g: tensor[seq, f32] -> f32, x: tensor[seq, f32]) -> f32 = g(x)\n\
+                  def reduce(x: tensor[seq, f32]) -> f32 = tensor_to_scalar(sum(x, seq))\n";
+    let tensor = "to_tensor([1.0f32, 2.0f32])";
+    assert_counted(
+        "built-in named-axis reduction in an interpreted def",
+        reduce,
+        &format!("if gt(apply(reduce, {tensor}), 0.0f32) then 1i64 else 0i64"),
+        2,
+    );
+}
+
+/// `prelude`, then a recursion whose bottom evaluates `leaf`, which counts
+/// `levels_in_leaf` levels: exactly 10,000 levels in total evaluate, and
+/// 10,001 report the budget.
+fn assert_counted(case: &str, prelude: &str, leaf: &str, levels_in_leaf: usize) {
+    let program = |levels: usize| {
+        format!(
+            "{prelude}def padder(n: i64) -> i64 = if eq(n, 0i64) then {leaf} else padder(sub(n, 1i64))\n\
+             out = padder({k}i64)\n",
+            k = levels - levels_in_leaf - 1
+        )
+    };
+    let within = eval(request(program(LEVELS)));
+    assert!(
+        within.is_ok(),
+        "{case}, 10,000 levels: {:?}",
+        within.err().map(|error| error.errors)
+    );
+    let error = eval(request(program(LEVELS + 1)))
+        .expect_err(&format!("{case}, 10,001 levels: evaluated past the budget"));
+    assert!(
+        error
+            .errors
+            .iter()
+            .any(|diagnostic| diagnostic.message == BUDGET_MESSAGE),
+        "{case}, 10,001 levels: {:?}",
+        error.errors
+    );
 }
 
 #[test]
