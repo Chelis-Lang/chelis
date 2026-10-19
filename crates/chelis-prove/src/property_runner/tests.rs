@@ -2440,14 +2440,69 @@ fn issue_3697_the_diagonal_completes_before_any_cell() {
     );
 }
 
-/// A schedule longer than the span keeps the diagonal until it is spent, so
-/// its tail is never displaced past the budget.
+/// **No exclusion-free schedule outruns the span**, which is what lets the
+/// typed-generator lane use `DIAGONAL_SPAN` as its whole cell-window
+/// boundary instead of pricing every binder's candidate list.
+///
+/// That lane passes no `!=` exclusions, and exclusions are the only thing
+/// that lengthens a schedule past the span — `DIAGONAL_SPAN` is defined as
+/// the unguarded `f64` length. If a dtype ever produced a longer one, the
+/// lane's windows would reopen the disjointness this boundary exists to
+/// close, silently. Hence the assertion rather than the comment.
+///
+/// Integer schedules are checked through the same bound: they are far
+/// shorter, and `int_edge_candidates` ignores exclusions entirely.
+#[test]
+fn issue_3697_no_unexcluded_schedule_outruns_the_span() {
+    // Exhaustive by construction: a new `FloatKind` variant makes this match
+    // fail to compile, rather than silently escaping the bound and reopening
+    // the disjointness the typed lane's `DIAGONAL_SPAN` boundary relies on.
+    let every_kind = |kind: FloatKind| match kind {
+        FloatKind::F32 => FloatKind::F32,
+        FloatKind::F64 => FloatKind::F64,
+    };
+    for kind in [FloatKind::F32, FloatKind::F64].map(every_kind) {
+        let full = float_edge_candidates(kind, -kind.max_finite(), kind.max_finite(), &[]);
+        assert!(
+            full.len() <= DIAGONAL_SPAN,
+            "{kind:?} unguarded schedule is {} candidates, past the \
+             {DIAGONAL_SPAN}-attempt span the typed lane assumes",
+            full.len()
+        );
+        // And a *narrower* guard can only drop candidates, never add them.
+        let narrow = float_edge_candidates(kind, -1.0, 1.0, &[]);
+        assert!(narrow.len() <= full.len(), "{kind:?}: {narrow:?}");
+    }
+    // `f64` measures exactly `DIAGONAL_SPAN`, so the bound has zero slack:
+    // any added IEEE landmark or ladder rung fails this test rather than
+    // quietly outgrowing the typed lane's boundary.
+    assert_eq!(
+        float_edge_candidates(FloatKind::F64, -f64::MAX, f64::MAX, &[]).len(),
+        DIAGONAL_SPAN,
+        "the span is defined as this length; if they diverge, decide which moved"
+    );
+    for prim in ["i8", "i16", "i32", "i64"] {
+        let (lower, upper) =
+            crate::opaque::int_sample_bounds(prim).expect("an integer width has bounds");
+        let candidates = int_edge_candidates(lower, upper);
+        assert!(
+            candidates.len() <= DIAGONAL_SPAN,
+            "{prim} schedule is {} candidates, past the span",
+            candidates.len()
+        );
+    }
+}
+
+/// A boundary past the span keeps every binder on the diagonal until it is
+/// reached, so the longest schedule's tail is never displaced past the
+/// budget.
 ///
 /// This is the exact defect round 2 measured: each `!=` exclusion adds two
 /// candidates, and under the interleaved revision a two-binder property with
 /// four exclusions per binder (52 candidates) reached its last candidate only
 /// at attempt 103, so it reported `fuzz_validated` at the default budget of
-/// 100 where it had refuted at 52.
+/// 100 where it had refuted at 52. The boundary is the maximum over the
+/// binders, so the binder that sets it is the one whose tail would be lost.
 #[test]
 fn issue_3697_a_long_schedule_keeps_its_diagonal() {
     let long = 52;
@@ -2455,11 +2510,13 @@ fn issue_3697_a_long_schedule_keeps_its_diagonal() {
         assert_eq!(
             schedule_slot(attempt, 2, 0, long, 100),
             ScheduleSlot::Diagonal(attempt),
-            "attempt {attempt} of a {long}-candidate schedule"
+            "attempt {attempt} under a boundary of {long}"
         );
     }
-    // Its cells begin where its own schedule ends, not where the span does.
+    // The cells begin where the longest schedule ends, not where the span
+    // does -- and for every binder at once, including the short ones.
     assert_eq!(schedule_slot(long, 2, 0, long, 100), ScheduleSlot::Cell(0));
+    assert_eq!(schedule_slot(long, 2, 1, long, 100), ScheduleSlot::Cell(0));
 }
 
 /// The cells run out, so a run longer than the grid regains the uniform
@@ -2489,18 +2546,21 @@ fn issue_3697_cells_exhaust_and_yield_back_to_the_uniform_draw() {
 /// 44-candidate diagonal, `2^6 = 64` exceeded them, and a six-binder
 /// property proposed no uniform draw at all.
 ///
-/// **`schedule_len` is an axis here because holding it at 44 is what hid the
+/// **`window_start` is an axis here because holding it at 44 is what hid the
 /// second instance of the same defect.** The share is divided out of
-/// `budget - max(DIAGONAL_SPAN, schedule_len)`, and a revision that divided
+/// `budget - window_start`, and a revision that divided
 /// `budget - DIAGONAL_SPAN` instead passed this test at every budget and
-/// arity while starving the generator completely for `L = 72`: 28 cells over
-/// the window `[72, 100)` is every attempt there was. A grid that varies one
-/// parameter of a claim and fixes another cannot falsify the claim.
+/// arity while starving the generator completely for a boundary of 72: 28
+/// cells over the window `[72, 100)` is every attempt there was. A grid that
+/// varies one parameter of a claim and fixes another cannot falsify the
+/// claim.
+///
+/// The axis starts at `DIAGONAL_SPAN` because the boundary is a maximum
+/// against it and can never be smaller.
 #[test]
 fn issue_3697_the_phase_never_outgrows_its_share_of_the_budget() {
     for budget in [46usize, 50, 60, 100, 160, 200, 1000] {
-        for schedule_len in [0usize, 20, 44, 45, 52, 72, 90, 150] {
-            let window_start = DIAGONAL_SPAN.max(schedule_len);
+        for window_start in [DIAGONAL_SPAN, 45, 52, 72, 90, 150] {
             let left = budget.saturating_sub(window_start);
             let share = left / CELL_BUDGET_DIVISOR;
             for arity in [2usize, 3, 4, 5, 6, 8, 12, 25, 64, usize::MAX] {
@@ -2511,19 +2571,20 @@ fn issue_3697_the_phase_never_outgrows_its_share_of_the_budget() {
                 // Whatever ends the phase -- the grid or the share -- the
                 // attempt after it is a uniform draw.
                 assert_eq!(
-                    schedule_slot(window_start + cells, arity, 0, schedule_len, budget),
+                    schedule_slot(window_start + cells, arity, 0, window_start, budget),
                     ScheduleSlot::Random,
-                    "budget {budget}, L {schedule_len}, arity {arity}: the cells \
-                     must yield by attempt {}, leaving {} of the {left} attempts \
-                     the diagonal left to the uniform draw",
+                    "budget {budget}, boundary {window_start}, arity {arity}: the \
+                     cells must yield by attempt {}, leaving {} of the {left} \
+                     attempts the diagonal left to the uniform draw",
                     window_start + cells,
                     left - cells
                 );
                 // And the uniform draw keeps at least half of them.
                 assert!(
                     left - cells >= left / CELL_BUDGET_DIVISOR,
-                    "budget {budget}, L {schedule_len}, arity {arity}: {cells} \
-                     cells of {left} attempts leaves the generator too little"
+                    "budget {budget}, boundary {window_start}, arity {arity}: \
+                     {cells} cells of {left} attempts leaves the generator too \
+                     little"
                 );
             }
         }

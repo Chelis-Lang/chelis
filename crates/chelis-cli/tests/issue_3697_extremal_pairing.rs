@@ -22,10 +22,12 @@
 //! `spec/design/chelis_property_spec.md` § "Pairing the extremal classes"
 //! carries the arithmetic and the tables.
 //!
-//! The three deliberate costs are pinned too, as tests that assert a property
-//! is *not* refuted: a pairing of an extreme with a moderate value, any
-//! pairing at all for an order-guarded property, and any pairing between
-//! binders whose schedules differ in length.
+//! The two deliberate costs are pinned too, as tests that assert a property
+//! is *not* refuted: a pairing of an extreme with a moderate value, and any
+//! pairing at all for an order-guarded property. A third — binders whose
+//! schedule lengths differ — was closed by sharing one cell-window boundary
+//! across the property, and `issue_3697_unequal_lengths_still_pair` now
+//! asserts the pairing instead.
 
 use assert_cmd::Command;
 use serde_json::Value;
@@ -297,8 +299,9 @@ where y > x, {exclusions}:
 /// the length to 52, and the refuting candidate -- a neighbour of an excluded
 /// value -- is proposed there.
 ///
-/// The phase boundary is `max(44, schedule_len)` per binder for exactly this
-/// reason: a boundary fixed at 44 reported `fuzz_validated` on this shape.
+/// The phase boundary floors at the longest schedule for exactly this
+/// reason: a boundary fixed at the span reported `fuzz_validated` on this
+/// shape.
 #[test]
 fn issue_3697_a_long_schedule_keeps_the_diagonal_until_it_is_spent() {
     let source = "module Pairing.Long
@@ -477,82 +480,75 @@ fn issue_3697_a_low_order_corner_is_reached_at_every_arity() {
     }
 }
 
-/// **The third declared cost: once two binders' schedule lengths differ by as
-/// much as the cell count, their cell windows are disjoint and no pairing
-/// happens at all.**
+/// **Binders whose schedules differ in length still pair.** This was a
+/// declared cost of the original policy and is now closed, so the test
+/// asserts the pairing rather than its absence.
 ///
-/// Each binder's window begins at its own `max(44, L)` and is `cells` wide,
-/// so the windows overlap only while the difference in lengths stays under
-/// `cells`. At arity two there are four cells and each `!=` exclusion adds
-/// two candidates, so **two exclusions on one binder is the whole bar**:
-/// `L = 48` against `L = 44` gives `[48, 52)` and `[44, 48)`, which touch
-/// without overlapping. One exclusion is harmless — `[46, 50)` against
-/// `[44, 48)` still shares attempts 46 and 47, and the corner is reached at
-/// 47 as usual — and the three controls below pin both sides of that
-/// threshold.
+/// Each binder's cell window used to begin at its own `max(44, L)` and was
+/// as wide as the cell count, so two binders whose lengths differed by that
+/// count had *disjoint* windows and were never both in a cell — no pairing at
+/// all, at any budget. At arity two there are four cells and each `!=`
+/// exclusion adds two candidates, so **two exclusions on one binder** lost
+/// every pairing, and it did not recover at 500, 2000 or 20000 samples.
 ///
-/// The loss does not recover at a larger budget, because at arity two the
-/// grid caps the cell count at four however much budget there is: measured
-/// `passed` at 500, 2000 and 20000 samples.
-///
-/// This is not a regression against `main`, which reaches none of these
-/// corners. Aligning every binder's cell window on one shared boundary would
-/// fix it structurally; that is not in this change.
+/// The window now opens at one boundary shared by the whole property,
+/// `max(44, L_0, ..., L_n)`, so the windows coincide by construction. The
+/// corner is then cell 2 of that shared window: attempt `47 + 2E` for `E`
+/// exclusions on one binder, since each adds two candidates to the boundary.
+/// A binder whose own schedule is shorter spends the gap on uniform draws,
+/// exactly as it did before any of this.
 #[test]
-fn issue_3697_unequal_schedule_lengths_lose_the_pairing() {
+fn issue_3697_unequal_lengths_still_pair() {
     let corner = "((x != 1.7976931348623157e308f64) || (y != -1.7976931348623157e308f64))";
-    let four = "x != 11.0f64, x != 12.0f64, x != 13.0f64, x != 14.0f64";
-    let unequal = format!(
-        "module Pairing.Unequal
-@property corner forall(x: f64, y: f64)
-where {four}:
-  {corner}
-"
-    );
-    for seed in ["0", "1", "7", "99"] {
-        let (code, record) = prove(&unequal, "500", seed);
-        assert_eq!(
-            code, 0,
-            "seed {seed}: x's window is [52, 56) and y's is [44, 48), so they \
-             are never both in a cell; if this now refutes, the windows were \
-             aligned and this cost is retired: {record:#}"
-        );
+    // **Both binders carry the offset in turn.** The boundary is a maximum
+    // over every binder, and `topo` is alphabetical for an edge-free plan, so
+    // lengthening only `x` leaves the maximum at the first binder. A fold
+    // that read just the first binder would then pass every assertion while
+    // losing `y`'s tail, which is a default-budget refutation. Only the
+    // mirrored case separates the two.
+    for lengthened in ["x", "y"] {
+        for exclusions in 0..=4usize {
+            let guards = (0..exclusions)
+                .map(|index| format!("{lengthened} != {}.0f64", 11 + index))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let where_clause = if guards.is_empty() {
+                String::new()
+            } else {
+                format!("\nwhere {guards}")
+            };
+            let source = format!(
+                "module Pairing.Offset\n@property corner forall(x: f64, y: f64){where_clause}:\n  {corner}\n"
+            );
+            for seed in ["0", "7"] {
+                let (code, record) = prove(&source, "500", seed);
+                assert_eq!(
+                    code, 1,
+                    "{exclusions} exclusion(s) on {lengthened}, seed {seed}: \
+                     the windows are shared, so an offset cannot separate \
+                     them: {record:#}"
+                );
+                assert_eq!(
+                    record["attempted_samples"],
+                    47 + 2 * exclusions,
+                    "{exclusions} exclusion(s) on {lengthened}, seed {seed}: \
+                     the corner is cell 2 of the shared window, wherever the \
+                     offset sits; a per-binder window would miss it from two \
+                     exclusions up, and a boundary folded over only the first \
+                     binder would miss the `y` half: {record:#}"
+                );
+            }
+        }
     }
-    // Control one: the same corner with both schedules at 52 pairs normally.
+    // Both binders long, which paired even under the per-binder window
+    // because equal lengths kept it aligned. It still does.
+    let four = "x != 11.0f64, x != 12.0f64, x != 13.0f64, x != 14.0f64";
     let both = format!(
-        "module Pairing.Both
-@property corner forall(x: f64, y: f64)
-where {four}, y != 11.0f64, y != 12.0f64, y != 13.0f64, y != 14.0f64:
-  {corner}
-"
+        "module Pairing.Both\n@property corner forall(x: f64, y: f64)\nwhere {four}, y != 11.0f64, y != 12.0f64, y != 13.0f64, y != 14.0f64:\n  {corner}\n"
     );
     let (code, record) = prove(&both, "500", "0");
     assert_eq!(code, 1, "equal lengths pair: {record:#}");
-    // Control two: an offset *under* the cell count still pairs, which is
-    // what makes the threshold the cell count rather than mere inequality.
-    let one = format!(
-        "module Pairing.OneShort
-@property corner forall(x: f64, y: f64)
-where x != 11.0f64:
-  {corner}
-"
-    );
-    let (code, record) = prove(&one, "500", "0");
-    assert_eq!(
-        code, 1,
-        "`L = 46` against `L = 44` still shares attempts 46 and 47: {record:#}"
-    );
-    assert_eq!(record["attempted_samples"], 47, "{record:#}");
-    // Control three: and with both at 44.
-    let neither = format!(
-        "module Pairing.Neither
-@property corner forall(x: f64, y: f64):
-  {corner}
-"
-    );
-    let (code, record) = prove(&neither, "500", "0");
-    assert_eq!(code, 1, "no exclusions at all: {record:#}");
-    assert_eq!(record["attempted_samples"], 47, "{record:#}");
+    assert_eq!(record["attempted_samples"], 55, "{record:#}");
 }
 
 /// **The shipping control for the same guarantee: a long schedule at a high
@@ -563,10 +559,10 @@ where x != 11.0f64:
 /// the cell window is `[72, 100)` at the default budget — exactly the 28
 /// attempts a share taken from `budget - 44` would have claimed in full,
 /// leaving the generator nothing. Measured over seeds 0–9, `main` refutes
-/// 4/10 at attempts 73 to 100 (seeds 0, 1, 7, 9); a share divided out of
-/// `budget - 44` refuted **0/10**; dividing out `budget - max(44, L)`
-/// restores 2/10 (seeds 1 and 7), which is the declared half-share trade
-/// rather than a loss of the class.
+/// 4/10 at attempts 73 to 100 (seeds 0, 1, 7, 9); a share measured from the
+/// span rather than from the window's own start refuted **0/10**; measuring
+/// it from the start restores 2/10 (seeds 1 and 7), which is the declared
+/// half-share trade rather than a loss of the class.
 #[test]
 fn issue_3697_a_long_schedule_at_high_arity_still_draws_uniformly() {
     let exclusions = (0..5)

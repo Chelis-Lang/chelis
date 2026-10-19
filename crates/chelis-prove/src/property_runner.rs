@@ -3378,12 +3378,17 @@ const DIAGONAL_SPAN: usize = 44;
 /// know.
 ///
 /// **This is the one place the share's arithmetic is written down.** The
-/// divided quantity is `budget - max(DIAGONAL_SPAN, schedule_len)`, the
-/// attempts that remain once **this binder's** diagonal ends — not
-/// `budget - DIAGONAL_SPAN`. `spec/design/chelis_property_spec.md` names the
-/// quantity in words and points here rather than repeating the formula,
-/// because a formula kept in two places was wrong in one of them twice. The two differ exactly when a binder's schedule
-/// outruns the span, and the difference is the whole guarantee: at `L = 72`
+/// divided quantity is `budget - window_start`: the attempts that remain
+/// once the property's shared cell window opens, where `window_start` is
+/// `max(DIAGONAL_SPAN, L_0, ..., L_n)` over every scheduled binder's own
+/// schedule length. Not `budget - DIAGONAL_SPAN`, which ignores a schedule
+/// longer than the span, and not a per-binder boundary, which leaves the
+/// windows disjoint. `spec/design/chelis_property_spec.md` names the quantity
+/// in words and points here rather than repeating the formula, because a
+/// formula kept in two places was wrong in one of them twice.
+///
+/// Measuring from the span instead of from the boundary is the mistake that
+/// matters, and the difference is the whole guarantee: at a boundary of 72
 /// and the default budget, `(100 - 44) / 2` is 28 cells over the window
 /// `[72, 100)`, which is every attempt the diagonal left and leaves the
 /// generator nothing. Each `!=` exclusion adds up to two candidates, so
@@ -3392,8 +3397,8 @@ const DIAGONAL_SPAN: usize = 44;
 const CELL_BUDGET_DIVISOR: usize = 2;
 
 /// Decide what attempt `attempt` proposes for the binder at `position` of a
-/// property with `arity` *scheduled* binders, whose own schedule holds
-/// `schedule_len` candidates (chelis#3697).
+/// property with `arity` *scheduled* binders, whose shared cell window opens
+/// at `window_start` (chelis#3697).
 ///
 /// `budget` is the attempts this run may still make — the lesser of the
 /// property's sample count and its attempt ceiling, which the caller computes
@@ -3415,17 +3420,13 @@ const CELL_BUDGET_DIVISOR: usize = 2;
 /// 52. Relocating chelis#3697's own defect onto the long-schedule axis is not
 /// a fix for it, so the diagonal is no longer rationed.
 ///
-/// Each binder's cell window therefore begins at its own
-/// `max(DIAGONAL_SPAN, schedule_len)`. **When two binders' schedules differ
-/// in length their windows can be disjoint, and then no pairing happens at
-/// all** — at arity two with lengths 52 and 44 the windows are `[52, 56)` and
-/// `[44, 48)`, so the two binders are never simultaneously in a cell at any
-/// budget. Every binder still proposes its whole schedule, and binders with
-/// equal-length schedules — the ordinary case, including every binder of one
-/// dtype under the same guards — stay aligned, which is why the phase is
-/// useful at all. Aligning the windows on a shared boundary would fix it
-/// structurally; that is not in this change, and
-/// `issue_3697_extremal_pairing.rs` pins the cost.
+/// `window_start` is shared by every binder of the property, not computed
+/// from this one's schedule, so the windows always coincide and a pairing is
+/// either proposed for all of them or for none. A per-binder window was as
+/// wide as the cell count and therefore *disjoint* between binders whose
+/// lengths differed by that much — two `!=` exclusions on one binder was
+/// enough to lose every pairing at any budget. See
+/// [`ConstraintSamplingPlan::cell_window_start`], which derives it.
 ///
 /// A single-binder property takes no cell at all: an odometer over one
 /// binder's own classes *is* the diagonal.
@@ -3433,17 +3434,17 @@ fn schedule_slot(
     attempt: usize,
     arity: usize,
     position: usize,
-    schedule_len: usize,
+    window_start: usize,
     budget: usize,
 ) -> ScheduleSlot {
-    if arity < 2 || attempt < DIAGONAL_SPAN || attempt < schedule_len {
+    if arity < 2 || attempt < window_start {
         return ScheduleSlot::Diagonal(attempt);
     }
     let cells = EXTREMAL_CLASSES
         .checked_pow(u32::try_from(arity).unwrap_or(u32::MAX))
         .unwrap_or(usize::MAX)
-        .min(budget.saturating_sub(DIAGONAL_SPAN.max(schedule_len)) / CELL_BUDGET_DIVISOR);
-    let cell = attempt - DIAGONAL_SPAN.max(schedule_len);
+        .min(budget.saturating_sub(window_start) / CELL_BUDGET_DIVISOR);
+    let cell = attempt - window_start;
     if cell >= cells {
         return ScheduleSlot::Random;
     }
@@ -3522,6 +3523,28 @@ struct ConstraintSamplingPlan {
     incoming: BTreeMap<String, Vec<(String, bool)>>,
     topo: Vec<String>,
     reserve_depth: BTreeMap<String, usize>,
+    /// The attempt at which **every** scheduled binder's cell window opens
+    /// (chelis#3697): `max(DIAGONAL_SPAN, L_0, ..., L_n)` over the binders'
+    /// own schedule lengths.
+    ///
+    /// One shared boundary rather than a per-binder one. A window that began
+    /// at each binder's own `max(DIAGONAL_SPAN, L)` was as wide as the cell
+    /// count, so two binders whose lengths differed by that count had
+    /// *disjoint* windows and were never both in a cell — no pairing at all,
+    /// at any budget, from two `!=` exclusions on one binder. Starting them
+    /// together makes that unreachable instead of merely unlikely.
+    ///
+    /// A binder whose own schedule is shorter than the boundary spends the
+    /// gap on uniform draws, exactly as it did before any of this: its
+    /// `Diagonal` index runs past its candidate list and falls through.
+    ///
+    /// Computed once here because it must not vary between attempts. That is
+    /// sound only while no binder's range depends on another's draw, which is
+    /// also exactly when the phase runs at all — see [`Self::has_order_edges`],
+    /// which gates it off otherwise. [`Self::resolve`] ignores its `values`
+    /// argument for a plan with no incoming edges, so the lengths below are
+    /// the lengths every attempt will see.
+    cell_window_start: usize,
 }
 
 impl ConstraintSamplingPlan {
@@ -3741,7 +3764,7 @@ impl ConstraintSamplingPlan {
             }
         }
 
-        Ok(Self {
+        let mut plan = Self {
             domains,
             ranges,
             excluded,
@@ -3749,7 +3772,34 @@ impl ConstraintSamplingPlan {
             incoming,
             topo,
             reserve_depth,
-        })
+            cell_window_start: DIAGONAL_SPAN,
+        };
+        plan.cell_window_start = plan.derive_cell_window_start();
+        Ok(plan)
+    }
+
+    /// The shared boundary described on [`Self::cell_window_start`].
+    ///
+    /// For a plan with order edges the phase never runs, so the span is
+    /// returned without pricing any candidate list. That early return is
+    /// **load bearing, not an optimisation**: [`Self::resolve`] indexes
+    /// `values[predecessor]`, and there are no predecessor values at derive
+    /// time, so reaching it for a plan with edges panics.
+    fn derive_cell_window_start(&self) -> usize {
+        if self.has_order_edges() {
+            return DIAGONAL_SPAN;
+        }
+        let values = BTreeMap::new();
+        self.topo
+            .iter()
+            .filter_map(|name| {
+                let (lower, upper) = self.resolve(name, self.ranges[name], &values)?;
+                Some(
+                    float_edge_candidates(self.kinds[name], lower, upper, &self.excluded[name])
+                        .len(),
+                )
+            })
+            .fold(DIAGONAL_SPAN, usize::max)
     }
 
     /// Whether any binder's admissible range is resolved from another
@@ -3861,7 +3911,7 @@ impl ConstraintSamplingPlan {
             let slot = if chained {
                 ScheduleSlot::Diagonal(attempt)
             } else {
-                schedule_slot(attempt, arity, position, candidates.len(), budget)
+                schedule_slot(attempt, arity, position, self.cell_window_start, budget)
             };
             // Once both schedules are spent the draw is a random one,
             // preferring the narrower proposal window (chelis#644 owns its
@@ -4743,8 +4793,14 @@ fn sample_value(
     seat: Option<(usize, usize)>,
     budget: usize,
 ) -> Result<SampleValue, SamplingError> {
-    let slot = |schedule_len: usize| match seat {
-        Some((position, arity)) => schedule_slot(attempt, arity, position, schedule_len, budget),
+    // `DIAGONAL_SPAN` is the whole boundary here: this lane passes no `!=`
+    // exclusions to `float_edge_candidates`, and without them no dtype's
+    // schedule is longer than the span -- which
+    // `issue_3697_no_unexcluded_schedule_outruns_the_span` pins. So
+    // `max(DIAGONAL_SPAN, L)` is `DIAGONAL_SPAN` for every binder, and every
+    // window opens together without the caller pricing any list.
+    let slot = || match seat {
+        Some((position, arity)) => schedule_slot(attempt, arity, position, DIAGONAL_SPAN, budget),
         None => ScheduleSlot::Random,
     };
     let sp = chelis_deep::Span::new(0, 0);
@@ -4766,8 +4822,7 @@ fn sample_value(
             let (lo, hi) = crate::opaque::int_sample_bounds(type_name)
                 .expect("is_int_width implies int_sample_bounds");
             let candidates = int_edge_candidates(lo, hi);
-            let value = scheduled_int(slot(candidates.len()), &candidates)
-                .unwrap_or_else(|| rng.next_i64(lo, hi));
+            let value = scheduled_int(slot(), &candidates).unwrap_or_else(|| rng.next_i64(lo, hi));
             let lit = Expr::Lit(Literal::Int(value), sp);
             if type_name == "i32" {
                 // i32 is the integer-literal default; no cast needed.
@@ -4792,8 +4847,8 @@ fn sample_value(
             let candidates = float_edge_candidates(kind, lower, upper, &[]);
             // The uniform window stays `[-10, 10]`; widening it is
             // chelis#644's separate question.
-            let value = scheduled_float(slot(candidates.len()), &candidates)
-                .unwrap_or_else(|| rng.next_f64(-10.0, 10.0));
+            let value =
+                scheduled_float(slot(), &candidates).unwrap_or_else(|| rng.next_f64(-10.0, 10.0));
             Ok(float_sample(name, type_name, value))
         }
         TypeExpr::Named(type_name, _) if type_name == "string" => {
