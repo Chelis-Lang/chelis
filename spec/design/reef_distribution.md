@@ -202,6 +202,23 @@ otherwise consume (chelis#972).
 A tool that fetches files outside Reef, such as a Nix fixed-output derivation, uses
 these two commands. Reef then owns the registry layout and `index.json`.
 
+Set `CHELIS_OFFLINE=1` to disable remote dependency resolution for package graph
+loads. This process policy covers `build`, `check`, `test`, `prove`, `eval`, and
+`reef build`. It also covers graph loads after a cache miss or an invalid cache.
+These loads make no network request and execute no `gh` subprocess.
+They can use installed registry packages, path dependencies, and the bundled runtime.
+
+Only the exact value `1` enables this policy. It overrides auto-fetch defaults and
+`BuildOptions.auto_fetch = true`.
+
+`reef build --no-auto-fetch` still disables auto-fetch when the variable is absent
+or has another value. For a missing registry dependency, the offline diagnostic first
+states the import prerequisite: `reef.lock` must record a valid `remote_origin`
+for every registry dependency. Then it names
+`chelis reef install --from-lockfile --artifact-dir <dir>`.
+An originless lock still fails import. Supply an origin-bearing lockfile before import.
+Prepare the lockfile and its pinned artifacts before the offline build.
+
 `fetch-plan` output is one JSON object with `format_version` 1, the root `package`
 (`name`, `version`), and an `artifacts` array in lock order. Each element has these
 fields:
@@ -551,7 +568,7 @@ post-order traversal; the install step is a loop over Item 6's helper.
 
 ### Item 8 — Auto-fetch during `chelis reef build`
 
-**Surface.** Default-on; opt out with `--no-auto-fetch`.
+**Surface.** Default-on. Use `--no-auto-fetch` or the process policy `CHELIS_OFFLINE=1` to disable auto-fetch.
 
 **Behavior.**
 
