@@ -15,9 +15,11 @@ Four things are locked here:
   (d) no-ai-authorship patterns cover the current banned tool identities.
 """
 
+import ast
 import importlib.util
 import io
 import json
+import itertools
 import os
 import re
 from collections import deque
@@ -528,6 +530,145 @@ def _nix_workflow_events(workflow: str) -> dict[str, dict[str, str]]:
 
 _NIX_REVIEWED_SCHEDULE = "'37 2 * * *'"
 _NIX_NATIVE_JOBS = ("nix-linux-x86-64", "nix-linux-arm64", "nix-darwin-arm64")
+
+
+def _nix_policy_field(block: str, key: str, indent: int) -> str | None:
+    values = []
+    for line in block.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if len(line) - len(line.lstrip(" ")) != indent:
+            continue
+        parsed_key, value = _parse_simple_yaml_mapping_entry(
+            line, expected_indent=indent
+        )
+        if parsed_key != key:
+            continue
+        if value.startswith("'"):
+            if len(value) < 2 or not value.endswith("'"):
+                raise AssertionError(f"unsupported quoted policy value: {value!r}")
+            value = value[1:-1].replace("''", "'")
+        elif value.startswith('"'):
+            try:
+                value = json.loads(value)
+            except json.JSONDecodeError as error:
+                raise AssertionError(
+                    f"unsupported quoted policy value: {value!r}"
+                ) from error
+        values.append(value)
+    if len(values) > 1:
+        raise AssertionError(f"duplicate workflow policy field {key!r}")
+    return values[0] if values else None
+
+
+def _nix_policy_value(
+    expression: str | None,
+    context: dict[str, str],
+    *,
+    success: bool = True,
+    cancelled: bool = False,
+    condition: bool = False,
+) -> bool:
+    """Evaluate this workflow's boolean and string expression subset."""
+    source = (expression or "success()").strip()
+    source = source.removeprefix("${{").removesuffix("}}").strip()
+    status_check = re.search(r"\b(?:success|failure|cancelled|always)\s*\(", source)
+    source = re.sub(
+        r"needs\.[\w-]+\.(?:outputs\.complete|result)|github\.event_name",
+        lambda match: repr(context[match.group()]),
+        source,
+    )
+    for name, value in (
+        ("success", success),
+        ("failure", not success and not cancelled),
+        ("cancelled", cancelled),
+        ("always", True),
+    ):
+        source = re.sub(rf"\b{name}\(\)", str(value), source)
+    source = re.sub(r"!(?!=)", " not ", source)
+    source = source.replace("&&", " and ").replace("||", " or ").strip()
+    tree = ast.parse(source, mode="eval")
+    allowed = (
+        ast.Expression, ast.BoolOp, ast.And, ast.Or, ast.UnaryOp, ast.Not,
+        ast.Compare, ast.Eq, ast.NotEq, ast.Constant, ast.Name, ast.Load,
+    )
+    if any(not isinstance(node, allowed) for node in ast.walk(tree)):
+        raise AssertionError(f"unsupported workflow policy expression: {expression}")
+    value = bool(eval(compile(tree, "<nix-policy>", "eval"), {
+        "__builtins__": {}, "true": True, "false": False,
+    }))
+    return value and (not condition or status_check is not None or success)
+
+
+def _assert_nix_cache_routing(workflow: str) -> None:
+    jobs = _workflow_job_blocks(workflow)
+    reports = (
+        "cache-status-linux-x86-64",
+        "cache-status-linux-arm64",
+        "cache-status-darwin-arm64",
+    )
+    aggregate = _nix_policy_field(jobs["cache-status"], "COMPLETE", 10)
+    if aggregate is None:
+        raise AssertionError("missing aggregate cache verdict")
+    states = tuple(itertools.product(
+        ("success", "failure", "skipped", "cancelled"), ("true", "false", "")
+    ))
+    for results in itertools.product(states, repeat=len(reports)):
+        context = {
+            f"needs.{job}.{field}": value
+            for job, state in zip(reports, results)
+            for field, value in zip(("result", "outputs.complete"), state)
+        }
+        expected = all(result == "success" and value == "true"
+                       for result, value in results)
+        if _nix_policy_value(aggregate, context) != expected:
+            raise AssertionError(f"unsafe aggregate cache verdict for {results!r}")
+
+    for event, cancelled, success, complete in itertools.product(
+        ("schedule", "workflow_dispatch", "release"),
+        (False, True), (False, True), ("true", "false", ""),
+    ):
+        context = {
+            "github.event_name": event,
+            "needs.cache-status.outputs.complete": complete,
+        }
+        for job in (*reports, "cache-status", *_NIX_NATIVE_JOBS):
+            if job in reports:
+                expected = event == "schedule" and success
+            elif job == "cache-status":
+                expected = event == "schedule" and not cancelled
+            else:
+                expected = not cancelled and (
+                    event != "schedule" or complete != "true"
+                )
+            actual = _nix_policy_value(
+                _nix_policy_field(jobs[job], "if", 4), context,
+                success=success, cancelled=cancelled, condition=True,
+            )
+            if actual != expected:
+                raise AssertionError(
+                    f"unsafe cache routing for {job}: "
+                    f"{event=}, {cancelled=}, {success=}, {complete=}"
+                )
+
+
+def _assert_nix_acceptance_admission(workflow: str) -> None:
+    jobs = _workflow_job_blocks(workflow)
+    for job in _NIX_NATIVE_JOBS:
+        block = jobs[job]
+        step = _ci_step_block(block, "Run the complete native flake check set")
+        _assert_executable_run_once(step, "nix flake check --print-build-logs")
+        for event in ("schedule", "workflow_dispatch", "release"):
+            context = {"github.event_name": event}
+            if not _nix_policy_value(
+                _nix_policy_field(step, "if", 8), context, condition=True
+            ):
+                raise AssertionError(f"native acceptance is gated for {job}: {event}")
+            for scope, indent in ((block, 4), (step, 8)):
+                ignored = _nix_policy_field(scope, "continue-on-error", indent)
+                if ignored is not None and _nix_policy_value(ignored, context):
+                    raise AssertionError(f"native acceptance ignores failure in {job}")
 
 
 def _assert_nix_only_setup(block: str, job: str) -> None:
@@ -3601,18 +3742,34 @@ class NixPackagesWorkflowTests(unittest.TestCase):
         for marker in required:
             self.assertIn(marker, text)
 
-    def test_each_native_job_runs_the_complete_flake_check_set(self):
-        text = _read_nix_packages_workflow()
-        self.assertEqual(
-            text.count("run: nix flake check --print-build-logs"),
-            3,
-            "each native Nix job must run the complete flake check set",
+    def test_native_acceptance_runs_and_propagates_failure_on_every_event(self):
+        _assert_nix_acceptance_admission(_read_nix_packages_workflow())
+
+    def test_only_successful_complete_reports_skip_scheduled_native_jobs(self):
+        _assert_nix_cache_routing(_read_nix_packages_workflow())
+
+    def test_quoted_policy_controls_preserve_admission_and_failure_behavior(self):
+        workflow = "jobs:\n" + "".join(
+            f"  {job}:\n    steps:\n"
+            "      - name: Run the complete native flake check set\n"
+            "        run: nix flake check --print-build-logs\n"
+            for job in _NIX_NATIVE_JOBS
         )
-        self.assertNotIn(
-            "scripts/gate.py",
-            text,
-            "Nix package jobs must stay separate from the canonical Cargo gate",
+        command = "        run: nix flake check --print-build-logs\n"
+        unsafe = (
+            "'if': github.event_name == 'workflow_dispatch'",
+            'if: "github.event_name == \'workflow_dispatch\'"',
+            "'continue-on-error': true",
         )
+        for policy in unsafe:
+            with self.subTest(policy=policy):
+                mutated = workflow.replace(command, f"        {policy}\n{command}", 1)
+                with self.assertRaises(AssertionError):
+                    _assert_nix_acceptance_admission(mutated)
+        safe = workflow.replace(
+            command, "        'if': \"success()\"\n" + command, 1
+        )
+        _assert_nix_acceptance_admission(safe)
 
     def test_native_nix_linux_checks_run_hosted_even_for_main_dispatch(self):
         # #3090: native package acceptance must not depend on the protected

@@ -509,6 +509,8 @@ definition replacement is specified above.
   `scripts/test_nix_cache_status.py` and `scripts/test_publish_nix_cache.py`.
   Completeness needs every package output and each exact-revision activated shell.
   Query errors remain errors. A workflow byte digest must not replace these controls.
+  `scripts/test_gate.py` evaluates aggregation and event admission.
+  Failed reports cannot authorize skips. Native acceptance must propagate failures.
 - Keep the loud-unsupported `BASELINE`. It is a shrink-only count census, not a
   content hash, and it has recorded true catches.
 

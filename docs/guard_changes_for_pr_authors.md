@@ -369,6 +369,8 @@ The cache-completeness and query-error controls belong in
 `scripts/test_nix_cache_status.py`. Publication controls belong in
 `scripts/test_publish_nix_cache.py`. Test package-only hits, absent activated
 shells, complete caches, and query errors through executable behavior.
+`scripts/test_gate.py` evaluates the workflow aggregation and admission policy.
+Its controls cover failed reports, manual and release events, and native check failures.
 Do not replace these controls with workflow byte digests or source-text checks.
 Keep the pull request Nix job evaluation-only and free of portable Devenv setup.
 
