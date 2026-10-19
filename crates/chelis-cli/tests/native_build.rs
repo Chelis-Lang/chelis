@@ -147,6 +147,62 @@ fn emit_c_compile_line_builds_with_a_directly_named_clang() {
     assert_eq!(run.stdout, b"answer = 42\n");
 }
 
+/// The `Compile:` line that `--emit-c` prints for `answer = add(20i64, 22i64)`
+/// with `compiler` named in `CHELIS_CC`.
+#[cfg(target_os = "macos")]
+fn emitted_compile_line(dir: &Path, compiler: &Path) -> String {
+    let file = dir.join("answer.ch");
+    let out = dir.join("out");
+    fs::write(&file, "answer = add(20i64, 22i64)\n").unwrap();
+    let printed = build(&file, &out)
+        .arg("--emit-c")
+        .env("CHELIS_CC", compiler)
+        .output()
+        .unwrap();
+    assert!(
+        printed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&printed.stderr)
+    );
+    String::from_utf8(printed.stdout)
+        .unwrap()
+        .lines()
+        .find_map(|line| line.strip_prefix("Compile: "))
+        .expect("a compile line")
+        .to_string()
+}
+
+/// chelis#3918: the Nix clang wrapper sets its own `SDKROOT`, so the build
+/// gives a compiler in the Nix store none, and the line that `--emit-c`
+/// prints sets none. A host compiler keeps the SDK of the `xcode-select`
+/// default, and its line sets it.
+#[cfg(target_os = "macos")]
+#[test]
+fn emit_c_compile_line_sets_the_sdk_only_for_a_host_compiler() {
+    let dir = tempdir().unwrap();
+    let bin = dir
+        .path()
+        .join("nix/store/0c9vbm2f8a5y6hsdkxwk1x6yh0jq3v4a-clang-wrapper-21.1.8/bin");
+    fs::create_dir_all(&bin).unwrap();
+    let nix_clang = bin.join("clang");
+    fs::write(&nix_clang, "#!/bin/sh\nexit 1\n").unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&nix_clang, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let nix_line = emitted_compile_line(&dir.path().join("nix"), &nix_clang);
+    assert!(
+        nix_line.starts_with(nix_clang.to_str().unwrap()),
+        "{nix_line}"
+    );
+    assert!(!nix_line.contains("SDKROOT"), "{nix_line}");
+
+    let host_dir = dir.path().join("host");
+    fs::create_dir_all(&host_dir).unwrap();
+    let host_line = emitted_compile_line(&host_dir, Path::new("/usr/bin/cc"));
+    assert!(host_line.starts_with("env SDKROOT="), "{host_line}");
+}
+
 #[test]
 fn missing_compiler_fails_with_install_guidance() {
     let dir = tempdir().unwrap();

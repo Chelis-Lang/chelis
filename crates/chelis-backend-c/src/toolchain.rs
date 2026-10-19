@@ -271,18 +271,23 @@ fn pinned_toolchain(
 ///   output, and sandboxed builds (Nix, macOS app sandboxes) need it.
 ///
 /// Locale variables are deliberately absent so diagnostics are stable. On
-/// macOS the caller's `SDKROOT` and `DEVELOPER_DIR` are absent too; instead
-/// [`tool_command`] sets `SDKROOT` to the SDK of the `xcode-select` default
-/// ([`selected_sdk`]), the one the `/usr/bin` shims choose. A compiler named
-/// directly in `CHELIS_CC`, such as another Xcode's `clang`, has no SDK of its
-/// own, so that is how it finds the system headers and libraries.
+/// macOS the caller's `SDKROOT` and `DEVELOPER_DIR` are absent too. Instead
+/// [`tool_command`] sets `SDKROOT` for a host tool to the SDK of the
+/// `xcode-select` default ([`selected_sdk`]), the one the `/usr/bin` shims
+/// choose. A compiler named directly in `CHELIS_CC`, such as another Xcode's
+/// `clang`, has no SDK of its own, so that is how it finds the system headers
+/// and libraries. A tool in the Nix store gets no `SDKROOT` and runs no
+/// `xcrun`: the Nix clang wrapper sets `SDKROOT` to its own SDK, so a value
+/// from the build would not reach the compile.
 pub const TOOL_ENVIRONMENT: &[&str] = &["PATH", "TMPDIR"];
 
 /// A command for a native build tool with the environment cleared except
-/// for [`TOOL_ENVIRONMENT`], plus `SDKROOT` on macOS ([`selected_sdk`]).
+/// for [`TOOL_ENVIRONMENT`], plus `SDKROOT` for a host tool on macOS
+/// ([`tool_sdk`]).
 pub fn tool_command(program: impl AsRef<OsStr>) -> Command {
+    let program = program.as_ref();
     let mut command = allowlisted_command(program);
-    if let Some(sdk) = selected_sdk() {
+    if let Some(sdk) = tool_sdk(program) {
         command.env("SDKROOT", sdk);
     }
     command
@@ -299,29 +304,78 @@ fn allowlisted_command(program: impl AsRef<OsStr>) -> Command {
     command
 }
 
+/// The `SDKROOT` that [`tool_command`] gives `program`: on macOS the
+/// [`selected_sdk`], except for a tool in the Nix store
+/// ([`is_nix_store_tool`]), which gets none. The Nix check comes first, so
+/// such a tool never makes the build run `xcrun`. `None` elsewhere.
+fn tool_sdk(program: &OsStr) -> Option<&'static OsStr> {
+    if !cfg!(target_os = "macos") || is_nix_store_tool(program) {
+        return None;
+    }
+    selected_sdk()
+}
+
+/// Whether `program`, resolved as the spawned tool will see it
+/// ([`resolve_executable`]), is a file in a Nix store. The canonical path
+/// decides, so a profile symlink into the store counts, and a store symlink
+/// to a host tool does not. A store entry is a `nix/store/<hash>-<name>`
+/// directory, where `<hash>` is 32 characters of Nix base32.
+fn is_nix_store_tool(program: &OsStr) -> bool {
+    let Some(path) = program.to_str().and_then(resolve_executable) else {
+        return false;
+    };
+    let path = path.canonicalize().unwrap_or(path);
+    is_in_nix_store(&path)
+}
+
+fn is_in_nix_store(path: &Path) -> bool {
+    let names: Vec<&OsStr> = path
+        .components()
+        .filter_map(|component| match component {
+            std::path::Component::Normal(name) => Some(name),
+            _ => None,
+        })
+        .collect();
+    names.windows(3).any(|window| {
+        window[0] == "nix" && window[1] == "store" && is_nix_store_entry_name(window[2])
+    })
+}
+
+/// The alphabet of Nix base32, which store path hashes use.
+const NIX_BASE32: &[u8] = b"0123456789abcdfghijklmnpqrsvwxyz";
+
+fn is_nix_store_entry_name(name: &OsStr) -> bool {
+    let Some((hash, rest)) = name.to_str().and_then(|name| name.split_once('-')) else {
+        return false;
+    };
+    hash.len() == 32 && !rest.is_empty() && hash.bytes().all(|byte| NIX_BASE32.contains(&byte))
+}
+
 /// On macOS, the SDK of the `xcode-select` default: what `xcrun --show-sdk-path`
 /// prints under [`TOOL_ENVIRONMENT`] alone, so the caller's `SDKROOT` and
 /// `DEVELOPER_DIR` cannot choose it. `None` elsewhere, or when `xcrun` finds no
-/// SDK; a compile then fails with the compiler's own diagnostic.
+/// SDK; a compile then fails with the compiler's own diagnostic. The first
+/// call runs `xcrun`, and later calls reuse its answer.
 fn selected_sdk() -> Option<&'static OsStr> {
     if !cfg!(target_os = "macos") {
         return None;
     }
-    SELECTED_SDK.as_deref()
+    SELECTED_SDK.get_or_init(probe_selected_sdk).as_deref()
 }
 
-static SELECTED_SDK: std::sync::LazyLock<Option<std::ffi::OsString>> =
-    std::sync::LazyLock::new(|| {
-        let output = allowlisted_command("/usr/bin/xcrun")
-            .arg("--show-sdk-path")
-            .stdin(Stdio::null())
-            .stderr(Stdio::null())
-            .output()
-            .ok()?;
-        let path = String::from_utf8(output.stdout).ok()?;
-        let path = path.trim();
-        (output.status.success() && !path.is_empty()).then(|| path.into())
-    });
+static SELECTED_SDK: std::sync::OnceLock<Option<std::ffi::OsString>> = std::sync::OnceLock::new();
+
+fn probe_selected_sdk() -> Option<std::ffi::OsString> {
+    let output = allowlisted_command("/usr/bin/xcrun")
+        .arg("--show-sdk-path")
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    let path = String::from_utf8(output.stdout).ok()?;
+    let path = path.trim();
+    (output.status.success() && !path.is_empty()).then(|| path.into())
+}
 
 /// The compiler a build used, recorded in the build output.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1300,6 +1354,98 @@ mod tests {
                 TOOL_ENVIRONMENT.contains(&name.as_str()),
                 "tool environment leaked {name}: {variables:?}"
             );
+        }
+    }
+
+    /// A compiler at a path shaped like a Nix store entry under `root`. It is
+    /// a script that fails, so nothing can compile with it by accident.
+    fn fake_nix_store_compiler(root: &Path) -> PathBuf {
+        let bin = root
+            .join("nix/store/0c9vbm2f8a5y6hsdkxwk1x6yh0jq3v4a-clang-wrapper-21.1.8")
+            .join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let compiler = bin.join("clang");
+        std::fs::write(&compiler, "#!/bin/sh\nexit 1\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&compiler, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        compiler
+    }
+
+    /// The `SDKROOT` that `command` sets, if any.
+    fn sdkroot(command: &Command) -> Option<&OsStr> {
+        command
+            .get_envs()
+            .find(|(name, _)| *name == "SDKROOT")
+            .and_then(|(_, value)| value)
+    }
+
+    /// chelis#3918: the Nix clang wrapper sets its own `SDKROOT`, so the build
+    /// gives a compiler in the Nix store none. A host compiler keeps the SDK
+    /// of the `xcode-select` default.
+    #[test]
+    fn tool_command_gives_the_sdk_only_to_a_host_compiler() {
+        let dir = tempfile::tempdir().unwrap();
+        let nix = fake_nix_store_compiler(dir.path());
+        assert_eq!(sdkroot(&tool_command(&nix)), None, "{}", nix.display());
+        let host = tool_command("/usr/bin/cc");
+        assert_eq!(sdkroot(&host), selected_sdk());
+        if cfg!(target_os = "macos") {
+            assert!(sdkroot(&host).is_some(), "xcrun found no SDK");
+        }
+    }
+
+    /// chelis#3918: a Nix store compiler that `PATH` selects by its bare name
+    /// gets no `SDKROOT`. The child process starts with only that compiler on
+    /// `PATH`, so the bare name resolves to it.
+    #[test]
+    fn nix_store_compiler_on_path_gets_no_sdk() {
+        const TEST: &str = "toolchain::tests::nix_store_compiler_on_path_gets_no_sdk";
+        if std::env::var_os("CHELIS_TOOLCHAIN_NIX_CHILD").is_none() {
+            let dir = tempfile::tempdir().unwrap();
+            let compiler = fake_nix_store_compiler(dir.path());
+            let status = Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", TEST])
+                .env("CHELIS_TOOLCHAIN_NIX_CHILD", "1")
+                .env("PATH", compiler.parent().unwrap())
+                .status()
+                .unwrap();
+            assert!(status.success(), "{TEST} failed in the child");
+            return;
+        }
+        assert_eq!(sdkroot(&tool_command("clang")), None);
+        // A fresh process: only `tool_command` could have run `xcrun` here.
+        assert!(SELECTED_SDK.get().is_none(), "xcrun ran for a Nix compiler");
+        let host = tool_command("/usr/bin/cc");
+        assert_eq!(sdkroot(&host), selected_sdk());
+        if cfg!(target_os = "macos") {
+            assert!(
+                SELECTED_SDK.get().is_some(),
+                "xcrun did not run for /usr/bin/cc"
+            );
+        }
+    }
+
+    #[test]
+    fn nix_store_entries_need_the_hash_and_a_name() {
+        let entry = "0c9vbm2f8a5y6hsdkxwk1x6yh0jq3v4a-clang-wrapper-21.1.8";
+        assert!(is_in_nix_store(
+            &Path::new("/nix/store").join(entry).join("bin/cc")
+        ));
+        assert!(is_in_nix_store(
+            &Path::new("/tmp/x/nix/store").join(entry).join("bin/cc")
+        ));
+        for path in [
+            "/usr/bin/cc",
+            "/nix/store/bin/cc",
+            "/nix/store/0c9vbm2f8a5y6hsdkxwk1x6yh0jq3v4a-",
+            "/nix/store/0c9vbm2f8a5y6hsdkxwk1x6yh0jq3v4/bin/cc",
+            "/nix/store/0c9vbm2f8a5y6hsdkxwk1x6yh0jq3v4e-cc/bin/cc",
+            "/opt/store/0c9vbm2f8a5y6hsdkxwk1x6yh0jq3v4a-cc/bin/cc",
+        ] {
+            assert!(!is_in_nix_store(Path::new(path)), "{path}");
         }
     }
 
