@@ -11,7 +11,7 @@
 //! `chelis test` worker thread reaches it exactly as `chelis eval` does.
 //!
 //! Evidentiary status: REGRESSION TEST, proven failing first. With the count
-//! check removed, the 10,001-level recursions evaluate and both tests fail.
+//! check removed, the 10,001-level recursions evaluate and all three tests fail.
 //! On the base, without the evaluation segment, an unoptimized build already
 //! fails the 10,000-level recursion with the stack message.
 
