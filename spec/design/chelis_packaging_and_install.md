@@ -182,12 +182,16 @@ or folded into the chelisup work).
 
 One resolver in `chelis-reef` (`crates/chelis-reef/src/home.rs`) gives the
 registry root and the directory of each on-disk compiler cache. It also gives
-the Chelis home of the compiler. An empty variable counts as unset.
+the Chelis home of the Reef commands, for example the artifact `bin/`
+directory. An empty variable counts as unset.
 
-Three other readers resolve the Chelis home with the same rule. They are
-`chelisup` (`resolve_home`), the default root of the source-crate store
-(`chelis_src::default_store_root`), and the Nix `chelisup` launcher.
-`chelisup` does not depend on `chelis-reef`, and the launcher is a shell script.
+Other readers resolve the Chelis home themselves, because `chelisup` does not
+depend on `chelis-reef` and the launchers are shell scripts. `chelisup`
+(`resolve_home`) gives the toolchain store, which the compiler also uses for its
+toolchain commands. The source-crate store (`chelis_src::default_store_root`)
+and the Nix `chelisup` launcher also read the home. These readers use the same
+rule. The bootstrap script `chelisup.sh` uses `${CHELIS_HOME:-$HOME/.chelis}`.
+With an empty `HOME`, it gives `/.chelis` where the other readers give an error.
 
 | State | Resolution order |
 |---|---|
