@@ -216,6 +216,54 @@ system that the flake supports:
 }
 ```
 
+### Keep the store paths of a built program
+
+On Linux, a program that `chelis build` makes with the `chelis` package uses
+paths in the Nix store. The Nix C toolchain writes the dynamic loader of its
+glibc into the program. It also writes run-time search paths for its glibc, its
+GCC runtime libraries, and OpenBLAS.
+
+Thus each program needs the glibc of the package. A program with parallel
+loops also needs the GCC runtime library `libgomp`. A program that calls BLAS
+also needs OpenBLAS. Run `ldd` on a program to see the loader and the libraries
+that it uses.
+
+All of these paths are in the closure of the `chelis` package. `nix run` and
+`nix shell` add no garbage-collector root for that closure. Thus
+`nix-collect-garbage` can delete these paths, and then the program does not
+start. Keep the closure with a root:
+
+```sh
+# Install the package in your Nix profile. The profile is a root.
+nix profile install github:Chelis-Lang/chelis/vX.Y.Z
+
+# Or make a root in the current directory. It stays while the link exists.
+nix build github:Chelis-Lang/chelis/vX.Y.Z --out-link chelis-toolchain
+```
+
+A compiler that `chelisup link` registers has a root, as the text above
+describes. On NixOS, a package in `environment.systemPackages` stays in the
+store while a system generation holds it.
+
+A root keeps the paths of one package version. After you upgrade the package,
+`nix-collect-garbage -d` deletes the old profile generations. Then Nix can
+delete the paths of the old version, so rebuild the programs that it made.
+
+On macOS, a program uses only the system libraries in `/usr/lib` and
+`/System/Library`, so it needs no store path.
+
+With `chelis-unwrapped`, `bin/chelis` adds no Nix C toolchain and declares no
+OpenBLAS directories. The program then uses only the paths that the C compiler
+on your `PATH` writes, and the directories in `CHELIS_C_LIBRARY_PATH`. A C
+compiler outside Nix, such as `/usr/bin/gcc`, uses the loader and libraries of
+the system. Thus the program needs no store path.
+
+A C compiler from Nix, for example in a `nix shell` or `nix develop`
+environment, writes the paths of its own glibc and GCC runtime. Keep that
+compiler with a root in the same way. A store directory in
+`CHELIS_C_LIBRARY_PATH` also gives the program a run-time search path into the
+store.
+
 ### Use the binary cache
 
 Without a binary cache, Nix compiles the compiler, its Rust dependencies, and
