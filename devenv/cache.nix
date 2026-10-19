@@ -1,0 +1,5 @@
+{ ... }:
+
+{
+  cachix.pull = [ "chelis-lang" ];
+}

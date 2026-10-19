@@ -14,6 +14,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 EXPECTED_IMPORTS = (
     "./devenv/toolchains.nix",
+    "./devenv/cache.nix",
     "./devenv/ci.nix",
     "./devenv/entry-shell.nix",
     "./devenv/commands.nix",
@@ -181,6 +182,16 @@ def parse_generated_files_module(text: str) -> DevenvGeneratedFiles:
     return DevenvGeneratedFiles(paths=paths)
 
 
+def parse_cache_module(text: str) -> str:
+    match = re.fullmatch(
+        r'\s*\{ \.\.\. \}:\s*\{\s*cachix\.pull = \[ "([^"]+)" \];\s*\}\s*',
+        text,
+    )
+    if match is None or match.group(1) != "chelis-lang":
+        raise ValueError("the cache module must only select the public Chelis cache")
+    return match.group(1)
+
+
 def parse_contributor_docs(text: str) -> None:
     required = (
         "chelis-gate",
@@ -195,6 +206,13 @@ def parse_contributor_docs(text: str) -> None:
         "scripts/check_commit_message.py",
         ".devenv/state/venv",
         "PYO3_PYTHON",
+        "Devenv is the only supported development shell.",
+        "`nix develop`",
+        "`devenv shell -- <command>`",
+        "cachix.pull",
+        "trusted-users",
+        "trusted-substituters",
+        "require-sigs",
     )
     missing = [fragment for fragment in required if fragment not in text]
     if missing:
@@ -237,6 +255,28 @@ class DevenvCompositionTests(unittest.TestCase):
     def test_contributor_docs_explain_the_devenv_surface(self) -> None:
         text = (REPO_ROOT / "docs/contributor_setup.md").read_text(encoding="utf-8")
         parse_contributor_docs(text)
+
+    def test_devenv_selects_the_same_cache_as_the_flake(self) -> None:
+        module = (REPO_ROOT / "devenv/cache.nix").read_text(encoding="utf-8")
+        name = parse_cache_module(module)
+        flake = (REPO_ROOT / "flake.nix").read_text(encoding="utf-8")
+        self.assertIn(f'"https://{name}.cachix.org"', flake)
+        key = re.search(rf'"({name}\.cachix\.org-1:[^"]+)"', flake)
+        self.assertIsNotNone(key)
+        docs = (REPO_ROOT / "docs/contributor_setup.md").read_text(encoding="utf-8")
+        self.assertIn(key.group(1), docs)
+
+    def test_cache_contract_rejects_missing_or_different_cache_and_trust_override(self) -> None:
+        module = (REPO_ROOT / "devenv/cache.nix").read_text(encoding="utf-8")
+        for mutated in (
+            module.replace('"chelis-lang"', ""),
+            module.replace('"chelis-lang"', '"another-cache"'),
+            module.replace("\n}", "\n  nix.settings.require-sigs = false;\n}"),
+            module.replace("\n}", '\n  cachix.push = "chelis-lang";\n}'),
+        ):
+            with self.subTest(module=mutated):
+                with self.assertRaisesRegex(ValueError, "only select"):
+                    parse_cache_module(mutated)
 
     def test_missing_import_fails_at_the_parse_boundary(self) -> None:
         root_text = (REPO_ROOT / "devenv.nix").read_text(encoding="utf-8")

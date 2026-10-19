@@ -3113,6 +3113,15 @@ reason = "script-unit realizes the project toolchain during activation and check
 tracking_issue = "chelis#2241"
 
 [[path_rule]]
+prefix = "devenv/cache.nix"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit checks the contributor cache selection and rejects cache or trust overrides through the Devenv composition contracts"
+tracking_issue = "chelis#3924"
+
+[[path_rule]]
 prefix = "nix/checks.nix"
 disposition = "owner"
 workflow = "ci.yml"

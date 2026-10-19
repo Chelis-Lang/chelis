@@ -296,6 +296,11 @@ pinned Rust, Python, C and contributor tools on `x86_64-linux`,
 `aarch64-linux`, and `aarch64-darwin`. It creates `.devenv/state/venv` for Python 3.11 and does not
 replace the root `.venv`.
 
+Devenv is the only supported development shell. The flake provides source
+packages and checks, not `devShells.default`. Thus `nix develop` does not
+supply the contributor toolchain. Use `devenv shell` to keep the pinned
+toolchain, Python environment, and activation tasks in one configuration.
+
 Install Nix using its [official instructions](https://nixos.org/download/):
 the macOS installer uses
 `curl -sSfL https://artifacts.nixos.org/nix-installer | sh -s -- install`,
@@ -319,6 +324,42 @@ From the repository root:
 devenv test
 devenv shell
 ```
+
+The `cachix.pull` setting in `devenv/cache.nix` selects the public
+`https://chelis-lang.cachix.org` cache. Devenv gets its public signing key
+from Cachix:
+
+```text
+chelis-lang.cachix.org-1:F4W65FQ7sunLoF2q6rzkWNTIBd3P/tJ/NFcv12OS9v8=
+```
+
+This is the same cache and key that the flake uses. CI publishes the
+activated shell, its environment, and its profile with their runtime
+closures. A trusted contributor can download these paths during shell
+activation when the cache holds the matching paths for that platform.
+Local configuration or toolchain changes can cause cache misses.
+Checkout-specific scripts can need small local shell derivations.
+
+Devenv adds the cache and key to its Nix process. It does not change
+global user settings. The Nix daemon still applies `trusted-users` and
+`trusted-substituters`. An untrusted user cannot authorize a new cache
+or signing key through this project.
+
+Ask the Nix administrator to authorize the cache and key with the
+[binary cache settings](book/src/install.md#use-the-binary-cache).
+Do not disable `require-sigs` or add users to `trusted-users` to avoid
+this boundary. A cache warning or local build is not proof of substitution.
+
+To check the tools through the documented command, run:
+
+```sh
+devenv shell -- bash -c 'cargo --version && rustc --version && python --version && cc --version && mdbook --version'
+```
+
+The command must report the pinned tools, including Python 3.11. To
+inspect cache transfers during activation, use `devenv --no-tui --verbose shell`.
+Successful transfers name `https://chelis-lang.cachix.org`. Files that
+already exist in the local store need no transfer.
 
 Inside a persistent shell, use `cargo build -p chelis-cli` and
 `chelis-gate --fast`. For one command outside it, use
