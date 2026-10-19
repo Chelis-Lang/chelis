@@ -234,7 +234,12 @@ fn workspace() -> PathBuf {
 fn every_input_of_each_runtime_configuration_is_declared_and_watched() {
     let workspace = workspace();
     let target = workspace.join("target/runtime-declared-inputs");
-    for features in [&[][..], &["--features", "ownership-ledger"][..]] {
+    for features in [
+        &[][..],
+        &["--features", "ownership-ledger"][..],
+        &["--features", "clarabel-provider"][..],
+        &["--features", "ownership-ledger,clarabel-provider"][..],
+    ] {
         let output = Command::new(env!("CARGO"))
             .current_dir(&workspace)
             .env("CARGO_TARGET_DIR", &target)

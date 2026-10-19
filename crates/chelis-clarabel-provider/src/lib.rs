@@ -9,6 +9,24 @@ use clarabel::algebra::CscMatrix;
 use clarabel::solver::{DefaultSettings, DefaultSolver, IPSolver, SolverStatus, SupportedConeT};
 use std::fmt;
 
+/// Reef package owning this provider.
+pub const PACKAGE_NAME: &str = env!("CHELIS_CLARABEL_PACKAGE_NAME");
+/// Exact carried Reef package version.
+pub const PACKAGE_VERSION: &str = env!("CHELIS_CLARABEL_PACKAGE_VERSION");
+/// Versioned provider identity recorded in proof evidence.
+pub const PACKAGE_IDENTITY: &str = concat!(
+    env!("CHELIS_CLARABEL_PACKAGE_NAME"),
+    "/",
+    env!("CHELIS_CLARABEL_PACKAGE_VERSION")
+);
+/// Exact operation admitted by both evaluator and native runtime.
+pub const QP_SOLVE_OPERATION: &str = concat!(
+    env!("CHELIS_CLARABEL_PACKAGE_NAME"),
+    "/",
+    env!("CHELIS_CLARABEL_PACKAGE_VERSION"),
+    "/Clarabel.Qp.solve"
+);
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InputError(String);
 

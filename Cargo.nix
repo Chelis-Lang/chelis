@@ -1992,6 +1992,12 @@ rec {
             optional = true;
           }
         ];
+        buildDependencies = [
+          {
+            name = "toml";
+            packageId = "toml";
+          }
+        ];
         features = {
           "solver" = [ "dep:clarabel" ];
         };

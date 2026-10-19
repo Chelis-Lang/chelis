@@ -13,6 +13,61 @@ fn example() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/clarabel_qp")
 }
 
+fn provider_package() -> (String, String) {
+    let manifest: toml::Value = std::fs::read_to_string(package().join("reef.toml"))
+        .expect("provider manifest")
+        .parse()
+        .expect("valid provider manifest");
+    (
+        manifest["package"]["name"].as_str().unwrap().to_owned(),
+        manifest["package"]["version"].as_str().unwrap().to_owned(),
+    )
+}
+
+// spec/11-ffi.md §4 binds the provider to the dependency package version,
+// even when another version contains byte-identical source.
+#[test]
+fn provider_admits_only_the_manifest_package_version() {
+    let (_, version) = provider_package();
+    for candidate in [version.as_str(), "0.0.0", "999.0.0"] {
+        let directory = tempfile::tempdir().expect("temporary package");
+        std::fs::create_dir(directory.path().join("src")).unwrap();
+        std::fs::create_dir(directory.path().join("tests")).unwrap();
+        let manifest = std::fs::read_to_string(package().join("reef.toml")).unwrap();
+        let changed = manifest.replace(
+            &format!("version = \"{version}\""),
+            &format!("version = \"{candidate}\""),
+        );
+        if candidate != version {
+            assert_ne!(changed, manifest);
+        }
+        std::fs::write(directory.path().join("reef.toml"), changed).unwrap();
+        for file in ["src/qp.ch", "tests/solve.ch"] {
+            std::fs::copy(package().join(file), directory.path().join(file)).unwrap();
+        }
+        let result = Command::cargo_bin("chelis")
+            .expect("chelis binary")
+            .current_dir(directory.path())
+            .args(["eval", "--file", "tests/solve.ch"])
+            .output()
+            .expect("evaluate versioned provider");
+        if candidate == version {
+            assert!(result.status.success(), "{result:?}");
+            assert_eq!(result.stdout, b"empty_values = []\nmain = true\n");
+        } else {
+            assert!(
+                !result.status.success(),
+                "{candidate} must not bind the provider"
+            );
+            assert!(
+                String::from_utf8_lossy(&result.stderr)
+                    .contains("Clarabel native provider unavailable"),
+                "{candidate}: {result:?}"
+            );
+        }
+    }
+}
+
 fn eval(file: &str) -> std::process::Output {
     Command::cargo_bin("chelis")
         .expect("chelis binary")
@@ -305,6 +360,8 @@ fn compiled_c_solves_the_checked_qp() {
     );
     let generated =
         std::fs::read_to_string(directory.path().join("solve.c")).expect("generated C source");
+    let (name, version) = provider_package();
+    assert!(generated.contains(&format!("{name}/{version}/Clarabel.Qp.solve")));
     assert!(generated.contains(&format!(
         "native provider archive sha256: {}",
         receipt["archive_sha256"].as_str().expect("archive digest")
@@ -351,6 +408,18 @@ fn ideal_property_uses_the_registered_solved_call() {
     .expect("JSON property row");
     assert_eq!(row["status"], "passed");
     assert_eq!(row["composite_verdict"], "proven_modulo_asserted_axiom");
+    let (name, version) = provider_package();
+    assert!(
+        row["assumptions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|assumption| {
+                assumption["name"] == "clarabel.qp.ideal_optimality"
+                    && assumption["discharge"]["evidence"]["provider"]
+                        == format!("{name}/{version}")
+            })
+    );
     assert!(
         row["qualifiers"]
             .as_array()

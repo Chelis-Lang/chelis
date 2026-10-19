@@ -13,6 +13,9 @@ solver = ["dep:clarabel"]
 [dependencies]
 clarabel = { version = "=0.11.1", optional = true }
 
+[build-dependencies]
+toml = "0.8"
+
 [[test]]
 name = "solver"
 required-features = ["solver"]

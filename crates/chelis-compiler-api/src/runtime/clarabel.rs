@@ -3,6 +3,9 @@
 
 use super::{RuntimeTensorValue, RuntimeValue, Values};
 use chelis_clarabel_provider::{Cone, DenseMatrix, DenseVector, Problem, Settings, Status, solve};
+use chelis_clarabel_provider::{
+    PACKAGE_IDENTITY, PACKAGE_NAME, PACKAGE_VERSION, QP_SOLVE_OPERATION,
+};
 use chelis_types::types::Prim;
 use sha2::{Digest, Sha256};
 
@@ -17,6 +20,7 @@ const CTOR: &str = "Pkg__chelis__clarabel__Clarabel__Qp__";
 pub struct RegisteredClarabelProvider {
     pub solve_symbol: String,
     pub operation: &'static str,
+    pub package_identity: &'static str,
     pub c_symbol: &'static str,
     pub abi_version: u32,
     pub archive_sha256: String,
@@ -28,8 +32,8 @@ pub fn linked_provider_binding(
     let source_sha256: [u8; 32] = Sha256::digest(PACKAGE_SOURCE).into();
     let Some(solve_symbol) = graph
         .linked_function_with_source_hash(
-            "chelis-clarabel",
-            "0.1.0",
+            PACKAGE_NAME,
+            PACKAGE_VERSION,
             "Clarabel.Qp",
             "solve",
             source_sha256,
@@ -42,7 +46,8 @@ pub fn linked_provider_binding(
         .map_err(|error| format!("Clarabel provider archive unavailable: {error}"))?;
     Ok(Some(RegisteredClarabelProvider {
         solve_symbol,
-        operation: "chelis-clarabel/0.1.0/Clarabel.Qp.solve",
+        operation: QP_SOLVE_OPERATION,
+        package_identity: PACKAGE_IDENTITY,
         c_symbol: "__chelis_native_provider_qp_solve_v1",
         abi_version: 1,
         archive_sha256,

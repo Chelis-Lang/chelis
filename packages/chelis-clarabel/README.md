@@ -30,6 +30,8 @@ non-solved termination status. Invalid cone dimensions fail before the
 solver runs. The optional provider feature is needed for execution. The
 provider call is admitted only for this package's registered version and exact
 `src/qp.ch` source; an edited package runs its own Chelis body instead.
+The compiler derives that version, the native operation identity, and proof
+evidence's provider identity from this package's `reef.toml`.
 
 `examples/clarabel_qp` is a separate Chelis package with a
 path dependency on this package. From that directory, run
