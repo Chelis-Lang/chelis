@@ -390,35 +390,27 @@ pub(crate) fn hex_prefix(data: &[u8], n: usize) -> String {
     out
 }
 
-/// Resolve the directory a named on-disk compiler cache lives in.
+/// Resolve the directory a named on-disk compiler cache lives in, through
+/// the shared resolver [`chelis_reef::cache_dir_for`]:
 ///
-/// - `$CHELIS_REEF_HOME/.cache/<name>/` when `CHELIS_REEF_HOME` is set
-///   and non-empty;
-/// - else `$XDG_CACHE_HOME/chelis/<name>/` when `XDG_CACHE_HOME` is set
-///   and non-empty;
+/// - `$CHELIS_REEF_HOME/.cache/<name>/`;
+/// - else `$CHELIS_HOME/reef/.cache/<name>/`;
+/// - else `$XDG_CACHE_HOME/chelis/<name>/`;
 /// - else `$HOME/.cache/chelis/<name>/`.
 ///
-/// The XDG fallback is mandatory: `cargo nextest` test workers do not set
-/// `CHELIS_REEF_HOME`, and they are exactly the workload these caches
-/// optimize. Returns `None` only when none of the three roots can be
-/// resolved (no `CHELIS_REEF_HOME`, no `XDG_CACHE_HOME`, no `HOME`), in
-/// which case the caller falls through to an uncached build.
+/// Each variable counts as unset when it is empty. The XDG fallback is
+/// mandatory: `cargo nextest` test workers do not set `CHELIS_REEF_HOME`,
+/// and they are exactly the workload these caches optimize. Returns `None`
+/// only when none of the four roots can be resolved, in which case the
+/// caller falls through to an uncached build.
 ///
 /// Both the chelis-std typecheck cache ([`typecheck_cache_dir`]) and the
 /// whole-package `CompiledContext` cache (`context.rs`) resolve through
-/// this one helper so the XDG fallback applies uniformly.
+/// this one helper, and the Reef prepared-graph cache uses the same
+/// resolver, so every cache follows one order.
 pub fn cache_dir_for(name: &str) -> Option<PathBuf> {
     let _fp_env = chelis_runtime::FpEnvGuard::enter();
-    if let Some(reef_home) = non_empty_env("CHELIS_REEF_HOME") {
-        return Some(PathBuf::from(reef_home).join(".cache").join(name));
-    }
-    if let Some(xdg) = non_empty_env("XDG_CACHE_HOME") {
-        return Some(PathBuf::from(xdg).join("chelis").join(name));
-    }
-    if let Some(home) = non_empty_env("HOME") {
-        return Some(PathBuf::from(home).join(".cache").join("chelis").join(name));
-    }
-    None
+    chelis_reef::cache_dir_for(name)
 }
 
 /// Resolve the directory the chelis-std typecheck cache lives in. See
@@ -426,13 +418,6 @@ pub fn cache_dir_for(name: &str) -> Option<PathBuf> {
 pub fn typecheck_cache_dir() -> Option<PathBuf> {
     let _fp_env = chelis_runtime::FpEnvGuard::enter();
     cache_dir_for("typecheck")
-}
-
-fn non_empty_env(name: &str) -> Option<String> {
-    match std::env::var(name) {
-        Ok(value) if !value.is_empty() => Some(value),
-        _ => None,
-    }
 }
 
 /// The on-disk path for a chelis-std typecheck cache entry.
@@ -537,7 +522,8 @@ pub fn load_or_build_stdlib_context(
     let key = stdlib_cache_key(build_decls, stdlib_source_digest);
     let Some(cache_dir) = typecheck_cache_dir() else {
         // No resolvable cache root at all — build uncached. Rare:
-        // requires CHELIS_REEF_HOME, XDG_CACHE_HOME and HOME all unset.
+        // requires CHELIS_REEF_HOME, CHELIS_HOME, XDG_CACHE_HOME and HOME
+        // all unset or empty.
         return build_stdlib_context(build_decls);
     };
     let cache_path = stdlib_cache_path(&cache_dir, key);
@@ -931,25 +917,6 @@ mod tests {
             .expect_err("the cache parser must reject a changed lowered payload");
 
         assert!(error.to_string().contains("lowered library payload"));
-    }
-
-    #[test]
-    fn cache_dir_prefers_reef_home_then_xdg_then_home() {
-        // This test only checks the resolution PRECEDENCE logic via the
-        // pure path math; it does not mutate process env (that would
-        // race other tests). The precedence is asserted structurally:
-        // a CHELIS_REEF_HOME root ends in .cache/typecheck; an XDG root
-        // ends in chelis/typecheck; a HOME root ends in
-        // .cache/chelis/typecheck.
-        let reef = PathBuf::from("/reef").join(".cache").join("typecheck");
-        assert!(reef.ends_with("typecheck"));
-        let xdg = PathBuf::from("/xdg").join("chelis").join("typecheck");
-        assert!(xdg.ends_with(PathBuf::from("chelis").join("typecheck")));
-        let home = PathBuf::from("/home/u")
-            .join(".cache")
-            .join("chelis")
-            .join("typecheck");
-        assert!(home.ends_with(PathBuf::from("chelis").join("typecheck")));
     }
 
     #[test]

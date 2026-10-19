@@ -2424,10 +2424,11 @@ enum EvalInContextError {
 }
 
 /// Build a `CompiledContext` for `package_root`, then evaluate `source`
-/// against it. `reef_home` is sourced from the `CHELIS_REEF_HOME` env var
-/// if present (matching how `chelis test` plumbs it to workers); Phase K
-/// uses it to key the disk cache so a warm `chelis eval --file` re-run
-/// against unchanged sources skips the ~67s library compile entirely.
+/// against it. The empty `reef_home` makes the disk cache resolve its
+/// directory through the shared resolver (`chelis_reef::cache_dir_for`),
+/// as `chelis test` does. Phase K keys that cache so a warm
+/// `chelis eval --file` re-run against unchanged sources skips the ~67s
+/// library compile entirely.
 fn prepare_eval_in_context(
     package_root: &Path,
     file: &Path,
@@ -2435,9 +2436,7 @@ fn prepare_eval_in_context(
     json: bool,
     target: chelis_types::types::Target,
 ) -> Result<eval_output::EvalOutput, EvalInContextError> {
-    let reef_home = env::var_os("CHELIS_REEF_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(""));
+    let reef_home = PathBuf::new();
     // chelis#2558: the context links only the chelis-std modules the package
     // and this source import, so the source's imports are collected first.
     // `detect_eval_package_root` routed here only because the source parsed.
@@ -7977,14 +7976,14 @@ fn cmd_test(
     //
     // Phase K: route through `load_or_compile_for_package` so an
     // unchanged-source re-run (typical CI / dev-loop iteration on
-    // tests) skips the ~67s library compile entirely. When
-    // CHELIS_REEF_HOME is unset the helper falls through to a direct
-    // context compile. This parent context build is intentionally
+    // tests) skips the ~67s library compile entirely. The empty
+    // `reef_home_path` makes the helper resolve the cache directory
+    // through the shared resolver (`chelis_reef::cache_dir_for`). When no
+    // root resolves, the helper falls through to a direct context
+    // compile. This parent context build is intentionally
     // fail-fast: a shared dependency compile error is one real runner
     // error, not N repeated per-worker fallbacks.
-    let reef_home_path = env::var("CHELIS_REEF_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_default();
+    let reef_home_path = PathBuf::new();
     // chelis#2558: the context links only the chelis-std modules the package
     // and the discovered test files import, and every worker runs its files
     // against this one context.

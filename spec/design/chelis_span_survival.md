@@ -422,8 +422,8 @@ carrier cannot expose node-keyed facts.
 
 Caches are handled by three rules rather than by a provenance digest scheme.
 The affected artifacts live in the invoking user's own cache directory
-(`stdlib_cache::cache_dir_for` resolves `CHELIS_REEF_HOME`, `XDG_CACHE_HOME`,
-then `$HOME/.cache/chelis`), which is not a trust boundary: whoever can rewrite
+(`stdlib_cache::cache_dir_for` resolves `CHELIS_REEF_HOME`, `CHELIS_HOME`,
+`XDG_CACHE_HOME`, then `$HOME/.cache/chelis`), which is not a trust boundary: whoever can rewrite
 a cache there can rewrite the installed toolchain beside it. The rules
 therefore defend against staleness and cross-unit aliasing, which is the
 defect, not against a local attacker who can already replace the compiler.
