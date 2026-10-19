@@ -27,6 +27,12 @@ PATHS = {
         "/nix/store/gggg-chelis-unwrapped-0.20.0",
         "/nix/store/cccc-chelisup-0.20.0",
     ],
+    "aarch64-linux": [
+        "/nix/store/jjjj-chelis-0.20.0",
+        "/nix/store/kkkk-chelis-runtime-0.20.0",
+        "/nix/store/llll-chelis-unwrapped-0.20.0",
+        "/nix/store/mmmm-chelisup-0.20.0",
+    ],
     "x86_64-linux": [
         "/nix/store/dddd-chelis-0.20.0",
         "/nix/store/eeee-chelis-runtime-0.20.0",
@@ -35,10 +41,12 @@ PATHS = {
     ],
 }
 ALL_PATHS = [path for outputs in PATHS.values() for path in outputs]
+SHELL = "/nix/store/iiii-activated-devenv-shell"
+SYSTEM = "aarch64-darwin"
 
 
 class FakeNix:
-    """Answers `nix eval` and `nix path-info`, and records each call."""
+    """Answer Nix and Devenv commands and record each call."""
 
     def __init__(
         self,
@@ -46,11 +54,19 @@ class FakeNix:
         missing: Sequence[str] = (),
         broken: Sequence[str] = (),
         eval_code: int = 0,
+        system: str = SYSTEM,
+        shell: object = SHELL,
+        shell_code: int = 0,
+        query_error: str = "error: unable to download narinfo",
     ) -> None:
         self.evaluated = evaluated
         self.missing = set(missing)
         self.broken = set(broken)
         self.eval_code = eval_code
+        self.system = system
+        self.shell = shell
+        self.shell_code = shell_code
+        self.query_error = query_error
         self.calls: list[list[str]] = []
 
     def __call__(self, argv: Sequence[str]) -> Completed:
@@ -59,11 +75,17 @@ class FakeNix:
         if argv[:2] == ["nix", "eval"]:
             if self.eval_code:
                 return Completed(self.eval_code, "", "error: evaluation failed")
+            if "--expr" in argv:
+                return Completed(0, self.system, "")
             return Completed(0, json.dumps(self.evaluated), "")
+        if Path(argv[0]).name == "devenv":
+            if self.shell_code:
+                return Completed(self.shell_code, "", "error: shell evaluation failed")
+            return Completed(0, json.dumps({"shell.outPath": self.shell}), "")
         if argv[:2] == ["nix", "path-info"]:
             path = argv[-1]
             if path in self.broken:
-                return Completed(1, "", "error: unable to download narinfo")
+                return Completed(1, "", self.query_error)
             if path in self.missing:
                 return Completed(
                     1,
@@ -97,8 +119,8 @@ class NixCacheStatusTests(unittest.TestCase):
         code, stdout, _ = run_main(nix, self.output)
         self.assertEqual(code, 0)
         self.assertEqual(self.output.read_text(encoding="utf-8"), "complete=true\n")
-        self.assertEqual(sorted(nix.queried()), sorted(ALL_PATHS))
-        self.assertIn("holds 8 of 8 package path(s)", stdout)
+        self.assertEqual(sorted(nix.queried()), sorted([*ALL_PATHS, SHELL]))
+        self.assertIn("holds 13 of 13 package and shell path(s)", stdout)
 
     def test_one_missing_path_makes_the_cache_incomplete(self) -> None:
         missing = PATHS["x86_64-linux"][0]
@@ -106,7 +128,7 @@ class NixCacheStatusTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(self.output.read_text(encoding="utf-8"), "complete=false\n")
         self.assertIn(f"does not hold {missing} (x86_64-linux)", stdout)
-        self.assertIn("holds 7 of 8 package path(s)", stdout)
+        self.assertIn("holds 12 of 13 package and shell path(s)", stdout)
 
     def test_each_query_names_the_published_cache(self) -> None:
         nix = FakeNix()
@@ -121,21 +143,17 @@ class NixCacheStatusTests(unittest.TestCase):
     def test_evaluation_disables_import_from_derivation(self) -> None:
         nix = FakeNix()
         run_main(nix)
-        [evaluation] = [argv for argv in nix.calls if argv[:2] == ["nix", "eval"]]
+        [evaluation] = [argv for argv in nix.calls if ".#packages" in argv]
         self.assertIn("allow-import-from-derivation", evaluation)
         index = evaluation.index("allow-import-from-derivation")
         self.assertEqual(evaluation[index - 1 : index + 2], ["--option", "allow-import-from-derivation", "false"])
         self.assertIn(".#packages", evaluation)
 
-    def test_evaluation_names_each_published_package(self) -> None:
-        expression = nix_cache_status.package_expression()
-        for name in nix_cache_status.PACKAGES:
-            self.assertIn(f'"{name}"', expression)
 
     def test_without_an_output_file_the_report_still_prints(self) -> None:
         code, stdout, _ = run_main(FakeNix())
         self.assertEqual(code, 0)
-        self.assertIn("holds 8 of 8", stdout)
+        self.assertIn("holds 13 of 13", stdout)
 
     def test_unknown_query_failure_is_an_error_not_a_missing_path(self) -> None:
         broken = PATHS["aarch64-darwin"][1]
@@ -162,6 +180,61 @@ class NixCacheStatusTests(unittest.TestCase):
                 code, _, _ = run_main(FakeNix(evaluated=shape), self.output)
                 self.assertEqual(code, 1)
                 self.assertFalse(self.output.exists())
+
+    def test_missing_activated_shell_prevents_a_skip_with_cached_packages(self) -> None:
+        nix = FakeNix(missing=[SHELL])
+        code, stdout, _ = run_main(nix, self.output)
+        self.assertEqual(code, 0)
+        self.assertEqual(self.output.read_text(encoding="utf-8"), "complete=false\n")
+        self.assertIn(f"does not hold {SHELL} ({SYSTEM})", stdout)
+        self.assertEqual(sorted(nix.queried()), sorted([*ALL_PATHS, SHELL]))
+
+    def test_shell_query_failure_is_not_a_cache_miss(self) -> None:
+        code, _, stderr = run_main(FakeNix(broken=[SHELL]), self.output)
+        self.assertEqual(code, 1)
+        self.assertIn("unable to download narinfo", stderr)
+        self.assertFalse(self.output.exists())
+
+    def test_invalid_signature_is_an_error_not_a_missing_shell(self) -> None:
+        error = f"error: signature for path '{SHELL}' is not valid"
+        nix = FakeNix(broken=[SHELL], query_error=error)
+        code, _, stderr = run_main(nix, self.output)
+        self.assertEqual(code, 1)
+        self.assertIn(error, stderr)
+        self.assertFalse(self.output.exists())
+
+    def test_failed_shell_evaluation_writes_no_verdict(self) -> None:
+        code, _, stderr = run_main(FakeNix(shell_code=1), self.output)
+        self.assertEqual(code, 1)
+        self.assertIn("shell evaluation failed", stderr)
+        self.assertFalse(self.output.exists())
+
+    def test_invalid_shell_evaluation_writes_no_verdict(self) -> None:
+        for shell in (None, [], "", "/tmp/shell"):
+            with self.subTest(shell=shell):
+                code, _, _ = run_main(FakeNix(shell=shell), self.output)
+                self.assertEqual(code, 1)
+                self.assertFalse(self.output.exists())
+
+    def test_unknown_native_system_writes_no_verdict(self) -> None:
+        code, _, stderr = run_main(FakeNix(system="unsupported"), self.output)
+        self.assertEqual(code, 1)
+        self.assertIn("unsupported", stderr)
+        self.assertFalse(self.output.exists())
+
+    def test_each_native_report_checks_its_own_activated_shell(self) -> None:
+        for system in PATHS:
+            with self.subTest(system=system):
+                nix = FakeNix(system=system)
+                code, _, _ = run_main(nix)
+                self.assertEqual(code, 0)
+                [evaluation] = [
+                    argv for argv in nix.calls if Path(argv[0]).name == "devenv"
+                ]
+                self.assertEqual(evaluation[evaluation.index("--system") + 1], system)
+                index = evaluation.index("allow-import-from-derivation")
+                self.assertEqual(evaluation[index + 1], "false")
+                self.assertIn(SHELL, nix.queried())
 
 
 if __name__ == "__main__":

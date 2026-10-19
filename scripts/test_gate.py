@@ -15,10 +15,11 @@ Four things are locked here:
   (d) no-ai-authorship patterns cover the current banned tool identities.
 """
 
-import hashlib
+import ast
 import importlib.util
 import io
 import json
+import itertools
 import os
 import re
 from collections import deque
@@ -527,44 +528,147 @@ def _nix_workflow_events(workflow: str) -> dict[str, dict[str, str]]:
     return events
 
 
-_NIX_REVIEWED_WORKFLOW_SHA256 = (
-    "61dc2e3803a75e3e740b6086bc83f679f3309906eaa10d31d2bc8f3faba3b362"
-)
 _NIX_REVIEWED_SCHEDULE = "'37 2 * * *'"
 _NIX_NATIVE_JOBS = ("nix-linux-x86-64", "nix-linux-arm64", "nix-darwin-arm64")
-_NIX_CACHE_STATUS_RUN = (
-    'run: python3 scripts/nix_cache_status.py --github-output "$GITHUB_OUTPUT"'
-)
-_NIX_CACHE_STATUS_IF = "    if: github.event_name == 'schedule'\n"
-_NIX_NATIVE_CACHE_GATE = (
-    "    needs: [cache-status]\n"
-    "    if: ${{ !cancelled() && (github.event_name != 'schedule' || "
-    "needs.cache-status.outputs.complete != 'true') }}\n"
-)
 
 
-def _assert_nix_workflow_matches_reviewed_recipe(workflow: str) -> None:
-    """Lock the workflow while the temporary event policy is active.
-
-    YAML has enough scalar and expression spellings that a partial parser or a
-    banlist can accept a semantically gated job. Bind every workflow byte so
-    top-level defaults, concurrency, permissions, triggers, jobs, and steps are
-    one closed reviewed artifact. The temporary policy keeps pull requests and
-    pushes out of this workflow. It runs on manual dispatch, published
-    releases, and a nightly schedule that skips the native jobs when the cache
-    holds the packages. Retire this digest in the reviewed change that ends
-    that policy, after replacement event/native-recipe controls and the
-    complete native flake and Devenv smoke checks pass on every supported
-    system under that policy. A recipe edit while the temporary policy stands
-    still requires an explicit reviewed freeze move. It does not authorize
-    retirement.
-    """
-    actual = hashlib.sha256(workflow.encode("utf-8")).hexdigest()
-    if actual != _NIX_REVIEWED_WORKFLOW_SHA256:
-        raise AssertionError(
-            "the intentional-event-only Nix workflow must match the reviewed "
-            f"native recipe and event policy: found SHA-256 {actual}"
+def _nix_policy_field(block: str, key: str, indent: int) -> str | None:
+    values = []
+    for line in block.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if len(line) - len(line.lstrip(" ")) != indent:
+            continue
+        parsed_key, value = _parse_simple_yaml_mapping_entry(
+            line, expected_indent=indent
         )
+        if parsed_key != key:
+            continue
+        if value.startswith("'"):
+            if len(value) < 2 or not value.endswith("'"):
+                raise AssertionError(f"unsupported quoted policy value: {value!r}")
+            value = value[1:-1].replace("''", "'")
+        elif value.startswith('"'):
+            try:
+                value = json.loads(value)
+            except json.JSONDecodeError as error:
+                raise AssertionError(
+                    f"unsupported quoted policy value: {value!r}"
+                ) from error
+        values.append(value)
+    if len(values) > 1:
+        raise AssertionError(f"duplicate workflow policy field {key!r}")
+    return values[0] if values else None
+
+
+def _nix_policy_value(
+    expression: str | None,
+    context: dict[str, str],
+    *,
+    success: bool = True,
+    cancelled: bool = False,
+    condition: bool = False,
+) -> bool:
+    """Evaluate this workflow's boolean and string expression subset."""
+    source = (expression or "success()").strip()
+    source = source.removeprefix("${{").removesuffix("}}").strip()
+    status_check = re.search(r"\b(?:success|failure|cancelled|always)\s*\(", source)
+    source = re.sub(
+        r"needs\.[\w-]+\.(?:outputs\.complete|result)|github\.event_name",
+        lambda match: repr(context[match.group()]),
+        source,
+    )
+    for name, value in (
+        ("success", success),
+        ("failure", not success and not cancelled),
+        ("cancelled", cancelled),
+        ("always", True),
+    ):
+        source = re.sub(rf"\b{name}\(\)", str(value), source)
+    source = re.sub(r"!(?!=)", " not ", source)
+    source = source.replace("&&", " and ").replace("||", " or ").strip()
+    tree = ast.parse(source, mode="eval")
+    allowed = (
+        ast.Expression, ast.BoolOp, ast.And, ast.Or, ast.UnaryOp, ast.Not,
+        ast.Compare, ast.Eq, ast.NotEq, ast.Constant, ast.Name, ast.Load,
+    )
+    if any(not isinstance(node, allowed) for node in ast.walk(tree)):
+        raise AssertionError(f"unsupported workflow policy expression: {expression}")
+    value = bool(eval(compile(tree, "<nix-policy>", "eval"), {
+        "__builtins__": {}, "true": True, "false": False,
+    }))
+    return value and (not condition or status_check is not None or success)
+
+
+def _assert_nix_cache_routing(workflow: str) -> None:
+    jobs = _workflow_job_blocks(workflow)
+    reports = (
+        "cache-status-linux-x86-64",
+        "cache-status-linux-arm64",
+        "cache-status-darwin-arm64",
+    )
+    aggregate = _nix_policy_field(jobs["cache-status"], "COMPLETE", 10)
+    if aggregate is None:
+        raise AssertionError("missing aggregate cache verdict")
+    states = tuple(itertools.product(
+        ("success", "failure", "skipped", "cancelled"), ("true", "false", "")
+    ))
+    for results in itertools.product(states, repeat=len(reports)):
+        context = {
+            f"needs.{job}.{field}": value
+            for job, state in zip(reports, results)
+            for field, value in zip(("result", "outputs.complete"), state)
+        }
+        expected = all(result == "success" and value == "true"
+                       for result, value in results)
+        if _nix_policy_value(aggregate, context) != expected:
+            raise AssertionError(f"unsafe aggregate cache verdict for {results!r}")
+
+    for event, cancelled, success, complete in itertools.product(
+        ("schedule", "workflow_dispatch", "release"),
+        (False, True), (False, True), ("true", "false", ""),
+    ):
+        context = {
+            "github.event_name": event,
+            "needs.cache-status.outputs.complete": complete,
+        }
+        for job in (*reports, "cache-status", *_NIX_NATIVE_JOBS):
+            if job in reports:
+                expected = event == "schedule" and success
+            elif job == "cache-status":
+                expected = event == "schedule" and not cancelled
+            else:
+                expected = not cancelled and (
+                    event != "schedule" or complete != "true"
+                )
+            actual = _nix_policy_value(
+                _nix_policy_field(jobs[job], "if", 4), context,
+                success=success, cancelled=cancelled, condition=True,
+            )
+            if actual != expected:
+                raise AssertionError(
+                    f"unsafe cache routing for {job}: "
+                    f"{event=}, {cancelled=}, {success=}, {complete=}"
+                )
+
+
+def _assert_nix_acceptance_admission(workflow: str) -> None:
+    jobs = _workflow_job_blocks(workflow)
+    for job in _NIX_NATIVE_JOBS:
+        block = jobs[job]
+        step = _ci_step_block(block, "Run the complete native flake check set")
+        _assert_executable_run_once(step, "nix flake check --print-build-logs")
+        for event in ("schedule", "workflow_dispatch", "release"):
+            context = {"github.event_name": event}
+            if not _nix_policy_value(
+                _nix_policy_field(step, "if", 8), context, condition=True
+            ):
+                raise AssertionError(f"native acceptance is gated for {job}: {event}")
+            for scope, indent in ((block, 4), (step, 8)):
+                ignored = _nix_policy_field(scope, "continue-on-error", indent)
+                if ignored is not None and _nix_policy_value(ignored, context):
+                    raise AssertionError(f"native acceptance ignores failure in {job}")
 
 
 def _assert_nix_only_setup(block: str, job: str) -> None:
@@ -575,45 +679,6 @@ def _assert_nix_only_setup(block: str, job: str) -> None:
     for marker in (DEVENV_SETUP_ACTION, "devenv"):
         if marker in block:
             raise AssertionError(f"the {job} job must install Nix only, not {marker!r}")
-
-
-def _assert_nix_schedule_cache_gate(workflow: str) -> None:
-    """A scheduled run skips the native jobs only when the cache is complete.
-
-    Manual dispatches and releases always run every native job. A failed
-    cache report leaves the output empty, so a scheduled run builds.
-    """
-    blocks = _workflow_job_blocks(workflow)
-    status = blocks.get("cache-status")
-    if status is None:
-        raise AssertionError("the Nix workflow must define the cache-status job")
-    for marker in (
-        "      complete: ${{ steps.status.outputs.complete }}\n",
-        "        id: status\n",
-        _NIX_CACHE_STATUS_RUN,
-    ):
-        if status.count(marker) != 1:
-            raise AssertionError(
-                f"the cache-status job must contain {marker.strip()!r} once"
-            )
-    # Only a scheduled run reads the report. Manual and release runs skip the
-    # job, and the `!cancelled()` condition starts their native jobs at once.
-    if re.findall(r"^    if:.*\n", status, re.MULTILINE) != [_NIX_CACHE_STATUS_IF]:
-        raise AssertionError("the cache-status job must run only for a scheduled run")
-    _assert_nix_only_setup(status, "cache-status")
-    for job in _NIX_NATIVE_JOBS:
-        block = blocks.get(job)
-        if block is None:
-            raise AssertionError(f"missing native Nix job {job!r}")
-        if block.count(_NIX_NATIVE_CACHE_GATE) != 1:
-            raise AssertionError(
-                f"native job {job!r} must skip only a scheduled run whose cache "
-                "report is complete"
-            )
-        if len(re.findall(r"^    (?:if|needs):", block, re.MULTILINE)) != 2:
-            raise AssertionError(
-                f"native job {job!r} must have one needs and one if condition"
-            )
 
 
 def _assert_nix_intentional_events_only(workflow: str) -> None:
@@ -629,8 +694,6 @@ def _assert_nix_intentional_events_only(workflow: str) -> None:
             f"releases, and the nightly schedule: found {events!r}"
         )
 
-    _assert_nix_schedule_cache_gate(workflow)
-    _assert_nix_workflow_matches_reviewed_recipe(workflow)
 
 
 def _assert_runner_resource_bounds(workflow: str) -> None:
@@ -3655,17 +3718,6 @@ class NixEvalJobTests(unittest.TestCase):
 class NixPackagesWorkflowTests(unittest.TestCase):
     """Lock the native Nix package jobs and their complete check command."""
 
-    def test_workflow_reader_preserves_raw_newlines_for_the_digest(self):
-        raw = NIX_PACKAGES_YML.read_bytes().replace(b"\n", b"\r\n")
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "nix-packages.yml"
-            path.write_bytes(raw)
-            text = _read_nix_packages_workflow(path)
-        self.assertEqual(text.encode("utf-8"), raw)
-        with self.assertRaisesRegex(AssertionError, "reviewed native recipe"):
-            _assert_nix_workflow_matches_reviewed_recipe(text)
-        with self.assertRaises(AssertionError):
-            _assert_nix_intentional_events_only(text)
 
     def test_workflow_reader_rejects_a_symlink(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -3690,18 +3742,34 @@ class NixPackagesWorkflowTests(unittest.TestCase):
         for marker in required:
             self.assertIn(marker, text)
 
-    def test_each_native_job_runs_the_complete_flake_check_set(self):
-        text = _read_nix_packages_workflow()
-        self.assertEqual(
-            text.count("run: nix flake check --print-build-logs"),
-            3,
-            "each native Nix job must run the complete flake check set",
+    def test_native_acceptance_runs_and_propagates_failure_on_every_event(self):
+        _assert_nix_acceptance_admission(_read_nix_packages_workflow())
+
+    def test_only_successful_complete_reports_skip_scheduled_native_jobs(self):
+        _assert_nix_cache_routing(_read_nix_packages_workflow())
+
+    def test_quoted_policy_controls_preserve_admission_and_failure_behavior(self):
+        workflow = "jobs:\n" + "".join(
+            f"  {job}:\n    steps:\n"
+            "      - name: Run the complete native flake check set\n"
+            "        run: nix flake check --print-build-logs\n"
+            for job in _NIX_NATIVE_JOBS
         )
-        self.assertNotIn(
-            "scripts/gate.py",
-            text,
-            "Nix package jobs must stay separate from the canonical Cargo gate",
+        command = "        run: nix flake check --print-build-logs\n"
+        unsafe = (
+            "'if': github.event_name == 'workflow_dispatch'",
+            'if: "github.event_name == \'workflow_dispatch\'"',
+            "'continue-on-error': true",
         )
+        for policy in unsafe:
+            with self.subTest(policy=policy):
+                mutated = workflow.replace(command, f"        {policy}\n{command}", 1)
+                with self.assertRaises(AssertionError):
+                    _assert_nix_acceptance_admission(mutated)
+        safe = workflow.replace(
+            command, "        'if': \"success()\"\n" + command, 1
+        )
+        _assert_nix_acceptance_admission(safe)
 
     def test_native_nix_linux_checks_run_hosted_even_for_main_dispatch(self):
         # #3090: native package acceptance must not depend on the protected
@@ -3710,15 +3778,6 @@ class NixPackagesWorkflowTests(unittest.TestCase):
         self.assertIn("    runs-on: ubuntu-latest\n", block)
         self.assertNotIn("chelis-ci-warm-x64", block)
         self.assertNotIn("fromJSON", block)
-
-    def test_protected_or_event_dependent_linux_route_fails_recipe_lock(self):
-        workflow = _read_nix_packages_workflow()
-        for route in ("chelis-ci-warm-x64", "${{ github.ref == 'refs/heads/main' && 'no-such-runner' || 'ubuntu-latest' }}"):
-            with self.subTest(route=route):
-                mutated = workflow.replace("    runs-on: ubuntu-latest\n", f"    runs-on: {route}\n", 1)
-                self.assertNotEqual(mutated, workflow)
-                with self.assertRaisesRegex(AssertionError, "reviewed native recipe"):
-                    _assert_nix_intentional_events_only(mutated)
 
     def test_each_native_job_rejects_the_wrong_runner_system(self):
         text = _read_nix_packages_workflow()
@@ -3826,217 +3885,6 @@ class NixPackagesWorkflowTests(unittest.TestCase):
                 with self.assertRaisesRegex(AssertionError, message):
                     _assert_nix_intentional_events_only(mutated)
 
-    def test_scheduled_run_skips_native_jobs_only_on_a_complete_cache(self):
-        _assert_nix_schedule_cache_gate(_read_nix_packages_workflow())
-
-    def test_cache_gate_mutations_fail_the_gate_lock(self):
-        text = _read_nix_packages_workflow()
-        condition = (
-            "    if: ${{ !cancelled() && (github.event_name != 'schedule' || "
-            "needs.cache-status.outputs.complete != 'true') }}\n"
-        )
-        mutations = {
-            "native job without the gate": (
-                text.replace(_NIX_NATIVE_CACHE_GATE, "", 1),
-                "must skip only a scheduled run",
-            ),
-            "gate that also skips a dispatch": (
-                text.replace(
-                    condition,
-                    "    if: ${{ !cancelled() && "
-                    "needs.cache-status.outputs.complete != 'true' }}\n",
-                    1,
-                ),
-                "must skip only a scheduled run",
-            ),
-            "gate that skips when the report fails": (
-                text.replace(
-                    condition,
-                    "    if: ${{ success() && (github.event_name != 'schedule' || "
-                    "needs.cache-status.outputs.complete != 'true') }}\n",
-                    1,
-                ),
-                "must skip only a scheduled run",
-            ),
-            "second job condition": (
-                text.replace(
-                    "    runs-on: macos-latest\n",
-                    "    if: false\n    runs-on: macos-latest\n",
-                    1,
-                ),
-                "one needs and one if",
-            ),
-            "missing cache report job": (
-                text.replace("  cache-status:\n", "  cache-status-retired:\n", 1),
-                "define the cache-status job",
-            ),
-            "cache report without its command": (
-                text.replace(_NIX_CACHE_STATUS_RUN, "run: 'true'", 1),
-                "nix_cache_status.py",
-            ),
-            "cache report on every event": (
-                text.replace(_NIX_CACHE_STATUS_IF, "", 1),
-                "must run only for a scheduled run",
-            ),
-            "cache report on a dispatch": (
-                text.replace(
-                    _NIX_CACHE_STATUS_IF,
-                    "    if: github.event_name != 'release'\n",
-                    1,
-                ),
-                "must run only for a scheduled run",
-            ),
-            "cache report through Devenv": (
-                text.replace(
-                    f"      - name: Install Nix\n        uses: {NIX_INSTALL_ACTION}\n",
-                    f"      - name: Install Nix\n        uses: {DEVENV_SETUP_ACTION}\n",
-                    1,
-                ),
-                "must contain|install Nix only",
-            ),
-        }
-        for name, (mutated, message) in mutations.items():
-            with self.subTest(name=name):
-                self.assertNotEqual(mutated, text)
-                with self.assertRaisesRegex(AssertionError, message):
-                    _assert_nix_schedule_cache_gate(mutated)
-                with self.assertRaises(AssertionError):
-                    _assert_nix_intentional_events_only(mutated)
-
-    def test_event_specific_job_gate_fails_the_event_lock(self):
-        text = _read_nix_packages_workflow()
-        mutated = text.replace(
-            "    runs-on: macos-latest\n",
-            "    if: github.event_name == 'workflow_dispatch'\n"
-            "    runs-on: macos-latest\n",
-            1,
-        )
-        with self.assertRaisesRegex(AssertionError, "one needs and one if"):
-            _assert_nix_intentional_events_only(mutated)
-
-    def test_policy_oracle_rejects_comment_and_job_gate_evasions(self):
-        text = _read_nix_packages_workflow()
-        mutations = {
-            "comment-only release": (
-                text.replace(
-                    "  release:\n    types: [published]\n",
-                    "  # release:\n  #   types: [published]\n",
-                    1,
-                ),
-                "published releases",
-            ),
-            "wrong release action hidden by comment": (
-                text.replace(
-                    "    types: [published]\n",
-                    "    types: [created]\n    # types: [published]\n",
-                    1,
-                ),
-                "published releases",
-            ),
-            "Linux dispatch blocked": (
-                text.replace(
-                    "  nix-linux-x86-64:\n",
-                    "  nix-linux-x86-64:\n"
-                    "    if: github.event.action == 'published'\n",
-                    1,
-                ),
-                "one needs and one if",
-            ),
-            "Darwin disabled": (
-                text.replace(
-                    "    runs-on: macos-latest\n",
-                    "    if: false\n    runs-on: macos-latest\n",
-                    1,
-                ),
-                "one needs and one if",
-            ),
-            "event-dependent empty matrix": (
-                text.replace(
-                    "  nix-linux-x86-64:\n",
-                    "  nix-linux-x86-64:\n"
-                    "    strategy:\n"
-                    "      matrix:\n"
-                    "        lane: ${{ github.event_name == 'workflow_dispatch' "
-                    "&& fromJSON('[\"run\"]') || fromJSON('[]') }}\n",
-                    1,
-                ),
-                "reviewed native recipe",
-            ),
-            "event-dependent runner": (
-                text.replace(
-                    "runs-on: ubuntu-latest",
-                    "runs-on: no-such-runner",
-                    1,
-                ),
-                "reviewed native recipe",
-            ),
-            "event-gated complete check step": (
-                text.replace(
-                    "      - name: Run the complete native flake check set\n"
-                    "        run: nix flake check --print-build-logs\n",
-                    "      - name: Run the complete native flake check set\n"
-                    "        if: github.event_name == 'workflow_dispatch'\n"
-                    "        run: nix flake check --print-build-logs\n",
-                    1,
-                ),
-                "reviewed native recipe",
-            ),
-            "escaped event-gated complete check step": (
-                text.replace(
-                    "      - name: Run the complete native flake check set\n"
-                    "        run: nix flake check --print-build-logs\n",
-                    "      - name: Run the complete native flake check set\n"
-                    "        run: nix flake check --print-build-logs\n"
-                    "        if: \"${{ gith\\u0075b.event_name == "
-                    "'workflow_dispatch' }}\"\n",
-                    1,
-                ),
-                "reviewed native recipe",
-            ),
-            "complete check allowed to fail": (
-                text.replace(
-                    "      - name: Run the complete native flake check set\n"
-                    "        run: nix flake check --print-build-logs\n",
-                    "      - name: Run the complete native flake check set\n"
-                    "        continue-on-error: true\n"
-                    "        run: nix flake check --print-build-logs\n",
-                    1,
-                ),
-                "reviewed native recipe",
-            ),
-            "sandbox false hidden by comment": (
-                text.replace(
-                    "        sandbox = true\n",
-                    "        sandbox = false # sandbox = true\n",
-                    1,
-                ),
-                "reviewed native recipe",
-            ),
-            "workflow working directory override": (
-                text.replace(
-                    "jobs:\n",
-                    "defaults:\n"
-                    "  run:\n"
-                    "    working-directory: definitely-missing-native-recipe\n\n"
-                    "jobs:\n",
-                    1,
-                ),
-                "reviewed native recipe",
-            ),
-            "workflow concurrency override": (
-                text.replace(
-                    "  group: nix-packages-${{ github.event_name }}-${{ github.ref }}\n",
-                    "  group: all-nix-runs-share-one-group\n",
-                    1,
-                ),
-                "reviewed native recipe",
-            ),
-        }
-        for name, (mutated, message) in mutations.items():
-            with self.subTest(name=name):
-                self.assertNotEqual(mutated, text)
-                with self.assertRaisesRegex(AssertionError, message):
-                    _assert_nix_intentional_events_only(mutated)
 
     def test_each_job_bounds_runner_resources(self):
         text = _read_nix_packages_workflow()

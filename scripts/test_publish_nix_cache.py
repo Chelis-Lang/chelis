@@ -8,6 +8,7 @@ from __future__ import annotations
 import base64
 import contextlib
 import io
+import json
 import re
 import sys
 import unittest
@@ -71,11 +72,15 @@ PUBLISH_GATE = "if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'r
 
 
 class FakeNix:
-    """Answers the five commands the publisher runs and records each call."""
+    """Answer publisher commands and record each call."""
 
-    def __init__(self, fail: str | None = None, closure: Sequence[str] = CLOSURE) -> None:
+    def __init__(
+        self, fail: str | None = None, closure: Sequence[str] = CLOSURE,
+        shell: object = ACTIVATED_SHELL,
+    ) -> None:
         self.fail = fail
         self.closure = list(closure)
+        self.shell = shell
         self.calls: list[tuple[list[str], str | None]] = []
 
     @staticmethod
@@ -88,6 +93,8 @@ class FakeNix:
         command = self.command_of(argv)
         if command == self.fail:
             raise publish_nix_cache.PublishError(f"{command} failed")
+        if command == "devenv":
+            return json.dumps({"shell.outPath": self.shell})
         if command == "eval":
             return f"{SYSTEM}\n"
         if command == "build":
@@ -255,6 +262,30 @@ class PublishNixCacheTests(unittest.TestCase):
         [(_, stdin)] = nix.pushes()
         self.assertIn(f"{ACTIVATED_SHELL}\n", stdin)
         self.assertIn(f"{ACTIVATED_ENVIRONMENT}\n", stdin)
+
+    def test_publication_rejects_another_revisions_activated_shell(self) -> None:
+        nix = FakeNix(shell="/nix/store/other-devenv-shell")
+        code, _, stderr = run_main(nix)
+        self.assertEqual(code, 1)
+        self.assertIn("activated shell", stderr)
+        self.assertNotIn("build", [nix.command_of(argv) for argv, _ in nix.calls])
+        self.assertEqual(nix.pushes(), [])
+
+    def test_shell_evaluation_failure_prevents_publication(self) -> None:
+        nix = FakeNix(fail="devenv")
+        code, _, stderr = run_main(nix)
+        self.assertEqual(code, 1)
+        self.assertIn("devenv failed", stderr)
+        self.assertEqual(nix.pushes(), [])
+
+    def test_invalid_shell_evaluation_prevents_publication(self) -> None:
+        for shell in (None, [], "", "/tmp/shell"):
+            with self.subTest(shell=shell):
+                nix = FakeNix(shell=shell)
+                code, _, stderr = run_main(nix)
+                self.assertEqual(code, 1)
+                self.assertIn("shell evaluation", stderr)
+                self.assertEqual(nix.pushes(), [])
 
     def test_a_missing_activated_root_stops_before_any_nix_command(self) -> None:
         for link in ACTIVATED_LINKS:

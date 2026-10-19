@@ -1,0 +1,1 @@
+The nightly Nix workflow skips native checks only when every package output and exact-revision activated shell exists in the cache. Shell-only changes trigger native publication. Cache query errors remain failures. See [#3892](https://github.com/Chelis-Lang/chelis/issues/3892).
