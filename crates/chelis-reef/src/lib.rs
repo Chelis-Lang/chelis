@@ -2507,22 +2507,17 @@ pub fn find_package_root_for_dir(dir: &Path) -> Result<Option<PathBuf>, String> 
 
 fn find_package_root_from_dir(mut dir: PathBuf) -> Result<Option<PathBuf>, String> {
     let home = env::var_os("HOME").map(PathBuf::from);
-    // Stop the ancestor walk when we hit the OS temp-dir boundary. Without
-    // this, a `tempdir()`-rooted lookup (`/tmp/.tmpXXXX/...`) walks into
-    // `/tmp` itself and finds whatever stray `reef.toml` another process or
-    // test left there — leaking that foreign package into otherwise-isolated
-    // test runs (e.g. an Octant-prefixed manifest causing module-prefix
-    // mismatches in unrelated tests). A package may live *inside* a temp
-    // dir, but never spans the temp-dir boundary into shared scratch space.
+    // Inspect the temp root itself, but never inspect its parent.
+    // A nearer package manifest still owns sources below this boundary.
     let temp_root = env::temp_dir().canonicalize().ok();
 
     loop {
-        if temp_root.as_ref().is_some_and(|tmp| *tmp == dir) {
-            return Ok(None);
-        }
         let manifest = dir.join("reef.toml");
         if manifest.exists() {
             return Ok(Some(dir));
+        }
+        if temp_root.as_ref().is_some_and(|tmp| *tmp == dir) {
+            return Ok(None);
         }
         if dir.join(".git").exists() {
             return Ok(None);
