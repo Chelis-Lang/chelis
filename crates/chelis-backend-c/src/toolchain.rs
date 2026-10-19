@@ -318,18 +318,33 @@ fn tool_sdk(program: &OsStr) -> Option<&'static OsStr> {
 
 /// Whether `program`, resolved as the spawned tool will see it
 /// ([`resolve_executable`]), belongs to a Nix cc or binutils wrapper: the
-/// store entry of the resolved path or of its canonical path holds
-/// [`NIX_WRAPPER_SDK_SCRIPT`]. The resolved path covers the `ar` of the
-/// binutils wrapper, a symlink to the unwrapped `ar`. The canonical path
-/// covers a profile symlink to a wrapper tool.
+/// store entry of some path of its symlink chain, or of its canonical path,
+/// holds [`NIX_WRAPPER_SDK_SCRIPT`]. The `ar` of a wrapper is a symlink to
+/// the unwrapped `ar`, and a profile can link to that symlink, so the chain
+/// is walked link by link.
 fn is_nix_wrapper_tool(program: &OsStr) -> bool {
-    let Some(path) = program.to_str().and_then(resolve_executable) else {
+    /// More links than any wrapper or profile chain has.
+    const MAX_LINKS: usize = 40;
+    let Some(mut path) = program.to_str().and_then(resolve_executable) else {
         return false;
     };
-    let canonical = path.canonicalize().ok();
-    [Some(path), canonical].into_iter().flatten().any(|path| {
-        nix_store_entry(&path).is_some_and(|entry| entry.join(NIX_WRAPPER_SDK_SCRIPT).is_file())
-    })
+    let wrapped = |path: &Path| {
+        nix_store_entry(path).is_some_and(|entry| entry.join(NIX_WRAPPER_SDK_SCRIPT).is_file())
+    };
+    for _ in 0..MAX_LINKS {
+        if wrapped(&path) {
+            return true;
+        }
+        let Ok(target) = std::fs::read_link(&path) else {
+            break;
+        };
+        path = match path.parent() {
+            Some(parent) => parent.join(target),
+            None => target,
+        };
+    }
+    path.canonicalize()
+        .is_ok_and(|canonical| wrapped(&canonical))
 }
 
 /// The file of a store entry that marks a Nix cc or binutils wrapper. The
@@ -1480,7 +1495,7 @@ mod tests {
     /// chelis#3948: the `ar` of the Nix binutils wrapper is a symlink to the
     /// unwrapped cctools `ar`. The wrapper entry, not the link target,
     /// decides, so it gets no `SDKROOT`. A profile symlink to a wrapper tool
-    /// gets none either.
+    /// gets none either, also when that tool is itself a symlink.
     #[cfg(unix)]
     #[test]
     fn binutils_wrapper_symlink_to_an_unwrapped_tool_gets_no_sdk() {
@@ -1508,6 +1523,12 @@ mod tests {
         std::fs::create_dir_all(&profile).unwrap();
         std::os::unix::fs::symlink(wrapper_bin.join("ld"), profile.join("ld")).unwrap();
         assert_eq!(sdkroot(&tool_command(profile.join("ld"))), None);
+        std::os::unix::fs::symlink(&wrapper_ar, profile.join("ar")).unwrap();
+        assert_eq!(sdkroot(&tool_command(profile.join("ar"))), None);
+        // A relative link resolves against the directory of the link.
+        let relative = dir.path().join("profile/relative-ar");
+        std::os::unix::fs::symlink("bin/ar", &relative).unwrap();
+        assert_eq!(sdkroot(&tool_command(&relative)), None);
     }
 
     #[test]
