@@ -450,6 +450,14 @@ The real installer copies itself into both executable paths. After each
 successful copy, the Nix launcher replaces `$CHELIS_HOME/bin/chelisup` with
 itself. `$CHELIS_HOME/bin/chelis` remains the real shim.
 
+The real `default` also copies the installer into both executable paths. The
+launcher handles `default` as it handles `install`: it stages and promotes the
+GC roots around the real command and then puts itself back at
+`$CHELIS_HOME/bin/chelisup`. The real `update` and `self update` advise the
+bootstrap installer, which replaces the launcher. The launcher answers these
+two commands itself and runs no installer. Its advice names the `nix run`
+command for the `chelisup` of a newer release tag `vX.Y.Z` of the flake.
+
 The stable GC root points to the complete Nix package output. It preserves the
 shim dependencies and every store reference in the installed launcher.
 
