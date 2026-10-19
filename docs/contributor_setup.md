@@ -249,6 +249,64 @@ Nix uses the cache only for a trusted user. The
 [install guide](book/src/install.md#use-the-binary-cache) gives the settings
 for other users, for NixOS, and for `/etc/nix/nix.conf`.
 
+### Build a Chelis program or Reef package
+
+The flake exports `lib.fetchReefLock` and `lib.buildChelisPackage`.
+Both functions take a `pkgs` package set for a supported system.
+The package builder uses the wrapped compiler from the same Chelis flake by default.
+
+Use this package expression with a `pkgs` set and a selected `chelisFlake` input:
+
+```nix
+{ pkgs, chelisFlake }:
+chelisFlake.lib.buildChelisPackage {
+  inherit pkgs;
+  pname = "demo";
+  version = "0.1.0";
+  src = ./.;
+  lockFile = ./reef.lock;
+}
+```
+
+Standalone programs need only their source files.
+A Reef project also needs its manifest.
+The default entry point is `src/main.ch`.
+The builder installs its executable as `$out/bin/demo`.
+Set `entryPoint` to select another source file.
+
+`lockFile` selects a `reef.lock` file during Nix evaluation.
+`fetchReefLock` reads it with `builtins.fromTOML` and creates SHA-256-pinned downloads.
+It fetches source archives, compiled shells, and binary entries for the selected system.
+Path dependencies must exist in `src`.
+Bundled runtime entries need no download.
+
+You can also call the fetch helper separately:
+
+```nix
+chelisFlake.lib.fetchReefLock {
+  inherit pkgs;
+  lockFile = ./reef.lock;
+}
+```
+
+The result is a directory for `chelis reef install --from-lockfile --artifact-dir`.
+Set `artifacts` on the package builder to supply an existing directory instead.
+The builder imports those files without network access and sets `CHELIS_OFFLINE=1`.
+Its temporary home and Reef registry stay inside the build directory.
+
+Set `reefPackage = true` to create Reef artifacts instead of an executable.
+The output contains `$out/share/reef/<pname>-<version>.tar.zst` and the matching `.chb` file.
+The source package name and version must match `pname` and `version` in this mode.
+`sourceDateEpoch` defaults to `0`.
+The builder sets that value after source unpack.
+Set another value only when the package release uses that epoch.
+
+`checks.<system>.reefBuilder` builds a Reef library and a program that imports it.
+It imports the library from local artifacts, then runs the installed program and checks `main = 42`.
+It also checks a source file name that contains `$`.
+The native check set includes this check on all three supported systems.
+
+
 Each pull request runs the `Nix flake evaluation` CI job. It builds nothing.
 It runs these two commands, which you can also run before a push:
 

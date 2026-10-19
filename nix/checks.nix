@@ -8,6 +8,7 @@
   nixfmt,
   packages,
   apps,
+  reefBuilder,
 }:
 let
   escape = lib.escapeShellArg;
@@ -660,6 +661,7 @@ let
     cvc5Dir
     lockParity
     nixFormat
+    reefBuilder
     runtimeConsumer
     runtimeCorrespondence
     runtimeShape
@@ -694,6 +696,7 @@ in
     lockParity
     native
     nixFormat
+    reefBuilder
     runtimeConsumer
     runtimeCorrespondence
     runtimeShape

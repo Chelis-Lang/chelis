@@ -25,6 +25,10 @@
       lib = nixpkgs.lib;
       contracts = import ./nix/contracts.nix;
       forAllSystems = lib.genAttrs contracts.supportedSystems;
+      reef = import ./nix/reef.nix {
+        inherit lib;
+        chelisForSystem = system: self.packages.${system}.chelis;
+      };
       perSystem = forAllSystems (
         system:
         let
@@ -94,6 +98,12 @@
             passthru = { inherit nixfmt; };
           };
           checks = import ./nix/checks.nix {
+            reefBuilder = import ./nix/tests/reef-builder.nix {
+              inherit pkgs lib;
+              inherit (built) version;
+              inherit (reef) buildChelisPackage;
+              chelis = packages.chelis;
+            };
             inherit
               apps
               built
@@ -123,6 +133,7 @@
       );
     in
     {
+      lib = reef;
       packages = lib.mapAttrs (_system: outputs: outputs.packages) perSystem;
       apps = lib.mapAttrs (_system: outputs: outputs.apps) perSystem;
       checks = lib.mapAttrs (_system: outputs: outputs.checks) perSystem;
