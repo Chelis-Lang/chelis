@@ -409,11 +409,15 @@ large `x` with a tiny `y`, and `x / y` being finite — false at exactly such a
 pair — reported `fuzz_validated` at every sample count measured, up to 50000
 with `accepted == attempted` throughout.
 
-A **cell phase** now runs between the diagonal and the uniform draw. Per
-binder, with `L` its own schedule length and `S = 44` the span:
+A **cell phase** now runs between the diagonal and the uniform draw. With
+`S = 44` the span, `L_i` each scheduled binder's own schedule length, and
+`W = max(S, L_0, ..., L_n)` the boundary the whole property shares:
 
-1. **Diagonal**, for `attempt < max(S, L)`: candidate `attempt` of this
-   binder's own schedule, exactly as before and at the same one-for-one rate.
+1. **Diagonal**, for `attempt < W`: candidate `attempt` of this binder's own
+   schedule, exactly as before and at the same one-for-one rate. A binder
+   whose own schedule is shorter than `W` runs past the end of its list and
+   spends the remainder on uniform draws, as it did before the phase
+   existed.
 2. **Cell**, for as many of the following attempts as the share below allows
    — a mixed-radix odometer over **two** classes per binder. For a float
    binder those are its largest and smallest admissible candidates by
@@ -510,9 +514,9 @@ which a constant does not know, so the allowance **is** a share of the
 budget.
 
 The quantity that gets divided is **the attempts this run may still make
-once this binder's own diagonal ends** — bounded below by the attempt ceiling
-as well as the sample count, and measured from where that binder's schedule
-actually runs out rather than from the span. `CELL_BUDGET_DIVISOR` in
+once the property's shared window opens** — bounded below by the attempt
+ceiling as well as the sample count, and measured from `W` rather than from
+the span. `CELL_BUDGET_DIVISOR` in
 `crates/chelis-prove/src/property_runner.rs` states the arithmetic, and is
 the only place that does: this document names the quantity and points there,
 because a formula kept in two places was wrong in one of them twice.
@@ -607,14 +611,23 @@ per-binder window was as wide as the cell count and therefore disjoint
 between binders whose lengths differed by that much: at two binders, four
 cells and two candidates per `!=` exclusion made **two exclusions on one
 binder** enough to lose every pairing, at 500, 2000 and 20000 samples alike.
-Sharing the boundary makes that unreachable rather than unlikely, and costs
-nothing measurable: the corner is cell 2 of the shared window, so it is
-reached at attempt `47 + 2E` for `E` exclusions, and the deliverable, the
-long-schedule shape and the order-guarded chain are unchanged attempt for
-attempt. A binder whose own schedule is shorter than the boundary spends the
-gap on uniform draws, exactly as it did before the phase existed. This is not a regression against a run with no phase,
-which reaches none of these corners. Aligning every binder's window on one
-shared boundary would fix it structurally; that is not in this change.
+Sharing the boundary makes that unreachable rather than unlikely. The corner
+is then cell 2 of the shared window, reached at attempt `47 + 2E` for `E`
+exclusions on either binder, and the deliverable, the long-schedule shape,
+the order-guarded chain and both arity tables are unchanged attempt for
+attempt at the default budget.
+
+It is not free at every budget, and the exception is worth stating because it
+looks like a regression and is not. At exactly `--samples 50` and `51`, with
+an offset of one exclusion, a run reaches the corner *without* the shared
+boundary and not with it: the boundary rises from 44 to 46, so the share
+allows two cells and cell 2 falls outside the prefix. What the unshared
+window hit there was not an odometer corner at all — it was one binder in its
+cell 0 while the other was in its cell 2, which the windows only made
+possible by being misaligned. With the lengths equal, an unshared window
+passes at those budgets too. So the aligned behaviour is the designed one and
+the loss is the accident going away; it is confined to those two budgets and
+to an offset of one, since reaching it needs `2E` under the cell count.
 
 Both remaining costs are asserted as tests that a property is *not* refuted,
 so a future policy that reaches either has to change them deliberately and
@@ -622,8 +635,9 @@ re-measure the displaced-draw rates. The closed one is asserted the other way
 round, as a pairing that must happen at every offset.
 
 A binder whose schedule is longer than the span keeps the diagonal until that
-schedule is spent, which is what `max(S, L)` is for: a boundary fixed at 44
-displaced the tail of a long schedule past the budget. An `!=` exclusion adds
+schedule is spent, which is what the `L_i` terms of `W` are for: a boundary
+fixed at the span displaced the tail of a long schedule past the budget, and
+one taken per binder displaced it for every binder but the longest. An `!=` exclusion adds
 **at most** two candidates — its two representable neighbours — so
 `L <= 44 + 2k` for `k` exclusions. It is only a bound because `push` drops a
 value the exclusion list contains, so an exclusion that is itself a schedule

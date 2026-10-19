@@ -2454,7 +2454,14 @@ fn issue_3697_the_diagonal_completes_before_any_cell() {
 /// shorter, and `int_edge_candidates` ignores exclusions entirely.
 #[test]
 fn issue_3697_no_unexcluded_schedule_outruns_the_span() {
-    for kind in [FloatKind::F32, FloatKind::F64] {
+    // Exhaustive by construction: a new `FloatKind` variant makes this match
+    // fail to compile, rather than silently escaping the bound and reopening
+    // the disjointness the typed lane's `DIAGONAL_SPAN` boundary relies on.
+    let every_kind = |kind: FloatKind| match kind {
+        FloatKind::F32 => FloatKind::F32,
+        FloatKind::F64 => FloatKind::F64,
+    };
+    for kind in [FloatKind::F32, FloatKind::F64].map(every_kind) {
         let full = float_edge_candidates(kind, -kind.max_finite(), kind.max_finite(), &[]);
         assert!(
             full.len() <= DIAGONAL_SPAN,
@@ -2466,6 +2473,14 @@ fn issue_3697_no_unexcluded_schedule_outruns_the_span() {
         let narrow = float_edge_candidates(kind, -1.0, 1.0, &[]);
         assert!(narrow.len() <= full.len(), "{kind:?}: {narrow:?}");
     }
+    // `f64` measures exactly `DIAGONAL_SPAN`, so the bound has zero slack:
+    // any added IEEE landmark or ladder rung fails this test rather than
+    // quietly outgrowing the typed lane's boundary.
+    assert_eq!(
+        float_edge_candidates(FloatKind::F64, -f64::MAX, f64::MAX, &[]).len(),
+        DIAGONAL_SPAN,
+        "the span is defined as this length; if they diverge, decide which moved"
+    );
     for prim in ["i8", "i16", "i32", "i64"] {
         let (lower, upper) =
             crate::opaque::int_sample_bounds(prim).expect("an integer width has bounds");

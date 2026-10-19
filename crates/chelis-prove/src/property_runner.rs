@@ -3385,8 +3385,10 @@ const DIAGONAL_SPAN: usize = 44;
 /// longer than the span, and not a per-binder boundary, which leaves the
 /// windows disjoint. `spec/design/chelis_property_spec.md` names the quantity
 /// in words and points here rather than repeating the formula, because a
-/// formula kept in two places was wrong in one of them twice. The two differ exactly when a binder's schedule
-/// outruns the span, and the difference is the whole guarantee: at `L = 72`
+/// formula kept in two places was wrong in one of them twice.
+///
+/// Measuring from the span instead of from the boundary is the mistake that
+/// matters, and the difference is the whole guarantee: at a boundary of 72
 /// and the default budget, `(100 - 44) / 2` is 28 cells over the window
 /// `[72, 100)`, which is every attempt the diagonal left and leaves the
 /// generator nothing. Each `!=` exclusion adds up to two candidates, so
@@ -3395,8 +3397,8 @@ const DIAGONAL_SPAN: usize = 44;
 const CELL_BUDGET_DIVISOR: usize = 2;
 
 /// Decide what attempt `attempt` proposes for the binder at `position` of a
-/// property with `arity` *scheduled* binders, whose own schedule holds
-/// `schedule_len` candidates (chelis#3697).
+/// property with `arity` *scheduled* binders, whose shared cell window opens
+/// at `window_start` (chelis#3697).
 ///
 /// `budget` is the attempts this run may still make — the lesser of the
 /// property's sample count and its attempt ceiling, which the caller computes
@@ -3778,8 +3780,11 @@ impl ConstraintSamplingPlan {
 
     /// The shared boundary described on [`Self::cell_window_start`].
     ///
-    /// For a plan with order edges the phase never runs, so the value is
-    /// unused and the span is returned without pricing any candidate list.
+    /// For a plan with order edges the phase never runs, so the span is
+    /// returned without pricing any candidate list. That early return is
+    /// **load bearing, not an optimisation**: [`Self::resolve`] indexes
+    /// `values[predecessor]`, and there are no predecessor values at derive
+    /// time, so reaching it for a plan with edges panics.
     fn derive_cell_window_start(&self) -> usize {
         if self.has_order_edges() {
             return DIAGONAL_SPAN;

@@ -299,8 +299,9 @@ where y > x, {exclusions}:
 /// the length to 52, and the refuting candidate -- a neighbour of an excluded
 /// value -- is proposed there.
 ///
-/// The phase boundary is `max(44, schedule_len)` per binder for exactly this
-/// reason: a boundary fixed at 44 reported `fuzz_validated` on this shape.
+/// The phase boundary floors at the longest schedule for exactly this
+/// reason: a boundary fixed at the span reported `fuzz_validated` on this
+/// shape.
 #[test]
 fn issue_3697_a_long_schedule_keeps_the_diagonal_until_it_is_spent() {
     let source = "module Pairing.Long
@@ -499,34 +500,44 @@ fn issue_3697_a_low_order_corner_is_reached_at_every_arity() {
 #[test]
 fn issue_3697_unequal_lengths_still_pair() {
     let corner = "((x != 1.7976931348623157e308f64) || (y != -1.7976931348623157e308f64))";
-    for exclusions in 0..=4usize {
-        let guards = (0..exclusions)
-            .map(|index| format!("x != {}.0f64", 11 + index))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let where_clause = if guards.is_empty() {
-            String::new()
-        } else {
-            format!("\nwhere {guards}")
-        };
-        let source = format!(
-            "module Pairing.Offset\n@property corner forall(x: f64, y: f64){where_clause}:\n  {corner}\n"
-        );
-        for seed in ["0", "7"] {
-            let (code, record) = prove(&source, "500", seed);
-            assert_eq!(
-                code, 1,
-                "{exclusions} exclusion(s) on x, seed {seed}: the windows are \
-                 shared, so an offset cannot separate them: {record:#}"
+    // **Both binders carry the offset in turn.** The boundary is a maximum
+    // over every binder, and `topo` is alphabetical for an edge-free plan, so
+    // lengthening only `x` leaves the maximum at the first binder. A fold
+    // that read just the first binder would then pass every assertion while
+    // losing `y`'s tail, which is a default-budget refutation. Only the
+    // mirrored case separates the two.
+    for lengthened in ["x", "y"] {
+        for exclusions in 0..=4usize {
+            let guards = (0..exclusions)
+                .map(|index| format!("{lengthened} != {}.0f64", 11 + index))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let where_clause = if guards.is_empty() {
+                String::new()
+            } else {
+                format!("\nwhere {guards}")
+            };
+            let source = format!(
+                "module Pairing.Offset\n@property corner forall(x: f64, y: f64){where_clause}:\n  {corner}\n"
             );
-            assert_eq!(
-                record["attempted_samples"],
-                47 + 2 * exclusions,
-                "{exclusions} exclusion(s) on x, seed {seed}: the corner is \
-                 cell 2 of the window opening at max(44, L); a per-binder \
-                 window would miss it entirely from two exclusions up: \
-                 {record:#}"
-            );
+            for seed in ["0", "7"] {
+                let (code, record) = prove(&source, "500", seed);
+                assert_eq!(
+                    code, 1,
+                    "{exclusions} exclusion(s) on {lengthened}, seed {seed}: \
+                     the windows are shared, so an offset cannot separate \
+                     them: {record:#}"
+                );
+                assert_eq!(
+                    record["attempted_samples"],
+                    47 + 2 * exclusions,
+                    "{exclusions} exclusion(s) on {lengthened}, seed {seed}: \
+                     the corner is cell 2 of the shared window, wherever the \
+                     offset sits; a per-binder window would miss it from two \
+                     exclusions up, and a boundary folded over only the first \
+                     binder would miss the `y` half: {record:#}"
+                );
+            }
         }
     }
     // Both binders long, which paired even under the per-binder window
@@ -548,10 +559,10 @@ fn issue_3697_unequal_lengths_still_pair() {
 /// the cell window is `[72, 100)` at the default budget — exactly the 28
 /// attempts a share taken from `budget - 44` would have claimed in full,
 /// leaving the generator nothing. Measured over seeds 0–9, `main` refutes
-/// 4/10 at attempts 73 to 100 (seeds 0, 1, 7, 9); a share divided out of
-/// `budget - 44` refuted **0/10**; dividing out `budget - max(44, L)`
-/// restores 2/10 (seeds 1 and 7), which is the declared half-share trade
-/// rather than a loss of the class.
+/// 4/10 at attempts 73 to 100 (seeds 0, 1, 7, 9); a share measured from the
+/// span rather than from the window's own start refuted **0/10**; measuring
+/// it from the start restores 2/10 (seeds 1 and 7), which is the declared
+/// half-share trade rather than a loss of the class.
 #[test]
 fn issue_3697_a_long_schedule_at_high_arity_still_draws_uniformly() {
     let exclusions = (0..5)
