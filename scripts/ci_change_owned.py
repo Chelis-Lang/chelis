@@ -83,6 +83,7 @@ CHANGE_OWNED_SHARD_ALGORITHM = "duration-lpt-v1"
 PACKAGE_EXPANSION_SHARD_ALGORITHM = "duration-lpt-v1"
 PACKAGE_EXPANSION_COMPATIBILITY_ALGORITHM = "sha256-modulo-v1"
 PACKAGE_EXPANSION_EXECUTION_KIND = "package_expansion_duration_plan"
+FRONTIER_APPLICABILITY_KIND = "targeted_rebase_frontier_applicability"
 PACKAGE_EXPANSION_GROUP_TARGET_LIMIT = 16
 PACKAGE_EXPANSION_GROUP_ESTIMATED_MILLISECONDS = 300_000
 SHARDS = tuple(range(4))
@@ -1859,6 +1860,13 @@ def make_plan(
             "package_expansion": shard_map(expansion),
         },
     }
+    if mode == "targeted_rebase":
+        plan["target_dispositions"].append(
+            {
+                "kind": FRONTIER_APPLICABILITY_KIND,
+                "identities": sorted(_expected_frontier_applicability_targets(plan)),
+            }
+        )
     attach_plan_digest(plan)
     return plan
 
@@ -2026,6 +2034,57 @@ def package_expansion_execution_disposition(
         "planning": dict(planning),
         "shards": {key: list(rows) for key, rows in shards.items()},
     }
+
+
+def _expected_frontier_applicability_targets(plan: Mapping[str, Any]) -> set[str]:
+    """Only unchanged ordinary frontier targets may have no applicable tests.
+
+    Direct targets, reviewed package obligations, standing coverage, explicit
+    manual owners and Cargo-required features retain their stronger oracle.
+    """
+    if plan["mode"] != "targeted_rebase":
+        return set()
+    required_packages = {
+        package
+        for row in plan["path_dispositions"]
+        for rule in row.get("required_package_rules", [])
+        for package in rule["packages"]
+    }
+    strict = set(duration_row_scope(plan)) | set(plan["standing_targets"])
+    strict.update(
+        row["identity"]
+        for key in ("manual_only_targets", "manual_gate_targets")
+        for row in plan[key]
+    )
+    strict.update(
+        TestIdentity.parse(row["identity"]).target_identity.canonical
+        for row in plan["test_exclusions"]
+    )
+    return {
+        identity
+        for identity in plan["change_owned"]
+        if identity not in strict
+        and Identity.parse(identity).package not in required_packages
+        and not plan["target_features"][identity]
+    }
+
+
+def frontier_applicability_targets(plan: Mapping[str, Any]) -> set[str]:
+    rows = [
+        row for row in plan["target_dispositions"]
+        if isinstance(row, dict) and row.get("kind") == FRONTIER_APPLICABILITY_KIND
+    ]
+    if plan["mode"] != "targeted_rebase":
+        if rows:
+            raise ValueError("frontier applicability belongs only to targeted rebases")
+        return set()
+    if len(rows) != 1 or set(rows[0]) != {"kind", "identities"}:
+        raise ValueError("plan requires one exact frontier applicability disposition")
+    identities = _identity_list(rows[0], "identities")
+    expected = _expected_frontier_applicability_targets(plan)
+    if identities != sorted(expected):
+        raise ValueError("plan frontier applicability does not match unchanged ordinary targets")
+    return expected
 
 
 def package_expansion_execution(
@@ -2423,6 +2482,8 @@ def _validate_plan_shape(plan: Mapping[str, Any]) -> None:
             "manual-only, or test-excluded targets"
         )
 
+    frontier_applicability_targets(plan)
+
     expected_change_owned = change_owned - standing_reuse
     shard_planning = plan.get("shard_planning")
     if not isinstance(shard_planning, dict) or set(shard_planning) != {
@@ -2582,6 +2643,8 @@ def _validate_receipt_shape(receipt: Mapping[str, Any]) -> None:
         "failures",
         "receipt_digest",
     }
+    if "not_applicable_targets" in receipt:
+        expected_keys.add("not_applicable_targets")
     if set(receipt) != expected_keys:
         raise ValueError(
             f"receipt schema keys mismatch: "
@@ -2613,6 +2676,21 @@ def _validate_receipt_shape(receipt: Mapping[str, Any]) -> None:
             TestIdentity.parse(row)
         if len(rows) != len(set(rows)):
             raise ValueError(f"receipt {key} contains duplicates")
+    # An absent field declares zero inspections, including in historical
+    # receipts. It never excuses missing required execution evidence.
+    if "not_applicable_targets" in receipt:
+        inspected = set(_identity_list(receipt, "not_applicable_targets"))
+        test_targets = {
+            TestIdentity.parse(test).target_identity.canonical
+            for key in ("selected_tests", "executed_tests", "manual_gate_tests")
+            for test in receipt[key]
+        }
+        if (
+            lane != "change-owned" or not inspected
+            or not inspected <= set(receipt["selected_targets"])
+            or inspected & (set(receipt["executed_targets"]) | test_targets)
+        ):
+            raise ValueError("receipt not-applicable targets must be inspected without execution")
     # A manual-gate test is listed and never run, so it is neither selected
     # nor executed, and only the required lane lists one.
     gate_tests = receipt["manual_gate_tests"]
@@ -3393,6 +3471,7 @@ def _listing_tests_for_group(
     *,
     manual_only: bool = False,
     allow_empty: bool = False,
+    allow_empty_targets: set[str] | frozenset[str] = frozenset(),
 ) -> list[str]:
     suites = data.get("rust-suites")
     if not isinstance(suites, dict):
@@ -3411,7 +3490,7 @@ def _listing_tests_for_group(
                 identity,
                 exclusions,
                 manual_only=manual_only,
-                allow_empty=allow_empty,
+                allow_empty=allow_empty or identity.canonical in allow_empty_targets,
             )
         )
     if len(selected) != len(set(selected)):
@@ -3684,6 +3763,9 @@ def execute_shard(
     manual_only_targets = {
         row["identity"] for row in plan["manual_only_targets"]
     }
+    frontier_applicability = (
+        frontier_applicability_targets(plan) if lane == "change-owned" else set()
+    )
     # The required lane lists a manual-gate target with its ignored tests and
     # stops there: the gate's prerequisites exist only where its documented
     # command is run by hand.
@@ -3803,6 +3885,7 @@ def execute_shard(
                     allow_empty=(
                         lane == "package-expansion" and not ignored_only
                     ),
+                    allow_empty_targets=frontier_applicability if not ignored_only else set(),
                 )
                 group_not_applicable = [
                     canonical
@@ -3813,7 +3896,8 @@ def execute_shard(
                     )
                 ]
                 not_applicable_targets.extend(group_not_applicable)
-                executed_targets.extend(group_not_applicable)
+                if lane == "package-expansion":
+                    executed_targets.extend(group_not_applicable)
                 (manual_gate_tests if manual_gate else selected_tests).extend(
                     listed_tests
                 )
@@ -3974,7 +4058,10 @@ def execute_shard(
                             if test.startswith(prefix)
                         )
                         if target_selected == target_executed:
-                            if canonical not in executed_targets:
+                            if (
+                                canonical not in executed_targets
+                                and canonical not in not_applicable_targets
+                            ):
                                 executed_targets.append(canonical)
                         else:
                             failures.append(
@@ -4049,6 +4136,8 @@ def execute_shard(
         "success": not failures,
         "failures": failures,
     }
+    if lane == "change-owned" and not_applicable_targets:
+        receipt["not_applicable_targets"] = sorted(not_applicable_targets)
     attach_receipt_digest(receipt)
     receipt_output.write_bytes(canonical_json(receipt))
     shutil.rmtree(scratch)
@@ -4492,6 +4581,7 @@ def _report_findings(
     all_selected_tests: list[str] = []
     all_executed_tests: list[str] = []
     all_manual_gate_tests: list[str] = []
+    all_not_applicable_targets: list[str] = []
     for shard, receipt in sorted(by_shard.items()):
         expected = execution_shards(plan, lane)[str(shard)]
         selected = receipt.get("selected_targets")
@@ -4516,6 +4606,7 @@ def _report_findings(
         all_selected_tests.extend(selected_tests)
         all_executed_tests.extend(executed_tests)
         all_manual_gate_tests.extend(receipt["manual_gate_tests"])
+        all_not_applicable_targets.extend(receipt.get("not_applicable_targets", []))
         # The informational lane reports an unsuccessful shard through the
         # introduced/inherited/unrun counts, which are derived from the shard's
         # own JUnit and target lists rather than from its prose.
@@ -4539,7 +4630,15 @@ def _report_findings(
         if lane == "change-owned"
         else set()
     )
-    expected_executed = sorted(set(expected_targets) - manual_gates)
+    inspected = set(all_not_applicable_targets)
+    allowed_inspection = (
+        frontier_applicability_targets(plan) if lane == "change-owned" else set()
+    )
+    if not inspected <= allowed_inspection:
+        findings.append("not-applicable targets lack frontier applicability")
+    if len(all_not_applicable_targets) != len(inspected):
+        findings.append("duplicate not-applicable target inspection")
+    expected_executed = sorted(set(expected_targets) - manual_gates - inspected)
     if sorted(all_selected_targets) != expected_targets:
         findings.append(
             "selected target coverage mismatch: "
@@ -4615,6 +4714,10 @@ def validate_change_owned_report(
         for row in plan["manual_gate_targets"]
         if row["identity"] in plan["change_owned"]
     ]
+    inspected = sorted(
+        target for receipt in receipts
+        for target in receipt.get("not_applicable_targets", [])
+    )
     return {
         "version": 1,
         "lane": "change-owned",
@@ -4623,8 +4726,11 @@ def validate_change_owned_report(
         "observed_success": True,
         "plan_digest": plan["plan_digest"],
         "covered_targets": sorted(
-            set(plan["change_owned"]) - {row["identity"] for row in manual_gates}
+            set(plan["change_owned"])
+            - {row["identity"] for row in manual_gates}
+            - set(inspected)
         ),
+        "not_applicable_targets": inspected,
         "manual_gate_targets": manual_gates,
         "standing_reused_targets": reused_targets,
         "shard_durations": shard_durations(
@@ -4985,6 +5091,10 @@ def _load_receipt_at(path: Path) -> dict[str, Any]:
                 f"sidecar digest mismatch for {sidecar}: "
                 f"expected {expected}, got {observed}"
             )
+    if "not_applicable_targets" in receipt:
+        listing = load_json(path.parent / receipt["test_list_file"])
+        if listing.get("not_applicable_targets") != receipt["not_applicable_targets"]:
+            raise ValueError("receipt not-applicable inspection differs from bound listing")
     return receipt
 
 
