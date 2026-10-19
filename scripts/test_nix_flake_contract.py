@@ -582,8 +582,10 @@ class NixFlakeContractTests(unittest.TestCase):
         )
         # The unwrapped package has the layout of the release tarball:
         # bin/chelis is the compiler itself, and no libexec/ exists.
-        self.assertEqual(shapes["chelis-unwrapped"]["required"][:2],
-                         ["bin/chelis", "lib/libchelis_runtime.a"])
+        self.assertEqual(
+            shapes["chelis-unwrapped"]["required"],
+            ["bin/chelis", *shapes["chelis-runtime"]["required"]],
+        )
         self.assertEqual(shapes["chelis-unwrapped"]["allowedProductExecutables"], ["bin/chelis"])
         self.assertEqual(shapes["chelis-unwrapped"]["forbidden"], ["bin/chelisup", "libexec"])
         self.assertEqual(
