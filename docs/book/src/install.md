@@ -168,10 +168,10 @@ with the first release after 0.20.0:
 nix run github:Chelis-Lang/chelis/vX.Y.Z#chelis-unwrapped -- --version
 ```
 
-With `chelis-unwrapped`, `chelis build` finds `cc` and `ar` on your `PATH`, or
-`CHELIS_CC` and `CHELIS_AR` select them. On Linux, a program that calls BLAS
-needs OpenBLAS. Declare its headers and libraries through
-`CHELIS_C_INCLUDE_PATH` and `CHELIS_C_LIBRARY_PATH`.
+With `chelis-unwrapped`, `chelis build` finds a C compiler (`gcc`, `clang`, or
+`cc`) and `ar` on your `PATH`, or `CHELIS_CC` and `CHELIS_AR` select them. On
+Linux, a program that calls BLAS needs OpenBLAS. Declare its headers and
+libraries through `CHELIS_C_INCLUDE_PATH` and `CHELIS_C_LIBRARY_PATH`.
 
 To let the `chelis` shim of `chelisup` run a Nix-built compiler, register the
 package with `chelisup link`:
@@ -225,10 +225,11 @@ builds for each release:
 - substituter: `https://chelis-lang.cachix.org`
 - public key: `chelis-lang.cachix.org-1:F4W65FQ7sunLoF2q6rzkWNTIBd3P/tJ/NFcv12OS9v8=`
 
-The cache holds the packages of each release tag and of a recent `main`
-commit. For another commit, Nix downloads the cvc5 tree and the unchanged
-crate builds, and compiles the crates that changed. Use a release tag, as in
-the commands above, to download the packages without a compile.
+The cache holds the packages of each release from 0.20.0 on and of a recent
+`main` commit. For another commit, Nix downloads the cvc5 tree and the unchanged
+crate builds, and compiles each crate whose sources or dependencies changed.
+Use a release tag, as in the commands above, to download the packages without
+a compile.
 
 The flake names this cache, but Nix uses the cache settings of a flake only
 for a trusted user. A trusted user is `root`, a user in `trusted-users`, or

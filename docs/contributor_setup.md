@@ -198,10 +198,11 @@ compiler itself, beside the runtime archive and the six headers. Its
 compiler crate, and the `sharedCompiler` check compares them.
 
 The `unwrappedClosure` check fails when the closure of `chelis-unwrapped` holds
-an output of the `stdenv` C compiler, of its binutils, or of OpenBLAS. It
-prints the closure size of both compiler packages and the closure of
-`chelis-unwrapped`. As a control, the closure of `chelis` must hold the
-`stdenv` C compiler.
+the `stdenv` C compiler, its wrapper, an output of its binutils, or an output of
+OpenBLAS. The library outputs of the C compiler, such as `libstdc++` and
+`libgcc_s` on Linux, can stay. The check prints the closure size of both
+compiler packages and the closure of `chelis-unwrapped`. As a control, the
+closure of `chelis` must hold the `stdenv` C compiler.
 
 The `chelis`, `chelis-unwrapped`, and `chelis-runtime` packages verify their
 copied archive and all six public headers against the sealed compiler's export.
