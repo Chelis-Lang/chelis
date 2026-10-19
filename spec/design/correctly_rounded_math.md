@@ -285,9 +285,11 @@ target. In `crates/chelis-backend-c/src/toolchain.rs` and the native build drive
   by naming its `clang` in `CHELIS_CC`, a compiler with no SDK of its own that
   compiles against this one.
 
-  A tool whose canonical path is in a Nix store (`nix/store/<hash>-<name>`) gets no
-  `SDKROOT`, and the build runs no `xcrun` for it. The Nix clang wrapper sets `SDKROOT`
-  to its own SDK, so a value from the build would not reach the compile. The line that
+  A tool of a Nix cc or binutils wrapper gets no `SDKROOT`, and the build runs no `xcrun`
+  for it. The wrapper sets `SDKROOT` to its own SDK, so a value from the build would not
+  reach the compile. The wrapper tools are those whose resolved or canonical path is in a
+  Nix store entry (`nix/store/<hash>-<name>`) with `nix-support/darwin-sdk-setup.bash`.
+  An unwrapped compiler in the Nix store gets the SDK of a host tool. The line that
   `--emit-c` prints sets the same variables as the compile.
 - The profile is `-O2 -ffp-contract=off -fno-fast-math` plus the target's required
   flags, the same strict profile `cross_lane_gate.md` PD2 defines, now the product
