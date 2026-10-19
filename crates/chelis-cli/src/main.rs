@@ -136,7 +136,8 @@ fn cmd_runtime(command: RuntimeCommand) -> Result<(), Box<dyn std::error::Error>
 #[command(
     name = "chelis",
     version = env!("CARGO_PKG_VERSION"),
-    about = "The Chelis programming language"
+    about = "The Chelis programming language",
+    after_help = "Set CHELIS_OFFLINE=1 to disable remote dependency resolution for package graph loads, including build, check, test, and prove."
 )]
 struct Cli {
     #[command(subcommand)]

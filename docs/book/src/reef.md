@@ -54,6 +54,27 @@ the usual way to prepare an application such as
 Clone that application to access its example programs; Reef downloads the
 libraries it depends on separately.
 
+## Resolve packages offline
+
+Set `CHELIS_OFFLINE=1` for package commands in an offline build:
+
+```sh
+CHELIS_OFFLINE=1 chelis build src/main.ch
+CHELIS_OFFLINE=1 chelis check src/main.ch
+CHELIS_OFFLINE=1 chelis test
+CHELIS_OFFLINE=1 chelis prove src/main.ch
+```
+
+This process control also covers `eval`, `reef build`, and package graph cache
+misses. Reef uses installed packages, path dependencies, and the bundled runtime.
+These graph loads make no network request and execute no `gh` subprocess.
+A missing registry dependency names `chelis reef install --from-lockfile --artifact-dir <dir>`.
+Prepare the lockfile and import its artifacts before the offline build.
+
+Only the exact value `1` enables offline resolution.
+It overrides automatic fetch defaults, but does not enable fetch when you pass
+`reef build --no-auto-fetch`.
+
 ## Fetch locked packages with another tool
 
 A build system such as Nix can download the locked packages itself and give

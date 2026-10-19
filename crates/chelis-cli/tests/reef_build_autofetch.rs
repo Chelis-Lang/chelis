@@ -1344,3 +1344,170 @@ fn phaseA_item8_real_github_manual_gate() {
         "expected nautilus 0.5.0 in index, got {entries:?}"
     );
 }
+
+fn stage_offline_project(parent: &Path) -> std::path::PathBuf {
+    let app = stage_downstream_project(parent);
+    fs::create_dir_all(app.join("tests")).expect("tests");
+    fs::write(
+        app.join("tests/offline.ch"),
+        "module Demo.Tests.Offline\nimport Std.Test (assert_true)\nexport (test_offline)\n\
+         def test_offline() -> unit ! { Test } = assert_true(true, \"offline\")\n",
+    )
+    .expect("test source");
+    app
+}
+
+#[test]
+fn offline_3921_blocks_missing_dependencies_for_all_load_commands() {
+    let _g = file_lock();
+    let harness = WiremockHarness::new();
+    let outer = tempdir().expect("tempdir");
+    let app = stage_offline_project(outer.path());
+    let reef_home = outer.path().join("reef-home");
+    let tools = outer.path().join("tools");
+    fs::create_dir_all(&tools).expect("tools");
+    let gh_marker = outer.path().join("gh-called");
+    fs::write(
+        tools.join("gh"),
+        format!("#!/bin/sh\n/bin/touch '{}'\nexit 1\n", gh_marker.display()),
+    )
+    .expect("gh trap");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(tools.join("gh"), fs::Permissions::from_mode(0o755))
+            .expect("executable gh trap");
+    }
+    let legacy = fs::read_to_string(app.join("reef.toml")).expect("manifest");
+    for resolver in [1, 2] {
+        let manifest = if resolver == 2 {
+            format!(
+                "schema = \"2\"\n{}",
+                legacy.replace("[dependencies]", "resolver = \"2\"\n\n[dependencies]")
+            )
+        } else {
+            legacy.clone()
+        };
+        fs::write(app.join("reef.toml"), manifest).expect("manifest");
+        for args in [
+            vec!["build", "src/main.ch"],
+            vec!["check", "src/main.ch"],
+            vec!["test"],
+            vec!["prove", "src/main.ch"],
+            vec!["reef", "build"],
+            vec!["reef", "build", "--no-auto-fetch"],
+        ] {
+            let output = Command::cargo_bin("chelis")
+                .expect("binary")
+                .current_dir(&app)
+                .env("CHELIS_OFFLINE", "1")
+                .env("CHELIS_STYLE_GATE_DISABLE", "1")
+                .env("CHELIS_REEF_HOME", &reef_home)
+                .env("CHELIS_REEF_GITHUB_BASE_API", harness.uri())
+                .env_remove("GITHUB_TOKEN")
+                .env("PATH", &tools)
+                .args(&args)
+                .output()
+                .expect("offline command");
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(!output.status.success(), "{resolver}: {args:?}: {stderr}");
+            assert!(stderr.contains("nautilus"), "{args:?}: {stderr}");
+            assert!(stderr.contains("CHELIS_OFFLINE=1"), "{args:?}: {stderr}");
+            assert!(
+                stderr.contains("chelis reef install --from-lockfile --artifact-dir <dir>"),
+                "{args:?}: {stderr}"
+            );
+            assert!(!gh_marker.exists(), "gh must not run: {args:?}");
+            assert!(!reef_home.join("index.json").exists());
+        }
+    }
+    assert!(
+        harness
+            .rt
+            .block_on(harness.server.received_requests())
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn offline_3921_uses_installed_packages_and_rejects_a_stale_warm_cache() {
+    let _g = file_lock();
+    let harness = WiremockHarness::new();
+    let (archive, shell) = synthetic_nautilus_artifacts();
+    harness.mount_all(canonical_api_mocks(archive, shell));
+    let outer = tempdir().expect("tempdir");
+    let app = stage_offline_project(outer.path());
+    let reef_home = outer.path().join("reef-home");
+    let command = |offline: &str, args: &[&str]| {
+        let mut command = Command::cargo_bin("chelis").expect("binary");
+        command
+            .current_dir(&app)
+            .env("CHELIS_STYLE_GATE_DISABLE", "1")
+            .env("CHELIS_REEF_HOME", &reef_home)
+            .env("CHELIS_REEF_GITHUB_BASE_API", harness.uri())
+            .env("GITHUB_TOKEN", "unit-test-token")
+            .env("CHELIS_OFFLINE", offline)
+            .env("PATH", "")
+            .args(args);
+        command
+    };
+    command("0", &["reef", "build"]).assert().success();
+    let requests = harness
+        .rt
+        .block_on(harness.server.received_requests())
+        .unwrap()
+        .len();
+    for _ in 0..2 {
+        command("1", &["check", "src/main.ch"])
+            .assert()
+            .success();
+    }
+    assert!(reef_home.join(".cache/prepared-graphs").exists());
+    fs::remove_dir_all(reef_home.join("packages/nautilus")).expect("remove dependency");
+    for origin in [true, false] {
+        if !origin {
+            let lock = fs::read_to_string(app.join("reef.lock")).expect("lock");
+            fs::write(
+                app.join("reef.lock"),
+                lock.replace(
+                    "remote_origin = \"github://chelis-lang/nautilus@v0.2.0\"\n",
+                    "",
+                ),
+            )
+            .expect("lock without origin");
+        }
+        for args in [
+            vec!["build", "src/main.ch"],
+            vec!["check", "src/main.ch"],
+            vec!["test"],
+            vec!["prove", "src/main.ch"],
+        ] {
+            command("1", &args)
+                .assert()
+                .failure()
+                .stderr(predicate::str::contains("missing dependency `nautilus`"))
+                .stderr(predicate::str::contains(
+                    "chelis reef install --from-lockfile --artifact-dir <dir>",
+                ));
+        }
+    }
+    assert_eq!(
+        harness
+            .rt
+            .block_on(harness.server.received_requests())
+            .unwrap()
+            .len(),
+        requests
+    );
+}
+
+#[test]
+fn offline_3921_control_appears_in_help() {
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("CHELIS_OFFLINE=1"));
+}

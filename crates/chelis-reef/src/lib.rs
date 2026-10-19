@@ -2324,6 +2324,8 @@ pub struct PackageBuildArtifacts {
 /// `chelis reef install --from-github` round trip first. Callers that
 /// want explicit control over network access during build pass
 /// `BuildOptions { auto_fetch: false, .. }`.
+/// `CHELIS_OFFLINE=1` disables auto-fetch for all package graph loads,
+/// including callers that pass `auto_fetch: true`.
 ///
 /// `BuildOptions::default()` matches the pre-Item-8 behavior except for
 /// the auto-fetch flip — a subtle but locked CLI behavior change
@@ -3700,7 +3702,7 @@ fn load_locked_manifest_for_assessment(
                 Ok(installed) => installed,
                 Err(LoadRegistryError::Other(message)) => return Err(message),
                 Err(LoadRegistryError::MissingFromIndex | LoadRegistryError::MissingPackageDir) => {
-                    if remote_origin.is_none() {
+                    if remote_origin.is_none() && !offline_mode() {
                         return Err(
                             package_versioning::VersioningError::UnavailableLockedOrigin {
                                 package: package_versioning::PackageName::from_str(
@@ -3985,10 +3987,8 @@ pub fn prepare_program_for_eval_source(
     compile_with_reef_graph(&graph, entry_decls, runtime).map(Some)
 }
 
-/// Build a package with the default options ([`BuildOptions::default`]),
-/// which today means auto-fetch is **on**: missing-from-registry
-/// dependencies are silently fetched from the canonical hosting org
-/// before the build resumes.
+/// Build a package with the default options ([`BuildOptions::default`]).
+/// Missing registry dependencies use auto-fetch unless `CHELIS_OFFLINE=1`.
 ///
 /// Pre-Item-8 callers that want the legacy "fail if anything is
 /// missing" behavior should call [`build_package_with_options`] with
@@ -4008,6 +4008,8 @@ pub fn build_package(
 ///
 /// ### Auto-fetch contract
 ///
+/// - `CHELIS_OFFLINE=1` overrides `auto_fetch`. Missing registry dependencies
+///   fail without network access and name the offline artifact import command.
 /// - `auto_fetch: true` (default): each missing-from-registry
 ///   dependency triggers a single attempt to
 ///   [`install_from_github`] against either the lockfile's
@@ -9182,6 +9184,13 @@ fn load_registry_package_or_autofetch(
         });
     }
 
+    if offline_mode() {
+        return Err(format!(
+            "missing dependency `{name}` `{version}`{}",
+            offline_import_hint()
+        ));
+    }
+
     // chelis-std is the language runtime — auto-fetch from GitHub is
     // intentionally disabled. The bytes ship with the compiler. If the
     // user's local registry doesn't have the runtime, that's a setup
@@ -9405,6 +9414,16 @@ fn github_fetch_error_category(e: &GitHubFetchError) -> &'static str {
     }
 }
 
+fn offline_mode() -> bool {
+    env::var_os("CHELIS_OFFLINE").is_some_and(|value| value == "1")
+}
+
+fn offline_import_hint() -> &'static str {
+    ". CHELIS_OFFLINE=1 disables remote dependency resolution. \
+     Import locked artifacts with \
+     `chelis reef install --from-lockfile --artifact-dir <dir>`."
+}
+
 /// Internal load knobs threaded through the package graph resolver: the
 /// auto-fetch choice from [`BuildOptions`] and the embedded runtime every
 /// graph links. This `Copy` carrier exists because the resolver passes
@@ -9416,20 +9435,17 @@ struct LoadOptions {
 }
 
 impl LoadOptions {
-    /// Default for non-build callers (eval, check, prepare-for-eval,
-    /// etc.). Keeps the user-experience promise that `chelis check`
-    /// against an empty registry will auto-fetch the same way
-    /// `chelis reef build` does.
+    /// Apply the process offline policy to all non-build graph loads.
     fn default_for_load(runtime: &'static EmbeddedRuntime) -> Self {
         Self {
-            auto_fetch: true,
+            auto_fetch: !offline_mode(),
             runtime,
         }
     }
 
     fn for_build(opts: &BuildOptions, runtime: &'static EmbeddedRuntime) -> Self {
         Self {
-            auto_fetch: opts.auto_fetch,
+            auto_fetch: opts.auto_fetch && !offline_mode(),
             runtime,
         }
     }

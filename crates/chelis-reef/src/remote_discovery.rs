@@ -290,6 +290,14 @@ impl fmt::Display for DiscoveryError {
                         write!(formatter, " {package}=[{}]", entries.join("; "))?;
                     }
                 }
+                if crate::offline_mode()
+                    && matches!(
+                        error.as_ref(),
+                        package_versioning::VersioningError::IncompatibleRequirements { .. }
+                    )
+                {
+                    formatter.write_str(crate::offline_import_hint())?;
+                }
                 Ok(())
             }
             Self::Io { operation, message } => write!(formatter, "{operation}: {message}"),
