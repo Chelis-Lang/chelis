@@ -3781,11 +3781,10 @@ impl ConstraintSamplingPlan {
 
     /// The shared boundary described on [`Self::cell_window_start`].
     ///
-    /// For a plan with order edges the phase never runs, so the span is
-    /// returned without pricing any candidate list. That early return is
-    /// **load bearing, not an optimisation**: [`Self::resolve`] indexes
-    /// `values[predecessor]`, and there are no predecessor values at derive
-    /// time, so reaching it for a plan with edges panics.
+    /// The per-binder `incoming` test in the body is the panic guard, not an
+    /// optimisation: [`Self::resolve`] indexes `values[predecessor]`, and
+    /// there are no predecessor values at derive time, so a binder with a
+    /// predecessor must take the bound rather than be priced.
     fn derive_cell_window_start(&self) -> usize {
         let values = BTreeMap::new();
         self.topo

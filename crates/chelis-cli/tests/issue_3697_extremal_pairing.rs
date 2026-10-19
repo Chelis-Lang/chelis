@@ -251,8 +251,9 @@ fn issue_3697_post_diagonal_uniform_draws_carry_refutations() {
 ///
 /// **This test does not discriminate the exemption**, precisely because the
 /// two now agree here; `issue_3697_an_order_guarded_property_pairs` is the
-/// test that does. What this one pins is the regression: 18 refutations over
-/// seeds 0-29, and the refutation at attempt 77 for the two seeds below.
+/// test that does. What this one pins is four seeds drawn from the 18-of-30
+/// rate the design doc records: the refutation at attempt 77 for two of
+/// them, and a pass for the other two.
 ///
 /// Pinned by the one consequence a property can observe: the refutation is
 /// seed-dependent, because it needs the predecessor's uniform draw to be
@@ -516,6 +517,25 @@ fn issue_3697_unequal_lengths_still_pair() {
     // that read just the first binder would then pass every assertion while
     // losing `y`'s tail, which is a default-budget refutation. Only the
     // mirrored case separates the two.
+    // A *self-deleting* exclusion separates the exact length from the bound:
+    // `1.0` is already a schedule member, so `push` drops it and the list
+    // grows by one, not two. The boundary is the exact 45, so the corner is
+    // attempt 48 -- the bound's 46 would put it at 49. This is the only
+    // committed case where the two differ, and it is what pins
+    // `derive_cell_window_start`'s exact branch for a binder with no
+    // predecessor.
+    let self_deleting = format!(
+        "module Pairing.SelfDel\n@property corner forall(x: f64, y: f64)\nwhere x != 1.0f64:\n  {corner}\n"
+    );
+    let (code, record) = prove(&self_deleting, "500", "0");
+    assert_eq!(code, 1, "a self-deleting exclusion still pairs: {record:#}");
+    assert_eq!(
+        record["attempted_samples"], 48,
+        "`x != 1.0f64` makes x's schedule 45 long, not 46: the exact length \
+         is the boundary, so the corner is cell 2 of a window opening at 45. \
+         A boundary taken from the bound `44 + 2k` would read 46 and put this \
+         at 49: {record:#}"
+    );
     for lengthened in ["x", "y"] {
         for exclusions in 0..=4usize {
             let guards = (0..exclusions)

@@ -444,10 +444,13 @@ those are `f64::MAX` and `5e-324`, so the issue's own property is refuted at
 the forty-seventh attempt under every seed.
 
 Each figure below was taken with `--tier fuzz-only` at the stated budget. They
-are recorded because three of the policy's four choices — two classes, the
-placement after the diagonal rather than before it, and the order-guard
-exemption — were each chosen by a measurement that a plausible alternative
-failed.
+are recorded because each of the policy's choices — two classes, the
+placement after the diagonal rather than before it, the share that bounds the
+cell phase, and one boundary shared by the property rather than per binder —
+was chosen by a measurement that a plausible alternative failed. A fifth
+choice, switching the phase off for an order-guarded property, was made the
+same way and later withdrawn when the shared boundary removed the figure that
+justified it.
 
 #### Reindexing alone cannot pay for it
 
@@ -581,10 +584,17 @@ order-guarded plan at first, and the measurement that justified it was taken
 under a *per-binder* window: on `forall(x: f64, y: f64) where y > x, <twenty
 `!=` exclusions on y>: (y != -1.0e-323f64)` at the default budget over 30
 seeds, 18/30 refutations with the phase off against 0/30 with cells proposed
-everywhere. The cause was mechanical rather than deep. Twenty exclusions make
-`y`'s schedule 84 candidates long and the refuting one sits at index 75, but
-a per-binder window opened `x`'s cells at attempt 44, which displaced `y`'s
-draw before its diagonal had reached 75.
+everywhere — that 0/30 was taken against a six-class build and is not
+re-measurable, and a partial exemption withholding cells from predecessors
+only measured 11/30 under the same build.
+
+The cause was mechanical rather than deep, and the re-measurable part of it
+is this: twenty exclusions make `y`'s schedule 84 candidates long and the
+refuting candidate sits near index 75, but a per-binder window opened `x`'s
+cells at attempt 44, displacing `y`'s draw before its diagonal reached it.
+Reproducing just that — two classes, the current share, a per-binder window
+and no exemption — measures **10/30**, so the window accounts for eight of
+the eighteen lost refutations and the rest belonged to the six-class radix.
 
 One shared boundary removes that, because it clears the *longest* schedule in
 the property. A successor's exact length is not derivable at plan-derive time
@@ -598,12 +608,28 @@ phase on, identical to the phase being off, seed for seed and attempt for
 attempt.**
 
 So an order-guarded property now pairs. What it pays is displacement, which
-is the trade the phase makes everywhere, bounded the same way by the share:
-measured over seeds 0–29 at the default budget as a delta against the phase
-being off, nine of ten order shapes lose between 0 and 4 refutations of 30,
-mean −1.9, and the worst is two disjoint edges at arity 4 at 24/30 against
-16/30. That worst case sits inside the envelope already accepted for a
-non-order-guarded property at arity 5, which is 21/30 against 11/30.
+is the trade the phase makes everywhere and is bounded the same way: the
+cells take at most half the attempts the diagonal left, and the attempts
+before the boundary are untouched, so the only refutations at risk are the
+ones a run without the phase found in its final `cells` attempts.
+
+**That bound, not a comparison of figures, is why the share is not reduced
+further for an order-guarded property.** The loss is budget-dependent and
+recovers: two disjoint edges at arity 4 measures 24/30 against 16/30 at the
+default 100 samples, and 29/30 against 29/30 at 200 and 30/30 against 30/30
+at 500.
+
+The figures themselves are worth stating carefully, because the obvious
+summary of them is wrong. Over seeds 0–29 at the default budget, ten order
+shapes at arity two to four lose between 0 and 8 refutations of 30, mean
+−1.9. But that sweep stops at arity four, and it does not extend: an arity-5
+single-edge shape measures 24/30 against 11/30, and an arity-6 two-edge shape
+21/30 against 9/30. Nor is a 30-seed delta a rate — the arity-4 worst row is
+77/100 against 61/100 over a hundred seeds, which is −4.8 per 30 rather than
+−8, while an arity-6 chain is −10.5 per 30 and is the worst stable loss
+found. A policy that widens the cell phase owes these figures a
+re-measurement at the arity it targets, over enough seeds to separate a rate
+from an excursion.
 
 #### What the phase costs
 
@@ -641,10 +667,11 @@ passes at those budgets too. So the aligned behaviour is the designed one and
 the loss is the accident going away; it is confined to those two budgets and
 to an offset of one, since reaching it needs `2E` under the cell count.
 
-Both remaining costs are asserted as tests that a property is *not* refuted,
-so a future policy that reaches either has to change them deliberately and
-re-measure the displaced-draw rates. The closed one is asserted the other way
-round, as a pairing that must happen at every offset.
+One cost remains, and it is asserted as a test that a property is *not*
+refuted, so a future policy that reaches it has to change that test
+deliberately and re-measure the displaced-draw rates. The two closed ones are
+asserted the other way round: a pairing that must happen at every offset, and
+a pairing that must happen under an order guard.
 
 A binder whose schedule is longer than the span keeps the diagonal until that
 schedule is spent, which is what the `L_i` terms of `W` are for: a boundary
@@ -682,8 +709,8 @@ The chelis#3697 extremal-pairing oracle is:
 cargo nextest run -p chelis-cli --test issue_3697_extremal_pairing
 ```
 
-It pins the pairing itself, the two costs above, the retirement of the third,
-and the measurements that
+It pins the pairing itself, the one cost above, the retirement of the other
+two, and the measurements that
 chose the policy: the post-diagonal draws' yield at arities one to eight, the
 same yield at a 72-candidate schedule, a long schedule's tail, the low-order
 corner's reach at every arity, and the rejection lane's accepted count. The chelis#3636
