@@ -415,9 +415,9 @@ operation. The separate source-defined module is `Std.Io.Csv` (§11).
 | `csv_strs` | `(rows, col: string) -> List[string]` | whole column verbatim |
 | `csv_nrows` | `(rows) -> i64` | exact data-row count |
 | `csv_cols` | `(rows) -> List[string]` | first row's columns in insertion order |
-| `csv_f64` | `(rows, row: int, col: string) -> f64` | one cell; row is a nonnegative 0-based data-row index |
-| `csv_int` | `(rows, row: int, col: string) -> i64` | one exact integer cell |
-| `csv_str` | `(rows, row: int, col: string) -> string` | one cell verbatim |
+| `csv_f64` | `(rows, row: i64, col: string) -> f64` | one cell; row is a nonnegative 0-based data-row index |
+| `csv_int` | `(rows, row: i64, col: string) -> i64` | one exact integer cell |
+| `csv_str` | `(rows, row: i64, col: string) -> string` | one cell verbatim |
 
 Missing columns name the requested column and list the available columns.
 The builtins run through the shared host runtime in both execution modes,
