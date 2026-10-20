@@ -7,9 +7,10 @@ either. `1.0f64 / ((x * x) - 2.0f64)` is disproved finite over the reals at
 asserting that was reported failed under `--tier auto` and `--tier smt-only`
 alike.
 
-The witness is now rounded to each binder's declared width and evaluated
-concretely, the same route a square-root domain witness takes, and the outcome
-is reported in the additive `machine_arithmetic` field:
+A readable witness is now rounded to each binder's declared width and evaluated
+concretely, the same route a square-root domain witness takes; an irrational one
+is classified from the model term itself, since no machine value equals it.
+Either way the outcome is reported in the additive `machine_arithmetic` field:
 
 - `confirmed` — the preconditions admit the rounded witness and the body is
   false there. The result is a definite `failed` carrying that machine value as

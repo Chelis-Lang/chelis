@@ -4739,6 +4739,183 @@ fn issue_3971_plain_text_reports_the_undecided_machine_arithmetic_question() {
     );
 }
 
+// chelis#3971 regression control for the disclosure clause. The lane is gated on
+// the DISCLOSED `real_arithmetic` qualifier, not on a verdict token, so a green
+// whose badge is `proven_modulo_certified_envelope` or
+// `proven_modulo_fuzz_validated_contract` reaches it as well. A revision of
+// `real_arithmetic_decision` asserted the `proven_modulo_real_arithmetic` token
+// and panicked a debug build here -- on a PASSING property, under the default
+// tier and the default output format, with empty stdout and exit 101.
+//
+// Plain text is the half that broke: `--json` serializes the fields without ever
+// calling `disclosure()`, and `--tier smt-only` takes the constant disclosure.
+// Nothing in the suite ran `--tier auto` without `--json` on such a green.
+#[cfg(feature = "smt")]
+#[test]
+fn issue_3971_auto_discloses_a_non_real_arithmetic_badge_in_plain_text() {
+    let dir = write_prop(
+        r#"
+@property erf_bounded forall(x: f32) where x >= 0.0f32, x <= 1.0f32:
+  (erf(x) <= 0.9f32)
+"#,
+    );
+    let path = dir.path().join("prop.ch");
+    let json = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["prove", path.to_str().unwrap(), "--tier", "auto", "--json"])
+        .output()
+        .expect("run prove");
+    let props = property_records(&json.stdout);
+    assert_eq!(props.len(), 1, "records: {props:?}");
+    // The fixture is only a control while it keeps producing a green whose
+    // badge is NOT `proven_modulo_real_arithmetic` and which still discloses
+    // the qualifier the lane gates on.
+    assert_eq!(props[0]["status"], "passed", "{}", props[0]);
+    assert_eq!(
+        props[0]["composite_verdict"], "proven_modulo_certified_envelope",
+        "{}",
+        props[0]
+    );
+    let qualifiers = props[0]["qualifiers"].as_array().expect("qualifiers");
+    assert!(
+        qualifiers.iter().any(|q| q == "real_arithmetic"),
+        "the lane only reaches this record because it discloses the qualifier: {}",
+        props[0]
+    );
+    assert_eq!(
+        props[0]["machine_arithmetic"]["status"], "corroborated",
+        "{}",
+        props[0]
+    );
+
+    let text = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["prove", path.to_str().unwrap(), "--tier", "auto"])
+        .output()
+        .expect("run prove");
+    let rendered = String::from_utf8_lossy(&text.stdout).to_string();
+    assert_eq!(
+        text.status.code(),
+        Some(0),
+        "a passing property must not abort the run: stdout={rendered}\nstderr={}",
+        String::from_utf8_lossy(&text.stderr)
+    );
+    assert!(
+        rendered.contains(
+            "property: erf_bounded -- proven_modulo_certified_envelope (proved over the reals; machine arithmetic corroborated on 100 samples)"
+        ),
+        "every over-the-reals green renders the proof-side clause whatever its \
+         badge: {rendered}"
+    );
+}
+
+// chelis#3971: the two `unconfirmed` reasons that are NOT the irrational one,
+// end to end. Both were unit-tested against a stubbed evaluator only, so
+// nothing pinned that cvc5 actually produces a witness reaching them.
+//
+// `(x * 49.0) != 1.0` on [0, 1]: the real witness is 1/49, and the double
+// nearest it times 49 is 0.9999999999999999, so the body HOLDS at the rounded
+// witness. Narrowing the guards to pin that same product instead makes the
+// rounded witness fail the property's own preconditions.
+#[cfg(feature = "smt")]
+#[test]
+fn issue_3971_the_body_holds_and_guard_rejected_witnesses_are_reached_by_cvc5() {
+    // The arithmetic the first fixture rests on.
+    let witness = 1.0f64 / 49.0f64;
+    assert_ne!(
+        witness * 49.0f64,
+        1.0f64,
+        "the double nearest 1/49 does not multiply back to exactly 1"
+    );
+
+    // `fuzz_only_passes` is false for the guard-rejected fixture: its guards are
+    // not the scalar shape the sampler supports, so `fuzz-only` reports
+    // `unsupported` there for its OWN reason. Asserting a pass for both would
+    // have claimed a divergence the second fixture does not exhibit.
+    for (source, expected_reason, fuzz_only_passes) in [
+        (
+            r#"
+@property times49_ne_one forall(x: f64) where x >= 0.0f64, x <= 1.0f64:
+  ((x * 49.0f64) != 1.0f64)
+"#,
+            "the property body holds at the solver's witness",
+            true,
+        ),
+        (
+            r#"
+@property guard_edge forall(x: f64) where (x * 49.0f64) >= 1.0f64, (x * 49.0f64) <= 1.0f64:
+  ((x * 49.0f64) != 1.0f64)
+"#,
+            "does not satisfy the property's own preconditions",
+            false,
+        ),
+    ] {
+        let dir = write_prop(source);
+        let path = dir.path().join("prop.ch");
+        for tier in ["auto", "smt-only"] {
+            let output = Command::cargo_bin("chelis")
+                .expect("binary")
+                .args([
+                    "prove",
+                    path.to_str().unwrap(),
+                    "--tier",
+                    tier,
+                    "--samples",
+                    "100",
+                    "--json",
+                ])
+                .output()
+                .expect("run prove");
+            let props = property_records(&output.stdout);
+            assert_eq!(props.len(), 1, "{tier} records: {props:?}");
+            let prop = &props[0];
+            assert_eq!(prop["status"], "unsupported", "{tier}: {prop}");
+            assert_eq!(
+                prop["machine_arithmetic"]["status"], "unconfirmed",
+                "{tier}: {prop}"
+            );
+            let reason = prop["machine_arithmetic"]["reason"]
+                .as_str()
+                .unwrap_or_default();
+            assert!(
+                reason.contains(expected_reason),
+                "{tier}: the reason names WHICH of the three ways the witness is \
+                 not a machine counterexample: {reason}"
+            );
+            assert_eq!(output.status.code(), Some(2), "{tier}: {prop}");
+        }
+
+        if !fuzz_only_passes {
+            continue;
+        }
+        // The divergence the rule deliberately creates, pinned rather than
+        // left implicit: `fuzz-only` never saw the over-the-reals disproof, so
+        // it passes where `auto` reports the question undecided. chelis#3634's
+        // parity claim is one-directional -- no PASS where `fuzz-only` refutes
+        // -- and this is the other direction, which it does not cover.
+        let fuzz = Command::cargo_bin("chelis")
+            .expect("binary")
+            .args([
+                "prove",
+                path.to_str().unwrap(),
+                "--tier",
+                "fuzz-only",
+                "--samples",
+                "100",
+                "--json",
+            ])
+            .output()
+            .expect("run prove");
+        assert_eq!(fuzz.status.code(), Some(0), "{fuzz:?}");
+        assert_eq!(
+            property_records(&fuzz.stdout)[0]["status"],
+            "passed",
+            "fuzz-only alone reports a pass: {:?}",
+            property_records(&fuzz.stdout)
+        );
+    }
+}
+
 // chelis#3971: the Deep property lane makes the same over-the-reals decision as
 // the Surf lane and must confirm its witness the same way. Pin both the
 // confirmed and the unconfirmed direction on a `.dp` input, so a future change

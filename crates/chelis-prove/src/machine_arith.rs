@@ -186,25 +186,30 @@ impl MachineArithmeticCheck {
     }
 
     /// The clause naming the over-the-reals decision this check was run
-    /// against. Read off the recorded verdict TOKEN rather than inferred from
-    /// the status, so the two sides of the lane cannot be described by each
-    /// other's sentence.
+    /// against, keyed on the ONE disproved verdict rather than on the green
+    /// ones. The lane only ever runs against an over-the-reals decision, and
+    /// every such decision that is not that disproof is a green -- for which
+    /// "proved over the reals" is correct whatever `proven_modulo_*` badge it
+    /// carries. `--tier smt-only` already prints exactly that clause beside
+    /// `proven_modulo_certified_envelope`.
+    ///
+    /// This deliberately does NOT assert the green token. A revision of this
+    /// function asserted `proven_modulo_real_arithmetic`, which is only one of
+    /// the greens that disclose `real_arithmetic`: the lane is gated on the
+    /// disclosed QUALIFIER, so a certified-envelope or fuzz-validated-contract
+    /// green reaches it too, and the assert panicked a debug build on a PASSING
+    /// property under the default tier and output format. Enumerating the green
+    /// badges here instead would be the same defect one token later -- the set
+    /// is open by design, which is why the gate reads the qualifier and not a
+    /// list.
     fn real_arithmetic_decision(&self) -> &'static str {
-        use crate::composition::CompositeVerdict;
-        if self.real_arithmetic_verdict == CompositeVerdict::DisprovedModuloRealArithmetic.as_str()
+        if self.real_arithmetic_verdict
+            == crate::composition::CompositeVerdict::DisprovedModuloRealArithmetic.as_str()
         {
-            return "disproved over the reals";
+            "disproved over the reals"
+        } else {
+            "proved over the reals"
         }
-        // Only two verdicts can be checked against, and reaching the fallback
-        // with anything else would describe a decision as its own opposite.
-        // Assert it rather than let a future third producer render a lie.
-        debug_assert_eq!(
-            self.real_arithmetic_verdict,
-            CompositeVerdict::ProvenModuloRealArithmetic.as_str(),
-            "a machine-arithmetic check was recorded against a verdict this \
-             disclosure has no sentence for"
-        );
-        "proved over the reals"
     }
 }
 
@@ -736,6 +741,25 @@ mod tests {
                 .disclosure(),
             "proved over the reals; machine arithmetic unchecked: starved"
         );
+        // Every OTHER green that discloses `real_arithmetic` reaches this lane
+        // too, because the gate reads the qualifier rather than a token list.
+        // Each must render the proof-side clause -- not panic, and not describe
+        // itself as a disproof. A revision that asserted the
+        // `proven_modulo_real_arithmetic` token here crashed a debug build on a
+        // passing property; the first two badges below are the ones that
+        // crashed it.
+        for green in [
+            "proven_modulo_certified_envelope",
+            "proven_modulo_fuzz_validated_contract",
+            "proven",
+            "sound_approximate",
+        ] {
+            assert_eq!(
+                MachineArithmeticCheck::corroborated(100, green).disclosure(),
+                "proved over the reals; machine arithmetic corroborated on 100 samples",
+                "{green} must render the proof-side clause"
+            );
+        }
         assert_eq!(
             MachineArithmeticCheck::corroborated(100, "proven_modulo_real_arithmetic").disclosure(),
             "proved over the reals; machine arithmetic corroborated on 100 samples"

@@ -1167,6 +1167,12 @@ same additive `machine_arithmetic` object:
   made, and it is recorded in `machine_arithmetic.real_arithmetic_verdict`
   rather than in the status.
 
+  A withdrawn record's `qualifiers` array is therefore **empty**, where the
+  hedged disproof it replaces published `["real_arithmetic"]`: a non-green
+  status discloses no green guarantee. A consumer that scanned `qualifiers` for
+  the over-the-reals caveat reads `machine_arithmetic.real_arithmetic_verdict`
+  on these records instead.
+
   The step this rule exists to forbid is reading "no machine value equals this
   witness" as "no machine input falsifies this property".
   `(x * x) != 11.0f64` on `[3, 4]` refutes that reading: `sqrt(11)` is
@@ -1188,12 +1194,17 @@ Only the first answer may report a failure, and no answer may report a pass.
 The lane needs a positive finding about the witness to say anything at all, and
 a positive finding about one witness is never a statement about the property.
 An algebraic witness's isolating interval is deliberately not read as a
-candidate point — its endpoints bracket the root, so a point taken from them is
-a different real from the one the solver exhibited. Reading it would narrow the
-undecided band (the `!= 11.0` case above would become a confirmed failure) but
-not close it, since a falsifying machine value away from the root is still
-reachable; that is additional capability rather than a different rule, and it is
-tracked separately.
+candidate point. Its endpoints bracket the root, so a point taken from them is a
+different real from the one the solver exhibited, and at the widths cvc5 prints
+they are not even close: the interval for `sqrt(2)` in chelis#3971's own
+reproduction, `(741455/524288, 2965821/2097152)`, is 4.8e-7 wide — some 2^31
+doubles — and neither endpoint nor the midpoint reaches the double nearest the
+root. Reaching that double needs the interval REFINED against the polynomial,
+which is a capability this rule does not have and does not claim. Adding it
+would narrow the undecided band without closing it, since a falsifying machine
+value away from the root stays reachable, so it is additional capability rather
+than a different rule. It is not tracked by a separate issue; chelis#3971
+remains open for it.
 
 Unlike the green side's refutation search, the confirmation is a **single
 concrete evaluation** of the solver's own witness rather than a second tier, so
