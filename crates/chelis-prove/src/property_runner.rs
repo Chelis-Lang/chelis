@@ -325,6 +325,34 @@ impl PropertyOutcome {
         self
     }
 
+    /// Withdraw a reported PASS, keeping the sampling evidence that produced it
+    /// (chelis#3971).
+    ///
+    /// Its one consumer: a sampling run that reported in place of an
+    /// over-the-reals DISPROOF may not be published as a pass. The witness
+    /// check establishes only that the point the solver exhibited is not a
+    /// machine counterexample, which says nothing about any other input, and
+    /// the decision it displaced was a disproof. So the honest status is that
+    /// the machine-arithmetic question is undecided -- not that the property
+    /// holds.
+    ///
+    /// `samples` goes to zero and the sampling detail stays in
+    /// `accepted_samples` / `attempted_samples`, which is this type's existing
+    /// convention for a terminal outcome that sampling work preceded. The base
+    /// discharge is dropped with the pass: a green base cannot survive a status
+    /// that is not green, and `base_verdict` would otherwise re-derive one.
+    pub(super) fn into_unsupported(mut self, reason: String) -> Self {
+        self.status = PropertyStatus::Unsupported;
+        self.samples = 0;
+        self.counterexample = None;
+        self.shrink_steps = 0;
+        self.base_discharge = None;
+        self.reason = Some(reason);
+        let base = base_verdict(&self.status, self.proof_tier, self.samples, None, None);
+        self.composite_verdict = rollup_composite(base, &self.assumptions);
+        self
+    }
+
     fn append_assumptions(&mut self, assumptions: Vec<AssumptionRecord>) {
         if assumptions.is_empty() {
             return;
@@ -935,6 +963,10 @@ fn prove_surf_property(
         return outcome;
     }
 
+    // chelis#3971: carries an over-the-reals disproof whose witness was shown
+    // not to be a machine counterexample, from the Tier B lane that declined it
+    // to the Tier C record that reports in its place.
+    let mut unconfirmed_disproof = None;
     // Tier B: attempt SMT proof when --tier auto / smt-only.
     if options.tier == "auto" || options.tier == "smt-only" {
         let semantic = match semantic_program.get_or_init(|| SemanticSurfProgram::new(decls)) {
@@ -953,6 +985,7 @@ fn prove_surf_property(
             property,
             options,
             seed,
+            &mut unconfirmed_disproof,
         ) {
             outcome.append_assumptions(contract_assumptions.clone());
             // chelis#3634: a Tier B green is a decision over the REALS, so it
@@ -1012,7 +1045,12 @@ fn prove_surf_property(
         eval_program,
     );
     outcome.append_assumptions(contract_assumptions);
-    outcome
+    // chelis#3971: when Tier C reports in place of an over-the-reals disproof,
+    // the record says so, and it may not say `passed`.
+    match unconfirmed_disproof {
+        Some(check) => resolve_unconfirmed_disproof(outcome, check),
+        None => outcome,
+    }
 }
 
 /// Conservatively decide whether a property's compiler AST reaches a recursive
@@ -2547,6 +2585,11 @@ fn lower_surf_tier_b_pass(
 /// `None` to fall through to Tier C (the property did not lower, including
 /// when the contract-abstraction lowering passes disagree under `auto`, or
 /// the solver timed out / errored).
+// The arity is the lane's own context (semantic view, authored declarations,
+// eval program, trusted contracts, property, options, seed) plus chelis#3971's
+// one out-parameter. Grouping them into a struct would hide which of them the
+// chelis#3645 split keeps separate on purpose.
+#[allow(clippy::too_many_arguments)]
 fn try_surf_tier_b(
     semantic: &SemanticSurfProgram,
     // The AUTHORED declarations, for the one job chelis#3645 keeps with them
@@ -2559,6 +2602,11 @@ fn try_surf_tier_b(
     property: &Property,
     options: &PropertyRunOptions,
     seed: u64,
+    // chelis#3971: set when an over-the-reals DISPROOF's witness was shown not
+    // to be a machine counterexample and `auto` is routing to Tier C. The
+    // caller attaches it to the Tier C record, so the solver's finding is
+    // disclosed on the result that displaced it rather than dropped.
+    unconfirmed_disproof: &mut Option<crate::machine_arith::MachineArithmeticCheck>,
 ) -> Option<PropertyOutcome> {
     let contracts = expanded_contracts(property);
     let lowered =
@@ -2705,6 +2753,11 @@ fn try_surf_tier_b(
             Vec::new(),
         ));
     }
+    // chelis#3971's witness projection reads the model at the PROPERTY
+    // BINDERS' sorts only. The abstraction's variables are abstract stand-ins
+    // for a contract's result, not inputs the concrete evaluator substitutes,
+    // so their model values are not part of the candidate machine point.
+    let param_variables = variables.clone();
     let mut variables = variables;
     variables.extend(abstraction.variables());
     let mut preconditions = preconditions;
@@ -2806,18 +2859,33 @@ fn try_surf_tier_b(
             // `disproved_modulo_real_arithmetic` -- the counterexample may be a
             // false counterexample at machine arithmetic -- rather than a
             // flattened definite `failed`.
-            Some(PropertyOutcome::with_base_discharge(
+            let hedged = PropertyOutcome::with_base_discharge(
                 property.name.clone(),
                 PropertyStatus::Failed,
                 PropertyTier::Smt,
                 0,
                 seed,
-                Some(model),
+                Some(model.clone()),
                 None,
                 false,
                 Vec::new(),
                 base_discharge,
-            ))
+            );
+            // chelis#3971: the hedge discloses the gap but the record is still
+            // REPORTED as a property failure, which claims a defect at some
+            // machine input the solver has not exhibited. Confirm the witness
+            // concretely before reporting it.
+            resolve_surf_disproof(
+                hedged,
+                &param_variables,
+                authored,
+                eval_program,
+                property,
+                &model,
+                options,
+                seed,
+                unconfirmed_disproof,
+            )
         }
         crate::tier_b::TierBResult::Timeout => {
             if options.tier == "smt-only" {
@@ -4430,8 +4498,334 @@ fn resolve_domain_witness(
     }
 }
 
-/// Turn a [`crate::tier_b::TierBResult::DomainDisproved`] witness into a
-/// [`Sample`] at the binders' DECLARED widths.
+// ===========================================================================
+// chelis#3971: machine-arithmetic confirmation of an over-the-reals DISPROOF
+// ===========================================================================
+
+/// What a [`crate::tier_b::TierBResult::Disproved`] model established once its
+/// witness was evaluated concretely.
+///
+/// Three answers, because they are materially different and route differently.
+/// `Unconfirmed` is a POSITIVE finding about the witness -- it is not a machine
+/// counterexample -- while `Unchecked` is the absence of a finding.
+#[derive(Debug)]
+enum DisproofWitness {
+    /// Every precondition admits the witness at its declared machine precision
+    /// and the body is false there. Carries the counterexample in the same
+    /// shape a Tier C failure reports.
+    Confirmed(serde_json::Value),
+    /// The witness is not a machine counterexample. Carries which of the three
+    /// ways it is not one.
+    Unconfirmed(&'static str),
+    /// Nothing established: a model value the projection cannot read, or a
+    /// witness the concrete evaluator could not run. Carries why.
+    Unchecked(String),
+}
+
+/// Fold the confirmation of an over-the-reals disproof's witness into the
+/// record the run reports (Surf lane).
+///
+/// - **Confirmed** replaces the hedged failure with a DEFINITE one at the
+///   concrete point: the machine evaluation, not the solver, decided it, so the
+///   record carries no `real_arithmetic` qualifier. Mirrors the chelis#3635
+///   domain-witness rule exactly.
+/// - **Unconfirmed** may be reported as neither a failure nor a pass. Under
+///   `auto` the run routes to Tier C, which is the lane that can actually search
+///   machine arithmetic, and the check travels to that record through
+///   `unconfirmed_disproof`; a Tier C counterexample is a concrete machine value
+///   and so a definite failure, while a clean Tier C run is withdrawn to
+///   `unsupported`. Under the terminal `--tier smt-only` there is nothing to
+///   route to, so the record is `unsupported` directly.
+/// - **Unchecked** leaves the disproof exactly as Tier B produced it. An
+///   evaluation limitation never displaces a decision, which is the disproof
+///   side of chelis#3634's "a sampler limitation never degrades a proof".
+#[allow(clippy::too_many_arguments)]
+fn resolve_surf_disproof(
+    hedged: PropertyOutcome,
+    variables: &[(String, crate::solver::SmtSort)],
+    decls: &[Decl],
+    eval_program: &SurfEvalProgramCell,
+    property: &Property,
+    model: &serde_json::Value,
+    options: &PropertyRunOptions,
+    seed: u64,
+    unconfirmed_disproof: &mut Option<crate::machine_arith::MachineArithmeticCheck>,
+) -> Option<PropertyOutcome> {
+    if !crate::machine_arith::disproof_confirmation_required(
+        &options.tier,
+        &hedged.disclosed_qualifiers(),
+    ) {
+        return Some(hedged);
+    }
+    let witness = confirm_surf_disproof_witness(variables, decls, eval_program, property, model);
+    resolve_disproof_outcome(
+        hedged,
+        witness,
+        &property.name,
+        options,
+        seed,
+        unconfirmed_disproof,
+    )
+}
+
+/// The lane-independent half of [`resolve_surf_disproof`]: it owns the routing
+/// rule, so the Surf and Deep lanes cannot disagree about it.
+fn resolve_disproof_outcome(
+    hedged: PropertyOutcome,
+    witness: DisproofWitness,
+    name: &str,
+    options: &PropertyRunOptions,
+    seed: u64,
+    unconfirmed_disproof: &mut Option<crate::machine_arith::MachineArithmeticCheck>,
+) -> Option<PropertyOutcome> {
+    use crate::machine_arith::MachineArithmeticCheck;
+
+    let verdict = hedged.composite_verdict.as_str();
+    match witness {
+        DisproofWitness::Confirmed(counterexample) => Some(
+            PropertyOutcome::new(
+                name,
+                PropertyStatus::Failed,
+                PropertyTier::Smt,
+                0,
+                seed,
+                Some(counterexample),
+                Some(crate::machine_arith::CONFIRMED_REASON.to_string()),
+                false,
+                Vec::new(),
+            )
+            .with_machine_arithmetic(MachineArithmeticCheck::confirmed(verdict)),
+        ),
+        DisproofWitness::Unconfirmed(reason) => {
+            let check = MachineArithmeticCheck::unconfirmed(verdict, reason);
+            if options.tier == "auto" {
+                *unconfirmed_disproof = Some(check);
+                return None;
+            }
+            // Terminal tier: nothing left to attempt, and the hedged failure
+            // may not stand either -- the witness it rests on has been shown
+            // not to be a machine counterexample. The machine-arithmetic
+            // question is undecided, which is what `unsupported` states.
+            Some(
+                PropertyOutcome::new(
+                    name,
+                    PropertyStatus::Unsupported,
+                    PropertyTier::Smt,
+                    0,
+                    seed,
+                    None,
+                    Some(crate::machine_arith::unconfirmed_disproof_reason(reason)),
+                    false,
+                    Vec::new(),
+                )
+                .with_machine_arithmetic(check),
+            )
+        }
+        DisproofWitness::Unchecked(reason) => Some(
+            hedged.with_machine_arithmetic(MachineArithmeticCheck::unchecked(0, verdict, reason)),
+        ),
+    }
+}
+
+/// Fold an unconfirmed over-the-reals disproof into the Tier C record that
+/// reported in its place, under `--tier auto` (chelis#3971).
+///
+/// A Tier C counterexample is a concrete machine value, so that record is a
+/// definite failure and stands. Anything else may NOT be published as a pass:
+/// Tier B decided the property FALSE over the reals, and all the witness check
+/// established is that the one point the solver exhibited is not a machine
+/// counterexample. Sampling then finding nothing is not evidence that nothing
+/// is there -- `(x * x) != 11.0f64` on `[3, 4]` survives 20000 samples and is
+/// false at the double nearest `sqrt(11)`, which squares to exactly `11.0`.
+///
+/// So a clean run is withdrawn to `unsupported`. That is the only outcome
+/// consistent with both halves of what is known, and it keeps the lane from
+/// doing on the disproof side what chelis#3634 forbids on the proof side:
+/// letting a sampler's silence displace a solver's decision.
+fn resolve_unconfirmed_disproof(
+    outcome: PropertyOutcome,
+    check: crate::machine_arith::MachineArithmeticCheck,
+) -> PropertyOutcome {
+    let clause = crate::machine_arith::unconfirmed_disproof_reason(
+        check.reason.as_deref().unwrap_or("no reason recorded"),
+    );
+    match outcome.display_status() {
+        // Withdrawn: the composed clause IS the record's reason.
+        "passed" => outcome
+            .into_unsupported(clause)
+            .with_machine_arithmetic(check),
+        // Tier C reached its own terminal state -- a sampler grammar it does
+        // not support, generator starvation, an evaluation error. That reason
+        // is the proximate cause and must survive verbatim, but on its own it
+        // tells a plain-text reader only about the sampler and never that the
+        // solver disproved the property over the reals. Append rather than
+        // replace, so the record carries both.
+        "unsupported" | "error" => {
+            let combined = match outcome.reason.as_deref() {
+                Some(existing) if !existing.is_empty() => format!("{existing}; {clause}"),
+                _ => clause,
+            };
+            let mut outcome = outcome;
+            outcome.reason = Some(combined);
+            outcome.with_machine_arithmetic(check)
+        }
+        // A Tier C FAILURE established a concrete machine counterexample, so
+        // the clause's "no machine counterexample established" would be false
+        // on it. The record keeps its own reason and discloses the displaced
+        // decision through `machine_arithmetic` alone.
+        _ => outcome.with_machine_arithmetic(check),
+    }
+}
+
+/// Confirm an over-the-reals disproof's witness on the HOST LANE, the only
+/// authority a real-arithmetic model has over machine arithmetic (chelis#3971).
+///
+/// The model is a point in the reals. It is projected to the binders' sorts,
+/// rounded once to each binder's declared width, and run through exactly the
+/// evaluation a Tier C sample gets: every precondition must hold at it, and the
+/// body must be false. A reported failure then rests on that concrete
+/// evaluation alone.
+fn confirm_surf_disproof_witness(
+    variables: &[(String, crate::solver::SmtSort)],
+    decls: &[Decl],
+    eval_program: &SurfEvalProgramCell,
+    property: &Property,
+    model: &serde_json::Value,
+) -> DisproofWitness {
+    let witness = match disproof_witness_scalars(variables, model) {
+        Ok(witness) => witness,
+        Err(declined) => return declined,
+    };
+    let sample = match witness_sample(&property.params, &witness) {
+        Ok(sample) => sample,
+        Err(reason) => return DisproofWitness::Unchecked(reason),
+    };
+    let program = match surf_eval_program(decls, eval_program) {
+        Ok(program) => program,
+        Err(SurfEvalProgramError::Desugar(reason)) => {
+            return DisproofWitness::Unchecked(format!("witness desugar failed: {reason}"));
+        }
+        Err(SurfEvalProgramError::Compile(message)) => {
+            return DisproofWitness::Unchecked(message.clone());
+        }
+    };
+    resolve_disproof_witness(
+        sample,
+        |sample, precondition| {
+            eval_surf_sample(
+                &program.library,
+                property,
+                &program.roots,
+                sample,
+                precondition,
+            )
+        },
+        property.preconditions.len(),
+    )
+}
+
+/// The Deep-lane counterpart of [`confirm_surf_disproof_witness`]. Same
+/// contract, same single authority: the concrete evaluation.
+fn confirm_deep_disproof_witness(
+    variables: &[(String, crate::solver::SmtSort)],
+    exprs: &[DeepExpr],
+    property: &DeepProperty,
+    model: &serde_json::Value,
+) -> DisproofWitness {
+    let witness = match disproof_witness_scalars(variables, model) {
+        Ok(witness) => witness,
+        Err(declined) => return declined,
+    };
+    let sample = match witness_sample(&property.params, &witness) {
+        Ok(sample) => sample,
+        Err(reason) => return DisproofWitness::Unchecked(reason),
+    };
+    let roots = SampleRoots::for_program(exprs);
+    resolve_disproof_witness(
+        sample,
+        |sample, precondition| eval_deep_sample(exprs, property, &roots, sample, precondition),
+        property.preconditions.len(),
+    )
+}
+
+/// Project a solver model onto the property binders' plain JSON scalars.
+///
+/// An IRRATIONAL binding decides the whole model on its own and is the stronger
+/// of the two declines, so the scan completes before an unreadable sibling is
+/// reported: every machine number is rational, so a model that binds any input
+/// to an irrational is not a machine point, whatever the rest of it looks like.
+fn disproof_witness_scalars(
+    variables: &[(String, crate::solver::SmtSort)],
+    model: &serde_json::Value,
+) -> Result<serde_json::Value, DisproofWitness> {
+    use crate::tier_b::ModelScalar;
+
+    let Some(bindings) = model.as_object() else {
+        return Err(DisproofWitness::Unchecked(
+            "the solver's counterexample model is not a binding map".to_string(),
+        ));
+    };
+    let mut scalars = serde_json::Map::new();
+    let mut unreadable: Option<&str> = None;
+    for (name, sort) in variables {
+        match crate::tier_b::model_scalar(bindings.get(name), *sort) {
+            ModelScalar::Value(json) => {
+                scalars.insert(name.clone(), json);
+            }
+            ModelScalar::Irrational => {
+                return Err(DisproofWitness::Unconfirmed(
+                    crate::machine_arith::IRRATIONAL_WITNESS_REASON,
+                ));
+            }
+            ModelScalar::Unreadable => unreadable = unreadable.or(Some(name.as_str())),
+        }
+    }
+    if let Some(name) = unreadable {
+        return Err(DisproofWitness::Unchecked(format!(
+            "the solver's counterexample value for `{name}` is not a shape the \
+             machine-arithmetic projection reads"
+        )));
+    }
+    Ok(serde_json::Value::Object(scalars))
+}
+
+/// The shared verdict both lanes derive from one concrete evaluation of the
+/// witness: admitted by every guard, and the body false there.
+fn resolve_disproof_witness(
+    sample: Sample,
+    mut eval: impl FnMut(&Sample, bool) -> Result<bool, String>,
+    precondition_count: usize,
+) -> DisproofWitness {
+    if precondition_count > 0 {
+        match eval(&sample, true) {
+            Ok(true) => {}
+            Ok(false) => {
+                return DisproofWitness::Unconfirmed(
+                    crate::machine_arith::WITNESS_REJECTED_BY_GUARDS_REASON,
+                );
+            }
+            Err(err) => {
+                return DisproofWitness::Unchecked(format!(
+                    "the solver's counterexample could not be evaluated: {err}"
+                ));
+            }
+        }
+    }
+    match eval(&sample, false) {
+        Ok(false) => DisproofWitness::Confirmed(counterexample_json(&sample)),
+        Ok(true) => DisproofWitness::Unconfirmed(crate::machine_arith::WITNESS_BODY_HOLDS_REASON),
+        Err(err) => DisproofWitness::Unchecked(format!(
+            "the solver's counterexample could not be evaluated: {err}"
+        )),
+    }
+}
+
+/// Turn a solver witness into a [`Sample`] at the binders' DECLARED widths.
+///
+/// Shared by chelis#3635's `sqrt`-domain lane and chelis#3971's main-goal
+/// disproof lane, which is why its messages name "witness" and not one of the
+/// two mechanisms: a chelis#3971 record used to blame chelis#3635's
+/// domain-obligation machinery for a main-goal counterexample it could not read.
 ///
 /// Every parameter must have a witness value of its declared shape. A missing
 /// binder, an unreadable value, an integer outside its width, or a float that
@@ -4442,19 +4836,16 @@ fn resolve_domain_witness(
 fn witness_sample(params: &[Param], witness: &serde_json::Value) -> Result<Sample, String> {
     let bindings = witness
         .as_object()
-        .ok_or_else(|| "the solver's domain witness is not a binding map".to_string())?;
+        .ok_or_else(|| "the solver's witness is not a binding map".to_string())?;
     let mut values = Vec::with_capacity(params.len());
     for param in params {
         let ty = param
             .ty
             .as_ref()
             .ok_or_else(|| format!("{} is missing an explicit type", param.name))?;
-        let value = bindings.get(&param.name).ok_or_else(|| {
-            format!(
-                "the solver's domain witness carries no value for `{}`",
-                param.name
-            )
-        })?;
+        let value = bindings
+            .get(&param.name)
+            .ok_or_else(|| format!("the solver's witness carries no value for `{}`", param.name))?;
         values.push(witness_value(&param.name, ty, value)?);
     }
     Ok(Sample { values })
@@ -4469,11 +4860,11 @@ fn witness_value(
         TypeExpr::Named(type_name, _) if type_name == "bool" => value
             .as_bool()
             .map(|value| bool_sample(name, value))
-            .ok_or_else(|| format!("`{name}`'s domain witness is not a bool")),
+            .ok_or_else(|| format!("`{name}`'s witness is not a bool")),
         TypeExpr::Named(type_name, _) if crate::opaque::is_int_width(type_name) => {
             let raw = value
                 .as_i64()
-                .ok_or_else(|| format!("`{name}`'s domain witness is not an integer"))?;
+                .ok_or_else(|| format!("`{name}`'s witness is not an integer"))?;
             // The bound is the width's REPRESENTABLE range, not
             // `int_sample_bounds`/`integer_fuzz_bounds`, which clamps to the
             // [-1000, 1000] fuzz convenience window. A witness is an exhibited
@@ -4487,7 +4878,7 @@ fn witness_value(
                 })?;
             if raw < lo || raw > hi {
                 return Err(format!(
-                    "`{name}`'s domain witness {raw} is outside {type_name}'s representable range \
+                    "`{name}`'s witness {raw} is outside {type_name}'s representable range \
                      [{lo}, {hi}]"
                 ));
             }
@@ -4496,21 +4887,19 @@ fn witness_value(
         TypeExpr::Named(type_name, _) if type_name == "f32" || type_name == "f64" => {
             let raw = value
                 .as_f64()
-                .ok_or_else(|| format!("`{name}`'s domain witness is not a number"))?;
+                .ok_or_else(|| format!("`{name}`'s witness is not a number"))?;
             let sample = directed_float_sample(name, type_name, raw);
             let rounded = sample
                 .json
                 .as_f64()
-                .ok_or_else(|| format!("`{name}`'s rounded domain witness is not a number"))?;
+                .ok_or_else(|| format!("`{name}`'s rounded witness is not a number"))?;
             if !rounded.is_finite() {
-                return Err(format!(
-                    "`{name}`'s domain witness is not finite at {type_name}"
-                ));
+                return Err(format!("`{name}`'s witness is not finite at {type_name}"));
             }
             Ok(sample)
         }
         _ => Err(format!(
-            "`{name}`'s declared type is outside the domain-witness fragment"
+            "`{name}`'s declared type is outside the witness fragment"
         )),
     }
 }
@@ -5829,8 +6218,11 @@ fn prove_deep_property(
         );
     }
 
+    let mut unconfirmed_disproof = None;
     if options.tier == "auto" || options.tier == "smt-only" {
-        if let Some(outcome) = try_deep_tier_b(exprs, property, options, seed) {
+        if let Some(outcome) =
+            try_deep_tier_b(exprs, property, options, seed, &mut unconfirmed_disproof)
+        {
             // chelis#3634: a Tier B green on a Deep property is the same
             // over-the-reals decision the Surf lane makes, so `auto` owes it the
             // same machine-arithmetic refutation search.
@@ -5859,7 +6251,12 @@ fn prove_deep_property(
         }
     }
 
-    prove_deep_property_fuzz(exprs, property, options, seed)
+    let outcome = prove_deep_property_fuzz(exprs, property, options, seed);
+    // chelis#3971: see the Surf lane.
+    match unconfirmed_disproof {
+        Some(check) => resolve_unconfirmed_disproof(outcome, check),
+        None => outcome,
+    }
 }
 
 /// Tier C for a Deep property: the sampling lane `prove_deep_property` falls
@@ -6065,6 +6462,8 @@ fn try_deep_tier_b(
     property: &DeepProperty,
     options: &PropertyRunOptions,
     seed: u64,
+    // chelis#3971: see the Surf lane's parameter of the same name.
+    unconfirmed_disproof: &mut Option<crate::machine_arith::MachineArithmeticCheck>,
 ) -> Option<PropertyOutcome> {
     let grad_diagnostic = RefCell::new(None);
     let ctx = DeepInlineCtx {
@@ -6119,6 +6518,7 @@ fn try_deep_tier_b(
     if preconditions.len() != property.preconditions.len() {
         return None;
     }
+    let param_variables = variables.clone();
     let mut smt_prop = crate::tier_b::SmtProperty {
         variables,
         preconditions,
@@ -6196,18 +6596,36 @@ fn try_deep_tier_b(
                 base_discharge,
             ))
         }
-        crate::tier_b::TierBResult::Disproved(model) => Some(PropertyOutcome::with_base_discharge(
-            property.name.clone(),
-            PropertyStatus::Failed,
-            PropertyTier::Smt,
-            0,
-            seed,
-            Some(model),
-            None,
-            false,
-            Vec::new(),
-            base_discharge,
-        )),
+        // chelis#3971, Deep lane. Same contract as the Surf lane above.
+        crate::tier_b::TierBResult::Disproved(model) => {
+            let hedged = PropertyOutcome::with_base_discharge(
+                property.name.clone(),
+                PropertyStatus::Failed,
+                PropertyTier::Smt,
+                0,
+                seed,
+                Some(model.clone()),
+                None,
+                false,
+                Vec::new(),
+                base_discharge,
+            );
+            if !crate::machine_arith::disproof_confirmation_required(
+                &options.tier,
+                &hedged.disclosed_qualifiers(),
+            ) {
+                return Some(hedged);
+            }
+            let witness = confirm_deep_disproof_witness(&param_variables, exprs, property, &model);
+            resolve_disproof_outcome(
+                hedged,
+                witness,
+                &property.name,
+                options,
+                seed,
+                unconfirmed_disproof,
+            )
+        }
         crate::tier_b::TierBResult::Timeout => {
             if options.tier == "smt-only" {
                 Some(PropertyOutcome::new(

@@ -2843,3 +2843,591 @@ fn issue_3697_unscheduled_binders_take_no_digit() {
     assert_eq!(arity, 1);
     assert_eq!(positions, vec![None, Some(0)]);
 }
+
+// ===========================================================================
+// chelis#3971: machine-arithmetic confirmation of an over-the-reals DISPROOF
+// ===========================================================================
+//
+// A Tier B disproof is decided over the reals, so its witness is an exact real
+// point. Reporting it as a property failure claims a defect at some MACHINE
+// input, which an exact rational -- let alone an irrational algebraic number --
+// need not supply. These tests pin the three answers the confirmation can give
+// and the routing each one earns, without going through a solver: the three
+// arms are decided by the concrete evaluation, so a stubbed evaluator is the
+// exact instrument, and the shapes it is fed are the shapes cvc5 prints.
+
+const DISPROVED_VERDICT: &str = "disproved_modulo_real_arithmetic";
+
+fn f64_sample(name: &str, value: f64) -> Sample {
+    Sample {
+        values: vec![directed_float_sample(name, "f64", value)],
+    }
+}
+
+/// `(guard_holds, body_holds)` as a stubbed concrete evaluation, in the
+/// `(sample, precondition)` shape both lanes pass to `resolve_disproof_witness`.
+fn stub_eval(
+    guard_holds: Result<bool, String>,
+    body_holds: Result<bool, String>,
+) -> impl FnMut(&Sample, bool) -> Result<bool, String> {
+    move |_sample, precondition| {
+        if precondition {
+            guard_holds.clone()
+        } else {
+            body_holds.clone()
+        }
+    }
+}
+
+// The positive case: the guards admit the rounded witness and the body is
+// false there. That is a definite machine counterexample, so the lane reports
+// it with the concrete point rather than the solver's real-valued model.
+#[test]
+fn issue3971_an_admitted_witness_with_a_false_body_is_confirmed() {
+    let resolved =
+        resolve_disproof_witness(f64_sample("x", 12345.0), stub_eval(Ok(true), Ok(false)), 1);
+    let DisproofWitness::Confirmed(counterexample) = resolved else {
+        panic!("an admitted witness with a false body is confirmed: {resolved:?}");
+    };
+    assert_eq!(counterexample, serde_json::json!({"x": 12345.0}));
+}
+
+// Negative parity, first way: the guards admit the rounded witness but the
+// body HOLDS there. Rounding moved the point off the exact real the solver
+// exhibited, so the exhibited witness is not a machine counterexample.
+#[test]
+fn issue3971_a_witness_whose_body_holds_is_unconfirmed_not_confirmed() {
+    // `std::f64::consts::SQRT_2` is the double nearest sqrt(2): the chelis#3971
+    // reproduction's rounded witness, named through the constant so the value
+    // cannot drift away from the one the lane actually evaluates.
+    let resolved = resolve_disproof_witness(
+        f64_sample("x", std::f64::consts::SQRT_2),
+        stub_eval(Ok(true), Ok(true)),
+        1,
+    );
+    assert!(
+        matches!(
+            resolved,
+            DisproofWitness::Unconfirmed(reason)
+                if reason == crate::machine_arith::WITNESS_BODY_HOLDS_REASON
+        ),
+        "{resolved:?}"
+    );
+}
+
+// Negative parity, second way: rounding can move a value OUT of the guard
+// region the exact real satisfied. A point the property's own preconditions
+// reject is not a counterexample to the guarded property, and the reason must
+// say that rather than blame the body.
+#[test]
+fn issue3971_a_witness_the_guards_reject_is_unconfirmed_and_the_body_is_not_consulted() {
+    let mut body_calls = 0usize;
+    let resolved = resolve_disproof_witness(
+        f64_sample("x", 2.0),
+        |_sample, precondition| {
+            if precondition {
+                Ok(false)
+            } else {
+                body_calls += 1;
+                Ok(false)
+            }
+        },
+        1,
+    );
+    assert!(
+        matches!(
+            resolved,
+            DisproofWitness::Unconfirmed(reason)
+                if reason == crate::machine_arith::WITNESS_REJECTED_BY_GUARDS_REASON
+        ),
+        "{resolved:?}"
+    );
+    assert_eq!(
+        body_calls, 0,
+        "a rejected witness is not a counterexample whatever the body says there"
+    );
+}
+
+// A property with no preconditions admits every input, so the guard evaluation
+// is skipped entirely rather than run against an empty conjunction.
+#[test]
+fn issue3971_an_unguarded_property_consults_only_its_body() {
+    let mut guard_calls = 0usize;
+    let resolved = resolve_disproof_witness(
+        f64_sample("x", -1.0),
+        |_sample, precondition| {
+            if precondition {
+                guard_calls += 1;
+            }
+            Ok(!precondition && false)
+        },
+        0,
+    );
+    assert!(
+        matches!(resolved, DisproofWitness::Confirmed(_)),
+        "{resolved:?}"
+    );
+    assert_eq!(guard_calls, 0);
+}
+
+// An evaluation that ERRORS establishes nothing, on either leg. It must not be
+// read as either answer: `Confirmed` would invent a failure and `Unconfirmed`
+// would withdraw a decision on no evidence.
+#[test]
+fn issue3971_an_evaluation_error_establishes_nothing_on_either_leg() {
+    for (guard, body) in [
+        (Err("guard blew up".to_string()), Ok(false)),
+        (Ok(true), Err("body blew up".to_string())),
+    ] {
+        let resolved = resolve_disproof_witness(f64_sample("x", 1.0), stub_eval(guard, body), 1);
+        let DisproofWitness::Unchecked(reason) = resolved else {
+            panic!("an evaluation error is Unchecked: {resolved:?}");
+        };
+        assert!(
+            reason.contains("could not be evaluated"),
+            "the reason names the limitation: {reason}"
+        );
+    }
+}
+
+// The projection half. An irrational binding decides the whole model on its
+// own -- no machine number equals it -- and is the stronger of the two
+// declines, so it must win over an unreadable sibling in ANY position. The
+// paired negative is the all-unreadable model, which establishes nothing.
+#[test]
+fn issue3971_an_irrational_binding_outranks_an_unreadable_sibling() {
+    let variables = vec![
+        ("a".to_string(), crate::solver::SmtSort::Real),
+        ("b".to_string(), crate::solver::SmtSort::Real),
+    ];
+    let algebraic = "(_ real_algebraic_number <1*x^2 + (-2), (5/4, 3/2)>)";
+    for model in [
+        serde_json::json!({"a": algebraic, "b": "(mod 5 2)"}),
+        serde_json::json!({"a": "(mod 5 2)", "b": algebraic}),
+        serde_json::json!({"b": algebraic}),
+    ] {
+        let declined = disproof_witness_scalars(&variables, &model)
+            .expect_err("a model binding an irrational has no machine point");
+        assert!(
+            matches!(
+                declined,
+                DisproofWitness::Unconfirmed(reason)
+                    if reason == crate::machine_arith::IRRATIONAL_WITNESS_REASON
+            ),
+            "{model}: {declined:?}"
+        );
+    }
+
+    let declined = disproof_witness_scalars(&variables, &serde_json::json!({"a": "(mod 5 2)"}))
+        .expect_err("an unreadable model has no machine point either");
+    let DisproofWitness::Unchecked(reason) = declined else {
+        panic!("an unreadable model establishes nothing: {declined:?}");
+    };
+    assert!(
+        reason.contains('`'),
+        "the reason names the binder it could not read: {reason}"
+    );
+
+    // A model that is not a binding map at all.
+    assert!(matches!(
+        disproof_witness_scalars(&variables, &serde_json::json!([1, 2])),
+        Err(DisproofWitness::Unchecked(_))
+    ));
+}
+
+#[cfg(feature = "smt")]
+#[test]
+fn issue3971_a_fully_readable_model_projects_to_the_candidate_point() {
+    let variables = vec![
+        ("x".to_string(), crate::solver::SmtSort::Real),
+        ("n".to_string(), crate::solver::SmtSort::Int),
+        ("p".to_string(), crate::solver::SmtSort::Bool),
+    ];
+    let scalars = disproof_witness_scalars(
+        &variables,
+        &serde_json::json!({"x": "(- (/ 1 2))", "n": "7", "p": "true"}),
+    )
+    .expect("every binding is readable");
+    assert_eq!(
+        scalars,
+        serde_json::json!({"x": -0.5, "n": 7, "p": true}),
+        "the projection is the candidate point, at the goal's sorts"
+    );
+}
+
+// The routing half, which is where the two tiers differ. `auto` has a Tier C
+// to route to, so an unconfirmed witness hands the check to it and the Tier B
+// record is withdrawn (`None`). `smt-only` is terminal, so the over-the-reals
+// disproof stands as the reported verdict with the check recorded beside it.
+#[test]
+fn issue3971_an_unconfirmed_witness_is_reported_as_neither_a_failure_nor_a_pass() {
+    for (tier, routes) in [("auto", true), ("smt-only", false)] {
+        let options = PropertyRunOptions {
+            tier: tier.to_string(),
+            ..PropertyRunOptions::new(&chelis_std_bundle::EMBEDDED_RUNTIME)
+        };
+        let mut carried = None;
+        let resolved = resolve_disproof_outcome(
+            hedged_disproof(),
+            DisproofWitness::Unconfirmed(crate::machine_arith::IRRATIONAL_WITNESS_REASON),
+            "p",
+            &options,
+            0,
+            &mut carried,
+        );
+        assert_eq!(resolved.is_none(), routes, "{tier}: {resolved:#?}");
+        assert_eq!(carried.is_some(), routes, "{tier}");
+        let check = match &resolved {
+            Some(outcome) => {
+                // The terminal lane has nothing left to attempt, and the hedged
+                // failure cannot stand on a witness shown not to be a machine
+                // counterexample. Neither a failure nor a pass.
+                assert_eq!(outcome.status, PropertyStatus::Unsupported, "{outcome:#?}");
+                assert_eq!(
+                    outcome.composite_verdict,
+                    CompositeVerdict::Unsupported,
+                    "{outcome:#?}"
+                );
+                assert!(
+                    outcome.counterexample.is_none(),
+                    "a withdrawn witness is not reported as a counterexample: {outcome:#?}"
+                );
+                let reason = outcome.reason.as_deref().unwrap_or_default();
+                assert!(
+                    reason.contains("disproved over the reals")
+                        && reason.contains("no machine counterexample established"),
+                    "the reason states BOTH halves of what is known: {reason}"
+                );
+                outcome.machine_arithmetic.clone()
+            }
+            None => carried.clone(),
+        }
+        .expect("the check is recorded on whichever record reports");
+        assert_eq!(
+            check.status,
+            crate::machine_arith::MachineArithmeticStatus::Unconfirmed
+        );
+        assert_eq!(check.real_arithmetic_verdict, DISPROVED_VERDICT);
+    }
+}
+
+/// chelis#3971's load-bearing negative control, and the reason the lane cannot
+/// publish a pass.
+///
+/// "No machine value equals this witness" is a fact about ONE point. Reading it
+/// as "no machine input falsifies this property" is the step the first
+/// implementation of this lane took, and `(x * x) != 11.0f64` on `[3, 4]`
+/// refutes it: cvc5's witness is the irrational `sqrt(11)`, and the nearest
+/// double squares to exactly `11.0`, so the property is false at a binary64
+/// input its own guards admit. Sampling does not find it (measured to 20000
+/// samples), so a clean Tier C run is not evidence of a pass.
+///
+/// The paired positive is directly below: a Tier C run that DOES refute keeps
+/// its definite failure, so withdrawing a pass never costs a real one.
+#[test]
+fn issue3971_a_clean_tier_c_run_after_an_unconfirmed_disproof_is_withdrawn_to_unsupported() {
+    let check = crate::machine_arith::MachineArithmeticCheck::unconfirmed(
+        DISPROVED_VERDICT,
+        crate::machine_arith::IRRATIONAL_WITNESS_REASON,
+    );
+    let clean_pass = PropertyOutcome::new(
+        "sq_ne_eleven",
+        PropertyStatus::Passed,
+        PropertyTier::Fuzz,
+        100,
+        0,
+        None,
+        None,
+        false,
+        Vec::new(),
+    );
+    assert_eq!(
+        clean_pass.composite_verdict,
+        CompositeVerdict::FuzzValidatedEmpirical,
+        "the input really is a reported pass"
+    );
+
+    let withdrawn = resolve_unconfirmed_disproof(clean_pass, check.clone());
+    assert_eq!(
+        withdrawn.status,
+        PropertyStatus::Unsupported,
+        "{withdrawn:#?}"
+    );
+    assert_eq!(
+        withdrawn.composite_verdict,
+        CompositeVerdict::Unsupported,
+        "{withdrawn:#?}"
+    );
+    assert_eq!(
+        withdrawn.samples, 0,
+        "an undecided record carries no sample ratio"
+    );
+    assert!(
+        withdrawn.disclosed_qualifiers().is_empty(),
+        "a withdrawn pass discloses no green guarantee: {withdrawn:#?}"
+    );
+    let reason = withdrawn.reason.as_deref().unwrap_or_default();
+    assert!(
+        reason.contains(crate::machine_arith::IRRATIONAL_WITNESS_REASON),
+        "the withdrawal carries WHY the witness was not confirmed: {reason}"
+    );
+    assert_eq!(
+        withdrawn.machine_arithmetic.map(|c| c.status),
+        Some(crate::machine_arith::MachineArithmeticStatus::Unconfirmed)
+    );
+}
+
+// The paired positive: a Tier C run that found a concrete machine
+// counterexample is a definite failure and must survive the fold untouched.
+// Withdrawing it would turn a real refutation into "undecided".
+#[test]
+fn issue3971_a_tier_c_refutation_after_an_unconfirmed_disproof_stays_a_failure() {
+    let check = crate::machine_arith::MachineArithmeticCheck::unconfirmed(
+        DISPROVED_VERDICT,
+        crate::machine_arith::IRRATIONAL_WITNESS_REASON,
+    );
+    let refuted = PropertyOutcome::new(
+        "p",
+        PropertyStatus::Failed,
+        PropertyTier::Fuzz,
+        7,
+        0,
+        Some(serde_json::json!({"x": 3.3166247903554})),
+        None,
+        false,
+        Vec::new(),
+    );
+    let kept = resolve_unconfirmed_disproof(refuted, check);
+    assert_eq!(kept.status, PropertyStatus::Failed, "{kept:#?}");
+    assert_eq!(
+        kept.composite_verdict,
+        CompositeVerdict::Failed,
+        "{kept:#?}"
+    );
+    assert_eq!(
+        kept.counterexample,
+        Some(serde_json::json!({"x": 3.3166247903554})),
+        "the machine witness Tier C found is what is reported"
+    );
+    assert_eq!(
+        kept.machine_arithmetic.map(|c| c.status),
+        Some(crate::machine_arith::MachineArithmeticStatus::Unconfirmed),
+        "the displaced over-the-reals decision is still disclosed"
+    );
+}
+
+// Negative parity for the fold's own guard: an `unsupported` or `error` Tier C
+// result is not a pass, so there is nothing to withdraw. Its own reason is the
+// proximate cause and must survive VERBATIM -- replacing it would hide a
+// sampler grammar limitation behind this lane's sentence. The lane's clause is
+// APPENDED, because the sampler's reason alone never tells a plain-text reader
+// that the solver disproved the property over the reals.
+#[test]
+fn issue3971_a_non_pass_tier_c_result_keeps_its_own_reason_and_gains_the_clause() {
+    for status in [PropertyStatus::Unsupported, PropertyStatus::Error] {
+        let original = PropertyOutcome::new(
+            "p",
+            status.clone(),
+            PropertyTier::Fuzz,
+            0,
+            0,
+            None,
+            Some("generator starved".to_string()),
+            false,
+            Vec::new(),
+        );
+        let folded = resolve_unconfirmed_disproof(
+            original,
+            crate::machine_arith::MachineArithmeticCheck::unconfirmed(
+                DISPROVED_VERDICT,
+                crate::machine_arith::IRRATIONAL_WITNESS_REASON,
+            ),
+        );
+        assert_eq!(folded.status, status, "{folded:#?}");
+        let reason = folded.reason.as_deref().unwrap_or_default();
+        assert!(
+            reason.starts_with("generator starved"),
+            "the sampler's own reason survives first and verbatim: {reason}"
+        );
+        assert!(
+            reason.contains("disproved over the reals"),
+            "and the displaced decision is named in the same reason: {reason}"
+        );
+    }
+}
+
+// The third arm, and the one where the clause must NOT appear: a Tier C
+// FAILURE established a concrete machine counterexample, so "no machine
+// counterexample established" would be a false sentence on that record.
+#[test]
+fn issue3971_a_tier_c_failure_does_not_gain_the_no_counterexample_clause() {
+    let folded = resolve_unconfirmed_disproof(
+        PropertyOutcome::new(
+            "p",
+            PropertyStatus::Failed,
+            PropertyTier::Fuzz,
+            7,
+            0,
+            Some(serde_json::json!({"x": 3.3166247903554})),
+            None,
+            false,
+            Vec::new(),
+        ),
+        crate::machine_arith::MachineArithmeticCheck::unconfirmed(
+            DISPROVED_VERDICT,
+            crate::machine_arith::IRRATIONAL_WITNESS_REASON,
+        ),
+    );
+    assert_eq!(folded.status, PropertyStatus::Failed, "{folded:#?}");
+    assert_eq!(
+        folded.reason, None,
+        "a refutation carries no `no counterexample established` sentence: {folded:#?}"
+    );
+    assert!(
+        folded.machine_arithmetic.is_some(),
+        "the displaced decision is still disclosed through the check: {folded:#?}"
+    );
+}
+
+// The confirmed witness is a concrete machine value, so the record is a
+// DEFINITE failure that discloses no real-arithmetic caveat: the evaluation,
+// not the solver, decided it. Same in both tiers -- the confirmation is one
+// evaluation, not a second tier, so it does not widen `smt-only`.
+#[test]
+fn issue3971_a_confirmed_witness_is_a_definite_failure_in_both_tiers() {
+    for tier in ["auto", "smt-only"] {
+        let options = PropertyRunOptions {
+            tier: tier.to_string(),
+            ..PropertyRunOptions::new(&chelis_std_bundle::EMBEDDED_RUNTIME)
+        };
+        let mut carried = None;
+        let outcome = resolve_disproof_outcome(
+            hedged_disproof(),
+            DisproofWitness::Confirmed(serde_json::json!({"x": 12345.0})),
+            "p",
+            &options,
+            0,
+            &mut carried,
+        )
+        .expect("a confirmed witness is always reported");
+        assert_eq!(outcome.status, PropertyStatus::Failed, "{tier}");
+        assert_eq!(
+            outcome.composite_verdict,
+            CompositeVerdict::Failed,
+            "{tier}"
+        );
+        assert!(
+            outcome.disclosed_qualifiers().is_empty(),
+            "{tier}: the concrete evaluation decided it: {outcome:#?}"
+        );
+        assert_eq!(outcome.proof_tier, PropertyTier::Smt, "{tier}");
+        assert_eq!(
+            outcome.counterexample,
+            Some(serde_json::json!({"x": 12345.0})),
+            "{tier}: the reported point is the one that was evaluated"
+        );
+        assert_eq!(
+            outcome.machine_arithmetic.map(|check| check.status),
+            Some(crate::machine_arith::MachineArithmeticStatus::Confirmed),
+            "{tier}"
+        );
+        assert!(carried.is_none(), "{tier}: nothing is routed onward");
+    }
+}
+
+// An evaluation limitation never displaces a decision -- the disproof side of
+// chelis#3634's "a sampler limitation never degrades a proof". The hedged
+// record survives verbatim in both tiers, with the reason recorded.
+#[test]
+fn issue3971_an_unchecked_witness_leaves_the_disproof_exactly_as_it_was() {
+    for tier in ["auto", "smt-only"] {
+        let options = PropertyRunOptions {
+            tier: tier.to_string(),
+            ..PropertyRunOptions::new(&chelis_std_bundle::EMBEDDED_RUNTIME)
+        };
+        let mut carried = None;
+        let outcome = resolve_disproof_outcome(
+            hedged_disproof(),
+            DisproofWitness::Unchecked("model unreadable".to_string()),
+            "p",
+            &options,
+            0,
+            &mut carried,
+        )
+        .expect("an unchecked witness never withdraws the disproof");
+        assert_eq!(outcome.status, PropertyStatus::Failed, "{tier}");
+        assert_eq!(
+            outcome.composite_verdict,
+            CompositeVerdict::DisprovedModuloRealArithmetic,
+            "{tier}: {outcome:#?}"
+        );
+        assert_eq!(
+            outcome.counterexample,
+            Some(serde_json::json!({"x": "(_ real_algebraic_number <x>)"})),
+            "{tier}: the solver's own model is still what is reported"
+        );
+        let check = outcome.machine_arithmetic.expect("the check is recorded");
+        assert_eq!(
+            check.status,
+            crate::machine_arith::MachineArithmeticStatus::Unchecked,
+            "{tier}"
+        );
+        assert_eq!(check.reason.as_deref(), Some("model unreadable"), "{tier}");
+        assert!(carried.is_none(), "{tier}");
+    }
+}
+
+/// The hedged Tier B disproof the three routing tests resolve: `Failed` with a
+/// `RealArith` base, which is what composes to
+/// `disproved_modulo_real_arithmetic`.
+fn hedged_disproof() -> PropertyOutcome {
+    PropertyOutcome::with_base_discharge(
+        "p",
+        PropertyStatus::Failed,
+        PropertyTier::Smt,
+        0,
+        0,
+        Some(serde_json::json!({"x": "(_ real_algebraic_number <x>)"})),
+        None,
+        false,
+        Vec::new(),
+        Some((
+            crate::discharge::Soundness::SoundApproximate,
+            crate::discharge::QualifierSet::from_iter_kinds([
+                crate::discharge::Qualifier::RealArith,
+            ]),
+        )),
+    )
+}
+
+// The gate itself, end to end on the lane predicate: an over-the-reals disproof
+// under a reported tier owes the check, and the exempt cases do not.
+#[test]
+fn issue3971_the_hedged_disproof_discloses_what_the_gate_reads() {
+    let hedged = hedged_disproof();
+    assert_eq!(
+        hedged.composite_verdict,
+        CompositeVerdict::DisprovedModuloRealArithmetic
+    );
+    assert!(crate::machine_arith::disproof_confirmation_required(
+        "auto",
+        &hedged.disclosed_qualifiers()
+    ));
+    // A definite failure with no real-arithmetic base has no witness gap.
+    let definite = PropertyOutcome::new(
+        "p",
+        PropertyStatus::Failed,
+        PropertyTier::Fuzz,
+        100,
+        0,
+        Some(serde_json::json!({"x": 1.0})),
+        None,
+        false,
+        Vec::new(),
+    );
+    assert_eq!(definite.composite_verdict, CompositeVerdict::Failed);
+    assert!(!crate::machine_arith::disproof_confirmation_required(
+        "auto",
+        &definite.disclosed_qualifiers()
+    ));
+}

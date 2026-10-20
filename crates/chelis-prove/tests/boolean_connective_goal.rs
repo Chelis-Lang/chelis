@@ -246,14 +246,27 @@ fn false_conjunction_is_disproved_at_smt_with_counterexample() {
         "a false conjunction is disproved at SMT: {outcome:?}"
     );
     assert_eq!(outcome.proof_tier, PropertyTier::Smt, "{outcome:?}");
+    // chelis#3971: the solver's witness for this goal is a rational the host
+    // lane CONFIRMS -- the guards admit it and `x >= 0.0` is false there in
+    // binary64 -- so the verdict is a definite `Failed`, not the reals-hedged
+    // `DisprovedModuloRealArithmetic` it was before the confirmation existed.
+    // The hedge is still what an UNCONFIRMED witness composes to; that half is
+    // pinned in `crates/chelis-prove/src/property_runner/tests.rs`.
     assert_eq!(
         outcome.composite_verdict,
-        CompositeVerdict::DisprovedModuloRealArithmetic,
+        CompositeVerdict::Failed,
         "{outcome:?}"
     );
+    let counterexample = outcome
+        .counterexample
+        .as_ref()
+        .unwrap_or_else(|| panic!("disproof carries a counterexample: {outcome:?}"));
+    let x = counterexample["x"]
+        .as_f64()
+        .unwrap_or_else(|| panic!("a confirmed witness is a concrete machine value: {outcome:?}"));
     assert!(
-        outcome.counterexample.is_some(),
-        "disproof carries a counterexample: {outcome:?}"
+        x < 0.0,
+        "the reported point actually falsifies `x >= 0.0`: {x}"
     );
 }
 
@@ -264,10 +277,18 @@ fn false_disjunction_is_disproved_at_smt() {
     let outcome = one(DISJ_FALSE, "smt-only", 0);
     assert_eq!(outcome.status, PropertyStatus::Failed, "{outcome:?}");
     assert_eq!(outcome.proof_tier, PropertyTier::Smt, "{outcome:?}");
+    // chelis#3971: confirmed at a concrete machine value, as above.
     assert_eq!(
         outcome.composite_verdict,
-        CompositeVerdict::DisprovedModuloRealArithmetic,
+        CompositeVerdict::Failed,
         "{outcome:?}"
+    );
+    let x = outcome.counterexample.as_ref().expect("counterexample")["x"]
+        .as_f64()
+        .unwrap_or_else(|| panic!("a confirmed witness is a concrete machine value: {outcome:?}"));
+    assert!(
+        x <= 1.0,
+        "the reported point actually falsifies `x > 1.0 || x > 2.0`: {x}"
     );
 }
 

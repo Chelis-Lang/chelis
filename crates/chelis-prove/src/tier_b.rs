@@ -579,42 +579,114 @@ fn require_proved_sqrt_domain(
 /// that binder and declines, rather than evaluating a substituted one.
 #[cfg(feature = "smt")]
 fn witness_scalars(property: &SmtProperty, bindings: &serde_json::Map<String, Value>) -> Value {
-    use num_traits::ToPrimitive;
-
     let mut scalars = serde_json::Map::new();
     for (name, sort) in &property.variables {
-        let Some(value) = bindings
-            .get(name)
-            .and_then(Value::as_str)
-            .and_then(|raw| parse_smt_model_value(raw, *sort))
-        else {
-            continue;
+        if let ModelScalar::Value(json) = model_scalar(bindings.get(name), *sort) {
+            scalars.insert(name.clone(), json);
+        }
+    }
+    Value::Object(scalars)
+}
+
+/// What one solver model binding is, read as a candidate MACHINE input.
+///
+/// A solver model is a point in the REALS. Projecting it is therefore not a
+/// decode but a classification, and the three answers are materially
+/// different: a value that has a machine candidate, a value no machine number
+/// equals, and a value this projection cannot read at all (chelis#3971).
+#[derive(Debug, Clone, PartialEq)]
+pub enum ModelScalar {
+    /// The binding has an exact value with a machine candidate at this sort:
+    /// a JSON bool, an `i64` for `Int`, or the `f64` nearest the exact
+    /// rational. The consumer rounds again to the binder's declared width.
+    Value(Value),
+    /// The binding is an IRRATIONAL real: cvc5 prints it as
+    /// `(_ real_algebraic_number <poly, (lo, hi)>)`. Every binary64, `f32`,
+    /// and integer value is rational, so no machine value equals it. The
+    /// exhibited model is therefore not a machine point, and that is a
+    /// positive finding rather than a reading failure.
+    Irrational,
+    /// A shape this projection does not claim: a missing binding, a
+    /// non-string/non-scalar JSON value, an SMT-LIB term form the exact parser
+    /// does not recognise, a non-integral `Int` value, or a rational whose
+    /// nearest `f64` is not finite. Nothing is established.
+    Unreadable,
+}
+
+/// cvc5's printed form for an irrational algebraic model value, as the
+/// indexed-identifier HEAD of the term. The isolating interval that follows is
+/// deliberately NOT read: its endpoints bracket the root, so a point taken from
+/// them is a different real from the one the solver exhibited, and the honest
+/// statement about the exhibited value is that no machine number equals it.
+const SMT_ALGEBRAIC_NUMBER_HEAD: &str = "(_ real_algebraic_number";
+
+/// Whether `raw` IS an algebraic-number term, rather than merely starting with
+/// those characters. The head has to end where the symbol ends: a longer symbol
+/// sharing the prefix is a different term, and reading it as an irrational
+/// would withdraw a disproof the solver did substantiate.
+///
+/// A COMPOUND term that merely contains an algebraic number somewhere inside is
+/// deliberately not claimed either. It is then unreadable, which keeps the
+/// disproof standing -- the conservative answer, since the lane may only
+/// withdraw a reported failure on a positive finding.
+fn is_algebraic_number_term(raw: &str) -> bool {
+    let Some(rest) = raw.trim_start().strip_prefix(SMT_ALGEBRAIC_NUMBER_HEAD) else {
+        return false;
+    };
+    rest.starts_with(char::is_whitespace) || rest.starts_with('<')
+}
+
+/// Classify one solver model binding at a given sort. See [`ModelScalar`].
+///
+/// `#[cfg]`-free so the consumer compiles in a build without cvc5. The
+/// algebraic-number head match is outside the feature gate on purpose: the
+/// inference it licenses -- that no machine value equals an irrational -- is
+/// arithmetic, not a solver capability, so it must not change with the build.
+/// What the gate removes is the exact RATIONAL parser, so in a cvc5-free build
+/// every readable value classifies `Unreadable` instead of `Value`.
+pub fn model_scalar(binding: Option<&Value>, sort: SmtSort) -> ModelScalar {
+    let Some(binding) = binding else {
+        return ModelScalar::Unreadable;
+    };
+    let Some(raw) = binding.as_str() else {
+        return ModelScalar::Unreadable;
+    };
+    if is_algebraic_number_term(raw) {
+        return ModelScalar::Irrational;
+    }
+    #[cfg(feature = "smt")]
+    {
+        use num_traits::ToPrimitive;
+
+        let Some(value) = parse_smt_model_value(raw, sort) else {
+            return ModelScalar::Unreadable;
         };
-        let json = match value {
-            ExactValue::Bool(value) => Value::Bool(value),
+        match value {
+            ExactValue::Bool(value) => ModelScalar::Value(Value::Bool(value)),
             ExactValue::Num(exact) if matches!(sort, SmtSort::Int) => {
                 // `to_i64` truncates a non-integral ratio; an Int-sorted model
                 // value is integral, and one that is not is not a value this
                 // projection claims.
-                let Some(value) = exact.to_i64().filter(|_| exact.is_integer()) else {
-                    continue;
-                };
-                Value::from(value)
+                match exact.to_i64().filter(|_| exact.is_integer()) {
+                    Some(value) => ModelScalar::Value(Value::from(value)),
+                    None => ModelScalar::Unreadable,
+                }
             }
-            ExactValue::Num(exact) => {
-                let Some(number) = exact
-                    .to_f64()
-                    .filter(|value| value.is_finite())
-                    .and_then(serde_json::Number::from_f64)
-                else {
-                    continue;
-                };
-                Value::Number(number)
-            }
-        };
-        scalars.insert(name.clone(), json);
+            ExactValue::Num(exact) => match exact
+                .to_f64()
+                .filter(|value| value.is_finite())
+                .and_then(serde_json::Number::from_f64)
+            {
+                Some(number) => ModelScalar::Value(Value::Number(number)),
+                None => ModelScalar::Unreadable,
+            },
+        }
     }
-    Value::Object(scalars)
+    #[cfg(not(feature = "smt"))]
+    {
+        let _ = sort;
+        ModelScalar::Unreadable
+    }
 }
 
 /// Prove, without assuming any new user-visible facts, that every exact
@@ -3869,5 +3941,131 @@ mod tests {
                 "x > {bound} must still disprove; the guard must not eat it"
             );
         }
+    }
+}
+
+/// chelis#3971: the model-value CLASSIFIER, which decides whether an
+/// over-the-reals disproof has a machine candidate at all. It runs in both
+/// builds, so the shape tests are unconditional and only the exact-value arms
+/// (which need the cvc5-gated rational parser) are feature-gated.
+#[cfg(test)]
+mod model_scalar_tests {
+    use super::*;
+    use serde_json::json;
+
+    const ALGEBRAIC_SQRT_2: &str =
+        "(_ real_algebraic_number <1*x^2 + (-2), (741455/524288, 2965821/2097152)>)";
+
+    // The chelis#3971 headline shape. An irrational witness is a POSITIVE
+    // finding -- no machine value equals it -- not a reading failure, so it
+    // must not be reported as `Unreadable`, which would leave the disproof
+    // standing as a failure.
+    #[test]
+    fn an_algebraic_number_is_irrational_at_every_numeric_sort() {
+        for sort in [SmtSort::Real, SmtSort::Int] {
+            assert_eq!(
+                model_scalar(Some(&json!(ALGEBRAIC_SQRT_2)), sort),
+                ModelScalar::Irrational,
+                "{sort:?}"
+            );
+        }
+        // Leading whitespace is cvc5 formatting, not a different value.
+        assert_eq!(
+            model_scalar(Some(&json!(format!("  {ALGEBRAIC_SQRT_2}"))), SmtSort::Real),
+            ModelScalar::Irrational
+        );
+    }
+
+    // Negative control for the classifier: the algebraic form is recognised by
+    // its HEAD, so a term that merely mentions the symbol deeper in is not
+    // laundered into the stronger finding. Reporting `Irrational` for a value
+    // that is not one would drop a real failure under `auto`.
+    #[test]
+    fn a_term_that_only_mentions_the_algebraic_symbol_is_not_irrational() {
+        for raw in [
+            "(/ 1.0 (_ real_algebraic_number <1*x^2 + (-2), (1, 2)>))",
+            "real_algebraic_number",
+            "(_ real_algebraic_numbers <>)",
+        ] {
+            assert_ne!(
+                model_scalar(Some(&json!(raw)), SmtSort::Real),
+                ModelScalar::Irrational,
+                "{raw:?}"
+            );
+        }
+    }
+
+    // A binding the projection has nothing to read establishes nothing. Each of
+    // these must stay `Unreadable` so the caller records `unchecked` and leaves
+    // the Tier B decision alone.
+    #[test]
+    fn a_missing_or_non_string_binding_is_unreadable() {
+        assert_eq!(model_scalar(None, SmtSort::Real), ModelScalar::Unreadable);
+        for value in [json!(1.5), json!(true), json!(null), json!([1]), json!({})] {
+            assert_eq!(
+                model_scalar(Some(&value), SmtSort::Real),
+                ModelScalar::Unreadable,
+                "{value}"
+            );
+        }
+    }
+
+    #[cfg(feature = "smt")]
+    #[test]
+    fn an_exact_model_value_projects_to_its_machine_candidate() {
+        assert_eq!(
+            model_scalar(Some(&json!("12345.0")), SmtSort::Real),
+            ModelScalar::Value(json!(12345.0))
+        );
+        assert_eq!(
+            model_scalar(Some(&json!("(- (/ 1 2))")), SmtSort::Real),
+            ModelScalar::Value(json!(-0.5))
+        );
+        // A rational no binary64 value equals still HAS a nearest candidate;
+        // whether that candidate falsifies the property is the concrete
+        // evaluation's call, not this projection's.
+        assert_eq!(
+            model_scalar(Some(&json!("(/ 1 3)")), SmtSort::Real),
+            ModelScalar::Value(json!(1.0f64 / 3.0))
+        );
+        assert_eq!(
+            model_scalar(Some(&json!("(- 7)")), SmtSort::Int),
+            ModelScalar::Value(json!(-7))
+        );
+        assert_eq!(
+            model_scalar(Some(&json!("true")), SmtSort::Bool),
+            ModelScalar::Value(json!(true))
+        );
+        assert_eq!(
+            model_scalar(Some(&json!("false")), SmtSort::Bool),
+            ModelScalar::Value(json!(false))
+        );
+    }
+
+    #[cfg(feature = "smt")]
+    #[test]
+    fn a_value_that_does_not_land_in_its_sort_is_unreadable() {
+        // A non-integral value for an `Int` binder is not a value this
+        // projection claims; substituting a truncation would evaluate a
+        // different input from the one the solver exhibited.
+        assert_eq!(
+            model_scalar(Some(&json!("(/ 1 2)")), SmtSort::Int),
+            ModelScalar::Unreadable
+        );
+        assert_eq!(
+            model_scalar(Some(&json!("yes")), SmtSort::Bool),
+            ModelScalar::Unreadable
+        );
+        assert_eq!(
+            model_scalar(Some(&json!("(mod 5 2)")), SmtSort::Real),
+            ModelScalar::Unreadable
+        );
+        // Past `f64`'s finite range the nearest candidate is an infinity, which
+        // is not a machine input any binder of declared width accepts.
+        let huge = format!("{}.0", "9".repeat(400));
+        assert_eq!(
+            model_scalar(Some(&json!(huge)), SmtSort::Real),
+            ModelScalar::Unreadable
+        );
     }
 }

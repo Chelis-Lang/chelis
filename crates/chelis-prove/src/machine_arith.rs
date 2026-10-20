@@ -39,8 +39,10 @@ pub struct MachineArithmeticCheck {
     pub status: MachineArithmeticStatus,
     /// Samples the Tier C refutation search accepted and evaluated.
     pub samples: usize,
-    /// The over-the-reals verdict this check was run against. On a refutation
-    /// it names the green the counterexample displaces.
+    /// The over-the-reals verdict this check was run against -- the green a
+    /// refutation displaces, or the disproof a confirmation makes definite. It
+    /// is also what tells the two sides of the lane apart: the disproof side
+    /// records `disproved_modulo_real_arithmetic` here.
     pub real_arithmetic_verdict: &'static str,
     /// Why the check could not be completed. Present only on
     /// [`MachineArithmeticStatus::Unchecked`].
@@ -58,9 +60,21 @@ pub enum MachineArithmeticStatus {
     /// A concrete machine counterexample refuted the goal. The record is a
     /// definite failure.
     Refuted,
-    /// The refutation search ran but established nothing (a binder Tier C
-    /// cannot sample, generator starvation, or precondition exhaustion). The
-    /// green stands unchanged.
+    /// A concrete machine input CONFIRMED an over-the-reals disproof: the
+    /// property's own preconditions admit the solver's witness at its declared
+    /// machine precision and the body is false there. The record is a definite
+    /// failure at that point (chelis#3971).
+    Confirmed,
+    /// An over-the-reals disproof's witness is NOT a machine counterexample:
+    /// no machine value equals it (an irrational algebraic witness), the
+    /// property's own preconditions reject it once rounded, or the body holds
+    /// there. The over-the-reals decision stands, but it has exhibited nothing
+    /// about machine arithmetic (chelis#3971).
+    Unconfirmed,
+    /// The check ran but established nothing: on the green side a binder Tier C
+    /// cannot sample, generator starvation, or precondition exhaustion; on the
+    /// disproof side a model value the projection cannot read or a witness the
+    /// concrete evaluator could not run. The Tier B decision stands unchanged.
     Unchecked,
 }
 
@@ -83,6 +97,28 @@ impl MachineArithmeticCheck {
         }
     }
 
+    /// chelis#3971: the disproof side's positive answer. It takes no samples --
+    /// one concrete evaluation of the solver's own witness decided it.
+    pub fn confirmed(real_arithmetic_verdict: &'static str) -> Self {
+        Self {
+            status: MachineArithmeticStatus::Confirmed,
+            samples: 0,
+            real_arithmetic_verdict,
+            reason: None,
+        }
+    }
+
+    /// chelis#3971: the witness is not a machine counterexample, and `reason`
+    /// says which of the three ways it failed to be one.
+    pub fn unconfirmed(real_arithmetic_verdict: &'static str, reason: impl Into<String>) -> Self {
+        Self {
+            status: MachineArithmeticStatus::Unconfirmed,
+            samples: 0,
+            real_arithmetic_verdict,
+            reason: Some(reason.into()),
+        }
+    }
+
     pub fn unchecked(
         samples: usize,
         real_arithmetic_verdict: &'static str,
@@ -96,25 +132,83 @@ impl MachineArithmeticCheck {
         }
     }
 
-    /// The one-clause plain-text disclosure a CLI render appends to an
-    /// over-the-reals green, in place of the `0/0 passed` sample ratio such a
-    /// green does not have. "Machine arithmetic" rather than "binary64": the
-    /// same gap covers `f32` and the integer widths, which lower to an
-    /// unbounded integer sort.
+    /// The one-clause plain-text disclosure a CLI render appends to a record
+    /// carrying this check -- for an over-the-reals green, in place of the
+    /// `0/0 passed` sample ratio such a green does not have. "Machine
+    /// arithmetic" rather than "binary64": the same gap covers `f32` and the
+    /// integer widths, which lower to an unbounded integer sort.
     pub fn disclosure(&self) -> String {
+        let decision = self.real_arithmetic_decision();
         match self.status {
             MachineArithmeticStatus::Corroborated => format!(
-                "proved over the reals; machine arithmetic corroborated on {} samples",
+                "{decision}; machine arithmetic corroborated on {} samples",
                 self.samples
             ),
             // A refuted check never renders beside a green.
             MachineArithmeticStatus::Refuted => {
-                "proved over the reals; refuted in machine arithmetic".to_string()
+                format!("{decision}; refuted in machine arithmetic")
             }
-            MachineArithmeticStatus::Unchecked => format!(
-                "proved over the reals; machine arithmetic unchecked: {}",
+            // A confirmed check never renders beside a pass.
+            MachineArithmeticStatus::Confirmed => {
+                format!("{decision}; confirmed at a machine input")
+            }
+            MachineArithmeticStatus::Unconfirmed => format!(
+                "{decision}; not confirmed in machine arithmetic: {}",
                 self.reason.as_deref().unwrap_or("no reason recorded")
             ),
+            MachineArithmeticStatus::Unchecked => format!(
+                "{decision}; machine arithmetic unchecked: {}",
+                self.reason.as_deref().unwrap_or("no reason recorded")
+            ),
+        }
+    }
+
+    /// Whether this check DISPLACED the Tier B decision it was run against, so
+    /// the record's reported tier is the lane's choice rather than a fall-back
+    /// from a decision Tier B could not reach.
+    ///
+    /// A consumer that explains why a record's tier differs from the requested
+    /// one has to ask this: under `auto` a refutation and an unconfirmed
+    /// disproof both report the Tier C tier AFTER Tier B decided, so calling
+    /// that a tier degradation states a cause that did not happen.
+    ///
+    /// [`MachineArithmeticStatus::Unchecked`] is deliberately NOT a
+    /// displacement: there the lane established nothing and left the Tier B
+    /// record exactly as it was, so whatever explains the reported tier is
+    /// unchanged by this check. Neither is
+    /// [`MachineArithmeticStatus::Corroborated`] or
+    /// [`MachineArithmeticStatus::Confirmed`], which keep the deductive tier.
+    pub fn displaced_the_tier_b_decision(&self) -> bool {
+        matches!(
+            self.status,
+            MachineArithmeticStatus::Refuted | MachineArithmeticStatus::Unconfirmed
+        )
+    }
+
+    /// The clause naming the over-the-reals decision this check was run
+    /// against, keyed on the ONE disproved verdict rather than on the green
+    /// ones. The lane only ever runs against an over-the-reals decision, and
+    /// every such decision that is not that disproof is a green -- for which
+    /// "proved over the reals" is correct whatever `proven_modulo_*` badge it
+    /// carries. `--tier smt-only` already prints exactly that clause beside
+    /// `proven_modulo_certified_envelope`.
+    ///
+    /// This deliberately does NOT assert the green token. A revision of this
+    /// function asserted `proven_modulo_real_arithmetic`, which is only one of
+    /// the greens that disclose `real_arithmetic`: the lane is gated on the
+    /// disclosed QUALIFIER, so a certified-envelope or fuzz-validated-contract
+    /// green reaches it too, and the assert panicked a debug build on a PASSING
+    /// property under the default tier and output format. Enumerating the green
+    /// badges here instead would be the same defect one token later -- the set
+    /// is open by design, which is why the gate reads the qualifier and not a
+    /// list.
+    fn real_arithmetic_decision(&self) -> &'static str {
+        if self.real_arithmetic_verdict
+            == crate::composition::CompositeVerdict::DisprovedModuloRealArithmetic.as_str()
+        {
+            "disproved over the reals"
+        } else {
+            "proved over the reals"
         }
     }
 }
@@ -127,6 +221,106 @@ pub const UNCHECKED_DISCLOSURE: &str = "proved over the reals; machine arithmeti
 /// a machine counterexample, so the failure says why a proof did not prevent it.
 pub const REFUTED_REASON: &str = "proved over the reals, refuted in machine arithmetic: the Tier B decision lowers \
      floating point to the reals, so it does not rule out this counterexample (chelis#3634)";
+
+/// The `reason` recorded on a record whose over-the-reals disproof was
+/// CONFIRMED at a concrete machine input (chelis#3971). It states only what
+/// was checked: the solver's model is the provenance of the input -- it is why
+/// this point was tried -- while the two verified facts are that the
+/// property's own preconditions admit the rounded value and that the body is
+/// false there.
+pub const CONFIRMED_REASON: &str = "an over-the-reals disproof located this input: the property's own preconditions \
+     admit it and the property body is false there in machine arithmetic \
+     (chelis#3971)";
+
+/// The `reason` recorded when the solver's witness is an irrational algebraic
+/// number. This is the chelis#3971 headline shape: `1/((x*x) - 2)` is disproved
+/// finite at `x = sqrt(2)`, and no binary64 value squares to exactly 2.
+pub const IRRATIONAL_WITNESS_REASON: &str = "the solver's witness is an irrational algebraic number, which no machine \
+     value equals, so it is not a machine counterexample (chelis#3971)";
+
+/// The `reason` recorded when the rounded witness is not admitted by the
+/// property's own preconditions. Rounding can move a value out of the guard
+/// region that the exact real satisfied, and a point the guards reject is not
+/// a counterexample to the guarded property.
+pub const WITNESS_REJECTED_BY_GUARDS_REASON: &str = "the solver's witness does not satisfy the property's own preconditions at its \
+     declared machine precision, so it is not a machine counterexample \
+     (chelis#3971)";
+
+/// The `reason` recorded when the rounded witness is admitted and the property
+/// body HOLDS there.
+pub const WITNESS_BODY_HOLDS_REASON: &str = "the property body holds at the solver's witness in machine arithmetic, so the \
+     witness is not a machine counterexample (chelis#3971)";
+
+/// The `reason` recorded on the record that reports in place of an
+/// over-the-reals disproof whose witness machine arithmetic did not confirm
+/// (chelis#3971).
+///
+/// Such a record may be neither a failure nor a pass, and the reason is what
+/// says why. The solver decided the property FALSE over the reals, so there is
+/// no basis for a pass; and the witness check establishes only that the ONE
+/// point the solver exhibited is not a machine counterexample, which is a fact
+/// about that point and not about the domain, so there is no basis for a
+/// failure either. The machine-arithmetic question is undecided, which is what
+/// `unsupported` states.
+///
+/// The step this wording exists to prevent is the one chelis#3971's first
+/// implementation took: reading "no machine value equals this witness" as "no
+/// machine value falsifies this property". `(x * x) != 11.0f64` on `[3, 4]` is
+/// the counterexample to that reading -- cvc5's witness is the irrational
+/// `sqrt(11)`, and the nearest double squares to exactly `11.0`, so the
+/// property is false at a binary64 input its own guards admit.
+pub fn unconfirmed_disproof_reason(witness_reason: &str) -> String {
+    format!(
+        "disproved over the reals, and no machine counterexample established: {witness_reason}. \
+         The over-the-reals decision rules out no machine input, and the witness check \
+         establishes nothing about inputs other than the witness, so machine arithmetic is \
+         undecided here"
+    )
+}
+
+/// Whether an over-the-reals DISPROOF owes its witness a machine-arithmetic
+/// confirmation before it is reported as a failure (chelis#3971).
+///
+/// A Tier B disproof is decided over the reals, so its witness is an exact real
+/// point, not a machine input. Reporting it as a property failure claims a
+/// defect at some machine input, which the solver has not exhibited: an exact
+/// rational, and an irrational algebraic number even more so, may have no
+/// binary64 value at which the property is false.
+///
+/// Unlike the green side's refutation search, the confirmation is a SINGLE
+/// concrete evaluation of the solver's own witness, not a second tier. It
+/// therefore runs under `--tier smt-only` as well -- the chelis#3635
+/// domain-witness confirmation already does, for the same reason -- and does
+/// not widen an explicitly selected tier. What the two tiers differ on is only
+/// how much is attempted when the witness is NOT confirmed: `auto` has a Tier C
+/// to route to, `smt-only` is terminal. Neither may report a pass there; see
+/// [`unconfirmed_disproof_reason`].
+///
+/// The `axiom` clause mirrors the green side's, for the same reason: an asserted
+/// axiom is a user-declared assumption the concrete evaluator does not honor,
+/// so the evaluation would be deciding the axiom rather than the witness.
+///
+/// On this side it is DEFENSIVE rather than load-bearing, and the difference is
+/// worth stating because the green side's identical clause is not. The outcome
+/// it describes -- "a disproof conditional on an asserted axiom carries no
+/// check" -- is produced upstream: `prove_surf_property` routes a property
+/// citing `clarabel.qp.ideal_optimality` or `clarabel.qp.assume_psd` to
+/// `qp_ideal::prove` and returns, so no axiom-qualified property reaches Tier B
+/// here at all. The clause also cannot fire on its own terms: both call sites
+/// build the hedged disproof with no assumptions, and a
+/// `DisprovedModuloRealArithmetic` base derives its disclosed qualifiers purely
+/// from that assumption list, which the caller appends only after this decision
+/// is made. The green side differs because its lane runs on an outcome whose
+/// assumptions are already attached.
+///
+/// It is kept because the live mechanism is an early return somewhere else: if
+/// that routing ever changes, this reads the published caveats and still
+/// declines.
+pub fn disproof_confirmation_required(tier: &str, disclosed: &[&str]) -> bool {
+    (tier == "auto" || tier == "smt-only")
+        && disclosed.contains(&crate::discharge::Qualifier::RealArith.as_str())
+        && !disclosed.contains(&crate::discharge::Qualifier::Axiom.as_str())
+}
 
 /// Whether `auto` owes a green a machine-arithmetic refutation search. The
 /// question is asked of the record's own PUBLISHED caveats (`disclosed`, the
@@ -485,6 +679,139 @@ mod tests {
             corroboration_required("auto", true, &["fuzz", "real_arithmetic"]),
             "a fuzz-validated CONTRACT is empirical, not an asserted idealization"
         );
+    }
+
+    // --- chelis#3971: the disproof side of the same lane ---
+
+    const DISPROVED: &str = "disproved_modulo_real_arithmetic";
+
+    // The confirmation is ONE concrete evaluation of the solver's own witness,
+    // not a second tier, so unlike the green side's refutation search it is
+    // owed under `smt-only` as well. The terminal engine lanes are still never
+    // widened, and `fuzz-only` never reached Tier B at all.
+    #[test]
+    fn disproof_confirmation_is_owed_by_auto_and_smt_only() {
+        let over_reals = ["real_arithmetic"];
+        for tier in ["auto", "smt-only"] {
+            assert!(
+                disproof_confirmation_required(tier, &over_reals),
+                "{tier} reports the disproof, so it owes the witness a check"
+            );
+        }
+        for tier in ["fuzz-only", "induction-only", "beacon-only"] {
+            assert!(
+                !disproof_confirmation_required(tier, &over_reals),
+                "{tier} is a terminal lane of its own"
+            );
+        }
+        assert!(
+            !disproof_confirmation_required("auto", &["fuzz_base"]),
+            "a disproof that is not over the reals is already a definite failure"
+        );
+        assert!(
+            !disproof_confirmation_required("auto", &["axiom", "real_arithmetic"]),
+            "a disproof under a user-asserted axiom would be checked against an \
+             evaluator that does not honor the axiom"
+        );
+    }
+
+    // The disclosure names the DECISION the check was run against, read off the
+    // recorded verdict token. Without that, the disproof side inherits the green
+    // side's "proved over the reals" sentence, which states the opposite of what
+    // happened.
+    #[test]
+    fn the_disclosure_names_which_side_of_the_lane_it_came_from() {
+        assert_eq!(
+            MachineArithmeticCheck::confirmed(DISPROVED).disclosure(),
+            "disproved over the reals; confirmed at a machine input"
+        );
+        assert_eq!(
+            MachineArithmeticCheck::unconfirmed(DISPROVED, "no machine value equals it")
+                .disclosure(),
+            "disproved over the reals; not confirmed in machine arithmetic: no machine value equals it"
+        );
+        assert_eq!(
+            MachineArithmeticCheck::unchecked(0, DISPROVED, "unreadable model").disclosure(),
+            "disproved over the reals; machine arithmetic unchecked: unreadable model"
+        );
+        // Same `Unchecked` status, opposite side: the shared variant must not
+        // describe a proof as a disproof or the reverse.
+        assert_eq!(
+            MachineArithmeticCheck::unchecked(0, "proven_modulo_real_arithmetic", "starved")
+                .disclosure(),
+            "proved over the reals; machine arithmetic unchecked: starved"
+        );
+        // The gate reads the DISCLOSED qualifier, not a token, so more than one
+        // green badge reaches this lane. The first two below are reachable and
+        // are exactly the ones that crashed a debug build on a passing property
+        // when a revision asserted the `proven_modulo_real_arithmetic` token
+        // here. The last two are defence in depth rather than reachable cases:
+        // `proven` discloses no `real_arithmetic` at all, and a
+        // `sound_approximate` base carrying `real_arithmetic` has no producer
+        // today. Each must render the proof-side clause -- not panic, and not
+        // describe itself as a disproof -- because the correct invariant is
+        // "every green says `proved`", which no token list can express.
+        for green in [
+            "proven_modulo_certified_envelope",
+            "proven_modulo_fuzz_validated_contract",
+            "proven",
+            "sound_approximate",
+        ] {
+            assert_eq!(
+                MachineArithmeticCheck::corroborated(100, green).disclosure(),
+                "proved over the reals; machine arithmetic corroborated on 100 samples",
+                "{green} must render the proof-side clause"
+            );
+        }
+        assert_eq!(
+            MachineArithmeticCheck::corroborated(100, "proven_modulo_real_arithmetic").disclosure(),
+            "proved over the reals; machine arithmetic corroborated on 100 samples"
+        );
+    }
+
+    // A confirmation and an unconfirmation take no samples: the disproof side
+    // evaluates the solver's exhibited point once. A nonzero count here would
+    // read as a sampling result the check never ran.
+    #[test]
+    fn the_disproof_side_records_no_samples() {
+        assert_eq!(MachineArithmeticCheck::confirmed(DISPROVED).samples, 0);
+        assert_eq!(
+            MachineArithmeticCheck::unconfirmed(DISPROVED, "reason").samples,
+            0
+        );
+        assert_eq!(
+            MachineArithmeticCheck::confirmed(DISPROVED).reason,
+            None,
+            "a confirmation's reason lives on the record, not on the check"
+        );
+    }
+
+    // Which outcomes a tier-explanation consumer must treat as the lane's
+    // choice rather than as a fall-back. Both displacing statuses REPLACE the
+    // Tier B record; the three others leave it where it was, so they explain
+    // nothing about the reported tier.
+    #[test]
+    fn only_a_displacement_explains_the_reported_tier() {
+        assert!(
+            MachineArithmeticCheck::refuted(100, "proven_modulo_real_arithmetic")
+                .displaced_the_tier_b_decision()
+        );
+        assert!(
+            MachineArithmeticCheck::unconfirmed(DISPROVED, "no machine value equals it")
+                .displaced_the_tier_b_decision()
+        );
+        assert!(
+            !MachineArithmeticCheck::corroborated(100, "proven_modulo_real_arithmetic")
+                .displaced_the_tier_b_decision()
+        );
+        assert!(!MachineArithmeticCheck::confirmed(DISPROVED).displaced_the_tier_b_decision());
+        for verdict in ["proven_modulo_real_arithmetic", DISPROVED] {
+            assert!(
+                !MachineArithmeticCheck::unchecked(0, verdict, "nothing established")
+                    .displaced_the_tier_b_decision(),
+                "{verdict}: a lane that established nothing left the record alone"
+            );
+        }
     }
 
     // The predicate is keyed on the DISCLOSED qualifier, not on a token list,

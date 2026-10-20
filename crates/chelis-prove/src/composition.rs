@@ -725,6 +725,13 @@ pub fn base_verdict_from_discharge(
 /// the failure as on the pass. The base re-enters the lattice through the same
 /// door every discharge does, so the array is consistent with the rendered
 /// badge.
+///
+/// chelis#3971 narrowed WHEN that hedge is reached rather than what it
+/// discloses: under `--tier auto` and `--tier smt-only` the solver's witness is
+/// first evaluated concretely, so a confirmed disproof composes to a definite
+/// `Failed` with no qualifier, an unconfirmed one is withdrawn to `Unsupported`,
+/// and this hedge survives only on a disproof whose witness the lane could not
+/// read or evaluate at all.
 pub fn composed_qualifier_strings(
     base_soundness: Soundness,
     base_qualifiers: &QualifierSet,
