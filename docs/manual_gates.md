@@ -125,6 +125,7 @@ respective hardware and record those results separately.
 Run `.venv/bin/python scripts/version_core_oracle.py` from the repository root.
 It needs the pinned Rust toolchain, `thumbv7em-none-eabi`, `cargo-nextest`,
 and the checkout's uv-managed Python environment.
+`python3` must execute from `PATH` for the shim fixtures.
 The target appears in the toolchain file.
 
 Success means exit zero and the final line `version core oracle: PASS`.

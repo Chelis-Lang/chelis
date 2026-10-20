@@ -16,6 +16,26 @@ pub fn classify(value: &str) -> (bool, bool) {
 }
 """
 
+VERSION_TESTS = (
+    "tests::strict_semver_accepts_xyz",
+    "tests::strict_semver_rejects_non_xyz",
+    "tests::path_component_rejects_traversal_and_separators",
+    "tests::path_component_accepts_versions_and_channels",
+    "tests::strict_semver_has_no_integer_component_limit",
+)
+SHIM_TESTS = (
+    "level5_default_resolves_outside_any_package",
+    "level1_plus_arg_wins_and_is_stripped",
+    "level2_env_overrides_default",
+    "level3_chelis_toolchain_file_overrides_default",
+    "level4_reef_pin_overrides_default",
+    "level3_beats_level4_toolchain_file_over_reef_pin",
+    "reef_pin_walks_up_from_subdirectory",
+    "resolved_but_not_installed_is_a_loud_error",
+    "nothing_resolved_is_a_loud_error",
+    "plus_arg_not_installed_does_not_fall_back",
+)
+
 HOST_SOURCE = r'''
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::hint::black_box;
@@ -82,6 +102,7 @@ fn main() {
 
 
 def validate() -> None:
+    run(("python3", "--version"))
     for default_features in (False, True):
         packages = portable(
             "chelis-version", PORTABLE_SOURCE, default_features=default_features
@@ -93,8 +114,14 @@ def validate() -> None:
         f'chelis-conformance = {{ path = "{ROOT / "crates" / "chelis-conformance"}" }}\n'
     )
     consumer("chelis-version", HOST_SOURCE, dependencies=dependencies)
-    run(("cargo", "nextest", "run", "-p", "chelis-version"))
-    run(("cargo", "nextest", "run", "-p", "chelisup", "--test", "shim_resolution"))
+    run(
+        ("cargo", "nextest", "run", "-p", "chelis-version"),
+        required_tests=VERSION_TESTS,
+    )
+    run(
+        ("cargo", "nextest", "run", "-p", "chelisup", "--test", "shim_resolution"),
+        required_tests=SHIM_TESTS,
+    )
     run((sys.executable, "scripts/test_no_std_core_support.py"))
     print("version core oracle: PASS", flush=True)
 
