@@ -41,8 +41,8 @@ tensor helpers admitted by the selected target (§6).
 - **Host execution:** `crates/chelis-ir/src/host.rs` represents calls, control,
   scalar and collection values, and tensor helpers. Eval uses
   `chelis-compiler-api/src/runtime/host_ops.rs`; compiled host programs use
-  target host emitters and the carried runtime. Some builtin applications are
-  explicitly eval/test-only (§3.5, §3.8, §3.9).
+  target host emitters and the carried runtime. I/O, decimal rounding, and
+  CSV operations use shared host-runtime definitions (§3.5, §3.8, §3.9).
 
 Transform rules include host values, lists, branches, and recursion;
 implementation coverage is in §5. The prover's supported subset is in §12.
@@ -59,7 +59,7 @@ host representation decisions.
 
 ---
 
-## 1. Tier-1 RISC primitives (the DAG)
+## 1. RISC primitives (the DAG)
 
 These registered builtins have direct tensor DAG nodes. Their contracts come from
 `spec/05` §2 and the dtype rules of `spec/04`. `D` denotes dimensions and `p`
@@ -391,8 +391,7 @@ rounds left of the decimal point, a count finer than the value is the
 identity, a zero result keeps the operand's sign, and a result past the
 largest finite value is the signed infinity. Non-finite operands pass
 through unchanged. Eval and compiled C share one definition.
-Eval/test execute it; compiled builds reject it through the shared
-eval-only gate. [05-HOST-2] requires compiled-host support.
+[05-HOST-2] requires the same host-runtime behavior in both execution modes.
 
 The source-defined `Std.Io.Json` module (§11) provides JSON values with
 distinct `JsonInt`, `JsonBigInt`, and `JsonFloat` numeric variants.
@@ -421,11 +420,9 @@ operation. The separate source-defined module is `Std.Io.Csv` (§11).
 | `csv_str` | `(rows, row: int, col: string) -> string` | one cell verbatim |
 
 Missing columns name the requested column and list the available columns.
-The shared eval-only gate in `crates/chelis-ir/src/host.rs` rejects these
-builtins in compiled builds, including calls reached through a helper.
-The source-defined `Std.Io.Csv` module supplies the compiled-host path
-(§11). Builtin compiled-host support required by [05-HOST-2] is tracked
-by chelis#1297.
+The builtins run through the shared host runtime in both execution modes,
+including calls reached through a helper. The source-defined `Std.Io.Csv`
+module (§11) provides a separate string-valued file interface.
 
 ---
 
@@ -774,7 +771,7 @@ statically resolved axis instead.
 [`spec/design/chelis_property_spec.md`](../spec/design/chelis_property_spec.md);
 the executable dispatch is in `crates/chelis-prove/src/property_runner.rs`.
 
-| Tier / option | Route |
+| Option | Route |
 |---|---|
 | `induction-only` | Surf structural-recursion subset: separate base and step SMT obligations; unsupported shapes stop without sampling. |
 | `smt-only` | Lowerable arithmetic and supported contract/gradient forms go to SMT; unsupported forms do not become sampled passes. |
