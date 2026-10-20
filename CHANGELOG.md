@@ -4,6 +4,43 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.21.1] - 2026-10-19
+
+### Added
+
+- Added `lib.fetchReefLock` and `lib.buildChelisPackage` to the Nix flake. The helpers fetch locked artifacts with fixed hashes and build programs or Reef packages without network access. Surf and Deep entry points use the compiler file-stem rule. Identical download URLs and pins share one file. Native checks build a Reef library and run a program that imports it. See [#3919](https://github.com/Chelis-Lang/chelis/issues/3919).
+
+- Set `CHELIS_OFFLINE=1` to disable remote dependency resolution for package graph loads, including `build`, `check`, `test`, and `prove`. Missing registry dependencies first state that import needs a lockfile with valid remote origins. Then they name `chelis reef install --from-lockfile --artifact-dir <dir>`. See [#3921](https://github.com/Chelis-Lang/chelis/issues/3921).
+
+### Fixed
+
+- Off-diagonal pairing now applies to an order-guarded property too. The phase
+  was switched off for any plan with an order edge, so an edge on a binder the
+  predicate never mentioned suppressed the pairing entirely. The shared
+  cell-window boundary clears an order successor's diagonal as well, using the
+  derivable bound on its schedule length, so the chain that justified the
+  exemption measures identically with the phase on (chelis#3697).
+
+- The `chelis` shim stops recursive linked wrappers with an error that names the linked toolchain directory. Normal wrappers preserve caller arguments. Compiler startup clears linked dispatch ancestry, so normal compiler subprocesses have no depth limit. Older linked compilers retain ordinary calls and direct child processes. They need the startup boundary for nested shim calls to a directory already in that ancestry. See [#3835](https://github.com/Chelis-Lang/chelis/issues/3835).
+
+- The Nix installation guide matches the canonical website page and names all three supported systems. It explains the Intel macOS exclusion without release-transition text.
+
+  The book and canonical website align their public release guidance. The transform guide removes an incorrect static-extent restriction on compiled ADT gradients.
+
+- The nightly Nix workflow skips native checks only when every package output and exact-revision activated shell exists in the cache. Shell-only changes trigger native publication. Cache query errors remain failures. See [#3892](https://github.com/Chelis-Lang/chelis/issues/3892).
+
+- Reef recognizes a package whose root equals `TMPDIR`. Package discovery still stops at this boundary and selects nearer package roots. See [#3920](https://github.com/Chelis-Lang/chelis/issues/3920).
+
+- Documented the explicit `SOURCE_DATE_EPOCH=0` setting for Nix rebuilds of Reef releases that use the default archive epoch. The guide also states that the compiler, package inputs, lockfile, and epoch must match the release.
+
+  See [#3922](https://github.com/Chelis-Lang/chelis/issues/3922).
+
+- Devenv shells select the public Chelis binary cache for contributor tools. The contributor guide explains Nix trust controls and the Devenv-only development shell.
+
+- Reef locks retain a binary entry for each declared platform. Fetch plans and offline imports select only the build-platform artifact. Use `reef fetch-plan --platform <slug>` to select another platform.
+
+  Reef rejects duplicate binary identities and inconsistent hash pins before an install can replace bytes. See [#3923](https://github.com/Chelis-Lang/chelis/issues/3923).
+
 ## [0.21.0] - 2026-10-19
 
 ### Added
