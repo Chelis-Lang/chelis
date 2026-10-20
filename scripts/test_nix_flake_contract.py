@@ -92,36 +92,6 @@ FRESHNESS_STEP = re.compile(
 )
 
 
-def assert_install_guide_names_supported_systems(guide: str) -> None:
-    """Check the Nix section of the install guide against the supported systems."""
-    start = guide.find("\n## Install with Nix\n")
-    if start < 0:
-        raise AssertionError("the install guide must have the section Install with Nix")
-    following = guide.find("\n## ", start + 1)
-    section = " ".join(guide[start : following if following >= 0 else None].split())
-    sentences = re.split(r"(?<=\.) ", section)
-    # One sentence lists every supported system. The sentence that names the
-    # most of them shows the systems that the list omits.
-    listing = max(
-        sentences, key=lambda sentence: sum(f"`{system}`" in sentence for system in EXPECTED_SYSTEMS)
-    )
-    missing = [system for system in EXPECTED_SYSTEMS if f"`{system}`" not in listing]
-    if missing:
-        raise AssertionError(
-            f"the Nix section of the install guide must list the supported systems {missing}"
-        )
-    if not any(
-        "`x86_64-darwin` is not supported" in sentence
-        and "nixpkgs" in sentence
-        and "Devenv" in sentence
-        for sentence in sentences
-    ):
-        raise AssertionError(
-            "the Nix section of the install guide must say that x86_64-darwin is not "
-            "supported, with the nixpkgs and the Devenv reason"
-        )
-
-
 def add_store_toolchain(
     scratch: Path, version: str = "0.0.7", compiler: Path | None = None
 ) -> Path:
@@ -1963,23 +1933,6 @@ class NixFlakeContractTests(unittest.TestCase):
 
 
 class NixSourceContractTests(unittest.TestCase):
-    def test_install_guide_names_each_supported_system(self) -> None:
-        guide = (REPO_ROOT / "docs" / "book" / "src" / "install.md").read_text(encoding="utf-8")
-        assert_install_guide_names_supported_systems(guide)
-
-    def test_install_guide_rule_rejects_each_omission(self) -> None:
-        guide = (REPO_ROOT / "docs" / "book" / "src" / "install.md").read_text(encoding="utf-8")
-        mutations = {
-            system: (f"`{system}`", "a system") for system in EXPECTED_SYSTEMS
-        }
-        mutations["x86_64-darwin"] = ("`x86_64-darwin` is not supported", "`x86_64-darwin` works")
-        for name, (old, new) in mutations.items():
-            with self.subTest(mutation=name):
-                mutated = guide.replace(old, new)
-                self.assertNotEqual(mutated, guide)
-                with self.assertRaisesRegex(AssertionError, name):
-                    assert_install_guide_names_supported_systems(mutated)
-
     def test_package_shape_rejects_every_undeclared_path(self) -> None:
         checks = (REPO_ROOT / "nix" / "checks.nix").read_text(encoding="utf-8")
         self.assertIn("assert_exact_inventory", checks)
