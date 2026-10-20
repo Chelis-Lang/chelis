@@ -1,6 +1,8 @@
 //! Shared, zero-dependency version + path-component primitives for the chelis
 //! toolchain.
 //!
+//! This crate uses `no_std` without allocation or package dependencies.
+//!
 //! This is the single source of truth for "what is a valid pin/version" so the
 //! installer ([`chelisup`]) and the downstream-conformance auditor
 //! ([`chelis-conformance`]) cannot silently diverge. Before this crate the
@@ -10,6 +12,11 @@
 //!
 //! [`chelisup`]: https://docs.rs/chelisup
 //! [`chelis-conformance`]: https://docs.rs/chelis-conformance
+
+#![no_std]
+
+#[cfg(test)]
+extern crate std;
 
 /// True iff `v` is a strict `X.Y.Z` release version: exactly three non-empty
 /// components, each one or more ASCII digits. No `v` prefix, no pre-release
@@ -55,29 +62,65 @@ mod tests {
 
     #[test]
     fn strict_semver_accepts_xyz() {
-        for good in ["0.12.0", "10.0.255", "0.14.0"] {
+        for good in ["0.12.0", "10.0.255", "0.14.0", "00.001.0002"] {
             assert!(is_strict_semver(good), "should accept {good:?}");
         }
     }
 
     #[test]
     fn strict_semver_rejects_non_xyz() {
-        for bad in ["0.13", "1.2.3.4", "v0.1.0", "0.1.0-rc1", "", "abc", "0..0"] {
+        for bad in [
+            "0.13",
+            "1.2.3.4",
+            "v0.1.0",
+            "0.1.0-rc1",
+            "",
+            "abc",
+            "0..0",
+            ".1.2",
+            "1.2.",
+            "1.2.3+build",
+            " 1.2.3",
+            "1.2.3 ",
+            "+1.2.3",
+            "１.2.3",
+            "1.٢.3",
+            "1.\t2.3",
+        ] {
             assert!(!is_strict_semver(bad), "should reject {bad:?}");
         }
     }
 
     #[test]
     fn path_component_rejects_traversal_and_separators() {
-        for bad in ["", ".", "..", "a/b", "a\\b", "../etc", "x\0y", "a\nb"] {
+        for bad in [
+            "", ".", "..", "a/b", "a\\b", "../etc", "x\0y", "a\nb", "a\tb", "a\u{7f}b", "a\u{85}b",
+            "a\u{9f}b",
+        ] {
             assert!(!is_safe_path_component(bad), "should reject {bad:?}");
         }
     }
 
     #[test]
     fn path_component_accepts_versions_and_channels() {
-        for good in ["0.12.0", "0.13.0-rc1", "nightly-2026-06-30", "0.13"] {
+        for good in [
+            "0.12.0",
+            "0.13.0-rc1",
+            "nightly-2026-06-30",
+            "0.13",
+            "a..b",
+            "a b",
+            "版本",
+        ] {
             assert!(is_safe_path_component(good), "should accept {good:?}");
         }
+    }
+
+    #[test]
+    fn strict_semver_has_no_integer_component_limit() {
+        let component = "9".repeat(4096);
+        let version = std::format!("{component}.{component}.{component}");
+        assert!(is_strict_semver(&version));
+        assert!(!is_strict_semver(&std::format!("{component}..1")));
     }
 }

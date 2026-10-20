@@ -4601,6 +4601,33 @@ reason = "the integration-support gate stage executes the focused evaluator boun
 tracking_issue = "chelis#1323"
 
 [[path_rule]]
+prefix = "scripts/version_core_oracle.py"
+disposition = "owner"
+workflow = "heavy-e2e.yml"
+job = "integration-support"
+cadence = "daily and workflow_dispatch"
+reason = "the integration-support domain slice executes target compilation and version host parity"
+tracking_issue = "chelis#3977"
+
+[[path_rule]]
+prefix = "scripts/no_std_core_support.py"
+disposition = "owner"
+workflow = "heavy-e2e.yml"
+job = "integration-support"
+cadence = "daily and workflow_dispatch"
+reason = "the version oracle executes standalone target and host consumers through this support module"
+tracking_issue = "chelis#3977"
+
+[[path_rule]]
+prefix = "scripts/test_no_std_core_support.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit discovers failure controls for target dependencies and mandatory test results"
+tracking_issue = "chelis#3977"
+
+[[path_rule]]
 prefix = "rust-toolchain.toml"
 disposition = "packages"
 packages = [
