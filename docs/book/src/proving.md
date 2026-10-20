@@ -154,8 +154,8 @@ takes. It reports the outcome in the same `machine_arithmetic` field:
   about the property.
 
 Do not read `unconfirmed` as "the property holds". `(x * x) != 11.0f64` on
-`[3, 4]` is `unconfirmed` — `sqrt(11)` is irrational, so no `f64` equals the
-witness — and the property is nevertheless false at `3.3166247903554`, whose
+`[3, 4]` is `unconfirmed`, because `sqrt(11)` is irrational and no `f64` equals
+the witness. The property is nevertheless false at `3.3166247903554`, whose
 square is exactly `11.0`. Sampling does not find it. `unsupported` is the
 honest answer: the machine-arithmetic question is open, and `chelis prove` exits
 `2` rather than `0` or `1`.
