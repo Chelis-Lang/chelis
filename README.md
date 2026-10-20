@@ -282,6 +282,18 @@ The retained binder smoke preserves all seven authenticated rows.
 These measurements do not prove fresh consumer execution, complete collector
 body translation, or whole-core correspondence.
 
+The binder also writes `native-type-environment.json` for its exact imported LLBC.
+This separate evidence file does not change schema 1 certificates or their complete native rows.
+`project_native_rows` matches canonical names, complete generic arguments, owning crates, and authenticated source files.
+It admits genuine dependency suppliers without a root-package restriction.
+It excludes rows whose declarations are absent and rejects ambiguous names or mismatched membership.
+
+The projection records declaration and file IDs only within its bound LLBC.
+The native smoke projects all seven rows into one retained IR environment.
+Boundary probes exclude absent NodeId rows and reject ambiguous String declarations, wrong owners, wrong source files, and wrong Cargo suppliers.
+These probes also show that new job-local IDs do not need historical numeric IDs.
+Dependency-row projection in this IR environment does not prove a whole pipeline import or universal compiler coverage.
+
 Use the built Lean library from the patched `aeneas-source` package, not the
 unmodified upstream library:
 
@@ -362,6 +374,161 @@ and compiled model under `.work/aeneas-verification/extracted/`. This acceptance
 not full-core extraction, a backend axiom audit, or a correspondence theorem.
 
 ### Verification status and remaining boundaries
+
+The [inactive Native371 checkpoint](verification/toolchain/aeneas/native371-checkpoint.json) preserves the exact frozen source manifest and outcome.
+Its archive restores all 1908 source files with matching byte counts, SHA-256 hashes, and stored permission modes.
+Executable source scripts and the static image remain included.
+The archive does not enter `SERIES`.
+All toolchain pins and library selections remain unchanged.
+
+Native366 publishes a native build, but its retained-aggregate fixture rejects an exact declared owner.
+Native371 contains the branch-local producer correction.
+It remains uncompiled and unexecuted.
+Local absolute evidence references do not supply portable build or proof evidence.
+Source recovery establishes neither an accepted toolchain nor completed production extraction.
+
+Fresh capacity admission and exact execution release must precede compilation.
+Exact-owner behavior, generated Lean values, variant checks, branch isolation, diagnostic removal, and clean publication remain open.
+Unchanged2098 consumers, nine callers, production consumers, NORMAL admission, and final proof gates also remain open.
+
+The older unintegrated `successor065` ownership and lifetime smoke results below are historical.
+They do not establish Native371 behavior or pinned toolchain acceptance.
+
+The ownership smoke passes all fifteen cases.
+Current references, nominal storage, explicit pending slots, latent dependencies, physical return suppliers, and parent suppliers retain ownership.
+History, saved snapshots, and declaration witnesses add no current ownership.
+The matcher accepts the repaired mask cardinality and rejects the later value mismatch.
+Payloads, metadata, frozen owners, and protected owners stay equal.
+The private assertions compare semantic set membership, not OCaml tree equality.
+
+The lifetime smoke's sole original runtime exits `0`.
+It executes the real `Move` from `local4` to `local0` at `host.rs:18094:25-18094:29`.
+Raw statement `5102` becomes actual statement `2` after prepasses, and the source becomes `Bottom`.
+Shared-borrow identity, metadata, equal erased shared-str views, strict checks, and complete forward/backward synthesis pass.
+`Free1` and `Free2` stay distinct.
+The declared forward outlives path admits assignment, while absent/reverse paths and invariant referents reject.
+
+Lifetime publication corrects only an incidental numeric-order assertion from that execution.
+No runtime repeats.
+
+| Smoke receipt | SHA-256 |
+| --- | --- |
+| [Ownership, fifteen cases](.work/diag/pin-integration-prep/source-pin-integration-resume-recovery-projection-004/source-standard-parent-string-owned-region-semantic-065-003/runtime-after-smoke/report.json) | `48ed6a386b3d031d7d722287a54dd831f8afc4e66861a8a39379a37a53bc7d49` |
+| [Lifetime, sole original runtime](.work/diag/production-native-certificate-cutover/fun662-native-after-publication-001/report.json) | `8e9c5b6203d8da8bd2471c24d0934287ed89c9b2736e8372941bb2eae76c068d` |
+
+Both receipts bind the same source, binary, build report, and native binding:
+
+| Shared identity | SHA-256 |
+| --- | --- |
+| Source | `bcfed526e5462fa8b3390ee1e5506c9ec06214d5d0b7bce55958848506f364fe` |
+| Binary | `0223a96cd7d33e4ef715940b7955c3343a5f282449c7fd92c10f3d8598511f08` |
+| Build report | `9e08012a5a4ec27a9776e040a5c9335fa407afc15252b1a81aa7ff9487488bbc` |
+| Native binding | `e4bae2f988884588b8a7b99a423cae440574c001cd22523d3654f57cc2fa815a` |
+
+All ten old native profiles bind a former Cargo configuration identity.
+Main preserves the current configuration and identity checks.
+Fresh supplier capture remains necessary.
+
+`verification/capture_native_collection_profile.py` now separates Cargo metadata JSON stdout from immutable diagnostic stderr.
+The command receipt records both stream identities, actual arguments, environment, exit status, and executable identities.
+Existing metadata consumers still read the `log` field.
+Other commands retain merged logs and their original receipt shape.
+No identity check changes.
+
+**Standalone fixture native evidence**
+
+Use the pinned Python environment and the existing shared execution guards.
+The fixture entry captures actual native layouts, extracts fresh Cargo Charon LLBC, and binds the existing certificate schema:
+
+```sh
+python3 -B verification/capture_native_collection_profile.py fixture --request request.json
+```
+
+The Python API is `capture_fixture_profile(*, fixture, case_name, charon, charon_options, public_types, llbc, work_dir, output, disk_guard)`.
+The request JSON must contain exactly these fields:
+
+| Field | Required value |
+| --- | --- |
+| `fixture` | Accepted original identity with absolute `path`, `bytes`, and `sha256`. |
+| `case_name` | Original fixture filename stem with hyphens replaced by underscores. |
+| `charon` | Absolute path to the pinned Charon executable. |
+| `charon_options` | String array of the original runner's parsed Charon options. |
+| `public_types` | Nonempty array of complete public ADT descriptors from the fixture library. |
+| `llbc` | Fresh absolute destination named `<case_name>.llbc`. |
+| `work_dir` | New exclusive task-owned directory under ROOT's `.work/`. |
+| `output` | New exclusive evidence directory under ROOT's `.work/`. |
+| `disk_guard` | Absolute path to the unchanged approved disk guard. |
+
+For `loop_zip_forwarded_reborrow`, use this `public_types` value:
+
+```json
+[{"kind":"adt","name":"loop_zip_forwarded_reborrow::Term","types":[],"consts":[]}]
+```
+
+The work directory, output directory, and LLBC destination must not exist.
+The output directory cannot contain the work directory.
+Neither output nor LLBC can overlap the generated workspace or target directories.
+The entry creates separate native and Charon target directories.
+
+Keep the original accepted fixture check in the caller.
+The producer checks the supplied identity and copies every fixture byte directly to the Cargo library's `src/lib.rs`.
+The library name equals `case_name`.
+The real Cargo package name replaces its underscores with hyphens.
+The workspace preserves an exact copy of ROOT's pinned `rust-toolchain.toml`.
+
+Original and copied source bytes and hashes must remain equal through capture, extraction, and binding.
+The public probe compiles and executes against the actual native Cargo library.
+The existing verifiers retain compiler, target, flags, package, feature, artifact, source, and configuration checks.
+Fresh Cargo Charon uses the original parsed options and must create a new nonempty LLBC file.
+The unchanged binder authenticates that actual output and its native supplier provenance.
+The production eight-package and feature policies remain unchanged.
+
+Exit `0` prints JSON with `llbc.path`, `bound.certificate.path`, and the `report` identity.
+The report retains original/copy identities, native capture, the actual Charon command receipt, source snapshots, and bound certificate references.
+The output directory contains `fixture-result.json` and `native-certificate/native-collection-layouts.json`.
+
+The [real fixture smoke](.work/diag/chelis-final-fixture-producer-real-001/attempt001/execution-report.json) passes native capture, fresh Cargo Charon, and unchanged certificate binding.
+It establishes neither Aeneas translation nor Lean correspondence.
+It does not establish production-matrix completion or whole-core acceptance.
+
+The actual pinned Cargo metadata smoke runs against this workspace under a task-owned package-cache lock and exits `0`.
+It parses the unique `chelis-deep` workspace root.
+Stdout contains valid JSON only, while stderr records a real Cargo lock diagnostic.
+A second actual Cargo control confirms unchanged merged-output behavior for unrelated commands.
+
+| Metadata stream evidence | SHA-256 |
+| --- | --- |
+| [Actual metadata smoke](.work/diag/production-native-certificate-cutover/native-metadata-stream-smoke-001/report.json) | `a806dd74000a1ffad914a76423a6ed553a0f89aa8df10bfb109550e538d2545a` |
+| Actual merged-output control report | `d9e6ae0404db1ccc5d29a78091e941caa2e201a7bd0808a591fb167c21164e92` |
+| Capture helper | `71152fadb86d0eb6cb4f788f18ac308430c8253a54af6b2778bbcf41f86564e3` |
+
+Current-configuration supplier rows `chelis-unord-default` and `chelis-vocab-default` pass.
+The unchanged `native_evidence` verifier authenticates both after the helper fix.
+Eight rows remain.
+The failed `chelis-deep` combined-log parse and all old evidence stay unchanged.
+A new caller/helper binding and supplier entry must precede the remaining captures.
+Full production translation and every earlier final gate remain open.
+
+These results establish neither complete native capture nor final acceptance.
+
+The exact remaining gates are:
+
+1. Current-configuration native evidence for all ten rows.
+2. Retained035 production loop translation.
+3. The full fresh `force_host_expr_type` consumer.
+4. Final all-nine E1.
+5. Unchanged 25-root E2.
+6. E5 source handoff.
+7. Source pin and patch-series integration.
+8. Both whole-core chains, default and lowering-trace.
+9. Coherent Lean compilation.
+10. Exact caller propositions.
+11. The unchanged full proof and runtime audits.
+
+The existing prepared integration sequence stays unchanged.
+These smoke results establish no final E1/E2, full extraction, caller correspondence, or whole-core correspondence.
+
+Earlier packaged-tool and extraction evidence follows.
 
 The packaged compiler passes the 25-model native/Lean matrix and all 16 unsupported
 collector rejection checks described above.
@@ -669,6 +836,11 @@ The fragment audit cannot satisfy whole-core acceptance.
 The default chain keeps 27 applicable public entries.
 The lowering-trace chain keeps all 32 public entries.
 Each caller theorem needs its exact proposition and extracted inner function.
+`verification/public_entries.json` records `lean_boundary` from each entry's `boundary_kind`.
+Resume entries use `BoundaryRelation`, catch entries use `CatchBoundaryRelation`, and panic-on-rejection entries use `PanicBoundaryRelation`.
+All three relations belong to `ChelisBridge.Runtime.Entries`.
+This field does not supply `statement` or `lean_inner`.
+Exact proposition validation still needs the generated models and their caller proofs.
 
 The archived O17 checks verified required theorem names, not caller propositions.
 A required-name `True` theorem does not establish caller correspondence.

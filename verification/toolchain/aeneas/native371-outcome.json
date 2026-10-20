@@ -1,0 +1,144 @@
+{
+  "status": "The approved branch correction is applied. Native371 preparation completes. Native371 remains uncompiled and unexecuted.",
+  "previous_outcome": {
+    "path": "/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/diag/resume38-main/compiler370-physical-packet-current-outcome001.json",
+    "bytes": 14353,
+    "sha256": "58ed7a51d810a86ef64f4df096db1d06310cc810986f44317abcfae9a5b95ed6"
+  },
+  "previous_protection": {
+    "path": "/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/diag/resume38-main/compiler370-physical-packet-current-protection001.json",
+    "bytes": 21249674,
+    "sha256": "f7a72d7a1e364be451ccb0568afa270750d229b308ff8888dfe8fe500c748627"
+  },
+  "native370_records_changed": false,
+  "changed_source_paths": [
+    "src/symbolic/SymbolicToPureExpressions.ml"
+  ],
+  "applied_edit": {
+    "branch_context": "ExpandAdt uses one local branch_ctx function for direct singleton expansion and every match branch.",
+    "guard": "The mutable-borrow predicate runs once for a nonempty expansion. Empty expansions avoid that type analysis.",
+    "producer": "Each selected mutable-borrow branch constructs one actual VAdt producer with the exact source type, variant, and typed symbolic fields.",
+    "isolation": "Each branch context derives from the incoming immutable context. Sibling branches do not share a selected producer.",
+    "obsolete_block": "The registration block is removed from translate_ExpandAdt_one_branch.",
+    "abs_changed": false,
+    "fallback_added": false
+  },
+  "accepted_native_binding": {
+    "path": "/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/diag/pin-integration-prep/source-pin-integration-resume-recovery-projection-004/source-candidate-conversion-068-366-physical-packet-001-build/native-build-binding.json",
+    "bytes": 43302,
+    "sha256": "e8e75b3c307d76db187c89557e6ef8261f0564dc697ba1d038295342e24719fd"
+  },
+  "accepted_native_catalog": {
+    "path": "/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/diag/pin-integration-prep/source-pin-integration-resume-recovery-projection-004/source-candidate-conversion-068-366-physical-packet-001-build/accepted-local-native-inputs.json",
+    "bytes": 102144,
+    "sha256": "bd59756f449d61569f42fd7ea4cc0242ae956f7103041a8d22f006d5d2bca78d"
+  },
+  "complete_current_native_catalog_equal": true,
+  "source_candidate": {
+    "path": "/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/diag/pin-integration-prep/source-pin-integration-resume-recovery-projection-004/source-candidate-conversion-068-371-physical-packet-001-build/source-candidate.json",
+    "bytes": 290972,
+    "sha256": "8be1f0e390220ab1335d54ced00f65f34e24414f54daff56172b68bbcd70982e"
+  },
+  "expressions_source": {
+    "path": "/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/source-pin-integration-resume-compiler-recovery-001/src/symbolic/SymbolicToPureExpressions.ml",
+    "bytes": 348545,
+    "sha256": "1b0227505440306203e7ee991fdbe73b3cfcb3d285880fdfc238c7a3000588e9"
+  },
+  "library_receipt": {
+    "path": "/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/diag/resume38-main/model-collection-library251-consumption-entries251-001/report.json",
+    "bytes": 36898,
+    "sha256": "1c7a14980c855fffedbd356d9b858cecda229982e2aa84758856ceb4cbf42eec"
+  },
+  "caller_input_seal": {
+    "path": "/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/diag/resume38-main/compiler356-current-plan-caller-seal-001/caller-input-seal.json",
+    "bytes": 4334,
+    "sha256": "31b8eb274cbc6916d47706bf1fc9cc3ca29ed5b7565c767c860b1b19d4caefcd"
+  },
+  "caller_seal_selection": {
+    "path": "/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/diag/resume38-main/compiler371-current-plan-caller-seal-001/caller-seal-selection.json",
+    "bytes": 7455,
+    "sha256": "d03f456742c2ee814db20614bfb3bb3bb8bdcb3bfca139517f1e2e84de92a58f"
+  },
+  "production_seal_count": 17,
+  "next_native_preparation": {
+    "path": "/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/diag/pin-integration-prep/source-pin-integration-resume-recovery-projection-004/source-candidate-conversion-068-371-physical-packet-001-build/preparation.json",
+    "bytes": 1678332,
+    "sha256": "56408ad700664e6ec66a5b57a500d314af242762cfe67ff99bc1664af893633d"
+  },
+  "preparation_result": {
+    "path": "/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/diag/pin-integration-prep/source-pin-integration-resume-recovery-projection-004/source-candidate-conversion-068-371-physical-packet-001-build/prepare-only-result.json",
+    "bytes": 40959,
+    "sha256": "da6d53d57f0c5620bf13b702a1f7334cab33c59dda6c743355dacc5a62289b9a"
+  },
+  "next_native_proof": {
+    "path": "/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/diag/resume38-main/compiler371-physical-packet-native-closure001.json",
+    "bytes": 164352,
+    "sha256": "c7eb3a55902da17294c87c93511a10384aee1177405479a34e125f8d66298f00"
+  },
+  "rebuild_plan": {
+    "path": "/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/diag/pin-integration-prep/source-pin-integration-resume-recovery-projection-004/source-candidate-conversion-068-371-physical-packet-001-build/rebuild-plan.json",
+    "bytes": 11208,
+    "sha256": "13287689c068811e0bc8cdf4928ec4bab218ac6ec99d741cec49d84aec575062"
+  },
+  "dependency_seed": "aeneas__SymbolicToPureExpressions",
+  "dependency_modules": [
+    "SymbolicToPure",
+    "SymbolicToPureExpressions",
+    "Translate"
+  ],
+  "dependency_output_count": 22,
+  "next_native_command": [
+    "/nix/store/3xqryhvq65kg2ahqjydcfwmhnbn9ny5i-python3-3.11.15/bin/python3",
+    "-B",
+    "/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/diag/pin-integration-prep/source-pin-integration-resume-recovery-projection-004/candidate_conversion_physical_packet_068_371_001.py",
+    "--execute"
+  ],
+  "build_cwd": "/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/source-pin-integration-resume-compiler-recovery-001/src",
+  "policy": {
+    "native_build_deadline_seconds": 1200,
+    "consumer_deadline_seconds": 7200,
+    "launch_floor_KiB": 13631488,
+    "runtime_floor_KiB": 8650752,
+    "capacity_sample_interval_seconds": 15,
+    "shared_heavy_slots": 1,
+    "outer_disk_guard_preserved": true
+  },
+  "baseline_dynamic_risk": {
+    "classification": "Unconfirmed Native366 baseline dynamic risk. No admitted error is demonstrated.",
+    "source": "SymbolicToPureAbs.ml:1947-1994",
+    "unchanged_abs_sha256": "e2612ec9c36a0b59f62ad0867c1be1e02033fdb6082b715633198cd38052f86f",
+    "registration_limit": "Registration establishes local shapes, not universal exact region equality.",
+    "required_conjunction": [
+      "[INFERENCE] A reachable dependency crosses incompatible ownership coordinates without witnessed transport.",
+      "That dependency then matches a concrete bid whose owner record matches the declaration coordinates."
+    ],
+    "evidence_limit": "Existing evidence neither demonstrates this conjunction nor proves its absence.",
+    "permitted_transport": "SymbolicToPureValues.ml:1365-1404 permits different historical supplier and receiver region names and masks.",
+    "permitted_copy": "InterpExpressions.ml:240-267 refreshes regions on primitive-copyable symbolic copy.",
+    "exact_type_guard_added": false,
+    "resolution_claimed": false
+  },
+  "remaining_verification": [
+    "Fresh capacity admission and Main release must precede the exact Native371 command.",
+    "Compile and publish the corrected source through the prepared dependency-derived route.",
+    "Exercise the actual exact-owner fixture and its generated Lean assertions.",
+    "Exercise alternative variants, forced single-branch matches, and sibling-branch producer isolation.",
+    "Retain the existing ownership, mask, stage, source-class, endpoint, ambiguity, and promised-output checks.",
+    "Complete the final trust audit, including the separate baseline dynamic risk.",
+    "After smoke proof, remove temporary diagnostics and publish the clean permanent binary.",
+    "Complete unchanged2098 symbolic and pure checks, all nine callers, and relevant production consumers.",
+    "Update existing documentation after smoke proof and prepare NORMAL without a production launch."
+  ],
+  "native371_compiled": false,
+  "next_native_executed": false,
+  "consumer_executed": false,
+  "capacity_admitted": false,
+  "execution_released": false,
+  "diagnostic_cleanup_complete": false,
+  "clean_permanent_native_published": false,
+  "source_documentation_updated": false,
+  "semantic_acceptance": false,
+  "full_production_launched": false,
+  "production_capture_executed": false,
+  "peer_contact": false
+}

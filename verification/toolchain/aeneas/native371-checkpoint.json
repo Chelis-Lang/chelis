@@ -1,0 +1,246 @@
+{
+  "activation": {
+    "accepted_toolchain": false,
+    "final_proof": false,
+    "library_changed": false,
+    "pins_changed": false,
+    "portable_build_environment": false,
+    "production_extraction_complete": false,
+    "series_entry_added": false
+  },
+  "archive_format": {
+    "compression": "gzip",
+    "compression_level": 9,
+    "directories_stored": false,
+    "format": "PAX",
+    "gid": 0,
+    "gname": "",
+    "gzip_filename": "",
+    "gzip_mtime": 0,
+    "links_stored": false,
+    "member_order": "Sorted source paths.",
+    "mtime": 0,
+    "uid": 0,
+    "uname": ""
+  },
+  "archive_smoke": {
+    "byte_counts_equal": true,
+    "links_present": false,
+    "modes_equal": true,
+    "passed": true,
+    "path_set_equal": true,
+    "restored_bytes": 26467953,
+    "restored_files": 1908,
+    "sha256_equal": true,
+    "temporary_tree_removed": true
+  },
+  "dependencies": {
+    "accepted_native_catalog": {
+      "bytes": 102144,
+      "path": "/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/diag/pin-integration-prep/source-pin-integration-resume-recovery-projection-004/source-candidate-conversion-068-366-physical-packet-001-build/accepted-local-native-inputs.json",
+      "sha256": "bd59756f449d61569f42fd7ea4cc0242ae956f7103041a8d22f006d5d2bca78d"
+    },
+    "accepted_predecessor": {
+      "bytes": 43302,
+      "path": "/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/diag/pin-integration-prep/source-pin-integration-resume-recovery-projection-004/source-candidate-conversion-068-366-physical-packet-001-build/native-build-binding.json",
+      "sha256": "e8e75b3c307d76db187c89557e6ef8261f0564dc697ba1d038295342e24719fd"
+    },
+    "affected_outputs": 22,
+    "caller_input_seal": {
+      "bytes": 4334,
+      "path": "/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/diag/resume38-main/compiler356-current-plan-caller-seal-001/caller-input-seal.json",
+      "sha256": "31b8eb274cbc6916d47706bf1fc9cc3ca29ed5b7565c767c860b1b19d4caefcd"
+    },
+    "caller_seal_selection": {
+      "bytes": 7455,
+      "path": "/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/diag/resume38-main/compiler371-current-plan-caller-seal-001/caller-seal-selection.json",
+      "sha256": "d03f456742c2ee814db20614bfb3bb3bb8bdcb3bfca139517f1e2e84de92a58f"
+    },
+    "dependency_proof": {
+      "bytes": 164352,
+      "path": "/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/diag/resume38-main/compiler371-physical-packet-native-closure001.json",
+      "sha256": "c7eb3a55902da17294c87c93511a10384aee1177405479a34e125f8d66298f00"
+    },
+    "library_receipt": {
+      "bytes": 36898,
+      "path": "/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/diag/resume38-main/model-collection-library251-consumption-entries251-001/report.json",
+      "sha256": "1c7a14980c855fffedbd356d9b858cecda229982e2aa84758856ceb4cbf42eec"
+    },
+    "limit": "These local records and the build environment are not archive payloads. Affected output counts are not whole-toolchain acceptance.",
+    "modules": [
+      "SymbolicToPure",
+      "SymbolicToPureExpressions",
+      "Translate"
+    ],
+    "production_seal_count": 17
+  },
+  "evidence_limit": "Local absolute references are not portable evidence. Source recovery does not reproduce native artifacts, library artifacts, sealed inputs, or production proofs.",
+  "git_bases": {
+    "aeneas_integration": "b82cf7fd935f2b49a1dda90c1c3919e9517a0a11",
+    "aeneas_pristine": "cba11f3bebc2bac2bdc6ce1298f6277f6d4d04de",
+    "aeneas_upstream": "ee9bb3935375aacfa8ea3682fc21b051b79fc931",
+    "charon_integration": "5b825fa64e1610cef599fccca91de555b9f846f9",
+    "charon_upstream": "ed22146b1cd4d0b578006a58b3299d41ecbe0fd4",
+    "chelis": "ad4cbf863f5d4533ff328e69dd03fecf76c22fc6"
+  },
+  "native371": {
+    "baseline_dynamic_risk": {
+      "classification": "Unconfirmed Native366 baseline dynamic risk. No admitted error is demonstrated.",
+      "evidence_limit": "Existing evidence neither demonstrates this conjunction nor proves its absence.",
+      "exact_type_guard_added": false,
+      "permitted_copy": "InterpExpressions.ml:240-267 refreshes regions on primitive-copyable symbolic copy.",
+      "permitted_transport": "SymbolicToPureValues.ml:1365-1404 permits different historical supplier and receiver region names and masks.",
+      "registration_limit": "Registration establishes local shapes, not universal exact region equality.",
+      "required_conjunction": [
+        "[INFERENCE] A reachable dependency crosses incompatible ownership coordinates without witnessed transport.",
+        "That dependency then matches a concrete bid whose owner record matches the declaration coordinates."
+      ],
+      "resolution_claimed": false,
+      "source": "SymbolicToPureAbs.ml:1947-1994",
+      "unchanged_abs_sha256": "e2612ec9c36a0b59f62ad0867c1be1e02033fdb6082b715633198cd38052f86f"
+    },
+    "compiled": false,
+    "executed": false,
+    "policy": {
+      "capacity_sample_interval_seconds": 15,
+      "consumer_deadline_seconds": 7200,
+      "launch_floor_KiB": 13631488,
+      "native_build_deadline_seconds": 1200,
+      "outer_disk_guard_preserved": true,
+      "runtime_floor_KiB": 8650752,
+      "shared_heavy_slots": 1
+    },
+    "preparation": {
+      "bytes": 1678332,
+      "path": "/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/diag/pin-integration-prep/source-pin-integration-resume-recovery-projection-004/source-candidate-conversion-068-371-physical-packet-001-build/preparation.json",
+      "sha256": "56408ad700664e6ec66a5b57a500d314af242762cfe67ff99bc1664af893633d"
+    },
+    "semantic_acceptance": false
+  },
+  "payloads": {
+    "native371-outcome.json": {
+      "bytes": 8754,
+      "path": "verification/toolchain/aeneas/native371-outcome.json",
+      "sha256": "39b845f6c4487f5241295c25ebad0c73fa1c6801b56b141dcd278dec8b19e263"
+    },
+    "native371-source-manifest.json": {
+      "bytes": 290972,
+      "path": "verification/toolchain/aeneas/native371-source-manifest.json",
+      "sha256": "8be1f0e390220ab1335d54ced00f65f34e24414f54daff56172b68bbcd70982e"
+    },
+    "native371-source.tar.gz": {
+      "bytes": 4273429,
+      "path": "verification/toolchain/aeneas/native371-source.tar.gz",
+      "sha256": "f2c91048341b81b626670a45338115caa2052129aaf36b716a2a85e2694569b4"
+    }
+  },
+  "prior_observations": {
+    "evidence_scope": "Prior local records only. This archive smoke does not repeat compiler or Lean checks.",
+    "historical_successor065": "Older bounded ownership and lifetime smoke results are historical. They do not establish Native371 behavior.",
+    "lean002": {
+      "capacity_errors": [],
+      "exit": 0,
+      "generated": {
+        "bytes": 2269,
+        "path": "/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/diag/resume38-main/consumer-packet-363-contract-006/PacketOccurrenceControl.lean",
+        "sha256": "2c879731af98493c18c34b666a22058b4894ea3551f3cc609d2e543905bbfef9"
+      },
+      "guard": {
+        "bytes": 6911,
+        "path": "/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/diag/resume38-main/compiler363-packet-contract-lean-002-guard-report.json",
+        "sha256": "7d7a025c7a785a450fa58ca7e447e940707966f4b20602819833c6d53f7777c3"
+      },
+      "library_stable": true,
+      "native_checks_repeated": false,
+      "preparation": {
+        "bytes": 7021,
+        "path": "/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/diag/resume38-main/compiler363-packet-contract-lean-002-preparation.json",
+        "sha256": "350f565a76529ddd8ac811ab54ab8a2011bb0fc275775738ad2af063cff3dc60"
+      },
+      "remaining_live": []
+    },
+    "native363": {
+      "backend_guard_result": {
+        "accepted": true,
+        "capacity_errors": [],
+        "cleanup": null,
+        "exit": 0,
+        "remaining_live": [],
+        "timed_out": false
+      },
+      "backend_report": {
+        "bytes": 11787,
+        "path": "/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/diag/resume38-main/consumer-packet-363-contract-006/report.json",
+        "sha256": "df90ee2cabbad1a3a0b5ec4eb2132f9a99c005d00fecdaa993bd71ba243b4842"
+      },
+      "contract_report": {
+        "bytes": 11464,
+        "path": "/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/diag/resume38-main/consumer-packet-363-contract-004/report.json",
+        "sha256": "3125f47e5842766eb64d6c920bdb73d3363014bca32348072fbc847d1812cfb6"
+      },
+      "limit": "Thirteen native cases and pure translation pass. The original combined consumer then rejects backend extraction.",
+      "native_contract_cases": 13
+    },
+    "native366": {
+      "binary": {
+        "bytes": 36165240,
+        "path": "/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/source-pin-integration-resume-compiler-recovery-001/src/_build/default/main.exe",
+        "sha256": "46131fc60f3a9c6a7f960c75ad288a21a728b4168fd4a0bba71abe9adf2d2aa9"
+      },
+      "failure_record": {
+        "bytes": 1909,
+        "path": ".work/diag/resume38-main/compiler366-fixture-first-owner-failure001.json",
+        "sha256": "88ddfadf4c116ccba2964d66b99a76b2977bdd3b20c88534678e4d9f8ea1bfd9"
+      },
+      "fixture_exception": "A physical application loses an exact declared owner",
+      "fixture_exit": 2,
+      "published_build": {
+        "bytes": 1513562,
+        "path": "/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/diag/resume38-main/source-candidate-conversion-068-366-physical-packet-001-build-evidence/report.json",
+        "sha256": "2f2c9134e67a6203c1c58adf4f2daf51e4dd71a4dd01e925258b4bd93995a4dd"
+      }
+    }
+  },
+  "publication_limit": "This checkpoint does not activate the toolchain or change SERIES, pins, or library selection. Git publication does not establish compiler acceptance.",
+  "remaining_prerequisites": [
+    "Fresh capacity admission and Main release must precede the exact Native371 command.",
+    "Compile and publish the corrected source through the prepared dependency-derived route.",
+    "Exercise the actual exact-owner fixture and its generated Lean assertions.",
+    "Exercise alternative variants, forced single-branch matches, and sibling-branch producer isolation.",
+    "Retain the existing ownership, mask, stage, source-class, endpoint, ambiguity, and promised-output checks.",
+    "Complete the final trust audit, including the separate baseline dynamic risk.",
+    "After smoke proof, remove temporary diagnostics and publish the clean permanent binary.",
+    "Complete unchanged2098 symbolic and pure checks, all nine callers, and relevant production consumers.",
+    "Update existing documentation after smoke proof and prepare NORMAL without a production launch."
+  ],
+  "restore": {
+    "instructions": [
+      "Authenticate the archive and manifest against payloads before restore.",
+      "Execute restore_python with archive, manifest, and a new destination as its three arguments.",
+      "Use a fresh destination. Do not overlay the active toolchain.",
+      "The restore checks every path, byte count, SHA-256 digest, and stored permission mode."
+    ],
+    "python_at_capture": "/nix/store/3xqryhvq65kg2ahqjydcfwmhnbn9ny5i-python3-3.11.15/bin/python3",
+    "restore_python": "import hashlib\nimport json\nimport os\nfrom pathlib import Path, PurePosixPath\nimport stat\nimport sys\nimport tarfile\n\ndef unique_object(pairs):\n    result = {}\n    for name, value in pairs:\n        if name in result:\n            raise ValueError('Duplicate JSON key: ' + name)\n        result[name] = value\n    return result\n\ndef safe_path(name):\n    path = PurePosixPath(name)\n    if not name or path.is_absolute() or path.as_posix() != name:\n        raise ValueError('Unsafe path: ' + repr(name))\n    if any(part in ('.', '..') for part in path.parts):\n        raise ValueError('Unsafe path: ' + repr(name))\n    if '\\\\' in name or any(ord(char) < 32 or ord(char) == 127 for char in name):\n        raise ValueError('Unsafe path: ' + repr(name))\n    return path\n\ndef restore(archive_path, manifest_path, destination):\n    manifest = json.loads(Path(manifest_path).read_bytes(), object_pairs_hook=unique_object)\n    if len(manifest) != 1908:\n        raise ValueError('The manifest count differs.')\n    for name, identity in manifest.items():\n        path = safe_path(name)\n        if any(parent.as_posix() in manifest for parent in path.parents):\n            raise ValueError('A source path also names a parent file.')\n        if set(identity) != {'bytes', 'sha256'} or type(identity['bytes']) is not int:\n            raise ValueError('The manifest identity schema differs.')\n        if identity['bytes'] < 0 or len(identity['sha256']) != 64:\n            raise ValueError('The manifest identity is invalid.')\n        int(identity['sha256'], 16)\n    destination = Path(destination)\n    if destination.exists() or destination.is_symlink():\n        raise ValueError('The restore destination must not exist.')\n    with tarfile.open(archive_path, 'r:gz') as archive:\n        members = archive.getmembers()\n        names = [member.name for member in members]\n        if len(names) != len(set(names)) or set(names) != set(manifest):\n            raise ValueError('The archive path set differs.')\n        for member in members:\n            safe_path(member.name)\n            if not member.isfile() or member.linkname or member.sparse is not None:\n                raise ValueError('The archive member is not a complete regular file.')\n            if member.size != manifest[member.name]['bytes']:\n                raise ValueError('The archive byte count differs.')\n            if member.mode & ~0o777 or member.uid or member.gid or member.mtime:\n                raise ValueError('The archive metadata differs.')\n            if member.uname or member.gname:\n                raise ValueError('The archive owner metadata differs.')\n        destination.mkdir()\n        total = 0\n        for member in members:\n            payload = archive.extractfile(member).read()\n            if hashlib.sha256(payload).hexdigest() != manifest[member.name]['sha256']:\n                raise ValueError('The archive payload hash differs: ' + member.name)\n            target = destination.joinpath(*safe_path(member.name).parts)\n            target.parent.mkdir(parents=True, exist_ok=True)\n            with target.open('xb') as stream:\n                stream.write(payload)\n            target.chmod(member.mode)\n            total += len(payload)\n    restored = set()\n    for directory, folders, files in os.walk(destination, followlinks=False):\n        for name in folders + files:\n            if (Path(directory) / name).is_symlink():\n                raise ValueError('The restored tree contains a link.')\n        for name in files:\n            path = Path(directory) / name\n            restored.add(path.relative_to(destination).as_posix())\n    if restored != set(manifest):\n        raise ValueError('The restored path set differs.')\n    modes = {member.name: member.mode for member in members}\n    for name, identity in manifest.items():\n        path = destination / name\n        payload = path.read_bytes()\n        if len(payload) != identity['bytes']:\n            raise ValueError('The restored byte count differs: ' + name)\n        if hashlib.sha256(payload).hexdigest() != identity['sha256']:\n            raise ValueError('The restored hash differs: ' + name)\n        if stat.S_IMODE(path.stat().st_mode) != modes[name]:\n            raise ValueError('The restored mode differs: ' + name)\n    return {'passed': True, 'restored_files': len(restored), 'restored_bytes': total,\n            'path_set_equal': True, 'byte_counts_equal': True, 'sha256_equal': True,\n            'modes_equal': True, 'links_present': False}\n\nif __name__ == '__main__':\n    print(json.dumps(restore(*sys.argv[1:]), sort_keys=True))\n"
+  },
+  "schema": "chelis.inactive-source-checkpoint.v1",
+  "source": {
+    "file_modes": {
+      "0o644": 1897,
+      "0o755": 11
+    },
+    "latest_source": {
+      "bytes": 348545,
+      "path": "/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/source-pin-integration-resume-compiler-recovery-001/src/symbolic/SymbolicToPureExpressions.ml",
+      "sha256": "1b0227505440306203e7ee991fdbe73b3cfcb3d285880fdfc238c7a3000588e9"
+    },
+    "link_limit": "All members are regular files. Link target bytes are authenticated. Original link topology is not restored.",
+    "manifest_entries": 1908,
+    "materialized_link_members": {},
+    "mode_limit": "Modes retain current source permission bits. Original Git link modes, ownership, ACLs, and extended attributes are not preserved.",
+    "payload_bytes": 26467953,
+    "root_at_capture": "/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/source-pin-integration-resume-compiler-recovery-001",
+    "selection": "The exact frozen manifest defines every source member. No mode-based exclusion applies."
+  },
+  "status": "Inactive WIP source checkpoint. Native371 remains uncompiled and unexecuted."
+}

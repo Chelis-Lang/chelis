@@ -502,6 +502,85 @@ Whole-entry noninterference and wrapper composition still need final whole-core 
 
 ## Extraction status
 
+The [inactive Native371 checkpoint](verification/toolchain/aeneas/native371-checkpoint.json) preserves source bytes, the frozen manifest, and the original outcome.
+Its archive restore smoke checks all 1908 source paths, byte counts, SHA-256 hashes, and stored permission modes.
+Executable source scripts and the static image remain included.
+The archive does not enter `SERIES`.
+Toolchain pins and library selections remain unchanged.
+
+Native366 publishes a native build, but its retained-aggregate fixture rejects an exact declared owner.
+Native371 contains the branch-local producer correction but remains uncompiled and unexecuted.
+Local absolute evidence references are not portable evidence.
+This checkpoint supplies neither an accepted toolchain nor a portable build environment, completed production extraction, or final proof.
+
+Fresh capacity admission and exact execution release must precede compilation.
+Exact-owner behavior, generated Lean values, variant checks, branch isolation, diagnostic removal, and clean publication remain open.
+Unchanged2098 consumers, nine callers, production consumers, NORMAL admission, and final proof gates also remain open.
+
+The older unintegrated `successor065` ownership and lifetime smoke results below are historical.
+The [verification status](README.md#verification-status-and-remaining-boundaries) records their receipt paths and shared SHA-256 identities.
+Those results do not establish Native371 behavior or pinned toolchain acceptance.
+
+All fifteen ownership cases pass.
+The collector retains current references, nominal storage, explicit pending slots, latent dependencies, physical return suppliers, and parent suppliers.
+History, saved snapshots, and declaration witnesses add no current ownership.
+The matcher accepts the repaired mask cardinality but still rejects the later value mismatch.
+Payloads, metadata, frozen owners, and protected owners stay equal.
+The private assertions use semantic set membership, not OCaml tree equality.
+
+The sole original lifetime runtime exits `0`.
+It executes `Move` from `local4` to `local0` at `host.rs:18094:25-18094:29`.
+Prepasses map raw statement `5102` to actual statement `2`, and the source becomes `Bottom`.
+Shared-borrow identity, metadata, equal erased shared-str views, strict checks, and complete forward/backward synthesis pass.
+`Free1` and `Free2` remain distinct.
+Assignment uses the declared forward outlives path, while absent/reverse paths and invariant referents reject.
+
+Publication corrects only an incidental numeric-order assertion from the existing lifetime execution.
+No runtime repeats.
+
+All ten old native profiles bind a former Cargo configuration identity.
+The current configuration and identity checks stay unchanged.
+Fresh supplier capture remains necessary.
+
+`verification/capture_native_collection_profile.py` separates Cargo metadata JSON stdout from immutable diagnostic stderr.
+The metadata receipt records both stream identities, actual arguments, environment, exit status, and executable identities.
+Existing metadata consumers retain the `log` field.
+Other commands keep merged logs and their original receipt shape.
+No identity check changes.
+
+The actual pinned metadata smoke exits `0` under a task-owned package-cache lock against this workspace.
+It parses the unique `chelis-deep` root from JSON-only stdout and records a real Cargo lock diagnostic in stderr.
+A second actual Cargo control confirms unchanged merged-output behavior for unrelated commands.
+The [verification status](README.md#verification-status-and-remaining-boundaries) records the smoke path, both report digests, and the helper digest.
+
+Current-configuration `chelis-unord-default` and `chelis-vocab-default` supplier rows pass.
+The unchanged `native_evidence` verifier authenticates both after the fix.
+Eight rows remain.
+The failed `chelis-deep` combined-log parse and all old evidence stay unchanged.
+A new caller/helper binding and supplier entry must precede further captures.
+Full production translation and every earlier final gate remain open.
+
+This smoke does not establish complete native capture or final acceptance.
+
+The exact remaining gates are:
+
+1. Current-configuration native evidence for all ten rows.
+2. Retained035 production loop translation.
+3. The full fresh `force_host_expr_type` consumer.
+4. Final all-nine E1.
+5. Unchanged 25-root E2.
+6. E5 source handoff.
+7. Source pin and patch-series integration.
+8. Default and lowering-trace whole-core chains.
+9. Coherent Lean compilation.
+10. Exact caller propositions.
+11. The unchanged full proof and runtime audits.
+
+The prepared integration sequence stays unchanged.
+Neither smoke establishes final E1/E2, full extraction, caller correspondence, or whole-core correspondence.
+
+Earlier extraction and packaged-tool evidence follows.
+
 `verification/extract.py` is a reproducible model-generation attempt, not a proof checker.
 It uses the standard Aeneas preset with borrow checking enabled and no exclusion/opacity
 rules for the retained crates. The local Charon patches preserve branching Box
