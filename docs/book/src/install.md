@@ -29,7 +29,7 @@ chelis --version
 
 The script installs only `chelisup`; `chelisup install` downloads the compiler.
 The compiler also bundles `chelis-std`. Reef checks a shell's declared runtime
-requirement against that bundled version; the runtime cannot be installed or
+requirement against that bundled version. The runtime cannot be installed or
 replaced independently.
 
 Release tags start with `v`, while `chelisup install` takes a bare `X.Y.Z`
@@ -45,8 +45,9 @@ holds `bin/chelis`, the runtime archive in `lib/`, and its headers in
 
 `chelis build` links your program with the runtime archive and with the C
 library of your system. So the archive must match that C library. The static
-and glibc 2.31 builds carry a glibc archive. On a musl distribution such as
-Alpine, `chelisup` installs the musl build instead
+and glibc 2.31 builds carry a glibc archive.
+
+On a musl distribution such as Alpine, `chelisup` installs the musl build instead
 (`chelis-vX.Y.Z-linux-x86_64-musl.tar.gz`), which carries a musl archive. Each
 build refuses to link with a compiler for the other C library. `chelis check`,
 `eval`, `test` and `prove` work with every build.
@@ -116,9 +117,9 @@ generated static library.
 ## Install with Nix
 
 The Chelis flake builds the compiler from source for `x86_64-linux`,
-`aarch64-linux`, and `aarch64-darwin`. The `aarch64-linux` packages start with
-the first release after 0.20.0. `x86_64-darwin` is not supported, because
-nixpkgs removes that system and Devenv publishes no build for it. The flake is
+`aarch64-linux`, and `aarch64-darwin`. `x86_64-darwin` (Intel macOS) is not
+supported because nixpkgs removes that system for 26.11 and Devenv publishes
+no build for it. The flake is
 a second channel beside the release binaries. `chelisup` stays
 the installer of release toolchains and selects the compiler version for each
 project. Run a release compiler, or install it in your Nix profile. Replace
@@ -128,9 +129,6 @@ project. Run a release compiler, or install it in your Nix profile. Replace
 nix run github:Chelis-Lang/chelis/vX.Y.Z -- --version
 nix profile install github:Chelis-Lang/chelis/vX.Y.Z
 ```
-
-The overlay and the C toolchain in the `chelis` package, which the text below
-describes, start with the first release after 0.20.0.
 
 The flake has four packages:
 
@@ -161,8 +159,7 @@ Use `chelis` when Nix supplies the complete toolchain, for example in a Nix
 shell or on a host without a C compiler. Use `chelis-unwrapped` when the host
 already has a C compiler and binutils, as for a release toolchain. Its closure
 holds no C compiler, no binutils, and no OpenBLAS, so it is much smaller. Both
-packages run the same compiler binary. The `chelis-unwrapped` package starts
-with the first release after 0.20.0:
+packages run the same compiler binary:
 
 ```sh
 nix run github:Chelis-Lang/chelis/vX.Y.Z#chelis-unwrapped -- --version
