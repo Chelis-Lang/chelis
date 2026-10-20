@@ -274,7 +274,7 @@ pub fn unconfirmed_disproof_reason(witness_reason: &str) -> String {
         "disproved over the reals, and no machine counterexample established: {witness_reason}. \
          The over-the-reals decision rules out no machine input, and the witness check \
          establishes nothing about inputs other than the witness, so machine arithmetic is \
-         undecided here (chelis#3971)"
+         undecided here"
     )
 }
 
@@ -741,13 +741,16 @@ mod tests {
                 .disclosure(),
             "proved over the reals; machine arithmetic unchecked: starved"
         );
-        // Every OTHER green that discloses `real_arithmetic` reaches this lane
-        // too, because the gate reads the qualifier rather than a token list.
-        // Each must render the proof-side clause -- not panic, and not describe
-        // itself as a disproof. A revision that asserted the
-        // `proven_modulo_real_arithmetic` token here crashed a debug build on a
-        // passing property; the first two badges below are the ones that
-        // crashed it.
+        // The gate reads the DISCLOSED qualifier, not a token, so more than one
+        // green badge reaches this lane. The first two below are reachable and
+        // are exactly the ones that crashed a debug build on a passing property
+        // when a revision asserted the `proven_modulo_real_arithmetic` token
+        // here. The last two are defence in depth rather than reachable cases:
+        // `proven` discloses no `real_arithmetic` at all, and a
+        // `sound_approximate` base carrying `real_arithmetic` has no producer
+        // today. Each must render the proof-side clause -- not panic, and not
+        // describe itself as a disproof -- because the correct invariant is
+        // "every green says `proved`", which no token list can express.
         for green in [
             "proven_modulo_certified_envelope",
             "proven_modulo_fuzz_validated_contract",

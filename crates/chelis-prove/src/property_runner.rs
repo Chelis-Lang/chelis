@@ -4646,15 +4646,35 @@ fn resolve_unconfirmed_disproof(
     outcome: PropertyOutcome,
     check: crate::machine_arith::MachineArithmeticCheck,
 ) -> PropertyOutcome {
-    if outcome.display_status() == "passed" {
-        let reason = crate::machine_arith::unconfirmed_disproof_reason(
-            check.reason.as_deref().unwrap_or("no reason recorded"),
-        );
-        return outcome
-            .into_unsupported(reason)
-            .with_machine_arithmetic(check);
+    let clause = crate::machine_arith::unconfirmed_disproof_reason(
+        check.reason.as_deref().unwrap_or("no reason recorded"),
+    );
+    match outcome.display_status() {
+        // Withdrawn: the composed clause IS the record's reason.
+        "passed" => outcome
+            .into_unsupported(clause)
+            .with_machine_arithmetic(check),
+        // Tier C reached its own terminal state -- a sampler grammar it does
+        // not support, generator starvation, an evaluation error. That reason
+        // is the proximate cause and must survive verbatim, but on its own it
+        // tells a plain-text reader only about the sampler and never that the
+        // solver disproved the property over the reals. Append rather than
+        // replace, so the record carries both.
+        "unsupported" | "error" => {
+            let combined = match outcome.reason.as_deref() {
+                Some(existing) if !existing.is_empty() => format!("{existing}; {clause}"),
+                _ => clause,
+            };
+            let mut outcome = outcome;
+            outcome.reason = Some(combined);
+            outcome.with_machine_arithmetic(check)
+        }
+        // A Tier C FAILURE established a concrete machine counterexample, so
+        // the clause's "no machine counterexample established" would be false
+        // on it. The record keeps its own reason and discloses the displaced
+        // decision through `machine_arithmetic` alone.
+        _ => outcome.with_machine_arithmetic(check),
     }
-    outcome.with_machine_arithmetic(check)
 }
 
 /// Confirm an over-the-reals disproof's witness on the HOST LANE, the only

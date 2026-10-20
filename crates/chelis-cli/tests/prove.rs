@@ -4885,14 +4885,6 @@ fn issue_3971_the_body_holds_and_guard_rejected_witnesses_are_reached_by_cvc5() 
             assert_eq!(output.status.code(), Some(2), "{tier}: {prop}");
         }
 
-        if !fuzz_only_passes {
-            continue;
-        }
-        // The divergence the rule deliberately creates, pinned rather than
-        // left implicit: `fuzz-only` never saw the over-the-reals disproof, so
-        // it passes where `auto` reports the question undecided. chelis#3634's
-        // parity claim is one-directional -- no PASS where `fuzz-only` refutes
-        // -- and this is the other direction, which it does not cover.
         let fuzz = Command::cargo_bin("chelis")
             .expect("binary")
             .args([
@@ -4906,6 +4898,28 @@ fn issue_3971_the_body_holds_and_guard_rejected_witnesses_are_reached_by_cvc5() 
             ])
             .output()
             .expect("run prove");
+        if !fuzz_only_passes {
+            // Assert the reason this fixture is excluded from the divergence
+            // claim, rather than leaving it in a comment: its guards are not
+            // the scalar shape the sampler supports. If that ever changed, the
+            // claim the test exists to pin would be silently wrong here.
+            let record = &property_records(&fuzz.stdout)[0];
+            assert_eq!(record["status"], "unsupported", "{record}");
+            assert_eq!(record["proof_tier"], "none", "{record}");
+            assert!(
+                record["reason"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("scalar guard"),
+                "excluded for the sampler's own grammar, not for this lane: {record}"
+            );
+            continue;
+        }
+        // The divergence the rule deliberately creates, pinned rather than
+        // left implicit: `fuzz-only` never saw the over-the-reals disproof, so
+        // it passes where `auto` reports the question undecided. chelis#3634's
+        // parity claim is one-directional -- no PASS where `fuzz-only` refutes
+        // -- and this is the other direction, which it does not cover.
         assert_eq!(fuzz.status.code(), Some(0), "{fuzz:?}");
         assert_eq!(
             property_records(&fuzz.stdout)[0]["status"],

@@ -3217,11 +3217,13 @@ fn issue3971_a_tier_c_refutation_after_an_unconfirmed_disproof_stays_a_failure()
 }
 
 // Negative parity for the fold's own guard: an `unsupported` or `error` Tier C
-// result is not a pass either, so there is nothing to withdraw and the record
-// must survive verbatim rather than be rewritten into a second `unsupported`
-// with this lane's reason in place of the sampler's.
+// result is not a pass, so there is nothing to withdraw. Its own reason is the
+// proximate cause and must survive VERBATIM -- replacing it would hide a
+// sampler grammar limitation behind this lane's sentence. The lane's clause is
+// APPENDED, because the sampler's reason alone never tells a plain-text reader
+// that the solver disproved the property over the reals.
 #[test]
-fn issue3971_a_non_pass_tier_c_result_is_not_rewritten() {
+fn issue3971_a_non_pass_tier_c_result_keeps_its_own_reason_and_gains_the_clause() {
     for status in [PropertyStatus::Unsupported, PropertyStatus::Error] {
         let original = PropertyOutcome::new(
             "p",
@@ -3242,12 +3244,49 @@ fn issue3971_a_non_pass_tier_c_result_is_not_rewritten() {
             ),
         );
         assert_eq!(folded.status, status, "{folded:#?}");
-        assert_eq!(
-            folded.reason.as_deref(),
-            Some("generator starved"),
-            "the sampler's own reason is not replaced: {folded:#?}"
+        let reason = folded.reason.as_deref().unwrap_or_default();
+        assert!(
+            reason.starts_with("generator starved"),
+            "the sampler's own reason survives first and verbatim: {reason}"
+        );
+        assert!(
+            reason.contains("disproved over the reals"),
+            "and the displaced decision is named in the same reason: {reason}"
         );
     }
+}
+
+// The third arm, and the one where the clause must NOT appear: a Tier C
+// FAILURE established a concrete machine counterexample, so "no machine
+// counterexample established" would be a false sentence on that record.
+#[test]
+fn issue3971_a_tier_c_failure_does_not_gain_the_no_counterexample_clause() {
+    let folded = resolve_unconfirmed_disproof(
+        PropertyOutcome::new(
+            "p",
+            PropertyStatus::Failed,
+            PropertyTier::Fuzz,
+            7,
+            0,
+            Some(serde_json::json!({"x": 3.3166247903554})),
+            None,
+            false,
+            Vec::new(),
+        ),
+        crate::machine_arith::MachineArithmeticCheck::unconfirmed(
+            DISPROVED_VERDICT,
+            crate::machine_arith::IRRATIONAL_WITNESS_REASON,
+        ),
+    );
+    assert_eq!(folded.status, PropertyStatus::Failed, "{folded:#?}");
+    assert_eq!(
+        folded.reason, None,
+        "a refutation carries no `no counterexample established` sentence: {folded:#?}"
+    );
+    assert!(
+        folded.machine_arithmetic.is_some(),
+        "the displaced decision is still disclosed through the check: {folded:#?}"
+    );
 }
 
 // The confirmed witness is a concrete machine value, so the record is a
