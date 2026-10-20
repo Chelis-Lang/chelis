@@ -17,11 +17,13 @@ these reasons:
   it shows signatures and shapes rather than output, as the attention-block
   files and `mlp.ch` do.
 - It uses a form that `chelis eval` accepts but `chelis build --target c`
-  rejects, such as host subprocesses in `process_run_chelis_version.ch`, a
-  non-`cpu` device region in `effects_handlers.ch`, or differentiation through
+  rejects, such as a non-`cpu` device region in `effects_handlers.ch`, or
+  differentiation through
   functions stored in constructor or record payloads in
   `grad_selector_provenance.ch`.
 - A compiler test reads it as a fixture, as its header comment says.
+- It depends on a host program, as `process_run_chelis_version.ch` does:
+  `chelis` must be on `PATH`, and its version determines the output.
 
 Subdirectories are complete Reef packages with their own `reef.toml` and data.
 `io_pipeline/` reads its CSV and JSON inputs with `chelis eval --file src/main.ch`

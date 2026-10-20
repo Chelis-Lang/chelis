@@ -43,12 +43,13 @@ checks before emission.
 | CLI path | Result |
 |---|---|
 | `chelis eval` | Checks and lowers the program, then executes it with the local IR evaluator. `--target eval`, `c`, `hip`, or `metal` selects the target's capability and root manifest; it does not run generated native or GPU code. |
-| `chelis build --target c` | Emits C source and a header, stages the C runtime artifacts, and prints the native compile command. C is the default build target. |
-| `chelis build --target hip` | Emits C++ host source and a header with embedded HIP kernels, stages the HIP and C runtime artifacts, and prints an `hipcc` command. The HIP runtime compiles kernels with `hiprtc` when the resulting program runs. |
-| `chelis build --target metal` | Emits Objective-C++ host source (`.mm`) and a header with embedded Metal Shading Language kernels, stages the Metal and C runtime artifacts, and prints a `clang++` command. The resulting program compiles kernels through Metal when it runs. |
+| `chelis build --target c` | Emits C source and a header, stages the C runtime artifacts, and invokes the native compiler to produce an executable or static library. C is the default build target. |
+| `chelis build --target hip` | Emits C++ host source and a header with embedded HIP kernels, stages the HIP and C runtime artifacts, and invokes `hipcc`. The HIP runtime compiles kernels with `hiprtc` when the resulting program runs. |
+| `chelis build --target metal` | Emits Objective-C++ host source (`.mm`) and a header with embedded Metal Shading Language kernels, stages the Metal and C runtime artifacts, and invokes `clang++`. The resulting program compiles kernels through Metal when it runs. |
 
-Build emits files and compile instructions. A native compiler is a separate
-step. The C backend handles CPU execution and runtime integration; the HIP
+Build retains generated sources and runtime artifacts alongside the native
+product. `--emit-c` stops after source emission without invoking a native
+compiler. The C backend handles CPU execution and runtime integration; the HIP
 and Metal backends generate GPU helpers alongside host code where the
 program requires them. A target may reject a program it cannot lower or
 emit. The [build guide](docs/book/src/backends.md) covers user-facing C

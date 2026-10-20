@@ -1,9 +1,8 @@
 //! Source architecture guard for the type-inference module tree
 //! (openspec `modularize-type-inference`).
 //!
-//! Inference used to live in one 25,000-line `src/infer.rs`. The split into
-//! `src/infer/` only stays split if something checks; review alone did not
-//! stop the file growing the first time. This module is that check.
+//! This module enforces the boundaries of `src/infer/` with file-size and
+//! required-role checks.
 //!
 //! It rejects three states:
 //!

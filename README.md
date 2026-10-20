@@ -11,6 +11,8 @@ Chelis is a numerical computing language for code that agents write and people
 supervise. Tensors carry named dimensions and precision in their type, and a proof
 stack checks the properties you state.
 
+This deliberately mismatched definition shows a shape error:
+
 ```chelis
 def portfolio_return(w: tensor[3, f64], r: tensor[3, 1, f64]) -> tensor[f64] = {
   weighted = mul(w, r)
@@ -57,7 +59,7 @@ The [Chelis guide](https://chelis.ch/docs/chelis/) covers the first program,
 the CLI, types, effects, properties, and Reef packages. The same guide is the
 mdBook in [`docs/book`](docs/book/), rendered from chelis.ch; build it locally
 with `mdbook build docs/book`. The [examples](examples/) directory holds executable
-Chelis programs.
+Chelis programs with commands for running them and their package examples.
 
 ## License
 

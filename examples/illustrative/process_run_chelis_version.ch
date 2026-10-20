@@ -1,10 +1,8 @@
 -- Run a subprocess from Chelis.
 --
 -- process_run(cmd, args) runs an external program and returns
--- (exit_code, stdout, stderr). It carries the IO effect and is an
--- eval/test-only builtin: it works under chelis eval / chelis test but
--- the C/HIP build backends reject it (a compiled artifact has no host
--- interpreter to reach the subprocess exec path).
+-- (exit_code, stdout, stderr). It carries the IO effect and runs through
+-- the host runtime in both the evaluator and compiled C programs.
 --
 -- Arguments are passed as argv with no shell, so a value in args cannot
 -- inject extra shell commands.

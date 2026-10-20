@@ -1,4 +1,4 @@
-//! Phase G: composed Compiled Artifact Cache.
+//! Reusable compiled package contexts and their disk cache.
 //!
 //! `CompiledContext` is the cacheable artifact a reef package compiles
 //! into once. New code (test files, eval inputs) is checked and lowered
@@ -14,7 +14,7 @@
 //!   library, and lowers it to a [`LoweredLibrary`].
 //! - `eval_in_context` / `check_in_context` / `eval_many_in_context`
 //!   (in `compiler.rs`): take a `CompiledContext` plus new source. Only
-//!   the new source is re-compiled; the C/D/E/F `_with_context` variants
+//!   the new source is re-compiled; the `_with_context` variants
 //!   stack the new code on top of the cached library state.
 //!
 //! ## Checker-state deserialization boundary
@@ -45,7 +45,7 @@ use crate::compiler::{CompilerError, bail_if_cancelled, cancelled_or};
 use crate::schema::{Diagnostic, GeneralKind};
 
 /// 32-byte content hash of every source file that contributed to a
-/// `CompiledContext`. Phase I disk cache keys on this for invalidation.
+/// `CompiledContext`. The disk cache uses it for invalidation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContextHash(pub [u8; 32]);
 
@@ -141,12 +141,12 @@ impl ContextHash {
 
 /// A reef package compiled once into a reusable artifact.
 ///
-/// Phase G composes the result of every pipeline stage:
-/// - `source_hash`: content hash for disk-cache invalidation (Phase I).
-/// - `reef_state`: linked library decls + reef metadata (Phase B).
+/// The context composes the result of every pipeline stage:
+/// - `source_hash`: content hash for disk-cache invalidation.
+/// - `reef_state`: linked library declarations and Reef metadata.
 /// - `library`: bound type environment and accepted program. Contextual
 ///   checks retain this proof through type, effect, and linearity stages.
-/// - `library_dag`: lowered library DAG carrier (Phase F). Used by
+/// - `library_dag`: lowered library DAG carrier. Used by
 ///   `lower_program_with_context`.
 ///
 /// Source artifacts are populated once by `compile_reef_context` and
@@ -409,7 +409,7 @@ impl CompiledContext {
         Ok((bytes, HandoffDigest(payload_sha256)))
     }
 
-    /// Phase I — atomically persist this context to `path`.
+    /// Atomically persist this context to `path`.
     ///
     /// The on-disk format is a bincode-serialized [`CacheEnvelope`]
     /// (see below) which embeds:
@@ -480,7 +480,7 @@ fn write_cache_file(path: &Path, bytes: &[u8]) -> Result<(), CacheError> {
         // `save()` for the same canonical path — one thread's `rename`
         // consumed the tempfile while another's was still writing,
         // surfacing as ENOENT or torn writes. Worker pools, async
-        // runtimes, and Phase H's concurrent test workers would all
+        // runtimes, and concurrent test workers would all
         // hit this. Adding tid + nanos makes the temp name unique
         // per-call.
         use std::time::{SystemTime, UNIX_EPOCH};
@@ -545,7 +545,7 @@ fn write_cache_file(path: &Path, bytes: &[u8]) -> Result<(), CacheError> {
 }
 
 impl CompiledContext {
-    /// Phase I — load `path` if its stored `source_hash` matches the hash
+    /// Load `path` if its stored `source_hash` matches the hash
     /// freshly recomputed from `package_dir`. Returns:
     ///
     /// - `Ok(Some(ctx))` on a valid, fresh cache hit;
@@ -672,8 +672,7 @@ fn load_verified_if_fresh(
 
 impl CompiledContext {
     /// Convenience for callers that only have a `reef_home` + `package_dir`
-    /// and want the canonical cache location. Phase H wires `cmd_eval` and
-    /// `cmd_check` through this helper; the disk-cache key is
+    /// and want the canonical cache location. The disk-cache key is
     /// `<reef_home>/.cache/compiled/<pkg_name>-<pkg_version>-<src16>-<id16>.ctx`.
     ///
     /// `src16` is 16 hex chars of the source-content hash; `id16` is 16
@@ -718,26 +717,23 @@ impl CompiledContext {
         format!("{safe_name}-{safe_version}-{src_hex}-{id_hex}.ctx")
     }
 
-    /// Read-only borrow of the underlying [`PreparedReefGraph`]. Phase H
-    /// `chelis test` workers use this to drive the legacy
+    /// Read-only borrow of the underlying [`PreparedReefGraph`].
+    /// Test workers can use this to drive the
     /// `compile_with_reef_graph` + `prepare_eval` evaluation path
     /// without paying for a per-worker `prepare_reef_graph` walk: the
     /// parent has already linked the library decls + lockfile state
     /// once and serialized them into the context, and decoded workers
     /// share the same in-memory snapshot.
     ///
-    /// Until the in-context Phase G/G' evaluator (host-runtime + linearity)
-    /// reaches feature parity with the monolithic evaluator on the
-    /// chelis-std test corpus, this accessor is the safe correctness
-    /// path for `chelis test`. The performance win still comes from
-    /// skipping the per-worker reef walk.
+    /// Reusing the prepared graph skips the per-worker Reef walk without
+    /// changing the evaluation route.
     pub fn reef_state(&self) -> &PreparedReefGraph {
         let _fp_env = chelis_runtime::FpEnvGuard::enter();
         &self.reef_state
     }
 }
 
-/// Phase K disk-cache wire-up: probe the on-disk cache for a fresh
+/// Probe the on-disk cache for a fresh
 /// [`CompiledContext`] for `package_dir`, falling back to a full
 /// `compile_reef_context` build (with side-effect: save to disk) on miss.
 ///
@@ -994,7 +990,7 @@ fn is_local_registry_hash_gap(err: &CompilerError) -> bool {
     })
 }
 
-/// Magic header bytes for the Phase I disk-cache file format.
+/// Magic header bytes for the disk-cache file format.
 /// Trailing newline guards against accidental concatenation with another
 /// file (e.g., a misuse that piped two cache files together).
 /// V10: `TypeEnv` now serializes transactional generalization levels,
@@ -1105,7 +1101,7 @@ const CACHE_MAGIC: &[u8] = b"CHELIS_CTX_V23\n";
 // V44 combines rank evidence with checked callable occurrence metadata.
 const CACHE_FORMAT_VERSION: u32 = 44;
 
-/// On-disk envelope for the Phase I cache. The full file layout is:
+/// On-disk cache envelope. The full file layout is:
 ///
 /// ```text
 /// [CACHE_MAGIC bytes][bincode-encoded CacheEnvelope]
@@ -1341,7 +1337,7 @@ fn hex_nibble(byte: u8) -> Result<u8, String> {
     }
 }
 
-/// Errors from the Phase I disk cache. Distinct from [`CompilerError`]
+/// Disk-cache errors. Distinct from [`CompilerError`]
 /// because the cache layer's failure modes (corrupt files, version
 /// skew, IO errors) are categorically different from compile failures
 /// and benefit from separate match arms in callers.
@@ -1495,14 +1491,10 @@ fn sanitize_path_component(s: &str) -> String {
 /// 3. Build an IR [`TypeEnv`] over the library.
 /// 4. Run the monolithic IR checker, the effects checker, and the
 ///    linearity checker over the library to produce a
-///    [`CheckedProgram`] (Phases C/D/E feed into this composite library
-///    snapshot — the `_with_context` callers receive this as their
-///    "library context" argument).
-/// 5. Lower the library to a [`LoweredLibrary`] (Phase F).
+///    [`CheckedProgram`]. The `_with_context` callers receive this
+///    snapshot as their library context.
+/// 5. Lower the library to a [`LoweredLibrary`].
 /// 6. Combine everything in a [`CompiledContext`].
-///
-/// `_reef_home` is currently unused; reserved for the Phase I disk-cache
-/// key (the cache lives under `$CHELIS_REEF_HOME/.cache/compiled/...`).
 pub fn compile_reef_context(
     reef_home: &Path,
     package_dir: &Path,
@@ -1527,7 +1519,7 @@ pub fn compile_reef_context_for_entries(
     // (internal-name-mangled), so the reserved linker-name rejection is
     // off for this whole context build.
     let _linked = chelis_types::install_linked_program_guard();
-    // Phase K profile instrumentation: when `CHELIS_PROFILE_COMPILE_CONTEXT=1`
+    // Profiling: when `CHELIS_PROFILE_COMPILE_CONTEXT=1`
     // is set, emit per-phase wall-clock to stderr so the operator can see
     // which stage dominates. Off by default — zero cost on the hot path.
     let profile = std::env::var_os("CHELIS_PROFILE_COMPILE_CONTEXT")
@@ -1602,7 +1594,7 @@ fn check_and_lower_library(
     ),
     CompilerError,
 > {
-    // Phase C+0e / chelis#451: build the checked library and its lowered DAG.
+    // Build the checked library and its lowered DAG.
     // The layered path reuses the cross-process
     // chelis-std typecheck cache so the chelis-std half of the library is
     // never re-walked here; only the package's own (non-chelis-std) decls

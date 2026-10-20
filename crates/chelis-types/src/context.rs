@@ -1,5 +1,5 @@
-//! Stacked type-checker context — Phase C of the compiled-artifact caching
-//! plan. A [`TypeEnv`] snapshots the state of the type checker after
+//! Stacked type-checker context for compiled-artifact caching.
+//! A [`TypeEnv`] snapshots the state of the type checker after
 //! processing a "library" set of decls (e.g. chelis-std + reef deps +
 //! the package's own modules). New code can then be type-checked against
 //! that context: name resolution walks the new-code's bindings first and
