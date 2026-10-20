@@ -409,30 +409,20 @@ fn emit(
                         outcome.name
                     )
                 } else if let Some(check) = &outcome.machine_arithmetic {
-                    if outcome.discloses_real_arithmetic() {
-                        // chelis#3634: an over-the-reals proof has no sample
-                        // ratio, and `0/0 passed` read as one. Print the
-                        // disclosure and what the machine-arithmetic check
-                        // established instead.
-                        println!(
-                            "property: {} -- {} ({}){suffix}",
-                            outcome.name,
-                            outcome.composite_verdict.as_str(),
-                            check.disclosure()
-                        )
-                    } else {
-                        // chelis#3971: a SAMPLED pass that carries a check is
-                        // Tier C reporting in place of an over-the-reals
-                        // disproof. It took samples, so it keeps its ratio; the
-                        // disclosure is additional, not a substitute.
-                        println!(
-                            "property: {} -- {}/{} passed ({}){suffix}",
-                            outcome.name,
-                            outcome.samples,
-                            outcome.samples,
-                            check.disclosure()
-                        )
-                    }
+                    // chelis#3634: an over-the-reals proof has no sample ratio,
+                    // and `0/0 passed` read as one. Print the disclosure and
+                    // what the machine-arithmetic check established instead.
+                    //
+                    // Only a corroborated or unchecked GREEN reaches here.
+                    // chelis#3971's disproof-side answers are never passes: a
+                    // confirmed witness is a failure and an unconfirmed one is
+                    // `unsupported`, both of which the arms below render.
+                    println!(
+                        "property: {} -- {} ({}){suffix}",
+                        outcome.name,
+                        outcome.composite_verdict.as_str(),
+                        check.disclosure()
+                    )
                 } else if outcome.discloses_real_arithmetic() {
                     println!(
                         "property: {} -- {} ({}){suffix}",

@@ -638,10 +638,12 @@ fn is_algebraic_number_term(raw: &str) -> bool {
 
 /// Classify one solver model binding at a given sort. See [`ModelScalar`].
 ///
-/// `#[cfg]`-free so the consumer compiles in a build without cvc5, where the
-/// exact parser is absent and every reachable model (the forced-result test
-/// seam, an out-of-tree engine's own counterexample) is [`ModelScalar`]'s
-/// conservative answer.
+/// `#[cfg]`-free so the consumer compiles in a build without cvc5. The
+/// algebraic-number head match is outside the feature gate on purpose: the
+/// inference it licenses -- that no machine value equals an irrational -- is
+/// arithmetic, not a solver capability, so it must not change with the build.
+/// What the gate removes is the exact RATIONAL parser, so in a cvc5-free build
+/// every readable value classifies `Unreadable` instead of `Value`.
 pub fn model_scalar(binding: Option<&Value>, sort: SmtSort) -> ModelScalar {
     let Some(binding) = binding else {
         return ModelScalar::Unreadable;

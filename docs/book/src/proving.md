@@ -124,8 +124,8 @@ unchecked rather than answering it.
 The same real-arithmetic model applies when the solver *disproves* a property.
 It exhibits a point in the real numbers where the property is false. Reporting
 that as a failure would claim a defect at a machine input, which the solver has
-not shown. An exact rational need not have a binary64 value where the property
-fails, and an irrational witness has none at all.
+not shown. No binary64 value equals an irrational, and an exact rational need
+not be representable either.
 
 For example, `1.0f64 / ((x * x) - 2.0f64)` is infinite over the reals at
 `x = sqrt(2)`, so a property that asserts it is finite on `[1, 2]` is disproved
@@ -143,23 +143,35 @@ takes. It reports the outcome in the same `machine_arithmetic` field:
   `disproved_modulo_real_arithmetic`, because a concrete evaluation decided it.
 - `"status":"unconfirmed"`: the witness is not a machine counterexample, with a
   `reason`. No machine value equals it, a precondition rejects it once rounded,
-  or the body holds there. Under `--tier auto` the run then samples the property
-  and reports what sampling found, carrying this field. Under `--tier smt-only`
-  there is no sampling tier to use, so the run keeps
-  `disproved_modulo_real_arithmetic` and records the field beside it.
+  or the body holds there. The result is then `unsupported`: there is no basis
+  for a failure, because the only point the solver exhibited is not one; and no
+  basis for a pass either, because the solver decided the property false over
+  the reals and the check says nothing about any other input. Under
+  `--tier auto` the run first samples the property, so a sampled counterexample
+  is still reported as a definite failure; only a clean run is `unsupported`.
 - `"status":"unchecked"`: the witness could not be read or evaluated, with a
   `reason`. The disproof is unchanged. An evaluation limit is not evidence
   about the property.
+
+Do not read `unconfirmed` as "the property holds". `(x * x) != 11.0f64` on
+`[3, 4]` is `unconfirmed` — `sqrt(11)` is irrational, so no `f64` equals the
+witness — and the property is nevertheless false at `3.3166247903554`, whose
+square is exactly `11.0`. Sampling does not find it. `unsupported` is the
+honest answer: the machine-arithmetic question is open, and `chelis prove` exits
+`2` rather than `0` or `1`.
 
 This check is one evaluation of the solver's own witness rather than a second
 tier, so `--tier smt-only` runs it too. A disproof conditional on an asserted
 axiom carries no check, for the reason above.
 
-In plain text a sampled pass keeps the ratio it has and adds the disclosure:
+In plain text an undecided record prints its reason, and no sample ratio:
 
 ```text
-property: g_finite -- 100/100 passed (disproved over the reals; not confirmed in machine arithmetic: <reason>)
+property unsupported: g_finite: disproved over the reals, and no machine counterexample established: <witness reason>. ...
 ```
+
+A `failed` record prints neither a counterexample nor a reason, so a `confirmed`
+or `unchecked` disproof discloses its check only under `--json`.
 
 Induction applies to a recursion on an integer such as this bond valuation,
 which recurses on `n` down to a base case at `n <= 0`:

@@ -190,13 +190,21 @@ impl MachineArithmeticCheck {
     /// the status, so the two sides of the lane cannot be described by each
     /// other's sentence.
     fn real_arithmetic_decision(&self) -> &'static str {
-        if self.real_arithmetic_verdict
-            == crate::composition::CompositeVerdict::DisprovedModuloRealArithmetic.as_str()
+        use crate::composition::CompositeVerdict;
+        if self.real_arithmetic_verdict == CompositeVerdict::DisprovedModuloRealArithmetic.as_str()
         {
-            "disproved over the reals"
-        } else {
-            "proved over the reals"
+            return "disproved over the reals";
         }
+        // Only two verdicts can be checked against, and reaching the fallback
+        // with anything else would describe a decision as its own opposite.
+        // Assert it rather than let a future third producer render a lie.
+        debug_assert_eq!(
+            self.real_arithmetic_verdict,
+            CompositeVerdict::ProvenModuloRealArithmetic.as_str(),
+            "a machine-arithmetic check was recorded against a verdict this \
+             disclosure has no sentence for"
+        );
+        "proved over the reals"
     }
 }
 
@@ -238,6 +246,33 @@ pub const WITNESS_REJECTED_BY_GUARDS_REASON: &str = "the solver's witness does n
 pub const WITNESS_BODY_HOLDS_REASON: &str = "the property body holds at the solver's witness in machine arithmetic, so the \
      witness is not a machine counterexample (chelis#3971)";
 
+/// The `reason` recorded on the record that reports in place of an
+/// over-the-reals disproof whose witness machine arithmetic did not confirm
+/// (chelis#3971).
+///
+/// Such a record may be neither a failure nor a pass, and the reason is what
+/// says why. The solver decided the property FALSE over the reals, so there is
+/// no basis for a pass; and the witness check establishes only that the ONE
+/// point the solver exhibited is not a machine counterexample, which is a fact
+/// about that point and not about the domain, so there is no basis for a
+/// failure either. The machine-arithmetic question is undecided, which is what
+/// `unsupported` states.
+///
+/// The step this wording exists to prevent is the one chelis#3971's first
+/// implementation took: reading "no machine value equals this witness" as "no
+/// machine value falsifies this property". `(x * x) != 11.0f64` on `[3, 4]` is
+/// the counterexample to that reading -- cvc5's witness is the irrational
+/// `sqrt(11)`, and the nearest double squares to exactly `11.0`, so the
+/// property is false at a binary64 input its own guards admit.
+pub fn unconfirmed_disproof_reason(witness_reason: &str) -> String {
+    format!(
+        "disproved over the reals, and no machine counterexample established: {witness_reason}. \
+         The over-the-reals decision rules out no machine input, and the witness check \
+         establishes nothing about inputs other than the witness, so machine arithmetic is \
+         undecided here (chelis#3971)"
+    )
+}
+
 /// Whether an over-the-reals DISPROOF owes its witness a machine-arithmetic
 /// confirmation before it is reported as a failure (chelis#3971).
 ///
@@ -251,13 +286,31 @@ pub const WITNESS_BODY_HOLDS_REASON: &str = "the property body holds at the solv
 /// concrete evaluation of the solver's own witness, not a second tier. It
 /// therefore runs under `--tier smt-only` as well -- the chelis#3635
 /// domain-witness confirmation already does, for the same reason -- and does
-/// not widen an explicitly selected tier. What the two tiers differ on is what
-/// happens when the witness is NOT confirmed: `auto` has a Tier C to route to,
-/// and `smt-only` is terminal.
+/// not widen an explicitly selected tier. What the two tiers differ on is only
+/// how much is attempted when the witness is NOT confirmed: `auto` has a Tier C
+/// to route to, `smt-only` is terminal. Neither may report a pass there; see
+/// [`unconfirmed_disproof_reason`].
 ///
-/// The `axiom` exemption is the green side's, for the same reason: an asserted
+/// The `axiom` clause mirrors the green side's, for the same reason: an asserted
 /// axiom is a user-declared assumption the concrete evaluator does not honor,
 /// so the evaluation would be deciding the axiom rather than the witness.
+///
+/// On this side it is DEFENSIVE rather than load-bearing, and the difference is
+/// worth stating because the green side's identical clause is not. The outcome
+/// it describes -- "a disproof conditional on an asserted axiom carries no
+/// check" -- is produced upstream: `prove_surf_property` routes a property
+/// citing `clarabel.qp.ideal_optimality` or `clarabel.qp.assume_psd` to
+/// `qp_ideal::prove` and returns, so no axiom-qualified property reaches Tier B
+/// here at all. The clause also cannot fire on its own terms: both call sites
+/// build the hedged disproof with no assumptions, and a
+/// `DisprovedModuloRealArithmetic` base derives its disclosed qualifiers purely
+/// from that assumption list, which the caller appends only after this decision
+/// is made. The green side differs because its lane runs on an outcome whose
+/// assumptions are already attached.
+///
+/// It is kept because the live mechanism is an early return somewhere else: if
+/// that routing ever changes, this reads the published caveats and still
+/// declines.
 pub fn disproof_confirmation_required(tier: &str, disclosed: &[&str]) -> bool {
     (tier == "auto" || tier == "smt-only")
         && disclosed.contains(&crate::discharge::Qualifier::RealArith.as_str())

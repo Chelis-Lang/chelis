@@ -325,6 +325,34 @@ impl PropertyOutcome {
         self
     }
 
+    /// Withdraw a reported PASS, keeping the sampling evidence that produced it
+    /// (chelis#3971).
+    ///
+    /// Its one consumer: a sampling run that reported in place of an
+    /// over-the-reals DISPROOF may not be published as a pass. The witness
+    /// check establishes only that the point the solver exhibited is not a
+    /// machine counterexample, which says nothing about any other input, and
+    /// the decision it displaced was a disproof. So the honest status is that
+    /// the machine-arithmetic question is undecided -- not that the property
+    /// holds.
+    ///
+    /// `samples` goes to zero and the sampling detail stays in
+    /// `accepted_samples` / `attempted_samples`, which is this type's existing
+    /// convention for a terminal outcome that sampling work preceded. The base
+    /// discharge is dropped with the pass: a green base cannot survive a status
+    /// that is not green, and `base_verdict` would otherwise re-derive one.
+    pub(super) fn into_unsupported(mut self, reason: String) -> Self {
+        self.status = PropertyStatus::Unsupported;
+        self.samples = 0;
+        self.counterexample = None;
+        self.shrink_steps = 0;
+        self.base_discharge = None;
+        self.reason = Some(reason);
+        let base = base_verdict(&self.status, self.proof_tier, self.samples, None, None);
+        self.composite_verdict = rollup_composite(base, &self.assumptions);
+        self
+    }
+
     fn append_assumptions(&mut self, assumptions: Vec<AssumptionRecord>) {
         if assumptions.is_empty() {
             return;
@@ -1018,12 +1046,11 @@ fn prove_surf_property(
     );
     outcome.append_assumptions(contract_assumptions);
     // chelis#3971: when Tier C reports in place of an over-the-reals disproof,
-    // the record says so. Dropping it would leave the solver's decision
-    // invisible on the only record the user sees.
-    if let Some(check) = unconfirmed_disproof {
-        outcome = outcome.with_machine_arithmetic(check);
+    // the record says so, and it may not say `passed`.
+    match unconfirmed_disproof {
+        Some(check) => resolve_unconfirmed_disproof(outcome, check),
+        None => outcome,
     }
-    outcome
 }
 
 /// Conservatively decide whether a property's compiler AST reaches a recursive
@@ -4502,11 +4529,13 @@ enum DisproofWitness {
 ///   concrete point: the machine evaluation, not the solver, decided it, so the
 ///   record carries no `real_arithmetic` qualifier. Mirrors the chelis#3635
 ///   domain-witness rule exactly.
-/// - **Unconfirmed** under `auto` routes to Tier C, which is the lane that can
-///   actually search machine arithmetic; the check travels to that record
-///   through `unconfirmed_disproof`. Under the terminal `--tier smt-only` there
-///   is nothing to route to, so the over-the-reals disproof stands as the
-///   reported verdict with the check recorded beside it.
+/// - **Unconfirmed** may be reported as neither a failure nor a pass. Under
+///   `auto` the run routes to Tier C, which is the lane that can actually search
+///   machine arithmetic, and the check travels to that record through
+///   `unconfirmed_disproof`; a Tier C counterexample is a concrete machine value
+///   and so a definite failure, while a clean Tier C run is withdrawn to
+///   `unsupported`. Under the terminal `--tier smt-only` there is nothing to
+///   route to, so the record is `unsupported` directly.
 /// - **Unchecked** leaves the disproof exactly as Tier B produced it. An
 ///   evaluation limitation never displaces a decision, which is the disproof
 ///   side of chelis#3634's "a sampler limitation never degrades a proof".
@@ -4573,12 +4602,59 @@ fn resolve_disproof_outcome(
                 *unconfirmed_disproof = Some(check);
                 return None;
             }
-            Some(hedged.with_machine_arithmetic(check))
+            // Terminal tier: nothing left to attempt, and the hedged failure
+            // may not stand either -- the witness it rests on has been shown
+            // not to be a machine counterexample. The machine-arithmetic
+            // question is undecided, which is what `unsupported` states.
+            Some(
+                PropertyOutcome::new(
+                    name,
+                    PropertyStatus::Unsupported,
+                    PropertyTier::Smt,
+                    0,
+                    seed,
+                    None,
+                    Some(crate::machine_arith::unconfirmed_disproof_reason(reason)),
+                    false,
+                    Vec::new(),
+                )
+                .with_machine_arithmetic(check),
+            )
         }
         DisproofWitness::Unchecked(reason) => Some(
             hedged.with_machine_arithmetic(MachineArithmeticCheck::unchecked(0, verdict, reason)),
         ),
     }
+}
+
+/// Fold an unconfirmed over-the-reals disproof into the Tier C record that
+/// reported in its place, under `--tier auto` (chelis#3971).
+///
+/// A Tier C counterexample is a concrete machine value, so that record is a
+/// definite failure and stands. Anything else may NOT be published as a pass:
+/// Tier B decided the property FALSE over the reals, and all the witness check
+/// established is that the one point the solver exhibited is not a machine
+/// counterexample. Sampling then finding nothing is not evidence that nothing
+/// is there -- `(x * x) != 11.0f64` on `[3, 4]` survives 20000 samples and is
+/// false at the double nearest `sqrt(11)`, which squares to exactly `11.0`.
+///
+/// So a clean run is withdrawn to `unsupported`. That is the only outcome
+/// consistent with both halves of what is known, and it keeps the lane from
+/// doing on the disproof side what chelis#3634 forbids on the proof side:
+/// letting a sampler's silence displace a solver's decision.
+fn resolve_unconfirmed_disproof(
+    outcome: PropertyOutcome,
+    check: crate::machine_arith::MachineArithmeticCheck,
+) -> PropertyOutcome {
+    if outcome.display_status() == "passed" {
+        let reason = crate::machine_arith::unconfirmed_disproof_reason(
+            check.reason.as_deref().unwrap_or("no reason recorded"),
+        );
+        return outcome
+            .into_unsupported(reason)
+            .with_machine_arithmetic(check);
+    }
+    outcome.with_machine_arithmetic(check)
 }
 
 /// Confirm an over-the-reals disproof's witness on the HOST LANE, the only
@@ -4724,8 +4800,12 @@ fn resolve_disproof_witness(
     }
 }
 
-/// Turn a [`crate::tier_b::TierBResult::DomainDisproved`] witness into a
-/// [`Sample`] at the binders' DECLARED widths.
+/// Turn a solver witness into a [`Sample`] at the binders' DECLARED widths.
+///
+/// Shared by chelis#3635's `sqrt`-domain lane and chelis#3971's main-goal
+/// disproof lane, which is why its messages name "witness" and not one of the
+/// two mechanisms: a chelis#3971 record used to blame chelis#3635's
+/// domain-obligation machinery for a main-goal counterexample it could not read.
 ///
 /// Every parameter must have a witness value of its declared shape. A missing
 /// binder, an unreadable value, an integer outside its width, or a float that
@@ -4736,19 +4816,16 @@ fn resolve_disproof_witness(
 fn witness_sample(params: &[Param], witness: &serde_json::Value) -> Result<Sample, String> {
     let bindings = witness
         .as_object()
-        .ok_or_else(|| "the solver's domain witness is not a binding map".to_string())?;
+        .ok_or_else(|| "the solver's witness is not a binding map".to_string())?;
     let mut values = Vec::with_capacity(params.len());
     for param in params {
         let ty = param
             .ty
             .as_ref()
             .ok_or_else(|| format!("{} is missing an explicit type", param.name))?;
-        let value = bindings.get(&param.name).ok_or_else(|| {
-            format!(
-                "the solver's domain witness carries no value for `{}`",
-                param.name
-            )
-        })?;
+        let value = bindings
+            .get(&param.name)
+            .ok_or_else(|| format!("the solver's witness carries no value for `{}`", param.name))?;
         values.push(witness_value(&param.name, ty, value)?);
     }
     Ok(Sample { values })
@@ -4763,11 +4840,11 @@ fn witness_value(
         TypeExpr::Named(type_name, _) if type_name == "bool" => value
             .as_bool()
             .map(|value| bool_sample(name, value))
-            .ok_or_else(|| format!("`{name}`'s domain witness is not a bool")),
+            .ok_or_else(|| format!("`{name}`'s witness is not a bool")),
         TypeExpr::Named(type_name, _) if crate::opaque::is_int_width(type_name) => {
             let raw = value
                 .as_i64()
-                .ok_or_else(|| format!("`{name}`'s domain witness is not an integer"))?;
+                .ok_or_else(|| format!("`{name}`'s witness is not an integer"))?;
             // The bound is the width's REPRESENTABLE range, not
             // `int_sample_bounds`/`integer_fuzz_bounds`, which clamps to the
             // [-1000, 1000] fuzz convenience window. A witness is an exhibited
@@ -4781,7 +4858,7 @@ fn witness_value(
                 })?;
             if raw < lo || raw > hi {
                 return Err(format!(
-                    "`{name}`'s domain witness {raw} is outside {type_name}'s representable range \
+                    "`{name}`'s witness {raw} is outside {type_name}'s representable range \
                      [{lo}, {hi}]"
                 ));
             }
@@ -4790,21 +4867,19 @@ fn witness_value(
         TypeExpr::Named(type_name, _) if type_name == "f32" || type_name == "f64" => {
             let raw = value
                 .as_f64()
-                .ok_or_else(|| format!("`{name}`'s domain witness is not a number"))?;
+                .ok_or_else(|| format!("`{name}`'s witness is not a number"))?;
             let sample = directed_float_sample(name, type_name, raw);
             let rounded = sample
                 .json
                 .as_f64()
-                .ok_or_else(|| format!("`{name}`'s rounded domain witness is not a number"))?;
+                .ok_or_else(|| format!("`{name}`'s rounded witness is not a number"))?;
             if !rounded.is_finite() {
-                return Err(format!(
-                    "`{name}`'s domain witness is not finite at {type_name}"
-                ));
+                return Err(format!("`{name}`'s witness is not finite at {type_name}"));
             }
             Ok(sample)
         }
         _ => Err(format!(
-            "`{name}`'s declared type is outside the domain-witness fragment"
+            "`{name}`'s declared type is outside the witness fragment"
         )),
     }
 }
@@ -6159,7 +6234,7 @@ fn prove_deep_property(
     let outcome = prove_deep_property_fuzz(exprs, property, options, seed);
     // chelis#3971: see the Surf lane.
     match unconfirmed_disproof {
-        Some(check) => outcome.with_machine_arithmetic(check),
+        Some(check) => resolve_unconfirmed_disproof(outcome, check),
         None => outcome,
     }
 }

@@ -4462,18 +4462,19 @@ fn issue_3971_auto_does_not_report_a_disproof_no_double_witnesses_as_a_failure()
         .expect("run prove");
     assert_eq!(
         output.status.code(),
-        Some(0),
-        "a property true at every binary64 input is not a failure: stdout={}\nstderr={}",
+        Some(2),
+        "the property is not reported FAILED, and not reported passed either: stdout={}\nstderr={}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
     let props = property_records(&output.stdout);
     assert_eq!(props.len(), 1, "records: {props:?}");
     let prop = &props[0];
-    assert_eq!(prop["status"], "passed", "{prop}");
-    assert_eq!(
-        prop["proof_tier"], "fuzz",
-        "`auto` routes to the tier that can search machine arithmetic: {prop}"
+    assert_eq!(prop["status"], "unsupported", "{prop}");
+    assert_eq!(prop["composite_verdict"], "unsupported", "{prop}");
+    assert!(
+        prop.get("counterexample").is_none(),
+        "a withdrawn witness is not reported as a counterexample: {prop}"
     );
     // The over-the-reals disproof is not dropped: it is disclosed on the record
     // that reports in its place, with WHY its witness is not a machine point.
@@ -4492,98 +4493,90 @@ fn issue_3971_auto_does_not_report_a_disproof_no_double_witnesses_as_a_failure()
             .contains("irrational algebraic number"),
         "the reason names why no machine value equals the witness: {prop}"
     );
-    // The record is at the fuzz tier because the machine-arithmetic lane sent it
-    // there, not because the goal failed to lower, so `failure_summary` must not
-    // be reached at all on a pass -- and when the routed Tier C run DOES fail,
-    // the same rule keeps it from naming a tier degradation as the cause.
+    let reason = prop["reason"].as_str().unwrap_or_default();
     assert!(
-        prop.get("failure_summary").is_none(),
-        "a pass carries no failure summary: {prop}"
+        reason.contains("disproved over the reals")
+            && reason.contains("no machine counterexample established"),
+        "the record states BOTH halves of what is known: {prop}"
     );
-    // Parity with the tier that only samples: before chelis#3971 `auto`
-    // reported a failure here while `fuzz-only` passed on the same file.
-    let fuzz = Command::cargo_bin("chelis")
-        .expect("binary")
-        .args([
-            "prove",
-            dir.path().join("prop.ch").to_str().unwrap(),
-            "--tier",
-            "fuzz-only",
-            "--samples",
-            "100",
-            "--json",
-        ])
-        .output()
-        .expect("run prove");
-    assert_eq!(fuzz.status.code(), Some(0), "{fuzz:?}");
-    assert_eq!(
-        property_records(&fuzz.stdout)[0]["status"],
-        "passed",
-        "fuzz-only agrees: {:?}",
-        property_records(&fuzz.stdout)
+    // The record is at the Tier C tier because the machine-arithmetic lane sent
+    // it there after Tier B DECIDED, not because the goal failed to lower, so
+    // `failure_summary` must not name a tier degradation as the cause.
+    assert_eq!(prop["failure_summary"]["actual_tier"], "fuzz", "{prop}");
+    assert_eq!(prop["failure_summary"]["requested_tier"], "auto", "{prop}");
+    assert!(
+        prop["failure_summary"].get("degradation").is_none(),
+        "a machine-arithmetic displacement is not a tier fall-back: {prop}"
     );
 }
 
-// Negative parity, and the half that must not over-correct: a disproof whose
-// witness IS a machine value stays a failure, and becomes a stronger one. The
-// exact root 12345.0 is an `f32`, the guard admits it, and the body is false
-// there, so the verdict is a definite `failed` carrying the concrete point.
+/// chelis#3971's load-bearing END-TO-END negative control: the lane must not
+/// report a pass, and this is the fixture that shows why.
+///
+/// `sqrt(11)` is irrational, so no binary64 value equals cvc5's witness for
+/// `(x * x) != 11.0f64` — and the double nearest it, `3.3166247903554`, squares
+/// to **exactly** `11.0`. The property is therefore false at a machine input its
+/// own guards admit, while the witness check can only ever say "not this point".
+///
+/// The first implementation of this lane read that as a pass and reported exit
+/// 0 here, which is strictly worse than the false alarm chelis#3971 set out to
+/// remove: it re-opened the class
+/// `measure_zero_false_call_form_is_refuted_at_smt_not_fuzz_passed` exists to
+/// prevent. Sampling cannot close the gap (measured clean to 20000 samples), so
+/// the only honest answer is that machine arithmetic is undecided.
 #[cfg(feature = "smt")]
 #[test]
-fn issue_3971_a_disproof_confirmed_at_a_machine_input_is_a_definite_failure() {
+fn issue_3971_a_withdrawn_disproof_is_never_reported_as_a_pass() {
     let dir = write_prop(
         r#"
-def h(x: f32) -> f32 = ((x - 12345.0f32) * (x - 12345.0f32))
-@property h_positive forall(x: f32) where x > 0.0f32:
-  (h(x) > 0.0f32)
+@property sq_ne_eleven forall(x: f64) where x >= 3.0f64, x <= 4.0f64:
+  ((x * x) != 11.0f64)
 "#,
     );
-    let output = Command::cargo_bin("chelis")
-        .expect("binary")
-        .args([
-            "prove",
-            dir.path().join("prop.ch").to_str().unwrap(),
-            "--tier",
-            "auto",
-            "--json",
-        ])
-        .output()
-        .expect("run prove");
+    // The arithmetic the fixture rests on, pinned here so the test cannot
+    // quietly stop being a control if the constant is ever edited.
+    let root = 3.3166247903554f64;
     assert_eq!(
-        output.status.code(),
-        Some(1),
-        "a confirmed machine counterexample is still a failure: stdout={}",
-        String::from_utf8_lossy(&output.stdout)
+        root * root,
+        11.0f64,
+        "the nearest double squares to exactly 11"
     );
-    let props = property_records(&output.stdout);
-    assert_eq!(props.len(), 1, "records: {props:?}");
-    let prop = &props[0];
-    assert_eq!(prop["status"], "failed", "{prop}");
-    assert_eq!(
-        prop["composite_verdict"], "failed",
-        "the concrete evaluation decided it, so the badge is definite: {prop}"
-    );
-    assert_eq!(
-        prop["qualifiers"],
-        serde_json::json!([]),
-        "a confirmed witness leaves no machine-arithmetic gap to disclose: {prop}"
-    );
-    assert_eq!(
-        prop["proof_tier"], "smt",
-        "the solver located the input; `auto` did not have to sample for it: {prop}"
-    );
-    assert_eq!(prop["machine_arithmetic"]["status"], "confirmed", "{prop}");
-    assert_eq!(
-        prop["counterexample"]["x"], 12345.0,
-        "the reported point is the concrete value that was evaluated: {prop}"
-    );
-    assert!(
-        prop["reason"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("false there in machine arithmetic"),
-        "the failure states what was checked: {prop}"
-    );
+    assert!((3.0..=4.0).contains(&root), "and the guards admit it");
+
+    for tier in ["auto", "smt-only"] {
+        let output = Command::cargo_bin("chelis")
+            .expect("binary")
+            .args([
+                "prove",
+                dir.path().join("prop.ch").to_str().unwrap(),
+                "--tier",
+                tier,
+                "--samples",
+                "1000",
+                "--json",
+            ])
+            .output()
+            .expect("run prove");
+        let props = property_records(&output.stdout);
+        assert_eq!(props.len(), 1, "{tier} records: {props:?}");
+        let prop = &props[0];
+        assert_ne!(
+            prop["status"], "passed",
+            "{tier} must not report a pass on a property that is false at a binary64 \
+             input: {prop}"
+        );
+        assert_ne!(
+            output.status.code(),
+            Some(0),
+            "{tier} must not exit 0: stdout={}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        assert_eq!(prop["status"], "unsupported", "{tier}: {prop}");
+        assert_eq!(
+            prop["machine_arithmetic"]["status"], "unconfirmed",
+            "{tier}: {prop}"
+        );
+    }
 }
 
 // The witness no double represents can still CONFIRM, which is why the lane
@@ -4636,13 +4629,12 @@ def cancel(x: f64) -> f64 = ((x + 1.0e17f64) - 1.0e17f64)
     );
 }
 
-// `--tier smt-only` is terminal: there is no Tier C to route to, so the
-// over-the-reals disproof stays the reported verdict. What changes is that the
-// record now DISCLOSES that its witness was not reproduced in binary64, instead
-// of presenting the hedged failure with nothing said about the machine question.
+// `--tier smt-only` is terminal: there is no Tier C to route to. It therefore
+// reports the same undecided result directly, rather than the hedged failure it
+// used to publish on a witness since shown not to be a machine counterexample.
 #[cfg(feature = "smt")]
 #[test]
-fn issue_3971_smt_only_keeps_the_over_reals_disproof_and_discloses_the_witness() {
+fn issue_3971_smt_only_reports_an_unconfirmed_disproof_as_undecided() {
     let dir = write_prop(ISSUE_3971_REPRODUCTION);
     let output = Command::cargo_bin("chelis")
         .expect("binary")
@@ -4657,21 +4649,23 @@ fn issue_3971_smt_only_keeps_the_over_reals_disproof_and_discloses_the_witness()
         .expect("run prove");
     assert_eq!(
         output.status.code(),
-        Some(1),
-        "the deductive verdict alone is what smt-only asked for: stdout={}",
+        Some(2),
+        "neither a failure nor a pass: stdout={}",
         String::from_utf8_lossy(&output.stdout)
     );
     let props = property_records(&output.stdout);
     assert_eq!(props.len(), 1, "records: {props:?}");
     let prop = &props[0];
-    assert_eq!(prop["status"], "failed", "{prop}");
-    assert_eq!(
-        prop["composite_verdict"], "disproved_modulo_real_arithmetic",
-        "{prop}"
-    );
+    assert_eq!(prop["status"], "unsupported", "{prop}");
+    assert_eq!(prop["composite_verdict"], "unsupported", "{prop}");
+    assert_eq!(prop["proof_tier"], "smt", "{prop}");
     assert_eq!(
         prop["machine_arithmetic"]["status"], "unconfirmed",
         "the terminal lane still says what it found out about the witness: {prop}"
+    );
+    assert!(
+        prop["failure_summary"].get("degradation").is_none(),
+        "smt-only did not fall back to anything: {prop}"
     );
 }
 
@@ -4710,13 +4704,12 @@ fn issue_3971_an_unreadable_disproof_model_leaves_auto_reporting_the_disproof() 
     );
 }
 
-// The plain-text render. A Tier C pass that reports in place of an
-// over-the-reals disproof TOOK samples, so it keeps its ratio; the disclosure
-// is additional, not a substitute for it (an over-the-reals proof has no ratio,
-// which is the chelis#3634 case the same branch handles).
+// The plain-text render. The record is not a pass, so it takes the
+// `unsupported` arm, and its `reason` is where a non-`--json` reader learns
+// both halves. (A sample ratio would be wrong here: nothing was established.)
 #[cfg(feature = "smt")]
 #[test]
-fn issue_3971_plain_text_keeps_the_sample_ratio_and_adds_the_disclosure() {
+fn issue_3971_plain_text_reports_the_undecided_machine_arithmetic_question() {
     let dir = write_prop(ISSUE_3971_REPRODUCTION);
     let output = Command::cargo_bin("chelis")
         .expect("binary")
@@ -4731,17 +4724,18 @@ fn issue_3971_plain_text_keeps_the_sample_ratio_and_adds_the_disclosure() {
         .output()
         .expect("run prove");
     let text = String::from_utf8_lossy(&output.stdout).to_string();
-    assert_eq!(output.status.code(), Some(0), "{text}");
+    assert_eq!(output.status.code(), Some(2), "{text}");
     assert!(
-        text.contains(
-            "property: g_finite -- 100/100 passed (disproved over the reals; not confirmed in machine arithmetic:"
-        ),
-        "the render keeps the ratio it actually has AND names the decision the \
-         sampling replaced: {text}"
+        text.contains("property unsupported: g_finite: disproved over the reals, and no machine counterexample established:"),
+        "the render names both halves of what is known: {text}"
     );
     assert!(
         text.contains("irrational algebraic number"),
-        "the render says why the witness is not a machine point: {text}"
+        "including why the witness is not a machine point: {text}"
+    );
+    assert!(
+        !text.contains("100/100 passed"),
+        "a record that established nothing has no sample ratio: {text}"
     );
 }
 
@@ -4760,9 +4754,9 @@ fn issue_3971_the_deep_lane_confirms_a_disproof_witness_like_the_surf_lane() {
             "confirmed",
             1,
         ),
-        // Unconfirmed: disproved over the reals at an irrational, true at every
-        // machine value in the guard region.
-        ("(x * x) != 2.0", "passed", "unconfirmed", 0),
+        // Unconfirmed: disproved over the reals at an irrational, and no machine
+        // counterexample established -- so undecided, not a pass.
+        ("(x * x) != 2.0", "unsupported", "unconfirmed", 2),
     ] {
         let dir = write_prop(&format!(
             "@property deep_disproof forall(x: f32):\n  {predicate}\n"
@@ -4817,6 +4811,11 @@ fn issue_3971_the_deep_lane_confirms_a_disproof_witness_like_the_surf_lane() {
             );
         } else {
             assert_eq!(prop["proof_tier"], "fuzz", "{predicate}: {prop}");
+            assert_eq!(
+                prop["composite_verdict"], "unsupported",
+                "{predicate}: {prop}"
+            );
+            assert_ne!(prop["status"], "passed", "{predicate}: {prop}");
         }
     }
 }

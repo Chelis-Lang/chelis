@@ -1146,13 +1146,37 @@ same additive `machine_arithmetic` object:
   domain-witness rule applied to the main goal's own model.
 - **Unconfirmed.** The witness is **not** a machine counterexample: no machine
   value equals it (an irrational algebraic witness), the property's own
-  preconditions reject it once rounded, or the body holds there. Under
-  `--tier auto` the run routes to Tier C, which is the tier that can actually
-  search machine arithmetic; whatever Tier C reports carries
-  `machine_arithmetic:{"status":"unconfirmed","reason":...}` naming the
-  over-the-reals disproof it reports in place of. Under the terminal
-  `--tier smt-only` there is nothing to route to, so the over-the-reals disproof
-  stays the reported verdict with the same object recorded beside it.
+  preconditions reject it once rounded, or the body holds there. Such a record
+  may be reported as **neither a failure nor a pass**, and this is the rule the
+  whole section turns on. There is no basis for a failure: the only machine
+  point the solver exhibited has been checked and is not one. There is no basis
+  for a pass either: Tier B decided the property FALSE over the reals, and
+  "this point is not a counterexample" is a fact about that point, not about
+  the domain. So the record is `status:"unsupported"` with
+  `composite_verdict:"unsupported"`, no counterexample, a `reason` stating both
+  halves, and `machine_arithmetic:{"status":"unconfirmed","reason":...}` naming
+  the over-the-reals disproof it reports in place of.
+
+  Under `--tier auto` the run first routes to Tier C, which is the tier that can
+  actually search machine arithmetic: a Tier C counterexample is a concrete
+  machine value and is reported as the definite failure it is, and only a clean
+  Tier C run is withdrawn to `unsupported`. Under the terminal
+  `--tier smt-only` there is nothing to route to, so the record is `unsupported`
+  directly. `unsupported` is widened here from "nothing decided" to "the
+  machine-arithmetic question is undecided": the over-the-reals decision was
+  made, and it is recorded in `machine_arithmetic.real_arithmetic_verdict`
+  rather than in the status.
+
+  The step this rule exists to forbid is reading "no machine value equals this
+  witness" as "no machine input falsifies this property".
+  `(x * x) != 11.0f64` on `[3, 4]` refutes that reading: `sqrt(11)` is
+  irrational, so no `f64` equals the solver's witness, and the `f64` nearest it
+  squares to **exactly** `11.0`, so the property is false at a binary64 input
+  its own guards admit. Sampling does not find it. A lane that published a pass
+  there would re-open the class the measure-zero-false refutation requirement
+  exists to prevent, and would do on the disproof side exactly what the rule
+  above forbids on the proof side: let a sampler's silence displace a solver's
+  decision.
 - **Unchecked.** Nothing was established: a model value the projection cannot
   read, or a witness the concrete evaluator could not run. The Tier B disproof
   stands exactly as it was, with
@@ -1160,11 +1184,16 @@ same additive `machine_arithmetic` object:
   limitation never displaces a decision, which is this side's form of "a sampler
   limitation never degrades a proof".
 
-Only the first answer may report a failure that the solver alone motivated, and
-only the second may withdraw one: the lane needs a positive finding about the
-witness in either direction. An algebraic witness's isolating interval is
-deliberately not read as a candidate point — its endpoints bracket the root, so
-a point taken from them is a different real from the one the solver exhibited.
+Only the first answer may report a failure, and no answer may report a pass.
+The lane needs a positive finding about the witness to say anything at all, and
+a positive finding about one witness is never a statement about the property.
+An algebraic witness's isolating interval is deliberately not read as a
+candidate point — its endpoints bracket the root, so a point taken from them is
+a different real from the one the solver exhibited. Reading it would narrow the
+undecided band (the `!= 11.0` case above would become a confirmed failure) but
+not close it, since a falsifying machine value away from the root is still
+reachable; that is additional capability rather than a different rule, and it is
+tracked separately.
 
 Unlike the green side's refutation search, the confirmation is a **single
 concrete evaluation** of the solver's own witness rather than a second tier, so
@@ -1177,12 +1206,18 @@ honor. The derived-obligation lane does not run the confirmation, for the
 chelis#3635 reason: its Tier C is a constructor-probe lane over a producer's
 arguments rather than an evaluation of typed property binders.
 
-Plain text keeps the sample ratio a Tier C pass actually has and adds the
-disclosure, rather than substituting one for the other:
+In plain text an undecided record takes the `unsupported` arm, where its
+`reason` carries both halves. No sample ratio is printed, because nothing was
+established:
 
 ```text
-property: g_finite -- 100/100 passed (disproved over the reals; not confirmed in machine arithmetic: <reason>)
+property unsupported: g_finite: disproved over the reals, and no machine counterexample established: <witness reason>. ...
 ```
+
+The `failed` arm does not render its `machine_arithmetic` object, so a
+`confirmed` or `unchecked` disproof discloses the check only under `--json`.
+That is the existing shape of the `failed` arm, which prints neither a
+counterexample nor a reason.
 
 ## Relationship To `chelis test`
 

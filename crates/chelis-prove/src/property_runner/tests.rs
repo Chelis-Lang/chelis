@@ -3060,7 +3060,7 @@ fn issue3971_a_fully_readable_model_projects_to_the_candidate_point() {
 // record is withdrawn (`None`). `smt-only` is terminal, so the over-the-reals
 // disproof stands as the reported verdict with the check recorded beside it.
 #[test]
-fn issue3971_an_unconfirmed_witness_routes_to_tier_c_under_auto_only() {
+fn issue3971_an_unconfirmed_witness_is_reported_as_neither_a_failure_nor_a_pass() {
     for (tier, routes) in [("auto", true), ("smt-only", false)] {
         let options = PropertyRunOptions {
             tier: tier.to_string(),
@@ -3079,12 +3079,25 @@ fn issue3971_an_unconfirmed_witness_routes_to_tier_c_under_auto_only() {
         assert_eq!(carried.is_some(), routes, "{tier}");
         let check = match &resolved {
             Some(outcome) => {
+                // The terminal lane has nothing left to attempt, and the hedged
+                // failure cannot stand on a witness shown not to be a machine
+                // counterexample. Neither a failure nor a pass.
+                assert_eq!(outcome.status, PropertyStatus::Unsupported, "{outcome:#?}");
                 assert_eq!(
                     outcome.composite_verdict,
-                    CompositeVerdict::DisprovedModuloRealArithmetic,
-                    "a terminal lane keeps the decision it was asked for: {outcome:#?}"
+                    CompositeVerdict::Unsupported,
+                    "{outcome:#?}"
                 );
-                assert_eq!(outcome.proof_tier, PropertyTier::Smt);
+                assert!(
+                    outcome.counterexample.is_none(),
+                    "a withdrawn witness is not reported as a counterexample: {outcome:#?}"
+                );
+                let reason = outcome.reason.as_deref().unwrap_or_default();
+                assert!(
+                    reason.contains("disproved over the reals")
+                        && reason.contains("no machine counterexample established"),
+                    "the reason states BOTH halves of what is known: {reason}"
+                );
                 outcome.machine_arithmetic.clone()
             }
             None => carried.clone(),
@@ -3095,6 +3108,145 @@ fn issue3971_an_unconfirmed_witness_routes_to_tier_c_under_auto_only() {
             crate::machine_arith::MachineArithmeticStatus::Unconfirmed
         );
         assert_eq!(check.real_arithmetic_verdict, DISPROVED_VERDICT);
+    }
+}
+
+/// chelis#3971's load-bearing negative control, and the reason the lane cannot
+/// publish a pass.
+///
+/// "No machine value equals this witness" is a fact about ONE point. Reading it
+/// as "no machine input falsifies this property" is the step the first
+/// implementation of this lane took, and `(x * x) != 11.0f64` on `[3, 4]`
+/// refutes it: cvc5's witness is the irrational `sqrt(11)`, and the nearest
+/// double squares to exactly `11.0`, so the property is false at a binary64
+/// input its own guards admit. Sampling does not find it (measured to 20000
+/// samples), so a clean Tier C run is not evidence of a pass.
+///
+/// The paired positive is directly below: a Tier C run that DOES refute keeps
+/// its definite failure, so withdrawing a pass never costs a real one.
+#[test]
+fn issue3971_a_clean_tier_c_run_after_an_unconfirmed_disproof_is_withdrawn_to_unsupported() {
+    let check = crate::machine_arith::MachineArithmeticCheck::unconfirmed(
+        DISPROVED_VERDICT,
+        crate::machine_arith::IRRATIONAL_WITNESS_REASON,
+    );
+    let clean_pass = PropertyOutcome::new(
+        "sq_ne_eleven",
+        PropertyStatus::Passed,
+        PropertyTier::Fuzz,
+        100,
+        0,
+        None,
+        None,
+        false,
+        Vec::new(),
+    );
+    assert_eq!(
+        clean_pass.composite_verdict,
+        CompositeVerdict::FuzzValidatedEmpirical,
+        "the input really is a reported pass"
+    );
+
+    let withdrawn = resolve_unconfirmed_disproof(clean_pass, check.clone());
+    assert_eq!(
+        withdrawn.status,
+        PropertyStatus::Unsupported,
+        "{withdrawn:#?}"
+    );
+    assert_eq!(
+        withdrawn.composite_verdict,
+        CompositeVerdict::Unsupported,
+        "{withdrawn:#?}"
+    );
+    assert_eq!(
+        withdrawn.samples, 0,
+        "an undecided record carries no sample ratio"
+    );
+    assert!(
+        withdrawn.disclosed_qualifiers().is_empty(),
+        "a withdrawn pass discloses no green guarantee: {withdrawn:#?}"
+    );
+    let reason = withdrawn.reason.as_deref().unwrap_or_default();
+    assert!(
+        reason.contains(crate::machine_arith::IRRATIONAL_WITNESS_REASON),
+        "the withdrawal carries WHY the witness was not confirmed: {reason}"
+    );
+    assert_eq!(
+        withdrawn.machine_arithmetic.map(|c| c.status),
+        Some(crate::machine_arith::MachineArithmeticStatus::Unconfirmed)
+    );
+}
+
+// The paired positive: a Tier C run that found a concrete machine
+// counterexample is a definite failure and must survive the fold untouched.
+// Withdrawing it would turn a real refutation into "undecided".
+#[test]
+fn issue3971_a_tier_c_refutation_after_an_unconfirmed_disproof_stays_a_failure() {
+    let check = crate::machine_arith::MachineArithmeticCheck::unconfirmed(
+        DISPROVED_VERDICT,
+        crate::machine_arith::IRRATIONAL_WITNESS_REASON,
+    );
+    let refuted = PropertyOutcome::new(
+        "p",
+        PropertyStatus::Failed,
+        PropertyTier::Fuzz,
+        7,
+        0,
+        Some(serde_json::json!({"x": 3.3166247903554})),
+        None,
+        false,
+        Vec::new(),
+    );
+    let kept = resolve_unconfirmed_disproof(refuted, check);
+    assert_eq!(kept.status, PropertyStatus::Failed, "{kept:#?}");
+    assert_eq!(
+        kept.composite_verdict,
+        CompositeVerdict::Failed,
+        "{kept:#?}"
+    );
+    assert_eq!(
+        kept.counterexample,
+        Some(serde_json::json!({"x": 3.3166247903554})),
+        "the machine witness Tier C found is what is reported"
+    );
+    assert_eq!(
+        kept.machine_arithmetic.map(|c| c.status),
+        Some(crate::machine_arith::MachineArithmeticStatus::Unconfirmed),
+        "the displaced over-the-reals decision is still disclosed"
+    );
+}
+
+// Negative parity for the fold's own guard: an `unsupported` or `error` Tier C
+// result is not a pass either, so there is nothing to withdraw and the record
+// must survive verbatim rather than be rewritten into a second `unsupported`
+// with this lane's reason in place of the sampler's.
+#[test]
+fn issue3971_a_non_pass_tier_c_result_is_not_rewritten() {
+    for status in [PropertyStatus::Unsupported, PropertyStatus::Error] {
+        let original = PropertyOutcome::new(
+            "p",
+            status.clone(),
+            PropertyTier::Fuzz,
+            0,
+            0,
+            None,
+            Some("generator starved".to_string()),
+            false,
+            Vec::new(),
+        );
+        let folded = resolve_unconfirmed_disproof(
+            original,
+            crate::machine_arith::MachineArithmeticCheck::unconfirmed(
+                DISPROVED_VERDICT,
+                crate::machine_arith::IRRATIONAL_WITNESS_REASON,
+            ),
+        );
+        assert_eq!(folded.status, status, "{folded:#?}");
+        assert_eq!(
+            folded.reason.as_deref(),
+            Some("generator starved"),
+            "the sampler's own reason is not replaced: {folded:#?}"
+        );
     }
 }
 
