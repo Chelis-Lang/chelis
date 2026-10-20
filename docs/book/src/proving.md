@@ -119,6 +119,48 @@ roughly as long as the solver and the sampler together. Use `--tier smt-only`
 to pay for the solver alone. That run leaves the machine-arithmetic question
 unchecked rather than answering it.
 
+## A solver disproof is checked again at its own witness
+
+The same real-arithmetic model applies when the solver *disproves* a property.
+It exhibits a point in the real numbers where the property is false. Reporting
+that as a failure would claim a defect at a machine input, which the solver has
+not shown. An exact rational need not have a binary64 value where the property
+fails, and an irrational witness has none at all.
+
+For example, `1.0f64 / ((x * x) - 2.0f64)` is infinite over the reals at
+`x = sqrt(2)`, so a property that asserts it is finite on `[1, 2]` is disproved
+there. No binary64 value squares to exactly 2. The two doubles nearest
+`sqrt(2)` give `x * x` of 2.0000000000000004 and 1.9999999999999996, so the
+quotient is finite at every double in that range.
+
+Chelis therefore rounds the witness to each parameter's declared width and
+evaluates the property concretely, the same route a square-root domain witness
+takes. It reports the outcome in the same `machine_arithmetic` field:
+
+- `"status":"confirmed"`: every precondition holds at the rounded witness and
+  the body is false there. The result is `failed` with that machine value as
+  the counterexample. The verdict is a definite `failed` rather than
+  `disproved_modulo_real_arithmetic`, because a concrete evaluation decided it.
+- `"status":"unconfirmed"`: the witness is not a machine counterexample, with a
+  `reason`. No machine value equals it, a precondition rejects it once rounded,
+  or the body holds there. Under `--tier auto` the run then samples the property
+  and reports what sampling found, carrying this field. Under `--tier smt-only`
+  there is no sampling tier to use, so the run keeps
+  `disproved_modulo_real_arithmetic` and records the field beside it.
+- `"status":"unchecked"`: the witness could not be read or evaluated, with a
+  `reason`. The disproof is unchanged. An evaluation limit is not evidence
+  about the property.
+
+This check is one evaluation of the solver's own witness rather than a second
+tier, so `--tier smt-only` runs it too. A disproof conditional on an asserted
+axiom carries no check, for the reason above.
+
+In plain text a sampled pass keeps the ratio it has and adds the disclosure:
+
+```text
+property: g_finite -- 100/100 passed (disproved over the reals; not confirmed in machine arithmetic: <reason>)
+```
+
 Induction applies to a recursion on an integer such as this bond valuation,
 which recurses on `n` down to a base case at `n <= 0`:
 
@@ -209,7 +251,7 @@ record is greater than zero and inspect each record:
 | `composite_verdict` and `qualifiers` | The strength and limits of a passing or failing result. |
 | `samples`, `sampling_method`, and sample counts | Evidence for a sampled result; accepted, attempted, and rejected counts appear when sampling details apply. |
 | `arith_model` | `real` means the solver checked real arithmetic. |
-| `machine_arithmetic` | For a solver proof under `auto`, records whether sampling in machine arithmetic `refuted`, `corroborated`, or left the proof `unchecked`. Absent when no such check ran. |
+| `machine_arithmetic` | What machine arithmetic established about a solver result. For a proof under `auto`: sampling `refuted` it, `corroborated` it, or left it `unchecked`. For a disproof: its witness was `confirmed` at a machine input, `unconfirmed` as one, or `unchecked`. Absent when no such check ran. |
 
 A custom build that omits `proof_tier` cannot establish a formal method from its JSON; use
 `--capabilities`, `samples`, and the verdict to understand its limits.

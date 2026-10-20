@@ -1120,6 +1120,70 @@ obligation: invariant:Probability:scale -- proved (smt; proved over the reals; m
 A sample ratio is reserved for a result that took samples: `0/0 passed` reads
 as a count of zero out of zero rather than as a proof that takes none.
 
+### `auto` confirms an over-the-reals disproof in machine arithmetic
+
+A Tier B **disproof** is decided over the same real-arithmetic model, so it is
+the symmetric half of the rule above. The solver exhibits a point in the reals
+at which the goal is false; reporting that as a property failure claims a defect
+at some MACHINE input, which the solver has not established. An exact rational
+need not have a binary64 value at which the property is false, and an irrational
+algebraic witness has none at all: `1/((x*x) - 2.0)` is disproved finite over
+the reals at `x = sqrt(2)`, while no binary64 value squares to exactly 2 -- the
+two doubles nearest `sqrt(2)` give `x*x` of 2.0000000000000004 and
+1.9999999999999996 -- so the quotient is finite at every double in `[1, 2]`.
+
+The witness is therefore handed to the property's host lane, which projects the
+model at the binders' sorts, rounds it once to each binder's declared width, and
+runs exactly the evaluation a Tier C sample gets. Three answers, reported in the
+same additive `machine_arithmetic` object:
+
+- **Confirmed.** Every precondition admits the rounded witness and the body is
+  false there. The record is `status:"failed"` with `composite_verdict:"failed"`
+  — definite, not reals-hedged, and carrying no `real_arithmetic` qualifier,
+  because the concrete evaluation decided it — at `proof_tier:"smt"`, with that
+  machine value as the `counterexample`, a `reason` stating what was checked,
+  and `machine_arithmetic:{"status":"confirmed"}`. This is the chelis#3635
+  domain-witness rule applied to the main goal's own model.
+- **Unconfirmed.** The witness is **not** a machine counterexample: no machine
+  value equals it (an irrational algebraic witness), the property's own
+  preconditions reject it once rounded, or the body holds there. Under
+  `--tier auto` the run routes to Tier C, which is the tier that can actually
+  search machine arithmetic; whatever Tier C reports carries
+  `machine_arithmetic:{"status":"unconfirmed","reason":...}` naming the
+  over-the-reals disproof it reports in place of. Under the terminal
+  `--tier smt-only` there is nothing to route to, so the over-the-reals disproof
+  stays the reported verdict with the same object recorded beside it.
+- **Unchecked.** Nothing was established: a model value the projection cannot
+  read, or a witness the concrete evaluator could not run. The Tier B disproof
+  stands exactly as it was, with
+  `machine_arithmetic:{"status":"unchecked","reason":...}`. An evaluation
+  limitation never displaces a decision, which is this side's form of "a sampler
+  limitation never degrades a proof".
+
+Only the first answer may report a failure that the solver alone motivated, and
+only the second may withdraw one: the lane needs a positive finding about the
+witness in either direction. An algebraic witness's isolating interval is
+deliberately not read as a candidate point — its endpoints bracket the root, so
+a point taken from them is a different real from the one the solver exhibited.
+
+Unlike the green side's refutation search, the confirmation is a **single
+concrete evaluation** of the solver's own witness rather than a second tier, so
+it runs under `--tier smt-only` as well and does not widen an explicitly
+selected tier. `machine_arithmetic` is absent from a disproof when no check was
+attempted: under `--tier induction-only` and `--tier beacon-only`, for a
+disproof whose base is not over the reals (already a definite `failed`), and for
+one conditional on an asserted `axiom`, which the concrete evaluator does not
+honor. The derived-obligation lane does not run the confirmation, for the
+chelis#3635 reason: its Tier C is a constructor-probe lane over a producer's
+arguments rather than an evaluation of typed property binders.
+
+Plain text keeps the sample ratio a Tier C pass actually has and adds the
+disclosure, rather than substituting one for the other:
+
+```text
+property: g_finite -- 100/100 passed (disproved over the reals; not confirmed in machine arithmetic: <reason>)
+```
+
 ## Relationship To `chelis test`
 
 `chelis test` remains the deterministic assertion runner for `Std.Test`.

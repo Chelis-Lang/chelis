@@ -409,15 +409,30 @@ fn emit(
                         outcome.name
                     )
                 } else if let Some(check) = &outcome.machine_arithmetic {
-                    // chelis#3634: an over-the-reals proof has no sample ratio,
-                    // and `0/0 passed` read as one. Print the disclosure and
-                    // what the machine-arithmetic check established instead.
-                    println!(
-                        "property: {} -- {} ({}){suffix}",
-                        outcome.name,
-                        outcome.composite_verdict.as_str(),
-                        check.disclosure()
-                    )
+                    if outcome.discloses_real_arithmetic() {
+                        // chelis#3634: an over-the-reals proof has no sample
+                        // ratio, and `0/0 passed` read as one. Print the
+                        // disclosure and what the machine-arithmetic check
+                        // established instead.
+                        println!(
+                            "property: {} -- {} ({}){suffix}",
+                            outcome.name,
+                            outcome.composite_verdict.as_str(),
+                            check.disclosure()
+                        )
+                    } else {
+                        // chelis#3971: a SAMPLED pass that carries a check is
+                        // Tier C reporting in place of an over-the-reals
+                        // disproof. It took samples, so it keeps its ratio; the
+                        // disclosure is additional, not a substitute.
+                        println!(
+                            "property: {} -- {}/{} passed ({}){suffix}",
+                            outcome.name,
+                            outcome.samples,
+                            outcome.samples,
+                            check.disclosure()
+                        )
+                    }
                 } else if outcome.discloses_real_arithmetic() {
                     println!(
                         "property: {} -- {} ({}){suffix}",
@@ -459,17 +474,18 @@ fn build_failure_summary_json(
 ) -> serde_json::Value {
     let requested_tier = options.tier;
     let actual_tier = outcome.proof_tier.as_str();
-    // chelis#3634: a machine-arithmetic refutation reports the fuzz tier after
-    // Tier B DECIDED, so the tier did not fall back. Reporting `degraded` there
-    // would state a false cause on a record whose own `machine_arithmetic`
-    // field says a proof was displaced.
-    let refuted_in_machine_arithmetic = outcome.machine_arithmetic.as_ref().is_some_and(|check| {
-        check.status == chelis_prove::machine_arith::MachineArithmeticStatus::Refuted
-    });
+    // chelis#3634 / chelis#3971: when the machine-arithmetic lane DISPLACED the
+    // Tier B decision, the reported tier is the one that lane chose after Tier B
+    // decided, not one a lowering failure fell back to. `degraded` there would
+    // state a cause that did not happen. The rule itself lives on the check.
+    let displaced = outcome
+        .machine_arithmetic
+        .as_ref()
+        .is_some_and(|check| check.displaced_the_tier_b_decision());
     let degradation = if requested_tier != actual_tier
         && !(requested_tier == "beacon-only" && actual_tier == "beacon")
         && actual_tier != "none"
-        && !refuted_in_machine_arithmetic
+        && !displaced
     {
         Some(json!({
             "degraded": true,
