@@ -7,6 +7,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+chelis-reef-bootstrap-core.workspace = true
 chelis-unord.workspace = true
 chelis-image-id.workspace = true
 chelis-deep.workspace = true
@@ -52,6 +53,7 @@ zstd = "0.13"
 flate2 = "1"
 
 [dev-dependencies]
+parking_lot = "0.12"
 # tests/tls_roots.rs: a local TLS server whose certificate only a generated
 # root trusts. `rustls` is the version reqwest 0.11 already links.
 rcgen = "0.14"

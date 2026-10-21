@@ -273,6 +273,16 @@ rec {
       # File a bug if you depend on any for non-debug work!
       debug = internal.debugCrate { inherit packageId; };
     };
+    "chelis-reef-bootstrap-core" = rec {
+      packageId = "chelis-reef-bootstrap-core";
+      build = internal.buildRustCrateWithFeatures {
+        packageId = "chelis-reef-bootstrap-core";
+      };
+
+      # Debug support which might change between releases.
+      # File a bug if you depend on any for non-debug work!
+      debug = internal.debugCrate { inherit packageId; };
+    };
     "chelis-repr-inventory" = rec {
       packageId = "chelis-repr-inventory";
       build = internal.buildRustCrateWithFeatures {
@@ -3278,6 +3288,10 @@ rec {
             packageId = "chelis-pipeline-core";
           }
           {
+            name = "chelis-reef-bootstrap-core";
+            packageId = "chelis-reef-bootstrap-core";
+          }
+          {
             name = "chelis-shell";
             packageId = "chelis-shell";
           }
@@ -3381,6 +3395,10 @@ rec {
             packageId = "chelis-std-bundle";
           }
           {
+            name = "parking_lot";
+            packageId = "parking_lot";
+          }
+          {
             name = "rcgen";
             packageId = "rcgen";
           }
@@ -3398,6 +3416,14 @@ rec {
             packageId = "wiremock";
           }
         ];
+
+      };
+      "chelis-reef-bootstrap-core" = rec {
+        crateName = "chelis-reef-bootstrap-core";
+        version = "0.21.1";
+        edition = "2024";
+        src = lib.cleanSourceWith { filter = sourceFilter;  src = ./crates/chelis-reef-bootstrap-core; };
+        libName = "chelis_reef_bootstrap_core";
 
       };
       "chelis-repr-inventory" = rec {

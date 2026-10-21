@@ -478,6 +478,10 @@ SYNTAX_CORE_ORACLE: list[str] = [
     MANAGED_PYTHON,
     "scripts/syntax_predicate_core_oracle.py",
 ]
+REEF_BOOTSTRAP_CORE_ORACLE: list[str] = [
+    MANAGED_PYTHON,
+    "scripts/reef_bootstrap_core_oracle.py",
+]
 # Generated chelis-std files stay out of the index: the bundle crate's build
 # script packs the runtime, so a tracked dist pair or a lock recording the
 # bundled runtime would go stale with the first std edit. Pure git and Python.
@@ -619,6 +623,7 @@ STAGES: dict[str, list[list[str]]] = {
         EVAL_SYSTEM_ORACLE,
         SYNTAX_CORE_ORACLE,
         VERSION_CORE_ORACLE,
+        REEF_BOOTSTRAP_CORE_ORACLE,
         OWNERSHIP_LEDGER_CLI_TESTS,
     ],
     "runtime-representation": [
@@ -685,6 +690,7 @@ LOCAL_STATIC_COMMANDS: list[list[str]] = [
     OWNERSHIP_LEDGER_API_TESTS,
     SYNTAX_CORE_ORACLE,
     VERSION_CORE_ORACLE,
+    REEF_BOOTSTRAP_CORE_ORACLE,
     OWNERSHIP_LEDGER_CLI_TESTS,
 ]
 

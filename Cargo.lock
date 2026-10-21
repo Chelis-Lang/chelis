@@ -914,6 +914,7 @@ dependencies = [
  "chelis-image-id",
  "chelis-macros",
  "chelis-pipeline-core",
+ "chelis-reef-bootstrap-core",
  "chelis-shell",
  "chelis-std-bundle",
  "chelis-surf",
@@ -921,6 +922,7 @@ dependencies = [
  "chelis-types",
  "chelis-unord",
  "flate2",
+ "parking_lot",
  "rcgen",
  "reqwest",
  "rustix",
@@ -943,6 +945,10 @@ dependencies = [
  "wiremock",
  "zstd",
 ]
+
+[[package]]
+name = "chelis-reef-bootstrap-core"
+version = "0.21.1"
 
 [[package]]
 name = "chelis-repr-inventory"

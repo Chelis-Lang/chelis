@@ -2792,6 +2792,8 @@ pub(super) fn install_default_bootstrap(
     registry: &Path,
     runtime: &'static EmbeddedRuntime,
 ) -> Result<Vec<crate::InstalledArtifact>, crate::BootstrapError> {
+    use chelis_reef_bootstrap_core::{BootstrapIdentity, BootstrapNode, validate_and_order};
+
     let mut session = DiscoverySession::for_bootstrap(runtime)?;
     let resolution = session.resolve()?;
     let packages = resolution
@@ -2801,27 +2803,26 @@ pub(super) fn install_default_bootstrap(
         .collect::<Vec<_>>();
     let nodes = packages
         .iter()
-        .map(|candidate| {
-            (
-                candidate.id.name.to_string(),
-                candidate.id.version.clone(),
-                candidate
-                    .dependencies
-                    .iter()
-                    .filter(|request| request.package.as_str() != crate::CHELIS_STD_PACKAGE_NAME)
-                    .map(|request| {
-                        (
-                            request.package.to_string(),
-                            package_versioning::DependencyRequirement::Compatible(
-                                request.requirement.clone(),
-                            ),
-                        )
-                    })
-                    .collect(),
-            )
+        .map(|candidate| BootstrapNode {
+            identity: BootstrapIdentity {
+                name: candidate.id.name.to_string(),
+                version: candidate.id.version.to_string(),
+            },
+            dependencies: candidate
+                .dependencies
+                .iter()
+                .filter(|request| request.package.as_str() != crate::CHELIS_STD_PACKAGE_NAME)
+                .map(|request| BootstrapIdentity {
+                    name: request.package.to_string(),
+                    version: resolution.selected.get(&request.package).map_or_else(
+                        || request.requirement.to_string(),
+                        |selected| selected.id.version.to_string(),
+                    ),
+                })
+                .collect(),
         })
-        .collect::<Vec<crate::BootstrapNode>>();
-    let order = crate::topo_sort_bootstrap(&nodes)?;
+        .collect::<Vec<_>>();
+    let order = validate_and_order(&nodes)?;
     let mut staged = stage_selected_remote(&mut session, &resolution)?
         .into_iter()
         .map(|item| (item.package.clone(), item))

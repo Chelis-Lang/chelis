@@ -6844,137 +6844,30 @@ fn fetch_manifest_only(spec: &GitHubReleaseSpec) -> Result<ParsedManifest, Boots
     })
 }
 
-/// One node in the bootstrap dependency graph: `(name, version,
-/// deps)` where `deps` is the list of `(dep_name, requirement)` edges
-/// the node's manifest declared. A `Vec<BootstrapNode>` is the input
-/// to [`topo_sort_bootstrap`].
-type BootstrapNode = (
-    String,
-    package_versioning::PackageVersion,
-    Vec<(String, package_versioning::DependencyRequirement)>,
-);
+use chelis_reef_bootstrap_core::{
+    BootstrapGraphError, BootstrapIdentity, BootstrapNode, validate_and_order,
+};
 
-/// Topologically sort `nodes` by their dependency edges so each entry
-/// is preceded by everything it depends on. Returns the sorted list
-/// of node indices into `nodes`.
-///
-/// The graph is keyed by `(name, version)`. Edges come from each
-/// node's manifest `[dependencies]` block: an edge from N to M means
-/// "N depends on M, install M before N." The DFS uses a recursion-
-/// stack set to detect cycles; on cycle detection the slice of the
-/// stack starting at the repeat node (with the repeat node appended
-/// at the end) is returned via [`BootstrapError::Cycle`] so the
-/// formatted message names every member of the loop.
-///
-/// Self-loops (a package depending on itself) surface as a 1-element
-/// cycle (the package's own `(name, version)` formatted twice with
-/// `->`).
-fn topo_sort_bootstrap(nodes: &[BootstrapNode]) -> Result<Vec<usize>, BootstrapError> {
-    // Input validation has rejected multiple versions of one package. Resolve
-    // every typed requirement to its explicit peer before traversing the graph.
-    // DFS then consumes only validated node indices, with no missing-edge fallback.
-    let index_by_name: chelis_unord::UnordMap<&str, usize> = nodes
-        .iter()
-        .enumerate()
-        .map(|(index, (name, _, _))| (name.as_str(), index))
-        .collect();
-    let mut edges = Vec::with_capacity(nodes.len());
-    for (name, _, dependencies) in nodes {
-        let mut resolved = Vec::with_capacity(dependencies.len());
-        for (dependency, requirement) in dependencies {
-            let index = index_by_name
-                .get(dependency.as_str())
-                .copied()
-                .ok_or_else(|| BootstrapError::MissingDependency {
-                    dependent: name.clone(),
-                    missing: dependency.clone(),
-                })?;
-            let selected_version = &nodes[index].1;
-            if !requirement.matches(selected_version) {
-                return Err(BootstrapError::Validation {
-                    message: format!(
-                        "shell `{name}` requires `{dependency}` `{}`, but the bootstrap input list \
-                         selects `{selected_version}`. Select a shell version that satisfies the requirement.",
-                        requirement.as_text()
-                    ),
-                });
+impl From<BootstrapGraphError> for BootstrapError {
+    fn from(error: BootstrapGraphError) -> Self {
+        match error {
+            BootstrapGraphError::DuplicateVersion { package, versions } => {
+                Self::DuplicateVersion { package, versions }
             }
-            resolved.push(index);
-        }
-        edges.push(resolved);
-    }
-
-    #[derive(Clone, Copy, PartialEq, Eq)]
-    enum Color {
-        White,
-        Gray,
-        Black,
-    }
-    let mut colors: Vec<Color> = vec![Color::White; nodes.len()];
-    let mut order: Vec<usize> = Vec::with_capacity(nodes.len());
-    // Iterative DFS using an explicit stack so we don't blow the
-    // call stack for pathological input. Each stack frame is
-    // `(node_index, edge_cursor)` — the cursor is how many of
-    // `nodes[i].2` we've already enqueued. When the cursor reaches
-    // the dep count, we pop the frame, paint the node black, and
-    // append it to `order`.
-    let mut path: Vec<(usize, usize)> = Vec::new();
-    // Track the depth-ordered list of (name, version) on the
-    // recursion stack so cycle reporting can name the loop without
-    // re-walking `path`.
-    let mut path_keys: Vec<(String, String)> = Vec::new();
-
-    for start in 0..nodes.len() {
-        if colors[start] != Color::White {
-            continue;
-        }
-        path.push((start, 0));
-        path_keys.push((nodes[start].0.clone(), nodes[start].1.to_string()));
-        colors[start] = Color::Gray;
-        while let Some(&(node_idx, cursor)) = path.last() {
-            let deps = &edges[node_idx];
-            if cursor >= deps.len() {
-                colors[node_idx] = Color::Black;
-                order.push(node_idx);
-                path.pop();
-                path_keys.pop();
-                continue;
-            }
-            // Advance cursor before recursing so we don't revisit on
-            // the next loop iteration after pop.
-            let last = path.last_mut().expect("path nonempty");
-            last.1 = cursor + 1;
-            let dep_idx = deps[cursor];
-            let dep_key = (nodes[dep_idx].0.clone(), nodes[dep_idx].1.to_string());
-            match colors[dep_idx] {
-                Color::Black => continue,
-                Color::Gray => {
-                    // Cycle — locate the repeat node in `path_keys`
-                    // and emit the slice from there to the end,
-                    // appending the repeat node again so the loop is
-                    // closed in the formatted message.
-                    let mut cycle_nodes: Vec<String> = Vec::new();
-                    let mut started = false;
-                    for key in &path_keys {
-                        if !started && *key == dep_key {
-                            started = true;
-                        }
-                        if started {
-                            cycle_nodes.push(format!("{}@{}", key.0, key.1));
-                        }
-                    }
-                    cycle_nodes.push(format!("{}@{}", dep_key.0, dep_key.1));
-                    return Err(BootstrapError::Cycle { cycle: cycle_nodes });
-                }
-                Color::White => {
-                    colors[dep_idx] = Color::Gray;
-                    path.push((dep_idx, 0));
-                    path_keys.push(dep_key);
+            BootstrapGraphError::MissingDependency { dependent, missing } => {
+                Self::MissingDependency {
+                    dependent: dependent.name,
+                    missing: missing.name,
                 }
             }
+            BootstrapGraphError::Cycle { cycle } => Self::Cycle {
+                cycle: cycle
+                    .into_iter()
+                    .map(|identity| format!("{}@{}", identity.name, identity.version))
+                    .collect(),
+            },
         }
     }
-    Ok(order)
 }
 
 /// Topologically install a set of shells from canonical-org GitHub
@@ -6988,10 +6881,7 @@ fn topo_sort_bootstrap(nodes: &[BootstrapNode]) -> Result<Vec<usize>, BootstrapE
 ///    drawn from each entry's manifest dependencies, matching by
 ///    each typed dependency requirement against the selected peer version
 ///    in `specs`.
-/// 3. Topologically sort via DFS with a recursion-stack cycle check.
-///    On cycle, return [`BootstrapError::Cycle`] naming the cycle
-///    members. On a dependency that names a package not in the input
-///    set, return [`BootstrapError::MissingDependency`].
+/// 3. Validate conflicts, exact projected edges, and cycles through the core.
 /// 4. For each entry in topo order, run [`install_from_github`] (full
 ///    archive + shell fetch + validate + place).
 ///
@@ -7009,11 +6899,9 @@ fn topo_sort_bootstrap(nodes: &[BootstrapNode]) -> Result<Vec<usize>, BootstrapE
 /// the placement step copies the same bytes into the same destinations
 /// and atomically updates `index.json` to the same final entries.
 ///
-/// **Order independence.** The topological sort depends only on the
-/// dependency graph, not on input order. Submitting the same set in
-/// different orders produces the same install sequence (modulo ties,
-/// which are resolved by input position to keep the result
-/// deterministic).
+/// **Stable order.** Traversal follows input occurrences and manifest edge order.
+/// Repeated identities retain separate install occurrences. Edges select the
+/// last occurrence. Installation uses each occurrence's original release spec.
 pub fn install_bootstrap(
     specs: &[GitHubReleaseSpec],
     registry_root: &Path,
@@ -7048,6 +6936,8 @@ pub fn install_bootstrap(
 
     // Phase 1: fetch each manifest, accumulate (name, version, deps).
     let mut nodes: Vec<BootstrapNode> = Vec::with_capacity(specs.len());
+    let mut requirements = Vec::with_capacity(specs.len());
+    let mut selected_by_name = BTreeMap::new();
     for spec in specs {
         let manifest = fetch_manifest_only(spec)?;
         // Lock manifest <-> spec agreement: the archive's
@@ -7126,43 +7016,50 @@ pub fn install_bootstrap(
             };
             deps.push((dep_name.to_string(), requirement));
         }
-        nodes.push((
-            manifest.package.name.clone(),
-            manifest.typed.package.version.clone(),
-            deps,
-        ));
+        selected_by_name.insert(spec.repo.as_str(), manifest.typed.package.version);
+        nodes.push(BootstrapNode {
+            identity: BootstrapIdentity {
+                name: manifest.raw.package.name,
+                version: manifest.raw.package.version,
+            },
+            dependencies: Vec::with_capacity(deps.len()),
+        });
+        requirements.push(deps);
     }
 
-    // Duplicate-version detection: the same package name appearing at
-    // two versions in the input list is ambiguous; refuse rather than
-    // silently picking one.
-    {
-        let mut by_name: chelis_unord::UnordMap<&str, Vec<&package_versioning::PackageVersion>> =
-            chelis_unord::UnordMap::new();
-        for (name, version, _) in &nodes {
-            by_name.entry(name.as_str()).or_default().push(version);
-        }
-        for (name, versions) in by_name.to_sorted() {
-            if versions.len() > 1 {
-                let mut sorted: Vec<String> = versions.iter().map(|s| s.to_string()).collect();
-                sorted.sort();
-                sorted.dedup();
-                if sorted.len() > 1 {
-                    return Err(BootstrapError::DuplicateVersion {
-                        package: (*name).to_string(),
-                        versions: sorted,
-                    });
-                }
-            }
+    // Requirements are host policy. Project satisfied peers to exact identities.
+    // Keep failed requirements as missing edges so core conflict precedence holds.
+    for (node, dependencies) in nodes.iter_mut().zip(requirements) {
+        for (dependency, requirement) in dependencies {
+            let selected = selected_by_name.get(dependency.as_str());
+            let version = match selected {
+                Some(version) if requirement.matches(version) => version.to_string(),
+                _ => requirement.as_text(),
+            };
+            node.dependencies.push(BootstrapIdentity {
+                name: dependency,
+                version,
+            });
         }
     }
-
-    let order = topo_sort_bootstrap(&nodes)?;
+    let order = validate_and_order(&nodes).map_err(|error| {
+        if let BootstrapGraphError::MissingDependency { dependent, missing } = &error
+            && let Some(selected) = selected_by_name.get(missing.name.as_str())
+        {
+            return BootstrapError::Validation {
+                message: format!(
+                    "shell `{}` requires `{}` `{}`, but the bootstrap input list \
+                     selects `{}`. Select a shell version that satisfies the requirement.",
+                    dependent.name, missing.name, missing.version, selected
+                ),
+            };
+        }
+        BootstrapError::from(error)
+    })?;
 
     // Phase 3: install in topological order via Item 6's full path.
     let mut installed: Vec<InstalledArtifact> = Vec::with_capacity(order.len());
     for idx in order {
-        // Nodes retain the original input order; only the install order changes.
         let spec = &specs[idx];
         let spec_str = format!("{}/{}@{}", spec.org, spec.repo, spec.tag);
         let artifact = install_from_github(&spec_str, registry_root)?;

@@ -108,3 +108,21 @@ The command checks parser, wire, formatter, macro, predicate, and host behavior.
 Allocation checks compare four source cases with the accepted source revision.
 Target compilation proves neither device execution nor device memory capacity.
 
+## Portable Reef bootstrap graph policy
+
+`chelis-reef-bootstrap-core` uses unconditional `no_std` with `alloc` and no package dependencies.
+It checks version conflicts, exact edges, and cycles before it returns dependency-first input indices.
+Each input occurrence remains separate, and dependency lookup selects the last matching occurrence.
+Traversal uses explicit heap-backed frames instead of recursive graph descent.
+
+For explicit bootstrap inputs, Reef matches typed peer requirements before graph projection.
+It retains canonical release checks, runtime checks, manifest access, artifact verification, and each occurrence's original release spec.
+The default bootstrap resolver remains in Reef.
+After default resolution, Reef sends selected package identities to the same checked core.
+This extraction does not make Reef or the compiler pipeline portable.
+
+Run `.venv/bin/python scripts/reef_bootstrap_core_oracle.py` for isolated target consumers and real host bootstrap checks.
+The [acceptance gate](docs/manual_gates.md#reef-bootstrap-core-portability) lists prerequisites, evidence, and CI owners.
+Target compilation proves neither device execution nor allocator capacity.
+
+

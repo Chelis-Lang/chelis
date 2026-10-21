@@ -1,0 +1,10 @@
+[package]
+name = "chelis-reef-bootstrap-core"
+description = "Portable checked bootstrap graph policy for Reef"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
