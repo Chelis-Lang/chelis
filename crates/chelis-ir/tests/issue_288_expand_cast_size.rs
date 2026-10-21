@@ -25,9 +25,11 @@ use chelis_ir::verify;
 use chelis_types::check_ir_program;
 
 fn lower_surf(src: &str) -> Result<chelis_ir::dag::Dag, String> {
-    let decls = chelis_surf::parser::parse_str(src).map_err(|e| format!("parse: {e:?}"))?;
+    let decls = chelis_surf::parser::parse_str(src, &chelis_syntax_host::NativeStack)
+        .map_err(|e| format!("parse: {e:?}"))?;
     let exprs = chelis_macros::expand_program(
-        &chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar"),
+        &chelis_surf::desugar::desugar_program(&decls, &chelis_syntax_host::NativeStack)
+            .expect("Surf fixture must desugar"),
         &chelis_macros::ExpansionOptions::default(),
     )
     .map_err(|e| format!("expand: {e:?}"))?

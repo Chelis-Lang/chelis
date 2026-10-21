@@ -359,9 +359,10 @@ mod tests {
 
     /// Render Surf source to canonical Deep, as `chelis deep` does for `.ch`.
     fn render_deep(surf: &str) -> Vec<Expr> {
-        let decls = chelis_surf::parser::parse_str(surf).expect("surf parse");
-        let deep =
-            chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar");
+        let decls = chelis_surf::parser::parse_str(surf, &chelis_syntax_host::NativeStack)
+            .expect("surf parse");
+        let deep = chelis_surf::desugar::desugar_program(&decls, &chelis_syntax_host::NativeStack)
+            .expect("Surf fixture must desugar");
         chelis_macros::expand_program(&deep, &chelis_macros::ExpansionOptions::default())
             .expect("macro expand")
             .into_exprs()
@@ -465,7 +466,8 @@ mod tests {
         // needed; the tool's verdict equals full check by construction.
         let module = chelis_deep::parse_and_stamp_file(
             "(module {} m \
-               (def {} f (fn {} (params {} (x {type: (t-prim {} f32)})) (var {} x))))",
+           (def {} f (fn {} (params {} (x {type: (t-prim {} f32)})) (var {} x))))",
+            &chelis_syntax_host::NativeStack,
         )
         .expect("deep module parse");
         let new_body = render_body("module M\ndef h(x: f32) -> f32 = x\n", "h");

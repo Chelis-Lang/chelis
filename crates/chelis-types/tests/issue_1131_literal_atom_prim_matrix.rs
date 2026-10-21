@@ -4,7 +4,8 @@ use chelis_deep::parser::parse_str;
 use chelis_types::{check_ir_program, check_typed_program};
 
 fn diagnostics(source: &str) -> Vec<String> {
-    let exprs = parse_str(source).expect("Deep fixture must parse");
+    let exprs =
+        parse_str(source, &chelis_syntax_host::NativeStack).expect("Deep fixture must parse");
     match check_ir_program(&exprs) {
         Ok(_) => Vec::new(),
         Err(result) => result
@@ -77,11 +78,13 @@ fn integer_spelled_float_suffix_is_marked_by_both_producers() {
 
     let declarations = chelis_surf::parser::parse_str(
         "def scalar() -> f32 = cast(7, f32)\n\
-         def vector() -> tensor[2, f32] = [1, 2]",
+     def vector() -> tensor[2, f32] = [1, 2]",
+        &chelis_syntax_host::NativeStack,
     )
     .expect("Surf producer fixture must parse");
     let program =
-        chelis_surf::desugar::desugar_program(&declarations).expect("Surf fixture must desugar");
+        chelis_surf::desugar::desugar_program(&declarations, &chelis_syntax_host::NativeStack)
+            .expect("Surf fixture must desugar");
     let errors = match check_typed_program(&program) {
         Ok(_) => Vec::new(),
         Err(result) => result.errors,
@@ -94,6 +97,10 @@ fn integer_spelled_float_suffix_is_marked_by_both_producers() {
 
 #[test]
 fn unknown_literal_origin_is_rejected_at_annotation_admission() {
-    let error = parse_str("(lit {type: (t-prim {} f32), literal_source: float} 1)").unwrap_err();
+    let error = parse_str(
+        "(lit {type: (t-prim {} f32), literal_source: float} 1)",
+        &chelis_syntax_host::NativeStack,
+    )
+    .unwrap_err();
     assert!(error.to_string().contains("literal_source"));
 }

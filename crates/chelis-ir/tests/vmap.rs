@@ -984,7 +984,8 @@ const VMAP_CONST_AXIS_DEEP: &str = r#"
 "#;
 
 fn check_effects_linearity_deep(deep_src: &str) -> chelis_types::CheckedProgram {
-    let exprs = chelis_deep::parser::parse_str(deep_src).expect("deep parse");
+    let exprs = chelis_deep::parser::parse_str(deep_src, &chelis_syntax_host::NativeStack)
+        .expect("deep parse");
     let checked = check_ir_program(&exprs)
         .unwrap_or_else(|r| panic!("deep program must check clean: {:?}", r.errors));
     let checked = chelis_effects::check_program(&checked).expect("effects");
@@ -992,9 +993,11 @@ fn check_effects_linearity_deep(deep_src: &str) -> chelis_types::CheckedProgram 
 }
 
 fn lower_surf_program(src: &str) -> Result<Dag, chelis_ir::lower::LowerDiagnostic> {
-    let decls = chelis_surf::parser::parse_str(src).expect("surf parse");
+    let decls =
+        chelis_surf::parser::parse_str(src, &chelis_syntax_host::NativeStack).expect("surf parse");
     let exprs = chelis_macros::expand_program(
-        &chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar"),
+        &chelis_surf::desugar::desugar_program(&decls, &chelis_syntax_host::NativeStack)
+            .expect("Surf fixture must desugar"),
         &chelis_macros::ExpansionOptions::default(),
     )
     .expect("expand")
@@ -1052,7 +1055,9 @@ fn lower_surf_program(src: &str) -> Result<Dag, chelis_ir::lower::LowerDiagnosti
 /// program can produce -- and PR #1602 records it as residual scope.
 #[test]
 fn issue524_runtime_vmap_axis_is_rejected_at_check_time() {
-    let exprs = chelis_deep::parser::parse_str(VMAP_RUNTIME_AXIS_DEEP).expect("deep parse");
+    let exprs =
+        chelis_deep::parser::parse_str(VMAP_RUNTIME_AXIS_DEEP, &chelis_syntax_host::NativeStack)
+            .expect("deep parse");
     let Err(result) = check_ir_program(&exprs) else {
         panic!("a runtime vmap axis must REJECT at check, not check clean and default to 0");
     };
@@ -1237,8 +1242,10 @@ fn the_vmap_node_map_names_every_input_nodes_batched_id() {
 fn vmap_grad_records_the_batched_forward_activation_as_a_shape_dep() {
     let source = "def h(x: tensor[2, f32]) -> tensor[f32] = sum(mul(x, x), 0i32)\n\
                   def main() = vmap(grad(h))(to_tensor([[1.0f32, 2.0f32], [3.0f32, 4.0f32]]))\n";
-    let decls = chelis_surf::parser::parse_str(source).expect("surf parse");
-    let exprs = chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar");
+    let decls = chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+        .expect("surf parse");
+    let exprs = chelis_surf::desugar::desugar_program(&decls, &chelis_syntax_host::NativeStack)
+        .expect("Surf fixture must desugar");
     let checked = check_ir_program(&exprs).expect("check");
     let checked = chelis_effects::check_program(&checked).expect("effects");
     let checked = chelis_types::check_linearity(&checked).expect("linearity");

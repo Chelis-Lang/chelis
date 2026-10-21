@@ -60,6 +60,26 @@ def test_inventory() -> dict:
     }
 
 
+def compiler_error(target: str, source: str) -> str:
+    return json.dumps({
+        "reason": "compiler-message",
+        "target": {"src_path": target},
+        "message": {
+            "level": "error",
+            "message": "unresolved import `retired::Thing`",
+            "code": {"code": "E0432"},
+            "spans": [{
+                "file_name": "src/lib.rs",
+                "line_start": 1,
+                "is_primary": True,
+                "text": [{"text": source}],
+                "label": "no Thing in the root",
+            }],
+            "children": [],
+        },
+    })
+
+
 class OracleFailureTests(unittest.TestCase):
     def test_failed_real_command_fails_acceptance(self) -> None:
         with self.assertRaisesRegex(support.OracleFailure, "exit 23"):
@@ -129,6 +149,21 @@ class OracleFailureTests(unittest.TestCase):
         })
         with self.assertRaisesRegex(support.OracleFailure, "did not pass"):
             support._check_test_results(result, {"core::core$tests::mandatory"})
+
+    def test_dependency_error_cannot_satisfy_a_negative_fixture(self) -> None:
+        source = "use retired::Thing;"
+        diagnostic = compiler_error("/dependency/src/lib.rs", source)
+        with self.assertRaisesRegex(support.OracleFailure, "no fixture-local error"):
+            support._fixture_diagnostics(diagnostic, Path("/fixture"), source)
+
+    def test_wrong_source_span_cannot_satisfy_a_negative_fixture(self) -> None:
+        diagnostic = compiler_error("/fixture/src/lib.rs", "use unrelated::Thing;")
+        with self.assertRaisesRegex(support.OracleFailure, "no fixture-local error"):
+            support._fixture_diagnostics(diagnostic, Path("/fixture"), "use retired::Thing;")
+
+    def test_invalid_compiler_json_fails_acceptance(self) -> None:
+        with self.assertRaisesRegex(support.OracleFailure, "invalid negative compile evidence"):
+            support._fixture_diagnostics("not JSON", Path("/fixture"), "use retired::Thing;")
 
 
 if __name__ == "__main__":

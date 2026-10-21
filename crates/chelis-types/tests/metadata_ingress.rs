@@ -4,11 +4,15 @@ use chelis_deep::node::Node;
 use chelis_deep::{Atom, DeepTag, Expr, Metadata, Span};
 const SPAN: Span = Span { offset: 0, len: 0 };
 fn verdicts(source: &str) -> Vec<Vec<chelis_types::errors::CheckError>> {
-    verdicts_for(&chelis_deep::parser::parse_str(source).unwrap())
+    verdicts_for(&chelis_deep::parser::parse_str(source, &chelis_syntax_host::NativeStack).unwrap())
 }
 fn verdicts_for(exprs: &[chelis_deep::Expr]) -> Vec<Vec<chelis_types::errors::CheckError>> {
     use chelis_types::*;
-    let library = chelis_deep::parser::parse_str("(def {} library_value (lit {} 1))").unwrap();
+    let library = chelis_deep::parser::parse_str(
+        "(def {} library_value (lit {} 1))",
+        &chelis_syntax_host::NativeStack,
+    )
+    .unwrap();
     let context = build_type_env_from_library(&library).unwrap();
     vec![
         check_ir_program(exprs)
@@ -42,9 +46,11 @@ fn verdicts_for(exprs: &[chelis_deep::Expr]) -> Vec<Vec<chelis_types::errors::Ch
 
 #[test]
 fn checked_effect_replacement_also_checks_metadata_before_publication() {
-    let original =
-        chelis_deep::parser::parse_str("(def {doc: \"keep\"} f (fn {} (params {}) (lit {} 1)))")
-            .unwrap();
+    let original = chelis_deep::parser::parse_str(
+        "(def {doc: \"keep\"} f (fn {} (params {}) (lit {} 1)))",
+        &chelis_syntax_host::NativeStack,
+    )
+    .unwrap();
     let checked = chelis_types::check_ir_program(&original).unwrap();
     checked
         .try_with_effect_annotations(checked.exprs().to_vec())
@@ -72,7 +78,8 @@ fn metadata_admission_precedes_inference_on_every_checker_session() {
         ("(def {} f (lit {type: unknown_type_syntax} 1))", "type"),
         ("(def {} f (grad {wrt: x} (var {} missing)))", "wrt"),
     ] {
-        let error = chelis_deep::parser::parse_str(source).unwrap_err();
+        let error =
+            chelis_deep::parser::parse_str(source, &chelis_syntax_host::NativeStack).unwrap_err();
         assert!(error.to_string().contains(key), "{error}");
     }
     // A locally misplaced, well-shaped payload has no admitted carrier: the

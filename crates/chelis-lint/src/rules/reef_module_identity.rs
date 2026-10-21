@@ -11,7 +11,7 @@
 //! loads and any workflow using it as a pre-build check got a false pass
 //! (chelis#2116).
 //!
-//! The verdict comes from [`chelis_surf::module_identity::validate_module_path`],
+//! The verdict comes from [`chelis_syntax_host::module_identity::validate_module_path`],
 //! the same function the loader calls, so the two cannot drift. What the rule
 //! adds is only the package context the loader gets from the manifest: which
 //! `module_prefix` applies, and which directories are source roots.
@@ -33,7 +33,7 @@ use crate::reef_package::{PackageLayout, read_layout};
 use crate::walker::Entry;
 use crate::{Context, LintError, PreparedRuleState, Rule, Surface, Violation};
 use chelis_surf::ast::Decl;
-use chelis_surf::module_identity::validate_module_path;
+use chelis_syntax_host::module_identity::validate_module_path;
 use std::any::Any;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -200,7 +200,8 @@ impl Rule for ReefModuleIdentity {
         // chelis#2116 false green in miniature, since `chelis fmt --check`
         // has no directory form and `chelis lint --check .` exited 0 on a
         // package whose source `reef build` rejected (chelis#2765).
-        let Ok(decls) = chelis_surf::parser::parse_str(source) else {
+        let Ok(decls) = chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+        else {
             return Vec::new();
         };
 

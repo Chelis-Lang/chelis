@@ -384,7 +384,11 @@ fn subexpression_context_does_not_replace_an_authored_binder_with_inferred_spell
     use chelis_ir::lower::SubexprLoweringContext;
     use chelis_types::types::Prim;
     use chelis_unord::UnordMap;
-    let parse = |source: &str| chelis_deep::parser::parse_str(source).unwrap().remove(0);
+    let parse = |source: &str| {
+        chelis_deep::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+            .unwrap()
+            .remove(0)
+    };
     let signature = |first, second| {
         parse(&format!(
             "(t-fn {{}} (t-tensor {{}} (d-var {{}} {first}) (t-prim {{}} f32)) (t-tensor {{}} (d-var {{}} {second}) (t-prim {{}} f32)) (t-tensor {{}} (d-var {{}} {first}) (t-prim {{}} f32)))"

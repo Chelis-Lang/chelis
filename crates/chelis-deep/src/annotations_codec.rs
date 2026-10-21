@@ -1,4 +1,10 @@
 //! Private Deep-text and legacy-serde codecs for typed annotation payloads.
+use alloc::{
+    borrow::ToOwned,
+    boxed::Box,
+    string::{String, ToString},
+    vec::Vec,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::annotations::*;
@@ -215,7 +221,7 @@ fn decode_value(key: MetadataKey, raw: RawExpr) -> Result<MetadataValue, Metadat
                 // for §5.9's explicit set form.
                 let decoded = match &bound {
                     RawExpr::List(members, list_span) => {
-                        let mut set = std::collections::BTreeSet::new();
+                        let mut set = alloc::collections::BTreeSet::new();
                         if members.is_empty() {
                             return Err(invalid(spelling, *list_span, "a non-empty dtype set"));
                         }

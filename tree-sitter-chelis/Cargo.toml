@@ -16,6 +16,7 @@ tree-sitter = "0.26.8"
 cc = "1"
 
 [dev-dependencies]
+chelis-syntax-host.workspace = true
 chelis-surf = { path = "../crates/chelis-surf" }
 ryu.workspace = true
 tempfile = "3"

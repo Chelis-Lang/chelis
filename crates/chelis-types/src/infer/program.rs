@@ -2026,7 +2026,8 @@ mod component_level_scope_tests {
     fn mutual_defs() -> Vec<deep::Expr> {
         chelis_deep::parser::parse_str(
             "(def {} left (fn {} (params {} x) (app {} (var {} right) (var {} x))))
-             (def {} right (fn {} (params {} x) (app {} (var {} left) (var {} x))))",
+         (def {} right (fn {} (params {} x) (app {} (var {} left) (var {} x))))",
+            &chelis_syntax_host::NativeStack,
         )
         .expect("mutual fixture parses")
     }
@@ -2195,8 +2196,11 @@ mod component_level_scope_tests {
         ));
 
         let follow_up = infer_program(
-            &chelis_deep::parser::parse_str("(def {} clean (fn {} (params {} x) (var {} x)))")
-                .expect("follow-up parses"),
+            &chelis_deep::parser::parse_str(
+                "(def {} clean (fn {} (params {} x) (var {} x)))",
+                &chelis_syntax_host::NativeStack,
+            )
+            .expect("follow-up parses"),
         );
         assert!(follow_up.errors.is_empty());
     }
@@ -2205,9 +2209,10 @@ mod component_level_scope_tests {
     fn primary_driver_mid_scc_cancellation_aborts_before_return() {
         let exprs = chelis_deep::parser::parse_str(
             "(defsig {} left (t-fn {} (t-prim {} i32) (t-prim {} i32)))
-             (defsig {} right (t-fn {} (t-prim {} i32) (t-prim {} i32)))
-             (def {} left (fn {} (params {} x) (app {} (var {} right) (var {} x))))
-             (def {} right (fn {} (params {} x) (app {} (var {} left) (var {} x))))",
+         (defsig {} right (t-fn {} (t-prim {} i32) (t-prim {} i32)))
+         (def {} left (fn {} (params {} x) (app {} (var {} right) (var {} x))))
+         (def {} right (fn {} (params {} x) (app {} (var {} left) (var {} x))))",
+            &chelis_syntax_host::NativeStack,
         )
         .expect("authored mutual-recursion fixture parses");
 
@@ -2236,8 +2241,11 @@ mod component_level_scope_tests {
         assert!(observation.all_temporary_bindings_removed);
 
         let follow_up = infer_program(
-            &chelis_deep::parser::parse_str("(def {} clean (fn {} (params {} x) (var {} x)))")
-                .expect("follow-up parses"),
+            &chelis_deep::parser::parse_str(
+                "(def {} clean (fn {} (params {} x) (var {} x)))",
+                &chelis_syntax_host::NativeStack,
+            )
+            .expect("follow-up parses"),
         );
         assert!(
             follow_up.errors.is_empty(),

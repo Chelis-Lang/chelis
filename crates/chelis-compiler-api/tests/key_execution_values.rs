@@ -112,10 +112,14 @@ fn printed_keys_feed_back_as_bindings() {
 
 #[test]
 fn a_key_field_of_a_data_type_decodes_only_from_a_key() {
-    let decls =
-        chelis_surf::parser::parse_str("type Boxed = | Boxed { k: key }\n").expect("surf parse");
+    let decls = chelis_surf::parser::parse_str(
+        "type Boxed = | Boxed { k: key }\n",
+        &chelis_syntax_host::NativeStack,
+    )
+    .expect("surf parse");
     let program: Vec<Expr> =
-        chelis_surf::desugar::desugar_program(&decls).expect("the fixture desugars");
+        chelis_surf::desugar::desugar_program(&decls, &chelis_syntax_host::NativeStack)
+            .expect("the fixture desugars");
     let decoded = decode_adt_value(
         &program,
         &serde_json::from_value(json!({

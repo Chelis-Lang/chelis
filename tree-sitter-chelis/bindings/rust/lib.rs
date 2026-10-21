@@ -46,7 +46,7 @@ mod tests {
     }
 
     fn rust_surf_has_error(source: &str) -> bool {
-        chelis_surf::parser::parse_str(source).is_err()
+        chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack).is_err()
     }
 
     fn assert_surf_parser_parity(source: &str, should_accept: bool) {
@@ -278,10 +278,13 @@ mod tests {
             "out = fn (v) -> (v |> f)\n",
         ] {
             assert_surf_parser_parity(source, true);
-            let formatted = chelis_surf::format::format_source(source).unwrap();
+            let formatted =
+                chelis_surf::format::format_source(source, &chelis_syntax_host::NativeStack)
+                    .unwrap();
             assert_surf_parser_parity(&formatted, true);
             assert_eq!(
-                chelis_surf::format::format_source(&formatted).unwrap(),
+                chelis_surf::format::format_source(&formatted, &chelis_syntax_host::NativeStack)
+                    .unwrap(),
                 formatted
             );
         }

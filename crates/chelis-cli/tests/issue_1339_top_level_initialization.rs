@@ -151,8 +151,10 @@ const POSITIVE_OUTPUT: &str = "base = 5\n\
                                forward_function = 5\n";
 
 fn surf_program(source: &str) -> Vec<chelis_deep::Expr> {
-    let declarations = parse_surf(source).expect("Surf fixture must parse");
-    desugar_program(&declarations).expect("Surf fixture must desugar")
+    let declarations =
+        parse_surf(source, &chelis_syntax_host::NativeStack).expect("Surf fixture must parse");
+    desugar_program(&declarations, &chelis_syntax_host::NativeStack)
+        .expect("Surf fixture must desugar")
 }
 
 fn ingress_diagnostics_for(program: &[chelis_deep::Expr]) -> (Diagnostics, Diagnostics) {
@@ -472,7 +474,8 @@ fn direct_forward_value_remains_an_unbound_variable_control() {
 
 #[test]
 fn bare_deep_carrier_rejects_identically_at_both_checker_ingresses_and_check() {
-    let program = parse_and_stamp(DEEP_INDIRECT_SOURCE).expect("bare Deep fixture must stamp");
+    let program = parse_and_stamp(DEEP_INDIRECT_SOURCE, &chelis_syntax_host::NativeStack)
+        .expect("bare Deep fixture must stamp");
     let (ir, typed) = ingress_diagnostics_for(&program);
     assert_eq!(ir, typed, "bare Deep: checker ingresses diverged");
     assert_exact_unbound(&ir, "root", "later", "bare Deep");

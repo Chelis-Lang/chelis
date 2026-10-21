@@ -20,8 +20,10 @@ use chelis_types::errors::{CheckError, CheckErrorKind};
 use chelis_types::{check_ir_program, check_typed_program};
 
 fn typecheck(source: &str) -> Vec<CheckError> {
-    let decls = parse_surf(source).expect("surf parse should succeed");
-    let deep = desugar_program(&decls).expect("Surf fixture must desugar");
+    let decls =
+        parse_surf(source, &chelis_syntax_host::NativeStack).expect("surf parse should succeed");
+    let deep = desugar_program(&decls, &chelis_syntax_host::NativeStack)
+        .expect("Surf fixture must desugar");
     match check_typed_program(&deep) {
         Ok(_) => Vec::new(),
         Err(errors) => errors.errors,
@@ -52,9 +54,13 @@ fn summary(errors: &[CheckError]) -> String {
 
 #[test]
 fn otherwise_unconsumed_expand_materializes_its_context_free_default() {
-    let decls =
-        parse_surf("t = expand(to_tensor([0.5f32]), 0, 8i64)").expect("surf parse should succeed");
-    let deep = desugar_program(&decls).expect("Surf fixture must desugar");
+    let decls = parse_surf(
+        "t = expand(to_tensor([0.5f32]), 0, 8i64)",
+        &chelis_syntax_host::NativeStack,
+    )
+    .expect("surf parse should succeed");
+    let deep = desugar_program(&decls, &chelis_syntax_host::NativeStack)
+        .expect("Surf fixture must desugar");
     let checked = check_typed_program(&deep).expect("bare expand binding should typecheck");
     let rendered = chelis_deep::printer::print_canonical(checked.annotated_exprs());
     assert!(
@@ -130,10 +136,13 @@ fn reshape_shape_read_selects_replacement_before_axis_validation_on_every_ingres
              result = reshape(expanded, [shape(&expanded, 1), 6i64])",
         ),
     ] {
-        let decls = parse_surf(source).expect("surf parse should succeed");
-        let lists = desugar_program(&decls).expect("Surf fixture must desugar");
+        let decls = parse_surf(source, &chelis_syntax_host::NativeStack)
+            .expect("surf parse should succeed");
+        let lists = desugar_program(&decls, &chelis_syntax_host::NativeStack)
+            .expect("Surf fixture must desugar");
         let canonical = chelis_deep::printer::print_canonical(&lists);
-        let nodes = parse_and_stamp_file(&canonical).expect("canonical Deep should stamp");
+        let nodes = parse_and_stamp_file(&canonical, &chelis_syntax_host::NativeStack)
+            .expect("canonical Deep should stamp");
 
         for (ingress, errors) in [
             ("list", typecheck_ir(&lists)),

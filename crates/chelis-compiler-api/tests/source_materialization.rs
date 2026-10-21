@@ -188,7 +188,7 @@ fn registered_def_expression_metadata_has_check_and_eval_admission_parity() {
 
         let nested =
             format!("(def {{{key}: (tuple {{}} (future_nested {{}} 1))}} value (lit {{}} 7))");
-        let stamped = chelis_deep::parse_and_stamp_file(&nested)
+        let stamped = chelis_deep::parse_and_stamp_file(&nested, &chelis_syntax_host::NativeStack)
             .expect("the lenient Deep parser must preserve the nested unknown form");
         let checker_errors = chelis_types::check_typed_program(&stamped)
             .expect_err("a nested unknown metadata expression must fail checking")

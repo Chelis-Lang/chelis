@@ -28,8 +28,10 @@ use chelis_surf::parser::parse_str;
 
 /// Every `__chelis_tmpN` occurrence in the printed program, counted.
 fn temp_occurrences(source: &str) -> UnordMap<String, usize> {
-    let decls = parse_str(source).expect("surf parse should succeed");
-    let deep = desugar_program(&decls).expect("Surf fixture must desugar");
+    let decls =
+        parse_str(source, &chelis_syntax_host::NativeStack).expect("surf parse should succeed");
+    let deep = desugar_program(&decls, &chelis_syntax_host::NativeStack)
+        .expect("Surf fixture must desugar");
     let printed = deep
         .iter()
         .map(|expr: &Expr| format!("{expr:?}"))

@@ -41,9 +41,11 @@ use chelis_types::types::Prim;
 /// linearity -> lower. Returns the lowered DAG, or a stage-tagged error
 /// string. Mirrors the `lower_surf` helper in `reduce_sum_lowering_adversarial`.
 fn lower_surf(src: &str) -> Result<chelis_ir::dag::Dag, String> {
-    let decls = chelis_surf::parser::parse_str(src).map_err(|e| format!("parse: {e:?}"))?;
+    let decls = chelis_surf::parser::parse_str(src, &chelis_syntax_host::NativeStack)
+        .map_err(|e| format!("parse: {e:?}"))?;
     let exprs = chelis_macros::expand_program(
-        &chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar"),
+        &chelis_surf::desugar::desugar_program(&decls, &chelis_syntax_host::NativeStack)
+            .expect("Surf fixture must desugar"),
         &chelis_macros::ExpansionOptions::default(),
     )
     .map_err(|e| format!("expand: {e:?}"))?
@@ -67,9 +69,11 @@ fn lower_surf(src: &str) -> Result<chelis_ir::dag::Dag, String> {
 /// checker-side negative-axis assertions so checker and lowering can be
 /// pinned to agree.
 fn check_surf(src: &str) -> Result<(), Vec<CheckError>> {
-    let decls = chelis_surf::parser::parse_str(src).expect("parse failed");
+    let decls = chelis_surf::parser::parse_str(src, &chelis_syntax_host::NativeStack)
+        .expect("parse failed");
     let exprs = chelis_macros::expand_program(
-        &chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar"),
+        &chelis_surf::desugar::desugar_program(&decls, &chelis_syntax_host::NativeStack)
+            .expect("Surf fixture must desugar"),
         &chelis_macros::ExpansionOptions::default(),
     )
     .expect("expand failed")
@@ -253,7 +257,7 @@ fn lowering_rejects_out_of_range_axis_without_panicking() {
   (var {type: (t-tensor {} (d-lit {} 2) (d-lit {} 3) (t-prim {} f32))} x)
   (lit {type: (t-prim {} i32)} 9))
 "#;
-    let expr = chelis_deep::parser::parse_str(deep_src)
+    let expr = chelis_deep::parser::parse_str(deep_src, &chelis_syntax_host::NativeStack)
         .expect("parse failed")
         .into_iter()
         .next()

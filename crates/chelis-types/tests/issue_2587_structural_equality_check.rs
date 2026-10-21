@@ -18,9 +18,12 @@ use chelis_types::{check_linearity, check_typed_program, infer_ir_program};
 fn deep(sources: &[&str]) -> Vec<chelis_deep::Expr> {
     let mut decls = Vec::new();
     for source in sources {
-        decls.extend(parse_str(source).unwrap_or_else(|error| panic!("{source}\n{error:?}")));
+        decls.extend(
+            parse_str(source, &chelis_syntax_host::NativeStack)
+                .unwrap_or_else(|error| panic!("{source}\n{error:?}")),
+        );
     }
-    let deep = desugar_program(&decls).expect("fixture desugars");
+    let deep = desugar_program(&decls, &chelis_syntax_host::NativeStack).expect("fixture desugars");
     chelis_macros::expand_program(&deep, &chelis_macros::ExpansionOptions::default())
         .expect("macro expansion")
         .into_exprs()

@@ -11,21 +11,26 @@ use chelis_types::check_ir_program;
 use chelis_types::types::Prim;
 
 fn lower(source: &str) -> chelis_ir::Dag {
-    let decls = parse_str(source).expect("Surf parse");
-    let checked = check_ir_program(&desugar_program(&decls).expect("Surf fixture must desugar"))
-        .unwrap_or_else(|report| {
-            panic!("type check failed: {:?}", report.errors);
-        });
+    let decls = parse_str(source, &chelis_syntax_host::NativeStack).expect("Surf parse");
+    let checked = check_ir_program(
+        &desugar_program(&decls, &chelis_syntax_host::NativeStack)
+            .expect("Surf fixture must desugar"),
+    )
+    .unwrap_or_else(|report| {
+        panic!("type check failed: {:?}", report.errors);
+    });
     chelis_ir::host::lower_named_tensor_entry_dag(&checked, "f").expect("named tensor entry lowers")
 }
 
 fn checked(source: &str) -> chelis_types::CheckedProgram {
-    let decls = parse_str(source).expect("Surf parse");
-    check_ir_program(&desugar_program(&decls).expect("Surf fixture must desugar")).unwrap_or_else(
-        |report| {
-            panic!("type check failed: {:?}", report.errors);
-        },
+    let decls = parse_str(source, &chelis_syntax_host::NativeStack).expect("Surf parse");
+    check_ir_program(
+        &desugar_program(&decls, &chelis_syntax_host::NativeStack)
+            .expect("Surf fixture must desugar"),
     )
+    .unwrap_or_else(|report| {
+        panic!("type check failed: {:?}", report.errors);
+    })
 }
 
 fn local_claims(dag: &chelis_ir::Dag) -> Vec<(usize, u64, String, String, i32)> {

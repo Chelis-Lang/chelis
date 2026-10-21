@@ -15,8 +15,9 @@ pub(super) struct SemanticSurfProgram {
 
 impl SemanticSurfProgram {
     pub(super) fn new(authored: &[Decl]) -> Result<Self, String> {
-        let deep = chelis_surf::desugar::desugar_program(authored)
-            .map_err(|error| format!("semantic Surf desugaring failed: {error}"))?;
+        let deep =
+            chelis_surf::desugar::desugar_program(authored, &chelis_syntax_host::NativeStack)
+                .map_err(|error| format!("semantic Surf desugaring failed: {error}"))?;
         let semantic = chelis_surf::resugar::resugar_program_for_analysis(&deep)
             .map_err(|error| format!("semantic Surf reconstruction failed: {error}"))?;
         Ok(Self {
@@ -90,7 +91,8 @@ pub(super) fn surf_literal_value(expr: &Expr) -> Option<SmtExpr> {
     ) {
         return None;
     }
-    let canonical = chelis_surf::desugar::desugar_expr_only(expr).ok()?;
+    let canonical =
+        chelis_surf::desugar::desugar_expr_only(expr, &chelis_syntax_host::NativeStack).ok()?;
     deep_literal_value(&canonical)
 }
 
@@ -168,7 +170,11 @@ mod tests {
     use chelis_surf::{ast::Decl, parser::parse_str};
 
     fn expression(source: &str) -> chelis_surf::ast::Expr {
-        let mut declarations = parse_str(&format!("value = {source}\n")).unwrap();
+        let mut declarations = parse_str(
+            &format!("value = {source}\n"),
+            &chelis_syntax_host::NativeStack,
+        )
+        .unwrap();
         let Decl::LetDef { value, .. } = declarations.remove(0) else {
             panic!("literal fixture is a value binding");
         };
@@ -194,7 +200,9 @@ mod tests {
                 Some(SmtExpr::IntLit(expected)),
                 "{source}"
             );
-            let deep = chelis_surf::desugar::desugar_expr_only(&expr).unwrap();
+            let deep =
+                chelis_surf::desugar::desugar_expr_only(&expr, &chelis_syntax_host::NativeStack)
+                    .unwrap();
             assert_eq!(
                 deep_literal_value(&deep),
                 Some(SmtExpr::IntLit(expected)),
@@ -221,7 +229,9 @@ mod tests {
                 Some(SmtExpr::RealLit(expected)),
                 "{source}"
             );
-            let deep = chelis_surf::desugar::desugar_expr_only(&expr).unwrap();
+            let deep =
+                chelis_surf::desugar::desugar_expr_only(&expr, &chelis_syntax_host::NativeStack)
+                    .unwrap();
             assert_eq!(
                 deep_literal_value(&deep),
                 Some(SmtExpr::RealLit(expected)),
@@ -255,8 +265,11 @@ mod tests {
             ("i32", i32::MIN as i64, i32::MAX as i64),
             ("i64", i64::MIN, i64::MAX),
         ] {
-            let mut declarations =
-                parse_str(&format!("@property p forall(x: {dtype}): true\n")).unwrap();
+            let mut declarations = parse_str(
+                &format!("@property p forall(x: {dtype}): true\n"),
+                &chelis_syntax_host::NativeStack,
+            )
+            .unwrap();
             let Decl::Property { params, .. } = declarations.remove(0) else {
                 panic!()
             };
@@ -276,7 +289,11 @@ mod tests {
                 ]
             );
         }
-        let mut declarations = parse_str("@property p forall(x: f32, b: bool): true\n").unwrap();
+        let mut declarations = parse_str(
+            "@property p forall(x: f32, b: bool): true\n",
+            &chelis_syntax_host::NativeStack,
+        )
+        .unwrap();
         let Decl::Property { params, .. } = declarations.remove(0) else {
             panic!()
         };

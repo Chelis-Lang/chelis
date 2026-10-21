@@ -19,8 +19,11 @@ fn grows_linearly(small: u64, large: u64) -> bool {
 }
 
 fn checked(source: &str) -> CheckedProgram {
-    let declarations = chelis_surf::parser::parse_str(source).expect("the probe parses");
-    let deep = chelis_surf::desugar::desugar_program(&declarations).expect("the probe desugars");
+    let declarations = chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+        .expect("the probe parses");
+    let deep =
+        chelis_surf::desugar::desugar_program(&declarations, &chelis_syntax_host::NativeStack)
+            .expect("the probe desugars");
     let expanded = chelis_macros::expand_program(
         &deep,
         &chelis_macros::ExpansionOptions {

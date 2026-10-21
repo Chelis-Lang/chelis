@@ -17,8 +17,10 @@ use chelis_types::{check_linearity, check_typed_program};
 
 /// Type errors, then linearity errors, of a Surf program.
 fn check_errors(source: &str) -> Vec<CheckError> {
-    let decls = parse_str(source).expect("surf parse should succeed");
-    let deep = desugar_program(&decls).expect("Surf fixture must desugar");
+    let decls =
+        parse_str(source, &chelis_syntax_host::NativeStack).expect("surf parse should succeed");
+    let deep = desugar_program(&decls, &chelis_syntax_host::NativeStack)
+        .expect("Surf fixture must desugar");
     match check_typed_program(&deep) {
         Ok(checked) => match check_linearity(&checked) {
             Ok(_) => Vec::new(),

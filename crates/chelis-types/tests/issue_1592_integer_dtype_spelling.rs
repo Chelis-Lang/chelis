@@ -52,7 +52,7 @@ fn language_and_interchange_integer_names_are_distinct() {
 fn retired_surf_names_reject_at_parser_ingress_with_the_versioned_migration_command() {
     for retired in ["int8", "int16", "int32", "int64"] {
         let source = format!("module P.M\nexport (f)\ndef f(x: {retired}) -> {retired} = x\n");
-        let message = parse_str(&source)
+        let message = parse_str(&source, &chelis_syntax_host::NativeStack)
             .expect_err("canonical Surf parser rejects retired dtype")
             .to_string();
         assert!(
@@ -75,7 +75,8 @@ fn retired_deep_primitive_and_type_variable_names_both_reject() {
              (var {{}} x))))\n"
         );
         let error =
-            chelis_deep::parser::parse_and_stamp_file(&source).expect_err("Deep ingress rejects");
+            chelis_deep::parser::parse_and_stamp_file(&source, &chelis_syntax_host::NativeStack)
+                .expect_err("Deep ingress rejects");
         let message = error.to_string();
         assert!(
             message.contains("int64") && message.contains(command),
@@ -90,7 +91,9 @@ fn canonical_deep_integer_primitive_checks_clean() {
                   (defsig {} f (t-fn {} (t-prim {} i64) (t-prim {} i64)))\n  \
                   (def {} f (fn {} (params {} (x {type: (t-prim {} i64)})) \
                   (var {} x))))\n";
-    let program = chelis_deep::parser::parse_and_stamp_file(source).expect("Deep parses");
+    let program =
+        chelis_deep::parser::parse_and_stamp_file(source, &chelis_syntax_host::NativeStack)
+            .expect("Deep parses");
     assert!(
         error_messages(&program).is_empty(),
         "canonical Deep must check clean"

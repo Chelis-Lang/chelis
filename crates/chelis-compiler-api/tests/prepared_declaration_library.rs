@@ -5,11 +5,18 @@ use chelis_compiler_api::{build_declaration_context, compiler};
 
 #[test]
 fn prepared_library_probes_agree_with_monolithic_evaluation() {
-    let library = chelis_surf::parser::parse_str("def twice(x: i64) -> i64 = x + x\n").unwrap();
+    let library = chelis_surf::parser::parse_str(
+        "def twice(x: i64) -> i64 = x + x\n",
+        &chelis_syntax_host::NativeStack,
+    )
+    .unwrap();
     let context = build_declaration_context(&library).unwrap();
     for value in [0, 7, -3, 9_007_199_254_740_993i64] {
-        let probe =
-            chelis_surf::parser::parse_str(&format!("answer = twice({value}i64)\n")).unwrap();
+        let probe = chelis_surf::parser::parse_str(
+            &format!("answer = twice({value}i64)\n"),
+            &chelis_syntax_host::NativeStack,
+        )
+        .unwrap();
         let selected = ["answer".to_string()];
         let result = compiler::eval_decls_selected_with_library(
             &context,
@@ -30,15 +37,23 @@ fn prepared_library_probes_agree_with_monolithic_evaluation() {
 
 #[test]
 fn prepared_library_probes_reject_wrong_arguments_and_recover() {
-    let library = chelis_surf::parser::parse_str("def twice(x: i64) -> i64 = x + x\n").unwrap();
+    let library = chelis_surf::parser::parse_str(
+        "def twice(x: i64) -> i64 = x + x\n",
+        &chelis_syntax_host::NativeStack,
+    )
+    .unwrap();
     let context = build_declaration_context(&library).unwrap();
     let selected = ["answer".to_string()];
-    let bad = chelis_surf::parser::parse_str("answer = twice(true)\n").unwrap();
+    let bad =
+        chelis_surf::parser::parse_str("answer = twice(true)\n", &chelis_syntax_host::NativeStack)
+            .unwrap();
     assert!(
         compiler::eval_decls_selected_with_library(&context, &bad, BTreeMap::new(), &selected)
             .is_err()
     );
-    let good = chelis_surf::parser::parse_str("answer = twice(7i64)\n").unwrap();
+    let good =
+        chelis_surf::parser::parse_str("answer = twice(7i64)\n", &chelis_syntax_host::NativeStack)
+            .unwrap();
     let result =
         compiler::eval_decls_selected_with_library(&context, &good, BTreeMap::new(), &selected)
             .unwrap();
@@ -47,15 +62,14 @@ fn prepared_library_probes_reject_wrong_arguments_and_recover() {
 
 #[test]
 fn prepared_library_keeps_globals_strings_and_tensor_bindings() {
-    let library = chelis_surf::parser::parse_str(
-        "offset = 3i64\ndef label(x: string) -> string = x\ndef shift(x: i64) -> i64 = x + offset\n",
-    ).unwrap();
+    let library = chelis_surf::parser::parse_str("offset = 3i64\ndef label(x: string) -> string = x\ndef shift(x: i64) -> i64 = x + offset\n",&chelis_syntax_host::NativeStack).unwrap();
     let context = build_declaration_context(&library).unwrap();
     for source in [
         "answer = (label(\"sample\"), shift(7i64))\n",
         "def answer(input: tensor[2, f32]) -> tensor[2, f32] = add(input, input)\n",
     ] {
-        let probe = chelis_surf::parser::parse_str(source).unwrap();
+        let probe =
+            chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack).unwrap();
         let selected = ["answer".to_string()];
         let bindings = if source.starts_with("def answer") {
             BTreeMap::from([(

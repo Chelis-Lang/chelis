@@ -1160,7 +1160,8 @@ fn s3_oracle_lowering_then_optimization_passes() {
         out
     }
 
-    let exprs = chelis_deep::parser::parse_str(source).expect("deep parse");
+    let exprs = chelis_deep::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+        .expect("deep parse");
     let input_spans = collect_input_spans(&exprs);
     assert!(
         input_spans.len() >= 7,

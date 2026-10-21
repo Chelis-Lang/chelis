@@ -15,17 +15,17 @@ name = "pipe_sugar_contract"
 required-features = ["pre-020-pipe-migration"]
 
 [dependencies]
-stacker.workspace = true
+chelis-stack-services.workspace = true
 chelis-unord.workspace = true
 chelis-deep.workspace = true
 chelis-pred.workspace = true
 chelis-vocab.workspace = true
-serde.workspace = true
-thiserror.workspace = true
-miette.workspace = true
-ryu.workspace = true
+serde = { version = "1", default-features = false, features = ["derive", "alloc", "rc"] }
+thiserror = { version = "2", default-features = false }
+ryu = { version = "1", default-features = false }
 
 [dev-dependencies]
+chelis-syntax-host.workspace = true
 chelis-macros.workspace = true
 proptest = "1"
 serde_json = "1"

@@ -27,6 +27,7 @@ chelis-std-bundle.workspace = true
 chelisup = { path = "../chelisup" }
 chelis-macros.workspace = true
 chelis-surf = { workspace = true, features = ["pre-020-pipe-migration"] }
+chelis-syntax-host.workspace = true
 chelis-types = { path = "../chelis-types" }
 chelis-effects.workspace = true
 chelis-ir = { path = "../chelis-ir" }

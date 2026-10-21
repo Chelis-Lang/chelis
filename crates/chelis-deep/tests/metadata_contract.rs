@@ -116,9 +116,11 @@ fn metadata_value_span(expr: &chelis_deep::RawExpr, key: &str) -> Option<Span> {
 #[test]
 fn every_declared_key_has_positive_and_negative_shape_coverage() {
     for (key, source) in CASES {
-        parse_raw_str(source).unwrap_or_else(|e| panic!("raw {key}: {e}"));
-        parse_str(source).unwrap_or_else(|e| panic!("stamped {key}: {e}"));
-        let raw = parse_raw_str(source).unwrap();
+        parse_raw_str(source, &chelis_syntax_host::NativeStack)
+            .unwrap_or_else(|e| panic!("raw {key}: {e}"));
+        parse_str(source, &chelis_syntax_host::NativeStack)
+            .unwrap_or_else(|e| panic!("stamped {key}: {e}"));
+        let raw = parse_raw_str(source, &chelis_syntax_host::NativeStack).unwrap();
         let value = raw
             .iter()
             .find_map(|expr| metadata_value_span(expr, key))
@@ -128,7 +130,9 @@ fn every_declared_key_has_positive_and_negative_shape_coverage() {
             &source[..value.offset],
             &source[value.end()..]
         );
-        let error = parse_raw_str(&bad).expect_err(key).to_string();
+        let error = parse_raw_str(&bad, &chelis_syntax_host::NativeStack)
+            .expect_err(key)
+            .to_string();
         assert!(error.contains(key), "{key}: {error}");
     }
 }
@@ -137,12 +141,16 @@ fn every_declared_key_has_positive_and_negative_shape_coverage() {
 fn issue_1478_paths_fail_closed() {
     for value in ["1", "(lit {} 1)", "\"Totally.Different\""] {
         let source = format!("(module {{surf_path: {value}}} m.path)");
-        let error = chelis_deep::parse_and_stamp_file(&source)
+        let error = chelis_deep::parse_and_stamp_file(&source, &chelis_syntax_host::NativeStack)
             .unwrap_err()
             .to_string();
         assert!(error.contains("surf_path"), "{error}");
     }
-    chelis_deep::parse_and_stamp_file("(module {surf_path: \"M.Path\"} m.path)").unwrap();
+    chelis_deep::parse_and_stamp_file(
+        "(module {surf_path: \"M.Path\"} m.path)",
+        &chelis_syntax_host::NativeStack,
+    )
+    .unwrap();
 }
 
 #[test]
@@ -158,7 +166,7 @@ fn metadata_expression_roles_reject_bare_names_with_remediation() {
         } else {
             format!("(def {{{key}: unwrapped}} f (lit {{}} 1))")
         };
-        let error = chelis_deep::parse_and_stamp_file(&source)
+        let error = chelis_deep::parse_and_stamp_file(&source, &chelis_syntax_host::NativeStack)
             .unwrap_err()
             .to_string();
         assert!(
@@ -169,7 +177,11 @@ fn metadata_expression_roles_reject_bare_names_with_remediation() {
         );
     }
     for value in ["(var {} x)", "(tuple {} (var {} x) (var {} y))"] {
-        parse_str(&format!("(grad {{wrt: {value}}} (var {{}} f))")).unwrap();
+        parse_str(
+            &format!("(grad {{wrt: {value}}} (var {{}} f))"),
+            &chelis_syntax_host::NativeStack,
+        )
+        .unwrap();
     }
     for value in [
         "(tuple {})",
@@ -177,19 +189,29 @@ fn metadata_expression_roles_reject_bare_names_with_remediation() {
         "(tuple {} x y)",
         "(lit {} 1)",
     ] {
-        assert!(parse_str(&format!("(grad {{wrt: {value}}} (var {{}} f))")).is_err());
+        assert!(
+            parse_str(
+                &format!("(grad {{wrt: {value}}} (var {{}} f))"),
+                &chelis_syntax_host::NativeStack
+            )
+            .is_err()
+        );
     }
 }
 
 #[test]
 fn data_and_provenance_are_not_metadata_or_expression_roles() {
-    parse_str(
-        "(defsig {dtype_bounds: {type: float, span: int, surf_future: numeric}} f (type span surf_future) (t-var {} type))",
-    )
+    parse_str("(defsig {dtype_bounds: {type: float, span: int, surf_future: numeric}} f (type span surf_future) (t-var {} type))",&chelis_syntax_host::NativeStack)
     .unwrap();
     let source = "(var {source: (macro_name {surf_future: 1, span: 2} bare_name), custom: {nested: (lit {span: \"id\"} 1)}, span_future: (a b)} x)";
-    parse_str(source).unwrap();
-    assert!(parse_str("(var {custom: {nested: (lit {span: 1} 1)}} x)").is_ok());
+    parse_str(source, &chelis_syntax_host::NativeStack).unwrap();
+    assert!(
+        parse_str(
+            "(var {custom: {nested: (lit {span: 1} 1)}} x)",
+            &chelis_syntax_host::NativeStack
+        )
+        .is_ok()
+    );
 }
 
 #[test]
@@ -218,7 +240,10 @@ fn placements_and_singleton_keys_are_validated() {
         "(defdim {surf_dim_group_size: 2} n)",
         "(defdim {surf_dim_group_size: 2} n) (defdim {surf_dim_group_size: 1} m)",
     ] {
-        assert!(parse_str(source).is_err(), "{source}");
+        assert!(
+            parse_str(source, &chelis_syntax_host::NativeStack).is_err(),
+            "{source}"
+        );
     }
 }
 
@@ -254,7 +279,9 @@ fn legacy_programmatic_carriers_cannot_hide_malformed_metadata() {
         "(future {property_seed: (lit {span: 1} 2)} (var {} x))",
         "(var {span: \"ok\", span: 2} x)",
     ] {
-        let error = parse_str(source).unwrap_err().to_string();
+        let error = parse_str(source, &chelis_syntax_host::NativeStack)
+            .unwrap_err()
+            .to_string();
         assert!(
             error.contains("span") || error.contains("property_seed"),
             "{source}: {error}"
@@ -264,13 +291,19 @@ fn legacy_programmatic_carriers_cannot_hide_malformed_metadata() {
 
 #[test]
 fn retired_pipe_metadata_is_rejected() {
-    assert!(parse_str("(fn {surf_pipe_stage: \"call-first\"} (params {} x) (var {} x))").is_err());
+    assert!(
+        parse_str(
+            "(fn {surf_pipe_stage: \"call-first\"} (params {} x) (var {} x))",
+            &chelis_syntax_host::NativeStack
+        )
+        .is_err()
+    );
 }
 
 #[test]
 fn each_registered_key_rejects_duplicates_at_the_second_value() {
     for (key, source) in CASES {
-        let raw = parse_raw_str(source).unwrap();
+        let raw = parse_raw_str(source, &chelis_syntax_host::NativeStack).unwrap();
         let span = raw
             .iter()
             .find_map(|v| metadata_value_span(v, key))
@@ -281,7 +314,7 @@ fn each_registered_key_rejects_duplicates_at_the_second_value() {
             &source[..span.end()],
             &source[span.end()..]
         );
-        let error = parse_raw_str(&bad).unwrap_err();
+        let error = parse_raw_str(&bad, &chelis_syntax_host::NativeStack).unwrap_err();
         assert!(error.to_string().contains(key), "{error}");
         let chelis_deep::parser::ParseError::Metadata(error) = error else {
             panic!("{error}");
@@ -305,7 +338,10 @@ fn structured_shapes_reject_wrong_members_and_closed_enum_values() {
         "(defsig {dtype_bounds: {p: int, p: float}} f (p) (t-var {} p))",
         "(defsig {dtype_bounds: {p: {nested: float}}} f (p) (t-var {} p))",
     ] {
-        assert!(parse_str(source).is_err(), "{source}");
+        assert!(
+            parse_str(source, &chelis_syntax_host::NativeStack).is_err(),
+            "{source}"
+        );
     }
 }
 
@@ -328,7 +364,7 @@ fn programmatic_type_metadata_obeys_recursive_type_roles() {
 #[test]
 fn property_metadata_has_its_required_fields_and_matching_binders() {
     let valid = "(def {chelis_role: \"property\", property_source_kind: \"user\", property_quantifiers: (params {} (x {type: (t-prim {} f32)})), property_preconditions: (tuple {})} p (fn {} (params {} (x {type: (t-prim {} f32)})) true))";
-    parse_str(valid).unwrap();
+    parse_str(valid, &chelis_syntax_host::NativeStack).unwrap();
     for bad in [
         valid.replacen("property_source_kind: \"user\", ", "", 1),
         valid.replacen(
@@ -338,23 +374,39 @@ fn property_metadata_has_its_required_fields_and_matching_binders() {
         ),
         valid.replacen("f32", "i32", 1),
     ] {
-        assert!(parse_str(&bad).is_err(), "{bad}");
+        assert!(
+            parse_str(&bad, &chelis_syntax_host::NativeStack).is_err(),
+            "{bad}"
+        );
     }
 }
 
 #[test]
 fn declaration_roles_and_property_binder_spellings_follow_the_contract() {
-    parse_str("(defsig {chelis_role: \"producer_signature\"} f (t-prim {} f32))").unwrap();
+    parse_str(
+        "(defsig {chelis_role: \"producer_signature\"} f (t-prim {} f32))",
+        &chelis_syntax_host::NativeStack,
+    )
+    .unwrap();
     for source in [
         "(var {chelis_role: \"producer_signature\"} f)",
         "(defsig {chelis_role: \"property\"} f (t-prim {} f32))",
     ] {
-        assert!(parse_str(source).is_err(), "{source}");
+        assert!(
+            parse_str(source, &chelis_syntax_host::NativeStack).is_err(),
+            "{source}"
+        );
     }
     let source = "(def {chelis_role: \"property\", property_source_kind: \"user\", property_quantifiers: (params {} ^{:type (t-prim {} f32)} x), property_preconditions: (tuple {})} p (fn {} (params {} (x {type: (t-prim {} f32), doc: \"binder\"})) true))";
-    parse_raw_str(source).unwrap();
-    parse_str(source).unwrap();
-    assert!(parse_str(&source.replacen("f32", "i32", 1)).is_err());
+    parse_raw_str(source, &chelis_syntax_host::NativeStack).unwrap();
+    parse_str(source, &chelis_syntax_host::NativeStack).unwrap();
+    assert!(
+        parse_str(
+            &source.replacen("f32", "i32", 1),
+            &chelis_syntax_host::NativeStack
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -373,7 +425,7 @@ fn each_registered_key_rejects_invalid_serialized_replacement() {
         node.children_slice().iter().find_map(|v| find(v, key))
     }
     for (key, source) in CASES {
-        let parsed = parse_str(source).unwrap();
+        let parsed = parse_str(source, &chelis_syntax_host::NativeStack).unwrap();
         let node = parsed.iter().find_map(|v| find(v, key)).expect(key).clone();
         let before = node.clone();
         let mut wire = serde_json::to_value(node.meta()).unwrap();
@@ -430,10 +482,18 @@ fn resource_effect_metadata_requires_string_devices_at_every_ingress() {
             let source =
                 format!("({owner} {{{key}: (effects {{}} (resource {{}} {device}))}} {children})");
             let valid = device == "\"gpu:0\"";
-            assert_eq!(parse_raw_str(&source).is_ok(), valid, "raw: {source}");
-            assert_eq!(parse_str(&source).is_ok(), valid, "stamped: {source}");
+            assert_eq!(
+                parse_raw_str(&source, &chelis_syntax_host::NativeStack).is_ok(),
+                valid,
+                "raw: {source}"
+            );
+            assert_eq!(
+                parse_str(&source, &chelis_syntax_host::NativeStack).is_ok(),
+                valid,
+                "stamped: {source}"
+            );
             if valid {
-                let parsed = parse_str(&source).unwrap();
+                let parsed = parse_str(&source, &chelis_syntax_host::NativeStack).unwrap();
                 let wire = serde_json::to_value(&parsed).unwrap();
                 assert_eq!(serde_json::from_value::<Vec<Expr>>(wire).unwrap(), parsed);
             }
@@ -486,10 +546,15 @@ fn metadata_expressions_follow_runtime_roles_through_helpers() {
         "(record {} T (kv {} x (app {} (var {} missing))))",
         "(app {} (var {} missing))",
     ] {
-        let valid = parse_str(payload).unwrap().remove(0);
+        let valid = parse_str(payload, &chelis_syntax_host::NativeStack)
+            .unwrap()
+            .remove(0);
         assert!(RuntimeExpression::try_new(valid).is_ok());
         let invalid = payload.replace("(var {} missing)", "missing");
         let source = format!("(def {{property_seed: {invalid}}} f 1)");
-        assert!(parse_str(&source).is_err(), "{source}");
+        assert!(
+            parse_str(&source, &chelis_syntax_host::NativeStack).is_err(),
+            "{source}"
+        );
     }
 }

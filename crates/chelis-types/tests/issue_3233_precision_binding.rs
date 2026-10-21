@@ -3,9 +3,11 @@
 use chelis_types::{check_ir_program, check_typed_program};
 
 fn diagnostics(source: &str) -> Vec<String> {
-    let surf = chelis_surf::parser::parse_str(source).expect("Surf parse");
+    let surf = chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+        .expect("Surf parse");
     let deep = chelis_macros::expand_program(
-        &chelis_surf::desugar::desugar_program(&surf).expect("Surf desugar"),
+        &chelis_surf::desugar::desugar_program(&surf, &chelis_syntax_host::NativeStack)
+            .expect("Surf desugar"),
         &chelis_macros::ExpansionOptions::default(),
     )
     .expect("expand")

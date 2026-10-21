@@ -30,8 +30,10 @@ use chelis_types::check_typed_program;
 
 /// Parse, desugar and expand macros, as `chelis deep` does.
 fn front_end(source: &str) -> Result<Vec<Expr>, String> {
-    let decls = parse_str(source).unwrap_or_else(|error| panic!("parse: {error}\n{source}"));
-    let desugared = desugar_program(&decls).map_err(|error| error.to_string())?;
+    let decls = parse_str(source, &chelis_syntax_host::NativeStack)
+        .unwrap_or_else(|error| panic!("parse: {error}\n{source}"));
+    let desugared = desugar_program(&decls, &chelis_syntax_host::NativeStack)
+        .map_err(|error| error.to_string())?;
     chelis_macros::expand_program(&desugared, &chelis_macros::ExpansionOptions::default())
         .map(|expanded| expanded.into_exprs())
         .map_err(|error| error.to_string())
@@ -86,7 +88,8 @@ fn root_type(source: &str, name: &str) -> String {
 }
 
 fn deep_file(source: &str) -> Vec<Expr> {
-    parse_and_stamp_file(source).unwrap_or_else(|error| panic!("Deep: {error:?}\n{source}"))
+    parse_and_stamp_file(source, &chelis_syntax_host::NativeStack)
+        .unwrap_or_else(|error| panic!("Deep: {error:?}\n{source}"))
 }
 
 fn deep_rejection(source: &str) -> Option<String> {

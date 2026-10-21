@@ -1,6 +1,11 @@
 use crate::ast::*;
 use crate::lexer::{self, Comment, LexError};
 use crate::parser::{self, ParseError};
+use alloc::{
+    string::{String, ToString},
+    vec::Vec,
+};
+use chelis_stack_services::StackServices;
 
 const WIDTH: usize = 80;
 
@@ -14,8 +19,8 @@ pub enum FormatError {
     ManualReservedIdentifier { keyword: String, offset: usize },
 }
 
-impl std::fmt::Display for FormatError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for FormatError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             FormatError::Lex(e) => write!(f, "{e}"),
             FormatError::Parse(e) => write!(f, "{e}"),
@@ -31,7 +36,7 @@ impl std::fmt::Display for FormatError {
     }
 }
 
-impl std::error::Error for FormatError {}
+impl core::error::Error for FormatError {}
 
 impl From<LexError> for FormatError {
     fn from(e: LexError) -> Self {
@@ -71,9 +76,9 @@ pub fn format_program(decls: &[Decl]) -> String {
 /// span (e.g. inside a function body) is emitted immediately before
 /// that declaration rather than being dropped — body-internal comment
 /// placement is not yet position-exact, but no comment is lost.
-pub fn format_source(source: &str) -> Result<String, FormatError> {
+pub fn format_source(source: &str, stack: &impl StackServices) -> Result<String, FormatError> {
     let (tokens, comments) = lexer::lex_with_comments(source)?;
-    let decls = parser::parse_canonical_source_tokens(source, &tokens)?;
+    let decls = parser::parse_canonical_source_tokens(source, &tokens, stack)?;
     Ok(format_decls_with_comments(&decls, &comments))
 }
 
@@ -94,7 +99,10 @@ pub(crate) fn format_pipe_migration_source(
 /// Harmless aliases are also accepted by the normal parser. This explicit
 /// entry point is reserved for genuinely legacy or incompatible grammar and
 /// renders through the same canonical AST printer used everywhere else.
-pub fn migrate_source_v018(source: &str) -> Result<String, FormatError> {
+pub fn migrate_source_v018(
+    source: &str,
+    stack: &impl StackServices,
+) -> Result<String, FormatError> {
     let (tokens, comments) = lexer::lex_with_comments(source).map_err(|error| match error {
         LexError::ReservedForFuture { keyword, offset } => {
             FormatError::ManualReservedIdentifier { keyword, offset }
@@ -102,16 +110,18 @@ pub fn migrate_source_v018(source: &str) -> Result<String, FormatError> {
         error => FormatError::Lex(error),
     })?;
     let mut decls =
-        parser::parse_legacy_v018_source_tokens(source, &tokens).map_err(|error| match &error {
-            ParseError::Expected { found, offset, .. }
-                if matches!(found.as_str(), "Do" | "Quote" | "Unquote" | "Splice") =>
-            {
-                FormatError::ManualReservedIdentifier {
-                    keyword: found.to_ascii_lowercase(),
-                    offset: *offset,
+        parser::parse_legacy_v018_source_tokens(source, &tokens, stack).map_err(|error| {
+            match &error {
+                ParseError::Expected { found, offset, .. }
+                    if matches!(found.as_str(), "Do" | "Quote" | "Unquote" | "Splice") =>
+                {
+                    FormatError::ManualReservedIdentifier {
+                        keyword: found.to_ascii_lowercase(),
+                        offset: *offset,
+                    }
                 }
+                _ => FormatError::Parse(error),
             }
-            _ => FormatError::Parse(error),
         })?;
     migrate_v018_names(&mut decls);
     if let Some(offset) = first_ambiguous_comment_offset(&decls, &comments) {
@@ -377,7 +387,7 @@ fn pattern_binder_shadows(pattern: &Pattern) -> Vec<bool> {
             .iter()
             .flat_map(|(_, inner)| pattern_binder_shadows(inner))
             .collect(),
-        Pattern::As(name, inner, _) => std::iter::once(name == "drop")
+        Pattern::As(name, inner, _) => core::iter::once(name == "drop")
             .chain(pattern_binder_shadows(inner))
             .collect(),
     }
@@ -1243,7 +1253,7 @@ fn is_i64_min_magnitude_sentinel(expr: &Expr) -> bool {
 /// Printable Unicode stays literal. The six P11 named escapes take
 /// precedence; the remaining C0/C1 controls use minimal lowercase `\\u{h}`.
 pub(crate) fn canonical_string(value: &str) -> String {
-    use std::fmt::Write as _;
+    use core::fmt::Write as _;
 
     let mut rendered = String::with_capacity(value.len() + 2);
     rendered.push('"');
@@ -1590,7 +1600,7 @@ fn format_pipe_layout(binding_head: Option<&str>, seed: String, stages: Vec<Stri
     }
 
     let total_stages = 1 + stages.len();
-    let flat_chain = std::iter::once(seed.clone())
+    let flat_chain = core::iter::once(seed.clone())
         .chain(stages.iter().map(|stage| format!("|> {stage}")))
         .collect::<Vec<_>>()
         .join(" ");
@@ -1769,6 +1779,7 @@ fn indent_lines(text: &str, spaces: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::boxed::Box;
 
     #[test]
     fn four_stage_pipe_chain_breaks_even_under_width() {
@@ -1791,7 +1802,8 @@ mod tests {
         // prove-JSON record carries. It must match the whole-program
         // formatter's expression rendering exactly.
         let source = "@property p forall(x: f32) where x > 0.0:\n  (x - 1.0) <= x\n";
-        let program = crate::parser::parse_str(source).expect("parse");
+        let program =
+            crate::parser::parse_str(source, &chelis_syntax_host::NativeStack).expect("parse");
         let Decl::Property { body, .. } = &program[0] else {
             panic!("expected a property decl");
         };
@@ -1801,7 +1813,8 @@ mod tests {
     }
 
     fn property_parts(source: &str) -> (Vec<Param>, Vec<Expr>, Expr) {
-        let program = crate::parser::parse_str(source).expect("parse");
+        let program =
+            crate::parser::parse_str(source, &chelis_syntax_host::NativeStack).expect("parse");
         let Decl::Property {
             params,
             preconditions,
@@ -1942,7 +1955,8 @@ mod tests {
         // a format round-trip. Erasing it silently downgrades the effect contract
         // and lets assertions leak into declared-pure functions.
         let source = "def f() -> unit ! {} = ()\n";
-        let program = crate::parser::parse_str(source).expect("parse");
+        let program =
+            crate::parser::parse_str(source, &chelis_syntax_host::NativeStack).expect("parse");
         let rendered = format_program(&program);
         assert!(
             rendered.contains("! {}"),
@@ -1953,7 +1967,8 @@ mod tests {
     #[test]
     fn explicit_effect_row_survives_round_trip() {
         let source = "def f() -> unit ! { Test } = ()\n";
-        let program = crate::parser::parse_str(source).expect("parse");
+        let program =
+            crate::parser::parse_str(source, &chelis_syntax_host::NativeStack).expect("parse");
         let rendered = format_program(&program);
         assert!(
             rendered.contains("! { Test }"),
@@ -1967,13 +1982,15 @@ mod tests {
   x == x
   with contract = "std.normal_cdf.reflection"
 "#;
-        let program = crate::parser::parse_str(source).expect("parse");
+        let program =
+            crate::parser::parse_str(source, &chelis_syntax_host::NativeStack).expect("parse");
         let rendered = format_program(&program);
         assert!(
             rendered.contains(r#"with contract = "std.normal_cdf.reflection""#),
             "contract option lost: {rendered}"
         );
-        let reparsed = crate::parser::parse_str(&rendered).expect("reparse formatted contract");
+        let reparsed = crate::parser::parse_str(&rendered, &chelis_syntax_host::NativeStack)
+            .expect("reparse formatted contract");
         assert_eq!(
             format_program(&reparsed),
             rendered,
@@ -1995,7 +2012,8 @@ mod tests {
         let source = "module M\n@opaque\n\
              @invariant(p) (p.value >= 0.0) && (p.value <= 1.0)\n\
              type Probability =\n  | Probability { value: f32 }\n";
-        let program = crate::parser::parse_str(source).expect("parse");
+        let program =
+            crate::parser::parse_str(source, &chelis_syntax_host::NativeStack).expect("parse");
         let rendered = format_program(&program);
         assert!(rendered.contains("@opaque"), "opaque lost: {rendered}");
         assert!(
@@ -2011,8 +2029,8 @@ mod tests {
         let source = "module M\n@opaque\n\
              @invariant(p) (p.value >= 0.0) && (p.value <= 1.0)\n\
              type Probability =\n  | Probability { value: f32 }\n";
-        let once = format_source(source).expect("format once");
-        let twice = format_source(&once).expect("format twice");
+        let once = format_source(source, &chelis_syntax_host::NativeStack).expect("format once");
+        let twice = format_source(&once, &chelis_syntax_host::NativeStack).expect("format twice");
         assert_eq!(
             once, twice,
             "fmt not idempotent:\n--once--\n{once}\n--twice--\n{twice}"
@@ -2023,7 +2041,8 @@ mod tests {
     fn unannotated_def_stays_unannotated() {
         // The absence of an effect row is distinct from an empty row and must survive.
         let source = "def f() -> unit = ()\n";
-        let program = crate::parser::parse_str(source).expect("parse");
+        let program =
+            crate::parser::parse_str(source, &chelis_syntax_host::NativeStack).expect("parse");
         let rendered = format_program(&program);
         assert!(
             !rendered.contains("! {"),
@@ -2038,7 +2057,8 @@ mod tests {
     #[test]
     fn qualified_reference_round_trips() {
         let source = "def f(m) = add(Demo.Dropout.use(m), Demo.Sd.use(Demo.Sd.Eval))\n";
-        let program = crate::parser::parse_str(source).expect("parse");
+        let program =
+            crate::parser::parse_str(source, &chelis_syntax_host::NativeStack).expect("parse");
         let rendered = format_program(&program);
         assert!(
             rendered.contains("Demo.Dropout.use(m)"),
@@ -2049,7 +2069,8 @@ mod tests {
             "qualified constructor must render as a dotted path; got: {rendered}"
         );
         // The rendered text must re-parse — the canonical invariant.
-        crate::parser::parse_str(&rendered).expect("formatted qualified reference must re-parse");
+        crate::parser::parse_str(&rendered, &chelis_syntax_host::NativeStack)
+            .expect("formatted qualified reference must re-parse");
     }
 
     // A module-qualified constructor *pattern* (chelis#316) must likewise
@@ -2058,13 +2079,14 @@ mod tests {
     fn qualified_constructor_pattern_round_trips() {
         let source =
             "def f(m) = match m with { | Demo.Dropout.Train => 1 | Demo.Dropout.Eval => 0 }\n";
-        let program = crate::parser::parse_str(source).expect("parse");
+        let program =
+            crate::parser::parse_str(source, &chelis_syntax_host::NativeStack).expect("parse");
         let rendered = format_program(&program);
         assert!(
             rendered.contains("Demo.Dropout.Train") && rendered.contains("Demo.Dropout.Eval"),
             "qualified constructor patterns must render as dotted paths; got: {rendered}"
         );
-        crate::parser::parse_str(&rendered)
+        crate::parser::parse_str(&rendered, &chelis_syntax_host::NativeStack)
             .expect("formatted qualified constructor pattern must re-parse");
     }
 
@@ -2073,13 +2095,15 @@ mod tests {
     #[test]
     fn qualified_type_name_round_trips() {
         let source = "def f(m: Demo.Dropout.Mode) -> i64 = Demo.Dropout.use(m)\n";
-        let program = crate::parser::parse_str(source).expect("parse");
+        let program =
+            crate::parser::parse_str(source, &chelis_syntax_host::NativeStack).expect("parse");
         let rendered = format_program(&program);
         assert!(
             rendered.contains("Demo.Dropout.Mode"),
             "qualified type name must render as a dotted path; got: {rendered}"
         );
-        crate::parser::parse_str(&rendered).expect("formatted qualified type name must re-parse");
+        crate::parser::parse_str(&rendered, &chelis_syntax_host::NativeStack)
+            .expect("formatted qualified type name must re-parse");
     }
 
     // ── format_source comment preservation (#144) ────────────────
@@ -2092,7 +2116,7 @@ mod tests {
                        -- expect:\n\
                        {- block comment -}\n\
                        def main() -> f32 = cast(1.0, f32)\n";
-        let rendered = format_source(source).expect("format");
+        let rendered = format_source(source, &chelis_syntax_host::NativeStack).expect("format");
         assert!(rendered.contains("-- regular comment 1"), "got: {rendered}");
         assert!(rendered.contains("--- triple-dash"), "got: {rendered}");
         assert!(rendered.contains("-- expect:"), "got: {rendered}");
@@ -2107,8 +2131,8 @@ mod tests {
                        def a() -> f32 = cast(1.0, f32)\n\
                        -- between defs\n\
                        def b() -> f32 = cast(2.0, f32)\n";
-        let once = format_source(source).expect("format once");
-        let twice = format_source(&once).expect("format twice");
+        let once = format_source(source, &chelis_syntax_host::NativeStack).expect("format once");
+        let twice = format_source(&once, &chelis_syntax_host::NativeStack).expect("format twice");
         assert_eq!(once, twice, "format_source must be idempotent");
     }
 
@@ -2119,7 +2143,7 @@ mod tests {
         let source = "module Empty\n\
                        -- this file is all documentation\n\
                        -- explaining a concept\n";
-        let rendered = format_source(source).expect("format");
+        let rendered = format_source(source, &chelis_syntax_host::NativeStack).expect("format");
         assert!(
             rendered.contains("-- this file is all documentation"),
             "comment-only module body was dropped; got: {rendered}"
@@ -2135,7 +2159,7 @@ mod tests {
         let source = "-- file header above the module\n\
                        module Top\n\
                        def x() -> f32 = cast(3.0, f32)\n";
-        let rendered = format_source(source).expect("format");
+        let rendered = format_source(source, &chelis_syntax_host::NativeStack).expect("format");
         assert!(
             rendered.starts_with("-- file header above the module"),
             "header comment lost or moved; got: {rendered}"
@@ -2145,7 +2169,7 @@ mod tests {
     #[test]
     fn format_source_reformats_non_canonical_while_keeping_comments() {
         let source = "module Bar\n-- keep me\ndef   f()  ->  f32  =  cast(1.0,f32)\n";
-        let rendered = format_source(source).expect("format");
+        let rendered = format_source(source, &chelis_syntax_host::NativeStack).expect("format");
         assert!(rendered.contains("-- keep me"), "got: {rendered}");
         assert!(
             rendered.contains("def f() -> f32 = cast(1.0, f32)"),
@@ -2156,8 +2180,10 @@ mod tests {
     #[test]
     fn format_source_without_comments_matches_format_program() {
         let source = "module Bare\ndef f() -> f32 = cast(1.0, f32)\n";
-        let via_source = format_source(source).expect("format_source");
-        let decls = crate::parser::parse_str(source).expect("parse");
+        let via_source =
+            format_source(source, &chelis_syntax_host::NativeStack).expect("format_source");
+        let decls =
+            crate::parser::parse_str(source, &chelis_syntax_host::NativeStack).expect("parse");
         let via_program = format_program(&decls);
         assert_eq!(
             via_source, via_program,
@@ -2194,14 +2220,16 @@ mod tests {
     /// Format the single `Sig` declaration in `source` and return only the
     /// type portion of the `sig <name>: <type>` line.
     fn sig_type_str(source: &str) -> String {
-        let decls = crate::parser::parse_str(source).expect("parse sig");
+        let decls =
+            crate::parser::parse_str(source, &chelis_syntax_host::NativeStack).expect("parse sig");
         let ty =
             find_sig_ty(&decls).unwrap_or_else(|| panic!("no Sig declaration found in: {source}"));
         format_type(ty)
     }
 
     fn sig_type_ast(source: &str) -> TypeExpr {
-        let decls = crate::parser::parse_str(source).expect("parse sig");
+        let decls =
+            crate::parser::parse_str(source, &chelis_syntax_host::NativeStack).expect("parse sig");
         find_sig_ty(&decls)
             .cloned()
             .unwrap_or_else(|| panic!("no Sig declaration found in: {source}"))
@@ -2220,8 +2248,8 @@ mod tests {
     fn hof_arg_arrow_format_is_idempotent() {
         // A second format pass over the issue reproducer must be stable.
         let source = "module T\nsig f[a, b, c]: (a -> b) -> c\ndef f(g, x) = x\n";
-        let once = format_source(source).expect("format once");
-        let twice = format_source(&once).expect("format twice");
+        let once = format_source(source, &chelis_syntax_host::NativeStack).expect("format once");
+        let twice = format_source(&once, &chelis_syntax_host::NativeStack).expect("format twice");
         assert_eq!(once, twice, "HOF sig formatting must be idempotent");
         assert!(
             once.contains("sig f[a, b, c]: (a -> b) -> c"),

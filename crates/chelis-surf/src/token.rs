@@ -1,3 +1,4 @@
+use alloc::string::String;
 pub use chelis_deep::LiteralSuffix;
 use chelis_deep::Span;
 

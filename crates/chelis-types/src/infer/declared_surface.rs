@@ -250,9 +250,7 @@ mod tests {
 
     #[test]
     fn valid_recursive_declarations_preserve_alias_edges() {
-        let source = chelis_deep::parser::parse_str(
-            "(typealias {} A () (t-adt {} B)) (typealias {} B () (t-tuple {} (t-prim {} f64) (t-adt {} A)))"
-        ).unwrap();
+        let source = chelis_deep::parser::parse_str("(typealias {} A () (t-adt {} B)) (typealias {} B () (t-tuple {} (t-prim {} f64) (t-adt {} A)))", &chelis_syntax_host::NativeStack).unwrap();
         let resolved = resolve_declared_surface(&source).unwrap();
         assert!(
             matches!(&resolved.registry().aliases["A"].body, Type::Adt(name, _) if name == "B")

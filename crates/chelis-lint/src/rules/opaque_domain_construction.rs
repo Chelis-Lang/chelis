@@ -148,7 +148,7 @@ impl Rule for OpaqueDomainConstruction {
 }
 
 fn check_surf(ctx: &Context<'_>, source: &str) -> Vec<Violation> {
-    let Ok(decls) = chelis_surf::parser::parse_str(source) else {
+    let Ok(decls) = chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack) else {
         return Vec::new();
     };
     let mut catalog = match collect_surf_catalog(ctx.root) {
@@ -171,7 +171,7 @@ fn check_surf(ctx: &Context<'_>, source: &str) -> Vec<Violation> {
 }
 
 fn check_surf_prepared(ctx: &Context<'_>, source: &str, catalog: &Catalog) -> Vec<Violation> {
-    let Ok(decls) = chelis_surf::parser::parse_str(source) else {
+    let Ok(decls) = chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack) else {
         return Vec::new();
     };
     check_surf_decls_with_catalog(ctx, source, &decls, catalog)
@@ -241,7 +241,8 @@ fn collect_surf_catalog_from_entries(entries: &[crate::walker::Entry]) -> Catalo
         };
         #[cfg(test)]
         CATALOG_PARSE_COUNT.with(|count| count.set(count.get() + 1));
-        let Ok(decls) = chelis_surf::parser::parse_str(&source) else {
+        let Ok(decls) = chelis_surf::parser::parse_str(&source, &chelis_syntax_host::NativeStack)
+        else {
             continue;
         };
         collect_surf_decls_catalog(&decls, None, &mut out);
@@ -445,7 +446,8 @@ fn check_deep(ctx: &Context<'_>, source: &str) -> Vec<Violation> {
     // does. A `.dp` the compiler will not accept produces no violations here;
     // the compile path reports it, and a lint has never been the surface that
     // announces malformed Deep.
-    let Ok(exprs) = chelis_deep::parse_and_stamp_file(source) else {
+    let Ok(exprs) = chelis_deep::parse_and_stamp_file(source, &chelis_syntax_host::NativeStack)
+    else {
         return Vec::new();
     };
     let catalog = collect_deep_catalog(&exprs);
@@ -965,13 +967,15 @@ def probability(x: f32) -> Probability = Probability { value: x }
             let source = format!(
                 "module Domain{index}\n@opaque\ntype Type{index} = | Type{index} {{ value: f32 }}\n"
             );
-            let decls = chelis_surf::parser::parse_str(&source).expect("parse indexed type");
+            let decls = chelis_surf::parser::parse_str(&source, &chelis_syntax_host::NativeStack)
+                .expect("parse indexed type");
             collect_surf_decls_catalog(&decls, None, &mut catalog);
         }
         for module in ["First.Domain", "Second.Domain"] {
             let source =
                 format!("module {module}\n@opaque\ntype Shared = | Shared {{ value: f32 }}\n");
-            let decls = chelis_surf::parser::parse_str(&source).expect("parse shared type");
+            let decls = chelis_surf::parser::parse_str(&source, &chelis_syntax_host::NativeStack)
+                .expect("parse shared type");
             collect_surf_decls_catalog(&decls, None, &mut catalog);
         }
 

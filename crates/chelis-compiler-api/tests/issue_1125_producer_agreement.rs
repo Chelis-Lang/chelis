@@ -46,7 +46,7 @@ fn surf_front_end(name: &str) -> Vec<Expr> {
     let path = examples_root().join(name);
     let source = std::fs::read_to_string(&path)
         .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
-    let decls = chelis_surf::parser::parse_str(&source)
+    let decls = chelis_surf::parser::parse_str(&source, &chelis_syntax_host::NativeStack)
         .unwrap_or_else(|error| panic!("{name} does not parse: {error}"));
     prepare_surf_decls(&decls, None)
         .unwrap_or_else(|error| panic!("{name} does not prepare: {error}"))
@@ -56,7 +56,7 @@ fn surf_front_end(name: &str) -> Vec<Expr> {
 /// The `.dp` front end `chelis check` runs, applied to the canonical print.
 fn deep_front_end(exprs: &[Expr]) -> Result<Vec<Expr>, String> {
     let printed = print_canonical(exprs);
-    chelis_deep::parse_and_stamp_file(&printed)
+    chelis_deep::parse_and_stamp_file(&printed, &chelis_syntax_host::NativeStack)
         .map_err(|error| format!("the printed Deep does not stamp: {error}"))
 }
 

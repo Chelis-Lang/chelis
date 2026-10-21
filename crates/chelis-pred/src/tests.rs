@@ -5,13 +5,14 @@
 //! pre-flight).
 
 use super::*;
+use alloc::boxed::Box;
 use chelis_deep::Span;
 use chelis_deep::ast::{Metadata, UnknownFormData};
 use chelis_deep::parser::parse_str;
 
 /// Parse a single Deep expression (the predicate fn node).
 fn fnnode(src: &str) -> Expr {
-    let exprs = parse_str(src).expect("predicate fn parses");
+    let exprs = parse_str(src, &chelis_syntax_host::NativeStack).expect("predicate fn parses");
     assert_eq!(exprs.len(), 1, "expected one top-level expr");
     exprs.into_iter().next().unwrap()
 }

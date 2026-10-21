@@ -10,6 +10,7 @@ repository.workspace = true
 chelis-unord.workspace = true
 chelis-deep.workspace = true
 chelis-surf.workspace = true
+chelis-syntax-host.workspace = true
 chelis-tide.workspace = true
 chelis-types.workspace = true
 serde = { version = "1", features = ["derive"] }

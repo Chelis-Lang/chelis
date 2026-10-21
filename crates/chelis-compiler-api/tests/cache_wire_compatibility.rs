@@ -24,7 +24,7 @@ fn manifest() -> serde_json::Value {
 }
 
 fn migrated_v018(source: &str) -> String {
-    chelis_surf::format::migrate_source_v018(source)
+    chelis_surf::format::migrate_source_v018(source, &chelis_syntax_host::NativeStack)
         .expect("historical source must migrate to the current canonical spelling")
 }
 
@@ -85,8 +85,10 @@ fn version_changes_alone_reject_old_subcontexts_before_payload_decode() {
     let evidence = manifest();
     let std_source = migrated_v018(evidence["stdlib_source"].as_str().unwrap());
     let dep_source = migrated_v018(evidence["dependency_source"].as_str().unwrap());
-    let std_decls = chelis_surf::parser::parse_str(&std_source).unwrap();
-    let dep_decls = chelis_surf::parser::parse_str(&dep_source).unwrap();
+    let std_decls =
+        chelis_surf::parser::parse_str(&std_source, &chelis_syntax_host::NativeStack).unwrap();
+    let dep_decls =
+        chelis_surf::parser::parse_str(&dep_source, &chelis_syntax_host::NativeStack).unwrap();
     let std_key = stdlib_cache_key(&std_decls, [0x5a; 32]);
     let lib_key = library_cache_key(&dep_decls, std_key);
     for (input_file, cache_file, prefix, expected_version, current_input, current_key) in [
@@ -145,8 +147,10 @@ fn current_numeric_subcontexts_roundtrip_through_actual_cache_codecs() {
     let evidence = manifest();
     let std_source = migrated_v018(evidence["stdlib_source"].as_str().unwrap());
     let dep_source = migrated_v018(evidence["dependency_source"].as_str().unwrap());
-    let std_decls = chelis_surf::parser::parse_str(&std_source).unwrap();
-    let dep_decls = chelis_surf::parser::parse_str(&dep_source).unwrap();
+    let std_decls =
+        chelis_surf::parser::parse_str(&std_source, &chelis_syntax_host::NativeStack).unwrap();
+    let dep_decls =
+        chelis_surf::parser::parse_str(&dep_source, &chelis_syntax_host::NativeStack).unwrap();
     let std_context = build_stdlib_context(&std_decls).unwrap();
     let lib_context = build_library_context(&std_context, &dep_decls)
         .unwrap()
@@ -326,7 +330,7 @@ fn historical_caches_contain_actual_old_scalar_and_storage_positional_bytes() {
 #[test]
 fn current_stdlib_cache_preserves_scalar_storage_bits_and_checked_reconstruction() {
     let source = migrated_v018(historical_producer::NUMERIC_SOURCE);
-    let decls = chelis_surf::parser::parse_str(&source).unwrap();
+    let decls = chelis_surf::parser::parse_str(&source, &chelis_syntax_host::NativeStack).unwrap();
     let context = build_stdlib_context(&decls).unwrap();
     let expected = expected_numeric_payloads(true);
     assert_eq!(
@@ -466,7 +470,8 @@ where
 #[test]
 fn every_cached_library_decoder_rejects_forged_selector_callable_metadata() {
     let pair_source = "def pair(x: f32, w: f32) -> f32 = x * w\n";
-    let pair_decls = chelis_surf::parser::parse_str(pair_source).unwrap();
+    let pair_decls =
+        chelis_surf::parser::parse_str(pair_source, &chelis_syntax_host::NativeStack).unwrap();
     let std_context = build_stdlib_context(&pair_decls).unwrap();
     assert_selector_forgery_rejects(&std_context);
 
@@ -530,7 +535,7 @@ fn cache_reconstruction_rejects_changed_numeric_bits_after_checksum_recomputed()
         historical_producer::NUMERIC_SOURCE,
         historical_producer::WITNESS_SOURCE
     ));
-    let decls = chelis_surf::parser::parse_str(&source).unwrap();
+    let decls = chelis_surf::parser::parse_str(&source, &chelis_syntax_host::NativeStack).unwrap();
     let context = build_stdlib_context(&decls).unwrap();
     let key = stdlib_cache_key(&decls, [0x5a; 32]);
     let std_path = directory.path().join("numeric.tc");
@@ -643,7 +648,7 @@ fn cache_reconstruction_rejects_a_program_only_literal_edit_after_checksum_recom
         historical_producer::NUMERIC_SOURCE,
         historical_producer::WITNESS_SOURCE
     ));
-    let decls = chelis_surf::parser::parse_str(&source).unwrap();
+    let decls = chelis_surf::parser::parse_str(&source, &chelis_syntax_host::NativeStack).unwrap();
     let context = build_stdlib_context(&decls).unwrap();
     let key = stdlib_cache_key(&decls, [0x5a; 32]);
     let std_path = directory.path().join("numeric.tc");
@@ -733,7 +738,9 @@ const LINEARITY_EDIT_SOURCE: &str = "module Dep.Ops\nexport (settle)\n\n\
 #[test]
 fn caches_without_a_lowering_reject_a_program_only_edit_into_a_linearity_violation() {
     let directory = tempfile::tempdir().unwrap();
-    let decls = chelis_surf::parser::parse_str(LINEARITY_EDIT_SOURCE).unwrap();
+    let decls =
+        chelis_surf::parser::parse_str(LINEARITY_EDIT_SOURCE, &chelis_syntax_host::NativeStack)
+            .unwrap();
 
     let empty_stdlib = build_stdlib_context(&[]).unwrap();
     let dependency = build_library_context(&empty_stdlib, &decls)
@@ -789,7 +796,9 @@ fn caches_without_a_lowering_reject_a_program_only_edit_into_a_linearity_violati
 #[test]
 fn caches_with_a_lowering_reject_a_program_only_edit_into_a_linearity_violation() {
     let directory = tempfile::tempdir().unwrap();
-    let decls = chelis_surf::parser::parse_str(LINEARITY_EDIT_SOURCE).unwrap();
+    let decls =
+        chelis_surf::parser::parse_str(LINEARITY_EDIT_SOURCE, &chelis_syntax_host::NativeStack)
+            .unwrap();
 
     let empty_stdlib = build_stdlib_context(&[]).unwrap();
     let dependency = build_library_context(&empty_stdlib, &decls)
@@ -832,7 +841,9 @@ fn caches_with_a_lowering_reject_a_program_only_edit_into_a_linearity_violation(
 #[test]
 fn typecheck_cache_hits_with_a_lowering_rerun_no_checker() {
     let directory = tempfile::tempdir().unwrap();
-    let decls = chelis_surf::parser::parse_str(LINEARITY_EDIT_SOURCE).unwrap();
+    let decls =
+        chelis_surf::parser::parse_str(LINEARITY_EDIT_SOURCE, &chelis_syntax_host::NativeStack)
+            .unwrap();
     let empty_stdlib = build_stdlib_context(&[]).unwrap();
     let dependency = build_library_context(&empty_stdlib, &decls)
         .unwrap()

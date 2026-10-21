@@ -56,9 +56,10 @@ fn assert_deferred_diagnostic(source: &str, name: &str, position: &str) {
 }
 
 fn surf_to_deep(source: &str) -> Vec<chelis_deep::Expr> {
-    let decls = parse_str(source).expect("surf parse");
+    let decls = parse_str(source, &chelis_syntax_host::NativeStack).expect("surf parse");
     chelis_macros::expand_program(
-        &desugar_program(&decls).expect("Surf fixture must desugar"),
+        &desugar_program(&decls, &chelis_syntax_host::NativeStack)
+            .expect("Surf fixture must desugar"),
         &chelis_macros::ExpansionOptions::default(),
     )
     .expect("macro expand")
@@ -78,7 +79,8 @@ fn messages(source: &str) -> Vec<String> {
 }
 
 fn assert_forbidden_surf_binder(source: &str, name: &str, position: &str) {
-    let error = parse_str(source).expect_err("reserved dtype vocabulary cannot be rebound");
+    let error = parse_str(source, &chelis_syntax_host::NativeStack)
+        .expect_err("reserved dtype vocabulary cannot be rebound");
     let message = error.to_string();
     assert!(
         message.contains(&format!("`{name}`"))
@@ -366,7 +368,11 @@ fn a_deep_type_variable_naming_a_rejected_spelling_is_rejected() {
                 ),
             ),
         ] {
-            let deep = chelis_deep::parser::parse_and_stamp_file(&source).expect("deep parse");
+            let deep = chelis_deep::parser::parse_and_stamp_file(
+                &source,
+                &chelis_syntax_host::NativeStack,
+            )
+            .expect("deep parse");
             let messages: Vec<String> = match check_ir_program(&deep) {
                 Ok(_) => Vec::new(),
                 Err(report) => report.errors.iter().map(|e| e.message.clone()).collect(),
@@ -394,7 +400,9 @@ fn an_ordinary_deep_type_variable_still_checks_clean() {
              (def {{}} f (fn {{}} (params {{}} (x {{type: (t-var {{}} {name})}})) \
              (var {{}} x))))\n"
         );
-        let deep = chelis_deep::parser::parse_and_stamp_file(&source).expect("deep parse");
+        let deep =
+            chelis_deep::parser::parse_and_stamp_file(&source, &chelis_syntax_host::NativeStack)
+                .expect("deep parse");
         assert!(
             check_ir_program(&deep).is_ok(),
             "`{name}` must still be a legal Deep type variable"

@@ -7,8 +7,10 @@ use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str;
 
 fn expand_surf(source: &str) -> String {
-    let decls = parse_str(source).expect("surf parse should succeed");
-    let deep = desugar_program(&decls).expect("Surf fixture must desugar");
+    let decls =
+        parse_str(source, &chelis_syntax_host::NativeStack).expect("surf parse should succeed");
+    let deep = desugar_program(&decls, &chelis_syntax_host::NativeStack)
+        .expect("Surf fixture must desugar");
     let expanded = expand_program(&deep, &ExpansionOptions::default()).expect("macro expansion");
     print_canonical(expanded.exprs())
 }
@@ -150,7 +152,8 @@ def run(record: f32) -> f32 = bump(record)
 fn parsed_deep_internal_macro_expands_from_raw_form_boundary() {
     let deep = chelis_deep::parser::parse_str(
         r#"(defmacro {} bump (params {} x) (app {} (var {} add) (var {} x) (lit {} 1.0)))
-(def {} f (app {} (var {} bump) (lit {} 2.0)))"#,
+    (def {} f (app {} (var {} bump) (lit {} 2.0)))"#,
+        &chelis_syntax_host::NativeStack,
     )
     .expect("Deep internal macro fixture must stamp");
     assert!(
@@ -195,9 +198,13 @@ def f(residual, x: tensor[4, f32]) -> tensor[4, f32] = residual(x)
 #[test]
 fn ordinary_defs_cannot_collide_with_standard_prelude_macros() {
     for name in ["linear_layer", "residual", "cross_entropy"] {
-        let decls = parse_str(&format!("def {name}(x: f32) -> f32 = x\n"))
-            .expect("surf parse should succeed");
-        let deep = desugar_program(&decls).expect("Surf fixture must desugar");
+        let decls = parse_str(
+            &format!("def {name}(x: f32) -> f32 = x\n"),
+            &chelis_syntax_host::NativeStack,
+        )
+        .expect("surf parse should succeed");
+        let deep = desugar_program(&decls, &chelis_syntax_host::NativeStack)
+            .expect("Surf fixture must desugar");
         let err = expand_program(&deep, &ExpansionOptions::default())
             .expect_err("a standard-prelude macro name must reject an ordinary def");
         let message = err.to_string();
@@ -209,8 +216,13 @@ fn ordinary_defs_cannot_collide_with_standard_prelude_macros() {
         );
     }
 
-    let decls = parse_str("sig residual: f32 -> f32\n").expect("surf parse should succeed");
-    let deep = desugar_program(&decls).expect("Surf fixture must desugar");
+    let decls = parse_str(
+        "sig residual: f32 -> f32\n",
+        &chelis_syntax_host::NativeStack,
+    )
+    .expect("surf parse should succeed");
+    let deep = desugar_program(&decls, &chelis_syntax_host::NativeStack)
+        .expect("Surf fixture must desugar");
     let err = expand_program(&deep, &ExpansionOptions::default())
         .expect_err("a standard-prelude macro name must reject an ordinary sig");
     assert!(
@@ -262,8 +274,12 @@ fn authored_name_collision_check_matches_expansion() {
         ),
     ];
     for (source, declarations, diagnostic) in cases {
-        let deep = desugar_program(&parse_str(source).expect("surf parse should succeed"))
-            .expect("Surf fixture must desugar");
+        let deep = desugar_program(
+            &parse_str(source, &chelis_syntax_host::NativeStack)
+                .expect("surf parse should succeed"),
+            &chelis_syntax_host::NativeStack,
+        )
+        .expect("Surf fixture must desugar");
         let expansion = expand_program(&deep, &ExpansionOptions::default())
             .map(drop)
             .map_err(|error| error.to_string());
@@ -296,9 +312,13 @@ def f(x: f32, y: f32) -> f32 = residual(x, y)
 #[test]
 fn ordinary_prelude_names_are_available_when_prelude_loading_is_disabled() {
     for name in ["linear_layer", "residual", "cross_entropy"] {
-        let decls = parse_str(&format!("def {name}(x: f32) -> f32 = x\n"))
-            .expect("surf parse should succeed");
-        let deep = desugar_program(&decls).expect("Surf fixture must desugar");
+        let decls = parse_str(
+            &format!("def {name}(x: f32) -> f32 = x\n"),
+            &chelis_syntax_host::NativeStack,
+        )
+        .expect("surf parse should succeed");
+        let deep = desugar_program(&decls, &chelis_syntax_host::NativeStack)
+            .expect("Surf fixture must desugar");
         expand_program(
             &deep,
             &ExpansionOptions {
@@ -314,15 +334,17 @@ fn ordinary_prelude_names_are_available_when_prelude_loading_is_disabled() {
 fn hygiene_renames_macro_introduced_binders_only() {
     let decls = parse_str(
         r#"
-macro capture(y) = {
-  x = 1.0
-  add(x, y)
-}
-def f(x: f32) -> f32 = capture(x)
-"#,
+    macro capture(y) = {
+      x = 1.0
+      add(x, y)
+    }
+    def f(x: f32) -> f32 = capture(x)
+    "#,
+        &chelis_syntax_host::NativeStack,
     )
     .expect("surf parse should succeed");
-    let deep = desugar_program(&decls).expect("Surf fixture must desugar");
+    let deep = desugar_program(&decls, &chelis_syntax_host::NativeStack)
+        .expect("Surf fixture must desugar");
     let expanded = expand_program(&deep, &ExpansionOptions::default()).expect("macro expansion");
     let text = print_canonical(expanded.exprs());
 
@@ -366,12 +388,14 @@ def f(batch: i32, x: tensor[batch, hidden, f32], w: tensor[hidden, out_dim, f32]
 fn recursive_macro_hits_expansion_limit() {
     let decls = parse_str(
         r#"
-macro loop(x) = loop(x)
-def f(x: f32) -> f32 = loop(x)
-"#,
+    macro loop(x) = loop(x)
+    def f(x: f32) -> f32 = loop(x)
+    "#,
+        &chelis_syntax_host::NativeStack,
     )
     .expect("surf parse should succeed");
-    let deep = desugar_program(&decls).expect("Surf fixture must desugar");
+    let deep = desugar_program(&decls, &chelis_syntax_host::NativeStack)
+        .expect("Surf fixture must desugar");
     let err = expand_program(
         &deep,
         &ExpansionOptions {

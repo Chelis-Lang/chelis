@@ -26,13 +26,19 @@ fn preparation_retains_the_typed_desugar_error() {
 
 #[test]
 fn linked_callable_context_resolves_qualified_aliases_before_layered_checking() {
-    let library_decls =
-        chelis_surf::parser::parse_str("def pkg__pair__pair(x: f32, w: f32) -> f32 = mul(x, w)\n")
-            .expect("library parses");
-    let library = chelis_surf::desugar::desugar_program(&library_decls).expect("library desugars");
-    let entry =
-        chelis_surf::parser::parse_str("alias = pkg__pair__pair\nselected = grad(alias, wrt=w)\n")
-            .expect("entry parses");
+    let library_decls = chelis_surf::parser::parse_str(
+        "def pkg__pair__pair(x: f32, w: f32) -> f32 = mul(x, w)\n",
+        &chelis_syntax_host::NativeStack,
+    )
+    .expect("library parses");
+    let library =
+        chelis_surf::desugar::desugar_program(&library_decls, &chelis_syntax_host::NativeStack)
+            .expect("library desugars");
+    let entry = chelis_surf::parser::parse_str(
+        "alias = pkg__pair__pair\nselected = grad(alias, wrt=w)\n",
+        &chelis_syntax_host::NativeStack,
+    )
+    .expect("entry parses");
 
     assert!(prepare_surf_decls_with_context(&entry, &library, None).is_ok());
     assert!(matches!(
@@ -47,17 +53,21 @@ fn linked_callable_context_resolves_qualified_aliases_before_layered_checking() 
 fn linked_branch_joins_require_exact_callable_origin() {
     let library_decls = chelis_surf::parser::parse_str(
         "def pkg__pair__left(x: f32, w: f32) -> f32 = mul(x, w)\n\
-         def pkg__pair__right(x: f32, w: f32) -> f32 = add(x, w)\n",
+     def pkg__pair__right(x: f32, w: f32) -> f32 = add(x, w)\n",
+        &chelis_syntax_host::NativeStack,
     )
     .expect("library parses");
-    let library = chelis_surf::desugar::desugar_program(&library_decls).expect("library desugars");
+    let library =
+        chelis_surf::desugar::desugar_program(&library_decls, &chelis_syntax_host::NativeStack)
+            .expect("library desugars");
 
     let distinct = chelis_surf::parser::parse_str(
         "def probe(flag: bool) -> unit = {\n\
-           chosen = if flag then pkg__pair__left else pkg__pair__right\n\
-           selected = grad(chosen, wrt=w)\n\
-           drop(selected)\n\
-         }\n",
+       chosen = if flag then pkg__pair__left else pkg__pair__right\n\
+       selected = grad(chosen, wrt=w)\n\
+       drop(selected)\n\
+     }\n",
+        &chelis_syntax_host::NativeStack,
     )
     .expect("distinct entry parses");
     assert!(matches!(
@@ -69,12 +79,13 @@ fn linked_branch_joins_require_exact_callable_origin() {
 
     let same = chelis_surf::parser::parse_str(
         "def probe(flag: bool) -> unit = {\n\
-           left = pkg__pair__left\n\
-           right = left\n\
-           chosen = if flag then left else right\n\
-           selected = grad(chosen, wrt=w)\n\
-           drop(selected)\n\
-         }\n",
+       left = pkg__pair__left\n\
+       right = left\n\
+       chosen = if flag then left else right\n\
+       selected = grad(chosen, wrt=w)\n\
+       drop(selected)\n\
+     }\n",
+        &chelis_syntax_host::NativeStack,
     )
     .expect("same-origin entry parses");
     assert!(prepare_surf_decls_with_context(&same, &library, None).is_ok());
@@ -84,46 +95,49 @@ fn linked_branch_joins_require_exact_callable_origin() {
 fn layered_context_preserves_same_origin_structural_joins() {
     let library_decls = chelis_surf::parser::parse_str(
         "def pkg__pair__left(x: f32, w: f32) -> f32 = mul(x, w)\n\
-         def pkg__pair__right(x: f32, w: f32) -> f32 = add(x, w)\n\
-         left_alias = pkg__pair__left\n\
-         same_if = if true then pkg__pair__left else left_alias\n\
-         same_match = match true with {\n\
-           | true => pkg__pair__left\n\
-           | false => left_alias\n\
-         }\n\
-         same_tuple = (if true then (pkg__pair__left,) else (left_alias,)).0\n\
-         same_block = if true then {\n\
-           local = pkg__pair__left\n\
-           local\n\
-         } else {\n\
-           local = left_alias\n\
-           local\n\
-         }\n\
-         distinct_if = if true then pkg__pair__left else pkg__pair__right\n\
-         distinct_match = match true with {\n\
-           | true => pkg__pair__left\n\
-           | false => pkg__pair__right\n\
-         }\n\
-         distinct_tuple = (if true then (pkg__pair__left,) else (pkg__pair__right,)).0\n\
-         distinct_block = if true then {\n\
-           local = pkg__pair__left\n\
-           local\n\
-         } else {\n\
-           local = pkg__pair__right\n\
-           local\n\
-         }\n",
+     def pkg__pair__right(x: f32, w: f32) -> f32 = add(x, w)\n\
+     left_alias = pkg__pair__left\n\
+     same_if = if true then pkg__pair__left else left_alias\n\
+     same_match = match true with {\n\
+       | true => pkg__pair__left\n\
+       | false => left_alias\n\
+     }\n\
+     same_tuple = (if true then (pkg__pair__left,) else (left_alias,)).0\n\
+     same_block = if true then {\n\
+       local = pkg__pair__left\n\
+       local\n\
+     } else {\n\
+       local = left_alias\n\
+       local\n\
+     }\n\
+     distinct_if = if true then pkg__pair__left else pkg__pair__right\n\
+     distinct_match = match true with {\n\
+       | true => pkg__pair__left\n\
+       | false => pkg__pair__right\n\
+     }\n\
+     distinct_tuple = (if true then (pkg__pair__left,) else (pkg__pair__right,)).0\n\
+     distinct_block = if true then {\n\
+       local = pkg__pair__left\n\
+       local\n\
+     } else {\n\
+       local = pkg__pair__right\n\
+       local\n\
+     }\n",
+        &chelis_syntax_host::NativeStack,
     )
     .expect("layered library parses");
     let library =
-        chelis_surf::desugar::desugar_program(&library_decls).expect("layered library desugars");
+        chelis_surf::desugar::desugar_program(&library_decls, &chelis_syntax_host::NativeStack)
+            .expect("layered library desugars");
 
     let same = chelis_surf::parser::parse_str(
         "selected = (\n\
-           grad(same_if, wrt=w),\n\
-           grad(same_match, wrt=w),\n\
-           grad(same_tuple, wrt=w),\n\
-           grad(same_block, wrt=w)\n\
-         )\n",
+       grad(same_if, wrt=w),\n\
+       grad(same_match, wrt=w),\n\
+       grad(same_tuple, wrt=w),\n\
+       grad(same_block, wrt=w)\n\
+     )\n",
+        &chelis_syntax_host::NativeStack,
     )
     .expect("same-origin entry parses");
     assert!(prepare_surf_decls_with_context(&same, &library, None).is_ok());
@@ -134,8 +148,11 @@ fn layered_context_preserves_same_origin_structural_joins() {
         "distinct_tuple",
         "distinct_block",
     ] {
-        let entry = chelis_surf::parser::parse_str(&format!("selected = grad({name}, wrt=w)\n"))
-            .expect("distinct-origin entry parses");
+        let entry = chelis_surf::parser::parse_str(
+            &format!("selected = grad({name}, wrt=w)\n"),
+            &chelis_syntax_host::NativeStack,
+        )
+        .expect("distinct-origin entry parses");
         assert!(
             matches!(
                 prepare_surf_decls_with_context(&entry, &library, None),
@@ -152,24 +169,35 @@ fn layered_context_preserves_same_origin_structural_joins() {
 fn linked_context_preseeds_forward_function_origins_before_aliases() {
     let library_decls = chelis_surf::parser::parse_str(
         "alias = pkg__pair__pair\n\
-         def pkg__pair__pair(x: f32, w: f32) -> f32 = mul(x, w)\n",
+     def pkg__pair__pair(x: f32, w: f32) -> f32 = mul(x, w)\n",
+        &chelis_syntax_host::NativeStack,
     )
     .expect("forward-alias library parses");
-    let library = chelis_surf::desugar::desugar_program(&library_decls).expect("library desugars");
-    let entry = chelis_surf::parser::parse_str("selected = grad(alias, wrt=w)\n")
-        .expect("forward-alias entry parses");
+    let library =
+        chelis_surf::desugar::desugar_program(&library_decls, &chelis_syntax_host::NativeStack)
+            .expect("library desugars");
+    let entry = chelis_surf::parser::parse_str(
+        "selected = grad(alias, wrt=w)\n",
+        &chelis_syntax_host::NativeStack,
+    )
+    .expect("forward-alias entry parses");
     assert!(prepare_surf_decls_with_context(&entry, &library, None).is_ok());
 
     let distinct_decls = chelis_surf::parser::parse_str(
         "chosen = if true then pkg__pair__left else pkg__pair__right\n\
-         def pkg__pair__left(x: f32, w: f32) -> f32 = mul(x, w)\n\
-         def pkg__pair__right(x: f32, w: f32) -> f32 = add(x, w)\n",
+     def pkg__pair__left(x: f32, w: f32) -> f32 = mul(x, w)\n\
+     def pkg__pair__right(x: f32, w: f32) -> f32 = add(x, w)\n",
+        &chelis_syntax_host::NativeStack,
     )
     .expect("distinct forward-origin library parses");
     let distinct_library =
-        chelis_surf::desugar::desugar_program(&distinct_decls).expect("library desugars");
-    let distinct_entry = chelis_surf::parser::parse_str("selected = grad(chosen, wrt=w)\n")
-        .expect("distinct entry parses");
+        chelis_surf::desugar::desugar_program(&distinct_decls, &chelis_syntax_host::NativeStack)
+            .expect("library desugars");
+    let distinct_entry = chelis_surf::parser::parse_str(
+        "selected = grad(chosen, wrt=w)\n",
+        &chelis_syntax_host::NativeStack,
+    )
+    .expect("distinct entry parses");
     assert!(matches!(
         prepare_surf_decls_with_context(&distinct_entry, &distinct_library, None),
         Err(PreparationError::SurfDesugar(
@@ -182,28 +210,37 @@ fn linked_context_preseeds_forward_function_origins_before_aliases() {
 fn linked_context_projects_match_bound_callable_origins() {
     let library_decls = chelis_surf::parser::parse_str(
         "def pkg__pair__left(x: f32, w: f32) -> f32 = mul(x, w)\n\
-         def pkg__pair__right(x: f32, w: f32) -> f32 = add(x, w)\n\
-         matched = match (pkg__pair__left,) with {\n\
-           | (chosen,) => chosen\n\
-         }\n\
-         distinct = match (if true then (pkg__pair__left,) else (pkg__pair__right,)) with {\n\
-           | (chosen,) => chosen\n\
-         }\n\
-         def chosen(x: f32, w: f32) -> f32 = mul(x, w)\n\
-         dynamic = match candidates with {\n\
-           | (chosen,) => chosen\n\
-         }\n",
+     def pkg__pair__right(x: f32, w: f32) -> f32 = add(x, w)\n\
+     matched = match (pkg__pair__left,) with {\n\
+       | (chosen,) => chosen\n\
+     }\n\
+     distinct = match (if true then (pkg__pair__left,) else (pkg__pair__right,)) with {\n\
+       | (chosen,) => chosen\n\
+     }\n\
+     def chosen(x: f32, w: f32) -> f32 = mul(x, w)\n\
+     dynamic = match candidates with {\n\
+       | (chosen,) => chosen\n\
+     }\n",
+        &chelis_syntax_host::NativeStack,
     )
     .expect("match-bound library parses");
-    let library = chelis_surf::desugar::desugar_program(&library_decls).expect("library desugars");
+    let library =
+        chelis_surf::desugar::desugar_program(&library_decls, &chelis_syntax_host::NativeStack)
+            .expect("library desugars");
 
-    let matching = chelis_surf::parser::parse_str("selected = grad(matched, wrt=w)\n")
-        .expect("matching entry parses");
+    let matching = chelis_surf::parser::parse_str(
+        "selected = grad(matched, wrt=w)\n",
+        &chelis_syntax_host::NativeStack,
+    )
+    .expect("matching entry parses");
     assert!(prepare_surf_decls_with_context(&matching, &library, None).is_ok());
 
     for name in ["distinct", "dynamic"] {
-        let entry = chelis_surf::parser::parse_str(&format!("selected = grad({name}, wrt=w)\n"))
-            .expect("negative entry parses");
+        let entry = chelis_surf::parser::parse_str(
+            &format!("selected = grad({name}, wrt=w)\n"),
+            &chelis_syntax_host::NativeStack,
+        )
+        .expect("negative entry parses");
         assert!(
             matches!(
                 prepare_surf_decls_with_context(&entry, &library, None),
@@ -220,37 +257,41 @@ fn linked_context_projects_match_bound_callable_origins() {
 fn linked_context_projects_constructor_and_record_payload_origins() {
     let library_decls = chelis_surf::parser::parse_str(
         "type FnBox = | FnBox(f32 -> f32 -> f32)\n\
-         type Outer = | Outer(FnBox)\n\
-         type FnRecord = | FnRecord { callback: f32 -> f32 -> f32 }\n\
-         type OuterRecord = | OuterRecord { payload: FnRecord }\n\
-         def pkg__pair__pair(x: f32, w: f32) -> f32 = mul(x, w)\n\
-         alias = pkg__pair__pair\n\
-         boxed = FnBox(alias)\n\
-         nested_boxed = Outer(boxed)\n\
-         recorded = FnRecord { callback: alias }\n\
-         nested_recorded = OuterRecord { payload: recorded }\n\
-         ctor_match = match boxed with {\n\
-           | FnBox(chosen) => chosen\n\
-         }\n\
-         nested_ctor_match = match nested_boxed with {\n\
-           | Outer(FnBox(chosen)) => chosen\n\
-         }\n\
-         record_match = match recorded with {\n\
-           | FnRecord { callback: chosen } => chosen\n\
-         }\n\
-         nested_record_match = match nested_recorded with {\n\
-           | OuterRecord { payload: FnRecord { callback: chosen } } => chosen\n\
-         }\n",
+     type Outer = | Outer(FnBox)\n\
+     type FnRecord = | FnRecord { callback: f32 -> f32 -> f32 }\n\
+     type OuterRecord = | OuterRecord { payload: FnRecord }\n\
+     def pkg__pair__pair(x: f32, w: f32) -> f32 = mul(x, w)\n\
+     alias = pkg__pair__pair\n\
+     boxed = FnBox(alias)\n\
+     nested_boxed = Outer(boxed)\n\
+     recorded = FnRecord { callback: alias }\n\
+     nested_recorded = OuterRecord { payload: recorded }\n\
+     ctor_match = match boxed with {\n\
+       | FnBox(chosen) => chosen\n\
+     }\n\
+     nested_ctor_match = match nested_boxed with {\n\
+       | Outer(FnBox(chosen)) => chosen\n\
+     }\n\
+     record_match = match recorded with {\n\
+       | FnRecord { callback: chosen } => chosen\n\
+     }\n\
+     nested_record_match = match nested_recorded with {\n\
+       | OuterRecord { payload: FnRecord { callback: chosen } } => chosen\n\
+     }\n",
+        &chelis_syntax_host::NativeStack,
     )
     .expect("aggregate-payload library parses");
-    let library = chelis_surf::desugar::desugar_program(&library_decls).expect("library desugars");
+    let library =
+        chelis_surf::desugar::desugar_program(&library_decls, &chelis_syntax_host::NativeStack)
+            .expect("library desugars");
     let entry = chelis_surf::parser::parse_str(
         "selected = (\n\
-           grad(ctor_match, wrt=w),\n\
-           grad(nested_ctor_match, wrt=w),\n\
-           grad(record_match, wrt=w),\n\
-           grad(nested_record_match, wrt=w)\n\
-         )\n",
+       grad(ctor_match, wrt=w),\n\
+       grad(nested_ctor_match, wrt=w),\n\
+       grad(record_match, wrt=w),\n\
+       grad(nested_record_match, wrt=w)\n\
+     )\n",
+        &chelis_syntax_host::NativeStack,
     )
     .expect("aggregate-payload entry parses");
     assert!(prepare_surf_decls_with_context(&entry, &library, None).is_ok());
@@ -258,26 +299,26 @@ fn linked_context_projects_constructor_and_record_payload_origins() {
 
 #[test]
 fn linked_context_rejects_distinct_or_dynamic_constructor_and_record_payloads() {
-    let library_decls = chelis_surf::parser::parse_str(
-        "def pkg__pair__left(x: f32, w: f32) -> f32 = mul(x, w)\n\
-         def pkg__pair__right(x: f32, w: f32) -> f32 = add(x, w)\n\
-         distinct_ctor = match \
-           (if true then FnBox(pkg__pair__left) else FnBox(pkg__pair__right)) with {\n\
-           | FnBox(chosen) => chosen\n\
-         }\n\
-         dynamic_ctor = match candidates with {\n\
-           | FnBox(chosen) => chosen\n\
-         }\n\
-         distinct_record = match \
-           (if true then FnRecord { callback: pkg__pair__left } else FnRecord { callback: pkg__pair__right }) with {\n\
-           | FnRecord { callback: chosen } => chosen\n\
-         }\n\
-         dynamic_record = match candidates with {\n\
-           | FnRecord { callback: chosen } => chosen\n\
-         }\n",
-    )
+    let library_decls = chelis_surf::parser::parse_str("def pkg__pair__left(x: f32, w: f32) -> f32 = mul(x, w)\n\
+     def pkg__pair__right(x: f32, w: f32) -> f32 = add(x, w)\n\
+     distinct_ctor = match \
+       (if true then FnBox(pkg__pair__left) else FnBox(pkg__pair__right)) with {\n\
+       | FnBox(chosen) => chosen\n\
+     }\n\
+     dynamic_ctor = match candidates with {\n\
+       | FnBox(chosen) => chosen\n\
+     }\n\
+     distinct_record = match \
+       (if true then FnRecord { callback: pkg__pair__left } else FnRecord { callback: pkg__pair__right }) with {\n\
+       | FnRecord { callback: chosen } => chosen\n\
+     }\n\
+     dynamic_record = match candidates with {\n\
+       | FnRecord { callback: chosen } => chosen\n\
+     }\n",&chelis_syntax_host::NativeStack)
     .expect("negative aggregate-payload library parses");
-    let library = chelis_surf::desugar::desugar_program(&library_decls).expect("library desugars");
+    let library =
+        chelis_surf::desugar::desugar_program(&library_decls, &chelis_syntax_host::NativeStack)
+            .expect("library desugars");
 
     for name in [
         "distinct_ctor",
@@ -285,8 +326,11 @@ fn linked_context_rejects_distinct_or_dynamic_constructor_and_record_payloads() 
         "distinct_record",
         "dynamic_record",
     ] {
-        let entry = chelis_surf::parser::parse_str(&format!("selected = grad({name}, wrt=w)\n"))
-            .expect("negative entry parses");
+        let entry = chelis_surf::parser::parse_str(
+            &format!("selected = grad({name}, wrt=w)\n"),
+            &chelis_syntax_host::NativeStack,
+        )
+        .expect("negative entry parses");
         assert!(
             matches!(
                 prepare_surf_decls_with_context(&entry, &library, None),

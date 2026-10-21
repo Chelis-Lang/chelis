@@ -412,12 +412,11 @@ pub fn prepare_source(
     let _fp_env = chelis_runtime::FpEnvGuard::enter();
     match source_kind {
         SourceKind::Surf => {
-            let decls = chelis_surf::parser::parse_str(source).map_err(|error| {
-                PreparationError::SurfParse {
+            let decls = chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+                .map_err(|error| PreparationError::SurfParse {
                     source: source.to_string(),
                     error,
-                }
-            })?;
+                })?;
             prepare_surf_decls(&decls, entry)
         }
         SourceKind::Deep => {
@@ -425,8 +424,8 @@ pub fn prepare_source(
             // stamped `.dp` ingress with the CLI. A top-level form that is
             // neither a `(module ...)` wrapper nor a declaration is rejected
             // here rather than reaching the checker as an untyped carrier.
-            let exprs =
-                chelis_deep::parse_and_stamp_file(source).map_err(PreparationError::DeepParse)?;
+            let exprs = chelis_deep::parse_and_stamp_file(source, &chelis_syntax_host::NativeStack)
+                .map_err(PreparationError::DeepParse)?;
             chelis_surf::resugar::validate_grad_selector_consistency(&exprs)
                 .map_err(PreparationError::DeepSelector)?;
             Ok(prepare_deep(exprs, entry))
@@ -450,8 +449,12 @@ pub fn prepare_surf_decls_with_context(
 ) -> Result<PreparedProgram, PreparationError> {
     let _fp_env = chelis_runtime::FpEnvGuard::enter();
     chelis_types::run_on_grown_stack(|| {
-        let desugared = chelis_surf::desugar::desugar_program_with_context(decls, context)
-            .map_err(PreparationError::SurfDesugar)?;
+        let desugared = chelis_surf::desugar::desugar_program_with_context(
+            decls,
+            context,
+            &chelis_syntax_host::NativeStack,
+        )
+        .map_err(PreparationError::SurfDesugar)?;
         let expanded =
             chelis_macros::expand_program(&desugared, &chelis_macros::ExpansionOptions::default())
                 .map_err(PreparationError::Expansion)?

@@ -14,8 +14,10 @@ use chelis_types::check_typed_program;
 use chelis_types::types::Prim;
 
 fn surf_to_library(source: &str) -> Result<LoweredLibrary, String> {
-    let decls = surf_parse(source).map_err(|error| format!("surf parse: {error:?}"))?;
-    let deep = desugar_program(&decls).expect("Surf fixture must desugar");
+    let decls = surf_parse(source, &chelis_syntax_host::NativeStack)
+        .map_err(|error| format!("surf parse: {error:?}"))?;
+    let deep = desugar_program(&decls, &chelis_syntax_host::NativeStack)
+        .expect("Surf fixture must desugar");
     let checked = check_typed_program(&deep)
         .map_err(|errors| format!("typecheck failed: {:?}", errors.errors))?;
     let checked = chelis_effects::check_program(&checked)

@@ -34,8 +34,8 @@ use copy_repair::assert_copy_repaired;
 mod copy_repair;
 
 fn surf_to_deep(source: &str) -> Vec<chelis_deep::Expr> {
-    let decls = parse_str(source).expect("surf parse");
-    desugar_program(&decls).expect("Surf fixture must desugar")
+    let decls = parse_str(source, &chelis_syntax_host::NativeStack).expect("surf parse");
+    desugar_program(&decls, &chelis_syntax_host::NativeStack).expect("Surf fixture must desugar")
 }
 
 fn linearity(source: &str) -> Result<(), Vec<CheckError>> {

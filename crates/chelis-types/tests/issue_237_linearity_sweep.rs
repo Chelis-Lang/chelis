@@ -53,8 +53,10 @@ use copy_repair::assert_copy_repaired;
 mod copy_repair;
 
 fn check_surf(source: &str) -> Result<(), Vec<chelis_types::errors::CheckError>> {
-    let decls = parse_str(source).expect("surf parse should succeed");
-    let deep = desugar_program(&decls).expect("Surf fixture must desugar");
+    let decls =
+        parse_str(source, &chelis_syntax_host::NativeStack).expect("surf parse should succeed");
+    let deep = desugar_program(&decls, &chelis_syntax_host::NativeStack)
+        .expect("Surf fixture must desugar");
     let checked = check_typed_program(&deep).expect("type check should succeed");
     check_linearity(&checked).map(|_| ())
 }

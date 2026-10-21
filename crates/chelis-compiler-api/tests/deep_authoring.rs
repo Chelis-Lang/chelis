@@ -149,7 +149,8 @@ fn assert_failure(
 }
 
 fn canonical_decls(source: &str) -> Vec<String> {
-    let exprs = chelis_deep::parser::parse_str_strict(source).expect("deep parses");
+    let exprs = chelis_deep::parser::parse_str_strict(source, &chelis_syntax_host::NativeStack)
+        .expect("deep parses");
     module_decl_exprs(&exprs)
         .iter()
         .map(chelis_deep::printer::print_expr)

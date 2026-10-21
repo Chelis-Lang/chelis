@@ -17,8 +17,9 @@ use chelis_deep::DeepTag;
 fn eval_renders_the_stored_constructor_source_spelling() {
     let deftype = chelis_deep::parser::parse_str(
         "(deftype {} Pkg__app__Demo__Shapes__Shape () \
-         (variant {} Pkg__app__Demo__Shapes__Foo__Bar (field {} value (t-prim {} i64))) \
-         (variant {} Pkg__app__Demo__Shapes__Bar (field {} value (t-prim {} i64))))",
+     (variant {} Pkg__app__Demo__Shapes__Foo__Bar (field {} value (t-prim {} i64))) \
+     (variant {} Pkg__app__Demo__Shapes__Bar (field {} value (t-prim {} i64))))",
+        &chelis_syntax_host::NativeStack,
     )
     .expect("parse deftype fixture");
     let names = collect_constructor_source_names(&deftype);
@@ -54,8 +55,10 @@ fn eval_renders_the_stored_constructor_source_spelling() {
 }
 
 fn checked_surf(source: &str) -> CheckedProgram {
-    let decls = chelis_surf::parser::parse_str(source).expect("surf parse");
-    let exprs = chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar");
+    let decls = chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+        .expect("surf parse");
+    let exprs = chelis_surf::desugar::desugar_program(&decls, &chelis_syntax_host::NativeStack)
+        .expect("Surf fixture must desugar");
     chelis_types::check_ir_program(&exprs).expect("ir check")
 }
 
@@ -107,8 +110,13 @@ fn flat_list_literal_evaluation_has_linear_element_copy_cost() {
 
 #[test]
 fn cons_with_a_non_list_tail_is_a_type_error() {
-    let decls = chelis_surf::parser::parse_str("result = Cons(1i64, 2i64)\n").expect("surf parse");
-    let exprs = chelis_surf::desugar::desugar_program(&decls).expect("desugar");
+    let decls = chelis_surf::parser::parse_str(
+        "result = Cons(1i64, 2i64)\n",
+        &chelis_syntax_host::NativeStack,
+    )
+    .expect("surf parse");
+    let exprs = chelis_surf::desugar::desugar_program(&decls, &chelis_syntax_host::NativeStack)
+        .expect("desugar");
     assert!(chelis_types::check_ir_program(&exprs).is_err());
 }
 
@@ -1845,8 +1853,10 @@ y = index(skip([cast(10, i64), cast(20, i64)], cast(1, i64)), cast(0, i64))
 /// owning declaration. The interpreter is never invoked: a rejected program has
 /// no checked form to evaluate.
 fn expect_unbounded_cast_target_rejection(source: &str, binder: &str, owner: &str) {
-    let decls = chelis_surf::parser::parse_str(source).expect("surf parse");
-    let exprs = chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar");
+    let decls = chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+        .expect("surf parse");
+    let exprs = chelis_surf::desugar::desugar_program(&decls, &chelis_syntax_host::NativeStack)
+        .expect("Surf fixture must desugar");
     let errors = chelis_types::check_ir_program(&exprs)
         .expect_err("an unbounded binder is not a primitive type position");
     let subject = format!("cast target `{binder}` in `{owner}` does not name an active primitive");
@@ -1939,8 +1949,10 @@ fn bounded_cast_target_does_not_accept_conflicting_precisions() {
 def choose_and_cast[p_int: Int](left: p_int, right: p_int) -> p_int = cast(left, p_int)
 value = choose_and_cast(cast(1, i16), cast(2, i64))
 "#;
-    let decls = chelis_surf::parser::parse_str(source).expect("surf parse");
-    let exprs = chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar");
+    let decls = chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+        .expect("surf parse");
+    let exprs = chelis_surf::desugar::desugar_program(&decls, &chelis_syntax_host::NativeStack)
+        .expect("Surf fixture must desugar");
     let errors = chelis_types::check_ir_program(&exprs)
         .expect_err("one bounded precision cannot actualize to two concrete dtypes");
     assert!(
@@ -2461,8 +2473,10 @@ fn eval_deep_with_bindings(
     args: &[(&str, RuntimeValue)],
 ) -> Result<String, String> {
     let source = format!("probe = {surf_expr}\n");
-    let decls = chelis_surf::parser::parse_str(&source).expect("surf parse");
-    let exprs = chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar");
+    let decls = chelis_surf::parser::parse_str(&source, &chelis_syntax_host::NativeStack)
+        .expect("surf parse");
+    let exprs = chelis_surf::desugar::desugar_program(&decls, &chelis_syntax_host::NativeStack)
+        .expect("Surf fixture must desugar");
     let Expr::Node(def, _) = &exprs[0] else {
         panic!("desugaring a top-level binding yields one def form");
     };
@@ -2863,8 +2877,11 @@ y = div(a, b)
 /// bound-variable form.
 #[test]
 fn issue_458_div_f32_over_i32_literal_rejected_before_eval_not_folded() {
-    let decls = chelis_surf::parser::parse_str("out = div(1.0, 4)").expect("surf parse");
-    let exprs = chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar");
+    let decls =
+        chelis_surf::parser::parse_str("out = div(1.0, 4)", &chelis_syntax_host::NativeStack)
+            .expect("surf parse");
+    let exprs = chelis_surf::desugar::desugar_program(&decls, &chelis_syntax_host::NativeStack)
+        .expect("Surf fixture must desugar");
     let err = chelis_types::check_ir_program(&exprs)
         .expect_err("chelis#458: div(1.0, 4) is a mixed (f32, i32) pair and must be a type error");
     assert!(
@@ -4201,7 +4218,9 @@ y = softmax(x, cast(5, i32))
 "#;
     let res = chelis_types::check_ir_program(
         &chelis_surf::desugar::desugar_program(
-            &chelis_surf::parser::parse_str(src).expect("surf parse"),
+            &chelis_surf::parser::parse_str(src, &chelis_syntax_host::NativeStack)
+                .expect("surf parse"),
+            &chelis_syntax_host::NativeStack,
         )
         .expect("Surf fixture must desugar"),
     );
@@ -4563,7 +4582,9 @@ def main() -> bf16 = add(cast(1.0, bf16), cast(1.0, f16))
 "#;
     let res = chelis_types::check_ir_program(
         &chelis_surf::desugar::desugar_program(
-            &chelis_surf::parser::parse_str(src).expect("surf parse"),
+            &chelis_surf::parser::parse_str(src, &chelis_syntax_host::NativeStack)
+                .expect("surf parse"),
+            &chelis_syntax_host::NativeStack,
         )
         .expect("Surf fixture must desugar"),
     );
@@ -5013,6 +5034,7 @@ fn fo_diag_bools_strings_and_nonnumeric_controls() {
     );
     let checked_function = chelis_deep::parser::parse_str(
         "(fn {} (params {} (x {type: (t-prim {} f32)})) (var {} x))",
+        &chelis_syntax_host::NativeStack,
     )
     .expect("parse checked function fixture")
     .remove(0);

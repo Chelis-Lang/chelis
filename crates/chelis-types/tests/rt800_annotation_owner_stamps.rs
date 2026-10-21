@@ -9,8 +9,10 @@ use chelis_types::{
 };
 
 fn surf(source: &str) -> Vec<Expr> {
-    let parsed = chelis_surf::parser::parse_str(source).expect("Surf source should parse");
-    chelis_surf::desugar::desugar_program(&parsed).expect("Surf fixture must desugar")
+    let parsed = chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+        .expect("Surf source should parse");
+    chelis_surf::desugar::desugar_program(&parsed, &chelis_syntax_host::NativeStack)
+        .expect("Surf fixture must desugar")
 }
 
 fn expanded_surf(source: &str) -> Vec<Expr> {
@@ -202,7 +204,8 @@ fn structural_child_roles_do_not_require_runtime_owner_stamps() {
     ];
 
     for (label, source) in fixtures {
-        let program = chelis_deep::parser::parse_str(source).expect("valid Deep fixture");
+        let program = chelis_deep::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+            .expect("valid Deep fixture");
         check_ir_program(&program).unwrap_or_else(|result| {
             panic!(
                 "{label} must classify structural children outside runtime ownership: {result:?}"
@@ -284,9 +287,10 @@ def caller(a, b: tensor[4, f32]) = helper(a, b)
 fn raw_top_level_def_and_cast_keep_primary_owner_stamps() {
     let program = chelis_deep::parser::parse_str(
         r#"(def {} answer
-              (cast {}
-                (lit {type: (t-prim {} i32)} 7)
-                (t-prim {} i64)))"#,
+          (cast {}
+            (lit {type: (t-prim {} i32)} 7)
+            (t-prim {} i64)))"#,
+        &chelis_syntax_host::NativeStack,
     )
     .expect("raw Deep owner fixture must parse");
     let checked = check_ir_program(&program)
@@ -309,16 +313,17 @@ fn raw_top_level_def_and_cast_keep_primary_owner_stamps() {
 fn guarded_match_arm_records_the_guard_owner_before_annotation() {
     let program = chelis_deep::parser::parse_str(
         r#"(def {} choose
-              (match {}
-                (lit {type: (t-prim {} bool)} true)
-                (arm {}
-                  (pat-lit {} true)
-                  (lit {type: (t-prim {} bool)} true)
-                  (lit {type: (t-prim {} i32)} 1))
-                (arm {}
-                  (pat-wild {})
-                  ()
-                  (lit {type: (t-prim {} i32)} 2))))"#,
+          (match {}
+            (lit {type: (t-prim {} bool)} true)
+            (arm {}
+              (pat-lit {} true)
+              (lit {type: (t-prim {} bool)} true)
+              (lit {type: (t-prim {} i32)} 1))
+            (arm {}
+              (pat-wild {})
+              ()
+              (lit {type: (t-prim {} i32)} 2))))"#,
+        &chelis_syntax_host::NativeStack,
     )
     .expect("guarded-arm owner fixture must parse");
     let checked = check_ir_program(&program)
@@ -336,12 +341,13 @@ fn guarded_match_arm_records_the_guard_owner_before_annotation() {
 
     let invalid = chelis_deep::parser::parse_str(
         r#"(def {} choose
-              (match {}
-                (lit {type: (t-prim {} bool)} true)
-                (arm {}
-                  (pat-wild {})
-                  (lit {type: (t-prim {} i32)} 1)
-                  (lit {type: (t-prim {} i32)} 2))))"#,
+          (match {}
+            (lit {type: (t-prim {} bool)} true)
+            (arm {}
+              (pat-wild {})
+              (lit {type: (t-prim {} i32)} 1)
+              (lit {type: (t-prim {} i32)} 2))))"#,
+        &chelis_syntax_host::NativeStack,
     )
     .expect("non-boolean guard fixture must parse");
     let errors = check_ir_program(&invalid)

@@ -90,8 +90,11 @@ fn a_substitution_copy_costs_the_same_at_every_size() {
 }
 
 fn check_bytes(source: &str) -> usize {
-    let declarations = chelis_surf::parser::parse_str(source).expect("the probe parses");
-    let program = chelis_surf::desugar::desugar_program(&declarations).expect("the probe desugars");
+    let declarations = chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+        .expect("the probe parses");
+    let program =
+        chelis_surf::desugar::desugar_program(&declarations, &chelis_syntax_host::NativeStack)
+            .expect("the probe desugars");
     let (checked, bytes) = allocated(|| chelis_types::check_typed_program(&program));
     checked.expect("the probe checks");
     bytes

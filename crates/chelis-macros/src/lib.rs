@@ -1,3 +1,14 @@
+#![no_std]
+
+#[macro_use]
+extern crate alloc;
+#[cfg(test)]
+extern crate std;
+
+use alloc::boxed::Box;
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
+
 use chelis_deep::DeepTag;
 use chelis_unord::{PersistentMap, PersistentSet, UnordMap, UnordSet};
 
@@ -2172,7 +2183,8 @@ mod tests {
     const ONE: &str = "(lit {type: (t-prim {} i32)} 1)";
 
     fn routes_to_first_pass(source: &str) -> bool {
-        let exprs = chelis_deep::parser::parse_str(source).expect("the probe parses");
+        let exprs = chelis_deep::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+            .expect("the probe parses");
         expansion_may_recur(
             &exprs,
             &standard_prelude_macros().expect("the prelude loads"),
@@ -2292,7 +2304,8 @@ mod tests {
             + &defmacro("outer", "x", "(app {} (var {} inner) (var {} x))")
             + &format!("(def {{}} main (app {{}} (var {{}} outer) {ONE}))\n");
         for source in [shadowing, chained] {
-            let exprs = chelis_deep::parser::parse_str(&source).expect("the probe parses");
+            let exprs = chelis_deep::parser::parse_str(&source, &chelis_syntax_host::NativeStack)
+                .expect("the probe parses");
             for load_std_prelude in [false, true] {
                 let options = ExpansionOptions {
                     max_iterations: 100,
@@ -2333,7 +2346,8 @@ mod tests {
             100,
         ));
         for (label, source, limit) in programs {
-            let exprs = chelis_deep::parser::parse_str(&source).expect("the probe parses");
+            let exprs = chelis_deep::parser::parse_str(&source, &chelis_syntax_host::NativeStack)
+                .expect("the probe parses");
             for load_std_prelude in [false, true] {
                 let options = ExpansionOptions {
                     max_iterations: limit,
@@ -2348,7 +2362,8 @@ mod tests {
         }
         // The arity error does fire inside the nested expansion, and names
         // only the macro and the counts.
-        let exprs = chelis_deep::parser::parse_str(NESTED_ARITY).expect("the probe parses");
+        let exprs = chelis_deep::parser::parse_str(NESTED_ARITY, &chelis_syntax_host::NativeStack)
+            .expect("the probe parses");
         let error = expand_program(&exprs, &ExpansionOptions::default())
             .expect_err("the nested call has the wrong arity");
         assert_eq!(
@@ -2640,10 +2655,11 @@ mod tests {
     fn macro_introduced_let_binder_is_renamed_and_user_binder_is_not() {
         let program = chelis_deep::parser::parse_str(
             "(defmacro {} shadow (params {} x) \
-               (let {} (bind {} tmp (var {} x)) \
-                 (app {} (var {} add) (var {} tmp) (var {} x)))) \
-             (def {} f (let {} (bind {} tmp (lit {} 1)) \
-               (app {} (var {} shadow) (var {} tmp))))",
+           (let {} (bind {} tmp (var {} x)) \
+             (app {} (var {} add) (var {} tmp) (var {} x)))) \
+         (def {} f (let {} (bind {} tmp (lit {} 1)) \
+           (app {} (var {} shadow) (var {} tmp))))",
+            &chelis_syntax_host::NativeStack,
         )
         .expect("fixture parses");
         let options = ExpansionOptions {

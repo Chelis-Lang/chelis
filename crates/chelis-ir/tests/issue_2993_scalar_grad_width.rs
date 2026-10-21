@@ -17,9 +17,11 @@ use chelis_types::types::Prim;
 use chelis_unord::UnordMap;
 
 fn checked_surf(src: &str) -> chelis_types::CheckedProgram {
-    let decls = chelis_surf::parser::parse_str(src).expect("surf parse");
+    let decls =
+        chelis_surf::parser::parse_str(src, &chelis_syntax_host::NativeStack).expect("surf parse");
     let exprs = chelis_macros::expand_program(
-        &chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar"),
+        &chelis_surf::desugar::desugar_program(&decls, &chelis_syntax_host::NativeStack)
+            .expect("Surf fixture must desugar"),
         &chelis_macros::ExpansionOptions::default(),
     )
     .expect("macro expansion")

@@ -66,12 +66,16 @@ fn on_large_stack<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) 
 /// prelude loaded, as `chelis check` expands it. The expansion must leave the
 /// macro-free program unchanged.
 fn expansion_allocations(source: &str) -> u64 {
-    let declarations = chelis_surf::parser::parse_str(source).unwrap();
-    let deep = chelis_surf::desugar::desugar_program(&declarations).expect("fixture desugars");
+    let declarations =
+        chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack).unwrap();
+    let deep =
+        chelis_surf::desugar::desugar_program(&declarations, &chelis_syntax_host::NativeStack)
+            .expect("fixture desugars");
     let options = ExpansionOptions::default();
     // The prelude is loaded per call; measure it alone so that only the
     // program's share is compared.
-    let empty = chelis_surf::desugar::desugar_program(&[]).unwrap();
+    let empty =
+        chelis_surf::desugar::desugar_program(&[], &chelis_syntax_host::NativeStack).unwrap();
     let (_, prelude_only) = allocations_during(|| expand_program(&empty, &options).unwrap());
     let (expanded, allocations) = allocations_during(|| expand_program(&deep, &options).unwrap());
     assert_eq!(expanded.exprs(), deep.as_slice());

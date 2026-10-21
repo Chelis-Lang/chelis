@@ -16,8 +16,9 @@ fn rendered(errors: &[CheckError]) -> Vec<String> {
 }
 
 fn whole_program(source: &str) -> [(&'static str, Result<(), Vec<CheckError>>); 2] {
-    let parsed = parse_str(source).expect("valid Surf");
-    let desugared = desugar_program(&parsed).expect("Surf fixture must desugar");
+    let parsed = parse_str(source, &chelis_syntax_host::NativeStack).expect("valid Surf");
+    let desugared = desugar_program(&parsed, &chelis_syntax_host::NativeStack)
+        .expect("Surf fixture must desugar");
     let expanded: Vec<Expr> = expand_program(&desugared, &ExpansionOptions::default())
         .expect("macro expansion")
         .into_exprs();

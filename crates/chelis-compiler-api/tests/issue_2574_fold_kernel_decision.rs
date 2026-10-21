@@ -72,9 +72,11 @@ fn root_display(result: &EvalResult, name: &str) -> String {
 }
 
 fn kernel_decision(source: &str, name: &str) -> Result<bool, String> {
-    let decls = chelis_surf::parser::parse_str(source).expect("surf parse");
+    let decls = chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+        .expect("surf parse");
     let exprs = chelis_macros::expand_program(
-        &chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar"),
+        &chelis_surf::desugar::desugar_program(&decls, &chelis_syntax_host::NativeStack)
+            .expect("Surf fixture must desugar"),
         &chelis_macros::ExpansionOptions::default(),
     )
     .expect("macro expansion")

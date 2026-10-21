@@ -15,8 +15,12 @@ const INTS: &[&str] = &["i8", "i16", "i32", "i64"];
 const NON_NUMERIC: &[&str] = &["bool"];
 
 fn diagnostics(source: &str) -> Vec<CheckError> {
-    let decls = parse_surf(source).expect("Surf fixture must parse");
-    match check_typed_program(&desugar_program(&decls).expect("Surf fixture must desugar")) {
+    let decls =
+        parse_surf(source, &chelis_syntax_host::NativeStack).expect("Surf fixture must parse");
+    match check_typed_program(
+        &desugar_program(&decls, &chelis_syntax_host::NativeStack)
+            .expect("Surf fixture must desugar"),
+    ) {
         Ok(_) => Vec::new(),
         Err(report) => report.errors,
     }
@@ -386,9 +390,10 @@ fn a_used_bound_is_accepted_where_the_absent_one_is_not() {
 fn a_def_may_not_bound_a_binder_its_sig_owns() {
     let error = parse_surf(
         r#"
-sig f[p: Float]: p -> p
-def f[p: Float](x: p) -> p = x
-"#,
+    sig f[p: Float]: p -> p
+    def f[p: Float](x: p) -> p = x
+    "#,
+        &chelis_syntax_host::NativeStack,
     )
     .expect_err("duplicate bound ownership must reject before desugaring");
     assert!(

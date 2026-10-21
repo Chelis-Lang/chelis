@@ -39,9 +39,10 @@ use chelis_types::errors::CheckErrorKind;
 use chelis_types::{BUILTIN_NAMES, check_ir_program};
 
 fn surf_to_deep(source: &str) -> Vec<chelis_deep::Expr> {
-    let decls = parse_str(source).expect("surf parse");
+    let decls = parse_str(source, &chelis_syntax_host::NativeStack).expect("surf parse");
     chelis_macros::expand_program(
-        &desugar_program(&decls).expect("Surf fixture must desugar"),
+        &desugar_program(&decls, &chelis_syntax_host::NativeStack)
+            .expect("Surf fixture must desugar"),
         &chelis_macros::ExpansionOptions::default(),
     )
     .expect("macro expand")
@@ -156,7 +157,7 @@ fn every_builtin_name_def_is_rejected() {
         let deep_src = format!(
             "(def {{}} {name} (fn {{}} (params {{}} (x {{type: (t-ref {{}} (t-tensor {{}} (d-lit {{}} 2) (t-prim {{}} f32)))}})) (app {{}} (var {{}} relu) (var {{}} x))))"
         );
-        let exprs = chelis_deep::parser::parse_str(&deep_src)
+        let exprs = chelis_deep::parser::parse_str(&deep_src, &chelis_syntax_host::NativeStack)
             .unwrap_or_else(|e| panic!("deep parse for builtin `{name}`: {e:?}"));
         let errs = shadowing_errors(&exprs);
         assert!(
@@ -179,7 +180,8 @@ fn defsig_rejection_spans_builtin_classes() {
         let deep_src = format!(
             "(defsig {{}} {name} (t-fn {{}} (t-ref {{}} (t-tensor {{}} (d-lit {{}} 2) (t-prim {{}} f32))) (t-tensor {{}} (d-lit {{}} 2) (t-prim {{}} f32))))"
         );
-        let exprs = chelis_deep::parser::parse_str(&deep_src).expect("deep parse");
+        let exprs = chelis_deep::parser::parse_str(&deep_src, &chelis_syntax_host::NativeStack)
+            .expect("deep parse");
         let errs = shadowing_errors(&exprs);
         assert!(
             !errs.is_empty(),

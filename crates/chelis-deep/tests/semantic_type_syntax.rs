@@ -4,8 +4,11 @@ use chelis_deep::{
 };
 
 fn parse_type_at_offset(source: &str, offset: usize) -> Expr {
-    parse_and_stamp_type(&format!("{}{source}", " ".repeat(offset)))
-        .unwrap_or_else(|error| panic!("valid type syntax {source:?}: {error}"))
+    parse_and_stamp_type(
+        &format!("{}{source}", " ".repeat(offset)),
+        &chelis_syntax_host::NativeStack,
+    )
+    .unwrap_or_else(|error| panic!("valid type syntax {source:?}: {error}"))
 }
 
 /// The same text as a structural list: its tag spelled as a head name,

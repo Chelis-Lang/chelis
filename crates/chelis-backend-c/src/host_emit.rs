@@ -17316,8 +17316,11 @@ mod forwarding_entry_identity_tests {
         } else {
             source
         };
-        let declarations = chelis_surf::parser::parse_str(&source).unwrap();
-        let deep = chelis_surf::desugar::desugar_program(&declarations).unwrap();
+        let declarations =
+            chelis_surf::parser::parse_str(&source, &chelis_syntax_host::NativeStack).unwrap();
+        let deep =
+            chelis_surf::desugar::desugar_program(&declarations, &chelis_syntax_host::NativeStack)
+                .unwrap();
         let checked = chelis_types::check_typed_program(&deep).unwrap();
         let checked = chelis_effects::check_program(&checked).unwrap();
         let checked = chelis_types::check_linearity(&checked).unwrap();

@@ -2,7 +2,8 @@ use chelis_ir::host::{find_direct_builtin_call, program_has_top_level_value_bind
 use chelis_types::{CheckedProgram, check_ir_program, check_typed_program};
 
 fn checked_ingresses(source: &str) -> (CheckedProgram, CheckedProgram) {
-    let stamped = chelis_deep::parse_and_stamp_file(source).expect("fixture must parse and stamp");
+    let stamped = chelis_deep::parse_and_stamp_file(source, &chelis_syntax_host::NativeStack)
+        .expect("fixture must parse and stamp");
     let typed = check_typed_program(&stamped)
         .unwrap_or_else(|errors| panic!("typed ingress must check: {:?}", errors.errors));
     let ir = check_ir_program(&stamped)

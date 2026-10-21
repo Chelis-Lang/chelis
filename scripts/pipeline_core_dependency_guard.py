@@ -33,6 +33,7 @@ APPROVED_WORKSPACE_CLOSURE = frozenset(
         "chelis-crmath",
         "chelis-pred",
         "chelis-vocab",
+        "chelis-stack-services",
     }
 )
 DENIED_PACKAGES = frozenset(

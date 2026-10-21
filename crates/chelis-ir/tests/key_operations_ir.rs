@@ -2662,7 +2662,7 @@ fn lowered_dropout(rate: f64, count: usize) -> Result<Vec<f64>, String> {
          (app {{}} (var {{}} key_from_seed) (lit {{type: (t-prim {{}} i64)}} 42)) \
          (var {{}} x) (lit {{type: (t-prim {{}} f32)}} {rate:?}))"
     );
-    let expression = chelis_deep::parser::parse_str(&source)
+    let expression = chelis_deep::parser::parse_str(&source, &chelis_syntax_host::NativeStack)
         .unwrap()
         .pop()
         .unwrap();

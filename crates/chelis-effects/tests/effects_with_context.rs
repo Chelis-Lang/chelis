@@ -20,8 +20,8 @@ use chelis_types::{
 // ── Helpers ──────────────────────────────────────────────────────────────
 
 fn parse_then_desugar(src: &str) -> Vec<Expr> {
-    let decls = parse_surf(src).expect("surf parse");
-    desugar_program(&decls).expect("Surf fixture must desugar")
+    let decls = parse_surf(src, &chelis_syntax_host::NativeStack).expect("surf parse");
+    desugar_program(&decls, &chelis_syntax_host::NativeStack).expect("Surf fixture must desugar")
 }
 
 /// Build (library_typeenv, library_checked_with_effects) from library Surf source.

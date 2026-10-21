@@ -1,3 +1,4 @@
+use alloc::{boxed::Box, string::String, vec::Vec};
 use chelis_deep::{DtypeBound, DtypeFamily, Span};
 use serde::{Deserialize, Deserializer, Serialize};
 
@@ -235,13 +236,13 @@ pub enum PipeStageSyntax {
     Realize,
 }
 
-impl std::ops::Deref for PipeStage {
+impl core::ops::Deref for PipeStage {
     type Target = Expr;
     fn deref(&self) -> &Expr {
         &self.expression
     }
 }
-impl std::ops::DerefMut for PipeStage {
+impl core::ops::DerefMut for PipeStage {
     fn deref_mut(&mut self) -> &mut Expr {
         &mut self.expression
     }
@@ -301,14 +302,14 @@ pub enum Expr {
 impl Expr {
     fn take_children_for_drop(&mut self, pending: &mut Vec<Expr>) {
         fn take_boxed(child: &mut Box<Expr>, span: Span) -> Expr {
-            std::mem::replace(child.as_mut(), Expr::Lit(Literal::Bool(false), span))
+            core::mem::replace(child.as_mut(), Expr::Lit(Literal::Bool(false), span))
         }
 
         match self {
             Self::Lit(_, _) | Self::Var(_, _) | Self::Constructor(_, _) => {}
             Self::Apply(callee, args, span) => {
                 pending.push(take_boxed(callee, *span));
-                pending.extend(std::mem::take(args));
+                pending.extend(core::mem::take(args));
             }
             Self::Accumulate(call, _, span)
             | Self::Access(call, _, span)
@@ -327,13 +328,13 @@ impl Expr {
             Self::List(items, _)
             | Self::Tuple(items, _)
             | Self::Par(items, _)
-            | Self::Do(items, _) => pending.extend(std::mem::take(items)),
+            | Self::Do(items, _) => pending.extend(core::mem::take(items)),
             Self::Record(_, fields, _) => {
-                pending.extend(std::mem::take(fields).into_iter().map(|(_, value)| value));
+                pending.extend(core::mem::take(fields).into_iter().map(|(_, value)| value));
             }
             Self::RecordUpdate(base, fields, span) => {
                 pending.push(take_boxed(base, *span));
-                pending.extend(std::mem::take(fields).into_iter().map(|(_, value)| value));
+                pending.extend(core::mem::take(fields).into_iter().map(|(_, value)| value));
             }
             Self::Binary(_, left, right, span) | Self::WithDevice(left, right, span) => {
                 pending.push(take_boxed(left, *span));
@@ -343,7 +344,7 @@ impl Expr {
             Self::Pipe(value, stages, span) => {
                 pending.push(take_boxed(value, *span));
                 pending.extend(
-                    std::mem::take(stages)
+                    core::mem::take(stages)
                         .into_iter()
                         .map(|stage| stage.expression),
                 );
@@ -355,7 +356,7 @@ impl Expr {
             }
             Self::Match(value, arms, span) => {
                 pending.push(take_boxed(value, *span));
-                for arm in std::mem::take(arms) {
+                for arm in core::mem::take(arms) {
                     pending.extend(arm.guard);
                     pending.push(arm.body);
                 }
@@ -363,7 +364,7 @@ impl Expr {
             Self::Lambda(_, body, span) => pending.push(take_boxed(body, *span)),
             Self::Block(bindings, result, span) => {
                 pending.extend(
-                    std::mem::take(bindings)
+                    core::mem::take(bindings)
                         .into_iter()
                         .map(|binding| binding.value),
                 );
@@ -400,7 +401,7 @@ pub enum LetPattern {
 impl LetPattern {
     fn take_children_for_drop(&mut self, pending: &mut Vec<LetPattern>) {
         if let Self::Tuple(items, _) = self {
-            pending.extend(std::mem::take(items));
+            pending.extend(core::mem::take(items));
         }
     }
 }
@@ -484,17 +485,17 @@ impl Pattern {
     fn take_children_for_drop(&mut self, pending: &mut Vec<Pattern>) {
         match self {
             Self::Constructor(_, items, _) | Self::Tuple(items, _) => {
-                pending.extend(std::mem::take(items));
+                pending.extend(core::mem::take(items));
             }
             Self::Record(_, fields, _) => {
                 pending.extend(
-                    std::mem::take(fields)
+                    core::mem::take(fields)
                         .into_iter()
                         .map(|(_, pattern)| pattern),
                 );
             }
             Self::As(_, inner, span) => {
-                let child = std::mem::replace(inner, Box::new(Self::Wildcard(*span)));
+                let child = core::mem::replace(inner, Box::new(Self::Wildcard(*span)));
                 pending.push(*child);
             }
             _ => {}
@@ -532,8 +533,8 @@ impl DimensionLiteral {
     }
 }
 
-impl std::fmt::Display for DimensionLiteral {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for DimensionLiteral {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         self.0.fmt(f)
     }
 }
@@ -601,13 +602,13 @@ impl<'de> Deserialize<'de> for TensorPrecision {
     }
 }
 
-impl std::fmt::Display for TensorPrecision {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for TensorPrecision {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         self.name.fmt(formatter)
     }
 }
 
-impl std::ops::Deref for TensorPrecision {
+impl core::ops::Deref for TensorPrecision {
     type Target = str;
 
     fn deref(&self) -> &Self::Target {
@@ -644,15 +645,15 @@ impl TypeExpr {
     fn take_children_for_drop(&mut self, pending: &mut Vec<TypeExpr>) {
         match self {
             Self::Tensor(items, _, _) | Self::App(_, items, _) | Self::Tuple(items, _) => {
-                pending.extend(std::mem::take(items));
+                pending.extend(core::mem::take(items));
             }
             Self::Arrow(args, result, span) => {
-                pending.extend(std::mem::take(args));
-                let child = std::mem::replace(result, Box::new(Self::Infer(*span)));
+                pending.extend(core::mem::take(args));
+                let child = core::mem::replace(result, Box::new(Self::Infer(*span)));
                 pending.push(*child);
             }
             Self::Ref(inner, span) => {
-                let child = std::mem::replace(inner, Box::new(Self::Infer(*span)));
+                let child = core::mem::replace(inner, Box::new(Self::Infer(*span)));
                 pending.push(*child);
             }
             _ => {}

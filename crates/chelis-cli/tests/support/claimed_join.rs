@@ -365,9 +365,9 @@ fn compiled(directory: &Path, stem: &str, source: &str) -> Outcome {
 }
 
 fn dag(cell: &Cell) -> Outcome {
-    let declarations = chelis_surf::parser::parse_str(&cell.source).expect("Surf parse");
+    let declarations = chelis_surf::parser::parse_str(&cell.source,&chelis_syntax_host::NativeStack).expect("Surf parse");
     let checked = chelis_types::check_ir_program(
-        &chelis_surf::desugar::desugar_program(&declarations).expect("Surf desugar"),
+        &chelis_surf::desugar::desugar_program(&declarations,&chelis_syntax_host::NativeStack).expect("Surf desugar"),
     )
     .unwrap_or_else(|report| panic!("type check failed: {:?}", report.errors));
     // A fatal lowering diagnostic (one raised inside a transform body)

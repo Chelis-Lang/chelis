@@ -17,15 +17,22 @@ use chelis_surf::parser::parse_str as parse_surf;
 use chelis_surf::resugar::resugar_expression;
 
 fn parse_one_deep(source: &str) -> DeepExpr {
-    let mut exprs = parse_deep(source).expect("Deep fixture parses");
+    let mut exprs =
+        parse_deep(source, &chelis_syntax_host::NativeStack).expect("Deep fixture parses");
     assert_eq!(exprs.len(), 1, "fixture must contain one Deep expression");
     exprs.remove(0)
 }
 
 fn redesugar_expression(source: &str) -> String {
-    let decls = parse_surf(&format!("def result() = {source}"))
-        .unwrap_or_else(|error| panic!("resugared Surf did not parse: {error}\n{source}"));
-    print_canonical(&desugar_program(&decls).expect("Surf fixture must desugar"))
+    let decls = parse_surf(
+        &format!("def result() = {source}"),
+        &chelis_syntax_host::NativeStack,
+    )
+    .unwrap_or_else(|error| panic!("resugared Surf did not parse: {error}\n{source}"));
+    print_canonical(
+        &desugar_program(&decls, &chelis_syntax_host::NativeStack)
+            .expect("Surf fixture must desugar"),
+    )
 }
 
 #[test]
@@ -217,12 +224,14 @@ fn par_resugars_through_the_canonical_surf_ast_printer() {
 fn public_decompiler_uses_the_shared_ast_spelling_for_cast_and_par() {
     // Suffixed operands keep their cast nodes (spec/04 §5.6).
     let source = "def result() = par { cast(1.0f64, f32); cast(2.0f64, f32) }";
-    let decls = parse_surf(source).expect("canonical Surf fixture parses");
-    let deep = desugar_program(&decls).expect("Surf fixture must desugar");
+    let decls = parse_surf(source, &chelis_syntax_host::NativeStack)
+        .expect("canonical Surf fixture parses");
+    let deep = desugar_program(&decls, &chelis_syntax_host::NativeStack)
+        .expect("Surf fixture must desugar");
 
-    let emitted = decompile_program(&deep);
+    let emitted = decompile_program(&deep, &chelis_syntax_host::NativeStack);
 
-    parse_surf(&emitted)
+    parse_surf(&emitted, &chelis_syntax_host::NativeStack)
         .unwrap_or_else(|error| panic!("decompiler emitted invalid Surf: {error}\n{emitted}"));
     assert!(
         emitted.contains("par {"),
@@ -241,7 +250,7 @@ fn public_decompiler_uses_the_shared_ast_spelling_for_cast_and_par() {
 
 #[test]
 fn malformed_cast_is_rejected_before_resugaring_node_construction() {
-    let error = parse_deep("(cast {} (lit {} 1.0))")
+    let error = parse_deep("(cast {} (lit {} 1.0))", &chelis_syntax_host::NativeStack)
         .expect_err("a one-child cast cannot become a stamped Deep node");
 
     assert!(
@@ -261,11 +270,17 @@ fn public_decompiler_propagates_malformed_foundation_nodes() {
         span,
     }));
 
-    let error = try_decompile_program(std::slice::from_ref(&malformed))
-        .expect_err("fallible public boundary must propagate an unknown Deep form");
+    let error = try_decompile_program(
+        std::slice::from_ref(&malformed),
+        &chelis_syntax_host::NativeStack,
+    )
+    .expect_err("fallible public boundary must propagate an unknown Deep form");
     assert!(error.to_string().contains("unknown form `future-form`"));
 
-    let displayed = decompile_program(std::slice::from_ref(&malformed));
+    let displayed = decompile_program(
+        std::slice::from_ref(&malformed),
+        &chelis_syntax_host::NativeStack,
+    );
     assert!(
         displayed.starts_with("-- Deep resugaring error:"),
         "display wrapper must expose the error: {displayed}"
@@ -280,8 +295,11 @@ fn public_decompiler_propagates_malformed_foundation_nodes() {
 fn fallible_program_boundary_rejects_invalid_declaration_without_expression_fallback() {
     let malformed = parse_one_deep("(def {} result (var {} if))");
 
-    let error = try_decompile_program(std::slice::from_ref(&malformed))
-        .expect_err("fallible public boundary must not return unparsable Surf");
+    let error = try_decompile_program(
+        std::slice::from_ref(&malformed),
+        &chelis_syntax_host::NativeStack,
+    )
+    .expect_err("fallible public boundary must not return unparsable Surf");
 
     assert!(
         error.to_string().contains("valid Surf value identifier"),
@@ -312,7 +330,8 @@ fn constructed_non_finite_deep_float_fails_loudly() {
 
 #[test]
 fn empty_par_is_an_error_not_an_empty_surface_block() {
-    let error = parse_deep("(par {})").expect_err("an empty par cannot become a stamped node");
+    let error = parse_deep("(par {})", &chelis_syntax_host::NativeStack)
+        .expect_err("an empty par cannot become a stamped node");
 
     assert!(
         error.to_string().contains("wrong child count for `par`")
@@ -377,7 +396,8 @@ fn overflowing_deep_text_is_rejected_before_resugaring() {
         "(lit {} 1e400)",
         "(match {} (var {} x) (arm {} (pat-lit {} 1e400) () (lit {} 1)))",
     ] {
-        let error = parse_deep(source).expect_err("overflowing source number must reject");
+        let error = parse_deep(source, &chelis_syntax_host::NativeStack)
+            .expect_err("overflowing source number must reject");
         assert!(
             error.to_string().contains("invalid number") && error.to_string().contains("1e400"),
             "diagnostic must identify source-number overflow: {error}"
@@ -442,8 +462,8 @@ fn semantic_resugaring_keeps_declaration_bound_literal_dtypes_before_source_elis
     use chelis_deep::LiteralSuffix;
     use chelis_surf::ast::{Decl, Expr, Literal};
     use chelis_surf::resugar::{resugar_program, resugar_program_for_analysis};
-    let declarations = parse_surf("sig standalone: i32 -> f64\ndef unrelated(x: i32) -> i32 = x\ndef standalone(dummy: i32) = 1.1\ndef declared(dummy: i32) -> f64 = 1.1\ndef wide(dummy: i32) -> i64 = 3000000000\ndef integer_float(dummy: i32) -> f64 = 16777217\ndef local(dummy: i32) -> f64 = { \n  value: f64 = 1.1\n  value\n}\n").unwrap();
-    let canonical = desugar_program(&declarations).unwrap();
+    let declarations = parse_surf("sig standalone: i32 -> f64\ndef unrelated(x: i32) -> i32 = x\ndef standalone(dummy: i32) = 1.1\ndef declared(dummy: i32) -> f64 = 1.1\ndef wide(dummy: i32) -> i64 = 3000000000\ndef integer_float(dummy: i32) -> f64 = 16777217\ndef local(dummy: i32) -> f64 = { \n  value: f64 = 1.1\n  value\n}\n",&chelis_syntax_host::NativeStack).unwrap();
+    let canonical = desugar_program(&declarations, &chelis_syntax_host::NativeStack).unwrap();
     let semantic = resugar_program_for_analysis(&canonical).unwrap();
     let source = resugar_program(&canonical).unwrap();
     let body = |declarations: &[Decl], name: &str| -> Expr {
@@ -482,7 +502,7 @@ fn semantic_resugaring_keeps_declaration_bound_literal_dtypes_before_source_elis
     let printed = chelis_surf::format::format_program(&source);
     assert_eq!(
         printed,
-        chelis_surf::format::format_source(&printed).unwrap()
+        chelis_surf::format::format_source(&printed, &chelis_syntax_host::NativeStack).unwrap()
     );
 }
 
@@ -492,7 +512,11 @@ fn semantic_resugaring_preserves_converting_named_and_binder_casts() {
     use chelis_surf::ast::{CastMode, Decl, Expr};
     use chelis_surf::resugar::resugar_program_for_analysis;
     let source = "def convert(dummy: i32) -> f64 = cast(1.1f32, f64)\ndef named(dummy: i32) -> i32 = cast_trunc(1.5, i32)\ndef binder[p: Float](dummy: p) -> p = cast(1.1, p)\n";
-    let canonical = desugar_program(&parse_surf(source).unwrap()).unwrap();
+    let canonical = desugar_program(
+        &parse_surf(source, &chelis_syntax_host::NativeStack).unwrap(),
+        &chelis_syntax_host::NativeStack,
+    )
+    .unwrap();
     let semantic = resugar_program_for_analysis(&canonical).unwrap();
     for (name, mode) in [
         ("convert", CastMode::Checked),
@@ -527,13 +551,18 @@ fn nested_grad_resugaring_preserves_callable_selector_identity() {
         let source = format!(
             "def pair(x: f32, w: f32) -> f32 = x * w\nselected = grad(grad({target}, wrt=w), wrt=x)\n"
         );
-        let canonical = desugar_program(&parse_surf(&source).unwrap()).unwrap();
+        let canonical = desugar_program(
+            &parse_surf(&source, &chelis_syntax_host::NativeStack).unwrap(),
+            &chelis_syntax_host::NativeStack,
+        )
+        .unwrap();
         for reconstructed in [
             resugar_program(&canonical),
             resugar_program_for_analysis(&canonical),
         ] {
             let reconstructed = reconstructed.expect("valid nested selectors reconstruct");
-            let roundtrip = desugar_program(&reconstructed).unwrap();
+            let roundtrip =
+                desugar_program(&reconstructed, &chelis_syntax_host::NativeStack).unwrap();
             assert_eq!(
                 print_canonical(&normalize_deep_for_surface_roundtrip(&roundtrip).unwrap()),
                 print_canonical(&normalize_deep_for_surface_roundtrip(&canonical).unwrap())
@@ -554,7 +583,7 @@ fn nested_grad_resugaring_rejects_contradictory_outer_and_inner_selectors() {
                  (lit {{type: (t-prim {{}} i32)}} {inner})) \
                (lit {{type: (t-prim {{}} i32)}} {outer})))"
         );
-        let canonical = parse_deep(&source).unwrap();
+        let canonical = parse_deep(&source, &chelis_syntax_host::NativeStack).unwrap();
         for result in [
             resugar_program(&canonical),
             resugar_program_for_analysis(&canonical),

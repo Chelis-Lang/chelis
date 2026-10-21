@@ -13,8 +13,10 @@ use chelis_surf::parser::parse_str;
 use chelis_surf::resugar::{normalize_deep_for_surface_roundtrip, resugar_program};
 
 fn canonical_deep(source: &str) -> String {
-    let decls = parse_str(source).unwrap_or_else(|error| panic!("{error}\n{source}"));
-    let deep = desugar_program(&decls).unwrap_or_else(|error| panic!("{error}\n{source}"));
+    let decls = parse_str(source, &chelis_syntax_host::NativeStack)
+        .unwrap_or_else(|error| panic!("{error}\n{source}"));
+    let deep = desugar_program(&decls, &chelis_syntax_host::NativeStack)
+        .unwrap_or_else(|error| panic!("{error}\n{source}"));
     print_canonical(
         &normalize_deep_for_surface_roundtrip(&deep).expect("valid round-trip metadata"),
     )
@@ -24,14 +26,16 @@ fn assert_round_trips(body: &str, expected: &str) {
     let source = format!("def main(x: f32) -> f32 = {body}\n");
     let authored = canonical_deep(&source);
 
-    let formatted = format_source(&source).unwrap_or_else(|error| panic!("{error}\n{source}"));
+    let formatted = format_source(&source, &chelis_syntax_host::NativeStack)
+        .unwrap_or_else(|error| panic!("{error}\n{source}"));
     assert_eq!(
         formatted,
         format!("def main(x: f32) -> f32 = {expected}\n"),
         "canonical text for `{body}`"
     );
     assert_eq!(
-        format_source(&formatted).expect("formatted text reparses"),
+        format_source(&formatted, &chelis_syntax_host::NativeStack)
+            .expect("formatted text reparses"),
         formatted,
         "formatted text is a fixed point for `{body}`"
     );
@@ -41,7 +45,11 @@ fn assert_round_trips(body: &str, expected: &str) {
         "formatting changed the Deep of `{body}`"
     );
 
-    let deep = desugar_program(&parse_str(&source).expect("parse")).expect("desugar");
+    let deep = desugar_program(
+        &parse_str(&source, &chelis_syntax_host::NativeStack).expect("parse"),
+        &chelis_syntax_host::NativeStack,
+    )
+    .expect("desugar");
     let resugared = format_program(&resugar_program(&deep).expect("resugar"));
     assert_eq!(
         canonical_deep(&resugared),

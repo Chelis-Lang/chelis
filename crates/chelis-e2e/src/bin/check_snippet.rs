@@ -143,7 +143,7 @@ fn analyze_fitness(
 }
 
 fn check_surf(source: &str) {
-    match parse_surf(source) {
+    match parse_surf(source, &chelis_syntax_host::NativeStack) {
         Ok(decls) => {
             let prepared = chelis_compiler_api::pipeline::prepare_surf_decls(&decls, None)
                 .expect("macro expansion should succeed for snippet checking");
@@ -172,7 +172,7 @@ fn check_deep(source: &str) {
     // chelis#1088: the snippet checker feeds `prepare_deep`, so it must use
     // the same stamped `.dp` ingress the compiler does. A weaker parse here
     // would report a fitness score for a tree the compiler never accepts.
-    match chelis_deep::parse_and_stamp_file(source) {
+    match chelis_deep::parse_and_stamp_file(source, &chelis_syntax_host::NativeStack) {
         Ok(exprs) => {
             let warnings = validate(&exprs);
             let prepared = chelis_compiler_api::pipeline::prepare_deep(exprs, None);

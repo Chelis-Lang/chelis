@@ -98,7 +98,7 @@ const VALUE_BINDING: &str =
     "(module {} econ.consts (def {} pi (lit {type: (t-prim {} f32)} 3.14159)))\n";
 
 fn parse(src: &str) -> Vec<Expr> {
-    parse_str(src).expect("fixture parse failed")
+    parse_str(src, &chelis_syntax_host::NativeStack).expect("fixture parse failed")
 }
 
 /// The embedded fixtures are the canonical Deep produced by `chelis deep`
@@ -134,7 +134,8 @@ fn resolve_splice_roundtrip_function_def() {
 
     // Round-trip invariant: print, re-parse, re-print is identical.
     let printed = print_canonical(&spliced);
-    let reparsed = parse_str(&printed).expect("spliced output re-parsed");
+    let reparsed =
+        parse_str(&printed, &chelis_syntax_host::NativeStack).expect("spliced output re-parsed");
     let reprinted = print_canonical(&reparsed);
     assert_eq!(
         printed, reprinted,
@@ -257,7 +258,8 @@ fn splice_preserves_property_chelis_role_metadata() {
 
     // The spliced property module still round-trips.
     let printed = print_canonical(&spliced);
-    let reparsed = parse_str(&printed).expect("spliced property re-parsed");
+    let reparsed =
+        parse_str(&printed, &chelis_syntax_host::NativeStack).expect("spliced property re-parsed");
     assert_eq!(printed, print_canonical(&reparsed));
 }
 

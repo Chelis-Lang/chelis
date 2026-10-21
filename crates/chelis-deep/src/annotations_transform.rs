@@ -5,6 +5,7 @@ use crate::{
     Atom, DeepTag, Expr, MetaExpr,
     metadata::{MetadataError, MetadataRole},
 };
+use alloc::{borrow::ToOwned, boxed::Box, string::ToString, vec::Vec};
 
 pub(crate) fn parts(
     expr: Expr,

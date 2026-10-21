@@ -5,7 +5,7 @@ use chelis_surf::{desugar::desugar_program, parser::parse_str};
 use chelis_types::{check_ir_program, check_typed_program};
 
 fn deep(source: &str) -> Vec<Expr> {
-    parse_and_stamp_file(source).expect("Deep")
+    parse_and_stamp_file(source, &chelis_syntax_host::NativeStack).expect("Deep")
 }
 
 fn diagnostics(program: &[Expr]) -> (Vec<String>, Vec<String>) {
@@ -37,7 +37,11 @@ fn assert_both(program: &[Expr], expected: Option<&str>, label: &str) {
 
 fn assert_surf(source: &str, expected: Option<&str>) {
     assert_both(
-        &desugar_program(&parse_str(source).expect("Surf")).expect("Surf fixture must desugar"),
+        &desugar_program(
+            &parse_str(source, &chelis_syntax_host::NativeStack).expect("Surf"),
+            &chelis_syntax_host::NativeStack,
+        )
+        .expect("Surf fixture must desugar"),
         expected,
         source,
     );
@@ -95,7 +99,8 @@ fn only_the_exact_adopting_relation_can_stamp_a_binder_literal() {
         Some("[04-INF-6]"),
     );
     let malformed = binder_program("float", "surf_literal_style: 1, ", "0.1");
-    let error = parse_and_stamp_file(&malformed).expect_err("malformed marker rejects at ingress");
+    let error = parse_and_stamp_file(&malformed, &chelis_syntax_host::NativeStack)
+        .expect_err("malformed marker rejects at ingress");
     assert!(error.to_string().contains("surf_literal_style"));
     for (label, marker) in [
         ("explicit", "surf_literal_style: \"explicit\", "),

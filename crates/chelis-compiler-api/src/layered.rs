@@ -444,7 +444,8 @@ mod artifact_outcome_tests {
     }
 
     fn check_with(source: &str, reporting: EffectRowReporting) -> LayeredCheck {
-        let decls = chelis_surf::parser::parse_str(source).expect("Surf parse");
+        let decls = chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+            .expect("Surf parse");
         check_layered(&[], [0; 32], &decls, reporting)
             .expect("empty library context")
             .expect("the fixture must pass type analysis")
@@ -532,7 +533,7 @@ mod build_layering_tests {
     use chelis_types::CheckedProgram;
 
     fn parse(src: &str) -> Vec<chelis_surf::ast::Decl> {
-        chelis_surf::parser::parse_str(src).expect("Surf parse")
+        chelis_surf::parser::parse_str(src, &chelis_syntax_host::NativeStack).expect("Surf parse")
     }
 
     /// Order-independent semantic equality of two checked programs.

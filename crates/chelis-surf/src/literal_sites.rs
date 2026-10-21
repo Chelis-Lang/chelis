@@ -728,6 +728,10 @@ impl<'a, V: SiteVisitor<'a>> Walker<'_, 'a, V> {
 mod tests {
     use super::*;
     use crate::parser::parse_str;
+    use alloc::{
+        string::{String, ToString},
+        vec::Vec,
+    };
 
     #[derive(Default)]
     struct Recorder(Vec<String>);
@@ -749,7 +753,7 @@ mod tests {
     }
 
     fn sites(source: &str) -> Vec<String> {
-        let decls = parse_str(source).expect("parse");
+        let decls = parse_str(source, &chelis_syntax_host::NativeStack).expect("parse");
         let mut recorder = Recorder::default();
         visit_program(&decls, &mut recorder);
         recorder.0

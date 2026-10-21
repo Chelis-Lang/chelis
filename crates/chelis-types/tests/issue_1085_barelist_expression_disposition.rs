@@ -30,7 +30,8 @@ fn zero() -> Span {
 }
 
 fn stamped(source: &str) -> Vec<Expr> {
-    parse_and_stamp(source).unwrap_or_else(|e| panic!("fixture must stamp: {source}\n{e}"))
+    parse_and_stamp(source, &chelis_syntax_host::NativeStack)
+        .unwrap_or_else(|e| panic!("fixture must stamp: {source}\n{e}"))
 }
 
 /// Errors from the stamped-Deep ingress.

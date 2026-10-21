@@ -9,8 +9,11 @@ use chelis_types::{
 };
 
 fn check(source: &str, accepted: bool) {
-    let program = desugar_program(&parse_str(source).expect("valid source"))
-        .expect("Surf fixture must desugar");
+    let program = desugar_program(
+        &parse_str(source, &chelis_syntax_host::NativeStack).expect("valid source"),
+        &chelis_syntax_host::NativeStack,
+    )
+    .expect("Surf fixture must desugar");
     let result = check_typed_program(&program);
     if accepted {
         assert!(result.is_ok(), "{source}\n{result:?}");
@@ -38,8 +41,9 @@ fn rendered(errors: &[CheckError]) -> Vec<String> {
 }
 
 fn both_ingress_diagnostics(source: &str) -> Vec<CheckError> {
-    let parsed = parse_str(source).expect("valid source");
-    let desugared = desugar_program(&parsed).expect("Surf fixture must desugar");
+    let parsed = parse_str(source, &chelis_syntax_host::NativeStack).expect("valid source");
+    let desugared = desugar_program(&parsed, &chelis_syntax_host::NativeStack)
+        .expect("Surf fixture must desugar");
     let expanded: Vec<Expr> = expand_program(&desugared, &ExpansionOptions::default())
         .expect("macro expansion")
         .into_exprs();
@@ -274,8 +278,11 @@ fn numeric_and_integer_operation_contracts_cover_each_spec_family() {
     );
     for binder in ["p", "p: Numeric", "p: Int"] {
         let source = format!("def g[{binder}](x: tensor[3, p]) -> tensor[p] = sum(x, 0i32)\n");
-        let program = desugar_program(&parse_str(&source).expect("valid source"))
-            .expect("Surf fixture must desugar");
+        let program = desugar_program(
+            &parse_str(&source, &chelis_syntax_host::NativeStack).expect("valid source"),
+            &chelis_syntax_host::NativeStack,
+        )
+        .expect("Surf fixture must desugar");
         assert!(check_typed_program(&program).is_err(), "{source}");
     }
     // Negative control: an aliased `sum` over an unbounded binder stays
@@ -639,7 +646,12 @@ fn a_primitive_function_value_carries_its_admission_requirement() {
 #[test]
 fn empty_literal_precision_cannot_evade_the_operation_contract() {
     let program = desugar_program(
-        &parse_str("def f() -> tensor[i32] = mean(to_tensor([]), 0i32)\n").unwrap(),
+        &parse_str(
+            "def f() -> tensor[i32] = mean(to_tensor([]), 0i32)\n",
+            &chelis_syntax_host::NativeStack,
+        )
+        .unwrap(),
+        &chelis_syntax_host::NativeStack,
     )
     .expect("Surf fixture must desugar");
     let Err(report) = check_typed_program(&program) else {
@@ -702,7 +714,11 @@ fn every_family_primitive_alias_preserves_its_requirement() {
 #[test]
 fn a_failed_family_application_does_not_also_claim_its_operand_was_never_bound() {
     let source = "def f() -> i32 = {\n a = fn(t) -> mean(t, 0i32)\n b = fn(u) -> matmul(u, u)\n _ = a(to_tensor([1i32, 2i32, 4i32]))\n 1i32\n}\n";
-    let program = desugar_program(&parse_str(source).unwrap()).expect("Surf fixture must desugar");
+    let program = desugar_program(
+        &parse_str(source, &chelis_syntax_host::NativeStack).unwrap(),
+        &chelis_syntax_host::NativeStack,
+    )
+    .expect("Surf fixture must desugar");
     let Err(report) = check_typed_program(&program) else {
         panic!("invalid family");
     };

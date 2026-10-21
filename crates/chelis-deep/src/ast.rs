@@ -1,3 +1,8 @@
+use alloc::{
+    boxed::Box,
+    string::{String, ToString},
+    vec::Vec,
+};
 use serde::{Deserialize, Serialize};
 
 pub use crate::annotations::Metadata;
@@ -64,7 +69,7 @@ impl Expr {
     /// Consume an atom while allowing every other carrier to retain ownership.
     pub fn into_atom(mut self) -> Result<(Atom, Span), Self> {
         if let Expr::Atom(atom, span) = &mut self {
-            Ok((std::mem::replace(atom, Atom::Bool(false)), *span))
+            Ok((core::mem::replace(atom, Atom::Bool(false)), *span))
         } else {
             Err(self)
         }
@@ -82,7 +87,7 @@ impl Expr {
 
     pub fn into_bare_list(mut self) -> Result<(Vec<Expr>, Span), Self> {
         if let Expr::BareList(items, span) = &mut self {
-            Ok((std::mem::take(items), *span))
+            Ok((core::mem::take(items), *span))
         } else {
             Err(self)
         }
@@ -90,7 +95,7 @@ impl Expr {
 
     pub fn into_metadata_map(mut self) -> Result<(Metadata, Span), Self> {
         if let Expr::Map(map, span) = &mut self {
-            Ok((std::mem::take(map), *span))
+            Ok((core::mem::take(map), *span))
         } else {
             Err(self)
         }
@@ -98,8 +103,8 @@ impl Expr {
 
     pub fn into_metadata_expression(mut self) -> Result<(Metadata, Expr, Span), Self> {
         if let Expr::MetaExpr(wrapper, span) = &mut self {
-            let metadata = std::mem::take(&mut wrapper.metadata);
-            let expression = std::mem::replace(
+            let metadata = core::mem::take(&mut wrapper.metadata);
+            let expression = core::mem::replace(
                 wrapper.expr.as_mut(),
                 Expr::Atom(Atom::Bool(false), Span::new(0, 0)),
             );
@@ -129,21 +134,21 @@ impl Expr {
     ) {
         match self {
             Expr::Atom(..) => {}
-            Expr::Map(map, _) => metadata.push(std::mem::take(map)),
+            Expr::Map(map, _) => metadata.push(core::mem::take(map)),
             Expr::MetaExpr(wrapper, _) => {
-                metadata.push(std::mem::take(&mut wrapper.metadata));
-                expressions.push(std::mem::replace(
+                metadata.push(core::mem::take(&mut wrapper.metadata));
+                expressions.push(core::mem::replace(
                     wrapper.expr.as_mut(),
                     Expr::Atom(Atom::Bool(false), Span::new(0, 0)),
                 ));
             }
             Expr::Node(node, _) => node.take_owned_children_for_drop(expressions, metadata),
             Expr::BareList(children, _) => {
-                expressions.extend(std::mem::take(children).into_iter().rev());
+                expressions.extend(core::mem::take(children).into_iter().rev());
             }
             Expr::UnknownForm(data) => {
-                expressions.extend(std::mem::take(&mut data.children).into_iter().rev());
-                metadata.push(std::mem::take(&mut data.meta));
+                expressions.extend(core::mem::take(&mut data.children).into_iter().rev());
+                metadata.push(core::mem::take(&mut data.meta));
             }
         }
     }
@@ -455,7 +460,7 @@ mod strip_metadata_tests {
     use crate::printer::print_expr_flat;
 
     fn first(source: &str) -> Expr {
-        parse_str(source)
+        parse_str(source, &chelis_syntax_host::NativeStack)
             .expect("parse")
             .into_iter()
             .next()

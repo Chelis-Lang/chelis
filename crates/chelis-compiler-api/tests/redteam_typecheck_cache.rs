@@ -641,8 +641,11 @@ fn stdlib_cache_key_is_deterministic_for_one_decl_slice() {
     // share one entry. A non-deterministic key would silently disable the
     // cache (perpetual cold cost), not corrupt anything, but it is still
     // a regression worth pinning.
-    let decls = chelis_surf::parser::parse_str("module Rt.Sample\ndef rt_sample() -> i32 = 1\n")
-        .expect("sample decls parse");
+    let decls = chelis_surf::parser::parse_str(
+        "module Rt.Sample\ndef rt_sample() -> i32 = 1\n",
+        &chelis_syntax_host::NativeStack,
+    )
+    .expect("sample decls parse");
     assert_eq!(
         stdlib_cache_key(&decls, REDTEAM_STDLIB_SOURCE_DIGEST),
         stdlib_cache_key(&decls, REDTEAM_STDLIB_SOURCE_DIGEST),
@@ -659,10 +662,16 @@ fn stdlib_cache_key_depends_on_the_decls_themselves() {
     // package resolves the checkout's own source, not the bundle). A key
     // that ignored the decl bytes would let an edited runtime silently
     // reuse the unedited runtime's typecheck result.
-    let decls_a = chelis_surf::parser::parse_str("module Rt.Sample\ndef rt_a() -> i32 = 1\n")
-        .expect("decls a parse");
-    let decls_b = chelis_surf::parser::parse_str("module Rt.Sample\ndef rt_b() -> i32 = 2\n")
-        .expect("decls b parse");
+    let decls_a = chelis_surf::parser::parse_str(
+        "module Rt.Sample\ndef rt_a() -> i32 = 1\n",
+        &chelis_syntax_host::NativeStack,
+    )
+    .expect("decls a parse");
+    let decls_b = chelis_surf::parser::parse_str(
+        "module Rt.Sample\ndef rt_b() -> i32 = 2\n",
+        &chelis_syntax_host::NativeStack,
+    )
+    .expect("decls b parse");
     assert_ne!(
         decls_a, decls_b,
         "test setup: the two decl slices must differ"
@@ -695,8 +704,11 @@ fn stdlib_cache_key_folds_the_compiler_version() {
     // further than the per-package context cache.
     use sha2::{Digest, Sha256};
 
-    let decls = chelis_surf::parser::parse_str("module Rt.Sample\ndef rt_sample() -> i32 = 1\n")
-        .expect("sample decls parse");
+    let decls = chelis_surf::parser::parse_str(
+        "module Rt.Sample\ndef rt_sample() -> i32 = 1\n",
+        &chelis_syntax_host::NativeStack,
+    )
+    .expect("sample decls parse");
     let real = stdlib_cache_key(&decls, REDTEAM_STDLIB_SOURCE_DIGEST);
 
     // Byte-for-byte mirror of `stdlib_cache_key`, parameterized on the

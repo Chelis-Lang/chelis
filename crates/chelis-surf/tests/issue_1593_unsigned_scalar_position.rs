@@ -45,8 +45,11 @@ const UNSIGNED: [&str; 8] = [
 const DEFERRED: [&str; 2] = ["complex64", "int4"];
 
 fn deep_of(source: &str) -> String {
-    let decls = parse_str(source).expect("parse");
-    print_canonical_flat(&desugar_program(&decls).expect("Surf fixture must desugar"))
+    let decls = parse_str(source, &chelis_syntax_host::NativeStack).expect("parse");
+    print_canonical_flat(
+        &desugar_program(&decls, &chelis_syntax_host::NativeStack)
+            .expect("Surf fixture must desugar"),
+    )
 }
 
 /// `(t-prim {} name)` and `(t-var {} name)` renderings. The `{} ` prefix makes
@@ -73,7 +76,8 @@ fn assert_reaches_rejection(deep: &str, name: &str, position: &str) {
 }
 
 fn assert_forbidden_binder(source: &str, name: &str, position: &str) {
-    let error = parse_str(source).expect_err("reserved dtype cannot enter binder list");
+    let error = parse_str(source, &chelis_syntax_host::NativeStack)
+        .expect_err("reserved dtype cannot enter binder list");
     let rendered = error.to_string();
     assert!(
         rendered.contains(&format!("`{name}`"))
@@ -202,12 +206,12 @@ fn a_genuine_explicit_lowercase_binder_still_quantifies() {
 fn the_formatter_leaves_an_unsigned_spelling_unchanged() {
     for name in UNSIGNED {
         let source = format!("module P.M\nexport (f)\ndef f(x: {name}) -> {name} = x\n");
-        let once = format_source(&source).expect("format once");
+        let once = format_source(&source, &chelis_syntax_host::NativeStack).expect("format once");
         assert!(
             once.contains(name),
             "the formatter must preserve `{name}`: {once}"
         );
-        let twice = format_source(&once).expect("format twice");
+        let twice = format_source(&once, &chelis_syntax_host::NativeStack).expect("format twice");
         assert_eq!(once, twice, "formatter idempotence on `{name}`");
     }
 }
@@ -281,7 +285,7 @@ fn the_deferred_family_reaches_the_rejection_in_a_scalar_position() {
 // ---------------------------------------------------------------------------
 
 fn deep_of_source(source: &str) -> Vec<chelis_deep::Expr> {
-    parse_and_stamp_file(source).expect("deep parse")
+    parse_and_stamp_file(source, &chelis_syntax_host::NativeStack).expect("deep parse")
 }
 
 const RESERVED_TVAR_SCALAR: &str = "(module {surf_path: \"P.M\"}\n\
@@ -305,7 +309,11 @@ fn the_decompiler_refuses_a_reserved_deep_type_variable() {
     for name in UNSIGNED.iter().chain(DEFERRED.iter()) {
         for template in [RESERVED_TVAR_SCALAR, RESERVED_TVAR_TENSOR] {
             let deep = deep_of_source(&template.replace("NAME", name));
-            let error = chelis_surf::decompile::try_decompile_program(&deep).expect_err(&format!(
+            let error = chelis_surf::decompile::try_decompile_program(
+                &deep,
+                &chelis_syntax_host::NativeStack,
+            )
+            .expect_err(&format!(
                 "`(t-var {{}} {name})` has no Surf representation and must fail closed"
             ));
             let rendered = error.to_string();
@@ -330,10 +338,16 @@ fn the_surf_deep_round_trip_law_holds_for_every_resugarable_type_variable() {
         for template in [RESERVED_TVAR_SCALAR, RESERVED_TVAR_TENSOR] {
             let source = template.replace("NAME", name);
             let deep = deep_of_source(&source);
-            let surf = chelis_surf::decompile::try_decompile_program(&deep)
-                .unwrap_or_else(|error| panic!("`{name}` must still resugar: {error}"));
-            let redesugared = desugar_program(&parse_str(&surf).expect("reparse"))
-                .expect("Surf fixture must desugar");
+            let surf = chelis_surf::decompile::try_decompile_program(
+                &deep,
+                &chelis_syntax_host::NativeStack,
+            )
+            .unwrap_or_else(|error| panic!("`{name}` must still resugar: {error}"));
+            let redesugared = desugar_program(
+                &parse_str(&surf, &chelis_syntax_host::NativeStack).expect("reparse"),
+                &chelis_syntax_host::NativeStack,
+            )
+            .expect("Surf fixture must desugar");
             assert_eq!(
                 print_canonical_flat(
                     &chelis_surf::resugar::normalize_deep_for_surface_roundtrip(&deep)

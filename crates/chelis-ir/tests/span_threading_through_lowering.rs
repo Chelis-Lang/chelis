@@ -28,7 +28,8 @@ use chelis_types::{check_ir_program, check_linearity};
 /// real driver runs (IR check check → effects → linearity), so the
 /// resulting `CheckedProgram` is exactly what `lower_program` expects.
 fn check(source: &str) -> chelis_types::CheckedProgram {
-    let exprs = chelis_deep::parser::parse_str(source).expect("deep parse");
+    let exprs = chelis_deep::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+        .expect("deep parse");
     let checked = check_ir_program(&exprs).expect("IR check clean");
     let checked = chelis_effects::check_program(&checked).expect("effects clean");
     check_linearity(&checked).expect("linearity clean")
@@ -109,7 +110,8 @@ fn span_threading_through_lowering() {
                (lit {type: (t-tensor {} (t-prim {} f32)) span: "src_lit_c"} 5.0)))
     "#;
 
-    let exprs = chelis_deep::parser::parse_str(source).expect("deep parse");
+    let exprs = chelis_deep::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+        .expect("deep parse");
     let input_spans = collect_input_spans(&exprs);
     assert!(
         !input_spans.is_empty(),
@@ -181,7 +183,8 @@ fn lowering_without_spans_produces_none_span_ids() {
                (lit {type: (t-tensor {} (t-prim {} f32))} 5.0)))
     "#;
 
-    let exprs = chelis_deep::parser::parse_str(source).expect("deep parse");
+    let exprs = chelis_deep::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+        .expect("deep parse");
     assert!(
         collect_input_spans(&exprs).is_empty(),
         "negative-parity fixture must have ZERO spans"
@@ -217,7 +220,8 @@ fn lowering_an_empty_program_does_not_panic() {
     // an empty (zero-node) DAG. Backward-compat invariant: code that
     // worked before S2 still works.
     let source = "";
-    let exprs = chelis_deep::parser::parse_str(source).expect("empty deep parse");
+    let exprs = chelis_deep::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+        .expect("empty deep parse");
     assert!(exprs.is_empty(), "empty source should yield zero exprs");
 
     let checked = check(source);
@@ -372,7 +376,8 @@ fn var_ref_to_let_bound_name_records_span_on_cached_node() {
                 (var {} out)))))
     "#;
 
-    let exprs = chelis_deep::parser::parse_str(source).expect("deep parse");
+    let exprs = chelis_deep::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+        .expect("deep parse");
     let input_spans = collect_input_spans(&exprs);
     assert!(
         input_spans.contains("var_a_use"),
@@ -534,7 +539,8 @@ fn atom_symbol_ref_to_let_bound_name_records_span_on_cached_node() {
     // hit comes from `current_span_id` being already set when a parent
     // expr lowers a bare atom child. We assert at minimum the audit
     // invariant holds end-to-end on this fixture.
-    let exprs = chelis_deep::parser::parse_str(source).expect("deep parse");
+    let exprs = chelis_deep::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+        .expect("deep parse");
     let input_spans = collect_input_spans(&exprs);
     let checked = check(source);
     let dag = lower_program(&checked);

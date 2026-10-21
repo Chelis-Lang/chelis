@@ -18,7 +18,7 @@ fn helper(reverse: bool) -> String {
 #[test]
 fn stdlib_and_dependency_direct_snapshots_keep_callable_labels() {
     for reverse in [false, true] {
-        let declarations = parse_str(&helper(reverse)).unwrap();
+        let declarations = parse_str(&helper(reverse), &chelis_syntax_host::NativeStack).unwrap();
         let stdlib = build_stdlib_context(&declarations).unwrap();
         let stdlib_decoded: StdLibContext =
             bincode::deserialize(&bincode::serialize(&stdlib).unwrap()).unwrap();
@@ -46,8 +46,11 @@ fn stdlib_and_dependency_direct_snapshots_keep_callable_labels() {
             ] {
                 let verdict = check_ir_with_context(
                     env,
-                    &desugar_program(&parse_str(source).unwrap())
-                        .expect("Surf fixture must desugar"),
+                    &desugar_program(
+                        &parse_str(source, &chelis_syntax_host::NativeStack).unwrap(),
+                        &chelis_syntax_host::NativeStack,
+                    )
+                    .expect("Surf fixture must desugar"),
                 );
                 assert_eq!(verdict.is_ok(), accepts, "{source}: {verdict:?}");
             }

@@ -17,7 +17,7 @@ fn var_through_parse_and_stamp_produces_node() {
     // Top-level must be a declaration. def's body is RuntimeExpr.
     // (def {} f (var {} x))
     let source = "(def {} f (var {} x))";
-    let result = parse_and_stamp(source);
+    let result = parse_and_stamp(source, &chelis_syntax_host::NativeStack);
     assert!(result.is_ok(), "expected Ok, got: {:?}", result.err());
 
     let exprs = result.unwrap();
@@ -35,7 +35,7 @@ fn var_through_parse_and_stamp_produces_node() {
 fn var_node_has_correct_tag_inside_def() {
     // (def {} x (var {} x))
     let source = "(def {} x (var {} x))";
-    let exprs = parse_and_stamp(source).unwrap();
+    let exprs = parse_and_stamp(source, &chelis_syntax_host::NativeStack).unwrap();
 
     let def_node = match &exprs[0] {
         Expr::Node(n, _) => n,
@@ -63,7 +63,7 @@ fn params_children_are_binder_names() {
     // recognized because the list has a valid vocabulary head + metadata
     // map. Non-vocabulary-headed lists still become BareList.
     let source = "(def {} f (fn {} (params {} x y z) (lit {} 1)))";
-    let raw = parse_raw_str(source).unwrap();
+    let raw = parse_raw_str(source, &chelis_syntax_host::NativeStack).unwrap();
     let typed = stamp_to_typed(raw).unwrap();
 
     let def_node = match &typed[0] {
@@ -108,7 +108,8 @@ fn deftype_type_parameters_remain_bare_and_variants_are_stamped() {
     let source = "(deftype {} Option (a)\n\
                   (variant {} Some (field {} value (t-var {} a)))\n\
                   (variant {} None))";
-    let typed = parse_and_stamp(source).expect("spec-valid deftype must stamp");
+    let typed = parse_and_stamp(source, &chelis_syntax_host::NativeStack)
+        .expect("spec-valid deftype must stamp");
     let Expr::Node(deftype, _) = &typed[0] else {
         panic!("expected stamped deftype, got {:?}", typed[0]);
     };
@@ -131,7 +132,8 @@ fn deftype_type_parameters_remain_bare_and_variants_are_stamped() {
 fn typealias_type_parameters_remain_bare_and_rhs_is_stamped() {
     let source = "(typealias {} Pair (a b)\n\
                   (t-tuple {} (t-var {} a) (t-var {} b)))";
-    let typed = parse_and_stamp(source).expect("spec-valid typealias must stamp");
+    let typed = parse_and_stamp(source, &chelis_syntax_host::NativeStack)
+        .expect("spec-valid typealias must stamp");
     let Expr::Node(alias, _) = &typed[0] else {
         panic!("expected stamped typealias, got {:?}", typed[0]);
     };
@@ -149,8 +151,11 @@ fn typealias_type_parameters_remain_bare_and_rhs_is_stamped() {
 
 #[test]
 fn deftype_requires_an_explicit_type_parameter_list() {
-    let err = chelis_deep::parser::parse_str_strict("(deftype {} Option (variant {} None))")
-        .expect_err("the spec requires a type-parameter list, including `()`");
+    let err = chelis_deep::parser::parse_str_strict(
+        "(deftype {} Option (variant {} None))",
+        &chelis_syntax_host::NativeStack,
+    )
+    .expect_err("the spec requires a type-parameter list, including `()`");
     assert!(
         err.to_string().contains("type-parameter list"),
         "the declaration validator must reject the missing slot: {err}"
@@ -159,8 +164,11 @@ fn deftype_requires_an_explicit_type_parameter_list() {
 
 #[test]
 fn strict_parse_rejects_a_tagged_type_parameter_slot() {
-    let err = chelis_deep::parser::parse_str_strict("(typealias {} Bad (t-var {} a) (t-var {} a))")
-        .expect_err("type parameters must be a structural list of binder names");
+    let err = chelis_deep::parser::parse_str_strict(
+        "(typealias {} Bad (t-var {} a) (t-var {} a))",
+        &chelis_syntax_host::NativeStack,
+    )
+    .expect_err("type parameters must be a structural list of binder names");
     assert!(
         err.to_string().contains("type-parameter list"),
         "the declaration owner must diagnose the malformed binder slot: {err}"
@@ -173,7 +181,7 @@ fn bare_list_at_syntax_slot_produces_barelist() {
     // should become BareList.
     // (def {} f (var {} (x y z)))
     let source = "(def {} f (var {} (x y z)))";
-    let raw = parse_raw_str(source).unwrap();
+    let raw = parse_raw_str(source, &chelis_syntax_host::NativeStack).unwrap();
     let typed = stamp_to_typed(raw).unwrap();
 
     let def_node = match &typed[0] {
@@ -208,7 +216,7 @@ fn bare_list_at_syntax_slot_produces_barelist() {
 fn bare_name_at_runtime_expr_produces_stamp_error() {
     // (def {} f x) — x is a bare name at RuntimeExpr position (def child 1).
     let source = "(def {} f x)";
-    let raw = parse_raw_str(source).unwrap();
+    let raw = parse_raw_str(source, &chelis_syntax_host::NativeStack).unwrap();
     let result = stamp_to_typed(raw);
 
     assert!(result.is_err(), "expected StampError, got Ok");
@@ -223,7 +231,7 @@ fn bare_name_at_runtime_expr_produces_stamp_error() {
 fn bare_name_via_parse_and_stamp_produces_stamp_error() {
     // Same test through the convenience function.
     let source = "(def {} f x)";
-    let result = parse_and_stamp(source);
+    let result = parse_and_stamp(source, &chelis_syntax_host::NativeStack);
     assert!(result.is_err());
     let err_str = format!("{}", result.unwrap_err());
     assert!(
@@ -255,7 +263,7 @@ fn misspelled_module_child_produces_stamp_error() {
     //
     // Top-level: (dfe {} f (lit {} 1)) — "dfe" is a typo for "def".
     let source = "(dfe {} f (lit {} 1))";
-    let raw = parse_raw_str(source).unwrap();
+    let raw = parse_raw_str(source, &chelis_syntax_host::NativeStack).unwrap();
     let result = stamp_to_typed(raw);
 
     assert!(result.is_err(), "expected StampError for misspelled child");
@@ -271,7 +279,7 @@ fn misspelled_module_child_produces_stamp_error() {
 fn non_declaration_at_top_level_is_error() {
     // (app {} (lit {} 1)) at top-level — app is known but not a declaration.
     let source = "(app {} (lit {} 1))";
-    let raw = parse_raw_str(source).unwrap();
+    let raw = parse_raw_str(source, &chelis_syntax_host::NativeStack).unwrap();
     let result = stamp_to_typed(raw);
 
     assert!(result.is_err());
@@ -340,7 +348,7 @@ fn misspelled_child_inside_module_produces_stamp_error_858() {
     // That IS the test above. Let's additionally verify the error message
     // is useful.
     let source = "(dfe {} my_fn (lit {} 42))";
-    let result = parse_and_stamp(source);
+    let result = parse_and_stamp(source, &chelis_syntax_host::NativeStack);
     assert!(result.is_err());
     let err_str = format!("{}", result.unwrap_err());
     assert!(
@@ -354,7 +362,7 @@ fn misspelled_child_inside_module_produces_stamp_error_858() {
 #[test]
 fn parse_raw_produces_raw_list_for_known_tags() {
     let source = "(var {} x)";
-    let raw = parse_raw_str(source).unwrap();
+    let raw = parse_raw_str(source, &chelis_syntax_host::NativeStack).unwrap();
     assert_eq!(raw.len(), 1);
     // Should be a RawExpr::List (no tag decoding at parse time)
     assert!(
@@ -367,7 +375,7 @@ fn parse_raw_produces_raw_list_for_known_tags() {
 #[test]
 fn parse_raw_preserves_empty_map() {
     let source = "(def {} f (lit {} 42))";
-    let raw = parse_raw_str(source).unwrap();
+    let raw = parse_raw_str(source, &chelis_syntax_host::NativeStack).unwrap();
     assert_eq!(raw.len(), 1);
     if let RawExpr::List(elements, _) = &raw[0] {
         // element 1 should be a Map
@@ -385,7 +393,7 @@ fn parse_raw_preserves_empty_map() {
 fn parse_raw_no_tag_decode() {
     // parse_raw does not decode tags — symbols stay as RawAtom::Symbol.
     let source = "(def {} f (var {} x))";
-    let raw = parse_raw_str(source).unwrap();
+    let raw = parse_raw_str(source, &chelis_syntax_host::NativeStack).unwrap();
     if let RawExpr::List(elements, _) = &raw[0] {
         // element 0 should be Symbol("def"), NOT a decoded tag.
         match &elements[0] {
@@ -407,8 +415,11 @@ fn parse_raw_no_tag_decode() {
 
 #[test]
 fn runtime_expression_ingress_accepts_an_expression() {
-    let exprs = chelis_deep::parse_and_stamp_runtime_exprs("(app {} (var {} f) (var {} x))")
-        .expect("an application is a runtime expression");
+    let exprs = chelis_deep::parse_and_stamp_runtime_exprs(
+        "(app {} (var {} f) (var {} x))",
+        &chelis_syntax_host::NativeStack,
+    )
+    .expect("an application is a runtime expression");
     assert_eq!(exprs.len(), 1);
     assert!(
         matches!(&exprs[0], Expr::Node(node, _) if node.tag() == DeepTag::App),
@@ -419,8 +430,11 @@ fn runtime_expression_ingress_accepts_an_expression() {
 
 #[test]
 fn runtime_expression_ingress_rejects_a_bare_name() {
-    let error = chelis_deep::parse_and_stamp_runtime_exprs("unwrapped_name")
-        .expect_err("a bare name is not a runtime expression");
+    let error = chelis_deep::parse_and_stamp_runtime_exprs(
+        "unwrapped_name",
+        &chelis_syntax_host::NativeStack,
+    )
+    .expect_err("a bare name is not a runtime expression");
     let chelis_deep::StampOrParseError::Stamp(stamp) = error else {
         panic!("expected a stamp rejection, got: {error:?}");
     };
@@ -440,6 +454,7 @@ fn tagged_ingress_accepts_the_named_tag() {
     let exprs = chelis_deep::parse_and_stamp_tagged(
         "(params {} (x {type: (t-prim {} f32)}))",
         DeepTag::Params,
+        &chelis_syntax_host::NativeStack,
     )
     .expect("a params node satisfies the params contract");
     assert_eq!(exprs.len(), 1);
@@ -452,8 +467,12 @@ fn tagged_ingress_accepts_the_named_tag() {
 
 #[test]
 fn tagged_ingress_rejects_a_different_tag() {
-    let error = chelis_deep::parse_and_stamp_tagged("(var {} x)", DeepTag::Params)
-        .expect_err("a var node does not satisfy the params contract");
+    let error = chelis_deep::parse_and_stamp_tagged(
+        "(var {} x)",
+        DeepTag::Params,
+        &chelis_syntax_host::NativeStack,
+    )
+    .expect_err("a var node does not satisfy the params contract");
     let chelis_deep::StampOrParseError::Stamp(stamp) = error else {
         panic!("expected a stamp rejection, got: {error:?}");
     };
@@ -474,17 +493,22 @@ fn tagged_ingress_rejects_a_different_tag() {
 fn type_ingress_stamps_one_closed_type_expression() {
     let ty = chelis_deep::parse_and_stamp_type(
         "(t-fn {} (t-tensor {} (d-rank {} r0) (t-var {} t0)) (t-var {} t0))",
+        &chelis_syntax_host::NativeStack,
     )
     .expect("a canonical function type must stamp at a type position");
 
     assert_eq!(ty.tag(), Some(DeepTag::TFn));
 
-    let multiple = chelis_deep::parse_and_stamp_type("(t-prim {} f32) (t-prim {} f64)")
-        .expect_err("a singular type boundary must reject multiple expressions");
+    let multiple = chelis_deep::parse_and_stamp_type(
+        "(t-prim {} f32) (t-prim {} f64)",
+        &chelis_syntax_host::NativeStack,
+    )
+    .expect_err("a singular type boundary must reject multiple expressions");
     assert!(multiple.to_string().contains("exactly one type expression"));
 
-    let unknown = chelis_deep::parse_and_stamp_type("(not-a-type {} f32)")
-        .expect_err("type syntax has a closed structural vocabulary");
+    let unknown =
+        chelis_deep::parse_and_stamp_type("(not-a-type {} f32)", &chelis_syntax_host::NativeStack)
+            .expect_err("type syntax has a closed structural vocabulary");
     assert!(unknown.to_string().contains("undecodable type head"));
 }
 
@@ -504,8 +528,11 @@ fn type_ingress_accepts_the_complete_authored_type_grammar() {
     ];
 
     for source in valid {
-        let expression = chelis_deep::parse_and_stamp_type(source)
-            .unwrap_or_else(|error| panic!("valid authored type `{source}` was rejected: {error}"));
+        let expression =
+            chelis_deep::parse_and_stamp_type(source, &chelis_syntax_host::NativeStack)
+                .unwrap_or_else(|error| {
+                    panic!("valid authored type `{source}` was rejected: {error}")
+                });
         assert!(
             matches!(
                 expression.tag(),
@@ -628,7 +655,7 @@ fn type_ingress_rejects_every_non_type_carrier_and_role_swap() {
     let admitted = invalid
         .iter()
         .filter_map(|(label, source)| {
-            chelis_deep::parse_and_stamp_type(source)
+            chelis_deep::parse_and_stamp_type(source, &chelis_syntax_host::NativeStack)
                 .ok()
                 .map(|_| *label)
         })
@@ -645,7 +672,7 @@ fn file_ingress_rejects_rank_spreads_in_nominal_argument_slots() {
         "(defsig {} bad (r) (t-fn {} (t-adt {} Rows (d-rank {} r)) (t-unit {})))",
         "(def {} bad (fn {} (params {} (x {type: (t-adt {} Rows (d-rank {} r))})) (var {} x)))",
     ] {
-        let error = chelis_deep::parse_and_stamp_file(source)
+        let error = chelis_deep::parse_and_stamp_file(source, &chelis_syntax_host::NativeStack)
             .expect_err("[04-ADT-4] forbids a rank spread in a nominal argument slot");
         let chelis_deep::StampOrParseError::Stamp(stamp) = error else {
             panic!("expected a stamp rejection, got: {error:?}");
@@ -678,7 +705,7 @@ fn file_ingress_keeps_nominal_dimensions_and_tensor_rank_spreads_legal() {
         "(defsig {} sized (t-fn {} (t-adt {} Rows (d-lit {} 3)) (t-unit {})))",
         "(defsig {} ranked (r) (t-fn {} (t-tensor {} (d-rank {} r) (t-prim {} f32)) (t-unit {})))",
     ] {
-        chelis_deep::parse_and_stamp_file(source)
+        chelis_deep::parse_and_stamp_file(source, &chelis_syntax_host::NativeStack)
             .unwrap_or_else(|error| panic!("spec-valid file ingress was rejected: {error}"));
     }
 }
@@ -689,8 +716,10 @@ fn declaration_ingress_rejects_a_module_wrapper_a_file_ingress_admits() {
     // `parse_and_stamp` is a declaration bundle, `parse_and_stamp_file` is a
     // `.dp` program. A caller that picks the wrong one is told so.
     let module = "(module {} m (def {} f (var {} x)))";
-    chelis_deep::parse_and_stamp_file(module).expect("a `.dp` program admits a module wrapper");
-    let error = parse_and_stamp(module).expect_err("a declaration bundle does not");
+    chelis_deep::parse_and_stamp_file(module, &chelis_syntax_host::NativeStack)
+        .expect("a `.dp` program admits a module wrapper");
+    let error = parse_and_stamp(module, &chelis_syntax_host::NativeStack)
+        .expect_err("a declaration bundle does not");
     let chelis_deep::StampOrParseError::Stamp(stamp) = error else {
         panic!("expected a stamp rejection, got: {error:?}");
     };
@@ -746,7 +775,7 @@ const HEADLESS_TOP_LEVEL_FORMS: &[(FormClass, &str, &str)] = &[
 #[test]
 fn every_headless_class_is_identified_by_its_spec_spelling() {
     for (class, source, spelling) in HEADLESS_TOP_LEVEL_FORMS {
-        let error = chelis_deep::parse_and_stamp_file(source)
+        let error = chelis_deep::parse_and_stamp_file(source, &chelis_syntax_host::NativeStack)
             .expect_err("[03-PROG-1] rejects every one of these at top level");
         let chelis_deep::StampOrParseError::Stamp(stamp) = error else {
             panic!("{class:?}: expected a stamp rejection for {source:?}, got {error:?}");
@@ -836,7 +865,8 @@ fn a_headed_form_is_still_identified_by_its_head() {
         ("(var {} x)", "var"),
         ("(future-form {} v)", "future-form"),
     ] {
-        let error = chelis_deep::parse_and_stamp_file(source).expect_err("rejected at top level");
+        let error = chelis_deep::parse_and_stamp_file(source, &chelis_syntax_host::NativeStack)
+            .expect_err("rejected at top level");
         let chelis_deep::StampOrParseError::Stamp(stamp) = error else {
             panic!("expected a stamp rejection for {source:?}");
         };
@@ -860,7 +890,7 @@ fn an_admissible_top_level_form_is_not_identified_at_all() {
         "(def {} f (lit {} 1))",
         "(export {} f)",
     ] {
-        chelis_deep::parse_and_stamp_file(source)
+        chelis_deep::parse_and_stamp_file(source, &chelis_syntax_host::NativeStack)
             .unwrap_or_else(|error| panic!("{source:?} is admissible: {error}"));
     }
 }

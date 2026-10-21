@@ -251,9 +251,11 @@ fn assert_keyless_entry_rejects(kind: SourceKind) {
     let keyless = "def sample(x: tensor[4, f32]) -> tensor[4, f32] = dropout(x, 0.5f32)\n";
     let keyed = "def sample(k: key, x: tensor[4, f32]) -> tensor[4, f32] = dropout(k, x, 0.5f32)\n";
     let deep_of = |source: &str| {
-        let decls = chelis_surf::parser::parse_str(source).unwrap();
+        let decls =
+            chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack).unwrap();
         chelis_deep::printer::print_canonical(
-            &chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar"),
+            &chelis_surf::desugar::desugar_program(&decls, &chelis_syntax_host::NativeStack)
+                .expect("Surf fixture must desugar"),
         )
     };
     let text = |source: &str| match kind {

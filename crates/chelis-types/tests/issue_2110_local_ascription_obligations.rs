@@ -9,8 +9,11 @@ use chelis_types::{
 };
 
 fn check_surf(source: &str) -> Result<CheckedProgram, chelis_types::InferResult> {
-    let decls = parse_str(source).expect("Surf parse");
-    check_ir_program(&desugar_program(&decls).expect("Surf fixture must desugar"))
+    let decls = parse_str(source, &chelis_syntax_host::NativeStack).expect("Surf parse");
+    check_ir_program(
+        &desugar_program(&decls, &chelis_syntax_host::NativeStack)
+            .expect("Surf fixture must desugar"),
+    )
 }
 
 fn checked_surf(source: &str) -> CheckedProgram {
@@ -18,7 +21,8 @@ fn checked_surf(source: &str) -> CheckedProgram {
 }
 
 fn check_deep(source: &str) -> Result<CheckedProgram, chelis_types::InferResult> {
-    let program = chelis_deep::parser::parse_str(source).expect("Deep parse");
+    let program = chelis_deep::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+        .expect("Deep parse");
     check_ir_program(&program)
 }
 
@@ -343,32 +347,36 @@ def f(x: tensor[*, f32]) -> tensor[*, f32] = {
 fn checked_library_composition_preserves_both_identity_domains() {
     let library_decls = parse_str(
         r#"
-def library_f(x: tensor[*, f32]) -> tensor[*, f32] = {
-  library_y: tensor[7, f32] =
-    pad(x, [[0i64, 0i64]], 0.0f32)
-  library_y
-}
-"#,
+    def library_f(x: tensor[*, f32]) -> tensor[*, f32] = {
+      library_y: tensor[7, f32] =
+        pad(x, [[0i64, 0i64]], 0.0f32)
+      library_y
+    }
+    "#,
+        &chelis_syntax_host::NativeStack,
     )
     .expect("library Surf parse");
     let (context, library_checked) = build_compiled_library_context(
-        &desugar_program(&library_decls).expect("Surf fixture must desugar"),
+        &desugar_program(&library_decls, &chelis_syntax_host::NativeStack)
+            .expect("Surf fixture must desugar"),
     )
     .expect("library type check");
 
     let application_decls = parse_str(
         r#"
-def application_f(x: tensor[*, f32]) -> tensor[*, f32] = {
-  application_y: tensor[11, f32] =
-    pad(x, [[0i64, 0i64]], 0.0f32)
-  application_y
-}
-"#,
+    def application_f(x: tensor[*, f32]) -> tensor[*, f32] = {
+      application_y: tensor[11, f32] =
+        pad(x, [[0i64, 0i64]], 0.0f32)
+      application_y
+    }
+    "#,
+        &chelis_syntax_host::NativeStack,
     )
     .expect("application Surf parse");
     let application_checked = check_ir_with_context(
         &context,
-        &desugar_program(&application_decls).expect("Surf fixture must desugar"),
+        &desugar_program(&application_decls, &chelis_syntax_host::NativeStack)
+            .expect("Surf fixture must desugar"),
     )
     .expect("application type check");
     let composed = CheckedProgram::compose(&library_checked, &application_checked)
@@ -457,8 +465,11 @@ fn callable_owner_distinguishes_deep_surf_and_inferred_binding_metadata() {
     ] {
         for operand in ["f", "copy(copy(f))"] {
             let source = callable_owner_source("run", operand);
-            let source_deep =
-                desugar_program(&parse_str(&source).expect("Surf parse")).expect("desugar");
+            let source_deep = desugar_program(
+                &parse_str(&source, &chelis_syntax_host::NativeStack).expect("Surf parse"),
+                &chelis_syntax_host::NativeStack,
+            )
+            .expect("desugar");
             let deep: Vec<_> = source_deep
                 .iter()
                 .map(|expr| callable_owner_origin(expr, origin, false))
@@ -502,7 +513,11 @@ fn callable_owner_distinguishes_deep_surf_and_inferred_binding_metadata() {
 fn callable_owner_does_not_promote_nonbinding_none_origin_abi_metadata() {
     use chelis_deep::annotations::BindingTypeOrigin;
     let source = callable_owner_source("run", "copy(f)");
-    let deep = desugar_program(&parse_str(&source).expect("Surf parse")).expect("desugar");
+    let deep = desugar_program(
+        &parse_str(&source, &chelis_syntax_host::NativeStack).expect("Surf parse"),
+        &chelis_syntax_host::NativeStack,
+    )
+    .expect("desugar");
     let deep: Vec<_> = deep
         .iter()
         .map(|expr| callable_owner_origin(expr, Some(BindingTypeOrigin::Inferred), true))
@@ -567,16 +582,30 @@ fn callable_owner_serialization_preserves_source_and_full_claims() {
 
 #[test]
 fn callable_owner_proof_bound_composition_remaps_ids_and_replaces_declarations() {
-    let library_deep =
-        desugar_program(&parse_str(&callable_owner_source("helper", "copy(f)")).unwrap()).unwrap();
+    let library_deep = desugar_program(
+        &parse_str(
+            &callable_owner_source("helper", "copy(f)"),
+            &chelis_syntax_host::NativeStack,
+        )
+        .unwrap(),
+        &chelis_syntax_host::NativeStack,
+    )
+    .unwrap();
     let (context, library) = build_compiled_library_context(&library_deep).expect("library checks");
     assert_eq!(
         library.local_ascriptions().len(),
         1,
         "library callable owner"
     );
-    let new_deep =
-        desugar_program(&parse_str(&callable_owner_source("entry", "f")).unwrap()).unwrap();
+    let new_deep = desugar_program(
+        &parse_str(
+            &callable_owner_source("entry", "f"),
+            &chelis_syntax_host::NativeStack,
+        )
+        .unwrap(),
+        &chelis_syntax_host::NativeStack,
+    )
+    .unwrap();
     let entry = check_ir_with_context(&context, &new_deep).expect("entry checks");
     let composed = CheckedProgram::compose(&library, &entry).expect("proof-bound compose");
     let records = composed.local_ascriptions();
@@ -625,9 +654,15 @@ fn callable_owner_proof_bound_composition_remaps_ids_and_replaces_declarations()
         "AST tokens and records use the same composition offset"
     );
 
-    let replacement_deep =
-        desugar_program(&parse_str(&callable_owner_source("helper", "copy(copy(f))")).unwrap())
-            .unwrap();
+    let replacement_deep = desugar_program(
+        &parse_str(
+            &callable_owner_source("helper", "copy(copy(f))"),
+            &chelis_syntax_host::NativeStack,
+        )
+        .unwrap(),
+        &chelis_syntax_host::NativeStack,
+    )
+    .unwrap();
     let replacement =
         check_ir_with_context(&context, &replacement_deep).expect("replacement checks");
     let composed = CheckedProgram::compose(&library, &replacement).expect("replacement compose");
@@ -680,7 +715,11 @@ fn zero_callable_source_spans(expr: &chelis_deep::Expr) -> chelis_deep::Expr {
 #[test]
 fn callable_owner_distinct_nested_bindings_ignore_equal_source_spans() {
     let source = "def run(flag: bool, x: tensor[*, f64]) -> tensor[*, bool] = {\n f = if flag then is_nan else is_finite\n g: &tensor[2, f64] -> tensor[*, bool] = copy(f)\n inner = { g: &tensor[2, f64] -> tensor[*, bool] = copy(f)\n g(x) }\n g(x)\n}\n";
-    let deep = desugar_program(&parse_str(source).unwrap()).unwrap();
+    let deep = desugar_program(
+        &parse_str(source, &chelis_syntax_host::NativeStack).unwrap(),
+        &chelis_syntax_host::NativeStack,
+    )
+    .unwrap();
     let deep: Vec<_> = deep.iter().map(zero_callable_source_spans).collect();
     let checked = check_ir_program(&deep).expect("zero spans are valid source provenance");
     let records = checked.local_ascriptions();
@@ -729,7 +768,11 @@ fn callable_owner_distinct_nested_bindings_ignore_equal_source_spans() {
 fn callable_owner_source_supplied_token_cannot_forge_checked_authority() {
     use chelis_deep::annotations::BindingTypeOrigin;
     let source = callable_owner_source("run", "copy(f)");
-    let deep = desugar_program(&parse_str(&source).unwrap()).unwrap();
+    let deep = desugar_program(
+        &parse_str(&source, &chelis_syntax_host::NativeStack).unwrap(),
+        &chelis_syntax_host::NativeStack,
+    )
+    .unwrap();
     let deep: Vec<_> = deep
         .iter()
         .map(|expr| callable_owner_origin(expr, Some(BindingTypeOrigin::Inferred), false))
@@ -887,7 +930,11 @@ fn callable_owner_effect_reannotation_accepts_new_derived_effect_containers() {
 #[test]
 fn callable_owner_effect_reannotation_rejects_swapped_equal_span_owners() {
     let source = "def run(flag: bool, x: tensor[*, f64]) -> tensor[*, bool] = {\n f = if flag then is_nan else is_finite\n g: &tensor[2, f64] -> tensor[*, bool] = copy(f)\n inner = { g: &tensor[2, f64] -> tensor[*, bool] = copy(f)\n g(x) }\n g(x)\n}\n";
-    let deep = desugar_program(&parse_str(source).unwrap()).unwrap();
+    let deep = desugar_program(
+        &parse_str(source, &chelis_syntax_host::NativeStack).unwrap(),
+        &chelis_syntax_host::NativeStack,
+    )
+    .unwrap();
     let deep: Vec<_> = deep.iter().map(zero_callable_source_spans).collect();
     let checked = check_ir_program(&deep).unwrap();
     let records = checked.local_ascriptions();

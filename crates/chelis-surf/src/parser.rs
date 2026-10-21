@@ -1,7 +1,13 @@
 use crate::ast::*;
 use crate::lexer::{self, LexError};
 use crate::token::{Token, TokenKind};
+use alloc::{
+    boxed::Box,
+    string::{String, ToString},
+    vec::Vec,
+};
 use chelis_deep::{BoundDtype, DtypeBound, DtypeFamily, Span};
+use chelis_stack_services::StackServices;
 use chelis_unord::UnordSet;
 use thiserror::Error;
 
@@ -74,14 +80,15 @@ pub enum ParseError {
     },
 }
 
-struct Parser {
+struct Parser<'s, S: StackServices> {
     // Lookahead owns a cursor, but shares the immutable stream. Cloning every
     // token for each BlockBinding made generated scalar modules quadratic.
-    tokens: std::sync::Arc<[Token]>,
-    closing_delimiters: std::sync::Arc<[usize]>,
+    tokens: alloc::sync::Arc<[Token]>,
+    closing_delimiters: alloc::sync::Arc<[usize]>,
     pos: usize,
     module_allowed: bool,
     mode: ParseMode,
+    stack: &'s S,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -96,17 +103,20 @@ enum ParseMode {
 // Public API
 // ---------------------------------------------------------------------------
 
-pub fn parse(tokens: &[Token]) -> Result<Vec<Decl>, ParseError> {
-    parse_with_mode(tokens, ParseMode::Canonical)
+pub fn parse(tokens: &[Token], stack: &impl StackServices) -> Result<Vec<Decl>, ParseError> {
+    parse_with_mode(tokens, ParseMode::Canonical, stack)
 }
 
 /// Parse the v0.18 compatibility grammar for the explicit migration path.
 /// Normal compiler, formatter, and CLI entry points must use [`parse`].
-pub fn parse_legacy_v018(tokens: &[Token]) -> Result<Vec<Decl>, ParseError> {
-    parse_with_mode(tokens, ParseMode::LegacyV018)
+pub fn parse_legacy_v018(
+    tokens: &[Token],
+    stack: &impl StackServices,
+) -> Result<Vec<Decl>, ParseError> {
+    parse_with_mode(tokens, ParseMode::LegacyV018, stack)
 }
 
-fn closing_delimiters(tokens: &[Token]) -> std::sync::Arc<[usize]> {
+fn closing_delimiters(tokens: &[Token]) -> alloc::sync::Arc<[usize]> {
     let mut matching = vec![usize::MAX; tokens.len()];
     let mut open = Vec::new();
     for (index, token) in tokens.iter().enumerate() {
@@ -123,13 +133,18 @@ fn closing_delimiters(tokens: &[Token]) -> std::sync::Arc<[usize]> {
     matching.into()
 }
 
-fn parse_with_mode(tokens: &[Token], mode: ParseMode) -> Result<Vec<Decl>, ParseError> {
+fn parse_with_mode(
+    tokens: &[Token],
+    mode: ParseMode,
+    stack: &impl StackServices,
+) -> Result<Vec<Decl>, ParseError> {
     let mut p = Parser {
         tokens: tokens.into(),
         closing_delimiters: closing_delimiters(tokens),
         pos: 0,
         module_allowed: true,
         mode,
+        stack,
     };
     let decls = p.parse_program()?;
     validate_property_names(&decls)?;
@@ -204,9 +219,9 @@ pub(crate) fn validate_bound_ownership(decls: &[Decl]) -> Result<(), ParseError>
     Ok(())
 }
 
-pub fn parse_str(source: &str) -> Result<Vec<Decl>, ParseError> {
+pub fn parse_str(source: &str, stack: &impl StackServices) -> Result<Vec<Decl>, ParseError> {
     let tokens = lexer::lex(source)?;
-    parse_canonical_source_tokens(source, &tokens)
+    parse_canonical_source_tokens(source, &tokens, stack)
 }
 
 /// Parse a token stream while validating source-sensitive literal semantics.
@@ -216,31 +231,39 @@ pub fn parse_str(source: &str) -> Result<Vec<Decl>, ParseError> {
 pub fn parse_canonical_source_tokens(
     source: &str,
     tokens: &[Token],
+    stack: &impl StackServices,
 ) -> Result<Vec<Decl>, ParseError> {
     validate_literal_spellings(source, tokens)?;
-    parse(tokens)
+    parse(tokens, stack)
 }
 
 /// Parse the previous canonical pipe grammar solely for explicit migration.
 /// All normal parser entry points enforce the new grouping contract.
 #[cfg(feature = "pre-020-pipe-migration")]
-pub(crate) fn parse_pipe_migration(source: &str) -> Result<Vec<Decl>, ParseError> {
+pub(crate) fn parse_pipe_migration(
+    source: &str,
+    stack: &impl StackServices,
+) -> Result<Vec<Decl>, ParseError> {
     let tokens = lexer::lex(source)?;
     validate_literal_spellings(source, &tokens)?;
-    parse_with_mode(&tokens, ParseMode::PipeMigration)
+    parse_with_mode(&tokens, ParseMode::PipeMigration, stack)
 }
 
-pub fn parse_str_legacy_v018(source: &str) -> Result<Vec<Decl>, ParseError> {
+pub fn parse_str_legacy_v018(
+    source: &str,
+    stack: &impl StackServices,
+) -> Result<Vec<Decl>, ParseError> {
     let tokens = lexer::lex(source)?;
-    parse_legacy_v018_source_tokens(source, &tokens)
+    parse_legacy_v018_source_tokens(source, &tokens, stack)
 }
 
 pub fn parse_legacy_v018_source_tokens(
     source: &str,
     tokens: &[Token],
+    stack: &impl StackServices,
 ) -> Result<Vec<Decl>, ParseError> {
     validate_finite_literals(source, tokens)?;
-    parse_legacy_v018(tokens)
+    parse_legacy_v018(tokens, stack)
 }
 
 fn validate_literal_spellings(source: &str, tokens: &[Token]) -> Result<(), ParseError> {
@@ -395,7 +418,7 @@ enum DeepSurfaceMetaForm {
 // Helpers
 // ---------------------------------------------------------------------------
 
-impl Parser {
+impl<S: StackServices> Parser<'_, S> {
     fn raw_peek(&self) -> &TokenKind {
         self.tokens
             .get(self.pos)
@@ -831,6 +854,7 @@ impl Parser {
             pos: 0,
             module_allowed: false,
             mode: self.mode,
+            stack: self.stack,
         };
         let expr = nested.parse_expr(0)?;
         if !nested.at_eof() {
@@ -1076,7 +1100,7 @@ impl Parser {
     fn parse_dtype_set_bound(&mut self, name: String) -> Result<TypeBinder, ParseError> {
         let open = self.current_offset();
         self.advance();
-        let mut members = std::collections::BTreeSet::new();
+        let mut members = alloc::collections::BTreeSet::new();
         loop {
             if *self.peek() == TokenKind::RBrace {
                 break;
@@ -1502,7 +1526,7 @@ impl Parser {
             "samples" => Ok(PropertyOption::Samples(value, span)),
             "contract" => match &mut value {
                 Expr::Lit(Literal::Str(id), _) => {
-                    Ok(PropertyOption::Contract(std::mem::take(id), span))
+                    Ok(PropertyOption::Contract(core::mem::take(id), span))
                 }
                 _ => Err(ParseError::Expected {
                     expected: "string literal contract id".into(),
@@ -1924,7 +1948,8 @@ impl Parser {
         // Every parenthesized expression re-enters this Pratt parser. Check
         // remaining native stack at that recursive entry so valid deep input
         // and its error path can grow regardless of the caller's thread size.
-        stacker::maybe_grow(128 * 1024, 8 * 1024 * 1024, || {
+        let stack = self.stack;
+        stack.maybe_grow(128 * 1024, 8 * 1024 * 1024, || {
             self.parse_expr_inner(min_bp)
         })
     }
@@ -3239,6 +3264,7 @@ impl Parser {
             pos: self.pos,
             module_allowed: false,
             mode: self.mode,
+            stack: self.stack,
         };
         let Ok(pattern) = probe.parse_let_pattern() else {
             return false;
@@ -3273,7 +3299,8 @@ impl Parser {
     }
 
     fn parse_let_pattern(&mut self) -> Result<LetPattern, ParseError> {
-        stacker::maybe_grow(128 * 1024, 8 * 1024 * 1024, || {
+        let stack = self.stack;
+        stack.maybe_grow(128 * 1024, 8 * 1024 * 1024, || {
             self.parse_let_pattern_inner()
         })
     }
@@ -3377,7 +3404,8 @@ impl Parser {
     // ---------------------------------------------------------------------------
 
     fn parse_type(&mut self) -> Result<TypeExpr, ParseError> {
-        stacker::maybe_grow(128 * 1024, 8 * 1024 * 1024, || self.parse_type_inner())
+        let stack = self.stack;
+        stack.maybe_grow(128 * 1024, 8 * 1024 * 1024, || self.parse_type_inner())
     }
 
     fn parse_type_inner(&mut self) -> Result<TypeExpr, ParseError> {
@@ -3400,7 +3428,8 @@ impl Parser {
     }
 
     fn parse_type_atom(&mut self) -> Result<TypeExpr, ParseError> {
-        stacker::maybe_grow(128 * 1024, 8 * 1024 * 1024, || self.parse_type_atom_inner())
+        let stack = self.stack;
+        stack.maybe_grow(128 * 1024, 8 * 1024 * 1024, || self.parse_type_atom_inner())
     }
 
     fn parse_type_atom_inner(&mut self) -> Result<TypeExpr, ParseError> {
@@ -3642,7 +3671,8 @@ impl Parser {
     // ---------------------------------------------------------------------------
 
     fn parse_pattern(&mut self) -> Result<Pattern, ParseError> {
-        stacker::maybe_grow(128 * 1024, 8 * 1024 * 1024, || self.parse_pattern_inner())
+        let stack = self.stack;
+        stack.maybe_grow(128 * 1024, 8 * 1024 * 1024, || self.parse_pattern_inner())
     }
 
     fn parse_pattern_inner(&mut self) -> Result<Pattern, ParseError> {
@@ -4267,11 +4297,11 @@ mod tests {
     use super::*;
 
     fn p(s: &str) -> Vec<Decl> {
-        parse_str_legacy_v018(s).unwrap()
+        parse_str_legacy_v018(s, &chelis_syntax_host::NativeStack).unwrap()
     }
 
     fn p_err(s: &str) -> ParseError {
-        parse_str_legacy_v018(s).unwrap_err()
+        parse_str_legacy_v018(s, &chelis_syntax_host::NativeStack).unwrap_err()
     }
 
     // Convenience: parse a single def, extract body expression.
@@ -5109,7 +5139,7 @@ mod tests {
         // issue's reproducer spelled the values `cast(1, i64)`; the suffix
         // form fails identically and keeps the fixture free of type sugar.
         let src = "def main() -> i64 = { a = 1i64; b = 2i64; add(a, b) }";
-        let err = parse_str(src).unwrap_err();
+        let err = parse_str(src, &chelis_syntax_host::NativeStack).unwrap_err();
         let offset = match err {
             ParseError::SemicolonBlockSeparator { offset } => offset,
             ref other => panic!("expected SemicolonBlockSeparator, got {other:?}"),
@@ -5145,7 +5175,7 @@ mod tests {
         // generic wording names only the newline, because that is the only
         // separator the grammar accepts here.
         let src = "def f() -> i64 = { a = 1i64";
-        let err = parse_str(src).unwrap_err();
+        let err = parse_str(src, &chelis_syntax_host::NativeStack).unwrap_err();
         match err {
             ParseError::Expected {
                 ref expected,
@@ -5167,7 +5197,7 @@ mod tests {
     /// Every canonical `;`-in-a-block shape must reach the one rule message,
     /// pointing at the `;` the reader actually typed.
     fn assert_semicolon_rule_at(src: &str, semicolon_index: usize) {
-        let err = parse_str(src).unwrap_err();
+        let err = parse_str(src, &chelis_syntax_host::NativeStack).unwrap_err();
         let offset = match err {
             ParseError::SemicolonBlockSeparator { offset } => offset,
             ref other => panic!("expected SemicolonBlockSeparator, got {other:?}"),
@@ -5244,8 +5274,11 @@ mod tests {
         // Positive parity for #23: `a = ; 1i64` is the v0.18 spelling the
         // migrator accepts and rewrites, so the guard must stay canonical
         // only or the migration path stops working on real source.
-        let decls = parse_str_legacy_v018("def f() -> i64 = {\n  a = ; 1i64\n  a\n}\n")
-            .expect("v0.18 accepts a `;` before a binding value");
+        let decls = parse_str_legacy_v018(
+            "def f() -> i64 = {\n  a = ; 1i64\n  a\n}\n",
+            &chelis_syntax_host::NativeStack,
+        )
+        .expect("v0.18 accepts a `;` before a binding value");
         assert_eq!(decls.len(), 1);
     }
 
@@ -5285,8 +5318,11 @@ mod tests {
         // the v0.18 helpers, so nothing pinned that a canonical block parses
         // at all. Without this, every negative above could pass on a parser
         // that rejected every block.
-        let decls = parse_str("def f() -> i64 = {\n  a = 1i64\n  add(a, 1i64)\n}\n")
-            .expect("a newline-separated canonical block parses");
+        let decls = parse_str(
+            "def f() -> i64 = {\n  a = 1i64\n  add(a, 1i64)\n}\n",
+            &chelis_syntax_host::NativeStack,
+        )
+        .expect("a newline-separated canonical block parses");
         assert_eq!(decls.len(), 1);
     }
 
@@ -5299,14 +5335,16 @@ mod tests {
         // advice that does not work. `migrate_source_v018` is the library
         // path behind that CLI command (`cmd_migrate` in chelis-cli).
         let repro = "def main() -> i64 = { a = 1i64; b = 2i64; add(a, b) }\n";
-        parse_str(repro).expect_err("the reproducer must not parse canonically");
-        let migrated = crate::format::migrate_source_v018(repro)
+        parse_str(repro, &chelis_syntax_host::NativeStack)
+            .expect_err("the reproducer must not parse canonically");
+        let migrated = crate::format::migrate_source_v018(repro, &chelis_syntax_host::NativeStack)
             .expect("the migrator rewrites the `;` block the diagnostic points at");
         assert!(
             !migrated.contains(';'),
             "migration should remove the block separators: {migrated}"
         );
-        parse_str(&migrated).expect("migrator output must parse under canonical Surf v0.19");
+        parse_str(&migrated, &chelis_syntax_host::NativeStack)
+            .expect("migrator output must parse under canonical Surf v0.19");
     }
 
     #[test]
@@ -5315,7 +5353,11 @@ mod tests {
         // two grammars accept different separators. `;` is genuinely one of
         // v0.18's, so dropping it from the legacy message would be the
         // chelis#1267 defect pointed the other way.
-        let err = parse_str_legacy_v018("def f() -> i64 = { a = 1i64").unwrap_err();
+        let err = parse_str_legacy_v018(
+            "def f() -> i64 = { a = 1i64",
+            &chelis_syntax_host::NativeStack,
+        )
+        .unwrap_err();
         match err {
             ParseError::Expected {
                 ref expected,
@@ -5335,8 +5377,11 @@ mod tests {
         // `chelis migrate surf --from 0.18` still reads `;` as a block
         // separator, so the new wording is scoped to canonical Surf v0.19
         // rather than claiming `;` is never a block separator.
-        let decls = parse_str_legacy_v018("def main() -> i64 = { a = 1i64; add(a, 2i64) }")
-            .expect("v0.18 blocks accept `;` separators");
+        let decls = parse_str_legacy_v018(
+            "def main() -> i64 = { a = 1i64; add(a, 2i64) }",
+            &chelis_syntax_host::NativeStack,
+        )
+        .expect("v0.18 blocks accept `;` separators");
         assert_eq!(decls.len(), 1);
     }
 
@@ -5347,7 +5392,7 @@ mod tests {
         // keep offering it. Naming the newline there would be the same
         // defect in the opposite direction.
         let src = "def f(x, y) -> unit = par {\n    g(x)\n    h(y)\n}";
-        let err = parse_str(src).unwrap_err();
+        let err = parse_str(src, &chelis_syntax_host::NativeStack).unwrap_err();
         match err {
             ParseError::Expected { ref expected, .. } => {
                 assert_eq!(expected, "separator (`;`)", "got {err:?}");
@@ -5491,12 +5536,12 @@ mod tests {
             "x: tensor[.._, f32] = x",
         ] {
             assert!(
-                parse_str(source).is_err(),
+                parse_str(source, &chelis_syntax_host::NativeStack).is_err(),
                 "tensor inference-hole spelling must not reach desugaring: {source}"
             );
         }
         assert!(
-            parse_str("x: tensor[*, 4, f32] = x").is_ok(),
+            parse_str("x: tensor[*, 4, f32] = x", &chelis_syntax_host::NativeStack).is_ok(),
             "`*` remains the explicit dynamic-dimension spelling"
         );
     }
@@ -5557,7 +5602,11 @@ mod tests {
     fn duplicate_rank_spread_name_is_parse_error() {
         // The one parse-time fence: a spread name may not repeat in one shape.
         assert!(
-            parse_str("x: tensor[..r, seq, ..r, f32] = x").is_err(),
+            parse_str(
+                "x: tensor[..r, seq, ..r, f32] = x",
+                &chelis_syntax_host::NativeStack
+            )
+            .is_err(),
             "a repeated `..r` in one tensor shape must be a parse error"
         );
     }
@@ -6464,7 +6513,7 @@ mod tests {
         // constructor resolution. Function names stay snake_case; the
         // carve-out covers value bindings and parameters only (chelis#437).
         assert!(
-            parse_str("def N(x: f32) -> f32 = x").is_err(),
+            parse_str("def N(x: f32) -> f32 = x", &chelis_syntax_host::NativeStack).is_err(),
             "single-letter uppercase function name must stay rejected"
         );
     }
@@ -6519,7 +6568,8 @@ mod tests {
         // binds a value named S. The binder reaches parse_let_pattern,
         // where the single-letter uppercase override applies.
         let src = "def f(x: f32) -> f32 = { S = x\n S }";
-        let decls = parse_str(src).expect("block binder S = x should parse");
+        let decls = parse_str(src, &chelis_syntax_host::NativeStack)
+            .expect("block binder S = x should parse");
         match &decls[0] {
             Decl::FunDef { body, .. } => match body {
                 Expr::Block(bindings, _, _) => {
@@ -6558,7 +6608,11 @@ mod tests {
         // A multi-letter PascalCase parameter is rejected — params are
         // values, and multi-letter uppercase is reserved for types.
         assert!(
-            parse_str("def f(Spot: f32) -> f32 = Spot").is_err(),
+            parse_str(
+                "def f(Spot: f32) -> f32 = Spot",
+                &chelis_syntax_host::NativeStack
+            )
+            .is_err(),
             "multi-letter uppercase parameter must be rejected"
         );
     }
@@ -6586,9 +6640,9 @@ mod tests {
         // placement differs. `|>` already had this continuation carve-out.
         let src = "def f(a: f32, b: f32) -> bool = {\n  c = neq(a, a)\n  if c then true\n  else lte(a, b)\n}";
         assert!(
-            parse_str(src).is_ok(),
+            parse_str(src, &chelis_syntax_host::NativeStack).is_ok(),
             "block + newline before `else` must parse: {:?}",
-            parse_str(src).err()
+            parse_str(src, &chelis_syntax_host::NativeStack).err()
         );
     }
 
@@ -6597,7 +6651,10 @@ mod tests {
         // Positive control for the sibling form, so the fix cannot be a
         // regression that only moves which layout works.
         let src = "def f(a: f32, b: f32) -> bool = {\n  c = neq(a, a)\n  if c then true else lte(a, b)\n}";
-        assert!(parse_str(src).is_ok(), "same-line form must keep parsing");
+        assert!(
+            parse_str(src, &chelis_syntax_host::NativeStack).is_ok(),
+            "same-line form must keep parsing"
+        );
     }
 
     #[test]
@@ -6606,7 +6663,7 @@ mod tests {
         // Pin the REASON, not merely that something failed -- an unrelated
         // rejection would otherwise keep this green (review of PR #1369).
         let src = "def f(a: f32, b: f32) -> bool = {\n  c = neq(a, a)\n  if c then true\n}";
-        match parse_str(src) {
+        match parse_str(src, &chelis_syntax_host::NativeStack) {
             Err(ParseError::Expected {
                 expected, found, ..
             }) => {
@@ -6622,7 +6679,7 @@ mod tests {
         // The `then` half of the same parity: admitting `then` as a
         // continuation must not make it optional either.
         let src = "def f(a: f32, b: f32) -> bool = {\n  c = neq(a, a)\n  if c\n}";
-        match parse_str(src) {
+        match parse_str(src, &chelis_syntax_host::NativeStack) {
             Err(ParseError::Expected { expected, .. }) => {
                 assert_eq!(expected, "Then", "the missing `then` is the reason");
             }
@@ -6637,9 +6694,9 @@ mod tests {
         // `expected Then, found Eof` for the identical reason.
         let src = "def f(a: f32, b: f32) -> bool = {\n  c = neq(a, a)\n  if c\n  then true\n  else lte(a, b)\n}";
         assert!(
-            parse_str(src).is_ok(),
+            parse_str(src, &chelis_syntax_host::NativeStack).is_ok(),
             "a newline before `then` must parse: {:?}",
-            parse_str(src).err()
+            parse_str(src, &chelis_syntax_host::NativeStack).err()
         );
     }
 
@@ -6649,9 +6706,9 @@ mod tests {
         // `else if` puts its own `then` and `else` on later lines.
         let src = "def f(a: f32, b: f32) -> f32 = {\n  c = neq(a, a)\n  if c\n  then a\n  else if lt(a, b)\n  then b\n  else mul(a, b)\n}";
         assert!(
-            parse_str(src).is_ok(),
+            parse_str(src, &chelis_syntax_host::NativeStack).is_ok(),
             "a multiline `else if` chain must parse: {:?}",
-            parse_str(src).err()
+            parse_str(src, &chelis_syntax_host::NativeStack).err()
         );
     }
 
@@ -6672,9 +6729,9 @@ mod tests {
             "  with { x: 1.0f32 }\n",
         );
         assert!(
-            parse_str(declaration_body).is_ok(),
+            parse_str(declaration_body, &chelis_syntax_host::NativeStack).is_ok(),
             "a newline-led `with` must continue a declaration body: {:?}",
-            parse_str(declaration_body).err()
+            parse_str(declaration_body, &chelis_syntax_host::NativeStack).err()
         );
 
         // The `where` precondition routes through `property_expr_end`, the
@@ -6683,9 +6740,9 @@ mod tests {
         let property_predicate =
             "@property p forall(x: i32) where if lte(x, 1i32)\n  then true\n  else false: true";
         assert!(
-            parse_str(property_predicate).is_ok(),
+            parse_str(property_predicate, &chelis_syntax_host::NativeStack).is_ok(),
             "a split `if` must survive a property predicate: {:?}",
-            parse_str(property_predicate).err()
+            parse_str(property_predicate, &chelis_syntax_host::NativeStack).err()
         );
     }
 
@@ -6726,9 +6783,9 @@ mod tests {
         ];
         for (label, src) in cases {
             assert!(
-                parse_str(src).is_ok(),
+                parse_str(src, &chelis_syntax_host::NativeStack).is_ok(),
                 "{label}: the continuation rule must hold here too: {:?}",
-                parse_str(src).err()
+                parse_str(src, &chelis_syntax_host::NativeStack).err()
             );
         }
     }
@@ -6738,9 +6795,21 @@ mod tests {
         // P12 selects exactly three safe continuations. Tokens that can head
         // an expression stay out, and so do non-selected infix operators: the
         // inability to begin an expression is necessary but not sufficient.
-        assert!(Parser::is_block_expression_continuation(&TokenKind::Pipe));
-        assert!(Parser::is_block_expression_continuation(&TokenKind::Then));
-        assert!(Parser::is_block_expression_continuation(&TokenKind::Else));
+        assert!(
+            Parser::<chelis_syntax_host::NativeStack>::is_block_expression_continuation(
+                &TokenKind::Pipe
+            )
+        );
+        assert!(
+            Parser::<chelis_syntax_host::NativeStack>::is_block_expression_continuation(
+                &TokenKind::Then
+            )
+        );
+        assert!(
+            Parser::<chelis_syntax_host::NativeStack>::is_block_expression_continuation(
+                &TokenKind::Else
+            )
+        );
         for excluded in [
             TokenKind::With,
             TokenKind::Match,
@@ -6751,7 +6820,11 @@ mod tests {
             TokenKind::AmpAmp,
             TokenKind::PipePipe,
         ] {
-            assert!(!Parser::is_block_expression_continuation(&excluded));
+            assert!(
+                !Parser::<chelis_syntax_host::NativeStack>::is_block_expression_continuation(
+                    &excluded
+                )
+            );
         }
     }
 
@@ -6761,9 +6834,9 @@ mod tests {
         // precedes `else`. A following binding must remain its own statement.
         let src = "def f(a: f32, b: f32) -> bool = {\n  c = neq(a, a)\n  d = if c then true\n  else lte(a, b)\n  d\n}";
         assert!(
-            parse_str(src).is_ok(),
+            parse_str(src, &chelis_syntax_host::NativeStack).is_ok(),
             "a statement after the if/else must still parse: {:?}",
-            parse_str(src).err()
+            parse_str(src, &chelis_syntax_host::NativeStack).err()
         );
     }
 

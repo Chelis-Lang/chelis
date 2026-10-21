@@ -23,8 +23,10 @@ fn chain_program(k: usize) -> Vec<deep::Expr> {
         "  [{}]\n}}\nr = index(f(1i64), 0i64)\n",
         items.join(", ")
     ));
-    let declarations = chelis_surf::parser::parse_str(&source).expect("generated Surf parses");
-    chelis_surf::desugar::desugar_program(&declarations).expect("generated Surf desugars")
+    let declarations = chelis_surf::parser::parse_str(&source, &chelis_syntax_host::NativeStack)
+        .expect("generated Surf parses");
+    chelis_surf::desugar::desugar_program(&declarations, &chelis_syntax_host::NativeStack)
+        .expect("generated Surf desugars")
 }
 
 fn grows_linearly(small: usize, large: usize) -> bool {

@@ -10,7 +10,11 @@ use chelis_types::{
 };
 
 fn parse(source: &str) -> Vec<chelis_deep::Expr> {
-    desugar_program(&parse_str(source).expect("fixture parses")).expect("Surf fixture must desugar")
+    desugar_program(
+        &parse_str(source, &chelis_syntax_host::NativeStack).expect("fixture parses"),
+        &chelis_syntax_host::NativeStack,
+    )
+    .expect("Surf fixture must desugar")
 }
 
 fn verdict_error(

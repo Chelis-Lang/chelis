@@ -179,16 +179,20 @@ fn cmd_prove_on_grown_stack(options: ProveOptions<'_>) -> Result<i32, String> {
             verified.verify_artifact(&source)?;
             let names: Vec<_> = match artifact.extension().and_then(|ext| ext.to_str()) {
                 Some("ch") => {
-                    let parsed = chelis_surf::parser::parse_str(&source)
-                        .map_err(|err| format!("parse {}: {err}", artifact.display()))?;
+                    let parsed =
+                        chelis_surf::parser::parse_str(&source, &chelis_syntax_host::NativeStack)
+                            .map_err(|err| format!("parse {}: {err}", artifact.display()))?;
                     property_names(&parsed)
                         .into_iter()
                         .map(|name| (name, None))
                         .collect()
                 }
                 Some("dp") => {
-                    let parsed = chelis_deep::parse_and_stamp_file(&source)
-                        .map_err(|err| format!("parse {}: {err}", artifact.display()))?;
+                    let parsed = chelis_deep::parse_and_stamp_file(
+                        &source,
+                        &chelis_syntax_host::NativeStack,
+                    )
+                    .map_err(|err| format!("parse {}: {err}", artifact.display()))?;
                     discover_deep_properties(&artifact, &parsed, None)?
                         .into_iter()
                         .map(|p| (p.name, p.source_id))
@@ -334,7 +338,8 @@ fn compute_surf_dependency_edges(source: &str) -> Result<Vec<(String, Vec<String
     #[cfg(not(feature = "chelis-prove"))]
     {
         use std::collections::BTreeSet;
-        let parsed = chelis_surf::parser::parse_str(source).map_err(|e| format!("parse: {e}"))?;
+        let parsed = chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+            .map_err(|e| format!("parse: {e}"))?;
         let flat = flatten_module_decls(&parsed);
         let module_names: BTreeSet<String> = flat
             .iter()
@@ -428,7 +433,8 @@ fn collect_surf_refs(
 
 fn compute_deep_dependency_edges(source: &str) -> Result<Vec<(String, Vec<String>)>, String> {
     use std::collections::BTreeSet;
-    let exprs = chelis_deep::parse_and_stamp_file(source).map_err(|e| format!("parse: {e}"))?;
+    let exprs = chelis_deep::parse_and_stamp_file(source, &chelis_syntax_host::NativeStack)
+        .map_err(|e| format!("parse: {e}"))?;
     // Collect module-level def names (exports).
     let mut module_names = BTreeSet::new();
     for expr in &exprs {
@@ -571,7 +577,7 @@ fn prove_surf_file(
     if let Some(provenance) = &options.provenance {
         provenance.verify_artifact(&source)?;
     }
-    let parsed = chelis_surf::parser::parse_str(&source)
+    let parsed = chelis_surf::parser::parse_str(&source, &chelis_syntax_host::NativeStack)
         .map_err(|err| format!("parse {}: {err}", path.display()))?;
     require_package_option_to_match_module_file(path, &parsed, options.package)?;
     let flat = flatten_module_decls(&parsed);
@@ -585,7 +591,10 @@ fn prove_surf_file(
     // capability builds agree on what is type-broken.
     #[cfg(not(feature = "chelis-prove"))]
     {
-        let deep_exprs = match chelis_surf::desugar::desugar_program(&parsed) {
+        let deep_exprs = match chelis_surf::desugar::desugar_program(
+            &parsed,
+            &chelis_syntax_host::NativeStack,
+        ) {
             Ok(deep) => deep,
             Err(error) => {
                 emit_module_check_failure(options, &[error.to_string()], totals);
@@ -1766,7 +1775,7 @@ fn prove_deep_file(
     if let Some(provenance) = &options.provenance {
         provenance.verify_artifact(&source)?;
     }
-    let exprs = chelis_deep::parse_and_stamp_file(&source)
+    let exprs = chelis_deep::parse_and_stamp_file(&source, &chelis_syntax_host::NativeStack)
         .map_err(|err| format!("parse {}: {err}", path.display()))?;
     if let Err(err) = chelis_validate::validate_deep(&source) {
         // Strict Deep-shape validation may reject a carrier that still

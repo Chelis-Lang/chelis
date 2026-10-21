@@ -19,12 +19,14 @@ use chelis_types::infer_ir_program;
 // ── Harness ──────────────────────────────────────────────────────
 
 fn deep_of_surf(source: &str) -> Vec<chelis_deep::Expr> {
-    let decls = parse_str(source).expect("surf parse should succeed");
-    desugar_program(&decls).expect("Surf fixture must desugar")
+    let decls =
+        parse_str(source, &chelis_syntax_host::NativeStack).expect("surf parse should succeed");
+    desugar_program(&decls, &chelis_syntax_host::NativeStack).expect("Surf fixture must desugar")
 }
 
 fn deep_of_dp(source: &str) -> Vec<chelis_deep::Expr> {
-    chelis_deep::parser::parse_str_strict(source).expect("deep parse should succeed")
+    chelis_deep::parser::parse_str_strict(source, &chelis_syntax_host::NativeStack)
+        .expect("deep parse should succeed")
 }
 
 fn errors(exprs: &[chelis_deep::Expr]) -> Vec<CheckError> {
@@ -131,9 +133,10 @@ fn simplex_tolerance_band_is_well_formed() {
 fn invariant_without_opaque_is_rejected() {
     let error = chelis_deep::parser::parse_str(
         "(deftype {invariant: (fn {} (params {} p) \
-            (app {} (var {} gte) (access {} (var {} p) value) (lit {type: (t-prim {} f32)} 0.0))), \
-            invariant_amenability: \"linear\"} \
-            Probability () (variant {} Probability (field {} value (t-prim {} f32))))",
+        (app {} (var {} gte) (access {} (var {} p) value) (lit {type: (t-prim {} f32)} 0.0))), \
+        invariant_amenability: \"linear\"} \
+        Probability () (variant {} Probability (field {} value (t-prim {} f32))))",
+        &chelis_syntax_host::NativeStack,
     )
     .unwrap_err()
     .to_string();

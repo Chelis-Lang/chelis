@@ -8,12 +8,8 @@
 //! defect chelis#2116 filed — a green style gate on a package that cannot
 //! load — so the rule lives in one place and both call it.
 //!
-//! It sits here, rather than in `chelis-reef`, because `chelis-lint` is
-//! deliberately dependency-pure, and pulling the package manager into the
-//! lint crate to reach 30 lines of string arithmetic would undo that.
-//! `chelis-surf` already owns module declarations, and both `chelis-reef` and
-//! `chelis-lint` already depend on it, so the shared home costs no new edge in
-//! either direction.
+//! Native path adaptation belongs to `chelis-syntax-host`.
+//! Reef and lint share this policy without a package-manager dependency.
 
 use std::path::Path;
 

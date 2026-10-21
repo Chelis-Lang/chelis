@@ -1,11 +1,17 @@
 //! Explicit migrations for retired Deep source versions.
 
+use alloc::string::{String, ToString};
+
 use crate::{RawAtom, RawExpr, parser, printer, stamp_to_typed};
 
 /// Rewrite v0.18 signed-integer `t-prim` names to canonical v0.19 `i*`
 /// spellings, then validate and print the canonical stamped Deep tree.
-pub fn migrate_source_v018(source: &str) -> Result<String, String> {
-    let mut expressions = parser::parse_raw_str(source).map_err(|error| error.to_string())?;
+pub fn migrate_source_v018(
+    source: &str,
+    stack: &impl chelis_stack_services::StackServices,
+) -> Result<String, String> {
+    let mut expressions =
+        parser::parse_raw_str(source, stack).map_err(|error| error.to_string())?;
     expressions.iter_mut().for_each(migrate_expr);
     let stamped =
         stamp_to_typed::stamp_deep_file(expressions).map_err(|error| error.to_string())?;

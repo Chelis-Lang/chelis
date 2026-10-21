@@ -33,9 +33,11 @@ fn run(surf: &str, tier: &str) -> Vec<ObligationOutcome> {
 }
 
 fn run_deep(surf: &str, tier: &str) -> Vec<ObligationOutcome> {
-    let declarations = chelis_surf::parser::parse_str(surf).expect("parse Surf fixture");
+    let declarations = chelis_surf::parser::parse_str(surf, &chelis_syntax_host::NativeStack)
+        .expect("parse Surf fixture");
     let expressions =
-        chelis_surf::desugar::desugar_program(&declarations).expect("Surf fixture must desugar");
+        chelis_surf::desugar::desugar_program(&declarations, &chelis_syntax_host::NativeStack)
+            .expect("Surf fixture must desugar");
     let source = chelis_deep::printer::print_canonical(&expressions);
     match run_deep_source_obligations(&source, &options(tier)).expect("engine run") {
         ObligationRunResult::Ran(outcomes) => outcomes,
@@ -389,8 +391,8 @@ fn zero_arg_constant_discovery_reads_the_stamped_module() {
         (def {} value (lit {} 1))
         (def {} zero (fn {} (params {}) (lit {} 2)))
         (def {} unary (fn {} (params {} x) (lit {} 3))))"#;
-    let stamped =
-        chelis_deep::parse_and_stamp_file(source).expect("constant-discovery fixture stamps");
+    let stamped = chelis_deep::parse_and_stamp_file(source, &chelis_syntax_host::NativeStack)
+        .expect("constant-discovery fixture stamps");
 
     let expected = vec!["value".to_string(), "zero".to_string()];
     assert_eq!(module_zero_arg_scalar_defs(&stamped), expected);
@@ -524,8 +526,11 @@ def make(x: f32) -> Probability = Probability { value: if (x >= 0.0) then if (x 
 ";
 
 fn clamp_module() -> (Vec<Expr>, OpaqueInvariant, ConstEnv) {
-    let declarations = chelis_surf::parser::parse_str(CLAMP).expect("parse module");
-    let exprs = chelis_surf::desugar::desugar_program(&declarations).expect("desugar module");
+    let declarations = chelis_surf::parser::parse_str(CLAMP, &chelis_syntax_host::NativeStack)
+        .expect("parse module");
+    let exprs =
+        chelis_surf::desugar::desugar_program(&declarations, &chelis_syntax_host::NativeStack)
+            .expect("desugar module");
     let invariants = crate::opaque::collect_opaque_invariants(&exprs);
     let consts = resolve_module_constants(&exprs, &invariants);
     (exprs, invariants[0].clone(), consts)

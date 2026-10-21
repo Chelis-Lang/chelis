@@ -11,11 +11,16 @@ use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str;
 
 fn desugar(source: &str) -> Vec<Expr> {
-    desugar_program(&parse_str(source).expect("Surf parses")).expect("Surf desugars")
+    desugar_program(
+        &parse_str(source, &chelis_syntax_host::NativeStack).expect("Surf parses"),
+        &chelis_syntax_host::NativeStack,
+    )
+    .expect("Surf desugars")
 }
 
 fn deep(source: &str) -> Vec<Expr> {
-    chelis_deep::parser::parse_str(source).expect("Deep fixture parses")
+    chelis_deep::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+        .expect("Deep fixture parses")
 }
 
 fn expand(program: &[Expr]) -> Result<ExpandedProgram, ExpansionError> {

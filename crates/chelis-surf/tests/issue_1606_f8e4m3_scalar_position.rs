@@ -23,8 +23,11 @@ use chelis_surf::format::format_source;
 use chelis_surf::parser::parse_str;
 
 fn deep_of(source: &str) -> String {
-    let decls = parse_str(source).expect("parse");
-    print_canonical_flat(&desugar_program(&decls).expect("Surf fixture must desugar"))
+    let decls = parse_str(source, &chelis_syntax_host::NativeStack).expect("parse");
+    print_canonical_flat(
+        &desugar_program(&decls, &chelis_syntax_host::NativeStack)
+            .expect("Surf fixture must desugar"),
+    )
 }
 
 fn prim_of(name: &str) -> String {
@@ -49,7 +52,8 @@ fn assert_reaches_rejection(deep: &str, position: &str) {
 }
 
 fn assert_forbidden_binder(source: &str, position: &str) {
-    let error = parse_str(source).expect_err("f8e4m3 cannot enter a declaration binder list");
+    let error = parse_str(source, &chelis_syntax_host::NativeStack)
+        .expect_err("f8e4m3 cannot enter a declaration binder list");
     let rendered = error.to_string();
     assert!(
         rendered.contains("`f8e4m3`") && rendered.contains("cannot be a declaration binder"),
@@ -174,9 +178,11 @@ fn the_decompiler_refuses_a_reserved_f8e4m3_type_variable() {
          (export {} f)\n\
          (defsig {} f (f8e4m3) (t-fn {} (t-var {} f8e4m3) (t-var {} f8e4m3)))\n\
          (def {} f (fn {} (params {} (x {type: (t-var {} f8e4m3)})) (var {} x))))";
-    let deep = parse_and_stamp_file(TEMPLATE).expect("deep parse");
-    let error = chelis_surf::decompile::try_decompile_program(&deep)
-        .expect_err("`(t-var {} f8e4m3)` has no Surf representation and must fail closed");
+    let deep =
+        parse_and_stamp_file(TEMPLATE, &chelis_syntax_host::NativeStack).expect("deep parse");
+    let error =
+        chelis_surf::decompile::try_decompile_program(&deep, &chelis_syntax_host::NativeStack)
+            .expect_err("`(t-var {} f8e4m3)` has no Surf representation and must fail closed");
     let rendered = error.to_string();
     assert!(
         rendered.contains("f8e4m3") && rendered.contains("type variable"),
@@ -189,12 +195,12 @@ fn the_decompiler_refuses_a_reserved_f8e4m3_type_variable() {
 #[test]
 fn the_formatter_leaves_f8e4m3_unchanged() {
     let source = "module P.M\nexport (f)\ndef f(x: f8e4m3) -> f8e4m3 = x\n";
-    let once = format_source(source).expect("format once");
+    let once = format_source(source, &chelis_syntax_host::NativeStack).expect("format once");
     assert!(
         once.contains("f8e4m3"),
         "the formatter must preserve `f8e4m3`: {once}"
     );
-    let twice = format_source(&once).expect("format twice");
+    let twice = format_source(&once, &chelis_syntax_host::NativeStack).expect("format twice");
     assert_eq!(once, twice, "formatter idempotence on `f8e4m3`");
 }
 

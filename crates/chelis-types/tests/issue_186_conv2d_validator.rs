@@ -26,9 +26,10 @@ use chelis_surf::parser::parse_str as parse_surf;
 use chelis_types::check_ir_program;
 
 fn surf_to_deep(source: &str) -> Vec<Expr> {
-    let decls = parse_surf(source).expect("surf parse");
+    let decls = parse_surf(source, &chelis_syntax_host::NativeStack).expect("surf parse");
     chelis_macros::expand_program(
-        &desugar_program(&decls).expect("Surf fixture must desugar"),
+        &desugar_program(&decls, &chelis_syntax_host::NativeStack)
+            .expect("Surf fixture must desugar"),
         &chelis_macros::ExpansionOptions::default(),
     )
     .expect("macro expand")
@@ -99,7 +100,7 @@ fn issue186_deep_conv_concrete_tensors_typechecks() {
                (def {type: (t-tensor {} (d-lit {} 1) (d-lit {} 8) (d-lit {} 6) (d-lit {} 6) (t-prim {} f32))} y \
                  (app {} (var {} conv) (var {} x) (var {} k) \
                    (app {} (var {} Cons) (lit {type: (t-prim {} i64)} 1) (app {} (var {} Cons) (lit {type: (t-prim {} i64)} 1) (var {} Nil))) (app {} (var {} Cons) (tuple {} (lit {type: (t-prim {} i64)} 0) (lit {type: (t-prim {} i64)} 0)) (app {} (var {} Cons) (tuple {} (lit {type: (t-prim {} i64)} 0) (lit {type: (t-prim {} i64)} 0)) (var {} Nil)))))";
-    let deep = parse_deep(src).expect("deep parse");
+    let deep = parse_deep(src, &chelis_syntax_host::NativeStack).expect("deep parse");
     let res = check_ir_program(&deep);
     if let Err(rep) = res {
         for err in &rep.errors {
@@ -536,7 +537,7 @@ fn red_team_205_round2_f1_padding_near_i64_max_does_not_panic() {
                (def {} y \
                  (app {} (var {} conv) (var {} x) (var {} k) \
                    (app {} (var {} Cons) (lit {type: (t-prim {} i64)} 1) (app {} (var {} Cons) (lit {type: (t-prim {} i64)} 1) (var {} Nil))) (app {} (var {} Cons) (tuple {} (lit {type: (t-prim {} i64)} 4611686018427387905) (lit {type: (t-prim {} i64)} 4611686018427387905)) (app {} (var {} Cons) (tuple {} (lit {type: (t-prim {} i64)} 4611686018427387905) (lit {type: (t-prim {} i64)} 4611686018427387905)) (var {} Nil)))))";
-    let deep = parse_deep(src).expect("deep parse");
+    let deep = parse_deep(src, &chelis_syntax_host::NativeStack).expect("deep parse");
     // Must NOT panic. Result is allowed to be Err with the overflow
     // diagnostic.
     let res = check_ir_program(&deep);
@@ -572,7 +573,7 @@ fn red_team_205_round2_f1_input_plus_padding_overflow_does_not_panic() {
            (app {{}} (var {{}} conv) (var {{}} x) (var {{}} k) \
              (app {{}} (var {{}} Cons) (lit {{type: (t-prim {{}} i64)}} 1) (app {{}} (var {{}} Cons) (lit {{type: (t-prim {{}} i64)}} 1) (var {{}} Nil))) (app {{}} (var {{}} Cons) (tuple {{}} (lit {{type: (t-prim {{}} i64)}} 1) (lit {{type: (t-prim {{}} i64)}} 1)) (app {{}} (var {{}} Cons) (tuple {{}} (lit {{type: (t-prim {{}} i64)}} 1) (lit {{type: (t-prim {{}} i64)}} 1)) (var {{}} Nil)))))"
     );
-    let deep = parse_deep(&src).expect("deep parse");
+    let deep = parse_deep(&src, &chelis_syntax_host::NativeStack).expect("deep parse");
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected overflow rejection");
     assert!(
@@ -1136,6 +1137,6 @@ fn issue186_deep_conv_nonliteral_stride_is_checker_legal() {
                (def {type: (t-tensor {} (d-lit {} 1) (d-lit {} 8) (d-lit {} 6) (d-lit {} 6) (t-prim {} f32))} y \
                  (app {} (var {} conv) (var {} x) (var {} k) \
                    (app {} (var {} Cons) (var {} stride_v) (app {} (var {} Cons) (var {} stride_v) (var {} Nil))) (app {} (var {} Cons) (tuple {} (lit {type: (t-prim {} i64)} 0) (lit {type: (t-prim {} i64)} 0)) (app {} (var {} Cons) (tuple {} (lit {type: (t-prim {} i64)} 0) (lit {type: (t-prim {} i64)} 0)) (var {} Nil)))))";
-    let deep = parse_deep(src).expect("deep parse");
+    let deep = parse_deep(src, &chelis_syntax_host::NativeStack).expect("deep parse");
     check_ir_program(&deep).expect("runtime stride metadata is not a type error");
 }

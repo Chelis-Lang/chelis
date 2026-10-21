@@ -7,9 +7,11 @@ use chelis_surf::parser::parse_str as parse_surf;
 use chelis_types::check_ir_program;
 
 fn surf_to_deep(source: &str, label: &str) -> Vec<Expr> {
-    let decls = parse_surf(source).unwrap_or_else(|e| panic!("{label}: surf parse failed: {e:?}"));
+    let decls = parse_surf(source, &chelis_syntax_host::NativeStack)
+        .unwrap_or_else(|e| panic!("{label}: surf parse failed: {e:?}"));
     chelis_macros::expand_program(
-        &desugar_program(&decls).expect("Surf fixture must desugar"),
+        &desugar_program(&decls, &chelis_syntax_host::NativeStack)
+            .expect("Surf fixture must desugar"),
         &chelis_macros::ExpansionOptions::default(),
     )
     .unwrap_or_else(|e| panic!("{label}: macro expansion failed: {e:?}"))

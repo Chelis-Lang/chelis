@@ -11,13 +11,13 @@ repository.workspace = true
 pre-020-pipe-migration = []
 
 [dependencies]
-chelis-vocab.workspace = true
-serde.workspace = true
-thiserror.workspace = true
-miette.workspace = true
-stacker.workspace = true
+chelis-vocab = { workspace = true, default-features = false }
+chelis-stack-services.workspace = true
+serde = { version = "1", default-features = false, features = ["alloc", "derive", "rc"] }
+thiserror = { version = "2", default-features = false }
 
 [dev-dependencies]
+chelis-syntax-host.workspace = true
 bincode = "1"
 proc-macro2 = "1"
 proptest = "1"

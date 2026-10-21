@@ -7,11 +7,12 @@ use std::collections::BTreeSet;
 use syn::visit::Visit;
 
 fn legacy(source: &str) -> Vec<Expr> {
-    chelis_deep::parser::parse_str(source).expect("fixture parses")
+    chelis_deep::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+        .expect("fixture parses")
 }
 
 fn stamped(source: &str) -> Vec<Expr> {
-    parse_and_stamp_file(source).expect("fixture stamps")
+    parse_and_stamp_file(source, &chelis_syntax_host::NativeStack).expect("fixture stamps")
 }
 
 fn messages(errors: &[CheckError]) -> Vec<String> {

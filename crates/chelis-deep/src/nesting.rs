@@ -20,10 +20,9 @@
 //! a verdict at every depth up to that limit for nested applications, `let`
 //! chains and function types.
 
-use std::cell::Cell;
+use core::cell::Cell;
 
-/// Size of the stack segment the raw parser runs on. `stacker::grow` reserves
-/// it as address space; only the pages a parse touches are committed.
+/// Size of the fresh stack segment that the supplied service gives each parse.
 pub const PARSE_SEGMENT_BYTES: usize = 64 * 1024 * 1024;
 
 /// Native stack (in bytes) the parser keeps in reserve within its segment. It
@@ -31,43 +30,101 @@ pub const PARSE_SEGMENT_BYTES: usize = 64 * 1024 * 1024;
 /// the diagnostic.
 pub const STACK_RED_ZONE_BYTES: usize = 128 * 1024;
 
-/// Nesting depth accepted on a platform whose remaining stack cannot be
-/// measured (`stacker::remaining_stack` returns `None`). Such a platform has
-/// no budget to consult, so the guard falls back to this static cap.
+/// Nesting depth accepted when the service cannot measure the remaining stack.
+/// The guard uses this static cap when no measured budget is available.
 const FALLBACK_MAX_DEPTH: usize = 512;
 
-thread_local! {
-    /// Live recursive-descent depth on this thread, consulted only where the
-    /// remaining stack cannot be measured.
-    static DEPTH: Cell<usize> = const { Cell::new(0) };
-}
+/// Live recursive depth belongs to one parse, not to its caller or thread.
+pub(crate) type ParseDepth = Cell<usize>;
 
 /// Run `parse` on a fresh parser segment.
-pub(crate) fn on_parse_segment<R>(parse: impl FnOnce() -> R) -> R {
-    stacker::grow(PARSE_SEGMENT_BYTES, parse)
+pub(crate) fn on_parse_segment<R>(
+    parse: impl FnOnce() -> R,
+    stack: &impl chelis_stack_services::StackServices,
+) -> R {
+    stack.grow(PARSE_SEGMENT_BYTES, parse)
 }
 
 /// One level of recursive descent. Holding it keeps the level counted; the
 /// level ends when it drops.
-pub(crate) struct Descent(());
+pub(crate) struct Descent<'a>(&'a ParseDepth);
 
-impl Descent {
-    /// Enter one more level, or `None` when the stack cannot afford it.
-    pub(crate) fn enter() -> Option<Self> {
-        let exhausted = match stacker::remaining_stack() {
+impl<'a> Descent<'a> {
+    /// Enter one more level, or return `None` if the stack cannot hold it.
+    pub(crate) fn enter(
+        depth: &'a ParseDepth,
+        stack: &impl chelis_stack_services::StackServices,
+    ) -> Option<Self> {
+        let exhausted = match stack.remaining_stack() {
             Some(remaining) => remaining < STACK_RED_ZONE_BYTES,
-            None => DEPTH.with(Cell::get) >= FALLBACK_MAX_DEPTH,
+            None => depth.get() >= FALLBACK_MAX_DEPTH,
         };
         if exhausted {
             return None;
         }
-        DEPTH.with(|depth| depth.set(depth.get() + 1));
-        Some(Self(()))
+        depth.set(depth.get() + 1);
+        Some(Self(depth))
     }
 }
 
-impl Drop for Descent {
+impl Drop for Descent<'_> {
     fn drop(&mut self) {
-        DEPTH.with(|depth| depth.set(depth.get() - 1));
+        self.0.set(self.0.get() - 1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloc::vec::Vec;
+
+    struct MeasuredStack(Option<usize>);
+
+    impl chelis_stack_services::StackServices for MeasuredStack {
+        fn grow<R>(&self, bytes: usize, operation: impl FnOnce() -> R) -> R {
+            chelis_stack_services::StackServices::grow(
+                &chelis_syntax_host::NativeStack,
+                bytes,
+                operation,
+            )
+        }
+
+        fn maybe_grow<R>(&self, red_zone: usize, bytes: usize, operation: impl FnOnce() -> R) -> R {
+            chelis_stack_services::StackServices::maybe_grow(
+                &chelis_syntax_host::NativeStack,
+                red_zone,
+                bytes,
+                operation,
+            )
+        }
+
+        fn remaining_stack(&self) -> Option<usize> {
+            self.0
+        }
+    }
+
+    #[test]
+    fn measured_guard_accepts_the_red_zone_boundary_and_rejects_less() {
+        let depth = Cell::new(0);
+        assert!(Descent::enter(&depth, &MeasuredStack(Some(STACK_RED_ZONE_BYTES))).is_some());
+        assert!(Descent::enter(&depth, &MeasuredStack(Some(STACK_RED_ZONE_BYTES - 1))).is_none());
+        assert_eq!(depth.get(), 0);
+    }
+
+    #[test]
+    fn unmeasured_guard_counts_each_parse_separately_and_releases_levels() {
+        let first = Cell::new(0);
+        let second = Cell::new(0);
+        let stack = MeasuredStack(None);
+        let mut levels: Vec<_> = (0..FALLBACK_MAX_DEPTH)
+            .map(|_| Descent::enter(&first, &stack).expect("fallback level is available"))
+            .collect();
+        assert!(Descent::enter(&first, &stack).is_none());
+        assert!(Descent::enter(&second, &stack).is_some());
+        levels.pop();
+        assert!(Descent::enter(&first, &stack).is_some());
+        drop(levels);
+        assert_eq!(first.get(), 0);
+        assert_eq!(second.get(), 0);
     }
 }

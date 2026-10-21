@@ -17,9 +17,11 @@
 use chelis_ir::host::{HostLoweringSession, host_def_kernel};
 
 fn checked_surf(src: &str) -> chelis_types::CheckedProgram {
-    let decls = chelis_surf::parser::parse_str(src).expect("surf parse");
+    let decls =
+        chelis_surf::parser::parse_str(src, &chelis_syntax_host::NativeStack).expect("surf parse");
     let exprs = chelis_macros::expand_program(
-        &chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar"),
+        &chelis_surf::desugar::desugar_program(&decls, &chelis_syntax_host::NativeStack)
+            .expect("Surf fixture must desugar"),
         &chelis_macros::ExpansionOptions::default(),
     )
     .expect("macro expansion")
@@ -153,9 +155,12 @@ fn signatureless_helper_retains_assigned_abi_order() {
     use chelis_ir::dag::{DimInfo, TensorType};
     use chelis_types::types::Prim;
     use chelis_unord::UnordMap;
-    let expr = chelis_deep::parser::parse_str("(app {} (var {} add) (var {} z) (var {} a))")
-        .unwrap()
-        .remove(0);
+    let expr = chelis_deep::parser::parse_str(
+        "(app {} (var {} add) (var {} z) (var {} a))",
+        &chelis_syntax_host::NativeStack,
+    )
+    .unwrap()
+    .remove(0);
     for names in [["z", "a"], ["a", "z"]] {
         let mut scope = UnordMap::new();
         for name in names {

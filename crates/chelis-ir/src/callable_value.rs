@@ -272,7 +272,7 @@ mod tests {
     fn function_contract(result: &str) -> Expr {
         chelis_deep::parser::parse_str(&format!(
             "(t-fn {{}} (t-ref {{}} (t-tensor {{}} (d-name {{}} *) (t-prim {{}} f64))) {result})"
-        ))
+        ), &chelis_syntax_host::NativeStack)
         .unwrap()
         .remove(0)
     }
@@ -433,9 +433,12 @@ mod tests {
     fn producer_cache_inherits_complete_alias_copy_and_generated_label_values() {
         use std::collections::BTreeMap;
         fn var(name: &str) -> Expr {
-            chelis_deep::parser::parse_str(&format!("(var {{}} {name})"))
-                .unwrap()
-                .remove(0)
+            chelis_deep::parser::parse_str(
+                &format!("(var {{}} {name})"),
+                &chelis_syntax_host::NativeStack,
+            )
+            .unwrap()
+            .remove(0)
         }
         let inner = function_contract("(t-tensor {} (d-lit {} 2) (t-prim {} bool))");
         let outer = function_contract("(t-tensor {} (d-name {} *) (t-prim {} bool))");
@@ -477,9 +480,12 @@ mod tests {
     fn producer_cache_keeps_shadow_and_non_callable_signature_failures_explicit() {
         use std::collections::BTreeMap;
         let var = |name| {
-            chelis_deep::parser::parse_str(&format!("(var {{}} {name})"))
-                .unwrap()
-                .remove(0)
+            chelis_deep::parser::parse_str(
+                &format!("(var {{}} {name})"),
+                &chelis_syntax_host::NativeStack,
+            )
+            .unwrap()
+            .remove(0)
         };
         let definitions = BTreeMap::from([("neg".into(), var("abs")), ("f".into(), var("neg"))]);
         let registry = chelis_types::adt::AdtRegistry::default();
@@ -490,9 +496,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(values["f"].symbol(), "abs");
-        let malformed = chelis_deep::parser::parse_str("(t-prim {} bool)")
-            .unwrap()
-            .remove(0);
+        let malformed =
+            chelis_deep::parser::parse_str("(t-prim {} bool)", &chelis_syntax_host::NativeStack)
+                .unwrap()
+                .remove(0);
         let signatures = BTreeMap::from([("f".into(), malformed)]);
         assert!(
             crate::lower::resolved_builtin_producer_bindings(&definitions, &signatures, &registry)
@@ -523,9 +530,12 @@ mod tests {
                 ),
             },
         );
-        let authored = chelis_deep::parser::parse_str("(t-adt {} Contract (d-lit {} 2))")
-            .unwrap()
-            .remove(0);
+        let authored = chelis_deep::parser::parse_str(
+            "(t-adt {} Contract (d-lit {} 2))",
+            &chelis_syntax_host::NativeStack,
+        )
+        .unwrap()
+        .remove(0);
         let frame = NormalizedCallableContract::from_authored(&registry, &authored)
             .unwrap()
             .unwrap();
@@ -541,9 +551,12 @@ mod tests {
         assert_eq!(result.tag(), DeepTag::TTensor);
         assert_eq!(result.children_slice()[0].tag(), Some(DeepTag::DLit));
         assert_eq!(frame.authored(), &authored);
-        let malformed = chelis_deep::parser::parse_str("(t-adt {} Contract (t-prim {} f64))")
-            .unwrap()
-            .remove(0);
+        let malformed = chelis_deep::parser::parse_str(
+            "(t-adt {} Contract (t-prim {} f64))",
+            &chelis_syntax_host::NativeStack,
+        )
+        .unwrap()
+        .remove(0);
         assert!(NormalizedCallableContract::from_authored(&registry, &malformed).is_err());
     }
 

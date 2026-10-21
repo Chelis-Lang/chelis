@@ -65,7 +65,7 @@ use chelis_types::{check_ir_program, check_typed_program};
 // ---------------------------------------------------------------------------
 
 fn stamped(source: &str) -> Vec<Expr> {
-    parse_and_stamp_file(source)
+    parse_and_stamp_file(source, &chelis_syntax_host::NativeStack)
         .unwrap_or_else(|e| panic!("fixture must stamp: {source}\nstamp error: {e}"))
 }
 

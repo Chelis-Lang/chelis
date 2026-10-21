@@ -150,9 +150,11 @@ mod tests {
         let source = "(module {} m (def {} out (tuple {} \
             (lit {type: (t-prim {} f32)} 1.0) \
             (lit {type: (t-prim {} f32)} 2.0))))";
-        let list_exprs = chelis_deep::parser::parse_str(source).expect("list Deep must parse");
+        let list_exprs = chelis_deep::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+            .expect("list Deep must parse");
         let typed_exprs =
-            chelis_deep::parse_and_stamp_file(source).expect("typed Deep must parse and stamp");
+            chelis_deep::parse_and_stamp_file(source, &chelis_syntax_host::NativeStack)
+                .expect("typed Deep must parse and stamp");
         assert!(matches!(typed_exprs.first(), Some(DeepExpr::Node(_, _))));
 
         let expected = vec![IrName::new("out.0"), IrName::new("out.1")];
@@ -168,8 +170,11 @@ mod tests {
 
     #[test]
     fn empty_tuple_declaration_has_no_flattened_root_names() {
-        let expressions = chelis_deep::parser::parse_str("(def {} empty (tuple {}))")
-            .expect("empty tuple Deep must parse");
+        let expressions = chelis_deep::parser::parse_str(
+            "(def {} empty (tuple {}))",
+            &chelis_syntax_host::NativeStack,
+        )
+        .expect("empty tuple Deep must parse");
 
         assert!(root_names_from_checked_exprs(&expressions, &BTreeMap::new(), None).is_empty());
     }
@@ -179,8 +184,8 @@ mod tests {
         let source = "(def {} mixed (tuple {} \
             (lit {type: (t-prim {} i32)} 1) \
             (lit {type: (t-tensor {} (d-name {} n) (t-prim {} f32))} 2.0)))";
-        let expressions =
-            chelis_deep::parser::parse_str(source).expect("mixed tuple Deep must parse");
+        let expressions = chelis_deep::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+            .expect("mixed tuple Deep must parse");
 
         assert_eq!(
             root_names_from_checked_exprs(&expressions, &BTreeMap::new(), None),
@@ -192,7 +197,8 @@ mod tests {
     fn typed_node_non_root_declaration_does_not_create_a_root_name() {
         let source = "(module {} m (defsig {} f (t-fn {} (t-prim {} f32))))";
         let typed_exprs =
-            chelis_deep::parse_and_stamp_file(source).expect("typed Deep must parse and stamp");
+            chelis_deep::parse_and_stamp_file(source, &chelis_syntax_host::NativeStack)
+                .expect("typed Deep must parse and stamp");
 
         assert!(root_names_from_checked_exprs(&typed_exprs, &BTreeMap::new(), None).is_empty());
     }

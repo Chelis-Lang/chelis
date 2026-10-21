@@ -45,19 +45,19 @@ pub struct ImproperConsTail<'a, N> {
     pub tail: &'a N,
 }
 
-impl<N> std::fmt::Debug for ImproperConsTail<'_, N> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl<N> core::fmt::Debug for ImproperConsTail<'_, N> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.write_str("ImproperConsTail")
     }
 }
 
-impl<N> std::fmt::Display for ImproperConsTail<'_, N> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl<N> core::fmt::Display for ImproperConsTail<'_, N> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.write_str("canonical Cons spine has an improper tail")
     }
 }
 
-impl<N> std::error::Error for ImproperConsTail<'_, N> {}
+impl<N> core::error::Error for ImproperConsTail<'_, N> {}
 
 /// Iterates over heads without using one native call frame per list element.
 pub struct ConsSpine<'a, N: ConsSpineNode> {

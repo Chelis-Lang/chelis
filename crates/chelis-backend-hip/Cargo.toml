@@ -12,6 +12,7 @@ chelis-types = { path = "../chelis-types" }
 chelis-vocab.workspace = true
 
 [dev-dependencies]
+chelis-syntax-host.workspace = true
 # Tests that link HIP or CPU hosts stage the runtime the bundle carries
 # (spec/08-backends.md §2.1) and link that exact archive.
 chelis-runtime-bundle.workspace = true

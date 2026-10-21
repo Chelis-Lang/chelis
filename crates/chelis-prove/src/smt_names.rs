@@ -284,8 +284,10 @@ mod tests {
     }
 
     fn deep_program(surf: &str) -> Vec<DeepExpr> {
-        let decls = chelis_surf::parser::parse_str(surf).expect("parse Surf fixture");
-        chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture desugars")
+        let decls = chelis_surf::parser::parse_str(surf, &chelis_syntax_host::NativeStack)
+            .expect("parse Surf fixture");
+        chelis_surf::desugar::desugar_program(&decls, &chelis_syntax_host::NativeStack)
+            .expect("Surf fixture desugars")
     }
 
     /// Every stem an injection site uses (chelis#3267).

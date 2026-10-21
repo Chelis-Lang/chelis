@@ -114,8 +114,9 @@ fn is_named_def(expr: &Expr, def_name: &str) -> bool {
 }
 
 fn checked_def(src: &str, def_name: &str) -> Expr {
-    let decls = parse_str(src).expect("surf parse");
-    let deep = desugar_program(&decls).expect("Surf fixture must desugar");
+    let decls = parse_str(src, &chelis_syntax_host::NativeStack).expect("surf parse");
+    let deep = desugar_program(&decls, &chelis_syntax_host::NativeStack)
+        .expect("Surf fixture must desugar");
     let checked = check_ir_program(&deep).expect("check");
     checked
         .exprs()

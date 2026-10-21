@@ -33,16 +33,20 @@ use chelis_types::{infer_ir_program, infer_program};
 fn deep_of_surf(sources: &[&str]) -> Vec<chelis_deep::Expr> {
     let mut decls = Vec::new();
     for src in sources {
-        decls.extend(parse_str(src).expect("surf parse should succeed"));
+        decls.extend(
+            parse_str(src, &chelis_syntax_host::NativeStack).expect("surf parse should succeed"),
+        );
     }
-    let deep = desugar_program(&decls).expect("Surf fixture must desugar");
+    let deep = desugar_program(&decls, &chelis_syntax_host::NativeStack)
+        .expect("Surf fixture must desugar");
     chelis_macros::expand_program(&deep, &chelis_macros::ExpansionOptions::default())
         .expect("macro expansion should succeed")
         .into_exprs()
 }
 
 fn deep_of_dp(source: &str) -> Vec<chelis_deep::Expr> {
-    chelis_deep::parser::parse_str_strict(source).expect("deep parse should succeed")
+    chelis_deep::parser::parse_str_strict(source, &chelis_syntax_host::NativeStack)
+        .expect("deep parse should succeed")
 }
 
 /// Errors from the executable check pipeline (the path `chelis check`
@@ -831,7 +835,8 @@ fn macro_expansion_attributes_to_call_site_module() {
     // the expander removes, not one of the 61 strict-vocabulary tags,
     // so this program models the post-desugar/pre-expansion state of
     // the pipeline rather than `.dp` ingestion.
-    let parsed = chelis_deep::parser::parse_str(program).expect("deep parse should succeed");
+    let parsed = chelis_deep::parser::parse_str(program, &chelis_syntax_host::NativeStack)
+        .expect("deep parse should succeed");
     let exprs = chelis_macros::expand_program(&parsed, &chelis_macros::ExpansionOptions::default())
         .expect("macro expansion should succeed")
         .into_exprs();

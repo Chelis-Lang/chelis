@@ -16,7 +16,11 @@ output = run(to_tensor([[0.0, 1.0], [2.0, 0.0]], f32), to_tensor([[2.0], [-1.0]]
 fn assert_eval(source: &str, shape: &[usize], bits: &[&str]) {
     let dir = tempdir().unwrap();
     let path = dir.path().join("actuals.ch");
-    fs::write(&path, chelis_surf::format::format_source(source).unwrap()).unwrap();
+    fs::write(
+        &path,
+        chelis_surf::format::format_source(source, &chelis_syntax_host::NativeStack).unwrap(),
+    )
+    .unwrap();
     let checked = Command::cargo_bin("chelis")
         .unwrap()
         .env_remove("CHELIS_STYLE_GATE_DISABLE")
@@ -90,8 +94,11 @@ fn invalid_axis_still_rejects_before_evaluation() {
     let path = dir.path().join("invalid.ch");
     fs::write(
         &path,
-        chelis_surf::format::format_source(&CONCAT.replace("second(y, x), -1", "second(y, x), 2"))
-            .unwrap(),
+        chelis_surf::format::format_source(
+            &CONCAT.replace("second(y, x), -1", "second(y, x), 2"),
+            &chelis_syntax_host::NativeStack,
+        )
+        .unwrap(),
     )
     .unwrap();
     let output = Command::cargo_bin("chelis")
@@ -111,7 +118,11 @@ alias = { f = aligned_left\n sum(f(to_tensor([1.0f32, 2.0f32]), to_tensor([1.0f3
     assert_eval(source, &[], &["40a00000"]);
     let dir = tempdir().unwrap();
     let path = dir.path().join("alias.ch");
-    fs::write(&path, chelis_surf::format::format_source(source).unwrap()).unwrap();
+    fs::write(
+        &path,
+        chelis_surf::format::format_source(source, &chelis_syntax_host::NativeStack).unwrap(),
+    )
+    .unwrap();
     let output = Command::cargo_bin("chelis")
         .unwrap()
         .args(["build"])

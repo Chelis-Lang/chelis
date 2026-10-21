@@ -103,7 +103,7 @@ fn assert_valid_report(label: &str, report: &chelis_types::fitness::FitnessRepor
 /// must also be byte-identical to the formatter's output.
 fn assert_canonical_surf(label: &str, body: &str) {
     let source = format!("{body}\n");
-    let canonical = format_source(&source)
+    let canonical = format_source(&source, &chelis_syntax_host::NativeStack)
         .unwrap_or_else(|err| panic!("{label} failed to format: {err}\n{body}"));
     assert_eq!(
         canonical, source,
@@ -149,15 +149,16 @@ fn validate_markdown_file(path: &PathBuf, expectations: Option<MarkdownExpectati
             path.display(),
             block.start_line
         );
-        let decls = parse_surf(&block.body)
+        let decls = parse_surf(&block.body, &chelis_syntax_host::NativeStack)
             .unwrap_or_else(|err| panic!("{label} failed to parse: {err}\n{}", block.body));
-        let deep = desugar_program(&decls).expect("Surf fixture must desugar");
+        let deep = desugar_program(&decls, &chelis_syntax_host::NativeStack)
+            .expect("Surf fixture must desugar");
         let report = chelis_types::check_program(&deep);
         assert_valid_report(&label, &report);
         assert_canonical_surf(&label, &block.body);
 
         let printed = print_canonical(&deep);
-        parse_deep_strict(&printed)
+        parse_deep_strict(&printed, &chelis_syntax_host::NativeStack)
             .unwrap_or_else(|err| panic!("{label} desugared to invalid Deep: {err}\n{printed}"));
     }
 
@@ -167,7 +168,7 @@ fn validate_markdown_file(path: &PathBuf, expectations: Option<MarkdownExpectati
         .iter()
         .filter(|block| block.lang == "chelis-surf-fragment")
     {
-        if parse_surf(&block.body).is_ok() {
+        if parse_surf(&block.body, &chelis_syntax_host::NativeStack).is_ok() {
             let label = format!("Surf fragment at {}:{}", path.display(), block.start_line);
             assert_canonical_surf(&label, &block.body);
         }
@@ -180,7 +181,7 @@ fn validate_markdown_file(path: &PathBuf, expectations: Option<MarkdownExpectati
             path.display(),
             block.start_line
         );
-        let exprs = parse_deep_strict(&block.body)
+        let exprs = parse_deep_strict(&block.body, &chelis_syntax_host::NativeStack)
             .unwrap_or_else(|err| panic!("{label} failed strict parse: {err}\n{}", block.body));
 
         let warnings = validate(&exprs);
@@ -205,10 +206,10 @@ fn validate_markdown_file(path: &PathBuf, expectations: Option<MarkdownExpectati
                 .collect::<Vec<_>>()
         );
 
-        let reparsed = parse_deep(&block.body)
+        let reparsed = parse_deep(&block.body, &chelis_syntax_host::NativeStack)
             .unwrap_or_else(|err| panic!("{label} failed non-strict parse: {err}\n{}", block.body));
         let canonical = print_canonical(&reparsed);
-        parse_deep_strict(&canonical).unwrap_or_else(|err| {
+        parse_deep_strict(&canonical, &chelis_syntax_host::NativeStack).unwrap_or_else(|err| {
             panic!("{label} failed after canonical reprint: {err}\n{canonical}")
         });
 

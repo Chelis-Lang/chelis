@@ -198,10 +198,11 @@ fn deep_type_has_hole(root: &chelis_deep::Expr) -> bool {
 
 fn measure(program: &Program) -> Measured {
     let source = program.source();
-    let declarations = chelis_surf::parser::parse_str(&source)
+    let declarations = chelis_surf::parser::parse_str(&source, &chelis_syntax_host::NativeStack)
         .unwrap_or_else(|error| panic!("generated Surf must parse: {error:?}\n{source}"));
     let exprs =
-        chelis_surf::desugar::desugar_program(&declarations).expect("Surf fixture must desugar");
+        chelis_surf::desugar::desugar_program(&declarations, &chelis_syntax_host::NativeStack)
+            .expect("Surf fixture must desugar");
     let items = top_level_decl_items_with_modules(&exprs);
     let flat = items
         .iter()
@@ -1247,12 +1248,10 @@ fn a_mixed_bare_and_module_component_follows_the_value_a_member_reads() {
     // Surf cannot spell this: the component has one member outside the module
     // wrapper and one inside, so only the module member is hoisted while the
     // group is emitted at whichever member the schedule reaches first.
-    let exprs = chelis_deep::parse_and_stamp_file(
-        "(def {} ping (fn {} (params {} n) (app {} (var {} pong) (var {} n))))\n\
-         (module {} Mixed\n  \
-           (def {} carried (lit {type: (t-prim {} i32)} 7))\n  \
-           (def {} pong (fn {} (params {} n) (app {} (var {} add) (var {} carried) (app {} (var {} ping) (var {} n))))))\n",
-    )
+    let exprs = chelis_deep::parse_and_stamp_file("(def {} ping (fn {} (params {} n) (app {} (var {} pong) (var {} n))))\n\
+     (module {} Mixed\n  \
+       (def {} carried (lit {type: (t-prim {} i32)} 7))\n  \
+       (def {} pong (fn {} (params {} n) (app {} (var {} add) (var {} carried) (app {} (var {} ping) (var {} n))))))\n", &chelis_syntax_host::NativeStack)
     .expect("mixed Deep fixture parses");
     let items = top_level_decl_items_with_modules(&exprs);
     assert_eq!(items.len(), 3);
@@ -1282,9 +1281,11 @@ fn cycle_precedence_value_is_available_before_the_cyclic_component() {
                   root = add(read_root(), later)\n\n\
                   later = 5i32\n\n\
                   def read_root() -> i32 = root\n";
-    let declarations = chelis_surf::parser::parse_str(source).expect("fixture parses");
+    let declarations = chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+        .expect("fixture parses");
     let exprs =
-        chelis_surf::desugar::desugar_program(&declarations).expect("Surf fixture must desugar");
+        chelis_surf::desugar::desugar_program(&declarations, &chelis_syntax_host::NativeStack)
+            .expect("Surf fixture must desugar");
     let items = top_level_decl_items_with_modules(&exprs);
     let plan = FunctionInferencePlan::build(&items);
     let schedule = primary_inference_schedule(&plan, &items);

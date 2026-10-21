@@ -10,9 +10,10 @@ use chelis_types::{check_ir_program, check_typed_program};
 /// Parse → desugar → macro-expand → type-check, returning the full
 /// CheckError structs for inspection.
 fn check_errors(source: &str) -> Vec<CheckError> {
-    let decls = parse_str(source).expect("surf parse");
+    let decls = parse_str(source, &chelis_syntax_host::NativeStack).expect("surf parse");
     let exprs = expand_program(
-        &desugar_program(&decls).expect("Surf fixture must desugar"),
+        &desugar_program(&decls, &chelis_syntax_host::NativeStack)
+            .expect("Surf fixture must desugar"),
         &ExpansionOptions::default(),
     )
     .expect("macro expand")
@@ -24,9 +25,10 @@ fn check_errors(source: &str) -> Vec<CheckError> {
 }
 
 fn check_errors_at_both_ingresses(source: &str) -> Vec<(&'static str, Vec<CheckError>)> {
-    let decls = parse_str(source).expect("surf parse");
+    let decls = parse_str(source, &chelis_syntax_host::NativeStack).expect("surf parse");
     let exprs = expand_program(
-        &desugar_program(&decls).expect("Surf fixture must desugar"),
+        &desugar_program(&decls, &chelis_syntax_host::NativeStack)
+            .expect("Surf fixture must desugar"),
         &ExpansionOptions::default(),
     )
     .expect("macro expand")

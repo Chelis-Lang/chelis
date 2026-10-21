@@ -38,9 +38,11 @@ fn evaluate_single_input(
 }
 
 fn lower_surf(source: &str) -> Dag {
-    let decls = chelis_surf::parser::parse_str(source).expect("Surf fixture parses");
+    let decls = chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+        .expect("Surf fixture parses");
     let exprs = chelis_macros::expand_program(
-        &chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture desugars"),
+        &chelis_surf::desugar::desugar_program(&decls, &chelis_syntax_host::NativeStack)
+            .expect("Surf fixture desugars"),
         &chelis_macros::ExpansionOptions::default(),
     )
     .expect("Surf fixture expands")

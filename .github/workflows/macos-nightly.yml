@@ -217,6 +217,10 @@ jobs:
         if: matrix.shard == 1
         run: .venv/bin/python scripts/version_core_oracle.py
 
+      - name: Syntax core portability
+        if: matrix.shard == 1
+        run: .venv/bin/python scripts/syntax_predicate_core_oracle.py
+
       - name: Verify packaged binary architecture
         if: matrix.shard == 2
         run: |

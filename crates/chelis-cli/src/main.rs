@@ -1313,7 +1313,7 @@ fn cmd_deep(file: &Path, flat: bool, annotate: bool) -> Result<(), Box<dyn std::
     // segment as checking, including temporary AST destruction.
     chelis_types::run_on_grown_stack(|| {
         let source = fs::read_to_string(file)?;
-        let decls = chelis_surf::parser::parse_str(&source)?;
+        let decls = chelis_surf::parser::parse_str(&source, &chelis_syntax_host::NativeStack)?;
         let deep_exprs = expanded_desugared_program(&decls).map_err(boxed_string_error)?;
         let deep_exprs = if annotate {
             match chelis_types::check_ir_program(&deep_exprs) {
@@ -1358,11 +1358,13 @@ fn cmd_surf(file: &Path, verbose: bool) -> Result<(), Box<dyn std::error::Error>
         let synthetic_name = file.file_stem().and_then(|stem| stem.to_str());
         if ext == "dp" {
             let deep_source = style_gate::strip_deep_lint_directive_lines(&source);
-            let deep_exprs = chelis_deep::parse_and_stamp_file(&deep_source)?;
+            let deep_exprs =
+                chelis_deep::parse_and_stamp_file(&deep_source, &chelis_syntax_host::NativeStack)?;
             let surf = chelis_surf::decompile::try_decompile_program_with_context(
                 &deep_exprs,
                 &options,
                 synthetic_name,
+                &chelis_syntax_host::NativeStack,
             )?;
             let surf = if verbose {
                 surf
@@ -1372,7 +1374,7 @@ fn cmd_surf(file: &Path, verbose: bool) -> Result<(), Box<dyn std::error::Error>
             print!("{surf}");
         } else {
             // For .ch files, round-trip through deep and back
-            let decls = chelis_surf::parser::parse_str(&source)?;
+            let decls = chelis_surf::parser::parse_str(&source, &chelis_syntax_host::NativeStack)?;
             // Public Deep is post-expansion. Resugaring the pre-expansion
             // compiler-only `defmacro`/`macro-invoke` forms would invent a second
             // Surf dialect and makes even a valid macro program fail here.
@@ -1381,6 +1383,7 @@ fn cmd_surf(file: &Path, verbose: bool) -> Result<(), Box<dyn std::error::Error>
                 &deep_exprs,
                 &options,
                 synthetic_name,
+                &chelis_syntax_host::NativeStack,
             )?;
             let surf = if verbose {
                 surf
@@ -1394,7 +1397,7 @@ fn cmd_surf(file: &Path, verbose: bool) -> Result<(), Box<dyn std::error::Error>
 }
 
 fn canonicalize_decompiled_surf(surf: &str) -> Result<String, Box<dyn std::error::Error>> {
-    let decls = chelis_surf::parser::parse_str(surf)
+    let decls = chelis_surf::parser::parse_str(surf, &chelis_syntax_host::NativeStack)
         .map_err(|err| format!("decompiler emitted Surf that the parser rejected: {err}"))?;
     Ok(chelis_surf::format::format_program(&decls))
 }
@@ -1409,12 +1412,15 @@ fn cmd_fmt(file: &Path, inplace: bool, check: bool) -> Result<(), Box<dyn std::e
         let source = fs::read_to_string(file)?;
         let ext = file.extension().and_then(|e| e.to_str()).unwrap_or("");
         let output = if ext == "dp" {
-            let deep_exprs = chelis_deep::parser::parse_and_stamp_file(&source)?;
+            let deep_exprs = chelis_deep::parser::parse_and_stamp_file(
+                &source,
+                &chelis_syntax_host::NativeStack,
+            )?;
             chelis_deep::printer::print_canonical(&deep_exprs)
         } else {
             // .ch: parse Surf -> pretty-print Surf while preserving surface
             // choices and source comments.
-            chelis_surf::format::format_source(&source)?
+            chelis_surf::format::format_source(&source, &chelis_syntax_host::NativeStack)?
         };
         if check {
             if output == source {
@@ -1467,9 +1473,14 @@ fn cmd_migrate_pipes(
             .into());
         }
         let previous = String::from_utf8(output.stdout)?;
-        let migration = chelis_surf::pipe_migration::prepare(&original, &previous)
-            .map_err(|error| format!("{}: {error}", path.display()))?;
-        let declarations = chelis_surf::parser::parse_str(&migration.source)?;
+        let migration = chelis_surf::pipe_migration::prepare(
+            &original,
+            &previous,
+            &chelis_syntax_host::NativeStack,
+        )
+        .map_err(|error| format!("{}: {error}", path.display()))?;
+        let declarations =
+            chelis_surf::parser::parse_str(&migration.source, &chelis_syntax_host::NativeStack)?;
         let current = expanded_desugared_program(&declarations).map_err(boxed_string_error)?;
         let normalize = chelis_surf::resugar::normalize_deep_for_surface_roundtrip;
         let expected = chelis_deep::printer::print_canonical(&normalize(&migration.baseline)?);
@@ -1674,14 +1685,17 @@ fn cmd_migrate_deep(
 fn preflight_deep_migration(path: &Path) -> Result<(PathBuf, String, String), String> {
     let source =
         fs::read_to_string(path).map_err(|error| format!("{}: {error}", path.display()))?;
-    let migrated = chelis_deep::migration::migrate_source_v018(&source)
-        .map_err(|error| format!("{}: {error}", path.display()))?;
-    let parsed = chelis_deep::parser::parse_and_stamp_file(&migrated).map_err(|error| {
-        format!(
-            "{}: migrated output does not parse: {error}",
-            path.display()
-        )
-    })?;
+    let migrated =
+        chelis_deep::migration::migrate_source_v018(&source, &chelis_syntax_host::NativeStack)
+            .map_err(|error| format!("{}: {error}", path.display()))?;
+    let parsed =
+        chelis_deep::parser::parse_and_stamp_file(&migrated, &chelis_syntax_host::NativeStack)
+            .map_err(|error| {
+                format!(
+                    "{}: migrated output does not parse: {error}",
+                    path.display()
+                )
+            })?;
     let canonical = chelis_deep::printer::print_canonical(&parsed);
     if canonical != migrated {
         return Err(format!(
@@ -1701,14 +1715,16 @@ fn preflight_deep_migration(path: &Path) -> Result<(PathBuf, String, String), St
 fn preflight_migration(path: &Path) -> Result<(PathBuf, String, String), String> {
     let source =
         fs::read_to_string(path).map_err(|error| format!("{}: {error}", path.display()))?;
-    let migrated = chelis_surf::format::migrate_source_v018(&source)
-        .map_err(|error| format!("{}: {error}", path.display()))?;
-    let canonical = chelis_surf::format::format_source(&migrated).map_err(|error| {
-        format!(
-            "{}: migrated output is not canonical: {error}",
-            path.display()
-        )
-    })?;
+    let migrated =
+        chelis_surf::format::migrate_source_v018(&source, &chelis_syntax_host::NativeStack)
+            .map_err(|error| format!("{}: {error}", path.display()))?;
+    let canonical = chelis_surf::format::format_source(&migrated, &chelis_syntax_host::NativeStack)
+        .map_err(|error| {
+            format!(
+                "{}: migrated output is not canonical: {error}",
+                path.display()
+            )
+        })?;
     if canonical != migrated {
         let line = migrated
             .lines()
@@ -1724,12 +1740,13 @@ fn preflight_migration(path: &Path) -> Result<(PathBuf, String, String), String>
         ));
     }
 
-    let declarations = chelis_surf::parser::parse_str(&migrated).map_err(|error| {
-        format!(
-            "{}: migrated output does not parse: {error}",
-            path.display()
-        )
-    })?;
+    let declarations = chelis_surf::parser::parse_str(&migrated, &chelis_syntax_host::NativeStack)
+        .map_err(|error| {
+            format!(
+                "{}: migrated output does not parse: {error}",
+                path.display()
+            )
+        })?;
     let deep = expanded_desugared_program(&declarations)
         .map_err(|error| format!("{}: macro expansion failed: {error}", path.display()))?;
     let resugared = chelis_surf::resugar::resugar_program(&deep)
@@ -2289,7 +2306,7 @@ fn cmd_eval_inner(
                 // The engine's own `parse_deep` is non-strict; surfacing
                 // the strict error in the CLI keeps every `.dp` CLI
                 // surface on the same closed-vocabulary gate.
-                chelis_deep::parse_and_stamp_file(&deep_source)
+                chelis_deep::parse_and_stamp_file(&deep_source, &chelis_syntax_host::NativeStack)
                     .map_err(|err| boxed_string_error(err.to_string()))?;
                 return if json {
                     prepare_eval_json(try_eval_result_for_target(
@@ -2416,7 +2433,7 @@ fn detect_eval_package_root(file: &Path) -> Result<Option<PathBuf>, Box<dyn std:
     // A parse failure here is non-fatal for routing: fall back to the
     // legacy path so the user sees the same parse error they would have
     // before the refactor.
-    if chelis_surf::parser::parse_str(&source).is_err() {
+    if chelis_surf::parser::parse_str(&source, &chelis_syntax_host::NativeStack).is_err() {
         return Ok(None);
     }
     chelis_reef::find_package_root_for_input(file).map_err(boxed_string_error)
@@ -2573,8 +2590,9 @@ fn copy_cost_for_file(file: &Path) -> Result<CopyCostReport, Box<dyn std::error:
     if ext == "dp" {
         let source = fs::read_to_string(file)?;
         let deep_source = style_gate::strip_deep_lint_directive_lines(&source);
-        let deep_exprs = chelis_deep::parse_and_stamp_file(&deep_source)
-            .map_err(|err| format!("Deep parse error: {err}"))?;
+        let deep_exprs =
+            chelis_deep::parse_and_stamp_file(&deep_source, &chelis_syntax_host::NativeStack)
+                .map_err(|err| format!("Deep parse error: {err}"))?;
         let checked =
             checked_program_with_effects(&deep_exprs).map_err(|e| format!("Check errors: {e}"))?;
         return Ok(CopyCostReport {
@@ -2590,7 +2608,7 @@ fn copy_cost_for_file(file: &Path) -> Result<CopyCostReport, Box<dyn std::error:
         None => {
             let source = fs::read_to_string(file)?;
             (
-                chelis_surf::parser::parse_str(&source)
+                chelis_surf::parser::parse_str(&source, &chelis_syntax_host::NativeStack)
                     .map_err(|e| format!("{}: {e}", file.display()))?,
                 Vec::new(),
                 false,
@@ -3444,7 +3462,7 @@ fn check_prepared_file(
     // namespace declarations. Establish it once for both checker paths. Retain
     // this parse for standalone checking; nonempty linked entries need no reparse.
     let source_decls = if prepared.is_none_or(|program| program.entry_decls.is_empty()) {
-        match chelis_surf::parser::parse_str(source) {
+        match chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack) {
             Ok(decls) if decls.is_empty() => {
                 return synthetic_check_report_with_error(EMPTY_PROGRAM_MESSAGE);
             }
@@ -3756,12 +3774,13 @@ fn assemble_validated_check_report(
 /// `.ch` parse-error path produces, never a propagated boxed `Err`.
 fn cmd_check_one_deep(source: &str, show_inferred: bool) -> CheckResult {
     let deep_source = style_gate::strip_deep_lint_directive_lines(source);
-    let deep_exprs = match chelis_deep::parse_and_stamp_file(&deep_source) {
-        Ok(deep_exprs) => deep_exprs,
-        Err(err) => {
-            return synthetic_check_report_with_error(&err.to_string());
-        }
-    };
+    let deep_exprs =
+        match chelis_deep::parse_and_stamp_file(&deep_source, &chelis_syntax_host::NativeStack) {
+            Ok(deep_exprs) => deep_exprs,
+            Err(err) => {
+                return synthetic_check_report_with_error(&err.to_string());
+            }
+        };
     // Parity with the `.ch` empty-file path (a parse-clean file with
     // zero top-level exprs): reject with the same canonical message so
     // the `.dp` and `.ch` surfaces agree.
@@ -4473,7 +4492,10 @@ fn build_prepared_file(
     // (chelis#2331).
     let (decls, entry_decls) = match &prepared {
         Some(prepared) => (prepared.decls.clone(), Some(prepared.entry_decls.clone())),
-        None => (chelis_surf::parser::parse_str(source)?, None),
+        None => (
+            chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack)?,
+            None,
+        ),
     };
     // Wave-1 red-team M2 (#207 follow-up): align with `chelis check`
     // and reject a zero-declaration program rather than emitting a
@@ -4970,8 +4992,9 @@ fn cmd_build_deep(
     let source = fs::read_to_string(file)?;
     style_gate::enforce_style_gate(file, &source, allow_style_violations)?;
     let deep_source = style_gate::strip_deep_lint_directive_lines(&source);
-    let deep_exprs = chelis_deep::parse_and_stamp_file(&deep_source)
-        .map_err(|err| format!("Deep parse error: {err}"))?;
+    let deep_exprs =
+        chelis_deep::parse_and_stamp_file(&deep_source, &chelis_syntax_host::NativeStack)
+            .map_err(|err| format!("Deep parse error: {err}"))?;
 
     // Deep files are their own selected program. Check before pruning: the
     // pruner seeds every top-level def but may still remove a declaration
@@ -8688,7 +8711,8 @@ fn classify_test_jobs_for_batch(
                 continue;
             }
         };
-        let parsed = match chelis_surf::parser::parse_str(&source) {
+        let parsed = match chelis_surf::parser::parse_str(&source, &chelis_syntax_host::NativeStack)
+        {
             Ok(parsed) => parsed,
             Err(e) => {
                 explain_batch_demotion(&job.rel_display, &format!("it could not be parsed: {e}"));
@@ -9377,7 +9401,8 @@ fn preflight_test_selection(
             Ok(s) => s,
             Err(_) => return TestSelectionPreflight::NeedsExecution,
         };
-        let parsed = match chelis_surf::parser::parse_str(&source) {
+        let parsed = match chelis_surf::parser::parse_str(&source, &chelis_syntax_host::NativeStack)
+        {
             Ok(p) => p,
             Err(_) => return TestSelectionPreflight::NeedsExecution,
         };
@@ -9451,7 +9476,8 @@ fn test_entry_imports<P: AsRef<Path>>(files: &[P]) -> chelis_reef::EntryImports 
         // module a test file is, by its location, bare.
         imports.add_entry_file(file.as_ref());
         if let Ok(source) = fs::read_to_string(file.as_ref())
-            && let Ok(decls) = chelis_surf::parser::parse_str(&source)
+            && let Ok(decls) =
+                chelis_surf::parser::parse_str(&source, &chelis_syntax_host::NativeStack)
         {
             imports.add_decls(&decls);
         }
@@ -10167,7 +10193,8 @@ fn estimate_selected_test_count(file: &Path, filter: Option<&str>, rel_display: 
     let Ok(source) = fs::read_to_string(file) else {
         return 1;
     };
-    let Ok(parsed) = chelis_surf::parser::parse_str(&source) else {
+    let Ok(parsed) = chelis_surf::parser::parse_str(&source, &chelis_syntax_host::NativeStack)
+    else {
         return 1;
     };
     let flat = flatten_module_decls(&parsed);
@@ -10629,7 +10656,7 @@ where
     for file in files {
         let source = fs::read_to_string(&file.file)
             .map_err(|e| format!("read {}: {e}", file.file.display()))?;
-        let parsed = chelis_surf::parser::parse_str(&source)
+        let parsed = chelis_surf::parser::parse_str(&source, &chelis_syntax_host::NativeStack)
             .map_err(|e| format!("parse {}: {e}", file.file.display()))?;
         let flat = flatten_module_decls(&parsed);
 
@@ -10849,7 +10876,7 @@ where
     F: FnMut(&TestRow),
 {
     let source = fs::read_to_string(file).map_err(|e| format!("read {}: {e}", file.display()))?;
-    let parsed = chelis_surf::parser::parse_str(&source)
+    let parsed = chelis_surf::parser::parse_str(&source, &chelis_syntax_host::NativeStack)
         .map_err(|e| format!("parse {}: {e}", file.display()))?;
 
     // A test file may wrap its contents in `module Foo.Bar` — we need the
@@ -11455,8 +11482,8 @@ struct EvalDecls {
 fn load_eval_decls(file: &Path) -> Result<EvalDecls, Box<dyn std::error::Error>> {
     let source =
         fs::read_to_string(file).map_err(|e| format!("failed to read {}: {e}", file.display()))?;
-    let decls =
-        chelis_surf::parser::parse_str(&source).map_err(|e| format!("{}: {e}", file.display()))?;
+    let decls = chelis_surf::parser::parse_str(&source, &chelis_syntax_host::NativeStack)
+        .map_err(|e| format!("{}: {e}", file.display()))?;
     // The file is linked by its own location, as `check` and `build` link
     // it (spec/02 §P2, chelis#2918).
     if let Some(prepared) = chelis_reef::prepare_program_for_file(file, &EMBEDDED_RUNTIME)
@@ -12514,8 +12541,8 @@ fn lowered_root_names_from_decls(
     program_exprs: &[DeepExpr],
     type_env: &BTreeMap<String, DeepExpr>,
 ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
-    let deep_exprs =
-        chelis_surf::desugar::desugar_program(decls).map_err(|error| error.to_string())?;
+    let deep_exprs = chelis_surf::desugar::desugar_program(decls, &chelis_syntax_host::NativeStack)
+        .map_err(|error| error.to_string())?;
     Ok(lowered_root_names_from_selected_exprs(
         &deep_exprs,
         program_exprs,
@@ -12529,7 +12556,8 @@ fn manifest_root_names_from_decls(
     target: chelis_types::types::Target,
 ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
     let entry_defs = entry_def_names(
-        &chelis_surf::desugar::desugar_program(decls).map_err(|error| error.to_string())?,
+        &chelis_surf::desugar::desugar_program(decls, &chelis_syntax_host::NativeStack)
+            .map_err(|error| error.to_string())?,
     );
     Ok(owed_root_manifest(checked, target, &entry_defs)
         .entries

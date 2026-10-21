@@ -128,7 +128,8 @@ fn stamped(expressions: Vec<Expr>) -> Value {
 }
 
 fn history(codec: &str, source: &str) -> Result<Value, String> {
-    let expressions = chelis_deep::parse_and_stamp_file(source).map_err(|e| e.to_string())?;
+    let expressions = chelis_deep::parse_and_stamp_file(source, &chelis_syntax_host::NativeStack)
+        .map_err(|e| e.to_string())?;
     let [Expr::Node(owner, _)] = expressions.as_slice() else {
         return Err("history probe requires one declaration".into());
     };
@@ -187,7 +188,8 @@ pub fn observe(carrier: &str, codec: &str, input: &str) -> Result<Value, String>
         ("SourceProgram", codec) => source_program(codec, input),
         ("SourceHistory", codec) => history(codec, input),
         ("RawSourceAdmission", "file" | "runtime") => {
-            let raw = chelis_deep::parser::parse_raw_str(input).map_err(|e| e.to_string())?;
+            let raw = chelis_deep::parser::parse_raw_str(input, &chelis_syntax_host::NativeStack)
+                .map_err(|e| e.to_string())?;
             let expressions = if codec == "file" {
                 chelis_deep::stamp_to_typed::stamp_deep_file(raw)
             } else {

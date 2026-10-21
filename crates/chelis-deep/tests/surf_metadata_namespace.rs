@@ -13,18 +13,28 @@ fn string(value: &str) -> Expr {
 
 #[test]
 fn parsers_reject_unknown_keys_in_the_closed_surf_namespace() {
-    let typed = parse_str("(var {surf_future: true} x)")
-        .expect_err("unknown surface metadata must fail at the typed parse boundary");
+    let typed = parse_str(
+        "(var {surf_future: true} x)",
+        &chelis_syntax_host::NativeStack,
+    )
+    .expect_err("unknown surface metadata must fail at the typed parse boundary");
     assert!(typed.to_string().contains("closed Surf metadata namespace"));
 
-    let raw = parse_raw_str("(var {surf_future: true} x)")
-        .expect_err("unknown surface metadata must fail at the raw parse boundary");
+    let raw = parse_raw_str(
+        "(var {surf_future: true} x)",
+        &chelis_syntax_host::NativeStack,
+    )
+    .expect_err("unknown surface metadata must fail at the raw parse boundary");
     assert!(raw.to_string().contains("closed Surf metadata namespace"));
 }
 
 #[test]
 fn programmatic_validation_accepts_known_surface_metadata_and_rejects_unknown_keys() {
-    let known = parse_str("(module {surf_path: \"M.Path\"} m.path)").unwrap();
+    let known = parse_str(
+        "(module {surf_path: \"M.Path\"} m.path)",
+        &chelis_syntax_host::NativeStack,
+    )
+    .unwrap();
     assert!(validate(&known).is_empty());
     assert!(
         Node::try_new(

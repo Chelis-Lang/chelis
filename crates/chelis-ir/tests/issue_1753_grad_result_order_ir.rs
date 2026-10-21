@@ -16,7 +16,9 @@ fn pair_roots(selection: &str, batched: bool) -> Vec<Vec<f64>> {
         grad
     };
     let source = format!("(app {{}} {transform} (var {{}} a) (var {{}} b))");
-    let expr = chelis_deep::parser::parse_str(&source).unwrap().remove(0);
+    let expr = chelis_deep::parser::parse_str(&source, &chelis_syntax_host::NativeStack)
+        .unwrap()
+        .remove(0);
     let shape = if batched { vec![2] } else { vec![] };
     let ty = TensorType {
         dims: shape.iter().copied().map(DimInfo::Lit).collect(),

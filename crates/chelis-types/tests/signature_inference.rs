@@ -6,8 +6,9 @@ use chelis_types::{
 };
 
 fn checked_surf(source: &str) -> CheckedProgram {
-    let decls = parse_str(source).expect("surf parse");
-    let deep = desugar_program(&decls).expect("Surf fixture must desugar");
+    let decls = parse_str(source, &chelis_syntax_host::NativeStack).expect("surf parse");
+    let deep = desugar_program(&decls, &chelis_syntax_host::NativeStack)
+        .expect("Surf fixture must desugar");
     check_typed_program(&deep).expect("type check")
 }
 
@@ -232,12 +233,14 @@ def caller(a, b: tensor[4, f32]) = {
 fn module_wrapped_unknown_helper_reports_exactly_one_unbound_root() {
     let decls = parse_str(
         r#"
-module Foo
-def caller(a, b: tensor[4, f32]) = missing_helper(a, b)
-"#,
+    module Foo
+    def caller(a, b: tensor[4, f32]) = missing_helper(a, b)
+    "#,
+        &chelis_syntax_host::NativeStack,
     )
     .expect("surf parse");
-    let deep = desugar_program(&decls).expect("Surf fixture must desugar");
+    let deep = desugar_program(&decls, &chelis_syntax_host::NativeStack)
+        .expect("Surf fixture must desugar");
     let result = check_typed_program(&deep).expect_err("unknown helper must reject");
     assert_eq!(result.errors.len(), 1, "unknown helper owns one diagnostic");
     assert!(matches!(
@@ -297,24 +300,28 @@ def pong(x, y: tensor[4, f32], n: i32) =
 fn context_signature_metadata_makes_imported_call_read_only() {
     let library_decls = parse_str(
         r#"
-def helper(x, y: tensor[4, f32]) = add(x, y)
-"#,
+    def helper(x, y: tensor[4, f32]) = add(x, y)
+    "#,
+        &chelis_syntax_host::NativeStack,
     )
     .expect("library surf parse");
-    let library_deep = desugar_program(&library_decls).expect("Surf fixture must desugar");
+    let library_deep = desugar_program(&library_decls, &chelis_syntax_host::NativeStack)
+        .expect("Surf fixture must desugar");
     let (type_env, library_checked) =
         build_compiled_library_context(&library_deep).expect("library context");
 
     let app_decls = parse_str(
         r#"
-def caller(a, b: tensor[4, f32]) = {
-  z: tensor[4, f32] = helper(a, b)
-  add(a, z)
-}
-"#,
+    def caller(a, b: tensor[4, f32]) = {
+      z: tensor[4, f32] = helper(a, b)
+      add(a, z)
+    }
+    "#,
+        &chelis_syntax_host::NativeStack,
     )
     .expect("app surf parse");
-    let app_deep = desugar_program(&app_decls).expect("Surf fixture must desugar");
+    let app_deep = desugar_program(&app_decls, &chelis_syntax_host::NativeStack)
+        .expect("Surf fixture must desugar");
     let checked = check_ir_with_signature_context(
         &type_env,
         library_checked.signature_inference(),
@@ -338,18 +345,20 @@ fn imported_rank_generic_adt_signatures_instantiate_independently() {
     // quantifier, so the first imported call concretized every later call.
     let library_decls = parse_str(
         r#"
-type Curve[n] =
-  | Curve { xs: tensor[n, f32] }
-def make[n](xs: tensor[n, f32]) -> Curve[n] =
-  Curve { xs }
-def value[n](curve: Curve[n]) -> f32 =
-  match curve with {
-    | Curve { xs: values } => index(to_list(values), cast(0, i64))
-  }
-"#,
+    type Curve[n] =
+      | Curve { xs: tensor[n, f32] }
+    def make[n](xs: tensor[n, f32]) -> Curve[n] =
+      Curve { xs }
+    def value[n](curve: Curve[n]) -> f32 =
+      match curve with {
+        | Curve { xs: values } => index(to_list(values), cast(0, i64))
+      }
+    "#,
+        &chelis_syntax_host::NativeStack,
     )
     .expect("library surf parse");
-    let library_deep = desugar_program(&library_decls).expect("Surf fixture must desugar");
+    let library_deep = desugar_program(&library_decls, &chelis_syntax_host::NativeStack)
+        .expect("Surf fixture must desugar");
     let (type_env, library_checked) =
         build_compiled_library_context(&library_deep).expect("library context");
 
@@ -370,8 +379,10 @@ def second() -> f32 =
             first_values = vector(first_extent),
             second_values = vector(second_extent),
         );
-        let app_decls = parse_str(&app_source).expect("app surf parse");
-        let app_deep = desugar_program(&app_decls).expect("Surf fixture must desugar");
+        let app_decls =
+            parse_str(&app_source, &chelis_syntax_host::NativeStack).expect("app surf parse");
+        let app_deep = desugar_program(&app_decls, &chelis_syntax_host::NativeStack)
+            .expect("Surf fixture must desugar");
         check_ir_with_signature_context(
             &type_env,
             library_checked.signature_inference(),
@@ -393,22 +404,26 @@ fn imported_fixed_rank_signature_still_rejects_a_different_extent() {
     // not weaken a genuinely fixed rank/extent contract.
     let library_decls = parse_str(
         r#"
-def fixed(xs: tensor[3, f32]) -> f32 =
-  index(to_list(xs), cast(0, i64))
-"#,
+    def fixed(xs: tensor[3, f32]) -> f32 =
+      index(to_list(xs), cast(0, i64))
+    "#,
+        &chelis_syntax_host::NativeStack,
     )
     .expect("library surf parse");
-    let library_deep = desugar_program(&library_decls).expect("Surf fixture must desugar");
+    let library_deep = desugar_program(&library_decls, &chelis_syntax_host::NativeStack)
+        .expect("Surf fixture must desugar");
     let (type_env, library_checked) =
         build_compiled_library_context(&library_deep).expect("library context");
     let app_decls = parse_str(
         r#"
-def wrong() -> f32 =
-  fixed(to_tensor([cast(1.0, f32), cast(2.0, f32)]))
-"#,
+    def wrong() -> f32 =
+      fixed(to_tensor([cast(1.0, f32), cast(2.0, f32)]))
+    "#,
+        &chelis_syntax_host::NativeStack,
     )
     .expect("app surf parse");
-    let app_deep = desugar_program(&app_decls).expect("Surf fixture must desugar");
+    let app_deep = desugar_program(&app_decls, &chelis_syntax_host::NativeStack)
+        .expect("Surf fixture must desugar");
     let err = check_ir_with_signature_context(
         &type_env,
         library_checked.signature_inference(),

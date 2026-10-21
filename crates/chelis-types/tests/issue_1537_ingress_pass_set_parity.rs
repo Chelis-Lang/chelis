@@ -47,11 +47,12 @@ struct Row {
 fn unstamped(source: Source) -> Vec<Expr> {
     match source {
         Source::Surf(source) => {
-            let declarations = parse_surf(source)
+            let declarations = parse_surf(source, &chelis_syntax_host::NativeStack)
                 .unwrap_or_else(|error| panic!("Surf fixture must parse:\n{source}\n{error}"));
-            desugar_program(&declarations).expect("Surf fixture must desugar")
+            desugar_program(&declarations, &chelis_syntax_host::NativeStack)
+                .expect("Surf fixture must desugar")
         }
-        Source::Deep(source) => parse_deep(source)
+        Source::Deep(source) => parse_deep(source, &chelis_syntax_host::NativeStack)
             .unwrap_or_else(|error| panic!("Deep fixture must parse:\n{source}\n{error}")),
         Source::MalformedDeep(source) => {
             panic!("malformed Deep has no admitted carrier:\n{source}")
@@ -61,7 +62,7 @@ fn unstamped(source: Source) -> Vec<Expr> {
 
 fn stamped(exprs: &[Expr]) -> Vec<Expr> {
     let canonical = printer::print_canonical(exprs);
-    parse_and_stamp_file(&canonical)
+    parse_and_stamp_file(&canonical, &chelis_syntax_host::NativeStack)
         .unwrap_or_else(|error| panic!("canonical fixture must stamp:\n{canonical}\n{error}"))
 }
 
@@ -149,14 +150,14 @@ fn assert_row(row: Row) {
         let Expected::RejectAtAdmission(needle) = row.expected else {
             panic!("{}: malformed Deep can only reject at admission", row.name);
         };
-        let lenient = parse_deep(source)
+        let lenient = parse_deep(source, &chelis_syntax_host::NativeStack)
             .expect_err("the lenient Deep ingress must reject wrong known-tag arity");
         assert!(
             lenient.to_string().contains(needle),
             "{}: unexpected lenient-admission error: {lenient}",
             row.name
         );
-        let file = parse_and_stamp_file(source)
+        let file = parse_and_stamp_file(source, &chelis_syntax_host::NativeStack)
             .expect_err("the stamped file ingress must reject wrong known-tag arity");
         assert!(
             file.to_string().contains(needle),

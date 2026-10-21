@@ -654,7 +654,8 @@ mod core_transform_fragment_tests {
     use super::*;
 
     fn deep_type(source: &str) -> deep::Expr {
-        let mut parsed = chelis_deep::parser::parse_str(source).expect("canonical Deep type");
+        let mut parsed = chelis_deep::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+            .expect("canonical Deep type");
         assert_eq!(parsed.len(), 1, "one Deep type expression");
         parsed.remove(0)
     }
@@ -677,9 +678,11 @@ mod core_transform_fragment_tests {
         let source = "def reduce(v: tensor[4, 3, f32]) -> tensor[3, f32] = sum(v, 0i32)\n\
                       pair = (reduce, 0i32)\n\
                       mapped = pair.0\n";
-        let declarations = chelis_surf::parser::parse_str(source).expect("module values parse");
-        let program = chelis_surf::desugar::desugar_program(&declarations)
-            .expect("Surf fixture must desugar");
+        let declarations = chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+            .expect("module values parse");
+        let program =
+            chelis_surf::desugar::desugar_program(&declarations, &chelis_syntax_host::NativeStack)
+                .expect("Surf fixture must desugar");
         let items = program.iter().collect::<Vec<_>>();
         let top_level_functions = collect_top_level_function_names(&items);
         let module_values = collect_top_level_transform_values(&items, &top_level_functions);
@@ -708,7 +711,8 @@ mod core_transform_fragment_tests {
                       (t-tensor {} (d-lit {} 4) (d-lit {} 3) (t-prim {} f32))})) \
                       (var {} v))) \
                   (vmap {} (var {} reduce))))))";
-        let program = chelis_deep::parser::parse_str(source).expect("canonical module program");
+        let program = chelis_deep::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+            .expect("canonical module program");
         let result = crate::infer_program(&program);
         assert!(
             result
@@ -830,9 +834,11 @@ mod core_transform_fragment_tests {
     fn surf_vmap_tensor_slot_holes_have_earlier_or_safe_boundaries() {
         let bare_type_variable = "out = vmap(fn (v: a) -> v)(to_tensor([[1.0f32]]))\n";
         let declarations =
-            chelis_surf::parser::parse_str(bare_type_variable).expect("bare type variable parses");
-        let program = chelis_surf::desugar::desugar_program(&declarations)
-            .expect("Surf fixture must desugar");
+            chelis_surf::parser::parse_str(bare_type_variable, &chelis_syntax_host::NativeStack)
+                .expect("bare type variable parses");
+        let program =
+            chelis_surf::desugar::desugar_program(&declarations, &chelis_syntax_host::NativeStack)
+                .expect("Surf fixture must desugar");
         let result = crate::infer_program(&program);
         assert!(
             result.errors.iter().any(|error| {
@@ -858,20 +864,22 @@ mod core_transform_fragment_tests {
 
         let precision_hole = "out = vmap(fn (v: tensor[4, _]) -> v)(to_tensor([[1.0f32]]))\n";
         assert!(
-            chelis_surf::parser::parse_str(precision_hole).is_err(),
+            chelis_surf::parser::parse_str(precision_hole, &chelis_syntax_host::NativeStack)
+                .is_err(),
             "Surf requires a named tensor precision"
         );
 
         let rank_hole = "out = vmap(fn (v: tensor[.._, f32]) -> v)(to_tensor([[1.0f32]]))\n";
         assert!(
-            chelis_surf::parser::parse_str(rank_hole).is_err(),
+            chelis_surf::parser::parse_str(rank_hole, &chelis_syntax_host::NativeStack).is_err(),
             "Surf requires a named rank spread"
         );
 
         let dimension_hole = "def probe(t: tensor[5, 4, 3, f32]) -> tensor[5, 3, f32] =\n\
              vmap(fn (v: tensor[_, 3, f32]) -> sum(v, 0i32))(t)\n";
         assert!(
-            chelis_surf::parser::parse_str(dimension_hole).is_err(),
+            chelis_surf::parser::parse_str(dimension_hole, &chelis_syntax_host::NativeStack)
+                .is_err(),
             "Surf dimension `_` must be rejected before desugaring"
         );
     }

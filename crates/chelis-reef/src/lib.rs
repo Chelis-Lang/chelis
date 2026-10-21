@@ -6,7 +6,7 @@ use chelis_surf::ast::{
     Decl, EffectExpr, Expr, ImportKind, LetBinding, LetPattern, MatchArm, Param, Pattern,
     PropertyOption, TypeExpr, TypeInvariant, Variant, VariantFields,
 };
-use chelis_surf::module_identity::validate_module_path;
+use chelis_syntax_host::module_identity::validate_module_path;
 use chelis_unord::{UnordMap, UnordSet};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -1641,7 +1641,7 @@ impl EntryImports {
     /// The modules a Surf source imports. A source that does not parse
     /// reports its parse error, because it cannot be run against any graph.
     pub fn from_surf_source(source: &str) -> Result<Self, String> {
-        chelis_surf::parser::parse_str(source)
+        chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack)
             .map(|decls| Self::from_decls(&decls))
             .map_err(|error| error.to_string())
     }
@@ -1866,7 +1866,7 @@ impl PreparedReefGraph {
         let source = std::str::from_utf8(&bytes).map_err(|error| {
             format!("provider source `{}` is not UTF-8: {error}", path.display())
         })?;
-        let parsed = chelis_surf::parser::parse_str(source)
+        let parsed = chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack)
             .map_err(|error| format!("parse provider source `{}`: {error}", path.display()))?;
         let [Decl::Module { name, decls, .. }] = parsed.as_slice() else {
             return Ok(None);
@@ -2247,8 +2247,9 @@ impl PreparedReefGraph {
                             entry.path().display()
                         )
                     })?;
-                    let parsed = chelis_surf::parser::parse_str(source)
-                        .map_err(|error| format!("{}: {error}", entry.path().display()))?;
+                    let parsed =
+                        chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+                            .map_err(|error| format!("{}: {error}", entry.path().display()))?;
                     let [Decl::Module { name, decls, .. }] = parsed.as_slice() else {
                         return Err(format!(
                             "{} must contain exactly one top-level module declaration",
@@ -2572,7 +2573,8 @@ pub fn prepare_program_for_file(
         let Ok(source) = fs::read_to_string(file) else {
             return Ok(None);
         };
-        let Ok(decls) = chelis_surf::parser::parse_str(&source) else {
+        let Ok(decls) = chelis_surf::parser::parse_str(&source, &chelis_syntax_host::NativeStack)
+        else {
             return Ok(None);
         };
         return prepare_single_file_program(&file.display().to_string(), &decls, runtime);
@@ -2628,7 +2630,7 @@ pub fn prepare_program_for_file(
         // set aside as theirs is.
         let source = fs::read_to_string(file)
             .map_err(|e| format!("failed to read {}: {e}", file.display()))?;
-        let decls = chelis_surf::parser::parse_str(&source)
+        let decls = chelis_surf::parser::parse_str(&source, &chelis_syntax_host::NativeStack)
             .map_err(|e| format!("{}: {e}", file.display()))?;
         let entry_decls = match decls.as_slice() {
             [Decl::Module { decls, .. }] => decls.as_slice(),
@@ -2672,8 +2674,8 @@ pub fn prepare_program_for_eval_file(
 ) -> Result<Option<PreparedProgram>, String> {
     let source =
         fs::read_to_string(file).map_err(|e| format!("failed to read {}: {e}", file.display()))?;
-    let decls =
-        chelis_surf::parser::parse_str(&source).map_err(|e| format!("{}: {e}", file.display()))?;
+    let decls = chelis_surf::parser::parse_str(&source, &chelis_syntax_host::NativeStack)
+        .map_err(|e| format!("{}: {e}", file.display()))?;
     if matches!(decls.as_slice(), [Decl::Module { .. }]) {
         return prepare_program_for_file(file, runtime);
     }
@@ -9809,7 +9811,8 @@ fn modules_from_source_files(
         } else {
             Path::new(&source_root_name).join(&rel)
         };
-        let decls = chelis_surf::parser::parse_str(&text).map_err(|e| format!("{display}: {e}"))?;
+        let decls = chelis_surf::parser::parse_str(&text, &chelis_syntax_host::NativeStack)
+            .map_err(|e| format!("{display}: {e}"))?;
         let module_decl = match decls.as_slice() {
             [Decl::Module { name, decls, .. }] => (name.clone(), decls.clone()),
             _ => {
@@ -11212,8 +11215,11 @@ fn sig_type_repr(module: &ModuleSource, name: &str) -> Result<Option<String>, St
     else {
         return Ok(None);
     };
-    let deep = chelis_surf::desugar::desugar_program(std::slice::from_ref(decl))
-        .map_err(|error| format!("desugaring signature `{name}` failed: {error}"))?;
+    let deep = chelis_surf::desugar::desugar_program(
+        std::slice::from_ref(decl),
+        &chelis_syntax_host::NativeStack,
+    )
+    .map_err(|error| format!("desugaring signature `{name}` failed: {error}"))?;
     let Some(expr) = deep.first() else {
         return Ok(None);
     };
@@ -12664,7 +12670,8 @@ fn access_segments(expr: &Expr) -> Option<(Vec<String>, chelis_deep::Span)> {
 }
 
 fn expanded_desugared_program(decls: &[Decl]) -> Result<Vec<chelis_deep::ast::Expr>, String> {
-    let deep = chelis_surf::desugar::desugar_program(decls).map_err(|err| err.to_string())?;
+    let deep = chelis_surf::desugar::desugar_program(decls, &chelis_syntax_host::NativeStack)
+        .map_err(|err| err.to_string())?;
     chelis_macros::expand_program(&deep, &chelis_macros::ExpansionOptions::default())
         .map(|expanded| expanded.into_exprs())
         .map_err(|err| err.to_string())
@@ -14157,8 +14164,11 @@ some-registry-lib = {{ version = "0.1.0" }}
             std::env::set_var("CHELIS_REEF_TEST_DISABLE_GH_AUTH_FALLBACK", "1");
             std::env::set_var("CHELIS_REEF_GITHUB_BASE_API", "http://127.0.0.1:9");
         }
-        let entry_decls =
-            chelis_surf::parser::parse_str("def result() -> i32 = 42").expect("parse");
+        let entry_decls = chelis_surf::parser::parse_str(
+            "def result() -> i32 = 42",
+            &chelis_syntax_host::NativeStack,
+        )
+        .expect("parse");
         let result = prepare_program_for_eval_source(&root, &entry_decls, test_runtime());
         unsafe {
             std::env::remove_var("CHELIS_REEF_HOME");
@@ -14381,8 +14391,11 @@ path = "./nonexistent_dep"
         );
 
         let start = std::time::Instant::now();
-        let entry_decls =
-            chelis_surf::parser::parse_str("def result() -> i32 = 42").expect("parse");
+        let entry_decls = chelis_surf::parser::parse_str(
+            "def result() -> i32 = 42",
+            &chelis_syntax_host::NativeStack,
+        )
+        .expect("parse");
         let result = prepare_program_for_eval_source(&root, &entry_decls, test_runtime());
         let elapsed = start.elapsed();
 
@@ -14577,7 +14590,9 @@ module_prefix = "Demo"
     fn synthetic_entry_signatures_require_same_entry_definitions() {
         let (_dir, root) = shared_graph_fixture();
         let graph = prepare_reef_graph(&root, test_runtime()).expect("prepare graph");
-        let orphan = chelis_surf::parser::parse_str("sig missing: i32").expect("parse orphan");
+        let orphan =
+            chelis_surf::parser::parse_str("sig missing: i32", &chelis_syntax_host::NativeStack)
+                .expect("parse orphan");
         let error = compile_with_reef_graph(&graph, &orphan, test_runtime())
             .expect_err("an eval entry signature cannot borrow a library definition");
         assert!(
@@ -14585,8 +14600,11 @@ module_prefix = "Demo"
             "unexpected synthetic-entry diagnostic: {error}"
         );
 
-        let paired = chelis_surf::parser::parse_str("sig present: i32\ndef present() -> i32 = 1")
-            .expect("parse pair");
+        let paired = chelis_surf::parser::parse_str(
+            "sig present: i32\ndef present() -> i32 = 1",
+            &chelis_syntax_host::NativeStack,
+        )
+        .expect("parse pair");
         compile_with_reef_graph(&graph, &paired, test_runtime())
             .expect("paired entry signature must link");
     }
@@ -14613,12 +14631,16 @@ module_prefix = "Demo"
     fn isolated_entries_do_not_publish_symbols_and_roots_avoid_source_collisions() {
         let (_dir, root) = shared_graph_fixture();
         let graph = prepare_reef_graph(&root, test_runtime()).expect("prepare graph");
-        let first = chelis_surf::parser::parse_str("def test_first() -> bool = sibling_value()\n")
-            .expect("parse first entry");
+        let first = chelis_surf::parser::parse_str(
+            "def test_first() -> bool = sibling_value()\n",
+            &chelis_syntax_host::NativeStack,
+        )
+        .expect("parse first entry");
         let second = chelis_surf::parser::parse_str(
             "def sibling_value() -> bool = true\n\
-             def __chelis_batch_root_0() -> bool = true\n\
-             def test_second() -> bool = sibling_value()\n",
+         def __chelis_batch_root_0() -> bool = true\n\
+         def test_second() -> bool = sibling_value()\n",
+            &chelis_syntax_host::NativeStack,
         )
         .expect("parse second entry");
         let entries = vec![
@@ -14680,7 +14702,8 @@ module_prefix = "Demo"
         let graph = prepare_reef_graph(&root, test_runtime()).expect("prepare graph");
         let declarations = chelis_surf::parser::parse_str(
             "import Mylib.Math (__chelis_batch_root_0)\n\
-             def test_imported() -> bool = __chelis_batch_root_0()\n",
+         def test_imported() -> bool = __chelis_batch_root_0()\n",
+            &chelis_syntax_host::NativeStack,
         )
         .expect("parse selectively imported entry");
         let entry = IsolatedEntryModule {
@@ -14714,8 +14737,11 @@ module_prefix = "Demo"
     fn isolated_entry_manifest_and_root_identity_fail_closed() {
         let (_dir, root) = shared_graph_fixture();
         let graph = prepare_reef_graph(&root, test_runtime()).expect("prepare graph");
-        let declarations =
-            chelis_surf::parser::parse_str("def test_one() -> bool = true\n").expect("parse entry");
+        let declarations = chelis_surf::parser::parse_str(
+            "def test_one() -> bool = true\n",
+            &chelis_syntax_host::NativeStack,
+        )
+        .expect("parse entry");
         let entry = IsolatedEntryModule {
             manifest_index: 3,
             declarations: declarations.clone(),
@@ -14738,9 +14764,11 @@ module_prefix = "Demo"
             .expect_err("missing selected roots must be rejected");
         assert!(missing_error.contains("selects missing root `missing`"));
 
-        let reserved_declarations =
-            chelis_surf::parser::parse_str("def pkg__forged__Module__test_one() -> bool = true\n")
-                .expect("parse reserved-name entry");
+        let reserved_declarations = chelis_surf::parser::parse_str(
+            "def pkg__forged__Module__test_one() -> bool = true\n",
+            &chelis_syntax_host::NativeStack,
+        )
+        .expect("parse reserved-name entry");
         let reserved = IsolatedEntryModule {
             manifest_index: 5,
             declarations: reserved_declarations.clone(),
@@ -14760,13 +14788,14 @@ module_prefix = "Demo"
         let graph = prepare_reef_graph(&root, test_runtime()).expect("prepare graph");
         let declarations = chelis_surf::parser::parse_str(
             "dim n\n\
-             sig helper: i32 -> i32\n\
-             def helper(x: i32) -> i32 = x\n\
-             type Row = tensor[n, i32]\n\
-             type Boxed = | Wrap(Row)\n\
-             macro identity(x) = x\n\
-             @property stable forall(x: i32): helper(x) == x\n\
-             def test_all() -> bool = true\n",
+         sig helper: i32 -> i32\n\
+         def helper(x: i32) -> i32 = x\n\
+         type Row = tensor[n, i32]\n\
+         type Boxed = | Wrap(Row)\n\
+         macro identity(x) = x\n\
+         @property stable forall(x: i32): helper(x) == x\n\
+         def test_all() -> bool = true\n",
+            &chelis_syntax_host::NativeStack,
         )
         .expect("parse every-namespace entry");
         let entry = IsolatedEntryModule {
@@ -15445,7 +15474,9 @@ path = "./coral"
 
         // An eval, check, or build entry with no `module` declaration.
         let graph = prepare_reef_graph(&root, test_runtime()).expect("prepare graph");
-        let declarations = chelis_surf::parser::parse_str(collision).expect("parse entry");
+        let declarations =
+            chelis_surf::parser::parse_str(collision, &chelis_syntax_host::NativeStack)
+                .expect("parse entry");
         assert_eq!(
             compile_with_reef_graph(&graph, &declarations, test_runtime())
                 .err()
@@ -15471,6 +15502,7 @@ path = "./coral"
         // `import M (..)` brings `combine` in as surely as naming it does.
         let wildcard = chelis_surf::parser::parse_str(
             &collision.replace("import Mylib.Math (combine)", "import Mylib.Math (..)"),
+            &chelis_syntax_host::NativeStack,
         )
         .expect("parse wildcard entry");
         assert_eq!(
@@ -15497,8 +15529,9 @@ path = "./coral"
         // A single-file program outside every package, against chelis-std.
         let single = chelis_surf::parser::parse_str(
             "import Std.Scalar (max)\n\
-             def max(a: i64, b: i64) -> i64 = a\n\
-             def main() -> i64 = max(1i64, 2i64)\n",
+         def max(a: i64, b: i64) -> i64 = a\n\
+         def main() -> i64 = max(1i64, 2i64)\n",
+            &chelis_syntax_host::NativeStack,
         )
         .expect("parse single-file program");
         assert_eq!(
@@ -15517,12 +15550,14 @@ path = "./coral"
         // The in-memory declaration surface.
         let library = chelis_surf::parser::parse_str(
             "module Pkg.Library\ndef combine(x: i32, y: i32) -> i32 = x + y\n",
+            &chelis_syntax_host::NativeStack,
         )
         .expect("parse library");
         let consumer = chelis_surf::parser::parse_str(
             "module Pkg.Consumer\n\
-             import Pkg.Library (combine)\n\
-             def combine(x: i32, y: i32) -> i32 = x\n",
+         import Pkg.Library (combine)\n\
+         def combine(x: i32, y: i32) -> i32 = x\n",
+            &chelis_syntax_host::NativeStack,
         )
         .expect("parse consumer");
         let surface_error = declared_surface::link_package_declarations(
@@ -15558,7 +15593,9 @@ path = "./coral"
             "import Mylib.Math\ndef combine(x: i32, y: i32) -> i32 = x\nvalue = combine(Mylib.Math.combine(1, 2), 2)\n",
             "import Mylib.Math (combine)\ndef pick(combine: i32) -> i32 = combine\nvalue = pick(combine(1, 2))\n",
         ] {
-            let declarations = chelis_surf::parser::parse_str(program).expect("parse entry");
+            let declarations =
+                chelis_surf::parser::parse_str(program, &chelis_syntax_host::NativeStack)
+                    .expect("parse entry");
             let prepared = compile_with_reef_graph(&graph, &declarations, test_runtime())
                 .unwrap_or_else(|error| panic!("{program:?} must link: {error}"));
             let deep = expanded_desugared_program(&prepared.decls).expect("desugar entry");
@@ -15772,7 +15809,8 @@ version = "0.1.0"
             ),
         ];
         for (source, collides) in cases {
-            let decls = chelis_surf::parser::parse_str(source).expect("fixture parses");
+            let decls = chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+                .expect("fixture parses");
             let expansion = expanded_desugared_program(&decls).map(drop);
             assert_eq!(expansion.is_err(), collides, "{source}: {expansion:?}");
             assert_eq!(
@@ -16098,8 +16136,12 @@ version = "0.1.0"
 
         let probe_source_a = "import Mylib.Math (add)\ndef result_a() -> i32 = add(1, 2)\n";
         let probe_source_b = "import Mylib.Math (add)\ndef result_b() -> i32 = add(3, 4)\n";
-        let decls_a = chelis_surf::parser::parse_str(probe_source_a).expect("parse a");
-        let decls_b = chelis_surf::parser::parse_str(probe_source_b).expect("parse b");
+        let decls_a =
+            chelis_surf::parser::parse_str(probe_source_a, &chelis_syntax_host::NativeStack)
+                .expect("parse a");
+        let decls_b =
+            chelis_surf::parser::parse_str(probe_source_b, &chelis_syntax_host::NativeStack)
+                .expect("parse b");
 
         // Split-path: one graph preparation, two per-file compiles.
         let graph =
@@ -16173,8 +16215,12 @@ version = "0.1.0"
 
         let probe_source_a = "import Mylib.Math (add)\ndef result_a() -> i32 = add(1, 2)\n";
         let probe_source_b = "import Mylib.Math (add)\ndef result_b() -> i32 = add(3, 4)\n";
-        let decls_a = chelis_surf::parser::parse_str(probe_source_a).expect("parse a");
-        let decls_b = chelis_surf::parser::parse_str(probe_source_b).expect("parse b");
+        let decls_a =
+            chelis_surf::parser::parse_str(probe_source_a, &chelis_syntax_host::NativeStack)
+                .expect("parse a");
+        let decls_b =
+            chelis_surf::parser::parse_str(probe_source_b, &chelis_syntax_host::NativeStack)
+                .expect("parse b");
 
         // Warm the OS caches — first run of either path tends to be skewed.
         let _ = prepare_program_for_eval_source(&root, &decls_a, test_runtime());
@@ -16419,8 +16465,9 @@ module_prefix = "RegistryLib"
         let (_dir, root) = shared_graph_fixture();
         let entry = chelis_surf::parser::parse_str(
             "import Mylib.Math (add)\n\
-             def selected(x: i32) -> i32 = add(x, x)\n\
-             @property identity forall(x: i32): selected(x) == add(x, x)\n",
+         def selected(x: i32) -> i32 = add(x, x)\n\
+         @property identity forall(x: i32): selected(x) == add(x, x)\n",
+            &chelis_syntax_host::NativeStack,
         )
         .expect("entry parses");
         let graph = prepare_reef_graph(&root, test_runtime()).expect("prepare graph");
@@ -16456,8 +16503,9 @@ module_prefix = "RegistryLib"
         );
         let entry = chelis_surf::parser::parse_str(
             "import Mylib.Math (Wrapped, Probability)\n\
-             def inspect(value: Wrapped, probability: Probability) -> i32 = \
-               match value with { | Wrapped(xs) => 1 }\n",
+         def inspect(value: Wrapped, probability: Probability) -> i32 = \
+           match value with { | Wrapped(xs) => 1 }\n",
+            &chelis_syntax_host::NativeStack,
         )
         .expect("entry parses");
         let graph = prepare_reef_graph(&root, test_runtime()).expect("prepare graph");
@@ -16487,10 +16535,11 @@ module_prefix = "RegistryLib"
     fn reachable_decls_follow_types_dimensions_constructors_and_patterns() {
         let decls = chelis_surf::parser::parse_str(
             "dim n\n\
-             type Values = tensor[n, i32]\n\
-             type Wrapped = | Wrapped(Values)\n\
-             def inspect(value: Wrapped) -> i32 = match value with { | Wrapped(xs) => 1 }\n\
-             def unrelated() -> i32 = 0\n",
+         type Values = tensor[n, i32]\n\
+         type Wrapped = | Wrapped(Values)\n\
+         def inspect(value: Wrapped) -> i32 = match value with { | Wrapped(xs) => 1 }\n\
+         def unrelated() -> i32 = 0\n",
+            &chelis_syntax_host::NativeStack,
         )
         .expect("fixture parses");
         let entry_decls = decls
@@ -16528,10 +16577,11 @@ module_prefix = "RegistryLib"
     fn reachable_decls_follow_invariant_only_and_macro_body_references() {
         let invariant_decls = chelis_surf::parser::parse_str(
             "def floor() -> f32 = 0.0\n\
-             @opaque\n\
-             @invariant(p) p.value >= floor()\n\
-             type Probability = | Probability { value: f32 }\n\
-             def unrelated() -> f32 = 1.0\n",
+         @opaque\n\
+         @invariant(p) p.value >= floor()\n\
+         type Probability = | Probability { value: f32 }\n\
+         def unrelated() -> f32 = 1.0\n",
+            &chelis_syntax_host::NativeStack,
         )
         .expect("invariant fixture parses");
         let invariant_entry = invariant_decls
@@ -16565,8 +16615,9 @@ module_prefix = "RegistryLib"
 
         let macro_decls = chelis_surf::parser::parse_str(
             "def increment() -> i32 = 1\n\
-             macro bump(x) = x + increment()\n\
-             def unrelated() -> i32 = 2\n",
+         macro bump(x) = x + increment()\n\
+         def unrelated() -> i32 = 2\n",
+            &chelis_syntax_host::NativeStack,
         )
         .expect("macro fixture parses");
         let macro_entry = macro_decls

@@ -65,8 +65,11 @@ fn push_meta_on_first_node(expr: &mut Expr, tag: DeepTag, entry: Metadata) -> bo
 
 #[test]
 fn accepted_stamped_program_stays_stamped_through_checker_output() {
-    let program =
-        parse_and_stamp("(def {} answer (lit {} 1))").expect("canonical Deep program must stamp");
+    let program = parse_and_stamp(
+        "(def {} answer (lit {} 1))",
+        &chelis_syntax_host::NativeStack,
+    )
+    .expect("canonical Deep program must stamp");
 
     let checked = check_typed_program(&program).expect("stamped program must type-check");
 
@@ -80,9 +83,10 @@ fn accepted_stamped_program_stays_stamped_through_checker_output() {
 fn stamped_comparison_keeps_its_boolean_result_contract() {
     let program = parse_and_stamp(
         r#"(defsig {} always_true (t-fn {} (t-prim {} f32) (t-prim {} bool)))
-           (def {} always_true
-             (fn {} (params {} (x {type: (t-prim {} f32)}))
-               (app {} (var {} gte) (var {} x) (var {} x))))"#,
+       (def {} always_true
+         (fn {} (params {} (x {type: (t-prim {} f32)}))
+           (app {} (var {} gte) (var {} x) (var {} x))))"#,
+        &chelis_syntax_host::NativeStack,
     )
     .expect("canonical comparison program must stamp");
 
@@ -99,12 +103,18 @@ fn stamped_comparison_keeps_its_boolean_result_contract() {
 
 #[test]
 fn stamped_let_bindings_enter_scope_and_unbound_names_still_reject() {
-    let accepted = parse_and_stamp("(def {} answer (let {} (bind {} x (lit {} 1)) (var {} x)))")
-        .expect("canonical let program must stamp");
+    let accepted = parse_and_stamp(
+        "(def {} answer (let {} (bind {} x (lit {} 1)) (var {} x)))",
+        &chelis_syntax_host::NativeStack,
+    )
+    .expect("canonical let program must stamp");
     check_typed_program(&accepted).expect("stamped bind child must introduce x into let scope");
 
-    let rejected = parse_and_stamp("(def {} answer (let {} (bind {}) (var {} missing)))")
-        .expect("canonical negative let program must stamp");
+    let rejected = parse_and_stamp(
+        "(def {} answer (let {} (bind {}) (var {} missing)))",
+        &chelis_syntax_host::NativeStack,
+    )
+    .expect("canonical negative let program must stamp");
     let errors = check_typed_program(&rejected).expect_err("unbound let body name must reject");
     assert!(
         errors
@@ -120,13 +130,14 @@ fn stamped_let_bindings_enter_scope_and_unbound_names_still_reject() {
 fn stamped_linearity_preserves_positive_and_negative_tensor_ownership() {
     let accepted = parse_and_stamp(
         r#"(defsig {} identity
-             (t-fn {}
-               (t-tensor {} (d-lit {} 4) (t-prim {} f32))
-               (t-tensor {} (d-lit {} 4) (t-prim {} f32))))
-           (def {} identity
-             (fn {}
-               (params {} (x {type: (t-tensor {} (d-lit {} 4) (t-prim {} f32))}))
-               (var {} x)))"#,
+         (t-fn {}
+           (t-tensor {} (d-lit {} 4) (t-prim {} f32))
+           (t-tensor {} (d-lit {} 4) (t-prim {} f32))))
+       (def {} identity
+         (fn {}
+           (params {} (x {type: (t-tensor {} (d-lit {} 4) (t-prim {} f32))}))
+           (var {} x)))"#,
+        &chelis_syntax_host::NativeStack,
     )
     .expect("positive linearity fixture must stamp");
     let accepted = check_typed_program(&accepted).expect("positive fixture type-checks");
@@ -134,15 +145,16 @@ fn stamped_linearity_preserves_positive_and_negative_tensor_ownership() {
 
     let rejected = parse_and_stamp(
         r#"(defsig {} alias_twice
-             (t-fn {}
-               (t-tensor {} (d-lit {} 4) (t-prim {} f32))
-               (t-tensor {} (d-lit {} 4) (t-prim {} f32))))
-           (def {} alias_twice
-             (fn {}
-               (params {} (x {type: (t-tensor {} (d-lit {} 4) (t-prim {} f32))}))
-               (let {}
-                 (bind {} y (app {} (var {} drop) (var {} x)))
-                 (var {} x))))"#,
+         (t-fn {}
+           (t-tensor {} (d-lit {} 4) (t-prim {} f32))
+           (t-tensor {} (d-lit {} 4) (t-prim {} f32))))
+       (def {} alias_twice
+         (fn {}
+           (params {} (x {type: (t-tensor {} (d-lit {} 4) (t-prim {} f32))}))
+           (let {}
+             (bind {} y (app {} (var {} drop) (var {} x)))
+             (var {} x))))"#,
+        &chelis_syntax_host::NativeStack,
     )
     .expect("negative linearity fixture must stamp");
     let rejected = check_typed_program(&rejected).expect("negative fixture type-checks first");
@@ -151,8 +163,11 @@ fn stamped_linearity_preserves_positive_and_negative_tensor_ownership() {
 
 #[test]
 fn effects_only_reannotation_accepts_stamped_nodes_and_rejects_other_metadata() {
-    let program = parse_and_stamp("(def {} answer (fn {} (params {}) (lit {} 1)))")
-        .expect("canonical Deep program must stamp");
+    let program = parse_and_stamp(
+        "(def {} answer (fn {} (params {}) (lit {} 1)))",
+        &chelis_syntax_host::NativeStack,
+    )
+    .expect("canonical Deep program must stamp");
     let checked = check_typed_program(&program).expect("stamped program must type-check");
 
     let mut effects_only = checked.annotated_exprs().to_vec();
@@ -201,8 +216,11 @@ fn effects_only_reannotation_accepts_stamped_nodes_and_rejects_other_metadata() 
 
 #[test]
 fn unknown_stamped_form_is_rejected_at_checker_boundary() {
-    let program = parse_and_stamp("(def {} answer (apl {} (lit {} 1)))")
-        .expect("lenient unknown runtime form must stamp as UnknownForm");
+    let program = parse_and_stamp(
+        "(def {} answer (apl {} (lit {} 1)))",
+        &chelis_syntax_host::NativeStack,
+    )
+    .expect("lenient unknown runtime form must stamp as UnknownForm");
 
     let errors = check_typed_program(&program).expect_err("unknown form must not type-check");
 

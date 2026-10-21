@@ -56,7 +56,8 @@ impl Rule for SurfParses {
         let Some(source) = ctx.source else {
             return Vec::new();
         };
-        let Err(error) = chelis_surf::parser::parse_str(source) else {
+        let Err(error) = chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+        else {
             return Vec::new();
         };
         vec![Violation {

@@ -5,8 +5,11 @@ use chelis_types::types::Prim;
 
 fn gradient_dag() -> Dag {
     let source = "def loss(x: tensor[4, f32], w: tensor[4, i64]) -> tensor[f32] = sum(mul(x, cast(abs(w), f32)), 0i32)\ndef main(x: tensor[4, f32], w: tensor[4, i64]) -> tensor[4, f32] = (grad(loss, wrt=x))(x, w)\n";
-    let declarations = chelis_surf::parser::parse_str(source).expect("parse");
-    let deep = chelis_surf::desugar::desugar_program(&declarations).expect("desugar");
+    let declarations =
+        chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack).expect("parse");
+    let deep =
+        chelis_surf::desugar::desugar_program(&declarations, &chelis_syntax_host::NativeStack)
+            .expect("desugar");
     let checked =
         chelis_types::check_typed_program(&deep).unwrap_or_else(|e| panic!("{:?}", e.errors));
     let checked = chelis_effects::check_program(&checked).expect("effects");

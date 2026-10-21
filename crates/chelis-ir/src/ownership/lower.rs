@@ -3423,9 +3423,10 @@ mod call_type_instantiation_tests {
     // representation-erased dimension binders, without changing its layout.
     #[test]
     fn specialized_type_slots_keep_consistent_residual_dimensions() {
-        let checked = chelis_deep::parser::parse_str("(t-var {} a)")
-            .unwrap()
-            .remove(0);
+        let checked =
+            chelis_deep::parser::parse_str("(t-var {} a)", &chelis_syntax_host::NativeStack)
+                .unwrap()
+                .remove(0);
         let column = |name: &str, precision| {
             ConcreteHostType::Adt(
                 "Column".into(),
@@ -3467,9 +3468,10 @@ mod call_type_instantiation_tests {
             assert!(call.admits(&pattern, &formal, &actuals[0]));
             assert!(!call.admits(&pattern, &formal, &actuals[1]));
         }
-        let other_checked = chelis_deep::parser::parse_str("(t-var {} b)")
-            .unwrap()
-            .remove(0);
+        let other_checked =
+            chelis_deep::parser::parse_str("(t-var {} b)", &chelis_syntax_host::NativeStack)
+                .unwrap()
+                .remove(0);
         let other = FormalTypePattern::from_specialized_checked(&formal, &other_checked);
         let mut call = CallTypeInstantiation::default();
         assert!(call.admits(&pattern, &formal, &column("d83", Prim::F32)));
@@ -3539,7 +3541,11 @@ mod call_type_instantiation_tests {
 
     #[test]
     fn residual_dimensions_are_limited_to_checked_type_substitution_slots() {
-        let parse = |source| chelis_deep::parser::parse_str(source).unwrap().remove(0);
+        let parse = |source| {
+            chelis_deep::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+                .unwrap()
+                .remove(0)
+        };
         let formal = tensor(vec![DimInfo::Named("n".into(), None)], Prim::F32);
         let actual = tensor(vec![DimInfo::Named("d83".into(), None)], Prim::F32);
         let checked = parse("(t-tensor {} (d-var {} d0) (t-prim {} f32))");
@@ -3588,9 +3594,12 @@ mod call_type_instantiation_tests {
 
     #[test]
     fn call_slot_placeholders_remain_nonbinding_inside_partial_instantiations() {
-        let checked = chelis_deep::parser::parse_str("(t-tuple {} (t-var {} a) (t-var {} b))")
-            .unwrap()
-            .remove(0);
+        let checked = chelis_deep::parser::parse_str(
+            "(t-tuple {} (t-var {} a) (t-var {} b))",
+            &chelis_syntax_host::NativeStack,
+        )
+        .unwrap()
+        .remove(0);
         let axis = |dim| tensor(vec![dim], Prim::F32);
         let formal = ConcreteHostType::Tuple(vec![
             axis(DimInfo::Named("n".into(), None)),

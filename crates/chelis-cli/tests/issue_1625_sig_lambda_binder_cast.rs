@@ -36,11 +36,14 @@ fn both_checker_apis_enforce_the_signature_binder() {
             true,
         ),
     ] {
-        let declarations = chelis_surf::parser::parse_str(source).expect("parse fixture");
-        let deep = chelis_surf::desugar::desugar_program(&declarations)
-            .expect("Surf fixture must desugar");
+        let declarations = chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+            .expect("parse fixture");
+        let deep =
+            chelis_surf::desugar::desugar_program(&declarations, &chelis_syntax_host::NativeStack)
+                .expect("Surf fixture must desugar");
         let text = chelis_deep::printer::print_canonical_flat(&deep);
-        let stamped = chelis_deep::parse_and_stamp_file(&text).expect("stamp fixture");
+        let stamped = chelis_deep::parse_and_stamp_file(&text, &chelis_syntax_host::NativeStack)
+            .expect("stamp fixture");
         for (name, result) in [
             ("ir", chelis_types::check_ir_program(&stamped)),
             ("typed", chelis_types::check_typed_program(&stamped)),

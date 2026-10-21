@@ -12,7 +12,8 @@ fn name(value: &str) -> Expr {
 }
 
 fn parse_runtime_expr(source: &str) -> Expr {
-    let mut exprs = parse_and_stamp_runtime_exprs(source).expect("fixture must stamp");
+    let mut exprs = parse_and_stamp_runtime_exprs(source, &chelis_syntax_host::NativeStack)
+        .expect("fixture must stamp");
     assert_eq!(exprs.len(), 1, "one expression");
     exprs.remove(0)
 }
@@ -150,7 +151,8 @@ fn legal_legacy_structural_lists_share_the_structural_disposition() {
     (fn {}
       (params {} (x {type: (t-prim {} f32)}))
       (var {} x))))";
-    let stamped = parse_and_stamp_file(source).expect("fixture must stamp");
+    let stamped =
+        parse_and_stamp_file(source, &chelis_syntax_host::NativeStack).expect("fixture must stamp");
     let renamed =
         rename_function(&stamped, "target", "renamed").expect("authoring rewrite succeeds");
 
@@ -196,10 +198,12 @@ fn undecodable_head_read_is_identical_for_constructed_and_parsed_forms() {
 
 #[test]
 fn undecodable_legacy_head_retains_its_external_span_id() {
-    let parsed =
-        chelis_deep::parser::parse_str(r#"(future-form {span: "legacy-unknown"} payload)"#)
-            .expect("legacy metadata fixture parses")
-            .remove(0);
+    let parsed = chelis_deep::parser::parse_str(
+        r#"(future-form {span: "legacy-unknown"} payload)"#,
+        &chelis_syntax_host::NativeStack,
+    )
+    .expect("legacy metadata fixture parses")
+    .remove(0);
     let Expr::BareList(elements, _) = &parsed else {
         panic!("unstamped source list must retain its structural role");
     };
@@ -282,7 +286,7 @@ fn malformed_legacy_heads_are_not_silently_decoded_or_treated_as_undecodable() {
         "(future-form not-metadata payload)",
     ] {
         assert!(
-            parse_and_stamp_runtime_exprs(malformed).is_err(),
+            parse_and_stamp_runtime_exprs(malformed, &chelis_syntax_host::NativeStack).is_err(),
             "`{malformed}` must be rejected at ingress"
         );
     }

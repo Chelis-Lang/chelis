@@ -430,9 +430,10 @@ fn canonical_variables(
     type_repr: &str,
     require_contiguous: bool,
 ) -> Result<CanonicalVariables, bincode::Error> {
-    let expression = chelis_deep::parse_and_stamp_type(type_repr).map_err(|error| {
-        validation_error(&format!("type representation is not valid Deep: {error}"))
-    })?;
+    let expression = chelis_deep::parse_and_stamp_type(type_repr, &chelis_syntax_host::NativeStack)
+        .map_err(|error| {
+            validation_error(&format!("type representation is not valid Deep: {error}"))
+        })?;
 
     fn visit(
         expr: &chelis_deep::Expr,
@@ -557,9 +558,10 @@ pub fn validate_collection_obligations_for_type_repr(
     validate_collection_obligation_ledger(obligations)?;
     let type_repr =
         type_repr.ok_or_else(|| "require a function type representation".to_string())?;
-    let expression = chelis_deep::parse_and_stamp_type(type_repr).map_err(|error| {
-        format!("require a function type representation that is valid Deep: {error}")
-    })?;
+    let expression = chelis_deep::parse_and_stamp_type(type_repr, &chelis_syntax_host::NativeStack)
+        .map_err(|error| {
+            format!("require a function type representation that is valid Deep: {error}")
+        })?;
     if !matches!(
         &expression,
         chelis_deep::Expr::Node(node, _) if node.tag() == chelis_deep::DeepTag::TFn
@@ -605,9 +607,11 @@ pub fn validate_collection_obligation_ledger(
     let mut previous: Option<(&str, Vec<&str>)> = None;
     for obligation in obligations {
         for carried in obligation.types() {
-            let expression = chelis_deep::parse_and_stamp_type(carried).map_err(|error| {
-                format!("contain a type representation that is not valid Deep: {error}")
-            })?;
+            let expression =
+                chelis_deep::parse_and_stamp_type(carried, &chelis_syntax_host::NativeStack)
+                    .map_err(|error| {
+                        format!("contain a type representation that is not valid Deep: {error}")
+                    })?;
             let canonical = chelis_deep::printer::print_expr(&expression);
             if canonical != carried {
                 return Err(format!(

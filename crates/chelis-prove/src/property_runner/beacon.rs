@@ -452,7 +452,7 @@ fn bound_expressions(
 /// Check the linked declarations themselves: printing and reparsing them
 /// would lose the declaration identities the proof is about.
 pub(super) fn check_scalar_source(decls: &[Decl]) -> Result<(), String> {
-    let deep = chelis_surf::desugar::desugar_program(decls)
+    let deep = chelis_surf::desugar::desugar_program(decls, &chelis_syntax_host::NativeStack)
         .map_err(|error| format!("Beacon scalar source desugar failed: {error}"))?;
     let _linked = chelis_types::install_linked_program_guard();
     chelis_types::check_typed_program(&deep).map_err(|infer| {

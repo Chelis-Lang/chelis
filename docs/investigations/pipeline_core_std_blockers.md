@@ -19,7 +19,10 @@ This inventory records direct core use and transitive blockers in its five direc
 
 ### `chelis-deep`
 
-`chelis-deep` uses standard collections and allocated strings throughout its AST and authoring APIs. Its default dependencies include `serde`, `thiserror`, and `miette`.
+`chelis-deep` uses unconditional `no_std` with allocation-backed syntax data.
+Its parser takes explicit `chelis-stack-services` resources.
+Native pipeline callers use `chelis-syntax-host::NativeStack`.
+This portable dependency does not make the pipeline core portable.
 
 ### `chelis-types`
 
@@ -43,7 +46,9 @@ The default dependencies include `serde`, `thiserror`, and `stacker`. `chelis-ir
 
 ### `chelis-unord`
 
-`chelis-unord` wraps standard-library hash collections behind an order-free API and uses `serde` for canonical cache serialization. Its storage therefore requires `std` even though observable iteration is unavailable.
+`chelis-unord` uses unconditional `no_std` and allocation-backed ordered storage behind its order-free collection interface.
+Its portable `serde` dependency retains canonical cache serialization.
+This dependency does not need host services.
 
 ## Scope
 

@@ -17,9 +17,11 @@ use chelis_types::types::Type;
 use chelis_types::{BUILTIN_NAMES, builtin_env, check_ir_fitness};
 
 fn surf_to_deep(source: &str) -> Vec<Expr> {
-    let decls = parse_surf(source).expect("Surf fixture must parse");
+    let decls =
+        parse_surf(source, &chelis_syntax_host::NativeStack).expect("Surf fixture must parse");
     chelis_macros::expand_program(
-        &desugar_program(&decls).expect("Surf fixture must desugar"),
+        &desugar_program(&decls, &chelis_syntax_host::NativeStack)
+            .expect("Surf fixture must desugar"),
         &chelis_macros::ExpansionOptions::default(),
     )
     .expect("Surf fixture must expand")
@@ -94,7 +96,8 @@ fn every_builtin_rejects_zero_and_oversized_arity_without_panicking() {
                 .collect::<Vec<_>>()
                 .join(" ");
             let source = format!("(def {{}} bad (app {{}} (var {{}} {name}) {args}))");
-            let deep = parse_deep_lenient(&source).expect("generated Deep fixture parses");
+            let deep = parse_deep_lenient(&source, &chelis_syntax_host::NativeStack)
+                .expect("generated Deep fixture parses");
             let outcome = catch_unwind(AssertUnwindSafe(|| check_ir_fitness(&deep)));
             let report = outcome
                 .unwrap_or_else(|_| panic!("builtin `{name}` with arity {arity} must not panic"));

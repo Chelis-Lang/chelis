@@ -1,4 +1,8 @@
 use crate::span::Span;
+use alloc::{
+    string::{String, ToString},
+    vec::Vec,
+};
 use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq)]

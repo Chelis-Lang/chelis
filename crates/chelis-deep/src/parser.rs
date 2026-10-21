@@ -1,5 +1,10 @@
 use crate::ast::Expr;
 use crate::lexer::{self, Token, TokenKind};
+use alloc::{
+    boxed::Box,
+    string::{String, ToString},
+    vec::Vec,
+};
 use thiserror::Error;
 
 /// Render a forbidden byte for diagnostic messages, using a printable
@@ -75,27 +80,36 @@ pub enum ParseError {
 
 use crate::raw::{RawAtom, RawExpr};
 
-struct RawParser<'a> {
+struct RawParser<'a, S> {
     tokens: &'a [Token],
     pos: usize,
     source: Option<&'a str>,
     preserved: bool,
+    depth: &'a crate::nesting::ParseDepth,
+    stack: &'a S,
 }
 
-impl<'a> RawParser<'a> {
-    fn new(tokens: &'a [Token]) -> Self {
+impl<'a, S: chelis_stack_services::StackServices> RawParser<'a, S> {
+    fn new(tokens: &'a [Token], depth: &'a crate::nesting::ParseDepth, stack: &'a S) -> Self {
         Self {
             tokens,
             pos: 0,
             source: None,
             preserved: false,
+            depth,
+            stack,
         }
     }
 
-    fn with_source(tokens: &'a [Token], source: Option<&'a str>) -> Self {
+    fn with_source(
+        tokens: &'a [Token],
+        source: Option<&'a str>,
+        depth: &'a crate::nesting::ParseDepth,
+        stack: &'a S,
+    ) -> Self {
         Self {
             source,
-            ..Self::new(tokens)
+            ..Self::new(tokens, depth, stack)
         }
     }
 
@@ -139,7 +153,7 @@ impl<'a> RawParser<'a> {
         let offset = self.current_offset();
         match self.peek() {
             Some(tok)
-                if std::mem::discriminant(&tok.kind) == std::mem::discriminant(expected_kind) =>
+                if core::mem::discriminant(&tok.kind) == core::mem::discriminant(expected_kind) =>
             {
                 Ok(&self.tokens[{
                     let i = self.pos;
@@ -167,7 +181,7 @@ impl<'a> RawParser<'a> {
     /// Every recursive descent of the parser passes through here, so this is
     /// the one place the nesting guard needs to stand.
     fn parse_expr(&mut self) -> Result<RawExpr, ParseError> {
-        let Some(_descent) = crate::nesting::Descent::enter() else {
+        let Some(_descent) = crate::nesting::Descent::enter(self.depth, self.stack) else {
             return Err(ParseError::NestingTooDeep {
                 offset: self.current_offset(),
             });
@@ -479,12 +493,19 @@ fn normalize_typed_literal_wrapper(
 /// Routes through the raw parser + `stamp_to_typed` pipeline. All production
 /// goes through `RawParser` → `stamp_to_typed`, which produces `Expr::Node`,
 /// `Expr::BareList`, and `Expr::UnknownForm`.
-pub fn parse(tokens: &[Token]) -> Result<Vec<Expr>, ParseError> {
-    parse_with_source(tokens, None)
+pub fn parse(
+    tokens: &[Token],
+    stack: &impl chelis_stack_services::StackServices,
+) -> Result<Vec<Expr>, ParseError> {
+    parse_with_source(tokens, None, stack)
 }
 
-fn parse_with_source(tokens: &[Token], source: Option<&str>) -> Result<Vec<Expr>, ParseError> {
-    let raw_exprs = parse_raw_with_source(tokens, source)?;
+fn parse_with_source(
+    tokens: &[Token],
+    source: Option<&str>,
+    stack: &impl chelis_stack_services::StackServices,
+) -> Result<Vec<Expr>, ParseError> {
+    let raw_exprs = parse_raw_with_source(tokens, source, stack)?;
     let typed = crate::stamp_to_typed::stamp_exprs_lenient(raw_exprs).map_err(|e| {
         ParseError::Expected {
             expected: "valid Deep structure".to_string(),
@@ -500,27 +521,44 @@ fn parse_with_source(tokens: &[Token], source: Option<&str>) -> Result<Vec<Expr>
 ///
 /// It runs on the parser's own stack segment, so its nesting limit does not
 /// depend on the caller's stack (chelis#2425, [`crate::nesting`]).
-fn parse_raw_syntax(tokens: &[Token], source: Option<&str>) -> Result<Vec<RawExpr>, ParseError> {
-    crate::nesting::on_parse_segment(|| RawParser::with_source(tokens, source).parse_exprs())
+fn parse_raw_syntax(
+    tokens: &[Token],
+    source: Option<&str>,
+    stack: &impl chelis_stack_services::StackServices,
+) -> Result<Vec<RawExpr>, ParseError> {
+    crate::nesting::on_parse_segment(
+        || {
+            let depth = crate::nesting::ParseDepth::new(0);
+            RawParser::with_source(tokens, source, &depth, stack).parse_exprs()
+        },
+        stack,
+    )
 }
 
 /// Quarantined previous-pipe reader for explicit, baseline-checked migration.
 /// The caller removes retired forms and metadata before current stamping.
 #[cfg(feature = "pre-020-pipe-migration")]
-pub fn parse_pipe_migration_raw(source: &str) -> Result<Vec<RawExpr>, ParseError> {
+pub fn parse_pipe_migration_raw(
+    source: &str,
+    stack: &impl chelis_stack_services::StackServices,
+) -> Result<Vec<RawExpr>, ParseError> {
     let tokens = crate::lexer::lex(source)?;
-    parse_raw_syntax(&tokens, Some(source))
+    parse_raw_syntax(&tokens, Some(source), stack)
 }
 
-pub fn parse_raw(tokens: &[Token]) -> Result<Vec<RawExpr>, ParseError> {
-    parse_raw_with_source(tokens, None)
+pub fn parse_raw(
+    tokens: &[Token],
+    stack: &impl chelis_stack_services::StackServices,
+) -> Result<Vec<RawExpr>, ParseError> {
+    parse_raw_with_source(tokens, None, stack)
 }
 
 fn parse_raw_with_source(
     tokens: &[Token],
     source: Option<&str>,
+    stack: &impl chelis_stack_services::StackServices,
 ) -> Result<Vec<RawExpr>, ParseError> {
-    let exprs = parse_raw_syntax(tokens, source)?;
+    let exprs = parse_raw_syntax(tokens, source, stack)?;
     reject_retired_pipes(&exprs)?;
     crate::metadata::validate_raw(&exprs).map_err(|error| {
         if let Some((byte_in_value, code_point)) = error.forbidden_span_char {
@@ -579,9 +617,12 @@ fn reject_retired_pipes(exprs: &[RawExpr]) -> Result<(), ParseError> {
     Ok(())
 }
 
-pub fn parse_raw_str(source: &str) -> Result<Vec<RawExpr>, ParseError> {
+pub fn parse_raw_str(
+    source: &str,
+    stack: &impl chelis_stack_services::StackServices,
+) -> Result<Vec<RawExpr>, ParseError> {
     let tokens = lexer::lex(source)?;
-    parse_raw_with_source(&tokens, Some(source))
+    parse_raw_with_source(&tokens, Some(source), stack)
 }
 
 /// Error from `parse_and_stamp` — wraps both parse errors and stamp errors.
@@ -591,8 +632,8 @@ pub enum StampOrParseError {
     Stamp(crate::stamp_to_typed::StampError),
 }
 
-impl std::fmt::Display for StampOrParseError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for StampOrParseError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             StampOrParseError::Parse(e) => write!(f, "parse error: {e}"),
             StampOrParseError::Stamp(e) => write!(f, "stamp error: {e}"),
@@ -600,7 +641,7 @@ impl std::fmt::Display for StampOrParseError {
     }
 }
 
-impl std::error::Error for StampOrParseError {}
+impl core::error::Error for StampOrParseError {}
 
 impl From<ParseError> for StampOrParseError {
     fn from(e: ParseError) -> Self {
@@ -622,9 +663,12 @@ impl From<crate::stamp_to_typed::StampError> for StampOrParseError {
 /// a declaration-bundle fragment (`new_decls`, a replacement `defsig`), not
 /// for a whole `.dp` file. Use [`parse_and_stamp_file`] when a top-level
 /// `(module ...)` wrapper is also admissible.
-pub fn parse_and_stamp(source: &str) -> Result<Vec<Expr>, StampOrParseError> {
+pub fn parse_and_stamp(
+    source: &str,
+    stack: &impl chelis_stack_services::StackServices,
+) -> Result<Vec<Expr>, StampOrParseError> {
     let tokens = lexer::lex(source).map_err(ParseError::from)?;
-    let raw_exprs = parse_raw_with_source(&tokens, Some(source))?;
+    let raw_exprs = parse_raw_with_source(&tokens, Some(source), stack)?;
     crate::migration::reject_retired_integer_names(&raw_exprs)?;
     let typed = crate::stamp_to_typed::stamp_to_typed(raw_exprs)?;
     Ok(typed)
@@ -633,9 +677,12 @@ pub fn parse_and_stamp(source: &str) -> Result<Vec<Expr>, StampOrParseError> {
 /// Lex, parse, then stamp via `stamp_deep_file` — the entry point for `.dp`
 /// file ingestion. Accepts both a single top-level `(module ...)` and bare
 /// declarations.
-pub fn parse_and_stamp_file(source: &str) -> Result<Vec<Expr>, StampOrParseError> {
+pub fn parse_and_stamp_file(
+    source: &str,
+    stack: &impl chelis_stack_services::StackServices,
+) -> Result<Vec<Expr>, StampOrParseError> {
     let tokens = lexer::lex(source).map_err(ParseError::from)?;
-    let raw_exprs = parse_raw_syntax(&tokens, Some(source))?;
+    let raw_exprs = parse_raw_syntax(&tokens, Some(source), stack)?;
     reject_retired_pipes(&raw_exprs)?;
     crate::migration::reject_retired_integer_names(&raw_exprs)?;
     let typed = crate::stamp_to_typed::stamp_deep_file(raw_exprs).map_err(|mut error| {
@@ -661,9 +708,12 @@ pub fn parse_and_stamp_file(source: &str) -> Result<Vec<Expr>, StampOrParseError
 /// is rejected here exactly as it would be inside a declaration body, so a
 /// caller that accepts an expression from outside the process never has to
 /// re-diagnose an untyped `Atom::Name`.
-pub fn parse_and_stamp_runtime_exprs(source: &str) -> Result<Vec<Expr>, StampOrParseError> {
+pub fn parse_and_stamp_runtime_exprs(
+    source: &str,
+    stack: &impl chelis_stack_services::StackServices,
+) -> Result<Vec<Expr>, StampOrParseError> {
     let tokens = lexer::lex(source).map_err(ParseError::from)?;
-    let raw_exprs = parse_raw_with_source(&tokens, Some(source))?;
+    let raw_exprs = parse_raw_with_source(&tokens, Some(source), stack)?;
     crate::migration::reject_retired_integer_names(&raw_exprs)?;
     let typed = crate::stamp_to_typed::stamp_runtime_exprs(raw_exprs)?;
     Ok(typed)
@@ -674,9 +724,12 @@ pub fn parse_and_stamp_runtime_exprs(source: &str) -> Result<Vec<Expr>, StampOrP
 /// This is the role-directed ingress for a serialized type representation.
 /// Type syntax is closed: a list whose head is not a type-vocabulary tag is
 /// rejected rather than retained as an untyped bare list.
-pub fn parse_and_stamp_type(source: &str) -> Result<Expr, StampOrParseError> {
+pub fn parse_and_stamp_type(
+    source: &str,
+    stack: &impl chelis_stack_services::StackServices,
+) -> Result<Expr, StampOrParseError> {
     let tokens = lexer::lex(source).map_err(ParseError::from)?;
-    let mut raw_exprs = parse_raw_with_source(&tokens, Some(source))?;
+    let mut raw_exprs = parse_raw_with_source(&tokens, Some(source), stack)?;
     crate::migration::reject_retired_integer_names(&raw_exprs)?;
     if raw_exprs.len() != 1 {
         return Err(ParseError::Expected {
@@ -699,9 +752,10 @@ pub fn parse_and_stamp_type(source: &str) -> Result<Expr, StampOrParseError> {
 pub fn parse_and_stamp_tagged(
     source: &str,
     expected: crate::tag::DeepTag,
+    stack: &impl chelis_stack_services::StackServices,
 ) -> Result<Vec<Expr>, StampOrParseError> {
     let tokens = lexer::lex(source).map_err(ParseError::from)?;
-    let raw_exprs = parse_raw_with_source(&tokens, Some(source))?;
+    let raw_exprs = parse_raw_with_source(&tokens, Some(source), stack)?;
     crate::migration::reject_retired_integer_names(&raw_exprs)?;
     let typed = crate::stamp_to_typed::stamp_as_tagged(raw_exprs, expected)?;
     Ok(typed)
@@ -720,9 +774,12 @@ pub fn parse_and_stamp_tagged(
 /// [`parse_and_stamp_type`] for one type, or [`parse_and_stamp_tagged`] for
 /// one named tag. This spelling survives for
 /// in-crate fixtures that build a fragment in no particular role.
-pub fn parse_str(source: &str) -> Result<Vec<Expr>, ParseError> {
+pub fn parse_str(
+    source: &str,
+    stack: &impl chelis_stack_services::StackServices,
+) -> Result<Vec<Expr>, ParseError> {
     let tokens = lexer::lex(source)?;
-    let exprs = parse_with_source(&tokens, Some(source))?;
+    let exprs = parse_with_source(&tokens, Some(source), stack)?;
     Ok(exprs)
 }
 
@@ -735,9 +792,12 @@ pub fn parse_str(source: &str) -> Result<Vec<Expr>, ParseError> {
 /// role-directed entry point to use instead; a caller that wants the
 /// vocabulary sweep as well runs `crate::validate::validate` over the
 /// stamped result.
-pub fn parse_str_strict(source: &str) -> Result<Vec<Expr>, ParseError> {
+pub fn parse_str_strict(
+    source: &str,
+    stack: &impl chelis_stack_services::StackServices,
+) -> Result<Vec<Expr>, ParseError> {
     let tokens = lexer::lex(source)?;
-    let exprs = parse_with_source(&tokens, Some(source))?;
+    let exprs = parse_with_source(&tokens, Some(source), stack)?;
     let warnings = crate::validate::validate(&exprs);
     if let Some(w) = warnings.first() {
         return Err(ParseError::Expected {
@@ -756,7 +816,7 @@ mod tests {
 
     /// Helper to parse and unwrap.
     fn p(source: &str) -> Vec<Expr> {
-        parse_str(source).unwrap()
+        parse_str(source, &chelis_syntax_host::NativeStack).unwrap()
     }
 
     // ── Atom tests ─────────────────────────────────────────────
@@ -834,7 +894,7 @@ mod tests {
 
     #[test]
     fn parse_bare_keyword_is_error() {
-        let err = parse_str(":axis")
+        let err = parse_str(":axis", &chelis_syntax_host::NativeStack)
             .expect_err("bare :keyword outside metadata map must be a parse error");
         assert_eq!(
             err.to_string(),
@@ -998,7 +1058,7 @@ mod tests {
 
     #[test]
     fn error_unmatched_lparen() {
-        let result = parse_str("(add 1 2");
+        let result = parse_str("(add 1 2", &chelis_syntax_host::NativeStack);
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(
@@ -1010,7 +1070,7 @@ mod tests {
 
     #[test]
     fn error_unmatched_rparen() {
-        let result = parse_str(")");
+        let result = parse_str(")", &chelis_syntax_host::NativeStack);
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(
@@ -1023,7 +1083,7 @@ mod tests {
     #[test]
     fn parse_empty_list_allowed() {
         // Empty lists () are valid in the new spec (e.g., empty guard in match arms)
-        let exprs = parse_str("()").unwrap();
+        let exprs = parse_str("()", &chelis_syntax_host::NativeStack).unwrap();
         assert_eq!(exprs.len(), 1);
         match &exprs[0] {
             Expr::BareList(elems, _) => assert!(elems.is_empty()),
@@ -1050,7 +1110,7 @@ mod tests {
 
     #[test]
     fn error_unexpected_rbrace() {
-        let result = parse_str("}");
+        let result = parse_str("}", &chelis_syntax_host::NativeStack);
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(
@@ -1088,6 +1148,70 @@ mod tests {
         assert!(exprs.is_empty());
     }
 
+    #[test]
+    fn native_segment_accepts_nested_input_from_a_small_caller_stack() {
+        std::thread::Builder::new()
+            .stack_size(256 * 1024)
+            .spawn(|| {
+                let source = format!("{}x{}", "(a ".repeat(1024), ")".repeat(1024));
+                let parsed = parse_raw_str(&source, &chelis_syntax_host::NativeStack)
+                    .expect("the parser segment accepts this depth");
+                assert_eq!(parsed.len(), 1);
+                assert_eq!(parsed[0].span(), crate::Span::new(0, source.len()));
+                crate::raw::drain_owned_source_arguments(parsed);
+            })
+            .expect("spawn parser thread")
+            .join()
+            .expect("parser thread");
+    }
+
+    struct UnmeasuredStack {
+        segments: core::cell::Cell<usize>,
+    }
+
+    impl chelis_stack_services::StackServices for UnmeasuredStack {
+        fn grow<R>(&self, bytes: usize, operation: impl FnOnce() -> R) -> R {
+            assert_eq!(bytes, crate::nesting::PARSE_SEGMENT_BYTES);
+            self.segments.set(self.segments.get() + 1);
+            chelis_stack_services::StackServices::grow(
+                &chelis_syntax_host::NativeStack,
+                bytes,
+                operation,
+            )
+        }
+
+        fn maybe_grow<R>(&self, red_zone: usize, bytes: usize, operation: impl FnOnce() -> R) -> R {
+            chelis_stack_services::StackServices::maybe_grow(
+                &chelis_syntax_host::NativeStack,
+                red_zone,
+                bytes,
+                operation,
+            )
+        }
+
+        fn remaining_stack(&self) -> Option<usize> {
+            None
+        }
+    }
+
+    #[test]
+    fn unavailable_measurements_accept_shallow_input_and_reject_excess_depth() {
+        let stack = UnmeasuredStack {
+            segments: core::cell::Cell::new(0),
+        };
+        let shallow = format!("{}x{}", "(a ".repeat(128), ")".repeat(128));
+        let deep = format!("{}x{}", "(a ".repeat(600), ")".repeat(600));
+        assert!(parse_raw_str(&shallow, &stack).is_ok());
+        let offset = match parse_raw_str(&deep, &stack) {
+            Err(ParseError::NestingTooDeep { offset }) => offset,
+            other => panic!("expected NestingTooDeep, got {:?}", other.map(|v| v.len())),
+        };
+        assert!(offset > 0 && offset < deep.len());
+        assert!(matches!(deep.as_bytes()[offset], b'(' | b'a'));
+        assert!(parse_raw_str(&shallow, &stack).is_ok());
+        assert_eq!(stack.segments.get(), 3);
+    }
+
     /// chelis#2425: input nested deeper than the parser's segment is a
     /// located `NestingTooDeep`, not a stack overflow, and the byte it names
     /// does not depend on the stack of the thread that calls the parser.
@@ -1099,10 +1223,14 @@ mod tests {
             let source = source.clone();
             std::thread::Builder::new()
                 .stack_size(stack_bytes)
-                .spawn(move || match parse_raw_str(&source) {
-                    Err(ParseError::NestingTooDeep { offset }) => offset,
-                    other => panic!("expected NestingTooDeep, got {:?}", other.map(|v| v.len())),
-                })
+                .spawn(
+                    move || match parse_raw_str(&source, &chelis_syntax_host::NativeStack) {
+                        Err(ParseError::NestingTooDeep { offset }) => offset,
+                        other => {
+                            panic!("expected NestingTooDeep, got {:?}", other.map(|v| v.len()))
+                        }
+                    },
+                )
                 .expect("spawn parser thread")
                 .join()
                 .expect("parser thread")

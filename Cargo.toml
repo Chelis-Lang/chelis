@@ -3,6 +3,8 @@ resolver = "3"
 members = [
     "crates/chelis-clarabel-provider",
     "crates/chelis-unord",
+    "crates/chelis-stack-services",
+    "crates/chelis-syntax-host",
     "crates/chelis-crmath",
     "crates/chelis-repr-inventory",
     "crates/chelis-vocab",
@@ -59,8 +61,10 @@ unexpected_cfgs = "deny"
 
 [workspace.dependencies]
 chelis-unord = { path = "crates/chelis-unord" }
+chelis-stack-services = { path = "crates/chelis-stack-services" }
+chelis-syntax-host = { path = "crates/chelis-syntax-host" }
 chelis-crmath = { path = "crates/chelis-crmath" }
-chelis-vocab = { path = "crates/chelis-vocab" }
+chelis-vocab = { path = "crates/chelis-vocab", default-features = false }
 chelis-abi = { path = "crates/chelis-abi" }
 chelis-image-id = { path = "crates/chelis-image-id" }
 chelis-deep = { path = "crates/chelis-deep" }

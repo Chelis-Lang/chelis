@@ -276,8 +276,11 @@ mod rejected_signature_resolution_tests {
         binder_names: &[&str],
         operation: impl FnOnce(&mut DeepTypeResolver<'_, '_, '_>, &chelis_deep::Expr) -> T,
     ) -> (T, Vec<CheckError>) {
-        let program = chelis_deep::parse_and_stamp_file(&format!("(defsig {{}} fixture {source})"))
-            .expect("parse declaration type");
+        let program = chelis_deep::parse_and_stamp_file(
+            &format!("(defsig {{}} fixture {source})"),
+            &chelis_syntax_host::NativeStack,
+        )
+        .expect("parse declaration type");
         let chelis_deep::Expr::Node(declaration, _) = &program[0] else {
             panic!("a declaration is a stamped node");
         };
@@ -805,7 +808,11 @@ mod builtin_selection_tests {
     use chelis_surf::{desugar::desugar_program, parser::parse_str};
 
     fn selections(source: &str) -> Result<Vec<BuiltinCaseSelection>, InferResult> {
-        let deep = desugar_program(&parse_str(source).unwrap()).expect("Surf fixture must desugar");
+        let deep = desugar_program(
+            &parse_str(source, &chelis_syntax_host::NativeStack).unwrap(),
+            &chelis_syntax_host::NativeStack,
+        )
+        .expect("Surf fixture must desugar");
         run_with_metadata(&deep, |sink| {
             Ok(crate::infer::builtin_selection_probe(&deep, sink))
         })

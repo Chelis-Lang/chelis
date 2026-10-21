@@ -55,7 +55,7 @@ fn validate_surf_on_grown_stack(source: &str) -> Result<(), ValidationError> {
     // The compiler parser decides acceptance. Do not run the recursive PEG on
     // accepted input: a valid, deeply nested comment may be cheap for the
     // iterative lexer but exhaust the PEG's native stack.
-    let parse_err = match chelis_surf::parser::parse_str(source) {
+    let parse_err = match chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack) {
         Ok(_) => return Ok(()),
         Err(err @ chelis_surf::parser::ParseError::Lex(_)) => {
             // A lexical failure has no grammar/parser split to classify. In
@@ -110,7 +110,7 @@ fn validate_deep_on_grown_stack(source: &str) -> Result<(), ValidationError> {
     // validation failure rather than a silent skip of the forgery checks
     // below. That skip was the original hole, because a forged name in a
     // source that happened not to stamp passed unreported.
-    let exprs = chelis_deep::parse_and_stamp_file(source)
+    let exprs = chelis_deep::parse_and_stamp_file(source, &chelis_syntax_host::NativeStack)
         .map_err(|err| ValidationError::Failed(err.to_string()))?;
 
     // The AST-side structural sweep, on the stamped tree. The Pest leg below
@@ -300,9 +300,9 @@ fn first_duplicate_defsig(exprs: &[chelis_deep::ast::Expr]) -> Option<String> {
 }
 
 pub fn validate_desugared(source: &str) -> Result<(), ValidationError> {
-    let decls = chelis_surf::parser::parse_str(source)
+    let decls = chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack)
         .map_err(|err| ValidationError::Failed(format!("compiler parse failed: {err}")))?;
-    let deep = chelis_surf::desugar::desugar_program(&decls)
+    let deep = chelis_surf::desugar::desugar_program(&decls, &chelis_syntax_host::NativeStack)
         .map_err(|err| ValidationError::Failed(format!("desugaring failed: {err}")))?;
     let deep = chelis_macros::expand_program(&deep, &chelis_macros::ExpansionOptions::default())
         .map_err(|err| ValidationError::Failed(format!("macro expansion failed: {err}")))?
@@ -733,7 +733,8 @@ mod tests {
                 "`{bogus}` must be rejected by the executable-grammar validator"
             );
             assert!(
-                chelis_deep::parse_and_stamp_file(&source).is_err(),
+                chelis_deep::parse_and_stamp_file(&source, &chelis_syntax_host::NativeStack)
+                    .is_err(),
                 "`{bogus}` must be rejected by the compiler's stamped ingress"
             );
         }
@@ -758,7 +759,7 @@ mod tests {
         // spec/03-deep-syntax.md §2.6: `*` is the explicit wildcard
         // spelling for the sole symbol child of `d-name`.
         let source = "(defsig {} f (t-tensor {} (d-name {} *) (t-prim {} f32)))\n";
-        chelis_deep::parse_and_stamp_file(source)
+        chelis_deep::parse_and_stamp_file(source, &chelis_syntax_host::NativeStack)
             .expect("the stamped compiler ingress accepts the wildcard dimension");
         validate_deep(source).expect("the independent grammar must accept it too");
     }
@@ -877,7 +878,7 @@ mod tests {
         // Premise: the compiler parser rejects it and the pest grammar accepts it,
         // i.e. this is exactly the grammar-too-lenient case.
         assert!(
-            chelis_surf::parser::parse_str(source).is_err(),
+            chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack).is_err(),
             "precondition: the compiler parser rejects the bare-statement block"
         );
         assert!(
@@ -933,7 +934,7 @@ mod tests {
         // The par{} companion: newline-separated items the parser rejects.
         let source = "def f(x, y) -> Unit = par {\n  g(x)\n  h(y)\n}\n";
         assert!(
-            chelis_surf::parser::parse_str(source).is_err(),
+            chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack).is_err(),
             "precondition: the compiler parser rejects bare par items"
         );
         validate_surf(source).expect_err("validator must reject bare par items too");
@@ -946,7 +947,8 @@ mod tests {
     fn deep_rejects_untagged_top_level_list_on_both_surfaces() {
         let source = "((var {} f) (var {} x))\n";
         validate_deep(source).expect_err("pest grammar must reject an untagged top-level list");
-        let exprs = chelis_deep::parser::parse_str(source).expect("lenient parse");
+        let exprs = chelis_deep::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+            .expect("lenient parse");
         assert!(
             !chelis_deep::validate::validate(&exprs).is_empty(),
             "the AST validator must reject the same input class"
@@ -1065,7 +1067,7 @@ mod tests {
         // two Deep surfaces agree (the core complaint of #167).
         validate_deep(source).unwrap_or_else(|err| panic!("{label} should validate: {err}"));
         validate_deep(BASE).expect("base program should validate");
-        chelis_deep::parse_and_stamp_file(source)
+        chelis_deep::parse_and_stamp_file(source, &chelis_syntax_host::NativeStack)
             .unwrap_or_else(|err| panic!("{label} should parse strictly: {err}"));
     }
 
@@ -1215,7 +1217,8 @@ mod tests {
                 "{source:?}: {error}"
             );
             assert!(
-                chelis_deep::parse_and_stamp_file(source).is_err(),
+                chelis_deep::parse_and_stamp_file(source, &chelis_syntax_host::NativeStack)
+                    .is_err(),
                 "the compiler's stamped ingress must agree about {source:?}"
             );
         }
@@ -1275,7 +1278,8 @@ mod tests {
                 "wrong reason for `{source}`: {error}"
             );
             assert!(
-                chelis_deep::parse_and_stamp_file(source).is_err(),
+                chelis_deep::parse_and_stamp_file(source, &chelis_syntax_host::NativeStack)
+                    .is_err(),
                 "the compiler's stamped ingress must agree about `{source}`"
             );
         }
@@ -1292,7 +1296,7 @@ mod tests {
             "(defsig {} f (t-fn {eff: (effects {})} (t-prim {} f32)))\n",
         ] {
             validate_deep(source).unwrap_or_else(|err| panic!("`{source}` should validate: {err}"));
-            chelis_deep::parse_and_stamp_file(source)
+            chelis_deep::parse_and_stamp_file(source, &chelis_syntax_host::NativeStack)
                 .unwrap_or_else(|err| panic!("`{source}` should stamp: {err}"));
         }
     }
@@ -1428,9 +1432,11 @@ mod tests {
                       export (planted_pick)\n\
                       sig planted_pick[p: Numeric]: p -> p -> p\n\
                       def planted_pick(a, b) = a\n";
-        let decls = chelis_surf::parser::parse_str(source).expect("bounded Surf parses");
+        let decls = chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+            .expect("bounded Surf parses");
         let printed = chelis_deep::printer::print_canonical(
-            &chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar"),
+            &chelis_surf::desugar::desugar_program(&decls, &chelis_syntax_host::NativeStack)
+                .expect("Surf fixture must desugar"),
         );
         assert!(
             printed.contains("dtype_bounds: {p: numeric}"),

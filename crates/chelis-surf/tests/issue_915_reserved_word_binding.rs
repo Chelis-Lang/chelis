@@ -21,7 +21,7 @@
 use chelis_surf::parser::parse_str;
 
 fn parse_err(src: &str) -> String {
-    parse_str(src)
+    parse_str(src, &chelis_syntax_host::NativeStack)
         .map(|decls| panic!("expected a parse error, got {} decl(s)", decls.len()))
         .unwrap_err()
         .to_string()
@@ -77,16 +77,23 @@ fn type_and_dim_as_value_bindings_name_the_reserved_word() {
 #[test]
 fn legitimate_sig_declaration_still_parses() {
     let src = "sig f : f64\ndef f() -> f64 = 0.2f64\n";
-    parse_str(src).expect("a real `sig` declaration must still parse");
+    parse_str(src, &chelis_syntax_host::NativeStack)
+        .expect("a real `sig` declaration must still parse");
 }
 
 /// A legitimate type declaration is untouched.
 #[test]
 fn legitimate_type_declaration_still_parses() {
-    parse_str("type Weights = tensor[hidden, hidden, f32]\n")
-        .expect("`type` alias declaration must still parse");
-    parse_str("type Probability = | Probability { value: f32 }\n")
-        .expect("`type` sum declaration must still parse");
+    parse_str(
+        "type Weights = tensor[hidden, hidden, f32]\n",
+        &chelis_syntax_host::NativeStack,
+    )
+    .expect("`type` alias declaration must still parse");
+    parse_str(
+        "type Probability = | Probability { value: f32 }\n",
+        &chelis_syntax_host::NativeStack,
+    )
+    .expect("`type` sum declaration must still parse");
 }
 
 /// A malformed `sig` declaration that is *not* an attempted value binding

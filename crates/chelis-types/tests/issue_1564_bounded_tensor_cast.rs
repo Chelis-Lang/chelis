@@ -3,8 +3,11 @@ use chelis_surf::{desugar::desugar_program, parser::parse_str};
 use chelis_types::{check_ir_program, check_typed_program};
 
 fn check(source: &str, expected: Option<&str>) {
-    let program =
-        desugar_program(&parse_str(source).expect("Surf")).expect("Surf fixture must desugar");
+    let program = desugar_program(
+        &parse_str(source, &chelis_syntax_host::NativeStack).expect("Surf"),
+        &chelis_syntax_host::NativeStack,
+    )
+    .expect("Surf fixture must desugar");
     let messages = |result: Result<_, chelis_types::InferResult>| match result {
         Ok(_) => vec![],
         Err(result) => result

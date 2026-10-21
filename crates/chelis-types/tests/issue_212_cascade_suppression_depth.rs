@@ -8,9 +8,10 @@ use chelis_surf::{desugar::desugar_program, parser::parse_str as parse_surf};
 use chelis_types::{check_ir_program, check_typed_program};
 
 fn surf_to_deep(source: &str) -> Vec<Expr> {
-    let declarations = parse_surf(source).expect("Surf fixture");
+    let declarations = parse_surf(source, &chelis_syntax_host::NativeStack).expect("Surf fixture");
     chelis_macros::expand_program(
-        &desugar_program(&declarations).expect("Surf fixture must desugar"),
+        &desugar_program(&declarations, &chelis_syntax_host::NativeStack)
+            .expect("Surf fixture must desugar"),
         &chelis_macros::ExpansionOptions::default(),
     )
     .expect("macro expansion")

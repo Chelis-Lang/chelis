@@ -5,7 +5,8 @@ use super::*;
 #[test]
 fn prepared_surf_fuzz_library_preserves_source_provenance() {
     let forged = "def pkg__demo__Hidden__identity(x: i64) -> i64 = x\n@property holds forall(x: i64): pkg__demo__Hidden__identity(x) == x\n";
-    let declarations = chelis_surf::parser::parse_str(forged).unwrap();
+    let declarations =
+        chelis_surf::parser::parse_str(forged, &chelis_syntax_host::NativeStack).unwrap();
     let baseline =
         chelis_compiler_api::compiler::eval_decls_selected(&declarations, BTreeMap::new(), &[])
             .unwrap_err();
@@ -42,11 +43,13 @@ fn prepared_surf_samples_preserve_monolithic_guards_predicates_and_shrinking() {
         "@property integer forall(x: i64): x > 5i64\n",
         "@property text forall(x: string): x == \"s0\"\n",
     ] {
-        let decls = chelis_surf::parser::parse_str(source).unwrap();
+        let decls =
+            chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack).unwrap();
         let property = collect_surf_properties(&decls, &decls, None)
             .unwrap()
             .remove(0);
-        let deep = chelis_surf::desugar::desugar_program(&decls).unwrap();
+        let deep = chelis_surf::desugar::desugar_program(&decls, &chelis_syntax_host::NativeStack)
+            .unwrap();
         let roots = SampleRoots::for_program(&deep);
         let cell = SurfEvalProgramCell::new();
         let Ok(program) = surf_eval_program(&decls, &cell) else {
@@ -674,9 +677,11 @@ inner = grad(square, wrt=xx)
 @property ordinary_alias_call forall(x: f32):
   (inner(x) >= 0.0)
 ";
-    let declarations = chelis_surf::parser::parse_str(surf).expect("alias fixture parses");
+    let declarations = chelis_surf::parser::parse_str(surf, &chelis_syntax_host::NativeStack)
+        .expect("alias fixture parses");
     let deep = chelis_deep::printer::print_canonical(
-        &chelis_surf::desugar::desugar_program(&declarations).expect("alias fixture desugars"),
+        &chelis_surf::desugar::desugar_program(&declarations, &chelis_syntax_host::NativeStack)
+            .expect("alias fixture desugars"),
     );
     let all = [
         ("alias_nested", ALIAS_REASON),
@@ -814,12 +819,13 @@ fn colliding_property_spans_preserve_invalid_nested_sibling_during_smt_routing()
 
     let parsed = chelis_surf::parser::parse_str(
         "module Inner
-def pair(x: f32) -> (f32, f32) = (x, x)
-@property invalid_sibling forall(x: f32):
-  (grad(pair, wrt=missing)(x) == x)
-@property reflexive forall(x: f32):
-  (x == x)
-",
+    def pair(x: f32) -> (f32, f32) = (x, x)
+    @property invalid_sibling forall(x: f32):
+      (grad(pair, wrt=missing)(x) == x)
+    @property reflexive forall(x: f32):
+      (x == x)
+    ",
+        &chelis_syntax_host::NativeStack,
     )
     .expect("parse collision fixture");
     let mut module_decls = vec![Decl::Module {
@@ -1175,8 +1181,11 @@ const DEEP_TRUE_PROPERTY: &str = r#"(module {}
 
 #[test]
 fn stamped_deep_property_discovery_never_silently_returns_zero() {
-    let exprs = chelis_deep::parser::parse_and_stamp_file(DEEP_TRUE_PROPERTY)
-        .expect("canonical Deep property stamps");
+    let exprs = chelis_deep::parser::parse_and_stamp_file(
+        DEEP_TRUE_PROPERTY,
+        &chelis_syntax_host::NativeStack,
+    )
+    .expect("canonical Deep property stamps");
     assert!(
         matches!(exprs.first(), Some(DeepExpr::Node(..))),
         "the file ingress must exercise the stamped Node representation: {exprs:#?}"
@@ -1552,7 +1561,9 @@ fn beacon_pipe_goal_must_end_in_bare_tensor_to_scalar() {
 // --- chelis#2965: contract verdicts resolve at the consumer's float widths ---
 
 fn widths_of(source: &str) -> Vec<Prim> {
-    let decls = flatten_module_decls(&chelis_surf::parser::parse_str(source).expect("parses"));
+    let decls = flatten_module_decls(
+        &chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack).expect("parses"),
+    );
     let properties = collect_surf_properties(&decls, &decls, None).expect("properties");
     property_float_widths(&decls, &properties[0])
 }
@@ -1598,7 +1609,9 @@ fn chelis_2965_spelled_widths_cover_suffixes_and_the_unsuffixed_literal_default(
 // --- chelis#2957: a property resolves only the contracts it names ---
 
 fn resolved_rows_of(source: &str) -> Vec<String> {
-    let decls = flatten_module_decls(&chelis_surf::parser::parse_str(source).expect("parses"));
+    let decls = flatten_module_decls(
+        &chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack).expect("parses"),
+    );
     let properties = collect_surf_properties(&decls, &decls, None).expect("properties");
     crate::contracts::RESOLVED_ROWS.with(|rows| rows.borrow_mut().clear());
     contract_assumptions(&decls, &properties[0], &chelis_std_bundle::EMBEDDED_RUNTIME)
@@ -1639,9 +1652,15 @@ def pkg__nautilus__Nautilus__Stats__quantile_vec[n](v: &tensor[n, f32], q: f32) 
 /// declares (binders, then contract-abstraction symbols), and the names the
 /// abstraction minted.
 fn tier_b_contract_variables(source: &str) -> (Vec<String>, Vec<String>) {
-    let decls = flatten_module_decls(&chelis_surf::parser::parse_str(source).expect("parses"));
+    let decls = flatten_module_decls(
+        &chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack).expect("parses"),
+    );
     let trusted = flatten_module_decls(
-        &chelis_surf::parser::parse_str(TRUSTED_CONTRACT_IMPLEMENTATIONS).expect("parses"),
+        &chelis_surf::parser::parse_str(
+            TRUSTED_CONTRACT_IMPLEMENTATIONS,
+            &chelis_syntax_host::NativeStack,
+        )
+        .expect("parses"),
     );
     let properties = collect_surf_properties(&decls, &decls, None).expect("properties");
     let [property] = properties.as_slice() else {
@@ -1848,8 +1867,11 @@ fn chelis_3236_post_check_rejects_a_symbol_that_captured_a_user_name() {
     assert!(reason.contains("#3236"), "{reason}");
     // A symbol spelled like a binder is rejected even if the binder is unused.
     let decls = flatten_module_decls(
-        &chelis_surf::parser::parse_str("module M\n@property p forall(m: f64):\n  true\n")
-            .expect("parses"),
+        &chelis_surf::parser::parse_str(
+            "module M\n@property p forall(m: f64):\n  true\n",
+            &chelis_syntax_host::NativeStack,
+        )
+        .expect("parses"),
     );
     let properties = collect_surf_properties(&decls, &decls, None).expect("properties");
     check_contract_symbols_fresh(
@@ -1961,8 +1983,11 @@ fn chelis_3267_sample_roots_avoid_a_module_definition_of_their_spelling() {
 #[test]
 fn chelis_3267_deep_sample_roots_avoid_a_module_definition_of_their_spelling() {
     let run_deep = |surf: &str| {
-        let decls = chelis_surf::parser::parse_str(surf).expect("parse Surf fixture");
-        let program = chelis_surf::desugar::desugar_program(&decls).expect("desugar fixture");
+        let decls = chelis_surf::parser::parse_str(surf, &chelis_syntax_host::NativeStack)
+            .expect("parse Surf fixture");
+        let program =
+            chelis_surf::desugar::desugar_program(&decls, &chelis_syntax_host::NativeStack)
+                .expect("desugar fixture");
         let opts = PropertyRunOptions {
             tier: "fuzz-only".to_string(),
             samples: 32,
@@ -2007,7 +2032,8 @@ fn chelis_3267_injection_roots_avoid_a_module_definition_of_their_spelling() {
 fn semantic_declaration_view_keeps_exact_production_lowering_and_authored_properties() {
     use crate::solver::{CmpOp, SmtExpr};
     let source = "def declared(dummy: i32) -> f64 = 1.1\ndef wide(dummy: i32) -> i64 = 3000000000\n@property true_case forall(x: i32): declared(x) == 1.1f64\n@property false_case forall(x: i32): declared(x) != 1.1f64\n@property wide_case forall(x: i32): wide(x) == 3000000000i64\n";
-    let declarations = chelis_surf::parser::parse_str(source).unwrap();
+    let declarations =
+        chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack).unwrap();
     let original = declarations.clone();
     let properties = collect_surf_properties(&declarations, &declarations, None).unwrap();
     let semantic = SemanticSurfProgram::new(&declarations).unwrap();
@@ -2054,7 +2080,8 @@ fn scalar_grad_literals_share_finalized_values_with_ordinary_lowering() {
         let source = format!(
             "def coefficient(x: {dtype}) -> {dtype} = x * {literal}\ndef helper(x: {dtype}) -> {dtype} = coefficient(x)\n@property positive forall(x: {dtype}): grad(coefficient, wrt=x)(x) == {literal}\n@property negative forall(x: {dtype}): grad(coefficient, wrt=x)(x) != {literal}\n@property nested forall(x: {dtype}): grad(helper, wrt=x)(x) == {literal}\n@property inline forall(x: {dtype}): grad(fn (xx: {dtype}) -> xx * {literal}, wrt=xx)(x) == {literal}\n"
         );
-        let declarations = chelis_surf::parser::parse_str(&source).unwrap();
+        let declarations =
+            chelis_surf::parser::parse_str(&source, &chelis_syntax_host::NativeStack).unwrap();
         let original = declarations.clone();
         let properties = collect_surf_properties(&declarations, &declarations, None).unwrap();
         let semantic = SemanticSurfProgram::new(&declarations).unwrap();
@@ -2091,7 +2118,8 @@ fn scalar_grad_literals_share_finalized_values_with_ordinary_lowering() {
 #[test]
 fn declared_f64_guard_interval_executes_through_default_enabled_fuzz_runner() {
     let source = "def declared(dummy: i32) -> f64 = 1.1\n@property exact forall(x: f64) where x >= declared(0), x <= 1.1f64:\n  x == 1.1f64\n@property false_twin forall(x: f64) where x >= declared(0), x <= 1.1f64:\n  x != 1.1f64\n";
-    let declarations = chelis_surf::parser::parse_str(source).unwrap();
+    let declarations =
+        chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack).unwrap();
     let properties = collect_surf_properties(&declarations, &declarations, None).unwrap();
     let outcomes = run_surf(source, "fuzz-only");
     assert_eq!(outcomes[0].status, PropertyStatus::Passed, "{outcomes:?}");
@@ -2154,7 +2182,8 @@ fn induction_plan_lowers_declared_helpers_from_the_cached_semantic_view() {
         let source = format!(
             "def declared(dummy: i32) -> {dtype} = {literal}\ndef model(n: i32) -> {dtype} = if n <= 0 then declared(n) else model(n - 1)\n@property positive forall(n: i32) where n >= 0:\n  model(n) == {literal}{dtype}\n@property negative forall(n: i32) where n >= 0:\n  model(n) != {literal}{dtype}\n"
         );
-        let declarations = chelis_surf::parser::parse_str(&source).unwrap();
+        let declarations =
+            chelis_surf::parser::parse_str(&source, &chelis_syntax_host::NativeStack).unwrap();
         let semantic = SemanticSurfProgram::new(&declarations).unwrap();
         let properties = collect_surf_properties(&declarations, &declarations, None).unwrap();
         for (property, comparison) in properties.iter().zip([CmpOp::Eq, CmpOp::Ne]) {
@@ -2781,7 +2810,7 @@ fn issue_3697_schedule_participation_matches_the_sampler() {
     for spelling in spellings {
         let source =
             format!("module T.Probe\n@property p forall(v: {spelling}):\n  (1.0f64 == 1.0f64)\n");
-        let decls = chelis_surf::parser::parse_str(&source)
+        let decls = chelis_surf::parser::parse_str(&source, &chelis_syntax_host::NativeStack)
             .unwrap_or_else(|error| panic!("`{spelling}` must parse: {error}"));
         let mut found = Vec::new();
         collect_property_decls(&decls, None, &mut Vec::new(), &mut found);

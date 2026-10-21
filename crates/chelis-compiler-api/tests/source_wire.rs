@@ -351,8 +351,11 @@ fn raw_dto_and_preserved_unknown_forms_do_not_establish_source_admission() {
 
 #[test]
 fn typed_deep_wire_bridge_preserves_complete_node_shape() {
-    let exprs =
-        chelis_deep::parse_and_stamp_file("(def {doc: \"test\"} root (var {} value))").unwrap();
+    let exprs = chelis_deep::parse_and_stamp_file(
+        "(def {doc: \"test\"} root (var {} value))",
+        &chelis_syntax_host::NativeStack,
+    )
+    .unwrap();
     let wire = source_wire::wire_deep_expr(&exprs[0]).unwrap();
     let json = roundtrip(&wire);
     let elements = json["kind"]["elements"].as_array().unwrap();

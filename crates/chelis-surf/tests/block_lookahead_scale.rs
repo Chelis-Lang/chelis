@@ -11,7 +11,7 @@ fn generated_scalar_block_has_bounded_parse_time() {
     }
     source.push_str("v19999\n}\n");
     let started = Instant::now();
-    let parsed = parse_str(&source).unwrap();
+    let parsed = parse_str(&source, &chelis_syntax_host::NativeStack).unwrap();
     assert_eq!(parsed.len(), 1);
     // A deliberately generous ceiling. The former full token-vector clone at
     // every binding took tens of seconds; a shared immutable stream takes ms.
@@ -28,12 +28,12 @@ fn lookahead_preserves_tuple_typed_binding_and_tail_boundaries() {
         "def f(x: f64) = {\n(a, (b, _)) = (x, (x, x))\nc: f64 = a\n(c, b)\n}",
         "def f(x: f64) = {\na = x\n(a, x)\n}",
     ] {
-        assert!(parse_str(source).is_ok());
+        assert!(parse_str(source, &chelis_syntax_host::NativeStack).is_ok());
     }
     for source in [
         "def f(x: f64) = {\n(a, b) = (x, x)\n}\n",
         "def f(x: f64) = {\na: f64 = x\n(a, x)\nx\n}\n",
     ] {
-        assert!(parse_str(source).is_err());
+        assert!(parse_str(source, &chelis_syntax_host::NativeStack).is_err());
     }
 }

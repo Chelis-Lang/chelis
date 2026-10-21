@@ -1,5 +1,10 @@
 //! Shared structural operations over Deep patterns.
 
+use alloc::{
+    string::{String, ToString},
+    vec::Vec,
+};
+
 use crate::{Atom, DeepTag, Expr};
 
 /// Return every value binder introduced by a Deep pattern.
@@ -131,7 +136,8 @@ mod tests {
     fn nested_node_patterns_collect_all_binders() {
         let exprs = crate::parser::parse_str(
             "(pat-as {} whole (pat-tuple {} (pat-var {} left) \
-             (pat-ctor {} Pair (pat-var {} right) (pat-wild {}))))",
+         (pat-ctor {} Pair (pat-var {} right) (pat-wild {}))))",
+            &chelis_syntax_host::NativeStack,
         )
         .expect("pattern fixture must parse");
         assert_eq!(pattern_binder_names(&exprs[0]), ["whole", "left", "right"]);

@@ -8,9 +8,11 @@ use tempfile::tempdir;
 fn eval_source(source: &str, json: bool, deep: bool) -> std::process::Output {
     let dir = tempdir().expect("tempdir");
     let (name, source) = if deep {
-        let declarations = chelis_surf::parser::parse_str(source).expect("parse Surf");
-        let expressions = chelis_surf::desugar::desugar_program(&declarations)
-            .expect("Surf fixture must desugar");
+        let declarations = chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+            .expect("parse Surf");
+        let expressions =
+            chelis_surf::desugar::desugar_program(&declarations, &chelis_syntax_host::NativeStack)
+                .expect("Surf fixture must desugar");
         (
             "failure.dp",
             chelis_deep::printer::print_canonical(&expressions),
@@ -18,7 +20,8 @@ fn eval_source(source: &str, json: bool, deep: bool) -> std::process::Output {
     } else {
         (
             "failure.ch",
-            chelis_surf::format::format_source(source).expect("format"),
+            chelis_surf::format::format_source(source, &chelis_syntax_host::NativeStack)
+                .expect("format"),
         )
     };
     let path = dir.path().join(name);
@@ -114,7 +117,8 @@ fn text_transcript_reaches_a_shared_sink_before_the_diagnostic() {
     let source = program("_ = print(\"before\")\nfail(\"authored failure\")");
     fs::write(
         &path,
-        chelis_surf::format::format_source(&source).expect("format"),
+        chelis_surf::format::format_source(&source, &chelis_syntax_host::NativeStack)
+            .expect("format"),
     )
     .expect("fixture");
     let mut sink = tempfile::tempfile().expect("sink");

@@ -29,8 +29,11 @@ fn chain(k: usize) -> CheckedProgram {
     let items = (0..k).map(|index| format!("t{index}")).collect::<Vec<_>>();
     writeln!(source, "  [{}]\n}}", items.join(", ")).unwrap();
     source.push_str("r = index(f(1i64), 0i64)\n");
-    let declarations = chelis_surf::parser::parse_str(&source).expect("the probe parses");
-    let deep = chelis_surf::desugar::desugar_program(&declarations).expect("the probe desugars");
+    let declarations = chelis_surf::parser::parse_str(&source, &chelis_syntax_host::NativeStack)
+        .expect("the probe parses");
+    let deep =
+        chelis_surf::desugar::desugar_program(&declarations, &chelis_syntax_host::NativeStack)
+            .expect("the probe desugars");
     chelis_types::check_typed_program(&deep).expect("the probe checks")
 }
 

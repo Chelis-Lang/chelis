@@ -23,7 +23,8 @@ use chelis_types::{check_ir_program, check_typed_program};
 type Diagnostics = Vec<(String, Option<String>, Option<String>)>;
 
 fn diagnostics(source: &str, typed: bool) -> Diagnostics {
-    let exprs = parse_and_stamp(source).expect("fixture must parse and stamp");
+    let exprs = parse_and_stamp(source, &chelis_syntax_host::NativeStack)
+        .expect("fixture must parse and stamp");
     let result = if typed {
         check_typed_program(&exprs)
     } else {

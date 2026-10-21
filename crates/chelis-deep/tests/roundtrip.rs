@@ -5,9 +5,10 @@ use chelis_deep::validate::validate;
 use chelis_deep::{Atom, Expr};
 
 fn roundtrip(source: &str) {
-    let exprs1 = parse_str(source).expect("first parse failed");
+    let exprs1 = parse_str(source, &chelis_syntax_host::NativeStack).expect("first parse failed");
     let printed = print_canonical(&exprs1);
-    let exprs2 = parse_str(&printed).expect("second parse failed (printed output was invalid)");
+    let exprs2 = parse_str(&printed, &chelis_syntax_host::NativeStack)
+        .expect("second parse failed (printed output was invalid)");
     let reprinted = print_canonical(&exprs2);
     assert_eq!(
         printed, reprinted,
@@ -48,7 +49,7 @@ fn roundtrip_pipeline() {
 fn post_sprint_def_ast_structure() {
     // Post-sprint 3-tuple: (def {} square (fn {} (params {} x) (app {} (var {} mul) (var {} x) (var {} x))))
     let src = "(def {} square (fn {} (params {} x) (app {} (var {} mul) (var {} x) (var {} x))))";
-    let exprs = parse_str(src).expect("parse failed");
+    let exprs = parse_str(src, &chelis_syntax_host::NativeStack).expect("parse failed");
     assert_eq!(exprs.len(), 1);
 
     match &exprs[0] {
@@ -74,7 +75,7 @@ fn post_sprint_def_ast_structure() {
 #[test]
 fn multiple_top_level_exprs() {
     let source = "(deftype {} Foo ()) (def {} bar (fn {} (params {}) (var {} nop)))";
-    let exprs = parse_str(source).expect("parse failed");
+    let exprs = parse_str(source, &chelis_syntax_host::NativeStack).expect("parse failed");
     assert_eq!(exprs.len(), 2);
     match &exprs[0] {
         Expr::Node(node, _) => assert_eq!(node.tag(), DeepTag::Deftype),
@@ -90,7 +91,7 @@ fn multiple_top_level_exprs() {
 
 #[test]
 fn error_unmatched_open_paren() {
-    let result = parse_str("(add 1 2");
+    let result = parse_str("(add 1 2", &chelis_syntax_host::NativeStack);
     assert!(result.is_err());
     let msg = result.unwrap_err().to_string();
     assert!(
@@ -101,7 +102,7 @@ fn error_unmatched_open_paren() {
 
 #[test]
 fn error_unexpected_close_paren() {
-    let result = parse_str(")");
+    let result = parse_str(")", &chelis_syntax_host::NativeStack);
     assert!(result.is_err());
     let msg = result.unwrap_err().to_string();
     assert!(msg.contains("found )"), "expected ')' error, got: {msg}");
@@ -110,13 +111,13 @@ fn error_unexpected_close_paren() {
 #[test]
 fn empty_list_now_valid() {
     // Empty lists () are valid in the new spec (e.g., empty guard)
-    let exprs = parse_str("()").unwrap();
+    let exprs = parse_str("()", &chelis_syntax_host::NativeStack).unwrap();
     assert_eq!(exprs.len(), 1);
 }
 
 #[test]
 fn error_incomplete_metadata() {
-    let result = parse_str("^{:type}");
+    let result = parse_str("^{:type}", &chelis_syntax_host::NativeStack);
     assert!(result.is_err(), "incomplete metadata should fail to parse");
 }
 
@@ -124,7 +125,7 @@ fn error_incomplete_metadata() {
 
 #[test]
 fn parse_empty_map() {
-    let exprs = parse_str("{}").unwrap();
+    let exprs = parse_str("{}", &chelis_syntax_host::NativeStack).unwrap();
     assert_eq!(exprs.len(), 1);
     match &exprs[0] {
         Expr::Map(m, _) => assert!(m.is_empty()),
@@ -134,7 +135,7 @@ fn parse_empty_map() {
 
 #[test]
 fn parse_map_with_entries() {
-    let exprs = parse_str("{type: (t-prim {} f32)}").unwrap();
+    let exprs = parse_str("{type: (t-prim {} f32)}", &chelis_syntax_host::NativeStack).unwrap();
     assert_eq!(exprs.len(), 1);
     match &exprs[0] {
         Expr::Map(m, _) => {
@@ -147,7 +148,11 @@ fn parse_map_with_entries() {
 
 #[test]
 fn parse_3tuple_node() {
-    let exprs = parse_str("(app {} (var {} f) (var {} x))").unwrap();
+    let exprs = parse_str(
+        "(app {} (var {} f) (var {} x))",
+        &chelis_syntax_host::NativeStack,
+    )
+    .unwrap();
     assert_eq!(exprs.len(), 1);
     roundtrip("(app {} (var {} f) (var {} x))");
 }
@@ -166,7 +171,7 @@ fn spec_colon_as_list_head_parser_leniency() {
     // Parser accepts (: 42 i32) — bare list, not a 3-tuple node.
     // Validator only checks 3-tuple nodes (sym + Map + children),
     // so bare lists like this pass without warnings.
-    let exprs = parse_str("(: 42 i32)").expect("parse failed");
+    let exprs = parse_str("(: 42 i32)", &chelis_syntax_host::NativeStack).expect("parse failed");
     assert_eq!(exprs.len(), 1);
     match &exprs[0] {
         Expr::BareList(elems, _) => {
@@ -191,7 +196,7 @@ fn spec_colon_as_list_head_parser_leniency() {
 fn spec_nested_lists_post_sprint() {
     // Numbered-spec form: type parameters are a structural binder list.
     let src = "(deftype {} Option (a) (variant {} Some (t-var {} a)) (variant {} None))";
-    let exprs = parse_str(src).expect("parse failed");
+    let exprs = parse_str(src, &chelis_syntax_host::NativeStack).expect("parse failed");
     assert_eq!(exprs.len(), 1);
     match &exprs[0] {
         Expr::Node(node, _) => {
@@ -211,7 +216,11 @@ fn spec_nested_lists_post_sprint() {
 fn spec_metadata_on_list_items() {
     // (fn (^{:type (t-prim {} f32)} x) body) — metadata on items within a list.
     // Since the list lacks a metadata map at index 1, this becomes a BareList.
-    let exprs = parse_str("(fn (^{:type (t-prim {} f32)} x) body)").expect("parse failed");
+    let exprs = parse_str(
+        "(fn (^{:type (t-prim {} f32)} x) body)",
+        &chelis_syntax_host::NativeStack,
+    )
+    .expect("parse failed");
     assert_eq!(exprs.len(), 1);
     match &exprs[0] {
         Expr::BareList(outer, _) => {
@@ -238,7 +247,7 @@ fn spec_metadata_on_list_items() {
 #[test]
 fn spec_float_exponent_only() {
     // -1e-5 as a single Float atom
-    let exprs = parse_str("-1e-5").expect("parse failed");
+    let exprs = parse_str("-1e-5", &chelis_syntax_host::NativeStack).expect("parse failed");
     assert_eq!(exprs.len(), 1);
     match &exprs[0] {
         Expr::Atom(Atom::Float(f), _) => assert!((f - (-1e-5)).abs() < 1e-15),
@@ -246,7 +255,7 @@ fn spec_float_exponent_only() {
     }
 
     // 1e10 as Float
-    let exprs = parse_str("1e10").expect("parse failed");
+    let exprs = parse_str("1e10", &chelis_syntax_host::NativeStack).expect("parse failed");
     assert_eq!(exprs.len(), 1);
     match &exprs[0] {
         Expr::Atom(Atom::Float(f), _) => assert!((f - 1e10).abs() < 1.0),
@@ -254,7 +263,7 @@ fn spec_float_exponent_only() {
     }
 
     // 5E3 as Float
-    let exprs = parse_str("5E3").expect("parse failed");
+    let exprs = parse_str("5E3", &chelis_syntax_host::NativeStack).expect("parse failed");
     assert_eq!(exprs.len(), 1);
     match &exprs[0] {
         Expr::Atom(Atom::Float(f), _) => assert!((f - 5e3).abs() < 1e-10),
@@ -265,7 +274,8 @@ fn spec_float_exponent_only() {
 // ── Fixture validation tests ─────────────────────────────────────
 
 fn assert_fixture_valid(name: &str, source: &str) {
-    let exprs = parse_str(source).unwrap_or_else(|e| panic!("fixture {name} failed to parse: {e}"));
+    let exprs = parse_str(source, &chelis_syntax_host::NativeStack)
+        .unwrap_or_else(|e| panic!("fixture {name} failed to parse: {e}"));
     let warnings = validate(&exprs);
     assert!(
         warnings.is_empty(),
@@ -288,13 +298,13 @@ fn all_fixtures_pass_tag_validator() {
 #[test]
 fn pretty_and_flat_printers_round_trip_to_same_ast() {
     let source = include_str!("fixtures/pattern_match.dp");
-    let exprs = parse_str(source).expect("parse fixture");
+    let exprs = parse_str(source, &chelis_syntax_host::NativeStack).expect("parse fixture");
 
     let pretty = print_canonical(&exprs);
     let flat = print_canonical_flat(&exprs);
 
-    let pretty_exprs = parse_str(&pretty).expect("parse pretty");
-    let flat_exprs = parse_str(&flat).expect("parse flat");
+    let pretty_exprs = parse_str(&pretty, &chelis_syntax_host::NativeStack).expect("parse pretty");
+    let flat_exprs = parse_str(&flat, &chelis_syntax_host::NativeStack).expect("parse flat");
 
     assert_eq!(print_canonical(&pretty_exprs), pretty);
     assert_eq!(print_canonical_flat(&pretty_exprs), flat);

@@ -38,8 +38,11 @@ fn prove_json(source: &str, extra: &[&str]) -> (i32, Vec<Value>, String) {
 }
 
 fn generated_deep(source: &str) -> String {
-    let declarations = chelis_surf::parser::parse_str(source).expect("Surf fixture parses");
-    let deep = chelis_surf::desugar::desugar_program(&declarations).expect("Surf fixture desugars");
+    let declarations = chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+        .expect("Surf fixture parses");
+    let deep =
+        chelis_surf::desugar::desugar_program(&declarations, &chelis_syntax_host::NativeStack)
+            .expect("Surf fixture desugars");
     chelis_deep::printer::print_canonical(&deep)
 }
 

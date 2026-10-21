@@ -30,8 +30,9 @@ use chelis_types::errors::CheckError;
 use chelis_types::{check_ir_program, check_typed_program};
 
 fn desugared(source: &str) -> Vec<Expr> {
-    let decls = parse_surf(source).unwrap_or_else(|e| panic!("surf must parse: {source}\n{e:?}"));
-    desugar_program(&decls).expect("Surf fixture must desugar")
+    let decls = parse_surf(source, &chelis_syntax_host::NativeStack)
+        .unwrap_or_else(|e| panic!("surf must parse: {source}\n{e:?}"));
+    desugar_program(&decls, &chelis_syntax_host::NativeStack).expect("Surf fixture must desugar")
 }
 
 fn expanded(source: &str) -> Vec<Expr> {
@@ -1465,7 +1466,7 @@ fn group_fixtures() -> Vec<(String, String)> {
             if (program.starts_with("def ")
                 || program.starts_with("type ")
                 || program.starts_with("sig "))
-                && parse_surf(program).is_ok()
+                && parse_surf(program, &chelis_syntax_host::NativeStack).is_ok()
                 && has_recursive_group(program)
             {
                 fixtures.push((format!("{file} literal {index}"), program.to_string()));
@@ -1478,7 +1479,8 @@ fn group_fixtures() -> Vec<(String, String)> {
             .split_once('\n')
             .expect("a fixture is a `==== name` line and a program");
         assert!(
-            parse_surf(program).is_ok() && has_recursive_group(program),
+            parse_surf(program, &chelis_syntax_host::NativeStack).is_ok()
+                && has_recursive_group(program),
             "fixture `{name}` must parse and hold a recursive group:\n{program}"
         );
         fixtures.push((name.to_string(), program.to_string()));
@@ -1506,7 +1508,9 @@ fn every_group_fixture_has_one_outcome_in_every_declaration_order() {
     for (name, program) in &fixtures {
         let orders = reorderings(program);
         assert!(
-            orders.iter().all(|order| parse_surf(order).is_ok()),
+            orders
+                .iter()
+                .all(|order| parse_surf(order, &chelis_syntax_host::NativeStack).is_ok()),
             "`{name}`: every reordering of a fixture must parse:\n{program}"
         );
         reordered += usize::from(orders.len() > 1);

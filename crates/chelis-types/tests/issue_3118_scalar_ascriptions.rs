@@ -3,7 +3,11 @@ use chelis_surf::{desugar::desugar_program, parser::parse_str};
 use chelis_types::check_typed_program;
 
 fn check(source: &str) -> Result<(), String> {
-    let deep = desugar_program(&parse_str(source).expect("Surf parse")).expect("desugar");
+    let deep = desugar_program(
+        &parse_str(source, &chelis_syntax_host::NativeStack).expect("Surf parse"),
+        &chelis_syntax_host::NativeStack,
+    )
+    .expect("desugar");
     check_typed_program(&deep)
         .map(|_| ())
         .map_err(|e| format!("{:?}", e.errors))

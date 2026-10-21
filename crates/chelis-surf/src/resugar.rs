@@ -6,6 +6,12 @@
 //! AST position. This module never substitutes `()` or a comment for source
 //! code.
 
+use alloc::boxed::Box;
+use alloc::collections::{BTreeMap, BTreeSet};
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::vec;
+use alloc::vec::Vec;
 use chelis_deep::annotations::{
     BindingTypeOrigin, EffectMember, LiteralStyle, MetadataKey as K, MetadataValue as M, TypeSyntax,
 };
@@ -14,7 +20,6 @@ use chelis_deep::cons_spine::{ConsSpine, ConsSpineTail};
 use chelis_deep::{DeepTag, LiteralSuffix, Span, cast_mode_of, decode_dtype_bounds};
 use chelis_unord::{UnordMap, UnordSet};
 use chelis_vocab::EffectKind;
-use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 
 use crate::ast::{
@@ -190,25 +195,27 @@ fn defsig_parts<'a>(node: &NodeRef<'a>) -> Result<(Vec<String>, &'a DeepExpr), R
 /// Keeping construction and rendering separate makes it impossible for this
 /// path to invent a second spelling for an AST construct.
 pub fn resugar_expression(expr: &DeepExpr) -> Result<Expr, ResugarError> {
-    chelis_deep::metadata::validate_metadata(std::slice::from_ref(expr))?;
-    validate_grad_selector_consistency(std::slice::from_ref(expr))?;
+    chelis_deep::metadata::validate_metadata(core::slice::from_ref(expr))?;
+    validate_grad_selector_consistency(core::slice::from_ref(expr))?;
     reject_extensions(expr)?;
     validate_binder_literal_adoption(expr, &[], &[])?;
-    let _declared = DeclaredTensorsScope::install(DeclaredTensors::default());
-    let _explicit = ExplicitLiteralSpansScope::install();
-    let mut expression = resugar_expression_inner(expr)?;
-    strip_redundant_expression_suffixes(&mut expression);
+    let mut state = ResugarState::default();
+    let mut expression = resugar_expression_inner(expr, &mut state)?;
+    strip_redundant_expression_suffixes(&mut expression, state.redundant);
     Ok(expression)
 }
 
-fn resugar_expression_inner(expr: &DeepExpr) -> Result<Expr, ResugarError> {
+fn resugar_expression_inner(
+    expr: &DeepExpr,
+    state: &mut ResugarState,
+) -> Result<Expr, ResugarError> {
     let node = node_ref(expr)?;
     let annotation = (node.tag != DeepTag::Lit)
         .then(|| node.meta.ty().map(|v| v.expression()).map(resugar_type))
         .flatten()
         .transpose()?;
     let span = node.span;
-    let expression = resugar_node(node)?;
+    let expression = resugar_node(node, state)?;
     let expression = match annotation {
         Some(ty) => Expr::Annotate(Box::new(expression), ty, span),
         None => expression,
@@ -247,48 +254,24 @@ fn resugar_program_with_literal_types(
     for expr in exprs {
         reject_extensions(expr)?;
     }
-    let _declared = DeclaredTensorsScope::install(DeclaredTensors::collect(exprs));
-    let _explicit = ExplicitLiteralSpansScope::install();
-    let mut declarations = resugar_declaration_sequence(exprs)?;
+    let mut state = ResugarState {
+        declared: DeclaredTensors::collect(exprs),
+        redundant: RedundantSuffixes::default(),
+    };
+    let mut declarations = resugar_declaration_sequence(exprs, &mut state)?;
     if !retain_literal_types {
-        strip_redundant_suffixes(&mut declarations);
+        strip_redundant_suffixes(&mut declarations, state.redundant);
     }
     validate_surface_declarations(&declarations)?;
     Ok(declarations)
 }
 
-thread_local! {
-    /// The spans of the `explicit`-style literals one resugaring prints. A
-    /// suffix the author wrote at the default is kept; a span shared with
-    /// another literal can only keep one more suffix, which is always safe.
-    static EXPLICIT_LITERAL_SPANS: std::cell::RefCell<BTreeSet<(usize, usize)>> =
-        std::cell::RefCell::default();
-}
-
-/// One resugaring's explicit-literal spans. Installing starts the request
-/// from an empty set and dropping restores the enclosing request's set, so a
-/// request that fails part way never leaves spans for the next one.
-struct ExplicitLiteralSpansScope(BTreeSet<(usize, usize)>);
-
-impl ExplicitLiteralSpansScope {
-    fn install() -> Self {
-        Self(EXPLICIT_LITERAL_SPANS.with(|spans| std::mem::take(&mut *spans.borrow_mut())))
-    }
-}
-
-impl Drop for ExplicitLiteralSpansScope {
-    fn drop(&mut self) {
-        let enclosing = std::mem::take(&mut self.0);
-        EXPLICIT_LITERAL_SPANS.with(|spans| *spans.borrow_mut() = enclosing);
-    }
-}
-
-fn record_explicit_literal(span: chelis_deep::Span) {
-    EXPLICIT_LITERAL_SPANS.with(|spans| spans.borrow_mut().insert((span.offset, span.len)));
-}
-
-fn take_explicit_literal_spans() -> BTreeSet<(usize, usize)> {
-    EXPLICIT_LITERAL_SPANS.with(|spans| std::mem::take(&mut *spans.borrow_mut()))
+/// One public request owns the tensor catalog and suffix data.
+/// Recursive construction shares this state. Errors discard it with the request.
+#[derive(Default)]
+struct ResugarState {
+    declared: DeclaredTensors,
+    redundant: RedundantSuffixes,
 }
 
 /// spec/03 §6.3.1: a printed literal goes bare only where re-reading it binds
@@ -297,21 +280,13 @@ fn take_explicit_literal_spans() -> BTreeSet<(usize, usize)> {
 /// suffix is the token default, and in a declaration or under a dtype
 /// argument when its suffix is the stated primitive. A cast operand and a
 /// dtype-less `to_tensor` element always keep their suffix.
-fn strip_redundant_suffixes(declarations: &mut [Decl]) {
-    let mut redundant = RedundantSuffixes {
-        explicit: take_explicit_literal_spans(),
-        ..RedundantSuffixes::default()
-    };
+fn strip_redundant_suffixes(declarations: &mut [Decl], mut redundant: RedundantSuffixes) {
     crate::literal_sites::visit_program(declarations, &mut redundant);
     let tokens = redundant.tokens;
     crate::pipe_sugar::visit_program_mut(declarations, &mut |expr| strip_suffix(expr, &tokens));
 }
 
-fn strip_redundant_expression_suffixes(expression: &mut Expr) {
-    let mut redundant = RedundantSuffixes {
-        explicit: take_explicit_literal_spans(),
-        ..RedundantSuffixes::default()
-    };
+fn strip_redundant_expression_suffixes(expression: &mut Expr, mut redundant: RedundantSuffixes) {
     crate::literal_sites::visit_expression(expression, &mut redundant);
     let tokens = redundant.tokens;
     crate::pipe_sugar::visit_expr_mut(expression, &mut |expr| strip_suffix(expr, &tokens));
@@ -1354,8 +1329,8 @@ fn strip_matching_param_type_items(
 }
 
 fn same_deep_shape(left: &DeepExpr, right: &DeepExpr) -> bool {
-    chelis_deep::printer::print_canonical(std::slice::from_ref(left))
-        == chelis_deep::printer::print_canonical(std::slice::from_ref(right))
+    chelis_deep::printer::print_canonical(core::slice::from_ref(left))
+        == chelis_deep::printer::print_canonical(core::slice::from_ref(right))
 }
 
 fn rebuild_node_like(
@@ -1690,7 +1665,10 @@ fn strip_reconstructible_surface_metadata(
     meta
 }
 
-fn resugar_declaration_sequence(exprs: &[DeepExpr]) -> Result<Vec<Decl>, ResugarError> {
+fn resugar_declaration_sequence(
+    exprs: &[DeepExpr],
+    state: &mut ResugarState,
+) -> Result<Vec<Decl>, ResugarError> {
     let mut declarations = Vec::new();
     let mut index = 0;
     while index < exprs.len() {
@@ -1703,7 +1681,7 @@ fn resugar_declaration_sequence(exprs: &[DeepExpr]) -> Result<Vec<Decl>, Resugar
                     && definition.tag == DeepTag::Def
                     && definition.children.first().and_then(atom_name) == Some(name.as_str())
                 {
-                    let declaration = resugar_definition(Some(&node), definition)?;
+                    let declaration = resugar_definition(Some(&node), definition, state)?;
                     let (declared_binders, _) = defsig_parts(&node)?;
                     if !declared_binders.is_empty()
                         && let Decl::LetDef {
@@ -1730,14 +1708,14 @@ fn resugar_declaration_sequence(exprs: &[DeepExpr]) -> Result<Vec<Decl>, Resugar
                 index += 1;
             }
             DeepTag::Def => {
-                declarations.push(resugar_definition(None, node)?);
+                declarations.push(resugar_definition(None, node, state)?);
                 index += 1;
             }
             DeepTag::Module => {
                 at_least(&node, 1)?;
                 declarations.push(Decl::Module {
                     name: resugar_surface_path(&node, 0)?,
-                    decls: resugar_declaration_sequence(&node.children[1..])?,
+                    decls: resugar_declaration_sequence(&node.children[1..], state)?,
                     span: node.span,
                 });
                 index += 1;
@@ -1807,7 +1785,7 @@ fn resugar_declaration_sequence(exprs: &[DeepExpr]) -> Result<Vec<Decl>, Resugar
                 index += group_size;
             }
             DeepTag::Deftype => {
-                declarations.push(resugar_type_definition(node)?);
+                declarations.push(resugar_type_definition(node, state)?);
                 index += 1;
             }
             DeepTag::Typealias => {
@@ -1840,6 +1818,7 @@ fn resugar_signature(node: &NodeRef<'_>, name: String) -> Result<Decl, ResugarEr
 fn resugar_definition(
     signature: Option<&NodeRef<'_>>,
     definition: NodeRef<'_>,
+    state: &mut ResugarState,
 ) -> Result<Decl, ResugarError> {
     exact(&definition, 2)?;
     let name = name_child(&definition, 0)?.to_string();
@@ -1886,7 +1865,7 @@ fn resugar_definition(
 
     if definition.meta.chelis_role().map(|v| v.value().as_str()) == Some("property") {
         let type_binders = resugar_dtype_bound_binders(bound_source, &declared_binders)?;
-        return resugar_property(declared_type, definition, name, type_binders);
+        return resugar_property(declared_type, definition, name, type_binders, state);
     }
 
     if value_node.is_some_and(|node| node.tag == DeepTag::Fn) {
@@ -1896,7 +1875,7 @@ fn resugar_definition(
         let raw_params = node_ref(&function.children[0])?;
         let mut ret_ty = None;
         let mut effects = None;
-        let mut result_declares_tensor = declared_tensors().results.contains(&name);
+        let mut result_declares_tensor = state.declared.results.contains(&name);
         if let Some(declared_type) = declared_type {
             let type_node = node_ref(declared_type)?;
             if type_node.tag != DeepTag::TFn || type_node.children.is_empty() {
@@ -1949,19 +1928,19 @@ fn resugar_definition(
             params,
             ret_ty,
             effects,
-            body: resugar_declared_value(&function.children[1], result_declares_tensor)?,
+            body: resugar_declared_value(&function.children[1], result_declares_tensor, state)?,
             span: definition.span,
         });
     }
 
     let value_declares_tensor = match declared_type {
         Some(declared_type) => is_tensor_type(declared_type),
-        None => declared_tensors().values.contains(&name),
+        None => state.declared.values.contains(&name),
     };
     Ok(Decl::LetDef {
         name,
         ty: declared_type.map(resugar_type).transpose()?,
-        value: resugar_declared_value(&definition.children[1], value_declares_tensor)?,
+        value: resugar_declared_value(&definition.children[1], value_declares_tensor, state)?,
         span: definition.span,
     })
 }
@@ -1971,6 +1950,7 @@ fn resugar_property(
     definition: NodeRef<'_>,
     name: String,
     type_binders: Vec<TypeBinder>,
+    state: &mut ResugarState,
 ) -> Result<Decl, ResugarError> {
     let function = node_ref(&definition.children[1])?;
     if function.tag != DeepTag::Fn {
@@ -2076,21 +2056,21 @@ fn resugar_property(
         })?
         .values()
         .iter()
-        .map(|value| resugar_expression_inner(value.expression()))
+        .map(|value| resugar_expression_inner(value.expression(), state))
         .collect::<Result<Vec<_>, _>>()?;
     let mut options = Vec::new();
     for value in definition.meta.values() {
         match value {
             M::PropertyTolerance(v) => options.push(PropertyOption::Tolerance(
-                resugar_expression_inner(v.expression())?,
+                resugar_expression_inner(v.expression(), state)?,
                 v.span(),
             )),
             M::PropertySeed(v) => options.push(PropertyOption::Seed(
-                resugar_expression_inner(v.expression())?,
+                resugar_expression_inner(v.expression(), state)?,
                 v.span(),
             )),
             M::PropertySamples(v) => options.push(PropertyOption::Samples(
-                resugar_expression_inner(v.expression())?,
+                resugar_expression_inner(v.expression(), state)?,
                 v.span(),
             )),
             M::PropertyContracts(v) => options.extend(
@@ -2107,7 +2087,7 @@ fn resugar_property(
         type_binders,
         params,
         preconditions,
-        body: resugar_expression_inner(&function.children[1])?,
+        body: resugar_expression_inner(&function.children[1], state)?,
         options,
         span: definition.span,
     })
@@ -2208,7 +2188,10 @@ fn resugar_type_alias(node: NodeRef<'_>) -> Result<Decl, ResugarError> {
     })
 }
 
-fn resugar_type_definition(node: NodeRef<'_>) -> Result<Decl, ResugarError> {
+fn resugar_type_definition(
+    node: NodeRef<'_>,
+    state: &mut ResugarState,
+) -> Result<Decl, ResugarError> {
     if node.children.len() < 2 {
         return Err(ResugarError::MinimumArity {
             tag: node.tag.as_str(),
@@ -2224,7 +2207,7 @@ fn resugar_type_definition(node: NodeRef<'_>) -> Result<Decl, ResugarError> {
     let invariant = node
         .meta
         .invariant()
-        .map(|value| resugar_invariant(&value.to_expression()))
+        .map(|value| resugar_invariant(&value.to_expression(), state))
         .transpose()?;
     if invariant.is_some() && !opaque {
         return Err(ResugarError::InvalidChild {
@@ -2292,7 +2275,10 @@ fn resugar_variant(expr: &DeepExpr) -> Result<Variant, ResugarError> {
     })
 }
 
-fn resugar_invariant(expr: &DeepExpr) -> Result<TypeInvariant, ResugarError> {
+fn resugar_invariant(
+    expr: &DeepExpr,
+    state: &mut ResugarState,
+) -> Result<TypeInvariant, ResugarError> {
     let function = node_ref(expr)?;
     if function.tag != DeepTag::Fn {
         return Err(ResugarError::InvalidChild {
@@ -2312,7 +2298,7 @@ fn resugar_invariant(expr: &DeepExpr) -> Result<TypeInvariant, ResugarError> {
     }
     Ok(TypeInvariant {
         binder: params[0].name.clone(),
-        body: resugar_expression_inner(&function.children[1])?,
+        body: resugar_expression_inner(&function.children[1], state)?,
         span: function.span,
     })
 }
@@ -2825,7 +2811,7 @@ fn node_ref(expr: &DeepExpr) -> Result<NodeRef<'_>, ResugarError> {
     Ok(node)
 }
 
-fn resugar_node(node: NodeRef<'_>) -> Result<Expr, ResugarError> {
+fn resugar_node(node: NodeRef<'_>, state: &mut ResugarState) -> Result<Expr, ResugarError> {
     use DeepTag as T;
 
     match node.tag {
@@ -2838,7 +2824,7 @@ fn resugar_node(node: NodeRef<'_>) -> Result<Expr, ResugarError> {
                 Ok(Expr::Var(name.to_string(), node.span))
             }
         }
-        T::Lit => resugar_literal(node),
+        T::Lit => resugar_literal(node, state),
         T::App => {
             at_least(&node, 1)?;
             // spec/03 §1.1 `accumulator`: the call's trailing
@@ -2850,10 +2836,10 @@ fn resugar_node(node: NodeRef<'_>) -> Result<Expr, ResugarError> {
                         expected: "a `(t-prim {} precision)` dtype",
                     },
                 )?;
-                let function = resugar_expression_inner(&node.children[0])?;
+                let function = resugar_expression_inner(&node.children[0], state)?;
                 let arguments = node.children[1..]
                     .iter()
-                    .map(resugar_expression_inner)
+                    .map(|expr| resugar_expression_inner(expr, state))
                     .collect::<Result<Vec<_>, _>>()?;
                 return Ok(Expr::Accumulate(
                     Box::new(Expr::Apply(Box::new(function), arguments, node.span)),
@@ -2861,13 +2847,13 @@ fn resugar_node(node: NodeRef<'_>) -> Result<Expr, ResugarError> {
                     node.span,
                 ));
             }
-            if let Some(items) = resugar_finite_list(node.expr)? {
+            if let Some(items) = resugar_finite_list(node.expr, state)? {
                 return Ok(Expr::List(items, node.span));
             }
-            if let Some(operator) = resugar_operator_application(&node)? {
+            if let Some(operator) = resugar_operator_application(&node, state)? {
                 return Ok(operator);
             }
-            let function = resugar_expression_inner(&node.children[0])?;
+            let function = resugar_expression_inner(&node.children[0], state)?;
             // spec/03 §6.4: `to_tensor(xs, p)` and `mmap_tensor(m, o, n, p)`
             // carry their dtype argument as a final type node, which prints in
             // the dtype position (§P9).
@@ -2886,7 +2872,7 @@ fn resugar_node(node: NodeRef<'_>) -> Result<Expr, ResugarError> {
             };
             let mut arguments = value_arguments
                 .iter()
-                .map(resugar_expression_inner)
+                .map(|expr| resugar_expression_inner(expr, state))
                 .collect::<Result<Vec<_>, _>>()?;
             if let Some(dtype) = dtype_argument {
                 arguments.push(Expr::Var(dtype.to_string(), node.span));
@@ -2913,7 +2899,7 @@ fn resugar_node(node: NodeRef<'_>) -> Result<Expr, ResugarError> {
                 index: 1,
                 expected: "a `(t-prim {} precision)` or `(t-var {} binder)` node",
             })?;
-            let operand = resugar_cast_operand(&node.children[0])?;
+            let operand = resugar_cast_operand(&node.children[0], state)?;
             Ok(Expr::Cast(
                 Box::new(operand),
                 target.to_string(),
@@ -2925,26 +2911,26 @@ fn resugar_node(node: NodeRef<'_>) -> Result<Expr, ResugarError> {
             exact(&node, 2)?;
             Ok(Expr::Lambda(
                 resugar_params(&node.children[0])?,
-                Box::new(resugar_expression_inner(&node.children[1])?),
+                Box::new(resugar_expression_inner(&node.children[1], state)?),
                 node.span,
             ))
         }
-        T::Let => resugar_let(node),
+        T::Let => resugar_let(node, state),
         T::If => {
             exact(&node, 3)?;
             Ok(Expr::If(
-                Box::new(resugar_expression_inner(&node.children[0])?),
-                Box::new(resugar_expression_inner(&node.children[1])?),
-                Box::new(resugar_expression_inner(&node.children[2])?),
+                Box::new(resugar_expression_inner(&node.children[0], state)?),
+                Box::new(resugar_expression_inner(&node.children[1], state)?),
+                Box::new(resugar_expression_inner(&node.children[2], state)?),
                 node.span,
             ))
         }
         T::Match => {
             at_least(&node, 1)?;
-            let scrutinee = resugar_expression_inner(&node.children[0])?;
+            let scrutinee = resugar_expression_inner(&node.children[0], state)?;
             let arms = node.children[1..]
                 .iter()
-                .map(resugar_arm)
+                .map(|expr| resugar_arm(expr, state))
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(Expr::Match(Box::new(scrutinee), arms, node.span))
         }
@@ -2953,23 +2939,23 @@ fn resugar_node(node: NodeRef<'_>) -> Result<Expr, ResugarError> {
             let name = name_child(&node, 0)?.to_string();
             let fields = node.children[1..]
                 .iter()
-                .map(resugar_kv_expression)
+                .map(|expr| resugar_kv_expression(expr, state))
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(Expr::Record(name, fields, node.span))
         }
         T::RecordUpdate => {
             at_least(&node, 1)?;
-            let base = resugar_expression_inner(&node.children[0])?;
+            let base = resugar_expression_inner(&node.children[0], state)?;
             let fields = node.children[1..]
                 .iter()
-                .map(resugar_kv_expression)
+                .map(|expr| resugar_kv_expression(expr, state))
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(Expr::RecordUpdate(Box::new(base), fields, node.span))
         }
         T::Access => {
             exact(&node, 2)?;
             Ok(Expr::Access(
-                Box::new(resugar_expression_inner(&node.children[0])?),
+                Box::new(resugar_expression_inner(&node.children[0], state)?),
                 name_child(&node, 1)?.to_string(),
                 node.span,
             ))
@@ -2982,7 +2968,7 @@ fn resugar_node(node: NodeRef<'_>) -> Result<Expr, ResugarError> {
                 expected: "an integer `(lit ...)` node",
             })?;
             Ok(Expr::TupleGet(
-                Box::new(resugar_expression_inner(&node.children[0])?),
+                Box::new(resugar_expression_inner(&node.children[0], state)?),
                 index,
                 node.span,
             ))
@@ -2997,12 +2983,12 @@ fn resugar_node(node: NodeRef<'_>) -> Result<Expr, ResugarError> {
                 && let DeepExpr::Node(operand, _) = &node.children[0]
                 && (operand.tag() == T::Lit || operand.meta().ty().is_some())
             {
-                return resugar_expression_inner(&node.children[0]);
+                return resugar_expression_inner(&node.children[0], state);
             }
             Ok(Expr::Do(
                 node.children
                     .iter()
-                    .map(resugar_expression_inner)
+                    .map(|expr| resugar_expression_inner(expr, state))
                     .collect::<Result<Vec<_>, _>>()?,
                 node.span,
             ))
@@ -3010,21 +2996,21 @@ fn resugar_node(node: NodeRef<'_>) -> Result<Expr, ResugarError> {
         T::Tuple => Ok(Expr::Tuple(
             node.children
                 .iter()
-                .map(resugar_expression_inner)
+                .map(|expr| resugar_expression_inner(expr, state))
                 .collect::<Result<Vec<_>, _>>()?,
             node.span,
         )),
         T::HandleEffect => {
             exact(&node, 2)?;
             let effect = decode_effect_kind(node)?;
-            let argument = Box::new(resugar_expression_inner(&node.children[0])?);
-            let body = Box::new(resugar_expression_inner(&node.children[1])?);
+            let argument = Box::new(resugar_expression_inner(&node.children[0], state)?);
+            let body = Box::new(resugar_expression_inner(&node.children[1], state)?);
             match effect {
                 EffectKind::Resource => Ok(Expr::WithDevice(argument, body, node.span)),
             }
         }
-        T::Borrow => unary_node(node, Expr::Borrow),
-        T::Grad => resugar_grad(node),
+        T::Borrow => unary_node(node, Expr::Borrow, state),
+        T::Grad => resugar_grad(node, state),
         T::Vmap => {
             exact(&node, 2)?;
             let axis = integer_literal(&node.children[1]).ok_or(ResugarError::InvalidChild {
@@ -3033,23 +3019,23 @@ fn resugar_node(node: NodeRef<'_>) -> Result<Expr, ResugarError> {
                 expected: "an integer `(lit ...)` axis",
             })?;
             Ok(Expr::Vmap(
-                Box::new(resugar_expression_inner(&node.children[0])?),
+                Box::new(resugar_expression_inner(&node.children[0], state)?),
                 (axis != 0).then_some(axis),
                 node.span,
             ))
         }
-        T::Jit => unary_node(node, Expr::Jit),
-        T::Realize => unary_node(node, Expr::Realize),
-        T::Copy => unary_node(node, Expr::Copy),
-        T::Quote => unary_node(node, Expr::Quote),
-        T::Unquote => unary_node(node, Expr::Unquote),
-        T::Splice => unary_node(node, Expr::Splice),
+        T::Jit => unary_node(node, Expr::Jit, state),
+        T::Realize => unary_node(node, Expr::Realize, state),
+        T::Copy => unary_node(node, Expr::Copy, state),
+        T::Quote => unary_node(node, Expr::Quote, state),
+        T::Unquote => unary_node(node, Expr::Unquote, state),
+        T::Splice => unary_node(node, Expr::Splice, state),
         T::Par => {
             at_least(&node, 1)?;
             Ok(Expr::Par(
                 node.children
                     .iter()
-                    .map(resugar_expression_inner)
+                    .map(|expr| resugar_expression_inner(expr, state))
                     .collect::<Result<Vec<_>, _>>()?,
                 node.span,
             ))
@@ -3116,7 +3102,7 @@ fn decode_effect_kind(node: NodeRef<'_>) -> Result<EffectKind, ResugarError> {
 /// are redundant is decided afterwards on the printed Surf, by the site rule
 /// desugaring applies ([`strip_redundant_suffixes`]). The `surf_literal_style`
 /// marker never removes a suffix: an `explicit` one keeps it.
-fn resugar_literal(node: NodeRef<'_>) -> Result<Expr, ResugarError> {
+fn resugar_literal(node: NodeRef<'_>, state: &mut ResugarState) -> Result<Expr, ResugarError> {
     exact(&node, 1)?;
     validate_literal_type(&node)?;
     reject_non_finite_float(&node.children[0])?;
@@ -3130,7 +3116,10 @@ fn resugar_literal(node: NodeRef<'_>) -> Result<Expr, ResugarError> {
         (suffix, _, _) => suffix,
     };
     if node.meta.surf_literal_style().map(|v| *v.value()) == Some(LiteralStyle::Explicit) {
-        record_explicit_literal(node.span);
+        state
+            .redundant
+            .explicit
+            .insert((node.span.offset, node.span.len));
     }
     if let DeepExpr::Atom(Atom::Int(value), _) = &node.children[0]
         && *value == i64::MIN
@@ -3205,7 +3194,7 @@ fn integer_minimum(suffix: Option<LiteralSuffix>) -> Option<i64> {
     }
 }
 
-fn resugar_cast_operand(expr: &DeepExpr) -> Result<Expr, ResugarError> {
+fn resugar_cast_operand(expr: &DeepExpr, state: &mut ResugarState) -> Result<Expr, ResugarError> {
     if let Ok(node) = node_ref(expr)
         && node.tag == DeepTag::App
         && node.children.len() == 2
@@ -3219,11 +3208,11 @@ fn resugar_cast_operand(expr: &DeepExpr) -> Result<Expr, ResugarError> {
         // operand would fold into one signed literal on rereading.
         return Ok(Expr::Apply(
             Box::new(Expr::Var("neg".into(), callee.span)),
-            vec![resugar_literal(literal)?],
+            vec![resugar_literal(literal, state)?],
             node.span,
         ));
     }
-    resugar_expression_inner(expr)
+    resugar_expression_inner(expr, state)
 }
 
 fn validate_literal_type(node: &NodeRef<'_>) -> Result<(), ResugarError> {
@@ -3330,23 +3319,26 @@ pub(crate) fn round_integer_at_float_width(value: i64, suffix: LiteralSuffix) ->
         };
     }
 
-    let target = (rounded as f64) * 2_f64.powi(shift as i32);
+    // The shift is at most 56, so this IEEE power of two is exact.
+    let scale = f64::from_bits((u64::from(shift) + 1023) << 52);
+    let target = (rounded as f64) * scale;
     if value.is_negative() { -target } else { target }
 }
 
 fn unary_node(
     node: NodeRef<'_>,
     constructor: impl FnOnce(Box<Expr>, Span) -> Expr,
+    state: &mut ResugarState,
 ) -> Result<Expr, ResugarError> {
     exact(&node, 1)?;
     Ok(constructor(
-        Box::new(resugar_expression_inner(&node.children[0])?),
+        Box::new(resugar_expression_inner(&node.children[0], state)?),
         node.span,
     ))
 }
 
-fn resugar_let(node: NodeRef<'_>) -> Result<Expr, ResugarError> {
-    if let Some(destructuring) = try_resugar_destructuring_let(&node)? {
+fn resugar_let(node: NodeRef<'_>, state: &mut ResugarState) -> Result<Expr, ResugarError> {
+    if let Some(destructuring) = try_resugar_destructuring_let(&node, state)? {
         return Ok(destructuring);
     }
     exact(&node, 2)?;
@@ -3395,24 +3387,27 @@ fn resugar_let(node: NodeRef<'_>) -> Result<Expr, ResugarError> {
                     .ty()
                     .is_some_and(|ty| is_tensor_type(ty.expression()))
             {
-                resugar_declared_tensor_value(&pair[1], true)?
-                    .map_or_else(|| resugar_node(value_node), Ok)?
+                resugar_declared_tensor_value(&pair[1], true, state)?
+                    .map_or_else(|| resugar_node(value_node, state), Ok)?
             } else {
-                resugar_node(value_node)?
+                resugar_node(value_node, state)?
             },
         });
     }
-    let mut body = resugar_expression_inner(&node.children[1])?;
+    let mut body = resugar_expression_inner(&node.children[1], state)?;
     if let Expr::Block(body_bindings, result, span) = &mut body {
-        bindings.extend(std::mem::take(body_bindings));
-        let result = std::mem::replace(result, Box::new(Expr::Tuple(vec![], *span)));
+        bindings.extend(core::mem::take(body_bindings));
+        let result = core::mem::replace(result, Box::new(Expr::Tuple(vec![], *span)));
         Ok(Expr::Block(bindings, result, node.span.merge(*span)))
     } else {
         Ok(Expr::Block(bindings, Box::new(body), node.span))
     }
 }
 
-fn try_resugar_destructuring_let(node: &NodeRef<'_>) -> Result<Option<Expr>, ResugarError> {
+fn try_resugar_destructuring_let(
+    node: &NodeRef<'_>,
+    state: &mut ResugarState,
+) -> Result<Option<Expr>, ResugarError> {
     if node.tag != DeepTag::Let || node.children.len() != 2 {
         return Ok(None);
     }
@@ -3483,14 +3478,14 @@ fn try_resugar_destructuring_let(node: &NodeRef<'_>) -> Result<Option<Expr>, Res
     let binding = LetBinding {
         pattern,
         ty: None,
-        value: resugar_expression_inner(&root_bind.children[1])?,
+        value: resugar_expression_inner(&root_bind.children[1], state)?,
     };
-    let mut body = resugar_expression_inner(current)?;
+    let mut body = resugar_expression_inner(current, state)?;
     Ok(Some(
         if let Expr::Block(bindings, result, span) = &mut body {
-            let mut bindings = std::mem::take(bindings);
+            let mut bindings = core::mem::take(bindings);
             bindings.insert(0, binding);
-            let result = std::mem::replace(result, Box::new(Expr::Tuple(vec![], *span)));
+            let result = core::mem::replace(result, Box::new(Expr::Tuple(vec![], *span)));
             Expr::Block(bindings, result, node.span.merge(*span))
         } else {
             Expr::Block(vec![binding], Box::new(body), node.span)
@@ -3681,7 +3676,7 @@ fn parameter_type_metadata(expr: &DeepExpr) -> Result<Option<&DeepExpr>, Resugar
         })
 }
 
-fn resugar_arm(expr: &DeepExpr) -> Result<MatchArm, ResugarError> {
+fn resugar_arm(expr: &DeepExpr, state: &mut ResugarState) -> Result<MatchArm, ResugarError> {
     let node = node_ref(expr)?;
     if node.tag != DeepTag::Arm {
         return Err(ResugarError::InvalidChild {
@@ -3694,12 +3689,12 @@ fn resugar_arm(expr: &DeepExpr) -> Result<MatchArm, ResugarError> {
     let guard = if is_empty_structural_list(&node.children[1]) {
         None
     } else {
-        Some(resugar_expression_inner(&node.children[1])?)
+        Some(resugar_expression_inner(&node.children[1], state)?)
     };
     Ok(MatchArm {
         pattern: resugar_pattern(&node.children[0])?,
         guard,
-        body: resugar_expression_inner(&node.children[2])?,
+        body: resugar_expression_inner(&node.children[2], state)?,
         span: node.span,
     })
 }
@@ -3772,7 +3767,10 @@ fn resugar_pattern(expr: &DeepExpr) -> Result<Pattern, ResugarError> {
     }
 }
 
-fn resugar_kv_expression(expr: &DeepExpr) -> Result<(String, Expr), ResugarError> {
+fn resugar_kv_expression(
+    expr: &DeepExpr,
+    state: &mut ResugarState,
+) -> Result<(String, Expr), ResugarError> {
     let node = node_ref(expr)?;
     if node.tag != DeepTag::Kv {
         return Err(ResugarError::InvalidChild {
@@ -3784,7 +3782,7 @@ fn resugar_kv_expression(expr: &DeepExpr) -> Result<(String, Expr), ResugarError
     exact(&node, 2)?;
     Ok((
         name_child(&node, 0)?.to_string(),
-        resugar_expression_inner(&node.children[1])?,
+        resugar_expression_inner(&node.children[1], state)?,
     ))
 }
 
@@ -3804,7 +3802,7 @@ fn resugar_kv_pattern(expr: &DeepExpr) -> Result<(String, Pattern), ResugarError
     ))
 }
 
-fn resugar_grad(node: NodeRef<'_>) -> Result<Expr, ResugarError> {
+fn resugar_grad(node: NodeRef<'_>, state: &mut ResugarState) -> Result<Expr, ResugarError> {
     if !(node.children.len() == 1 || node.children.len() == 2) {
         return Err(ResugarError::ExactArity {
             tag: node.tag.as_str(),
@@ -3826,7 +3824,7 @@ fn resugar_grad(node: NodeRef<'_>) -> Result<Expr, ResugarError> {
         });
     }
     Ok(Expr::Grad(
-        Box::new(resugar_expression_inner(&node.children[0])?),
+        Box::new(resugar_expression_inner(&node.children[0], state)?),
         wrt,
         node.span,
     ))
@@ -3879,31 +3877,6 @@ impl DeclaredTensors {
     }
 }
 
-thread_local! {
-    static DECLARED_TENSORS: std::cell::RefCell<std::rc::Rc<DeclaredTensors>> =
-        std::cell::RefCell::default();
-}
-
-/// Installs one program's declared tensor contexts for the duration of its
-/// resugaring and restores the previous contexts when dropped.
-struct DeclaredTensorsScope(std::rc::Rc<DeclaredTensors>);
-
-impl DeclaredTensorsScope {
-    fn install(declared: DeclaredTensors) -> Self {
-        Self(DECLARED_TENSORS.with(|cell| cell.replace(std::rc::Rc::new(declared))))
-    }
-}
-
-impl Drop for DeclaredTensorsScope {
-    fn drop(&mut self) {
-        DECLARED_TENSORS.with(|cell| cell.replace(std::rc::Rc::clone(&self.0)));
-    }
-}
-
-fn declared_tensors() -> std::rc::Rc<DeclaredTensors> {
-    DECLARED_TENSORS.with(|cell| std::rc::Rc::clone(&cell.borrow()))
-}
-
 /// Whether a Deep type is a tensor type, which makes a bare bracket literal
 /// declared at it a tensor literal.
 fn is_tensor_type(ty: &DeepExpr) -> bool {
@@ -3919,7 +3892,7 @@ fn untyped_chain_items(expr: &DeepExpr, outer_typed: bool) -> Option<Vec<&DeepEx
     let mut spine = ConsSpine::new(expr);
     for cell in spine.by_ref() {
         let node = node_ref(cell.node).ok()?;
-        if node.meta.ty().is_some() && !(outer_typed && std::ptr::eq(cell.node, expr)) {
+        if node.meta.ty().is_some() && !(outer_typed && core::ptr::eq(cell.node, expr)) {
             return None;
         }
         items.push(cell.head);
@@ -3928,7 +3901,7 @@ fn untyped_chain_items(expr: &DeepExpr, outer_typed: bool) -> Option<Vec<&DeepEx
         return None;
     };
     let node = node_ref(tail).ok()?;
-    if node.meta.ty().is_some() && !(outer_typed && std::ptr::eq(tail, expr)) {
+    if node.meta.ty().is_some() && !(outer_typed && core::ptr::eq(tail, expr)) {
         return None;
     }
     Some(items)
@@ -3939,28 +3912,34 @@ fn untyped_chain_items(expr: &DeepExpr, outer_typed: bool) -> Option<Vec<&DeepEx
 /// dtype argument has no default (`spec/04-type-system.md` §5.6), so every
 /// literal element keeps its suffix, and a negative literal prints as the
 /// negated literal that the round-trip law equates with it.
-fn resugar_explicit_tensor_items(chain: &DeepExpr) -> Result<Option<Vec<Expr>>, ResugarError> {
+fn resugar_explicit_tensor_items(
+    chain: &DeepExpr,
+    state: &mut ResugarState,
+) -> Result<Option<Vec<Expr>>, ResugarError> {
     let Some(items) = untyped_chain_items(chain, false) else {
         return Ok(None);
     };
     items
         .into_iter()
-        .map(resugar_explicit_tensor_item)
+        .map(|item| resugar_explicit_tensor_item(item, state))
         .collect::<Result<Vec<_>, _>>()
         .map(Some)
 }
 
-fn resugar_explicit_tensor_item(item: &DeepExpr) -> Result<Expr, ResugarError> {
+fn resugar_explicit_tensor_item(
+    item: &DeepExpr,
+    state: &mut ResugarState,
+) -> Result<Expr, ResugarError> {
     let node = node_ref(item)?;
     if node.tag == DeepTag::Lit {
-        return resugar_literal(node);
+        return resugar_literal(node, state);
     }
     if node.tag == DeepTag::App
-        && let Some(items) = resugar_explicit_tensor_items(item)?
+        && let Some(items) = resugar_explicit_tensor_items(item, state)?
     {
         return Ok(Expr::List(items, node.span));
     }
-    resugar_expression_inner(item)
+    resugar_expression_inner(item, state)
 }
 
 /// The explicit `to_tensor([...])` spelling of a `to_tensor` call of an
@@ -3970,6 +3949,7 @@ fn resugar_explicit_tensor_item(item: &DeepExpr) -> Result<Expr, ResugarError> {
 fn explicit_tensor_call(
     node: &NodeRef<'_>,
     binding_typed: bool,
+    state: &mut ResugarState,
 ) -> Result<Option<Expr>, ResugarError> {
     if node.tag != DeepTag::App || (node.meta.ty().is_some() && !binding_typed) {
         return Ok(None);
@@ -3980,11 +3960,11 @@ fn explicit_tensor_call(
     if variable_name(function) != Some("to_tensor") || node_ref(function)?.meta.ty().is_some() {
         return Ok(None);
     }
-    let Some(items) = resugar_explicit_tensor_items(chain)? else {
+    let Some(items) = resugar_explicit_tensor_items(chain, state)? else {
         return Ok(None);
     };
     Ok(Some(Expr::Apply(
-        Box::new(resugar_expression_inner(function)?),
+        Box::new(resugar_expression_inner(function, state)?),
         vec![Expr::List(items, node_ref(chain)?.span)],
         node.span,
     )))
@@ -4001,9 +3981,10 @@ fn explicit_tensor_call(
 fn resugar_declared_tensor_value(
     expr: &DeepExpr,
     binding_typed: bool,
+    state: &mut ResugarState,
 ) -> Result<Option<Expr>, ResugarError> {
     let node = node_ref(expr)?;
-    if let Some(tensor) = explicit_tensor_call(&node, binding_typed)? {
+    if let Some(tensor) = explicit_tensor_call(&node, binding_typed, state)? {
         return Ok(Some(tensor));
     }
     let Some(items) = untyped_chain_items(expr, binding_typed) else {
@@ -4016,7 +3997,7 @@ fn resugar_declared_tensor_value(
     for item in items.into_iter().rev() {
         value = Expr::Apply(
             Box::new(Expr::Constructor("Cons".to_string(), node.span)),
-            vec![resugar_expression_inner(item)?, value],
+            vec![resugar_expression_inner(item, state)?, value],
             node.span,
         );
     }
@@ -4025,24 +4006,31 @@ fn resugar_declared_tensor_value(
 
 /// Resugars a binding value or function body whose declaration states a
 /// tensor type when `declares_tensor`, and context-free otherwise.
-fn resugar_declared_value(expr: &DeepExpr, declares_tensor: bool) -> Result<Expr, ResugarError> {
+fn resugar_declared_value(
+    expr: &DeepExpr,
+    declares_tensor: bool,
+    state: &mut ResugarState,
+) -> Result<Expr, ResugarError> {
     if declares_tensor {
-        resugar_declared_tensor_value(expr, false)?
-            .map_or_else(|| resugar_expression_inner(expr), Ok)
+        resugar_declared_tensor_value(expr, false, state)?
+            .map_or_else(|| resugar_expression_inner(expr, state), Ok)
     } else {
-        resugar_expression_inner(expr)
+        resugar_expression_inner(expr, state)
     }
 }
 
-fn resugar_finite_list(expr: &DeepExpr) -> Result<Option<Vec<Expr>>, ResugarError> {
+fn resugar_finite_list(
+    expr: &DeepExpr,
+    state: &mut ResugarState,
+) -> Result<Option<Vec<Expr>>, ResugarError> {
     let mut spine = ConsSpine::new(expr);
     let Some(first) = spine.next() else {
         return Ok(None);
     };
 
-    let mut items = vec![resugar_expression_inner(first.head)?];
+    let mut items = vec![resugar_expression_inner(first.head, state)?];
     for cell in spine.by_ref() {
-        items.push(resugar_expression_inner(cell.head)?);
+        items.push(resugar_expression_inner(cell.head, state)?);
     }
     if spine.require_nil().is_err() {
         return Ok(None);
@@ -4050,7 +4038,10 @@ fn resugar_finite_list(expr: &DeepExpr) -> Result<Option<Vec<Expr>>, ResugarErro
     Ok(Some(items))
 }
 
-fn resugar_operator_application(node: &NodeRef<'_>) -> Result<Option<Expr>, ResugarError> {
+fn resugar_operator_application(
+    node: &NodeRef<'_>,
+    state: &mut ResugarState,
+) -> Result<Option<Expr>, ResugarError> {
     let Some(name) = node.children.first().and_then(variable_name) else {
         return Ok(None);
     };
@@ -4062,7 +4053,7 @@ fn resugar_operator_application(node: &NodeRef<'_>) -> Result<Option<Expr>, Resu
         };
         return Ok(Some(Expr::Unary(
             operator,
-            Box::new(resugar_expression_inner(&node.children[1])?),
+            Box::new(resugar_expression_inner(&node.children[1], state)?),
             node.span,
         )));
     }
@@ -4089,8 +4080,8 @@ fn resugar_operator_application(node: &NodeRef<'_>) -> Result<Option<Expr>, Resu
     };
     Ok(Some(Expr::Binary(
         operator,
-        Box::new(resugar_expression_inner(&node.children[1])?),
-        Box::new(resugar_expression_inner(&node.children[2])?),
+        Box::new(resugar_expression_inner(&node.children[1], state)?),
+        Box::new(resugar_expression_inner(&node.children[2], state)?),
         node.span,
     )))
 }
@@ -4577,5 +4568,158 @@ fn describe_deep(expr: &DeepExpr) -> String {
         DeepExpr::Node(_, _) => "a typed node".to_string(),
         DeepExpr::BareList(_, _) => "a structural bare list".to_string(),
         DeepExpr::UnknownForm(data) => format!("unknown form `{}`", data.head),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(source: &str) -> Vec<DeepExpr> {
+        chelis_deep::parser::parse_and_stamp_file(source, &chelis_syntax_host::NativeStack)
+            .expect("valid Deep fixture")
+    }
+
+    fn literal(explicit: bool) -> DeepExpr {
+        let style = if explicit { "explicit" } else { "unsuffixed" };
+        let source =
+            format!("(lit {{surf_literal_style: \"{style}\", type: (t-prim {{}} f32)}} 1.1)");
+        let mut expr = chelis_deep::parser::parse_and_stamp_runtime_exprs(
+            &source,
+            &chelis_syntax_host::NativeStack,
+        )
+        .expect("valid Deep literal")
+        .remove(0);
+        let DeepExpr::Node(_, span) = &mut expr else {
+            panic!("expected a literal node");
+        };
+        *span = Span {
+            offset: 10,
+            len: 20,
+        };
+        expr
+    }
+
+    #[test]
+    fn expression_requests_do_not_share_explicit_spans() {
+        let explicit = literal(true);
+        let ordinary = literal(false);
+        assert!(matches!(
+            resugar_expression(&explicit).unwrap(),
+            Expr::Lit(Literal::TypedFloat(_, LiteralSuffix::F32), _)
+        ));
+        assert!(matches!(
+            resugar_expression(&ordinary).unwrap(),
+            Expr::Lit(Literal::Float(_), _)
+        ));
+
+        let failed = DeepExpr::BareList(
+            vec![
+                explicit,
+                DeepExpr::Atom(Atom::Name("invalid".into()), Span::new(0, 0)),
+            ],
+            Span::new(0, 0),
+        );
+        assert!(resugar_expression(&failed).is_err());
+        assert!(matches!(
+            resugar_expression(&ordinary).unwrap(),
+            Expr::Lit(Literal::Float(_), _)
+        ));
+    }
+
+    #[test]
+    fn source_and_analysis_requests_do_not_share_explicit_spans() {
+        let explicit = DeepExpr::node(
+            DeepTag::Def,
+            Metadata::default(),
+            vec![
+                DeepExpr::Atom(Atom::Name("x".into()), Span::new(0, 0)),
+                literal(true),
+            ],
+            Span::new(0, 0),
+        );
+        let ordinary = DeepExpr::node(
+            DeepTag::Def,
+            Metadata::default(),
+            vec![
+                DeepExpr::Atom(Atom::Name("x".into()), Span::new(0, 0)),
+                literal(false),
+            ],
+            Span::new(0, 0),
+        );
+        let ordinary = core::slice::from_ref(&ordinary);
+        let before = resugar_program(ordinary).unwrap();
+        resugar_program(core::slice::from_ref(&explicit)).unwrap();
+        resugar_program_for_analysis(core::slice::from_ref(&explicit)).unwrap();
+        assert_eq!(before, resugar_program(ordinary).unwrap());
+        assert!(matches!(
+            &resugar_program_for_analysis(ordinary).unwrap()[0],
+            Decl::LetDef {
+                value: Expr::Lit(Literal::TypedFloat(_, LiteralSuffix::F32), _),
+                ..
+            }
+        ));
+
+        let mut failed = vec![explicit];
+        failed.extend(parse("(defsig {} y (t-var {} p))"));
+        assert!(resugar_program(&failed).is_err());
+        assert!(resugar_program_for_analysis(&failed).is_err());
+        assert_eq!(before, resugar_program(ordinary).unwrap());
+    }
+
+    #[test]
+    fn tensor_catalogs_do_not_cross_request_boundaries() {
+        let declarations = parse(
+            "(defsig {} xs (t-tensor {} (d-lit {} 1) (t-prim {} f32))) \
+             (defsig {} f (t-fn {} (t-tensor {} (d-lit {} 1) (t-prim {} f32))))",
+        );
+        let values = parse(
+            "(def {} xs (app {} (var {} Cons) (lit {} 1) (var {} Nil))) \
+             (def {} f (fn {} (params {}) \
+                 (app {} (var {} Cons) (lit {} 1) (var {} Nil))))",
+        );
+        let before = resugar_program(&values).unwrap();
+        let mut declared = declarations;
+        declared.extend(values);
+        for program in [
+            resugar_program(&declared).unwrap(),
+            resugar_program_for_analysis(&declared).unwrap(),
+        ] {
+            assert!(matches!(
+                &program[2],
+                Decl::LetDef {
+                    value: Expr::Apply(..),
+                    ..
+                }
+            ));
+            assert!(matches!(
+                &program[3],
+                Decl::FunDef {
+                    body: Expr::Apply(..),
+                    ..
+                }
+            ));
+        }
+        assert!(matches!(
+            &before[0],
+            Decl::LetDef {
+                value: Expr::List(..),
+                ..
+            }
+        ));
+        assert!(matches!(
+            &before[1],
+            Decl::FunDef {
+                body: Expr::List(..),
+                ..
+            }
+        ));
+        let values = &declared[2..];
+        assert_eq!(before, resugar_program(values).unwrap());
+
+        declared.extend(parse("(defsig {} y (t-var {} p))"));
+        assert!(resugar_program(&declared).is_err());
+        assert!(resugar_program_for_analysis(&declared).is_err());
+        assert_eq!(before, resugar_program(&declared[2..4]).unwrap());
     }
 }

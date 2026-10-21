@@ -8,8 +8,11 @@ use chelis_types::errors::{CheckError, CheckErrorKind};
 use chelis_types::{check_ir_program, check_typed_program};
 
 fn diagnostics(source: &str) -> Vec<CheckError> {
-    let deep: Vec<Expr> =
-        desugar_program(&parse_str(source).expect("Surf parses")).expect("Surf desugars");
+    let deep: Vec<Expr> = desugar_program(
+        &parse_str(source, &chelis_syntax_host::NativeStack).expect("Surf parses"),
+        &chelis_syntax_host::NativeStack,
+    )
+    .expect("Surf desugars");
     let expanded = expand_program(&deep, &ExpansionOptions::default())
         .expect("macro expansion")
         .into_exprs();

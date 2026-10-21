@@ -1919,8 +1919,10 @@ type Probability = | Probability { value: f32 }
 
 def make(x: f32) -> Probability = Probability { value: x }
 "#;
-    let decls = chelis_surf::parser::parse_str(SRC).expect("surf parse");
-    let exprs = chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar");
+    let decls =
+        chelis_surf::parser::parse_str(SRC, &chelis_syntax_host::NativeStack).expect("surf parse");
+    let exprs = chelis_surf::desugar::desugar_program(&decls, &chelis_syntax_host::NativeStack)
+        .expect("Surf fixture must desugar");
 
     for violating in [2.5_f64, -0.5_f64] {
         let payload = ExecutionValue::Adt {

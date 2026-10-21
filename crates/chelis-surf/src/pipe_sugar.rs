@@ -1,5 +1,6 @@
 //! Surf-to-Surf pipe normalization, before any dtype or callable inference.
 use crate::ast::*;
+use alloc::{boxed::Box, vec::Vec};
 use chelis_deep::Span;
 
 /// Visit every expression, including macros, invariants and property options.
@@ -202,16 +203,16 @@ pub(crate) fn normalize(expr: &mut Expr) {
         return;
     };
     // Move rather than repeatedly cloning a growing chain.
-    let mut carried = *std::mem::replace(seed, Box::new(Expr::Tuple(vec![], Span::new(0, 0))));
-    for stage in std::mem::take(stages) {
+    let mut carried = *core::mem::replace(seed, Box::new(Expr::Tuple(vec![], Span::new(0, 0))));
+    for stage in core::mem::take(stages) {
         let span = crate::parser::expression_span(&stage.expression);
         let mut stage_expr = stage.expression;
         carried = match stage.syntax {
             PipeStageSyntax::CallFirst => match &mut stage_expr {
                 Expr::Apply(callee, arguments, _) => {
                     let callee =
-                        std::mem::replace(callee, Box::new(Expr::Tuple(vec![], Span::new(0, 0))));
-                    let mut arguments = std::mem::take(arguments);
+                        core::mem::replace(callee, Box::new(Expr::Tuple(vec![], Span::new(0, 0))));
+                    let mut arguments = core::mem::take(arguments);
                     arguments.insert(0, carried);
                     Expr::Apply(callee, arguments, span)
                 }
@@ -220,12 +221,12 @@ pub(crate) fn normalize(expr: &mut Expr) {
                         unreachable!("parser-validated accumulator call stage")
                     };
                     let callee =
-                        std::mem::replace(callee, Box::new(Expr::Tuple(vec![], Span::new(0, 0))));
-                    let mut arguments = std::mem::take(arguments);
+                        core::mem::replace(callee, Box::new(Expr::Tuple(vec![], Span::new(0, 0))));
+                    let mut arguments = core::mem::take(arguments);
                     arguments.insert(0, carried);
                     Expr::Accumulate(
                         Box::new(Expr::Apply(callee, arguments, span)),
-                        std::mem::take(precision),
+                        core::mem::take(precision),
                         span,
                     )
                 }

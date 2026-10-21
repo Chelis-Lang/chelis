@@ -7,7 +7,8 @@ use chelis_types::{
 };
 
 fn errors(source: &str) -> Vec<String> {
-    let exprs = parse_str(source).expect("Deep fixture must parse");
+    let exprs =
+        parse_str(source, &chelis_syntax_host::NativeStack).expect("Deep fixture must parse");
     match check_ir_program(&exprs) {
         Ok(_) => Vec::new(),
         Err(result) => result
@@ -57,10 +58,17 @@ fn def_without_defsig_remains_valid() {
 
 #[test]
 fn a_previous_library_def_does_not_back_a_new_units_orphan_defsig() {
-    let library =
-        parse_str("(def {} existing (lit {type: (t-prim {} i32)} 1))").expect("library fixture");
+    let library = parse_str(
+        "(def {} existing (lit {type: (t-prim {} i32)} 1))",
+        &chelis_syntax_host::NativeStack,
+    )
+    .expect("library fixture");
     let context = build_type_env_from_library(&library).expect("library must check");
-    let next = parse_str("(defsig {} existing (t-prim {} i32))").expect("next fixture");
+    let next = parse_str(
+        "(defsig {} existing (t-prim {} i32))",
+        &chelis_syntax_host::NativeStack,
+    )
+    .expect("next fixture");
     let errors = check_ir_with_context(&context, &next)
         .expect_err("a defsig must be backed in its own check unit")
         .errors;

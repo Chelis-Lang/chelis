@@ -11,19 +11,23 @@ use chelis_types::{
 type Diagnostics = Vec<(String, String)>;
 
 fn deep_program(source: &str) -> Vec<chelis_deep::Expr> {
-    parse_and_stamp(source).expect("Deep fixture must parse and stamp")
+    parse_and_stamp(source, &chelis_syntax_host::NativeStack)
+        .expect("Deep fixture must parse and stamp")
 }
 
 /// Declaration-level Deep parse. `parse_and_stamp` stamps expression forms;
 /// a `(module {} ...)` wrapper is only valid at declaration position, so the
 /// matrix's wrapped rows need this entry point.
 fn deep_file_program(source: &str) -> Vec<chelis_deep::Expr> {
-    parse_and_stamp_file(source).expect("Deep file fixture must parse and stamp")
+    parse_and_stamp_file(source, &chelis_syntax_host::NativeStack)
+        .expect("Deep file fixture must parse and stamp")
 }
 
 fn surf_program(source: &str) -> Vec<chelis_deep::Expr> {
-    let declarations = parse_surf(source).expect("Surf fixture must parse");
-    desugar_program(&declarations).expect("Surf fixture must desugar")
+    let declarations =
+        parse_surf(source, &chelis_syntax_host::NativeStack).expect("Surf fixture must parse");
+    desugar_program(&declarations, &chelis_syntax_host::NativeStack)
+        .expect("Surf fixture must desugar")
 }
 
 fn diagnostics(program: &[chelis_deep::Expr]) -> (Diagnostics, Diagnostics) {

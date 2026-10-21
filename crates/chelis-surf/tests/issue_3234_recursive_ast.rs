@@ -76,7 +76,8 @@ fn direct_parser_releases_deep_reference_type_on_small_stack() {
         "direct_parser_releases_deep_reference_type_on_small_stack",
         || {
             let source = nested_reference_type_source(20_000, true);
-            let parsed = parse_str(&source).expect("nested reference type is Surf syntax");
+            let parsed = parse_str(&source, &chelis_syntax_host::NativeStack)
+                .expect("nested reference type is Surf syntax");
             drop(parsed);
         },
     );
@@ -89,9 +90,11 @@ fn direct_parser_rejects_invalid_deep_reference_type_on_small_stack() {
         || {
             let source = nested_reference_type_source(20_000, false);
             let valid = nested_reference_type_source(20_000, true);
-            let parsed = parse_str(&valid).expect("valid control must parse");
+            let parsed = parse_str(&valid, &chelis_syntax_host::NativeStack)
+                .expect("valid control must parse");
             drop(parsed);
-            let error = parse_str(&source).expect_err("trailing token must be rejected");
+            let error = parse_str(&source, &chelis_syntax_host::NativeStack)
+                .expect_err("trailing token must be rejected");
             assert!(error.to_string().contains("byte"), "{error}");
         },
     );
@@ -103,7 +106,8 @@ fn direct_parser_reports_invalid_deep_precision_on_small_stack() {
         "direct_parser_reports_invalid_deep_precision_on_small_stack",
         || {
             let source = nested_invalid_tensor_precision_source(20_000);
-            let error = parse_str(&source).expect_err("a reference is not a tensor precision");
+            let error = parse_str(&source, &chelis_syntax_host::NativeStack)
+                .expect_err("a reference is not a tensor precision");
             let message = error.to_string();
             assert!(message.contains("precision type name"), "{message}");
             assert!(message.contains("reference type"), "{message}");
@@ -118,7 +122,8 @@ fn direct_parser_releases_deep_reference_expression_on_small_stack() {
         "direct_parser_releases_deep_reference_expression_on_small_stack",
         || {
             let source = nested_reference_expression_source(20_000, true);
-            let parsed = parse_str(&source).expect("nested reference expression is Surf syntax");
+            let parsed = parse_str(&source, &chelis_syntax_host::NativeStack)
+                .expect("nested reference expression is Surf syntax");
             drop(parsed);
         },
     );
@@ -130,7 +135,8 @@ fn direct_parser_rejects_invalid_deep_reference_expression_on_small_stack() {
         "direct_parser_rejects_invalid_deep_reference_expression_on_small_stack",
         || {
             let source = nested_reference_expression_source(20_000, false);
-            let error = parse_str(&source).expect_err("trailing token must be rejected");
+            let error = parse_str(&source, &chelis_syntax_host::NativeStack)
+                .expect_err("trailing token must be rejected");
             assert!(error.to_string().contains("byte"), "{error}");
         },
     );
@@ -142,7 +148,8 @@ fn direct_parser_rejects_deep_expression_from_invalid_binding_on_small_stack() {
         "direct_parser_rejects_deep_expression_from_invalid_binding_on_small_stack",
         || {
             let source = nested_invalid_binding_expression_source(20_000);
-            let error = parse_str(&source).expect_err("invalid binding leaf must be rejected");
+            let error = parse_str(&source, &chelis_syntax_host::NativeStack)
+                .expect_err("invalid binding leaf must be rejected");
             assert!(error.to_string().contains("byte"), "{error}");
         },
     );
@@ -154,7 +161,8 @@ fn direct_parser_releases_deep_match_pattern_on_small_stack() {
         "direct_parser_releases_deep_match_pattern_on_small_stack",
         || {
             let source = nested_match_pattern_source(20_000, true);
-            let parsed = parse_str(&source).expect("nested match pattern is Surf syntax");
+            let parsed = parse_str(&source, &chelis_syntax_host::NativeStack)
+                .expect("nested match pattern is Surf syntax");
             drop(parsed);
         },
     );
@@ -166,7 +174,8 @@ fn direct_parser_rejects_invalid_deep_match_pattern_on_small_stack() {
         "direct_parser_rejects_invalid_deep_match_pattern_on_small_stack",
         || {
             let source = nested_match_pattern_source(20_000, false);
-            let error = parse_str(&source).expect_err("trailing token must be rejected");
+            let error = parse_str(&source, &chelis_syntax_host::NativeStack)
+                .expect_err("trailing token must be rejected");
             assert!(error.to_string().contains("byte"), "{error}");
         },
     );
@@ -178,7 +187,8 @@ fn direct_parser_releases_deep_binding_pattern_on_small_stack() {
         "direct_parser_releases_deep_binding_pattern_on_small_stack",
         || {
             let source = nested_binding_pattern_source(20_000, true);
-            let parsed = parse_str(&source).expect("nested binding pattern is Surf syntax");
+            let parsed = parse_str(&source, &chelis_syntax_host::NativeStack)
+                .expect("nested binding pattern is Surf syntax");
             drop(parsed);
         },
     );
@@ -190,7 +200,8 @@ fn direct_parser_rejects_invalid_deep_binding_pattern_on_small_stack() {
         "direct_parser_rejects_invalid_deep_binding_pattern_on_small_stack",
         || {
             let source = nested_binding_pattern_source(20_000, false);
-            let error = parse_str(&source).expect_err("trailing token must be rejected");
+            let error = parse_str(&source, &chelis_syntax_host::NativeStack)
+                .expect_err("trailing token must be rejected");
             assert!(error.to_string().contains("byte"), "{error}");
         },
     );

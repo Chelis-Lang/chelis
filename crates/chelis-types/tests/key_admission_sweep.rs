@@ -28,8 +28,9 @@ use chelis_types::{
 };
 
 fn verdict(source: &str) -> Result<(), Vec<CheckError>> {
-    let decls = parse_str(source).unwrap_or_else(|error| panic!("{source}\n{error:?}"));
-    let deep = desugar_program(&decls).expect("fixture desugars");
+    let decls = parse_str(source, &chelis_syntax_host::NativeStack)
+        .unwrap_or_else(|error| panic!("{source}\n{error:?}"));
+    let deep = desugar_program(&decls, &chelis_syntax_host::NativeStack).expect("fixture desugars");
     let checked = check_typed_program(&deep).map_err(|result| result.errors)?;
     check_linearity(&checked).map(|_| ())
 }

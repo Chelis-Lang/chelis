@@ -81,8 +81,10 @@ fn options(samples: usize) -> PropertyRunOptions {
 }
 
 fn deep_source(surf: &str) -> String {
-    let decls = chelis_surf::parser::parse_str(surf).expect("source parses");
-    let program = chelis_surf::desugar::desugar_program(&decls).expect("source desugars");
+    let decls = chelis_surf::parser::parse_str(surf, &chelis_syntax_host::NativeStack)
+        .expect("source parses");
+    let program = chelis_surf::desugar::desugar_program(&decls, &chelis_syntax_host::NativeStack)
+        .expect("source desugars");
     chelis_deep::printer::print_canonical(&program)
 }
 

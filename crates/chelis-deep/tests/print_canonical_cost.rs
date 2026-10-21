@@ -68,7 +68,8 @@ fn typed_parameter(depth: usize) -> String {
 
 /// Heap bytes allocated per byte of canonical output.
 fn bytes_per_output_byte(source: &str) -> f64 {
-    let exprs = chelis_deep::parser::parse_and_stamp_file(source).expect("the probe parses");
+    let exprs = chelis_deep::parser::parse_and_stamp_file(source, &chelis_syntax_host::NativeStack)
+        .expect("the probe parses");
     let before = ALLOCATED.load(Ordering::Relaxed);
     let printed = print_canonical(&exprs);
     let allocated = ALLOCATED.load(Ordering::Relaxed) - before;

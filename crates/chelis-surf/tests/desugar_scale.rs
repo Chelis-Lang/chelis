@@ -16,9 +16,10 @@ fn scalar_helpers_normalize_without_quadratic_subtree_copying() {
                 }
                 source.push_str("v255\n}\n");
             }
-            let declarations = parse_str(&source).unwrap();
+            let declarations = parse_str(&source, &chelis_syntax_host::NativeStack).unwrap();
             let started = Instant::now();
-            let deep = desugar_program(&declarations).expect("Surf fixture must desugar");
+            let deep = desugar_program(&declarations, &chelis_syntax_host::NativeStack)
+                .expect("Surf fixture must desugar");
             let elapsed = started.elapsed();
             assert_eq!(chelis_deep::validate::find_raw_vocabulary_tag(&deep), None);
             assert_eq!(deep.len(), 128, "one definition and signature per helper");

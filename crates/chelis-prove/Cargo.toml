@@ -67,6 +67,7 @@ carcara = ["smt", "dep:carcara"]
 arb = ["dep:arb-sys"]
 
 [dependencies]
+chelis-syntax-host.workspace = true
 chelis-reef.workspace = true
 chelis-unord.workspace = true
 cvc5-rs = { version = "0.3", optional = true }

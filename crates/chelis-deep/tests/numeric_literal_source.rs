@@ -4,7 +4,7 @@ use chelis_deep::{
 };
 
 fn expr(source: &str) -> Expr {
-    parse_str(source)
+    parse_str(source, &chelis_syntax_host::NativeStack)
         .expect("Deep")
         .pop()
         .expect("one expression")

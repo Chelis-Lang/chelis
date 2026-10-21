@@ -234,6 +234,7 @@ def portable(
     features: Iterable[str] = (),
     default_features: bool = False,
     forbidden: Iterable[str] = (),
+    dependencies: str | None = None,
 ) -> set[str]:
     with _package(
         crate,
@@ -241,6 +242,7 @@ def portable(
         executable=False,
         features=features,
         default_features=default_features,
+        dependencies=dependencies,
     ) as directory:
         result = run(
             ("cargo", "metadata", "--format-version", "1", "--filter-platform", TARGET),
@@ -272,3 +274,67 @@ def consumer(
         dependencies=dependencies,
     ) as directory:
         return run(("cargo", "run", "--quiet"), cwd=directory)
+
+
+def _fixture_diagnostics(stdout: str, directory: Path, source: str) -> str:
+    fixture = (directory / "src/lib.rs").resolve()
+    lines = source.splitlines()
+    diagnostics: list[str] = []
+    for line in stdout.splitlines():
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError as error:
+            raise OracleFailure(f"invalid negative compile evidence: {error}") from error
+        if record.get("reason") != "compiler-message":
+            continue
+        target = Path(record["target"]["src_path"])
+        if not target.is_absolute():
+            target = directory / target
+        message = record["message"]
+        if target.resolve() != fixture or message["level"] != "error":
+            continue
+        local = False
+        for span in message["spans"]:
+            index = span["line_start"] - 1
+            if (
+                span["is_primary"]
+                and Path(span["file_name"]).name == "lib.rs"
+                and 0 <= index < len(lines)
+                and any(text["text"].strip() == lines[index].strip() for text in span["text"])
+            ):
+                local = True
+        if local:
+            diagnostics.append(message["message"])
+            if message.get("code"):
+                diagnostics.append(message["code"]["code"])
+            diagnostics.extend(span["label"] for span in message["spans"] if span.get("label"))
+            diagnostics.extend(child["message"] for child in message["children"])
+    if not diagnostics:
+        raise OracleFailure("negative compile fixture has no fixture-local error")
+    return "\n".join(diagnostics)
+
+
+def compile_rejected(
+    crate: str | Path,
+    source: str,
+    *,
+    expected: str | Sequence[str],
+    features: Iterable[str] = (),
+    default_features: bool = False,
+    dependencies: str | None = None,
+) -> None:
+    with _package(
+        crate,
+        source,
+        executable=False,
+        features=features,
+        default_features=default_features,
+        dependencies=dependencies,
+    ) as directory:
+        result = _execute(("cargo", "check", "--lib", "--message-format", "json"), cwd=directory)
+        if result.returncode == 0:
+            raise OracleFailure("negative compile fixture unexpectedly passed")
+        diagnostic = _fixture_diagnostics(result.stdout, directory, source)
+        fragments = (expected,) if isinstance(expected, str) else expected
+        if not fragments or any(fragment not in diagnostic for fragment in fragments):
+            raise OracleFailure("negative compile fixture failed for an unexpected reason")

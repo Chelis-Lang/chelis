@@ -54,8 +54,10 @@ use chelis_deep::Expr;
 /// Render Surf source to canonical Deep `Expr`s, exactly as the `chelis deep`
 /// CLI does for a `.ch` file (`parse_str -> desugar_program -> expand_program`).
 fn render_deep(surf_source: &str) -> Vec<Expr> {
-    let decls = chelis_surf::parser::parse_str(surf_source).expect("surf parse");
-    let deep = chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar");
+    let decls = chelis_surf::parser::parse_str(surf_source, &chelis_syntax_host::NativeStack)
+        .expect("surf parse");
+    let deep = chelis_surf::desugar::desugar_program(&decls, &chelis_syntax_host::NativeStack)
+        .expect("Surf fixture must desugar");
     chelis_macros::expand_program(&deep, &chelis_macros::ExpansionOptions::default())
         .expect("macro expand")
         .into_exprs()
@@ -228,7 +230,8 @@ fn assert_splice_faithful(module: &[Expr], target: &str, new_body: &Expr) {
 
     // Round-trip: canonical print re-parses to the same canonical text.
     let printed = chelis_deep::printer::print_canonical(&rewritten);
-    let reparsed = chelis_deep::parser::parse_str(&printed).expect("rewritten module re-parses");
+    let reparsed = chelis_deep::parser::parse_str(&printed, &chelis_syntax_host::NativeStack)
+        .expect("rewritten module re-parses");
     assert_eq!(
         chelis_deep::printer::print_canonical(&reparsed),
         printed,

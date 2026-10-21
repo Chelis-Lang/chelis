@@ -20,7 +20,8 @@ fn parse(source: &str) -> Vec<chelis_deep::Expr> {
     // Deliberately lenient: the checker owns the fail-closed diagnostic for an
     // unknown tag nested in a type position, even when strict Deep validation
     // would reject the same input earlier.
-    chelis_deep::parser::parse_str(source).expect("Deep fixture must parse")
+    chelis_deep::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+        .expect("Deep fixture must parse")
 }
 
 fn assert_accepts(source: &str, label: &str) {
@@ -32,10 +33,11 @@ fn assert_accepts(source: &str, label: &str) {
 }
 
 fn assert_surf_accepts(source: &str, label: &str) {
-    let declarations = chelis_surf::parser::parse_str(source)
+    let declarations = chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack)
         .unwrap_or_else(|error| panic!("{label}: Surf fixture must parse: {error}"));
     let exprs =
-        chelis_surf::desugar::desugar_program(&declarations).expect("Surf fixture must desugar");
+        chelis_surf::desugar::desugar_program(&declarations, &chelis_syntax_host::NativeStack)
+            .expect("Surf fixture must desugar");
     let fitness = chelis_types::check_program(&exprs);
     assert!(
         fitness.errors.is_empty(),
@@ -54,7 +56,7 @@ fn assert_surf_accepts(source: &str, label: &str) {
 }
 
 fn assert_one_type_resolution_error(source: &str, needle: &str, label: &str) {
-    let exprs = match chelis_deep::parser::parse_str(source) {
+    let exprs = match chelis_deep::parser::parse_str(source, &chelis_syntax_host::NativeStack) {
         Ok(exprs) => exprs,
         Err(error) => {
             let message = error.to_string();

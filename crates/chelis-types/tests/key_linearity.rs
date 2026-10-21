@@ -329,8 +329,8 @@ fn cached_result_origins_distinguish_concrete_keys_from_generic_parameters() {
 }
 
 fn verdict(source: &str) -> Result<(), Vec<CheckError>> {
-    let decls = parse_str(source).expect("fixture parses");
-    let deep = desugar_program(&decls).expect("fixture desugars");
+    let decls = parse_str(source, &chelis_syntax_host::NativeStack).expect("fixture parses");
+    let deep = desugar_program(&decls, &chelis_syntax_host::NativeStack).expect("fixture desugars");
     let checked = check_typed_program(&deep).map_err(|result| result.errors)?;
     check_linearity(&checked).map(|_| ())
 }
@@ -962,10 +962,13 @@ fn key_is_not_a_numeric_or_castable_dtype() {
     );
     // spec/04 §5.6 Binding: no numeric literal binds at `key`, so Surf
     // ingress rejects a declared key tensor literal.
-    let decls =
-        parse_str("def bad() -> tensor[2, key] = {\n  x: tensor[2, key] = [1, 2]\n  x\n}\n")
-            .expect("fixture parses");
-    let error = desugar_program(&decls).expect_err("a declared key literal");
+    let decls = parse_str(
+        "def bad() -> tensor[2, key] = {\n  x: tensor[2, key] = [1, 2]\n  x\n}\n",
+        &chelis_syntax_host::NativeStack,
+    )
+    .expect("fixture parses");
+    let error = desugar_program(&decls, &chelis_syntax_host::NativeStack)
+        .expect_err("a declared key literal");
     assert!(error.to_string().contains("cannot bind at key"), "{error}");
 }
 
@@ -1237,8 +1240,8 @@ fn keys_pass_through_concrete_parameters_and_data_types() {
 }
 
 fn surf_program(source: &str) -> Vec<chelis_deep::Expr> {
-    let decls = parse_str(source).expect("fixture parses");
-    desugar_program(&decls).expect("fixture desugars")
+    let decls = parse_str(source, &chelis_syntax_host::NativeStack).expect("fixture parses");
+    desugar_program(&decls, &chelis_syntax_host::NativeStack).expect("fixture desugars")
 }
 
 fn context_verdict(context: &TypeEnv, source: &str) -> Result<(), Vec<CheckError>> {

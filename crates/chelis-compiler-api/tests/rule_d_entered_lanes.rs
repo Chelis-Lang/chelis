@@ -1694,8 +1694,11 @@ impl GatedKind {
 /// give it, and evaluated by the DAG evaluator: the root's values, or the
 /// evaluator's error.
 fn dag_evaluator(source: &str, inputs: &UnordMap<String, DagTensor>) -> Result<Vec<f64>, String> {
-    let declarations = chelis_surf::parser::parse_str(source).expect("parse");
-    let deep = chelis_surf::desugar::desugar_program(&declarations).expect("desugar");
+    let declarations =
+        chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack).expect("parse");
+    let deep =
+        chelis_surf::desugar::desugar_program(&declarations, &chelis_syntax_host::NativeStack)
+            .expect("desugar");
     let checked = chelis_types::check_typed_program(&deep)
         .unwrap_or_else(|errors| panic!("check: {:?}", errors.errors));
     let checked = chelis_effects::check_program(&checked).expect("effects");

@@ -23,7 +23,7 @@ use chelis_deep::parser::parse_str;
 use chelis_types::check_typed_program;
 
 fn deep(src: &str) -> Vec<Expr> {
-    parse_str(src).expect("deep parse")
+    parse_str(src, &chelis_syntax_host::NativeStack).expect("deep parse")
 }
 
 /// Walk an Expr tree and return the first node whose tag matches.

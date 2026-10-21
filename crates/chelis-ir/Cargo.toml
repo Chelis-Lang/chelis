@@ -23,6 +23,7 @@ stacker.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+chelis-syntax-host.workspace = true
 syn.workspace = true
 chelis-surf.workspace = true
 chelis-macros.workspace = true

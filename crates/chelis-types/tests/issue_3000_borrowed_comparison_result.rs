@@ -14,9 +14,10 @@ use chelis_types::check_ir_program;
 use chelis_types::errors::CheckErrorKind;
 
 fn surf_to_deep(source: &str) -> Vec<Expr> {
-    let decls = parse_surf(source).expect("surf parse");
+    let decls = parse_surf(source, &chelis_syntax_host::NativeStack).expect("surf parse");
     chelis_macros::expand_program(
-        &desugar_program(&decls).expect("Surf fixture must desugar"),
+        &desugar_program(&decls, &chelis_syntax_host::NativeStack)
+            .expect("Surf fixture must desugar"),
         &chelis_macros::ExpansionOptions::default(),
     )
     .expect("macro expand")

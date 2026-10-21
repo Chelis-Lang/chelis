@@ -8,6 +8,9 @@
 //! Custom `Deserialize` routes through `try_new` and surfaces failures
 //! as `serde::de::Error` rather than panicking.
 
+#[cfg(test)]
+use alloc::{boxed::Box, string::ToString};
+use alloc::{string::String, vec::Vec};
 use serde::{Deserialize, Serialize};
 
 use crate::Metadata;
@@ -43,8 +46,8 @@ pub enum NodeError {
     RawVocabularyTag { container: DeepTag, raw_tag: String },
 }
 
-impl std::fmt::Display for NodeError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for NodeError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             NodeError::Metadata(error) => error.fmt(f),
             NodeError::NameAtExprSlot { tag, index, name } => {
@@ -84,7 +87,7 @@ impl std::fmt::Display for NodeError {
     }
 }
 
-impl std::error::Error for NodeError {}
+impl core::error::Error for NodeError {}
 
 /// A role-tagged reference to a child, for total traversal by
 /// printers and serializers.
@@ -114,8 +117,8 @@ impl Node {
     pub(crate) fn take_parts(&mut self) -> (DeepTag, Metadata, Vec<Expr>) {
         (
             self.tag,
-            std::mem::take(&mut self.meta),
-            std::mem::take(&mut self.children),
+            core::mem::take(&mut self.meta),
+            core::mem::take(&mut self.children),
         )
     }
 
@@ -124,8 +127,8 @@ impl Node {
         expressions: &mut Vec<Expr>,
         metadata: &mut Vec<Metadata>,
     ) {
-        expressions.extend(std::mem::take(&mut self.children).into_iter().rev());
-        metadata.push(std::mem::take(&mut self.meta));
+        expressions.extend(core::mem::take(&mut self.children).into_iter().rev());
+        metadata.push(core::mem::take(&mut self.meta));
     }
 
     /// Consume a node for atomic rebuilding of coupled metadata and children.
@@ -204,7 +207,7 @@ impl Node {
         meta.visit_expressions(&mut |value, _| {
             if raw_tag.is_none() {
                 raw_tag = crate::validate::find_raw_vocabulary_tag_below_gate(
-                    std::slice::from_ref(value),
+                    core::slice::from_ref(value),
                 );
             }
         });
@@ -478,10 +481,14 @@ mod tests {
             node, original,
             "invalid replacement preserves the required body"
         );
-        let error = crate::parser::parse_str("(fn {} (params {}))")
-            .expect_err("the parser cannot produce a body-less stamped fn");
+        let error =
+            crate::parser::parse_str("(fn {} (params {}))", &chelis_syntax_host::NativeStack)
+                .expect_err("the parser cannot produce a body-less stamped fn");
         assert!(error.to_string().contains("wrong child count for `fn`"));
-        let valid = crate::parser::parse_str("(fn {} (params {}) (lit {} 7))");
+        let valid = crate::parser::parse_str(
+            "(fn {} (params {}) (lit {} 7))",
+            &chelis_syntax_host::NativeStack,
+        );
         assert!(
             valid.is_ok(),
             "a valid nullary fn remains accepted: {valid:?}"

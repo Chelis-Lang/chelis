@@ -27655,9 +27655,10 @@ mod declaration_attribution_tests {
     use super::*;
 
     fn checked(source: &str) -> CheckedProgram {
-        let declarations = chelis_surf::parser::parse_str(source).unwrap();
+        let declarations =
+            chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack).unwrap();
         let checked = chelis_types::check_typed_program(
-            &chelis_surf::desugar::desugar_program(&declarations)
+            &chelis_surf::desugar::desugar_program(&declarations, &chelis_syntax_host::NativeStack)
                 .expect("Surf fixture must desugar"),
         )
         .unwrap();
@@ -28030,10 +28031,15 @@ mod fused_zero_tests {
                 let source = format!(
                     "def apply(f: tensor[f32] -> f32, x: tensor[f32]) -> f32 = f(x)\ndef mapped(f: tensor[f32] -> f32, xs: tensor[2, f32]) -> tensor[2, f32] = {{ target = fn (x: tensor[f32]) -> {body}\n vmap(grad(target))(xs) }}\n"
                 );
-                let declarations = chelis_surf::parser::parse_str(&source).unwrap();
+                let declarations =
+                    chelis_surf::parser::parse_str(&source, &chelis_syntax_host::NativeStack)
+                        .unwrap();
                 let checked = chelis_types::check_typed_program(
-                    &chelis_surf::desugar::desugar_program(&declarations)
-                        .expect("Surf fixture must desugar"),
+                    &chelis_surf::desugar::desugar_program(
+                        &declarations,
+                        &chelis_syntax_host::NativeStack,
+                    )
+                    .expect("Surf fixture must desugar"),
                 )
                 .unwrap();
                 let checked = chelis_effects::check_program(&checked).unwrap();
@@ -28221,15 +28227,18 @@ mod fused_zero_tests {
     }
 
     fn parsed(source: &str) -> Expr {
-        chelis_deep::parser::parse_str(source).unwrap().remove(0)
+        chelis_deep::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+            .unwrap()
+            .remove(0)
     }
 
     #[test]
     fn fused_zero_consumer_maps_shared_coefficient_gradients() {
         let source = "def loss(x: tensor[rows, f32], y: tensor[rows, f32]) -> f32 = {\n n = shape(x, 0)\n m = shape(y, 0)\n a = insert(mul(sum(x, 0), scalar_to_tensor(cast(n, f32))), 0, add(n, 0i64))\n b = insert(mul(sum(y, 0), scalar_to_tensor(add(cast(m, f32), 2.0f32))), 0, add(m, 0i64))\n tensor_to_scalar(add(sum(a, 0), sum(b, 0)))\n}\n";
-        let declarations = chelis_surf::parser::parse_str(source).unwrap();
+        let declarations =
+            chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack).unwrap();
         let checked = chelis_types::check_typed_program(
-            &chelis_surf::desugar::desugar_program(&declarations)
+            &chelis_surf::desugar::desugar_program(&declarations, &chelis_syntax_host::NativeStack)
                 .expect("Surf fixture must desugar"),
         )
         .unwrap();
@@ -28560,6 +28569,7 @@ mod tests {
         let contract = chelis_deep::parser::parse_str(
             "(t-fn {} (t-ref {} (t-tensor {} (d-name {} *) (t-prim {} f64))) \
              (t-tensor {} (d-lit {} 2) (t-prim {} bool)))",
+            &chelis_syntax_host::NativeStack,
         )
         .unwrap()
         .remove(0);
@@ -28650,10 +28660,12 @@ mod tests {
                 name.into(),
                 CallableExpr::Builtin(ResolvedBuiltinValue::resolve_bare(operation).unwrap()),
             );
-            let expression =
-                chelis_deep::parser::parse_str(&format!("(vmap {{}} (var {{}} {name}))"))
-                    .unwrap()
-                    .remove(0);
+            let expression = chelis_deep::parser::parse_str(
+                &format!("(vmap {{}} (var {{}} {name}))"),
+                &chelis_syntax_host::NativeStack,
+            )
+            .unwrap()
+            .remove(0);
             let Some(CallableExpr::Vmap {
                 target: ResolvedVmapTarget::Builtin(value),
                 ..
@@ -28663,9 +28675,12 @@ mod tests {
             };
             assert_eq!(value.symbol(), operation);
         }
-        let expression = chelis_deep::parser::parse_str("(vmap {} (var {} is_finite))")
-            .unwrap()
-            .remove(0);
+        let expression = chelis_deep::parser::parse_str(
+            "(vmap {} (var {} is_finite))",
+            &chelis_syntax_host::NativeStack,
+        )
+        .unwrap()
+        .remove(0);
         let Some(CallableExpr::Vmap {
             target: ResolvedVmapTarget::Builtin(value),
             ..
@@ -28683,7 +28698,11 @@ mod tests {
     /// nothing is never transported.
     #[test]
     fn only_spelled_dimension_names_are_transported() {
-        let parse = |source: &str| chelis_deep::parser::parse_str(source).unwrap().remove(0);
+        let parse = |source: &str| {
+            chelis_deep::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+                .unwrap()
+                .remove(0)
+        };
         let rank = [(
             "r".to_owned(),
             vec![DimInfo::Lit(2), DimInfo::Named("q".to_owned(), None)],
@@ -28764,7 +28783,7 @@ mod tests {
     #[test]
     fn a_pipe_free_definition_table_keeps_its_arc() {
         let parse = |source: &str| {
-            chelis_deep::parser::parse_str(source)
+            chelis_deep::parser::parse_str(source, &chelis_syntax_host::NativeStack)
                 .expect("the fixture parses")
                 .remove(0)
         };
@@ -29001,7 +29020,8 @@ mod tests {
     }
 
     fn static_match_of(pattern: &str, value: &LoweredValue) -> StaticPatternMatch {
-        let exprs = chelis_deep::parser::parse_str(pattern).expect("pattern parses");
+        let exprs = chelis_deep::parser::parse_str(pattern, &chelis_syntax_host::NativeStack)
+            .expect("pattern parses");
         match_static_pattern(&exprs[0], value)
     }
 
@@ -29154,7 +29174,7 @@ mod tests {
             chelis_types::FloatClassify::Infinite,
         ] {
             for precision in [Prim::F16, Prim::Bf16, Prim::F32, Prim::F64] {
-                let expr = chelis_deep::parser::parse_str("(app {type: (t-tensor {} (d-name {} *) (d-name {} *) (t-prim {} bool))} (var {} f) (var {} x))").unwrap().remove(0);
+                let expr = chelis_deep::parser::parse_str("(app {type: (t-tensor {} (d-name {} *) (d-name {} *) (t-prim {} bool))} (var {} f) (var {} x))", &chelis_syntax_host::NativeStack).unwrap().remove(0);
                 let axes = vec![
                     DimInfo::Named("batch".into(), None),
                     DimInfo::Named("_rt_actual_axis".into(), None),
@@ -29221,7 +29241,7 @@ mod tests {
         };
         let expr = chelis_deep::parser::parse_str(
             "(tuple {type: (t-tuple {} (t-tensor {} (d-lit {} 3) (t-prim {} f32)) (t-tensor {} (d-lit {} 3) (t-prim {} f32)))} (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))} x) (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))} x))",
-        )
+         &chelis_syntax_host::NativeStack)
         .expect("parse typed duplicate tuple")
         .remove(0);
         let context = SubexprLoweringContext {
@@ -29449,6 +29469,7 @@ mod tests {
         ctx.bindings.insert("x".into(), LoweredValue::Node(input));
         let expr = chelis_deep::parser::parse_str(
             "(app {} (var {} len) (app {} (var {} to_list) (var {} x)))",
+            &chelis_syntax_host::NativeStack,
         )
         .unwrap()
         .remove(0);
@@ -29520,6 +29541,7 @@ mod tests {
         let metadata_carrier = chelis_deep::parser::parse_str(
             "(lit {custom: (match {} (lit {} 0) \
              (arm {} (pat-var {} bad) () (lit {} 0)))} 0)",
+            &chelis_syntax_host::NativeStack,
         )
         .expect("metadata match parses")
         .remove(0);
@@ -29561,10 +29583,11 @@ mod tests {
              y: tensor[2, f32] = pad(x, [[0i64, 0i64]], 0.0f32)\n  \
              y\n\
              }\n",
+            &chelis_syntax_host::NativeStack,
         )
         .expect("Surf local-ascription fixture parses");
         let checked = chelis_types::check_ir_program(
-            &chelis_surf::desugar::desugar_program(&declarations)
+            &chelis_surf::desugar::desugar_program(&declarations, &chelis_syntax_host::NativeStack)
                 .expect("Surf fixture must desugar"),
         )
         .unwrap_or_else(|report| panic!("fixture type check failed: {:?}", report.errors));
@@ -29864,7 +29887,8 @@ mod tests {
     }
 
     fn parse_and_check(src: &str) -> chelis_types::CheckedProgram {
-        let exprs = chelis_deep::parser::parse_str(src).expect("parse failed");
+        let exprs = chelis_deep::parser::parse_str(src, &chelis_syntax_host::NativeStack)
+            .expect("parse failed");
         let checked = chelis_types::check_ir_program(&exprs)
             .unwrap_or_else(|result| panic!("IR check failed: {:?}", result.errors));
         let checked = chelis_effects::check_program(&checked)
@@ -30083,7 +30107,8 @@ mod tests {
     }
 
     fn parse_and_lower_unchecked(src: &str) -> Dag {
-        let exprs = chelis_deep::parser::parse_str(src).expect("parse failed");
+        let exprs = chelis_deep::parser::parse_str(src, &chelis_syntax_host::NativeStack)
+            .expect("parse failed");
         let mut ctx = LowerCtx::new(
             BTreeMap::new(),
             BTreeMap::new(),
@@ -30419,7 +30444,8 @@ mod tests {
             None,
         );
         ctx.bindings.insert("x".into(), LoweredValue::Node(x));
-        let expr = chelis_deep::parser::parse_str(expr_src).expect("parse expand expr");
+        let expr = chelis_deep::parser::parse_str(expr_src, &chelis_syntax_host::NativeStack)
+            .expect("parse expand expr");
         let _ = ctx.lower_expr(&expr[0]);
         ctx.dag
     }
@@ -30656,7 +30682,8 @@ mod tests {
             None,
         );
         ctx.bindings.insert("x".into(), LoweredValue::Node(x));
-        let expr = chelis_deep::parser::parse_str(body_src).expect("parse body");
+        let expr = chelis_deep::parser::parse_str(body_src, &chelis_syntax_host::NativeStack)
+            .expect("parse body");
         let _ = ctx.lower_expr(&expr[0]);
         ctx.dag
     }
@@ -30867,7 +30894,8 @@ mod tests {
                 None,
             );
             ctx.bindings.insert("k".into(), LoweredValue::Node(k));
-            let expr = chelis_deep::parser::parse_str(&body).expect("parse body");
+            let expr = chelis_deep::parser::parse_str(&body, &chelis_syntax_host::NativeStack)
+                .expect("parse body");
             let _ = ctx.lower_expr(&expr[0]);
             let expand = ctx
                 .dag
@@ -31142,6 +31170,7 @@ mod tests {
                 (app {} (var {} neg) (lit {type: (t-prim {} i64)} 7)))
                 (lit {type: (t-prim {} i64)} 9))
         "#,
+            &chelis_syntax_host::NativeStack,
         )
         .unwrap();
         let mut ctx = LowerCtx::new(
@@ -31253,10 +31282,12 @@ mod tests {
             r#"
                 def consume(x: tensor[2, 3, f32]) -> tensor[2, 3, f32] = realize(x)
             "#,
+            &chelis_syntax_host::NativeStack,
         )
         .expect("parse library");
-        let library_exprs = chelis_surf::desugar::desugar_program(&library_decls)
-            .expect("Surf fixture must desugar");
+        let library_exprs =
+            chelis_surf::desugar::desugar_program(&library_decls, &chelis_syntax_host::NativeStack)
+                .expect("Surf fixture must desugar");
         let (type_env, library_checked) =
             chelis_types::build_compiled_library_context(&library_exprs).expect("library checks");
         let library_checked =
@@ -31270,10 +31301,12 @@ mod tests {
                 def double_it(x: tensor[2, 3, f32]) -> tensor[2, 3, f32] =
                   add(consume(x), consume(x))
             "#,
+            &chelis_syntax_host::NativeStack,
         )
         .expect("parse new code");
         let new_exprs =
-            chelis_surf::desugar::desugar_program(&new_decls).expect("Surf fixture must desugar");
+            chelis_surf::desugar::desugar_program(&new_decls, &chelis_syntax_host::NativeStack)
+                .expect("Surf fixture must desugar");
         let new_checked =
             chelis_types::check_ir_with_context(&type_env, &new_exprs).expect("new code checks");
         let new_checked =
@@ -31656,7 +31689,7 @@ mod tests {
         .declared_for_test();
         let app_exprs = chelis_deep::parser::parse_str(
             "(app {} (var {} jac_row) (var {} lm_model) (app {} (var {} to_tensor) (app {} (var {} Cons) (lit {type: (t-prim {} f32)} 1.0) (app {} (var {} Cons) (lit {type: (t-prim {} f32)} 2.0) (var {} Nil)))) (cast {} (lit {type: (t-prim {} f32)} 1.0) (t-prim {} f32)) (cast {} (lit {type: (t-prim {} f32)} 3.0) (t-prim {} f32)))"
-        )
+        , &chelis_syntax_host::NativeStack)
         .expect("parse app expr");
         let (DeepTag::App, _, app_kids) = stamped_parts(&app_exprs[0]).expect("expected app")
         else {
@@ -31800,7 +31833,8 @@ mod tests {
         // Use `parse_and_lower_unchecked` because the standalone
         // `(import {} ...)` form isn't run through the regular
         // type-checker path; we want a direct lowering observation.
-        let exprs = chelis_deep::parser::parse_str(src).expect("parse failed");
+        let exprs = chelis_deep::parser::parse_str(src, &chelis_syntax_host::NativeStack)
+            .expect("parse failed");
         let mut ctx = LowerCtx::new(
             BTreeMap::new(),
             BTreeMap::new(),
@@ -31830,7 +31864,8 @@ mod tests {
             (def {} forward (lit {type: (t-prim {} f32)} 1.0))
             (import-all {} Math)
         "#;
-        let exprs = chelis_deep::parser::parse_str(src).expect("parse failed");
+        let exprs = chelis_deep::parser::parse_str(src, &chelis_syntax_host::NativeStack)
+            .expect("parse failed");
         let mut ctx = LowerCtx::new(
             BTreeMap::new(),
             BTreeMap::new(),
@@ -32519,11 +32554,14 @@ mod tests {
     /// numeric boundary is a cited rejection and allocates no DAG node.
     #[test]
     fn lower_lit_rejects_a_string_literal_with_a_cited_diagnostic() {
-        let expr = chelis_deep::parser::parse_str("(lit {type: (t-prim {} string)} \"hi\")")
-            .expect("parse failed")
-            .into_iter()
-            .next()
-            .expect("one expression");
+        let expr = chelis_deep::parser::parse_str(
+            "(lit {type: (t-prim {} string)} \"hi\")",
+            &chelis_syntax_host::NativeStack,
+        )
+        .expect("parse failed")
+        .into_iter()
+        .next()
+        .expect("one expression");
         let outcome = catch_lowering(UnrollBudget::Unbounded, move || {
             let mut ctx = LowerCtx::new(
                 BTreeMap::new(),
@@ -32557,7 +32595,11 @@ mod tests {
 
     #[test]
     fn issue_1915_actual_values_precede_formals_and_restore_caller() {
-        let parse = |source: &str| chelis_deep::parser::parse_str(source).unwrap().remove(0);
+        let parse = |source: &str| {
+            chelis_deep::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+                .unwrap()
+                .remove(0)
+        };
         for (params, body) in [("x y", "x) (var {} y"), ("a b", "a) (var {} b")] {
             let mut ctx = LowerCtx::new(
                 BTreeMap::new(),
@@ -32586,7 +32628,11 @@ mod tests {
 
     #[test]
     fn issue_1915_static_size_actual_precedes_formal_and_restores() {
-        let parse = |source: &str| chelis_deep::parser::parse_str(source).unwrap().remove(0);
+        let parse = |source: &str| {
+            chelis_deep::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+                .unwrap()
+                .remove(0)
+        };
         let mut ctx = LowerCtx::new(
             BTreeMap::new(),
             BTreeMap::from([(
@@ -32654,7 +32700,7 @@ mod tests {
     }
 
     fn parse_type_expr(src: &str) -> Expr {
-        chelis_deep::parser::parse_str(src)
+        chelis_deep::parser::parse_str(src, &chelis_syntax_host::NativeStack)
             .expect("parse failed")
             .into_iter()
             .next()
@@ -33637,7 +33683,8 @@ mod regression_tests {
     }
 
     fn parse_and_lower(src: &str) -> Dag {
-        let exprs = chelis_deep::parser::parse_str(src).expect("parse failed");
+        let exprs = chelis_deep::parser::parse_str(src, &chelis_syntax_host::NativeStack)
+            .expect("parse failed");
         let checked = chelis_types::check_ir_program(&exprs)
             .unwrap_or_else(|result| panic!("IR check failed: {:?}", result.errors));
         let checked = chelis_effects::check_program(&checked)
@@ -33648,7 +33695,8 @@ mod regression_tests {
     }
 
     fn parse_and_lower_unchecked(src: &str) -> Dag {
-        let exprs = chelis_deep::parser::parse_str(src).expect("parse failed");
+        let exprs = chelis_deep::parser::parse_str(src, &chelis_syntax_host::NativeStack)
+            .expect("parse failed");
         let mut ctx = LowerCtx::new(
             BTreeMap::new(),
             BTreeMap::new(),
@@ -33786,6 +33834,7 @@ mod regression_tests {
                         (var {} x)
                         (var {} w)))
             "#,
+            &chelis_syntax_host::NativeStack,
         )
         .expect("parse failed");
         let mut ctx = LowerCtx::new(
@@ -34108,7 +34157,9 @@ mod regression_tests {
              (app {{}} (var {{}} Cons) {one} (var {{}} Nil))) (var {{}} Nil)) \
              (var {{type: (t-prim {{}} f32)}} f))"
         );
-        let expr = chelis_deep::parser::parse_str(&src).unwrap().remove(0);
+        let expr = chelis_deep::parser::parse_str(&src, &chelis_syntax_host::NativeStack)
+            .unwrap()
+            .remove(0);
         let root = ctx.lower_expr_node(&expr, "runtime-fill pad");
         let mut dag = ctx.dag;
         let select = dag.get(root).unwrap();
@@ -34322,11 +34373,14 @@ mod regression_tests {
             ("127.5", Prim::Int8),
             ("128.0", Prim::Int8),
         ] {
-            let expr = chelis_deep::parser::parse_str(&format!(
-                "(cast {{}} \
+            let expr = chelis_deep::parser::parse_str(
+                &format!(
+                    "(cast {{}} \
                     (lit {{surf_literal_style: \"unsuffixed\", type: (t-var {{}} p)}} {literal}) \
                     (t-var {{}} p))"
-            ))
+                ),
+                &chelis_syntax_host::NativeStack,
+            )
             .unwrap_or_else(|error| panic!("parse binder literal {literal}: {error}"))
             .pop()
             .expect("one binder cast");
@@ -34795,9 +34849,11 @@ mod regression_tests {
     /// The checker's ADT registry for `types`, the declaration source
     /// record construction orders its slots by (chelis#3230).
     fn checked_registry(types: &str) -> chelis_types::adt::AdtRegistry {
-        let declarations = chelis_surf::parser::parse_str(types).expect("Surf fixture parses");
+        let declarations = chelis_surf::parser::parse_str(types, &chelis_syntax_host::NativeStack)
+            .expect("Surf fixture parses");
         chelis_types::check_typed_program(
-            &chelis_surf::desugar::desugar_program(&declarations).expect("fixture desugars"),
+            &chelis_surf::desugar::desugar_program(&declarations, &chelis_syntax_host::NativeStack)
+                .expect("fixture desugars"),
         )
         .expect("fixture checks")
         .adt_registry()
@@ -34811,7 +34867,8 @@ mod regression_tests {
         registry: Option<&chelis_types::adt::AdtRegistry>,
         deep: &str,
     ) -> Result<String, String> {
-        let exprs = chelis_deep::parser::parse_str(deep).expect("parse failed");
+        let exprs = chelis_deep::parser::parse_str(deep, &chelis_syntax_host::NativeStack)
+            .expect("parse failed");
         let mut ctx = LowerCtx::new(
             BTreeMap::new(),
             BTreeMap::new(),
@@ -34973,6 +35030,7 @@ mod regression_tests {
     fn an_unsupported_transform_in_pipe_position_names_the_transform() {
         let exprs = chelis_deep::parser::parse_str(
             "(app {} (grad {} (var {} f)) (lit {type: (t-prim {} f32)} 1.0))",
+            &chelis_syntax_host::NativeStack,
         )
         .expect("parse failed");
         let err =
@@ -34998,7 +35056,8 @@ mod regression_tests {
     #[test]
     fn computed_callee_never_becomes_its_last_argument() {
         let source = "(app {} (app {} (fn {} (params {} (x {type: (t-prim {} i64)})) (fn {} (params {} (y {type: (t-prim {} i64)})) (var {} x))) (lit {type: (t-prim {} i64)} 3)) (lit {type: (t-prim {} i64)} 9))";
-        let exprs = chelis_deep::parser::parse_str(source).expect("parse probe");
+        let exprs = chelis_deep::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+            .expect("parse probe");
         let error =
             try_lower_subexpr_program(&exprs[0], UnordMap::new(), UnordMap::new(), UnordMap::new())
                 .expect_err("a computed closure is a host value, not its final actual");
@@ -35030,7 +35089,8 @@ mod regression_tests {
             ),
         ] {
             let source = format!("(app {{}} (var {{}} {operation}) {args})");
-            let exprs = chelis_deep::parser::parse_str(&source).expect("parse probe");
+            let exprs = chelis_deep::parser::parse_str(&source, &chelis_syntax_host::NativeStack)
+                .expect("parse probe");
             let error = try_lower_subexpr_program(
                 &exprs[0],
                 UnordMap::new(),
@@ -35062,6 +35122,7 @@ mod regression_tests {
         let exprs = chelis_deep::parser::parse_str(
             "(def {} x (lit {} 1.0))
              (def {} y (app {} (var {} reshape) (var {} x)))",
+            &chelis_syntax_host::NativeStack,
         )
         .expect("parse failed");
         let err = std::panic::catch_unwind(|| {
@@ -35112,7 +35173,8 @@ mod regression_tests {
                 Simplex
                 (field {} weights (t-tensor {} (d-lit {} 3) (t-prim {} f32)))))
         "#;
-        let exprs = chelis_deep::parser::parse_str(src).expect("parse failed");
+        let exprs = chelis_deep::parser::parse_str(src, &chelis_syntax_host::NativeStack)
+            .expect("parse failed");
         // Neither audit may panic on declaration metadata.
         for expr in &exprs {
             assert_ir_typed(expr);
@@ -35146,7 +35208,8 @@ mod regression_tests {
                 Probability
                 (field {} value (t-prim {} f32))))
         "#;
-        let exprs = chelis_deep::parser::parse_str(src).expect("parse failed");
+        let exprs = chelis_deep::parser::parse_str(src, &chelis_syntax_host::NativeStack)
+            .expect("parse failed");
         for expr in &exprs {
             assert_ir_typed(expr);
             assert_ir_lowerable(expr);
@@ -35161,6 +35224,7 @@ mod regression_tests {
         let exprs = chelis_deep::parser::parse_str(
             "(def {} x (lit {} 1.0))
              (def {} y (app {} (var {} reshape) (var {} x)))",
+            &chelis_syntax_host::NativeStack,
         )
         .expect("parse failed");
         let err = std::panic::catch_unwind(|| {
@@ -35213,12 +35277,12 @@ mod regression_tests {
               (grad {} (var {} loss))
               (var {type: (t-tensor {} (d-lit {} 1) (t-prim {} f32))} input))
         "#;
-        let fn_expr = chelis_deep::parser::parse_str(fn_src)
+        let fn_expr = chelis_deep::parser::parse_str(fn_src, &chelis_syntax_host::NativeStack)
             .expect("parse fn failed")
             .into_iter()
             .next()
             .expect("fn expr");
-        let app_expr = chelis_deep::parser::parse_str(app_src)
+        let app_expr = chelis_deep::parser::parse_str(app_src, &chelis_syntax_host::NativeStack)
             .expect("parse app failed")
             .into_iter()
             .next()
@@ -35268,12 +35332,12 @@ mod regression_tests {
               (grad {} (var {} loss))
               (var {type: (t-tensor {} (d-lit {} 1) (t-prim {} f32))} input))
         "#;
-        let fn_expr = chelis_deep::parser::parse_str(fn_src)
+        let fn_expr = chelis_deep::parser::parse_str(fn_src, &chelis_syntax_host::NativeStack)
             .expect("parse fn failed")
             .into_iter()
             .next()
             .expect("fn expr");
-        let app_expr = chelis_deep::parser::parse_str(app_src)
+        let app_expr = chelis_deep::parser::parse_str(app_src, &chelis_syntax_host::NativeStack)
             .expect("parse app failed")
             .into_iter()
             .next()
@@ -35332,12 +35396,12 @@ mod regression_tests {
               (grad {} (var {} loss))
               (var {type: (t-tensor {} (d-lit {} 1) (t-prim {} f32))} input))
         "#;
-        let fn_expr = chelis_deep::parser::parse_str(fn_src)
+        let fn_expr = chelis_deep::parser::parse_str(fn_src, &chelis_syntax_host::NativeStack)
             .expect("parse fn failed")
             .into_iter()
             .next()
             .expect("fn expr");
-        let app_expr = chelis_deep::parser::parse_str(app_src)
+        let app_expr = chelis_deep::parser::parse_str(app_src, &chelis_syntax_host::NativeStack)
             .expect("parse app failed")
             .into_iter()
             .next()
@@ -35385,8 +35449,10 @@ mod lowerability_memo_tests {
     use super::*;
 
     fn checked(source: &str) -> CheckedProgram {
-        let decls = chelis_surf::parser::parse_str(source).expect("surf parse failed");
-        let deep = chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture desugars");
+        let decls = chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+            .expect("surf parse failed");
+        let deep = chelis_surf::desugar::desugar_program(&decls, &chelis_syntax_host::NativeStack)
+            .expect("Surf fixture desugars");
         let typed = chelis_types::check_ir_program(&deep)
             .unwrap_or_else(|result| panic!("IR check failed: {:?}", result.errors));
         let effected = chelis_effects::check_program(&typed)
@@ -35785,8 +35851,10 @@ mod lowerability_memo_tests {
     }
 
     fn try_checked(source: &str) -> Option<CheckedProgram> {
-        let decls = chelis_surf::parser::parse_str(source).ok()?;
-        let deep = chelis_surf::desugar::desugar_program(&decls).ok()?;
+        let decls =
+            chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack).ok()?;
+        let deep =
+            chelis_surf::desugar::desugar_program(&decls, &chelis_syntax_host::NativeStack).ok()?;
         let typed = chelis_types::check_ir_program(&deep).ok()?;
         let effected = chelis_effects::check_program(&typed).ok()?;
         chelis_types::check_linearity(&effected).ok()
@@ -35921,9 +35989,11 @@ def example() -> f32 = bisection(erf_projectile, cast(0.1, f32), cast(0.7, f32),
     }
 
     fn checked(source: &str) -> CheckedProgram {
-        let declarations = chelis_surf::parser::parse_str(source).expect("the probe parses");
+        let declarations = chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+            .expect("the probe parses");
         let checked = chelis_types::check_typed_program(
-            &chelis_surf::desugar::desugar_program(&declarations).expect("the probe desugars"),
+            &chelis_surf::desugar::desugar_program(&declarations, &chelis_syntax_host::NativeStack)
+                .expect("the probe desugars"),
         )
         .expect("the probe checks");
         let checked =
@@ -36313,7 +36383,7 @@ def example() -> f32 = bisection(erf_projectile, cast(0.1, f32), cast(0.7, f32),
             );
             let call = chelis_deep::parser::parse_str(
                 "(app {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))} (var {} example) (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))} seed))",
-            )
+             &chelis_syntax_host::NativeStack)
             .expect("the call parses")
             .remove(0);
             let seed = TensorType {

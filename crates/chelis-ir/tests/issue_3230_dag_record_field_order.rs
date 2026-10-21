@@ -18,9 +18,11 @@ use chelis_unord::UnordMap;
 const TYPES: &str = "type P =\n  | P { w: f32, b: f32 }\nprobe = 0.0f32\n";
 
 fn checked_surf(source: &str) -> chelis_types::CheckedProgram {
-    let declarations = chelis_surf::parser::parse_str(source).expect("Surf parse");
+    let declarations = chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+        .expect("Surf parse");
     let exprs =
-        chelis_surf::desugar::desugar_program(&declarations).expect("Surf fixture must desugar");
+        chelis_surf::desugar::desugar_program(&declarations, &chelis_syntax_host::NativeStack)
+            .expect("Surf fixture must desugar");
     let checked = chelis_types::check_ir_program(&exprs).unwrap_or_else(|report| {
         panic!(
             "type check failed: {:?}",
@@ -46,7 +48,7 @@ fn positional_match(written: [&str; 2], taken: &str) -> Expr {
          (arm {{}} (pat-ctor {{}} P (pat-var {{}} first) (pat-var {{}} second)) () \
          (var {{}} {taken})))"
     );
-    chelis_deep::parser::parse_str(&source)
+    chelis_deep::parser::parse_str(&source, &chelis_syntax_host::NativeStack)
         .expect("Deep parse")
         .remove(0)
 }

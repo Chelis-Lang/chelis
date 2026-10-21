@@ -2,12 +2,15 @@
 //! converts it (spec/02-surf-syntax.md §P10b, spec/04-type-system.md §5.6).
 use chelis_surf::{desugar::desugar_program, parser::parse_str};
 fn deep(source: &str) -> String {
-    desugar_program(&parse_str(source).unwrap())
-        .unwrap()
-        .iter()
-        .map(chelis_deep::printer::print_expr)
-        .collect::<Vec<_>>()
-        .join("\n")
+    desugar_program(
+        &parse_str(source, &chelis_syntax_host::NativeStack).unwrap(),
+        &chelis_syntax_host::NativeStack,
+    )
+    .unwrap()
+    .iter()
+    .map(chelis_deep::printer::print_expr)
+    .collect::<Vec<_>>()
+    .join("\n")
 }
 #[test]
 fn bare_numeric_bindings_are_lists_and_to_tensor_makes_tensors() {
@@ -71,8 +74,9 @@ fn a_lexical_binding_of_to_tensor_is_a_loud_refusal() {
         "def sample() = {\n to_tensor = fn (xs: List[i32]) -> xs\n xs: List[i32] = [1, 2]\n to_tensor(xs)\n}\nresult = sample()\n",
         "def sample() = {\n to_tensor = fn (xs: List[i32]) -> xs\n xs = [1, 2]\n to_tensor(xs)\n}\nresult = sample()\n",
     ] {
-        let parsed = parse_str(source).unwrap();
-        let error = desugar_program(&parsed).expect_err("`to_tensor` cannot be bound");
+        let parsed = parse_str(source, &chelis_syntax_host::NativeStack).unwrap();
+        let error = desugar_program(&parsed, &chelis_syntax_host::NativeStack)
+            .expect_err("`to_tensor` cannot be bound");
         assert!(
             error.to_string().contains("`to_tensor` is reserved"),
             "{error}"

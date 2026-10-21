@@ -15,9 +15,11 @@ const ARITHMETIC: [&str; 8] = [
 ];
 
 fn diagnostics(source: &str) -> Vec<CheckError> {
-    let surf = chelis_surf::parser::parse_str(source).expect("Surf parse");
+    let surf = chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+        .expect("Surf parse");
     let deep = chelis_macros::expand_program(
-        &chelis_surf::desugar::desugar_program(&surf).expect("Surf fixture must desugar"),
+        &chelis_surf::desugar::desugar_program(&surf, &chelis_syntax_host::NativeStack)
+            .expect("Surf fixture must desugar"),
         &chelis_macros::ExpansionOptions::default(),
     )
     .expect("expand")
@@ -88,7 +90,8 @@ fn handwritten_deep_uses_the_same_declared_binder_at_both_ingresses() {
             let source = format!(
                 "(defsig {{dtype_bounds: {{p: int}}}} f (p) (t-fn {{}} (t-tensor {{}} (d-lit {{}} 3) (t-var {{}} p)) (t-tensor {{}} (d-lit {{}} 3) {result}))) (def {{}} f (fn {{}} (params {{}} xs) (app {{}} (var {{}} {op}) {lhs} {rhs})))"
             );
-            let deep = chelis_deep::parser::parse_str(&source).expect("Deep parse");
+            let deep = chelis_deep::parser::parse_str(&source, &chelis_syntax_host::NativeStack)
+                .expect("Deep parse");
             assert_mixed(&deep_diagnostics(&deep), comparison, &source);
         }
     }
@@ -199,7 +202,12 @@ fn declaration_binders_stay_independent_and_rigid() {
 #[test]
 fn cached_library_bounds_and_lexical_aliases_preserve_the_boundary() {
     let library = chelis_surf::desugar::desugar_program(
-        &chelis_surf::parser::parse_str("def id[p: Float](x: p) -> p = x\n").unwrap(),
+        &chelis_surf::parser::parse_str(
+            "def id[p: Float](x: p) -> p = x\n",
+            &chelis_syntax_host::NativeStack,
+        )
+        .unwrap(),
+        &chelis_syntax_host::NativeStack,
     )
     .expect("Surf fixture must desugar");
     let context = chelis_types::build_type_env_from_library(&library).unwrap();
@@ -208,7 +216,8 @@ fn cached_library_bounds_and_lexical_aliases_preserve_the_boundary() {
     for (operand, mixed) in [("xs", true), ("c", false)] {
         let source = format!("def f[p: Float](xs: tensor[3, p], c: p) = gt({operand}, id(c))\n");
         let deep = chelis_surf::desugar::desugar_program(
-            &chelis_surf::parser::parse_str(&source).unwrap(),
+            &chelis_surf::parser::parse_str(&source, &chelis_syntax_host::NativeStack).unwrap(),
+            &chelis_syntax_host::NativeStack,
         )
         .expect("Surf fixture must desugar");
         let errors = chelis_types::check_ir_with_context(&context, &deep)

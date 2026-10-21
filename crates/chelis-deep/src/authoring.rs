@@ -5,7 +5,12 @@
 //! on the AST so cascade tools can prove what they touched instead of relying
 //! on string search.
 
-use std::collections::{BTreeMap, BTreeSet};
+use alloc::collections::{BTreeMap, BTreeSet};
+use alloc::{
+    boxed::Box,
+    string::{String, ToString},
+    vec::Vec,
+};
 
 use crate::node::{Node, NodeError};
 use crate::tag::DeepTag;
@@ -1122,7 +1127,7 @@ fn edit_node_parts<R>(
     if !matches!(expr, Expr::Node(..)) {
         return None;
     }
-    let detached = std::mem::replace(expr, Expr::Atom(Atom::Bool(false), Span::new(0, 0)));
+    let detached = core::mem::replace(expr, Expr::Atom(Atom::Bool(false), Span::new(0, 0)));
     let (tag, mut meta, mut children, span) = detached
         .into_node_parts()
         .unwrap_or_else(|_| unreachable!("checked that `expr` is a node"));

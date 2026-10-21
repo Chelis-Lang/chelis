@@ -668,7 +668,7 @@ async fn decompile_endpoint_round_trips_and_rejects_bad_deep() {
     assert!(ok["ok"].as_bool().unwrap());
     let surf_text = ok["result"]["surf_text"].as_str().unwrap();
     assert!(surf_text.contains("def main"));
-    let reparsed = chelis_surf::parser::parse_str(surf_text)
+    let reparsed = chelis_surf::parser::parse_str(surf_text, &chelis_syntax_host::NativeStack)
         .expect("decompile endpoint returns parseable Surf");
     assert_eq!(
         chelis_surf::format::format_program(&reparsed),
@@ -699,7 +699,8 @@ async fn replace_function_body_endpoint_accepts_well_typed_replacement() {
         .as_str()
         .expect("module_deep string");
     let reparsed =
-        chelis_deep::parser::parse_str_strict(module_deep).expect("module_deep reparses");
+        chelis_deep::parser::parse_str_strict(module_deep, &chelis_syntax_host::NativeStack)
+            .expect("module_deep reparses");
     assert_eq!(
         chelis_deep::printer::print_canonical(&reparsed),
         module_deep
@@ -855,7 +856,8 @@ async fn add_function_endpoint_accepts_well_typed_function_bundle() {
         .as_str()
         .expect("module_deep string");
     let reparsed =
-        chelis_deep::parser::parse_str_strict(module_deep).expect("module_deep reparses");
+        chelis_deep::parser::parse_str_strict(module_deep, &chelis_syntax_host::NativeStack)
+            .expect("module_deep reparses");
     assert_eq!(
         chelis_deep::printer::print_canonical(&reparsed),
         module_deep

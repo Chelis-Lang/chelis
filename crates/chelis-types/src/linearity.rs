@@ -6273,9 +6273,13 @@ mod tests {
 
         fn checked(source: &str) -> CheckedProgram {
             let declarations =
-                chelis_surf::parser::parse_str(source).expect("generated Surf parses");
-            let program = chelis_surf::desugar::desugar_program(&declarations)
-                .expect("generated Surf desugars");
+                chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+                    .expect("generated Surf parses");
+            let program = chelis_surf::desugar::desugar_program(
+                &declarations,
+                &chelis_syntax_host::NativeStack,
+            )
+            .expect("generated Surf desugars");
             crate::check_typed_program(&program).expect("generated Surf checks")
         }
 

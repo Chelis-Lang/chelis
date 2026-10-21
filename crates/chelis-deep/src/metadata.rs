@@ -8,6 +8,10 @@ use crate::annotations::{
     EffectMember, InvariantPredicate, MetadataValue as V, PropertyBinder, VariableRef, WrtTargets,
 };
 use crate::{Atom, DeepTag, Expr, Metadata, RawAtom, RawExpr, Span};
+use alloc::{
+    string::{String, ToString},
+    vec::Vec,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MetadataError {
@@ -18,8 +22,8 @@ pub struct MetadataError {
     pub(crate) forbidden_span_char: Option<(usize, u8)>,
 }
 
-impl std::fmt::Display for MetadataError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for MetadataError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(
             f,
             "metadata `{}` requires {} at byte {}; see spec/03 §1.1 [03-META-1/2]",
@@ -31,7 +35,7 @@ impl std::fmt::Display for MetadataError {
         Ok(())
     }
 }
-impl std::error::Error for MetadataError {}
+impl core::error::Error for MetadataError {}
 
 #[derive(Clone, Copy)]
 enum Shape {
@@ -175,7 +179,7 @@ enum View<'a> {
     Value(&'a V),
     Name(&'a str, Span),
     /// §5.9's explicit dtype set, viewed as its ordered member names.
-    BoundSet(&'a std::collections::BTreeSet<crate::BoundDtype>, Span),
+    BoundSet(&'a alloc::collections::BTreeSet<crate::BoundDtype>, Span),
     String(&'a str, Span),
     True(Span),
     Annotations(&'a Metadata, Span),
@@ -295,7 +299,7 @@ impl<'a> View<'a> {
             ),
             Self::Ast(Expr::BareList(v, _)) => Some(v.iter().map(Self::Ast).collect()),
             Self::Value(V::Source(v)) => Some(
-                std::iter::once(Self::Name(v.name.value(), v.name.span()))
+                core::iter::once(Self::Name(v.name.value(), v.name.span()))
                     .chain(v.arguments.iter().map(Self::Raw))
                     .collect(),
             ),
@@ -1149,7 +1153,7 @@ fn push_metadata<'a>(meta: Entries<'a>, stack: &mut Vec<(View<'a>, Context)>) {
     }
 }
 #[cfg(test)]
-thread_local! { static ADMISSION_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
+std::thread_local! { static ADMISSION_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
 
 fn walk(
     mut stack: Vec<(View<'_>, Context)>,
@@ -1246,7 +1250,7 @@ pub(crate) fn validate_node(
 /// Inductive decode-once admission: typed Node subtrees already passed this gate.
 pub(crate) fn validate_payload_tags(key: &str, expr: &Expr) -> Result<(), MetadataError> {
     if let Some(tag) =
-        crate::validate::find_raw_vocabulary_tag_below_gate(std::slice::from_ref(expr))
+        crate::validate::find_raw_vocabulary_tag_below_gate(core::slice::from_ref(expr))
     {
         let mut error = crate::annotations::invalid(
             key,

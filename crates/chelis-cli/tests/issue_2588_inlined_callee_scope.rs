@@ -24,7 +24,8 @@ fn eval(source: &str) -> String {
     let path = dir.path().join("scope.ch");
     fs::write(
         &path,
-        chelis_surf::format::format_source(source).expect("format"),
+        chelis_surf::format::format_source(source, &chelis_syntax_host::NativeStack)
+            .expect("format"),
     )
     .expect("source");
     let output = Command::cargo_bin("chelis")

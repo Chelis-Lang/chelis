@@ -741,9 +741,12 @@ mod tests {
             before: actual.0,
             value: StageValue::Tensor(actual),
             ty: HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(Prim::Int64)),
-            expression: chelis_deep::parser::parse_str("(lit {type: (t-prim {} i64)} 2)")
-                .unwrap()
-                .remove(0),
+            expression: chelis_deep::parser::parse_str(
+                "(lit {type: (t-prim {} i64)} 2)",
+                &chelis_syntax_host::NativeStack,
+            )
+            .unwrap()
+            .remove(0),
             captures: vec![(
                 "x".into(),
                 StageValue::Tensor(x),
@@ -876,9 +879,12 @@ mod tests {
             before: actual.0,
             value: StageValue::Tensor(actual),
             ty: HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(Prim::Int64)),
-            expression: chelis_deep::parser::parse_str("(lit {type: (t-prim {} i64)} 2)")
-                .unwrap()
-                .remove(0),
+            expression: chelis_deep::parser::parse_str(
+                "(lit {type: (t-prim {} i64)} 2)",
+                &chelis_syntax_host::NativeStack,
+            )
+            .unwrap()
+            .remove(0),
             captures: vec![(
                 "x".into(),
                 StageValue::Tensor(x),
@@ -1017,9 +1023,12 @@ mod tests {
             before: actual.0,
             value: StageValue::Tensor(actual),
             ty: HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(Prim::Int64)),
-            expression: chelis_deep::parser::parse_str("(lit {type: (t-prim {} i64)} 2)")
-                .unwrap()
-                .remove(0),
+            expression: chelis_deep::parser::parse_str(
+                "(lit {type: (t-prim {} i64)} 2)",
+                &chelis_syntax_host::NativeStack,
+            )
+            .unwrap()
+            .remove(0),
             captures: vec![(
                 "x".into(),
                 StageValue::Tensor(input),
@@ -1149,9 +1158,12 @@ mod tests {
             before: actual.0,
             value: StageValue::Tensor(actual),
             ty: HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(Prim::Int64)),
-            expression: chelis_deep::parser::parse_str("(lit {type: (t-prim {} int64)} 2)")
-                .unwrap()
-                .remove(0),
+            expression: chelis_deep::parser::parse_str(
+                "(lit {type: (t-prim {} int64)} 2)",
+                &chelis_syntax_host::NativeStack,
+            )
+            .unwrap()
+            .remove(0),
             captures: vec![(
                 "x".into(),
                 StageValue::Tensor(input),

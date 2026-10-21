@@ -59,7 +59,8 @@ fn on_measuring_thread<R: Send + 'static>(work: impl FnOnce() -> R + Send + 'sta
 }
 
 fn apply_visits(source: &str) -> usize {
-    let program = chelis_deep::parse_and_stamp_file(source).expect("the probe parses");
+    let program = chelis_deep::parse_and_stamp_file(source, &chelis_syntax_host::NativeStack)
+        .expect("the probe parses");
     let _ = take_apply_visits();
     let checked = check_typed_program(&program);
     let visits = take_apply_visits();

@@ -16,8 +16,12 @@ use chelis_types::{
 };
 
 fn parse(source: &str) -> Vec<Expr> {
-    desugar_program(&parse_str(source).expect("canonical Surf fixture parses"))
-        .expect("fixture desugars")
+    desugar_program(
+        &parse_str(source, &chelis_syntax_host::NativeStack)
+            .expect("canonical Surf fixture parses"),
+        &chelis_syntax_host::NativeStack,
+    )
+    .expect("fixture desugars")
 }
 
 fn clean(result: Result<CheckedProgram, InferResult>, label: &str) {
@@ -70,9 +74,10 @@ fn direct_and_multi_hop_helpers_preserve_complete_parametric_rows() {
 }
 
 fn invalid_function_metadata(ty: &str) -> Vec<Expr> {
-    chelis_deep::parser::parse_str(&format!(
-        "(def {{}} invalid (fn {{type: {ty}}} (params {{}} x) (var {{}} x)))"
-    ))
+    chelis_deep::parser::parse_str(
+        &format!("(def {{}} invalid (fn {{type: {ty}}} (params {{}} x) (var {{}} x)))"),
+        &chelis_syntax_host::NativeStack,
+    )
     .expect("authored metadata fixture parses")
 }
 

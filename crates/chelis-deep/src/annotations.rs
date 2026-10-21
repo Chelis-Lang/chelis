@@ -2,7 +2,8 @@
 //!
 //! Keys are derived from typed variants. Raw key/value pairs exist only at
 //! ingress and serialization boundaries; consumers observe dedicated payloads.
-use std::collections::BTreeMap;
+use alloc::collections::BTreeMap;
+use alloc::{string::String, vec::Vec};
 
 pub use crate::ExtensionData;
 pub use crate::annotations_transform::MetadataName;
@@ -70,21 +71,21 @@ impl SpanId {
 macro_rules! expression_payload {
     ($name:ident, $key:literal) => {
         #[derive(Debug, Clone, PartialEq)]
-        pub struct $name(std::sync::Arc<Expr>);
+        pub struct $name(alloc::sync::Arc<Expr>);
         impl $name {
             pub fn try_new(value: Expr) -> Result<Self, MetadataError> {
                 crate::metadata::validate_payload($key, &value)?;
-                Ok(Self(std::sync::Arc::new(value)))
+                Ok(Self(alloc::sync::Arc::new(value)))
             }
             pub fn expression(&self) -> &Expr {
                 &self.0
             }
             /// The expression, shared with this payload.
-            pub fn shared(&self) -> &std::sync::Arc<Expr> {
+            pub fn shared(&self) -> &alloc::sync::Arc<Expr> {
                 &self.0
             }
             pub fn into_expression(self) -> Expr {
-                std::sync::Arc::unwrap_or_clone(self.0)
+                alloc::sync::Arc::unwrap_or_clone(self.0)
             }
             pub fn span(&self) -> Span {
                 self.0.span()
@@ -279,7 +280,7 @@ impl VariableTuple {
         })
     }
     pub fn variables(&self) -> impl Iterator<Item = &VariableRef> {
-        std::iter::once(&self.first).chain(&self.rest)
+        core::iter::once(&self.first).chain(&self.rest)
     }
     pub fn metadata(&self) -> &Metadata {
         &self.container.metadata
@@ -299,7 +300,7 @@ impl WrtTargets {
             Self::Variable(v) => (v, &[][..]),
             Self::Tuple(t) => (&t.first, t.rest.as_slice()),
         };
-        std::iter::once(first).chain(rest)
+        core::iter::once(first).chain(rest)
     }
     pub fn span(&self) -> Span {
         match self {
@@ -536,7 +537,7 @@ impl Metadata {
         if self.checked_binding_owner() == owner.as_deref() {
             return;
         }
-        std::sync::Arc::make_mut(self.storage.get_or_insert_with(Default::default))
+        alloc::sync::Arc::make_mut(self.storage.get_or_insert_with(Default::default))
             .checked_binding_owner = owner;
     }
 }
@@ -629,9 +630,7 @@ struct Storage {
 // `storage_copies_are_independent_of_clone_count` can assert that promise as
 // a ratio instead of a wall clock. Release builds compile the recorder away.
 #[cfg(test)]
-thread_local! {
-    static STORAGE_COPIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-}
+std::thread_local! { static STORAGE_COPIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
 
 #[cfg(test)]
 fn record_storage_copy() {
@@ -660,22 +659,22 @@ impl Storage {
         metadata: &mut Vec<Metadata>,
     ) {
         let mut take_expression = |expression: &mut Expr| {
-            expressions.push(std::mem::replace(
+            expressions.push(core::mem::replace(
                 expression,
                 Expr::Atom(Atom::Bool(false), Span::new(0, 0)),
             ));
         };
-        for mut value in std::mem::take(&mut self.core) {
+        for mut value in core::mem::take(&mut self.core) {
             match &mut value {
                 // A shared payload whose other holders outlive this one keeps
                 // its expression; the last holder takes it for the walk.
                 MetadataValue::Type(value) => {
-                    if let Some(expression) = std::sync::Arc::get_mut(&mut value.0) {
+                    if let Some(expression) = alloc::sync::Arc::get_mut(&mut value.0) {
                         take_expression(expression);
                     }
                 }
                 MetadataValue::Accumulator(value) => {
-                    if let Some(expression) = std::sync::Arc::get_mut(&mut value.0) {
+                    if let Some(expression) = alloc::sync::Arc::get_mut(&mut value.0) {
                         take_expression(expression);
                     }
                 }
@@ -683,48 +682,48 @@ impl Storage {
                 | MetadataValue::PropertySeed(value)
                 | MetadataValue::PropertySamples(value) => take_expression(&mut value.0),
                 MetadataValue::Eff(value) | MetadataValue::Effects(value) => {
-                    metadata.push(std::mem::take(&mut value.container.metadata));
+                    metadata.push(core::mem::take(&mut value.container.metadata));
                     for member in &mut value.values {
                         if let EffectMember::Resource(resource) = member {
-                            metadata.push(std::mem::take(&mut resource.container.metadata));
+                            metadata.push(core::mem::take(&mut resource.container.metadata));
                         }
                     }
                 }
                 MetadataValue::Wrt(value) => match value {
                     WrtTargets::Variable(variable) => {
-                        metadata.push(std::mem::take(&mut variable.container.metadata));
+                        metadata.push(core::mem::take(&mut variable.container.metadata));
                     }
                     WrtTargets::Tuple(tuple) => {
-                        metadata.push(std::mem::take(&mut tuple.container.metadata));
-                        metadata.push(std::mem::take(&mut tuple.first.container.metadata));
+                        metadata.push(core::mem::take(&mut tuple.container.metadata));
+                        metadata.push(core::mem::take(&mut tuple.first.container.metadata));
                         for variable in &mut tuple.rest {
-                            metadata.push(std::mem::take(&mut variable.container.metadata));
+                            metadata.push(core::mem::take(&mut variable.container.metadata));
                         }
                     }
                 },
                 MetadataValue::PropertyQuantifiers(value) => {
-                    metadata.push(std::mem::take(&mut value.container.metadata));
+                    metadata.push(core::mem::take(&mut value.container.metadata));
                     for binder in &mut value.values {
-                        metadata.push(std::mem::take(&mut binder.container.metadata));
+                        metadata.push(core::mem::take(&mut binder.container.metadata));
                     }
                 }
                 MetadataValue::PropertyPreconditions(value) => {
-                    metadata.push(std::mem::take(&mut value.container.metadata));
+                    metadata.push(core::mem::take(&mut value.container.metadata));
                     for condition in &mut value.values {
                         take_expression(&mut condition.0);
                     }
                 }
                 MetadataValue::PropertyContracts(value) => {
-                    metadata.push(std::mem::take(&mut value.container.metadata));
+                    metadata.push(core::mem::take(&mut value.container.metadata));
                 }
                 MetadataValue::Invariant(value) => {
-                    metadata.push(std::mem::take(&mut value.container.metadata));
-                    metadata.push(std::mem::take(&mut value.params.metadata));
-                    metadata.push(std::mem::take(&mut value.binder.container.metadata));
+                    metadata.push(core::mem::take(&mut value.container.metadata));
+                    metadata.push(core::mem::take(&mut value.params.metadata));
+                    metadata.push(core::mem::take(&mut value.binder.container.metadata));
                     take_expression(&mut value.body.0);
                 }
                 MetadataValue::Source(value) => {
-                    crate::raw::drain_owned_source_arguments(std::mem::take(&mut value.arguments));
+                    crate::raw::drain_owned_source_arguments(core::mem::take(&mut value.arguments));
                 }
                 MetadataValue::DtypeBounds(_)
                 | MetadataValue::Loc(_)
@@ -804,7 +803,7 @@ pub struct Metadata {
     /// Shared behind a reference count. Cloning a Deep tree copies one
     /// pointer per node instead of every node's annotation storage; a write
     /// copies through `Arc::make_mut`, so sharing stays invisible.
-    storage: Option<std::sync::Arc<Storage>>,
+    storage: Option<alloc::sync::Arc<Storage>>,
 }
 impl PartialEq for Metadata {
     fn eq(&self, other: &Self) -> bool {
@@ -831,7 +830,7 @@ impl Metadata {
         let Some(storage) = self.storage.take() else {
             return;
         };
-        if let Some(mut storage) = std::sync::Arc::into_inner(storage) {
+        if let Some(mut storage) = alloc::sync::Arc::into_inner(storage) {
             storage.take_owned_children_for_drop(expressions, metadata);
         }
     }
@@ -868,14 +867,14 @@ impl Metadata {
             Some(Err(index)) => index,
             None => 0,
         };
-        let storage = std::sync::Arc::make_mut(self.storage.get_or_insert_with(Default::default));
+        let storage = alloc::sync::Arc::make_mut(self.storage.get_or_insert_with(Default::default));
         storage.core.insert(index, value);
         Ok(())
     }
     pub fn replace(&mut self, value: MetadataValue) -> Option<MetadataValue> {
-        let storage = std::sync::Arc::make_mut(self.storage.get_or_insert_with(Default::default));
+        let storage = alloc::sync::Arc::make_mut(self.storage.get_or_insert_with(Default::default));
         match storage.locate(value.key()) {
-            Ok(index) => Some(std::mem::replace(&mut storage.core[index], value)),
+            Ok(index) => Some(core::mem::replace(&mut storage.core[index], value)),
             Err(index) => {
                 storage.core.insert(index, value);
                 None
@@ -886,7 +885,7 @@ impl Metadata {
         // Decide before `Arc::make_mut`, for the same reason `insert` does:
         // removing a key that is not there writes nothing.
         let index = self.storage.as_ref()?.locate(key).ok()?;
-        let storage = std::sync::Arc::make_mut(
+        let storage = alloc::sync::Arc::make_mut(
             self.storage
                 .as_mut()
                 .expect("storage was present when the index was located"),
@@ -903,7 +902,8 @@ impl Metadata {
         self.storage.as_ref().map_or(&EMPTY, |s| &s.extensions)
     }
     pub fn extensions_mut(&mut self) -> &mut ExtensionMap {
-        &mut std::sync::Arc::make_mut(self.storage.get_or_insert_with(Default::default)).extensions
+        &mut alloc::sync::Arc::make_mut(self.storage.get_or_insert_with(Default::default))
+            .extensions
     }
 
     /// Visit the live expression leaves and annotations of structural payloads.
@@ -1083,6 +1083,10 @@ impl ExtensionMap {
 mod test_support {
     use super::{Metadata, MetadataKey, MetadataValue, STORAGE_COPIES, Spanned};
     use crate::Span;
+    use alloc::{
+        string::{String, ToString},
+        vec::Vec,
+    };
 
     pub(super) fn span() -> Span {
         Span::new(0, 0)
@@ -1125,6 +1129,7 @@ mod shared_storage_receipt {
     use super::{Metadata, MetadataKey, MetadataValue, Spanned};
     use crate::tag::DeepTag;
     use crate::{Atom, Expr};
+    use alloc::string::ToString;
 
     /// A nested `app` chain of `depth` annotated nodes over one annotated
     /// `var` leaf, so the tree carries exactly `depth + 1` non-empty
@@ -1428,6 +1433,7 @@ mod shared_storage_order {
         copies_now, copies_since, observed, span, strictly_increasing, text,
     };
     use super::{Metadata, MetadataKey, MetadataValue};
+    use alloc::vec::Vec;
 
     /// Deliberately scrambled against the declared key order: ChelisRole is
     /// ninth, PropertySourceId thirteenth, SurfPath twenty-first, Doc

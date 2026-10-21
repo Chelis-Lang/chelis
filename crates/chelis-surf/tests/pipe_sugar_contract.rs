@@ -4,8 +4,8 @@ use chelis_surf::resugar::{normalize_deep_for_surface_roundtrip, resugar_program
 use chelis_surf::{desugar::desugar_program, format::format_source, parser::parse_str};
 
 fn meaning(source: &str) -> String {
-    let decls = parse_str(source).expect("Surf parses");
-    let deep = desugar_program(&decls).expect("Surf desugars");
+    let decls = parse_str(source, &chelis_syntax_host::NativeStack).expect("Surf parses");
+    let deep = desugar_program(&decls, &chelis_syntax_host::NativeStack).expect("Surf desugars");
     print_canonical(&normalize_deep_for_surface_roundtrip(&deep).expect("valid Deep"))
 }
 
@@ -32,9 +32,12 @@ fn delimited_handlers_are_atoms_while_record_updates_require_grouping() {
         let source = format!("out = {pipe}\n");
         let expected = meaning(&format!("out = {call}\n"));
         assert_eq!(meaning(&source), expected, "{pipe}");
-        let formatted = format_source(&source).unwrap();
+        let formatted = format_source(&source, &chelis_syntax_host::NativeStack).unwrap();
         assert_eq!(meaning(&formatted), expected, "{formatted}");
-        assert_eq!(format_source(&formatted).unwrap(), formatted);
+        assert_eq!(
+            format_source(&formatted, &chelis_syntax_host::NativeStack).unwrap(),
+            formatted
+        );
     }
     for expression in [
         "r with { a: x } |> f",
@@ -45,7 +48,11 @@ fn delimited_handlers_are_atoms_while_record_updates_require_grouping() {
         "with unknown(\"cpu\") { x } |> f",
     ] {
         assert!(
-            parse_str(&format!("out = {expression}\n")).is_err(),
+            parse_str(
+                &format!("out = {expression}\n"),
+                &chelis_syntax_host::NativeStack
+            )
+            .is_err(),
             "{expression}"
         );
     }
@@ -55,9 +62,12 @@ fn delimited_handlers_are_atoms_while_record_updates_require_grouping() {
         "with device(\"cpu\") { (a + b) |> f } |> g",
     ] {
         let source = format!("out = {expression}\n");
-        let formatted = format_source(&source).unwrap();
+        let formatted = format_source(&source, &chelis_syntax_host::NativeStack).unwrap();
         assert_eq!(meaning(&source), meaning(&formatted));
-        assert_eq!(format_source(&formatted).unwrap(), formatted);
+        assert_eq!(
+            format_source(&formatted, &chelis_syntax_host::NativeStack).unwrap(),
+            formatted
+        );
     }
 }
 
@@ -72,8 +82,11 @@ fn every_named_cast_stage_preserves_its_mode_and_rejects_a_mismatched_descriptor
             meaning(&source),
             meaning(&format!("out = {keyword}(x, i8)\n"))
         );
-        assert_eq!(format_source(&source).unwrap(), source);
-        let mut declarations = parse_str(&source).unwrap();
+        assert_eq!(
+            format_source(&source, &chelis_syntax_host::NativeStack).unwrap(),
+            source
+        );
+        let mut declarations = parse_str(&source, &chelis_syntax_host::NativeStack).unwrap();
         let Decl::LetDef {
             value: Expr::Pipe(_, stages, _),
             ..
@@ -86,7 +99,7 @@ fn every_named_cast_stage_preserves_its_mode_and_rejects_a_mismatched_descriptor
         ));
         assert!(
             matches!(
-                desugar_program(&declarations),
+                desugar_program(&declarations, &chelis_syntax_host::NativeStack),
                 Err(chelis_surf::desugar::DesugarError::InvalidPipeStage { .. })
             ),
             "{keyword}: mismatched rung must fail closed"
@@ -130,9 +143,13 @@ fn transform_stages_use_the_same_callable_resolution_as_calls() {
         );
     }
     for expression in ["x |> grad(f, wrt=missing)", "grad(f, wrt=missing)(x)"] {
-        let declarations = parse_str(&format!("{declaration}out = {expression}\n")).unwrap();
+        let declarations = parse_str(
+            &format!("{declaration}out = {expression}\n"),
+            &chelis_syntax_host::NativeStack,
+        )
+        .unwrap();
         assert!(
-            matches!(desugar_program(&declarations), Err(chelis_surf::desugar::DesugarError::UnknownGradParameter { parameter, .. }) if parameter == "missing"),
+            matches!(desugar_program(&declarations, &chelis_syntax_host::NativeStack), Err(chelis_surf::desugar::DesugarError::UnknownGradParameter { parameter, .. }) if parameter == "missing"),
             "{expression}",
         );
     }
@@ -154,18 +171,26 @@ fn contextual_declarations_normalize_before_callable_resolution() {
     use chelis_surf::{ast::Decl, desugar::desugar_expr_in_program_scope};
     let mut results = Vec::new();
     for carried in ["f |> Hold", "Hold(f)"] {
-        let declarations = parse_str(&callable_context_source(carried, "x")).unwrap();
+        let declarations = parse_str(
+            &callable_context_source(carried, "x"),
+            &chelis_syntax_host::NativeStack,
+        )
+        .unwrap();
         let Decl::LetDef { value, .. } = declarations.last().unwrap() else {
             panic!("output declaration");
         };
-        let whole = desugar_program(&declarations).unwrap();
+        let whole = desugar_program(&declarations, &chelis_syntax_host::NativeStack).unwrap();
         let ExprCarrier::DecodedNode(DeepTag::Def, _, children) = whole.last().unwrap().carrier()
         else {
             panic!("output definition");
         };
-        let contextual =
-            desugar_expr_in_program_scope(&declarations[..declarations.len() - 1], value, &[])
-                .expect("contextual pipe origins agree with whole-program origins");
+        let contextual = desugar_expr_in_program_scope(
+            &declarations[..declarations.len() - 1],
+            value,
+            &[],
+            &chelis_syntax_host::NativeStack,
+        )
+        .expect("contextual pipe origins agree with whole-program origins");
         let actual = print_canonical(&normalize_deep_for_surface_roundtrip(&[contextual]).unwrap());
         let expected =
             print_canonical(&normalize_deep_for_surface_roundtrip(&[children[1].clone()]).unwrap());
@@ -182,27 +207,40 @@ fn contextual_normalization_preserves_selector_and_shadow_rejections() {
         desugar::{DesugarError, desugar_expr_in_program_scope},
     };
     for carried in ["f |> Hold", "Hold(f)"] {
-        let declarations = parse_str(&callable_context_source(carried, "missing")).unwrap();
+        let declarations = parse_str(
+            &callable_context_source(carried, "missing"),
+            &chelis_syntax_host::NativeStack,
+        )
+        .unwrap();
         let Decl::LetDef { value, .. } = declarations.last().unwrap() else {
             panic!("output declaration");
         };
         for result in [
-            desugar_program(&declarations).map(|_| ()),
-            desugar_expr_in_program_scope(&declarations[..declarations.len() - 1], value, &[])
-                .map(|_| ()),
+            desugar_program(&declarations, &chelis_syntax_host::NativeStack).map(|_| ()),
+            desugar_expr_in_program_scope(
+                &declarations[..declarations.len() - 1],
+                value,
+                &[],
+                &chelis_syntax_host::NativeStack,
+            )
+            .map(|_| ()),
         ] {
             assert!(
                 matches!(result, Err(DesugarError::UnknownGradParameter { parameter, .. }) if parameter == "missing"),
                 "{carried}"
             );
         }
-        let declarations = parse_str(&callable_context_source(carried, "x")).unwrap();
+        let declarations = parse_str(
+            &callable_context_source(carried, "x"),
+            &chelis_syntax_host::NativeStack,
+        )
+        .unwrap();
         let Decl::LetDef { value, .. } = declarations.last().unwrap() else {
             panic!("output declaration");
         };
         assert!(
             matches!(
-                desugar_expr_in_program_scope(&declarations[..declarations.len() - 1], value, &["chosen".into()]),
+                desugar_expr_in_program_scope(&declarations[..declarations.len() - 1], value, &["chosen".into()], &chelis_syntax_host::NativeStack),
                 Err(DesugarError::UnresolvedGradTarget { target, .. }) if target == "chosen"
             ),
             "lexical shadow remains unresolved: {carried}"
@@ -216,12 +254,20 @@ fn every_mixed_operator_requires_grouping() {
         "+", "-", "*", "/", "%", "==", "!=", "<", ">", "<=", ">=", "&&", "||",
     ] {
         let source = format!("out = a {operator} b |> f\n");
-        let error = parse_str(&source)
+        let error = parse_str(&source, &chelis_syntax_host::NativeStack)
             .expect_err("ungrouped mix must fail")
             .to_string();
         assert!(error.contains("group"), "{source}: {error}");
-        parse_str(&format!("out = (a {operator} b) |> f\n")).expect("grouped seed");
-        parse_str(&format!("out = a {operator} (b |> f)\n")).expect("grouped pipe");
+        parse_str(
+            &format!("out = (a {operator} b) |> f\n"),
+            &chelis_syntax_host::NativeStack,
+        )
+        .expect("grouped seed");
+        parse_str(
+            &format!("out = a {operator} (b |> f)\n"),
+            &chelis_syntax_host::NativeStack,
+        )
+        .expect("grouped pipe");
     }
     for source in [
         "out = -x |> f\n",
@@ -241,7 +287,10 @@ fn every_mixed_operator_requires_grouping() {
         "out = if c then x |> f else y\n",
         "out = fn (v) -> v |> f\n",
     ] {
-        assert!(parse_str(source).is_err(), "{source}");
+        assert!(
+            parse_str(source, &chelis_syntax_host::NativeStack).is_err(),
+            "{source}"
+        );
     }
 }
 
@@ -317,11 +366,18 @@ fn pipe_grouping_diagnostics_match_the_rejected_form() {
         ("x |> f + y", "`(x |> f) + y`", "(x |> f) + y"),
         ("x |> f * y", "`(x |> f) * y`", "(x |> f) * y"),
     ] {
-        let error = parse_str(&format!("out = {rejected}\n"))
-            .expect_err("ungrouped expression must fail")
-            .to_string();
+        let error = parse_str(
+            &format!("out = {rejected}\n"),
+            &chelis_syntax_host::NativeStack,
+        )
+        .expect_err("ungrouped expression must fail")
+        .to_string();
         assert!(error.contains(hint), "{rejected}: {error}");
-        parse_str(&format!("out = {grouped}\n")).expect("suggested grouping must parse");
+        parse_str(
+            &format!("out = {grouped}\n"),
+            &chelis_syntax_host::NativeStack,
+        )
+        .expect("suggested grouping must parse");
     }
 }
 
@@ -336,9 +392,16 @@ fn accumulator_pipe_stages_preserve_the_explicit_width_and_call_arity() {
             meaning(&source),
             meaning("out = sum(x, 0i32, accumulator=f64)\n")
         );
-        let formatted = format_source(&source).unwrap();
-        assert_eq!(format_source(&formatted).unwrap(), formatted);
-        let deep = desugar_program(&parse_str(&source).unwrap()).unwrap();
+        let formatted = format_source(&source, &chelis_syntax_host::NativeStack).unwrap();
+        assert_eq!(
+            format_source(&formatted, &chelis_syntax_host::NativeStack).unwrap(),
+            formatted
+        );
+        let deep = desugar_program(
+            &parse_str(&source, &chelis_syntax_host::NativeStack).unwrap(),
+            &chelis_syntax_host::NativeStack,
+        )
+        .unwrap();
         let surf = chelis_surf::format::format_program(&resugar_program(&deep).unwrap());
         assert_eq!(meaning(&surf), meaning(&source));
         assert!(!surf.contains("|>"));
@@ -347,7 +410,13 @@ fn accumulator_pipe_stages_preserve_the_explicit_width_and_call_arity() {
         "x |> sum(0i32, accumulator=wat)",
         "x |> sum(0i32, accumulator=f64, 1i32)",
     ] {
-        assert!(parse_str(&format!("out = {expression}\n")).is_err());
+        assert!(
+            parse_str(
+                &format!("out = {expression}\n"),
+                &chelis_syntax_host::NativeStack
+            )
+            .is_err()
+        );
     }
 }
 
@@ -366,13 +435,23 @@ fn grouped_pipes_preserve_fmt_and_surface_retraction() {
         "out = if c then (x |> f) else y\n",
         "out = fn (v) -> (v |> f)\n",
     ] {
-        let formatted = format_source(source).expect("format");
-        assert_eq!(format_source(&formatted).unwrap(), formatted);
+        let formatted = format_source(source, &chelis_syntax_host::NativeStack).expect("format");
+        assert_eq!(
+            format_source(&formatted, &chelis_syntax_host::NativeStack).unwrap(),
+            formatted
+        );
         assert_eq!(meaning(source), meaning(&formatted));
-        let deep = desugar_program(&parse_str(source).unwrap()).unwrap();
+        let deep = desugar_program(
+            &parse_str(source, &chelis_syntax_host::NativeStack).unwrap(),
+            &chelis_syntax_host::NativeStack,
+        )
+        .unwrap();
         let surf = chelis_surf::format::format_program(&resugar_program(&deep).unwrap());
         assert!(!surf.contains("|>"), "{surf}");
-        assert_eq!(format_source(&surf).unwrap(), surf);
+        assert_eq!(
+            format_source(&surf, &chelis_syntax_host::NativeStack).unwrap(),
+            surf
+        );
         assert_eq!(meaning(source), meaning(&surf));
     }
 }
@@ -384,7 +463,8 @@ fn removed_deep_forms_and_spelling_metadata_fail_closed() {
         "(fn {surf_pipe_stage: \"call-first\"} (params {} v) (var {} v))",
     ] {
         assert!(
-            chelis_deep::parse_and_stamp_runtime_exprs(source).is_err(),
+            chelis_deep::parse_and_stamp_runtime_exprs(source, &chelis_syntax_host::NativeStack)
+                .is_err(),
             "{source}"
         );
     }
@@ -395,19 +475,28 @@ fn removed_deep_forms_and_spelling_metadata_fail_closed() {
 fn migration_preserves_literal_dtype_and_old_grouping() {
     let source = "out = 0.1 |> cast(f64)\n";
     let baseline = "(def {} out (pipe {} (lit {span: \"surf:6..9\", type: (t-prim {} f32)} 0.1) (fn {surf_pipe_stage: \"call-first\"} (params {} p) (cast {} (var {} p) (t-prim {} f64)))))";
-    let migration = chelis_surf::pipe_migration::prepare(source, baseline).unwrap();
+    let migration =
+        chelis_surf::pipe_migration::prepare(source, baseline, &chelis_syntax_host::NativeStack)
+            .unwrap();
     assert_eq!(migration.source, "out = 0.1f32 |> cast(f64)\n");
     assert_eq!(
         meaning(&migration.source),
         print_canonical(&normalize_deep_for_surface_roundtrip(&migration.baseline).unwrap())
     );
-    assert_eq!(format_source(&migration.source).unwrap(), migration.source);
-    assert!(chelis_surf::pipe_migration::prepare(source, "(def {} out (var {} x))").is_err());
+    assert_eq!(
+        format_source(&migration.source, &chelis_syntax_host::NativeStack).unwrap(),
+        migration.source
+    );
+    assert!(
+        chelis_surf::pipe_migration::prepare(
+            source,
+            "(def {} out (var {} x))",
+            &chelis_syntax_host::NativeStack
+        )
+        .is_err()
+    );
 
-    let migration = chelis_surf::pipe_migration::prepare(
-        "out = 2.0 * x |> f\n",
-        "(def {} out (pipe {} (app {} (var {} mul) (lit {span: \"surf:6..9\", type: (t-prim {} f32)} 2.0) (var {} x)) (var {} f)))",
-    ).unwrap();
+    let migration = chelis_surf::pipe_migration::prepare("out = 2.0 * x |> f\n","(def {} out (pipe {} (app {} (var {} mul) (lit {span: \"surf:6..9\", type: (t-prim {} f32)} 2.0) (var {} x)) (var {} f)))",&chelis_syntax_host::NativeStack).unwrap();
     assert_eq!(migration.source, "out = (2.0 * x) |> f\n");
     assert_eq!(
         meaning(&migration.source),
@@ -429,7 +518,12 @@ fn migration_preserves_negative_seed_graphs_for_changed_and_unchanged_cast_width
                 "type: (t-prim {} f32)",
                 &format!("type: (t-prim {{}} {old_dtype})"),
             );
-        let migrated = chelis_surf::pipe_migration::prepare(&source, &previous).unwrap();
+        let migrated = chelis_surf::pipe_migration::prepare(
+            &source,
+            &previous,
+            &chelis_syntax_host::NativeStack,
+        )
+        .unwrap();
         // chelis#3164: the printer spells the negated seed as a suffixed
         // negative literal; the Deep check below proves it keeps the neg call.
         assert_eq!(
@@ -440,9 +534,19 @@ fn migration_preserves_negative_seed_graphs_for_changed_and_unchanged_cast_width
             meaning(&migrated.source),
             print_canonical(&normalize_deep_for_surface_roundtrip(&migrated.baseline).unwrap())
         );
-        assert_eq!(format_source(&migrated.source).unwrap(), migrated.source);
+        assert_eq!(
+            format_source(&migrated.source, &chelis_syntax_host::NativeStack).unwrap(),
+            migrated.source
+        );
         let missing = previous.replace(&format!(", type: (t-prim {{}} {old_dtype})"), "");
-        assert!(chelis_surf::pipe_migration::prepare(&source, &missing).is_err());
+        assert!(
+            chelis_surf::pipe_migration::prepare(
+                &source,
+                &missing,
+                &chelis_syntax_host::NativeStack
+            )
+            .is_err()
+        );
     }
 }
 
@@ -451,7 +555,9 @@ fn migration_preserves_negative_seed_graphs_for_changed_and_unchanged_cast_width
 fn migration_signed_seed_uses_the_signed_source_span_and_only_changed_dtypes() {
     let source = "out = cast(-1.0, f32) |> f\n";
     let previous = "(def {} out (pipe {} (cast {} (lit {span: \"surf:11..15\", type: (t-prim {} f32)} -1.0) (t-prim {} f32)) (var {} f)))";
-    let migrated = chelis_surf::pipe_migration::prepare(source, previous).unwrap();
+    let migrated =
+        chelis_surf::pipe_migration::prepare(source, previous, &chelis_syntax_host::NativeStack)
+            .unwrap();
     // chelis#3164: `cast(-1.0, f32)` is now the literal itself, so keeping the
     // baseline's `cast` node takes the suffix the cast operand already had.
     assert_eq!(migrated.source, "out = cast(-1.0f32, f32) |> f\n");
@@ -462,7 +568,8 @@ fn migration_signed_seed_uses_the_signed_source_span_and_only_changed_dtypes() {
     assert!(
         chelis_surf::pipe_migration::prepare(
             source,
-            "(def {} out (pipe {} (var {} x) (var {} f)))"
+            "(def {} out (pipe {} (var {} x) (var {} f)))",
+            &chelis_syntax_host::NativeStack,
         )
         .is_err()
     );
@@ -473,7 +580,9 @@ fn migration_signed_seed_uses_the_signed_source_span_and_only_changed_dtypes() {
 fn migration_keeps_authored_first_argument_lambdas_as_values() {
     let source = "out = x |> (fn (v) -> h(v))\n";
     let previous = "(def {} out (pipe {} (var {} x) (fn {span: \"surf:12..26\", surf_pipe_stage: \"call-first\"} (params {} v) (app {} (var {} h) (var {} v)))))";
-    let migrated = chelis_surf::pipe_migration::prepare(source, previous).unwrap();
+    let migrated =
+        chelis_surf::pipe_migration::prepare(source, previous, &chelis_syntax_host::NativeStack)
+            .unwrap();
     assert_eq!(
         meaning(source),
         print_canonical(&normalize_deep_for_surface_roundtrip(&migrated.baseline).unwrap())
@@ -486,7 +595,9 @@ fn migration_keeps_authored_first_argument_lambdas_as_values() {
 fn migration_uses_validated_metadata_without_erasing_extensions() {
     let source = "out = 0.1 |> f\n";
     let previous = "(def {} out (pipe {} (lit {span: \"surf:6..9\", type: (t-prim {} f32), surf_literal_style: \"unsuffixed\", audit_note: \"literal\"} 0.1) (var {span: \"surf:13..14\"} f)))";
-    let migration = chelis_surf::pipe_migration::prepare(source, previous).unwrap();
+    let migration =
+        chelis_surf::pipe_migration::prepare(source, previous, &chelis_syntax_host::NativeStack)
+            .unwrap();
     assert_eq!(migration.source, "out = 0.1 |> f\n");
     let baseline = print_canonical(&migration.baseline);
     assert!(baseline.contains("audit_note"));
@@ -501,7 +612,12 @@ fn migration_uses_validated_metadata_without_erasing_extensions() {
     ] {
         let previous = format!("(def {{}} out (pipe {{}} (lit {{{metadata}}} 0.1) (var {{}} f)))");
         assert!(
-            chelis_surf::pipe_migration::prepare(source, &previous).is_err(),
+            chelis_surf::pipe_migration::prepare(
+                source,
+                &previous,
+                &chelis_syntax_host::NativeStack
+            )
+            .is_err(),
             "{metadata}"
         );
     }
@@ -519,7 +635,9 @@ fn migration_preserves_metadata_owner_and_bind_value_placement() {
     let previous = format!(
         "(def {{}} out (let {{}} (bind {{}} x (pipe {{surf_binding_type: \"inferred\"}} {literal} (var {{}} f))) (var {{}} x)))"
     );
-    let migrated = chelis_surf::pipe_migration::prepare(source, &previous).unwrap();
+    let migrated =
+        chelis_surf::pipe_migration::prepare(source, &previous, &chelis_syntax_host::NativeStack)
+            .unwrap();
     assert!(migrated.source.contains("0.1 |> f"));
     assert!(print_canonical(&migrated.baseline).contains("surf_binding_type"));
     assert_eq!(
@@ -535,7 +653,8 @@ fn migration_preserves_metadata_owner_and_bind_value_placement() {
         "(def {{}} out (let {{}} (bind {{}} x (lit {{span: \"surf:{start}..{}\", type: (t-prim {{}} f32), surf_literal_style: \"unsuffixed\", surf_binding_type: \"inferred\"}} 0.1)) (pipe {{}} (var {{}} x) (var {{}} f))))",
         start + 3
     );
-    chelis_surf::pipe_migration::prepare(source, &previous).unwrap();
+    chelis_surf::pipe_migration::prepare(source, &previous, &chelis_syntax_host::NativeStack)
+        .unwrap();
 
     for (source, previous, key) in [
         (
@@ -554,7 +673,11 @@ fn migration_preserves_metadata_owner_and_bind_value_placement() {
             "surf_binding_type",
         ),
     ] {
-        let error = match chelis_surf::pipe_migration::prepare(source, previous) {
+        let error = match chelis_surf::pipe_migration::prepare(
+            source,
+            previous,
+            &chelis_syntax_host::NativeStack,
+        ) {
             Ok(_) => panic!("accepted misplaced {key}: {previous}"),
             Err(error) => error,
         };
@@ -577,9 +700,12 @@ fn migration_validates_compacting_stage_annotations_before_erasure() {
                 "(def {{}} out (pipe {{}} (var {{}} x) (fn {{{metadata}, surf_pipe_stage: \"call-first\"}} (params {{}} p) {body})))"
             )
         };
-        let migrated =
-            chelis_surf::pipe_migration::prepare(&source, &previous("span: \"surf:11..20\""))
-                .unwrap();
+        let migrated = chelis_surf::pipe_migration::prepare(
+            &source,
+            &previous("span: \"surf:11..20\""),
+            &chelis_syntax_host::NativeStack,
+        )
+        .unwrap();
         assert_eq!(
             meaning(&migrated.source),
             print_canonical(&normalize_deep_for_surface_roundtrip(&migrated.baseline).unwrap())
@@ -591,7 +717,11 @@ fn migration_validates_compacting_stage_annotations_before_erasure() {
             ("surf_literal_style: \"unsuffixed\"", "surf_literal_style"),
             ("surf_binding_type: \"inferred\"", "surf_binding_type"),
         ] {
-            let error = match chelis_surf::pipe_migration::prepare(&source, &previous(metadata)) {
+            let error = match chelis_surf::pipe_migration::prepare(
+                &source,
+                &previous(metadata),
+                &chelis_syntax_host::NativeStack,
+            ) {
                 Ok(_) => panic!("accepted malformed {key} on compacting stage {stage}"),
                 Err(error) => error,
             };
@@ -605,7 +735,9 @@ fn migration_validates_compacting_stage_annotations_before_erasure() {
 fn migration_requires_node_maps_and_preserves_macro_source_data() {
     let source = "out = x |> f(y)\n";
     let previous = "(def {} out (pipe {} (var {} x) (fn {surf_pipe_stage: \"call-first\"} (params {} p) (app {} (var {} f) (var {} p) (var {} y)))))";
-    let valid = chelis_surf::pipe_migration::prepare(source, previous).unwrap();
+    let valid =
+        chelis_surf::pipe_migration::prepare(source, previous, &chelis_syntax_host::NativeStack)
+            .unwrap();
     assert_eq!(
         meaning(&valid.source),
         print_canonical(&normalize_deep_for_surface_roundtrip(&valid.baseline).unwrap())
@@ -616,7 +748,11 @@ fn migration_requires_node_maps_and_preserves_macro_source_data() {
     ] {
         for replacement in ["true", "(var {} x)", "()", ""] {
             let malformed = previous.replace(pattern, &format!("({owner} {replacement}"));
-            let error = match chelis_surf::pipe_migration::prepare(source, &malformed) {
+            let error = match chelis_surf::pipe_migration::prepare(
+                source,
+                &malformed,
+                &chelis_syntax_host::NativeStack,
+            ) {
                 Ok(_) => panic!("accepted non-map envelope for {owner}: {replacement}"),
                 Err(error) => error,
             };
@@ -630,13 +766,22 @@ fn migration_requires_node_maps_and_preserves_macro_source_data() {
     ] {
         let previous =
             format!("(def {{}} out (pipe {{}} (var {{}} x) (var {{source: {data}}} f)))");
-        let migrated = chelis_surf::pipe_migration::prepare("out = x |> f\n", &previous).unwrap();
+        let migrated = chelis_surf::pipe_migration::prepare(
+            "out = x |> f\n",
+            &previous,
+            &chelis_syntax_host::NativeStack,
+        )
+        .unwrap();
         assert!(print_canonical(&migrated.baseline).contains(data), "{data}");
     }
     for data in ["true", "(true x y)"] {
         let previous =
             format!("(def {{}} out (pipe {{}} (var {{}} x) (var {{source: {data}}} f)))");
-        let error = match chelis_surf::pipe_migration::prepare("out = x |> f\n", &previous) {
+        let error = match chelis_surf::pipe_migration::prepare(
+            "out = x |> f\n",
+            &previous,
+            &chelis_syntax_host::NativeStack,
+        ) {
             Ok(_) => panic!("accepted malformed source record: {data}"),
             Err(error) => error,
         };
@@ -650,7 +795,9 @@ fn migration_preserves_structural_binder_roles_without_admitting_program_shapes(
     let source =
         "sig identity[pipe: Numeric] : pipe -> pipe\ndef identity(x) = x\nout = 1i32 |> identity\n";
     let previous = "(defsig {dtype_bounds: {pipe: numeric}} identity (pipe) (t-fn {} (t-var {} pipe) (t-var {} pipe)))\n(def {} identity (fn {} (params {} x) (var {} x)))\n(def {} out (pipe {} (lit {type: (t-prim {} i32)} 1) (var {} identity)))";
-    let migrated = chelis_surf::pipe_migration::prepare(source, previous).unwrap();
+    let migrated =
+        chelis_surf::pipe_migration::prepare(source, previous, &chelis_syntax_host::NativeStack)
+            .unwrap();
     assert_eq!(
         meaning(&migrated.source),
         print_canonical(&normalize_deep_for_surface_roundtrip(&migrated.baseline).unwrap())
@@ -660,12 +807,20 @@ fn migration_preserves_structural_binder_roles_without_admitting_program_shapes(
         previous.replace("pipe: numeric", "pipe: true"),
         previous.replace("out (pipe {}", "out (pipe true"),
     ] {
-        assert!(chelis_surf::pipe_migration::prepare(source, &malformed).is_err());
+        assert!(
+            chelis_surf::pipe_migration::prepare(
+                source,
+                &malformed,
+                &chelis_syntax_host::NativeStack
+            )
+            .is_err()
+        );
     }
     // Quote's Syntax role still contains a program template to normalize.
     let quoted = chelis_surf::pipe_migration::prepare(
         "out = quote (x |> f)\n",
         "(def {} out (quote {} (pipe {} (var {} x) (var {} f))))",
+        &chelis_syntax_host::NativeStack,
     )
     .unwrap();
     assert_eq!(
@@ -676,6 +831,7 @@ fn migration_preserves_structural_binder_roles_without_admitting_program_shapes(
         chelis_surf::pipe_migration::prepare(
             "out = quote (x |> f)\n",
             "(def {} out (quote {} (pipe true (var {} x) (var {} f))))",
+            &chelis_syntax_host::NativeStack,
         )
         .is_err()
     );
@@ -694,8 +850,16 @@ fn migration_preserves_trailing_lambda_and_conditional_grouping() {
             "(def {} out (if {} (var {} c) (var {} a) (pipe {} (var {} b) (var {} f))))",
         ),
     ] {
-        let migrated = chelis_surf::pipe_migration::prepare(source, previous).unwrap();
-        assert_eq!(format_source(&migrated.source).unwrap(), migrated.source);
+        let migrated = chelis_surf::pipe_migration::prepare(
+            source,
+            previous,
+            &chelis_syntax_host::NativeStack,
+        )
+        .unwrap();
+        assert_eq!(
+            format_source(&migrated.source, &chelis_syntax_host::NativeStack).unwrap(),
+            migrated.source
+        );
         assert_eq!(
             meaning(&migrated.source),
             print_canonical(&normalize_deep_for_surface_roundtrip(&migrated.baseline).unwrap()),
@@ -706,7 +870,11 @@ fn migration_preserves_trailing_lambda_and_conditional_grouping() {
 #[test]
 fn macro_arguments_and_templates_preserve_pipe_grouping() {
     fn expanded(source: &str) -> String {
-        let deep = desugar_program(&parse_str(source).unwrap()).unwrap();
+        let deep = desugar_program(
+            &parse_str(source, &chelis_syntax_host::NativeStack).unwrap(),
+            &chelis_syntax_host::NativeStack,
+        )
+        .unwrap();
         let deep =
             chelis_macros::expand_program(&deep, &chelis_macros::ExpansionOptions::default())
                 .unwrap()
@@ -733,7 +901,13 @@ fn macro_arguments_and_templates_preserve_pipe_grouping() {
     ] {
         assert_eq!(expanded(pipe), expanded(call));
     }
-    assert!(parse_str("macro bad(x) = x + b |> f\n").is_err());
+    assert!(
+        parse_str(
+            "macro bad(x) = x + b |> f\n",
+            &chelis_syntax_host::NativeStack
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -754,7 +928,9 @@ fn invalid_programmatic_stage_fails_without_panicking() {
             }],
             span,
         );
-        let error = chelis_surf::desugar::desugar_expr_only(&expr).unwrap_err();
+        let error =
+            chelis_surf::desugar::desugar_expr_only(&expr, &chelis_syntax_host::NativeStack)
+                .unwrap_err();
         assert_eq!(error.span(), Some(span));
     }
 }
@@ -763,16 +939,21 @@ fn invalid_programmatic_stage_fails_without_panicking() {
 fn retired_head_rejection_preserves_binders_and_macro_source_data() {
     chelis_deep::parse_and_stamp_file(
         "(defsig {} f (pipe) (t-fn {} (t-var {} pipe) (t-var {} pipe)))",
+        &chelis_syntax_host::NativeStack,
     )
     .unwrap();
     chelis_deep::parse_and_stamp_file(
         "(def {source: (pipe {} historic)} x (lit {type: (t-prim {} i32)} 1))",
+        &chelis_syntax_host::NativeStack,
     )
     .unwrap();
     #[cfg(feature = "pre-020-pipe-migration")]
     {
-        let raw = chelis_deep::parser::parse_pipe_migration_raw("(pipe {} (var {} x) (var {} f))")
-            .unwrap();
+        let raw = chelis_deep::parser::parse_pipe_migration_raw(
+            "(pipe {} (var {} x) (var {} f))",
+            &chelis_syntax_host::NativeStack,
+        )
+        .unwrap();
         let error = chelis_deep::stamp_runtime_exprs(raw).unwrap_err();
         assert!(error.to_string().contains("0.20") && error.to_string().contains("pipe"));
     }

@@ -9,9 +9,12 @@ use chelis_types::errors::CheckError;
 use chelis_types::{check_ir_program, check_typed_program};
 
 fn deep(source: &str) -> Vec<chelis_deep::Expr> {
-    desugar_program(&parse_surf(source).unwrap_or_else(|error| {
-        panic!("fixture must parse as Surf: {error:?}\n{source}");
-    }))
+    desugar_program(
+        &parse_surf(source, &chelis_syntax_host::NativeStack).unwrap_or_else(|error| {
+            panic!("fixture must parse as Surf: {error:?}\n{source}");
+        }),
+        &chelis_syntax_host::NativeStack,
+    )
     .expect("Surf fixture must desugar")
 }
 

@@ -63,13 +63,15 @@ fn structural_child_stamp_roles_match_owner_positions() {
 }
 
 fn check(src: &str) -> InferResult {
-    let exprs = chelis_deep::parser::parse_str(src).unwrap();
+    let exprs = chelis_deep::parser::parse_str(src, &chelis_syntax_host::NativeStack).unwrap();
     infer_program(&exprs)
 }
 
 fn checked_surf(src: &str) -> CheckedProgram {
-    let decls = chelis_surf::parser::parse_str(src).expect("surf parse");
-    let exprs = chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar");
+    let decls =
+        chelis_surf::parser::parse_str(src, &chelis_syntax_host::NativeStack).expect("surf parse");
+    let exprs = chelis_surf::desugar::desugar_program(&decls, &chelis_syntax_host::NativeStack)
+        .expect("Surf fixture must desugar");
     check_ir_program(&exprs).expect("IR check")
 }
 
@@ -229,8 +231,10 @@ def use_bool() = identity(true)
 /// `InferResult` (errors included) so a test can assert clean or assert
 /// a specific failure mode end-to-end.
 fn infer_surf(src: &str) -> InferResult {
-    let decls = chelis_surf::parser::parse_str(src).expect("surf parse");
-    let exprs = chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar");
+    let decls =
+        chelis_surf::parser::parse_str(src, &chelis_syntax_host::NativeStack).expect("surf parse");
+    let exprs = chelis_surf::desugar::desugar_program(&decls, &chelis_syntax_host::NativeStack)
+        .expect("Surf fixture must desugar");
     infer_program(&exprs)
 }
 
@@ -1006,9 +1010,11 @@ fn surf_source_accepts_f64_tensor_ascription() {
     // the user-facing syntax `(expr : tensor[4, f64])` is accepted.
     let decls = chelis_surf::parser::parse_str(
         "y = (to_tensor([1.0, 2.0, 3.0, 4.0], f32) : tensor[4, f64])",
+        &chelis_syntax_host::NativeStack,
     )
     .expect("surf parse");
-    let exprs = chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar");
+    let exprs = chelis_surf::desugar::desugar_program(&decls, &chelis_syntax_host::NativeStack)
+        .expect("Surf fixture must desugar");
     let result = infer_program(&exprs);
     assert!(
         !result
@@ -1023,9 +1029,13 @@ fn surf_source_accepts_f64_tensor_ascription() {
 #[test]
 fn surf_source_accepts_cast_to_f64_tensor() {
     // v0.2.3: exercise the full pipeline for `cast(tensor, f64)`.
-    let decls =
-        chelis_surf::parser::parse_str("y = cast(to_tensor([1.5], f32), f64)").expect("surf parse");
-    let exprs = chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar");
+    let decls = chelis_surf::parser::parse_str(
+        "y = cast(to_tensor([1.5], f32), f64)",
+        &chelis_syntax_host::NativeStack,
+    )
+    .expect("surf parse");
+    let exprs = chelis_surf::desugar::desugar_program(&decls, &chelis_syntax_host::NativeStack)
+        .expect("Surf fixture must desugar");
     let result = infer_program(&exprs);
     assert!(
         !result
@@ -1077,8 +1087,9 @@ fn grad_function() {
 fn grad_non_float_param_is_ignored_by_default() {
     let exprs = chelis_deep::parser::parse_str(
         "(defsig {} f (t-fn {} (t-prim {} bool) (t-prim {} f32)))
-         (def {} f (fn {} (params {} x) (lit {type: (t-prim {} f32)} 1.0)))
-         (def {} g (grad {} (var {} f)))",
+     (def {} f (fn {} (params {} x) (lit {type: (t-prim {} f32)} 1.0)))
+     (def {} g (grad {} (var {} f)))",
+        &chelis_syntax_host::NativeStack,
     )
     .unwrap();
     let checked = check_ir_program(&exprs).expect("IR check");
@@ -1098,11 +1109,12 @@ fn grad_over_all_float_field_adt_types_as_same_adt() {
     // `grad(f : Box -> f32) : Box -> Box`.
     let exprs = chelis_deep::parser::parse_str(
         "(deftype {} Box ()
-            (variant {} Box
-                (field {} t (t-tensor {} (d-lit {} 2) (t-prim {} f32)))))
-         (defsig {} f (t-fn {} (t-adt {} Box) (t-prim {} f32)))
-         (def {} f (fn {} (params {} p) (lit {type: (t-prim {} f32)} 1.0)))
-         (def {} g (grad {} (var {} f)))",
+        (variant {} Box
+            (field {} t (t-tensor {} (d-lit {} 2) (t-prim {} f32)))))
+     (defsig {} f (t-fn {} (t-adt {} Box) (t-prim {} f32)))
+     (def {} f (fn {} (params {} p) (lit {type: (t-prim {} f32)} 1.0)))
+     (def {} g (grad {} (var {} f)))",
+        &chelis_syntax_host::NativeStack,
     )
     .unwrap();
     let checked = check_ir_program(&exprs).expect("IR check");
@@ -1122,12 +1134,13 @@ fn grad_over_mixed_field_adt_preserves_the_nominal_cotangent_shape() {
     // and explicit-bool-wrt tests retain negative parity for all-unit targets.
     let exprs = chelis_deep::parser::parse_str(
         "(deftype {} Mixed ()
-            (variant {} Mixed
-                (field {} t (t-tensor {} (d-lit {} 2) (t-prim {} f32)))
-                (field {} n (t-prim {} i32))))
-         (defsig {} f (t-fn {} (t-adt {} Mixed) (t-prim {} f32)))
-         (def {} f (fn {} (params {} p) (lit {type: (t-prim {} f32)} 1.0)))
-         (def {} g (grad {} (var {} f)))",
+        (variant {} Mixed
+            (field {} t (t-tensor {} (d-lit {} 2) (t-prim {} f32)))
+            (field {} n (t-prim {} i32))))
+     (defsig {} f (t-fn {} (t-adt {} Mixed) (t-prim {} f32)))
+     (def {} f (fn {} (params {} p) (lit {type: (t-prim {} f32)} 1.0)))
+     (def {} g (grad {} (var {} f)))",
+        &chelis_syntax_host::NativeStack,
     )
     .unwrap();
     let checked = check_ir_program(&exprs).expect("IR check");
@@ -1147,14 +1160,15 @@ fn grad_over_adt_plus_tensor_multi_target_returns_tuple() {
     // tensor gradient.
     let exprs = chelis_deep::parser::parse_str(
         "(deftype {} Box ()
-            (variant {} Box
-                (field {} t (t-tensor {} (d-lit {} 2) (t-prim {} f32)))))
-         (defsig {} f (t-fn {}
-            (t-adt {} Box)
-            (t-tensor {} (d-lit {} 2) (t-prim {} f32))
-            (t-prim {} f32)))
-         (def {} f (fn {} (params {} p y) (lit {type: (t-prim {} f32)} 1.0)))
-         (def {} g (grad {} (var {} f)))",
+        (variant {} Box
+            (field {} t (t-tensor {} (d-lit {} 2) (t-prim {} f32)))))
+     (defsig {} f (t-fn {}
+        (t-adt {} Box)
+        (t-tensor {} (d-lit {} 2) (t-prim {} f32))
+        (t-prim {} f32)))
+     (def {} f (fn {} (params {} p y) (lit {type: (t-prim {} f32)} 1.0)))
+     (def {} g (grad {} (var {} f)))",
+        &chelis_syntax_host::NativeStack,
     )
     .unwrap();
     let checked = check_ir_program(&exprs).expect("IR check");
@@ -1176,14 +1190,15 @@ fn grad_wrt_adt_in_multi_arg_call_returns_struct() {
     // no enclosing tuple).
     let exprs = chelis_deep::parser::parse_str(
         "(deftype {} Box ()
-            (variant {} Box
-                (field {} t (t-tensor {} (d-lit {} 2) (t-prim {} f32)))))
-         (defsig {} f (t-fn {}
-            (t-adt {} Box)
-            (t-tensor {} (d-lit {} 2) (t-prim {} f32))
-            (t-prim {} f32)))
-         (def {} f (fn {} (params {} p y) (lit {type: (t-prim {} f32)} 1.0)))
-         (def {} g (grad {} (var {} f) (lit {type: (t-prim {} i32)} 0)))",
+        (variant {} Box
+            (field {} t (t-tensor {} (d-lit {} 2) (t-prim {} f32)))))
+     (defsig {} f (t-fn {}
+        (t-adt {} Box)
+        (t-tensor {} (d-lit {} 2) (t-prim {} f32))
+        (t-prim {} f32)))
+     (def {} f (fn {} (params {} p y) (lit {type: (t-prim {} f32)} 1.0)))
+     (def {} g (grad {} (var {} f) (lit {type: (t-prim {} i32)} 0)))",
+        &chelis_syntax_host::NativeStack,
     )
     .unwrap();
     let checked = check_ir_program(&exprs).expect("IR check");
@@ -1204,11 +1219,12 @@ fn grad_over_pure_enum_stays_unit() {
     // default gradient payload is unit, the pre-#520 typing.
     let exprs = chelis_deep::parser::parse_str(
         "(deftype {} Mode ()
-            (variant {} ModeA)
-            (variant {} ModeB))
-         (defsig {} f (t-fn {} (t-adt {} Mode) (t-prim {} f32)))
-         (def {} f (fn {} (params {} m) (lit {type: (t-prim {} f32)} 1.0)))
-         (def {} g (grad {} (var {} f)))",
+        (variant {} ModeA)
+        (variant {} ModeB))
+     (defsig {} f (t-fn {} (t-adt {} Mode) (t-prim {} f32)))
+     (def {} f (fn {} (params {} m) (lit {type: (t-prim {} f32)} 1.0)))
+     (def {} g (grad {} (var {} f)))",
+        &chelis_syntax_host::NativeStack,
     )
     .unwrap();
     let checked = check_ir_program(&exprs).expect("IR check");
@@ -1227,14 +1243,15 @@ fn grad_over_enum_plus_tensor_keeps_tensor_only_payload() {
     // gradient payload is the tensor alone, the pre-#520 typing.
     let exprs = chelis_deep::parser::parse_str(
         "(deftype {} Mode ()
-            (variant {} ModeA)
-            (variant {} ModeB))
-         (defsig {} f (t-fn {}
-            (t-adt {} Mode)
-            (t-tensor {} (d-lit {} 2) (t-prim {} f32))
-            (t-prim {} f32)))
-         (def {} f (fn {} (params {} m x) (lit {type: (t-prim {} f32)} 1.0)))
-         (def {} g (grad {} (var {} f)))",
+        (variant {} ModeA)
+        (variant {} ModeB))
+     (defsig {} f (t-fn {}
+        (t-adt {} Mode)
+        (t-tensor {} (d-lit {} 2) (t-prim {} f32))
+        (t-prim {} f32)))
+     (def {} f (fn {} (params {} m x) (lit {type: (t-prim {} f32)} 1.0)))
+     (def {} g (grad {} (var {} f)))",
+        &chelis_syntax_host::NativeStack,
     )
     .unwrap();
     let checked = check_ir_program(&exprs).expect("IR check");
@@ -1266,15 +1283,16 @@ fn grad_rejects_non_scalar_output() {
 fn grad_with_explicit_wrt_returns_selected_gradient_only() {
     let exprs = chelis_deep::parser::parse_str(
         "(defsig {} loss
-            (t-fn {}
-                (t-tensor {} (d-name {} features) (t-prim {} f32))
-                (t-tensor {} (d-name {} hidden) (t-prim {} f32))
-                (t-prim {} f32)))
-         (def {} loss
-            (fn {} (params {} x w)
-                (lit {type: (t-prim {} f32)} 1.0)))
-         (def {} dw
-            (grad {} (var {} loss) (lit {type: (t-prim {} i32)} 1)))",
+        (t-fn {}
+            (t-tensor {} (d-name {} features) (t-prim {} f32))
+            (t-tensor {} (d-name {} hidden) (t-prim {} f32))
+            (t-prim {} f32)))
+     (def {} loss
+        (fn {} (params {} x w)
+            (lit {type: (t-prim {} f32)} 1.0)))
+     (def {} dw
+        (grad {} (var {} loss) (lit {type: (t-prim {} i32)} 1)))",
+        &chelis_syntax_host::NativeStack,
     )
     .unwrap();
     let checked = check_ir_program(&exprs).expect("IR check");
@@ -1291,18 +1309,19 @@ fn grad_with_explicit_wrt_returns_selected_gradient_only() {
 fn grad_with_multiple_wrt_returns_flat_tuple() {
     let exprs = chelis_deep::parser::parse_str(
         "(defsig {} loss
-            (t-fn {}
-                (t-tensor {} (d-name {} features) (t-prim {} f32))
-                (t-tensor {} (d-name {} hidden) (t-prim {} f32))
-                (t-prim {} f32)))
-         (def {} loss
-            (fn {} (params {} x w)
-                (lit {type: (t-prim {} f32)} 1.0)))
-         (def {} grads
-            (grad {} (var {} loss)
-                (tuple {}
-                    (lit {type: (t-prim {} i32)} 0)
-                    (lit {type: (t-prim {} i32)} 1))))",
+        (t-fn {}
+            (t-tensor {} (d-name {} features) (t-prim {} f32))
+            (t-tensor {} (d-name {} hidden) (t-prim {} f32))
+            (t-prim {} f32)))
+     (def {} loss
+        (fn {} (params {} x w)
+            (lit {type: (t-prim {} f32)} 1.0)))
+     (def {} grads
+        (grad {} (var {} loss)
+            (tuple {}
+                (lit {type: (t-prim {} i32)} 0)
+                (lit {type: (t-prim {} i32)} 1))))",
+        &chelis_syntax_host::NativeStack,
     )
     .unwrap();
     let checked = check_ir_program(&exprs).expect("IR check");
@@ -1711,8 +1730,10 @@ fn typealias_resolves_in_literal_metadata() {
 /// errors (empty on success). Parse failures panic — the source is
 /// the test's own fixture, not user input under test.
 fn surf_check_errors(src: &str) -> Vec<CheckError> {
-    let decls = chelis_surf::parser::parse_str(src).expect("surf parse");
-    let exprs = chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar");
+    let decls =
+        chelis_surf::parser::parse_str(src, &chelis_syntax_host::NativeStack).expect("surf parse");
+    let exprs = chelis_surf::desugar::desugar_program(&decls, &chelis_syntax_host::NativeStack)
+        .expect("Surf fixture must desugar");
     match check_ir_program(&exprs) {
         Ok(_) => Vec::new(),
         Err(result) => result.errors,

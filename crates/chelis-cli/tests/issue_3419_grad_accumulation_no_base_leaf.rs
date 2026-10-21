@@ -14,7 +14,8 @@ const DTYPES: [&str; 4] = ["f16", "bf16", "f32", "f64"];
 fn write_file(path: &std::path::Path, source: &str) {
     common::write_file(
         path,
-        &chelis_surf::format::format_source(source).expect("canonical Surf"),
+        &chelis_surf::format::format_source(source, &chelis_syntax_host::NativeStack)
+            .expect("canonical Surf"),
     );
 }
 

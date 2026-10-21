@@ -119,7 +119,8 @@ mod tests {
     #[test]
     fn carrier_owns_the_expanded_deep_vector() {
         let expressions =
-            chelis_deep::parser::parse_str("(lit {} 1)").expect("the fixture Deep must parse");
+            chelis_deep::parser::parse_str("(lit {} 1)", &chelis_syntax_host::NativeStack)
+                .expect("the fixture Deep must parse");
         let expected = expressions.clone();
 
         let prepared = PreparedProgram::from_expanded_deep(expressions);
@@ -138,7 +139,8 @@ mod tests {
 
     fn prepared(source: &str) -> PreparedProgram {
         PreparedProgram::from_expanded_deep(
-            chelis_deep::parser::parse_str(source).expect("the test Deep must parse"),
+            chelis_deep::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+                .expect("the test Deep must parse"),
         )
     }
 

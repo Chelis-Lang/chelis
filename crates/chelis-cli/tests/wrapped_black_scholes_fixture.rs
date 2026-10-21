@@ -69,14 +69,15 @@ fn collect_one(expr: &Expr, acc: &mut Vec<String>) {
 
 #[test]
 fn wrapped_fixture_parses_strict() {
-    parse_str_strict(WRAPPED_DP).expect("wrapped fixture must parse strictly");
+    parse_str_strict(WRAPPED_DP, &chelis_syntax_host::NativeStack)
+        .expect("wrapped fixture must parse strictly");
 }
 
 #[test]
 fn wrapped_fixture_round_trips_through_fmt() {
-    let exprs1 = parse_str(WRAPPED_DP).expect("first parse");
+    let exprs1 = parse_str(WRAPPED_DP, &chelis_syntax_host::NativeStack).expect("first parse");
     let printed = print_canonical(&exprs1);
-    let exprs2 = parse_str(&printed).expect("re-parse after fmt");
+    let exprs2 = parse_str(&printed, &chelis_syntax_host::NativeStack).expect("re-parse after fmt");
     let reprinted = print_canonical(&exprs2);
     assert_eq!(
         printed, reprinted,
@@ -92,7 +93,7 @@ fn wrapped_fixture_round_trips_through_fmt() {
 
 #[test]
 fn wrapped_fixture_typechecks_ir() {
-    let exprs = parse_str_strict(WRAPPED_DP).expect("parse");
+    let exprs = parse_str_strict(WRAPPED_DP, &chelis_syntax_host::NativeStack).expect("parse");
     match chelis_types::check_ir_program(&exprs) {
         Ok(_) => {}
         Err(report) => {
@@ -113,7 +114,7 @@ fn wrapped_fixture_typechecks_ir() {
 fn wrapped_fixture_span_ids_match_sidecar() {
     // Spec contract: every span ID present in the .dp must appear in
     // the .spans.json sidecar (the audit chain), and vice versa.
-    let exprs = parse_str(WRAPPED_DP).expect("parse");
+    let exprs = parse_str(WRAPPED_DP, &chelis_syntax_host::NativeStack).expect("parse");
     let dp_ids: BTreeSet<String> = collect_span_ids(&exprs).into_iter().collect();
 
     // Parse the .spans.json minimally — extract every "deep_node_id"
@@ -148,7 +149,7 @@ fn wrapped_fixture_includes_octant_emitted_spans() {
     // Sanity: the bodies inlined into the wrapper carry the verbatim
     // Octant-emitted span IDs (eq:d1_*, eq:d2_*, eq:c_*). If the
     // fixture is regenerated from a different .tex, this list updates.
-    let exprs = parse_str(WRAPPED_DP).expect("parse");
+    let exprs = parse_str(WRAPPED_DP, &chelis_syntax_host::NativeStack).expect("parse");
     let ids: BTreeSet<String> = collect_span_ids(&exprs).into_iter().collect();
     for octant_id in [
         "eq:d1_002",

@@ -141,7 +141,7 @@ fn defers_on_two_module_declarations_because_the_parser_rejects_them() {
     // is the point: one rule owns the parse verdict and the rest defer.
     let body = "module Ub10.Data\nmodule Ub10.Other\ndef value() -> i64 = cast(1, i64)\n";
     assert!(
-        chelis_surf::parser::parse_str(body).is_err(),
+        chelis_surf::parser::parse_str(body, &chelis_syntax_host::NativeStack).is_err(),
         "premise: the parser rejects a second module declaration"
     );
 

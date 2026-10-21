@@ -5,8 +5,9 @@ use chelis_types::{CheckedProgram, check_ir_program, check_linearity};
 fn checked_program() -> CheckedProgram {
     let exprs = chelis_deep::parser::parse_str(
         r#"(def {span: "rt800:root"} apply_relu
-              (fn {} (params {} (x {type: (t-tensor {} (d-lit {} 4) (t-prim {} f32))}))
-                (app {} (var {} relu) (var {} x))))"#,
+          (fn {} (params {} (x {type: (t-tensor {} (d-lit {} 4) (t-prim {} f32))}))
+            (app {} (var {} relu) (var {} x))))"#,
+        &chelis_syntax_host::NativeStack,
     )
     .expect("fixture parses");
     let typed = check_ir_program(&exprs).expect("fixture type-checks");

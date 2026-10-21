@@ -24,7 +24,8 @@ const MODULE: &str = r#"(module {}
 "#;
 
 fn parse(source: &str) -> Vec<chelis_deep::Expr> {
-    chelis_deep::parser::parse_str_strict(source).expect("deep parses")
+    chelis_deep::parser::parse_str_strict(source, &chelis_syntax_host::NativeStack)
+        .expect("deep parses")
 }
 
 #[test]
@@ -215,7 +216,8 @@ fn unknown_form_subtrees_are_traversed_not_dropped() {
   (def {} caller
     (fn {} (params {})
       (future-form {} (app {} (var {} target) (lit {} true))))))"#;
-    let exprs = chelis_deep::parser::parse_str(source).expect("lenient deep parses");
+    let exprs = chelis_deep::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+        .expect("lenient deep parses");
     let refs = references(&exprs, "target").expect("references");
     assert_eq!(
         refs.references.len(),

@@ -34,9 +34,10 @@ use chelis_surf::parser::parse_str as parse_surf;
 use chelis_types::check_ir_program;
 
 fn surf_to_deep(source: &str) -> Vec<Expr> {
-    let decls = parse_surf(source).expect("surf parse");
+    let decls = parse_surf(source, &chelis_syntax_host::NativeStack).expect("surf parse");
     chelis_macros::expand_program(
-        &desugar_program(&decls).expect("Surf fixture must desugar"),
+        &desugar_program(&decls, &chelis_syntax_host::NativeStack)
+            .expect("Surf fixture must desugar"),
         &chelis_macros::ExpansionOptions::default(),
     )
     .expect("macro expand")
@@ -431,7 +432,7 @@ fn issue216_vmap_cast_wrapped_negative_axis_is_error() {
              (def {} f (fn {} (params {} x) (var {} x)))
              (def {} g (vmap {} (var {} f)
                  (cast {} (lit {type: (t-prim {} i32)} -1) (t-prim {} i32))))";
-    let deep = parse_deep(src).expect("deep parse");
+    let deep = parse_deep(src, &chelis_syntax_host::NativeStack).expect("deep parse");
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected check to fail on cast-wrapped negative vmap axis");
     assert!(
@@ -479,7 +480,7 @@ fn issue216_grad_wrt_cast_wrapped_negative_index_is_error() {
              (def {} dw
                 (grad {} (var {} loss)
                     (cast {} (lit {type: (t-prim {} i32)} -1) (t-prim {} i32))))";
-    let deep = parse_deep(src).expect("deep parse");
+    let deep = parse_deep(src, &chelis_syntax_host::NativeStack).expect("deep parse");
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected check to fail on cast-wrapped negative grad wrt index");
     // Lock the post-fix diagnostic: "must be non-negative, got -1".
@@ -514,7 +515,7 @@ fn issue216_grad_wrt_cast_wrapped_negative_tuple_index_is_error() {
                     (tuple {}
                         (lit {type: (t-prim {} i32)} 0)
                         (cast {} (lit {type: (t-prim {} i32)} -1) (t-prim {} i32)))))";
-    let deep = parse_deep(src).expect("deep parse");
+    let deep = parse_deep(src, &chelis_syntax_host::NativeStack).expect("deep parse");
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected check to fail on cast-wrapped negative tuple wrt index");
     assert!(
