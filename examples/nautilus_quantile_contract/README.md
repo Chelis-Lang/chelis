@@ -21,9 +21,20 @@ chelis reef setup
 chelis prove src/proofs.ch --tier smt-only --json
 ```
 
-The SMT tier needs a compiler built with SMT support, as release binaries are.
+The SMT proof tier needs a compiler built with SMT support, as release binaries are.
 Success is one `property` record with `status:"passed"`, `proof_tier:"smt"`,
 and an assumption named `std.quantile.monotonicity` whose implementation is
 `Nautilus.Stats.quantile_vec`. The compiler binds that assumption through the
 linked dependency's declaration, so the import name alone does not decide which
 implementation the proof trusts.
+
+Read `composite_verdict` and the assumption's `discharge` record as well.
+The built-in contract sampler produces
+`proven_modulo_fuzz_validated_contract` with `real_arithmetic` and `fuzz`
+qualifications. The result depends on an empirically checked library contract;
+it does not establish the library implementation's correctness for all inputs.
+
+If `CHELIS_BEACON_BIN` is set, the configured external checker must accept the
+contract request. A checker failure reports `unsupported` and exits nonzero.
+Use a compatible checker, or unset the variable to use the built-in contract
+sampler.

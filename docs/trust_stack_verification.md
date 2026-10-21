@@ -1,99 +1,82 @@
-# Trust-Stack Verification Architecture
+# Proof-tier verification architecture
 
-This document describes the three-tier proof pipeline behind `chelis prove`
-and where it sits in the Chelis trust stack.
+`chelis prove` checks declared properties and invariant obligations, then
+reports the proof tier and assumptions behind each result. The
+[user guide](book/src/proving.md) explains commands, result fields, and exit
+codes. This page maps those results to the implementation.
 
-## Layers
+## Inputs and proof tiers
 
-```
-┌─────────────────────────────────────────────────────────┐
-│  Specification Consumption (chelis-prove)                │
-│  @property → Tier A/B/C dispatch → proof artifact       │
-├─────────────────────────────────────────────────────────┤
-│  Per-Program Runtime Verification (--tier fuzz-only)    │
-│  @property → randomized testing → statistical confidence│
-└─────────────────────────────────────────────────────────┘
-```
+Requirements enter as Surf or Deep `@property` declarations with parameters,
+preconditions, and a predicate. A translator can attach a sibling source
+manifest. The consumer verifies the generated file, original source hashes,
+byte ranges, and property mappings before attributing results to requirements.
+That attribution establishes provenance; it does not strengthen a verdict.
 
-Requirements enter this stack as Chelis Surf `@property` declarations with
-parameters, preconditions, and postconditions. A tool that translates
-requirements written in another notation emits those declarations; the proof
-pipeline does not depend on where they came from.
+Tier A (type checking) rejects ill-formed declarations before verification. It
+does not discharge an arbitrary property. The proof tiers are:
 
-Generated Surf properties can carry a sibling source manifest. The `prove`
-consumer verifies the generated artifact, original source hashes, byte ranges,
-and property-name mappings before adding requirement attribution to its
-results. Display text comes from verified source bytes. This provenance layer
-preserves the proof stack's evidence and verdicts.
+- **Tier B (SMT):** cvc5 checks supported predicates over real arithmetic.
+  Builds with the `z3` feature can use Z3 for goals cvc5 leaves unknown.
+- **Induction:** supported recursive properties produce base and step goals.
+  Both must be proved without vacuity; the arithmetic model remains real.
+- **Tier C (sampling):** deterministic edge inputs precede seeded random draws. The
+  edge schedule includes guard boundaries and their neighbours, both zeros,
+  subnormals, finite extrema, small integers, and decade magnitudes. Every
+  accepted input must satisfy the preconditions. A pass establishes only
+  that the property held on the sampled inputs.
 
-**chelis-prove** is the specification-consumption layer. It takes Chelis
-properties and dispatches them through three verification tiers:
+`--tier` selects a proof tier or automatic dispatch. Availability depends on the
+build; `chelis prove --capabilities` reports its configuration. The result's
+`proof_tier` identifies its method, and `composite_verdict` and `qualifiers`
+state what that proof tier establishes.
 
-- **Tier A (Type System):** Structural validation via the existing Chelis type
-  checker. Rejects ill-formed properties and passes every other property on to
-  Tier B. Tier A does not positively discharge properties.
+## Machine arithmetic
 
-- **Tier B (SMT):** Lowers predicates to SMT terms and solves them with cvc5
-  (the `smt` feature), with Z3 as an optional second engine (the `z3` feature)
-  for goals cvc5 leaves unknown. Proves or disproves properties over nonlinear
-  real arithmetic, polynomial bounds, and, where the solver handles them,
-  transcendental expressions.
+An SMT proof over real arithmetic does not establish the same property for
+floating-point execution. Automatic dispatch samples after an eligible solver
+proof to look for a machine counterexample. A found counterexample makes the
+record fail. A clean sample leaves the real-arithmetic qualification intact;
+an inconclusive sample leaves the proof unchanged and explains why.
 
-- **Tier C (Fuzz):** Property-based testing with a seeded PRNG, preceded by a
-  deterministic edge schedule: each binder's guard endpoints and their adjacent
-  doubles, the neighbours of a `!=` guard's excluded value, both zeros, the
-  smallest subnormals, `±MAX`, the small integers, and a ladder of decade
-  magnitudes. Those points are proposed before any random draw and do not
-  depend on the seed, so a property refuted at one is refuted under every seed
-  (chelis#3636). Empirical validation when Tier A is inconclusive and Tier B
-  times out or is not amenable; a pass is `fuzz_validated`, never `proven`.
+For a solver disproof, the verifier rounds the solver's witness to the
+parameter widths and checks it concretely. A witness that satisfies all
+preconditions and falsifies the body establishes a machine failure. An
+unconfirmed witness leaves the machine question open. The `machine_arithmetic`
+field records this distinction. Explicit solver selection also checks a
+disproof's witness, although it does not add sampling after a proof.
 
-- **COMPOSE:** Folds each proof with the producer/contract assumptions it
-  depends on. Result JSON carries the weakest-badge `composite_verdict` token,
-  a `qualifiers` array with the full disclosed caveat set, and per-assumption
-  `discharge:{method,evidence}` records. A fuzz-only BASE (no proof underneath)
-  composes to `fuzz_validated` and never to a `proven_*` badge; a
-  sound-over-approximation base composes to `sound_approximate`. For an
-  SMT-proved base: all-SMT discharges compose to `proven_modulo_real_arithmetic`
-  (the proof is over the reals, not machine arithmetic); a fuzz CONTRACT
-  discharge is qualified `proven_modulo_fuzz_validated_contract`; asserted
-  axioms are qualified `proven_modulo_asserted_axiom`. Plain `proven` is
-  reserved for a future exact-machine-arithmetic lowering.
+## Assumptions and composed evidence
 
-**chelis prove** is also the per-program runtime verification layer. It
-discovers `@property` declarations and evaluates them with random inputs. The
-three-tier dispatcher extends this with static verification for properties that
-admit it.
+Composition combines a result with the producer and contract assumptions it
+uses. JSON records disclose each assumption's `discharge` method and evidence:
 
-## Design Constraints
+- Sampling alone produces `fuzz_validated`, never a proof badge.
+- An SMT proof with SMT-discharged assumptions is
+  `proven_modulo_real_arithmetic`.
+- A proof relying on a sampled contract carries
+  `proven_modulo_fuzz_validated_contract`.
+- A proof relying on an asserted axiom carries
+  `proven_modulo_asserted_axiom`.
 
-- **Predicate lowering**: how Chelis predicates map to SMT terms. Tier B
-  inlines producer bodies before lowering.
-- **Soundness preservation**: a timeout or unknown answer is never reported as a
-  proof, or as a failure without a counterexample.
-- **Solver abstraction**: each solver is a discharge engine behind a shared
-  interface, so engines can be added or swapped without architectural change.
+Assumptions must also pass a non-vacuity check: an inconsistent assumption
+domain makes the verdict `invalid`; an inconclusive check makes it
+`unsupported`. An idealizing asserted axiom can exclude a machine-arithmetic
+cross-check, as with `clarabel.qp.ideal_optimality`. The result remains
+conditional on that disclosed axiom.
 
-## Relationship to Compiler Correctness
+## Rejections and solver limits
 
-Compiler correctness is a separate layer: differential testing of the compiler
-against a reference checker and evaluator asks whether the compiler implements
-the language specification. The tiers above ask whether a user's program
-satisfies the user's `@property` requirements. The two layers are complementary,
-not duplicates.
+Timeouts and unknown answers establish neither a proof nor a counterexample.
+Explicit solver requests report `unsupported`; automatic dispatch can try
+sampling. A square root enters SMT only when a separate total-algebraic
+obligation proves its argument nonnegative from independent preconditions.
+An unresolved obligation cannot silently strengthen the query. Auxiliary and
+main solver work share the request timeout.
 
-## Scope Limits
+## Compiler correctness
 
-- Tier B timeout/unknown is unsupported with a reason on smt-only paths, or
-  Tier C fallback in auto mode. It is never reported as failed without a
-  counterexample.
-- Tier B emits cvc5's partial `sqrt` only when a separate total-algebraic
-  obligation proves every argument non-negative from the user's independent
-  conjunctive preconditions. Unproved, nested, quantified, or partial-evidence
-  shapes fall through to Tier C rather than strengthening the query. The
-  auxiliary and main solver phases share the request timeout; their aggregate
-  solver budget does not exceed it, while non-`sqrt` requests retain the whole
-  timeout.
-- Assumption-backed green proofs run a non-vacuity check over the assumptions
-  alone. SAT establishes the assumption domain, UNSAT makes the composed
-  verdict `invalid`, and unknown/timeout makes it `unsupported`.
+Property verification asks whether a program satisfies the author's stated
+requirements. Differential compiler tests and the reference checker ask
+whether the implementation follows the language specification. Both forms
+of evidence matter, and neither replaces the other.

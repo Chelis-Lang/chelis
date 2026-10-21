@@ -3939,8 +3939,8 @@ pub fn builtin_env() -> (Env, VarGen) {
     // type of the file and process builtins exact, so each carries its exact
     // signature and ordinary unification rejects any other argument. A generic
     // scheme here admitted an `f32` path. The IO effect is still assigned in
-    // `chelis-effects` by name. `process_run` is eval/test-only (Hull Phase 0a)
-    // and rejected by the C/HIP build backends.
+    // `chelis-effects` by name. `process_run` shares its host-runtime
+    // implementation between evaluation and compiled C.
     let string = || Type::Prim(Prim::String);
     let list_of = |element: Type| Type::adt("List".to_string(), vec![element]);
     let mapped_file = || Type::adt("MappedFile".to_string(), Vec::new());

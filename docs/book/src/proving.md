@@ -13,9 +13,9 @@ chelis prove --capabilities
 
 This prints JSON without loading a source file. Check `smt_available` before requesting solver
 checks and `obligation_engine_available` when relying on invariant obligations.
-The available methods depend on how the compiler is built.
-`supported_tiers` lists possible methods, including some this installation cannot use. Confirm
-the method in each result.
+The available proof tiers depend on how the compiler is built.
+`supported_tiers` lists possible proof tiers, including some this installation cannot use.
+Confirm the proof tier in each result.
 
 ## Run properties
 
@@ -46,16 +46,16 @@ a command-line request alone does not establish the method used. An unsupported 
 establish the property. An explicit `.ch` file discovers properties in that file; imports can
 resolve names but are not additional discovery targets.
 
-The `--tier` values select how a property is checked:
+The `--tier` values select the proof tier used to check a property:
 
-| Tier | Method | What a pass establishes |
+| Proof tier | Method | What a pass establishes |
 |---|---|---|
 | `auto` (default) | Type checking first. Induction handles recursive properties, otherwise SMT. Sampling runs when neither applies and after solver proofs to find counterexamples the real-arithmetic model cannot see. | Whatever the method named in `proof_tier` establishes. For a solver proof, read `machine_arithmetic` for the machine-arithmetic result. |
 | `smt-only` | The SMT solver, over real numbers. | The property for every input satisfying the `where` preconditions, in real arithmetic. |
 | `induction-only` | Induction on one integer argument of a recursive function: the solver proves a concrete base case and a symbolic step case. | As `smt-only`: every input, in real arithmetic. Both cases must be proved; either failing or being vacuous leaves the property unproved. |
 | `fuzz-only` | A fixed set of edge inputs, then seeded random sampling. Edge inputs include each binder's guard endpoints and adjacent values, plus neighbours of a `!=` guard's excluded value. They also include both zeros, the smallest positive subnormals, the largest finite values, small integers, and a ladder of decade magnitudes. Every input must satisfy the preconditions. | The property held on every sampled input, and nothing about the others. |
 
-An unknown tier is a usage error before discovery or verification. With
+An unknown proof tier is a usage error before discovery or verification. With
 `auto`, an SMT proof reports zero samples even when `--samples` was supplied.
 The sample count and seed apply when sampling runs, including the
 machine-arithmetic search below. That search reports its own count in
@@ -89,8 +89,8 @@ It reports the result in the additive `machine_arithmetic` field:
   The generator could not produce an input, or could not satisfy its preconditions.
   The proof is unchanged. A sampler limit is not evidence about the property.
 
-The field is absent when no such check ran. An explicit tier never widens into
-a second one. Thus `--tier smt-only` and `--tier induction-only` run no
+The field is absent when no such check ran. An explicitly selected proof tier
+runs on its own. Thus `--tier smt-only` and `--tier induction-only` run no
 machine-arithmetic check. An induction proof carries none either.
 
 A result conditional on an asserted axiom such as `clarabel.qp.ideal_optimality`
@@ -110,7 +110,7 @@ A counterexample that sampling would find cannot hide behind a solver proof.
 Thus `auto` does not report such a pass where `--tier fuzz-only` reports a
 failure. An induction proof is outside this check.
 
-The two tiers still differ in the other direction. When sampling errors or
+The two modes also differ when sampling is inconclusive. When sampling errors or
 establishes nothing, `auto` reports its proof and `--tier fuzz-only` reports
 that failure.
 
@@ -161,7 +161,7 @@ honest answer: the machine-arithmetic question is open, and `chelis prove` exits
 `2` rather than `0` or `1`.
 
 This check is one evaluation of the solver's own witness rather than a second
-tier, so `--tier smt-only` runs it too. A disproof conditional on an asserted
+proof tier, so `--tier smt-only` runs it too. A disproof conditional on an asserted
 axiom carries no check, for the reason above.
 
 In plain text an undecided record prints its reason, and no sample ratio:
