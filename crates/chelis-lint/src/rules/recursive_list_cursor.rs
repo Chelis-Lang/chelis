@@ -66,7 +66,8 @@ impl Rule for RecursiveListCursor {
         let Some(source) = ctx.source else {
             return Vec::new();
         };
-        let Ok(decls) = chelis_surf::parser::parse_str(source) else {
+        let Ok(decls) = chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+        else {
             return Vec::new();
         };
         let mut out = Vec::new();
@@ -398,7 +399,7 @@ mod tests {
     /// violations on a parse error, so without this every negative test
     /// below would pass for the wrong reason.
     fn violations(src: &str) -> Vec<Violation> {
-        chelis_surf::parser::parse_str(src)
+        chelis_surf::parser::parse_str(src, &chelis_syntax_host::NativeStack)
             .unwrap_or_else(|error| panic!("fixture must parse: {error:?}\n{src}"));
         RecursiveListCursor.check(&ctx(src))
     }

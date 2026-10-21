@@ -72,8 +72,10 @@ fn generated_program(definitions: usize, shape: GraphShape) -> Vec<deep::Expr> {
             function_body(index, definitions, shape)
         ));
     }
-    let declarations = chelis_surf::parser::parse_str(&source).expect("generated Surf parses");
-    chelis_surf::desugar::desugar_program(&declarations).expect("Surf fixture must desugar")
+    let declarations = chelis_surf::parser::parse_str(&source, &chelis_syntax_host::NativeStack)
+        .expect("generated Surf parses");
+    chelis_surf::desugar::desugar_program(&declarations, &chelis_syntax_host::NativeStack)
+        .expect("Surf fixture must desugar")
 }
 
 fn plan_for(program: &[deep::Expr]) -> FunctionInferencePlan {
@@ -327,19 +329,27 @@ fn issue_1316_malformed_group_is_rejected_before_either_driver() {
             ..
         })
     ));
-    assert!(chelis_deep::parser::parse_str("(def {} broken (fn {} (params {} x)))").is_err());
+    assert!(
+        chelis_deep::parser::parse_str(
+            "(def {} broken (fn {} (params {} x)))",
+            &chelis_syntax_host::NativeStack
+        )
+        .is_err()
+    );
 }
 
 #[test]
 fn issue_1316_unknown_call_diagnostic_order_is_stable_across_drivers() {
     let declarations = chelis_surf::parser::parse_str(
         "module Profile.Errors\n\
-         def first(x: i32) -> i32 = missing_first(x)\n\
-         def second(x: i32) -> i32 = missing_second(x)\n",
+     def first(x: i32) -> i32 = missing_first(x)\n\
+     def second(x: i32) -> i32 = missing_second(x)\n",
+        &chelis_syntax_host::NativeStack,
     )
     .expect("fixture parses");
     let program =
-        chelis_surf::desugar::desugar_program(&declarations).expect("Surf fixture must desugar");
+        chelis_surf::desugar::desugar_program(&declarations, &chelis_syntax_host::NativeStack)
+            .expect("Surf fixture must desugar");
     let messages = |result: Result<CheckedProgram, InferResult>| {
         result
             .expect_err("unknown calls must reject")

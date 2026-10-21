@@ -1203,14 +1203,15 @@ mod tests {
     use chelis_surf::{desugar::desugar_program, parser::parse_str as parse_surf};
 
     fn checked(src: &str) -> CheckedProgram {
-        let exprs = parse_str(src).unwrap();
+        let exprs = parse_str(src, &chelis_syntax_host::NativeStack).unwrap();
         let checked = chelis_types::check_ir_program(&exprs).unwrap();
         check_program(&checked).unwrap()
     }
 
     fn surf_checked(src: &str) -> CheckedProgram {
-        let decls = parse_surf(src).expect("surf parse");
-        let deep = desugar_program(&decls).expect("Surf fixture must desugar");
+        let decls = parse_surf(src, &chelis_syntax_host::NativeStack).expect("surf parse");
+        let deep = desugar_program(&decls, &chelis_syntax_host::NativeStack)
+            .expect("Surf fixture must desugar");
         let checked = chelis_types::check_ir_program(&deep).expect("type check");
         check_program(&checked).expect("effect check")
     }
@@ -1258,8 +1259,10 @@ mod tests {
             .stack_size(64 * 1024 * 1024)
             .spawn(move || {
                 let source = issue_1205_source(operations, flat);
-                let decls = parse_surf(&source).expect("#1205 surf fixture parses");
-                let deep = desugar_program(&decls).expect("Surf fixture must desugar");
+                let decls = parse_surf(&source, &chelis_syntax_host::NativeStack)
+                    .expect("#1205 surf fixture parses");
+                let deep = desugar_program(&decls, &chelis_syntax_host::NativeStack)
+                    .expect("Surf fixture must desugar");
                 let typed =
                     chelis_types::check_ir_program(&deep).expect("#1205 fixture type checks");
                 reset_effect_work_profile();
@@ -1307,8 +1310,13 @@ mod tests {
 
     #[test]
     fn effect_annotation_reconstruction_preserves_type_context() {
-        let decls = parse_surf("def add_one(x: i32) -> i32 = add(x, 1)").expect("surf parse");
-        let deep = desugar_program(&decls).expect("Surf fixture must desugar");
+        let decls = parse_surf(
+            "def add_one(x: i32) -> i32 = add(x, 1)",
+            &chelis_syntax_host::NativeStack,
+        )
+        .expect("surf parse");
+        let deep = desugar_program(&decls, &chelis_syntax_host::NativeStack)
+            .expect("Surf fixture must desugar");
         let typed = chelis_types::check_ir_program(&deep).expect("type check");
         let expected_type_env = typed.type_env().clone();
         let expected_signatures = typed.signature_inference().clone();
@@ -1320,8 +1328,11 @@ mod tests {
 
     #[test]
     fn stamped_effect_annotation_preserves_the_checked_node_carrier() {
-        let deep = chelis_deep::parse_and_stamp("(def {} answer (fn {} (params {}) (lit {} 1)))")
-            .expect("canonical Deep fixture stamps");
+        let deep = chelis_deep::parse_and_stamp(
+            "(def {} answer (fn {} (params {}) (lit {} 1)))",
+            &chelis_syntax_host::NativeStack,
+        )
+        .expect("canonical Deep fixture stamps");
         let typed = chelis_types::check_typed_program(&deep).expect("type check");
 
         let reconstructed = check_program(&typed).expect("effect check");
@@ -1339,13 +1350,14 @@ mod tests {
     fn stamped_declared_pure_function_rejects_inferred_io() {
         let deep = chelis_deep::parse_and_stamp(
             r#"(defsig {} entry
-                 (t-fn {eff: (effects {})}
-                   (t-prim {} string)
-                   (t-prim {} string)))
-               (def {} entry
-                 (fn {}
-                   (params {} (x {type: (t-prim {} string)}))
-                   (app {} (var {} debug) (var {} x))))"#,
+             (t-fn {eff: (effects {})}
+               (t-prim {} string)
+               (t-prim {} string)))
+           (def {} entry
+             (fn {}
+               (params {} (x {type: (t-prim {} string)}))
+               (app {} (var {} debug) (var {} x))))"#,
+            &chelis_syntax_host::NativeStack,
         )
         .expect("canonical Deep fixture stamps");
         let typed = chelis_types::check_typed_program(&deep).expect("type check");
@@ -1371,17 +1383,18 @@ mod tests {
     fn effects_reader_classes_read_a_recursive_stamped_program() {
         let successor = chelis_deep::parse_and_stamp_file(
             r#"(module {} Test
-                 (defsig {} entry
-                   (t-fn {eff: (effects {})} (t-prim {} unit)))
-                 (def {} entry
-                   (fn {}
-                     (params {})
-                     (let {}
-                       (bind {} local
-                         (fn {}
-                           (params {})
-                           (app {} (var {} debug) (lit {} 1))))
-                       (app {} (var {} local))))))"#,
+             (defsig {} entry
+               (t-fn {eff: (effects {})} (t-prim {} unit)))
+             (def {} entry
+               (fn {}
+                 (params {})
+                 (let {}
+                   (bind {} local
+                     (fn {}
+                       (params {})
+                       (app {} (var {} debug) (lit {} 1))))
+                   (app {} (var {} local))))))"#,
+            &chelis_syntax_host::NativeStack,
         )
         .expect("recursive effects fixture stamps");
 
@@ -1458,7 +1471,8 @@ mod tests {
     #[test]
     fn undecodable_head_metadata_is_not_traversed_by_handler_validation() {
         fn stamped_def_body(source: &str) -> Expr {
-            let exprs = chelis_deep::parse_and_stamp(source).expect("fixture stamps");
+            let exprs = chelis_deep::parse_and_stamp(source, &chelis_syntax_host::NativeStack)
+                .expect("fixture stamps");
             let ExprCarrier::DecodedNode(DeepTag::Def, _, children) = exprs[0].carrier() else {
                 panic!("fixture is a def");
             };
@@ -1631,9 +1645,10 @@ mod tests {
     fn declared_effect_reader_reads_a_decoded_defsig() {
         let mut parsed = chelis_deep::parse_and_stamp(
             "(defsig {} entry \
-               (t-fn {eff: (effects {} accum io)} \
-                 (t-prim {} i32) \
-                 (t-prim {} i32)))",
+           (t-fn {eff: (effects {} accum io)} \
+             (t-prim {} i32) \
+             (t-prim {} i32)))",
+            &chelis_syntax_host::NativeStack,
         )
         .expect("canonical defsig fixture stamps");
         let successor = parsed.remove(0);
@@ -1674,18 +1689,19 @@ mod tests {
     fn stamped_declared_pure_function_rejects_io_local_closure() {
         let deep = chelis_deep::parse_and_stamp(
             r#"(defsig {} entry
-                 (t-fn {eff: (effects {})}
-                   (t-prim {} string)
-                   (t-prim {} string)))
-               (def {} entry
-                 (fn {}
-                   (params {} (x {type: (t-prim {} string)}))
-                   (let {}
-                     (bind {} step
-                       (fn {}
-                         (params {} (y {type: (t-prim {} string)}))
-                         (app {} (var {} debug) (var {} y))))
-                     (app {} (var {} step) (var {} x)))))"#,
+             (t-fn {eff: (effects {})}
+               (t-prim {} string)
+               (t-prim {} string)))
+           (def {} entry
+             (fn {}
+               (params {} (x {type: (t-prim {} string)}))
+               (let {}
+                 (bind {} step
+                   (fn {}
+                     (params {} (y {type: (t-prim {} string)}))
+                     (app {} (var {} debug) (var {} y))))
+                 (app {} (var {} step) (var {} x)))))"#,
+            &chelis_syntax_host::NativeStack,
         )
         .expect("canonical Deep fixture stamps");
         let typed = chelis_types::check_typed_program(&deep).expect("type check");
@@ -1704,9 +1720,10 @@ mod tests {
     fn literal_resource_handler_crosses_the_type_effect_boundary() {
         let deep = parse_str(
             r#"(def {} value
-                   (handle-effect {effect: resource}
-                     (lit {type: (t-prim {} string)} "cpu")
-                     (lit {type: (t-prim {} i32)} 1)))"#,
+               (handle-effect {effect: resource}
+                 (lit {type: (t-prim {} string)} "cpu")
+                 (lit {type: (t-prim {} i32)} 1)))"#,
+            &chelis_syntax_host::NativeStack,
         )
         .expect("Deep handler fixture parses");
         let typed = chelis_types::check_ir_program(&deep).expect("type boundary accepts");
@@ -1717,7 +1734,8 @@ mod tests {
     fn nonliteral_resource_handler_is_rejected_once_by_the_effect_owner() {
         let deep = parse_str(
             "(def {} value (handle-effect {effect: resource} \
-             (var {} computed_handler) (lit {type: (t-prim {} i32)} 1)))",
+         (var {} computed_handler) (lit {type: (t-prim {} i32)} 1)))",
+            &chelis_syntax_host::NativeStack,
         )
         .expect("Deep handler fixture parses");
         let typed = chelis_types::check_ir_program(&deep)
@@ -1740,9 +1758,10 @@ mod tests {
         // retired with the counter stream, #2413).
         let exprs = parse_str(
             "(def {} x (lit {type: (t-tensor {} (d-lit {} 8) (t-prim {} f32))} 0))
-             (def {} y (app {} (var {} dropout)
-               (app {} (var {} key_from_seed) (lit {type: (t-prim {} i64)} 7))
-               (var {} x) (lit {type: (t-prim {} f32)} 0.5)))",
+         (def {} y (app {} (var {} dropout)
+           (app {} (var {} key_from_seed) (lit {type: (t-prim {} i64)} 7))
+           (var {} x) (lit {type: (t-prim {} f32)} 0.5)))",
+            &chelis_syntax_host::NativeStack,
         )
         .unwrap();
         let (inferred, _) = infer_program_effects(&exprs);
@@ -1784,9 +1803,10 @@ def pure_add(x: i64, y: i64) -> i64 = add(x, y)
         // draw at a value root needs no handler.
         let exprs = parse_str(
             "(def {} x (lit {type: (t-tensor {} (d-lit {} 8) (t-prim {} f32))} 0))
-             (def {} y (app {} (var {} dropout)
-               (app {} (var {} key_from_seed) (lit {type: (t-prim {} i64)} 7))
-               (var {} x) (lit {type: (t-prim {} f32)} 0.5)))",
+         (def {} y (app {} (var {} dropout)
+           (app {} (var {} key_from_seed) (lit {type: (t-prim {} i64)} 7))
+           (var {} x) (lit {type: (t-prim {} f32)} 0.5)))",
+            &chelis_syntax_host::NativeStack,
         )
         .unwrap();
         let checked = chelis_types::check_ir_program(&exprs).unwrap();
@@ -2255,12 +2275,16 @@ pure_value = add(1i64, 2i64)
         // Declaring IO admits the same bodies.
         for clock in ["clock_wall_read", "clock_monotonic_read"] {
             for (declared, admitted) in [("{}", false), ("{Test}", false), ("{IO}", true)] {
-                let decls = parse_surf(&format!(
-                    "def read() -> (i64, i64) ! {declared} = {clock}()\n\
+                let decls = parse_surf(
+                    &format!(
+                        "def read() -> (i64, i64) ! {declared} = {clock}()\n\
                      def outer() -> (i64, i64) ! {declared} = read()\n"
-                ))
+                    ),
+                    &chelis_syntax_host::NativeStack,
+                )
                 .expect("surf parse");
-                let deep = desugar_program(&decls).expect("Surf fixture must desugar");
+                let deep = desugar_program(&decls, &chelis_syntax_host::NativeStack)
+                    .expect("Surf fixture must desugar");
                 let checked = chelis_types::check_ir_program(&deep).expect("type check");
                 let verdict = check_program(&checked);
                 if admitted {
@@ -2370,11 +2394,13 @@ def sealed() -> unit =
         // sig declares no effects.
         let decls = parse_surf(
             r#"
-def g() -> unit ! {} = test_assert(true, "leak")
-"#,
+        def g() -> unit ! {} = test_assert(true, "leak")
+        "#,
+            &chelis_syntax_host::NativeStack,
         )
         .expect("surf parse");
-        let deep = desugar_program(&decls).expect("Surf fixture must desugar");
+        let deep = desugar_program(&decls, &chelis_syntax_host::NativeStack)
+            .expect("Surf fixture must desugar");
         let checked = chelis_types::check_ir_program(&deep).expect("type check");
         let errors = check_program(&checked)
             .expect_err("def with `! {}` that calls test_assert must be rejected");
@@ -2392,12 +2418,14 @@ def g() -> unit ! {} = test_assert(true, "leak")
         // The `! {}` signature on g must still reject this.
         let decls = parse_surf(
             r#"
-def f() -> unit = test_assert(true, "x")
-def g() -> unit ! {} = f()
-"#,
+        def f() -> unit = test_assert(true, "x")
+        def g() -> unit ! {} = f()
+        "#,
+            &chelis_syntax_host::NativeStack,
         )
         .expect("surf parse");
-        let deep = desugar_program(&decls).expect("Surf fixture must desugar");
+        let deep = desugar_program(&decls, &chelis_syntax_host::NativeStack)
+            .expect("Surf fixture must desugar");
         let checked = chelis_types::check_ir_program(&deep).expect("type check");
         let errors =
             check_program(&checked).expect_err("transitive caller with `! {}` must be rejected");
@@ -2416,11 +2444,13 @@ def g() -> unit ! {} = f()
         // When the caller honestly declares `! { Test }`, no error.
         let decls = parse_surf(
             r#"
-def test_ok() -> unit ! {Test} = test_assert(true, "ok")
-"#,
+        def test_ok() -> unit ! {Test} = test_assert(true, "ok")
+        "#,
+            &chelis_syntax_host::NativeStack,
         )
         .expect("surf parse");
-        let deep = desugar_program(&decls).expect("Surf fixture must desugar");
+        let deep = desugar_program(&decls, &chelis_syntax_host::NativeStack)
+            .expect("Surf fixture must desugar");
         let checked = chelis_types::check_ir_program(&deep).expect("type check");
         check_program(&checked).expect("declared Test should accept test_assert caller");
     }
@@ -2432,11 +2462,13 @@ def test_ok() -> unit ! {Test} = test_assert(true, "ok")
         // systems are orthogonal axes of the effect row.
         let decls = parse_surf(
             r#"
-def leak() -> unit ! {IO} = test_assert(true, "sneak")
-"#,
+        def leak() -> unit ! {IO} = test_assert(true, "sneak")
+        "#,
+            &chelis_syntax_host::NativeStack,
         )
         .expect("surf parse");
-        let deep = desugar_program(&decls).expect("Surf fixture must desugar");
+        let deep = desugar_program(&decls, &chelis_syntax_host::NativeStack)
+            .expect("Surf fixture must desugar");
         let checked = chelis_types::check_ir_program(&deep).expect("type check");
         let errors =
             check_program(&checked).expect_err("IO-declared fn must not silently acquire Test");
@@ -2459,8 +2491,9 @@ def leak() -> unit ! {IO} = test_assert(true, "sneak")
     /// Type-check a module-WRAPPED Deep program (the shape `chelis check` runs
     /// on a `.dp` MODULE), preserving the `(module ...)` wrapper.
     fn typed_module(src: &str) -> CheckedProgram {
-        let decls = parse_surf(src).expect("surf parse");
-        let deep = desugar_program(&decls).expect("Surf fixture must desugar");
+        let decls = parse_surf(src, &chelis_syntax_host::NativeStack).expect("surf parse");
+        let deep = desugar_program(&decls, &chelis_syntax_host::NativeStack)
+            .expect("Surf fixture must desugar");
         chelis_types::check_typed_program(&deep).expect("type check")
     }
 
@@ -2556,7 +2589,8 @@ mod decode_once_producer_tests {
     #[test]
     fn effect_annotation_reaches_registered_expressions_and_preserves_data() {
         let source = "(def {property_seed: (fn {} (params {}) (app {} (var {} debug) (lit {} 1))), custom: (fn {} (params {}) (app {} (var {} debug) (lit {} 1))), source: (original (fn {} (params {}) (app {} (var {} debug) (lit {} 1))))} f (lit {} 1))";
-        let parsed = chelis_deep::parser::parse_str(source).unwrap();
+        let parsed =
+            chelis_deep::parser::parse_str(source, &chelis_syntax_host::NativeStack).unwrap();
         let Expr::Node(node, _) = &parsed[0] else {
             panic!("stamped declaration")
         };

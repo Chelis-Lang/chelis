@@ -34,7 +34,8 @@ fn check_fails_on_lint_violation() {
     // `_internal` parses cleanly but trips `surf-value-snake-case`
     // (§3.2 forbids leading underscore).
     let src = "def _internal() -> i32 = 1\n";
-    let decls = chelis_surf::parser::parse_str(src).expect("parses");
+    let decls =
+        chelis_surf::parser::parse_str(src, &chelis_syntax_host::NativeStack).expect("parses");
     let canonical = chelis_surf::format::format_program(&decls);
     fs::write(&path, &canonical).unwrap();
     Command::cargo_bin("chelis")
@@ -76,7 +77,8 @@ fn check_fails_on_no_em_dash_public_string() {
     let path = dir.path().join("message.ch");
     let dash = '\u{2014}';
     let src = format!("def message() -> string = \"one {dash} two\"\n");
-    let decls = chelis_surf::parser::parse_str(&src).expect("parses");
+    let decls =
+        chelis_surf::parser::parse_str(&src, &chelis_syntax_host::NativeStack).expect("parses");
     let canonical = chelis_surf::format::format_program(&decls);
     fs::write(&path, &canonical).unwrap();
     Command::cargo_bin("chelis")
@@ -95,7 +97,8 @@ fn check_relative_bare_filename_fails_on_lint_violation() {
     let path = dir.path().join("message.ch");
     let dash = '\u{2014}';
     let src = format!("def message() -> string = \"one {dash} two\"\n");
-    let decls = chelis_surf::parser::parse_str(&src).expect("parses");
+    let decls =
+        chelis_surf::parser::parse_str(&src, &chelis_syntax_host::NativeStack).expect("parses");
     let canonical = chelis_surf::format::format_program(&decls);
     fs::write(&path, &canonical).unwrap();
     Command::cargo_bin("chelis")
@@ -411,7 +414,11 @@ fn style_gated_commands_spawn_no_workspace_probe() {
     let deep = dir.path().join("clean.dp");
     fs::write(&deep, "(def {} value (lit {} 1))\n").unwrap();
     let flagged = dir.path().join("flagged.ch");
-    let decls = chelis_surf::parser::parse_str("def _internal() -> i32 = 1\n").expect("parses");
+    let decls = chelis_surf::parser::parse_str(
+        "def _internal() -> i32 = 1\n",
+        &chelis_syntax_host::NativeStack,
+    )
+    .expect("parses");
     fs::write(&flagged, chelis_surf::format::format_program(&decls)).unwrap();
 
     let runs: [(&[&str], &std::path::Path, bool); 5] = [

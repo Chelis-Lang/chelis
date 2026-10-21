@@ -38,9 +38,10 @@ use chelis_types::errors::CheckErrorKind;
 /// `(kind, message)` pairs of any diagnostics. An empty vector means the
 /// program type-checked cleanly.
 fn check_diagnostics(source: &str) -> Vec<(CheckErrorKind, String)> {
-    let decls = parse_str(source).expect("surf parse");
+    let decls = parse_str(source, &chelis_syntax_host::NativeStack).expect("surf parse");
     let exprs = expand_program(
-        &desugar_program(&decls).expect("Surf fixture must desugar"),
+        &desugar_program(&decls, &chelis_syntax_host::NativeStack)
+            .expect("Surf fixture must desugar"),
         &ExpansionOptions::default(),
     )
     .expect("macro expand")

@@ -29,9 +29,11 @@ use chelis_types::{BUILTINS, ShapeClass, builtin_env, check_ir_program};
 const DTYPES: [&str; 3] = ["f32", "i32", "bool"];
 
 fn surf_to_deep(source: &str) -> Vec<Expr> {
-    let decls = parse_surf(source).unwrap_or_else(|error| panic!("parse {source}: {error:?}"));
+    let decls = parse_surf(source, &chelis_syntax_host::NativeStack)
+        .unwrap_or_else(|error| panic!("parse {source}: {error:?}"));
     chelis_macros::expand_program(
-        &desugar_program(&decls).expect("generated probe must desugar"),
+        &desugar_program(&decls, &chelis_syntax_host::NativeStack)
+            .expect("generated probe must desugar"),
         &chelis_macros::ExpansionOptions::default(),
     )
     .expect("macro expand")

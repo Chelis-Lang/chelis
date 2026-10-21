@@ -173,9 +173,10 @@ const POSITIONS: &[Position] = &[
 ];
 
 fn deep(source: &str) -> Vec<Expr> {
-    let decls = parse_str(source).unwrap_or_else(|error| panic!("parse: {error}\n{source}"));
-    let desugared =
-        desugar_program(&decls).unwrap_or_else(|error| panic!("desugar: {error}\n{source}"));
+    let decls = parse_str(source, &chelis_syntax_host::NativeStack)
+        .unwrap_or_else(|error| panic!("parse: {error}\n{source}"));
+    let desugared = desugar_program(&decls, &chelis_syntax_host::NativeStack)
+        .unwrap_or_else(|error| panic!("desugar: {error}\n{source}"));
     chelis_macros::expand_program(&desugared, &chelis_macros::ExpansionOptions::default())
         .unwrap_or_else(|error| panic!("expand: {error}\n{source}"))
         .into_exprs()
@@ -338,7 +339,9 @@ fn a_list_value_under_a_tensor_declaration_resugars_as_constructor_calls() {
             "def f(n: i32) -> tensor[1, f32] = Cons(1.5, Nil)\n",
         ),
     ] {
-        let original = chelis_deep::parser::parse_str(deep_source).expect("Deep parses");
+        let original =
+            chelis_deep::parser::parse_str(deep_source, &chelis_syntax_host::NativeStack)
+                .expect("Deep parses");
         let resugared = format_program(&resugar_program(&original).expect("Deep resugars"));
         assert_eq!(resugared, expected);
         assert_eq!(normalized(&deep(&resugared)), normalized(&original));
@@ -358,8 +361,9 @@ fn a_declared_tensor_value_round_trips_through_the_explicit_spelling() {
     ] {
         let original = deep(&source);
         let resugared = format_program(&resugar_program(&original).expect("Deep resugars"));
-        let decls = parse_str(&resugared).unwrap_or_else(|error| panic!("{error}\n{resugared}"));
-        let redesugared = desugar_program(&decls)
+        let decls = parse_str(&resugared, &chelis_syntax_host::NativeStack)
+            .unwrap_or_else(|error| panic!("{error}\n{resugared}"));
+        let redesugared = desugar_program(&decls, &chelis_syntax_host::NativeStack)
             .unwrap_or_else(|error| panic!("{source} no longer desugars: {error}\n{resugared}"));
         let reexpanded = chelis_macros::expand_program(
             &redesugared,

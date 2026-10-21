@@ -61,7 +61,8 @@ fn cons_chain_reshape_expr() -> Expr {
                  (cast {} (lit {} 3) (t-prim {} i64))
                  (var {} Nil))))
     "#;
-    let mut exprs = chelis_deep::parser::parse_str(src).expect("deep parse");
+    let mut exprs =
+        chelis_deep::parser::parse_str(src, &chelis_syntax_host::NativeStack).expect("deep parse");
     assert_eq!(exprs.len(), 1, "expected exactly one top-level expr");
     exprs.pop().unwrap()
 }

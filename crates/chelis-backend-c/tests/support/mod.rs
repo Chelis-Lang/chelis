@@ -92,11 +92,13 @@ fn codegen_host_fixture(
             params.join(", ")
         ));
     }
-    let declarations = chelis_surf::parser::parse_str(&source).unwrap_or_else(|error| {
-        panic!("parse synthetic host signature source: {error:?}\n{source}")
-    });
+    let declarations = chelis_surf::parser::parse_str(&source, &chelis_syntax_host::NativeStack)
+        .unwrap_or_else(|error| {
+            panic!("parse synthetic host signature source: {error:?}\n{source}")
+        });
     let deep =
-        chelis_surf::desugar::desugar_program(&declarations).expect("Surf fixture must desugar");
+        chelis_surf::desugar::desugar_program(&declarations, &chelis_syntax_host::NativeStack)
+            .expect("Surf fixture must desugar");
     let checked = chelis_types::check_typed_program(&deep)
         .unwrap_or_else(|errors| panic!("check synthetic host signatures: {:?}", errors.errors));
     let checked = chelis_effects::check_program(&checked)

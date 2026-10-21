@@ -8,8 +8,11 @@ use chelis_surf::{
 };
 
 fn lower(source: &str) -> Vec<Expr> {
-    desugar_program(&parse_str(source).expect("parse source fixture"))
-        .expect("Surf fixture must desugar")
+    desugar_program(
+        &parse_str(source, &chelis_syntax_host::NativeStack).expect("parse source fixture"),
+        &chelis_syntax_host::NativeStack,
+    )
+    .expect("Surf fixture must desugar")
 }
 
 #[test]
@@ -98,7 +101,8 @@ fn binder_clauses_never_rebind_reserved_precisions() {
         assert!(!text.contains(&format!("(t-var {{}} {name})")), "{text}");
 
         let source = format!("def inspect[{name}](x: tensor[3, {name}]) -> i32 = 0i32");
-        let error = parse_str(&source).expect_err("reserved dtype cannot enter binder list");
+        let error = parse_str(&source, &chelis_syntax_host::NativeStack)
+            .expect_err("reserved dtype cannot enter binder list");
         let rendered = error.to_string();
         assert!(
             rendered.contains(&format!("`{name}`"))
@@ -131,11 +135,15 @@ fn a_property_keeps_its_required_typed_carriers_for_round_trip() {
 fn the_single_owner_form_satisfies_the_round_trip_law() {
     let program = parse_and_stamp_file(
         "(defsig {} identity (t-fn {} (t-prim {} f32) (t-prim {} f32)))\n\
-         (def {} identity (fn {} (params {} (x {type: (t-var {} _)})) (var {} x)))",
+     (def {} identity (fn {} (params {} (x {type: (t-var {} _)})) (var {} x)))",
+        &chelis_syntax_host::NativeStack,
     )
     .expect("parse canonical owner fixture");
-    let restored = desugar_program(&resugar_program(&program).expect("resugar a declared slot"))
-        .expect("Surf fixture must desugar");
+    let restored = desugar_program(
+        &resugar_program(&program).expect("resugar a declared slot"),
+        &chelis_syntax_host::NativeStack,
+    )
+    .expect("Surf fixture must desugar");
     assert_eq!(
         print_canonical_flat(
             &normalize_deep_for_surface_roundtrip(&restored).expect("normalize restored program")
@@ -150,7 +158,8 @@ fn the_single_owner_form_satisfies_the_round_trip_law() {
 fn a_real_parameter_disagreement_cannot_normalize_to_a_hole() {
     let program = parse_and_stamp_file(
         "(defsig {} identity (t-fn {} (t-prim {} f32) (t-prim {} f32)))\n\
-         (def {} identity (fn {} (params {} (x {type: (t-prim {} bool)})) (var {} x)))",
+     (def {} identity (fn {} (params {} (x {type: (t-prim {} bool)})) (var {} x)))",
+        &chelis_syntax_host::NativeStack,
     )
     .expect("parse independent constraint fixture");
     assert!(resugar_program(&program).is_err());

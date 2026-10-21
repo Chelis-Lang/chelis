@@ -125,7 +125,8 @@ fn flatten_module_decls(decls: &[chelis_surf::ast::Decl]) -> Vec<chelis_surf::as
 fn format_library_plus_snippet(package_dir: &Path, snippet: &str) -> String {
     let graph = chelis_reef::prepare_reef_graph(package_dir, &chelis_std_bundle::EMBEDDED_RUNTIME)
         .expect("prepare_reef_graph");
-    let entry_decls = chelis_surf::parser::parse_str(snippet).expect("parse snippet");
+    let entry_decls = chelis_surf::parser::parse_str(snippet, &chelis_syntax_host::NativeStack)
+        .expect("parse snippet");
     let flat_decls = flatten_module_decls(&entry_decls);
     let prepared = chelis_reef::compile_with_reef_graph(
         &graph,
@@ -674,7 +675,9 @@ fn g9_newcode_redeclaring_an_imported_library_def_is_rejected_at_every_stage() {
 
     let graph = chelis_reef::prepare_reef_graph(&root, &chelis_std_bundle::EMBEDDED_RUNTIME)
         .expect("prepare_reef_graph");
-    let entry = flatten_module_decls(&chelis_surf::parser::parse_str(snippet).expect("parse"));
+    let entry = flatten_module_decls(
+        &chelis_surf::parser::parse_str(snippet, &chelis_syntax_host::NativeStack).expect("parse"),
+    );
     let linked =
         chelis_reef::compile_with_reef_graph(&graph, &entry, &chelis_std_bundle::EMBEDDED_RUNTIME)
             .err();

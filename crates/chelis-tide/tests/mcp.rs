@@ -272,7 +272,8 @@ fn add_function_accepts_well_typed_function_bundle() {
     );
     let module_deep = result["module_deep"].as_str().expect("module_deep");
     let reparsed =
-        chelis_deep::parser::parse_str_strict(module_deep).expect("module_deep reparses");
+        chelis_deep::parser::parse_str_strict(module_deep, &chelis_syntax_host::NativeStack)
+            .expect("module_deep reparses");
     assert_eq!(
         chelis_deep::printer::print_canonical(&reparsed),
         module_deep
@@ -341,7 +342,8 @@ fn replace_function_body_accepts_well_typed_replacement() {
     // `module_deep` is canonical: parse_str_strict + print_canonical is a
     // fixed point.
     let reparsed =
-        chelis_deep::parser::parse_str_strict(module_deep).expect("module_deep reparses");
+        chelis_deep::parser::parse_str_strict(module_deep, &chelis_syntax_host::NativeStack)
+            .expect("module_deep reparses");
     let reprinted = chelis_deep::printer::print_canonical(&reparsed);
     assert_eq!(
         reprinted, module_deep,
@@ -836,7 +838,8 @@ fn each_tool_dispatches_successfully() {
                 .as_str()
                 .expect("decompile surf_text");
             let reparsed =
-                chelis_surf::parser::parse_str(surf_text).expect("MCP decompile returns Surf");
+                chelis_surf::parser::parse_str(surf_text, &chelis_syntax_host::NativeStack)
+                    .expect("MCP decompile returns Surf");
             assert_eq!(
                 chelis_surf::format::format_program(&reparsed),
                 surf_text,

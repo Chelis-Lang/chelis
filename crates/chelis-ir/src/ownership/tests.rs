@@ -4528,8 +4528,11 @@ fn running_live_byte_totals_keep_the_owner_order_sum() {
 }
 
 fn lower_source_for_ownership(source: &str) -> super::HostOwnershipProgram {
-    let declarations = chelis_surf::parser::parse_str(source).expect("surf parse");
-    let deep = chelis_surf::desugar::desugar_program(&declarations).expect("desugar");
+    let declarations = chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+        .expect("surf parse");
+    let deep =
+        chelis_surf::desugar::desugar_program(&declarations, &chelis_syntax_host::NativeStack)
+            .expect("desugar");
     let checked = chelis_types::check_typed_program(&deep)
         .unwrap_or_else(|errors| panic!("type check: {:?}", errors.errors));
     let checked = chelis_effects::check_program(&checked)

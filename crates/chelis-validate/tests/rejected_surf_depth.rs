@@ -84,7 +84,7 @@ fn rejected_nested_comments_return_a_bounded_error_on_a_small_stack() {
         || {
             let source = nested_comment_source(5_000, false);
             assert!(
-                chelis_surf::parser::parse_str(&source).is_err(),
+                chelis_surf::parser::parse_str(&source, &chelis_syntax_host::NativeStack).is_err(),
                 "control parser must reject the input"
             );
             let error = validate_surf(&source).expect_err("rejected Surf must fail validation");
@@ -138,7 +138,7 @@ fn accepted_extreme_parentheses_survive_a_small_stack() {
     run_on_small_stack_in_child("accepted_extreme_parentheses_survive_a_small_stack", || {
         let source = nested_expression_source(40_000, true);
         assert!(
-            chelis_surf::parser::parse_str(&source).is_ok(),
+            chelis_surf::parser::parse_str(&source, &chelis_syntax_host::NativeStack).is_ok(),
             "valid Surf was rejected by the direct parser"
         );
         assert!(validate_surf(&source).is_ok(), "valid Surf was rejected");
@@ -152,7 +152,7 @@ fn rejected_extreme_parentheses_report_a_parse_error_on_a_small_stack() {
         || {
             let source = nested_expression_source(40_000, false);
             assert!(
-                chelis_surf::parser::parse_str(&source).is_err(),
+                chelis_surf::parser::parse_str(&source, &chelis_syntax_host::NativeStack).is_err(),
                 "invalid Surf was accepted by the direct parser"
             );
             let error = validate_surf(&source).expect_err("invalid Surf must fail");
@@ -169,10 +169,14 @@ fn extreme_type_parentheses_keep_accept_and_reject_verdicts() {
         "extreme_type_parentheses_keep_accept_and_reject_verdicts",
         || {
             let valid = nested_type_source(40_000, true);
-            assert!(chelis_surf::parser::parse_str(&valid).is_ok());
+            assert!(
+                chelis_surf::parser::parse_str(&valid, &chelis_syntax_host::NativeStack).is_ok()
+            );
             assert!(validate_surf(&valid).is_ok());
             let invalid = nested_type_source(40_000, false);
-            assert!(chelis_surf::parser::parse_str(&invalid).is_err());
+            assert!(
+                chelis_surf::parser::parse_str(&invalid, &chelis_syntax_host::NativeStack).is_err()
+            );
             let error = validate_surf(&invalid).expect_err("invalid type source must fail");
             let message = error.to_string();
             assert!(message.contains("compiler parse failed"), "{message}");
@@ -187,10 +191,14 @@ fn extreme_pattern_parentheses_keep_accept_and_reject_verdicts() {
         "extreme_pattern_parentheses_keep_accept_and_reject_verdicts",
         || {
             let valid = nested_pattern_source(40_000, true);
-            assert!(chelis_surf::parser::parse_str(&valid).is_ok());
+            assert!(
+                chelis_surf::parser::parse_str(&valid, &chelis_syntax_host::NativeStack).is_ok()
+            );
             assert!(validate_surf(&valid).is_ok());
             let invalid = nested_pattern_source(40_000, false);
-            assert!(chelis_surf::parser::parse_str(&invalid).is_err());
+            assert!(
+                chelis_surf::parser::parse_str(&invalid, &chelis_syntax_host::NativeStack).is_err()
+            );
             let error = validate_surf(&invalid).expect_err("invalid pattern source must fail");
             let message = error.to_string();
             assert!(message.contains("compiler parse failed"), "{message}");

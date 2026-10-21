@@ -95,9 +95,14 @@ fn a_nonterminating_expansion_reaches_its_limit_in_polynomial_memory() {
         .stack_size(256 * 1024 * 1024)
         .spawn(|| {
             for (label, source) in NONTERMINATING {
-                let declarations = chelis_surf::parser::parse_str(source).expect("probe parses");
-                let deep =
-                    chelis_surf::desugar::desugar_program(&declarations).expect("probe desugars");
+                let declarations =
+                    chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+                        .expect("probe parses");
+                let deep = chelis_surf::desugar::desugar_program(
+                    &declarations,
+                    &chelis_syntax_host::NativeStack,
+                )
+                .expect("probe desugars");
                 let mut peaks = Vec::new();
                 for limit in LIMITS {
                     let options = ExpansionOptions {

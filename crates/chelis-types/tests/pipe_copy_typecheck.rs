@@ -8,8 +8,10 @@ use chelis_surf::parser::parse_str;
 use chelis_types::check_typed_program;
 
 fn typecheck_surf(source: &str) -> Result<(), Vec<chelis_types::errors::CheckError>> {
-    let decls = parse_str(source).expect("surf parse should succeed");
-    let deep = desugar_program(&decls).expect("Surf fixture must desugar");
+    let decls =
+        parse_str(source, &chelis_syntax_host::NativeStack).expect("surf parse should succeed");
+    let deep = desugar_program(&decls, &chelis_syntax_host::NativeStack)
+        .expect("Surf fixture must desugar");
     check_typed_program(&deep)
         .map(|_| ())
         .map_err(|result| result.errors)

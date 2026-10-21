@@ -41,8 +41,11 @@ fn grows_linearly(small: u64, large: u64) -> bool {
 /// Lower, verify and walk every site's actions, as the C projection does,
 /// counting the entries the site lookups visit.
 fn site_lookup_entries(source: &str) -> u64 {
-    let declarations = chelis_surf::parser::parse_str(source).expect("the probe parses");
-    let deep = chelis_surf::desugar::desugar_program(&declarations).expect("the probe desugars");
+    let declarations = chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+        .expect("the probe parses");
+    let deep =
+        chelis_surf::desugar::desugar_program(&declarations, &chelis_syntax_host::NativeStack)
+            .expect("the probe desugars");
     let checked = chelis_types::check_typed_program(&deep).expect("the probe checks");
     let checked = chelis_effects::check_program(&checked).expect("the probe has no effect errors");
     let checked = chelis_types::check_linearity(&checked).expect("the probe is linear");

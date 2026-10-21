@@ -9,8 +9,9 @@ use chelis_types::errors::{CheckError, CheckErrorKind};
 use chelis_types::{check_ir_program, check_typed_program};
 
 fn desugared(source: &str) -> Vec<Expr> {
-    let decls = parse_str(source).unwrap_or_else(|error| panic!("{source}\n{error:?}"));
-    desugar_program(&decls).expect("desugar fixture")
+    let decls = parse_str(source, &chelis_syntax_host::NativeStack)
+        .unwrap_or_else(|error| panic!("{source}\n{error:?}"));
+    desugar_program(&decls, &chelis_syntax_host::NativeStack).expect("desugar fixture")
 }
 
 fn diagnostics(source: &str) -> Vec<CheckError> {

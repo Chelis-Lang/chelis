@@ -64,8 +64,10 @@ fn chain(k: usize) -> Vec<Expr> {
         ));
     }
     source.push_str(&format!("  sum(a{}, 0i32)\n}}\n", k - 1));
-    let declarations = chelis_surf::parser::parse_str(&source).expect("chain parses");
-    chelis_surf::desugar::desugar_program(&declarations).expect("chain desugars")
+    let declarations = chelis_surf::parser::parse_str(&source, &chelis_syntax_host::NativeStack)
+        .expect("chain parses");
+    chelis_surf::desugar::desugar_program(&declarations, &chelis_syntax_host::NativeStack)
+        .expect("chain desugars")
 }
 
 /// Peak heap bytes while effect-checking a type-checked `k`-binding chain.

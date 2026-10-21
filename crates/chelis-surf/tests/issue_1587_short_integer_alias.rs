@@ -25,9 +25,10 @@ use chelis_surf::format::format_source;
 use chelis_surf::parser::parse_str;
 
 fn deep_of(source: &str) -> String {
-    let decls = parse_str(source).expect("parse");
+    let decls = parse_str(source, &chelis_syntax_host::NativeStack).expect("parse");
     chelis_deep::printer::print_canonical(
-        &desugar_program(&decls).expect("Surf fixture must desugar"),
+        &desugar_program(&decls, &chelis_syntax_host::NativeStack)
+            .expect("Surf fixture must desugar"),
     )
 }
 
@@ -84,7 +85,7 @@ fn the_canonical_formatter_rewrites_the_alias() {
                   sig g[n]: tensor[n, i64] -> tensor[n, i64]\n\
                   def g(t) = t\n\
                   def f(x: i32) -> i64 = cast(x, i64)\n";
-    let formatted = format_source(source).expect("format");
+    let formatted = format_source(source, &chelis_syntax_host::NativeStack).expect("format");
     assert!(
         formatted.contains("i64") && formatted.contains("i32"),
         "the formatter must print the canonical integer names: {formatted}"
@@ -94,8 +95,8 @@ fn the_canonical_formatter_rewrites_the_alias() {
 #[test]
 fn formatting_the_alias_is_idempotent() {
     let source = "module P.M\nexport (f)\ndef f(x: i32) -> i64 = cast(x, i64)\n";
-    let once = format_source(source).expect("format once");
-    let twice = format_source(&once).expect("format twice");
+    let once = format_source(source, &chelis_syntax_host::NativeStack).expect("format once");
+    let twice = format_source(&once, &chelis_syntax_host::NativeStack).expect("format twice");
     assert_eq!(once, twice, "formatter idempotence on an aliased source");
 }
 

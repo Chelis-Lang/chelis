@@ -89,17 +89,18 @@ fn check_decls(
     options: &ProveOptions<'_>,
     totals: &mut Summary,
 ) -> Status {
-    let deep_exprs = match chelis_surf::desugar::desugar_program(decls) {
-        Ok(deep) => deep,
-        Err(error) => {
-            emit_check_failure(
-                options,
-                &[names.render(&error.to_string()).into_owned()],
-                totals,
-            );
-            return Status::Error;
-        }
-    };
+    let deep_exprs =
+        match chelis_surf::desugar::desugar_program(decls, &chelis_syntax_host::NativeStack) {
+            Ok(deep) => deep,
+            Err(error) => {
+                emit_check_failure(
+                    options,
+                    &[names.render(&error.to_string()).into_owned()],
+                    totals,
+                );
+                return Status::Error;
+            }
+        };
     let _linked = chelis_types::install_linked_program_guard();
     if let Err(infer) = chelis_types::check_typed_program(&deep_exprs) {
         let messages = infer

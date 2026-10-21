@@ -2099,9 +2099,11 @@ mod tests {
 
     #[test]
     fn current_surf_tensor_precision_round_trips_through_the_context_binary_codec() {
-        let decls =
-            chelis_surf::parser::parse_str("def identity(x: tensor[4, f32]) -> tensor[4, f32] = x")
-                .expect("parse tensor declaration");
+        let decls = chelis_surf::parser::parse_str(
+            "def identity(x: tensor[4, f32]) -> tensor[4, f32] = x",
+            &chelis_syntax_host::NativeStack,
+        )
+        .expect("parse tensor declaration");
         let bytes = bincode::serialize(&decls).expect("encode current Surf AST with bincode");
         let restored: Vec<chelis_surf::ast::Decl> =
             bincode::deserialize(&bytes).expect("decode current Surf AST with bincode");

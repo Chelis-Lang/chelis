@@ -923,7 +923,9 @@ mod alias_syntax_materialization_tests {
     use super::*;
 
     fn parse(source: &str) -> deep::Expr {
-        chelis_deep::parser::parse_str(source).unwrap().remove(0)
+        chelis_deep::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+            .unwrap()
+            .remove(0)
     }
     fn registry() -> AdtRegistry {
         let mut registry = AdtRegistry::default();

@@ -18,8 +18,10 @@ fn chain_program(count: usize, reversed: bool) -> Vec<deep::Expr> {
         defs.reverse();
     }
     let source = format!("{}\n", defs.join("\n"));
-    let declarations = chelis_surf::parser::parse_str(&source).expect("generated Surf parses");
-    chelis_surf::desugar::desugar_program(&declarations).expect("generated Surf desugars")
+    let declarations = chelis_surf::parser::parse_str(&source, &chelis_syntax_host::NativeStack)
+        .expect("generated Surf parses");
+    chelis_surf::desugar::desugar_program(&declarations, &chelis_syntax_host::NativeStack)
+        .expect("generated Surf desugars")
 }
 
 #[test]
@@ -61,9 +63,11 @@ fn issue_3717_consuming_callee_keeps_its_callers_owned() {
             "def c{index}(x, y: tensor[4, f32]) = {{\n  z: tensor[4, f32] = c{previous}(x, y)\n  add(x, z)\n}}\n"
         ));
     }
-    let declarations = chelis_surf::parser::parse_str(&source).expect("generated Surf parses");
+    let declarations = chelis_surf::parser::parse_str(&source, &chelis_syntax_host::NativeStack)
+        .expect("generated Surf parses");
     let program =
-        chelis_surf::desugar::desugar_program(&declarations).expect("generated Surf desugars");
+        chelis_surf::desugar::desugar_program(&declarations, &chelis_syntax_host::NativeStack)
+            .expect("generated Surf desugars");
     let checked = check_typed_program(&program).expect("generated chain checks");
     for index in 0..8 {
         let function = &checked.signature_inference().functions[&format!("c{index}")];

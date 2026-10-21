@@ -35,6 +35,7 @@ chelis-pipeline-core.workspace = true
 chelis-runtime.workspace = true
 chelis-reef.workspace = true
 chelis-surf.workspace = true
+chelis-syntax-host.workspace = true
 chelis-types.workspace = true
 chelis-validate.workspace = true
 chelis-vocab.workspace = true

@@ -22,7 +22,8 @@ fn source(elements: usize, preceding_effect: bool) -> String {
          {effect}result = lsum(map(fn (i: i64) -> cast(i, f32), \
          range(0i64, {elements}i64)), 0i64, {elements}i64, 0.0f64)\n"
     );
-    chelis_surf::format::format_source(&raw).expect("format recursive fixture")
+    chelis_surf::format::format_source(&raw, &chelis_syntax_host::NativeStack)
+        .expect("format recursive fixture")
 }
 
 fn tail_source(elements: usize) -> String {
@@ -34,7 +35,8 @@ fn tail_source(elements: usize) -> String {
          result = lsum(map(fn (i: i64) -> cast(i, f32), \
          range(0i64, {elements}i64)), 0i64, {elements}i64, 0.0f64)\n"
     );
-    chelis_surf::format::format_source(&raw).expect("format tail-recursive fixture")
+    chelis_surf::format::format_source(&raw, &chelis_syntax_host::NativeStack)
+        .expect("format tail-recursive fixture")
 }
 
 fn swapping_tail_source(iterations: usize) -> String {
@@ -44,7 +46,8 @@ fn swapping_tail_source(iterations: usize) -> String {
          if eq(n, 0i64) then a else swap(b, a, sub(n, 1i64))\n\
          result = swap(7i64, 11i64, {iterations}i64)\n"
     );
-    chelis_surf::format::format_source(&raw).expect("format swapping tail fixture")
+    chelis_surf::format::format_source(&raw, &chelis_syntax_host::NativeStack)
+        .expect("format swapping tail fixture")
 }
 
 fn shadowing_tail_source() -> String {
@@ -54,7 +57,8 @@ fn shadowing_tail_source() -> String {
                  if eq(n, 0i64) then 0i64 else step(n)\n\
                }\n\
                result = step(3i64)\n";
-    chelis_surf::format::format_source(raw).expect("format shadowing tail fixture")
+    chelis_surf::format::format_source(raw, &chelis_syntax_host::NativeStack)
+        .expect("format shadowing tail fixture")
 }
 
 fn build(source: &str, output_dir: &Path) -> PathBuf {
@@ -225,8 +229,9 @@ fn exported_recursion_uses_the_calling_worker_threads_stack() {
     let path = dir.path().join("worker.ch");
     let source = chelis_surf::format::format_source(
         "module Probe.Worker\n\
-         def step(n: i64) -> i64 = if eq(n, 0i64) then n else \
-         add(step(sub(n, 1i64)), 1i64)\n",
+     def step(n: i64) -> i64 = if eq(n, 0i64) then n else \
+     add(step(sub(n, 1i64)), 1i64)\n",
+        &chelis_syntax_host::NativeStack,
     )
     .expect("format library fixture");
     fs::write(&path, source).expect("write library source");
@@ -295,8 +300,9 @@ fn shadowed_function_name_does_not_create_a_recursive_call_cycle() {
     let path = dir.path().join("shadow.ch");
     let source = chelis_surf::format::format_source(
         "module Probe.ShadowStack\n\
-         def tally(tally: i64) -> i64 = add(tally, tally)\n\
-         def entry(n: i64) -> i64 = tally(n)\n",
+     def tally(tally: i64) -> i64 = add(tally, tally)\n\
+     def entry(n: i64) -> i64 = tally(n)\n",
+        &chelis_syntax_host::NativeStack,
     )
     .expect("format shadowed-name fixture");
     fs::write(&path, source).expect("write library source");
@@ -402,9 +408,10 @@ fn named_callback_recursion_reports_the_callback_call_span() {
     let dir = tempdir().expect("tempdir");
     let program = chelis_surf::format::format_source(
         "module Probe.CallbackStack\n\
-         def descend(n: i64) -> i64 = if eq(n, 0i64) then 0i64 else \
-         index(map(descend, [sub(n, 1i64)]), 0i64)\n\
-         result = descend(120000i64)\n",
+     def descend(n: i64) -> i64 = if eq(n, 0i64) then 0i64 else \
+     index(map(descend, [sub(n, 1i64)]), 0i64)\n\
+     result = descend(120000i64)\n",
+        &chelis_syntax_host::NativeStack,
     )
     .expect("format callback recursion");
     let callback_start = program.find("map(descend").expect("named callback");

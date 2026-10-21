@@ -123,7 +123,8 @@ fn flatten_module_decls(decls: &[chelis_surf::ast::Decl]) -> Vec<chelis_surf::as
 fn format_library_plus_snippet(package_dir: &Path, snippet: &str) -> String {
     let graph = chelis_reef::prepare_reef_graph(package_dir, &chelis_std_bundle::EMBEDDED_RUNTIME)
         .expect("prepare_reef_graph");
-    let entry_decls = chelis_surf::parser::parse_str(snippet).expect("parse snippet");
+    let entry_decls = chelis_surf::parser::parse_str(snippet, &chelis_syntax_host::NativeStack)
+        .expect("parse snippet");
     let flat_decls = flatten_module_decls(&entry_decls);
     let prepared = chelis_reef::compile_with_reef_graph(
         &graph,

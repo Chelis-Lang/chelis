@@ -10,16 +10,19 @@ use chelis_types::check_ir_program;
 use chelis_types::errors::{CheckError, CheckErrorKind};
 
 fn deep_errors(source: &str) -> Vec<CheckError> {
-    let exprs = parse_deep_lenient(source).expect("Deep fixture must parse");
+    let exprs = parse_deep_lenient(source, &chelis_syntax_host::NativeStack)
+        .expect("Deep fixture must parse");
     check_ir_program(&exprs)
         .expect_err("adversarial Deep fixture must be rejected")
         .errors
 }
 
 fn surf_errors(source: &str) -> Vec<CheckError> {
-    let decls = parse_surf(source).expect("Surf fixture must parse");
+    let decls =
+        parse_surf(source, &chelis_syntax_host::NativeStack).expect("Surf fixture must parse");
     let exprs = expand_program(
-        &desugar_program(&decls).expect("Surf fixture must desugar"),
+        &desugar_program(&decls, &chelis_syntax_host::NativeStack)
+            .expect("Surf fixture must desugar"),
         &ExpansionOptions::default(),
     )
     .expect("Surf fixture must macro-expand")

@@ -81,8 +81,10 @@ pub fn fuzz(property_source: &str, property_name: &str, samples: usize, _seed: u
 /// Surf `property_source` spells. A source that does not parse or desugar
 /// cannot be evaluated either, so its error is the result.
 fn probe_root_name(property_source: &str, property_name: &str) -> Result<String, String> {
-    let decls = chelis_surf::parser::parse_str(property_source).map_err(|e| e.to_string())?;
-    let program = chelis_surf::desugar::desugar_program(&decls).map_err(|e| e.to_string())?;
+    let decls = chelis_surf::parser::parse_str(property_source, &chelis_syntax_host::NativeStack)
+        .map_err(|e| e.to_string())?;
+    let program = chelis_surf::desugar::desugar_program(&decls, &chelis_syntax_host::NativeStack)
+        .map_err(|e| e.to_string())?;
     Ok(crate::smt_names::fresh_root_name(
         &program,
         &format!("__chelis_prove_probe_{property_name}"),

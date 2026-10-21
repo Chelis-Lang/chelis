@@ -1764,10 +1764,12 @@ mod cancellation_tests {
     fn validation_only_failure_fixture() -> Vec<deep::Expr> {
         let declarations = chelis_surf::parser::parse_str(
             "def f(x: tensor[1, 1, 4, f32], k: tensor[1, 1, 2, f32]) = \
-             conv(x, k, [0i64], [(0i64, 0i64)])\n",
+         conv(x, k, [0i64], [(0i64, 0i64)])\n",
+            &chelis_syntax_host::NativeStack,
         )
         .expect("the zero-stride Surf fixture must parse");
-        chelis_surf::desugar::desugar_program(&declarations).expect("Surf fixture must desugar")
+        chelis_surf::desugar::desugar_program(&declarations, &chelis_syntax_host::NativeStack)
+            .expect("Surf fixture must desugar")
     }
 
     fn observe_check(result: Result<CheckedProgram, InferResult>) -> Observation {

@@ -1276,9 +1276,11 @@ mod tests {
     use chelis_types::types::Prim;
 
     fn check_program_from_source(source: &str) -> CheckedProgram {
-        let decls = chelis_surf::parser::parse_str(source).expect("parse");
+        let decls = chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+            .expect("parse");
         let deep = chelis_macros::expand_program(
-            &chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar"),
+            &chelis_surf::desugar::desugar_program(&decls, &chelis_syntax_host::NativeStack)
+                .expect("Surf fixture must desugar"),
             &chelis_macros::ExpansionOptions::default(),
         )
         .expect("desugar")
@@ -1872,8 +1874,9 @@ mod tests {
                 "(t-fn {} (t-tensor {} (d-name {} *) (t-prim {} f32)))",
             ),
         ] {
-            let expr = chelis_deep::parser::parse_and_stamp_type(source)
-                .unwrap_or_else(|error| panic!("{label}: {error:?}"));
+            let expr =
+                chelis_deep::parser::parse_and_stamp_type(source, &chelis_syntax_host::NativeStack)
+                    .unwrap_or_else(|error| panic!("{label}: {error:?}"));
             assert!(
                 !type_expr_has_unresolved_observation_parameter(&expr),
                 "{label} must be a resolved runtime extent"
@@ -1903,8 +1906,9 @@ mod tests {
                 "(t-fn {} (t-tensor {} (d-rank {} r) (t-prim {} f32)))",
             ),
         ] {
-            let expr = chelis_deep::parser::parse_and_stamp_type(source)
-                .unwrap_or_else(|error| panic!("{label}: {error:?}"));
+            let expr =
+                chelis_deep::parser::parse_and_stamp_type(source, &chelis_syntax_host::NativeStack)
+                    .unwrap_or_else(|error| panic!("{label}: {error:?}"));
             assert!(
                 type_expr_has_unresolved_observation_parameter(&expr),
                 "{label} must stay an unresolved observation parameter"
@@ -2105,7 +2109,9 @@ mod tests {
     #[test]
     fn tagged_metadata_declines_unknown_forms() {
         let span = chelis_deep::Span::new(0, 0);
-        let ty = chelis_deep::parse_and_stamp_type("(t-prim {} f64)").expect("type stamps");
+        let ty =
+            chelis_deep::parse_and_stamp_type("(t-prim {} f64)", &chelis_syntax_host::NativeStack)
+                .expect("type stamps");
         let metadata = Metadata::from(chelis_deep::annotations::MetadataValue::Type(
             chelis_deep::annotations::TypeSyntax::try_new(ty).expect("type metadata"),
         ));

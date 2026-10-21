@@ -59,7 +59,7 @@ builds; [GPU backends](docs/gpu_backends.md) covers the HIP and Metal targets.
 
 | Area | Primary crates |
 |---|---|
-| Source syntax and macros | `chelis-surf`, `chelis-deep`, `chelis-macros` |
+| Source syntax and predicates | `chelis-surf`, `chelis-deep`, `chelis-pred`, `chelis-macros` |
 | Semantic pipeline | `chelis-types`, `chelis-effects`, `chelis-pipeline-core`, `chelis-compiler-api` |
 | DAG, transforms, evaluation | `chelis-ir` |
 | Native emission and runtime | `chelis-backend-c`, `chelis-backend-hip`, `chelis-backend-metal`, `chelis-runtime` |
@@ -83,4 +83,28 @@ Run `.venv/bin/python scripts/version_core_oracle.py` for target compilation,
 an independent host consumer, allocation checks, and installer resolution checks.
 The [acceptance gate](docs/manual_gates.md#version-core-portability) lists prerequisites and CI owners.
 Target compilation does not prove device execution.
+
+## Portable syntax and predicates
+
+`chelis-deep`, `chelis-pred`, `chelis-surf`, and `chelis-macros` use unconditional `no_std` with `alloc`.
+They share the existing Deep representation, grammar, macro rules, and Surf formatter.
+`chelis-unord` retains its order-free collection interface with allocation-backed portable storage.
+These libraries need an allocator and a caller-defined stack policy.
+
+`chelis-stack-services` defines the allocation-free `StackServices` interface.
+Parser, formatter, desugarer, and decompiler entry points take a final `&impl StackServices` argument.
+Native callers pass `&chelis_syntax_host::NativeStack`.
+Embedded callers supply their platform implementation.
+The portable crates contain no implicit host implementation or `std` feature.
+
+`chelis-syntax-host` owns native stack growth and path-based module identity checks.
+The module identity import is `chelis_syntax_host::module_identity`, not `chelis_surf::module_identity`.
+Resugar operations use request-local state instead of thread-local state.
+Compiler orchestration, source discovery, diagnostics presentation, and filesystem access remain outside the portable graph.
+
+Run `.venv/bin/python scripts/syntax_predicate_core_oracle.py` for isolated target builds and fixed-revision native parity.
+The [acceptance gate](docs/manual_gates.md#syntax-core-portability) lists prerequisites, evidence, and CI owners.
+The command checks parser, wire, formatter, macro, predicate, and host behavior.
+Allocation checks compare four source cases with the accepted source revision.
+Target compilation proves neither device execution nor device memory capacity.
 

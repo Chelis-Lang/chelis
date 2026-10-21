@@ -122,7 +122,7 @@ fn tensor_type_dim_count(ty: &Expr) -> Option<usize> {
 
 #[test]
 fn conv_error_operand_does_not_clobber_concrete_annotation() {
-    let exprs = parse_str(CONV2D_SRC).expect("parse deep");
+    let exprs = parse_str(CONV2D_SRC, &chelis_syntax_host::NativeStack).expect("parse deep");
     // Program is well-typed: the clobber was a SILENT writeback degradation,
     // not a surfaced type error, so `check_ir_program` must succeed.
     let checked = check_ir_program(&exprs).expect("conv program should check clean");

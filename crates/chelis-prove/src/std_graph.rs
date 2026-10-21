@@ -124,8 +124,11 @@ pub fn normal_cdf_graph_digest(runtime: &'static EmbeddedRuntime) -> Result<Stri
     digests
         .entry(runtime.archive_sha256().to_string())
         .or_insert_with(|| {
-            let entry = chelis_surf::parser::parse_str("import Std.Contracts (normal_cdf)\n")
-                .map_err(|err| format!("normal_cdf digest probe did not parse: {err:?}"))?;
+            let entry = chelis_surf::parser::parse_str(
+                "import Std.Contracts (normal_cdf)\n",
+                &chelis_syntax_host::NativeStack,
+            )
+            .map_err(|err| format!("normal_cdf digest probe did not parse: {err:?}"))?;
             let program =
                 chelis_reef::prepare_single_file_program("prove-normal-cdf", &entry, runtime)?
                     .ok_or("normal_cdf digest probe did not link chelis-std")?;
@@ -150,7 +153,7 @@ fn evaluate_normal_cdf(
     );
     // Link the bundled chelis-std exactly as a single-file `chelis eval`
     // program does, so the graph evaluated is the one Chelis ships.
-    let entry = chelis_surf::parser::parse_str(&source)
+    let entry = chelis_surf::parser::parse_str(&source, &chelis_syntax_host::NativeStack)
         .map_err(|err| format!("normal_cdf probe did not parse: {err:?}"))?;
     let program = chelis_reef::prepare_single_file_program("prove-normal-cdf", &entry, runtime)?
         .ok_or("normal_cdf probe did not link chelis-std")?;
@@ -219,7 +222,8 @@ mod tests {
                       a = normal_cdf(1.0f32)\n\
                       b = normal_cdf(neg(2.5f32))\n\
                       c = normal_cdf(0.75f64)\n";
-        let entry = chelis_surf::parser::parse_str(source).unwrap();
+        let entry =
+            chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack).unwrap();
         let program = chelis_reef::prepare_single_file_program("t", &entry, &EMBEDDED_RUNTIME)
             .unwrap()
             .unwrap();

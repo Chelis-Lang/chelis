@@ -21,12 +21,15 @@ const ROGUE: &str = r#"
 "#;
 
 fn parse(source: &str) -> Vec<chelis_deep::Expr> {
-    chelis_deep::parser::parse_str(source).expect("Deep binder fixture must parse")
+    chelis_deep::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+        .expect("Deep binder fixture must parse")
 }
 
 fn surf(source: &str) -> Vec<chelis_deep::Expr> {
-    let parsed = chelis_surf::parser::parse_str(source).expect("Surf binder fixture must parse");
-    chelis_surf::desugar::desugar_program(&parsed).expect("Surf fixture must desugar")
+    let parsed = chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+        .expect("Surf binder fixture must parse");
+    chelis_surf::desugar::desugar_program(&parsed, &chelis_syntax_host::NativeStack)
+        .expect("Surf fixture must desugar")
 }
 
 fn assert_legal() {
@@ -99,7 +102,8 @@ fn serialized_context_drops_transient_binder_scope() {
 #[test]
 fn malformed_parameter_type_is_rejected_once_at_annotation_admission() {
     let malformed = "(def {} bad (fn {} (params {} (x {type: (t-prim {} f32 extra)})) (var {} x)))";
-    let error = chelis_deep::parser::parse_str(malformed).unwrap_err();
+    let error =
+        chelis_deep::parser::parse_str(malformed, &chelis_syntax_host::NativeStack).unwrap_err();
     assert!(
         matches!(error, chelis_deep::parser::ParseError::Metadata(_)),
         "{error}"

@@ -5,8 +5,9 @@ use chelis_surf::{desugar::desugar_program, parser::parse_str};
 use chelis_types::check_typed_program;
 
 fn check(source: &str, accepted: bool) {
-    let parsed = parse_str(source).expect("fixture parses");
-    let deep = desugar_program(&parsed).expect("fixture desugars");
+    let parsed = parse_str(source, &chelis_syntax_host::NativeStack).expect("fixture parses");
+    let deep =
+        desugar_program(&parsed, &chelis_syntax_host::NativeStack).expect("fixture desugars");
     let result = check_typed_program(&deep);
     assert_eq!(result.is_ok(), accepted, "{source}\n{result:?}");
 }
@@ -163,7 +164,8 @@ fn deep_expression_ascription_is_not_a_gradient_parameter_binding_site() {
                     (fn {{}} (params {{}} {parameter})
                         (lit {{type: (t-prim {{}} f32)}} 1.0)))))"
         );
-        let deep = chelis_deep::parse_and_stamp_file(&source).expect("Deep fixture stamps");
+        let deep = chelis_deep::parse_and_stamp_file(&source, &chelis_syntax_host::NativeStack)
+            .expect("Deep fixture stamps");
         let result = check_typed_program(&deep);
         assert_eq!(result.is_ok(), accepted, "{source}\n{result:?}");
     }
@@ -251,7 +253,8 @@ fn deep_result_constraints_follow_an_initially_unknown_callable() {
             value
         };
         let source = format!("(def {{}} main (fn {{}} (params {{}}) {value}))");
-        let deep = chelis_deep::parse_and_stamp_file(&source).expect("Deep fixture stamps");
+        let deep = chelis_deep::parse_and_stamp_file(&source, &chelis_syntax_host::NativeStack)
+            .expect("Deep fixture stamps");
         let result = check_typed_program(&deep);
         assert_eq!(result.is_ok(), accepted, "{source}\n{result:?}");
     }
@@ -610,8 +613,8 @@ fn checked_library_round_trip_preserves_result_constraint_origins() {
         "def forward_grad(p, flag: bool) = sibling(p, flag)\ndef sibling(p, flag: bool) = if flag then p else forward_grad(grad(fn (w: f32) -> 1.0f32), true)",
         "def forward_grad(p, flag: bool) = if flag then {\n d: (f32 -> f32) = p\n d\n} else forward_grad(p, true)",
     ] {
-        let parsed = parse_str(library).unwrap();
-        let library = desugar_program(&parsed).unwrap();
+        let parsed = parse_str(library, &chelis_syntax_host::NativeStack).unwrap();
+        let library = desugar_program(&parsed, &chelis_syntax_host::NativeStack).unwrap();
         let context = build_type_env_from_library(&library).unwrap();
         let restored: TypeEnv =
             bincode::deserialize(&bincode::serialize(&context).unwrap()).unwrap();
@@ -629,7 +632,11 @@ fn checked_library_round_trip_preserves_result_constraint_origins() {
             let source = format!(
                 "def main() = (forward_grad(grad(fn ({parameter}) -> 1.0f32){flag})){application}"
             );
-            let program = desugar_program(&parse_str(&source).unwrap()).unwrap();
+            let program = desugar_program(
+                &parse_str(&source, &chelis_syntax_host::NativeStack).unwrap(),
+                &chelis_syntax_host::NativeStack,
+            )
+            .unwrap();
             for context in [&context, &restored] {
                 let checked = check_ir_with_context(context, &program);
                 assert_eq!(checked.is_ok(), accepted, "{source}\n{checked:?}");
@@ -745,7 +752,11 @@ fn mutual_publication_keeps_grad_result_equality_without_binding_its_input() {
 fn checked_library_round_trip_preserves_recursive_signature_compatibility() {
     use chelis_types::{TypeEnv, build_type_env_from_library, check_ir_with_context};
     let library = "def first(p, flag: bool) = second(p, flag)\ndef second(p, flag: bool) = if flag then p else first(1.0f32, true)";
-    let library = desugar_program(&parse_str(library).unwrap()).unwrap();
+    let library = desugar_program(
+        &parse_str(library, &chelis_syntax_host::NativeStack).unwrap(),
+        &chelis_syntax_host::NativeStack,
+    )
+    .unwrap();
     let context = build_type_env_from_library(&library).unwrap();
     let restored: TypeEnv = bincode::deserialize(&bincode::serialize(&context).unwrap()).unwrap();
     for (ty, value, accepted) in [
@@ -754,7 +765,11 @@ fn checked_library_round_trip_preserves_recursive_signature_compatibility() {
         ("bool", "2.0f32", false),
     ] {
         let source = format!("def main() -> {ty} = first({value}, false)");
-        let program = desugar_program(&parse_str(&source).unwrap()).unwrap();
+        let program = desugar_program(
+            &parse_str(&source, &chelis_syntax_host::NativeStack).unwrap(),
+            &chelis_syntax_host::NativeStack,
+        )
+        .unwrap();
         for context in [&context, &restored] {
             let checked = check_ir_with_context(context, &program);
             assert_eq!(checked.is_ok(), accepted, "{source}\n{checked:?}");
@@ -961,7 +976,11 @@ fn accumulator_contract_survives_callable_transport_and_cache() {
         let library = format!(
             "def return_op() = {operation}\ndef pair_op() = ({operation}, true)\ndef identity(f) = f\ndef recursive_op(flag: bool) = if flag then {operation} else recursive_op(true)"
         );
-        let program = desugar_program(&parse_str(&library).unwrap()).unwrap();
+        let program = desugar_program(
+            &parse_str(&library, &chelis_syntax_host::NativeStack).unwrap(),
+            &chelis_syntax_host::NativeStack,
+        )
+        .unwrap();
         let context = build_type_env_from_library(&program).unwrap();
         let restored: TypeEnv =
             bincode::deserialize(&bincode::serialize(&context).unwrap()).unwrap();
@@ -975,7 +994,11 @@ fn accumulator_contract_survives_callable_transport_and_cache() {
                 let source = format!(
                     "def main() -> {result_type} = {{\n op = {callee}\n op(fn (acc: f32, item: i64) -> acc, 1.0f32, [1i64])\n}}"
                 );
-                let program = desugar_program(&parse_str(&source).unwrap()).unwrap();
+                let program = desugar_program(
+                    &parse_str(&source, &chelis_syntax_host::NativeStack).unwrap(),
+                    &chelis_syntax_host::NativeStack,
+                )
+                .unwrap();
                 for context in [&context, &restored] {
                     let checked = check_ir_with_context(context, &program);
                     assert_eq!(checked.is_ok(), accepted, "{source}\n{checked:?}");
@@ -1023,7 +1046,11 @@ fn accumulator_aliases_carry_grad_result_origin_before_helper_instantiation() {
         let library = format!(
             "def pick(p) = {{\n op = {operation}\n r = op(fn (acc, item: i64) -> grad(fn (w: f32) -> 1.0f32), p, [1i64])\n {project}\n}}"
         );
-        let program = desugar_program(&parse_str(&library).unwrap()).unwrap();
+        let program = desugar_program(
+            &parse_str(&library, &chelis_syntax_host::NativeStack).unwrap(),
+            &chelis_syntax_host::NativeStack,
+        )
+        .unwrap();
         let context = build_type_env_from_library(&program).unwrap();
         let restored: TypeEnv =
             bincode::deserialize(&bincode::serialize(&context).unwrap()).unwrap();
@@ -1036,7 +1063,11 @@ fn accumulator_aliases_carry_grad_result_origin_before_helper_instantiation() {
             let source =
                 format!("def main() = (pick(grad(fn ({parameter}) -> 1.0f32))){application}");
             check(&format!("{library}\n{source}"), accepted);
-            let program = desugar_program(&parse_str(&source).unwrap()).unwrap();
+            let program = desugar_program(
+                &parse_str(&source, &chelis_syntax_host::NativeStack).unwrap(),
+                &chelis_syntax_host::NativeStack,
+            )
+            .unwrap();
             for context in [&context, &restored] {
                 let checked = check_ir_with_context(context, &program);
                 assert_eq!(checked.is_ok(), accepted, "{source}\n{checked:?}");
@@ -1077,7 +1108,11 @@ fn fold_branch_escape_keeps_local_result_provenance() {
 fn callable_result_components_survive_transport_alias_depth_and_cache() {
     use chelis_types::{TypeEnv, build_type_env_from_library, check_ir_with_context};
     let library = "type Holder[a] = | Holder { value: a }\ndef select(p) = if true then p else grad(fn (w: f32) -> 1.0f32)\ndef identity(f) = f";
-    let program = desugar_program(&parse_str(library).unwrap()).unwrap();
+    let program = desugar_program(
+        &parse_str(library, &chelis_syntax_host::NativeStack).unwrap(),
+        &chelis_syntax_host::NativeStack,
+    )
+    .unwrap();
     let context = build_type_env_from_library(&program).unwrap();
     let restored: TypeEnv = bincode::deserialize(&bincode::serialize(&context).unwrap()).unwrap();
     for (selection, arguments, projection) in [
@@ -1134,7 +1169,11 @@ fn callable_result_components_survive_transport_alias_depth_and_cache() {
                     depth - 1
                 );
                 check(&format!("{library}\n{source}"), accepted);
-                let program = desugar_program(&parse_str(&source).unwrap()).unwrap();
+                let program = desugar_program(
+                    &parse_str(&source, &chelis_syntax_host::NativeStack).unwrap(),
+                    &chelis_syntax_host::NativeStack,
+                )
+                .unwrap();
                 for context in [&context, &restored] {
                     let checked = check_ir_with_context(context, &program);
                     assert_eq!(checked.is_ok(), accepted, "{source}\n{checked:?}");
@@ -1153,7 +1192,11 @@ fn restricted_result_origins_publish_a_coherent_scheme() {
         "def choose[p: Numeric](a: p, b: p) -> p = if lt(a, b) then a else b\n",
         "def choose[p: Int](current: p, stop: p, out: List[p]) -> List[p] = if gte(current, stop) then out else choose(add(current, cast(1, p)), stop, append(out, current))\n",
     ] {
-        let library = desugar_program(&parse_str(source).unwrap()).unwrap();
+        let library = desugar_program(
+            &parse_str(source, &chelis_syntax_host::NativeStack).unwrap(),
+            &chelis_syntax_host::NativeStack,
+        )
+        .unwrap();
         let live = build_type_env_from_library(&library).unwrap();
         let scheme = live.scheme("choose").unwrap();
         for (variable, _) in &scheme.tvar_restrictions {
@@ -1168,8 +1211,12 @@ fn restricted_result_origins_publish_a_coherent_scheme() {
         }
     }
     let library = desugar_program(
-        &parse_str("def choose[p: Numeric](x: p, flag: bool) -> p = if flag then x else x\n")
-            .unwrap(),
+        &parse_str(
+            "def choose[p: Numeric](x: p, flag: bool) -> p = if flag then x else x\n",
+            &chelis_syntax_host::NativeStack,
+        )
+        .unwrap(),
+        &chelis_syntax_host::NativeStack,
     )
     .unwrap();
     let live = build_type_env_from_library(&library).unwrap();
@@ -1181,7 +1228,11 @@ fn restricted_result_origins_publish_a_coherent_scheme() {
             ("out = choose(true, true)", false),
             ("out = choose(\"bad\", false)", false),
         ] {
-            let deep = desugar_program(&parse_str(source).unwrap()).unwrap();
+            let deep = desugar_program(
+                &parse_str(source, &chelis_syntax_host::NativeStack).unwrap(),
+                &chelis_syntax_host::NativeStack,
+            )
+            .unwrap();
             let result = check_ir_with_context(context, &deep);
             assert_eq!(result.is_ok(), accepted, "{source}: {result:?}");
         }
@@ -1206,7 +1257,11 @@ fn origin_dtype_restrictions_survive_representative_changes_and_serialization() 
     use chelis_types::{TypeEnv, build_type_env_from_library, check_ir_with_context};
     let source =
         "sig boxed[n, p: Float]: p -> tensor[n, p]\ndef boxed(x) = to_tensor(skip([x], 1i64))\n";
-    let library = desugar_program(&parse_str(source).unwrap()).unwrap();
+    let library = desugar_program(
+        &parse_str(source, &chelis_syntax_host::NativeStack).unwrap(),
+        &chelis_syntax_host::NativeStack,
+    )
+    .unwrap();
     let live = build_type_env_from_library(&library).unwrap();
     let scheme = live.scheme("boxed").unwrap();
     let origin = scheme
@@ -1228,7 +1283,11 @@ fn origin_dtype_restrictions_survive_representative_changes_and_serialization() 
             ("out = boxed(1i64)", false),
             ("out = boxed(true)", false),
         ] {
-            let deep = desugar_program(&parse_str(source).unwrap()).unwrap();
+            let deep = desugar_program(
+                &parse_str(source, &chelis_syntax_host::NativeStack).unwrap(),
+                &chelis_syntax_host::NativeStack,
+            )
+            .unwrap();
             let result = check_ir_with_context(context, &deep);
             assert_eq!(result.is_ok(), accepted, "{source}: {result:?}");
         }

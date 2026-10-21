@@ -21,9 +21,10 @@ mod tests {
     use super::*;
     use crate::Expr;
     use crate::parser::parse_str;
+    use alloc::string::ToString;
 
     fn metadata(source: &str) -> Metadata {
-        let expr = parse_str(source)
+        let expr = parse_str(source, &chelis_syntax_host::NativeStack)
             .expect("parse Deep")
             .into_iter()
             .next()
@@ -60,7 +61,7 @@ mod tests {
         ] {
             let source = format!("(handle-effect {{{metadata}}} (lit {{}} 1) (lit {{}} 2))");
             assert!(
-                parse_str(&source)
+                parse_str(&source, &chelis_syntax_host::NativeStack)
                     .unwrap_err()
                     .to_string()
                     .contains("effect")

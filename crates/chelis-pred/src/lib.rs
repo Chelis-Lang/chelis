@@ -27,6 +27,16 @@
 //! here; it lives in `chelis-prove` so this crate stays prove-independent
 //! and the existing tide amenability surface stays stable (RFC D-PRED).
 
+#![no_std]
+
+#[macro_use]
+extern crate alloc;
+#[cfg(test)]
+extern crate std;
+
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
+
 use chelis_deep::DeepTag;
 use chelis_deep::{Atom, Expr, ExprCarrier};
 

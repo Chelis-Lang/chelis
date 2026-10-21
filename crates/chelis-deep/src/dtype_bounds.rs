@@ -9,7 +9,11 @@
 //! encoding so the desugarer, the resugarer, and the type resolver cannot
 //! drift on the spelling.
 
-use std::collections::BTreeSet;
+use alloc::collections::BTreeSet;
+use alloc::{
+    string::{String, ToString},
+    vec::Vec,
+};
 
 use serde::{Deserialize, Serialize};
 
@@ -363,7 +367,9 @@ mod tests {
         }
     }
     fn metadata(source: &str) -> Metadata {
-        let expr = crate::parser::parse_str(source).unwrap().remove(0);
+        let expr = crate::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+            .unwrap()
+            .remove(0);
         let Expr::Node(node, _) = &expr else {
             panic!("node")
         };
@@ -391,7 +397,7 @@ mod tests {
         ] {
             let source = format!("(defsig {{dtype_bounds: {value}}} f (p) (t-var {{}} p))");
             assert!(
-                crate::parser::parse_str(&source)
+                crate::parser::parse_str(&source, &chelis_syntax_host::NativeStack)
                     .unwrap_err()
                     .to_string()
                     .contains("dtype_bounds")

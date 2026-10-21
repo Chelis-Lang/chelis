@@ -5425,9 +5425,11 @@ mod tests {
             .join(", ");
         let body = (2..=inputs).fold("x1".to_string(), |body, i| format!("add({body}, x{i})"));
         let source = format!("def f[n]({params}) -> tensor[n, f32] = {body}\n");
-        let declarations = chelis_surf::parser::parse_str(&source).unwrap();
+        let declarations =
+            chelis_surf::parser::parse_str(&source, &chelis_syntax_host::NativeStack).unwrap();
         let checked = chelis_types::check_typed_program(
-            &chelis_surf::desugar::desugar_program(&declarations).unwrap(),
+            &chelis_surf::desugar::desugar_program(&declarations, &chelis_syntax_host::NativeStack)
+                .unwrap(),
         )
         .unwrap();
         let checked = chelis_effects::check_program(&checked).unwrap();

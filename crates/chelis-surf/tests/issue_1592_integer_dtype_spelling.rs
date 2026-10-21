@@ -6,9 +6,10 @@ use chelis_surf::format::{format_source, migrate_source_v018};
 use chelis_surf::parser::parse_str;
 
 fn deep_of(source: &str) -> String {
-    let declarations = parse_str(source).expect("Surf parses");
+    let declarations = parse_str(source, &chelis_syntax_host::NativeStack).expect("Surf parses");
     chelis_deep::printer::print_canonical(
-        &desugar_program(&declarations).expect("Surf fixture must desugar"),
+        &desugar_program(&declarations, &chelis_syntax_host::NativeStack)
+            .expect("Surf fixture must desugar"),
     )
 }
 
@@ -35,8 +36,8 @@ fn canonical_integer_names_survive_surf_to_deep_in_every_type_position() {
 #[test]
 fn canonical_formatter_preserves_the_single_integer_spelling() {
     let source = "module P.M\nexport (f)\ndef f(x: i32) -> i64 = cast(x, i64)\n";
-    let once = format_source(source).expect("format");
-    let twice = format_source(&once).expect("format fixed point");
+    let once = format_source(source, &chelis_syntax_host::NativeStack).expect("format");
+    let twice = format_source(&once, &chelis_syntax_host::NativeStack).expect("format fixed point");
     assert_eq!(once, source);
     assert_eq!(twice, once);
 }
@@ -49,7 +50,8 @@ fn canonical_parser_rejects_retired_integer_names_in_every_type_edge() {
         "value = cast(1, int16)\n",
         "value = 1 |> cast(int8)\n",
     ] {
-        let error = parse_str(source).expect_err("retired dtype spelling must not parse");
+        let error = parse_str(source, &chelis_syntax_host::NativeStack)
+            .expect_err("retired dtype spelling must not parse");
         let rendered = error.to_string();
         assert!(
             rendered.contains("chelis migrate surf --from 0.18"),
@@ -63,7 +65,8 @@ fn v018_migration_rewrites_retired_integer_names_without_touching_identifiers() 
     let source = "module P.M\nexport (int64_value, f)\n\
                   int64_value: int64 = 1i64\n\
                   def f[n](x: tensor[n, int32]) -> int64 = cast(x.0, int64)\n";
-    let migrated = migrate_source_v018(source).expect("legacy migration");
+    let migrated =
+        migrate_source_v018(source, &chelis_syntax_host::NativeStack).expect("legacy migration");
     assert!(migrated.contains("int64_value: i64"));
     assert!(migrated.contains("tensor[n, i32]"));
     assert!(migrated.contains("cast(x.0, i64)"));

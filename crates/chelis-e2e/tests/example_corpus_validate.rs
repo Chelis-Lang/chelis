@@ -168,7 +168,7 @@ fn phase1f_surf_examples_and_specs_agree_with_parser() {
 
     for (label, source) in surf_inputs {
         assert!(
-            parse_surf(&source).is_ok(),
+            parse_surf(&source, &chelis_syntax_host::NativeStack).is_ok(),
             "compiler parser should accept {label}"
         );
         let file = write_temp_file("ch", &source);
@@ -201,7 +201,7 @@ fn phase1f_deep_examples_and_specs_agree_with_strict_parser() {
     ));
     for (label, source) in deep_inputs {
         assert!(
-            parse_deep_strict(&source).is_ok(),
+            parse_deep_strict(&source, &chelis_syntax_host::NativeStack).is_ok(),
             "strict compiler parser should accept {label}"
         );
         let file = write_temp_file("dp", &source);
@@ -232,7 +232,7 @@ fn phase1f_skill_blocks_agree_with_compiler_paths() {
         match block.lang.as_str() {
             "chelis-surf" => {
                 assert!(
-                    parse_surf(&block.body).is_ok(),
+                    parse_surf(&block.body, &chelis_syntax_host::NativeStack).is_ok(),
                     "compiler parser should accept SKILL surf block {}",
                     index + 1
                 );
@@ -245,7 +245,7 @@ fn phase1f_skill_blocks_agree_with_compiler_paths() {
             }
             "chelis-deep" => {
                 assert!(
-                    parse_deep_strict(&block.body).is_ok(),
+                    parse_deep_strict(&block.body, &chelis_syntax_host::NativeStack).is_ok(),
                     "compiler strict parser should accept SKILL deep block {}",
                     index + 1
                 );
@@ -294,7 +294,8 @@ fn documentation_surf_blocks_draw_no_lint_diagnostics() {
         let text = fs::read_to_string(&markdown).expect("read markdown");
         for (index, block) in extract_code_blocks(&text).into_iter().enumerate() {
             let is_surf = block.lang == "chelis-surf"
-                || (block.lang == "chelis-surf-fragment" && parse_surf(&block.body).is_ok());
+                || (block.lang == "chelis-surf-fragment"
+                    && parse_surf(&block.body, &chelis_syntax_host::NativeStack).is_ok());
             if !is_surf {
                 continue;
             }
@@ -355,7 +356,7 @@ fn phase1f_negative_fixtures_fail_in_validator_and_compiler() {
     for source in bad_surf {
         let file = write_temp_file("ch", source);
         assert!(
-            parse_surf(source).is_err(),
+            parse_surf(source, &chelis_syntax_host::NativeStack).is_err(),
             "compiler parser should reject {source:?}"
         );
         assert!(
@@ -373,7 +374,7 @@ fn phase1f_negative_fixtures_fail_in_validator_and_compiler() {
     for source in bad_deep {
         let file = write_temp_file("dp", source);
         assert!(
-            parse_deep_strict(source).is_err(),
+            parse_deep_strict(source, &chelis_syntax_host::NativeStack).is_err(),
             "strict compiler parser should reject {source:?}"
         );
         assert!(

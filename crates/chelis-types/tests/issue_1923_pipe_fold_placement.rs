@@ -19,9 +19,10 @@ const PIPED: &str = "def f() -> tensor[f32] = \
                      [1.0f32, 2.0f32] |> to_tensor |> sum(cast(0, i32))\n";
 
 fn surf_to_deep(source: &str) -> Vec<Expr> {
-    let decls = parse_surf(source).expect("surf parse");
+    let decls = parse_surf(source, &chelis_syntax_host::NativeStack).expect("surf parse");
     chelis_macros::expand_program(
-        &desugar_program(&decls).expect("Surf fixture must desugar"),
+        &desugar_program(&decls, &chelis_syntax_host::NativeStack)
+            .expect("Surf fixture must desugar"),
         &chelis_macros::ExpansionOptions::default(),
     )
     .expect("macro expand")

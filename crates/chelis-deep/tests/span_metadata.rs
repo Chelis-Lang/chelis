@@ -54,7 +54,8 @@ const BLACK_SCHOLES_DP: &str =
 #[test]
 fn roundtrip_span_metadata_black_scholes_fixture() {
     // Parse → walk → assert 20 expected n_001..n_020 span IDs are present.
-    let exprs1 = parse_str(BLACK_SCHOLES_DP).expect("first parse failed");
+    let exprs1 =
+        parse_str(BLACK_SCHOLES_DP, &chelis_syntax_host::NativeStack).expect("first parse failed");
     let ids1 = collect_span_ids(&exprs1);
 
     let expected: Vec<String> = (1..=20).map(|i| format!("n_{i:03}")).collect();
@@ -74,7 +75,8 @@ fn roundtrip_span_metadata_black_scholes_fixture() {
 
     // Reprint → re-parse → walk again → same 20 spans (same order).
     let printed = print_canonical(&exprs1);
-    let exprs2 = parse_str(&printed).expect("second parse failed");
+    let exprs2 =
+        parse_str(&printed, &chelis_syntax_host::NativeStack).expect("second parse failed");
     let ids2 = collect_span_ids(&exprs2);
     assert_eq!(
         ids2, ids1,
@@ -83,7 +85,8 @@ fn roundtrip_span_metadata_black_scholes_fixture() {
 
     // Third cycle: reprint → re-parse → same set (fixed-point check).
     let reprinted = print_canonical(&exprs2);
-    let exprs3 = parse_str(&reprinted).expect("third parse failed");
+    let exprs3 =
+        parse_str(&reprinted, &chelis_syntax_host::NativeStack).expect("third parse failed");
     let ids3 = collect_span_ids(&exprs3);
     assert_eq!(ids3, ids1, "third parse: span ID list drifted from first");
     assert_eq!(
@@ -96,7 +99,8 @@ fn roundtrip_span_metadata_black_scholes_fixture() {
 fn black_scholes_fixture_span_ids_are_strings() {
     // Sanity: the fixture's `span` values really are string literals,
     // exercising the `Expr::Atom(Atom::Str, _)` branch of `span_id()`.
-    let exprs = parse_str(BLACK_SCHOLES_DP).expect("parse failed");
+    let exprs =
+        parse_str(BLACK_SCHOLES_DP, &chelis_syntax_host::NativeStack).expect("parse failed");
     // Top-level def carries n_001.
     assert_eq!(exprs[0].span_id(), Some("n_001"));
 }
@@ -106,7 +110,7 @@ fn black_scholes_fixture_span_ids_are_strings() {
 #[test]
 fn span_id_returns_none_for_atom() {
     // Atoms do not carry metadata.
-    let exprs = parse_str("42").expect("parse failed");
+    let exprs = parse_str("42", &chelis_syntax_host::NativeStack).expect("parse failed");
     assert_eq!(exprs.len(), 1);
     assert!(matches!(&exprs[0], Expr::Atom(Atom::Int(42), _)));
     assert_eq!(exprs[0].span_id(), None);
@@ -115,19 +119,30 @@ fn span_id_returns_none_for_atom() {
 #[test]
 fn span_id_returns_none_when_meta_lacks_span_key() {
     // List with non-empty meta but no `span` key.
-    let exprs = parse_str("(def {type: (t-prim {} f32)} c (lit {} 0))").expect("parse failed");
+    let exprs = parse_str(
+        "(def {type: (t-prim {} f32)} c (lit {} 0))",
+        &chelis_syntax_host::NativeStack,
+    )
+    .expect("parse failed");
     assert_eq!(exprs[0].span_id(), None);
 }
 
 #[test]
 fn span_id_returns_none_for_empty_meta() {
-    let exprs = parse_str("(def {} c (lit {} 0))").expect("parse failed");
+    let exprs =
+        parse_str("(def {} c (lit {} 0))", &chelis_syntax_host::NativeStack).expect("parse failed");
     assert_eq!(exprs[0].span_id(), None);
 }
 
 #[test]
 fn non_string_span_cannot_enter_an_annotation_carrier() {
-    assert!(parse_str("(def {span: 42} c (lit {} 0))").is_err());
+    assert!(
+        parse_str(
+            "(def {span: 42} c (lit {} 0))",
+            &chelis_syntax_host::NativeStack
+        )
+        .is_err()
+    );
     let raw = serde_json::json!({"entries": [["span", Expr::Atom(chelis_deep::Atom::Int(42), chelis_deep::Span::new(0, 0))]]});
     assert!(serde_json::from_value::<chelis_deep::Metadata>(raw).is_err());
 }
@@ -138,12 +153,13 @@ fn span_id_empty_string_is_some_empty() {
     // convention: `Some("")`, NOT `None`. This catches accidental
     // is_empty() coercions in future refactors.
     let src = r#"(def {span: ""} c (lit {} 0))"#;
-    let exprs = parse_str(src).expect("parse failed");
+    let exprs = parse_str(src, &chelis_syntax_host::NativeStack).expect("parse failed");
     assert_eq!(exprs[0].span_id(), Some(""));
 
     // Round-trip preserves the empty string.
     let printed = print_canonical(&exprs);
-    let exprs2 = parse_str(&printed).expect("second parse failed");
+    let exprs2 =
+        parse_str(&printed, &chelis_syntax_host::NativeStack).expect("second parse failed");
     assert_eq!(exprs2[0].span_id(), Some(""));
     let reprinted = print_canonical(&exprs2);
     assert_eq!(printed, reprinted, "empty-span printer not fixed point");
@@ -155,11 +171,12 @@ fn span_id_unicode_preserved_bit_for_bit() {
     // parse → print → parse.
     let original = "α.β.γ";
     let src = format!(r#"(def {{span: "{original}"}} c (lit {{}} 0))"#);
-    let exprs = parse_str(&src).expect("parse failed");
+    let exprs = parse_str(&src, &chelis_syntax_host::NativeStack).expect("parse failed");
     assert_eq!(exprs[0].span_id(), Some(original));
 
     let printed = print_canonical(&exprs);
-    let exprs2 = parse_str(&printed).expect("second parse failed");
+    let exprs2 =
+        parse_str(&printed, &chelis_syntax_host::NativeStack).expect("second parse failed");
     assert_eq!(exprs2[0].span_id(), Some(original));
     assert_eq!(
         print_canonical(&exprs2),
@@ -173,11 +190,12 @@ fn span_id_large_2kb_preserved_through_roundtrip() {
     // 2000-char span ID — well past any reasonable producer length.
     let big: String = "a".repeat(2000);
     let src = format!(r#"(def {{span: "{big}"}} c (lit {{}} 0))"#);
-    let exprs = parse_str(&src).expect("parse failed");
+    let exprs = parse_str(&src, &chelis_syntax_host::NativeStack).expect("parse failed");
     assert_eq!(exprs[0].span_id(), Some(big.as_str()));
 
     let printed = print_canonical(&exprs);
-    let exprs2 = parse_str(&printed).expect("second parse failed");
+    let exprs2 =
+        parse_str(&printed, &chelis_syntax_host::NativeStack).expect("second parse failed");
     assert_eq!(exprs2[0].span_id(), Some(big.as_str()));
     assert_eq!(
         print_canonical(&exprs2),
@@ -217,17 +235,19 @@ fn run_thousand_nested_spans_oracle() {
     }
 
     let t0 = Instant::now();
-    let exprs1 = parse_str(&src).expect("first parse failed");
+    let exprs1 = parse_str(&src, &chelis_syntax_host::NativeStack).expect("first parse failed");
     let ids1 = collect_span_ids(&exprs1);
     assert_eq!(ids1.len(), N, "first parse: span count mismatch");
 
     let printed = print_canonical(&exprs1);
-    let exprs2 = parse_str(&printed).expect("second parse failed");
+    let exprs2 =
+        parse_str(&printed, &chelis_syntax_host::NativeStack).expect("second parse failed");
     let ids2 = collect_span_ids(&exprs2);
     assert_eq!(ids2, ids1, "reprint: span list differs from first parse");
 
     let reprinted = print_canonical(&exprs2);
-    let exprs3 = parse_str(&reprinted).expect("third parse failed");
+    let exprs3 =
+        parse_str(&reprinted, &chelis_syntax_host::NativeStack).expect("third parse failed");
     let ids3 = collect_span_ids(&exprs3);
     assert_eq!(ids3, ids1, "third parse: span list drifted");
     assert_eq!(printed, reprinted, "printer not fixed point on N=1000");

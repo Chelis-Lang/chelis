@@ -11,7 +11,7 @@ const PAIR2: &str = "
       (fn {} (params {} x y) (var {} x)))";
 
 fn stamped(source: &str) -> Vec<Expr> {
-    parse_and_stamp_file(source).expect("fixture must stamp")
+    parse_and_stamp_file(source, &chelis_syntax_host::NativeStack).expect("fixture must stamp")
 }
 
 fn diagnostics(

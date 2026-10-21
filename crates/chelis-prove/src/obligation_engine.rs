@@ -405,7 +405,8 @@ pub fn run_surf_source_obligations(
     source: &str,
     options: &ObligationRunOptions,
 ) -> Result<ObligationRunResult, String> {
-    let decls = chelis_surf::parser::parse_str(source).map_err(|e| format!("parse: {e}"))?;
+    let decls = chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+        .map_err(|e| format!("parse: {e}"))?;
     run_surf_decls_obligations(&decls, options)
 }
 
@@ -417,8 +418,8 @@ pub fn run_surf_decls_obligations(
     decls: &[chelis_surf::ast::Decl],
     options: &ObligationRunOptions,
 ) -> Result<ObligationRunResult, String> {
-    let exprs =
-        chelis_surf::desugar::desugar_program(decls).map_err(|e| format!("desugar: {e}"))?;
+    let exprs = chelis_surf::desugar::desugar_program(decls, &chelis_syntax_host::NativeStack)
+        .map_err(|e| format!("desugar: {e}"))?;
     let sigs: BTreeMap<String, Type> = match chelis_types::check_typed_program(&exprs) {
         Ok(checked) => checked
             .signature_inference()
@@ -466,8 +467,8 @@ pub fn run_deep_source_obligations(
     source: &str,
     options: &ObligationRunOptions,
 ) -> Result<ObligationRunResult, String> {
-    let exprs =
-        chelis_deep::parse_and_stamp_file(source).map_err(|error| format!("parse: {error}"))?;
+    let exprs = chelis_deep::parse_and_stamp_file(source, &chelis_syntax_host::NativeStack)
+        .map_err(|error| format!("parse: {error}"))?;
     let sigs: BTreeMap<String, Type> = match chelis_types::check_typed_program(&exprs) {
         Ok(checked) => checked
             .signature_inference()
@@ -1679,11 +1680,12 @@ fn eval_scalar_const(source: &str, name: &str) -> Option<f64> {
     // An in-module constant may be a value binding (`(var name)`) or a
     // zero-argument constant function (`(app (var name))`, the desugaring
     // of `def eps() -> f32 = 0.01`).
-    let exprs: Vec<Expr> = chelis_deep::parse_and_stamp_file(source)
-        .ok()?
-        .iter()
-        .map(strip_invariant_meta)
-        .collect();
+    let exprs: Vec<Expr> =
+        chelis_deep::parse_and_stamp_file(source, &chelis_syntax_host::NativeStack)
+            .ok()?
+            .iter()
+            .map(strip_invariant_meta)
+            .collect();
 
     // Fast path: if the const def body is a plain literal, read it
     // directly (CR-8). A top-level value binding `hi = 1.0` is itself a
@@ -2010,8 +2012,9 @@ impl ProducerCall {
                 ob.producer
             )
         };
-        let exprs = chelis_deep::parse_and_stamp_file(&module_source)
-            .map_err(|error| internal(format!("reparse module: {error}")))?;
+        let exprs =
+            chelis_deep::parse_and_stamp_file(&module_source, &chelis_syntax_host::NativeStack)
+                .map_err(|error| internal(format!("reparse module: {error}")))?;
         let stripped: Vec<Expr> = exprs.iter().map(strip_invariant_meta).collect();
         let probe = fresh_root_name(&stripped, "__chelis_value_probe");
         let Some(Expr::Node(function, _)) = producer_function(&stripped, &ob.producer) else {
@@ -2380,7 +2383,7 @@ fn inject_probe_stripped(
     stem: &str,
     body: Expr,
 ) -> Result<(Vec<Expr>, String), String> {
-    let exprs = chelis_deep::parse_and_stamp_file(module_source)
+    let exprs = chelis_deep::parse_and_stamp_file(module_source, &chelis_syntax_host::NativeStack)
         .map_err(|error| format!("reparse module: {error}"))?;
     let stripped: Vec<Expr> = exprs.iter().map(strip_invariant_meta).collect();
     let probe = fresh_root_name(&stripped, stem);
@@ -2635,8 +2638,11 @@ type LargeInt =
   | LargeInt { value: i64 }
 def bound() -> i64 = 9007199254740993i64
 ";
-        let declarations = chelis_surf::parser::parse_str(source).expect("parse module");
-        let exprs = chelis_surf::desugar::desugar_program(&declarations).expect("desugar module");
+        let declarations = chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+            .expect("parse module");
+        let exprs =
+            chelis_surf::desugar::desugar_program(&declarations, &chelis_syntax_host::NativeStack)
+                .expect("desugar module");
         let invariants = crate::opaque::collect_opaque_invariants(&exprs);
         let constants = resolve_module_constants(&exprs, &invariants);
         assert!(
@@ -2657,8 +2663,11 @@ type Bounded =
 def hi() -> f32 = 0.5 + 0.25
 __chelis_const_probe = true
 ";
-        let declarations = chelis_surf::parser::parse_str(source).expect("parse module");
-        let exprs = chelis_surf::desugar::desugar_program(&declarations).expect("desugar module");
+        let declarations = chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+            .expect("parse module");
+        let exprs =
+            chelis_surf::desugar::desugar_program(&declarations, &chelis_syntax_host::NativeStack)
+                .expect("desugar module");
         let invariants = crate::opaque::collect_opaque_invariants(&exprs);
         let constants = resolve_module_constants(&exprs, &invariants);
         assert_eq!(

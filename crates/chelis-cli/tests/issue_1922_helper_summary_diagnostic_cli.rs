@@ -17,7 +17,8 @@ const SOURCE: &str = include_str!("../../../tests/support/helper_summary_fatal.c
 fn fatal_summary_diagnostic_is_visible_in_text_and_json_eval() {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("sink.ch");
-    let formatted = chelis_surf::format::format_source(SOURCE).expect("format fixture");
+    let formatted = chelis_surf::format::format_source(SOURCE, &chelis_syntax_host::NativeStack)
+        .expect("format fixture");
     let operand = "[x, y]";
     let start = formatted
         .find(operand)

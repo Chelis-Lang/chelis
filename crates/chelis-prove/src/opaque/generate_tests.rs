@@ -3,8 +3,10 @@
 use super::*;
 
 fn deep_of(surf: &str) -> Vec<Expr> {
-    let decls = chelis_surf::parser::parse_str(surf).expect("parse surf");
-    chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar")
+    let decls =
+        chelis_surf::parser::parse_str(surf, &chelis_syntax_host::NativeStack).expect("parse surf");
+    chelis_surf::desugar::desugar_program(&decls, &chelis_syntax_host::NativeStack)
+        .expect("Surf fixture must desugar")
 }
 
 fn source_of(surf: &str) -> String {

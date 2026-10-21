@@ -2144,7 +2144,8 @@ mod tests {
     fn record_field_reduction_rejects_missing_or_duplicate_fields() {
         let decls = chelis_surf::parser::parse_str(
             "type Box = | Box { x: f32 }\n\
-             def read_x(p: Box) -> f32 = p.x\n",
+         def read_x(p: Box) -> f32 = p.x\n",
+            &chelis_syntax_host::NativeStack,
         )
         .expect("parse record source");
         for (constructor, fields) in [
@@ -2381,7 +2382,8 @@ mod tests {
     }
 
     fn parsed_grad_error(source: &str, target: &str, wrt: &[&str]) -> String {
-        let decls = chelis_surf::parser::parse_str(source).expect("parse boundary fixture");
+        let decls = chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+            .expect("parse boundary fixture");
         let wrt = wrt
             .iter()
             .map(|name| (*name).to_string())

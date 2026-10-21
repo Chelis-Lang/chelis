@@ -793,6 +793,7 @@ pub fn bypass_child_expectation(tag: DeepTag, index: usize) -> BypassExpectation
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::{boxed::Box, vec::Vec};
 
     #[test]
     fn child_stamp_role_is_total_over_deeptag() {

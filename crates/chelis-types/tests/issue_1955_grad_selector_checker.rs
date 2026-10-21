@@ -16,10 +16,12 @@ use chelis_types::{
 fn selector_program(index: i64) -> Vec<Expr> {
     let declarations = parse_surf(
         "def pair(x: f32, w: f32) -> f32 = mul(x, w)\n\
-         selected = grad(pair, wrt=w)\n",
+     selected = grad(pair, wrt=w)\n",
+        &chelis_syntax_host::NativeStack,
     )
     .expect("selector fixture Surf must parse");
-    let consistent = desugar_program(&declarations).expect("selector fixture must desugar");
+    let consistent = desugar_program(&declarations, &chelis_syntax_host::NativeStack)
+        .expect("selector fixture must desugar");
     if index == 1 {
         return consistent;
     }
@@ -30,27 +32,35 @@ fn selector_program(index: i64) -> Vec<Expr> {
         1,
         "fixture must contain exactly one operative selector:\n{canonical}"
     );
-    chelis_deep::parser::parse_str(&canonical.replacen(
-        selector,
-        &format!("(lit {{type: (t-prim {{}} i32)}} {index})"),
-        1,
-    ))
+    chelis_deep::parser::parse_str(
+        &canonical.replacen(
+            selector,
+            &format!("(lit {{type: (t-prim {{}} i32)}} {index})"),
+            1,
+        ),
+        &chelis_syntax_host::NativeStack,
+    )
     .expect("mutated selector fixture must parse")
 }
 
 fn stamped_selector_program(index: i64) -> Vec<Expr> {
-    chelis_deep::parse_and_stamp_file(&print_canonical(&selector_program(index)))
-        .expect("selector fixture must stamp")
+    chelis_deep::parse_and_stamp_file(
+        &print_canonical(&selector_program(index)),
+        &chelis_syntax_host::NativeStack,
+    )
+    .expect("selector fixture must stamp")
 }
 
 fn stamped_nested_selector_program() -> Vec<Expr> {
     let declarations = parse_surf(
         "def square(x: f32) -> f32 = mul(x, x)\n\
-         selected = grad(grad(square, wrt=x), wrt=x)\n",
+     selected = grad(grad(square, wrt=x), wrt=x)\n",
+        &chelis_syntax_host::NativeStack,
     )
     .expect("nested selector fixture Surf must parse");
-    let deep = desugar_program(&declarations).expect("nested selector fixture must desugar");
-    chelis_deep::parse_and_stamp_file(&print_canonical(&deep))
+    let deep = desugar_program(&declarations, &chelis_syntax_host::NativeStack)
+        .expect("nested selector fixture must desugar");
+    chelis_deep::parse_and_stamp_file(&print_canonical(&deep), &chelis_syntax_host::NativeStack)
         .expect("nested selector fixture must stamp")
 }
 

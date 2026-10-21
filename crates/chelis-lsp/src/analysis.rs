@@ -192,7 +192,7 @@ pub fn document_status(state: &DocumentState) -> serde_json::Value {
 }
 
 fn analyze_surf_document(text: &str) -> DocumentAnalysis {
-    let decls = match chelis_surf::parser::parse_str(text) {
+    let decls = match chelis_surf::parser::parse_str(text, &chelis_syntax_host::NativeStack) {
         Ok(decls) => decls,
         Err(err) => {
             return DocumentAnalysis {
@@ -273,7 +273,7 @@ fn analyze_surf_document(text: &str) -> DocumentAnalysis {
         ),
     };
 
-    let deep_view = chelis_surf::desugar::desugar_program(&decls)
+    let deep_view = chelis_surf::desugar::desugar_program(&decls, &chelis_syntax_host::NativeStack)
         .ok()
         .map(|deep| chelis_deep::printer::print_canonical(&deep));
 
@@ -294,16 +294,17 @@ fn analyze_deep_document(text: &str) -> DocumentAnalysis {
     // chelis#1088: the editor reports what the compiler decides. Both use the
     // stamped `.dp` ingress, so a document the compiler rejects is underlined
     // here instead of looking clean until the user runs `chelis check`.
-    let diagnostics = match chelis_deep::parse_and_stamp_file(text) {
-        Ok(_) => Vec::new(),
-        Err(err) => vec![Diagnostic {
-            range: range_for_offset(text, deep_ingress_error_offset(&err)),
-            severity: Some(DiagnosticSeverity::ERROR),
-            message: err.to_string(),
-            source: Some("chelis".to_string()),
-            ..Diagnostic::default()
-        }],
-    };
+    let diagnostics =
+        match chelis_deep::parse_and_stamp_file(text, &chelis_syntax_host::NativeStack) {
+            Ok(_) => Vec::new(),
+            Err(err) => vec![Diagnostic {
+                range: range_for_offset(text, deep_ingress_error_offset(&err)),
+                severity: Some(DiagnosticSeverity::ERROR),
+                message: err.to_string(),
+                source: Some("chelis".to_string()),
+                ..Diagnostic::default()
+            }],
+        };
 
     DocumentAnalysis {
         source_kind: SourceKind::Deep,
@@ -1237,7 +1238,8 @@ fn resolve_target_to_location(
         DefinitionTarget::ImportedName { module, name } => {
             let path = module_path(workspace_root?, module)?;
             let contents = fs::read_to_string(&path).ok()?;
-            let decls = chelis_surf::parser::parse_str(&contents).ok()?;
+            let decls =
+                chelis_surf::parser::parse_str(&contents, &chelis_syntax_host::NativeStack).ok()?;
             let index = build_top_level_index(&contents, &decls);
             if !symbol_is_public(&index, name) {
                 return None;
@@ -1777,7 +1779,7 @@ mod tests {
             "{}",
             analysis.diagnostics[0].message
         );
-        assert!(chelis_deep::parse_and_stamp_file(text).is_err());
+        assert!(chelis_deep::parse_and_stamp_file(text, &chelis_syntax_host::NativeStack).is_err());
     }
 
     #[test]
@@ -1797,7 +1799,10 @@ mod tests {
                 "{text:?}: {}",
                 analysis.diagnostics[0].message
             );
-            assert!(chelis_deep::parse_and_stamp_file(text).is_err(), "{text:?}");
+            assert!(
+                chelis_deep::parse_and_stamp_file(text, &chelis_syntax_host::NativeStack).is_err(),
+                "{text:?}"
+            );
         }
     }
 
@@ -1812,7 +1817,7 @@ mod tests {
             "{:?}",
             analysis.diagnostics
         );
-        assert!(chelis_deep::parse_and_stamp_file(text).is_ok());
+        assert!(chelis_deep::parse_and_stamp_file(text, &chelis_syntax_host::NativeStack).is_ok());
     }
 
     #[test]

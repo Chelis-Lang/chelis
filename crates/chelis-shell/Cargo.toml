@@ -8,6 +8,7 @@ repository.workspace = true
 
 [dependencies]
 chelis-deep.workspace = true
+chelis-syntax-host.workspace = true
 serde.workspace = true
 bincode = "1"
 semver.workspace = true

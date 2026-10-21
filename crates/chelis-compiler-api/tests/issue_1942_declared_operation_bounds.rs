@@ -9,7 +9,8 @@ use chelis_types::{check_ir_with_context, errors::CheckErrorKind};
 fn checked_library_round_trips_preserve_generic_function_values() {
     let declarations = parse_str(
         "def average[p: Float](x: tensor[3, p]) -> tensor[p] = mean(x, 0i32)\n\
-         def middle[q: Float](x: tensor[3, q]) -> tensor[q] = average(x)\n",
+     def middle[q: Float](x: tensor[3, q]) -> tensor[q] = average(x)\n",
+        &chelis_syntax_host::NativeStack,
     )
     .unwrap();
     let stdlib = build_stdlib_context(&declarations).unwrap();
@@ -38,8 +39,11 @@ fn checked_library_round_trips_preserve_generic_function_values() {
                 let source = format!("out: tensor[{dtype}] = {expression}\n");
                 let verdict = check_ir_with_context(
                     env,
-                    &desugar_program(&parse_str(&source).unwrap())
-                        .expect("Surf fixture must desugar"),
+                    &desugar_program(
+                        &parse_str(&source, &chelis_syntax_host::NativeStack).unwrap(),
+                        &chelis_syntax_host::NativeStack,
+                    )
+                    .expect("Surf fixture must desugar"),
                 );
                 if accepts {
                     verdict.unwrap_or_else(|errors| panic!("{source}: {errors:?}"));
@@ -70,7 +74,7 @@ fn checked_libraries_refuse_builtins_applicable_only_by_name() {
         "window_sum = reduce_window_sum\n",
         "primitive_average = mean\n",
     ] {
-        let declarations = parse_str(source).unwrap();
+        let declarations = parse_str(source, &chelis_syntax_host::NativeStack).unwrap();
         assert!(build_stdlib_context(&declarations).is_err(), "{source}");
         assert!(
             build_library_context(&empty, &declarations)
@@ -106,7 +110,7 @@ fn insufficient_authored_contracts_cannot_be_published_as_checked_libraries() {
             true,
         ),
     ] {
-        let declarations = parse_str(source).unwrap();
+        let declarations = parse_str(source, &chelis_syntax_host::NativeStack).unwrap();
         assert_eq!(
             build_stdlib_context(&declarations).is_ok(),
             accepted,
@@ -121,9 +125,10 @@ fn insufficient_authored_contracts_cannot_be_published_as_checked_libraries() {
         );
     }
     for binder in ["p", "p: Numeric", "p: Float"] {
-        let declarations = parse_str(&format!(
-            "def average[{binder}](x: tensor[3, p]) -> tensor[p] = mean(x, 0i32)\n"
-        ))
+        let declarations = parse_str(
+            &format!("def average[{binder}](x: tensor[3, p]) -> tensor[p] = mean(x, 0i32)\n"),
+            &chelis_syntax_host::NativeStack,
+        )
         .unwrap();
         assert_eq!(
             build_stdlib_context(&declarations).is_ok(),
@@ -143,10 +148,13 @@ fn insufficient_authored_contracts_cannot_be_published_as_checked_libraries() {
         ("reduce_window_sum", "p", false),
         ("reduce_window_sum", "p: Numeric", true),
     ] {
-        let declarations = parse_str(&format!(
-            "def windowed[{binder}](x: tensor[3, p]) -> tensor[2, p] = \
+        let declarations = parse_str(
+            &format!(
+                "def windowed[{binder}](x: tensor[3, p]) -> tensor[2, p] = \
              {operation}(x, [2i64], [1i64])\n"
-        ))
+            ),
+            &chelis_syntax_host::NativeStack,
+        )
         .unwrap();
         assert_eq!(
             build_stdlib_context(&declarations).is_ok(),

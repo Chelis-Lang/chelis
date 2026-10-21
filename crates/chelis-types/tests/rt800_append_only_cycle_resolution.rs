@@ -2,8 +2,11 @@ use chelis_surf::{desugar::desugar_program, parser::parse_str};
 use chelis_types::{TypeEnv, build_type_env_from_library, check_ir_program, check_ir_with_context};
 
 fn surf(source: &str) -> Vec<chelis_deep::Expr> {
-    desugar_program(&parse_str(source).expect("Surf fixture parses"))
-        .expect("Surf fixture must desugar")
+    desugar_program(
+        &parse_str(source, &chelis_syntax_host::NativeStack).expect("Surf fixture parses"),
+        &chelis_syntax_host::NativeStack,
+    )
+    .expect("Surf fixture must desugar")
 }
 
 fn assert_checks(source: &str) {
@@ -104,13 +107,14 @@ fn bare_acyclic_later_helper_remains_textually_unavailable() {
     // the existing function-inference contract while aligning eager values.
     let deep = chelis_deep::parser::parse_str(
         r#"
-(def {} caller
-  (fn {} (params {} n)
-    (app {} (var {} later) (var {} n))))
-(def {} later
-  (fn {} (params {} n)
-    (app {} (var {} add) (var {} n) (lit {type: (t-prim {} i32)} 1))))
-"#,
+    (def {} caller
+      (fn {} (params {} n)
+        (app {} (var {} later) (var {} n))))
+    (def {} later
+      (fn {} (params {} n)
+        (app {} (var {} add) (var {} n) (lit {type: (t-prim {} i32)} 1))))
+    "#,
+        &chelis_syntax_host::NativeStack,
     )
     .expect("Deep fixture parses");
     let result =

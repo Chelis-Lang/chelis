@@ -7333,11 +7333,13 @@ fn std_adt_identity_changes_when_same_dtype_variant_changes() {
 fn exported_public_numeric_stdlib_def_is_enumerated() {
     let decls = chelis_surf::parser::parse_str(
         "module Planted\n\
-         export (public_numeric)\n\
-         def public_numeric(x: i64) -> i64 = x\n",
+     export (public_numeric)\n\
+     def public_numeric(x: i64) -> i64 = x\n",
+        &chelis_syntax_host::NativeStack,
     )
     .expect("planted stdlib source parses");
-    let exprs = chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar");
+    let exprs = chelis_surf::desugar::desugar_program(&decls, &chelis_syntax_host::NativeStack)
+        .expect("Surf fixture must desugar");
     let mut rows = Vec::new();
     scan_deftypes(&exprs, "planted", &mut rows);
     assert!(
@@ -8150,8 +8152,10 @@ fn an_unresolvable_array_typedef_is_rejected() {
 /// Parse one planted Surf module the way `stdlib_rows` does and run the
 /// stdlib enumerator over it.
 fn planted_stdlib_rows(label: &str, source: &str) -> Vec<Row> {
-    let decls = chelis_surf::parser::parse_str(source).expect("planted module parses");
-    let exprs = chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar");
+    let decls = chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+        .expect("planted module parses");
+    let exprs = chelis_surf::desugar::desugar_program(&decls, &chelis_syntax_host::NativeStack)
+        .expect("Surf fixture must desugar");
     let mut rows = Vec::new();
     scan_deftypes(&exprs, label, &mut rows);
     rows

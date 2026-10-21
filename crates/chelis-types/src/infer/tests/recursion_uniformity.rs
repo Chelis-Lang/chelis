@@ -6,14 +6,18 @@
 use super::*;
 
 fn surf_errors(src: &str) -> Vec<CheckError> {
-    let decls = chelis_surf::parser::parse_str(src).expect("surf parse");
-    let exprs = chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar");
+    let decls =
+        chelis_surf::parser::parse_str(src, &chelis_syntax_host::NativeStack).expect("surf parse");
+    let exprs = chelis_surf::desugar::desugar_program(&decls, &chelis_syntax_host::NativeStack)
+        .expect("Surf fixture must desugar");
     infer_program(&exprs).errors
 }
 
 fn surf_ir_errors(src: &str) -> Vec<CheckError> {
-    let decls = chelis_surf::parser::parse_str(src).expect("surf parse");
-    let exprs = chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar");
+    let decls =
+        chelis_surf::parser::parse_str(src, &chelis_syntax_host::NativeStack).expect("surf parse");
+    let exprs = chelis_surf::desugar::desugar_program(&decls, &chelis_syntax_host::NativeStack)
+        .expect("Surf fixture must desugar");
     match check_ir_program(&exprs) {
         Ok(_) => Vec::new(),
         Err(result) => result.errors,
@@ -137,7 +141,8 @@ fn inferred_recursive_members_generalize_after_both_driver_scc_boundaries() {
          (def {} bool_use
             (app {} (var {} left) (lit {type: (t-prim {} bool)} true)
               (lit {type: (t-prim {} bool)} false)))";
-    let exprs = chelis_deep::parser::parse_str(source).expect("Deep fixture parses");
+    let exprs = chelis_deep::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+        .expect("Deep fixture parses");
     let inferred = infer_program(&exprs);
     assert!(
         inferred.errors.is_empty(),

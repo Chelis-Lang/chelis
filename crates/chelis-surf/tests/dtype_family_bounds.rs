@@ -14,12 +14,17 @@ use chelis_surf::parser::parse_str as surf_parse;
 use chelis_surf::resugar::resugar_program;
 
 fn deep_text(source: &str) -> String {
-    let decls = surf_parse(source).unwrap_or_else(|error| panic!("parse `{source}`: {error}"));
-    print_canonical(&desugar_program(&decls).expect("Surf fixture must desugar"))
+    let decls = surf_parse(source, &chelis_syntax_host::NativeStack)
+        .unwrap_or_else(|error| panic!("parse `{source}`: {error}"));
+    print_canonical(
+        &desugar_program(&decls, &chelis_syntax_host::NativeStack)
+            .expect("Surf fixture must desugar"),
+    )
 }
 
 fn formatted(source: &str) -> String {
-    let decls = surf_parse(source).unwrap_or_else(|error| panic!("parse `{source}`: {error}"));
+    let decls = surf_parse(source, &chelis_syntax_host::NativeStack)
+        .unwrap_or_else(|error| panic!("parse `{source}`: {error}"));
     format_program(&decls)
 }
 
@@ -83,10 +88,14 @@ fn a_lambda_valued_binding_desugars_its_sig_binder_cast_target_as_t_var() {
     // produces, so the [04-DTYPE-1] classifier (which keys on a `t-var`
     // target) recognizes it. Before the fix, this desugared to
     // `(t-prim {} p)` and slipped past the checker at both ingresses.
-    let declarations = surf_parse("sig recast[p]: p -> p\nrecast = fn (v) -> cast(v, p)")
-        .expect("parse signature and lambda");
+    let declarations = surf_parse(
+        "sig recast[p]: p -> p\nrecast = fn (v) -> cast(v, p)",
+        &chelis_syntax_host::NativeStack,
+    )
+    .expect("parse signature and lambda");
     let deep = chelis_surf::resugar::normalize_deep_for_surface_roundtrip(
-        &desugar_program(&declarations).expect("Surf fixture must desugar"),
+        &desugar_program(&declarations, &chelis_syntax_host::NativeStack)
+            .expect("Surf fixture must desugar"),
     )
     .expect("normalize source spans");
     let text = chelis_deep::printer::print_canonical_flat(&deep);
@@ -102,8 +111,11 @@ fn a_lambda_valued_binding_desugars_its_sig_binder_cast_target_as_t_var() {
 
 #[test]
 fn a_lambda_valued_binding_does_not_rebind_a_primitive_sig_binder_name() {
-    let error = surf_parse("sig recast[f32]: f32 -> f32\nrecast = fn (v) -> cast(v, f32)")
-        .expect_err("an active primitive cannot enter the binder list");
+    let error = surf_parse(
+        "sig recast[f32]: f32 -> f32\nrecast = fn (v) -> cast(v, f32)",
+        &chelis_syntax_host::NativeStack,
+    )
+    .expect_err("an active primitive cannot enter the binder list");
     assert!(
         error
             .to_string()
@@ -114,8 +126,11 @@ fn a_lambda_valued_binding_does_not_rebind_a_primitive_sig_binder_name() {
 
 #[test]
 fn a_lambda_valued_binding_does_not_rebind_a_reserved_sig_binder_name() {
-    let error = surf_parse("sig recast[u8]: u8 -> u8\nrecast = fn (v) -> cast(v, u8)")
-        .expect_err("a reserved dtype cannot enter the binder list");
+    let error = surf_parse(
+        "sig recast[u8]: u8 -> u8\nrecast = fn (v) -> cast(v, u8)",
+        &chelis_syntax_host::NativeStack,
+    )
+    .expect_err("a reserved dtype cannot enter the binder list");
     assert!(
         error
             .to_string()
@@ -149,7 +164,8 @@ fn a_bound_forces_a_signature_even_with_no_other_annotation() {
 
 #[test]
 fn an_adt_name_is_not_a_bound() {
-    let error = surf_parse("sig f[p: Tensor]: p -> p").expect_err("must reject");
+    let error = surf_parse("sig f[p: Tensor]: p -> p", &chelis_syntax_host::NativeStack)
+        .expect_err("must reject");
     let rendered = error.to_string();
     assert!(
         rendered.contains("dtype family"),
@@ -160,22 +176,29 @@ fn an_adt_name_is_not_a_bound() {
 #[test]
 fn a_lowercase_family_spelling_is_rejected() {
     // Surf spells families PascalCase; the lowercase form is Deep's.
-    surf_parse("sig f[p: float]: p -> p").expect_err("must reject a Deep spelling in Surf");
+    surf_parse("sig f[p: float]: p -> p", &chelis_syntax_host::NativeStack)
+        .expect_err("must reject a Deep spelling in Surf");
 }
 
 #[test]
 fn a_primitive_name_is_not_a_bound() {
-    surf_parse("sig f[p: f32]: p -> p").expect_err("must reject a concrete dtype as a bound");
+    surf_parse("sig f[p: f32]: p -> p", &chelis_syntax_host::NativeStack)
+        .expect_err("must reject a concrete dtype as a bound");
 }
 
 #[test]
 fn a_bound_requires_a_family_after_the_colon() {
-    surf_parse("def f[p: ](x: p) -> p = x").expect_err("must reject a missing family");
+    surf_parse(
+        "def f[p: ](x: p) -> p = x",
+        &chelis_syntax_host::NativeStack,
+    )
+    .expect_err("must reject a missing family");
 }
 
 #[test]
 fn an_empty_binder_list_stays_rejected_on_a_sig() {
-    surf_parse("sig f[]: i32 -> i32").expect_err("must reject `[]`");
+    surf_parse("sig f[]: i32 -> i32", &chelis_syntax_host::NativeStack)
+        .expect_err("must reject `[]`");
 }
 
 // === Canonical formatting ===
@@ -214,7 +237,7 @@ fn bounded_deep_reparses_and_reprints_identically() {
         "sig total[p: Numeric]: p -> p -> p",
     ] {
         let printed = deep_text(source);
-        let reparsed = deep_parse_strict(&printed)
+        let reparsed = deep_parse_strict(&printed, &chelis_syntax_host::NativeStack)
             .unwrap_or_else(|error| panic!("strict Deep re-parse of `{source}`: {error}"));
         assert_eq!(
             print_canonical(&reparsed),
@@ -237,8 +260,9 @@ fn desugar_of_resugar_is_the_identity_on_bounded_declarations() {
         // equivalent `def` spelling.
         "sig recast[p: Float]: p -> p\nrecast = fn (v) -> cast(v, p)",
     ] {
-        let decls = surf_parse(source).expect("parse");
-        let deep = desugar_program(&decls).expect("Surf fixture must desugar");
+        let decls = surf_parse(source, &chelis_syntax_host::NativeStack).expect("parse");
+        let deep = desugar_program(&decls, &chelis_syntax_host::NativeStack)
+            .expect("Surf fixture must desugar");
         let recovered =
             resugar_program(&deep).unwrap_or_else(|error| panic!("resugar `{source}`: {error}"));
         // `span` is derived surface provenance normalized away by
@@ -246,7 +270,8 @@ fn desugar_of_resugar_is_the_identity_on_bounded_declarations() {
         assert_eq!(
             print_canonical(
                 &chelis_surf::resugar::normalize_deep_for_surface_roundtrip(
-                    &desugar_program(&recovered).expect("Surf fixture must desugar")
+                    &desugar_program(&recovered, &chelis_syntax_host::NativeStack)
+                        .expect("Surf fixture must desugar")
                 )
                 .expect("valid metadata for round-trip normalization")
             ),
@@ -261,9 +286,16 @@ fn desugar_of_resugar_is_the_identity_on_bounded_declarations() {
 
 #[test]
 fn resugaring_recovers_the_authored_bound_spelling() {
-    let decls = surf_parse("sig arange[n, p: Int]: p -> p -> tensor[n, p]").expect("parse");
-    let recovered = resugar_program(&desugar_program(&decls).expect("Surf fixture must desugar"))
-        .expect("resugar");
+    let decls = surf_parse(
+        "sig arange[n, p: Int]: p -> p -> tensor[n, p]",
+        &chelis_syntax_host::NativeStack,
+    )
+    .expect("parse");
+    let recovered = resugar_program(
+        &desugar_program(&decls, &chelis_syntax_host::NativeStack)
+            .expect("Surf fixture must desugar"),
+    )
+    .expect("resugar");
     assert_eq!(
         format_program(&recovered).trim(),
         "sig arange[n, p: Int]: p -> p -> tensor[n, p]"
@@ -272,9 +304,16 @@ fn resugaring_recovers_the_authored_bound_spelling() {
 
 #[test]
 fn resugaring_an_unbounded_sig_preserves_its_complete_binder_list() {
-    let decls = surf_parse("sig identity[n, p]: tensor[n, p] -> tensor[n, p]").expect("parse");
-    let recovered = resugar_program(&desugar_program(&decls).expect("Surf fixture must desugar"))
-        .expect("resugar");
+    let decls = surf_parse(
+        "sig identity[n, p]: tensor[n, p] -> tensor[n, p]",
+        &chelis_syntax_host::NativeStack,
+    )
+    .expect("parse");
+    let recovered = resugar_program(
+        &desugar_program(&decls, &chelis_syntax_host::NativeStack)
+            .expect("Surf fixture must desugar"),
+    )
+    .expect("resugar");
     assert_eq!(
         format_program(&recovered).trim(),
         "sig identity[n, p]: tensor[n, p] -> tensor[n, p]"
@@ -283,22 +322,30 @@ fn resugaring_an_unbounded_sig_preserves_its_complete_binder_list() {
 
 #[test]
 fn a_malformed_deep_bound_fails_resugaring_closed() {
-    deep_parse_strict("(defsig {dtype_bounds: {p: signed}} f (p) (t-var {} p))")
-        .expect_err("unknown dtype families are rejected at ingress");
+    deep_parse_strict(
+        "(defsig {dtype_bounds: {p: signed}} f (p) (t-var {} p))",
+        &chelis_syntax_host::NativeStack,
+    )
+    .expect_err("unknown dtype families are rejected at ingress");
 }
 
 fn binder_deep(body: &str) -> Vec<chelis_deep::Expr> {
     deep_parse_strict(&format!(
         "(defsig {{dtype_bounds: {{p: float}}}} scale (p) (t-fn {{}} (t-var {{}} p) (t-var {{}} p)))\n\
          (def {{}} scale (fn {{}} (params {{}} (x {{type: (t-var {{}} p)}})) {body}))"
-    ))
+    ),&chelis_syntax_host::NativeStack)
     .expect("Deep fixture")
 }
 
 #[test]
 fn unary_minus_literal_source_preserves_its_adopting_cast_through_resugar() {
     let deep = desugar_program(
-        &surf_parse("def scale[p: Float](x: p) -> p = cast(-0.1, p)").expect("Surf"),
+        &surf_parse(
+            "def scale[p: Float](x: p) -> p = cast(-0.1, p)",
+            &chelis_syntax_host::NativeStack,
+        )
+        .expect("Surf"),
+        &chelis_syntax_host::NativeStack,
     )
     .expect("Surf fixture must desugar");
     let printed = print_canonical(&deep);
@@ -339,13 +386,11 @@ fn a_local_neg_call_is_not_a_negative_literal_source() {
 #[test]
 fn unrepresentable_binder_literal_provenance_fails_resugaring() {
     for deep in [
-        deep_parse_strict("(defsig {} scale (t-fn {} (t-prim {} f32) (t-prim {} f32)))\n(def {} scale (fn {} (params {} (x {type: (t-prim {} f32)})) (cast {} (lit {surf_literal_style: \"unsuffixed\", type: (t-var {} p)} 0.1) (t-var {} p))))").expect("Deep fixture"),
+        deep_parse_strict("(defsig {} scale (t-fn {} (t-prim {} f32) (t-prim {} f32)))\n(def {} scale (fn {} (params {} (x {type: (t-prim {} f32)})) (cast {} (lit {surf_literal_style: \"unsuffixed\", type: (t-var {} p)} 0.1) (t-var {} p))))",&chelis_syntax_host::NativeStack).expect("Deep fixture"),
         binder_deep("(lit {surf_literal_style: \"unsuffixed\", type: (t-var {} p)} 0.1)"),
-        deep_parse_strict(
-            "(defsig {dtype_bounds: {p: float}} scale (p) (t-fn {} (t-fn {} (t-var {} p) (t-var {} p)) (t-var {} p) (t-var {} p)))\n\
-             (def {} scale (fn {} (params {} (neg {type: (t-fn {} (t-var {} p) (t-var {} p))}) (x {type: (t-var {} p)}))\n\
-               (cast {} (app {} (var {} neg) (lit {surf_literal_style: \"unsuffixed\", type: (t-var {} p)} 0.1)) (t-var {} p))))",
-        )
+        deep_parse_strict("(defsig {dtype_bounds: {p: float}} scale (p) (t-fn {} (t-fn {} (t-var {} p) (t-var {} p)) (t-var {} p) (t-var {} p)))\n\
+         (def {} scale (fn {} (params {} (neg {type: (t-fn {} (t-var {} p) (t-var {} p))}) (x {type: (t-var {} p)}))\n\
+           (cast {} (app {} (var {} neg) (lit {surf_literal_style: \"unsuffixed\", type: (t-var {} p)} 0.1)) (t-var {} p))))",&chelis_syntax_host::NativeStack)
         .expect("forged local neg Deep fixture"),
     ] {
         resugar_program(&deep).expect_err("unrepresentable binder provenance");
@@ -358,7 +403,7 @@ fn unrepresentable_binder_literal_provenance_fails_resugaring() {
         let source = format!(
             "(defsig {{dtype_bounds: {{p: float}}}} scale (p) (t-fn {{}} (t-var {{}} p) (t-var {{}} p))) (def {{}} scale (fn {{}} (params {{}} (x {{type: (t-var {{}} p)}})) (cast {{}} (lit {{{marker}type: (t-var {{}} p)}} 0.1) (t-var {{}} p))))"
         );
-        match deep_parse_strict(&source) {
+        match deep_parse_strict(&source, &chelis_syntax_host::NativeStack) {
             Ok(deep) => {
                 resugar_program(&deep).expect_err("unrepresentable binder provenance");
             }
@@ -373,8 +418,16 @@ fn duplicate_authored_bounds_reject_before_deep_construction() {
         "sig f[p: Float, p: Int]: p -> p\ndef f(x) = x",
         "def f[p: Float, p: Int](x: p) -> p = x",
     ] {
-        assert!(chelis_surf::parser::parse_str(source).is_err(), "{source}");
+        assert!(
+            chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack).is_err(),
+            "{source}"
+        );
     }
-    let declarations = chelis_surf::parser::parse_str("def f[p: Float](x: p) -> p = x").unwrap();
-    chelis_surf::desugar::desugar_program(&declarations).expect("Surf fixture must desugar");
+    let declarations = chelis_surf::parser::parse_str(
+        "def f[p: Float](x: p) -> p = x",
+        &chelis_syntax_host::NativeStack,
+    )
+    .unwrap();
+    chelis_surf::desugar::desugar_program(&declarations, &chelis_syntax_host::NativeStack)
+        .expect("Surf fixture must desugar");
 }

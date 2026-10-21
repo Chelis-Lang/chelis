@@ -82,9 +82,10 @@ impl Site {
 }
 
 fn parse_decls(module: &str, name: &str, value: i32) -> Vec<chelis_surf::ast::Decl> {
-    chelis_surf::parser::parse_str(&format!(
-        "module {module}\nexport ({name})\ndef {name}() -> i32 = cast({value}, i32)\n"
-    ))
+    chelis_surf::parser::parse_str(
+        &format!("module {module}\nexport ({name})\ndef {name}() -> i32 = cast({value}, i32)\n"),
+        &chelis_syntax_host::NativeStack,
+    )
     .expect("cache fixture declarations must parse")
 }
 

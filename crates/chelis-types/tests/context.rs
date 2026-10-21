@@ -10,7 +10,7 @@ use chelis_types::{
 };
 
 fn parse(src: &str) -> Vec<chelis_deep::Expr> {
-    chelis_deep::parser::parse_str(src).expect("deep parse")
+    chelis_deep::parser::parse_str(src, &chelis_syntax_host::NativeStack).expect("deep parse")
 }
 
 fn build_ctx(library_src: &str) -> TypeEnv {
@@ -46,7 +46,8 @@ fn adt_variant_and_field_readers_match_both_carriers() {
            (variant {} Pair \
              (field {} left (t-prim {} madeup))))",
     ] {
-        let program = chelis_deep::parse_and_stamp_file(source).expect("fixture stamps");
+        let program = chelis_deep::parse_and_stamp_file(source, &chelis_syntax_host::NativeStack)
+            .expect("fixture stamps");
         assert_eq!(
             checker_messages(check_typed_program(&program)),
             checker_messages(check_ir_program(&program)),
@@ -88,7 +89,8 @@ fn adt_non_node_variant_and_field_carriers_reject_with_entry_parity() {
     let span = Span::new(0, 0);
 
     let mut malformed_variant =
-        chelis_deep::parse_and_stamp_file(source).expect("variant fixture stamps");
+        chelis_deep::parse_and_stamp_file(source, &chelis_syntax_host::NativeStack)
+            .expect("variant fixture stamps");
     replace_deftype_variant(
         &mut malformed_variant,
         Expr::UnknownForm(Box::new(UnknownFormData {
@@ -101,7 +103,8 @@ fn adt_non_node_variant_and_field_carriers_reject_with_entry_parity() {
     assert_mutated_adt_rejects_on_both_ingresses(&malformed_variant, "undecodable variant");
 
     let mut malformed_field =
-        chelis_deep::parse_and_stamp_file(source).expect("field fixture stamps");
+        chelis_deep::parse_and_stamp_file(source, &chelis_syntax_host::NativeStack)
+            .expect("field fixture stamps");
     let (variant_tag, variant_meta, mut variant_children, variant_span) = {
         let Expr::Node(deftype, _) = &malformed_field[0] else {
             panic!("fixture deftype must use the successor carrier");

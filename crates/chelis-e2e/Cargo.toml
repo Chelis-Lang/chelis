@@ -19,6 +19,7 @@ chelis-compiler-api.workspace = true
 chelis-deep.workspace = true
 chelis-macros.workspace = true
 chelis-surf.workspace = true
+chelis-syntax-host.workspace = true
 chelis-types = { path = "../chelis-types" }
 chelis-effects.workspace = true
 chelis-ir = { path = "../chelis-ir" }

@@ -360,10 +360,12 @@ fn assert_reports_errors(name: &str, exprs: &[deep::Expr]) {
 /// raw single-file `.ch` check path takes (parse_str ->
 /// desugar_program -> macro expansion).
 fn surf_to_deep(source: &str) -> Vec<deep::Expr> {
-    let decls = chelis_surf::parser::parse_str(source).expect("control/hole Surf must parse");
+    let decls = chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+        .expect("control/hole Surf must parse");
     assert!(!decls.is_empty(), "program must have declarations");
     let deep_exprs =
-        chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar");
+        chelis_surf::desugar::desugar_program(&decls, &chelis_syntax_host::NativeStack)
+            .expect("Surf fixture must desugar");
     chelis_macros::expand_program(&deep_exprs, &chelis_macros::ExpansionOptions::default())
         .expect("macro expansion must succeed")
         .into_exprs()
@@ -372,7 +374,8 @@ fn surf_to_deep(source: &str) -> Vec<deep::Expr> {
 /// `.dp` source -> Deep exprs, the same strict parser the CLI's `.dp`
 /// ingestion uses.
 fn dp_to_deep(source: &str) -> Vec<deep::Expr> {
-    chelis_deep::parser::parse_str_strict(source).expect("probe .dp must parse")
+    chelis_deep::parser::parse_str_strict(source, &chelis_syntax_host::NativeStack)
+        .expect("probe .dp must parse")
 }
 
 // ===========================================================================
@@ -524,7 +527,10 @@ fn totality_holds_for_dp_def_missing_body() {
     // #908: wrong-arity Deep now fails at the stamp pass (arity validation),
     // not at the checker. The invariant still holds: the malformed form cannot
     // produce a vacuous pass.
-    let result = chelis_deep::parser::parse_str_strict("(module {} m.main (def {} orphan))");
+    let result = chelis_deep::parser::parse_str_strict(
+        "(module {} m.main (def {} orphan))",
+        &chelis_syntax_host::NativeStack,
+    );
     assert!(
         result.is_err(),
         "a def with missing body must fail at the stamp pass (arity violation)"
@@ -537,6 +543,7 @@ fn totality_holds_for_dp_def_missing_body() {
 fn totality_holds_for_dp_cast_missing_target() {
     let result = chelis_deep::parser::parse_str_strict(
         "(module {} m.main (def {} out (cast {} (lit {type: (t-prim {} f32)} 42.0))))",
+        &chelis_syntax_host::NativeStack,
     );
     assert!(
         result.is_err(),

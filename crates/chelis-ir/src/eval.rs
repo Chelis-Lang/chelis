@@ -9502,7 +9502,7 @@ mod tests {
     }
 
     fn lower_library(src: &str) -> LoweredLibrary {
-        let exprs = parse_str(src).expect("parse failed");
+        let exprs = parse_str(src, &chelis_syntax_host::NativeStack).expect("parse failed");
         let checked = chelis_types::check_ir_program(&exprs)
             .unwrap_or_else(|result| panic!("IR check failed: {:?}", result.errors));
         let checked = chelis_effects::check_program(&checked)

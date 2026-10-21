@@ -177,7 +177,11 @@ fn no_disposition_list_is_disjoint_and_in_vocabulary() {
 
 #[test]
 fn unknown_tag_outside_the_vocabulary_keeps_the_raw_string_loud_arm() {
-    let exprs = parse_str("(def {} f (bogus_wrapper {}))").expect("lenient Deep parse");
+    let exprs = parse_str(
+        "(def {} f (bogus_wrapper {}))",
+        &chelis_syntax_host::NativeStack,
+    )
+    .expect("lenient Deep parse");
     let errors = infer_program(&exprs).errors;
     let unknown_form = errors
         .iter()
@@ -222,7 +226,8 @@ fn untagged_list_in_expression_position_is_rejected_loudly() {
 fn block_types_as_its_last_child() {
     let exprs = parse_str(
         "(def {} f (block {} (lit {type: (t-prim {} i32)} 1) \
-         (lit {type: (t-prim {} f32)} 2.0)))",
+     (lit {type: (t-prim {} f32)} 2.0)))",
+        &chelis_syntax_host::NativeStack,
     )
     .expect("lenient Deep parse");
     let result = infer_program(&exprs);
@@ -239,7 +244,8 @@ fn block_checks_every_child_not_only_the_last() {
     // exempt discarded children from checking.
     let exprs = parse_str(
         "(def {} f (block {} (app {} (var {} add) (lit {type: (t-prim {} f32)} 1.0) \
-         (lit {type: (t-prim {} i64)} 2)) (lit {type: (t-prim {} f32)} 3.0)))",
+     (lit {type: (t-prim {} i64)} 2)) (lit {type: (t-prim {} f32)} 3.0)))",
+        &chelis_syntax_host::NativeStack,
     )
     .expect("lenient Deep parse");
     let result = infer_program(&exprs);
@@ -254,7 +260,7 @@ fn childless_block_is_malformed() {
     // A childless block has no value. The stamped `Node` constructor is the
     // only way to build a vocabulary node, so it cannot reach the checker.
     assert!(
-        parse_str("(def {} f (block {}))").is_err(),
+        parse_str("(def {} f (block {}))", &chelis_syntax_host::NativeStack).is_err(),
         "the stamped constructor must reject a childless block at ingress"
     );
     assert!(
@@ -270,7 +276,7 @@ fn dispatched_tags_still_check_cleanly() {
     let source = "(def {} f (lit {type: (t-prim {} f32)} 1.0))\n\
                   (def {} g (if {} (lit {type: (t-prim {} bool)} true) \
                   (var {} f) (lit {type: (t-prim {} f32)} 2.0)))";
-    let exprs = parse_str(source).expect("lenient Deep parse");
+    let exprs = parse_str(source, &chelis_syntax_host::NativeStack).expect("lenient Deep parse");
     let result = infer_program(&exprs);
     assert!(
         result.errors.is_empty(),

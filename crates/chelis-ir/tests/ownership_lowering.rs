@@ -111,8 +111,10 @@ fn fixture_source(name: &str) -> String {
 }
 
 fn front(source: &str) -> Front {
-    let declarations = surf_parse(source).unwrap_or_else(|error| panic!("parse: {error:?}"));
-    let deep = desugar_program(&declarations).expect("Surf fixture must desugar");
+    let declarations = surf_parse(source, &chelis_syntax_host::NativeStack)
+        .unwrap_or_else(|error| panic!("parse: {error:?}"));
+    let deep = desugar_program(&declarations, &chelis_syntax_host::NativeStack)
+        .expect("Surf fixture must desugar");
     let checked = check_typed_program(&deep)
         .unwrap_or_else(|errors| panic!("type check: {:?}", errors.errors));
     let checked = chelis_effects::check_program(&checked)
@@ -1125,8 +1127,10 @@ fn all_previously_supported_host_combinators_reach_the_verified_boundary() {
 }
 
 fn assert_front_rejects(source: &str) {
-    let declarations = surf_parse(source).expect("negative twin still parses");
-    let deep = desugar_program(&declarations).expect("Surf fixture must desugar");
+    let declarations =
+        surf_parse(source, &chelis_syntax_host::NativeStack).expect("negative twin still parses");
+    let deep = desugar_program(&declarations, &chelis_syntax_host::NativeStack)
+        .expect("Surf fixture must desugar");
     let report = check_typed_program(&deep).expect_err("negative twin unexpectedly checked");
     assert_eq!(report.errors.len(), 1, "{source}: {:?}", report.errors);
     let error = &report.errors[0];

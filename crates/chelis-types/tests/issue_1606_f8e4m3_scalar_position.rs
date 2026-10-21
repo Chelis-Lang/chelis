@@ -18,9 +18,10 @@ use chelis_types::{check_ir_program, check_typed_program};
 use serde_json::Value;
 
 fn surf_to_deep(source: &str) -> Vec<chelis_deep::Expr> {
-    let decls = parse_str(source).expect("surf parse");
+    let decls = parse_str(source, &chelis_syntax_host::NativeStack).expect("surf parse");
     chelis_macros::expand_program(
-        &desugar_program(&decls).expect("Surf fixture must desugar"),
+        &desugar_program(&decls, &chelis_syntax_host::NativeStack)
+            .expect("Surf fixture must desugar"),
         &chelis_macros::ExpansionOptions::default(),
     )
     .expect("macro expand")
@@ -54,7 +55,7 @@ fn hand_authored_deep_property_slots(
     body: &str,
 ) -> Vec<chelis_deep::Expr> {
     let source = hand_authored_deep_property_slots_source(signature_types, parameter_types, body);
-    chelis_deep::parse_and_stamp_file(&source)
+    chelis_deep::parse_and_stamp_file(&source, &chelis_syntax_host::NativeStack)
         .unwrap_or_else(|error| panic!("valid hand-authored Deep property:\n{source}\n{error:?}"))
 }
 
@@ -96,7 +97,7 @@ fn hand_authored_nominal_property(application: &str) -> Vec<chelis_deep::Expr> {
          (defsig {{}} inspect (t-fn {{}} {application} (t-prim {{}} bool)))\n\
          (def {{}} inspect (fn {{}} (params {{}} x) (lit {{}} true)))"
     );
-    chelis_deep::parse_and_stamp_file(&source)
+    chelis_deep::parse_and_stamp_file(&source, &chelis_syntax_host::NativeStack)
         .unwrap_or_else(|error| panic!("valid nominal recovery fixture:\n{source}\n{error:?}"))
 }
 
@@ -171,7 +172,8 @@ fn assert_rejected(src: &str, position: &str) {
         let source = src.replace("f8e4m3", name);
         let desugared = surf_to_deep(&source);
         let text = chelis_deep::printer::print_canonical_flat(&desugared);
-        let stamped = chelis_deep::parse_and_stamp_file(&text).expect("stamp canonical Deep");
+        let stamped = chelis_deep::parse_and_stamp_file(&text, &chelis_syntax_host::NativeStack)
+            .expect("stamp canonical Deep");
         for (carrier, exprs) in [("desugared", desugared), ("stamped", stamped)] {
             for (entry, result) in [
                 ("ir", check_ir_program(&exprs)),
@@ -194,7 +196,8 @@ fn assert_rejected(src: &str, position: &str) {
 }
 
 fn assert_forbidden_surf_binder(source: &str, name: &str, position: &str) {
-    let error = parse_str(source).expect_err("reserved dtype vocabulary cannot be rebound");
+    let error = parse_str(source, &chelis_syntax_host::NativeStack)
+        .expect_err("reserved dtype vocabulary cannot be rebound");
     let message = error.to_string();
     assert!(
         message.contains(&format!("`{name}`"))
@@ -248,7 +251,8 @@ fn assert_one_report_per_site(source: &str, names: &[&str]) {
 }
 
 fn surf_with_legacy_tensor_precision(source: &str, name: &str) -> Vec<chelis_deep::Expr> {
-    let decls = parse_str(source).expect("parse current Surf AST");
+    let decls =
+        parse_str(source, &chelis_syntax_host::NativeStack).expect("parse current Surf AST");
     let mut encoded = serde_json::to_value(decls).expect("serialize Surf AST");
     let precision = &mut encoded[0]["TypeAlias"]["ty"]["Tensor"][1];
     assert_eq!(
@@ -259,7 +263,7 @@ fn surf_with_legacy_tensor_precision(source: &str, name: &str) -> Vec<chelis_dee
     *precision = Value::String(name.to_string());
     let legacy: Vec<chelis_surf::ast::Decl> =
         serde_json::from_value(encoded).expect("decode legacy precision string");
-    desugar_program(&legacy).expect("Surf fixture must desugar")
+    desugar_program(&legacy, &chelis_syntax_host::NativeStack).expect("Surf fixture must desugar")
 }
 
 #[test]
@@ -583,7 +587,8 @@ fn property_copy_ownership_fails_closed_per_invalid_or_noncanonical_slot() {
             "(lit {} true)",
         );
         assert!(
-            chelis_deep::parse_and_stamp_file(&malformed_source).is_err(),
+            chelis_deep::parse_and_stamp_file(&malformed_source, &chelis_syntax_host::NativeStack)
+                .is_err(),
             "a malformed type carrier must fail closed at Deep ingress"
         );
     }
@@ -868,11 +873,16 @@ fn a_tensor_element_reserved_site_has_one_located_owner() {
 fn deep_surf_deep_roundtrip_preserves_tensor_precision_diagnostic_span() {
     for name in ["f8e4m3", "f8e5m2"] {
         let source = format!("def classify(x: tensor[3, {name}]) -> i32 = 0i32");
-        let original = desugar_program(&parse_str(&source).expect("parse source"))
-            .expect("Surf fixture must desugar");
-        let restored =
-            desugar_program(&resugar_program(&original).expect("resugar direct Deep program"))
-                .expect("Surf fixture must desugar");
+        let original = desugar_program(
+            &parse_str(&source, &chelis_syntax_host::NativeStack).expect("parse source"),
+            &chelis_syntax_host::NativeStack,
+        )
+        .expect("Surf fixture must desugar");
+        let restored = desugar_program(
+            &resugar_program(&original).expect("resugar direct Deep program"),
+            &chelis_syntax_host::NativeStack,
+        )
+        .expect("Surf fixture must desugar");
         let offset = source.find(name).expect("reserved precision site");
 
         for (carrier, program) in [
@@ -961,7 +971,8 @@ fn matching_deep_signature_and_annotation_share_a_declaration_owner() {
             "(defsig {{}} classify (t-fn {{}} (t-prim {{span: \"{display_span}\"}} f8e4m3) (t-prim {{}} i32)))\n\
              (def {{}} classify (fn {{}} (params {{}} (x {{type: (t-prim {{span: \"{display_span}\"}} f8e4m3)}})) (lit {{type: (t-prim {{}} i32)}} 0)))"
         );
-        let program = chelis_deep::parse_and_stamp_file(&source).expect("parse two authored sites");
+        let program = chelis_deep::parse_and_stamp_file(&source, &chelis_syntax_host::NativeStack)
+            .expect("parse two authored sites");
         for result in [check_ir_program(&program), check_typed_program(&program)] {
             let report = result.expect_err("the declaration-owned annotation must reject");
             assert_eq!(report.errors.len(), 1, "{:?}", report.errors);
@@ -1001,7 +1012,7 @@ fn an_arity_mismatch_does_not_recheck_parameter_annotations() {
         let program = chelis_deep::parse_and_stamp_file(&format!(
             "(defsig {{}} classify (t-fn {{}} (t-prim {{}} f8e4m3) (t-prim {{}} i32)))\n\
              (def {{}} classify (fn {{}} (params {{}} (x {{type: (t-prim {{}} f8e5m2)}}){extra}) (lit {{type: (t-prim {{}} i32)}} 0)))"
-        )).expect("parse independent annotations");
+        ), &chelis_syntax_host::NativeStack).expect("parse independent annotations");
         for result in [check_ir_program(&program), check_typed_program(&program)] {
             let report = result.expect_err("both reserved sites reject");
             let reserved: Vec<_> = report
@@ -1054,7 +1065,8 @@ fn a_canonical_parameter_hole_does_not_erase_declared_shape_evidence() {
     let source = "def f(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 6, 6, f32] = conv(&x, &k, [0i64, 0i64], [(0i64, 0i64), (0i64, 0i64)])";
     let desugared = surf_to_deep(source);
     let text = chelis_deep::printer::print_canonical_flat(&desugared);
-    let stamped = chelis_deep::parse_and_stamp_file(&text).expect("stamp canonical Deep");
+    let stamped = chelis_deep::parse_and_stamp_file(&text, &chelis_syntax_host::NativeStack)
+        .expect("stamp canonical Deep");
     for (carrier, expressions) in [("desugared", desugared), ("stamped", stamped)] {
         let report = check_ir_program(&expressions)
             .expect_err("the zero-stride validator must retain declared tensor shapes");
@@ -1078,7 +1090,8 @@ fn a_canonical_parameter_hole_does_not_erase_declared_shape_evidence() {
 fn source_annotation_presence_and_read_only_inference_survive_transport() {
     let program = surf_to_deep("def readonly(x, y: tensor[4, f32]) = add(x, y)");
     let text = chelis_deep::printer::print_canonical_flat(&program);
-    let printed = chelis_deep::parse_and_stamp_file(&text).expect("parse printed input");
+    let printed = chelis_deep::parse_and_stamp_file(&text, &chelis_syntax_host::NativeStack)
+        .expect("parse printed input");
     let encoded = serde_json::to_vec(&program).expect("encode input");
     let decoded: Vec<chelis_deep::Expr> = serde_json::from_slice(&encoded).expect("decode input");
     for expressions in [&program, &printed, &decoded] {
@@ -1147,7 +1160,8 @@ fn multiple_reserved_sites_survive_printing_and_serialization() {
     ] {
         let program = surf_to_deep(source);
         let text = chelis_deep::printer::print_canonical_flat(&program);
-        let printed = chelis_deep::parse_and_stamp_file(&text).expect("parse printed input");
+        let printed = chelis_deep::parse_and_stamp_file(&text, &chelis_syntax_host::NativeStack)
+            .expect("parse printed input");
         let encoded = serde_json::to_vec(&program).expect("encode input");
         let decoded: Vec<chelis_deep::Expr> =
             serde_json::from_slice(&encoded).expect("decode input");
@@ -1209,7 +1223,8 @@ fn signature_ownership_requires_explicit_authority() {
 fn a_printed_program_preserves_its_diagnostic_count() {
     let program = surf_to_deep("def classify(x: f8e4m3) -> i32 = 0i32");
     let text = chelis_deep::printer::print_canonical_flat(&program);
-    let reparsed = chelis_deep::parse_and_stamp_file(&text).expect("parse printed Deep");
+    let reparsed = chelis_deep::parse_and_stamp_file(&text, &chelis_syntax_host::NativeStack)
+        .expect("parse printed Deep");
     let saved = serde_json::to_vec(&program).expect("encode Deep");
     let decoded: Vec<chelis_deep::Expr> = serde_json::from_slice(&saved).expect("decode Deep");
     let mut counts = Vec::new();
@@ -1260,7 +1275,8 @@ fn handwritten_deep_cannot_bypass_the_type_resolver() {
             "(defsig {{}} f (t-fn {{}} (t-prim {{}} {name}) (t-prim {{}} {name})))\n\
              (def {{}} f (fn {{}} (params {{}} x) (var {{}} x)))"
         );
-        let exprs = chelis_deep::parse_and_stamp_file(&source).expect("stamp Deep fixture");
+        let exprs = chelis_deep::parse_and_stamp_file(&source, &chelis_syntax_host::NativeStack)
+            .expect("stamp Deep fixture");
         for result in [check_ir_program(&exprs), check_typed_program(&exprs)] {
             let report = result.expect_err("reserved primitive must reject");
             assert!(
@@ -1282,7 +1298,8 @@ fn handwritten_reserved_type_variable_cannot_bypass_the_resolver() {
             "(defsig {{}} f ({name}) (t-fn {{}} (t-var {{}} {name}) (t-var {{}} {name})))\n\
              (def {{}} f (fn {{}} (params {{}} x) (var {{}} x)))"
         );
-        let exprs = chelis_deep::parse_and_stamp_file(&source).expect("stamp Deep fixture");
+        let exprs = chelis_deep::parse_and_stamp_file(&source, &chelis_syntax_host::NativeStack)
+            .expect("stamp Deep fixture");
         for result in [check_ir_program(&exprs), check_typed_program(&exprs)] {
             let report = result.expect_err("reserved type variable must reject");
             assert!(
@@ -1307,7 +1324,8 @@ fn aliases_fields_and_value_annotations_reject_fp8() {
 fn assert_accepted(source: &str) {
     let desugared = surf_to_deep(source);
     let text = chelis_deep::printer::print_canonical_flat(&desugared);
-    let stamped = chelis_deep::parse_and_stamp_file(&text).expect("stamp canonical Deep");
+    let stamped = chelis_deep::parse_and_stamp_file(&text, &chelis_syntax_host::NativeStack)
+        .expect("stamp canonical Deep");
     for exprs in [&desugared, &stamped] {
         for result in [check_ir_program(exprs), check_typed_program(exprs)] {
             assert!(result.is_ok(), "{source}: {result:?}");

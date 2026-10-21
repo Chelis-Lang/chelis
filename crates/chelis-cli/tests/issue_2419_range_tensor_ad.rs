@@ -6,7 +6,8 @@ use tempfile::tempdir;
 mod common;
 
 fn assert_both(source: &str, expected: &[f64], stem: &str) {
-    let source = chelis_surf::format::format_source(source).unwrap();
+    let source =
+        chelis_surf::format::format_source(source, &chelis_syntax_host::NativeStack).unwrap();
     let dir = tempdir().unwrap();
     let path = dir.path().join(format!("{stem}.ch"));
     common::write_file(&path, &source);
@@ -216,12 +217,12 @@ fn runtime_builder_handles_a_different_extent_and_nonzero_selected_index() {
 #[test]
 fn callbacks_with_observable_checks_require_ordered_execution() {
     let source = chelis_surf::format::format_source(r#"
-def loss[n](theta: tensor[n, f32]) -> f32 = {
+    def loss[n](theta: tensor[n, f32]) -> f32 = {
     values = to_tensor(map(fn (i: i64) -> cast(trunc_div(1i64, sub(i, 1i64)), f32), range(0i64, shape(theta, 0i32))))
     tensor_to_scalar(sum(mul(theta, values), 0i32))
-}
-out = grad(loss)(to_tensor([1.0f32, 2.0f32]))
-"#).unwrap();
+    }
+    out = grad(loss)(to_tensor([1.0f32, 2.0f32]))
+    "#,&chelis_syntax_host::NativeStack).unwrap();
     let dir = tempdir().unwrap();
     let path = dir.path().join("ordered.ch");
     common::write_file(&path, &source);
@@ -306,7 +307,8 @@ fn captured_cotangent_keeps_the_false_forward_range_claim() {
             "range(0i64, add(items_len, 1i64))"
         )
     );
-    let source = chelis_surf::format::format_source(&source).unwrap();
+    let source =
+        chelis_surf::format::format_source(&source, &chelis_syntax_host::NativeStack).unwrap();
     let dir = tempdir().unwrap();
     let path = dir.path().join("false_claim.ch");
     common::write_file(&path, &source);

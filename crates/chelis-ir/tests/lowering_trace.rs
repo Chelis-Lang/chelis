@@ -21,8 +21,11 @@ def derivative(x: tensor[3, f32]) -> tensor[3, f32] = grad(loss)(x)
 
 #[cfg(feature = "lowering-trace")]
 fn checked(source: &str) -> CheckedProgram {
-    let deep = desugar_program(&parse_str(source).expect("parse fixture"))
-        .expect("Surf fixture must desugar");
+    let deep = desugar_program(
+        &parse_str(source, &chelis_syntax_host::NativeStack).expect("parse fixture"),
+        &chelis_syntax_host::NativeStack,
+    )
+    .expect("Surf fixture must desugar");
     let program = check_typed_program(&deep).expect("check fixture types");
     let program = chelis_effects::check_program(&program).expect("check fixture effects");
     chelis_types::check_linearity(&program).expect("check fixture linearity")

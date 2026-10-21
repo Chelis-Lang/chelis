@@ -12,9 +12,11 @@ type CallerNamedClaim = (String, NamedAxis, NamedAxis);
 
 fn checked_surf(source: &str) -> chelis_types::CheckedProgram {
     let _linked = chelis_types::install_linked_program_guard();
-    let declarations = chelis_surf::parser::parse_str(source).expect("Surf parse");
+    let declarations = chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+        .expect("Surf parse");
     let expanded = chelis_macros::expand_program(
-        &chelis_surf::desugar::desugar_program(&declarations).expect("Surf fixture must desugar"),
+        &chelis_surf::desugar::desugar_program(&declarations, &chelis_syntax_host::NativeStack)
+            .expect("Surf fixture must desugar"),
         &chelis_macros::ExpansionOptions::default(),
     )
     .expect("macro expansion")

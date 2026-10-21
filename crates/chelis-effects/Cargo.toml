@@ -12,6 +12,7 @@ chelis-types.workspace = true
 chelis-vocab.workspace = true
 
 [dev-dependencies]
+chelis-syntax-host.workspace = true
 chelis-macros.workspace = true
 chelis-surf.workspace = true
 

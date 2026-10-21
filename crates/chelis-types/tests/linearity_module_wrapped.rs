@@ -31,8 +31,10 @@ mod copy_repair;
 /// fixtures that assert a violation can match on
 /// `CheckErrorKind::UseAfterConsume` and message content.
 fn linearity_errors(source: &str) -> Vec<chelis_types::errors::CheckError> {
-    let decls = parse_str(source).expect("surf parse should succeed");
-    let deep = desugar_program(&decls).expect("Surf fixture must desugar");
+    let decls =
+        parse_str(source, &chelis_syntax_host::NativeStack).expect("surf parse should succeed");
+    let deep = desugar_program(&decls, &chelis_syntax_host::NativeStack)
+        .expect("Surf fixture must desugar");
     let checked = check_typed_program(&deep).expect("type check should succeed");
     check_linearity(&checked).expect_err("linearity check must error on use-after-consume")
 }

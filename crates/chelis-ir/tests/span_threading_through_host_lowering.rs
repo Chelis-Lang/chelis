@@ -90,7 +90,8 @@ fn host_expr_schema_carries_span_id_and_merged_spans() {
 // ── Helpers ────────────────────────────────────────────────────────────
 
 fn check(source: &str) -> chelis_types::CheckedProgram {
-    let exprs = chelis_deep::parser::parse_str(source).expect("deep parse");
+    let exprs = chelis_deep::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+        .expect("deep parse");
     let checked = check_ir_program(&exprs).expect("IR check clean");
     let checked = chelis_effects::check_program(&checked).expect("effects clean");
     check_linearity(&checked).expect("linearity clean")
@@ -371,7 +372,8 @@ fn span_threading_through_host_lowering() {
             (var {type: (t-prim {} string) span: "src_var_use"} greeting)))
     "#;
 
-    let exprs = chelis_deep::parser::parse_str(source).expect("deep parse");
+    let exprs = chelis_deep::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+        .expect("deep parse");
     let input_spans = collect_input_spans(&exprs);
     let expected: BTreeSet<String> = [
         "src_def",
@@ -435,7 +437,8 @@ fn host_lowering_without_spans_produces_none_span_ids() {
             (var {type: (t-prim {} string)} greeting)))
     "#;
 
-    let exprs = chelis_deep::parser::parse_str(source).expect("deep parse");
+    let exprs = chelis_deep::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+        .expect("deep parse");
     assert!(
         collect_input_spans(&exprs).is_empty(),
         "negative-parity fixture must have ZERO spans"
@@ -471,7 +474,8 @@ fn host_lowering_without_spans_produces_none_span_ids() {
 #[test]
 fn host_lowering_an_empty_program_does_not_panic() {
     let source = "";
-    let exprs = chelis_deep::parser::parse_str(source).expect("empty deep parse");
+    let exprs = chelis_deep::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+        .expect("empty deep parse");
     assert!(exprs.is_empty(), "empty source should yield zero exprs");
 
     let checked = check(source);
@@ -508,7 +512,8 @@ fn realize_wrapper_collapses_into_body_via_merged_spans() {
             (var {type: (t-prim {} string)} s)))
     "#;
 
-    let exprs = chelis_deep::parser::parse_str(source).expect("deep parse");
+    let exprs = chelis_deep::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+        .expect("deep parse");
     let input_spans = collect_input_spans(&exprs);
     assert!(input_spans.contains("outer_realize"));
     assert!(input_spans.contains("inner_lit"));
@@ -865,7 +870,8 @@ fn fixture_with_tensor_fn(fn_span: &str, body_inner_span: &str) -> String {
 fn fn_form_span_surfaces_through_lower_host_function() {
     let source = fixture_with_tensor_fn("fn_form_span", "body_inner_span");
 
-    let exprs = chelis_deep::parser::parse_str(&source).expect("deep parse");
+    let exprs = chelis_deep::parser::parse_str(&source, &chelis_syntax_host::NativeStack)
+        .expect("deep parse");
     let input_spans = collect_input_spans(&exprs);
     assert!(
         input_spans.contains("fn_form_span"),
@@ -937,7 +943,8 @@ fn unspanned_fn_form_does_not_fabricate_a_span_in_host_function() {
                  (lit {type: (t-tensor {} (t-prim {} f32))} 2.0))))
     "#;
 
-    let exprs = chelis_deep::parser::parse_str(source).expect("deep parse");
+    let exprs = chelis_deep::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+        .expect("deep parse");
     assert!(
         collect_input_spans(&exprs).is_empty(),
         "fixture must have ZERO spans"

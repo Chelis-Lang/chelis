@@ -26,9 +26,10 @@ use chelis_types::{
 const MARKER: &str = "is applicable only by name";
 
 fn surf_to_deep(source: &str) -> Vec<chelis_deep::Expr> {
-    let decls = parse_str(source).expect("surf parse");
+    let decls = parse_str(source, &chelis_syntax_host::NativeStack).expect("surf parse");
     chelis_macros::expand_program(
-        &desugar_program(&decls).expect("Surf fixture must desugar"),
+        &desugar_program(&decls, &chelis_syntax_host::NativeStack)
+            .expect("Surf fixture must desugar"),
         &chelis_macros::ExpansionOptions::default(),
     )
     .expect("macro expand")
@@ -91,7 +92,8 @@ fn value_admission_equals_carried_contract_for_every_builtin() {
         let carried =
             builtin_decl(name).is_some_and(|decl| builtin_value_contract_carried(decl, scheme));
         let source = format!("(def {{}} op (var {{}} {name}))");
-        let exprs = chelis_deep::parser::parse_str(&source).expect("Deep fixture must parse");
+        let exprs = chelis_deep::parser::parse_str(&source, &chelis_syntax_host::NativeStack)
+            .expect("Deep fixture must parse");
         let refused = !by_name_rejections(&errors_of(&exprs), name).is_empty();
         if refused == carried {
             mismatches.push(format!("{name}: carried={carried} but refused={refused}"));

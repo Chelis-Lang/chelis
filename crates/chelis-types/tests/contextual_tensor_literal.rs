@@ -29,8 +29,10 @@ use chelis_types::infer::infer_program;
 /// type metadata, plus the inference result so tests can pin error
 /// counts.
 fn pipeline(src: &str) -> (Vec<String>, chelis_types::infer::InferResult) {
-    let decls = chelis_surf::parser::parse_str(src).expect("surf parse");
-    let exprs = chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar");
+    let decls =
+        chelis_surf::parser::parse_str(src, &chelis_syntax_host::NativeStack).expect("surf parse");
+    let exprs = chelis_surf::desugar::desugar_program(&decls, &chelis_syntax_host::NativeStack)
+        .expect("Surf fixture must desugar");
     let printed: Vec<String> = exprs
         .iter()
         .map(|e| {
@@ -345,7 +347,8 @@ fn negative_deep_mixed_dtype_in_to_tensor_body_errors() {
                    (app {} (var {} Cons) (lit {type: (t-prim {} f64)} 2.0)
                      (app {} (var {} Cons) (lit {type: (t-prim {} f32)} 3.0)
                        (var {} Nil))))))";
-    let exprs = chelis_deep::parser::parse_str(src).expect("deep parse");
+    let exprs =
+        chelis_deep::parser::parse_str(src, &chelis_syntax_host::NativeStack).expect("deep parse");
     let result = infer_program(&exprs);
     assert!(
         !result.errors.is_empty(),

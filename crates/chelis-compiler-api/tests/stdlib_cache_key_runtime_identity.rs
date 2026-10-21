@@ -39,7 +39,8 @@ fn repacked_runtime(mtime: u64) -> &'static EmbeddedRuntime {
 /// The linked chelis-std declarations, the exact source digest, and the cache
 /// key of a program that imports the runtime, linked against `runtime`.
 fn stdlib_identity(runtime: &'static EmbeddedRuntime) -> (Vec<Decl>, [u8; 32], [u8; 32]) {
-    let decls = chelis_surf::parser::parse_str(PROGRAM).expect("parse the probe program");
+    let decls = chelis_surf::parser::parse_str(PROGRAM, &chelis_syntax_host::NativeStack)
+        .expect("parse the probe program");
     let prepared = prepare_single_file_program("probe.ch", &decls, runtime)
         .expect("link the probe program")
         .expect("the probe program imports the runtime");

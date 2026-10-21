@@ -15,8 +15,10 @@ use chelis_types::{CopyRepair, CopyRepairUseKind, check_typed_program, copy_repa
 
 /// The copy repairs of a Surf program that must pass linearity.
 pub fn copy_repairs_of(source: &str) -> Vec<CopyRepair> {
-    let decls = parse_str(source).expect("surf parse should succeed");
-    let deep = desugar_program(&decls).expect("Surf fixture must desugar");
+    let decls =
+        parse_str(source, &chelis_syntax_host::NativeStack).expect("surf parse should succeed");
+    let deep = desugar_program(&decls, &chelis_syntax_host::NativeStack)
+        .expect("Surf fixture must desugar");
     let checked = check_typed_program(&deep)
         .unwrap_or_else(|error| panic!("type check should succeed: {:?}", error.errors));
     copy_repairs(&checked, None)

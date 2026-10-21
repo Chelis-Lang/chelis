@@ -277,7 +277,11 @@ fn fix6b_pat_as_binds_name() {
 // Fix 7: fitness report includes unresolved names
 #[test]
 fn fix7_fitness_unresolved_names() {
-    let exprs = chelis_deep::parser::parse_str("(def {} x (var {} unknown))").unwrap();
+    let exprs = chelis_deep::parser::parse_str(
+        "(def {} x (var {} unknown))",
+        &chelis_syntax_host::NativeStack,
+    )
+    .unwrap();
     let result = crate::infer::infer_program(&exprs);
     let report = crate::fitness::FitnessReport::from_infer_result(&result);
     assert!(
@@ -291,7 +295,11 @@ fn fix7_fitness_unresolved_names() {
 
 #[test]
 fn fitness_uses_the_structured_identifier_instead_of_rendered_prose() {
-    let exprs = chelis_deep::parser::parse_str("(def {} x (var {} unknown))").unwrap();
+    let exprs = chelis_deep::parser::parse_str(
+        "(def {} x (var {} unknown))",
+        &chelis_syntax_host::NativeStack,
+    )
+    .unwrap();
     let mut result = crate::infer::infer_program(&exprs);
     let error = result
         .errors
@@ -324,10 +332,12 @@ fn fix7b_suggestions_for_unbound() {
 fn ir_literal_dimension_mismatch_surfaces_error() {
     let decls = chelis_surf::parser::parse_str(
         "def want_2x2(a: tensor[2, 2, f32]) -> tensor[f32] = trace(a, 0, 1)\n\
-         def main(a: tensor[3, 3, f32]) -> tensor[f32] = want_2x2(a)\n",
+     def main(a: tensor[3, 3, f32]) -> tensor[f32] = want_2x2(a)\n",
+        &chelis_syntax_host::NativeStack,
     )
     .expect("surf parse");
-    let exprs = chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar");
+    let exprs = chelis_surf::desugar::desugar_program(&decls, &chelis_syntax_host::NativeStack)
+        .expect("Surf fixture must desugar");
 
     let result = infer_ir_program(&exprs);
     assert!(
@@ -352,11 +362,13 @@ fn ir_literal_dimension_mismatch_surfaces_error() {
 fn ir_rejects_polymorphic_dims_pinned_by_body() {
     let decls = chelis_surf::parser::parse_str(
         "def want_2x2(a: tensor[2, 2, f32]) -> tensor[f32] = trace(a, 0, 1)\n\
-         def bad_consumer[m, n](a: tensor[m, n, f32]) -> tensor[f32] = want_2x2(a)\n\
-         def main() -> f32 = cast(0.0, f32)\n",
+     def bad_consumer[m, n](a: tensor[m, n, f32]) -> tensor[f32] = want_2x2(a)\n\
+     def main() -> f32 = cast(0.0, f32)\n",
+        &chelis_syntax_host::NativeStack,
     )
     .expect("surf parse");
-    let exprs = chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar");
+    let exprs = chelis_surf::desugar::desugar_program(&decls, &chelis_syntax_host::NativeStack)
+        .expect("Surf fixture must desugar");
 
     let result = infer_ir_program(&exprs);
     assert!(
@@ -381,10 +393,12 @@ fn ir_rejects_polymorphic_dims_pinned_by_body() {
 fn ir_preserves_unresolved_name_errors() {
     let decls = chelis_surf::parser::parse_str(
         "def probe(x: f32) -> f32 = sub(x, frobnicate(x))\n\
-         def main() -> f32 = probe(cast(1.0, f32))\n",
+     def main() -> f32 = probe(cast(1.0, f32))\n",
+        &chelis_syntax_host::NativeStack,
     )
     .expect("surf parse");
-    let exprs = chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar");
+    let exprs = chelis_surf::desugar::desugar_program(&decls, &chelis_syntax_host::NativeStack)
+        .expect("Surf fixture must desugar");
 
     let result = infer_ir_program(&exprs);
     assert!(
@@ -417,17 +431,19 @@ fn ir_preserves_unresolved_name_errors() {
 fn ir_resolves_consistently_mangled_constructor_names() {
     let decls = chelis_surf::parser::parse_str(
         "type Pkg__chelis__std__Std__Nn__Generate__KVCache[a] = \
-            | Pkg__chelis__std__Std__Nn__Generate__KVCache(List[a])\n\
-         def keep_cache[p](cache: \
-             Option[Pkg__chelis__std__Std__Nn__Generate__KVCache[p]]) -> \
-             Pkg__chelis__std__Std__Nn__Generate__KVCache[p] =\n\
-           match cache with {\n\
-             | Some(value) => value\n\
-             | None => Pkg__chelis__std__Std__Nn__Generate__KVCache([])\n\
-           }\n",
+        | Pkg__chelis__std__Std__Nn__Generate__KVCache(List[a])\n\
+     def keep_cache[p](cache: \
+         Option[Pkg__chelis__std__Std__Nn__Generate__KVCache[p]]) -> \
+         Pkg__chelis__std__Std__Nn__Generate__KVCache[p] =\n\
+       match cache with {\n\
+         | Some(value) => value\n\
+         | None => Pkg__chelis__std__Std__Nn__Generate__KVCache([])\n\
+       }\n",
+        &chelis_syntax_host::NativeStack,
     )
     .expect("surf parse");
-    let exprs = chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar");
+    let exprs = chelis_surf::desugar::desugar_program(&decls, &chelis_syntax_host::NativeStack)
+        .expect("Surf fixture must desugar");
 
     let result = infer_ir_program(&exprs);
     assert!(
@@ -450,12 +466,14 @@ fn ir_resolves_consistently_mangled_constructor_names() {
 fn ir_rejects_out_of_scope_terminal_constructor_name() {
     let decls = chelis_surf::parser::parse_str(
         "type Pkg__chelis__std__Std__Nn__Generate__KVCache[a] = \
-            | Pkg__chelis__std__Std__Nn__Generate__KVCache(List[a])\n\
-         def make_cache[p]() -> \
-             Pkg__chelis__std__Std__Nn__Generate__KVCache[p] = KVCache([])\n",
+        | Pkg__chelis__std__Std__Nn__Generate__KVCache(List[a])\n\
+     def make_cache[p]() -> \
+         Pkg__chelis__std__Std__Nn__Generate__KVCache[p] = KVCache([])\n",
+        &chelis_syntax_host::NativeStack,
     )
     .expect("surf parse");
-    let exprs = chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar");
+    let exprs = chelis_surf::desugar::desugar_program(&decls, &chelis_syntax_host::NativeStack)
+        .expect("Surf fixture must desugar");
 
     let result = infer_ir_program(&exprs);
     assert!(
@@ -585,8 +603,11 @@ fn fix11b_pat_record_accepts_valid_field() {
 #[test]
 fn fix12_structure_score_measured() {
     // check_program runs tag validator — structure should be 1.0 for valid programs
-    let exprs =
-        chelis_deep::parser::parse_str("(def {} x (lit {type: (t-prim {} i32)} 42))").unwrap();
+    let exprs = chelis_deep::parser::parse_str(
+        "(def {} x (lit {type: (t-prim {} i32)} 42))",
+        &chelis_syntax_host::NativeStack,
+    )
+    .unwrap();
     let report = crate::fitness::check_program(&exprs);
     assert!(
         (report.components.structure - 1.0).abs() < 0.01,
@@ -599,6 +620,7 @@ fn fix12_structure_score_measured() {
 fn checked_program_annotates_fn_bodies() {
     let exprs = chelis_deep::parser::parse_str(
         "(def {} f (fn {} (params {} (x {type: (t-prim {} f32)})) (var {} x)))",
+        &chelis_syntax_host::NativeStack,
     )
     .unwrap();
     let checked = check_ir_program(&exprs).expect("checked program");
@@ -613,8 +635,9 @@ fn checked_program_annotates_fn_bodies() {
 fn checked_program_annotates_apps_and_updates_type_env() {
     let exprs = chelis_deep::parser::parse_str(
         "(def {} a (lit {type: (t-tensor {} (d-name {} batch) (t-prim {} f32))} 0))
-         (def {} b (lit {type: (t-tensor {} (d-name {} batch) (t-prim {} f32))} 0))
-         (def {} c (app {} (var {} add) (var {} a) (var {} b)))",
+     (def {} b (lit {type: (t-tensor {} (d-name {} batch) (t-prim {} f32))} 0))
+     (def {} c (app {} (var {} add) (var {} a) (var {} b)))",
+        &chelis_syntax_host::NativeStack,
     )
     .unwrap();
     let checked = check_ir_program(&exprs).expect("checked program");
@@ -628,12 +651,10 @@ fn checked_program_annotates_apps_and_updates_type_env() {
 
 #[test]
 fn ir_accepts_symbolic_normalized_axis_for_layer_norm() {
-    let exprs = chelis_deep::parser::parse_str(
-        "(def {} x (lit {type: (t-tensor {} (d-name {} batch) (d-name {} hidden) (t-prim {} f32))} 0))
-         (def {} gamma (lit {type: (t-tensor {} (d-name {} hidden) (t-prim {} f32))} 0))
-         (def {} beta (lit {type: (t-tensor {} (d-name {} hidden) (t-prim {} f32))} 0))
-         (def {} y (app {} (var {} layer_norm) (var {} x) (var {} gamma) (var {} beta) (lit {type: (t-prim {} f32)} 0.00001)))",
-    )
+    let exprs = chelis_deep::parser::parse_str("(def {} x (lit {type: (t-tensor {} (d-name {} batch) (d-name {} hidden) (t-prim {} f32))} 0))
+     (def {} gamma (lit {type: (t-tensor {} (d-name {} hidden) (t-prim {} f32))} 0))
+     (def {} beta (lit {type: (t-tensor {} (d-name {} hidden) (t-prim {} f32))} 0))
+     (def {} y (app {} (var {} layer_norm) (var {} x) (var {} gamma) (var {} beta) (lit {type: (t-prim {} f32)} 0.00001)))", &chelis_syntax_host::NativeStack)
     .unwrap();
     check_ir_program(&exprs)
         .expect("symbolic normalized-axis metadata is legal at the language checker");
@@ -733,10 +754,12 @@ padded = pad_sequences_to([[cast(1, i64)], [cast(2, i64), cast(3, i64)]], cast(4
 fn pad_sequences_to_literal_width_matches_declared_shape() {
     let decls = chelis_surf::parser::parse_str(
         "def f() -> tensor[1, 4, f32] = \
-         pad_sequences_to([[cast(10.0, f32)]], cast(4, i64), cast(0.0, f32))\n",
+     pad_sequences_to([[cast(10.0, f32)]], cast(4, i64), cast(0.0, f32))\n",
+        &chelis_syntax_host::NativeStack,
     )
     .expect("surf parse");
-    let exprs = chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar");
+    let exprs = chelis_surf::desugar::desugar_program(&decls, &chelis_syntax_host::NativeStack)
+        .expect("Surf fixture must desugar");
     let result = infer_ir_program(&exprs);
     assert!(
         result.errors.is_empty(),
@@ -749,10 +772,12 @@ fn pad_sequences_to_literal_width_matches_declared_shape() {
 fn pad_sequences_to_wrong_literal_width_is_rejected() {
     let decls = chelis_surf::parser::parse_str(
         "def f() -> tensor[1, 5, f32] = \
-         pad_sequences_to([[cast(10.0, f32)]], cast(4, i64), cast(0.0, f32))\n",
+     pad_sequences_to([[cast(10.0, f32)]], cast(4, i64), cast(0.0, f32))\n",
+        &chelis_syntax_host::NativeStack,
     )
     .expect("surf parse");
-    let exprs = chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar");
+    let exprs = chelis_surf::desugar::desugar_program(&decls, &chelis_syntax_host::NativeStack)
+        .expect("Surf fixture must desugar");
     let result = infer_ir_program(&exprs);
     assert!(
         !result.errors.is_empty(),
@@ -767,15 +792,17 @@ fn pad_sequences_to_mismatched_width_through_shared_sig_dim_is_rejected() {
     // Different literal widths (8 vs 5) must collide on `d`.
     let decls = chelis_surf::parser::parse_str(
         "sig demo_unify[s, d, p]: &tensor[s, d, p] -> &tensor[s, d, p] -> tensor[s, d, p]\n\
-         def demo_unify(a, b) = a\n\
-         def test_mismatch[s, d]() -> tensor[s, d, f32] = {\n\
-           q = pad_sequences_to([[cast(0.0, f32)]], cast(8, i64), cast(0.0, f32))\n\
-           k = pad_sequences_to([[cast(0.0, f32)]], cast(5, i64), cast(0.0, f32))\n\
-           demo_unify(q, k)\n\
-         }\n",
+     def demo_unify(a, b) = a\n\
+     def test_mismatch[s, d]() -> tensor[s, d, f32] = {\n\
+       q = pad_sequences_to([[cast(0.0, f32)]], cast(8, i64), cast(0.0, f32))\n\
+       k = pad_sequences_to([[cast(0.0, f32)]], cast(5, i64), cast(0.0, f32))\n\
+       demo_unify(q, k)\n\
+     }\n",
+        &chelis_syntax_host::NativeStack,
     )
     .expect("surf parse");
-    let exprs = chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar");
+    let exprs = chelis_surf::desugar::desugar_program(&decls, &chelis_syntax_host::NativeStack)
+        .expect("Surf fixture must desugar");
     let result = infer_ir_program(&exprs);
     assert!(
         result
@@ -1233,14 +1260,16 @@ fn surf_einsum_rejects_ellipsis_in_3h() {
         &chelis_surf::desugar::desugar_program(
             &chelis_surf::parser::parse_str(
                 r#"
-def bad(
-  x: tensor[batch, seq, hidden, f32],
-  w: tensor[hidden, out_dim, f32]
-) -> tensor[batch, seq, out_dim, f32] =
-  einsum("...h,ho->...o", x, w)
-"#,
+                def bad(
+                  x: tensor[batch, seq, hidden, f32],
+                  w: tensor[hidden, out_dim, f32]
+                ) -> tensor[batch, seq, out_dim, f32] =
+                  einsum("...h,ho->...o", x, w)
+                "#,
+                &chelis_syntax_host::NativeStack,
             )
             .expect("surf parse"),
+            &chelis_syntax_host::NativeStack,
         )
         .expect("Surf fixture must desugar"),
     );
@@ -1261,15 +1290,17 @@ fn surf_where_rejects_non_bool_condition_tensor() {
         &chelis_surf::desugar::desugar_program(
             &chelis_surf::parser::parse_str(
                 r#"
-def bad(
-  cond: tensor[batch, hidden, f32],
-  x: tensor[batch, hidden, f32],
-  y: tensor[batch, hidden, f32]
-) -> tensor[batch, hidden, f32] =
-  where(cond, x, y)
-"#,
+                def bad(
+                  cond: tensor[batch, hidden, f32],
+                  x: tensor[batch, hidden, f32],
+                  y: tensor[batch, hidden, f32]
+                ) -> tensor[batch, hidden, f32] =
+                  where(cond, x, y)
+                "#,
+                &chelis_syntax_host::NativeStack,
             )
             .expect("surf parse"),
+            &chelis_syntax_host::NativeStack,
         )
         .expect("Surf fixture must desugar"),
     );
@@ -1289,15 +1320,17 @@ fn surf_scatter_replace_rejects_unknown_mode() {
         &chelis_surf::desugar::desugar_program(
             &chelis_surf::parser::parse_str(
                 r#"
-def bad(
-  base: tensor[seq, hidden, f32],
-  ids: tensor[seq, i64],
-  updates: tensor[seq, hidden, f32]
-) -> tensor[seq, hidden, f32] =
-  scatter(base, ids, updates, 0, "last")
-"#,
+                def bad(
+                  base: tensor[seq, hidden, f32],
+                  ids: tensor[seq, i64],
+                  updates: tensor[seq, hidden, f32]
+                ) -> tensor[seq, hidden, f32] =
+                  scatter(base, ids, updates, 0, "last")
+                "#,
+                &chelis_syntax_host::NativeStack,
             )
             .expect("surf parse"),
+            &chelis_syntax_host::NativeStack,
         )
         .expect("Surf fixture must desugar"),
     );
@@ -1319,12 +1352,14 @@ fn surf_einsum_rejects_static_extent_mismatch() {
         &chelis_surf::desugar::desugar_program(
             &chelis_surf::parser::parse_str(
                 r#"
-a = pad_sequences([[1.0, 2.0], [3.0, 4.0]], 0.0)
-b = pad_sequences([[5.0, 6.0], [7.0, 8.0], [9.0, 10.0]], 0.0)
-out = einsum("ij,jk->ik", a, b)
-"#,
+                a = pad_sequences([[1.0, 2.0], [3.0, 4.0]], 0.0)
+                b = pad_sequences([[5.0, 6.0], [7.0, 8.0], [9.0, 10.0]], 0.0)
+                out = einsum("ij,jk->ik", a, b)
+                "#,
+                &chelis_syntax_host::NativeStack,
             )
             .expect("surf parse"),
+            &chelis_syntax_host::NativeStack,
         )
         .expect("Surf fixture must desugar"),
     );
@@ -1344,14 +1379,16 @@ fn surf_scatter_replace_accepts_static_duplicate_indices() {
         &chelis_surf::desugar::desugar_program(
             &chelis_surf::parser::parse_str(
                 r#"
-base = pad_sequences([[0.0, 0.0], [0.0, 0.0], [0.0, 0.0]], 0.0)
-ids: List[i64] = [cast(1, i64), cast(1, i64)]
-idx = to_tensor(ids)
-updates = pad_sequences([[5.0, 5.0], [6.0, 6.0]], 0.0)
-out = scatter(base, idx, updates, 0, "replace")
-"#,
+                base = pad_sequences([[0.0, 0.0], [0.0, 0.0], [0.0, 0.0]], 0.0)
+                ids: List[i64] = [cast(1, i64), cast(1, i64)]
+                idx = to_tensor(ids)
+                updates = pad_sequences([[5.0, 5.0], [6.0, 6.0]], 0.0)
+                out = scatter(base, idx, updates, 0, "replace")
+                "#,
+                &chelis_syntax_host::NativeStack,
             )
             .expect("surf parse"),
+            &chelis_syntax_host::NativeStack,
         )
         .expect("Surf fixture must desugar"),
     );
@@ -1378,11 +1415,13 @@ fn surf_append_rejects_wrong_element_type() {
         &chelis_surf::desugar::desugar_program(
             &chelis_surf::parser::parse_str(
                 r#"
-xs: List[i64] = [cast(1, i64)]
-bad = append(xs, "oops")
-"#,
+                xs: List[i64] = [cast(1, i64)]
+                bad = append(xs, "oops")
+                "#,
+                &chelis_syntax_host::NativeStack,
             )
             .expect("surf parse"),
+            &chelis_syntax_host::NativeStack,
         )
         .expect("Surf fixture must desugar"),
     );
@@ -1402,11 +1441,13 @@ fn surf_filter_rejects_non_bool_callback() {
         &chelis_surf::desugar::desugar_program(
             &chelis_surf::parser::parse_str(
                 r#"
-xs: List[i64] = [cast(1, i64)]
-bad = filter(fn (x: i64) -> add(x, cast(1, i64)), xs)
-"#,
+                xs: List[i64] = [cast(1, i64)]
+                bad = filter(fn (x: i64) -> add(x, cast(1, i64)), xs)
+                "#,
+                &chelis_syntax_host::NativeStack,
             )
             .expect("surf parse"),
+            &chelis_syntax_host::NativeStack,
         )
         .expect("Surf fixture must desugar"),
     );
@@ -1428,11 +1469,13 @@ fn surf_dict_entries_rejects_non_dict_input() {
         &chelis_surf::desugar::desugar_program(
             &chelis_surf::parser::parse_str(
                 r#"
-xs: List[i64] = [cast(1, i64)]
-bad = dict_entries(xs)
-"#,
+                xs: List[i64] = [cast(1, i64)]
+                bad = dict_entries(xs)
+                "#,
+                &chelis_syntax_host::NativeStack,
             )
             .expect("surf parse"),
+            &chelis_syntax_host::NativeStack,
         )
         .expect("Surf fixture must desugar"),
     );
@@ -1452,10 +1495,12 @@ fn surf_to_list_rejects_rank2_tensor() {
         &chelis_surf::desugar::desugar_program(
             &chelis_surf::parser::parse_str(
                 r#"
-def bad(x: tensor[2, 2, f32]) -> List[f32] = to_list(x)
-"#,
+                def bad(x: tensor[2, 2, f32]) -> List[f32] = to_list(x)
+                "#,
+                &chelis_syntax_host::NativeStack,
             )
             .expect("surf parse"),
+            &chelis_syntax_host::NativeStack,
         )
         .expect("Surf fixture must desugar"),
     );
@@ -1472,15 +1517,11 @@ def bad(x: tensor[2, 2, f32]) -> List[f32] = to_list(x)
 #[test]
 fn surf_fold_rejects_accumulator_mismatch() {
     let result = check_ir_program(
-        &chelis_surf::desugar::desugar_program(
-            &chelis_surf::parser::parse_str(
-                r#"
-xs: List[i64] = [cast(1, i64)]
-bad = fold(fn (acc: string, x: i64) -> string_concat(acc, to_string(x)), cast(0, i64), xs)
-"#,
-            )
-            .expect("surf parse"),
-        )
+        &chelis_surf::desugar::desugar_program(&chelis_surf::parser::parse_str(r#"
+                xs: List[i64] = [cast(1, i64)]
+                bad = fold(fn (acc: string, x: i64) -> string_concat(acc, to_string(x)), cast(0, i64), xs)
+                "#, &chelis_syntax_host::NativeStack)
+        .expect("surf parse"), &chelis_syntax_host::NativeStack)
         .expect("Surf fixture must desugar"),
     );
     let err = result.expect_err("fold should reject mismatched accumulator type");
@@ -1498,21 +1539,23 @@ fn surf_tuple_fold_tensor_slot_program() -> Vec<deep::Expr> {
     chelis_surf::desugar::desugar_program(
         &chelis_surf::parser::parse_str(
             r#"
-def f[n](xs: tensor[n, f32]) -> (tensor[n, f32], i64) = {
-  idxs = range(cast(0, i64), numel(copy(xs)))
-  state0 = (to_tensor(map(fn (x: f32) -> cast(0.0, f32), to_list(copy(xs)))), cast(0, i64))
-  step = fn (state, i) -> {
-acc = state.0
-total = state.1
-(acc, add(total, i))
-  }
-  fold(step, state0, idxs)
-}
-
-out = f(to_tensor([1.0, 2.0, 3.0], f32))
-"#,
+        def f[n](xs: tensor[n, f32]) -> (tensor[n, f32], i64) = {
+          idxs = range(cast(0, i64), numel(copy(xs)))
+          state0 = (to_tensor(map(fn (x: f32) -> cast(0.0, f32), to_list(copy(xs)))), cast(0, i64))
+          step = fn (state, i) -> {
+        acc = state.0
+        total = state.1
+        (acc, add(total, i))
+          }
+          fold(step, state0, idxs)
+        }
+        
+        out = f(to_tensor([1.0, 2.0, 3.0], f32))
+        "#,
+            &chelis_syntax_host::NativeStack,
         )
         .expect("surf parse"),
+        &chelis_syntax_host::NativeStack,
     )
     .expect("Surf fixture must desugar")
 }
@@ -1542,25 +1585,21 @@ fn surf_polymorphic_tuple_fold_with_tensor_slot_type_checks() {
 #[test]
 fn surf_collection_helper_builtins_type_check() {
     let result = check_ir_program(
-        &chelis_surf::desugar::desugar_program(
-            &chelis_surf::parser::parse_str(
-                r#"
-xs: List[i64] = [cast(1, i64), cast(2, i64), cast(3, i64)]
-prefix = take(xs, cast(2, i64))
-suffix = skip(xs, cast(1, i64))
-groups = chunk(xs, cast(2, i64))
-scanned = scan(fn (acc: i64, x: i64) -> add(acc, x), cast(0, i64), xs)
-buckets = partition(fn (x: i64) -> gt(x, cast(1, i64)), xs)
-exploded = flat_map(fn (x: i64) -> [x, add(x, cast(10, i64))], xs)
-flattened = flatten([[cast(1, i64)], [cast(2, i64), cast(3, i64)]])
-base: Dict[string, i64] = dict_of([("alpha", cast(1, i64))])
-extended = dict_insert(base, "beta", cast(2, i64))
-merged = dict_merge(extended, dict_of([("beta", cast(20, i64)), ("gamma", cast(3, i64))]))
-trimmed = dict_remove(merged, "gamma")
-"#,
-            )
-            .expect("surf parse"),
-        )
+        &chelis_surf::desugar::desugar_program(&chelis_surf::parser::parse_str(r#"
+                xs: List[i64] = [cast(1, i64), cast(2, i64), cast(3, i64)]
+                prefix = take(xs, cast(2, i64))
+                suffix = skip(xs, cast(1, i64))
+                groups = chunk(xs, cast(2, i64))
+                scanned = scan(fn (acc: i64, x: i64) -> add(acc, x), cast(0, i64), xs)
+                buckets = partition(fn (x: i64) -> gt(x, cast(1, i64)), xs)
+                exploded = flat_map(fn (x: i64) -> [x, add(x, cast(10, i64))], xs)
+                flattened = flatten([[cast(1, i64)], [cast(2, i64), cast(3, i64)]])
+                base: Dict[string, i64] = dict_of([("alpha", cast(1, i64))])
+                extended = dict_insert(base, "beta", cast(2, i64))
+                merged = dict_merge(extended, dict_of([("beta", cast(20, i64)), ("gamma", cast(3, i64))]))
+                trimmed = dict_remove(merged, "gamma")
+                "#, &chelis_syntax_host::NativeStack)
+        .expect("surf parse"), &chelis_syntax_host::NativeStack)
         .expect("Surf fixture must desugar"),
     );
     result.expect("collection helper builtins should type check");
@@ -1572,11 +1611,13 @@ fn surf_take_rejects_non_integer_count() {
         &chelis_surf::desugar::desugar_program(
             &chelis_surf::parser::parse_str(
                 r#"
-xs: List[i64] = [cast(1, i64), cast(2, i64)]
-bad = take(xs, "two")
-"#,
+                xs: List[i64] = [cast(1, i64), cast(2, i64)]
+                bad = take(xs, "two")
+                "#,
+                &chelis_syntax_host::NativeStack,
             )
             .expect("surf parse"),
+            &chelis_syntax_host::NativeStack,
         )
         .expect("Surf fixture must desugar"),
     );
@@ -1596,11 +1637,13 @@ fn surf_dict_insert_rejects_value_type_mismatch() {
         &chelis_surf::desugar::desugar_program(
             &chelis_surf::parser::parse_str(
                 r#"
-base: Dict[string, i64] = dict_of([("alpha", cast(1, i64))])
-bad = dict_insert(base, "beta", "two")
-"#,
+                base: Dict[string, i64] = dict_of([("alpha", cast(1, i64))])
+                bad = dict_insert(base, "beta", "two")
+                "#,
+                &chelis_syntax_host::NativeStack,
             )
             .expect("surf parse"),
+            &chelis_syntax_host::NativeStack,
         )
         .expect("Surf fixture must desugar"),
     );
@@ -1622,12 +1665,14 @@ fn surf_dict_merge_rejects_mismatched_dict_value_types() {
         &chelis_surf::desugar::desugar_program(
             &chelis_surf::parser::parse_str(
                 r#"
-lhs: Dict[string, i64] = dict_of([("alpha", cast(1, i64))])
-rhs: Dict[string, string] = dict_of([("beta", "two")])
-bad = dict_merge(lhs, rhs)
-"#,
+                lhs: Dict[string, i64] = dict_of([("alpha", cast(1, i64))])
+                rhs: Dict[string, string] = dict_of([("beta", "two")])
+                bad = dict_merge(lhs, rhs)
+                "#,
+                &chelis_syntax_host::NativeStack,
             )
             .expect("surf parse"),
+            &chelis_syntax_host::NativeStack,
         )
         .expect("Surf fixture must desugar"),
     );
@@ -1647,15 +1692,11 @@ bad = dict_merge(lhs, rhs)
 #[test]
 fn surf_scan_rejects_accumulator_mismatch() {
     let result = check_ir_program(
-        &chelis_surf::desugar::desugar_program(
-            &chelis_surf::parser::parse_str(
-                r#"
-xs: List[i64] = [cast(1, i64)]
-bad = scan(fn (acc: string, x: i64) -> string_concat(acc, to_string(x)), cast(0, i64), xs)
-"#,
-            )
-            .expect("surf parse"),
-        )
+        &chelis_surf::desugar::desugar_program(&chelis_surf::parser::parse_str(r#"
+                xs: List[i64] = [cast(1, i64)]
+                bad = scan(fn (acc: string, x: i64) -> string_concat(acc, to_string(x)), cast(0, i64), xs)
+                "#, &chelis_syntax_host::NativeStack)
+        .expect("surf parse"), &chelis_syntax_host::NativeStack)
         .expect("Surf fixture must desugar"),
     );
     let err = result.expect_err("scan should reject mismatched accumulator type");
@@ -1675,11 +1716,13 @@ fn surf_partition_rejects_non_bool_callback() {
         &chelis_surf::desugar::desugar_program(
             &chelis_surf::parser::parse_str(
                 r#"
-xs: List[i64] = [cast(1, i64)]
-bad = partition(fn (x: i64) -> add(x, cast(1, i64)), xs)
-"#,
+                xs: List[i64] = [cast(1, i64)]
+                bad = partition(fn (x: i64) -> add(x, cast(1, i64)), xs)
+                "#,
+                &chelis_syntax_host::NativeStack,
             )
             .expect("surf parse"),
+            &chelis_syntax_host::NativeStack,
         )
         .expect("Surf fixture must desugar"),
     );
@@ -1701,11 +1744,13 @@ fn surf_flat_map_rejects_non_list_callback() {
         &chelis_surf::desugar::desugar_program(
             &chelis_surf::parser::parse_str(
                 r#"
-xs: List[i64] = [cast(1, i64)]
-bad = flat_map(fn (x: i64) -> add(x, cast(1, i64)), xs)
-"#,
+                xs: List[i64] = [cast(1, i64)]
+                bad = flat_map(fn (x: i64) -> add(x, cast(1, i64)), xs)
+                "#,
+                &chelis_syntax_host::NativeStack,
             )
             .expect("surf parse"),
+            &chelis_syntax_host::NativeStack,
         )
         .expect("Surf fixture must desugar"),
     );
@@ -1725,11 +1770,13 @@ fn surf_flatten_rejects_non_nested_list_input() {
         &chelis_surf::desugar::desugar_program(
             &chelis_surf::parser::parse_str(
                 r#"
-xs: List[i64] = [cast(1, i64)]
-bad = flatten(xs)
-"#,
+                xs: List[i64] = [cast(1, i64)]
+                bad = flatten(xs)
+                "#,
+                &chelis_syntax_host::NativeStack,
             )
             .expect("surf parse"),
+            &chelis_syntax_host::NativeStack,
         )
         .expect("Surf fixture must desugar"),
     );
@@ -1749,11 +1796,13 @@ fn surf_dict_remove_rejects_mismatched_key_type() {
         &chelis_surf::desugar::desugar_program(
             &chelis_surf::parser::parse_str(
                 r#"
-base: Dict[string, i64] = dict_of([("alpha", cast(1, i64))])
-bad = dict_remove(base, cast(7, i64))
-"#,
+                base: Dict[string, i64] = dict_of([("alpha", cast(1, i64))])
+                bad = dict_remove(base, cast(7, i64))
+                "#,
+                &chelis_syntax_host::NativeStack,
             )
             .expect("surf parse"),
+            &chelis_syntax_host::NativeStack,
         )
         .expect("Surf fixture must desugar"),
     );
@@ -1774,11 +1823,13 @@ fn surf_chunk_rejects_non_integer_size() {
         &chelis_surf::desugar::desugar_program(
             &chelis_surf::parser::parse_str(
                 r#"
-xs: List[i64] = [cast(1, i64)]
-bad = chunk(xs, "two")
-"#,
+                xs: List[i64] = [cast(1, i64)]
+                bad = chunk(xs, "two")
+                "#,
+                &chelis_syntax_host::NativeStack,
             )
             .expect("surf parse"),
+            &chelis_syntax_host::NativeStack,
         )
         .expect("Surf fixture must desugar"),
     );
@@ -1797,8 +1848,10 @@ bad = chunk(xs, "two")
 // ------------------------------------------------------------------
 
 fn ir_errors_from_surf(src: &str) -> Vec<CheckError> {
-    let decls = chelis_surf::parser::parse_str(src).expect("surf parse");
-    let exprs = chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar");
+    let decls =
+        chelis_surf::parser::parse_str(src, &chelis_syntax_host::NativeStack).expect("surf parse");
+    let exprs = chelis_surf::desugar::desugar_program(&decls, &chelis_syntax_host::NativeStack)
+        .expect("Surf fixture must desugar");
     infer_ir_program(&exprs).errors
 }
 
@@ -2578,9 +2631,10 @@ fn sum_result_widening_rejections_name_the_rule_and_the_repair() {
         &message_of("def f[p: Int](x: tensor[3, p]) -> tensor[3, p] = cumsum(x, 0i32)\n"),
         &generic,
     );
-    let hole = chelis_deep::parser::parse_str(include_str!(
-        "../../../../chelis-cli/tests/fixtures/sum_result_holes/g1h.dp"
-    ))
+    let hole = chelis_deep::parser::parse_str(
+        include_str!("../../../../chelis-cli/tests/fixtures/sum_result_holes/g1h.dp"),
+        &chelis_syntax_host::NativeStack,
+    )
     .expect("deep parse");
     let errors = match check_ir_program(&hole) {
         Ok(_) => Vec::new(),

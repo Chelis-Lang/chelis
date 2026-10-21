@@ -8,7 +8,11 @@ use chelis_types::errors::{CheckError, CheckErrorKind};
 use chelis_types::{check_ir_program, check_typed_program};
 
 fn desugared(source: &str) -> Vec<Expr> {
-    desugar_program(&parse_str(source).expect("Surf parses")).expect("Surf desugars")
+    desugar_program(
+        &parse_str(source, &chelis_syntax_host::NativeStack).expect("Surf parses"),
+        &chelis_syntax_host::NativeStack,
+    )
+    .expect("Surf desugars")
 }
 
 fn errors(source: &str) -> Vec<CheckError> {

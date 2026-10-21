@@ -28260,8 +28260,13 @@ mod tests {
             let source = format!(
                 "out = fold(fn (acc: List[tensor[3, f32]], i: {item_type}) -> {body}, [to_tensor([1.0f32, 2.0f32, 3.0f32])], {items})\n"
             );
-            let declarations = chelis_surf::parser::parse_str(&source).unwrap();
-            let deep = chelis_surf::desugar::desugar_program(&declarations).unwrap();
+            let declarations =
+                chelis_surf::parser::parse_str(&source, &chelis_syntax_host::NativeStack).unwrap();
+            let deep = chelis_surf::desugar::desugar_program(
+                &declarations,
+                &chelis_syntax_host::NativeStack,
+            )
+            .unwrap();
             let checked = chelis_types::check_ir_program(&deep).unwrap();
             let function = checked.exprs().iter().find_map(find_fn).unwrap();
             stationary_accumulator_proof(function, checked.adt_registry())
@@ -28567,7 +28572,7 @@ mod tests {
     #[test]
     fn inferred_type_holes_are_not_authored_binders() {
         let parse = |source: &str| {
-            chelis_deep::parser::parse_str(source)
+            chelis_deep::parser::parse_str(source, &chelis_syntax_host::NativeStack)
                 .expect("Deep type parses")
                 .into_iter()
                 .next()
@@ -28591,7 +28596,7 @@ mod tests {
     #[test]
     fn retained_body_respells_dimension_binders_in_callback_annotations() {
         let parse = |source: &str| {
-            chelis_deep::parser::parse_str(source)
+            chelis_deep::parser::parse_str(source, &chelis_syntax_host::NativeStack)
                 .expect("Deep type parses")
                 .into_iter()
                 .next()
@@ -30131,7 +30136,8 @@ def main(x: tensor[4, f32], rate: f32) -> tensor[4, f32] =
     }
 
     fn parse_and_check(src: &str) -> CheckedProgram {
-        let exprs = chelis_deep::parser::parse_str(src).expect("parse failed");
+        let exprs = chelis_deep::parser::parse_str(src, &chelis_syntax_host::NativeStack)
+            .expect("parse failed");
         let checked = chelis_types::check_ir_program(&exprs)
             .unwrap_or_else(|result| panic!("IR check failed: {:?}", result.errors));
         let checked = chelis_effects::check_program(&checked)
@@ -30141,9 +30147,10 @@ def main(x: tensor[4, f32], rate: f32) -> tensor[4, f32] =
     }
 
     fn surf_check(src: &str) -> CheckedProgram {
-        let decls = chelis_surf::parser::parse_str(src).expect("surf parse failed");
-        let deep =
-            chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar");
+        let decls = chelis_surf::parser::parse_str(src, &chelis_syntax_host::NativeStack)
+            .expect("surf parse failed");
+        let deep = chelis_surf::desugar::desugar_program(&decls, &chelis_syntax_host::NativeStack)
+            .expect("Surf fixture must desugar");
         chelis_types::check_ir_program(&deep)
             .unwrap_or_else(|result| panic!("IR check failed: {:?}", result.errors))
     }
@@ -31291,8 +31298,12 @@ def main(x: tensor[4, f32], rate: f32) -> tensor[4, f32] =
         let mut programs = sources
             .iter()
             .filter_map(|source| {
-                let decls = chelis_surf::parser::parse_str(source).ok()?;
-                let deep = chelis_surf::desugar::desugar_program(&decls).ok()?;
+                let decls =
+                    chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+                        .ok()?;
+                let deep =
+                    chelis_surf::desugar::desugar_program(&decls, &chelis_syntax_host::NativeStack)
+                        .ok()?;
                 chelis_types::check_ir_program(&deep).ok()
             })
             .collect::<Vec<_>>();
@@ -31550,10 +31561,13 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
     /// and no dtype can be chosen for it downstream.
     #[test]
     fn unresolved_empty_to_tensor_is_rejected_at_check_before_lowering() {
-        let decls = chelis_surf::parser::parse_str("result = numel(to_tensor([]))\n")
-            .expect("surf parse failed");
-        let deep =
-            chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar");
+        let decls = chelis_surf::parser::parse_str(
+            "result = numel(to_tensor([]))\n",
+            &chelis_syntax_host::NativeStack,
+        )
+        .expect("surf parse failed");
+        let deep = chelis_surf::desugar::desugar_program(&decls, &chelis_syntax_host::NativeStack)
+            .expect("Surf fixture must desugar");
         let rejected = chelis_types::check_ir_program(&deep)
             .expect_err("an empty tensor without a checked dtype must be rejected before lowering");
         assert!(
@@ -31664,7 +31678,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
     // before the coarse arg-ty fallback erases it to f32.
 
     fn parse_deep_app(src: &str) -> Expr {
-        chelis_deep::parser::parse_str(src)
+        chelis_deep::parser::parse_str(src, &chelis_syntax_host::NativeStack)
             .expect("parse failed")
             .into_iter()
             .next()
@@ -32648,6 +32662,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
     fn host_type_parser_unwraps_borrowed_tensor_refs() {
         let expr = chelis_deep::parser::parse_str(
             "(t-ref {} (t-tensor {} (d-name {} n) (t-prim {} f32)))",
+            &chelis_syntax_host::NativeStack,
         )
         .expect("parse ref type")
         .into_iter()
@@ -34108,7 +34123,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
     /// Parse one Deep expression into the stamped carrier that
     /// `lower_host_expr_kind` dispatches on.
     fn deep_expr(source: &str) -> Expr {
-        chelis_deep::parser::parse_str(source)
+        chelis_deep::parser::parse_str(source, &chelis_syntax_host::NativeStack)
             .expect("parse failed")
             .into_iter()
             .next()
@@ -34845,8 +34860,10 @@ mod record_hoist_binder_vocabulary_tests {
     /// name -- fell through undecoded. An oracle over a representation nobody
     /// emits proves nothing about the representation everybody emits.
     fn deep_program(source: &str) -> Vec<Expr> {
-        let decls = chelis_surf::parser::parse_str(source).expect("surf parse");
-        chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar")
+        let decls = chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+            .expect("surf parse");
+        chelis_surf::desugar::desugar_program(&decls, &chelis_syntax_host::NativeStack)
+            .expect("Surf fixture must desugar")
     }
 
     /// The body of the named `def`, which is the subtree the hoist walks.
@@ -35150,7 +35167,7 @@ mod match_arm_substitution_tests {
     use super::*;
 
     fn deep(source: &str) -> Expr {
-        chelis_deep::parser::parse_str(source)
+        chelis_deep::parser::parse_str(source, &chelis_syntax_host::NativeStack)
             .expect("Deep fixture parses")
             .into_iter()
             .next()
@@ -36396,8 +36413,11 @@ mod accumulator_delta_tests {
         let source = format!(
             "out = fold(fn (acc: List[tensor[3, f32]], i: i64) -> {body}, [to_tensor([1.0f32, 2.0f32, 3.0f32])], range(0i64, 2i64))\n"
         );
-        let declarations = chelis_surf::parser::parse_str(&source).unwrap();
-        let deep = chelis_surf::desugar::desugar_program(&declarations).unwrap();
+        let declarations =
+            chelis_surf::parser::parse_str(&source, &chelis_syntax_host::NativeStack).unwrap();
+        let deep =
+            chelis_surf::desugar::desugar_program(&declarations, &chelis_syntax_host::NativeStack)
+                .unwrap();
         let checked = chelis_types::check_ir_program(&deep).unwrap();
         accumulator_delta_proof(
             checked.exprs().iter().find_map(find_fn).unwrap(),
@@ -36463,8 +36483,11 @@ mod accumulator_delta_tests {
     #[test]
     fn lexical_identity_undo_preserves_sibling_constructor_components() {
         let source = "type Node[T] =\n | End { v: T }\n | Link { values: List[T], next: Node[T] }\ndef step(acc: Node[tensor[3, f32]], i: i64) -> Node[tensor[*, f32]] = { old = acc\n Link { values: { old = [to_tensor([1.0f32, 2.0f32, 3.0f32])]\n old }, next: old } }\nout = 3i64\n";
-        let declarations = chelis_surf::parser::parse_str(source).unwrap();
-        let deep = chelis_surf::desugar::desugar_program(&declarations).unwrap();
+        let declarations =
+            chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack).unwrap();
+        let deep =
+            chelis_surf::desugar::desugar_program(&declarations, &chelis_syntax_host::NativeStack)
+                .unwrap();
         let checked = chelis_types::check_ir_program(&deep).unwrap();
         let session = HostLoweringSession::new(&checked);
         let (_, callee) = session.def_named("step").unwrap();
@@ -36517,6 +36540,7 @@ mod accumulator_delta_tests {
         assert!(proof.validates_pattern(proof.pattern()));
         let changed = chelis_deep::parser::parse_str(
             "(t-adt {} List (t-tensor {} (d-lit {} 5) (t-prim {} f32)))",
+            &chelis_syntax_host::NativeStack,
         )
         .unwrap();
         let changed = crate::claim_pattern::ClaimPattern::derive(
@@ -36648,8 +36672,11 @@ mod accumulator_delta_nominal_tests {
             node.children_slice().iter().find_map(find_fn)
         }
         let source = "type Chain[n] =\n | End { v: tensor[n, f32] }\n | Link { v: tensor[n, f32], next: Chain[n] }\ndef step[n](acc: Chain[n], i: i64) -> Chain[n] = Link { v: insert(scalar_to_tensor(0.0f32), 0i32, add(i, 3i64)), next: acc }\n";
-        let declarations = chelis_surf::parser::parse_str(source).unwrap();
-        let deep = chelis_surf::desugar::desugar_program(&declarations).unwrap();
+        let declarations =
+            chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack).unwrap();
+        let deep =
+            chelis_surf::desugar::desugar_program(&declarations, &chelis_syntax_host::NativeStack)
+                .unwrap();
         let checked = chelis_types::check_ir_program(&deep).unwrap();
         let proof = accumulator_construction_proof(
             checked.exprs().iter().find_map(find_fn).unwrap(),
@@ -36685,8 +36712,11 @@ mod accumulator_delta_nominal_tests {
             node.children_slice().iter().find_map(find_fn)
         }
         let source = "type Chain[n] =\n | End { v: tensor[n, f32] }\n | Link { v: tensor[n, f32], next: Chain[n] }\nout = fold(fn (acc: Chain[3], i: i64) -> Link { v: to_tensor([1.0f32, 2.0f32, 3.0f32]), next: acc }, End { v: to_tensor([1.0f32, 2.0f32, 3.0f32]) }, range(0i64, 2i64))\n";
-        let declarations = chelis_surf::parser::parse_str(source).unwrap();
-        let deep = chelis_surf::desugar::desugar_program(&declarations).unwrap();
+        let declarations =
+            chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack).unwrap();
+        let deep =
+            chelis_surf::desugar::desugar_program(&declarations, &chelis_syntax_host::NativeStack)
+                .unwrap();
         let checked = chelis_types::check_ir_program(&deep).unwrap();
         let proof = accumulator_delta_proof(
             checked.exprs().iter().find_map(find_fn).unwrap(),
@@ -36736,8 +36766,11 @@ mod accumulator_delta_identity_tests {
             node.children_slice().iter().find_map(find_fn)
         }
         let source = "type Chain[n] =\n | End { v: tensor[n, f32] }\n | Link { v: tensor[n, f32], next: Chain[n] }\ntype Other[n] =\n | Link { v: tensor[n, f32], next: Chain[n] }\ndef wrong(acc: Chain[3], i: i64) -> Other[3] = Link { v: to_tensor([1.0f32, 2.0f32, 3.0f32]), next: acc }\n";
-        let declarations = chelis_surf::parser::parse_str(source).unwrap();
-        let deep = chelis_surf::desugar::desugar_program(&declarations).unwrap();
+        let declarations =
+            chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack).unwrap();
+        let deep =
+            chelis_surf::desugar::desugar_program(&declarations, &chelis_syntax_host::NativeStack)
+                .unwrap();
         let checked = chelis_types::check_ir_program(&deep).unwrap();
         assert!(
             accumulator_delta_proof(
@@ -36784,8 +36817,13 @@ mod accumulator_delta_type_witness_tests {
             let source = format!(
                 "def run[{binders}](seed: List[{element}], steps: i64) -> i64 = len(fold(fn (acc: List[{element}], i: i64) -> append(acc, index(seed, 0i64)), seed, range(0i64, steps)))\n"
             );
-            let declarations = chelis_surf::parser::parse_str(&source).unwrap();
-            let deep = chelis_surf::desugar::desugar_program(&declarations).unwrap();
+            let declarations =
+                chelis_surf::parser::parse_str(&source, &chelis_syntax_host::NativeStack).unwrap();
+            let deep = chelis_surf::desugar::desugar_program(
+                &declarations,
+                &chelis_syntax_host::NativeStack,
+            )
+            .unwrap();
             let checked = match chelis_types::check_ir_program(&deep) {
                 Ok(checked) => checked,
                 Err(errors) if element.contains("..") => {
@@ -36836,8 +36874,11 @@ mod accumulator_forwarding_wrapper_tests {
         let source = format!(
             "def step(acc: List[tensor[3, f32]], i: i64) -> List[tensor[*, f32]] = append(acc, to_tensor([1.0f32, 2.0f32, 3.0f32]))\nout = fold(fn (acc: List[tensor[*, f32]], i: i64) -> {body}, [to_tensor([1.0f32, 2.0f32, 3.0f32])], range(0i64, 2i64))\n"
         );
-        let declarations = chelis_surf::parser::parse_str(&source).unwrap();
-        let deep = chelis_surf::desugar::desugar_program(&declarations).unwrap();
+        let declarations =
+            chelis_surf::parser::parse_str(&source, &chelis_syntax_host::NativeStack).unwrap();
+        let deep =
+            chelis_surf::desugar::desugar_program(&declarations, &chelis_syntax_host::NativeStack)
+                .unwrap();
         let checked = chelis_types::check_ir_program(&deep).unwrap();
         let session = HostLoweringSession::new(&checked);
         let (_, callee) = session.def_named("step").unwrap();
@@ -36851,8 +36892,11 @@ mod accumulator_forwarding_wrapper_tests {
         let source = format!(
             "def step(acc: List[tensor[3, f32]], i: i64) -> List[tensor[*, f32]] = append(acc, to_tensor([1.0f32, 2.0f32, 3.0f32]))\nout = fold(fn (acc: List[tensor[*, f32]], i: i64) -> {body}, [to_tensor([1.0f32, 2.0f32, 3.0f32])], range(0i64, 2i64))\n"
         );
-        let declarations = chelis_surf::parser::parse_str(&source).unwrap();
-        let deep = chelis_surf::desugar::desugar_program(&declarations).unwrap();
+        let declarations =
+            chelis_surf::parser::parse_str(&source, &chelis_syntax_host::NativeStack).unwrap();
+        let deep =
+            chelis_surf::desugar::desugar_program(&declarations, &chelis_syntax_host::NativeStack)
+                .unwrap();
         let checked = chelis_types::check_ir_program(&deep).unwrap();
         bound_accumulator_forwarding_plan(checked.exprs().last().and_then(find_lambda).unwrap())
     }
@@ -37111,8 +37155,11 @@ mod accumulator_forwarding_wrapper_tests {
     #[test]
     fn forwarding_plan_retains_the_application_beneath_legacy_metadata() {
         let source = "def step(acc: List[tensor[3, f32]], i: i64) -> List[tensor[*, f32]] = acc\nout = fold(fn (acc: List[tensor[*, f32]], i: i64) -> step(acc, i), [to_tensor([1.0f32, 2.0f32, 3.0f32])], range(0i64, 1i64))\n";
-        let declarations = chelis_surf::parser::parse_str(source).unwrap();
-        let deep = chelis_surf::desugar::desugar_program(&declarations).unwrap();
+        let declarations =
+            chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack).unwrap();
+        let deep =
+            chelis_surf::desugar::desugar_program(&declarations, &chelis_syntax_host::NativeStack)
+                .unwrap();
         let checked = chelis_types::check_ir_program(&deep).unwrap();
         let callback = checked.exprs().last().and_then(find_lambda).unwrap();
         let node = as_node(callback).unwrap();

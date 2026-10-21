@@ -267,14 +267,17 @@ pub fn parse(request: ParseRequest) -> Result<ParseResult> {
 pub fn desugar(request: DesugarRequest) -> Result<DesugarResult> {
     let _fp_env = chelis_runtime::FpEnvGuard::enter();
     let decls = parse_surf(&request.source)?;
-    let deep_exprs = chelis_surf::desugar::desugar_program(&decls).map_err(|error| {
-        stage_error_with_span(
-            "desugar",
-            error.to_string(),
-            GeneralKind::TypeMismatch,
-            deep_span_to_diagnostic(error.span()),
-        )
-    })?;
+    let deep_exprs =
+        chelis_surf::desugar::desugar_program(&decls, &chelis_syntax_host::NativeStack).map_err(
+            |error| {
+                stage_error_with_span(
+                    "desugar",
+                    error.to_string(),
+                    GeneralKind::TypeMismatch,
+                    deep_span_to_diagnostic(error.span()),
+                )
+            },
+        )?;
     Ok(DesugarResult {
         deep_text: chelis_deep::printer::print_canonical(&deep_exprs),
         deep_ast: deep_exprs
@@ -535,8 +538,8 @@ pub fn add_property(request: AddPropertyRequest) -> Result<AddPropertyResult> {
 /// explicitly afterwards, so an authoring request naming an unknown tag is
 /// still rejected at its own boundary rather than reaching a rewriter.
 fn parse_deep_authoring_module(stage: &str, source: &str) -> Result<Vec<DeepExpr>> {
-    let exprs =
-        chelis_deep::parse_and_stamp_file(source).map_err(|err| deep_ingress_error(stage, &err))?;
+    let exprs = chelis_deep::parse_and_stamp_file(source, &chelis_syntax_host::NativeStack)
+        .map_err(|err| deep_ingress_error(stage, &err))?;
     require_valid_deep(stage, &exprs)?;
     Ok(exprs)
 }
@@ -544,8 +547,8 @@ fn parse_deep_authoring_module(stage: &str, source: &str) -> Result<Vec<DeepExpr
 /// Stamped declaration-bundle text ingress for the authoring APIs
 /// (chelis#1088). Every top-level form must be a declaration.
 fn parse_deep_authoring_decls(stage: &str, source: &str) -> Result<Vec<DeepExpr>> {
-    let exprs =
-        chelis_deep::parse_and_stamp(source).map_err(|err| deep_ingress_error(stage, &err))?;
+    let exprs = chelis_deep::parse_and_stamp(source, &chelis_syntax_host::NativeStack)
+        .map_err(|err| deep_ingress_error(stage, &err))?;
     require_valid_deep(stage, &exprs)?;
     Ok(exprs)
 }
@@ -557,8 +560,9 @@ fn parse_one_deep_authoring_tagged(
     source: &str,
     expected: DeepTag,
 ) -> Result<DeepExpr> {
-    let exprs = chelis_deep::parse_and_stamp_tagged(source, expected)
-        .map_err(|err| deep_ingress_error(stage, &err))?;
+    let exprs =
+        chelis_deep::parse_and_stamp_tagged(source, expected, &chelis_syntax_host::NativeStack)
+            .map_err(|err| deep_ingress_error(stage, &err))?;
     require_valid_deep(stage, &exprs)?;
     exactly_one_deep(stage, field, exprs)
 }
@@ -571,8 +575,9 @@ fn parse_one_deep_authoring_decl(stage: &str, field: &str, source: &str) -> Resu
 
 /// Stamped ingress for a field that must be exactly one runtime expression.
 fn parse_one_deep_runtime_expr(stage: &str, field: &str, source: &str) -> Result<DeepExpr> {
-    let exprs = chelis_deep::parse_and_stamp_runtime_exprs(source)
-        .map_err(|err| deep_ingress_error(stage, &err))?;
+    let exprs =
+        chelis_deep::parse_and_stamp_runtime_exprs(source, &chelis_syntax_host::NativeStack)
+            .map_err(|err| deep_ingress_error(stage, &err))?;
     require_valid_deep(stage, &exprs)?;
     exactly_one_deep(stage, field, exprs)
 }
@@ -3805,9 +3810,11 @@ pub fn validate(request: ValidateRequest) -> Result<ValidateResult> {
 pub fn decompile(request: DecompileRequest) -> Result<DecompileResult> {
     let _fp_env = chelis_runtime::FpEnvGuard::enter();
     let exprs = parse_deep(&request.source)?;
-    let surf_text = chelis_surf::decompile::try_decompile_program(&exprs).map_err(|error| {
-        stage_error("decompile", error.to_string(), GeneralKind::ValidationError)
-    })?;
+    let surf_text =
+        chelis_surf::decompile::try_decompile_program(&exprs, &chelis_syntax_host::NativeStack)
+            .map_err(|error| {
+                stage_error("decompile", error.to_string(), GeneralKind::ValidationError)
+            })?;
     Ok(DecompileResult {
         surf_text: canonicalize_decompiled_surf(&surf_text)?,
     })
@@ -4705,7 +4712,7 @@ fn compiled_from_pipeline_outcome(
 /// real parse diagnostic, unchanged from pre-#816 behavior.
 pub fn surf_source_has_import(source: &str) -> bool {
     let _fp_env = chelis_runtime::FpEnvGuard::enter();
-    match chelis_surf::parser::parse_str(source) {
+    match chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack) {
         Ok(decls) => flatten_module_decls(&decls)
             .iter()
             .any(|decl| matches!(decl, Decl::Import { .. })),
@@ -4714,7 +4721,7 @@ pub fn surf_source_has_import(source: &str) -> bool {
 }
 
 fn parse_surf(source: &str) -> Result<Vec<Decl>> {
-    chelis_surf::parser::parse_str(source).map_err(|err| {
+    chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack).map_err(|err| {
         stage_error_with_span(
             "parse",
             err.to_string(),
@@ -4733,7 +4740,8 @@ fn parse_surf(source: &str) -> Result<Vec<Decl>> {
 /// an unknown head stays an `Expr::UnknownForm` so the wire AST preserves it
 /// and the checker owns the rejection.
 fn parse_deep(source: &str) -> Result<Vec<DeepExpr>> {
-    chelis_deep::parse_and_stamp_file(source).map_err(|err| deep_ingress_error("parse", &err))
+    chelis_deep::parse_and_stamp_file(source, &chelis_syntax_host::NativeStack)
+        .map_err(|err| deep_ingress_error("parse", &err))
 }
 
 /// Render a stamped-ingress failure as a staged compiler error.
@@ -4758,14 +4766,16 @@ fn deep_ingress_error(stage: &str, error: &chelis_deep::StampOrParseError) -> Co
 }
 
 fn canonicalize_decompiled_surf(source: &str) -> Result<String> {
-    let decls = chelis_surf::parser::parse_str(source).map_err(|err| {
-        stage_error_with_span(
-            "decompile",
-            format!("decompiler emitted Surf that the parser rejected: {err}"),
-            GeneralKind::SurfParseError,
-            Some(parse_error_span_surf(source, &err)),
-        )
-    })?;
+    let decls = chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack).map_err(
+        |err| {
+            stage_error_with_span(
+                "decompile",
+                format!("decompiler emitted Surf that the parser rejected: {err}"),
+                GeneralKind::SurfParseError,
+                Some(parse_error_span_surf(source, &err)),
+            )
+        },
+    )?;
     Ok(chelis_surf::format::format_program(&decls))
 }
 
@@ -8132,9 +8142,11 @@ mod tests {
     fn a_replaced_definitions_key_parameter_stays_its_own_on_the_wire() {
         let source =
             "def keep(k: key, x: tensor[4, f32]) -> tensor[4, f32] = dropout(k, x, 0.5f32)\n";
-        let exprs =
-            chelis_surf::desugar::desugar_program(&chelis_surf::parser::parse_str(source).unwrap())
-                .unwrap();
+        let exprs = chelis_surf::desugar::desugar_program(
+            &chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack).unwrap(),
+            &chelis_syntax_host::NativeStack,
+        )
+        .unwrap();
         let (type_env, library) = chelis_types::build_compiled_library_context(&exprs).unwrap();
         let library = chelis_effects::check_program(&library).unwrap();
         let library = chelis_types::check_linearity(&library).unwrap();
@@ -8414,13 +8426,15 @@ mod tests {
     fn native_wire_projection_preserves_live_local_ascription_claims() {
         let declarations = chelis_surf::parser::parse_str(
             "def f(x: tensor[*, f32]) -> tensor[*, f32] = {\n  \
-             y: tensor[2, f32] = pad(x, [[0i64, 0i64]], 0.0f32)\n  \
-             y\n\
-             }\n",
+         y: tensor[2, f32] = pad(x, [[0i64, 0i64]], 0.0f32)\n  \
+         y\n\
+         }\n",
+            &chelis_syntax_host::NativeStack,
         )
         .unwrap();
-        let deep = chelis_surf::desugar::desugar_program(&declarations)
-            .expect("Surf fixture must desugar");
+        let deep =
+            chelis_surf::desugar::desugar_program(&declarations, &chelis_syntax_host::NativeStack)
+                .expect("Surf fixture must desugar");
         let checked = chelis_types::check_ir_program(&deep).unwrap();
         let dag = chelis_ir::host::lower_named_tensor_entry_dag(&checked, "f").unwrap();
         let projected = wire_dag(&dag).unwrap();
@@ -8444,14 +8458,16 @@ mod tests {
     fn native_wire_projection_preserves_local_claim_runtime_branch_activation() {
         let declarations = chelis_surf::parser::parse_str(
             "def f(flag: bool, x: tensor[*, f32]) -> tensor[*, f32] = \
-             if flag then {\n  \
-               y: tensor[2, f32] = pad(x, [[0i64, 0i64]], 0.0f32)\n  \
-               y\n\
-             } else x\n",
+         if flag then {\n  \
+           y: tensor[2, f32] = pad(x, [[0i64, 0i64]], 0.0f32)\n  \
+           y\n\
+         } else x\n",
+            &chelis_syntax_host::NativeStack,
         )
         .unwrap();
-        let deep = chelis_surf::desugar::desugar_program(&declarations)
-            .expect("Surf fixture must desugar");
+        let deep =
+            chelis_surf::desugar::desugar_program(&declarations, &chelis_syntax_host::NativeStack)
+                .expect("Surf fixture must desugar");
         let checked = chelis_types::check_ir_program(&deep).unwrap();
         let dag = chelis_ir::host::lower_named_tensor_entry_dag(&checked, "f").unwrap();
         let projected = wire_dag(&dag).unwrap();
@@ -8551,7 +8567,7 @@ mod tests {
     #[test]
     fn a_surf_lex_error_retains_its_point() {
         let source = "x=\"unterminated";
-        let error = chelis_surf::parser::parse_str(source)
+        let error = chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack)
             .expect_err("an unterminated string is a lex error");
         assert!(
             matches!(error, chelis_surf::parser::ParseError::Lex(_)),
@@ -8580,7 +8596,7 @@ mod tests {
         let source = "(x \"unterminated";
         // `parse_raw_str` is the lex-then-parse entry; the stamped entries
         // wrap the same `ParseError` in `StampOrParseError`.
-        let error = chelis_deep::parser::parse_raw_str(source)
+        let error = chelis_deep::parser::parse_raw_str(source, &chelis_syntax_host::NativeStack)
             .expect_err("an unterminated string is a lex error");
         assert!(
             matches!(error, chelis_deep::parser::ParseError::Lex(_)),
@@ -8640,21 +8656,31 @@ mod tests {
     #[test]
     fn opaque_extension_wire_is_explicit_and_preserves_scalar_spelling() {
         let payload = "{type: false, type: (var {}), value: 1e-3f32}";
-        let exprs = chelis_deep::parse_and_stamp_file(&format!(
-            "(def {{tool_data: {payload}}} f (lit {{}} 1))"
-        ))
+        let exprs = chelis_deep::parse_and_stamp_file(
+            &format!("(def {{tool_data: {payload}}} f (lit {{}} 1))"),
+            &chelis_syntax_host::NativeStack,
+        )
         .unwrap();
         let wire = serde_json::to_value(wire_deep_expr(&exprs[0])).unwrap();
         let text = wire.to_string();
         assert!(text.contains("extension_data"), "{text}");
         assert!(text.contains(payload), "{text}");
-        assert!(chelis_deep::parse_and_stamp_file("(def {type: false} f (lit {} 1))").is_err());
+        assert!(
+            chelis_deep::parse_and_stamp_file(
+                "(def {type: false} f (lit {} 1))",
+                &chelis_syntax_host::NativeStack
+            )
+            .is_err()
+        );
     }
 
     #[test]
     fn typed_deep_node_wire_bridge_preserves_the_complete_node_shape() {
-        let exprs = chelis_deep::parse_and_stamp_file("(def {doc: \"test\"} root (var {} value))")
-            .expect("typed Deep must parse and stamp");
+        let exprs = chelis_deep::parse_and_stamp_file(
+            "(def {doc: \"test\"} root (var {} value))",
+            &chelis_syntax_host::NativeStack,
+        )
+        .expect("typed Deep must parse and stamp");
         assert!(matches!(exprs.first(), Some(DeepExpr::Node(_, _))));
 
         let wire = wire_deep_expr(&exprs[0]).expect("finite Deep source must encode");

@@ -116,7 +116,7 @@ fn missing_and_malformed_metadata_are_distinct_decode_failures() {
 }
 
 fn parse_one(source: &str) -> chelis_deep::ast::Expr {
-    parse_str(source)
+    parse_str(source, &chelis_syntax_host::NativeStack)
         .expect("valid Deep fixture")
         .into_iter()
         .next()
@@ -245,7 +245,7 @@ fn raw_decoder_rejects_malformed_and_unknown_syntax_without_a_term() {
     // The parser rejects a zero-child `t-prim` before it can reach the
     // decoder, and a stamped node cannot carry one.
     let span = Span::new(0, 0);
-    assert!(parse_str("(t-prim {})").is_err());
+    assert!(parse_str("(t-prim {})", &chelis_syntax_host::NativeStack).is_err());
 
     let unknown = parse_one("(t-prim {} float24)");
     assert_eq!(
@@ -261,7 +261,7 @@ fn raw_decoder_rejects_malformed_and_unknown_syntax_without_a_term() {
         Err(HostTypeDecodeError::MissingTypeMetadata)
     );
 
-    assert!(parse_str("(lit {type: nope} 1)").is_err());
+    assert!(parse_str("(lit {type: nope} 1)", &chelis_syntax_host::NativeStack).is_err());
     // Invalid type payloads cannot enter an AST annotation, including via serde.
     assert!(
         chelis_deep::annotations::TypeSyntax::try_new(Expr::Atom(Atom::Name("nope".into()), span),)
@@ -387,6 +387,12 @@ fn nominal_dimension_arguments_retain_exact_kind_and_identity() {
         decode_host_type(&parse_one("(t-adt {} Leaf (d-lit {} 3))")).unwrap(),
         decode_host_type(&parse_one("(t-adt {} Leaf (t-prim {} i64))")).unwrap()
     );
-    assert!(parse_str("(t-adt {} Leaf (d-rank {} rank))").is_err());
+    assert!(
+        parse_str(
+            "(t-adt {} Leaf (d-rank {} rank))",
+            &chelis_syntax_host::NativeStack
+        )
+        .is_err()
+    );
     assert!(decode_host_type(&parse_one("(t-adt {} Leaf (d-lit {} -1))")).is_err());
 }

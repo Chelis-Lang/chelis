@@ -20,7 +20,8 @@ use chelis_deep::{Atom, DeepTag, Expr, StampErrorKind, StampOrParseError};
 
 /// Stamp a `.dp` program, panicking with the error on failure.
 fn stamp(source: &str) -> Vec<Expr> {
-    parse_and_stamp_file(source).unwrap_or_else(|e| panic!("fixture must stamp: {e}"))
+    parse_and_stamp_file(source, &chelis_syntax_host::NativeStack)
+        .unwrap_or_else(|e| panic!("fixture must stamp: {e}"))
 }
 
 /// Descend into a stamped `Node`, returning the child at `index`.
@@ -132,7 +133,7 @@ fn bare_name_at_expr_slot_rejects_citing_role_rule() {
     // [03-ROLE-2]: a bare identifier at an expression position is an
     // ingress rejection that names the identifier and the `(var {} ...)`
     // remediation spelling.
-    let err = parse_and_stamp_file("(def {} f oops)")
+    let err = parse_and_stamp_file("(def {} f oops)", &chelis_syntax_host::NativeStack)
         .expect_err("a bare name at a RuntimeExpr slot must reject at ingress");
     let StampOrParseError::Stamp(stamp_err) = err else {
         panic!("the rejection is a stamp error, got {err:?}");

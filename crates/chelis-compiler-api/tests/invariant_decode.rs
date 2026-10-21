@@ -51,8 +51,10 @@ def wrap(x: f32, w: f32) -> Pair = Pair { prob: make(x), weight: w }
 /// Desugar Surf to the Deep program exprs the chokepoint needs (deftype
 /// declarations supply the field tables and invariants).
 fn program_exprs(source: &str) -> Vec<Expr> {
-    let decls = chelis_surf::parser::parse_str(source).expect("surf parse");
-    chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar")
+    let decls = chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+        .expect("surf parse");
+    chelis_surf::desugar::desugar_program(&decls, &chelis_syntax_host::NativeStack)
+        .expect("Surf fixture must desugar")
 }
 
 /// Evaluate `source` and return the `ExecutionValue` bound to top-level
@@ -539,7 +541,7 @@ fn constant_referencing_invariant_rejects_violating_payload() {
 /// The decode chokepoint accepts hand-authored Deep, so this exercises the
 /// surface a Surf desugar cannot produce.
 fn program_exprs_deep(source: &str) -> Vec<Expr> {
-    chelis_deep::parser::parse_str(source).expect("deep parse")
+    chelis_deep::parser::parse_str(source, &chelis_syntax_host::NativeStack).expect("deep parse")
 }
 
 /// A hand-authored Deep program declaring the in-module constant `eps` as a
@@ -717,9 +719,12 @@ const PROBABILITY_DEEP_WELL_FORMED_INVARIANT: &str = r#"
 
 #[test]
 fn malformed_invariant_metadata_fails_closed_at_decode() {
-    let error = chelis_deep::parser::parse_str(PROBABILITY_DEEP_MALFORMED_INVARIANT)
-        .unwrap_err()
-        .to_string();
+    let error = chelis_deep::parser::parse_str(
+        PROBABILITY_DEEP_MALFORMED_INVARIANT,
+        &chelis_syntax_host::NativeStack,
+    )
+    .unwrap_err()
+    .to_string();
     assert!(error.contains("invariant"), "{error}");
 }
 

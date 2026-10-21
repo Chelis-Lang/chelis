@@ -25,7 +25,7 @@ fn f32_mat(rows: usize, cols: usize) -> TensorType {
 }
 
 fn parse_one(src: &str) -> Expr {
-    chelis_deep::parser::parse_str(src)
+    chelis_deep::parser::parse_str(src, &chelis_syntax_host::NativeStack)
         .expect("parse failed")
         .into_iter()
         .next()

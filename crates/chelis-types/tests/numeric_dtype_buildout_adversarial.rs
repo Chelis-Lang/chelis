@@ -17,9 +17,10 @@ use chelis_surf::parser::parse_str;
 use chelis_types::check_ir_program;
 
 fn surf_to_deep(source: &str) -> Vec<chelis_deep::Expr> {
-    let decls = parse_str(source).expect("surf parse");
+    let decls = parse_str(source, &chelis_syntax_host::NativeStack).expect("surf parse");
     chelis_macros::expand_program(
-        &desugar_program(&decls).expect("Surf fixture must desugar"),
+        &desugar_program(&decls, &chelis_syntax_host::NativeStack)
+            .expect("Surf fixture must desugar"),
         &chelis_macros::ExpansionOptions::default(),
     )
     .expect("macro expand")
@@ -305,7 +306,7 @@ fn ws_b1_decimal_suffix_mixed_precision_addition_rejected_per_spec_5_4() {
 fn ws_b1_float_token_with_int_suffix_is_parse_error_per_spec_5_5() {
     let src = "out: i8 = 1.0i8";
     // Per §5.5, this MUST fail at lex/parse time.
-    let parse_res = parse_str(src);
+    let parse_res = parse_str(src, &chelis_syntax_host::NativeStack);
     assert!(
         parse_res.is_err(),
         "spec §5.5: `1.0i8` (float token + int suffix) must be a parse error; \
@@ -370,7 +371,7 @@ fn ws_a0_f8e4m3_in_contextual_tensor_position_rejected() {
 #[test]
 fn ws_b1_unsigned_suffix_u8_lex_rejected_per_spec_1_1_2() {
     let src = "out: i8 = 42u8";
-    let parse_res = parse_str(src);
+    let parse_res = parse_str(src, &chelis_syntax_host::NativeStack);
     assert!(
         parse_res.is_err(),
         "spec §1.1.2: `42u8` suffix must be a lex error"
@@ -380,7 +381,7 @@ fn ws_b1_unsigned_suffix_u8_lex_rejected_per_spec_1_1_2() {
 #[test]
 fn ws_b1_unsigned_suffix_u16_lex_rejected_per_spec_1_1_2() {
     let src = "out: i16 = 42u16";
-    let parse_res = parse_str(src);
+    let parse_res = parse_str(src, &chelis_syntax_host::NativeStack);
     assert!(
         parse_res.is_err(),
         "spec §1.1.2: `42u16` suffix must be a lex error"
@@ -390,7 +391,7 @@ fn ws_b1_unsigned_suffix_u16_lex_rejected_per_spec_1_1_2() {
 #[test]
 fn ws_b1_f8e4m3_suffix_lex_rejected_per_spec_1_1_1() {
     let src = "out: f32 = 1.0f8e4m3";
-    let parse_res = parse_str(src);
+    let parse_res = parse_str(src, &chelis_syntax_host::NativeStack);
     assert!(
         parse_res.is_err(),
         "spec §1.1.1: `1.0f8e4m3` suffix must be a lex error"

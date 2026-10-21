@@ -10,8 +10,10 @@
 use chelis_deep::validate::find_raw_vocabulary_tag;
 
 fn desugared(source: &str) -> Vec<chelis_deep::Expr> {
-    let decls = chelis_surf::parser::parse_str(source).expect("surf parse");
-    chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar")
+    let decls = chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+        .expect("surf parse");
+    chelis_surf::desugar::desugar_program(&decls, &chelis_syntax_host::NativeStack)
+        .expect("Surf fixture must desugar")
 }
 
 #[test]

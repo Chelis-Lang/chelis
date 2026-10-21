@@ -1293,7 +1293,8 @@ fn census_checked_program(source: &str) -> chelis_types::CheckedProgram {
     // Check resolved source declarations independently of C emission. The
     // single-file resolver retains local names and links only explicit imports;
     // it never substitutes types inferred from the emitted artifact.
-    let declarations = chelis_surf::parser::parse_str(source).expect("parse census source");
+    let declarations = chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+        .expect("parse census source");
     let prepared = chelis_reef::prepare_single_file_program(
         "guard-census",
         &declarations,
@@ -1305,8 +1306,11 @@ fn census_checked_program(source: &str) -> chelis_types::CheckedProgram {
         .map(|_| chelis_types::install_linked_program_guard());
     let resolved_deep = prepared.map(|program| {
         chelis_deep::printer::print_canonical(
-            &chelis_surf::desugar::desugar_program(&program.decls)
-                .expect("desugar resolved census declarations"),
+            &chelis_surf::desugar::desugar_program(
+                &program.decls,
+                &chelis_syntax_host::NativeStack,
+            )
+            .expect("desugar resolved census declarations"),
         )
     });
     let (source_kind, checked_source) = match resolved_deep.as_deref() {
@@ -1941,7 +1945,8 @@ fn assert_result_guards_follow_authored_signature(
             _ => None,
         })
     }
-    let decls = chelis_surf::parser::parse_str(source).expect("shipped example parses");
+    let decls = chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+        .expect("shipped example parses");
     for (function, target, axis, required) in guards {
         if target != "__result" {
             continue;

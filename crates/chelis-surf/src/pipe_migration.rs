@@ -2,9 +2,16 @@
 //! opt-in `pre-020-pipe-migration` feature. This is the only reader of retired raw
 //! `pipe` forms; core consumers must use normal Deep ingress, which rejects them.
 use crate::{ast::*, pipe_sugar};
+use alloc::{
+    borrow::ToOwned,
+    boxed::Box,
+    collections::{BTreeMap, BTreeSet},
+    string::{String, ToString},
+    vec::Vec,
+};
 use chelis_deep::annotations::{Metadata, MetadataValue};
 use chelis_deep::{Atom, DeepTag, ExprCarrier, RawAtom, RawExpr, Span};
-use std::collections::{BTreeMap, BTreeSet};
+use chelis_stack_services::StackServices;
 
 pub struct PipeMigration {
     pub source: String,
@@ -316,7 +323,7 @@ fn fold(
     let RawExpr::List(items, span) = expr else {
         unreachable!()
     };
-    let mut items = std::mem::take(items);
+    let mut items = core::mem::take(items);
     if items.len() < 4 {
         return Err("malformed previous Deep pipe".into());
     }
@@ -447,18 +454,24 @@ fn literal_dtypes(
 /// Prepare grouped, explicitly typed source using the previous compiler's Deep.
 /// The caller MUST compare the expanded migrated Deep with `baseline` before
 /// publishing or replacing any file. A missing old dtype never defaults.
-pub fn prepare(source: &str, previous_deep: &str) -> Result<PipeMigration, String> {
-    let mut baseline =
-        chelis_deep::parser::parse_pipe_migration_raw(previous_deep).map_err(|e| e.to_string())?;
+pub fn prepare(
+    source: &str,
+    previous_deep: &str,
+    stack: &impl StackServices,
+) -> Result<PipeMigration, String> {
+    let mut baseline = chelis_deep::parser::parse_pipe_migration_raw(previous_deep, stack)
+        .map_err(|e| e.to_string())?;
     let mut dtypes = BTreeMap::new();
     let mut old_negated_literals = BTreeSet::new();
     for expr in &baseline {
         literal_dtypes(expr, &mut dtypes, &mut old_negated_literals, false)?;
     }
-    let mut decls = crate::parser::parse_pipe_migration(source).map_err(|e| e.to_string())?;
+    let mut decls =
+        crate::parser::parse_pipe_migration(source, stack).map_err(|e| e.to_string())?;
     let mut current_dtypes = BTreeMap::new();
     let mut current_negated_literals = BTreeSet::new();
-    let current = crate::desugar::desugar_program(&decls).map_err(|error| error.to_string())?;
+    let current =
+        crate::desugar::desugar_program(&decls, stack).map_err(|error| error.to_string())?;
     for expr in &current {
         literal_dtypes(
             &expr.to_raw(),
@@ -504,7 +517,9 @@ pub fn prepare(source: &str, previous_deep: &str) -> Result<PipeMigration, Strin
             .map_err(|error| error.to_string())?;
         current_dtypes.clear();
         current_negated_literals.clear();
-        for expr in crate::desugar::desugar_program(&decls).map_err(|error| error.to_string())? {
+        for expr in
+            crate::desugar::desugar_program(&decls, stack).map_err(|error| error.to_string())?
+        {
             literal_dtypes(
                 &expr.to_raw(),
                 &mut current_dtypes,
@@ -558,10 +573,10 @@ pub fn prepare(source: &str, previous_deep: &str) -> Result<PipeMigration, Strin
     for ((start, end), replacement) in shape_edits.into_iter().rev() {
         suffixed.replace_range(start..end, &replacement);
     }
-    let decls = crate::parser::parse_pipe_migration(&suffixed).map_err(|e| e.to_string())?;
+    let decls = crate::parser::parse_pipe_migration(&suffixed, stack).map_err(|e| e.to_string())?;
     let source = crate::format::format_pipe_migration_source(&suffixed, &decls)
         .map_err(|e| e.to_string())?;
-    if crate::format::format_source(&source).map_err(|e| e.to_string())? != source {
+    if crate::format::format_source(&source, stack).map_err(|e| e.to_string())? != source {
         return Err("pipe migration did not reach a formatter fixed point".into());
     }
     for expr in &mut baseline {

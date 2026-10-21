@@ -274,7 +274,8 @@ fn prove_precision_diagnostic_count(
 
 fn assert_multiplicity(source: &str, expected: usize, label: &str) {
     let allow_legacy_unknown_precision_fallback = source == UNDECODABLE_HEAD_METADATA;
-    let program = parse_and_stamp_file(source).expect("fixture must stamp");
+    let program =
+        parse_and_stamp_file(source, &chelis_syntax_host::NativeStack).expect("fixture must stamp");
     let (ir, typed) = checker_errors(&program);
     assert_eq!(
         diagnostics(&typed),

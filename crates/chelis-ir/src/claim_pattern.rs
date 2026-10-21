@@ -1057,8 +1057,10 @@ mod tests {
     use super::*;
 
     fn registry(source: &str) -> AdtRegistry {
-        let decls = chelis_surf::parser::parse_str(source).expect("surf parse");
-        let deep = chelis_surf::desugar::desugar_program(&decls).expect("desugar");
+        let decls = chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+            .expect("surf parse");
+        let deep = chelis_surf::desugar::desugar_program(&decls, &chelis_syntax_host::NativeStack)
+            .expect("desugar");
         chelis_types::check_ir_program(&deep)
             .unwrap_or_else(|result| panic!("check failed: {:?}", result.errors))
             .adt_registry()
@@ -1066,7 +1068,7 @@ mod tests {
     }
 
     fn ty(text: &str) -> Expr {
-        chelis_deep::parser::parse_str(text)
+        chelis_deep::parser::parse_str(text, &chelis_syntax_host::NativeStack)
             .expect("type syntax")
             .remove(0)
     }

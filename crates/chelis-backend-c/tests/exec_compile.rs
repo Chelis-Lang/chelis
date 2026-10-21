@@ -8591,9 +8591,11 @@ fn runtime_branch_local_ascription_c() -> chelis_backend_c::CodegenResult {
                     y: tensor[2, f32] = pad(x, [[0i64, 0i64]], 0.0f32)\n  \
                     y\n\
                   } else x\n";
-    let decls = chelis_surf::parser::parse_str(source).expect("Surf parse");
+    let decls = chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+        .expect("Surf parse");
     let checked = chelis_types::check_ir_program(
-        &chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar"),
+        &chelis_surf::desugar::desugar_program(&decls, &chelis_syntax_host::NativeStack)
+            .expect("Surf fixture must desugar"),
     )
     .unwrap_or_else(|report| panic!("type check failed: {:?}", report.errors));
     let dag = chelis_ir::host::lower_named_tensor_entry_dag(&checked, "f")
@@ -10478,7 +10480,8 @@ fn shared_runtime_extent_declares_once_and_rechecks_the_later_carrier() {
            (app {{}} (var {{}} Cons) {row} (app {{}} (var {{}} Cons) {row} (var {{}} Nil))) \
            (cast {{}} (lit {{}} 0) (t-prim {{}} i32))))"
     );
-    let mut exprs = chelis_deep::parser::parse_str(&src).expect("deep parse");
+    let mut exprs =
+        chelis_deep::parser::parse_str(&src, &chelis_syntax_host::NativeStack).expect("deep parse");
     assert_eq!(exprs.len(), 1);
     let expr = exprs.pop().unwrap();
     let mut scoped = UnordMap::new();
@@ -10869,7 +10872,9 @@ int main() {{
 // cotangents from each actual's physical axes, including cached composition.
 fn gradient_geometry_checked(source: &str) -> chelis_types::CheckedProgram {
     let deep = chelis_surf::desugar::desugar_program(
-        &chelis_surf::parser::parse_str(source).expect("gradient fixture parses"),
+        &chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+            .expect("gradient fixture parses"),
+        &chelis_syntax_host::NativeStack,
     )
     .unwrap();
     let checked = chelis_types::check_typed_program(&deep).expect("gradient fixture checks");
@@ -11053,12 +11058,19 @@ fn issue_1767_live_and_decoded_helper_contexts_execute_on_eval_and_c() {
     let decoded =
         serde_json::from_slice::<chelis_ir::LoweredLibrary>(&serde_json::to_vec(&library).unwrap())
             .unwrap();
-    let library_deep =
-        chelis_surf::desugar::desugar_program(&chelis_surf::parser::parse_str(source).unwrap())
-            .unwrap();
+    let library_deep = chelis_surf::desugar::desugar_program(
+        &chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack).unwrap(),
+        &chelis_syntax_host::NativeStack,
+    )
+    .unwrap();
     let env = chelis_types::build_type_env_from_library(&library_deep).unwrap();
     let new = chelis_surf::desugar::desugar_program(
-        &chelis_surf::parser::parse_str("derivative = helper(copy(x))\n").unwrap(),
+        &chelis_surf::parser::parse_str(
+            "derivative = helper(copy(x))\n",
+            &chelis_syntax_host::NativeStack,
+        )
+        .unwrap(),
+        &chelis_syntax_host::NativeStack,
     )
     .unwrap();
     let new = chelis_types::check_ir_with_context(&env, &new).unwrap();
@@ -11377,9 +11389,11 @@ int main(void) {{
 /// compiled C: each lane's value, or its trap text (for C, the emitter's
 /// refusal where it refuses the graph).
 fn tensor_entry_lanes(source: &str, n: usize) -> (Result<f64, String>, Result<f64, String>) {
-    let decls = chelis_surf::parser::parse_str(source).expect("Surf parse");
+    let decls = chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+        .expect("Surf parse");
     let checked = chelis_types::check_ir_program(
-        &chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar"),
+        &chelis_surf::desugar::desugar_program(&decls, &chelis_syntax_host::NativeStack)
+            .expect("Surf fixture must desugar"),
     )
     .unwrap_or_else(|report| panic!("type check failed: {:?}", report.errors));
     let dag = chelis_ir::host::lower_named_tensor_entry_dag(&checked, "f")
@@ -11479,9 +11493,11 @@ fn tensor_entry_lanes_over(
     source: &str,
     inputs: &[(&str, usize)],
 ) -> (Result<f64, String>, Result<f64, String>) {
-    let decls = chelis_surf::parser::parse_str(source).expect("Surf parse");
+    let decls = chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+        .expect("Surf parse");
     let checked = chelis_types::check_ir_program(
-        &chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar"),
+        &chelis_surf::desugar::desugar_program(&decls, &chelis_syntax_host::NativeStack)
+            .expect("Surf fixture must desugar"),
     )
     .unwrap_or_else(|report| panic!("type check failed: {:?}", report.errors));
     let dag = chelis_ir::host::lower_named_tensor_entry_dag(&checked, "f")

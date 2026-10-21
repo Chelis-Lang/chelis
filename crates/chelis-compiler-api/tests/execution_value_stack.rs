@@ -36,15 +36,19 @@ fn nested_list_wire(depth: usize, leaf: &str) -> String {
 
 fn chain_program() -> Vec<chelis_deep::ast::Expr> {
     let source = "type Chain =\n  | End { value: i64 }\n  | Link { next: Chain }\n";
-    let decls = chelis_surf::parser::parse_str(source).expect("parse Chain declaration");
-    chelis_surf::desugar::desugar_program(&decls).expect("desugar Chain declaration")
+    let decls = chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+        .expect("parse Chain declaration");
+    chelis_surf::desugar::desugar_program(&decls, &chelis_syntax_host::NativeStack)
+        .expect("desugar Chain declaration")
 }
 
 fn opaque_carrier_program() -> Vec<chelis_deep::ast::Expr> {
     let source = "type Chain =\n  | End { value: f32 }\n  | Link { next: Chain }\n\
 @opaque\n@invariant(c) c.seed >= 0.0\ntype Carrier =\n  | Carrier { seed: f32, next: Chain }\n";
-    let decls = chelis_surf::parser::parse_str(source).expect("parse Carrier declaration");
-    chelis_surf::desugar::desugar_program(&decls).expect("desugar Carrier declaration")
+    let decls = chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+        .expect("parse Carrier declaration");
+    chelis_surf::desugar::desugar_program(&decls, &chelis_syntax_host::NativeStack)
+        .expect("desugar Carrier declaration")
 }
 
 fn scalar_f32(value: f32) -> ExecutionValue {

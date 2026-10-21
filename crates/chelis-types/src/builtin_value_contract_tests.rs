@@ -249,8 +249,8 @@ fn route_env(scheme: &Scheme) -> TypeEnv {
 /// The checker's whole per-program verdict: types, then the linearity pass
 /// that owns consumption, borrowing and use after a consuming call.
 fn verdict(env: &TypeEnv, source: &str) -> Option<bool> {
-    let declarations = parse_str(source).ok()?;
-    let deep = desugar_program(&declarations).ok()?;
+    let declarations = parse_str(source, &chelis_syntax_host::NativeStack).ok()?;
+    let deep = desugar_program(&declarations, &chelis_syntax_host::NativeStack).ok()?;
     Some(
         crate::check_ir_with_context(env, &deep)
             .is_ok_and(|checked| crate::check_linearity(&checked).is_ok()),

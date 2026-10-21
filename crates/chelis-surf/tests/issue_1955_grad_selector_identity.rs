@@ -7,32 +7,29 @@ use chelis_surf::{
     ast::Decl,
     decompile::try_decompile_program,
     desugar::{
-        DesugarError, desugar_decl_only, desugar_expr_in_program, desugar_expr_in_program_scope,
-        desugar_expr_only, desugar_program,
+        DesugarError, desugar_expr_in_program, desugar_expr_in_program_scope, desugar_program,
     },
     parser::parse_str,
     resugar::{resugar_expression, resugar_program},
 };
 
-#[test]
-fn canonical_public_desugar_apis_are_fallible() {
-    let _: fn(&[Decl]) -> Result<Vec<chelis_deep::Expr>, DesugarError> = desugar_program;
-    let _: fn(&Decl) -> Result<Vec<chelis_deep::Expr>, DesugarError> = desugar_decl_only;
-    let _: fn(&chelis_surf::ast::Expr) -> Result<chelis_deep::Expr, DesugarError> =
-        desugar_expr_only;
-}
-
 fn deep(source: &str) -> String {
-    let declarations = parse_str(source).expect("Surf fixture parses");
-    print_canonical(&desugar_program(&declarations).expect("selector resolves"))
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
+    let declarations =
+        parse_str(source, &chelis_syntax_host::NativeStack).expect("Surf fixture parses");
+    print_canonical(
+        &desugar_program(&declarations, &chelis_syntax_host::NativeStack)
+            .expect("selector resolves"),
+    )
+    .split_whitespace()
+    .collect::<Vec<_>>()
+    .join(" ")
 }
 
 fn error(source: &str) -> DesugarError {
-    let declarations = parse_str(source).expect("Surf fixture parses");
-    desugar_program(&declarations).expect_err("selector must reject")
+    let declarations =
+        parse_str(source, &chelis_syntax_host::NativeStack).expect("Surf fixture parses");
+    desugar_program(&declarations, &chelis_syntax_host::NativeStack)
+        .expect_err("selector must reject")
 }
 
 #[test]
@@ -203,20 +200,30 @@ selected = grad(pair, wrt=(w, x, w))
 fn cloned_fragments_resolve_against_program_context_and_lexical_shadowing() {
     let declarations = parse_str(
         "def pair(x: f32, w: f32) -> f32 = mul(x, w)\n\
-         alias = pair\n\
-         selected = grad(alias, wrt=w)\n",
+     alias = pair\n\
+     selected = grad(alias, wrt=w)\n",
+        &chelis_syntax_host::NativeStack,
     )
     .expect("program parses");
     let Decl::LetDef { value, .. } = &declarations[2] else {
         panic!("selected value binding")
     };
     let cloned = value.clone();
-    let deep = print_canonical(&[desugar_expr_in_program(&declarations, &cloned)
-        .expect("cloned expression resolves in program context")]);
+    let deep = print_canonical(&[desugar_expr_in_program(
+        &declarations,
+        &cloned,
+        &chelis_syntax_host::NativeStack,
+    )
+    .expect("cloned expression resolves in program context")]);
     assert!(deep.contains("(lit {type: (t-prim {} i32)} 1)"), "{deep}");
 
     assert!(matches!(
-        desugar_expr_in_program_scope(&declarations, &cloned, &["alias".to_string()]),
+        desugar_expr_in_program_scope(
+            &declarations,
+            &cloned,
+            &["alias".to_string()],
+            &chelis_syntax_host::NativeStack
+        ),
         Err(DesugarError::UnresolvedGradTarget { .. })
     ));
 }
@@ -287,11 +294,13 @@ def apply(pair: f32 -> f32) -> unit = {
 fn matching_deep_round_trips_and_contradictory_metadata_rejects() {
     let matching = chelis_deep::parser::parse_str(
         "(def {} pair (fn {} (params {} x w) (app {} (var {} mul) (var {} x) (var {} w))))\n\
-         (def {} selected (grad {wrt: (var {} w)} (var {} pair) (lit {type: (t-prim {} i32)} 1)))",
+     (def {} selected (grad {wrt: (var {} w)} (var {} pair) (lit {type: (t-prim {} i32)} 1)))",
+        &chelis_syntax_host::NativeStack,
     )
     .expect("matching Deep parses");
     let surf = resugar_program(&matching).expect("matching selector resugars");
-    let redesugared = desugar_program(&surf).expect("matching selector redesugars");
+    let redesugared = desugar_program(&surf, &chelis_syntax_host::NativeStack)
+        .expect("matching selector redesugars");
     let original = chelis_surf::resugar::normalize_deep_for_surface_roundtrip(&matching)
         .expect("normalize original");
     let roundtrip = chelis_surf::resugar::normalize_deep_for_surface_roundtrip(&redesugared)
@@ -300,7 +309,8 @@ fn matching_deep_round_trips_and_contradictory_metadata_rejects() {
 
     let contradictory = chelis_deep::parser::parse_str(
         "(def {} pair (fn {} (params {} x w) (app {} (var {} mul) (var {} x) (var {} w))))\n\
-         (def {} selected (grad {wrt: (var {} w)} (var {} pair) (lit {type: (t-prim {} i32)} 0)))",
+     (def {} selected (grad {wrt: (var {} w)} (var {} pair) (lit {type: (t-prim {} i32)} 0)))",
+        &chelis_syntax_host::NativeStack,
     )
     .expect("contradictory Deep parses structurally");
     let error = resugar_program(&contradictory).expect_err("contradiction must reject");
@@ -313,16 +323,18 @@ fn matching_deep_round_trips_and_contradictory_metadata_rejects() {
 
     let local_alias = chelis_deep::parser::parse_str(
         "(def {} pair (fn {} (params {} x w) (app {} (var {} mul) (var {} x) (var {} w))))\n\
-         (def {} selected (let {} (bind {} local (var {} pair)) \
-           (grad {wrt: (var {} w)} (var {} local) (lit {type: (t-prim {} i32)} 1))))",
+     (def {} selected (let {} (bind {} local (var {} pair)) \
+       (grad {wrt: (var {} w)} (var {} local) (lit {type: (t-prim {} i32)} 1))))",
+        &chelis_syntax_host::NativeStack,
     )
     .expect("local-alias Deep parses");
     resugar_program(&local_alias).expect("matching local alias selector resugars");
 
     let local_contradiction = chelis_deep::parser::parse_str(
         "(def {} pair (fn {} (params {} x w) (app {} (var {} mul) (var {} x) (var {} w))))\n\
-         (def {} selected (let {} (bind {} local (var {} pair)) \
-           (grad {wrt: (var {} w)} (var {} local) (lit {type: (t-prim {} i32)} 0))))",
+     (def {} selected (let {} (bind {} local (var {} pair)) \
+       (grad {wrt: (var {} w)} (var {} local) (lit {type: (t-prim {} i32)} 0))))",
+        &chelis_syntax_host::NativeStack,
     )
     .expect("contradictory local-alias Deep parses");
     assert!(
@@ -334,8 +346,9 @@ fn matching_deep_round_trips_and_contradictory_metadata_rejects() {
 
     let out_of_range = chelis_deep::parser::parse_str(
         "(def {} pair (fn {} (params {} x w) (app {} (var {} mul) (var {} x) (var {} w))))\n\
-         (def {} selected (grad {wrt: (var {} w)} (var {} pair) \
-           (lit {type: (t-prim {} i32)} 4)))",
+     (def {} selected (grad {wrt: (var {} w)} (var {} pair) \
+       (lit {type: (t-prim {} i32)} 4)))",
+        &chelis_syntax_host::NativeStack,
     )
     .expect("out-of-range Deep parses structurally");
     assert!(
@@ -350,20 +363,23 @@ fn matching_deep_round_trips_and_contradictory_metadata_rejects() {
 fn deep_resugaring_preseeds_forward_function_origins_before_aliases() {
     let forward_alias = chelis_deep::parser::parse_str(
         "(def {} alias (var {} pair))\n\
-         (def {} pair (fn {} (params {} x w) (app {} (var {} mul) (var {} x) (var {} w))))\n\
-         (def {} selected (grad {wrt: (var {} w)} (var {} alias) \
-           (lit {type: (t-prim {} i32)} 1)))",
+     (def {} pair (fn {} (params {} x w) (app {} (var {} mul) (var {} x) (var {} w))))\n\
+     (def {} selected (grad {wrt: (var {} w)} (var {} alias) \
+       (lit {type: (t-prim {} i32)} 1)))",
+        &chelis_syntax_host::NativeStack,
     )
     .expect("forward-alias Deep parses");
     let surf = resugar_program(&forward_alias).expect("forward function alias resugars");
-    desugar_program(&surf).expect("forward function alias round-trips");
+    desugar_program(&surf, &chelis_syntax_host::NativeStack)
+        .expect("forward function alias round-trips");
 
     let distinct = chelis_deep::parser::parse_str(
         "(def {} chosen (if {} (lit {} true) (var {} left) (var {} right)))\n\
-         (def {} left (fn {} (params {} x w) (app {} (var {} mul) (var {} x) (var {} w))))\n\
-         (def {} right (fn {} (params {} x w) (app {} (var {} add) (var {} x) (var {} w))))\n\
-         (def {} selected (grad {wrt: (var {} w)} (var {} chosen) \
-           (lit {type: (t-prim {} i32)} 1)))",
+     (def {} left (fn {} (params {} x w) (app {} (var {} mul) (var {} x) (var {} w))))\n\
+     (def {} right (fn {} (params {} x w) (app {} (var {} add) (var {} x) (var {} w))))\n\
+     (def {} selected (grad {wrt: (var {} w)} (var {} chosen) \
+       (lit {type: (t-prim {} i32)} 1)))",
+        &chelis_syntax_host::NativeStack,
     )
     .expect("distinct forward-origin Deep parses");
     assert!(matches!(
@@ -376,17 +392,18 @@ fn deep_resugaring_preseeds_forward_function_origins_before_aliases() {
 fn deep_resugaring_projects_match_bound_callable_origins() {
     let matching = chelis_deep::parser::parse_str(
         "(def {} pair (fn {} (params {} x w) (app {} (var {} mul) (var {} x) (var {} w))))\n\
-         (def {} matched \
-           (match {} (tuple {} (var {} pair)) \
-             (arm {} (pat-tuple {} (pat-var {} chosen)) () (var {} chosen))))\n\
-         (def {} selected \
-           (tuple {} \
-             (grad {wrt: (var {} w)} (var {} matched) \
-               (lit {type: (t-prim {} i32)} 1)) \
-             (match {} (tuple {} (var {} pair)) \
-               (arm {} (pat-tuple {} (pat-var {} chosen)) () \
-                 (grad {wrt: (var {} w)} (var {} chosen) \
-                   (lit {type: (t-prim {} i32)} 1))))))",
+     (def {} matched \
+       (match {} (tuple {} (var {} pair)) \
+         (arm {} (pat-tuple {} (pat-var {} chosen)) () (var {} chosen))))\n\
+     (def {} selected \
+       (tuple {} \
+         (grad {wrt: (var {} w)} (var {} matched) \
+           (lit {type: (t-prim {} i32)} 1)) \
+         (match {} (tuple {} (var {} pair)) \
+           (arm {} (pat-tuple {} (pat-var {} chosen)) () \
+             (grad {wrt: (var {} w)} (var {} chosen) \
+               (lit {type: (t-prim {} i32)} 1))))))",
+        &chelis_syntax_host::NativeStack,
     )
     .expect("match-bound Deep parses");
     resugar_program(&matching).expect("match-bound callable origins resugar");
@@ -416,7 +433,8 @@ fn deep_resugaring_projects_match_bound_callable_origins() {
                      (lit {type: (t-prim {} i32)} 1)))))",
         ),
     ] {
-        let deep = chelis_deep::parser::parse_str(source).expect("negative Deep parses");
+        let deep = chelis_deep::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+            .expect("negative Deep parses");
         assert!(
             matches!(
                 resugar_program(&deep),
@@ -535,37 +553,39 @@ def probe(candidates: FnRecord) -> unit = {
 fn deep_resugaring_projects_constructor_and_record_payload_origins() {
     let matching = chelis_deep::parser::parse_str(
         "(def {} pair (fn {} (params {} x w) (app {} (var {} mul) (var {} x) (var {} w))))\n\
-         (def {} alias (var {} pair))\n\
-         (def {} boxed (app {} (var {} FnBox) (var {} alias)))\n\
-         (def {} nested_boxed (app {} (var {} Outer) (var {} boxed)))\n\
-         (def {} recorded (record {} FnRecord (kv {} callback (var {} alias))))\n\
-         (def {} nested_recorded (record {} OuterRecord (kv {} payload (var {} recorded))))\n\
-         (def {} selected \
-           (tuple {} \
-             (match {} (var {} boxed) \
-               (arm {} (pat-ctor {} FnBox (pat-var {} chosen)) () \
-                 (grad {wrt: (var {} w)} (var {} chosen) \
-                   (lit {type: (t-prim {} i32)} 1)))) \
-             (match {} (var {} nested_boxed) \
-               (arm {} (pat-ctor {} Outer (pat-ctor {} FnBox (pat-var {} chosen))) () \
-                 (grad {wrt: (var {} w)} (var {} chosen) \
-                   (lit {type: (t-prim {} i32)} 1)))) \
-             (match {} (var {} recorded) \
-               (arm {} (pat-record {} FnRecord (kv {} callback (pat-var {} chosen))) () \
-                 (grad {wrt: (var {} w)} (var {} chosen) \
-                   (lit {type: (t-prim {} i32)} 1)))) \
-             (match {} (var {} nested_recorded) \
-               (arm {} \
-                 (pat-record {} OuterRecord \
-                   (kv {} payload \
-                     (pat-record {} FnRecord (kv {} callback (pat-var {} chosen))))) \
-                 () \
-                 (grad {wrt: (var {} w)} (var {} chosen) \
-                   (lit {type: (t-prim {} i32)} 1))))))",
+     (def {} alias (var {} pair))\n\
+     (def {} boxed (app {} (var {} FnBox) (var {} alias)))\n\
+     (def {} nested_boxed (app {} (var {} Outer) (var {} boxed)))\n\
+     (def {} recorded (record {} FnRecord (kv {} callback (var {} alias))))\n\
+     (def {} nested_recorded (record {} OuterRecord (kv {} payload (var {} recorded))))\n\
+     (def {} selected \
+       (tuple {} \
+         (match {} (var {} boxed) \
+           (arm {} (pat-ctor {} FnBox (pat-var {} chosen)) () \
+             (grad {wrt: (var {} w)} (var {} chosen) \
+               (lit {type: (t-prim {} i32)} 1)))) \
+         (match {} (var {} nested_boxed) \
+           (arm {} (pat-ctor {} Outer (pat-ctor {} FnBox (pat-var {} chosen))) () \
+             (grad {wrt: (var {} w)} (var {} chosen) \
+               (lit {type: (t-prim {} i32)} 1)))) \
+         (match {} (var {} recorded) \
+           (arm {} (pat-record {} FnRecord (kv {} callback (pat-var {} chosen))) () \
+             (grad {wrt: (var {} w)} (var {} chosen) \
+               (lit {type: (t-prim {} i32)} 1)))) \
+         (match {} (var {} nested_recorded) \
+           (arm {} \
+             (pat-record {} OuterRecord \
+               (kv {} payload \
+                 (pat-record {} FnRecord (kv {} callback (pat-var {} chosen))))) \
+             () \
+             (grad {wrt: (var {} w)} (var {} chosen) \
+               (lit {type: (t-prim {} i32)} 1))))))",
+        &chelis_syntax_host::NativeStack,
     )
     .expect("aggregate-payload Deep parses");
     let surf = resugar_program(&matching).expect("aggregate payload origins resugar");
-    desugar_program(&surf).expect("aggregate payload origins round-trip");
+    desugar_program(&surf, &chelis_syntax_host::NativeStack)
+        .expect("aggregate payload origins round-trip");
 }
 
 #[test]
@@ -616,7 +636,8 @@ fn deep_resugaring_rejects_distinct_or_dynamic_constructor_and_record_payloads()
                      (lit {type: (t-prim {} i32)} 1)))))",
         ),
     ] {
-        let deep = chelis_deep::parser::parse_str(source).expect("negative Deep parses");
+        let deep = chelis_deep::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+            .expect("negative Deep parses");
         assert!(
             matches!(
                 resugar_program(&deep),
@@ -656,29 +677,32 @@ fn expression_resugaring_and_lone_decompilation_reject_unpreservable_selectors()
                (lit {type: (t-prim {} i32)} 1))",
         ),
     ] {
-        let deep = chelis_deep::parser::parse_str(source).expect("Deep expression parses");
+        let deep = chelis_deep::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+            .expect("Deep expression parses");
         assert_eq!(deep.len(), 1, "{label}");
         assert!(
             resugar_expression(&deep[0]).is_err(),
             "public expression resugaring rewrote {label}"
         );
         assert!(
-            try_decompile_program(&deep).is_err(),
+            try_decompile_program(&deep, &chelis_syntax_host::NativeStack).is_err(),
             "lone-expression decompilation fallback rewrote {label}"
         );
     }
 
     let same_origin = chelis_deep::parser::parse_str(
         "(let {} \
-           (bind {} \
-             base (fn {} (params {} x w) (app {} (var {} mul) (var {} x) (var {} w))) \
-             left (var {} base) \
-             right (var {} base)) \
-           (grad {wrt: (var {} w)} \
-             (if {} (lit {} true) (var {} left) (var {} right)) \
-             (lit {type: (t-prim {} i32)} 1)))",
+       (bind {} \
+         base (fn {} (params {} x w) (app {} (var {} mul) (var {} x) (var {} w))) \
+         left (var {} base) \
+         right (var {} base)) \
+       (grad {wrt: (var {} w)} \
+         (if {} (lit {} true) (var {} left) (var {} right)) \
+         (lit {type: (t-prim {} i32)} 1)))",
+        &chelis_syntax_host::NativeStack,
     )
     .expect("same-origin Deep expression parses");
     resugar_expression(&same_origin[0]).expect("same-origin branch selector resugars");
-    try_decompile_program(&same_origin).expect("same-origin branch selector decompiles");
+    try_decompile_program(&same_origin, &chelis_syntax_host::NativeStack)
+        .expect("same-origin branch selector decompiles");
 }

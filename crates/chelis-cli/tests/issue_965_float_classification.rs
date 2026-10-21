@@ -1790,7 +1790,9 @@ fn callable_deep_binding_origin(
         chelis_deep::Expr::node(node.tag(), node.meta().clone(), children, *span)
     }
     let deep = chelis_surf::desugar::desugar_program(
-        &chelis_surf::parser::parse_str(source).expect("Surf fixture parses"),
+        &chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+            .expect("Surf fixture parses"),
+        &chelis_syntax_host::NativeStack,
     )
     .expect("desugars");
     chelis_deep::printer::print_canonical(

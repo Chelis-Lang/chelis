@@ -50,7 +50,8 @@ fn assert_one_lowered_site(program: &CheckedProgram) {
 
 #[test]
 fn stdlib_and_dependency_cache_roundtrips_preserve_composed_local_obligations() {
-    let declarations = parse_str(dependency_source()).expect("dependency parses");
+    let declarations = parse_str(dependency_source(), &chelis_syntax_host::NativeStack)
+        .expect("dependency parses");
     let stdlib = build_stdlib_context(&declarations).expect("stdlib context");
     let stdlib_decoded: StdLibContext =
         bincode::deserialize(&bincode::serialize(&stdlib).expect("stdlib encode"))
@@ -68,8 +69,12 @@ fn stdlib_and_dependency_cache_roundtrips_preserve_composed_local_obligations() 
     assert_one_checked_obligation(dependency_decoded.library_checked());
 
     let entry = desugar_program(
-        &parse_str("def entry(x: tensor[*, f32]) -> tensor[*, f32] = helper(x)\n")
-            .expect("entry parses"),
+        &parse_str(
+            "def entry(x: tensor[*, f32]) -> tensor[*, f32] = helper(x)\n",
+            &chelis_syntax_host::NativeStack,
+        )
+        .expect("entry parses"),
+        &chelis_syntax_host::NativeStack,
     )
     .expect("Surf fixture must desugar");
     let checked_entry =
@@ -83,9 +88,10 @@ fn stdlib_and_dependency_cache_roundtrips_preserve_composed_local_obligations() 
 fn contextual_lowering_carries_dependency_local_obligations_into_inlined_helpers() {
     let declarations = parse_str(
         "def helper(x: tensor[*, f32]) -> tensor[*, f32] = {\n  \
-         y: tensor[2, f32] = exp(x)\n  \
-         y\n\
-         }\n",
+     y: tensor[2, f32] = exp(x)\n  \
+     y\n\
+     }\n",
+        &chelis_syntax_host::NativeStack,
     )
     .expect("dependency parses");
     let empty = build_stdlib_context(&[]).expect("empty stdlib");
@@ -107,8 +113,12 @@ fn contextual_lowering_carries_dependency_local_obligations_into_inlined_helpers
     );
 
     let entry = desugar_program(
-        &parse_str("def entry(x: tensor[*, f32]) -> tensor[2, f32] = helper(x)\n")
-            .expect("entry parses"),
+        &parse_str(
+            "def entry(x: tensor[*, f32]) -> tensor[2, f32] = helper(x)\n",
+            &chelis_syntax_host::NativeStack,
+        )
+        .expect("entry parses"),
+        &chelis_syntax_host::NativeStack,
     )
     .expect("Surf fixture must desugar");
     let checked_entry =
@@ -151,9 +161,10 @@ fn contextual_lowering_carries_dependency_local_obligations_into_inlined_helpers
 fn composed_sources_with_equal_local_names_and_offsets_lower_their_own_identities() {
     let dependency_declarations = parse_str(
         "def same(x: tensor[*, f32]) -> tensor[*, f32] = {\n  \
-         y: tensor[2, f32] = exp(x)\n  \
-         y\n\
-         }\n",
+     y: tensor[2, f32] = exp(x)\n  \
+     y\n\
+     }\n",
+        &chelis_syntax_host::NativeStack,
     )
     .expect("dependency parses");
     let empty = build_stdlib_context(&[]).expect("empty stdlib");
@@ -163,15 +174,17 @@ fn composed_sources_with_equal_local_names_and_offsets_lower_their_own_identitie
 
     let application_declarations = parse_str(
         "def same(x: tensor[*, f32]) -> tensor[*, f32] = {\n  \
-         y: tensor[3, f32] = exp(x)\n  \
-         y\n\
-         }\n\
-         def entry(x: tensor[*, f32]) -> tensor[*, f32] = same(x)\n",
+     y: tensor[3, f32] = exp(x)\n  \
+     y\n\
+     }\n\
+     def entry(x: tensor[*, f32]) -> tensor[*, f32] = same(x)\n",
+        &chelis_syntax_host::NativeStack,
     )
     .expect("application parses");
     let checked_application = check_ir_with_context(
         dependency.type_env(),
-        &desugar_program(&application_declarations).expect("Surf fixture must desugar"),
+        &desugar_program(&application_declarations, &chelis_syntax_host::NativeStack)
+            .expect("Surf fixture must desugar"),
     )
     .expect("application checks");
     let lowered_dependency =
@@ -255,7 +268,7 @@ fn composed_sources_with_equal_local_names_and_offsets_lower_their_own_identitie
 #[test]
 fn callable_binding_cache_roundtrips_preserve_complete_owner_and_composition() {
     let source = "def helper(flag: bool, x: tensor[*, f64]) -> tensor[*, bool] = {\n f = if flag then is_nan else is_finite\n g: &tensor[2, f64] -> tensor[*, bool] = copy(f)\n g(x)\n}\ndef rank_helper[r](x: tensor[..r, f64]) -> tensor[..r, f64] = neg(x)\n";
-    let declarations = parse_str(source).expect("source parses");
+    let declarations = parse_str(source, &chelis_syntax_host::NativeStack).expect("source parses");
     let stdlib = build_stdlib_context(&declarations).expect("stdlib checks");
     let stdlib_decoded: StdLibContext =
         bincode::deserialize(&bincode::serialize(&stdlib).unwrap()).expect("stdlib decode");
@@ -287,12 +300,8 @@ fn callable_binding_cache_roundtrips_preserve_complete_owner_and_composition() {
             .type_env()
             .matches_checked_program(dependency_decoded.library_checked())
     );
-    let entry = desugar_program(
-        &parse_str(
-            "def entry(flag: bool, x: tensor[*, f64]) -> tensor[*, bool] = helper(flag, x)\ndef rank_entry[s](x: tensor[..s, f64]) -> tensor[..s, f64] = rank_helper(x)\n",
-        )
-        .unwrap(),
-    )
+    let entry = desugar_program(&parse_str("def entry(flag: bool, x: tensor[*, f64]) -> tensor[*, bool] = helper(flag, x)\ndef rank_entry[s](x: tensor[..s, f64]) -> tensor[..s, f64] = rank_helper(x)\n",&chelis_syntax_host::NativeStack)
+    .unwrap(),&chelis_syntax_host::NativeStack)
     .unwrap();
     let checked =
         check_ir_with_context(dependency_decoded.type_env(), &entry).expect("entry checks");

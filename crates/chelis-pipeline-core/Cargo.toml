@@ -17,5 +17,8 @@ chelis-types.workspace = true
 chelis-effects.workspace = true
 chelis-ir.workspace = true
 
+[dev-dependencies]
+chelis-syntax-host.workspace = true
+
 [lints]
 workspace = true

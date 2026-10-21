@@ -1,5 +1,11 @@
 use crate::ast::Expr;
 use crate::tag::DeepTag;
+#[cfg(test)]
+use alloc::boxed::Box;
+use alloc::{
+    string::{String, ToString},
+    vec::Vec,
+};
 
 /// Canonical closed Deep tag vocabulary (`spec/03-deep-syntax.md` §2),
 /// derived from the single [`DeepTag`] declaration so the string list and
@@ -455,7 +461,8 @@ mod tests {
     }
 
     fn parse_one(source: &str) -> Expr {
-        let mut exprs = crate::parser::parse_str(source).expect("deep parses");
+        let mut exprs = crate::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+            .expect("deep parses");
         assert_eq!(exprs.len(), 1, "one top-level form");
         exprs.remove(0)
     }
@@ -478,7 +485,8 @@ mod tests {
     #[test]
     fn parsed_trees_carry_no_raw_vocabulary_tag_strings() {
         let source = "(module {} m\n  (defsig {} f (t-fn {} (t-prim {} f32) (t-prim {} f32)))\n  (deftype {opaque: true, invariant: (fn {} (params {} p) (app {} (var {} gte) (access {} (var {} p) value) (lit {type: (t-prim {} f32)} 0.0)))} T () (variant {} T (field {} value (t-prim {} f32))))\n  (def {} f (fn {} (params {} (x {type: (t-prim {} f32)})) (handle-effect {effect: resource} (lit {} \"gpu:0\") (var {} x)))))";
-        let exprs = crate::parser::parse_str(source).expect("deep parses");
+        let exprs = crate::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+            .expect("deep parses");
         assert_eq!(
             find_raw_vocabulary_tag(&exprs),
             None,
@@ -508,11 +516,15 @@ mod tests {
 
     #[test]
     fn strict_node_validation_preserves_helper_shape_contracts() {
-        crate::parser::parse_str_strict("(let {} (bind {}) (var {} x))")
-            .expect("an empty sequential binding list is valid");
+        crate::parser::parse_str_strict(
+            "(let {} (bind {}) (var {} x))",
+            &chelis_syntax_host::NativeStack,
+        )
+        .expect("an empty sequential binding list is valid");
 
         let odd_bind = crate::parser::parse_str_strict(
             "(let {} (bind {} x (lit {type: (t-prim {} i64)} 1) y) (var {} x))",
+            &chelis_syntax_host::NativeStack,
         )
         .expect_err("an odd binding list must be rejected");
         assert!(
@@ -522,6 +534,7 @@ mod tests {
 
         let invalid_param = crate::parser::parse_str_strict(
             "(fn {} (params {} 1) (lit {type: (t-prim {} i64)} 1))",
+            &chelis_syntax_host::NativeStack,
         )
         .expect_err("a parameter must be a bare name or typed helper");
         assert!(
@@ -532,7 +545,7 @@ mod tests {
 
     #[test]
     fn strict_parser_rejects_vocabulary_head_without_metadata() {
-        let error = crate::parser::parse_str_strict("(var x)")
+        let error = crate::parser::parse_str_strict("(var x)", &chelis_syntax_host::NativeStack)
             .expect_err("a vocabulary-headed form cannot fall through as a structural bare list");
         assert!(
             error.to_string().contains("metadata map"),
@@ -544,6 +557,7 @@ mod tests {
     fn strict_parser_rejects_unknown_forms_and_walks_their_metadata() {
         let err = crate::parser::parse_str_strict(
             "(def {} f (mystery {payload: (tuple {} (var {} x))} (var {} y)))",
+            &chelis_syntax_host::NativeStack,
         )
         .expect_err("strict mode must reject an UnknownForm");
         assert!(
@@ -592,7 +606,9 @@ mod tests {
     /// nested bare lists (empty guards, `loc` metadata values) stay legal.
     #[test]
     fn untagged_top_level_list_is_rejected() {
-        let exprs = crate::parser::parse_str("((var {} f) (var {} x))").expect("lenient parse");
+        let exprs =
+            crate::parser::parse_str("((var {} f) (var {} x))", &chelis_syntax_host::NativeStack)
+                .expect("lenient parse");
         let warnings = validate(&exprs);
         assert!(
             warnings
@@ -610,6 +626,7 @@ mod tests {
         // stay valid; only the top level requires a tagged node.
         let exprs = crate::parser::parse_str(
             "(def {} f (match {} (var {} x) (arm {} (pat-wild {}) () (var {} x))))",
+            &chelis_syntax_host::NativeStack,
         )
         .expect("lenient parse");
         let warnings = validate(&exprs);
@@ -726,8 +743,11 @@ mod tests {
     /// with an arity violation to warn about.
     #[test]
     fn arity_is_validated() {
-        let error = crate::parser::parse_str("(if {} (lit {} true) (lit {} 1))")
-            .expect_err("a two-child `if` must not stamp");
+        let error = crate::parser::parse_str(
+            "(if {} (lit {} true) (lit {} 1))",
+            &chelis_syntax_host::NativeStack,
+        )
+        .expect_err("a two-child `if` must not stamp");
         assert!(
             error.to_string().contains("wrong child count for `if`"),
             "the rejection must name the arity violation: {error}"
@@ -747,7 +767,7 @@ mod tests {
     // ── Opaque-invariant metadata shape (RFC D-META) ─────────────────
 
     fn structural_messages(src: &str) -> Vec<String> {
-        match crate::parser::parse_str(src) {
+        match crate::parser::parse_str(src, &chelis_syntax_host::NativeStack) {
             Ok(exprs) => validate(&exprs)
                 .into_iter()
                 .filter(|w| matches!(w.kind, WarningKind::Structural))

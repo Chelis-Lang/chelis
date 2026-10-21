@@ -14,8 +14,11 @@ const UNKNOWN_DTYPES: [(&str, Option<&str>); 5] = [
 const RESERVED_DTYPES: [&str; 2] = ["f8e4m3", "f8e5m2"];
 
 fn surf(source: &str) -> Vec<Expr> {
-    desugar_program(&parse_surf(source).expect("Surf fixture must parse"))
-        .expect("Surf fixture must desugar")
+    desugar_program(
+        &parse_surf(source, &chelis_syntax_host::NativeStack).expect("Surf fixture must parse"),
+        &chelis_syntax_host::NativeStack,
+    )
+    .expect("Surf fixture must desugar")
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -195,7 +198,8 @@ fn standalone_signature_and_matching_inline_annotation_share_one_unknown_owner()
          (defsig {} ident
            (t-fn {} (t-prim {} float32) (t-prim {} float32)))",
     ] {
-        let program = parse_deep(source).expect("Deep fixture must parse");
+        let program =
+            parse_deep(source, &chelis_syntax_host::NativeStack).expect("Deep fixture must parse");
         assert_unknown_spelling_order(&program, &["float32"]);
     }
 }
@@ -253,17 +257,18 @@ fn unknown_primitive_owners_preserve_spelling_declaration_order_and_module_scope
 
     let modules = parse_deep(
         "(module {} Left
-           (defsig {} ident
-             (t-fn {} (t-prim {} float32) (t-prim {} float32)))
-           (def {} ident
-             (fn {} (params {} (x {type: (t-prim {} float32)}))
-               (var {} x))))
-         (module {} Right
-           (defsig {} ident
-             (t-fn {} (t-prim {} float32) (t-prim {} float32)))
-           (def {} ident
-             (fn {} (params {} (x {type: (t-prim {} float32)}))
-               (var {} x))))",
+       (defsig {} ident
+         (t-fn {} (t-prim {} float32) (t-prim {} float32)))
+       (def {} ident
+         (fn {} (params {} (x {type: (t-prim {} float32)}))
+           (var {} x))))
+     (module {} Right
+       (defsig {} ident
+         (t-fn {} (t-prim {} float32) (t-prim {} float32)))
+       (def {} ident
+         (fn {} (params {} (x {type: (t-prim {} float32)}))
+           (var {} x))))",
+        &chelis_syntax_host::NativeStack,
     )
     .expect("module fixture must parse");
     assert_unknown_spelling_order_amid_other_errors(&modules, &["float32", "float32"]);
@@ -326,11 +331,14 @@ fn repeated_undeclared_type_dimension_and_rank_names_share_declaration_owners() 
             "undeclared rank variable",
         ),
     ] {
-        let program = parse_deep(&format!(
-            "(defsig {{}} ident (t-fn {{}} {slot} {slot}))
+        let program = parse_deep(
+            &format!(
+                "(defsig {{}} ident (t-fn {{}} {slot} {slot}))
              (def {{}} ident
                (fn {{}} (params {{}} (x {{type: {slot}}})) (var {{}} x)))"
-        ))
+            ),
+            &chelis_syntax_host::NativeStack,
+        )
         .expect("repeated undeclared-name fixture must parse");
         let ir = diagnostics(check_ir_program(&program));
         let typed = diagnostics(check_typed_program(&program));
@@ -351,14 +359,15 @@ fn repeated_undeclared_type_dimension_and_rank_names_share_declaration_owners() 
 fn one_spelling_in_distinct_name_resolution_classes_keeps_distinct_diagnostics() {
     let program = parse_deep(
         "(defsig {} classify
-           (t-fn {}
-             (t-tuple {}
-               (t-var {} q)
-               (t-tensor {} (d-var {} q) (t-prim {} f32))
-               (t-tensor {} (d-rank {} q) (t-prim {} f32)))
-             (t-prim {} f32)))
-         (def {} classify
-           (fn {} (params {} x) (lit {type: (t-prim {} f32)} 0.0)))",
+       (t-fn {}
+         (t-tuple {}
+           (t-var {} q)
+           (t-tensor {} (d-var {} q) (t-prim {} f32))
+           (t-tensor {} (d-rank {} q) (t-prim {} f32)))
+         (t-prim {} f32)))
+     (def {} classify
+       (fn {} (params {} x) (lit {type: (t-prim {} f32)} 0.0)))",
+        &chelis_syntax_host::NativeStack,
     )
     .expect("diagnostic-class fixture must parse");
     let ir = diagnostics(check_ir_program(&program));
@@ -389,21 +398,27 @@ fn one_spelling_in_distinct_name_resolution_classes_keeps_distinct_diagnostics()
 #[test]
 fn undeclared_dimension_owners_are_isolated_by_declaration_and_module() {
     let slot = "(t-tensor {} (d-var {} n) (t-prim {} f32))";
-    let declaration_program = parse_deep(&format!(
-        "(defsig {{}} first (t-fn {{}} {slot} {slot}))
+    let declaration_program = parse_deep(
+        &format!(
+            "(defsig {{}} first (t-fn {{}} {slot} {slot}))
          (def {{}} first (fn {{}} (params {{}} x) (var {{}} x)))
          (defsig {{}} second (t-fn {{}} {slot} {slot}))
          (def {{}} second (fn {{}} (params {{}} x) (var {{}} x)))"
-    ))
+        ),
+        &chelis_syntax_host::NativeStack,
+    )
     .expect("distinct declaration fixture must parse");
-    let module_program = parse_deep(&format!(
-        "(module {{}} Left
+    let module_program = parse_deep(
+        &format!(
+            "(module {{}} Left
            (defsig {{}} ident (t-fn {{}} {slot} {slot}))
            (def {{}} ident (fn {{}} (params {{}} x) (var {{}} x))))
          (module {{}} Right
            (defsig {{}} ident (t-fn {{}} {slot} {slot}))
            (def {{}} ident (fn {{}} (params {{}} x) (var {{}} x))))"
-    ))
+        ),
+        &chelis_syntax_host::NativeStack,
+    )
     .expect("module-isolation fixture must parse");
 
     for (label, program) in [
@@ -483,8 +498,8 @@ fn declaration_body_annotations_preserve_one_explicit_binder_scope() {
     ] {
         let surf_program = surf(source);
         let canonical_source = print_canonical_flat(&surf_program);
-        let canonical_program =
-            parse_deep(&canonical_source).expect("desugared body-binder Deep must parse");
+        let canonical_program = parse_deep(&canonical_source, &chelis_syntax_host::NativeStack)
+            .expect("desugared body-binder Deep must parse");
         for (carrier, program) in [
             ("Surf-desugared Deep", surf_program.as_slice()),
             ("canonical Deep", canonical_program.as_slice()),
@@ -512,8 +527,8 @@ fn expression_tensor_ascriptions_preserve_rigid_dimension_identity() {
     let source = "def f[n,m,p:Float](x:tensor[n,p], y:tensor[m,p])->tensor[m,p] = (y: tensor[n,p])";
     let surf_program = surf(source);
     let canonical_source = print_canonical_flat(&surf_program);
-    let canonical_program =
-        parse_deep(&canonical_source).expect("desugared expression ascription must parse");
+    let canonical_program = parse_deep(&canonical_source, &chelis_syntax_host::NativeStack)
+        .expect("desugared expression ascription must parse");
 
     for (carrier, program) in [
         ("Surf-desugared Deep", surf_program.as_slice()),
@@ -573,12 +588,15 @@ fn contextual_literal_copies_share_one_unknown_precision_owner() {
 #[test]
 fn defsig_less_function_metadata_shares_the_declaration_owner() {
     let tensor = "(t-tensor {} (d-lit {} 2) (t-prim {} madeup))";
-    let program = parse_deep(&format!(
-        "(def {{}} helper
+    let program = parse_deep(
+        &format!(
+            "(def {{}} helper
            (fn {{type: (t-fn {{}} {tensor} {tensor})}}
              (params {{}} (x {{type: {tensor}}}))
              (var {{}} x)))"
-    ))
+        ),
+        &chelis_syntax_host::NativeStack,
+    )
     .expect("defsig-less function metadata fixture must parse");
 
     assert_unknown_spelling_order(&program, &["madeup"]);
@@ -611,8 +629,8 @@ fn body_only_surf_binders_check_at_both_ingresses() {
 fn assert_non_function_binder_narrowing_rejects(source: &str, declaration: &str, binders: &[&str]) {
     let surf_program = surf(source);
     let canonical_source = print_canonical_flat(&surf_program);
-    let canonical_program =
-        parse_deep(&canonical_source).expect("desugared non-function Deep must parse");
+    let canonical_program = parse_deep(&canonical_source, &chelis_syntax_host::NativeStack)
+        .expect("desugared non-function Deep must parse");
     for (carrier, program) in [
         ("Surf-desugared Deep", surf_program.as_slice()),
         ("canonical Deep", canonical_program.as_slice()),
@@ -680,8 +698,8 @@ fn non_function_declaration_binders_reject_concrete_narrowing_at_both_ingresses(
 fn unconstrained_polymorphic_non_function_value_remains_valid_at_both_ingresses() {
     let surf_program = surf("sig empty[p]: List[p]\nempty = []");
     let canonical_source = print_canonical_flat(&surf_program);
-    let canonical_program =
-        parse_deep(&canonical_source).expect("desugared polymorphic value must parse");
+    let canonical_program = parse_deep(&canonical_source, &chelis_syntax_host::NativeStack)
+        .expect("desugared polymorphic value must parse");
     for (carrier, program) in [
         ("Surf-desugared Deep", surf_program.as_slice()),
         ("canonical Deep", canonical_program.as_slice()),
@@ -736,8 +754,8 @@ fn assert_body_only_shape_binder_pin_rejects(
 ) {
     let surf_program = surf(source);
     let canonical_source = print_canonical_flat(&surf_program);
-    let canonical_program =
-        parse_deep(&canonical_source).expect("desugared canonical Deep must parse");
+    let canonical_program = parse_deep(&canonical_source, &chelis_syntax_host::NativeStack)
+        .expect("desugared canonical Deep must parse");
 
     for (carrier, program) in [
         ("Surf-desugared Deep", surf_program.as_slice()),
@@ -819,8 +837,8 @@ fn recursive_body_only_dimension_and_rank_binders_remain_rigid() {
 fn assert_body_only_dimension_cannot_collapse_into_return_only(source: &str, declaration: &str) {
     let surf_program = surf(source);
     let canonical_source = print_canonical_flat(&surf_program);
-    let canonical_program =
-        parse_deep(&canonical_source).expect("desugared canonical Deep must parse");
+    let canonical_program = parse_deep(&canonical_source, &chelis_syntax_host::NativeStack)
+        .expect("desugared canonical Deep must parse");
 
     for (carrier, program) in [
         ("Surf-desugared Deep", surf_program.as_slice()),
@@ -879,8 +897,8 @@ fn distinct_return_only_dimensions_may_share_one_body_inferred_output() {
                   }";
     let surf_program = surf(source);
     let canonical_source = print_canonical_flat(&surf_program);
-    let canonical_program =
-        parse_deep(&canonical_source).expect("desugared canonical Deep must parse");
+    let canonical_program = parse_deep(&canonical_source, &chelis_syntax_host::NativeStack)
+        .expect("desugared canonical Deep must parse");
 
     for (carrier, program) in [
         ("Surf-desugared Deep", surf_program.as_slice()),
@@ -960,8 +978,9 @@ fn canonical_deep_body_only_binders_fill_a_wildcard_result_at_both_ingresses() {
         ("n", "(t-tensor {} (d-var {} n) (t-prim {} f32))"),
         ("r", "(t-tensor {} (d-rank {} r) (t-prim {} f32))"),
     ] {
-        let program = parse_deep(&format!(
-            "(defsig {{}} maker ({binder}) (t-fn {{}} (t-var {{}} _)))
+        let program = parse_deep(
+            &format!(
+                "(defsig {{}} maker ({binder}) (t-fn {{}} (t-var {{}} _)))
              (def {{}}
                maker
                (fn {{}}
@@ -969,7 +988,9 @@ fn canonical_deep_body_only_binders_fill_a_wildcard_result_at_both_ingresses() {
                  (fn {{}}
                    (params {{}} (x {{type: {annotation}}}))
                    (var {{}} x))))"
-        ))
+            ),
+            &chelis_syntax_host::NativeStack,
+        )
         .expect("canonical Deep fixture must parse");
         check_ir_program(&program).unwrap_or_else(|report| {
             panic!(
@@ -1006,8 +1027,9 @@ fn body_annotations_cannot_introduce_undeclared_binders_at_either_ingress() {
             "undeclared rank variable",
         ),
     ] {
-        let program = parse_deep(&format!(
-            "(defsig {{}} maker (t-fn {{}} (t-var {{}} _)))
+        let program = parse_deep(
+            &format!(
+                "(defsig {{}} maker (t-fn {{}} (t-var {{}} _)))
              (def {{}}
                maker
                (fn {{}}
@@ -1015,7 +1037,9 @@ fn body_annotations_cannot_introduce_undeclared_binders_at_either_ingress() {
                  (fn {{}}
                    (params {{}} (x {{type: {annotation}}}))
                    (var {{}} x))))"
-        ))
+            ),
+            &chelis_syntax_host::NativeStack,
+        )
         .expect("canonical Deep fixture must parse");
         let ir = diagnostics(check_ir_program(&program));
         let typed = diagnostics(check_typed_program(&program));
@@ -1035,9 +1059,10 @@ fn body_annotations_cannot_introduce_undeclared_binders_at_either_ingress() {
 fn explicit_deep_t_var_nodes_remain_valid_binders() {
     let program = parse_deep(
         "(defsig {} ident (float32)
-           (t-fn {} (t-var {} float32) (t-var {} float32)))
-         (def {} ident
-           (fn {} (params {} (x {type: (t-var {} float32)})) (var {} x)))",
+       (t-fn {} (t-var {} float32) (t-var {} float32)))
+     (def {} ident
+       (fn {} (params {} (x {type: (t-var {} float32)})) (var {} x)))",
+        &chelis_syntax_host::NativeStack,
     )
     .expect("Deep fixture must parse");
     check_ir_program(&program).expect("an authored Deep `t-var` is explicit");
@@ -1088,11 +1113,14 @@ fn forbidden_dtype_names_reject_once_at_the_deep_binder_list() {
             "(fn {} (params {}) (lit {type: (t-prim {} i32)} 0))",
         ),
     ] {
-        let program = parse_deep(&format!(
-            "(defsig {{}} ident ({name})
+        let program = parse_deep(
+            &format!(
+                "(defsig {{}} ident ({name})
                {ty})
              (def {{}} ident {body})"
-        ))
+            ),
+            &chelis_syntax_host::NativeStack,
+        )
         .expect("Deep fixture must parse");
         let ir = diagnostics(check_ir_program(&program));
         let typed = diagnostics(check_typed_program(&program));
@@ -1109,22 +1137,28 @@ fn forbidden_dtype_names_reject_once_at_the_deep_binder_list() {
 #[test]
 fn explicit_deep_unknown_primitives_reject_like_desugared_surf() {
     for (name, nearest) in UNKNOWN_DTYPES {
-        let program = parse_deep(&format!(
-            "(defsig {{}} ident
+        let program = parse_deep(
+            &format!(
+                "(defsig {{}} ident
                (t-fn {{}} (t-prim {{}} {name}) (t-prim {{}} {name})))
              (def {{}} ident
                (fn {{}} (params {{}} x) (var {{}} x)))"
-        ))
+            ),
+            &chelis_syntax_host::NativeStack,
+        )
         .expect("Deep fixture must parse");
         assert_both_ingresses_reject_once(&program, name, nearest);
     }
     for name in RESERVED_DTYPES {
-        let program = parse_deep(&format!(
-            "(defsig {{}} ident
+        let program = parse_deep(
+            &format!(
+                "(defsig {{}} ident
                (t-fn {{}} (t-prim {{}} {name}) (t-prim {{}} {name})))
              (def {{}} ident
                (fn {{}} (params {{}} x) (var {{}} x)))"
-        ))
+            ),
+            &chelis_syntax_host::NativeStack,
+        )
         .expect("Deep fixture must parse");
         assert_both_ingresses_reject_once(&program, name, None);
     }
@@ -1134,8 +1168,9 @@ fn explicit_deep_unknown_primitives_reject_like_desugared_surf() {
 fn distinct_unknown_deep_scalar_names_keep_distinct_diagnostics() {
     let program = parse_deep(
         "(defsig {} convert
-           (t-fn {} (t-prim {} float32) (t-prim {} fp32)))
-         (def {} convert (fn {} (params {} x) (var {} x)))",
+       (t-fn {} (t-prim {} float32) (t-prim {} fp32)))
+     (def {} convert (fn {} (params {} x) (var {} x)))",
+        &chelis_syntax_host::NativeStack,
     )
     .expect("Deep fixture must parse");
     let ir = diagnostics(check_ir_program(&program));
@@ -1178,10 +1213,13 @@ fn arbitrary_non_dtype_names_remain_legal_deep_binders() {
             "(fn {} (params {}) (lit {type: (t-prim {} i32)} 0))",
         ),
     ] {
-        let program = parse_deep(&format!(
-            "(defsig {{}} ident (float32) {ty})
+        let program = parse_deep(
+            &format!(
+                "(defsig {{}} ident (float32) {ty})
              (def {{}} ident {body})"
-        ))
+            ),
+            &chelis_syntax_host::NativeStack,
+        )
         .expect("Deep fixture must parse");
         check_ir_program(&program).expect("arbitrary Deep binder must remain legal");
         check_typed_program(&program).expect("typed ingress must agree");
@@ -1207,10 +1245,13 @@ fn undeclared_deep_type_dimension_and_rank_variables_reject() {
             "undeclared rank variable",
         ),
     ] {
-        let program = parse_deep(&format!(
-            "(defsig {{}} f {ty})
+        let program = parse_deep(
+            &format!(
+                "(defsig {{}} f {ty})
              (def {{}} f (fn {{}} (params {{}} x) (lit {{type: (t-prim {{}} f32)}} 0.0)))"
-        ))
+            ),
+            &chelis_syntax_host::NativeStack,
+        )
         .expect("Deep fixture must parse");
         let ir = diagnostics(check_ir_program(&program));
         let typed = diagnostics(check_typed_program(&program));
@@ -1227,7 +1268,8 @@ fn undeclared_deep_type_dimension_and_rank_variables_reject() {
 fn empty_deep_binder_list_is_rejected_at_both_checker_ingresses() {
     let program = parse_deep(
         "(defsig {} f () (t-fn {} (t-prim {} f32) (t-prim {} f32)))
-         (def {} f (fn {} (params {} x) (lit {type: (t-prim {} f32)} 0.0)))",
+     (def {} f (fn {} (params {} x) (lit {type: (t-prim {} f32)} 0.0)))",
+        &chelis_syntax_host::NativeStack,
     )
     .expect("structural fixture parses before semantic validation");
     let ir = diagnostics(check_ir_program(&program));
@@ -1249,10 +1291,13 @@ fn malformed_and_duplicate_deep_binder_lists_reject_at_both_ingresses() {
             "expected a nonempty structural list of distinct symbol names",
         ),
     ] {
-        let program = parse_deep(&format!(
-            "(defsig {{}} f {binders} (t-fn {{}} (t-var {{}} a) (t-var {{}} a)))
+        let program = parse_deep(
+            &format!(
+                "(defsig {{}} f {binders} (t-fn {{}} (t-var {{}} a) (t-var {{}} a)))
              (def {{}} f (fn {{}} (params {{}} x) (var {{}} x)))"
-        ))
+            ),
+            &chelis_syntax_host::NativeStack,
+        )
         .expect("structural fixture parses before checker validation");
         let ir = diagnostics(check_ir_program(&program));
         let typed = diagnostics(check_typed_program(&program));
@@ -1280,10 +1325,13 @@ fn declared_deep_type_dimension_and_rank_variables_check_clean() {
                       (t-tensor {} (d-rank {} r) (t-prim {} f32)))",
         ),
     ] {
-        let program = parse_deep(&format!(
-            "(defsig {{}} f {binders} {ty})
+        let program = parse_deep(
+            &format!(
+                "(defsig {{}} f {binders} {ty})
              (def {{}} f (fn {{}} (params {{}} x) (var {{}} x)))"
-        ))
+            ),
+            &chelis_syntax_host::NativeStack,
+        )
         .expect("Deep fixture must parse");
         check_ir_program(&program).expect("declared Deep binder must check");
         check_typed_program(&program).expect("typed ingress must agree");
@@ -1294,8 +1342,9 @@ fn declared_deep_type_dimension_and_rank_variables_check_clean() {
 fn declared_but_unused_deep_binder_is_a_vacuous_quantifier() {
     let program = parse_deep(
         "(defsig {} constant (a) (t-fn {} (t-prim {} i32)))
-         (def {} constant
-           (fn {} (params {}) (lit {type: (t-prim {} i32)} 1)))",
+     (def {} constant
+       (fn {} (params {}) (lit {type: (t-prim {} i32)} 1)))",
+        &chelis_syntax_host::NativeStack,
     )
     .expect("Deep fixture must parse");
     check_ir_program(&program).expect("IR ingress must accept an unused unbounded binder");
@@ -1306,9 +1355,10 @@ fn declared_but_unused_deep_binder_is_a_vacuous_quantifier() {
 fn declared_but_unused_bounded_deep_binder_rejects_at_both_ingresses() {
     let program = parse_deep(
         "(defsig {dtype_bounds: {a: numeric}} constant (a)
-           (t-fn {} (t-prim {} i32)))
-         (def {} constant
-           (fn {} (params {}) (lit {type: (t-prim {} i32)} 1)))",
+       (t-fn {} (t-prim {} i32)))
+     (def {} constant
+       (fn {} (params {}) (lit {type: (t-prim {} i32)} 1)))",
+        &chelis_syntax_host::NativeStack,
     )
     .expect("Deep fixture must parse");
     let ir = diagnostics(check_ir_program(&program));

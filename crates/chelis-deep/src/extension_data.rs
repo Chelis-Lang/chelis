@@ -1,6 +1,8 @@
 //! Producer data is a validated, flat syntax tree, never a program expression.
 //! Keeping its canonical token stream flat also makes clone/drop stack safe.
 
+use alloc::string::{String, ToString};
+
 use crate::{
     Span,
     lexer::{self, Token, TokenKind},

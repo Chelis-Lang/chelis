@@ -101,9 +101,9 @@ COMPILE_CASES = tuple(
 def validate_fixture_inventory(root: Path) -> None:
     """The compile driver owns exact fixtures, never their containing directory.
 
-    The historical producer is compiled by cache_wire_compatibility and remains
-    subject to normal configuration-closure dep-info reconciliation. Its source
-    must also be the source recorded with the historical binary artifacts.
+    The compatibility test includes the retained producer as byte data.
+    Configuration-closure dependency information still covers this source.
+    Its identity must match the manifest for the historical binary artifacts.
     """
     base = root / "crates/chelis-compiler-api/tests/fixtures"
     expected = {case.fixture for case in COMPILE_CASES}

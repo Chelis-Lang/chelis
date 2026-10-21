@@ -137,8 +137,10 @@ fn rejected_packages_keep_type_effect_and_linearity_boundaries() {
         &chelis_std_bundle::EMBEDDED_RUNTIME,
     )
     .expect_err("both unbound names must reject the package");
-    let decls = parse_str(TYPE_REJECTION_SOURCE).expect("rejected package source must parse");
-    let exprs = desugar_program(&decls).expect("rejected package source must desugar");
+    let decls = parse_str(TYPE_REJECTION_SOURCE, &chelis_syntax_host::NativeStack)
+        .expect("rejected package source must parse");
+    let exprs = desugar_program(&decls, &chelis_syntax_host::NativeStack)
+        .expect("rejected package source must desugar");
     let report = check_typed_program(&exprs).expect_err("both unbound names must reject at check");
     let mut unbound = report
         .errors

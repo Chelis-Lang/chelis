@@ -122,7 +122,8 @@ fn macro_pipeline_preserves_successor_carriers_across_reader_walks() {
       (arm {} (pat-var {} item) () (var {} item)))))
 (def {} result
   (app {audit: (var {} metadata_name)} (var {} wrap) (lit {} 9)))";
-    let parsed = chelis_deep::parser::parse_str(source).expect("fixture stamps");
+    let parsed = chelis_deep::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+        .expect("fixture stamps");
     assert!(
         parsed.iter().any(|expr| matches!(expr, Expr::Node(_, _))),
         "the fixture must reach the successor Node carrier"
@@ -187,9 +188,11 @@ fn macro_walks_preserve_every_explicit_nondecoded_carrier_role() {
 
 #[test]
 fn nonlegacy_macro_invoke_carriers_are_not_reclassified_as_the_raw_boundary() {
-    let mut program =
-        chelis_deep::parser::parse_str("(defmacro {} keep (params {} value) (var {} value))")
-            .expect("macro definition stamps");
+    let mut program = chelis_deep::parser::parse_str(
+        "(defmacro {} keep (params {} value) (var {} value))",
+        &chelis_syntax_host::NativeStack,
+    )
+    .expect("macro definition stamps");
     program.push(Expr::UnknownForm(Box::new(UnknownFormData {
         head: "macro-invoke".to_string(),
         meta: Metadata::default(),

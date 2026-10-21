@@ -1,3 +1,4 @@
+#![no_std]
 #![forbid(unsafe_code)]
 
 //! Order-free collections for compiler internals.
@@ -27,14 +28,17 @@
 //! the same ordered boundary over shared storage, so a copy that outlives its
 //! scope costs O(1) to take and O(log n) per later change.
 
-use std::borrow::Borrow;
-use std::cmp::Ordering;
-use std::collections::{BTreeMap, BTreeSet, btree_map};
-use std::fmt;
-use std::iter::FromIterator;
-use std::marker::PhantomData;
-use std::ops::Index;
-use std::sync::Arc;
+extern crate alloc;
+
+use alloc::collections::{BTreeMap, BTreeSet, btree_map};
+use alloc::sync::Arc;
+use alloc::vec::Vec;
+use core::borrow::Borrow;
+use core::cmp::Ordering;
+use core::fmt;
+use core::iter::FromIterator;
+use core::marker::PhantomData;
+use core::ops::Index;
 
 use serde::de::{Error as _, SeqAccess, Visitor};
 use serde::ser::SerializeSeq;
@@ -678,7 +682,7 @@ fn insert_at<K: Ord + Clone, V: Clone>(link: &mut Link<K, V>, key: K, value: V) 
     let displaced = match key.cmp(&node.key) {
         Ordering::Less => insert_at(&mut node.left, key, value),
         Ordering::Greater => insert_at(&mut node.right, key, value),
-        Ordering::Equal => return Some(std::mem::replace(&mut node.value, value)),
+        Ordering::Equal => return Some(core::mem::replace(&mut node.value, value)),
     };
     if displaced.is_none() {
         rebalance(link);
@@ -696,7 +700,7 @@ fn remove_least<K: Clone, V: Clone>(link: &mut Link<K, V>) -> (K, V) {
     }
     let right = node.right.take();
     let Node { key, value, .. } =
-        Arc::unwrap_or_clone(std::mem::replace(link, right).expect("the subtree is nonempty"));
+        Arc::unwrap_or_clone(core::mem::replace(link, right).expect("the subtree is nonempty"));
     (key, value)
 }
 
@@ -713,7 +717,7 @@ where
         Ordering::Greater => remove_at(&mut node.right, key),
         Ordering::Equal => match (node.left.take(), node.right.take()) {
             (None, child) | (child, None) => {
-                let removed = std::mem::replace(link, child).expect("the subtree holds the key");
+                let removed = core::mem::replace(link, child).expect("the subtree holds the key");
                 return Arc::unwrap_or_clone(removed).value;
             }
             (Some(left), Some(right)) => {
@@ -721,7 +725,7 @@ where
                 node.right = Some(right);
                 let (least_key, least_value) = remove_least(&mut node.right);
                 node.key = least_key;
-                std::mem::replace(&mut node.value, least_value)
+                core::mem::replace(&mut node.value, least_value)
             }
         },
     };

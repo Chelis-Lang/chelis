@@ -3,6 +3,12 @@
 //! Walks top-down, consulting `child_stamp_role` at each child to decide
 //! whether a list decodes as a Node, BareList, or UnknownForm.
 
+use alloc::{
+    boxed::Box,
+    string::{String, ToString},
+    vec::Vec,
+};
+
 use crate::Metadata;
 use crate::ast::{Atom, Expr};
 use crate::node::Node;
@@ -77,8 +83,8 @@ impl FormClass {
     }
 }
 
-impl std::fmt::Display for FormClass {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for FormClass {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.write_str(self.as_str())
     }
 }
@@ -105,8 +111,8 @@ impl FormIdentity {
     }
 }
 
-impl std::fmt::Display for FormIdentity {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for FormIdentity {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Head(symbol) => write!(f, "`{symbol}`"),
             Self::Class(class) => write!(f, "{class}"),
@@ -144,8 +150,8 @@ pub enum StampErrorKind {
     NodeError(crate::node::NodeError),
 }
 
-impl std::fmt::Display for StampError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for StampError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match &self.kind {
             StampErrorKind::RetiredPipe => write!(
                 f,
@@ -186,7 +192,7 @@ impl std::fmt::Display for StampError {
     }
 }
 
-impl std::error::Error for StampError {}
+impl core::error::Error for StampError {}
 
 fn extension_at_program_slot(data: crate::ExtensionData) -> StampError {
     StampError {

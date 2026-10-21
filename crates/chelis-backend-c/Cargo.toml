@@ -22,6 +22,7 @@ tree-sitter = "0.26.8"
 tree-sitter-c = "0.24.1"
 
 [dev-dependencies]
+chelis-syntax-host.workspace = true
 chelis-deep.workspace = true
 chelis-effects.workspace = true
 # Tests that link generated C stage the runtime the bundle carries

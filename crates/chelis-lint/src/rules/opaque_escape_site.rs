@@ -58,7 +58,8 @@ impl Rule for OpaqueEscapeSite {
         let Some(source) = ctx.source else {
             return Vec::new();
         };
-        let Ok(decls) = chelis_surf::parser::parse_str(source) else {
+        let Ok(decls) = chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+        else {
             return Vec::new();
         };
         let mut out = Vec::new();

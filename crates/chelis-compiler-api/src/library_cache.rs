@@ -898,9 +898,12 @@ mod tests {
     /// irrelevant to the key tests; what matters is that the same slice
     /// hashes identically and a different slice hashes differently.
     fn sample_decls(marker: &str) -> Vec<chelis_surf::ast::Decl> {
-        chelis_surf::parser::parse_str(&format!(
-            "module Dep\nexport ({marker}_value)\ndef {marker}_value() -> i32 = cast(1, i32)\n"
-        ))
+        chelis_surf::parser::parse_str(
+            &format!(
+                "module Dep\nexport ({marker}_value)\ndef {marker}_value() -> i32 = cast(1, i32)\n"
+            ),
+            &chelis_syntax_host::NativeStack,
+        )
         .expect("sample decls must parse")
     }
 

@@ -729,8 +729,11 @@ mod tests {
     }
 
     fn sample_decls(marker: &str) -> Vec<chelis_surf::ast::Decl> {
-        chelis_surf::parser::parse_str(&format!("module Sample\ndef {marker}_value() -> i32 = 1\n"))
-            .expect("sample decls must parse")
+        chelis_surf::parser::parse_str(
+            &format!("module Sample\ndef {marker}_value() -> i32 = 1\n"),
+            &chelis_syntax_host::NativeStack,
+        )
+        .expect("sample decls must parse")
     }
 
     #[test]

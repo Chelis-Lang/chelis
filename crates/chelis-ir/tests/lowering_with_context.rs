@@ -23,7 +23,7 @@ use chelis_types::{
 };
 
 fn parse(src: &str) -> Vec<Expr> {
-    chelis_deep::parser::parse_str(src).expect("deep parse")
+    chelis_deep::parser::parse_str(src, &chelis_syntax_host::NativeStack).expect("deep parse")
 }
 
 fn check_lib(library_src: &str) -> (Vec<Expr>, TypeEnv, CheckedProgram) {

@@ -1414,7 +1414,8 @@ pub(super) fn prove(
             Ok(value) => value,
             Err(reason) => return unsupported_outcome(reason),
         };
-    let deep = match chelis_surf::desugar::desugar_program(decls) {
+    let deep = match chelis_surf::desugar::desugar_program(decls, &chelis_syntax_host::NativeStack)
+    {
         Ok(value) => value,
         Err(error) => {
             return unsupported_outcome(unsupported(format!(

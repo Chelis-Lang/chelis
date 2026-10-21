@@ -1,3 +1,7 @@
+use alloc::{
+    string::{String, ToString},
+    vec::Vec,
+};
 use chelis_deep::{LiteralSuffix, Span};
 use thiserror::Error;
 

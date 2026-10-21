@@ -11,12 +11,13 @@ use chelis_surf::parser::parse_str as surf_parse;
 /// vocabulary and round-trips through the Deep parser.
 fn roundtrip(surf_source: &str) {
     // 1. Parse Surf
-    let decls = surf_parse(surf_source).unwrap_or_else(|e| {
+    let decls = surf_parse(surf_source, &chelis_syntax_host::NativeStack).unwrap_or_else(|e| {
         panic!("Surf parse failed for:\n{surf_source}\nError: {e}");
     });
 
     // 2. Desugar to Deep
-    let deep_exprs = desugar_program(&decls).expect("Surf fixture must desugar");
+    let deep_exprs = desugar_program(&decls, &chelis_syntax_host::NativeStack)
+        .expect("Surf fixture must desugar");
     assert!(
         !deep_exprs.is_empty(),
         "Desugarer produced no output for:\n{surf_source}"
@@ -30,7 +31,7 @@ fn roundtrip(surf_source: &str) {
     );
 
     // 4. Re-parse Deep with STRICT validation (unknown tags = error)
-    let reparsed = deep_parse_strict(&deep_text).unwrap_or_else(|e| {
+    let reparsed = deep_parse_strict(&deep_text,&chelis_syntax_host::NativeStack).unwrap_or_else(|e| {
         panic!(
             "Deep strict re-parse failed.\nOriginal Surf:\n{surf_source}\nDeep output:\n{deep_text}\nError: {e}"
         );
@@ -58,15 +59,17 @@ fn roundtrip_property_decl_desugars_to_property_metadata() {
   x >= 0.0
   with samples = 3
 "#;
-    let decls = surf_parse(source).expect("property parses");
-    let deep_exprs = desugar_program(&decls).expect("Surf fixture must desugar");
+    let decls = surf_parse(source, &chelis_syntax_host::NativeStack).expect("property parses");
+    let deep_exprs = desugar_program(&decls, &chelis_syntax_host::NativeStack)
+        .expect("Surf fixture must desugar");
     let deep_text = print_canonical(&deep_exprs);
     assert!(deep_text.contains("chelis_role: \"property\""));
     assert!(deep_text.contains("property_source_kind: \"user\""));
     assert!(deep_text.contains("property_quantifiers: (params {}"));
     assert!(deep_text.contains("property_preconditions: (tuple {}"));
     assert!(deep_text.contains("property_samples"));
-    deep_parse_strict(&deep_text).expect("property Deep validates");
+    deep_parse_strict(&deep_text, &chelis_syntax_host::NativeStack)
+        .expect("property Deep validates");
 }
 
 #[test]
@@ -75,20 +78,23 @@ fn opaque_type_decl_desugars_to_metadata() {
 @opaque
 type Probability = | Probability { value: f32 }
 "#;
-    let decls = surf_parse(source).expect("opaque type parses");
-    let deep_exprs = desugar_program(&decls).expect("Surf fixture must desugar");
+    let decls = surf_parse(source, &chelis_syntax_host::NativeStack).expect("opaque type parses");
+    let deep_exprs = desugar_program(&decls, &chelis_syntax_host::NativeStack)
+        .expect("Surf fixture must desugar");
     let deep_text = print_canonical(&deep_exprs);
     assert!(deep_text.contains("opaque: true"));
     assert!(deep_text.contains("Probability"));
     // An opaque type without an invariant carries neither key.
     assert!(!deep_text.contains("invariant"));
-    deep_parse_strict(&deep_text).expect("opaque type Deep validates");
+    deep_parse_strict(&deep_text, &chelis_syntax_host::NativeStack)
+        .expect("opaque type Deep validates");
 }
 
 /// Desugar a single Surf module and print canonical Deep.
 fn desugar_to_deep(source: &str) -> String {
-    let decls = surf_parse(source).expect("Surf parses");
-    let deep_exprs = desugar_program(&decls).expect("Surf fixture must desugar");
+    let decls = surf_parse(source, &chelis_syntax_host::NativeStack).expect("Surf parses");
+    let deep_exprs = desugar_program(&decls, &chelis_syntax_host::NativeStack)
+        .expect("Surf fixture must desugar");
     print_canonical(&deep_exprs)
 }
 
@@ -108,7 +114,8 @@ fn invariant_linear_desugars_to_three_metadata_keys() {
     assert!(deep_text.contains("invariant_amenability: \"linear\""));
     // The embedded fn (a full Deep expr in the metadata map) round-trips
     // through the strict validator.
-    deep_parse_strict(&deep_text).expect("invariant Deep validates strictly");
+    deep_parse_strict(&deep_text, &chelis_syntax_host::NativeStack)
+        .expect("invariant Deep validates strictly");
 }
 
 #[test]
@@ -118,7 +125,8 @@ fn invariant_polynomial_amenability_recorded() {
          type Probability = | Probability { value: f32 }",
     );
     assert!(deep_text.contains("invariant_amenability: \"polynomial\""));
-    deep_parse_strict(&deep_text).expect("polynomial invariant validates");
+    deep_parse_strict(&deep_text, &chelis_syntax_host::NativeStack)
+        .expect("polynomial invariant validates");
 }
 
 #[test]
@@ -128,7 +136,8 @@ fn invariant_transcendental_amenability_recorded() {
          type Probability = | Probability { value: f32 }",
     );
     assert!(deep_text.contains("invariant_amenability: \"transcendental\""));
-    deep_parse_strict(&deep_text).expect("transcendental invariant validates");
+    deep_parse_strict(&deep_text, &chelis_syntax_host::NativeStack)
+        .expect("transcendental invariant validates");
 }
 
 #[test]
@@ -146,7 +155,8 @@ fn simplex_tolerance_band_desugars_and_validates() {
     assert!(deep_text.contains("invariant_amenability: \"linear\""));
     // The `sum` callee is present (it carries a span; match the suffix).
     assert!(deep_text.contains("sum)"));
-    deep_parse_strict(&deep_text).expect("simplex invariant validates strictly");
+    deep_parse_strict(&deep_text, &chelis_syntax_host::NativeStack)
+        .expect("simplex invariant validates strictly");
 }
 
 #[test]
@@ -229,8 +239,9 @@ fn roundtrip_example_mlp() {
 
 #[test]
 fn dim_params_produce_d_var() {
-    let decls = surf_parse("def transpose[batch, hidden](x: tensor[batch, hidden, f32]) -> tensor[hidden, batch, f32] = x").unwrap();
-    let deep = desugar_program(&decls).expect("Surf fixture must desugar");
+    let decls = surf_parse("def transpose[batch, hidden](x: tensor[batch, hidden, f32]) -> tensor[hidden, batch, f32] = x",&chelis_syntax_host::NativeStack).unwrap();
+    let deep = desugar_program(&decls, &chelis_syntax_host::NativeStack)
+        .expect("Surf fixture must desugar");
     let text = print_canonical(&deep);
     // batch and hidden are declared dim params → must be d-var, not d-name
     assert!(
@@ -252,8 +263,13 @@ fn dim_params_produce_d_var() {
 
 #[test]
 fn wildcard_dimension_desugars_to_d_name_star() {
-    let decls = surf_parse("def f(x: tensor[*, f32]) -> tensor[*, f32] = x").unwrap();
-    let deep = desugar_program(&decls).expect("Surf fixture must desugar");
+    let decls = surf_parse(
+        "def f(x: tensor[*, f32]) -> tensor[*, f32] = x",
+        &chelis_syntax_host::NativeStack,
+    )
+    .unwrap();
+    let deep = desugar_program(&decls, &chelis_syntax_host::NativeStack)
+        .expect("Surf fixture must desugar");
     let text = print_canonical(&deep);
     assert!(
         text.contains("(d-name {} *)"),
@@ -265,8 +281,9 @@ fn wildcard_dimension_desugars_to_d_name_star() {
 
 #[test]
 fn typed_def_emits_defsig() {
-    let decls = surf_parse("def f(x: f32) -> f32 = x").unwrap();
-    let deep = desugar_program(&decls).expect("Surf fixture must desugar");
+    let decls = surf_parse("def f(x: f32) -> f32 = x", &chelis_syntax_host::NativeStack).unwrap();
+    let deep = desugar_program(&decls, &chelis_syntax_host::NativeStack)
+        .expect("Surf fixture must desugar");
     assert!(
         matches!(
             deep.as_slice(),
@@ -284,8 +301,13 @@ fn typed_def_emits_defsig() {
 
 #[test]
 fn type_var_not_prim() {
-    let decls = surf_parse("type Option[a] = | Some(a) | None").unwrap();
-    let deep = desugar_program(&decls).expect("Surf fixture must desugar");
+    let decls = surf_parse(
+        "type Option[a] = | Some(a) | None",
+        &chelis_syntax_host::NativeStack,
+    )
+    .unwrap();
+    let deep = desugar_program(&decls, &chelis_syntax_host::NativeStack)
+        .expect("Surf fixture must desugar");
     let text = print_canonical(&deep);
     assert!(
         text.contains("(t-var {} a)"),
@@ -295,8 +317,9 @@ fn type_var_not_prim() {
 
 #[test]
 fn annotation_in_metadata() {
-    let decls = surf_parse("def f(x) = x : f32").unwrap();
-    let deep = desugar_program(&decls).expect("Surf fixture must desugar");
+    let decls = surf_parse("def f(x) = x : f32", &chelis_syntax_host::NativeStack).unwrap();
+    let deep = desugar_program(&decls, &chelis_syntax_host::NativeStack)
+        .expect("Surf fixture must desugar");
     let text = print_canonical(&deep);
     assert!(
         text.contains("type: (t-prim {} f32)"),
@@ -306,10 +329,13 @@ fn annotation_in_metadata() {
 
 #[test]
 fn pat_lit_raw_value() {
-    let decls =
-        surf_parse("type B = | T | F\ndef f(x: f32) -> f32 = match x with { | 0 => 1 | _ => x }")
-            .unwrap();
-    let deep = desugar_program(&decls).expect("Surf fixture must desugar");
+    let decls = surf_parse(
+        "type B = | T | F\ndef f(x: f32) -> f32 = match x with { | 0 => 1 | _ => x }",
+        &chelis_syntax_host::NativeStack,
+    )
+    .unwrap();
+    let deep = desugar_program(&decls, &chelis_syntax_host::NativeStack)
+        .expect("Surf fixture must desugar");
     let text = print_canonical(&deep);
     assert!(
         text.contains("(pat-lit {} 0)"),
@@ -320,8 +346,13 @@ fn pat_lit_raw_value() {
 #[test]
 fn no_legacy_tags() {
     // Verify no legacy tags appear in desugared output
-    let decls = surf_parse("def f(x: f32) -> f32 = x + 1").unwrap();
-    let deep = desugar_program(&decls).expect("Surf fixture must desugar");
+    let decls = surf_parse(
+        "def f(x: f32) -> f32 = x + 1",
+        &chelis_syntax_host::NativeStack,
+    )
+    .unwrap();
+    let deep = desugar_program(&decls, &chelis_syntax_host::NativeStack)
+        .expect("Surf fixture must desugar");
     let text = print_canonical(&deep);
     assert!(
         !text.contains("(sig "),
@@ -339,8 +370,13 @@ fn no_legacy_tags() {
 
 #[test]
 fn effect_annotations_desugar_into_t_fn_metadata() {
-    let decls = surf_parse("sig f: f32 -> f32 ! {Diff, Accum, Resource(\"gpu:0\")}").unwrap();
-    let deep = desugar_program(&decls).expect("Surf fixture must desugar");
+    let decls = surf_parse(
+        "sig f: f32 -> f32 ! {Diff, Accum, Resource(\"gpu:0\")}",
+        &chelis_syntax_host::NativeStack,
+    )
+    .unwrap();
+    let deep = desugar_program(&decls, &chelis_syntax_host::NativeStack)
+        .expect("Surf fixture must desugar");
     let text = print_canonical(&deep);
     assert!(
         text.contains("{eff: (effects {} diff accum (resource {} \"gpu:0\"))}"),
@@ -354,17 +390,30 @@ fn effect_annotations_desugar_into_t_fn_metadata() {
 // must preserve.
 #[test]
 fn hof_argument_sig_desugars_to_nested_t_fn() {
-    let hof = surf_parse("sig f[a, b, c]: (a -> b) -> c").unwrap();
-    let hof_text = print_canonical(&desugar_program(&hof).expect("Surf fixture must desugar"));
+    let hof = surf_parse(
+        "sig f[a, b, c]: (a -> b) -> c",
+        &chelis_syntax_host::NativeStack,
+    )
+    .unwrap();
+    let hof_text = print_canonical(
+        &desugar_program(&hof, &chelis_syntax_host::NativeStack)
+            .expect("Surf fixture must desugar"),
+    );
     assert!(
         hof_text.contains("(t-fn {} (t-fn {} (t-var {} a) (t-var {} b)) (t-var {} c))"),
         "HOF sig did not desugar to a nested t-fn; got:\n{hof_text}"
     );
-    deep_parse_strict(&hof_text).expect("HOF sig Deep validates");
+    deep_parse_strict(&hof_text, &chelis_syntax_host::NativeStack).expect("HOF sig Deep validates");
 
-    let curried = surf_parse("sig f[a, b, c]: a -> b -> c").unwrap();
-    let curried_text =
-        print_canonical(&desugar_program(&curried).expect("Surf fixture must desugar"));
+    let curried = surf_parse(
+        "sig f[a, b, c]: a -> b -> c",
+        &chelis_syntax_host::NativeStack,
+    )
+    .unwrap();
+    let curried_text = print_canonical(
+        &desugar_program(&curried, &chelis_syntax_host::NativeStack)
+            .expect("Surf fixture must desugar"),
+    );
     assert!(
         curried_text.contains("(t-fn {} (t-var {} a) (t-var {} b) (t-var {} c))"),
         "curried sig did not desugar to a flat t-fn; got:\n{curried_text}"
@@ -381,26 +430,48 @@ fn hof_argument_sig_desugars_to_nested_t_fn() {
 #[test]
 fn bare_realize_as_pipe_stage_parses() {
     let src = "def f(x: tensor[3, f32]) -> tensor[3, f32] = x |> realize";
-    let deep = desugar_program(&surf_parse(src).unwrap()).unwrap();
+    let deep = desugar_program(
+        &surf_parse(src, &chelis_syntax_host::NativeStack).unwrap(),
+        &chelis_syntax_host::NativeStack,
+    )
+    .unwrap();
     let text = print_canonical(&deep);
     assert!(text.contains("(realize {"));
     assert!(!text.contains("(pipe {") && !text.contains("__chelis_pipe"));
-    assert_eq!(text, print_canonical(&deep_parse_strict(&text).unwrap()));
+    assert_eq!(
+        text,
+        print_canonical(&deep_parse_strict(&text, &chelis_syntax_host::NativeStack).unwrap())
+    );
 }
 
 #[test]
 fn bare_copy_as_pipe_stage_parses() {
     let src = "def f(x: tensor[3, f32]) -> tensor[3, f32] = x |> copy";
-    let text = print_canonical(&desugar_program(&surf_parse(src).unwrap()).unwrap());
+    let text = print_canonical(
+        &desugar_program(
+            &surf_parse(src, &chelis_syntax_host::NativeStack).unwrap(),
+            &chelis_syntax_host::NativeStack,
+        )
+        .unwrap(),
+    );
     assert!(text.contains("(copy {"));
     assert!(!text.contains("(pipe {") && !text.contains("__chelis_pipe"));
-    assert_eq!(text, print_canonical(&deep_parse_strict(&text).unwrap()));
+    assert_eq!(
+        text,
+        print_canonical(&deep_parse_strict(&text, &chelis_syntax_host::NativeStack).unwrap())
+    );
 }
 
 #[test]
 fn chained_bare_keyword_with_named_pipe_stages_parses() {
     let src = "def f(x: tensor[3, f32]) -> tensor[3, f32] = x |> realize |> relu";
-    let text = print_canonical(&desugar_program(&surf_parse(src).unwrap()).unwrap());
+    let text = print_canonical(
+        &desugar_program(
+            &surf_parse(src, &chelis_syntax_host::NativeStack).unwrap(),
+            &chelis_syntax_host::NativeStack,
+        )
+        .unwrap(),
+    );
     assert!(text.contains("(realize {") && text.contains("relu)") && text.contains("(app {"));
     assert!(!text.contains("(pipe {") && !text.contains("__chelis_pipe"));
 }
@@ -414,8 +485,10 @@ fn keyword_with_arg_form_in_pipe_stage_still_parses() {
     // `LParen`. This test exercises a non-pipe call followed by a bare
     // pipe stage to ensure neither path interferes with the other.
     let src = "def f(x: tensor[3, f32]) -> tensor[3, f32] = cast(x, f32) |> realize";
-    let decls = surf_parse(src).expect("cast arg form + bare-realize pipe should parse");
-    let deep = desugar_program(&decls).expect("Surf fixture must desugar");
+    let decls = surf_parse(src, &chelis_syntax_host::NativeStack)
+        .expect("cast arg form + bare-realize pipe should parse");
+    let deep = desugar_program(&decls, &chelis_syntax_host::NativeStack)
+        .expect("Surf fixture must desugar");
     let text = print_canonical(&deep);
     // The cast call retains its arg form.
     assert!(
@@ -451,7 +524,7 @@ fn fmt_compacts_bare_keyword_pipe_stages_back_to_keyword_form() {
             "def f(x: tensor[3, f32]) -> tensor[3, f32] = x |> realize |> relu",
         ),
     ] {
-        let decls = surf_parse(src).expect(label);
+        let decls = surf_parse(src, &chelis_syntax_host::NativeStack).expect(label);
         let formatted = format_program(&decls);
         assert!(
             formatted.contains("|> realize") || formatted.contains("|> copy"),
@@ -463,7 +536,8 @@ fn fmt_compacts_bare_keyword_pipe_stages_back_to_keyword_form() {
         );
         // Idempotency: formatting the formatted output produces the same
         // text (no further compaction or expansion).
-        let reformatted = format_program(&surf_parse(&formatted).expect(label));
+        let reformatted =
+            format_program(&surf_parse(&formatted, &chelis_syntax_host::NativeStack).expect(label));
         assert_eq!(formatted, reformatted, "{label}: fmt is not idempotent");
     }
 }
@@ -476,7 +550,7 @@ fn unsupported_structural_keyword_pipe_stage_still_rejected() {
     // same family.
     for kw in ["if", "match", "fn", "par", "with"] {
         let src = format!("def f(x: tensor[3, f32]) -> tensor[3, f32] = x |> {kw}");
-        let result = surf_parse(&src);
+        let result = surf_parse(&src, &chelis_syntax_host::NativeStack);
         assert!(
             result.is_err(),
             "expected parser to reject bare `|> {kw}` (no callable-form semantics), \
@@ -509,10 +583,11 @@ fn top_level_bare_unary_builtin_reference_parses() {
     // is `fn (v) -> realize(v)`.
     for kw in ["realize", "copy"] {
         let src = format!("f = {kw}\n");
-        let decls = surf_parse(&src)
+        let decls = surf_parse(&src, &chelis_syntax_host::NativeStack)
             .unwrap_or_else(|e| panic!("bare top-level `{kw}` should parse, got: {e}"));
         assert_eq!(decls.len(), 1, "expected one decl for `{src}`");
-        let deep = desugar_program(&decls).expect("Surf fixture must desugar");
+        let deep = desugar_program(&decls, &chelis_syntax_host::NativeStack)
+            .expect("Surf fixture must desugar");
         let text = print_canonical(&deep);
         // η-expanded body references the builtin.
         assert!(
@@ -528,9 +603,10 @@ fn bare_unary_builtin_as_juxtaposition_argument_parses() {
     // function-valued argument. Same η-expansion as H1.
     for kw in ["realize", "copy"] {
         let src = format!("def f(x: tensor[3, f32]) -> tensor[3, f32] = apply_fn({kw})\n");
-        let decls =
-            surf_parse(&src).unwrap_or_else(|e| panic!("`apply_fn({kw})` should parse, got: {e}"));
-        let deep = desugar_program(&decls).expect("Surf fixture must desugar");
+        let decls = surf_parse(&src, &chelis_syntax_host::NativeStack)
+            .unwrap_or_else(|e| panic!("`apply_fn({kw})` should parse, got: {e}"));
+        let deep = desugar_program(&decls, &chelis_syntax_host::NativeStack)
+            .expect("Surf fixture must desugar");
         let text = print_canonical(&deep);
         // The `apply_fn` call must remain a single `app` of `apply_fn`
         // applied to the synthesized lambda (or builtin reference) — not
@@ -547,8 +623,10 @@ fn one_arg_cast_pipe_stage_parses() {
     // Per spec §3.6, `x |> cast(f32)` ≡ `cast(x, f32)`: the piped value
     // fills the first slot, the type argument fills the second.
     let src = "def f(x: tensor[3, f32]) -> tensor[3, f32] = x |> cast(f32)\n";
-    let decls = surf_parse(src).expect("`x |> cast(f32)` should parse per spec §3.6");
-    let deep = desugar_program(&decls).expect("Surf fixture must desugar");
+    let decls = surf_parse(src, &chelis_syntax_host::NativeStack)
+        .expect("`x |> cast(f32)` should parse per spec §3.6");
+    let deep = desugar_program(&decls, &chelis_syntax_host::NativeStack)
+        .expect("Surf fixture must desugar");
     let text = print_canonical(&deep);
     assert!(
         !text.contains("(pipe {"),
@@ -567,8 +645,9 @@ fn one_arg_cast_pipe_stage_parses() {
 #[test]
 fn parsed_surf_expression_spans_enter_deep_metadata() {
     let source = "def f(x) = add(x, 1)";
-    let decls = surf_parse(source).unwrap();
-    let deep = desugar_program(&decls).expect("Surf fixture must desugar");
+    let decls = surf_parse(source, &chelis_syntax_host::NativeStack).unwrap();
+    let deep = desugar_program(&decls, &chelis_syntax_host::NativeStack)
+        .expect("Surf fixture must desugar");
     let text = print_canonical(&deep);
     assert!(
         text.contains("(app {span: \"surf:11..20\"}"),
@@ -593,7 +672,7 @@ fn retired_seed_handler_and_random_effect_are_typed_parse_errors() {
         "def f() = with seed(42i64) { x }",
         "sig f: f32 -> f32 ! {Random}",
     ] {
-        let error = surf_parse(source).expect_err(source);
+        let error = surf_parse(source, &chelis_syntax_host::NativeStack).expect_err(source);
         assert!(
             matches!(
                 error,
@@ -606,8 +685,13 @@ fn retired_seed_handler_and_random_effect_are_typed_parse_errors() {
 
 #[test]
 fn with_device_desugars_to_handle_effect() {
-    let decls = surf_parse("def f() = with device(\"gpu:0\") { x }").unwrap();
-    let deep = desugar_program(&decls).expect("Surf fixture must desugar");
+    let decls = surf_parse(
+        "def f() = with device(\"gpu:0\") { x }",
+        &chelis_syntax_host::NativeStack,
+    )
+    .unwrap();
+    let deep = desugar_program(&decls, &chelis_syntax_host::NativeStack)
+        .expect("Surf fixture must desugar");
     let text = print_canonical(&deep);
     assert!(
         text.contains("(handle-effect {effect: resource"),
@@ -645,11 +729,11 @@ fn with_device_desugars_to_handle_effect() {
 fn assert_fmt_idempotent(label: &str, src: &str) {
     use chelis_surf::format::format_program;
     let pass1 = format_program(
-        &surf_parse(src)
+        &surf_parse(src, &chelis_syntax_host::NativeStack)
             .unwrap_or_else(|e| panic!("{label}: pass-0 parse failed: {e}\nsrc:\n{src}")),
     );
     let pass2 = format_program(
-        &surf_parse(&pass1)
+        &surf_parse(&pass1, &chelis_syntax_host::NativeStack)
             .unwrap_or_else(|e| panic!("{label}: pass-1 re-parse failed: {e}\npass1:\n{pass1}")),
     );
     assert_eq!(
@@ -658,7 +742,10 @@ fn assert_fmt_idempotent(label: &str, src: &str) {
     );
     // `fmt --check` semantics: pass-1 output is byte-identical to formatting
     // its own parse.
-    let pass1_check = format_program(&surf_parse(&pass1).expect("pass-1 must remain parseable"));
+    let pass1_check = format_program(
+        &surf_parse(&pass1, &chelis_syntax_host::NativeStack)
+            .expect("pass-1 must remain parseable"),
+    );
     assert_eq!(
         pass1, pass1_check,
         "{label}: fmt --check would reject pass-1 output."
@@ -697,14 +784,15 @@ def f(x: tensor[3, f32]) -> tensor[3, f32] = x |> neg |> abs |> sigmoid
 fn fmt_if_as_binary_operand_is_idempotent_and_meaning_preserving() {
     use chelis_surf::format::format_program;
     let source = "def f(x: f32, y: f32) -> f32 = (if x > y then x else y) + 1.0\n";
-    let decls1 = surf_parse(source).expect("parse");
+    let decls1 = surf_parse(source, &chelis_syntax_host::NativeStack).expect("parse");
     let pass1 = format_program(&decls1);
     // The if-operand is wrapped, so `+ 1.0` applies to the whole if-expression.
     assert!(
         pass1.contains("((if (x > y) then x else y) + 1.0)"),
         "the if operand must be parenthesized so + 1.0 binds outside the else: {pass1}"
     );
-    let decls2 = surf_parse(&pass1).expect("pass-1 output re-parses");
+    let decls2 =
+        surf_parse(&pass1, &chelis_syntax_host::NativeStack).expect("pass-1 output re-parses");
     let pass2 = format_program(&decls2);
     // Idempotency: a second format is byte-identical.
     assert_eq!(pass1, pass2, "fmt must be idempotent on an if-as-operand");
@@ -823,7 +911,7 @@ fn fmt_idempotent_on_repo_ch_corpus() {
     for path in &files {
         let src = std::fs::read_to_string(path)
             .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
-        let pass1 = match format_source(&src) {
+        let pass1 = match format_source(&src, &chelis_syntax_host::NativeStack) {
             Ok(formatted) => formatted,
             Err(error) => {
                 failures.push(format!(
@@ -840,7 +928,7 @@ fn fmt_idempotent_on_repo_ch_corpus() {
             ));
             continue;
         }
-        let pass2 = match format_source(&pass1) {
+        let pass2 = match format_source(&pass1, &chelis_syntax_host::NativeStack) {
             Ok(formatted) => formatted,
             Err(error) => {
                 failures.push(format!(

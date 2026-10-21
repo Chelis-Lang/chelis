@@ -124,12 +124,13 @@ fn in_template(body: &str) -> String {
 }
 
 fn expansion_allocations(source: &str) -> u64 {
-    let deep = chelis_deep::parser::parse_str(source).unwrap_or_else(|error| {
-        panic!(
-            "the probe parses: {error:?}\n{}",
-            &source[..source.len().min(300)]
-        )
-    });
+    let deep = chelis_deep::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+        .unwrap_or_else(|error| {
+            panic!(
+                "the probe parses: {error:?}\n{}",
+                &source[..source.len().min(300)]
+            )
+        });
     let options = ExpansionOptions {
         max_iterations: 100,
         load_std_prelude: false,

@@ -3,12 +3,19 @@
 //! Every Deep node is a 3-tuple: (tag {} children...)
 //! where {} is an inline metadata map.
 
+use alloc::{
+    boxed::Box,
+    string::{String, ToString},
+    vec::Vec,
+};
 use chelis_deep::{
     Atom as DeepAtom, DeepTag, LiteralFamilyFit, LiteralSource, classify_literal_source,
     encode_dtype_bounds,
 };
+use chelis_stack_services::StackServices;
 use chelis_unord::{UnordMap, UnordSet};
 
+use alloc::collections::BTreeMap;
 use chelis_deep::Span;
 use chelis_deep::annotations::{
     AccumulatorSyntax, Amenability, BindingTypeOrigin, EffectMember, EffectSet as AstEffectSet,
@@ -19,7 +26,6 @@ use chelis_deep::annotations::{
 };
 use chelis_deep::ast as deep;
 use chelis_vocab::EffectKind;
-use std::collections::BTreeMap;
 use thiserror::Error;
 
 use crate::ast::*;
@@ -127,8 +133,11 @@ impl DesugarError {
 /// Desugar parser-validated declarations. Programmatic callers receive the
 /// same typed failure as source callers; Deep is never constructed with a
 /// guessed selector index.
-pub fn desugar_program(decls: &[Decl]) -> Result<Vec<deep::Expr>, DesugarError> {
-    desugar_program_with_context(decls, &[])
+pub fn desugar_program(
+    decls: &[Decl],
+    stack: &impl StackServices,
+) -> Result<Vec<deep::Expr>, DesugarError> {
+    desugar_program_with_context(decls, &[], stack)
 }
 
 /// Desugar declarations with callable origins supplied by an already checked
@@ -136,8 +145,9 @@ pub fn desugar_program(decls: &[Decl]) -> Result<Vec<deep::Expr>, DesugarError> 
 pub fn desugar_program_with_context(
     decls: &[Decl],
     context: &[deep::Expr],
+    stack: &impl StackServices,
 ) -> Result<Vec<deep::Expr>, DesugarError> {
-    stacker::grow(64 * 1024 * 1024, || {
+    stack.grow(64 * 1024 * 1024, || {
         crate::parser::validate_bound_ownership(decls).map_err(|error| {
             DesugarError::InvalidDeclarationOwnership {
                 message: error.to_string(),
@@ -157,12 +167,18 @@ pub fn desugar_program_with_context(
     })
 }
 
-pub fn desugar_decl_only(decl: &Decl) -> Result<Vec<deep::Expr>, DesugarError> {
-    desugar_program(std::slice::from_ref(decl))
+pub fn desugar_decl_only(
+    decl: &Decl,
+    stack: &impl StackServices,
+) -> Result<Vec<deep::Expr>, DesugarError> {
+    desugar_program(core::slice::from_ref(decl), stack)
 }
 
-pub fn desugar_expr_only(expr: &Expr) -> Result<deep::Expr, DesugarError> {
-    stacker::grow(64 * 1024 * 1024, || {
+pub fn desugar_expr_only(
+    expr: &Expr,
+    stack: &impl StackServices,
+) -> Result<deep::Expr, DesugarError> {
+    stack.grow(64 * 1024 * 1024, || {
         let normalized = crate::pipe_sugar::normalized_expression(expr)?;
         let expr = &normalized;
         reject_reserved_expression_binders(expr)?;
@@ -174,8 +190,12 @@ pub fn desugar_expr_only(expr: &Expr) -> Result<deep::Expr, DesugarError> {
 
 /// Desugar an expression using the declarations that establish its callable
 /// aliases and formal-parameter identities.
-pub fn desugar_expr_in_program(decls: &[Decl], expr: &Expr) -> Result<deep::Expr, DesugarError> {
-    desugar_expr_in_program_scope(decls, expr, &[])
+pub fn desugar_expr_in_program(
+    decls: &[Decl],
+    expr: &Expr,
+    stack: &impl StackServices,
+) -> Result<deep::Expr, DesugarError> {
+    desugar_expr_in_program_scope(decls, expr, &[], stack)
 }
 
 /// Desugar an expression using its program and lexical binder context.
@@ -183,8 +203,9 @@ pub fn desugar_expr_in_program_scope(
     decls: &[Decl],
     expr: &Expr,
     bound_names: &[String],
+    stack: &impl StackServices,
 ) -> Result<deep::Expr, DesugarError> {
-    stacker::grow(64 * 1024 * 1024, || {
+    stack.grow(64 * 1024 * 1024, || {
         crate::parser::validate_bound_ownership(decls).map_err(|error| {
             DesugarError::InvalidDeclarationOwnership {
                 message: error.to_string(),
@@ -251,12 +272,12 @@ struct DesugarCtx<'a> {
     /// the fix is simply to never reuse one within a context.
     ///
     /// A `Cell` because the desugar walk takes `&self` throughout.
-    next_destructure_temp: std::cell::Cell<usize>,
+    next_destructure_temp: core::cell::Cell<usize>,
     /// Each declaration's inline or standalone-signature binders. `None`
     /// marks a declared but unbounded binder, which cannot adopt a literal.
     declared_type_binders: UnordMap<String, UnordMap<String, Option<chelis_deep::DtypeBound>>>,
     /// Binder scope installed while one declaration body is desugared.
-    current_type_binders: std::cell::RefCell<UnordMap<String, Option<chelis_deep::DtypeBound>>>,
+    current_type_binders: core::cell::RefCell<UnordMap<String, Option<chelis_deep::DtypeBound>>>,
 }
 
 impl<'a> DesugarCtx<'a> {
@@ -299,9 +320,9 @@ impl<'a> DesugarCtx<'a> {
             declarations: ProgramDeclarations::collect(decls),
             explicit_sig_names,
             def_effects,
-            next_destructure_temp: std::cell::Cell::new(0),
+            next_destructure_temp: core::cell::Cell::new(0),
             declared_type_binders,
-            current_type_binders: std::cell::RefCell::new(UnordMap::new()),
+            current_type_binders: core::cell::RefCell::new(UnordMap::new()),
         }
     }
 
@@ -1548,12 +1569,14 @@ fn bind_deep_match_pattern(
 
 #[cfg(test)]
 fn desugar_decl(decl: &Decl) -> Vec<deep::Expr> {
-    desugar_decl_only(decl).expect("internal Surf declaration fixture must desugar")
+    desugar_decl_only(decl, &chelis_syntax_host::NativeStack)
+        .expect("internal Surf declaration fixture must desugar")
 }
 
 #[cfg(test)]
 fn desugar_expr(expr: &Expr) -> deep::Expr {
-    desugar_expr_only(expr).expect("internal Surf expression fixture must desugar")
+    desugar_expr_only(expr, &chelis_syntax_host::NativeStack)
+        .expect("internal Surf expression fixture must desugar")
 }
 
 // ---------------------------------------------------------------------------
@@ -2643,7 +2666,7 @@ impl<'a> DesugarCtx<'a> {
             // Predicate fn node: (fn {} (params {} <binder>) <body>).
             // The body is desugared with the binder in scope.
             let params_node = node(DeepTag::Params, vec![sym(&inv.binder)]);
-            let body = self.desugar_expr_with_scope(&inv.body, std::slice::from_ref(&inv.binder));
+            let body = self.desugar_expr_with_scope(&inv.body, core::slice::from_ref(&inv.binder));
             let fn_node = node(DeepTag::Fn, vec![params_node, body]);
             let amenability = chelis_pred::classify_predicate(&fn_node);
             meta_entries.push(M::Invariant(
@@ -3156,7 +3179,7 @@ fn destructure_pattern(
     pattern: &LetPattern,
     source_name: &str,
     body: deep::Expr,
-    next_tmp: &std::cell::Cell<usize>,
+    next_tmp: &core::cell::Cell<usize>,
     bindings: &[LetBinding],
     authored_body: &Expr,
 ) -> deep::Expr {
@@ -3187,7 +3210,7 @@ fn destructure_pattern(
 fn fresh_destructure_temp(
     bindings: &[LetBinding],
     body: &Expr,
-    next_tmp: &std::cell::Cell<usize>,
+    next_tmp: &core::cell::Cell<usize>,
 ) -> String {
     loop {
         let candidate = format!("__chelis_tmp{}", next_tmp.get());
@@ -4052,8 +4075,10 @@ mod tests {
   with contract = "std.normal_cdf.reflection"
   with contract = "std.normal_cdf.range"
 "#;
-        let decls = crate::parser::parse_str(source).expect("parse");
-        let deep = desugar_program(&decls).expect("Surf fixture must desugar");
+        let decls =
+            crate::parser::parse_str(source, &chelis_syntax_host::NativeStack).expect("parse");
+        let deep = desugar_program(&decls, &chelis_syntax_host::NativeStack)
+            .expect("Surf fixture must desugar");
         let contracts = deep
             .iter()
             .find_map(|expr| match expr {

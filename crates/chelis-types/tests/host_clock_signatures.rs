@@ -15,8 +15,9 @@ use chelis_types::{BUILTIN_NAMES, check_ir_program, check_typed_program};
 const CLOCKS: [&str; 2] = ["clock_wall_read", "clock_monotonic_read"];
 
 fn desugared(source: &str) -> Vec<Expr> {
-    let decls = parse_surf(source).unwrap_or_else(|e| panic!("surf must parse: {source}\n{e:?}"));
-    desugar_program(&decls).expect("Surf fixture must desugar")
+    let decls = parse_surf(source, &chelis_syntax_host::NativeStack)
+        .unwrap_or_else(|e| panic!("surf must parse: {source}\n{e:?}"));
+    desugar_program(&decls, &chelis_syntax_host::NativeStack).expect("Surf fixture must desugar")
 }
 
 fn expanded(source: &str) -> Vec<Expr> {

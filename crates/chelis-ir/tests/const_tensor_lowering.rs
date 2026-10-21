@@ -11,8 +11,10 @@ use chelis_types::{check_linearity, check_typed_program};
 
 /// Full Surf-to-DAG pipeline.
 fn surf_to_dag(source: &str) -> Result<Dag, String> {
-    let decls = surf_parse(source).map_err(|e| format!("surf parse: {e:?}"))?;
-    let deep = desugar_program(&decls).expect("Surf fixture must desugar");
+    let decls = surf_parse(source, &chelis_syntax_host::NativeStack)
+        .map_err(|e| format!("surf parse: {e:?}"))?;
+    let deep = desugar_program(&decls, &chelis_syntax_host::NativeStack)
+        .expect("Surf fixture must desugar");
     let checked = check_typed_program(&deep)
         .map_err(|errs| format!("typecheck failed: {:?}", errs.errors))?;
     let checked = chelis_effects::check_program(&checked)
@@ -25,8 +27,8 @@ fn surf_to_dag(source: &str) -> Result<Dag, String> {
 /// Deep-source pipeline for witnesses Surf cannot express (hand-written
 /// `.dp` shapes; see the chelis#1123 red-team report on PR #1123).
 fn deep_to_dag(source: &str) -> Result<Dag, String> {
-    let deep =
-        chelis_deep::parser::parse_and_stamp(source).map_err(|e| format!("deep parse: {e:?}"))?;
+    let deep = chelis_deep::parser::parse_and_stamp(source, &chelis_syntax_host::NativeStack)
+        .map_err(|e| format!("deep parse: {e:?}"))?;
     let checked = check_typed_program(&deep)
         .map_err(|errs| format!("typecheck failed: {:?}", errs.errors))?;
     let checked = chelis_effects::check_program(&checked)

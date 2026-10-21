@@ -69,7 +69,9 @@ fn tuple_chain(depth: usize) -> String {
 /// Peak heap bytes while completing the checks of a `depth` chain, and the
 /// root names the checked compilation yields when they are read.
 fn completion_peak(depth: usize) -> (usize, Vec<String>) {
-    let exprs = chelis_deep::parse_and_stamp_file(&tuple_chain(depth)).expect("the probe parses");
+    let exprs =
+        chelis_deep::parse_and_stamp_file(&tuple_chain(depth), &chelis_syntax_host::NativeStack)
+            .expect("the probe parses");
     let analysis = match analyze_prepared(PreparedProgram::from_expanded_deep(exprs)) {
         PreparedTypeAnalysisOutcome::Accepted(analysis) => *analysis,
         PreparedTypeAnalysisOutcome::Rejected { fitness } => {

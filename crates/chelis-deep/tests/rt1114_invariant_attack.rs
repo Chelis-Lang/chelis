@@ -362,7 +362,7 @@ fn splice_payload_shapes() -> Vec<(&'static str, Expr, &'static str)> {
 
 #[test]
 fn splice_function_body_rejects_every_raw_payload_shape() {
-    let module = parse_str(MODULE).expect("fixture parses");
+    let module = parse_str(MODULE, &chelis_syntax_host::NativeStack).expect("fixture parses");
 
     for (label, payload, expected_tag) in splice_payload_shapes() {
         let result = splice_function_body(&module, "attack.probe.identity", payload);
@@ -375,7 +375,7 @@ fn splice_function_body_rejects_every_raw_payload_shape() {
         );
         assert_eq!(
             module,
-            parse_str(MODULE).expect("fixture parses"),
+            parse_str(MODULE, &chelis_syntax_host::NativeStack).expect("fixture parses"),
             "{label}: the source program remains unchanged"
         );
     }
@@ -383,7 +383,7 @@ fn splice_function_body_rejects_every_raw_payload_shape() {
 
 #[test]
 fn spliced_function_def_rejects_every_raw_payload_shape() {
-    let module = parse_str(MODULE).expect("fixture parses");
+    let module = parse_str(MODULE, &chelis_syntax_host::NativeStack).expect("fixture parses");
 
     for (label, payload, expected_tag) in splice_payload_shapes() {
         let result = spliced_function_def(&module, "attack.probe.identity", payload);
@@ -401,7 +401,7 @@ fn spliced_function_def_rejects_every_raw_payload_shape() {
 fn splice_accepts_a_clean_stamped_body() {
     // Negative parity for the two tests above: the same splice path with a
     // clean stamped body succeeds, so the rejections are about the raw tag.
-    let module = parse_str(MODULE).expect("fixture parses");
+    let module = parse_str(MODULE, &chelis_syntax_host::NativeStack).expect("fixture parses");
     let spliced = splice_function_body(&module, "attack.probe.identity", stamped_lit())
         .expect("a clean stamped body splices");
     assert_ne!(spliced, module);

@@ -51,8 +51,9 @@ def f(x: tensor[*, f32]) -> tensor[*, f32] = {
   explicit
 }
 "#;
-    let decls = parse_str(source).expect("Surf parse");
-    let program = desugar_program(&decls).expect("Surf fixture must desugar");
+    let decls = parse_str(source, &chelis_syntax_host::NativeStack).expect("Surf parse");
+    let program = desugar_program(&decls, &chelis_syntax_host::NativeStack)
+        .expect("Surf fixture must desugar");
     let mut bindings = Vec::new();
     for expr in &program {
         collect_bindings(expr, &mut bindings);

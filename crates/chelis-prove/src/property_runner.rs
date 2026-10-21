@@ -572,7 +572,8 @@ pub fn run_surf_source_properties(
     source: &str,
     options: &PropertyRunOptions,
 ) -> Result<PropertyRunResult, String> {
-    let parsed = chelis_surf::parser::parse_str(source).map_err(|e| format!("parse: {e}"))?;
+    let parsed = chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+        .map_err(|e| format!("parse: {e}"))?;
     let flat = flatten_module_decls(&parsed);
     run_surf_decls_properties(&flat, &flat, &parsed, options)
 }
@@ -653,8 +654,8 @@ pub fn run_deep_source_properties(
     source: &str,
     options: &PropertyRunOptions,
 ) -> Result<PropertyRunResult, String> {
-    let exprs =
-        chelis_deep::parser::parse_and_stamp_file(source).map_err(|e| format!("parse: {e}"))?;
+    let exprs = chelis_deep::parser::parse_and_stamp_file(source, &chelis_syntax_host::NativeStack)
+        .map_err(|e| format!("parse: {e}"))?;
     let properties = discover_deep_properties(&exprs, options.only.as_deref())?;
     let mut out = Vec::new();
     for property in &properties {
@@ -884,22 +885,23 @@ fn prove_surf_property(
     let auto_recursive =
         options.tier == "auto" && property_reaches_recursive_model(decls, property);
     if options.tier == "induction-only" || auto_recursive {
-        let deep = match chelis_surf::desugar::desugar_program(decls) {
-            Ok(deep) => deep,
-            Err(error) => {
-                return PropertyOutcome::new(
-                    property.name.clone(),
-                    PropertyStatus::Error,
-                    PropertyTier::Induction,
-                    0,
-                    seed,
-                    None,
-                    Some(format!("induction desugar failed: {error}")),
-                    false,
-                    Vec::new(),
-                );
-            }
-        };
+        let deep =
+            match chelis_surf::desugar::desugar_program(decls, &chelis_syntax_host::NativeStack) {
+                Ok(deep) => deep,
+                Err(error) => {
+                    return PropertyOutcome::new(
+                        property.name.clone(),
+                        PropertyStatus::Error,
+                        PropertyTier::Induction,
+                        0,
+                        seed,
+                        None,
+                        Some(format!("induction desugar failed: {error}")),
+                        false,
+                        Vec::new(),
+                    );
+                }
+            };
         if let Err(infer) = chelis_types::check_typed_program(&deep) {
             return PropertyOutcome::new(
                 property.name.clone(),
@@ -5410,10 +5412,11 @@ fn surf_eval_program<'a>(
         // every name it spells (chelis#3267). The evaluator desugars the same
         // declarations, so a program that does not desugar fails here exactly
         // as its first sample would.
-        let names = match chelis_surf::desugar::desugar_program(decls) {
-            Ok(program) => NameSupply::for_deep_program(&program),
-            Err(reason) => return Err(SurfEvalProgramError::Desugar(reason.to_string())),
-        };
+        let names =
+            match chelis_surf::desugar::desugar_program(decls, &chelis_syntax_host::NativeStack) {
+                Ok(program) => NameSupply::for_deep_program(&program),
+                Err(reason) => return Err(SurfEvalProgramError::Desugar(reason.to_string())),
+            };
         let roots = SampleRoots::from_names(&names);
         let library = chelis_compiler_api::build_declaration_context(decls)
             .map_err(|err| SurfEvalProgramError::Compile(compiler_error_message(err)))?;
@@ -7274,7 +7277,8 @@ impl Lcg {
 pub fn property_dependency_edges(
     source: &str,
 ) -> Result<Vec<crate::artifact::PropertyDependency>, String> {
-    let parsed = chelis_surf::parser::parse_str(source).map_err(|e| format!("parse: {e}"))?;
+    let parsed = chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+        .map_err(|e| format!("parse: {e}"))?;
     let flat = flatten_module_decls(&parsed);
     let module_names: std::collections::BTreeSet<String> = flat
         .iter()

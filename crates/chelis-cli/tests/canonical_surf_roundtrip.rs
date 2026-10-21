@@ -86,10 +86,12 @@ fn assert_macro_roundtrip(source: &str) {
 
     let original = chelis_deep::parser::parse_str(
         std::str::from_utf8(&original_deep.stdout).expect("Deep output is UTF-8"),
+        &chelis_syntax_host::NativeStack,
     )
     .expect("first Deep output parses");
     let roundtrip = chelis_deep::parser::parse_str(
         std::str::from_utf8(&roundtrip_deep.stdout).expect("Deep output is UTF-8"),
+        &chelis_syntax_host::NativeStack,
     )
     .expect("roundtrip Deep output parses");
     assert_eq!(
@@ -168,10 +170,12 @@ fn checked_deep_resugars_without_losing_expression_types() {
 
     let checked = chelis_deep::parser::parse_str(
         std::str::from_utf8(&checked_deep.stdout).expect("checked Deep is UTF-8"),
+        &chelis_syntax_host::NativeStack,
     )
     .expect("checked Deep parses");
     let roundtrip = chelis_deep::parser::parse_str(
         std::str::from_utf8(&roundtrip_deep.stdout).expect("roundtrip Deep is UTF-8"),
+        &chelis_syntax_host::NativeStack,
     )
     .expect("roundtrip Deep parses");
     assert_eq!(
@@ -343,10 +347,12 @@ fn assert_retraction_law(path: &Path, resugared_path: &Path) {
 
     let original = chelis_deep::parser::parse_str(
         std::str::from_utf8(&original_deep.stdout).expect("original Deep is UTF-8"),
+        &chelis_syntax_host::NativeStack,
     )
     .expect("original Deep parses");
     let roundtrip = chelis_deep::parser::parse_str(
         std::str::from_utf8(&roundtrip_deep.stdout).expect("roundtrip Deep is UTF-8"),
+        &chelis_syntax_host::NativeStack,
     )
     .expect("roundtrip Deep parses");
     assert_eq!(

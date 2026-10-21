@@ -337,7 +337,8 @@ impl DeepTag {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeSet;
+    use alloc::collections::BTreeSet;
+    use alloc::vec::Vec;
 
     /// The §2.10 tag-count-summary rows, spelled out independently of the
     /// enum so the enum cannot drift from spec/03 without this failing

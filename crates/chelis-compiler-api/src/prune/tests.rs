@@ -11,9 +11,11 @@ use chelis_macros::ExpansionOptions;
 /// Parse + desugar + expand Surf into the Deep program form `prune_to_entry`
 /// consumes (one `module` node).
 fn expand(source: &str) -> Vec<DeepExpr> {
-    let decls = chelis_surf::parser::parse_str(source).expect("surf parses");
+    let decls = chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+        .expect("surf parses");
     chelis_macros::expand_program(
-        &chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar"),
+        &chelis_surf::desugar::desugar_program(&decls, &chelis_syntax_host::NativeStack)
+            .expect("Surf fixture must desugar"),
         &ExpansionOptions::default(),
     )
     .expect("expansion succeeds")
@@ -178,7 +180,7 @@ fn unknown_entry_leaves_the_program_unchanged() {
 /// "the same program through two ingresses" true by construction.
 fn stamp(exprs: &[DeepExpr]) -> Vec<DeepExpr> {
     let text = chelis_deep::printer::print_canonical(exprs);
-    chelis_deep::parse_and_stamp_file(&text).unwrap_or_else(|e| {
+    chelis_deep::parse_and_stamp_file(&text, &chelis_syntax_host::NativeStack).unwrap_or_else(|e| {
         panic!("canonical Deep must re-parse through the stamping ingress: {e}")
     })
 }

@@ -18,7 +18,8 @@ use chelis_deep::printer::print_canonical;
 // ── Forbidden character rejection ─────────────────────────────────
 
 fn assert_forbidden(src: &str, want_byte: u8, want_repr: &str) {
-    let err = parse_str(src).expect_err("parser must reject forbidden span char");
+    let err = parse_str(src, &chelis_syntax_host::NativeStack)
+        .expect_err("parser must reject forbidden span char");
     let display = err.to_string();
     match err {
         ParseError::ForbiddenSpanChar {
@@ -99,7 +100,8 @@ fn forbidden_char_error_message_cites_spec_and_byte_position() {
     // position inside the value, the canonical representation, and a
     // pointer back to spec/03-deep-syntax.md §1.1.1.
     let src = "(def {span: \"abc\\ndef\"} c (lit {} 0))";
-    let err = parse_str(src).expect_err("parser must reject forbidden span char");
+    let err = parse_str(src, &chelis_syntax_host::NativeStack)
+        .expect_err("parser must reject forbidden span char");
     let msg = err.to_string();
     assert!(
         msg.contains("byte 3"),
@@ -126,7 +128,7 @@ fn empty_span_id_is_valid() {
     // Spec decision (§1.1.1): empty span ID is a VALID "no-provenance"
     // sentinel. Lock here so a future refactor can't silently flip it.
     let src = r#"(def {span: ""} c (lit {} 0))"#;
-    let exprs = parse_str(src).expect("empty span ID must parse");
+    let exprs = parse_str(src, &chelis_syntax_host::NativeStack).expect("empty span ID must parse");
     assert_eq!(exprs.len(), 1);
 }
 
@@ -135,7 +137,8 @@ fn leading_and_trailing_whitespace_in_span_id_is_valid() {
     // U+0020 (ASCII space) is explicitly NOT forbidden. Discouraged but
     // valid per spec §1.1.1.
     let src = r#"(def {span: " eq1.body "} c (lit {} 0))"#;
-    let exprs = parse_str(src).expect("space-padded span ID must parse");
+    let exprs =
+        parse_str(src, &chelis_syntax_host::NativeStack).expect("space-padded span ID must parse");
     assert_eq!(exprs[0].span_id(), Some(" eq1.body "));
 }
 
@@ -153,10 +156,12 @@ fn unicode_dot_path_span_id_round_trips_byte_identical() {
     ];
     for original in &originals {
         let src = format!(r#"(def {{span: "{original}"}} c (lit {{}} 0))"#);
-        let exprs1 = parse_str(&src).expect("unicode span ID must parse");
+        let exprs1 =
+            parse_str(&src, &chelis_syntax_host::NativeStack).expect("unicode span ID must parse");
         assert_eq!(exprs1[0].span_id(), Some(*original));
         let printed = print_canonical(&exprs1);
-        let exprs2 = parse_str(&printed).expect("reprint must re-parse");
+        let exprs2 =
+            parse_str(&printed, &chelis_syntax_host::NativeStack).expect("reprint must re-parse");
         assert_eq!(exprs2[0].span_id(), Some(*original));
         // Fixed-point: reprint = print(parse(print(...))).
         let reprinted = print_canonical(&exprs2);
@@ -173,7 +178,8 @@ fn synthesized_marker_span_ids_pass_validation() {
     // identifiers so they must pass the charset check. Lock to prevent
     // accidental over-restriction (e.g. forbidding `_`).
     let src = r#"(def {span: "__synthesized_grad__"} c (lit {} 0))"#;
-    let exprs = parse_str(src).expect("synthesized marker span must parse");
+    let exprs = parse_str(src, &chelis_syntax_host::NativeStack)
+        .expect("synthesized marker span must parse");
     assert_eq!(exprs[0].span_id(), Some("__synthesized_grad__"));
 }
 
@@ -183,5 +189,6 @@ fn other_meta_keys_with_control_chars_unaffected() {
     // metadata values are unconstrained — verify a `\n` in some other
     // key is still accepted.
     let src = "(def {note: \"line1\\nline2\"} c (lit {} 0))";
-    parse_str(src).expect("non-span string metadata must accept newlines");
+    parse_str(src, &chelis_syntax_host::NativeStack)
+        .expect("non-span string metadata must accept newlines");
 }

@@ -37,7 +37,8 @@ pub(super) fn property_has_opaque_invariant_binder(
     params: &[Param],
 ) -> Result<bool, String> {
     validate_property_path(decls, property_path)?;
-    chelis_surf::desugar::desugar_program(decls).map_err(|error| error.to_string())?;
+    chelis_surf::desugar::desugar_program(decls, &chelis_syntax_host::NativeStack)
+        .map_err(|error| error.to_string())?;
     let types = type_declarations(decls);
     let scope = property_module(decls, property_path);
     params.iter().try_fold(false, |found, parameter| {
@@ -265,7 +266,8 @@ pub(super) fn prove_with_injection(
     let seed = options.injection_seed();
     let samples_needed = options.samples;
 
-    let exprs = match chelis_surf::desugar::desugar_program(decls) {
+    let exprs = match chelis_surf::desugar::desugar_program(decls, &chelis_syntax_host::NativeStack)
+    {
         Ok(exprs) => exprs,
         Err(error) => {
             return outcome(
@@ -325,25 +327,34 @@ pub(super) fn prove_with_injection(
         .iter()
         .map(|parameter| parameter.name.clone())
         .collect::<Vec<_>>();
-    let body_deep =
-        match chelis_surf::desugar::desugar_expr_in_program_scope(decls, body, &bound_names) {
-            Ok(body) => body,
-            Err(error) => {
-                return outcome(
-                    property_name,
-                    PropertyStatus::Error,
-                    0,
-                    seed,
-                    None,
-                    Some(format!("property body desugar failed: {error}")),
-                    Vec::new(),
-                );
-            }
-        };
+    let body_deep = match chelis_surf::desugar::desugar_expr_in_program_scope(
+        decls,
+        body,
+        &bound_names,
+        &chelis_syntax_host::NativeStack,
+    ) {
+        Ok(body) => body,
+        Err(error) => {
+            return outcome(
+                property_name,
+                PropertyStatus::Error,
+                0,
+                seed,
+                None,
+                Some(format!("property body desugar failed: {error}")),
+                Vec::new(),
+            );
+        }
+    };
     let pre_deep: Vec<Expr> = match preconditions
         .iter()
         .map(|precondition| {
-            chelis_surf::desugar::desugar_expr_in_program_scope(decls, precondition, &bound_names)
+            chelis_surf::desugar::desugar_expr_in_program_scope(
+                decls,
+                precondition,
+                &bound_names,
+                &chelis_syntax_host::NativeStack,
+            )
         })
         .collect::<Result<_, _>>()
     {
@@ -1483,10 +1494,11 @@ mod tests {
     use super::*;
 
     fn resolved_module_constants(source: &str) -> crate::opaque::ConstEnv {
-        let declarations =
-            chelis_surf::parser::parse_str(source).expect("parse the invariant module");
-        let exprs = chelis_surf::desugar::desugar_program(&declarations)
-            .expect("desugar the invariant module");
+        let declarations = chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+            .expect("parse the invariant module");
+        let exprs =
+            chelis_surf::desugar::desugar_program(&declarations, &chelis_syntax_host::NativeStack)
+                .expect("desugar the invariant module");
         let invariants = crate::opaque::collect_opaque_invariants(&exprs);
         resolve_constants(&exprs, &invariants)
     }
@@ -1619,8 +1631,8 @@ def bound() -> i64 = 9007199254740993i64
         source: &str,
         property_name: &str,
     ) -> (Vec<Decl>, Vec<usize>, Vec<Param>) {
-        let parsed =
-            chelis_surf::parser::parse_str(source).expect("parse injection routing fixture");
+        let parsed = chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+            .expect("parse injection routing fixture");
         let module_decls = parsed
             .iter()
             .find_map(|decl| match decl {

@@ -14,7 +14,7 @@ use chelis_surf::ast::{Decl, TypeExpr};
 use chelis_surf::parser::{parse_str, parse_str_legacy_v018};
 
 fn assert_rejects_integer_type(source: &str) {
-    let error = parse_str(source)
+    let error = parse_str(source, &chelis_syntax_host::NativeStack)
         .err()
         .unwrap_or_else(|| panic!("{source:?} must not parse"));
     let message = error.to_string();
@@ -57,8 +57,11 @@ fn integer_dimension_argument_parses_in_type_application() {
     // A type-application argument is a dimension position: chelis#940's
     // dimension-parameterized ADTs are instantiated with concrete integer
     // dimensions (`Frame[2]` flowing into `tensor[2, f32]`).
-    let decls = parse_str("def concrete(frame: Frame[2]) -> Frame[2] = frame\n")
-        .expect("integer dimension arguments parse in type applications");
+    let decls = parse_str(
+        "def concrete(frame: Frame[2]) -> Frame[2] = frame\n",
+        &chelis_syntax_host::NativeStack,
+    )
+    .expect("integer dimension arguments parse in type applications");
     let Decl::FunDef { params, .. } = &decls[0] else {
         panic!("expected a function definition");
     };
@@ -71,8 +74,11 @@ fn integer_dimension_argument_parses_in_type_application() {
 
 #[test]
 fn integer_argument_parses_in_nested_type_application() {
-    let decls =
-        parse_str("value: Hamt[Column[2]] = source\n").expect("nested dimension arguments parse");
+    let decls = parse_str(
+        "value: Hamt[Column[2]] = source\n",
+        &chelis_syntax_host::NativeStack,
+    )
+    .expect("nested dimension arguments parse");
     let Decl::LetDef { ty: Some(ty), .. } = &decls[0] else {
         panic!("expected an annotated binding");
     };
@@ -110,15 +116,22 @@ fn integer_literal_rejects_in_legacy_mode() {
     // The restriction is grammar-level, not a canonicalization rule, so the
     // v0.18 migration parser rejects the same spelling.
     assert!(
-        parse_str_legacy_v018("def g(a: 732) -> f32 = a\n").is_err(),
+        parse_str_legacy_v018(
+            "def g(a: 732) -> f32 = a\n",
+            &chelis_syntax_host::NativeStack
+        )
+        .is_err(),
         "legacy parse mode must reject integer literals in type position"
     );
 }
 
 #[test]
 fn tensor_dimension_integers_still_parse_in_parameter_annotation() {
-    let decls = parse_str("def g(a: tensor[3, 4, f32]) -> tensor[3, 4, f32] = a\n")
-        .expect("integer tensor dimensions parse");
+    let decls = parse_str(
+        "def g(a: tensor[3, 4, f32]) -> tensor[3, 4, f32] = a\n",
+        &chelis_syntax_host::NativeStack,
+    )
+    .expect("integer tensor dimensions parse");
     let Decl::FunDef { params, .. } = &decls[0] else {
         panic!("expected a function definition");
     };
@@ -133,8 +146,11 @@ fn tensor_dimension_integers_still_parse_in_parameter_annotation() {
 
 #[test]
 fn tensor_dimension_integers_still_parse_in_binding_annotation() {
-    let decls = parse_str("value: tensor[732, f32] = source\n")
-        .expect("integer tensor dimension parses in a binding annotation");
+    let decls = parse_str(
+        "value: tensor[732, f32] = source\n",
+        &chelis_syntax_host::NativeStack,
+    )
+    .expect("integer tensor dimension parses in a binding annotation");
     let Decl::LetDef { ty: Some(ty), .. } = &decls[0] else {
         panic!("expected an annotated binding");
     };

@@ -19,7 +19,8 @@ fn unresolved_copy_source(copy_meta: &str) -> String {
 fn native_deep_bad_copy_points_to_the_actual_copy_node() {
     let source = unresolved_copy_source("{}");
     let source = source.as_str();
-    let exprs = chelis_deep::parser::parse_str(source).expect("valid Deep source");
+    let exprs = chelis_deep::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+        .expect("valid Deep source");
     let report = check_ir_program(&exprs).expect_err("copying an unresolved operand must reject");
     let at = source.find("(copy").unwrap();
     let error = report
@@ -49,7 +50,8 @@ fn native_deep_bad_copy_points_to_the_actual_copy_node() {
 fn external_deep_identity_is_preserved_not_derived_from_its_coordinate() {
     let source = unresolved_copy_source("{span: \"octant:line:7\"}");
     let source = source.as_str();
-    let exprs = chelis_deep::parser::parse_str(source).expect("valid Deep source");
+    let exprs = chelis_deep::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+        .expect("valid Deep source");
     let report = check_ir_program(&exprs).expect_err("copying an unresolved operand must reject");
     let at = source.find("(copy").unwrap();
     let error = report
@@ -74,7 +76,8 @@ fn opaque_application_identity_survives_alongside_the_native_coordinate() {
         (x {type: (t-tensor {} (d-lit {} 1) (d-lit {} 2) (t-prim {} f32))})
         (y {type: (t-tensor {} (d-lit {} 3) (d-lit {} 1) (t-prim {} f32))}))
         (app {span: \"octant:line:7\"} (var {} matmul) (var {} x) (var {} y))))";
-    let exprs = chelis_deep::parser::parse_str(source).expect("valid Deep source");
+    let exprs = chelis_deep::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+        .expect("valid Deep source");
     let report = check_ir_program(&exprs).expect_err("incompatible contraction axes must reject");
     let error = report
         .errors
@@ -100,7 +103,8 @@ fn native_deep_application_with_no_external_id_keeps_its_measured_coordinate() {
       (fn {} (params {}
         (x {type: (t-tensor {} (d-lit {} 2) (d-lit {} 2) (t-prim {} f32))}))
         (app {} (var {} to_list) (var {} x))))";
-    let exprs = chelis_deep::parser::parse_str(source).expect("valid Deep source");
+    let exprs = chelis_deep::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+        .expect("valid Deep source");
     let report = check_ir_program(&exprs).expect_err("rank-two conversion rejects");
     let at = source.find("(app {} (var {} to_list)").unwrap();
     let error = report
@@ -126,7 +130,8 @@ fn native_deep_tensor_to_scalar_reports_its_measured_call_without_an_external_id
         let source = format!(
             "(def {{}} bad (fn {{}} (params {{}} (x {{type: {operand}}})) (app {{}} (var {{}} tensor_to_scalar) (var {{}} x))))"
         );
-        let exprs = chelis_deep::parser::parse_str(&source).expect("native Deep fixture parses");
+        let exprs = chelis_deep::parser::parse_str(&source, &chelis_syntax_host::NativeStack)
+            .expect("native Deep fixture parses");
         let report = check_ir_program(&exprs).expect_err("invalid conversion rejects");
         let error = report
             .errors
@@ -145,7 +150,8 @@ fn native_deep_tensor_to_scalar_reports_its_measured_call_without_an_external_id
         assert_eq!(error.got.as_deref(), Some(got));
     }
     let accepted = "(def {} good (fn {} (params {} (x {type: (t-tensor {} (t-prim {} f32))})) (app {} (var {} tensor_to_scalar) (var {} x))))";
-    let exprs = chelis_deep::parser::parse_str(accepted).expect("rank-zero Deep fixture parses");
+    let exprs = chelis_deep::parser::parse_str(accepted, &chelis_syntax_host::NativeStack)
+        .expect("rank-zero Deep fixture parses");
     assert!(
         check_ir_program(&exprs).is_ok(),
         "rank-zero tensor is convertible"
@@ -156,7 +162,8 @@ fn native_deep_tensor_to_scalar_reports_its_measured_call_without_an_external_id
 fn opaque_numeric_range_id_does_not_override_measured_native_coordinate() {
     let source = unresolved_copy_source("{span: \"octant:line:42..69\"}");
     let source = source.as_str();
-    let exprs = chelis_deep::parser::parse_str(source).expect("valid Deep source");
+    let exprs = chelis_deep::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+        .expect("valid Deep source");
     let report = check_ir_program(&exprs).expect_err("unresolved copy rejects");
     let error = report
         .errors
@@ -172,7 +179,8 @@ fn opaque_numeric_range_id_does_not_override_measured_native_coordinate() {
 #[test]
 fn valid_tensor_conversion_does_not_acquire_a_spurious_rejection() {
     let source = "(def {} xs (app {} (var {} to_tensor) (app {} (var {} Cons) (lit {type: (t-prim {} f32)} 1.0) (var {} Nil))))\n(def {} out (app {} (var {} to_list) (var {} xs)))";
-    let exprs = chelis_deep::parser::parse_str(source).expect("valid Deep source");
+    let exprs = chelis_deep::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+        .expect("valid Deep source");
     let outcome = check_ir_program(&exprs);
     assert!(
         outcome.is_ok(),
@@ -184,7 +192,8 @@ fn valid_tensor_conversion_does_not_acquire_a_spurious_rejection() {
 #[test]
 fn native_deep_axis_dtype_rejection_uses_the_application_coordinate() {
     let source = "(def {} bad (fn {} (params {} (x {type: (t-tensor {} (d-lit {} 2) (t-prim {} f32))})) (app {} (var {} expand) (var {} x) (lit {type: (t-prim {} i64)} 0) (lit {type: (t-prim {} i64)} 3))))";
-    let exprs = chelis_deep::parser::parse_str(source).expect("valid Deep source");
+    let exprs = chelis_deep::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+        .expect("valid Deep source");
     let report = check_ir_program(&exprs).expect_err("i64 is not an axis dtype");
     let error = report
         .errors

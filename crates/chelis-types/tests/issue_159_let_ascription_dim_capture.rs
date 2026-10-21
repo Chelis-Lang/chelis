@@ -27,8 +27,10 @@ use chelis_types::check_typed_program;
 use chelis_types::errors::{CheckError, CheckErrorKind};
 
 fn typecheck_surf(source: &str) -> Vec<CheckError> {
-    let decls = parse_str(source).expect("surf parse should succeed");
-    let deep = desugar_program(&decls).expect("Surf fixture must desugar");
+    let decls =
+        parse_str(source, &chelis_syntax_host::NativeStack).expect("surf parse should succeed");
+    let deep = desugar_program(&decls, &chelis_syntax_host::NativeStack)
+        .expect("Surf fixture must desugar");
     match check_typed_program(&deep) {
         Ok(_) => Vec::new(),
         Err(prog_errors) => prog_errors.errors,
@@ -166,7 +168,11 @@ fn callable_copy_binding<'a>(exprs: &'a [chelis_deep::Expr], name: &str) -> &'a 
 #[test]
 fn callable_copy_annotation_retains_independent_origin_type_and_span() {
     let source = "def run(flag: bool, x: tensor[*, f64]) -> tensor[*, bool] = {\n f = if flag then is_nan else is_finite\n g: &tensor[2, f64] -> tensor[*, bool] = copy(f)\n h: &tensor[*, f64] -> tensor[2, bool] = copy(copy(g))\n h(x)\n}\n";
-    let deep = desugar_program(&parse_str(source).expect("Surf parses")).expect("desugars");
+    let deep = desugar_program(
+        &parse_str(source, &chelis_syntax_host::NativeStack).expect("Surf parses"),
+        &chelis_syntax_host::NativeStack,
+    )
+    .expect("desugars");
     let checked = check_typed_program(&deep).expect("runtime extents defer independent claims");
     for name in ["g", "h"] {
         let source_binding = callable_copy_binding(&deep, name);
@@ -202,7 +208,11 @@ fn callable_copy_annotation_retains_independent_origin_type_and_span() {
 #[test]
 fn callable_copy_annotation_unannotated_static_and_invalid_dtype_controls() {
     let source = "def run(x: tensor[2, f64]) -> tensor[2, bool] = {\n f = is_nan\n g = copy(copy(f))\n g(x)\n}\n";
-    let deep = desugar_program(&parse_str(source).expect("Surf parses")).expect("desugars");
+    let deep = desugar_program(
+        &parse_str(source, &chelis_syntax_host::NativeStack).expect("Surf parses"),
+        &chelis_syntax_host::NativeStack,
+    )
+    .expect("desugars");
     let checked = check_typed_program(&deep).expect("static unannotated copies remain valid");
     assert!(
         matches!(callable_copy_binding(checked.annotated_exprs(), "g"), chelis_deep::Expr::Node(node, _) if node.tag() == chelis_deep::DeepTag::Var)

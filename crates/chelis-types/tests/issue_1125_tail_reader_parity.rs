@@ -5,7 +5,7 @@ use chelis_types::errors::CheckError;
 use chelis_types::{check_ir_program, check_typed_program};
 
 fn stamped(source: &str) -> Vec<Expr> {
-    parse_and_stamp_file(source).expect("fixture must stamp")
+    parse_and_stamp_file(source, &chelis_syntax_host::NativeStack).expect("fixture must stamp")
 }
 
 fn messages(errors: Vec<CheckError>) -> Vec<String> {

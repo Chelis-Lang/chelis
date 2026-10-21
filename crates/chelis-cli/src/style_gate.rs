@@ -267,7 +267,10 @@ fn check_fmt(file: &Path, source: &str) -> Option<FmtDiff> {
                 path: file.to_path_buf(),
             });
         }
-        match chelis_deep::parser::parse_and_stamp_file(&format_source) {
+        match chelis_deep::parser::parse_and_stamp_file(
+            &format_source,
+            &chelis_syntax_host::NativeStack,
+        ) {
             Ok(exprs) => chelis_deep::printer::print_canonical(&exprs),
             // The stamped ingress is the only Deep ingress (chelis#1088):
             // there is no weaker second parse to fall back to. A `.dp` it
@@ -279,7 +282,7 @@ fn check_fmt(file: &Path, source: &str) -> Option<FmtDiff> {
             Err(_) => return None,
         }
     } else {
-        match chelis_surf::format::format_source(source) {
+        match chelis_surf::format::format_source(source, &chelis_syntax_host::NativeStack) {
             Ok(canonical) => canonical,
             // If the file doesn't lex/parse, the regular compile path
             // surfaces that error with a better message.
@@ -600,7 +603,7 @@ mod tests {
         let path = dir.path().join("leading_underscore.ch");
         let src = "def _internal() -> i32 = 1\n";
         // Write the canonical form so fmt-check passes.
-        let decls = chelis_surf::parser::parse_str(src).unwrap();
+        let decls = chelis_surf::parser::parse_str(src, &chelis_syntax_host::NativeStack).unwrap();
         let canonical = chelis_surf::format::format_program(&decls);
         std::fs::write(&path, &canonical).unwrap();
         let res = enforce_style_gate(&path, &canonical, false);

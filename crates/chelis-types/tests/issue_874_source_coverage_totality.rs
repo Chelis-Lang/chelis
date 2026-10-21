@@ -74,7 +74,8 @@ fn program(body: &str) -> String {
 }
 
 fn stamped(source: &str) -> Vec<Expr> {
-    parse_and_stamp_file(source).unwrap_or_else(|e| panic!("fixture must stamp:\n{source}\n{e}"))
+    parse_and_stamp_file(source, &chelis_syntax_host::NativeStack)
+        .unwrap_or_else(|e| panic!("fixture must stamp:\n{source}\n{e}"))
 }
 
 /// Diagnostics from the ingress `chelis check` runs.

@@ -3,6 +3,24 @@
 //! This crate provides the lexer, parser, AST types, and canonical printer
 //! for Chelis Deep syntax (`.dp` files). Deep is the canonical s-expression
 //! form that the compiler operates on internally.
+//!
+//! Parsing uses an explicit stack service. Native callers use the host adapter.
+//!
+//! ```
+//! use chelis_deep::parse_and_stamp_runtime_exprs;
+//! use chelis_syntax_host::NativeStack;
+//!
+//! let expressions = parse_and_stamp_runtime_exprs("(lit {} 7)", &NativeStack)?;
+//! assert_eq!(expressions.len(), 1);
+//! # Ok::<(), chelis_deep::StampOrParseError>(())
+//! ```
+
+#![no_std]
+
+#[macro_use]
+extern crate alloc;
+#[cfg(test)]
+extern crate std;
 
 pub mod ast;
 pub mod authoring;

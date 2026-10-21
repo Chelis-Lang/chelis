@@ -218,7 +218,8 @@ fn walkdir(dir: &Path) -> Vec<PathBuf> {
 fn an_entry_extends_the_linked_modules_and_the_digests_name_the_set() {
     let (_dir, root) = package(NO_IMPORT_MODULE);
     let graph = prepared(&root);
-    let snippet = chelis_surf::parser::parse_str(JSON_SNIPPET).expect("parse snippet");
+    let snippet = chelis_surf::parser::parse_str(JSON_SNIPPET, &chelis_syntax_host::NativeStack)
+        .expect("parse snippet");
 
     // Entries the package already covers leave the graph as it is.
     let unchanged = graph
@@ -265,7 +266,8 @@ fn an_entry_extends_the_linked_modules_and_the_digests_name_the_set() {
 fn compiling_an_entry_links_the_stdlib_modules_it_imports() {
     let (_dir, root) = package(NO_IMPORT_MODULE);
     let graph = prepared(&root);
-    let snippet = chelis_surf::parser::parse_str(JSON_SNIPPET).expect("parse snippet");
+    let snippet = chelis_surf::parser::parse_str(JSON_SNIPPET, &chelis_syntax_host::NativeStack)
+        .expect("parse snippet");
     let program = compile_with_reef_graph(&graph, &snippet, &chelis_std_bundle::EMBEDDED_RUNTIME)
         .expect("compile snippet");
     assert_eq!(
@@ -280,7 +282,8 @@ fn compiling_an_entry_links_the_stdlib_modules_it_imports() {
 fn rewriting_an_entry_against_a_graph_without_its_imports_is_refused() {
     let (_dir, root) = package(NO_IMPORT_MODULE);
     let graph = prepared(&root);
-    let snippet = chelis_surf::parser::parse_str(JSON_SNIPPET).expect("parse snippet");
+    let snippet = chelis_surf::parser::parse_str(JSON_SNIPPET, &chelis_syntax_host::NativeStack)
+        .expect("parse snippet");
     let error = rewrite_entry_decls_with_reef_graph(&graph, &snippet)
         .expect_err("the graph does not link Std.Io.Json");
     assert!(

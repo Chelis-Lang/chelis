@@ -323,6 +323,16 @@ rec {
       # File a bug if you depend on any for non-debug work!
       debug = internal.debugCrate { inherit packageId; };
     };
+    "chelis-stack-services" = rec {
+      packageId = "chelis-stack-services";
+      build = internal.buildRustCrateWithFeatures {
+        packageId = "chelis-stack-services";
+      };
+
+      # Debug support which might change between releases.
+      # File a bug if you depend on any for non-debug work!
+      debug = internal.debugCrate { inherit packageId; };
+    };
     "chelis-std-bundle" = rec {
       packageId = "chelis-std-bundle";
       build = internal.buildRustCrateWithFeatures {
@@ -337,6 +347,16 @@ rec {
       packageId = "chelis-surf";
       build = internal.buildRustCrateWithFeatures {
         packageId = "chelis-surf";
+      };
+
+      # Debug support which might change between releases.
+      # File a bug if you depend on any for non-debug work!
+      debug = internal.debugCrate { inherit packageId; };
+    };
+    "chelis-syntax-host" = rec {
+      packageId = "chelis-syntax-host";
+      build = internal.buildRustCrateWithFeatures {
+        packageId = "chelis-syntax-host";
       };
 
       # Debug support which might change between releases.
@@ -451,36 +471,6 @@ rec {
     #   inject test dependencies into the build
 
     crates = {
-      "addr2line" = rec {
-        crateName = "addr2line";
-        version = "0.25.1";
-        edition = "2018";
-        crateBin = [];
-        sha256 = "0jwb96gv17vdr29hbzi0ha5q6jkpgjyn7rjlg5nis65k41rk0p8v";
-        dependencies = [
-          {
-            name = "gimli";
-            packageId = "gimli";
-            usesDefaultFeatures = false;
-            features = [ "read" ];
-          }
-        ];
-        features = {
-          "all" = [ "bin" "wasm" ];
-          "alloc" = [ "dep:alloc" ];
-          "bin" = [ "loader" "rustc-demangle" "cpp_demangle" "fallible-iterator" "smallvec" "dep:clap" ];
-          "core" = [ "dep:core" ];
-          "cpp_demangle" = [ "dep:cpp_demangle" ];
-          "default" = [ "rustc-demangle" "cpp_demangle" "loader" "fallible-iterator" "smallvec" ];
-          "fallible-iterator" = [ "dep:fallible-iterator" ];
-          "loader" = [ "std" "dep:object" "dep:memmap2" "dep:typed-arena" ];
-          "rustc-demangle" = [ "dep:rustc-demangle" ];
-          "rustc-dep-of-std" = [ "core" "alloc" "gimli/rustc-dep-of-std" ];
-          "smallvec" = [ "dep:smallvec" ];
-          "std" = [ "gimli/std" ];
-          "wasm" = [ "object/wasm" ];
-        };
-      };
       "adler2" = rec {
         crateName = "adler2";
         version = "2.0.1";
@@ -575,7 +565,7 @@ rec {
           }
           {
             name = "unicode-width";
-            packageId = "unicode-width 0.2.2";
+            packageId = "unicode-width";
           }
         ];
         features = {
@@ -1274,77 +1264,6 @@ rec {
         };
         resolvedDefaultFeatures = [ "tracing" ];
       };
-      "backtrace" = rec {
-        crateName = "backtrace";
-        version = "0.3.76";
-        edition = "2021";
-        sha256 = "1mibx75x4jf6wz7qjifynld3hpw3vq6sy3d3c9y5s88sg59ihlxv";
-        authors = [
-          "The Rust Project Developers"
-        ];
-        dependencies = [
-          {
-            name = "addr2line";
-            packageId = "addr2line";
-            usesDefaultFeatures = false;
-            target = { target, features }: (!((target."windows" or false) && ("msvc" == target."env" or null) && (!("uwp" == target."vendor" or null))));
-          }
-          {
-            name = "cfg-if";
-            packageId = "cfg-if";
-          }
-          {
-            name = "libc";
-            packageId = "libc";
-            usesDefaultFeatures = false;
-            target = { target, features }: (!((target."windows" or false) && ("msvc" == target."env" or null) && (!("uwp" == target."vendor" or null))));
-          }
-          {
-            name = "miniz_oxide";
-            packageId = "miniz_oxide";
-            usesDefaultFeatures = false;
-            target = { target, features }: (!((target."windows" or false) && ("msvc" == target."env" or null) && (!("uwp" == target."vendor" or null))));
-          }
-          {
-            name = "object";
-            packageId = "object";
-            usesDefaultFeatures = false;
-            target = { target, features }: (!((target."windows" or false) && ("msvc" == target."env" or null) && (!("uwp" == target."vendor" or null))));
-            features = [ "read_core" "elf" "macho" "pe" "xcoff" "unaligned" "archive" ];
-          }
-          {
-            name = "rustc-demangle";
-            packageId = "rustc-demangle";
-          }
-          {
-            name = "windows-link";
-            packageId = "windows-link";
-            target = { target, features }: ((target."windows" or false) || ("cygwin" == target."os" or null));
-          }
-        ];
-        features = {
-          "cpp_demangle" = [ "dep:cpp_demangle" ];
-          "default" = [ "std" ];
-          "ruzstd" = [ "dep:ruzstd" ];
-          "serde" = [ "dep:serde" ];
-          "serialize-serde" = [ "serde" ];
-        };
-        resolvedDefaultFeatures = [ "default" "std" ];
-      };
-      "backtrace-ext" = rec {
-        crateName = "backtrace-ext";
-        version = "0.2.1";
-        edition = "2018";
-        sha256 = "0l4xacjnx4jrn9k14xbs2swks018mviq03sp7c1gn62apviywysk";
-        libName = "backtrace_ext";
-        dependencies = [
-          {
-            name = "backtrace";
-            packageId = "backtrace";
-          }
-        ];
-
-      };
       "base64 0.21.7" = rec {
         crateName = "base64";
         version = "0.21.7";
@@ -1781,6 +1700,7 @@ rec {
           {
             name = "chelis-vocab";
             packageId = "chelis-vocab";
+            usesDefaultFeatures = false;
           }
         ];
 
@@ -1815,6 +1735,7 @@ rec {
           {
             name = "chelis-vocab";
             packageId = "chelis-vocab";
+            usesDefaultFeatures = false;
           }
           {
             name = "half";
@@ -1850,6 +1771,10 @@ rec {
           {
             name = "chelis-surf";
             packageId = "chelis-surf";
+          }
+          {
+            name = "chelis-syntax-host";
+            packageId = "chelis-syntax-host";
           }
           {
             name = "serde_json";
@@ -1888,6 +1813,7 @@ rec {
           {
             name = "chelis-vocab";
             packageId = "chelis-vocab";
+            usesDefaultFeatures = false;
           }
         ];
         devDependencies = [
@@ -1902,6 +1828,10 @@ rec {
           {
             name = "chelis-surf";
             packageId = "chelis-surf";
+          }
+          {
+            name = "chelis-syntax-host";
+            packageId = "chelis-syntax-host";
           }
           {
             name = "half";
@@ -1944,6 +1874,7 @@ rec {
           {
             name = "chelis-vocab";
             packageId = "chelis-vocab";
+            usesDefaultFeatures = false;
           }
           {
             name = "half";
@@ -1967,6 +1898,10 @@ rec {
           {
             name = "chelis-surf";
             packageId = "chelis-surf";
+          }
+          {
+            name = "chelis-syntax-host";
+            packageId = "chelis-syntax-host";
           }
           {
             name = "serde_json";
@@ -2091,6 +2026,10 @@ rec {
             features = [ "pre-020-pipe-migration" ];
           }
           {
+            name = "chelis-syntax-host";
+            packageId = "chelis-syntax-host";
+          }
+          {
             name = "chelis-tide";
             packageId = "chelis-tide";
           }
@@ -2109,6 +2048,7 @@ rec {
           {
             name = "chelis-vocab";
             packageId = "chelis-vocab";
+            usesDefaultFeatures = false;
           }
           {
             name = "chelisup";
@@ -2316,6 +2256,10 @@ rec {
             packageId = "chelis-surf";
           }
           {
+            name = "chelis-syntax-host";
+            packageId = "chelis-syntax-host";
+          }
+          {
             name = "chelis-types";
             packageId = "chelis-types";
           }
@@ -2330,6 +2274,7 @@ rec {
           {
             name = "chelis-vocab";
             packageId = "chelis-vocab";
+            usesDefaultFeatures = false;
           }
           {
             name = "half";
@@ -2531,32 +2476,34 @@ rec {
         libName = "chelis_deep";
         dependencies = [
           {
-            name = "chelis-vocab";
-            packageId = "chelis-vocab";
+            name = "chelis-stack-services";
+            packageId = "chelis-stack-services";
           }
           {
-            name = "miette";
-            packageId = "miette";
-            features = [ "fancy" ];
+            name = "chelis-vocab";
+            packageId = "chelis-vocab";
+            usesDefaultFeatures = false;
           }
           {
             name = "serde";
             packageId = "serde";
-            features = [ "derive" "rc" ];
-          }
-          {
-            name = "stacker";
-            packageId = "stacker";
+            usesDefaultFeatures = false;
+            features = [ "alloc" "derive" "rc" ];
           }
           {
             name = "thiserror";
             packageId = "thiserror 2.0.18";
+            usesDefaultFeatures = false;
           }
         ];
         devDependencies = [
           {
             name = "bincode";
             packageId = "bincode";
+          }
+          {
+            name = "chelis-syntax-host";
+            packageId = "chelis-syntax-host";
           }
           {
             name = "proc-macro2";
@@ -2636,6 +2583,10 @@ rec {
             packageId = "chelis-surf";
           }
           {
+            name = "chelis-syntax-host";
+            packageId = "chelis-syntax-host";
+          }
+          {
             name = "chelis-types";
             packageId = "chelis-types";
           }
@@ -2700,6 +2651,7 @@ rec {
           {
             name = "chelis-vocab";
             packageId = "chelis-vocab";
+            usesDefaultFeatures = false;
           }
         ];
         devDependencies = [
@@ -2710,6 +2662,10 @@ rec {
           {
             name = "chelis-surf";
             packageId = "chelis-surf";
+          }
+          {
+            name = "chelis-syntax-host";
+            packageId = "chelis-syntax-host";
           }
         ];
 
@@ -2774,6 +2730,7 @@ rec {
           {
             name = "chelis-vocab";
             packageId = "chelis-vocab";
+            usesDefaultFeatures = false;
           }
           {
             name = "num-bigint";
@@ -2807,6 +2764,10 @@ rec {
             packageId = "chelis-surf";
           }
           {
+            name = "chelis-syntax-host";
+            packageId = "chelis-syntax-host";
+          }
+          {
             name = "serde_json";
             packageId = "serde_json";
           }
@@ -2833,6 +2794,10 @@ rec {
           {
             name = "chelis-surf";
             packageId = "chelis-surf";
+          }
+          {
+            name = "chelis-syntax-host";
+            packageId = "chelis-syntax-host";
           }
           {
             name = "chelis-unord";
@@ -2892,6 +2857,10 @@ rec {
             packageId = "chelis-surf";
           }
           {
+            name = "chelis-syntax-host";
+            packageId = "chelis-syntax-host";
+          }
+          {
             name = "chelis-tide";
             packageId = "chelis-tide";
           }
@@ -2948,6 +2917,7 @@ rec {
           {
             name = "thiserror";
             packageId = "thiserror 2.0.18";
+            usesDefaultFeatures = false;
           }
         ];
         devDependencies = [
@@ -2962,6 +2932,10 @@ rec {
           {
             name = "chelis-surf";
             packageId = "chelis-surf";
+          }
+          {
+            name = "chelis-syntax-host";
+            packageId = "chelis-syntax-host";
           }
           {
             name = "chelis-types";
@@ -2998,6 +2972,12 @@ rec {
             packageId = "chelis-unord";
           }
         ];
+        devDependencies = [
+          {
+            name = "chelis-syntax-host";
+            packageId = "chelis-syntax-host";
+          }
+        ];
         features = {
           "lowering-trace" = [ "chelis-ir/lowering-trace" ];
         };
@@ -3016,6 +2996,13 @@ rec {
           {
             name = "thiserror";
             packageId = "thiserror 2.0.18";
+            usesDefaultFeatures = false;
+          }
+        ];
+        devDependencies = [
+          {
+            name = "chelis-syntax-host";
+            packageId = "chelis-syntax-host";
           }
         ];
 
@@ -3075,6 +3062,10 @@ rec {
           {
             name = "chelis-surf";
             packageId = "chelis-surf";
+          }
+          {
+            name = "chelis-syntax-host";
+            packageId = "chelis-syntax-host";
           }
           {
             name = "chelis-types";
@@ -3191,6 +3182,7 @@ rec {
           {
             name = "chelis-vocab";
             packageId = "chelis-vocab";
+            usesDefaultFeatures = false;
           }
           {
             name = "libc";
@@ -3292,6 +3284,10 @@ rec {
           {
             name = "chelis-surf";
             packageId = "chelis-surf";
+          }
+          {
+            name = "chelis-syntax-host";
+            packageId = "chelis-syntax-host";
           }
           {
             name = "chelis-types";
@@ -3473,6 +3469,7 @@ rec {
           {
             name = "chelis-vocab";
             packageId = "chelis-vocab";
+            usesDefaultFeatures = false;
           }
           {
             name = "half";
@@ -3590,6 +3587,10 @@ rec {
             packageId = "chelis-deep";
           }
           {
+            name = "chelis-syntax-host";
+            packageId = "chelis-syntax-host";
+          }
+          {
             name = "semver";
             packageId = "semver";
             features = [ "serde" ];
@@ -3600,6 +3601,14 @@ rec {
             features = [ "derive" "rc" ];
           }
         ];
+
+      };
+      "chelis-stack-services" = rec {
+        crateName = "chelis-stack-services";
+        version = "0.21.1";
+        edition = "2024";
+        src = lib.cleanSourceWith { filter = sourceFilter;  src = ./crates/chelis-stack-services; };
+        libName = "chelis_stack_services";
 
       };
       "chelis-std-bundle" = rec {
@@ -3656,40 +3665,43 @@ rec {
             packageId = "chelis-pred";
           }
           {
+            name = "chelis-stack-services";
+            packageId = "chelis-stack-services";
+          }
+          {
             name = "chelis-unord";
             packageId = "chelis-unord";
           }
           {
             name = "chelis-vocab";
             packageId = "chelis-vocab";
-          }
-          {
-            name = "miette";
-            packageId = "miette";
-            features = [ "fancy" ];
+            usesDefaultFeatures = false;
           }
           {
             name = "ryu";
             packageId = "ryu";
+            usesDefaultFeatures = false;
           }
           {
             name = "serde";
             packageId = "serde";
-            features = [ "derive" "rc" ];
-          }
-          {
-            name = "stacker";
-            packageId = "stacker";
+            usesDefaultFeatures = false;
+            features = [ "derive" "alloc" "rc" ];
           }
           {
             name = "thiserror";
             packageId = "thiserror 2.0.18";
+            usesDefaultFeatures = false;
           }
         ];
         devDependencies = [
           {
             name = "chelis-macros";
             packageId = "chelis-macros";
+          }
+          {
+            name = "chelis-syntax-host";
+            packageId = "chelis-syntax-host";
           }
           {
             name = "proptest";
@@ -3708,6 +3720,24 @@ rec {
           "pre-020-pipe-migration" = [ "chelis-deep/pre-020-pipe-migration" ];
         };
         resolvedDefaultFeatures = [ "pre-020-pipe-migration" ];
+      };
+      "chelis-syntax-host" = rec {
+        crateName = "chelis-syntax-host";
+        version = "0.21.1";
+        edition = "2024";
+        src = lib.cleanSourceWith { filter = sourceFilter;  src = ./crates/chelis-syntax-host; };
+        libName = "chelis_syntax_host";
+        dependencies = [
+          {
+            name = "chelis-stack-services";
+            packageId = "chelis-stack-services";
+          }
+          {
+            name = "stacker";
+            packageId = "stacker";
+          }
+        ];
+
       };
       "chelis-tide" = rec {
         crateName = "chelis-tide";
@@ -3770,6 +3800,10 @@ rec {
             packageId = "chelis-std-bundle";
           }
           {
+            name = "chelis-syntax-host";
+            packageId = "chelis-syntax-host";
+          }
+          {
             name = "http-body-util";
             packageId = "http-body-util";
           }
@@ -3818,6 +3852,7 @@ rec {
           {
             name = "chelis-vocab";
             packageId = "chelis-vocab";
+            usesDefaultFeatures = false;
           }
           {
             name = "half";
@@ -3860,6 +3895,10 @@ rec {
             packageId = "chelis-surf";
           }
           {
+            name = "chelis-syntax-host";
+            packageId = "chelis-syntax-host";
+          }
+          {
             name = "proc-macro2";
             packageId = "proc-macro2";
           }
@@ -3890,7 +3929,8 @@ rec {
           {
             name = "serde";
             packageId = "serde";
-            features = [ "derive" "rc" ];
+            usesDefaultFeatures = false;
+            features = [ "alloc" ];
           }
         ];
         devDependencies = [
@@ -3924,6 +3964,10 @@ rec {
           {
             name = "chelis-surf";
             packageId = "chelis-surf";
+          }
+          {
+            name = "chelis-syntax-host";
+            packageId = "chelis-syntax-host";
           }
           {
             name = "chelis-types";
@@ -6231,23 +6275,6 @@ rec {
           "wasm_js" = [ "dep:wasm-bindgen" "dep:js-sys" ];
         };
       };
-      "gimli" = rec {
-        crateName = "gimli";
-        version = "0.32.3";
-        edition = "2018";
-        sha256 = "1iqk5xznimn5bfa8jy4h7pa1dv3c624hzgd2dkz8mpgkiswvjag6";
-        features = {
-          "default" = [ "read-all" "write" ];
-          "endian-reader" = [ "read" "dep:stable_deref_trait" ];
-          "fallible-iterator" = [ "dep:fallible-iterator" ];
-          "read" = [ "read-core" ];
-          "read-all" = [ "read" "std" "fallible-iterator" "endian-reader" ];
-          "rustc-dep-of-std" = [ "dep:core" "dep:alloc" ];
-          "std" = [ "fallible-iterator?/std" "stable_deref_trait?/std" ];
-          "write" = [ "dep:indexmap" ];
-        };
-        resolvedDefaultFeatures = [ "read" "read-core" ];
-      };
       "glob" = rec {
         crateName = "glob";
         version = "0.3.3";
@@ -7738,17 +7765,6 @@ rec {
         };
         resolvedDefaultFeatures = [ "default" "std" ];
       };
-      "is_ci" = rec {
-        crateName = "is_ci";
-        version = "1.2.0";
-        edition = "2018";
-        crateBin = [];
-        sha256 = "0ifwvxmrsj4r29agfzr71bjq6y1bihkx38fbzafq5vl0jn1wjmbn";
-        authors = [
-          "Kat Marchán <kzm@zkat.tech>"
-        ];
-
-      };
       "is_terminal_polyfill" = rec {
         crateName = "is_terminal_polyfill";
         version = "1.70.2";
@@ -8230,109 +8246,6 @@ rec {
         };
         resolvedDefaultFeatures = [ "default" ];
       };
-      "miette" = rec {
-        crateName = "miette";
-        version = "7.6.0";
-        edition = "2018";
-        sha256 = "1dwjnnpcff4jzpf5ns1m19di2p0n5j31zmjv5dskrih7i3nfz62z";
-        authors = [
-          "Kat Marchán <kzm@zkat.tech>"
-        ];
-        dependencies = [
-          {
-            name = "backtrace";
-            packageId = "backtrace";
-            optional = true;
-          }
-          {
-            name = "backtrace-ext";
-            packageId = "backtrace-ext";
-            optional = true;
-          }
-          {
-            name = "cfg-if";
-            packageId = "cfg-if";
-          }
-          {
-            name = "miette-derive";
-            packageId = "miette-derive";
-            optional = true;
-          }
-          {
-            name = "owo-colors";
-            packageId = "owo-colors";
-            optional = true;
-          }
-          {
-            name = "supports-color";
-            packageId = "supports-color";
-            optional = true;
-          }
-          {
-            name = "supports-hyperlinks";
-            packageId = "supports-hyperlinks";
-            optional = true;
-          }
-          {
-            name = "supports-unicode";
-            packageId = "supports-unicode";
-            optional = true;
-          }
-          {
-            name = "terminal_size";
-            packageId = "terminal_size";
-            optional = true;
-          }
-          {
-            name = "textwrap";
-            packageId = "textwrap";
-            optional = true;
-            usesDefaultFeatures = false;
-            features = [ "unicode-linebreak" "unicode-width" ];
-          }
-          {
-            name = "unicode-width";
-            packageId = "unicode-width 0.1.14";
-          }
-        ];
-        features = {
-          "default" = [ "derive" ];
-          "derive" = [ "dep:miette-derive" ];
-          "fancy" = [ "fancy-no-backtrace" "dep:backtrace" "dep:backtrace-ext" ];
-          "fancy-base" = [ "dep:owo-colors" "dep:textwrap" ];
-          "fancy-no-backtrace" = [ "fancy-base" "dep:terminal_size" "dep:supports-hyperlinks" "dep:supports-color" "dep:supports-unicode" ];
-          "fancy-no-syscall" = [ "fancy-base" ];
-          "serde" = [ "dep:serde" ];
-          "syntect-highlighter" = [ "fancy-no-backtrace" "dep:syntect" ];
-        };
-        resolvedDefaultFeatures = [ "default" "derive" "fancy" "fancy-base" "fancy-no-backtrace" ];
-      };
-      "miette-derive" = rec {
-        crateName = "miette-derive";
-        version = "7.6.0";
-        edition = "2018";
-        sha256 = "12w13a67n2cc37nzidvv0v0vrvf4rsflzxz6slhbn3cm9rqjjnyv";
-        procMacro = true;
-        libName = "miette_derive";
-        authors = [
-          "Kat Marchán <kzm@zkat.tech>"
-        ];
-        dependencies = [
-          {
-            name = "proc-macro2";
-            packageId = "proc-macro2";
-          }
-          {
-            name = "quote";
-            packageId = "quote";
-          }
-          {
-            name = "syn";
-            packageId = "syn 2.0.117";
-          }
-        ];
-
-      };
       "mime" = rec {
         crateName = "mime";
         version = "0.3.17";
@@ -8725,20 +8638,6 @@ rec {
           "Alex Crichton <alex@alexcrichton.com>"
         ];
 
-      };
-      "owo-colors" = rec {
-        crateName = "owo-colors";
-        version = "4.3.0";
-        edition = "2021";
-        sha256 = "0kgrf4r9vcczhw5r30nkcl6abm99l0ay8dr2fxl0ymvbkcxq04fj";
-        libName = "owo_colors";
-        authors = [
-          "jam1garner <8260240+jam1garner@users.noreply.github.com>"
-        ];
-        features = {
-          "supports-color" = [ "dep:supports-color" ];
-          "supports-colors" = [ "dep:supports-color-2" "supports-color" ];
-        };
       };
       "parking_lot" = rec {
         crateName = "parking_lot";
@@ -9908,7 +9807,7 @@ rec {
           }
           {
             name = "unicode-width";
-            packageId = "unicode-width 0.2.2";
+            packageId = "unicode-width";
           }
         ];
         features = {
@@ -10023,7 +9922,7 @@ rec {
           }
           {
             name = "unicode-width";
-            packageId = "unicode-width 0.2.2";
+            packageId = "unicode-width";
           }
         ];
         features = {
@@ -10577,20 +10476,6 @@ rec {
           "wasm32_unknown_unknown_js" = [ "getrandom/js" ];
         };
         resolvedDefaultFeatures = [ "alloc" "default" "dev_urandom_fallback" ];
-      };
-      "rustc-demangle" = rec {
-        crateName = "rustc-demangle";
-        version = "0.1.27";
-        edition = "2015";
-        sha256 = "17f0jl6lgsy8kwxdzxp3s2wmipvlpna03kkc4vkqr1gwv5lqh2xm";
-        libName = "rustc_demangle";
-        authors = [
-          "Alex Crichton <alex@alexcrichton.com>"
-        ];
-        features = {
-          "core" = [ "dep:core" ];
-          "rustc-dep-of-std" = [ "core" ];
-        };
       };
       "rustc-hash" = rec {
         crateName = "rustc-hash";
@@ -12021,45 +11906,6 @@ rec {
         ];
 
       };
-      "supports-color" = rec {
-        crateName = "supports-color";
-        version = "3.0.2";
-        edition = "2018";
-        sha256 = "1mk7r2j6l7zmqk3pg7av0l6viq413lmk1vz4bjnf9lnq5liwfky6";
-        libName = "supports_color";
-        authors = [
-          "Kat Marchán <kzm@zkat.tech>"
-        ];
-        dependencies = [
-          {
-            name = "is_ci";
-            packageId = "is_ci";
-          }
-        ];
-
-      };
-      "supports-hyperlinks" = rec {
-        crateName = "supports-hyperlinks";
-        version = "3.2.0";
-        edition = "2021";
-        sha256 = "14byz5m3mcfz8jcg3vd639sp5qvd6svs05di40qvik0i7d9bd5p3";
-        libName = "supports_hyperlinks";
-        authors = [
-          "Kat Marchán <kzm@zkat.tech>"
-        ];
-
-      };
-      "supports-unicode" = rec {
-        crateName = "supports-unicode";
-        version = "3.0.0";
-        edition = "2018";
-        sha256 = "1qpc344453x3ai4k9iygxnbk6lr2nw5jflj8ns5q3dbcmwq1lh5p";
-        libName = "supports_unicode";
-        authors = [
-          "Kat Marchán <kzm@zkat.tech>"
-        ];
-
-      };
       "syn 1.0.109" = rec {
         crateName = "syn";
         version = "1.0.109";
@@ -12325,66 +12171,12 @@ rec {
         };
         resolvedDefaultFeatures = [ "default" "getrandom" ];
       };
-      "terminal_size" = rec {
-        crateName = "terminal_size";
-        version = "0.4.4";
-        edition = "2021";
-        sha256 = "0x4839vhhpzacc42rqj2wjhivlhlggzz3890b0c5pmyb3j11n2i3";
-        authors = [
-          "Andrew Chin <achin@eminence32.net>"
-        ];
-        dependencies = [
-          {
-            name = "rustix";
-            packageId = "rustix";
-            target = { target, features }: (target."unix" or false);
-            features = [ "termios" ];
-          }
-          {
-            name = "windows-sys";
-            packageId = "windows-sys 0.61.2";
-            target = { target, features }: (target."windows" or false);
-            features = [ "Win32_Foundation" "Win32_System_Console" ];
-          }
-        ];
-
-      };
       "termtree" = rec {
         crateName = "termtree";
         version = "0.5.1";
         edition = "2021";
         sha256 = "10s610ax6nb70yi7xfmwcb6d3wi9sj5isd0m63gy2pizr2zgwl4g";
 
-      };
-      "textwrap" = rec {
-        crateName = "textwrap";
-        version = "0.16.2";
-        edition = "2021";
-        sha256 = "0mrhd8q0dnh5hwbwhiv89c6i41yzmhw4clwa592rrp24b9hlfdf1";
-        authors = [
-          "Martin Geisler <martin@geisler.net>"
-        ];
-        dependencies = [
-          {
-            name = "unicode-linebreak";
-            packageId = "unicode-linebreak";
-            optional = true;
-          }
-          {
-            name = "unicode-width";
-            packageId = "unicode-width 0.2.2";
-            optional = true;
-          }
-        ];
-        features = {
-          "default" = [ "unicode-linebreak" "unicode-width" "smawk" ];
-          "hyphenation" = [ "dep:hyphenation" ];
-          "smawk" = [ "dep:smawk" ];
-          "terminal_size" = [ "dep:terminal_size" ];
-          "unicode-linebreak" = [ "dep:unicode-linebreak" ];
-          "unicode-width" = [ "dep:unicode-width" ];
-        };
-        resolvedDefaultFeatures = [ "unicode-linebreak" "unicode-width" ];
       };
       "thiserror 1.0.69" = rec {
         crateName = "thiserror";
@@ -13618,6 +13410,10 @@ rec {
             packageId = "chelis-surf";
           }
           {
+            name = "chelis-syntax-host";
+            packageId = "chelis-syntax-host";
+          }
+          {
             name = "ryu";
             packageId = "ryu";
           }
@@ -13721,17 +13517,6 @@ rec {
         ];
 
       };
-      "unicode-linebreak" = rec {
-        crateName = "unicode-linebreak";
-        version = "0.1.5";
-        edition = "2021";
-        sha256 = "07spj2hh3daajg335m4wdav6nfkl0f6c0q72lc37blr97hych29v";
-        libName = "unicode_linebreak";
-        authors = [
-          "Axel Forsman <axelsfor@gmail.com>"
-        ];
-
-      };
       "unicode-normalization" = rec {
         crateName = "unicode-normalization";
         version = "0.1.25";
@@ -13789,7 +13574,7 @@ rec {
           }
           {
             name = "unicode-width";
-            packageId = "unicode-width 0.2.2";
+            packageId = "unicode-width";
           }
         ];
         features = {
@@ -13797,26 +13582,7 @@ rec {
         };
         resolvedDefaultFeatures = [ "std" ];
       };
-      "unicode-width 0.1.14" = rec {
-        crateName = "unicode-width";
-        version = "0.1.14";
-        edition = "2021";
-        sha256 = "1bzn2zv0gp8xxbxbhifw778a7fc93pa6a1kj24jgg9msj07f7mkx";
-        libName = "unicode_width";
-        authors = [
-          "kwantam <kwantam@gmail.com>"
-          "Manish Goregaokar <manishsmail@gmail.com>"
-        ];
-        features = {
-          "compiler_builtins" = [ "dep:compiler_builtins" ];
-          "core" = [ "dep:core" ];
-          "default" = [ "cjk" ];
-          "rustc-dep-of-std" = [ "std" "core" "compiler_builtins" ];
-          "std" = [ "dep:std" ];
-        };
-        resolvedDefaultFeatures = [ "cjk" "default" ];
-      };
-      "unicode-width 0.2.2" = rec {
+      "unicode-width" = rec {
         crateName = "unicode-width";
         version = "0.2.2";
         edition = "2021";

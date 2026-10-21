@@ -74,7 +74,8 @@ fn variable_chain(depth: usize) -> String {
 }
 
 fn check_bytes(source: &str) -> usize {
-    let program = chelis_deep::parse_and_stamp_file(source).expect("the probe parses");
+    let program = chelis_deep::parse_and_stamp_file(source, &chelis_syntax_host::NativeStack)
+        .expect("the probe parses");
     let (checked, bytes) = allocated(|| chelis_types::check_typed_program(&program));
     checked.expect("the probe checks");
     bytes

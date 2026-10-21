@@ -1604,8 +1604,9 @@ fn read_produced_field(
     // defining module so field access on the opaque type is legal, named
     // fresh against the program so a module that defines the plain spelling
     // cannot turn every proposal into a duplicate definition (chelis#3267).
-    let exprs = chelis_deep::parser::parse_and_stamp_file(module_source)
-        .map_err(|error| format!("its module does not re-parse: {error}"))?;
+    let exprs =
+        chelis_deep::parser::parse_and_stamp_file(module_source, &chelis_syntax_host::NativeStack)
+            .map_err(|error| format!("its module does not re-parse: {error}"))?;
     let (probe, linked) = crate::smt_names::fresh_module_probe_name(
         &exprs,
         type_name,

@@ -5,8 +5,10 @@
 //! shared Surf AST through [`crate::resugar`] and renders that AST through the
 //! one canonical formatter in [`crate::format`].
 
+use alloc::string::{String, ToString};
 use chelis_deep::role::is_declaration_tag;
 use chelis_deep::{DeepTag, Expr};
+use chelis_stack_services::StackServices;
 
 use crate::ast::Decl;
 use crate::format::format_program;
@@ -41,28 +43,36 @@ impl DecompileOptions {
 /// Boundaries that can return an error must use [`try_decompile_program`].
 /// This wrapper keeps malformed Deep visible as a stable comment rather than
 /// panicking or inventing placeholder Surf.
-pub fn decompile_program(exprs: &[Expr]) -> String {
-    decompile_program_with_context(exprs, &DecompileOptions::idiomatic(), None)
+pub fn decompile_program(exprs: &[Expr], stack: &impl StackServices) -> String {
+    decompile_program_with_context(exprs, &DecompileOptions::idiomatic(), None, stack)
 }
 
-pub fn decompile_program_with_options(exprs: &[Expr], options: &DecompileOptions) -> String {
-    decompile_program_with_context(exprs, options, None)
+pub fn decompile_program_with_options(
+    exprs: &[Expr],
+    options: &DecompileOptions,
+    stack: &impl StackServices,
+) -> String {
+    decompile_program_with_context(exprs, options, None, stack)
 }
 
 pub fn decompile_program_with_context(
     exprs: &[Expr],
     options: &DecompileOptions,
     synthetic_name: Option<&str>,
+    stack: &impl StackServices,
 ) -> String {
-    match try_decompile_program_with_context(exprs, options, synthetic_name) {
+    match try_decompile_program_with_context(exprs, options, synthetic_name, stack) {
         Ok(source) => source,
         Err(error) => format!("-- Deep resugaring error: {error}\n"),
     }
 }
 
 /// Resugar a Deep program through the shared Surf AST and canonical printer.
-pub fn try_decompile_program(exprs: &[Expr]) -> Result<String, ResugarError> {
-    try_decompile_program_with_context(exprs, &DecompileOptions::idiomatic(), None)
+pub fn try_decompile_program(
+    exprs: &[Expr],
+    stack: &impl StackServices,
+) -> Result<String, ResugarError> {
+    try_decompile_program_with_context(exprs, &DecompileOptions::idiomatic(), None, stack)
 }
 
 /// Resugar a Deep program with an optional name for a single expression-only
@@ -71,6 +81,7 @@ pub fn try_decompile_program_with_context(
     exprs: &[Expr],
     options: &DecompileOptions,
     synthetic_name: Option<&str>,
+    stack: &impl StackServices,
 ) -> Result<String, ResugarError> {
     let declarations = match resugar_program(exprs) {
         Ok(declarations) => declarations,
@@ -90,8 +101,10 @@ pub fn try_decompile_program_with_context(
     if options.emit_deep_debug_comments {
         append_deep_debug_comments(&mut source, exprs);
     }
-    crate::parser::parse_str(&source).map_err(|error| ResugarError::InvalidSurfaceProgram {
-        reason: error.to_string(),
+    crate::parser::parse_str(&source, stack).map_err(|error| {
+        ResugarError::InvalidSurfaceProgram {
+            reason: error.to_string(),
+        }
     })?;
     Ok(source)
 }
@@ -114,19 +127,27 @@ mod tests {
     use super::*;
     use crate::desugar::desugar_program;
     use crate::parser::parse_str;
+    use alloc::boxed::Box;
 
     #[test]
     fn verbose_mode_is_canonical_surf_plus_comments() {
-        let surf = parse_str("def f(x: f32) -> f32 = x").expect("Surf parses");
-        let deep = desugar_program(&surf).expect("Surf fixture must desugar");
+        let surf = parse_str("def f(x: f32) -> f32 = x", &chelis_syntax_host::NativeStack)
+            .expect("Surf parses");
+        let deep = desugar_program(&surf, &chelis_syntax_host::NativeStack)
+            .expect("Surf fixture must desugar");
 
-        let rendered =
-            try_decompile_program_with_context(&deep, &DecompileOptions::verbose(), None)
-                .expect("Deep resugars");
+        let rendered = try_decompile_program_with_context(
+            &deep,
+            &DecompileOptions::verbose(),
+            None,
+            &chelis_syntax_host::NativeStack,
+        )
+        .expect("Deep resugars");
 
         assert!(rendered.starts_with("def f(x: f32) -> f32 = x\n"));
         assert!(rendered.contains("-- deep-debug: (defsig"));
-        parse_str(&rendered).expect("debug comments do not introduce a dialect");
+        parse_str(&rendered, &chelis_syntax_host::NativeStack)
+            .expect("debug comments do not introduce a dialect");
     }
 
     #[test]
@@ -142,7 +163,8 @@ mod tests {
             span,
         }))];
 
-        let error = try_decompile_program(&deep).expect_err("unknown Deep form is rejected");
+        let error = try_decompile_program(&deep, &chelis_syntax_host::NativeStack)
+            .expect_err("unknown Deep form is rejected");
 
         assert!(error.to_string().contains("unknown form `future-form`"));
     }
@@ -181,8 +203,11 @@ mod tests {
                 None,
             ),
         ] {
-            let deep = chelis_deep::parser::parse_str(deep_source).expect("Deep literal parses");
-            let rendered = try_decompile_program(&deep).expect("typed literal resugars");
+            let deep =
+                chelis_deep::parser::parse_str(deep_source, &chelis_syntax_host::NativeStack)
+                    .expect("Deep literal parses");
+            let rendered = try_decompile_program(&deep, &chelis_syntax_host::NativeStack)
+                .expect("typed literal resugars");
 
             assert!(
                 rendered.contains(expected),
@@ -194,7 +219,8 @@ mod tests {
                     "integer payload was rounded through f64:\n{rendered}"
                 );
             }
-            parse_str(&rendered).expect("resugared Surf reparses");
+            parse_str(&rendered, &chelis_syntax_host::NativeStack)
+                .expect("resugared Surf reparses");
         }
     }
 
@@ -202,11 +228,13 @@ mod tests {
     fn integer_spelled_float_rejects_a_non_finite_target_image() {
         let deep = chelis_deep::parser::parse_str(
             "(lit {type: (t-prim {} f16), literal_source: integer} 65520)",
+            &chelis_syntax_host::NativeStack,
         )
         .expect("Deep literal parses");
 
         assert_eq!(
-            try_decompile_program(&deep).expect_err("f16 overflow has no Surf literal"),
+            try_decompile_program(&deep, &chelis_syntax_host::NativeStack)
+                .expect_err("f16 overflow has no Surf literal"),
             ResugarError::NonFiniteFloat,
         );
     }
@@ -221,9 +249,9 @@ mod tests {
             "(lit {type: (t-prim {} f32), literal_source: integer, \
              literal_source: integer} 7)",
         ] {
-            match chelis_deep::parser::parse_str(malformed) {
+            match chelis_deep::parser::parse_str(malformed, &chelis_syntax_host::NativeStack) {
                 Ok(deep) => assert!(
-                    try_decompile_program(&deep).is_err(),
+                    try_decompile_program(&deep, &chelis_syntax_host::NativeStack).is_err(),
                     "malformed literal provenance resugared cleanly: {malformed}"
                 ),
                 Err(error) => assert!(error.to_string().contains("literal_source")),

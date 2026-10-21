@@ -175,8 +175,10 @@ enum Entry {
 }
 
 fn checked_program(source: &str, entry: Entry) -> CheckedProgram {
-    let declarations = parse_str(source).expect("Surf fixture parses");
-    let program = desugar_program(&declarations).expect("Surf fixture must desugar");
+    let declarations =
+        parse_str(source, &chelis_syntax_host::NativeStack).expect("Surf fixture parses");
+    let program = desugar_program(&declarations, &chelis_syntax_host::NativeStack)
+        .expect("Surf fixture must desugar");
     match entry {
         Entry::Ir => check_ir_program(&program).expect("IR entry type-checks the fixture"),
         Entry::Typed => check_typed_program(&program).expect("typed entry type-checks the fixture"),

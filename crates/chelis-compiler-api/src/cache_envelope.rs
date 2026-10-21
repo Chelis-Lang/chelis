@@ -476,7 +476,8 @@ mod tests {
 
     fn sample(marker: u32) -> StdLibContext {
         let source = format!("module CacheProof\ndef value_{marker}() -> i32 = {marker}\n");
-        let decls = chelis_surf::parser::parse_str(&source).unwrap();
+        let decls =
+            chelis_surf::parser::parse_str(&source, &chelis_syntax_host::NativeStack).unwrap();
         build_stdlib_context(&decls).unwrap()
     }
 

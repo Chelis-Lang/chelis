@@ -25,9 +25,10 @@ use chelis_surf::resugar::resugar_program;
 /// The desugared program, one Deep form per line, whitespace flattened and
 /// `span` metadata removed.
 fn deep(source: &str) -> String {
-    let decls = parse_str(source).unwrap_or_else(|error| panic!("parse: {error}\n{source}"));
-    let exprs =
-        desugar_program(&decls).unwrap_or_else(|error| panic!("desugar: {error}\n{source}"));
+    let decls = parse_str(source, &chelis_syntax_host::NativeStack)
+        .unwrap_or_else(|error| panic!("parse: {error}\n{source}"));
+    let exprs = desugar_program(&decls, &chelis_syntax_host::NativeStack)
+        .unwrap_or_else(|error| panic!("desugar: {error}\n{source}"));
     strip_spans(
         &exprs
             .iter()
@@ -44,8 +45,9 @@ fn deep(source: &str) -> String {
 
 /// The desugaring error a Surf program must produce.
 fn desugar_error(source: &str) -> String {
-    let decls = parse_str(source).unwrap_or_else(|error| panic!("parse: {error}\n{source}"));
-    match desugar_program(&decls) {
+    let decls = parse_str(source, &chelis_syntax_host::NativeStack)
+        .unwrap_or_else(|error| panic!("parse: {error}\n{source}"));
+    match desugar_program(&decls, &chelis_syntax_host::NativeStack) {
         Ok(exprs) => panic!(
             "expected a desugaring error, got:\n{}\n--- source\n{source}",
             exprs.iter().map(print_expr).collect::<Vec<_>>().join("\n")
@@ -474,8 +476,8 @@ fn every_binder_of_to_tensor_is_rejected_at_surf_ingress() {
 fn a_failed_resugaring_leaves_no_printer_state_for_the_next() {
     let fail = "(def {} x (lit {surf_literal_style: \"explicit\"  , type: (t-prim {} f32)} 1.1))\n(defsig {} y (t-var {} p))";
     let ok = "(def {} x (lit {surf_literal_style: \"unsuffixed\", type: (t-prim {} f32)} 1.1))";
-    let failed = parse_and_stamp_file(fail).unwrap();
-    let good = parse_and_stamp_file(ok).unwrap();
+    let failed = parse_and_stamp_file(fail, &chelis_syntax_host::NativeStack).unwrap();
+    let good = parse_and_stamp_file(ok, &chelis_syntax_host::NativeStack).unwrap();
     let before = format_program(&resugar_program(&good).unwrap());
     assert!(
         resugar_program(&failed).is_err(),

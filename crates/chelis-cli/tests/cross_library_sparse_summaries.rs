@@ -650,7 +650,8 @@ fn checked_sparse_host_helpers_execute_nontrailing_exact_integer_domains() {
         let source = format!(
             "def inner(base: tensor[2,3,i64], indices: tensor[2,i64], updates: tensor[2,2,i64]) -> tensor[{result_shape},i64] = {op}\ndef outer(base: tensor[2,3,i64], indices: tensor[2,i64], updates: tensor[2,2,i64]) -> tensor[{result_shape},i64] = inner(base,indices,updates)\nbase: tensor[2,3,i64] = reshape(to_tensor([9007199254740993i64,9007199254740994i64,9007199254740995i64,9007199254740996i64,9007199254740997i64,9007199254740998i64]),[2i64,3i64])\nindices: tensor[2,i64] = to_tensor([2i64,2i64])\nupdates: tensor[2,2,i64] = reshape(to_tensor([9007199254741001i64,9007199254741002i64,9007199254741003i64,9007199254741004i64]),[2i64,2i64])\nresult = outer(base,indices,updates)\n"
         );
-        let source = chelis_surf::format::format_source(&source).unwrap();
+        let source =
+            chelis_surf::format::format_source(&source, &chelis_syntax_host::NativeStack).unwrap();
         let c = build_to_c(&source, program);
         let body = function_body(&c, program, "outer");
         assert!(body_contains_checked_sparse_loop(

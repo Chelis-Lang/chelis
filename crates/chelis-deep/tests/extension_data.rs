@@ -2,14 +2,31 @@ use chelis_deep::{metadata::validate_metadata, parser::parse_str, printer::print
 
 #[test]
 fn owner_combination_preserves_data_and_rejects_conflicts_transactionally() {
-    let owner = parse_str("(var {tool_data: {id: 1}} x)").unwrap().remove(0);
-    let replacement = parse_str("(var {other: 2} y)").unwrap().remove(0);
+    let owner = parse_str(
+        "(var {tool_data: {id: 1}} x)",
+        &chelis_syntax_host::NativeStack,
+    )
+    .unwrap()
+    .remove(0);
+    let replacement = parse_str("(var {other: 2} y)", &chelis_syntax_host::NativeStack)
+        .unwrap()
+        .remove(0);
     let merged = replacement.clone().try_inherit_extensions(&owner).unwrap();
     assert!(print_expr_flat(&merged).contains("tool_data: {id: 1}"));
     assert!(print_expr_flat(&merged).contains("other: 2"));
-    let identical = parse_str("(var {tool_data: {id: 1}} y)").unwrap().remove(0);
+    let identical = parse_str(
+        "(var {tool_data: {id: 1}} y)",
+        &chelis_syntax_host::NativeStack,
+    )
+    .unwrap()
+    .remove(0);
     assert!(identical.try_inherit_extensions(&owner).is_ok());
-    let conflicting = parse_str("(var {tool_data: {id: 2}} y)").unwrap().remove(0);
+    let conflicting = parse_str(
+        "(var {tool_data: {id: 2}} y)",
+        &chelis_syntax_host::NativeStack,
+    )
+    .unwrap()
+    .remove(0);
     let before = conflicting.clone();
     assert!(
         conflicting
@@ -20,7 +37,7 @@ fn owner_combination_preserves_data_and_rejects_conflicts_transactionally() {
             .contains("tool_data")
     );
     assert_eq!(conflicting, before);
-    let atom = parse_str("1")
+    let atom = parse_str("1", &chelis_syntax_host::NativeStack)
         .unwrap()
         .remove(0)
         .try_inherit_extensions(&owner)
@@ -74,7 +91,8 @@ fn producer_data_is_not_compiler_syntax() {
         "(unknown_macro {type: false} bare_name)",
     ] {
         let source = format!("(var {{tool_data: {payload}}} x)");
-        let program = parse_str(&source).unwrap_or_else(|e| panic!("{source}: {e}"));
+        let program = parse_str(&source, &chelis_syntax_host::NativeStack)
+            .unwrap_or_else(|e| panic!("{source}: {e}"));
         validate_metadata(&program).unwrap();
         assert!(print_expr_flat(&program[0]).contains(payload));
     }
@@ -84,15 +102,20 @@ fn producer_data_is_not_compiler_syntax() {
         "(var {surf_future: false} x)",
         "(var {tool_data: 1, tool_data: 2} x)",
     ] {
-        assert!(parse_str(source).is_err(), "accepted {source}");
+        assert!(
+            parse_str(source, &chelis_syntax_host::NativeStack).is_err(),
+            "accepted {source}"
+        );
     }
 }
 
 #[test]
 fn semantic_visitors_skip_extensions_but_visit_registered_expressions() {
-    let program =
-        parse_str("(def {tool_data: (var {} historical), property_seed: (var {} live)} f 1)")
-            .unwrap();
+    let program = parse_str(
+        "(def {tool_data: (var {} historical), property_seed: (var {} live)} f 1)",
+        &chelis_syntax_host::NativeStack,
+    )
+    .unwrap();
     let chelis_deep::Expr::Node(node, _) = &program[0] else {
         panic!("node")
     };
@@ -112,7 +135,7 @@ fn semantic_visitors_skip_extensions_but_visit_registered_expressions() {
 
 #[test]
 fn metadata_replacements_retain_expression_and_binder_owners() {
-    let parsed = parse_str("(def {property_seed: (var {tool_data: 1} old), property_quantifiers: (params {container_data: 2} (x {binder_data: 3}))} f 1)").unwrap();
+    let parsed = parse_str("(def {property_seed: (var {tool_data: 1} old), property_quantifiers: (params {container_data: 2} (x {binder_data: 3}))} f 1)",&chelis_syntax_host::NativeStack).unwrap();
     let chelis_deep::Expr::Node(node, _) = &parsed[0] else {
         panic!("node")
     };
@@ -121,9 +144,13 @@ fn metadata_replacements_retain_expression_and_binder_owners() {
         .try_map_expressions_with_annotations::<chelis_deep::metadata::MetadataError>(
             &mut |value, _| {
                 Ok(if print_expr_flat(value).starts_with("(var ") {
-                    parse_str("(var {} new)").unwrap().remove(0)
+                    parse_str("(var {} new)", &chelis_syntax_host::NativeStack)
+                        .unwrap()
+                        .remove(0)
                 } else if print_expr_flat(value).starts_with("(x ") {
-                    parse_str("y").unwrap().remove(0)
+                    parse_str("y", &chelis_syntax_host::NativeStack)
+                        .unwrap()
+                        .remove(0)
                 } else {
                     value.clone()
                 })
@@ -141,7 +168,9 @@ fn metadata_replacements_retain_expression_and_binder_owners() {
         node.meta()
             .try_map_expressions::<chelis_deep::metadata::MetadataError>(&mut |value, _| Ok(
                 if print_expr_flat(value).starts_with("(var ") {
-                    parse_str("(var {tool_data: 9} new)").unwrap().remove(0)
+                    parse_str("(var {tool_data: 9} new)", &chelis_syntax_host::NativeStack)
+                        .unwrap()
+                        .remove(0)
                 } else {
                     value.clone()
                 }
@@ -152,8 +181,8 @@ fn metadata_replacements_retain_expression_and_binder_owners() {
 
 #[test]
 fn authoring_preserves_replaced_declaration_owners_and_conflicts_fail() {
-    let original = chelis_deep::parse_and_stamp_file("(module {} m (defsig {sig_data: 1} f (t-fn {} (t-prim {} i32))) (def {def_data: 2} f (fn {} (params {params_data: 3}) (lit {} 1))))").unwrap();
-    let replacement = chelis_deep::parse_and_stamp_file("(defsig {} f (t-fn {} (t-prim {} i32))) (def {new_data: 4} f (fn {} (params {}) (lit {} 2)))").unwrap();
+    let original = chelis_deep::parse_and_stamp_file("(module {} m (defsig {sig_data: 1} f (t-fn {} (t-prim {} i32))) (def {def_data: 2} f (fn {} (params {params_data: 3}) (lit {} 1))))",&chelis_syntax_host::NativeStack).unwrap();
+    let replacement = chelis_deep::parse_and_stamp_file("(defsig {} f (t-fn {} (t-prim {} i32))) (def {new_data: 4} f (fn {} (params {}) (lit {} 2)))",&chelis_syntax_host::NativeStack).unwrap();
     let replaced =
         chelis_deep::authoring::replace_function(&original, "m.f", &replacement).unwrap();
     let text = replaced
@@ -168,16 +197,20 @@ fn authoring_preserves_replaced_declaration_owners_and_conflicts_fail() {
         !text.contains("params_data"),
         "removed body nodes lose their data: {text}"
     );
-    let bad =
-        chelis_deep::parse_and_stamp_file("(def {def_data: 9} f (fn {} (params {}) (lit {} 2)))")
-            .unwrap();
+    let bad = chelis_deep::parse_and_stamp_file(
+        "(def {def_data: 9} f (fn {} (params {}) (lit {} 2)))",
+        &chelis_syntax_host::NativeStack,
+    )
+    .unwrap();
     assert!(
         chelis_deep::authoring::replace_function(&original, "m.f", &bad)
             .unwrap_err()
             .to_string()
             .contains("def_data")
     );
-    let params = parse_str("(params {})").unwrap().remove(0);
+    let params = parse_str("(params {})", &chelis_syntax_host::NativeStack)
+        .unwrap()
+        .remove(0);
     let changed = chelis_deep::authoring::change_signature(
         &original,
         "m.f",
@@ -227,7 +260,7 @@ fn raw_and_token_ingress_cannot_forge_unvalidated_data() {
         kind: TokenKind::Symbol("a )".into()),
         span,
     };
-    assert!(chelis_deep::parser::parse(&tokens).is_err());
+    assert!(chelis_deep::parser::parse(&tokens, &chelis_syntax_host::NativeStack).is_err());
     let data = RawExpr::ExtensionData(ExtensionData::parse("(var {} x)").unwrap());
     assert!(chelis_deep::stamp_to_typed(vec![data.clone()]).is_err());
     assert!(chelis_deep::stamp_runtime_exprs(vec![data.clone()]).is_err());
@@ -293,7 +326,7 @@ fn raw_data_conversion_preserves_map_key_identity() {
 
 #[test]
 fn authoring_renames_live_references_and_preserves_recorded_names() {
-    let original = chelis_deep::parse_and_stamp_file("(module {} m (def {} f (fn {} (params {}) (lit {} 1))) (def {tool_data: (var {} f)} g (fn {} (params {}) (var {} f))))").unwrap();
+    let original = chelis_deep::parse_and_stamp_file("(module {} m (def {} f (fn {} (params {}) (lit {} 1))) (def {tool_data: (var {} f)} g (fn {} (params {}) (var {} f))))",&chelis_syntax_host::NativeStack).unwrap();
     let renamed = chelis_deep::authoring::rename_function(&original, "m.f", "renamed").unwrap();
     let text = renamed
         .module

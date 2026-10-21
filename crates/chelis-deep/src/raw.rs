@@ -6,6 +6,7 @@
 //! role-directed walk. This is technique C (staging) in minimal form.
 
 use crate::span::Span;
+use alloc::{boxed::Box, string::String, vec::Vec};
 
 /// A raw atom as produced by the lexer/parser.
 ///

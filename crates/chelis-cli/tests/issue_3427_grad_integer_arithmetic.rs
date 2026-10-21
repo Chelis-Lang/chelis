@@ -21,7 +21,8 @@ use common::build_and_run;
 fn write_file(path: &std::path::Path, source: &str) {
     common::write_file(
         path,
-        &chelis_surf::format::format_source(source).expect("canonical Surf"),
+        &chelis_surf::format::format_source(source, &chelis_syntax_host::NativeStack)
+            .expect("canonical Surf"),
     );
 }
 

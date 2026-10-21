@@ -23,6 +23,7 @@ serde_json = "1"
 tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "sync"] }
 
 [dev-dependencies]
+chelis-syntax-host.workspace = true
 assert_cmd = "2"
 chelis-deep.workspace = true
 # The embedded chelis-std runtime the tests pass; the library takes it as a

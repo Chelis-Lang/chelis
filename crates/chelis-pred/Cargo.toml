@@ -8,7 +8,10 @@ repository.workspace = true
 
 [dependencies]
 chelis-deep.workspace = true
-thiserror.workspace = true
+thiserror = { version = "2", default-features = false }
+
+[dev-dependencies]
+chelis-syntax-host.workspace = true
 
 [lints]
 workspace = true

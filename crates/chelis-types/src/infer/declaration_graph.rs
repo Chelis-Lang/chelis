@@ -1392,9 +1392,10 @@ mod top_level_reference_graph_tests {
     use super::*;
 
     fn surf_program(source: &str) -> Vec<deep::Expr> {
-        let declarations = chelis_surf::parser::parse_str(source)
+        let declarations = chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack)
             .unwrap_or_else(|error| panic!("graph fixture must parse: {error:?}\n{source}"));
-        chelis_surf::desugar::desugar_program(&declarations).expect("Surf fixture must desugar")
+        chelis_surf::desugar::desugar_program(&declarations, &chelis_syntax_host::NativeStack)
+            .expect("Surf fixture must desugar")
     }
 
     fn graph(source: &str) -> TopLevelReferenceGraph {

@@ -23,6 +23,10 @@
 
 use crate::ast::{Atom, Expr};
 use crate::tag::DeepTag;
+use alloc::{
+    string::{String, ToString},
+    vec::Vec,
+};
 
 /// The child index of the function body inside a `(fn {} (params {} ...)
 /// BODY)` node: the `(params {} ...)` node is child 0 and the body child 1.
@@ -765,7 +769,7 @@ mod tests {
     use crate::parser::parse_str;
 
     fn parse_one(src: &str) -> Expr {
-        parse_str(src)
+        parse_str(src, &chelis_syntax_host::NativeStack)
             .expect("parse failed")
             .into_iter()
             .next()
@@ -839,10 +843,11 @@ mod tests {
     fn two_fn_module() -> Vec<Expr> {
         parse_str(
             "(module {} m \
-               (defsig {} f (t-fn {} (t-prim {} f32) (t-prim {} f32))) \
-               (def {} f (fn {} (params {} (x {type: (t-prim {} f32)})) (var {} x))) \
-               (defsig {} g (t-fn {} (t-prim {} f32) (t-prim {} f32))) \
-               (def {} g (fn {} (params {} (y {type: (t-prim {} f32)})) (var {} y))))",
+           (defsig {} f (t-fn {} (t-prim {} f32) (t-prim {} f32))) \
+           (def {} f (fn {} (params {} (x {type: (t-prim {} f32)})) (var {} x))) \
+           (defsig {} g (t-fn {} (t-prim {} f32) (t-prim {} f32))) \
+           (def {} g (fn {} (params {} (y {type: (t-prim {} f32)})) (var {} y))))",
+            &chelis_syntax_host::NativeStack,
         )
         .expect("module parse")
     }
@@ -885,7 +890,8 @@ mod tests {
         // A target with no defsig returns None.
         let no_sig = parse_str(
             "(module {} m \
-               (def {} f (fn {} (params {} (x {type: (t-prim {} f32)})) (var {} x))))",
+           (def {} f (fn {} (params {} (x {type: (t-prim {} f32)})) (var {} x))))",
+            &chelis_syntax_host::NativeStack,
         )
         .expect("module parse");
         assert!(function_defsig(&no_sig, "f").is_none());
@@ -932,7 +938,8 @@ mod tests {
     fn spliced_function_def_on_value_binding_is_not_a_function() {
         let module = parse_str(
             "(module {} m \
-               (def {} pi (lit {type: (t-prim {} f32)} 3.14)))",
+           (def {} pi (lit {type: (t-prim {} f32)} 3.14)))",
+            &chelis_syntax_host::NativeStack,
         )
         .expect("module parse");
         let err = spliced_function_def(&module, "pi", parse_one("(lit {} 1.0)")).unwrap_err();
@@ -945,7 +952,10 @@ mod tests {
     /// test verifies the early structural rejection.
     #[test]
     fn resolve_body_less_function_is_malformed_not_panic() {
-        let result = parse_str("(module {} m (def {} f (fn {} (params {}))))");
+        let result = parse_str(
+            "(module {} m (def {} f (fn {} (params {}))))",
+            &chelis_syntax_host::NativeStack,
+        );
         assert!(
             result.is_err(),
             "body-less fn must be rejected at parse time (arity violation), got: {:?}",
@@ -961,7 +971,10 @@ mod tests {
     #[test]
     fn splice_body_less_function_is_malformed_not_panic() {
         // Same as above: arity validation at parse time catches this.
-        let result = parse_str("(module {} m (def {} f (fn {} (params {}))))");
+        let result = parse_str(
+            "(module {} m (def {} f (fn {} (params {}))))",
+            &chelis_syntax_host::NativeStack,
+        );
         assert!(
             result.is_err(),
             "body-less fn must be rejected at parse time (arity violation), got: {:?}",
@@ -974,11 +987,12 @@ mod tests {
     fn two_module_slice() -> Vec<Expr> {
         parse_str(
             "(module {} first \
-               (defsig {} f (t-fn {} (t-prim {} f32) (t-prim {} f32))) \
-               (def {} f (fn {} (params {} (x {type: (t-prim {} f32)})) (var {} a)))) \
-             (module {} second \
-               (defsig {} f (t-fn {} (t-prim {} f32) (t-prim {} f32))) \
-               (def {} f (fn {} (params {} (x {type: (t-prim {} f32)})) (var {} b))))",
+           (defsig {} f (t-fn {} (t-prim {} f32) (t-prim {} f32))) \
+           (def {} f (fn {} (params {} (x {type: (t-prim {} f32)})) (var {} a)))) \
+         (module {} second \
+           (defsig {} f (t-fn {} (t-prim {} f32) (t-prim {} f32))) \
+           (def {} f (fn {} (params {} (x {type: (t-prim {} f32)})) (var {} b))))",
+            &chelis_syntax_host::NativeStack,
         )
         .expect("two-module parse")
     }
@@ -1013,8 +1027,9 @@ mod tests {
         // future refactor cannot degrade to pick-first.
         let module = parse_str(
             "(module {} m \
-               (def {} dup (fn {} (params {} (x {type: (t-prim {} f32)})) (var {} x))) \
-               (def {} dup (fn {} (params {} (y {type: (t-prim {} f32)})) (var {} y))))",
+           (def {} dup (fn {} (params {} (x {type: (t-prim {} f32)})) (var {} x))) \
+           (def {} dup (fn {} (params {} (y {type: (t-prim {} f32)})) (var {} y))))",
+            &chelis_syntax_host::NativeStack,
         )
         .expect("module parse");
         let err = resolve_function(&module, "dup").unwrap_err();
@@ -1036,7 +1051,8 @@ mod tests {
         // A module whose `f` has a def but no defsig reports false for `f`.
         let no_sig = parse_str(
             "(module {} m \
-               (def {} f (fn {} (params {} (x {type: (t-prim {} f32)})) (var {} x))))",
+           (def {} f (fn {} (params {} (x {type: (t-prim {} f32)})) (var {} x))))",
+            &chelis_syntax_host::NativeStack,
         )
         .expect("module parse");
         assert!(!module_has_defsig_for(&no_sig, "f"));

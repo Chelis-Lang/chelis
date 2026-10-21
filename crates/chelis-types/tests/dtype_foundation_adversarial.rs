@@ -13,9 +13,10 @@ use chelis_types::check_ir_program;
 use chelis_types::types::Prim;
 
 fn surf_to_deep(source: &str) -> Vec<chelis_deep::Expr> {
-    let decls = parse_str(source).expect("surf parse");
+    let decls = parse_str(source, &chelis_syntax_host::NativeStack).expect("surf parse");
     chelis_macros::expand_program(
-        &desugar_program(&decls).expect("Surf fixture must desugar"),
+        &desugar_program(&decls, &chelis_syntax_host::NativeStack)
+            .expect("Surf fixture must desugar"),
         &chelis_macros::ExpansionOptions::default(),
     )
     .expect("macro expand")
@@ -105,8 +106,10 @@ fn bare_int_literal_binds_at_a_declared_int64_result_and_nowhere_else() {
 fn bare_float_literal_does_not_satisfy_int64() {
     // spec/04 §5.6 Binding: the declared i64 states a dtype a decimal
     // literal cannot bind at, which Surf ingress rejects before any check.
-    let decls = parse_str("def main() -> i64 = 1.0").expect("surf parse");
-    let error = desugar_program(&decls).expect_err("a decimal literal never binds at i64");
+    let decls =
+        parse_str("def main() -> i64 = 1.0", &chelis_syntax_host::NativeStack).expect("surf parse");
+    let error = desugar_program(&decls, &chelis_syntax_host::NativeStack)
+        .expect_err("a decimal literal never binds at i64");
     assert!(
         error.to_string().contains("cannot bind at i64"),
         "spec §5.6: {error}"
@@ -153,7 +156,7 @@ fn cast_to_f8e4m3_via_to_tensor_pipe_still_rejected() {
 #[test]
 fn literal_suffix_f32_is_implemented_per_spec_5_5() {
     let src = "def main() -> f32 = 1.0f32";
-    let decls = match chelis_surf::parser::parse_str(src) {
+    let decls = match chelis_surf::parser::parse_str(src, &chelis_syntax_host::NativeStack) {
         Ok(d) => d,
         Err(e) => panic!(
             "spec §5.5 pins literal suffix grammar (`1.0f32`, `42i64`); \
@@ -162,7 +165,8 @@ fn literal_suffix_f32_is_implemented_per_spec_5_5() {
         ),
     };
     let exprs = chelis_macros::expand_program(
-        &desugar_program(&decls).expect("Surf fixture must desugar"),
+        &desugar_program(&decls, &chelis_syntax_host::NativeStack)
+            .expect("Surf fixture must desugar"),
         &chelis_macros::ExpansionOptions::default(),
     )
     .expect("macro expand")
@@ -181,7 +185,7 @@ fn literal_suffix_f32_is_implemented_per_spec_5_5() {
 #[test]
 fn literal_suffix_i64_is_implemented_per_spec_5_5() {
     let src = "def main() -> i64 = 42i64";
-    let decls = match chelis_surf::parser::parse_str(src) {
+    let decls = match chelis_surf::parser::parse_str(src, &chelis_syntax_host::NativeStack) {
         Ok(d) => d,
         Err(e) => panic!(
             "spec §5.5: `42i64` suffix grammar not implemented in surf lexer. \
@@ -189,7 +193,8 @@ fn literal_suffix_i64_is_implemented_per_spec_5_5() {
         ),
     };
     let exprs = chelis_macros::expand_program(
-        &desugar_program(&decls).expect("Surf fixture must desugar"),
+        &desugar_program(&decls, &chelis_syntax_host::NativeStack)
+            .expect("Surf fixture must desugar"),
         &chelis_macros::ExpansionOptions::default(),
     )
     .expect("macro expand")
@@ -207,12 +212,13 @@ fn literal_suffix_i64_is_implemented_per_spec_5_5() {
 #[test]
 fn literal_suffix_f8e4m3_is_lex_error_per_spec_5_5() {
     let src = "def main() -> f32 = 1.0f8e4m3";
-    if let Ok(decls) = chelis_surf::parser::parse_str(src) {
+    if let Ok(decls) = chelis_surf::parser::parse_str(src, &chelis_syntax_host::NativeStack) {
         // The expected behavior per §5.5 is a parse error. Anything
         // else is divergence. If desugar/check don't catch it either,
         // it's silent acceptance — a SPEC-DIVERGENCE finding.
         let exprs = chelis_macros::expand_program(
-            &desugar_program(&decls).expect("Surf fixture must desugar"),
+            &desugar_program(&decls, &chelis_syntax_host::NativeStack)
+                .expect("Surf fixture must desugar"),
             &chelis_macros::ExpansionOptions::default(),
         )
         .expect("macro expand")
@@ -231,9 +237,10 @@ fn literal_suffix_f8e4m3_is_lex_error_per_spec_5_5() {
 #[test]
 fn literal_suffix_u8_is_lex_error_per_spec_5_5() {
     let src = "def main() -> i32 = 42u8";
-    if let Ok(decls) = chelis_surf::parser::parse_str(src) {
+    if let Ok(decls) = chelis_surf::parser::parse_str(src, &chelis_syntax_host::NativeStack) {
         let exprs = chelis_macros::expand_program(
-            &desugar_program(&decls).expect("Surf fixture must desugar"),
+            &desugar_program(&decls, &chelis_syntax_host::NativeStack)
+                .expect("Surf fixture must desugar"),
             &chelis_macros::ExpansionOptions::default(),
         )
         .expect("macro expand")
@@ -314,7 +321,8 @@ fn f32_literal_does_not_widen_to_f64_context() {
 #[test]
 fn hex_float_suffix_is_rejected_at_lex_time() {
     let src = "def main() -> f32 = 0xFFf32";
-    let err = parse_str(src).expect_err("spec §5.5: hex float suffix must lex-error");
+    let err = parse_str(src, &chelis_syntax_host::NativeStack)
+        .expect_err("spec §5.5: hex float suffix must lex-error");
     let msg = format!("{err}");
     assert!(
         msg.contains("hex literals cannot carry float-typed suffixes"),
@@ -347,7 +355,8 @@ fn decimal_integer_suffix_is_well_formed() {
 #[test]
 fn integer_suffix_on_float_literal_is_lex_error() {
     let src = "def main() -> i8 = 1.0i8";
-    let err = parse_str(src).expect_err("spec §5.5: int suffix on float lits must lex-error");
+    let err = parse_str(src, &chelis_syntax_host::NativeStack)
+        .expect_err("spec §5.5: int suffix on float lits must lex-error");
     let msg = format!("{err}");
     assert!(
         msg.contains("integer suffixes attach to integer literals only"),
@@ -359,7 +368,8 @@ fn integer_suffix_on_float_literal_is_lex_error() {
 #[test]
 fn unknown_suffix_is_lex_error() {
     let src = "def main() -> f32 = 1.0xyz";
-    let err = parse_str(src).expect_err("spec §5.5: unknown suffix must lex-error");
+    let err = parse_str(src, &chelis_syntax_host::NativeStack)
+        .expect_err("spec §5.5: unknown suffix must lex-error");
     let msg = format!("{err}");
     assert!(
         msg.contains("unrecognized literal suffix") || msg.contains("xyz"),

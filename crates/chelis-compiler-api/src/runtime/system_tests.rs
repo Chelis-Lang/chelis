@@ -171,8 +171,10 @@ impl EvalSystem for FailingReadAdapter {
 #[test]
 fn injected_system_failure_preserves_prior_transcript_and_failure_kind() {
     let source = "before = print(\"prior output\")\nresult = read_file(\"/virtual/input\")\n";
-    let decls = chelis_surf::parser::parse_str(source).expect("parse");
-    let exprs = chelis_surf::desugar::desugar_program(&decls).expect("desugar");
+    let decls =
+        chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack).expect("parse");
+    let exprs = chelis_surf::desugar::desugar_program(&decls, &chelis_syntax_host::NativeStack)
+        .expect("desugar");
     let program = chelis_types::check_ir_program(&exprs).expect("checked fixture");
     let roots: UnordMap<String, RuntimeTensorValue> = UnordMap::new();
     let failure = super::evaluate_host_program_with_library_and_types_and_system(
@@ -297,8 +299,10 @@ fn evaluate_with(
     source: &str,
     adapter: FixedClockAdapter,
 ) -> Result<UnordMap<String, RuntimeValue>, RuntimeFailure> {
-    let decls = chelis_surf::parser::parse_str(source).expect("parse");
-    let exprs = chelis_surf::desugar::desugar_program(&decls).expect("desugar");
+    let decls =
+        chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack).expect("parse");
+    let exprs = chelis_surf::desugar::desugar_program(&decls, &chelis_syntax_host::NativeStack)
+        .expect("desugar");
     let program = chelis_types::check_ir_program(&exprs).expect("checked fixture");
     let roots: UnordMap<String, RuntimeTensorValue> = UnordMap::new();
     super::evaluate_host_program_with_library_and_types_and_system(

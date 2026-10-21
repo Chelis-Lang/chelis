@@ -91,7 +91,8 @@ fn bare_list_and_unknown_form_edges_are_recursive_validation_edges() {
 
 #[test]
 fn clean_successor_carriers_remain_clean() {
-    let stamped = parse_and_stamp("(def {} f (lit {} 1))").expect("valid stamped declaration");
+    let stamped = parse_and_stamp("(def {} f (lit {} 1))", &chelis_syntax_host::NativeStack)
+        .expect("valid stamped declaration");
     assert_eq!(find_raw_vocabulary_tag(&stamped), None);
     assert!(validate(&stamped).is_empty());
 
@@ -115,7 +116,8 @@ fn clean_successor_carriers_remain_clean() {
 fn canonical_stamped_function_with_typed_params_has_no_structural_warning() {
     let exprs = chelis_deep::parse_and_stamp_file(
         "(def {} negate (fn {} (params {} (x {type: (t-prim {} f32)})) \
-         (app {} (var {} neg) (var {} x))))",
+     (app {} (var {} neg) (var {} x))))",
+        &chelis_syntax_host::NativeStack,
     )
     .expect("canonical function must stamp");
 
@@ -130,18 +132,19 @@ fn canonical_stamped_function_with_typed_params_has_no_structural_warning() {
 fn canonical_stamped_effect_and_property_metadata_have_no_structural_warning() {
     let exprs = chelis_deep::parse_and_stamp_file(
         r#"(defsig {}
-  always_true
-  (t-fn {eff: (effects {} diff (resource {} "gpu:0"))}
-    (t-prim {} f32)
-    (t-prim {} bool)))
-(def {chelis_role: "property",
-       property_preconditions: (tuple {}),
-       property_quantifiers: (params {} (x {type: (t-prim {} f32)})),
-       property_source_kind: "user"}
-  always_true
-  (fn {}
-    (params {} (x {type: (t-prim {} f32)}))
-    (app {} (var {} gte) (var {} x) (var {} x))))"#,
+      always_true
+      (t-fn {eff: (effects {} diff (resource {} "gpu:0"))}
+        (t-prim {} f32)
+        (t-prim {} bool)))
+    (def {chelis_role: "property",
+           property_preconditions: (tuple {}),
+           property_quantifiers: (params {} (x {type: (t-prim {} f32)})),
+           property_source_kind: "user"}
+      always_true
+      (fn {}
+        (params {} (x {type: (t-prim {} f32)}))
+        (app {} (var {} gte) (var {} x) (var {} x))))"#,
+        &chelis_syntax_host::NativeStack,
     )
     .expect("canonical property declarations must stamp");
 

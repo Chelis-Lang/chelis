@@ -15,8 +15,10 @@ mod copy_repair;
 /// Run linearity and return the surfaced errors. Fixtures that
 /// expect a hard error call this.
 fn linearity_errors(source: &str) -> Vec<chelis_types::errors::CheckError> {
-    let decls = parse_str(source).expect("surf parse should succeed");
-    let deep = desugar_program(&decls).expect("Surf fixture must desugar");
+    let decls =
+        parse_str(source, &chelis_syntax_host::NativeStack).expect("surf parse should succeed");
+    let deep = desugar_program(&decls, &chelis_syntax_host::NativeStack)
+        .expect("Surf fixture must desugar");
     let checked = check_typed_program(&deep).expect("type check should succeed");
     check_linearity(&checked).expect_err("linearity check must error")
 }
@@ -24,8 +26,10 @@ fn linearity_errors(source: &str) -> Vec<chelis_types::errors::CheckError> {
 /// Run linearity and assert no errors. Used by positive controls
 /// that must stay clean.
 fn assert_linearity_clean(source: &str) {
-    let decls = parse_str(source).expect("surf parse should succeed");
-    let deep = desugar_program(&decls).expect("Surf fixture must desugar");
+    let decls =
+        parse_str(source, &chelis_syntax_host::NativeStack).expect("surf parse should succeed");
+    let deep = desugar_program(&decls, &chelis_syntax_host::NativeStack)
+        .expect("Surf fixture must desugar");
     let checked = check_typed_program(&deep).expect("type check should succeed");
     check_linearity(&checked).expect("linearity check should not error");
 }

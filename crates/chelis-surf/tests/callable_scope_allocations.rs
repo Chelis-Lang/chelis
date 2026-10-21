@@ -119,10 +119,19 @@ fn on_large_stack<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) 
 /// Allocations made by the context desugar of `ENTRY` against an N-definition
 /// library, with the entry's canonical Deep text.
 fn context_desugar_allocations(definitions: usize) -> (String, u64) {
-    let library = desugar_program(&parse_str(&library_source(definitions)).unwrap())
-        .expect("library desugars");
-    let entry = parse_str(ENTRY).unwrap();
-    let (deep, allocations) = allocations_during(|| desugar_program_with_context(&entry, &library));
+    let library = desugar_program(
+        &parse_str(
+            &library_source(definitions),
+            &chelis_syntax_host::NativeStack,
+        )
+        .unwrap(),
+        &chelis_syntax_host::NativeStack,
+    )
+    .expect("library desugars");
+    let entry = parse_str(ENTRY, &chelis_syntax_host::NativeStack).unwrap();
+    let (deep, allocations) = allocations_during(|| {
+        desugar_program_with_context(&entry, &library, &chelis_syntax_host::NativeStack)
+    });
     (
         print_canonical(&deep.expect("entry resolves against the library")),
         allocations,
@@ -155,8 +164,14 @@ fn context_desugar_allocations_grow_linearly_with_library_size() {
 fn program_desugar_allocations_grow_linearly_with_definition_count() {
     on_large_stack(|| {
         let measure = |definitions: usize| {
-            let declarations = parse_str(&library_source(definitions)).unwrap();
-            let (deep, allocations) = allocations_during(|| desugar_program(&declarations));
+            let declarations = parse_str(
+                &library_source(definitions),
+                &chelis_syntax_host::NativeStack,
+            )
+            .unwrap();
+            let (deep, allocations) = allocations_during(|| {
+                desugar_program(&declarations, &chelis_syntax_host::NativeStack)
+            });
             deep.expect("program desugars");
             allocations
         };

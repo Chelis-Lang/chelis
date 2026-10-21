@@ -21,8 +21,11 @@ use chelis_types::unsupported::Unsupported;
 /// Lower `source`'s `main` as `chelis build --target hip` lowers an entry
 /// def before codegen.
 fn lowered(source: &str) -> Dag {
-    let declarations = chelis_surf::parser::parse_str(source).expect("parse source");
-    let deep = chelis_surf::desugar::desugar_program(&declarations).expect("desugar source");
+    let declarations = chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+        .expect("parse source");
+    let deep =
+        chelis_surf::desugar::desugar_program(&declarations, &chelis_syntax_host::NativeStack)
+            .expect("desugar source");
     let checked = chelis_types::check_typed_program(&deep)
         .unwrap_or_else(|errors| panic!("check source: {:?}", errors.errors));
     let checked = chelis_effects::check_program(&checked).expect("effects");

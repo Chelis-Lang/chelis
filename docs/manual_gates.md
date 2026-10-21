@@ -139,6 +139,31 @@ Default PR CI does not execute this complete command.
 Target compilation does not prove device execution.
 Owner: chelis#3977.
 
+## Syntax core portability
+
+Run `.venv/bin/python scripts/syntax_predicate_core_oracle.py` from the repository root.
+It needs the pinned Rust toolchain, `thumbv7em-none-eabi`, `cargo-nextest`, Git, and the checkout's uv-managed Python environment.
+Native consumers use `chelis-syntax-host::NativeStack`.
+Embedded consumers must supply their allocator and `StackServices` implementation.
+
+A shallow checkout needs access to the canonical repository to fetch the pinned baseline.
+A complete local clone uses its existing history.
+
+Success means exit zero and the final line `syntax core oracle: PASS`.
+The command checks:
+
+- Isolated target builds with default features enabled and disabled, plus the explicit pipe-migration feature.
+- Dependency rejection for host services and compilation failure when a caller omits its stack service.
+- Fixed-revision syntax, diagnostics, spans, JSON, bincode, formatter, and macro parity.
+- Allocation counts and requested bytes for four source cases across parser, formatter, macro, and resugar operations.
+- Native syntax suites, parser stack limits, request-state isolation, compiler integration, and real CLI rejection behavior.
+
+Linux integration support runs this command in its domain slice.
+macOS nightly validation runs it on workspace shard one.
+Default PR CI does not execute this complete command.
+The native measurements do not prove device execution or device memory capacity.
+Owner: chelis#3979.
+
 ## Compiler feature acceptance gates
 
 The incremental [eval-performance suite](eval_performance.md) runs its sparse

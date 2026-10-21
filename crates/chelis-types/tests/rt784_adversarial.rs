@@ -103,7 +103,7 @@ fn visit<'a>(expr: &'a Expr, f: &mut dyn FnMut(&'a Expr)) {
 /// After `check_ir_program`, collect the written-back `type:` tag of every
 /// app node whose callee is `callee`.
 fn writeback_type_tags(src: &str, callee: &str) -> Vec<String> {
-    let exprs = parse_str(src).expect("parse deep");
+    let exprs = parse_str(src, &chelis_syntax_host::NativeStack).expect("parse deep");
     let checked = check_ir_program(&exprs).expect("program should check clean");
     let mut tags = Vec::new();
     for expr in checked.exprs() {
@@ -177,9 +177,10 @@ fn insert_error_operand_does_not_clobber_concrete_annotation() {
 // ── Part B helpers (Surf source) ─────────────────────────────────────────
 
 fn surf_to_deep(source: &str) -> Vec<Expr> {
-    let decls = parse_surf(source).expect("surf parse");
+    let decls = parse_surf(source, &chelis_syntax_host::NativeStack).expect("surf parse");
     chelis_macros::expand_program(
-        &desugar_program(&decls).expect("Surf fixture must desugar"),
+        &desugar_program(&decls, &chelis_syntax_host::NativeStack)
+            .expect("Surf fixture must desugar"),
         &chelis_macros::ExpansionOptions::default(),
     )
     .expect("macro expand")

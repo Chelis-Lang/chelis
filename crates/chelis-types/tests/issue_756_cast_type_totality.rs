@@ -33,9 +33,10 @@ const ACTIVE_CAST_TARGETS: [&str; 9] = [
 ];
 
 fn surf_to_deep(source: &str) -> Vec<Expr> {
-    let decls = parse_surf(source).expect("surf parse");
+    let decls = parse_surf(source, &chelis_syntax_host::NativeStack).expect("surf parse");
     chelis_macros::expand_program(
-        &desugar_program(&decls).expect("Surf fixture must desugar"),
+        &desugar_program(&decls, &chelis_syntax_host::NativeStack)
+            .expect("Surf fixture must desugar"),
         &chelis_macros::ExpansionOptions::default(),
     )
     .expect("macro expand")
@@ -58,7 +59,8 @@ fn deep_cast_program(target: &str) -> String {
 }
 
 fn deep_fitness(source: &str) -> FitnessReport {
-    let deep = parse_deep(source).expect("Deep cast fixture must parse");
+    let deep =
+        parse_deep(source, &chelis_syntax_host::NativeStack).expect("Deep cast fixture must parse");
     check_ir_fitness(&deep)
 }
 
@@ -153,8 +155,11 @@ fn unknown_bare_and_canonical_deep_cast_targets_are_rejected_loudly() {
 fn canonical_t_prim_with_an_extra_child_is_rejected_once() {
     // The stamped `Node` constructor is the only way to build a vocabulary
     // node, so a wrong-arity canonical type cannot reach the cast resolver.
-    let error = chelis_deep::parser::parse_str(&deep_cast_program("(t-prim {} f32 extra)"))
-        .expect_err("wrong-arity canonical types must be rejected at stamped ingress");
+    let error = chelis_deep::parser::parse_str(
+        &deep_cast_program("(t-prim {} f32 extra)"),
+        &chelis_syntax_host::NativeStack,
+    )
+    .expect_err("wrong-arity canonical types must be rejected at stamped ingress");
     assert!(
         error.to_string().contains("wrong child count"),
         "unexpected stamped-ingress diagnostic: {error}"
@@ -164,9 +169,11 @@ fn canonical_t_prim_with_an_extra_child_is_rejected_once() {
 #[test]
 fn canonical_formatter_output_for_bare_deep_cast_remains_checkable() {
     let source = deep_cast_program("f16");
-    let parsed = parse_deep(&source).expect("bare-symbol Deep cast must parse");
+    let parsed = parse_deep(&source, &chelis_syntax_host::NativeStack)
+        .expect("bare-symbol Deep cast must parse");
     let formatted = print_canonical(&parsed);
-    let reparsed = parse_deep(&formatted).expect("canonical formatter output must parse");
+    let reparsed = parse_deep(&formatted, &chelis_syntax_host::NativeStack)
+        .expect("canonical formatter output must parse");
     let report = check_ir_fitness(&reparsed);
     assert!(
         report.errors.is_empty() && report.score == 1.0,

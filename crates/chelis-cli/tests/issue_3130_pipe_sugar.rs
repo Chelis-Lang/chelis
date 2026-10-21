@@ -195,7 +195,8 @@ fn macro_signed_cast_operands_preserve_exact_values_after_decompilation() {
             String::from_utf8_lossy(&surf.stdout)
         );
         let normalized = |text: &str| {
-            let expressions = chelis_deep::parse_and_stamp_file(text).unwrap();
+            let expressions =
+                chelis_deep::parse_and_stamp_file(text, &chelis_syntax_host::NativeStack).unwrap();
             chelis_deep::printer::print_canonical(
                 &chelis_surf::resugar::normalize_deep_for_surface_roundtrip(&expressions).unwrap(),
             )

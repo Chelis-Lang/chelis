@@ -38,7 +38,7 @@ use chelis_types::errors::CheckError;
 use chelis_types::{check_ir_program, check_typed_program};
 
 fn stamped(source: &str) -> Vec<Expr> {
-    parse_and_stamp_file(source)
+    parse_and_stamp_file(source, &chelis_syntax_host::NativeStack)
         .unwrap_or_else(|e| panic!("fixture must stamp: {source}\nstamp error: {e}"))
 }
 
@@ -626,12 +626,13 @@ const INVARIANT_WITHOUT_OPAQUE: &str = "(module {} m.wf \
 /// invoked from the typed entry; its readers could not decode the carrier.
 #[test]
 fn invariant_without_opaque_is_rejected_on_both_ingresses() {
-    let error = parse_and_stamp_file(INVARIANT_WITHOUT_OPAQUE)
+    let error = parse_and_stamp_file(INVARIANT_WITHOUT_OPAQUE, &chelis_syntax_host::NativeStack)
         .expect_err("invalid metadata cannot create a stamped Node");
     assert!(error.to_string().contains("opaque"));
-    let error = chelis_deep::parser::parse_str(INVARIANT_WITHOUT_OPAQUE)
-        .unwrap_err()
-        .to_string();
+    let error =
+        chelis_deep::parser::parse_str(INVARIANT_WITHOUT_OPAQUE, &chelis_syntax_host::NativeStack)
+            .unwrap_err()
+            .to_string();
     assert!(error.contains("invariant") && error.contains("opaque"));
 }
 

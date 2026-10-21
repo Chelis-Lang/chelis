@@ -3,9 +3,11 @@
 use chelis_ir::host::{HostLoweringSession, host_def_kernel};
 
 fn checked(src: &str) -> chelis_types::CheckedProgram {
-    let parsed = chelis_surf::parser::parse_str(src).expect("parse");
+    let parsed =
+        chelis_surf::parser::parse_str(src, &chelis_syntax_host::NativeStack).expect("parse");
     let expanded = chelis_macros::expand_program(
-        &chelis_surf::desugar::desugar_program(&parsed).expect("Surf fixture must desugar"),
+        &chelis_surf::desugar::desugar_program(&parsed, &chelis_syntax_host::NativeStack)
+            .expect("Surf fixture must desugar"),
         &chelis_macros::ExpansionOptions::default(),
     )
     .expect("expand")
@@ -164,7 +166,7 @@ fn forced_dynamic_concat_rejects_instead_of_fabricating_a_load() {
     use chelis_ir::dag::{DimInfo, TensorType};
     use chelis_types::types::Prim;
     use chelis_unord::UnordMap;
-    let expr = chelis_deep::parser::parse_str("(app {} (var {} concat) (app {} (var {} Cons) (var {} x) (app {} (var {} Cons) (var {} x) (var {} Nil))) (lit {} 1))").unwrap().remove(0);
+    let expr = chelis_deep::parser::parse_str("(app {} (var {} concat) (app {} (var {} Cons) (var {} x) (app {} (var {} Cons) (var {} x) (var {} Nil))) (lit {} 1))", &chelis_syntax_host::NativeStack).unwrap().remove(0);
     let scope = UnordMap::from([(
         "x".to_string(),
         TensorType {

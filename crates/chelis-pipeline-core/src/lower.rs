@@ -325,7 +325,8 @@ mod tests {
     };
 
     fn checked_compilation(source: &str) -> CheckedCompilation {
-        let expressions = chelis_deep::parser::parse_str(source).expect("test Deep must parse");
+        let expressions = chelis_deep::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+            .expect("test Deep must parse");
         let prepared = PreparedProgram::from_expanded_deep(expressions);
         let analysis = match analyze_prepared(prepared) {
             PreparedTypeAnalysisOutcome::Accepted(analysis) => *analysis,

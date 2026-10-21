@@ -22,7 +22,8 @@ use chelis_deep::{DeepTag, Span};
 use chelis_macros::{ExpansionOptions, expand_program};
 
 fn expand_deep(source: &str) -> String {
-    let deep = chelis_deep::parser::parse_str(source).expect("deep fixture must stamp");
+    let deep = chelis_deep::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+        .expect("deep fixture must stamp");
     let expanded = expand_program(
         &deep,
         &ExpansionOptions {
@@ -40,7 +41,7 @@ const BUMP_MACRO: &str =
 #[test]
 fn macro_replacements_preserve_owners_and_reject_conflicting_data() {
     let source = "(defmacro {} keep (params {} x) (var {template: 1} x)) (def {} f (app {call_data: 3} (var {} keep) (lit {argument: 2} 7)))";
-    let parsed = chelis_deep::parser::parse_str(source).unwrap();
+    let parsed = chelis_deep::parser::parse_str(source, &chelis_syntax_host::NativeStack).unwrap();
     let options = ExpansionOptions {
         max_iterations: 100,
         load_std_prelude: false,
@@ -62,7 +63,8 @@ fn macro_replacements_preserve_owners_and_reject_conflicting_data() {
         );
     }
     let conflict = source.replace("argument: 2", "template: 2");
-    let parsed = chelis_deep::parser::parse_str(&conflict).unwrap();
+    let parsed =
+        chelis_deep::parser::parse_str(&conflict, &chelis_syntax_host::NativeStack).unwrap();
     let before = parsed.clone();
     assert!(
         expand_program(&parsed, &options)
@@ -340,9 +342,11 @@ fn hygiene_preserves_extension_references_and_renames_live_children() {
 fn metadata_without_macro_syntax_round_trips_byte_identically() {
     // Control: the metadata walk must not rewrite metadata containing no
     // macro syntax.
-    let deep =
-        chelis_deep::parser::parse_str("(def {note: {inner: (var {} plain)}} f (lit {} 0.0))")
-            .expect("control fixture must stamp");
+    let deep = chelis_deep::parser::parse_str(
+        "(def {note: {inner: (var {} plain)}} f (lit {} 0.0))",
+        &chelis_syntax_host::NativeStack,
+    )
+    .expect("control fixture must stamp");
     let before = chelis_deep::printer::print_canonical(&deep);
     let expanded = expand_program(
         &deep,

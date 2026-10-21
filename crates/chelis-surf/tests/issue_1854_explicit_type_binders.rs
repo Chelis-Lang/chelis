@@ -19,12 +19,16 @@ const UNKNOWN_DTYPES: [&str; 7] = [
 ];
 
 fn deep(source: &str) -> String {
-    let declarations = parse_str(source).expect("Surf fixture must parse");
-    print_canonical_flat(&desugar_program(&declarations).expect("Surf fixture must desugar"))
+    let declarations =
+        parse_str(source, &chelis_syntax_host::NativeStack).expect("Surf fixture must parse");
+    print_canonical_flat(
+        &desugar_program(&declarations, &chelis_syntax_host::NativeStack)
+            .expect("Surf fixture must desugar"),
+    )
 }
 
 fn defsig_has_binders(rendered: &str, name: &str, expected: &[&str]) -> bool {
-    parse_deep(rendered)
+    parse_deep(rendered,&chelis_syntax_host::NativeStack)
         .expect("desugared Deep must parse")
         .iter()
         .any(|expr| match expr.carrier() {
@@ -176,10 +180,13 @@ fn body_only_declaration_binders_synthesize_and_round_trip_a_defsig() {
              {source}\n{rendered}"
         );
 
-        let program = parse_deep(&rendered).expect("desugared Deep must parse");
+        let program = parse_deep(&rendered, &chelis_syntax_host::NativeStack)
+            .expect("desugared Deep must parse");
         let recovered = resugar_program(&program).expect("body-only binder carrier must resugar");
-        let redeep =
-            print_canonical_flat(&desugar_program(&recovered).expect("Surf fixture must desugar"));
+        let redeep = print_canonical_flat(
+            &desugar_program(&recovered, &chelis_syntax_host::NativeStack)
+                .expect("Surf fixture must desugar"),
+        );
         assert!(
             defsig_has_binders(&redeep, "maker", &[binder]) && redeep.contains(annotation),
             "canonical Surf/Deep round-trip must preserve the body-only binder: \
@@ -192,7 +199,8 @@ fn body_only_declaration_binders_synthesize_and_round_trip_a_defsig() {
 fn polymorphic_value_defsig_resugars_as_a_standalone_signature() {
     let original = parse_deep(
         "(defsig {} empty (p) (t-adt {} List (t-var {} p)))
-         (def {} empty (var {} Nil))",
+     (def {} empty (var {} Nil))",
+        &chelis_syntax_host::NativeStack,
     )
     .expect("polymorphic value fixture must parse");
 
@@ -219,7 +227,8 @@ fn polymorphic_value_defsig_resugars_as_a_standalone_signature() {
         format_program(&recovered),
         "sig empty[p]: List[p]\nempty = Nil\n"
     );
-    let redesugared = desugar_program(&recovered).expect("Surf fixture must desugar");
+    let redesugared = desugar_program(&recovered, &chelis_syntax_host::NativeStack)
+        .expect("Surf fixture must desugar");
     assert_eq!(
         print_canonical_flat(
             &normalize_deep_for_surface_roundtrip(&redesugared)
@@ -237,7 +246,8 @@ fn polymorphic_value_defsig_resugars_as_a_standalone_signature() {
 fn monomorphic_value_defsig_keeps_the_canonical_inline_binding() {
     let original = parse_deep(
         "(defsig {} empty_i64 (t-adt {} List (t-prim {} i64)))
-         (def {} empty_i64 (var {} Nil))",
+     (def {} empty_i64 (var {} Nil))",
+        &chelis_syntax_host::NativeStack,
     )
     .expect("monomorphic value fixture must parse");
 
@@ -259,7 +269,8 @@ fn monomorphic_value_defsig_keeps_the_canonical_inline_binding() {
 #[test]
 fn polymorphic_property_binders_are_structural_and_round_trip() {
     let source = "@property accepts[p] forall(x: p):\n  true\n";
-    let parsed = parse_str(source).expect("explicit property binders must parse");
+    let parsed = parse_str(source, &chelis_syntax_host::NativeStack)
+        .expect("explicit property binders must parse");
     assert_eq!(format_program(&parsed), source);
     let serialized = serde_json::to_string(&parsed).expect("property AST serializes");
     let decoded: Vec<Decl> = serde_json::from_str(&serialized).expect("property AST deserializes");
@@ -268,7 +279,8 @@ fn polymorphic_property_binders_are_structural_and_round_trip() {
         "Surf AST serialization must retain the property binder list"
     );
 
-    let lowered = desugar_program(&parsed).expect("Surf fixture must desugar");
+    let lowered = desugar_program(&parsed, &chelis_syntax_host::NativeStack)
+        .expect("Surf fixture must desugar");
     let rendered = print_canonical_flat(&lowered);
     assert!(
         defsig_has_binders(&rendered, "accepts", &["p"])
@@ -283,7 +295,8 @@ fn polymorphic_property_binders_are_structural_and_round_trip() {
     assert_eq!(
         print_canonical_flat(
             &normalize_deep_for_surface_roundtrip(
-                &desugar_program(&recovered).expect("Surf fixture must desugar")
+                &desugar_program(&recovered, &chelis_syntax_host::NativeStack)
+                    .expect("Surf fixture must desugar")
             )
             .expect("recovered property must normalize"),
         ),
@@ -318,7 +331,8 @@ fn property_binder_lists_reject_duplicate_and_forbidden_names() {
             "dtype spelling `f32` cannot be a declaration binder",
         ),
     ] {
-        let error = parse_str(source).expect_err("invalid property binder list must reject");
+        let error = parse_str(source, &chelis_syntax_host::NativeStack)
+            .expect_err("invalid property binder list must reject");
         assert!(
             error.to_string().contains(needle),
             "wrong property-binder diagnostic for `{source}`: {error}"
@@ -352,8 +366,10 @@ fn nested_module_body_tensor_precision_binders_round_trip() {
                     b\n\
                   }\n\
                   def main() -> tensor[2, f32] = f(to_tensor([1.0f32, 2.0f32]))\n";
-    let parsed = parse_str(source).expect("nested-module fixture must parse");
-    let lowered = desugar_program(&parsed).expect("Surf fixture must desugar");
+    let parsed = parse_str(source, &chelis_syntax_host::NativeStack)
+        .expect("nested-module fixture must parse");
+    let lowered = desugar_program(&parsed, &chelis_syntax_host::NativeStack)
+        .expect("Surf fixture must desugar");
     let rendered = print_canonical_flat(&lowered);
     assert!(
         rendered.contains("(module ")
@@ -366,7 +382,8 @@ fn nested_module_body_tensor_precision_binders_round_trip() {
     assert_eq!(
         print_canonical_flat(
             &normalize_deep_for_surface_roundtrip(
-                &desugar_program(&recovered).expect("Surf fixture must desugar")
+                &desugar_program(&recovered, &chelis_syntax_host::NativeStack)
+                    .expect("Surf fixture must desugar")
             )
             .expect("recovered nested module must normalize"),
         ),
@@ -379,15 +396,18 @@ fn nested_module_body_tensor_precision_binders_round_trip() {
 
 #[test]
 fn nested_module_property_resugaring_preserves_binders() {
-    let original = parse_deep(concat!(
-        "(module {surf_path: \"Demo.Property\"} demo.property ",
-        "(defsig {} accepts (p) (t-fn {} (t-var {} p) (t-prim {} bool))) ",
-        "(def {chelis_role: \"property\", property_source_kind: \"user\", ",
-        "property_quantifiers: (params {} (x {type: (t-var {} p)})), ",
-        "property_preconditions: (tuple {})} accepts ",
-        "(fn {} (params {} (x {type: (t-var {} p)})) ",
-        "(lit {type: (t-prim {} bool)} true))))",
-    ))
+    let original = parse_deep(
+        concat!(
+            "(module {surf_path: \"Demo.Property\"} demo.property ",
+            "(defsig {} accepts (p) (t-fn {} (t-var {} p) (t-prim {} bool))) ",
+            "(def {chelis_role: \"property\", property_source_kind: \"user\", ",
+            "property_quantifiers: (params {} (x {type: (t-var {} p)})), ",
+            "property_preconditions: (tuple {})} accepts ",
+            "(fn {} (params {} (x {type: (t-var {} p)})) ",
+            "(lit {type: (t-prim {} bool)} true))))",
+        ),
+        &chelis_syntax_host::NativeStack,
+    )
     .expect("nested polymorphic property fixture must parse");
 
     let recovered = resugar_program(&original).expect("nested property must resugar");
@@ -395,7 +415,8 @@ fn nested_module_property_resugaring_preserves_binders() {
         format_program(&recovered),
         "module Demo.Property\n@property accepts[p] forall(x: p):\n  true\n"
     );
-    let redesugared = desugar_program(&recovered).expect("Surf fixture must desugar");
+    let redesugared = desugar_program(&recovered, &chelis_syntax_host::NativeStack)
+        .expect("Surf fixture must desugar");
     assert_eq!(
         print_canonical_flat(
             &normalize_deep_for_surface_roundtrip(&redesugared)
@@ -411,10 +432,14 @@ fn nested_module_property_resugaring_preserves_binders() {
 #[test]
 fn monomorphic_properties_keep_the_existing_canonical_spelling() {
     let source = "@property accepts forall(x: i32):\n  true\n";
-    let parsed = parse_str(source).expect("monomorphic property parses");
+    let parsed =
+        parse_str(source, &chelis_syntax_host::NativeStack).expect("monomorphic property parses");
     assert_eq!(format_program(&parsed), source);
-    let recovered = resugar_program(&desugar_program(&parsed).expect("Surf fixture must desugar"))
-        .expect("monomorphic property resugars");
+    let recovered = resugar_program(
+        &desugar_program(&parsed, &chelis_syntax_host::NativeStack)
+            .expect("Surf fixture must desugar"),
+    )
+    .expect("monomorphic property resugars");
     assert_eq!(format_program(&recovered), source);
 }
 
@@ -455,7 +480,8 @@ fn body_annotations_without_a_declaration_binder_remain_unbound() {
 fn matching_def_cannot_declare_a_second_binder_list() {
     let error = parse_str(
         "sig ident[a]: a -> a\n\
-         def ident[a](x: a) -> a = x",
+     def ident[a](x: a) -> a = x",
+        &chelis_syntax_host::NativeStack,
     )
     .expect_err("one declaration has one binder owner");
     assert!(
@@ -468,8 +494,11 @@ fn matching_def_cannot_declare_a_second_binder_list() {
 
 #[test]
 fn duplicate_surf_binder_names_are_rejected_before_desugaring() {
-    let error = parse_str("sig ident[a, a]: a -> a\ndef ident(x) = x")
-        .expect_err("a declaration cannot bind one name twice");
+    let error = parse_str(
+        "sig ident[a, a]: a -> a\ndef ident(x) = x",
+        &chelis_syntax_host::NativeStack,
+    )
+    .expect_err("a declaration cannot bind one name twice");
     assert!(
         error.to_string().contains("duplicate binder `a`"),
         "wrong duplicate-binder diagnostic: {error}"
@@ -516,7 +545,8 @@ fn forbidden_dtype_vocabulary_is_rejected_at_the_surf_binder_list() {
         ("int32", "def constant[int32]() -> i32 = 1i32"),
         ("complex64", "def constant[complex64]() -> i32 = 1i32"),
     ] {
-        let error = parse_str(source).expect_err("dtype vocabulary cannot be rebound");
+        let error = parse_str(source, &chelis_syntax_host::NativeStack)
+            .expect_err("dtype vocabulary cannot be rebound");
         assert!(
             error.to_string().contains(&format!("`{name}`"))
                 && error.to_string().contains("cannot be a declaration binder"),
@@ -548,8 +578,9 @@ fn arbitrary_non_dtype_names_remain_legal_surf_binders() {
 fn active_primitive_t_vars_have_no_resugar_fallback() {
     let program = parse_deep(
         "(defsig {} ident (f32)
-           (t-fn {} (t-var {} f32) (t-var {} f32)))
-         (def {} ident (fn {} (params {} x) (var {} x)))",
+       (t-fn {} (t-var {} f32) (t-var {} f32)))
+     (def {} ident (fn {} (params {} x) (var {} x)))",
+        &chelis_syntax_host::NativeStack,
     )
     .expect("structural Deep fixture must parse");
     let error = resugar_program(&program).expect_err("active primitives cannot be Surf binders");
@@ -568,7 +599,8 @@ fn deep_defsig_ingress_reports_the_declared_arity_before_child_decoding() {
         ("(defsig {} ident)", 1),
         ("(defsig {} ident (a) (t-var {} a) (t-prim {} f32))", 4),
     ] {
-        let error = parse_deep(source).expect_err("invalid defsig arity must reject");
+        let error = parse_deep(source, &chelis_syntax_host::NativeStack)
+            .expect_err("invalid defsig arity must reject");
         let rendered = error.to_string();
         assert!(
             rendered.contains(&format!(
@@ -594,10 +626,13 @@ fn declared_but_unused_unbounded_binders_are_preserved() {
             defsig_has_binders(&rendered, "constant", &["a"]),
             "a vacuous explicit quantifier must remain structural: {rendered}"
         );
-        let program = parse_deep(&rendered).expect("desugared Deep must parse");
+        let program = parse_deep(&rendered, &chelis_syntax_host::NativeStack)
+            .expect("desugared Deep must parse");
         let recovered = resugar_program(&program).expect("unused unbounded binder must resugar");
-        let redeep =
-            print_canonical_flat(&desugar_program(&recovered).expect("Surf fixture must desugar"));
+        let redeep = print_canonical_flat(
+            &desugar_program(&recovered, &chelis_syntax_host::NativeStack)
+                .expect("Surf fixture must desugar"),
+        );
         assert!(
             defsig_has_binders(&redeep, "constant", &["a"]),
             "round-trip must preserve the declared binder: {redeep}"

@@ -346,15 +346,17 @@ mod tests {
     use super::*;
 
     fn score(src: &str) -> FitnessReport {
-        let exprs = chelis_deep::parser::parse_str(src).unwrap();
+        let exprs = chelis_deep::parser::parse_str(src, &chelis_syntax_host::NativeStack).unwrap();
         FitnessReport::from_infer_result(&crate::infer::infer_program(&exprs))
     }
 
     #[test]
     fn accepted_analysis_uses_one_type_session() {
-        let exprs =
-            chelis_deep::parser::parse_str("(def {} answer (lit {type: (t-prim {} i32)} 42))")
-                .unwrap();
+        let exprs = chelis_deep::parser::parse_str(
+            "(def {} answer (lit {type: (t-prim {} i32)} 42))",
+            &chelis_syntax_host::NativeStack,
+        )
+        .unwrap();
         crate::session::reset_type_analysis_session_count();
 
         assert!(matches!(
@@ -366,7 +368,11 @@ mod tests {
 
     #[test]
     fn rejected_analysis_uses_one_type_session() {
-        let exprs = chelis_deep::parser::parse_str("(def {} answer (var {} missing))").unwrap();
+        let exprs = chelis_deep::parser::parse_str(
+            "(def {} answer (var {} missing))",
+            &chelis_syntax_host::NativeStack,
+        )
+        .unwrap();
         crate::session::reset_type_analysis_session_count();
 
         assert!(matches!(
@@ -479,8 +485,11 @@ mod tests {
 
     #[test]
     fn check_program_fn_works() {
-        let exprs =
-            chelis_deep::parser::parse_str("(def {} x (lit {type: (t-prim {} i32)} 42))").unwrap();
+        let exprs = chelis_deep::parser::parse_str(
+            "(def {} x (lit {type: (t-prim {} i32)} 42))",
+            &chelis_syntax_host::NativeStack,
+        )
+        .unwrap();
         let r = check_program(&exprs);
         assert!((r.score - 1.0).abs() < 1e-9);
     }
@@ -489,6 +498,7 @@ mod tests {
     fn ir_check_accepts_typed_self_loads() {
         let exprs = chelis_deep::parser::parse_str(
             "(def {} x (var {type: (t-tensor {} (d-lit {} 32) (d-lit {} 784) (t-prim {} f32))} x))",
+            &chelis_syntax_host::NativeStack,
         )
         .unwrap();
         let r = check_ir_program(&exprs);
@@ -498,9 +508,7 @@ mod tests {
 
     #[test]
     fn ir_check_never_reports_perfect_score_with_errors() {
-        let exprs = chelis_deep::parser::parse_str(
-            "(def {} f (app {} (var {} add) (lit {type: (t-prim {} i32)} 1) (lit {type: (t-prim {} bool)} true)))",
-        )
+        let exprs = chelis_deep::parser::parse_str("(def {} f (app {} (var {} add) (lit {type: (t-prim {} i32)} 1) (lit {type: (t-prim {} bool)} true)))", &chelis_syntax_host::NativeStack)
         .unwrap();
         let r = check_ir_program(&exprs);
         assert!(!r.errors.is_empty(), "{r:?}");
@@ -516,6 +524,7 @@ mod tests {
     fn declaration_only_error_forces_score_below_one_ir() {
         let exprs = chelis_deep::parser::parse_str(
             "(deftype {} Foo () (variant {} Foo)) (deftype {} Foo () (variant {} Foo))",
+            &chelis_syntax_host::NativeStack,
         )
         .unwrap();
         let r = check_ir_program(&exprs);
@@ -539,6 +548,7 @@ mod tests {
     fn declaration_only_error_forces_score_below_one_non_ir() {
         let exprs = chelis_deep::parser::parse_str(
             "(deftype {} Foo () (variant {} Foo)) (deftype {} Foo () (variant {} Foo))",
+            &chelis_syntax_host::NativeStack,
         )
         .unwrap();
         let r = check_program(&exprs);
@@ -550,7 +560,11 @@ mod tests {
     /// vector) is unaffected by the honesty fix and still scores a clean 1.0.
     #[test]
     fn clean_declaration_only_program_still_scores_one() {
-        let exprs = chelis_deep::parser::parse_str("(deftype {} Foo () (variant {} Foo))").unwrap();
+        let exprs = chelis_deep::parser::parse_str(
+            "(deftype {} Foo () (variant {} Foo))",
+            &chelis_syntax_host::NativeStack,
+        )
+        .unwrap();
         let r = check_ir_program(&exprs);
         assert!(r.errors.is_empty(), "{r:?}");
         assert!((r.score - 1.0).abs() < 1e-9, "got {}", r.score);
@@ -562,9 +576,7 @@ mod tests {
     /// degenerate perfect-sum case rather than overwriting calibration.
     #[test]
     fn honesty_cap_leaves_coverage_scored_failures_untouched() {
-        let exprs = chelis_deep::parser::parse_str(
-            "(def {} f (app {} (var {} add) (lit {type: (t-prim {} i32)} 1) (lit {type: (t-prim {} bool)} true)))",
-        )
+        let exprs = chelis_deep::parser::parse_str("(def {} f (app {} (var {} add) (lit {type: (t-prim {} i32)} 1) (lit {type: (t-prim {} bool)} true)))", &chelis_syntax_host::NativeStack)
         .unwrap();
         let r = check_ir_program(&exprs);
         assert!(!r.errors.is_empty(), "{r:?}");

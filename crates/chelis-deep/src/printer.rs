@@ -3,6 +3,10 @@
 //! Converts `&[Expr]` into the canonical string representation used for `.dp`
 //! files and `chelis deep`.
 
+#[cfg(test)]
+use alloc::{boxed::Box, string::ToString};
+use alloc::{string::String, vec::Vec};
+
 use crate::annotations_codec::{
     WireExpr, WireMetaExpr as MetaExpr, WireMetadata as MetaMap, WireNode, WireUnknown,
 };
@@ -213,7 +217,7 @@ fn sorted_entries(entries: &[(String, WireExpr)]) -> Vec<(&str, &WireExpr)> {
 }
 
 fn write_atom(out: &mut String, atom: &Atom) {
-    use std::fmt::Write as _;
+    use core::fmt::Write as _;
     match atom {
         Atom::Name(s) => out.push_str(s),
         Atom::Int(n) => write!(out, "{n}").expect("writing to a String cannot fail"),
@@ -415,7 +419,7 @@ impl Printer {
 /// Start a new line indented to `indent`.
 fn push_line_start(out: &mut String, indent: usize) {
     out.push('\n');
-    out.extend(std::iter::repeat_n(' ', indent));
+    out.extend(core::iter::repeat_n(' ', indent));
 }
 
 /// Write extension data's spelling, with every raw control character inside
@@ -457,7 +461,7 @@ fn write_extension(out: &mut String, syntax: &str) {
 /// The canonical String escape of a control character (spec/03 §6.4): its
 /// named escape where one exists, otherwise minimal lowercase `\u{h}`.
 fn write_control_escape(out: &mut String, control: char) {
-    use std::fmt::Write as _;
+    use core::fmt::Write as _;
     match control {
         '\n' => out.push_str("\\n"),
         '\t' => out.push_str("\\t"),
@@ -848,10 +852,8 @@ mod tests {
     const CONTROLS: &[&str] = &[
         "\u{1}", "\u{8}", "\u{1b}", "\u{1f}", "\u{7f}", "\u{85}", "\u{9f}",
     ];
-    thread_local! {
-        /// Generated extension lists whose separators held a control character.
-        static CONTROL_SEPARATORS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-    }
+    std::thread_local! { /// Generated extension lists whose separators held a control character.
+    static CONTROL_SEPARATORS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
     const RAW_PIECES: &[&str] = &[
         "\r", "\n", "\r\n", "\r\r\n", "\t", "\u{e9}", "\u{4e2d}", "\u{2460}", "q", "w", " ",
         "\n\n", "\u{1}", "\u{1b}", "\\n", "\\r",
@@ -1199,7 +1201,7 @@ mod tests {
     fn printing_properties(exprs: &[Expr]) -> Result<bool, String> {
         let printed = print_canonical(exprs);
         for expr in exprs {
-            if print_expr(expr) + "\n" != print_canonical(std::slice::from_ref(expr)) {
+            if print_expr(expr) + "\n" != print_canonical(core::slice::from_ref(expr)) {
                 return Err("print_expr disagrees with print_canonical".into());
             }
         }
@@ -1220,13 +1222,13 @@ mod tests {
         // A tree the parser can produce: its flat printing parses back to a
         // tree that prints the same. Other shapes only the Rust API builds.
         let flat = print_canonical_flat(exprs);
-        if crate::parser::parse_str(&flat)
+        if crate::parser::parse_str(&flat, &chelis_syntax_host::NativeStack)
             .map_or(true, |parsed| print_canonical_flat(&parsed) != flat)
         {
             return Ok(false);
         }
         // (a) The printed text parses back to the same data.
-        let reparsed = crate::parser::parse_str(&printed)
+        let reparsed = crate::parser::parse_str(&printed, &chelis_syntax_host::NativeStack)
             .map_err(|error| format!("{error:?} reparsing {printed:?}"))?;
         if extension_data(&reparsed).0 != extension_data(exprs).0 {
             return Err(format!("extension data changed through {printed:?}"));
@@ -1266,10 +1268,10 @@ mod tests {
                 }
             }
         }
-        eprintln!("carriage-return extension values by owner {OWNERS:?} and depth: {reach:?}");
-        eprintln!("trees that round-trip through the parser: {round_trips}");
+        std::eprintln!("carriage-return extension values by owner {OWNERS:?} and depth: {reach:?}");
+        std::eprintln!("trees that round-trip through the parser: {round_trips}");
         let separators = CONTROL_SEPARATORS.with(std::cell::Cell::get);
-        eprintln!("extension lists separated by control characters: {separators}");
+        std::eprintln!("extension lists separated by control characters: {separators}");
         assert!(
             separators > 500,
             "only {separators} control-character separators"
@@ -1371,8 +1373,11 @@ mod tests {
         let handle = on_large_stack
             .spawn(move || {
                 for source in &stamped {
-                    let exprs =
-                        crate::parser::parse_and_stamp_file(source).expect("stamped probe parses");
+                    let exprs = crate::parser::parse_and_stamp_file(
+                        source,
+                        &chelis_syntax_host::NativeStack,
+                    )
+                    .expect("stamped probe parses");
                     assert_eq!(
                         streaming_layout(&exprs),
                         returning_layout(&exprs),
@@ -1383,7 +1388,9 @@ mod tests {
                 for width in [1, 2, 4, 8, 16, 32] {
                     for seed in 0..40 {
                         let source = list_program(width, seed);
-                        let exprs = crate::parser::parse_str(&source).expect("list probe parses");
+                        let exprs =
+                            crate::parser::parse_str(&source, &chelis_syntax_host::NativeStack)
+                                .expect("list probe parses");
                         assert_eq!(
                             streaming_layout(&exprs),
                             returning_layout(&exprs),
@@ -1425,7 +1432,8 @@ mod tests {
                 ),
                 format!("(module {{custom: (a {raw} \"{}\")}})\n", "x".repeat(56)),
             ] {
-                let exprs = crate::parser::parse_str(&source).expect("the probe parses");
+                let exprs = crate::parser::parse_str(&source, &chelis_syntax_host::NativeStack)
+                    .expect("the probe parses");
                 printing_properties(&exprs)
                     .unwrap_or_else(|failure| panic!("{source:?}: {failure}"));
                 let printed = print_canonical(&exprs);
@@ -1440,7 +1448,8 @@ mod tests {
         }
         // The round-1 witness: a broken zero-child module.
         let witness = format!("(module {{custom: \"a\r\nb{}\"}})\n", "x".repeat(56));
-        let exprs = crate::parser::parse_str(&witness).expect("the witness parses");
+        let exprs = crate::parser::parse_str(&witness, &chelis_syntax_host::NativeStack)
+            .expect("the witness parses");
         let printed = print_canonical(&exprs);
         assert!(printed.contains("a\\r\\nb"), "{printed:?}");
         assert!(printing_properties(&exprs).unwrap());
@@ -1453,7 +1462,8 @@ mod tests {
         // in the input, padded or uppercase, read as its value.
         let source =
             "(def {} s (lit {} \"\u{0041}\\u{000A}\\u{7F}\u{1b}\\u{85}\u{9f}\\u{1F600}\"))\n";
-        let exprs = crate::parser::parse_str(source).expect("the string parses");
+        let exprs = crate::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+            .expect("the string parses");
         let printed = print_canonical(&exprs);
         assert_eq!(
             printed,
@@ -1463,7 +1473,8 @@ mod tests {
         // In extension data the author's escape keeps its spelling, and a raw
         // control character takes its canonical escape.
         let source = "(def {} x (lit {custom: \"\\u{0041}\u{1b}\u{7f}\\u{A}\u{85}\"} 1))\n";
-        let exprs = crate::parser::parse_str(source).expect("the extension parses");
+        let exprs = crate::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+            .expect("the extension parses");
         let printed = print_canonical(&exprs);
         assert!(
             printed.contains("\"\\u{0041}\\u{1b}\\u{7f}\\u{A}\\u{85}\""),
@@ -1569,7 +1580,8 @@ mod tests {
             printed.contains("(params {}"),
             "empty metadata must keep both braces:\n{printed}"
         );
-        let reparsed = crate::parser::parse_str(&printed).expect("printed Deep reparses");
+        let reparsed = crate::parser::parse_str(&printed, &chelis_syntax_host::NativeStack)
+            .expect("printed Deep reparses");
         assert_eq!(reparsed.len(), 1);
         assert_eq!(print_expr(&reparsed[0]), printed);
     }
@@ -1768,7 +1780,7 @@ mod tests {
                 .stack_size(256 * 1024)
                 .spawn_scoped(scope, || {
                     (
-                        print_canonical_flat(std::slice::from_ref(&input)),
+                        print_canonical_flat(core::slice::from_ref(&input)),
                         print_expr_flat(&input),
                     )
                 })

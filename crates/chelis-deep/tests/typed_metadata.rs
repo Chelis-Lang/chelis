@@ -17,9 +17,12 @@ fn every_annotation_key_is_unique_including_extensions() {
             _ => ("var", "\"a\"", "x"),
         };
         let single = format!("({tag} {{{key}: {value}}} {children})");
-        parse_str(&single).unwrap_or_else(|e| panic!("{single}: {e}"));
+        parse_str(&single, &chelis_syntax_host::NativeStack)
+            .unwrap_or_else(|e| panic!("{single}: {e}"));
         let duplicate = format!("({tag} {{{key}: {value}, {key}: {value}}} {children})");
-        let error = parse_str(&duplicate).expect_err(&duplicate).to_string();
+        let error = parse_str(&duplicate, &chelis_syntax_host::NativeStack)
+            .expect_err(&duplicate)
+            .to_string();
         assert!(error.contains(key), "{error}");
     }
 }
@@ -38,19 +41,34 @@ fn additional_core_payloads_reject_bad_shapes_and_owners() {
         "(app {accumulator: (t-tensor {} (t-prim {} f64))} (var {} sum) (lit {} 1))",
         "(var {accumulator: (t-prim {} f64)} x)",
     ] {
-        assert!(parse_str(source).is_err(), "accepted {source}");
+        assert!(
+            parse_str(source, &chelis_syntax_host::NativeStack).is_err(),
+            "accepted {source}"
+        );
     }
 }
 
 #[test]
 fn source_arguments_and_extension_values_are_data() {
     let historical = "(var {source: (macro_name {custom: 1, custom: 2, surf_future: false})} x)";
-    let parsed = parse_str(historical).unwrap();
+    let parsed = parse_str(historical, &chelis_syntax_host::NativeStack).unwrap();
     let wire = serde_json::to_string(&parsed).unwrap();
     let decoded: Vec<chelis_deep::Expr> = serde_json::from_str(&wire).unwrap();
     assert_eq!(parsed, decoded);
-    assert!(parse_str("(var {custom: {custom: 1, custom: 2}} x)").is_ok());
-    assert!(parse_str("(var {custom: {surf_future: false}} x)").is_ok());
+    assert!(
+        parse_str(
+            "(var {custom: {custom: 1, custom: 2}} x)",
+            &chelis_syntax_host::NativeStack
+        )
+        .is_ok()
+    );
+    assert!(
+        parse_str(
+            "(var {custom: {surf_future: false}} x)",
+            &chelis_syntax_host::NativeStack
+        )
+        .is_ok()
+    );
 }
 
 #[test]
@@ -242,7 +260,8 @@ fn typed_payloads_round_trip_all_registered_shapes() {
                 .any(|child| dedicated(child, key))
     }
     for (key, source) in TYPED_CASES {
-        let parsed = parse_str(source).unwrap_or_else(|e| panic!("{key}: {e}"));
+        let parsed = parse_str(source, &chelis_syntax_host::NativeStack)
+            .unwrap_or_else(|e| panic!("{key}: {e}"));
         assert!(
             parsed.iter().any(|expr| dedicated(expr, key)),
             "{key} was not decoded to a dedicated variant"
@@ -260,7 +279,9 @@ fn typed_payloads_round_trip_all_registered_shapes() {
         let canonical = chelis_deep::printer::print_canonical_flat(&parsed);
         assert_eq!(
             canonical,
-            chelis_deep::printer::print_canonical_flat(&parse_str(&canonical).unwrap()),
+            chelis_deep::printer::print_canonical_flat(
+                &parse_str(&canonical, &chelis_syntax_host::NativeStack).unwrap()
+            ),
             "{key}"
         );
     }
@@ -269,7 +290,7 @@ fn typed_payloads_round_trip_all_registered_shapes() {
 #[test]
 fn binder_annotation_spans_survive_structural_payload_decoding() {
     let source = "(def {property_quantifiers: (params {} (x {type: (t-prim {} f32)}))} p 1)";
-    let parsed = parse_str(source).unwrap();
+    let parsed = parse_str(source, &chelis_syntax_host::NativeStack).unwrap();
     let wire = serde_json::to_value(&parsed).unwrap();
     let encoded = wire.to_string();
     let map_offset = source.find("{type:").unwrap();
@@ -300,9 +321,11 @@ fn empty_storage_and_invalid_extension_names_have_no_hidden_state() {
 
 #[test]
 fn wire_export_preserves_structures_and_source_data_without_admitting_it() {
-    let program =
-        parse_str("(t-fn {source: (macro {k: 1, k: 2}), eff: (effects {} io)} (t-unit {}))")
-            .unwrap();
+    let program = parse_str(
+        "(t-fn {source: (macro {k: 1, k: 2}), eff: (effects {} io)} (t-unit {}))",
+        &chelis_syntax_host::NativeStack,
+    )
+    .unwrap();
     let raw = program[0].to_raw();
     let chelis_deep::raw::RawExpr::List(items, _) = raw else {
         panic!("node exports as raw list")
@@ -324,14 +347,20 @@ fn wire_export_preserves_structures_and_source_data_without_admitting_it() {
         panic!("argument data")
     };
     assert_eq!(arguments.len(), 2);
-    assert!(parse_str("(t-fn {eff: (effects {}), eff: (effects {})} (t-unit {}))").is_err());
+    assert!(
+        parse_str(
+            "(t-fn {eff: (effects {}), eff: (effects {})} (t-unit {}))",
+            &chelis_syntax_host::NativeStack
+        )
+        .is_err()
+    );
 }
 
 #[test]
 fn metadata_rewrites_visit_structural_annotations_without_rewriting_roots() {
     use chelis_deep::annotations::MetadataKey;
     use chelis_deep::{DeepTag, Expr};
-    let program = parse_str("(t-fn {eff: (effects {span: \"effects\"} (resource {span: \"resource\"} \"cpu\"))} (t-unit {}))").unwrap();
+    let program = parse_str("(t-fn {eff: (effects {span: \"effects\"} (resource {span: \"resource\"} \"cpu\"))} (t-unit {}))",&chelis_syntax_host::NativeStack).unwrap();
     let Expr::Node(node, _) = &program[0] else {
         panic!("typed node")
     };
@@ -390,7 +419,9 @@ fn expression_payload_admission_rejects_undecoded_vocabulary() {
     };
     assert!(TypeSyntax::try_new(raw("t-var")).is_err());
     assert!(RuntimeExpression::try_new(raw("var")).is_err());
-    let typed = parse_str("(var {} x)").unwrap().remove(0);
+    let typed = parse_str("(var {} x)", &chelis_syntax_host::NativeStack)
+        .unwrap()
+        .remove(0);
     assert!(RuntimeExpression::try_new(typed).is_ok());
     let mut annotations = Metadata::default();
     annotations
@@ -425,7 +456,11 @@ fn serde_metadata_does_not_restamp_an_invalid_typed_payload() {
     }));
     let wire = serde_json::json!({"entries": [["custom", raw]]});
     assert!(serde_json::from_value::<Metadata>(wire).is_err());
-    let typed = parse_str("(var {custom: (var {} x), source: (m (var {} historical))} x)").unwrap();
+    let typed = parse_str(
+        "(var {custom: (var {} x), source: (m (var {} historical))} x)",
+        &chelis_syntax_host::NativeStack,
+    )
+    .unwrap();
     assert_eq!(
         serde_json::from_value::<Vec<Expr>>(serde_json::to_value(&typed).unwrap()).unwrap(),
         typed
@@ -434,7 +469,11 @@ fn serde_metadata_does_not_restamp_an_invalid_typed_payload() {
 
 #[test]
 fn prefix_metadata_supports_binary_checkpoint_round_trips() {
-    let program = parse_str("^{:type (t-prim {} f32)} x").unwrap();
+    let program = parse_str(
+        "^{:type (t-prim {} f32)} x",
+        &chelis_syntax_host::NativeStack,
+    )
+    .unwrap();
     let bytes = bincode::serialize(&program).expect("prefix metadata serializes in binary formats");
     let restored: Vec<chelis_deep::Expr> = bincode::deserialize(&bytes).unwrap();
     assert_eq!(restored, program);
@@ -493,13 +532,21 @@ fn previous_extension_checkpoints_reject_and_core_json_remains_readable() {
         // (#2413): its source no longer parses and its old core JSON no
         // longer decodes, each naming the retired kind.
         if source.contains("(pipe ") {
-            assert!(parse_str(source).unwrap_err().to_string().contains("0.20"));
+            assert!(
+                parse_str(source, &chelis_syntax_host::NativeStack)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("0.20")
+            );
             assert!(serde_json::from_value::<Vec<chelis_deep::Expr>>(json).is_err());
             retired += 1;
             continue;
         }
         if source.contains("{effect: random}") {
-            assert!(parse_str(source).is_err(), "retired kind parsed: {source}");
+            assert!(
+                parse_str(source, &chelis_syntax_host::NativeStack).is_err(),
+                "retired kind parsed: {source}"
+            );
             let error = serde_json::from_value::<Vec<chelis_deep::Expr>>(json)
                 .unwrap_err()
                 .to_string();
@@ -507,7 +554,7 @@ fn previous_extension_checkpoints_reject_and_core_json_remains_readable() {
             retired += 1;
             continue;
         }
-        let expected = parse_str(source).unwrap();
+        let expected = parse_str(source, &chelis_syntax_host::NativeStack).unwrap();
         let current = serde_json::to_value(&expected).unwrap();
         let decoded = serde_json::from_value::<Vec<chelis_deep::Expr>>(json);
         if current.to_string().contains("ExtensionData") {
@@ -605,7 +652,11 @@ fn serde_rejects_duplicate_core_and_extension_entries_in_json_and_binary() {
 #[test]
 fn unknown_effect_diagnostics_preserve_the_kind_at_text_and_serde_ingress() {
     use chelis_deep::{Atom, Expr, Metadata, Span};
-    parse_str("(handle-effect {effect: resource} (lit {} 1) (lit {} 2))").unwrap();
+    parse_str(
+        "(handle-effect {effect: resource} (lit {} 1) (lit {} 2))",
+        &chelis_syntax_host::NativeStack,
+    )
+    .unwrap();
     let value = Expr::Atom(Atom::Name("resource".into()), Span::new(0, 0));
     let wire = serde_json::json!({"entries": [["effect", value]]});
     assert!(serde_json::from_value::<Metadata>(wire).is_ok());
@@ -620,7 +671,9 @@ fn unknown_effect_diagnostics_preserve_the_kind_at_text_and_serde_ingress() {
         let value = Expr::Atom(Atom::Name(kind.into()), Span::new(0, 0));
         let wire = serde_json::json!({"entries": [["effect", value]]});
         for error in [
-            parse_str(&source).unwrap_err().to_string(),
+            parse_str(&source, &chelis_syntax_host::NativeStack)
+                .unwrap_err()
+                .to_string(),
             serde_json::from_value::<Metadata>(wire)
                 .unwrap_err()
                 .to_string(),
@@ -629,9 +682,12 @@ fn unknown_effect_diagnostics_preserve_the_kind_at_text_and_serde_ingress() {
             assert!(error.contains(expected), "{error}");
         }
     }
-    let wrong_owner = parse_str("(var {effect: resource} x)")
-        .unwrap_err()
-        .to_string();
+    let wrong_owner = parse_str(
+        "(var {effect: resource} x)",
+        &chelis_syntax_host::NativeStack,
+    )
+    .unwrap_err()
+    .to_string();
     assert!(wrong_owner.contains("handle-effect"), "{wrong_owner}");
     assert!(
         !wrong_owner.contains("unknown effect kind"),
@@ -675,7 +731,8 @@ fn checked_binding_occurrence_is_private_clone_and_serde_transport() {
 #[test]
 fn author_extension_cannot_set_the_private_checked_binding_occurrence() {
     let source = "(lit {checked_binding_owner: \"local-ascription:7\"} true)";
-    let parsed = chelis_deep::parser::parse_str(source).expect("extension data is valid source");
+    let parsed = chelis_deep::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+        .expect("extension data is valid source");
     let wire = serde_json::to_value(&parsed).unwrap();
     fn private_tokens(value: &serde_json::Value) -> usize {
         match value {

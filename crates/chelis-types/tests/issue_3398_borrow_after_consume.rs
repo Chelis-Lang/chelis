@@ -29,8 +29,13 @@ def sq(r: tensor[2, f32]) -> tensor[2, f32] = mul(r, r)
 ";
 
 fn repairs(source: &str) -> Result<Vec<CopyRepair>, Vec<CheckError>> {
-    let decls = parse_str(&format!("{PRELUDE}{source}")).expect("surf parse should succeed");
-    let deep = desugar_program(&decls).expect("Surf fixture must desugar");
+    let decls = parse_str(
+        &format!("{PRELUDE}{source}"),
+        &chelis_syntax_host::NativeStack,
+    )
+    .expect("surf parse should succeed");
+    let deep = desugar_program(&decls, &chelis_syntax_host::NativeStack)
+        .expect("Surf fixture must desugar");
     let checked = check_typed_program(&deep)
         .unwrap_or_else(|error| panic!("type check should succeed: {:?}", error.errors));
     copy_repairs(&checked, None)
@@ -311,8 +316,13 @@ fn the_report_is_deterministic() {
 }
 
 fn repairs_with_roots(source: &str, roots: &std::collections::BTreeSet<String>) -> Vec<CopyRepair> {
-    let decls = parse_str(&format!("{PRELUDE}{source}")).expect("surf parse should succeed");
-    let deep = desugar_program(&decls).expect("Surf fixture must desugar");
+    let decls = parse_str(
+        &format!("{PRELUDE}{source}"),
+        &chelis_syntax_host::NativeStack,
+    )
+    .expect("surf parse should succeed");
+    let deep = desugar_program(&decls, &chelis_syntax_host::NativeStack)
+        .expect("Surf fixture must desugar");
     let checked = check_typed_program(&deep)
         .unwrap_or_else(|error| panic!("type check should succeed: {:?}", error.errors));
     copy_repairs(&checked, Some(roots)).expect("linearity should pass")

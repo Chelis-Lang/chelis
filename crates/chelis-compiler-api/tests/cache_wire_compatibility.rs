@@ -24,7 +24,7 @@ fn manifest() -> serde_json::Value {
 }
 
 fn migrated_v018(source: &str) -> String {
-    chelis_surf::format::migrate_source_v018(source)
+    chelis_surf::format::migrate_source_v018(source, &chelis_syntax_host::NativeStack)
         .expect("historical source must migrate to the current canonical spelling")
 }
 
@@ -48,7 +48,11 @@ fn historical_artifacts_match_the_recorded_actual_producer() {
         assert_eq!(
             format!(
                 "{:x}",
-                Sha256::digest(fs::read(fixtures().join(file)).unwrap())
+                match file.as_str() {
+                    "producer.rs" =>
+                        Sha256::digest(include_bytes!("fixtures/cache_wire_v3/producer.rs")),
+                    _ => Sha256::digest(fs::read(fixtures().join(file)).unwrap()),
+                }
             ),
             digest.as_str().unwrap()
         );
@@ -85,8 +89,10 @@ fn version_changes_alone_reject_old_subcontexts_before_payload_decode() {
     let evidence = manifest();
     let std_source = migrated_v018(evidence["stdlib_source"].as_str().unwrap());
     let dep_source = migrated_v018(evidence["dependency_source"].as_str().unwrap());
-    let std_decls = chelis_surf::parser::parse_str(&std_source).unwrap();
-    let dep_decls = chelis_surf::parser::parse_str(&dep_source).unwrap();
+    let std_decls =
+        chelis_surf::parser::parse_str(&std_source, &chelis_syntax_host::NativeStack).unwrap();
+    let dep_decls =
+        chelis_surf::parser::parse_str(&dep_source, &chelis_syntax_host::NativeStack).unwrap();
     let std_key = stdlib_cache_key(&std_decls, [0x5a; 32]);
     let lib_key = library_cache_key(&dep_decls, std_key);
     for (input_file, cache_file, prefix, expected_version, current_input, current_key) in [
@@ -145,8 +151,10 @@ fn current_numeric_subcontexts_roundtrip_through_actual_cache_codecs() {
     let evidence = manifest();
     let std_source = migrated_v018(evidence["stdlib_source"].as_str().unwrap());
     let dep_source = migrated_v018(evidence["dependency_source"].as_str().unwrap());
-    let std_decls = chelis_surf::parser::parse_str(&std_source).unwrap();
-    let dep_decls = chelis_surf::parser::parse_str(&dep_source).unwrap();
+    let std_decls =
+        chelis_surf::parser::parse_str(&std_source, &chelis_syntax_host::NativeStack).unwrap();
+    let dep_decls =
+        chelis_surf::parser::parse_str(&dep_source, &chelis_syntax_host::NativeStack).unwrap();
     let std_context = build_stdlib_context(&std_decls).unwrap();
     let lib_context = build_library_context(&std_context, &dep_decls)
         .unwrap()
@@ -180,15 +188,75 @@ fn current_numeric_subcontexts_roundtrip_through_actual_cache_codecs() {
     );
 }
 
-#[allow(dead_code)]
-#[path = "fixtures/cache_wire_v3/producer.rs"]
-mod historical_producer;
+const NUMERIC_SOURCE: &str = "def fixture_wide() -> int64 = 9007199254740993i64\ndef fixture_zero() -> f64 = 0.0f64\ndef fixture_tensor() -> tensor[2, f64] = to_tensor([-0.0f64, 1.0000000000000002f64])\ndef fixture_tensor_int() -> tensor[2, int64] = to_tensor([9007199254740993i64, -9007199254740993i64])\n";
 
-/// The current-producer twin of `historical_producer::assert_literal_result`.
-/// The historical harness reads the JSON spelling its own commit wrote, where
-/// a Deep node was a tagged list; the current lowered library spells every
-/// node as `Expr::Node` (chelis#1125), so the current controls decode the
-/// definition and read the same exact result type through the node API.
+const WITNESS_SOURCE: &str = "def fixture_literal(b: tensor[f32], x: tensor[rows, f32]) -> tensor[4, f32] = insert(b, 0i32, shape(x, 0i32))\nfixture_claim = fixture_literal(scalar_to_tensor(7.0f32), to_tensor([1.0f32, 1.0f32, 1.0f32, 1.0f32]))\n";
+
+fn numeric_payloads(library: &chelis_ir::lower::LoweredLibrary) -> Vec<serde_json::Value> {
+    use chelis_ir::RiscOp;
+    use chelis_types::{StorageView, types::Prim};
+    let mut rows = Vec::new();
+    for node in library.dag().nodes() {
+        let (mut row, bytes) = match &node.op {
+            RiscOp::Const { value } if value.prim() == Prim::Int64 => (
+                serde_json::json!({"kind":"scalar","dtype":"int64","value":value.as_i64_exact().unwrap()}),
+                bincode::serialize(value).unwrap(),
+            ),
+            RiscOp::Const { value } if value.prim() == Prim::F64 => (
+                serde_json::json!({"kind":"scalar","dtype":"f64","bits":format!("{:016x}", value.as_f64_lossy().to_bits())}),
+                bincode::serialize(value).unwrap(),
+            ),
+            RiscOp::ConstTensor { data } => {
+                let row = match data.view() {
+                    StorageView::F64(values) => {
+                        serde_json::json!({"kind":"storage","dtype":"f64","bits":values.iter().map(|value|format!("{:016x}",value.to_bits())).collect::<Vec<_>>()})
+                    }
+                    StorageView::I64(values) => {
+                        serde_json::json!({"kind":"storage","dtype":"int64","values":values})
+                    }
+                    _ => continue,
+                };
+                (row, bincode::serialize(data).unwrap())
+            }
+            _ => continue,
+        };
+        row["bincode"] = serde_json::json!(
+            bytes
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        );
+        rows.push(row);
+    }
+    rows.sort_by_key(|row| row.to_string());
+    rows.dedup();
+    rows
+}
+
+fn context_numeric_payloads(context: &CompiledContext) -> Vec<serde_json::Value> {
+    let body = serde_json::to_value(context).unwrap();
+    let library = serde_json::from_value(body["library_dag"].clone()).unwrap();
+    numeric_payloads(&library)
+}
+
+fn package_fixture(package: &Path) {
+    use chelis_compiler_api::COMPILER_VERSION;
+    fs::create_dir_all(package.join("src")).unwrap();
+    fs::create_dir_all(package.join("mylib/src")).unwrap();
+    fs::write(package.join("reef.toml"), format!("[package]\nname = \"fixture\"\nversion = \"0.1.0\"\ncompiler = \"={COMPILER_VERSION}\"\nmodule_prefix = \"Fixture\"\n\n[dependencies]\nmylib = {{ path = \"./mylib\" }}\n")).unwrap();
+    fs::write(
+        package.join("src/main.ch"),
+        "module Fixture.Main\n\ndef main() -> f32 = 1.0f32\n",
+    )
+    .unwrap();
+    fs::write(package.join("mylib/reef.toml"), format!("[package]\nname = \"mylib\"\nversion = \"0.1.0\"\ncompiler = \"={COMPILER_VERSION}\"\nmodule_prefix = \"Mylib\"\n")).unwrap();
+    fs::write(package.join("mylib/src/math.ch"), format!("module Mylib.Math\nexport (scale, fixture_wide, fixture_zero, fixture_tensor, fixture_tensor_int, fixture_literal, fixture_claim)\n\ndef scale(x: f32) -> f32 = x * 0.5f32\n{NUMERIC_SOURCE}{WITNESS_SOURCE}")).unwrap();
+    fs::write(package.join("reef.lock"), format!("[package]\nname = \"fixture\"\nversion = \"0.1.0\"\n\n[[dependencies]]\nname = \"mylib\"\nversion = \"0.1.0\"\ncompiler = \"={COMPILER_VERSION}\"\narchive_sha256 = \"\"\nshell_sha256 = \"\"\n\n[dependencies.source]\nkind = \"path\"\npath = \"./mylib\"\n")).unwrap();
+}
+
+// The retained producer is byte evidence, not a current API consumer.
+// Current helpers use the node API to inspect the same literal result type.
+// The retained producer uses the earlier tagged-list representation.
 fn assert_current_literal_result(library: &serde_json::Value) {
     use chelis_deep::{Atom, DeepTag, Expr};
 
@@ -325,12 +393,12 @@ fn historical_caches_contain_actual_old_scalar_and_storage_positional_bytes() {
 
 #[test]
 fn current_stdlib_cache_preserves_scalar_storage_bits_and_checked_reconstruction() {
-    let source = migrated_v018(historical_producer::NUMERIC_SOURCE);
-    let decls = chelis_surf::parser::parse_str(&source).unwrap();
+    let source = migrated_v018(NUMERIC_SOURCE);
+    let decls = chelis_surf::parser::parse_str(&source, &chelis_syntax_host::NativeStack).unwrap();
     let context = build_stdlib_context(&decls).unwrap();
     let expected = expected_numeric_payloads(true);
     assert_eq!(
-        historical_producer::numeric_payloads(context.library_dag().unwrap().raw()),
+        numeric_payloads(context.library_dag().unwrap().raw()),
         expected
     );
     let directory = tempfile::tempdir().unwrap();
@@ -341,7 +409,7 @@ fn current_stdlib_cache_preserves_scalar_storage_bits_and_checked_reconstruction
         .unwrap()
         .unwrap();
     assert_eq!(
-        historical_producer::numeric_payloads(restored.library_dag().unwrap().raw()),
+        numeric_payloads(restored.library_dag().unwrap().raw()),
         expected
     );
     assert_eq!(
@@ -370,7 +438,7 @@ fn assert_payload_bytes(bytes: &[u8], expected: &[serde_json::Value]) {
 fn current_compiled_disk_and_worker_preserve_scalar_storage_bits_and_reconstruct() {
     let directory = tempfile::tempdir().unwrap();
     let package = directory.path().join("package");
-    historical_producer::package_fixture(&package);
+    package_fixture(&package);
     migrate_historical_package_for_current_compiler(&package);
     let reef_home = directory.path().join("reef-home");
     let context = chelis_compiler_api::compile_reef_context(
@@ -380,10 +448,7 @@ fn current_compiled_disk_and_worker_preserve_scalar_storage_bits_and_reconstruct
     )
     .unwrap();
     let expected = expected_numeric_payloads(true);
-    assert_eq!(
-        historical_producer::context_numeric_payloads(&context),
-        expected
-    );
+    assert_eq!(context_numeric_payloads(&context), expected);
     let path = directory.path().join("numeric.ctx");
     context.save(&path).unwrap();
     let bytes = context.encode().unwrap();
@@ -401,10 +466,7 @@ fn current_compiled_disk_and_worker_preserve_scalar_storage_bits_and_reconstruct
     assert_current_literal_result(&serde_json::to_value(&context).unwrap()["library_dag"]);
     for restored in [&disk, &worker] {
         assert_current_literal_result(&serde_json::to_value(restored).unwrap()["library_dag"]);
-        assert_eq!(
-            historical_producer::context_numeric_payloads(restored),
-            expected
-        );
+        assert_eq!(context_numeric_payloads(restored), expected);
         assert_eq!(
             bincode::serialize(restored).unwrap(),
             bincode::serialize(&context).unwrap()
@@ -466,7 +528,8 @@ where
 #[test]
 fn every_cached_library_decoder_rejects_forged_selector_callable_metadata() {
     let pair_source = "def pair(x: f32, w: f32) -> f32 = x * w\n";
-    let pair_decls = chelis_surf::parser::parse_str(pair_source).unwrap();
+    let pair_decls =
+        chelis_surf::parser::parse_str(pair_source, &chelis_syntax_host::NativeStack).unwrap();
     let std_context = build_stdlib_context(&pair_decls).unwrap();
     assert_selector_forgery_rejects(&std_context);
 
@@ -478,7 +541,7 @@ fn every_cached_library_decoder_rejects_forged_selector_callable_metadata() {
 
     let directory = tempfile::tempdir().unwrap();
     let package = directory.path().join("package");
-    historical_producer::package_fixture(&package);
+    package_fixture(&package);
     migrate_historical_package_for_current_compiler(&package);
     let reef_home = directory.path().join("reef-home");
     let compiled = chelis_compiler_api::compile_reef_context(
@@ -525,19 +588,15 @@ fn change_numeric_bits(payload: &mut [u8], storage: bool) {
 #[test]
 fn cache_reconstruction_rejects_changed_numeric_bits_after_checksum_recomputed() {
     let directory = tempfile::tempdir().unwrap();
-    let source = migrated_v018(&format!(
-        "{}{}",
-        historical_producer::NUMERIC_SOURCE,
-        historical_producer::WITNESS_SOURCE
-    ));
-    let decls = chelis_surf::parser::parse_str(&source).unwrap();
+    let source = migrated_v018(&format!("{}{}", NUMERIC_SOURCE, WITNESS_SOURCE));
+    let decls = chelis_surf::parser::parse_str(&source, &chelis_syntax_host::NativeStack).unwrap();
     let context = build_stdlib_context(&decls).unwrap();
     let key = stdlib_cache_key(&decls, [0x5a; 32]);
     let std_path = directory.path().join("numeric.tc");
     cache_envelope::save(&std_path, key, &context).unwrap();
     let std_bytes = fs::read(&std_path).unwrap();
     let package = directory.path().join("package");
-    historical_producer::package_fixture(&package);
+    package_fixture(&package);
     migrate_historical_package_for_current_compiler(&package);
     let reef_home = directory.path().join("reef-home");
     let compiled = chelis_compiler_api::compile_reef_context(
@@ -638,19 +697,15 @@ fn change_program_literal_within(payload: &mut [u8], range: std::ops::Range<usiz
 #[test]
 fn cache_reconstruction_rejects_a_program_only_literal_edit_after_checksum_recomputed() {
     let directory = tempfile::tempdir().unwrap();
-    let source = migrated_v018(&format!(
-        "{}{}",
-        historical_producer::NUMERIC_SOURCE,
-        historical_producer::WITNESS_SOURCE
-    ));
-    let decls = chelis_surf::parser::parse_str(&source).unwrap();
+    let source = migrated_v018(&format!("{}{}", NUMERIC_SOURCE, WITNESS_SOURCE));
+    let decls = chelis_surf::parser::parse_str(&source, &chelis_syntax_host::NativeStack).unwrap();
     let context = build_stdlib_context(&decls).unwrap();
     let key = stdlib_cache_key(&decls, [0x5a; 32]);
     let std_path = directory.path().join("numeric.tc");
     cache_envelope::save(&std_path, key, &context).unwrap();
     let std_bytes = fs::read(&std_path).unwrap();
     let package = directory.path().join("package");
-    historical_producer::package_fixture(&package);
+    package_fixture(&package);
     migrate_historical_package_for_current_compiler(&package);
     let reef_home = directory.path().join("reef-home");
     let compiled = chelis_compiler_api::compile_reef_context(
@@ -733,7 +788,9 @@ const LINEARITY_EDIT_SOURCE: &str = "module Dep.Ops\nexport (settle)\n\n\
 #[test]
 fn caches_without_a_lowering_reject_a_program_only_edit_into_a_linearity_violation() {
     let directory = tempfile::tempdir().unwrap();
-    let decls = chelis_surf::parser::parse_str(LINEARITY_EDIT_SOURCE).unwrap();
+    let decls =
+        chelis_surf::parser::parse_str(LINEARITY_EDIT_SOURCE, &chelis_syntax_host::NativeStack)
+            .unwrap();
 
     let empty_stdlib = build_stdlib_context(&[]).unwrap();
     let dependency = build_library_context(&empty_stdlib, &decls)
@@ -789,7 +846,9 @@ fn caches_without_a_lowering_reject_a_program_only_edit_into_a_linearity_violati
 #[test]
 fn caches_with_a_lowering_reject_a_program_only_edit_into_a_linearity_violation() {
     let directory = tempfile::tempdir().unwrap();
-    let decls = chelis_surf::parser::parse_str(LINEARITY_EDIT_SOURCE).unwrap();
+    let decls =
+        chelis_surf::parser::parse_str(LINEARITY_EDIT_SOURCE, &chelis_syntax_host::NativeStack)
+            .unwrap();
 
     let empty_stdlib = build_stdlib_context(&[]).unwrap();
     let dependency = build_library_context(&empty_stdlib, &decls)
@@ -832,7 +891,9 @@ fn caches_with_a_lowering_reject_a_program_only_edit_into_a_linearity_violation(
 #[test]
 fn typecheck_cache_hits_with_a_lowering_rerun_no_checker() {
     let directory = tempfile::tempdir().unwrap();
-    let decls = chelis_surf::parser::parse_str(LINEARITY_EDIT_SOURCE).unwrap();
+    let decls =
+        chelis_surf::parser::parse_str(LINEARITY_EDIT_SOURCE, &chelis_syntax_host::NativeStack)
+            .unwrap();
     let empty_stdlib = build_stdlib_context(&[]).unwrap();
     let dependency = build_library_context(&empty_stdlib, &decls)
         .unwrap()
