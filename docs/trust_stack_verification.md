@@ -1,11 +1,11 @@
-# Property verification architecture
+# Proof-tier verification architecture
 
 `chelis prove` checks declared properties and invariant obligations, then
-reports the method and assumptions behind each result. The
+reports the proof tier and assumptions behind each result. The
 [user guide](book/src/proving.md) explains commands, result fields, and exit
 codes. This page maps those results to the implementation.
 
-## Inputs and verification methods
+## Inputs and proof tiers
 
 Requirements enter as Surf or Deep `@property` declarations with parameters,
 preconditions, and a predicate. A translator can attach a sibling source
@@ -13,23 +13,23 @@ manifest. The consumer verifies the generated file, original source hashes,
 byte ranges, and property mappings before attributing results to requirements.
 That attribution establishes provenance; it does not strengthen a verdict.
 
-Type checking rejects ill-formed declarations before verification. It does
-not discharge an arbitrary property. The core verification methods are:
+Tier A (type checking) rejects ill-formed declarations before verification. It
+does not discharge an arbitrary property. The proof tiers are:
 
-- **SMT solving:** cvc5 checks supported predicates over real arithmetic.
+- **Tier B (SMT):** cvc5 checks supported predicates over real arithmetic.
   Builds with the `z3` feature can use Z3 for goals cvc5 leaves unknown.
 - **Induction:** supported recursive properties produce base and step goals.
   Both must be proved without vacuity; the arithmetic model remains real.
-- **Sampling:** deterministic edge inputs precede seeded random draws. The
+- **Tier C (sampling):** deterministic edge inputs precede seeded random draws. The
   edge schedule includes guard boundaries and their neighbours, both zeros,
   subnormals, finite extrema, small integers, and decade magnitudes. Every
   accepted input must satisfy the preconditions. A pass establishes only
   that the property held on the sampled inputs.
 
-`--tier` selects a method or automatic dispatch. Availability depends on the
+`--tier` selects a proof tier or automatic dispatch. Availability depends on the
 build; `chelis prove --capabilities` reports its configuration. The result's
 `proof_tier` identifies its method, and `composite_verdict` and `qualifiers`
-state what that method establishes.
+state what that proof tier establishes.
 
 ## Machine arithmetic
 

@@ -771,7 +771,7 @@ statically resolved axis instead.
 [`spec/design/chelis_property_spec.md`](../spec/design/chelis_property_spec.md);
 the executable dispatch is in `crates/chelis-prove/src/property_runner.rs`.
 
-| Option | Route |
+| Proof tier / option | Route |
 |---|---|
 | `induction-only` | Surf structural-recursion subset: separate base and step SMT obligations; unsupported shapes stop without sampling. |
 | `smt-only` | Lowerable arithmetic and supported contract/gradient forms go to SMT; unsupported forms do not become sampled passes. |

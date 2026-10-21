@@ -1,12 +1,13 @@
-//! Property verification and evidence composition.
+//! Proof-tier dispatch and evidence composition.
 //!
 //! This crate implements the specification-consumption layer of the Chelis
 //! trust stack. It takes `@property` declarations and dispatches them through:
 //!
-//! - Type checking rejects ill-formed properties before verification.
-//! - SMT solving via cvc5 checks properties over real arithmetic.
+//! - **Tier A (type checking):** rejects ill-formed properties before verification.
+//! - **Tier B (SMT):** cvc5 checks properties over real arithmetic.
 //! - Induction checks base and step cases for supported recursive properties.
-//! - Seeded sampling checks concrete machine inputs and reports empirical evidence.
+//! - **Tier C (sampling):** seeded sampling checks concrete machine inputs and
+//!   reports empirical evidence.
 //!
 //! See `docs/trust_stack_verification.md` for architectural framing.
 
