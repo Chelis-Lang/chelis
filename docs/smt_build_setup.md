@@ -90,6 +90,9 @@ non-gate job (rule-id GATE-SCOPE-SMT in
 sanitizer job, because cvc5 builds from source and is not a per-PR
 developer-loop prerequisite.
 
+The integration controls exercise worker creation, real verdicts, abnormal exits, timeouts, and later recovery.
+They do not impose a source-text setup pattern on unrelated certificate tests.
+
 The full solver/proof corpus lives in `.github/workflows/smt-full-prove.yml`.
 That workflow runs on a nightly schedule and on manual dispatch only -- NOT on
 PRs. The ~46m corpus is too heavy for the per-PR path, and `SMT Full Prove
