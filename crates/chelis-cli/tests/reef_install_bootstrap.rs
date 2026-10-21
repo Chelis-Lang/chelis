@@ -152,9 +152,9 @@ fn build_test_shell_bytes(
     archive_sha256: &str,
     compiler: &str,
 ) -> Vec<u8> {
-    let shell = chelis_shell::ShellPackage {
-        format_version: chelis_shell::SHELL_FORMAT_VERSION,
-        package: chelis_shell::PackageId {
+    let shell = chelis_shell_core::ShellPackage {
+        format_version: chelis_shell_core::SHELL_FORMAT_VERSION,
+        package: chelis_shell_core::PackageId {
             name: name.to_string(),
             version: version.to_string(),
         },

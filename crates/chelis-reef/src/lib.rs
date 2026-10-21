@@ -1,6 +1,7 @@
-use chelis_shell::{
+use chelis_shell::read_shell;
+use chelis_shell_core::{
     CollectionObligation, PackageId, SHELL_FORMAT_VERSION, ShellModule, ShellPackage, ShellSymbol,
-    SymbolKind, TypeVariableDomain, TypeVariableRestriction, read_shell,
+    SymbolKind, TypeVariableDomain, TypeVariableRestriction,
 };
 use chelis_surf::ast::{
     Decl, EffectExpr, Expr, ImportKind, LetBinding, LetPattern, MatchArm, Param, Pattern,
@@ -7280,9 +7281,10 @@ impl<'de> Deserialize<'de> for PackageSchema {
         }
         for module in &wire.modules {
             for function in &module.functions {
-                chelis_shell::validate_collection_obligations_for_type_repr(
+                chelis_shell_core::validate_collection_obligations_for_type_repr(
                     function.type_repr.as_deref(),
                     &function.collection_obligations,
+                    &chelis_syntax_host::NativeStack,
                 )
                 .map_err(|message| {
                     serde::de::Error::custom(format!(
@@ -7372,7 +7374,7 @@ pub fn package_schema(
             let internal =
                 internal_name(&root_pkg.id.name, &module_source.module_name, export_name);
             match kind {
-                Some(chelis_shell::SymbolKind::Value) => {
+                Some(chelis_shell_core::SymbolKind::Value) => {
                     let signature = exported_function_type(&checked, &internal, || {
                         sig_type_repr(module_source, export_name)
                     })?;
@@ -7392,7 +7394,7 @@ pub fn package_schema(
                         has_body,
                     });
                 }
-                Some(chelis_shell::SymbolKind::Type) => {
+                Some(chelis_shell_core::SymbolKind::Type) => {
                     // Find the type definition to extract constructors
                     let type_def = module_source.decls.iter().find_map(|d| match d {
                         Decl::TypeDef {
@@ -10344,7 +10346,7 @@ impl ShellTypeVariableRenamer {
 #[cfg(test)]
 mod shell_type_variable_canonicalization_tests {
     use super::{canonical_shell_scheme, canonical_shell_type_repr};
-    use chelis_shell::{TypeVariableDomain, TypeVariableRestriction};
+    use chelis_shell_core::{TypeVariableDomain, TypeVariableRestriction};
     use chelis_types::infer::type_to_deep_expr;
     use chelis_types::types::{
         Dim, DimVar, RankVar, Scheme, TensorPrec, Type, TypeVar, TypeVarRestriction,
@@ -10873,9 +10875,11 @@ fn render_collection_obligation(
             result,
         } => CollectionObligation::FloatClassify {
             kind: match kind {
-                chelis_types::FloatClassify::Nan => chelis_shell::FloatClassifyKind::Nan,
-                chelis_types::FloatClassify::Finite => chelis_shell::FloatClassifyKind::Finite,
-                chelis_types::FloatClassify::Infinite => chelis_shell::FloatClassifyKind::Infinite,
+                chelis_types::FloatClassify::Nan => chelis_shell_core::FloatClassifyKind::Nan,
+                chelis_types::FloatClassify::Finite => chelis_shell_core::FloatClassifyKind::Finite,
+                chelis_types::FloatClassify::Infinite => {
+                    chelis_shell_core::FloatClassifyKind::Infinite
+                }
             },
             operand: render(operand),
             result: render(result),

@@ -60,9 +60,9 @@ fn nautilus_archive() -> Vec<u8> {
 
 /// The `nautilus` 0.2.0 shell that pairs with `archive`.
 fn nautilus_shell(archive: &[u8]) -> Vec<u8> {
-    chelis_shell::encode_shell(&chelis_shell::ShellPackage {
-        format_version: chelis_shell::SHELL_FORMAT_VERSION,
-        package: chelis_shell::PackageId {
+    chelis_shell::encode_shell(&chelis_shell_core::ShellPackage {
+        format_version: chelis_shell_core::SHELL_FORMAT_VERSION,
+        package: chelis_shell_core::PackageId {
             name: "nautilus".to_string(),
             version: "0.2.0".to_string(),
         },

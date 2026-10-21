@@ -333,6 +333,16 @@ rec {
       # File a bug if you depend on any for non-debug work!
       debug = internal.debugCrate { inherit packageId; };
     };
+    "chelis-shell-core" = rec {
+      packageId = "chelis-shell-core";
+      build = internal.buildRustCrateWithFeatures {
+        packageId = "chelis-shell-core";
+      };
+
+      # Debug support which might change between releases.
+      # File a bug if you depend on any for non-debug work!
+      debug = internal.debugCrate { inherit packageId; };
+    };
     "chelis-stack-services" = rec {
       packageId = "chelis-stack-services";
       build = internal.buildRustCrateWithFeatures {
@@ -2129,6 +2139,10 @@ rec {
             packageId = "chelis-shell";
           }
           {
+            name = "chelis-shell-core";
+            packageId = "chelis-shell-core";
+          }
+          {
             name = "flate2";
             packageId = "flate2";
           }
@@ -3296,6 +3310,10 @@ rec {
             packageId = "chelis-shell";
           }
           {
+            name = "chelis-shell-core";
+            packageId = "chelis-shell-core";
+          }
+          {
             name = "chelis-surf";
             packageId = "chelis-surf";
           }
@@ -3609,22 +3627,57 @@ rec {
             packageId = "bincode";
           }
           {
-            name = "chelis-deep";
-            packageId = "chelis-deep";
+            name = "chelis-shell-core";
+            packageId = "chelis-shell-core";
           }
           {
             name = "chelis-syntax-host";
             packageId = "chelis-syntax-host";
           }
+        ];
+        devDependencies = [
+          {
+            name = "tempfile";
+            packageId = "tempfile";
+          }
+        ];
+
+      };
+      "chelis-shell-core" = rec {
+        crateName = "chelis-shell-core";
+        version = "0.21.1";
+        edition = "2024";
+        src = lib.cleanSourceWith { filter = sourceFilter;  src = ./crates/chelis-shell-core; };
+        libName = "chelis_shell_core";
+        dependencies = [
+          {
+            name = "chelis-deep";
+            packageId = "chelis-deep";
+          }
+          {
+            name = "chelis-stack-services";
+            packageId = "chelis-stack-services";
+          }
           {
             name = "semver";
             packageId = "semver";
-            features = [ "serde" ];
+            usesDefaultFeatures = false;
           }
           {
             name = "serde";
             packageId = "serde";
-            features = [ "derive" "rc" ];
+            usesDefaultFeatures = false;
+            features = [ "alloc" "derive" ];
+          }
+        ];
+        devDependencies = [
+          {
+            name = "chelis-syntax-host";
+            packageId = "chelis-syntax-host";
+          }
+          {
+            name = "serde_json";
+            packageId = "serde_json";
           }
         ];
 
@@ -3663,6 +3716,10 @@ rec {
           {
             name = "chelis-shell";
             packageId = "chelis-shell";
+          }
+          {
+            name = "chelis-shell-core";
+            packageId = "chelis-shell-core";
           }
           {
             name = "serde_json";

@@ -18,6 +18,7 @@ chelis-syntax-host.workspace = true
 chelis-types.workspace = true
 chelis-effects.workspace = true
 chelis-shell.workspace = true
+chelis-shell-core.workspace = true
 serde.workspace = true
 semver.workspace = true
 spdx.workspace = true

@@ -70,7 +70,7 @@ use chelis_reef::{
     GitHubFetchError, GitHubReleaseSpec, LockSource, LockedDependency, LockfileInstallEntry,
     LockfileInstallError, ReefLock, RemoteOriginParseError, parse_remote_origin,
 };
-use chelis_shell::PackageId;
+use chelis_shell_core::PackageId;
 use chelis_std_bundle::{BUNDLED_CHELIS_STD_VERSION, CHELIS_STD_ARCHIVE, CHELIS_STD_SHELL};
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -163,9 +163,9 @@ fn sha256_bytes(b: &[u8]) -> String {
 }
 
 fn build_test_shell_bytes(name: &str, version: &str, archive_sha256: &str) -> Vec<u8> {
-    let shell = chelis_shell::ShellPackage {
-        format_version: chelis_shell::SHELL_FORMAT_VERSION,
-        package: chelis_shell::PackageId {
+    let shell = chelis_shell_core::ShellPackage {
+        format_version: chelis_shell_core::SHELL_FORMAT_VERSION,
+        package: chelis_shell_core::PackageId {
             name: name.to_string(),
             version: version.to_string(),
         },

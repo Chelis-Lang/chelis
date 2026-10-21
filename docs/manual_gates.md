@@ -186,6 +186,36 @@ Default PR CI does not execute the complete command.
 Target compilation does not prove device execution, and host execution does not prove firmware acceptance.
 Owner: chelis#3984.
 
+## Shell metadata core portability
+
+Run `.venv/bin/python scripts/shell_metadata_core_oracle.py` from the repository root.
+It needs the pinned Rust toolchain, `thumbv7em-none-eabi`, `cargo-nextest`, Git, and the checkout's uv-managed Python environment.
+Native build prerequisites remain necessary for the Reef and CLI checks.
+
+The oracle uses the original implementation at commit `7ab8af85c193cd2a29979adb5b003c9a6d19ded7` without source changes.
+A shallow checkout needs access to the canonical repository to fetch that commit.
+Missing baseline evidence fails acceptance.
+
+Success means exit zero and the final line `shell metadata core oracle: PASS`.
+The command checks:
+
+- Independent target consumers with default features enabled and disabled, without host dependencies or target `std` features.
+- Real host consumers with an explicit allocator, `NativeStack`, and typed validation failures.
+- All current metadata fields, type-variable restrictions, collection contracts, canonical identities, and first-error order.
+- Fixed-revision CHB 8 bytes, decoded values, malformed-byte diagnostics, and embedded bundle digests.
+- Host codec and filesystem behavior, real Reef and CLI artifact rejection, and unchanged registry state after rejection.
+- Mandatory test execution, obsolete public API rejection, host dependency rejection, and acceptance failure controls.
+- Matching snapshots with missing metadata fields or invalid collection and scalar evidence fail acceptance.
+
+The core validates metadata, not archive integrity or publisher identity.
+Reef retains the complete artifact and package identity checks.
+
+Linux integration support executes this command in its domain slice.
+macOS nightly validation executes it on workspace shard one.
+Default PR CI does not execute the complete command.
+Target compilation does not prove device execution or allocator capacity.
+Owner: chelis#3986.
+
 ## Compiler feature acceptance gates
 
 The incremental [eval-performance suite](eval_performance.md) runs its sparse

@@ -107,9 +107,9 @@ fn sha256_bytes(b: &[u8]) -> String {
 /// archive's bytes. Item-8 tests only need the validation pipeline to
 /// accept the bytes — no module data has to be present.
 fn build_test_shell_bytes(name: &str, version: &str, archive_sha256: &str) -> Vec<u8> {
-    let shell = chelis_shell::ShellPackage {
-        format_version: chelis_shell::SHELL_FORMAT_VERSION,
-        package: chelis_shell::PackageId {
+    let shell = chelis_shell_core::ShellPackage {
+        format_version: chelis_shell_core::SHELL_FORMAT_VERSION,
+        package: chelis_shell_core::PackageId {
             name: name.to_string(),
             version: version.to_string(),
         },

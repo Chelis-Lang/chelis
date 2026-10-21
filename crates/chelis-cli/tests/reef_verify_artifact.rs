@@ -1,5 +1,6 @@
 use assert_cmd::Command;
-use chelis_shell::{PackageId, SHELL_FORMAT_VERSION, ShellPackage, encode_shell};
+use chelis_shell::encode_shell;
+use chelis_shell_core::{PackageId, SHELL_FORMAT_VERSION, ShellPackage};
 use predicates::prelude::*;
 use serde_json::Value;
 use sha2::{Digest, Sha256};

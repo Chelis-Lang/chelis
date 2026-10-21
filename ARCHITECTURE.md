@@ -125,4 +125,25 @@ Run `.venv/bin/python scripts/reef_bootstrap_core_oracle.py` for isolated target
 The [acceptance gate](docs/manual_gates.md#reef-bootstrap-core-portability) lists prerequisites, evidence, and CI owners.
 Target compilation proves neither device execution nor allocator capacity.
 
+## Portable CHB metadata and complete validation
+
+`chelis-shell-core` owns CHB 8 metadata models and complete metadata validation.
+It uses unconditional `no_std` with `alloc`, portable Deep, explicit stack services, Serde, and SemVer.
+It checks type representations, canonical variables, type-variable restrictions, and collection contracts, as well as envelope fields and order.
+
+Metadata imports now use `chelis_shell_core`.
+There are no compatibility re-exports from `chelis_shell`.
+`validate_shell`, `validate_collection_obligation_ledger`, and `validate_collection_obligations_for_type_repr` take a final `&impl StackServices` argument.
+They return typed errors without a binary-codec dependency.
+
+`chelis-shell` retains bincode, `SHELL_MAGIC`, byte encoding, canonical decoding, and filesystem adapters.
+Its codec validates complete metadata through the core and maps failures to the existing host error form.
+Reef retains archive-digest and requested-package identity checks before installation.
+Valid metadata alone does not prove archive integrity or publisher identity.
+
+Run `.venv/bin/python scripts/shell_metadata_core_oracle.py` for isolated target consumers, fixed-revision CHB parity, and real Reef and CLI checks.
+The [acceptance gate](docs/manual_gates.md#shell-metadata-core-portability) lists prerequisites, evidence, and CI owners.
+Target compilation proves neither device execution nor allocator capacity.
+
+
 

@@ -1,7 +1,6 @@
 use chelis_reef::{install_validated_artifact_pair, verify_artifact_pair};
-use chelis_shell::{
-    PackageId, SHELL_FORMAT_VERSION, SHELL_MAGIC, ShellModule, ShellPackage, encode_shell,
-};
+use chelis_shell::{SHELL_MAGIC, encode_shell};
+use chelis_shell_core::{PackageId, SHELL_FORMAT_VERSION, ShellModule, ShellPackage};
 use sha2::{Digest, Sha256};
 use std::fs;
 use tempfile::tempdir;
