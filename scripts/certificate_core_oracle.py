@@ -672,6 +672,11 @@ def main() -> int:
             "intentional_admission_differences": sorted(REPAIR_CASES),
         }, sort_keys=True), flush=True)
     native_suites()
+    run((sys.executable, "scripts/test_no_std_core_support.py"))
+    from test_certificate_core_oracle import MANDATORY_TESTS
+    result = run((sys.executable, "scripts/test_certificate_core_oracle.py"))
+    if parse_record(result.stdout, "CERTIFICATE_ORACLE_TESTS ") != {"passed": sorted(MANDATORY_TESTS), "skipped": 0}:
+        raise OracleFailure("incomplete oracle failure-control test evidence")
     print("certificate core oracle: PASS", flush=True)
     print("Native host evidence: external allocator consumer, frozen-base parity, and complete mandatory suites.", flush=True)
     print("No device execution, allocator capacity, or whole-pipeline portability claim.", flush=True)

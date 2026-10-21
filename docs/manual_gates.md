@@ -236,7 +236,8 @@ The command checks:
 - Polynomial normalization, large coefficients, singular PSD matrices, tiny negative pivots, error precedence, and affine repair.
 - Fixed-revision arithmetic, canonical host outcomes, exact evidence, and native Clarabel production parity.
 - Goal and interval binding, strict-goal rejection, and noncanonical block counts, matrix dimensions, and multipliers.
-- Mandatory core and host test execution, obsolete API rejection, and acceptance failure controls.
+- Mandatory core and host test execution, both Python control suites, obsolete API rejection, and acceptance failure controls.
+- Named Python control results reject an incomplete or skipped certificate suite before the PASS marker.
 
 The six specified noncanonical certificate cases intentionally differ from the baseline.
 The baseline admits these arithmetically valid certificates.

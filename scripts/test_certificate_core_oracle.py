@@ -7,6 +7,7 @@ from copy import deepcopy
 import json
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -324,5 +325,60 @@ class BaselineHistoryTests(unittest.TestCase):
                 oracle.checkout_baseline(self.directory / "baseline")
 
 
+MANDATORY_TESTS = (
+    "CertificateEvidenceTests.test_matching_empty_snapshots_cannot_prove_parity",
+    "CertificateEvidenceTests.test_matching_empty_arithmetic_cannot_prove_parity",
+    "CertificateEvidenceTests.test_each_arithmetic_section_is_mandatory_on_both_sides",
+    "CertificateEvidenceTests.test_matching_wrong_exact_values_cannot_prove_parity",
+    "CertificateEvidenceTests.test_each_host_section_is_mandatory_on_both_sides",
+    "CertificateEvidenceTests.test_each_host_case_is_mandatory_on_both_sides",
+    "CertificateEvidenceTests.test_extra_case_cannot_expand_the_admission_exception",
+    "CertificateEvidenceTests.test_canonical_block_order_cannot_change",
+    "CertificateEvidenceTests.test_matching_missing_certificate_fields_cannot_prove_parity",
+    "CertificateEvidenceTests.test_matching_empty_exact_values_cannot_prove_parity",
+    "CertificateEvidenceTests.test_invalid_rational_text_cannot_prove_parity",
+    "CertificateEvidenceTests.test_missing_gram_entries_or_multiplier_cannot_prove_parity",
+    "CertificateEvidenceTests.test_public_error_label_change_cannot_hide_in_an_unknown",
+    "CertificateEvidenceTests.test_binding_rejection_evidence_must_match_the_base",
+    "CertificateEvidenceTests.test_production_exact_evidence_must_match_the_base",
+    "CertificateEvidenceTests.test_production_proof_cannot_regress_to_unknown",
+    "CertificateEvidenceTests.test_production_nonproof_cannot_gain_authority",
+    "CertificateEvidenceTests.test_nonproof_cannot_retain_a_qualifier",
+    "CertificateEvidenceTests.test_engine_attribution_is_mandatory",
+    "CertificateEvidenceTests.test_baseline_layout_admission_must_demonstrate_the_original_defect",
+    "CertificateEvidenceTests.test_original_layout_admission_requires_exact_certificate_evidence",
+    "CertificateEvidenceTests.test_candidate_layout_admission_must_reject_the_original_defect",
+    "CertificateEvidenceTests.test_layout_repair_cannot_change_arithmetic",
+    "CertificateEvidenceTests.test_an_unrelated_rejection_cannot_substitute_for_the_layout_repair",
+    "CertificateEvidenceTests.test_layout_repair_requires_the_exact_detail",
+    "StructuredRecordTests.test_one_record_preserves_exact_values",
+    "StructuredRecordTests.test_missing_repeated_or_invalid_records_cannot_prove_parity",
+    "BaselineHistoryTests.test_shallow_clone_fetches_the_exact_pinned_commit",
+    "BaselineHistoryTests.test_cached_commit_needs_no_remote_access",
+    "BaselineHistoryTests.test_complete_clone_fails_for_an_absent_pinned_commit",
+    "BaselineHistoryTests.test_failed_fetch_cannot_substitute_candidate_evidence",
+    "BaselineHistoryTests.test_missing_original_source_cannot_prove_baseline_parity",
+)
+
+
+class EvidenceResult(unittest.TextTestResult):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.passed: set[str] = set()
+
+    def addSuccess(self, test):
+        super().addSuccess(test)
+        self.passed.add(test.id().removeprefix("__main__."))
+
+
+def main() -> int:
+    suite = unittest.defaultTestLoader.loadTestsFromModule(sys.modules[__name__])
+    result = unittest.TextTestRunner(verbosity=2, resultclass=EvidenceResult).run(suite)
+    if not result.wasSuccessful() or result.passed != set(MANDATORY_TESTS) or result.skipped:
+        return 1
+    print("CERTIFICATE_ORACLE_TESTS " + json.dumps({"passed": sorted(result.passed), "skipped": 0}, sort_keys=True))
+    return 0
+
+
 if __name__ == "__main__":
-    unittest.main()
+    raise SystemExit(main())
