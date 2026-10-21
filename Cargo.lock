@@ -555,6 +555,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "chelis-certificate-core"
+version = "0.21.1"
+dependencies = [
+ "num-bigint",
+ "num-rational",
+ "num-traits",
+]
+
+[[package]]
 name = "chelis-clarabel-provider"
 version = "0.21.1"
 dependencies = [
@@ -853,6 +862,7 @@ dependencies = [
  "base64 0.22.1",
  "bincode",
  "carcara",
+ "chelis-certificate-core",
  "chelis-compiler-api",
  "chelis-crmath",
  "chelis-deep",

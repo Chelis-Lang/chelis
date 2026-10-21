@@ -1,39 +1,21 @@
-//! The [`ClarabelSosEngine`] discharge engine.
+//! Host proof admission for exact interval certificates.
 //!
-//! Wires the goal-shape fit ([`super::extract`]) and the exact verifier
-//! ([`super::exact`]) into the [`DischargeEngine`] seam. The honesty contract,
-//! enforced here and locked by tests:
+//! A certificate must match the requested polynomial and exact endpoints.
+//! Arithmetic verification checks block symmetry, PSD, and polynomial identity.
+//! Host admission also checks the canonical Markov-Lukacs block layout.
+//! These checks preserve the existing strict-goal rejection behavior.
 //!
-//! - A [`Qualifier::CertificateBearing`] discharge at [`Soundness::Exact`] is
-//!   produced ONLY when an exact rational SoS certificate VERIFIES
-//!   ([`SosCertificate::verify`] returns `Ok`). This is the single gate to
-//!   `Exact`; a float SDP solution alone never reaches it.
-//! - A certificate that FAILS exact verification (non-PSD over the rationals, a
-//!   polynomial mismatch, an asymmetric Gram -- the boundary-degeneracy failure
-//!   modes) yields an honest [`Soundness::Untrusted`] [`TierBResult::Unknown`]
-//!   with an EMPTY qualifier set. Never `Exact`, never a fabricated cert.
-//! - No certificate found (the proposer returns `None`: SDP infeasible, repair
-//!   fails, or -- standalone, before the BLAS-linkage decision -- the proposer
-//!   is not yet wired) yields the same honest `Unknown@Untrusted`.
-//! - A polynomial NEGATIVE somewhere on the interval has no SoS certificate, so
-//!   the proposer returns `None` and the goal is not-proved (never `Disproved`;
-//!   the engine only certifies nonnegativity, it does not refute -- cvc5 owns
-//!   the disproof). At WS-5 merge time a Clarabel `Unknown` falls through to
-//!   cvc5, whose NRA may still decide the goal.
-//!
-//! The proposer is injected as a [`SosProposer`] so the engine's honesty logic
-//! is testable WITHOUT a live Clarabel solve: a mock proposer can hand back a
-//! known-good cert (must reach `Exact`), a known-bad cert (must be rejected to
-//! `Unknown`), or nothing (must be `Unknown`). The real proposer (Markov-Lukacs
-//! SDP, Clarabel, Peyrl-Parrilo repair) plugs in here once the PSD-cone
-//! BLAS-linkage decision is pinned.
+//! Only an admitted certificate yields `CertificateBearing@Exact`.
+//! A missing or rejected certificate yields `Unknown@Untrusted`
+//! with an empty qualifier set and no certificate evidence.
 
 use serde_json::json;
 
-use super::exact::{CertError, SosCertificate};
+use super::encode::SosLayout;
 use super::extract::{PolyOnInterval, extract_poly_on_interval};
 use crate::discharge::{Discharge, DischargeEngine, Goal, Qualifier, QualifierSet, Soundness};
 use crate::tier_b::TierBResult;
+use chelis_certificate_core::exact::{CertError, SosCertificate};
 
 /// Proposes a candidate SoS certificate for a recognized poly-on-interval goal,
 /// or `None` if it cannot (SDP infeasible, repair failed, polynomial negative
@@ -205,9 +187,21 @@ impl<P: SosProposer> DischargeEngine for ClarabelSosEngine<P> {
             );
         }
 
-        // VERIFY the candidate EXACTLY. This is the single gate to Exact.
+        // Preserve arithmetic error precedence before host layout admission.
         match cert.verify() {
             Ok(()) => {
+                if !SosLayout::matches_certificate(
+                    poly_goal.poly.degree().unwrap_or(0),
+                    &poly_goal.lo,
+                    &poly_goal.hi,
+                    &cert,
+                ) {
+                    return Self::unknown(
+                        "certificate does not match the canonical interval layout",
+                        json!({ "cert_matches_goal_layout": false }),
+                    );
+                }
+
                 // The exact rational certificate verifies: every Gram is
                 // symmetric + exactly PSD over the rationals AND the combined
                 // quadratic form equals the goal polynomial exactly. ONLY now do
@@ -286,12 +280,12 @@ fn cert_evidence(cert: &SosCertificate) -> serde_json::Value {
 
 #[cfg(test)]
 mod tests {
-    use super::super::exact::{RatSymMatrix, SosBlock};
-    use super::super::poly::RationalPoly;
     use super::*;
     use crate::discharge::GoalShape;
     use crate::solver::{ArithOp, CmpOp, SmtExpr, SmtSort};
     use crate::tier_b::SmtProperty;
+    use chelis_certificate_core::exact::{RatSymMatrix, SosBlock};
+    use chelis_certificate_core::poly::RationalPoly;
     use num_bigint::BigInt;
     use num_rational::BigRational;
 
@@ -343,10 +337,16 @@ mod tests {
             poly: RationalPoly::from_int_coeffs(&[0, 0, 1]), // x^2
             lo: ri(lo),
             hi: ri(hi),
-            blocks: vec![SosBlock {
-                gram: sym(2, &[0, 0, 0, 1]),
-                multiplier: RationalPoly::from_int_coeffs(&[1]),
-            }],
+            blocks: vec![
+                SosBlock {
+                    gram: sym(2, &[0, 0, 0, 1]),
+                    multiplier: RationalPoly::from_int_coeffs(&[1]),
+                },
+                SosBlock {
+                    gram: sym(1, &[0]),
+                    multiplier: RationalPoly::from_int_coeffs(&[-lo * hi, lo + hi, -1]),
+                },
+            ],
         }
     }
 
@@ -600,10 +600,16 @@ mod tests {
             poly: RationalPoly::from_int_coeffs(&[0, 1, -1]), // x - x^2
             lo: ri(0),
             hi: ri(1),
-            blocks: vec![SosBlock {
-                gram: sym(1, &[1]),
-                multiplier: RationalPoly::from_int_coeffs(&[0, 1, -1]), // x - x^2
-            }],
+            blocks: vec![
+                SosBlock {
+                    gram: sym(2, &[0, 0, 0, 0]),
+                    multiplier: RationalPoly::from_int_coeffs(&[1]),
+                },
+                SosBlock {
+                    gram: sym(1, &[1]),
+                    multiplier: RationalPoly::from_int_coeffs(&[0, 1, -1]),
+                },
+            ],
         };
         let engine = ClarabelSosEngine::with_proposer(FixedProposer(cert));
         let discharge = engine.discharge(&goal, 1_000);

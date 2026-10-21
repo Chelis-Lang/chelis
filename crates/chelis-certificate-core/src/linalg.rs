@@ -1,27 +1,13 @@
-//! Exact rational dense linear algebra for the SoS encoding and the
-//! Peyrl-Parrilo projection.
-//!
-//! Two operations, both pure `BigRational` (no float, no tolerance):
-//!
-//! - [`rref`]: reduced row-echelon form of an augmented system, recording the
-//!   pivot columns. The coefficient-matching constraints `A x = b` (the SoS
-//!   "the blocks' combined quadratic form equals `p`" identity, as a linear
-//!   system in the Gram entries) are solved with this.
-//! - [`project_onto_affine`]: the Peyrl-Parrilo exact projection. Given the
-//!   coefficient-matching system `A x = b` and a candidate point `x0` (the
-//!   float SDP solution, rounded to rationals), produce an EXACT rational point
-//!   that satisfies `A x = b` exactly, staying as close to `x0` as the
-//!   free-variable assignment allows: keep `x0`'s value on every FREE
-//!   (non-pivot) coordinate and solve exactly for the pivot coordinates by
-//!   back-substitution. The result satisfies `A x = b` by construction, so the
-//!   downstream exact verifier's polynomial-identity check passes; only the PSD
-//!   check can then fail (the boundary-degeneracy case).
+//! Exact row reduction and affine repair.
+//! Repair establishes an affine identity, not PSD or proof admission.
+
+use alloc::{vec, vec::Vec};
 
 use num_rational::BigRational;
 use num_traits::Zero;
 
-/// A dense matrix of exact rationals, row-major.
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// A dense rational matrix with row-major storage.
 pub struct RatMatrix {
     rows: usize,
     cols: usize,
@@ -29,8 +15,7 @@ pub struct RatMatrix {
 }
 
 impl RatMatrix {
-    /// Build from a row-major entry vector. Panics if the length is not
-    /// `rows * cols`.
+    /// Construct a matrix. The entry count must equal `rows * cols`.
     pub fn from_data(rows: usize, cols: usize, data: Vec<BigRational>) -> Self {
         assert_eq!(
             data.len(),
@@ -40,7 +25,6 @@ impl RatMatrix {
         Self { rows, cols, data }
     }
 
-    /// A `rows x cols` zero matrix.
     pub fn zeros(rows: usize, cols: usize) -> Self {
         Self {
             rows,
@@ -66,26 +50,16 @@ impl RatMatrix {
     }
 }
 
-/// The result of reducing an augmented system `[A | b]` to reduced row-echelon
-/// form.
 #[derive(Debug, Clone)]
+/// A reduced augmented system with deterministic pivot order.
 pub struct Rref {
-    /// The reduced augmented matrix `[R | c]` with `n_vars + 1` columns.
     pub reduced: RatMatrix,
-    /// The number of variable columns (`A` had `n_vars` columns; the last
-    /// column of `reduced` is the augmented `b`/`c`).
     pub n_vars: usize,
-    /// For each pivot, `(row, var_column)`. Sorted by row.
     pub pivots: Vec<(usize, usize)>,
 }
 
 impl Rref {
-    /// Whether the system is INCONSISTENT (a pivot in the augmented column: a
-    /// `0 = nonzero` row). An inconsistent coefficient-matching system means no
-    /// SoS decomposition of the chosen degree structure reproduces `p`.
     pub fn is_inconsistent(&self) -> bool {
-        // A row that is all-zero in the variable columns but non-zero in the
-        // augmented column is `0 = c != 0`.
         let last = self.n_vars;
         for i in 0..self.reduced.rows() {
             let mut all_zero_vars = true;
@@ -102,9 +76,9 @@ impl Rref {
         false
     }
 
-    /// The free (non-pivot) variable columns, ascending.
+    /// Return non-pivot variable columns in ascending order.
     pub fn free_columns(&self) -> Vec<usize> {
-        let pivot_cols: std::collections::BTreeSet<usize> =
+        let pivot_cols: alloc::collections::BTreeSet<usize> =
             self.pivots.iter().map(|&(_, c)| c).collect();
         (0..self.n_vars)
             .filter(|c| !pivot_cols.contains(c))
@@ -112,9 +86,9 @@ impl Rref {
     }
 }
 
-/// Reduce the augmented system `[A | b]` (an `m x (n+1)` matrix; the last column
-/// is `b`) to reduced row-echelon form over the rationals, recording pivots.
-/// Exact: no tolerance, exact pivot selection (first non-zero in the column).
+/// Reduce an augmented system with exact rational arithmetic.
+/// The matrix must contain `n_vars + 1` columns.
+/// Each pivot uses the first nonzero row at or below the current row.
 pub fn rref(augmented: &RatMatrix, n_vars: usize) -> Rref {
     assert_eq!(
         augmented.cols(),
@@ -131,11 +105,9 @@ pub fn rref(augmented: &RatMatrix, n_vars: usize) -> Rref {
         if pivot_row >= rows {
             break;
         }
-        // Find a row at or below pivot_row with a non-zero entry in this column.
         let Some(sel) = (pivot_row..rows).find(|&r| !m.at(r, col).is_zero()) else {
             continue;
         };
-        // Swap into the pivot row.
         if sel != pivot_row {
             for j in 0..total_cols {
                 let a = m.at(pivot_row, j).clone();
@@ -144,13 +116,11 @@ pub fn rref(augmented: &RatMatrix, n_vars: usize) -> Rref {
                 m.set(sel, j, a);
             }
         }
-        // Normalize the pivot row so the pivot is 1.
         let pivot_val = m.at(pivot_row, col).clone();
         for j in 0..total_cols {
             let v = m.at(pivot_row, j) / &pivot_val;
             m.set(pivot_row, j, v);
         }
-        // Eliminate this column from every other row.
         for r in 0..rows {
             if r == pivot_row {
                 continue;
@@ -175,26 +145,17 @@ pub fn rref(augmented: &RatMatrix, n_vars: usize) -> Rref {
     }
 }
 
-/// Why an exact affine projection failed.
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// An exact affine repair error.
 pub enum ProjectError {
-    /// The coefficient-matching system `A x = b` is inconsistent: no point
-    /// satisfies it, so no SoS decomposition of the chosen structure reproduces
-    /// `p`.
     Inconsistent,
 }
 
-/// The Peyrl-Parrilo exact projection. Given the coefficient-matching system
-/// `A x = b` (as the augmented matrix `[A | b]`) and a candidate point `x0`
-/// (length `n_vars`, the rounded float solution), return an EXACT rational point
-/// `x` that satisfies `A x = b` exactly: `x` keeps `x0`'s value on every FREE
-/// (non-pivot) coordinate and solves exactly for each pivot coordinate by
-/// back-substitution. `Err(Inconsistent)` if no point satisfies the system.
-///
-/// The returned point satisfies `A x = b` EXACTLY (the polynomial identity holds
-/// exactly), so the downstream exact verifier's identity check passes by
-/// construction; only the PSD check can then fail (boundary degeneracy). This is
-/// the projection step the SoS rational repair runs before verifying.
+/// Preserve free coordinates and solve pivot coordinates exactly.
+/// The candidate must contain `n_vars` entries.
+/// The augmented matrix must contain `n_vars + 1` columns.
+/// An inconsistent system returns `ProjectError::Inconsistent`.
+/// Success does not establish PSD or proof admission.
 pub fn project_onto_affine(
     augmented: &RatMatrix,
     n_vars: usize,
@@ -205,14 +166,8 @@ pub fn project_onto_affine(
     if r.is_inconsistent() {
         return Err(ProjectError::Inconsistent);
     }
-    // Start from x0 on every coordinate; the free coordinates keep their x0
-    // value, and we overwrite each pivot coordinate by its reduced-row equation.
     let mut x = x0.to_vec();
     let aug_col = n_vars;
-    // In RREF, each pivot row reads:  x[pivot_col] + sum_{free} R[row][free] * x[free] = c[row]
-    // so  x[pivot_col] = c[row] - sum_{free} R[row][free] * x[free].
-    // The free x values are x0's (already in `x`); reference them, not the
-    // pivot ones (a reduced pivot row has zero in every OTHER pivot column).
     for &(row, pcol) in &r.pivots {
         let mut val = r.reduced.at(row, aug_col).clone();
         for fcol in r.free_columns() {
@@ -243,7 +198,6 @@ mod tests {
         RatMatrix::from_data(rows, cols, vals.iter().map(|&v| ri(v)).collect())
     }
 
-    /// Check `A x = b` exactly for an augmented `[A | b]`.
     fn satisfies(augmented: &RatMatrix, n_vars: usize, x: &[BigRational]) -> bool {
         for i in 0..augmented.rows() {
             let mut lhs = BigRational::zero();
@@ -259,20 +213,17 @@ mod tests {
 
     #[test]
     fn rref_solves_a_unique_2x2_system() {
-        // x + y = 3 ; x - y = 1  ->  x = 2, y = 1.
         let aug = mat(2, 3, &[1, 1, 3, 1, -1, 1]);
         let r = rref(&aug, 2);
         assert!(!r.is_inconsistent());
         assert_eq!(r.pivots.len(), 2);
         assert!(r.free_columns().is_empty());
-        // Reduced augmented column holds the unique solution.
         assert_eq!(*r.reduced.at(0, 2), ri(2));
         assert_eq!(*r.reduced.at(1, 2), ri(1));
     }
 
     #[test]
     fn rref_detects_inconsistency() {
-        // x + y = 1 ; x + y = 2  -> inconsistent.
         let aug = mat(2, 3, &[1, 1, 1, 1, 1, 2]);
         let r = rref(&aug, 2);
         assert!(r.is_inconsistent());
@@ -280,7 +231,6 @@ mod tests {
 
     #[test]
     fn rref_identifies_free_columns_in_underdetermined_system() {
-        // x + y + z = 1 (one equation, three vars) -> one pivot, two free.
         let aug = mat(1, 4, &[1, 1, 1, 1]);
         let r = rref(&aug, 3);
         assert!(!r.is_inconsistent());
@@ -290,20 +240,17 @@ mod tests {
 
     #[test]
     fn project_keeps_free_coords_and_solves_pivots_exactly() {
-        // x + y + z = 1, free y, z. With x0 = [9, 1/2, 1/4] the projection keeps
-        // y = 1/2, z = 1/4 and solves x = 1 - 1/2 - 1/4 = 1/4.
         let aug = mat(1, 4, &[1, 1, 1, 1]);
         let x0 = vec![ri(9), r(1, 2), r(1, 4)];
         let x = project_onto_affine(&aug, 3, &x0).expect("consistent");
         assert_eq!(x[0], r(1, 4));
-        assert_eq!(x[1], r(1, 2)); // free, unchanged
-        assert_eq!(x[2], r(1, 4)); // free, unchanged
+        assert_eq!(x[1], r(1, 2));
+        assert_eq!(x[2], r(1, 4));
         assert!(satisfies(&aug, 3, &x));
     }
 
     #[test]
     fn project_onto_unique_solution_ignores_x0() {
-        // Unique solution (no free vars): x = 2, y = 1 regardless of x0.
         let aug = mat(2, 3, &[1, 1, 3, 1, -1, 1]);
         let x0 = vec![ri(100), ri(-100)];
         let x = project_onto_affine(&aug, 2, &x0).expect("consistent");
@@ -314,8 +261,6 @@ mod tests {
 
     #[test]
     fn project_result_satisfies_system_exactly_with_rational_x0() {
-        // 2x + 4y = 6, free y. x0 = [0, 7/3]: keep y = 7/3, solve
-        // x = (6 - 4*7/3)/2 = (6 - 28/3)/2 = (-10/3)/2 = -5/3.
         let aug = mat(1, 3, &[2, 4, 6]);
         let x0 = vec![ri(0), r(7, 3)];
         let x = project_onto_affine(&aug, 2, &x0).expect("consistent");
@@ -336,8 +281,6 @@ mod tests {
 
     #[test]
     fn project_handles_multiple_pivots_and_frees() {
-        // x + z = 2 ; y + z = 3, free z. x0 = [0,0, 1/2]:
-        // keep z = 1/2, x = 2 - 1/2 = 3/2, y = 3 - 1/2 = 5/2.
         let aug = mat(2, 4, &[1, 0, 1, 2, 0, 1, 1, 3]);
         let x0 = vec![ri(0), ri(0), r(1, 2)];
         let x = project_onto_affine(&aug, 3, &x0).expect("consistent");

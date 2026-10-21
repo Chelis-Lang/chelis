@@ -1,17 +1,9 @@
-//! Exact univariate polynomials over the rationals.
-//!
-//! The SoS certificate's trust anchor is exact rational arithmetic: a
-//! certificate is valid iff its Gram-matrix quadratic form re-multiplies to the
-//! goal polynomial EXACTLY (this module's `==`) and every Gram matrix is exactly
-//! PSD over the rationals (see [`super::exact`]). Nothing here uses floats, so
-//! the verifier is independent of the Clarabel float SDP proposer's precision.
-//!
-//! Representation: a dense coefficient vector `coeffs`, little-endian by degree
-//! (`coeffs[i]` is the coefficient of `x^i`). The canonical form has no trailing
-//! zero coefficients (so equal polynomials have an equal coefficient vector and
-//! an equal degree), enforced by [`RationalPoly::trim`].
+//! Exact univariate polynomials with rational coefficients.
+//! Coefficients use degree order and contain no final zero entries.
 
+use alloc::{vec, vec::Vec};
 use num_bigint::BigInt;
+
 use num_rational::BigRational;
 use num_traits::{One, Zero};
 
@@ -126,7 +118,7 @@ impl RationalPoly {
         Self::from_coeffs(self.coeffs.iter().map(|c| -c.clone()).collect())
     }
 
-    /// Exact product (schoolbook convolution; degrees here are small).
+    /// Exact product with schoolbook convolution.
     pub fn mul(&self, other: &Self) -> Self {
         if self.is_zero() || other.is_zero() {
             return Self::zero();

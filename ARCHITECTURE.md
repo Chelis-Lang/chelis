@@ -145,5 +145,27 @@ Run `.venv/bin/python scripts/shell_metadata_core_oracle.py` for isolated target
 The [acceptance gate](docs/manual_gates.md#shell-metadata-core-portability) lists prerequisites, evidence, and CI owners.
 Target compilation proves neither device execution nor allocator capacity.
 
+## Portable certificate arithmetic
+
+`chelis-certificate-core` owns exact rational polynomials, matrices, PSD checks, certificate arithmetic, and affine projection.
+It uses unconditional `no_std` with `alloc` and arbitrary-precision rational dependencies without `std` defaults.
+Consumers import its `poly`, `exact`, and `linalg` modules directly.
+The former `chelis_prove::clarabel_sos` arithmetic modules do not exist.
+
+Arithmetic verification checks Gram symmetry, positive semidefiniteness, and the certificate's own polynomial identity.
+It does not establish the requested goal, interval validity, or multiplier nonnegativity.
+`RatSymMatrix::is_psd` needs a symmetric input.
+`SosCertificate::verify` checks symmetry before PSD.
+
+The host retains goal extraction, canonical interval layouts, Clarabel, native BLAS, floating-point proposals, evidence, and proof admission.
+Admission needs exact goal and endpoint agreement, arithmetic verification, and the canonical block count, matrix dimensions, and ordered interval multipliers.
+Layout construction and admission share canonical block definitions.
+Only host admission can produce `CertificateBearing@Exact`.
+
+Run `.venv/bin/python scripts/certificate_core_oracle.py` for independent target consumers, fixed-revision arithmetic comparisons, and native host admission.
+The [acceptance gate](docs/manual_gates.md#certificate-arithmetic-core-portability) defines prerequisites, evidence, and CI owners.
+Target compilation does not prove device execution, allocator capacity, or whole-pipeline portability.
+
+
 
 

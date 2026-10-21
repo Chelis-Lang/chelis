@@ -83,6 +83,16 @@ rec {
       # File a bug if you depend on any for non-debug work!
       debug = internal.debugCrate { inherit packageId; };
     };
+    "chelis-certificate-core" = rec {
+      packageId = "chelis-certificate-core";
+      build = internal.buildRustCrateWithFeatures {
+        packageId = "chelis-certificate-core";
+      };
+
+      # Debug support which might change between releases.
+      # File a bug if you depend on any for non-debug work!
+      debug = internal.debugCrate { inherit packageId; };
+    };
     "chelis-clarabel-provider" = rec {
       packageId = "chelis-clarabel-provider";
       build = internal.buildRustCrateWithFeatures {
@@ -1934,6 +1944,32 @@ rec {
         ];
 
       };
+      "chelis-certificate-core" = rec {
+        crateName = "chelis-certificate-core";
+        version = "0.21.1";
+        edition = "2024";
+        src = lib.cleanSourceWith { filter = sourceFilter;  src = ./crates/chelis-certificate-core; };
+        libName = "chelis_certificate_core";
+        dependencies = [
+          {
+            name = "num-bigint";
+            packageId = "num-bigint";
+            usesDefaultFeatures = false;
+          }
+          {
+            name = "num-rational";
+            packageId = "num-rational";
+            usesDefaultFeatures = false;
+            features = [ "num-bigint" ];
+          }
+          {
+            name = "num-traits";
+            packageId = "num-traits";
+            usesDefaultFeatures = false;
+          }
+        ];
+
+      };
       "chelis-clarabel-provider" = rec {
         crateName = "chelis-clarabel-provider";
         version = "0.21.1";
@@ -3163,7 +3199,7 @@ rec {
           "arb" = [ "dep:arb-sys" ];
           "carcara" = [ "smt" "dep:carcara" ];
           "ci-openblas-system" = [ "clarabel" "dep:openblas-src" ];
-          "clarabel" = [ "dep:clarabel" "num-rational" "dep:num-bigint" "dep:num-traits" ];
+          "clarabel" = [ "dep:clarabel" "dep:chelis-certificate-core" "num-rational" "dep:num-bigint" "dep:num-traits" ];
           "clarabel-provider" = [ "chelis-compiler-api/clarabel-provider" ];
           "cvc5-rs" = [ "dep:cvc5-rs" ];
           "num-rational" = [ "dep:num-rational" ];

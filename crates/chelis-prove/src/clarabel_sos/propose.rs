@@ -1,13 +1,10 @@
 //! The Clarabel float SDP proposer (behind the BLAS-linked `sdp` backend).
 //!
-//! This is the ONLY float / BLAS-dependent step. It PROPOSES a candidate SoS
-//! certificate by solving the Markov-Lukacs PSD feasibility SDP with Clarabel,
-//! reading back the float Gram matrices, rounding to rationals, and running the
-//! Peyrl-Parrilo exact projection ([`super::linalg::project_onto_affine`]) so
-//! the candidate's polynomial identity holds EXACTLY. It does NOT decide
-//! soundness: the engine ([`super::engine`]) re-verifies the candidate exactly
-//! before trusting it, so a numerically-off or boundary-degenerate proposal is
-//! rejected downstream rather than laundered into a false `Exact`.
+//! Clarabel proposes floating-point Gram matrices for the host interval layout.
+//! Exact affine projection repairs the polynomial identity over rationals.
+//! [`chelis_certificate_core::linalg::project_onto_affine`] owns that repair.
+//! The host engine checks arithmetic, goal binding, and canonical layout.
+//! A floating-point result alone does not authorize a proof.
 //!
 //! # SDP variable layout
 //!
@@ -34,9 +31,9 @@ use num_rational::BigRational;
 
 use super::encode::SosLayout;
 use super::engine::SosProposer;
-use super::exact::SosCertificate;
 use super::extract::PolyOnInterval;
-use super::linalg::project_onto_affine;
+use chelis_certificate_core::exact::SosCertificate;
+use chelis_certificate_core::linalg::project_onto_affine;
 
 /// The Clarabel SDP proposer. Solves the Markov-Lukacs PSD feasibility problem
 /// in floating point, then rounds + projects to an exact rational candidate.
@@ -237,9 +234,9 @@ fn dense_to_csc(dense: &[Vec<f64>], rows: usize, cols: usize) -> CscMatrix<f64> 
 
 #[cfg(test)]
 mod tests {
-    use super::super::poly::RationalPoly;
     use super::*;
-    use crate::clarabel_sos::exact::CertError;
+    use chelis_certificate_core::exact::CertError;
+    use chelis_certificate_core::poly::RationalPoly;
 
     fn ri(n: i64) -> BigRational {
         BigRational::from(BigInt::from(n))

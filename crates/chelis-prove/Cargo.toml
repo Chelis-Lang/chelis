@@ -30,16 +30,11 @@ clarabel-provider = ["chelis-compiler-api/clarabel-provider"]
 # libz3 on this workstation). See `docs/local_z3_environment.md` for the link
 # recipe and `scripts/z3_test.py` for the wrapper that sets it.
 z3 = ["dep:z3", "num-rational"]
-# WI-15 SoS certificate engine: a univariate-polynomial-nonneg-on-interval
-# DischargeEngine that proves p(x) >= 0 on [a,b] via a Markov-Lukacs
-# sum-of-squares SDP (Clarabel as the float SDP core) followed by a
-# Peyrl-Parrilo EXACT RATIONAL repair + exact certificate verification. The
-# certificate trust anchor is pure rational arithmetic (num-rational over
-# num-bigint), independent of Clarabel's float precision: a float SDP solution
-# is only a proposal; the exact-verified rational cert is the proof. The
-# discharge is CertificateBearing@Exact ONLY when the exact cert verifies. The
-# default / smt / solver-free builds link none of this.
-clarabel = ["dep:clarabel", "num-rational", "dep:num-bigint", "dep:num-traits"]
+# Clarabel supplies floating-point proposals for interval certificates.
+# Portable rational arithmetic checks each certificate.
+# Host admission binds it to the requested goal and canonical interval layout.
+# Solver-free builds do not enable this feature.
+clarabel = ["dep:clarabel", "dep:chelis-certificate-core", "num-rational", "dep:num-bigint", "dep:num-traits"]
 # CI's pinned Nix LP64 provider supplies the static OpenBLAS archive. The
 # supported `system` feature skips openblas-src's native source build; keeping
 # this opt-in preserves the bundled provider for ordinary non-Nix builds.
@@ -68,6 +63,7 @@ arb = ["dep:arb-sys"]
 
 [dependencies]
 chelis-syntax-host.workspace = true
+chelis-certificate-core = { workspace = true, optional = true }
 chelis-reef.workspace = true
 chelis-unord.workspace = true
 cvc5-rs = { version = "0.3", optional = true }
@@ -156,6 +152,10 @@ chelis-crmath.workspace = true
 # parameter and never depends on the bundle.
 chelis-std-bundle.workspace = true
 syn.workspace = true
+
+[[test]]
+name = "certificate_core_contract"
+required-features = ["clarabel"]
 
 # A compiled mock `chelis-beacon` binary for the shim integration tests: it reads
 # a request and emits a canned CheckReport JSON selected by an env var, so every
