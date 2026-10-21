@@ -425,6 +425,14 @@ input graph through Item 6's per-shell install path. Without entries, it
 resolves the canonical default roots and their complete dependency closure.
 Both forms report shells in deterministic dependency order.
 
+`chelis-reef-bootstrap-core::validate_and_order` owns checked graph order for explicit and resolved default inputs.
+The dependency-free core uses `no_std` with `alloc` and accepts exact identities and ordered edges.
+For explicit inputs, Reef matches typed requirements before projection and retains each occurrence's original release spec.
+Manifest access, runtime checks, default discovery, artifact verification, and installation remain host operations.
+
+Run `.venv/bin/python scripts/reef_bootstrap_core_oracle.py` for portable graph and host parity checks.
+Target compilation does not prove device execution or allocator capacity.
+
 **Behavior.**
 
 - For explicit selectors, parse entries into a graph keyed by `(name, version)` with edges

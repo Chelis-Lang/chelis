@@ -22,6 +22,7 @@ members = [
     "crates/chelis-std-bundle",
     "crates/chelis-conformance",
     "crates/chelis-reef",
+    "crates/chelis-reef-bootstrap-core",
     "crates/chelis-deep",
     "crates/chelis-pred",
     "crates/chelis-macros",
@@ -78,6 +79,7 @@ chelis-shell = { path = "crates/chelis-shell" }
 chelis-std-bundle = { path = "crates/chelis-std-bundle" }
 chelis-conformance = { path = "crates/chelis-conformance" }
 chelis-reef = { path = "crates/chelis-reef" }
+chelis-reef-bootstrap-core = { path = "crates/chelis-reef-bootstrap-core" }
 chelis-macros = { path = "crates/chelis-macros" }
 chelis-surf = { path = "crates/chelis-surf" }
 chelis-types = { path = "crates/chelis-types" }

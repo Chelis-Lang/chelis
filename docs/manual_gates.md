@@ -164,6 +164,28 @@ Default PR CI does not execute this complete command.
 The native measurements do not prove device execution or device memory capacity.
 Owner: chelis#3979.
 
+## Reef bootstrap core portability
+
+Run `.venv/bin/python scripts/reef_bootstrap_core_oracle.py` from the repository root.
+It needs the pinned Rust toolchain, `thumbv7em-none-eabi`, `cargo-nextest`, and the checkout's uv-managed Python environment.
+`python3` must execute from `PATH` for the CLI fixtures.
+
+Success means exit zero and the final line `reef bootstrap core oracle: PASS`.
+The command checks:
+
+- Independent target consumers with default features enabled and disabled, without package dependencies.
+- A host consumer with an explicit allocator, exact graph orders, and typed errors.
+- Conflict precedence, missing-edge order, cycle paths, repeated occurrences, and a long iterative chain.
+- Real Reef and CLI fixtures for requirements, diagnostics, artifact failure, fetch counts, and retry state.
+- Test identities, complete execution results, public API rejection, and negative dependency controls.
+
+The existing real-release manual gate remains separate because it needs a compatible published shell graph.
+Linux integration support executes this command in its domain slice.
+macOS nightly validation executes it on workspace shard one.
+Default PR CI does not execute the complete command.
+Target compilation does not prove device execution, and host execution does not prove firmware acceptance.
+Owner: chelis#3984.
+
 ## Compiler feature acceptance gates
 
 The incremental [eval-performance suite](eval_performance.md) runs its sparse

@@ -738,6 +738,61 @@ fn bootstrap_typed_peer_edges_preserve_cycle_rejection() {
     assert!(!registry.exists());
 }
 
+#[test]
+fn bootstrap_core_preserves_conflict_and_requirement_precedence() {
+    let _g = file_lock();
+    let user = peer_requirement_fixture(2, "=0.9.0");
+    let peer = SyntheticShell::new("chelis-lang", "peer", "v0.2.0", "0.2.0", vec![]);
+    let duplicate = SyntheticShell::new("chelis-lang", "peer", "v0.3.0", "0.3.0", vec![]);
+    let harness = fixture_for_shells(&[user.clone(), peer.clone(), duplicate.clone()]);
+    let dir = tempdir().expect("tempdir");
+    let registry = dir.path().join("registry");
+    let inputs = [
+        user.spec_string(),
+        peer.spec_string(),
+        duplicate.spec_string(),
+    ];
+    let references = inputs.iter().map(String::as_str).collect::<Vec<_>>();
+    let error = lib_install_bootstrap(
+        &references,
+        &harness.uri(),
+        Some("unit-test-token"),
+        &registry,
+    )
+    .expect_err("version conflict precedes incompatible requirement");
+    assert!(matches!(
+        error,
+        chelis_reef::BootstrapError::DuplicateVersion { .. }
+    ));
+    assert!(harness.install_order().is_empty());
+    assert!(!registry.exists());
+
+    let mut peer = peer;
+    peer.schema = 2;
+    peer.deps.push(("peer", "=0.2.0".to_string()));
+    let harness = fixture_for_shells(&[user.clone(), peer.clone()]);
+    let inputs = [user.spec_string(), peer.spec_string()];
+    let references = inputs.iter().map(String::as_str).collect::<Vec<_>>();
+    let error = lib_install_bootstrap(
+        &references,
+        &harness.uri(),
+        Some("unit-test-token"),
+        &registry,
+    )
+    .expect_err("incompatible requirement precedes cycle");
+    assert_eq!(
+        error.to_string(),
+        "shell `peer-user` requires `peer` `=0.9.0`, but the bootstrap input list \
+         selects `0.2.0`. Select a shell version that satisfies the requirement."
+    );
+    assert!(matches!(
+        error,
+        chelis_reef::BootstrapError::Validation { .. }
+    ));
+    assert!(harness.install_order().is_empty());
+    assert!(!registry.exists());
+}
+
 // The default-mode contract is owned by reef_distribution.md Item 7.
 fn default_cohort() -> Vec<SyntheticShell> {
     let mut shells = vec![
