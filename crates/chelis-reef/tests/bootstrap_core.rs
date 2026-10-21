@@ -82,9 +82,9 @@ impl Host {
         } else {
             format!("{:x}", Sha256::digest(&bytes))
         };
-        let shell = chelis_shell::ShellPackage {
-            format_version: chelis_shell::SHELL_FORMAT_VERSION,
-            package: chelis_shell::PackageId {
+        let shell = chelis_shell_core::ShellPackage {
+            format_version: chelis_shell_core::SHELL_FORMAT_VERSION,
+            package: chelis_shell_core::PackageId {
                 name: name.into(),
                 version: version.into(),
             },

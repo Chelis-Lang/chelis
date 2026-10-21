@@ -90,6 +90,7 @@ cargo-husky = { version = "1", default-features = false, features = ["user-hooks
 # bit casts are memcpy, from the code the probe's own lowering emits.
 chelis-crmath.workspace = true
 chelis-shell.workspace = true
+chelis-shell-core.workspace = true
 # `reef_setup.rs` synthesizes a chelis toolchain release tarball
 # (`chelis-vX.Y.Z-<build>.tar.gz`, gzip) so the auto-install-via-chelisup path
 # runs fully offline through the real chelisup binary.

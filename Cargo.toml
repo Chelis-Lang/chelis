@@ -18,6 +18,7 @@ members = [
     "crates/chelis-version",
     "crates/chelis-image-id",
     "crates/chelis-python",
+    "crates/chelis-shell-core",
     "crates/chelis-shell",
     "crates/chelis-std-bundle",
     "crates/chelis-conformance",
@@ -75,6 +76,7 @@ chelis-runtime-bundle-macro = { path = "crates/chelis-runtime-bundle-macro" }
 chelis-runtime-bundle = { path = "crates/chelis-runtime-bundle" }
 chelis-compiler-api = { path = "crates/chelis-compiler-api" }
 chelis-pipeline-core = { path = "crates/chelis-pipeline-core" }
+chelis-shell-core = { path = "crates/chelis-shell-core" }
 chelis-shell = { path = "crates/chelis-shell" }
 chelis-std-bundle = { path = "crates/chelis-std-bundle" }
 chelis-conformance = { path = "crates/chelis-conformance" }

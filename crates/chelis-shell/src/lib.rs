@@ -1,216 +1,18 @@
 use bincode::Options;
-use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+#[cfg(test)]
+use chelis_shell_core::{
+    CollectionObligation, FloatClassifyKind, PackageId, ShellModule, ShellSymbol, SymbolKind,
+    TypeVariableDomain, TypeVariableRestriction,
+};
+use chelis_shell_core::{SHELL_FORMAT_VERSION, ShellPackage};
 use std::fs;
 use std::path::Path;
 
 pub const SHELL_MAGIC: &[u8; 8] = b"CHELCHB\0";
-// v4 carries #2071's authored and operation-value type-variable domains. v5
-// adds checked collection-operation relations. Positional bincode cannot read
-// either change as an absent field without changing the programs an export
-// admits, so both require exact version rejection.
-/// Bumped to 6 for chelis#2443: [`TypeVariableDomain`] gained an
-/// `ActiveSet` variant, so a shell published by this compiler can carry a
-/// domain a version-5 reader cannot decode.
-// #3130: Surf stages carry explicit syntax and Deep 0.20 has no Pipe.
-// Float classification adds a checked predicate relation to exported schemes.
-pub const SHELL_FORMAT_VERSION: u32 = 8;
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ShellPackage {
-    pub format_version: u32,
-    pub package: PackageId,
-    pub compiler: String,
-    pub modules: Vec<ShellModule>,
-    pub dependencies: Vec<PackageId>,
-    pub archive_sha256: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PackageId {
-    pub name: String,
-    pub version: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ShellModule {
-    pub module: String,
-    pub exports: Vec<ShellSymbol>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ShellSymbol {
-    pub name: String,
-    pub kind: SymbolKind,
-    /// Canonical serialized type for a value export. Values always carry
-    /// `Some` (including signature-only exports with `has_body == false`);
-    /// type, macro, and dimension exports may use `None`. An empty string is
-    /// never a representation.
-    pub type_repr: Option<String>,
-    pub type_variable_restrictions: Vec<TypeVariableRestriction>,
-    /// Published description of this function value's checked
-    /// collection-operation relations. This ledger contributes to CHB package
-    /// identity; it is not a serialized checker-reuse environment. Every
-    /// canonical variable must also occur in `type_repr`; newly authored
-    /// wrappers may not publish hidden body-inferred predicates ([04-INF-9]).
-    pub collection_obligations: Vec<CollectionObligation>,
-    pub effects: Vec<String>,
-    pub has_body: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum FloatClassifyKind {
-    Nan,
-    Finite,
-    Infinite,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub enum CollectionObligation {
-    FloatClassify {
-        kind: FloatClassifyKind,
-        operand: String,
-        result: String,
-    },
-    Len {
-        operand: String,
-        result: String,
-    },
-    Index {
-        list: String,
-        index: String,
-        result: String,
-    },
-    Append {
-        list: String,
-        value: String,
-        result: String,
-    },
-    Concat {
-        lhs: String,
-        rhs: String,
-        result: String,
-    },
-    KeyFromSeed {
-        operand: String,
-        result: String,
-    },
-    SplitKey {
-        operand: String,
-        result: String,
-    },
-    SplitKeys {
-        operand: String,
-        count: String,
-        result: String,
-    },
-    FoldIn {
-        operand: String,
-        index: String,
-        result: String,
-    },
-}
-
-impl CollectionObligation {
-    pub fn builtin(&self) -> &'static str {
-        match self {
-            Self::FloatClassify { kind, .. } => match kind {
-                FloatClassifyKind::Nan => "is_nan",
-                FloatClassifyKind::Finite => "is_finite",
-                FloatClassifyKind::Infinite => "is_infinite",
-            },
-            Self::Len { .. } => "len",
-            Self::Index { .. } => "index",
-            Self::Append { .. } => "append",
-            Self::Concat { .. } => "concat",
-            Self::KeyFromSeed { .. } => "key_from_seed",
-            Self::SplitKey { .. } => "split_key",
-            Self::SplitKeys { .. } => "split_keys",
-            Self::FoldIn { .. } => "fold_in",
-        }
-    }
-
-    pub fn types(&self) -> Vec<&str> {
-        match self {
-            Self::FloatClassify {
-                operand, result, ..
-            }
-            | Self::Len { operand, result } => vec![operand, result],
-            Self::Index {
-                list,
-                index,
-                result,
-            } => vec![list, index, result],
-            Self::Append {
-                list,
-                value,
-                result,
-            } => vec![list, value, result],
-            Self::Concat { lhs, rhs, result } => vec![lhs, rhs, result],
-            Self::KeyFromSeed { operand, result } | Self::SplitKey { operand, result } => {
-                vec![operand, result]
-            }
-            Self::SplitKeys {
-                operand,
-                count,
-                result,
-            } => vec![operand, count, result],
-            Self::FoldIn {
-                operand,
-                index,
-                result,
-            } => vec![operand, index, result],
-        }
-    }
-}
-
-/// A canonical quantified-type-variable domain carried across public package
-/// metadata. `variable` names the alpha-canonical identity in `type_repr`.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct TypeVariableRestriction {
-    pub variable: String,
-    pub domain: TypeVariableDomain,
-}
-
-/// The §5.9 primitive dtype bounds and §3.1 inferred operation-value
-/// restrictions from `spec/04-type-system.md`, kept distinct in published
-/// metadata. A new semantic domain requires a spec and shell format change.
-// Not `Copy`: §5.9's set form publishes its member spellings, so the domain
-// carries a `Vec`. A published format names its dtypes rather than encoding
-// them as bits, which a shell consumer would have to decode.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TypeVariableDomain {
-    /// §5.9 `Float`.
-    ActiveFloat,
-    /// §5.9 `Int`.
-    ActiveInt,
-    /// §5.9 `Numeric`.
-    ActiveNumeric,
-    /// An inferred operation operand is a float scalar or tensor, not a dtype.
-    FloatValue,
-    /// An inferred operation operand is a signed integer scalar or tensor.
-    IntValue,
-    /// An inferred operation operand is a numeric scalar or tensor.
-    NumericValue,
-    /// §5.9's explicit dtype set, as the member spellings it admits in §1.1
-    /// declaration order. Unlike a family, this does not widen when §1.1
-    /// activates a dtype, so the members are published rather than a name.
-    ActiveSet(Vec<String>),
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum SymbolKind {
-    Value,
-    Type,
-    Macro,
-    Dim,
-}
 
 pub fn encode_shell(shell: &ShellPackage) -> Result<Vec<u8>, bincode::Error> {
-    validate_shell(shell)?;
+    chelis_shell_core::validate_shell(shell, &chelis_syntax_host::NativeStack)
+        .map_err(metadata_error)?;
     let payload = bincode::serialize(shell)?;
     let mut encoded = Vec::with_capacity(SHELL_MAGIC.len() + 4 + payload.len());
     encoded.extend_from_slice(SHELL_MAGIC);
@@ -244,7 +46,8 @@ pub fn decode_shell(bytes: &[u8]) -> Result<ShellPackage, bincode::Error> {
         .with_fixint_encoding()
         .reject_trailing_bytes()
         .deserialize(payload)?;
-    validate_shell(&shell)?;
+    chelis_shell_core::validate_shell(&shell, &chelis_syntax_host::NativeStack)
+        .map_err(metadata_error)?;
     let canonical = encode_shell(&shell)?;
     if canonical != bytes {
         return Err(validation_error(
@@ -265,388 +68,14 @@ pub fn read_shell(path: &Path) -> Result<ShellPackage, Box<dyn std::error::Error
     Ok(decode_shell(&bytes)?)
 }
 
-/// Validate invariants carried by the complete CHB payload.
-///
-/// A CHB is read at a package-install trust boundary, so fields that are
-/// not needed to locate the paired archive still need validation. This
-/// rejects malformed metadata, ambiguous duplicate entries, and ordering
-/// that cannot have been emitted by [`encode_shell`] from Reef's canonical
-/// shell builder.
-pub fn validate_shell(shell: &ShellPackage) -> Result<(), bincode::Error> {
-    if shell.format_version != SHELL_FORMAT_VERSION {
-        return Err(validation_error(&format!(
-            "payload format version {} is unsupported; expected {SHELL_FORMAT_VERSION}; {}regenerate the shell package",
-            shell.format_version,
-            if shell.format_version == 6 {
-                "Deep 0.20 removes pipe nodes; "
-            } else {
-                ""
-            }
-        )));
-    }
-    validate_nonempty_trimmed("package.name", &shell.package.name)?;
-    validate_nonempty_trimmed("package.version", &shell.package.version)?;
-    validate_compiler_pin(&shell.compiler)?;
-    if !is_lowercase_hex_sha256(&shell.archive_sha256) {
-        return Err(validation_error(
-            "archive_sha256 must be exactly 64 lowercase hexadecimal characters",
-        ));
-    }
-
-    validate_strict_order(
-        "modules",
-        shell.modules.iter().map(|module| module.module.as_str()),
-    )?;
-    for module in &shell.modules {
-        validate_nonempty_trimmed("module name", &module.module)?;
-        validate_strict_order(
-            &format!("exports for module `{}`", module.module),
-            module.exports.iter().map(|symbol| symbol.name.as_str()),
-        )?;
-        for symbol in &module.exports {
-            validate_nonempty_trimmed("export name", &symbol.name)?;
-            validate_collection_obligations_for_type_repr(
-                symbol.type_repr.as_deref(),
-                &symbol.collection_obligations,
-            )
-            .map_err(|message| {
-                validation_error(&format!(
-                    "collection obligations for export `{}` in module `{}` {message}",
-                    symbol.name, module.module
-                ))
-            })?;
-            let variables = match &symbol.type_repr {
-                Some(type_repr) => Some(canonical_variables(type_repr, true)?),
-                None if symbol.kind == SymbolKind::Value => {
-                    return Err(validation_error(&format!(
-                        "value export `{}` in module `{}` requires a type representation",
-                        symbol.name, module.module
-                    )));
-                }
-                None => None,
-            };
-            validate_type_variable_restrictions(
-                &format!(
-                    "type-variable restrictions for export `{}` in module `{}`",
-                    symbol.name, module.module
-                ),
-                &symbol.type_variable_restrictions,
-            )?;
-            if !symbol.type_variable_restrictions.is_empty() && symbol.type_repr.is_none() {
-                return Err(validation_error(&format!(
-                    "export `{}` in module `{}` carries type-variable restrictions without a type representation",
-                    symbol.name, module.module
-                )));
-            }
-            if let Some(variables) = variables {
-                for restriction in &symbol.type_variable_restrictions {
-                    let index = canonical_type_variable_index(&restriction.variable)?;
-                    if !variables.types.contains(&index) {
-                        return Err(validation_error(&format!(
-                            "export `{}` in module `{}` restricts `{}` but that canonical variable is absent from its type representation",
-                            symbol.name, module.module, restriction.variable
-                        )));
-                    }
-                }
-            }
-            for effect in &symbol.effects {
-                validate_nonempty_trimmed("effect name", effect)?;
-            }
-        }
-    }
-
-    validate_strict_order(
-        "dependencies",
-        shell
-            .dependencies
-            .iter()
-            .map(|dependency| dependency.name.as_str()),
-    )?;
-    for dependency in &shell.dependencies {
-        validate_nonempty_trimmed("dependency name", &dependency.name)?;
-        if !dependency.version.is_empty() && dependency.version.trim() != dependency.version {
-            return Err(validation_error(&format!(
-                "dependency `{}` version must not have leading or trailing whitespace",
-                dependency.name
-            )));
-        }
-    }
-    Ok(())
-}
-
-fn validate_nonempty_trimmed(label: &str, value: &str) -> Result<(), bincode::Error> {
-    if value.is_empty() || value.trim() != value {
-        return Err(validation_error(&format!(
-            "{label} must be non-empty without leading or trailing whitespace"
-        )));
-    }
-    Ok(())
-}
-
-fn validate_type_variable_restrictions(
-    label: &str,
-    restrictions: &[TypeVariableRestriction],
-) -> Result<(), bincode::Error> {
-    let mut previous = None;
-    for restriction in restrictions {
-        let index = canonical_type_variable_index(&restriction.variable)?;
-        if previous.is_some_and(|prior| prior >= index) {
-            return Err(validation_error(&format!(
-                "{label} must be strictly sorted by canonical index with no duplicates"
-            )));
-        }
-        previous = Some(index);
-    }
-    Ok(())
-}
-
-fn canonical_type_variable_index(value: &str) -> Result<u32, bincode::Error> {
-    let Some(index) = value.strip_prefix('t') else {
-        return Err(validation_error(
-            "restricted type-variable identities must use canonical `t<index>` spelling",
-        ));
-    };
-    if index.is_empty()
-        || !index.bytes().all(|byte| byte.is_ascii_digit())
-        || (index.len() > 1 && index.starts_with('0'))
-    {
-        return Err(validation_error(
-            "restricted type-variable identities must use canonical `t<index>` spelling",
-        ));
-    }
-    index.parse().map_err(|_| {
-        validation_error("restricted type-variable identity index exceeds the u32 range")
-    })
-}
-
-#[derive(Default)]
-struct CanonicalVariables {
-    types: BTreeSet<u32>,
-    dimensions: BTreeSet<u32>,
-    ranks: BTreeSet<u32>,
-}
-
-fn canonical_variables(
-    type_repr: &str,
-    require_contiguous: bool,
-) -> Result<CanonicalVariables, bincode::Error> {
-    let expression = chelis_deep::parse_and_stamp_type(type_repr, &chelis_syntax_host::NativeStack)
-        .map_err(|error| {
-            validation_error(&format!("type representation is not valid Deep: {error}"))
-        })?;
-
-    fn visit(
-        expr: &chelis_deep::Expr,
-        variables: &mut CanonicalVariables,
-    ) -> Result<(), bincode::Error> {
-        use chelis_deep::{Atom, DeepTag, Expr};
-
-        match expr {
-            Expr::Atom(..) => {}
-            Expr::Node(node, _) => {
-                let namespace = match node.tag() {
-                    DeepTag::TVar => Some(("t-var", &mut variables.types, "t")),
-                    DeepTag::DVar => Some(("d-var", &mut variables.dimensions, "d")),
-                    DeepTag::DRank => Some(("d-rank", &mut variables.ranks, "r")),
-                    _ => None,
-                };
-                if let Some((tag, namespace, prefix)) = namespace {
-                    let Some(Expr::Atom(Atom::Name(name), _)) = node.children_slice().first()
-                    else {
-                        return Err(validation_error(&format!(
-                            "{tag} type representation is missing its canonical identity"
-                        )));
-                    };
-                    namespace.insert(canonical_variable_index(name, prefix, tag)?);
-                }
-                for child in node.children_slice() {
-                    visit(child, variables)?;
-                }
-            }
-            Expr::Map(..) | Expr::MetaExpr(..) | Expr::BareList(..) | Expr::UnknownForm(..) => {
-                return Err(validation_error(
-                    "type representation contains a non-type carrier",
-                ));
-            }
-        }
-        Ok(())
-    }
-
-    let mut variables = CanonicalVariables::default();
-    visit(&expression, &mut variables)?;
-    if require_contiguous {
-        for (namespace, prefix, indices) in [
-            ("type", "t", &variables.types),
-            ("dimension", "d", &variables.dimensions),
-            ("rank", "r", &variables.ranks),
-        ] {
-            for (expected, actual) in indices.iter().copied().enumerate() {
-                if actual != expected as u32 {
-                    return Err(validation_error(&format!(
-                        "type representation {namespace} variables must be contiguous from `{prefix}0`"
-                    )));
-                }
-            }
-        }
-    }
-    Ok(variables)
-}
-
-fn canonical_variable_index(value: &str, prefix: &str, tag: &str) -> Result<u32, bincode::Error> {
-    let Some(index) = value.strip_prefix(prefix) else {
-        return Err(validation_error(&format!(
-            "{tag} identities must use canonical `{prefix}<index>` spelling"
-        )));
-    };
-    if index.is_empty()
-        || !index.bytes().all(|byte| byte.is_ascii_digit())
-        || (index.len() > 1 && index.starts_with('0'))
-    {
-        return Err(validation_error(&format!(
-            "{tag} identities must use canonical `{prefix}<index>` spelling"
-        )));
-    }
-    index
-        .parse()
-        .map_err(|_| validation_error(&format!("{tag} identity index exceeds the u32 range")))
-}
-
-fn validate_compiler_pin(pin: &str) -> Result<(), bincode::Error> {
-    let Some(version) = pin.strip_prefix('=') else {
-        return Err(validation_error(
-            "compiler must be an exact pin beginning with `=`",
-        ));
-    };
-    semver::Version::parse(version).map_err(|error| {
-        validation_error(&format!(
-            "compiler must be an exact `=<semver>` pin: {error}"
-        ))
-    })?;
-    Ok(())
-}
-
-fn validate_strict_order<'a>(
-    label: &str,
-    values: impl Iterator<Item = &'a str>,
-) -> Result<(), bincode::Error> {
-    let mut previous: Option<&str> = None;
-    for value in values {
-        if previous.is_some_and(|prior| prior >= value) {
-            return Err(validation_error(&format!(
-                "{label} must be strictly sorted with no duplicates"
-            )));
-        }
-        previous = Some(value);
-    }
-    Ok(())
-}
-
-/// Validate one published collection-contract ledger against its callable
-/// type representation.
-///
-/// Both CHB validation and public Reef-schema deserialization use this
-/// boundary so canonical Deep parsing, ledger identity, and carried-variable
-/// membership cannot drift between package formats.
-pub fn validate_collection_obligations_for_type_repr(
-    type_repr: Option<&str>,
-    obligations: &[CollectionObligation],
-) -> Result<(), String> {
-    if obligations.is_empty() {
-        return Ok(());
-    }
-
-    validate_collection_obligation_ledger(obligations)?;
-    let type_repr =
-        type_repr.ok_or_else(|| "require a function type representation".to_string())?;
-    let expression = chelis_deep::parse_and_stamp_type(type_repr, &chelis_syntax_host::NativeStack)
-        .map_err(|error| {
-            format!("require a function type representation that is valid Deep: {error}")
-        })?;
-    if !matches!(
-        &expression,
-        chelis_deep::Expr::Node(node, _) if node.tag() == chelis_deep::DeepTag::TFn
-    ) {
-        return Err("require a function type representation".to_string());
-    }
-
-    let variables =
-        canonical_variables(type_repr, true).map_err(|error| validation_message(&error))?;
-    for obligation in obligations {
-        for carried in obligation.types() {
-            let carried_variables =
-                canonical_variables(carried, false).map_err(|error| validation_message(&error))?;
-            for (prefix, carried_indices, declared_indices) in [
-                ("t", &carried_variables.types, &variables.types),
-                ("d", &carried_variables.dimensions, &variables.dimensions),
-                ("r", &carried_variables.ranks, &variables.ranks),
-            ] {
-                for index in carried_indices {
-                    if !declared_indices.contains(index) {
-                        return Err(format!(
-                            "contain a `{}` contract variable `{prefix}{index}` absent from its type representation",
-                            obligation.builtin()
-                        ));
-                    }
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
-/// Validate the canonical identity of one published collection-contract
-/// ledger.
-///
-/// Parsing alone is insufficient at an artifact trust boundary: whitespace
-/// variants describe the same Deep type while producing distinct CHB bytes.
-/// Exact canonical rendering plus strict order makes semantic identity and
-/// artifact identity agree.
-pub fn validate_collection_obligation_ledger(
-    obligations: &[CollectionObligation],
-) -> Result<(), String> {
-    let mut previous: Option<(&str, Vec<&str>)> = None;
-    for obligation in obligations {
-        for carried in obligation.types() {
-            let expression =
-                chelis_deep::parse_and_stamp_type(carried, &chelis_syntax_host::NativeStack)
-                    .map_err(|error| {
-                        format!("contain a type representation that is not valid Deep: {error}")
-                    })?;
-            let canonical = chelis_deep::printer::print_expr(&expression);
-            if canonical != carried {
-                return Err(format!(
-                    "must use exact canonical Deep rendering; got `{carried}`, canonical form is `{canonical}`"
-                ));
-            }
-        }
-        let key = (obligation.builtin(), obligation.types());
-        if previous.as_ref().is_some_and(|prior| prior >= &key) {
-            return Err("must be strictly sorted with no duplicates".to_string());
-        }
-        previous = Some(key);
-    }
-    Ok(())
-}
-
-fn is_lowercase_hex_sha256(value: &str) -> bool {
-    value.len() == 64
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-}
-
 fn validation_error(message: &str) -> bincode::Error {
     Box::new(bincode::ErrorKind::Custom(format!(
         "invalid shell envelope: {message}"
     )))
 }
 
-fn validation_message(error: &bincode::Error) -> String {
-    let rendered = error.to_string();
-    rendered
-        .strip_prefix("invalid shell envelope: ")
-        .unwrap_or(&rendered)
-        .to_string()
+fn metadata_error(error: chelis_shell_core::ShellValidationError) -> bincode::Error {
+    Box::new(bincode::ErrorKind::Custom(error.to_string()))
 }
 
 #[cfg(test)]
@@ -868,8 +297,9 @@ mod tests {
             symbol.type_repr = Some("(t-fn {} (t-var {} t0) (t-var {} t1))".into());
             symbol.collection_obligations = obligations;
 
-            let error = validate_shell(&invalid)
-                .expect_err("noncanonical relation ledger must fail validation");
+            let error =
+                chelis_shell_core::validate_shell(&invalid, &chelis_syntax_host::NativeStack)
+                    .expect_err("noncanonical relation ledger must fail validation");
             assert!(
                 error.to_string().contains("strictly sorted"),
                 "unexpected {label} validation diagnostic: {error}"
@@ -902,7 +332,8 @@ mod tests {
             symbol.collection_obligations = vec![noncanonical];
 
             let error =
-                validate_shell(&invalid).expect_err("noncanonical Deep must fail validation");
+                chelis_shell_core::validate_shell(&invalid, &chelis_syntax_host::NativeStack)
+                    .expect_err("noncanonical Deep must fail validation");
             assert!(
                 error.to_string().contains("canonical Deep"),
                 "unexpected {label} validation diagnostic: {error}"
@@ -926,7 +357,7 @@ mod tests {
             result: "(t-prim {} i64)".into(),
         }];
         assert!(
-            validate_shell(&hidden)
+            chelis_shell_core::validate_shell(&hidden, &chelis_syntax_host::NativeStack)
                 .unwrap_err()
                 .to_string()
                 .contains("absent from its type representation")
@@ -938,7 +369,7 @@ mod tests {
             result: "(t-prim {} i64)".into(),
         }];
         assert!(
-            validate_shell(&malformed)
+            chelis_shell_core::validate_shell(&malformed, &chelis_syntax_host::NativeStack)
                 .unwrap_err()
                 .to_string()
                 .contains("not valid Deep")
@@ -964,7 +395,9 @@ mod tests {
                 operand: operand.into(),
                 result: "(t-prim {} i64)".into(),
             }];
-            let error = validate_shell(&hidden_shape).unwrap_err();
+            let error =
+                chelis_shell_core::validate_shell(&hidden_shape, &chelis_syntax_host::NativeStack)
+                    .unwrap_err();
             assert!(
                 error.to_string().contains(variable),
                 "unexpected hidden-variable diagnostic: {error}"
@@ -1002,7 +435,8 @@ mod tests {
             domain: TypeVariableDomain::ActiveFloat,
         }];
 
-        let error = validate_shell(&shell).expect_err("detached restriction must be rejected");
+        let error = chelis_shell_core::validate_shell(&shell, &chelis_syntax_host::NativeStack)
+            .expect_err("detached restriction must be rejected");
         assert!(
             error.to_string().contains(
                 "restricts `t1` but that canonical variable is absent from its type representation"
@@ -1017,8 +451,9 @@ mod tests {
             variable: "t0".to_string(),
             domain: TypeVariableDomain::ActiveFloat,
         }];
-        let error = validate_shell(&metadata_only)
-            .expect_err("a metadata-only variable is not part of the quantified type");
+        let error =
+            chelis_shell_core::validate_shell(&metadata_only, &chelis_syntax_host::NativeStack)
+                .expect_err("a metadata-only variable is not part of the quantified type");
         assert!(
             error.to_string().contains(
                 "restricts `t0` but that canonical variable is absent from its type representation"
@@ -1068,7 +503,8 @@ mod tests {
 
                     let shape = format!("{label}, has_body={has_body}, restricted={restricted}");
                     assert!(
-                        validate_shell(&shell).is_err(),
+                        chelis_shell_core::validate_shell(&shell, &chelis_syntax_host::NativeStack)
+                            .is_err(),
                         "validate_shell admitted {shape}"
                     );
                     assert!(
@@ -1104,7 +540,7 @@ mod tests {
                     .into_iter()
                     .collect();
 
-                validate_shell(&shell).unwrap_or_else(|error| {
+                chelis_shell_core::validate_shell(&shell, &chelis_syntax_host::NativeStack).unwrap_or_else(|error| {
                     panic!(
                         "valid signature rejected for has_body={has_body}, restricted={restricted}: {error}"
                     )
@@ -1120,7 +556,8 @@ mod tests {
             symbol.has_body = has_body;
             symbol.type_repr = None;
             assert!(
-                validate_shell(&shell).is_err(),
+                chelis_shell_core::validate_shell(&shell, &chelis_syntax_host::NativeStack)
+                    .is_err(),
                 "value export without a type representation was admitted (has_body={has_body})"
             );
         }
@@ -1131,9 +568,10 @@ mod tests {
             symbol.kind = kind;
             symbol.type_repr = None;
             symbol.has_body = false;
-            validate_shell(&shell).unwrap_or_else(|error| {
-                panic!("{kind:?} export without a value type failed: {error}")
-            });
+            chelis_shell_core::validate_shell(&shell, &chelis_syntax_host::NativeStack)
+                .unwrap_or_else(|error| {
+                    panic!("{kind:?} export without a value type failed: {error}")
+                });
         }
     }
 

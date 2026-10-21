@@ -225,6 +225,10 @@ jobs:
         if: matrix.shard == 1
         run: .venv/bin/python scripts/reef_bootstrap_core_oracle.py
 
+      - name: Shell metadata core portability
+        if: matrix.shard == 1
+        run: .venv/bin/python scripts/shell_metadata_core_oracle.py
+
       - name: Verify packaged binary architecture
         if: matrix.shard == 2
         run: |

@@ -317,7 +317,7 @@ fn public_schema_and_decoded_chb_preserve_exact_scheme_restrictions() {
 
     assert_eq!(
         shell_json["format_version"],
-        chelis_shell::SHELL_FORMAT_VERSION
+        chelis_shell_core::SHELL_FORMAT_VERSION
     );
     assert_eq!(
         exported(&shell_json, "set_bounded", "exports")["type_variable_restrictions"],

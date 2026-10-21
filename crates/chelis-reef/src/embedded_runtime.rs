@@ -21,7 +21,7 @@ use crate::{
     modules_from_source_files, package_versioning, parse_manifest_contents, sha256_bytes,
     shell_package_sha256,
 };
-use chelis_shell::{PackageId, ShellPackage};
+use chelis_shell_core::{PackageId, ShellPackage};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fmt;

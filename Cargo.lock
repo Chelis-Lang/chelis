@@ -586,6 +586,7 @@ dependencies = [
  "chelis-runtime",
  "chelis-runtime-bundle",
  "chelis-shell",
+ "chelis-shell-core",
  "chelis-std-bundle",
  "chelis-surf",
  "chelis-syntax-host",
@@ -916,6 +917,7 @@ dependencies = [
  "chelis-pipeline-core",
  "chelis-reef-bootstrap-core",
  "chelis-shell",
+ "chelis-shell-core",
  "chelis-std-bundle",
  "chelis-surf",
  "chelis-syntax-host",
@@ -1004,10 +1006,21 @@ name = "chelis-shell"
 version = "0.21.1"
 dependencies = [
  "bincode",
+ "chelis-shell-core",
+ "chelis-syntax-host",
+ "tempfile",
+]
+
+[[package]]
+name = "chelis-shell-core"
+version = "0.21.1"
+dependencies = [
  "chelis-deep",
+ "chelis-stack-services",
  "chelis-syntax-host",
  "semver",
  "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -1020,6 +1033,7 @@ version = "0.21.1"
 dependencies = [
  "chelis-reef",
  "chelis-shell",
+ "chelis-shell-core",
  "serde_json",
  "sha2",
  "tempfile",

@@ -5,7 +5,8 @@
 mod common;
 
 use assert_cmd::Command;
-use chelis_shell::{ShellSymbol, SymbolKind, read_shell, write_shell};
+use chelis_shell::{read_shell, write_shell};
+use chelis_shell_core::{ShellSymbol, SymbolKind};
 use common::authored_c_symbol;
 use predicates::prelude::*;
 use serde_json::Value;

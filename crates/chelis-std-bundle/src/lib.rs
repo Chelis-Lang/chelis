@@ -43,9 +43,8 @@ pub mod stage;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chelis_shell::{
-        SHELL_FORMAT_VERSION, TypeVariableDomain, TypeVariableRestriction, decode_shell,
-    };
+    use chelis_shell::decode_shell;
+    use chelis_shell_core::{SHELL_FORMAT_VERSION, TypeVariableDomain, TypeVariableRestriction};
     use std::collections::BTreeMap;
     use std::path::{Path, PathBuf};
     use tempfile::tempdir;
