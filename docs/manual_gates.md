@@ -146,6 +146,9 @@ It needs the pinned Rust toolchain, `thumbv7em-none-eabi`, `cargo-nextest`, Git,
 Native consumers use `chelis-syntax-host::NativeStack`.
 Embedded consumers must supply their allocator and `StackServices` implementation.
 
+A shallow checkout needs access to the canonical repository to fetch the pinned baseline.
+A complete local clone uses its existing history.
+
 Success means exit zero and the final line `syntax core oracle: PASS`.
 The command checks:
 

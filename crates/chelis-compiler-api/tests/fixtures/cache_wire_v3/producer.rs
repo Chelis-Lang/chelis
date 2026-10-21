@@ -12,10 +12,8 @@ fn main() {
     let std_source =
         format!("def fixture_base(x: f32) -> f32 = x + 0.5f32\n{NUMERIC_SOURCE}{WITNESS_SOURCE}");
     let dep_source = "def fixture_transform(x: f32) -> f32 = fixture_base(x) + 0.25f32\n";
-    let std_decls =
-        chelis_surf::parser::parse_str(&std_source, &chelis_syntax_host::NativeStack).unwrap();
-    let dep_decls =
-        chelis_surf::parser::parse_str(dep_source, &chelis_syntax_host::NativeStack).unwrap();
+    let std_decls = chelis_surf::parser::parse_str(&std_source).unwrap();
+    let dep_decls = chelis_surf::parser::parse_str(dep_source).unwrap();
     let digest = [0x5a; 32];
     let std_key = stdlib_cache_key(&std_decls, digest);
     let std_ctx = load_or_build_stdlib_context(&std_decls, digest).unwrap();

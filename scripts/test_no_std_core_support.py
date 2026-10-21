@@ -1,19 +1,11 @@
 from __future__ import annotations
 
-import importlib.util
 import json
 from pathlib import Path
 import sys
 import unittest
 
-
-spec = importlib.util.spec_from_file_location(
-    "no_std_core_support", Path(__file__).with_name("no_std_core_support.py")
-)
-assert spec is not None and spec.loader is not None
-support = importlib.util.module_from_spec(spec)
-sys.modules[spec.name] = support
-spec.loader.exec_module(support)
+import no_std_core_support as support
 
 
 def metadata(*, missing: bool = False) -> dict:

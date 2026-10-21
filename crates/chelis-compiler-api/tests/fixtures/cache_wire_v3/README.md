@@ -16,11 +16,15 @@ keys, and SHA-256 identities. The key-input files are the actual ordered bytes
 hashed by that producer. The compatibility test changes only their format
 version to isolate version admission from build-identity invalidation.
 
-The compatibility test compiles `producer.rs` against the current compiler API
-for its helpers, so the copy here passes the embedded chelis-std runtime to
-`compile_reef_context` and `CompiledContext::load_if_fresh`, which take it
-explicitly. At the producer commit those calls have no runtime argument; remove
-it when regenerating.
+The compatibility test includes `producer.rs` as historical byte data.
+Its current cache helpers are in `cache_wire_compatibility.rs`.
+The manifest binds the retained producer source to the historical binary artifacts.
+Keep those bytes and recorded hashes unchanged during Rust API migration.
+
+The retained harness supplies the embedded runtime to `compile_reef_context`
+and `CompiledContext::load_if_fresh`.
+At the producer commit, those calls take no runtime argument.
+Remove that argument when you regenerate the historical artifacts.
 
 To regenerate, create an isolated worktree at the producer commit, copy
 `producer.rs` to `crates/chelis-compiler-api/examples/cache_wire_fixture_producer.rs`,

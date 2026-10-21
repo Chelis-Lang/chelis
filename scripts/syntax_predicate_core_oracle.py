@@ -14,6 +14,7 @@ import no_std_core_support as support
 from no_std_core_support import ROOT, OracleFailure, compile_rejected, consumer, portable, run
 
 BASELINE = "389e368d2d742e08918e00cbae36a8c9d06a9f47"
+BASELINE_REPOSITORY = "https://github.com/Chelis-Lang/chelis.git"
 CRATES = ("chelis-deep", "chelis-pred", "chelis-surf", "chelis-macros")
 CASES = ("identity", "macro", "tensor", "integer-float")
 OPERATIONS = ("parse", "format", "expand", "resugar")
@@ -201,11 +202,52 @@ def snapshot(workspace: Path, *, native: bool) -> dict:
         raise OracleFailure("invalid syntax snapshot JSON") from error
 
 
+def _validate_semantics(semantic: object) -> None:
+    expected = {*CASES, "predicate", "errors", "span", "path_error"}
+    if not isinstance(semantic, dict) or set(semantic) != expected:
+        raise OracleFailure("incomplete syntax semantic cases")
+    for case in CASES:
+        source = semantic[case]
+        if not isinstance(source, dict) or set(source) != {
+            "canonical", "deep", "json", "binary", "recovered",
+        }:
+            raise OracleFailure(f"incomplete syntax source fields: {case}")
+        if any(not isinstance(source[field], str) or not source[field]
+               for field in ("canonical", "deep", "json", "recovered")):
+            raise OracleFailure(f"incomplete syntax source text: {case}")
+        binary = source["binary"]
+        if not isinstance(binary, list) or not binary or any(
+            type(byte) is not int or not 0 <= byte <= 255 for byte in binary
+        ):
+            raise OracleFailure(f"invalid syntax binary evidence: {case}")
+    predicate = semantic["predicate"]
+    if not isinstance(predicate, dict) or set(predicate) != {"free_vars", "rejection"}:
+        raise OracleFailure("incomplete syntax predicate fields")
+    free_vars = predicate["free_vars"]
+    if not isinstance(free_vars, list) or not free_vars or any(
+        not isinstance(name, str) or not name for name in free_vars
+    ):
+        raise OracleFailure("incomplete syntax predicate free variables")
+    if not isinstance(predicate["rejection"], str) or not predicate["rejection"]:
+        raise OracleFailure("incomplete syntax predicate rejection")
+    errors = semantic["errors"]
+    if not isinstance(errors, list) or len(errors) != 4 or any(
+        not isinstance(error, str) or not error for error in errors
+    ):
+        raise OracleFailure("incomplete syntax diagnostic evidence")
+    span = semantic["span"]
+    if not isinstance(span, dict) or set(span) != {"offset", "len"} or any(
+        type(value) is not int or value < 0 for value in span.values()
+    ):
+        raise OracleFailure("incomplete syntax span evidence")
+    if not isinstance(semantic["path_error"], str) or not semantic["path_error"]:
+        raise OracleFailure("incomplete syntax path-error evidence")
+
+
 def compare_snapshots(baseline: dict, candidate: dict) -> None:
     try:
-        expected_semantic = {*CASES, "predicate", "errors", "span", "path_error"}
-        if any(set(record["semantic"]) != expected_semantic for record in (baseline, candidate)):
-            raise OracleFailure("incomplete syntax semantic cases")
+        for record in (baseline, candidate):
+            _validate_semantics(record["semantic"])
         if baseline["semantic"] != candidate["semantic"]:
             raise OracleFailure("syntax, diagnostic, or wire parity differs")
         if set(baseline["costs"]) != set(CASES) or set(candidate["costs"]) != set(CASES):
@@ -296,13 +338,22 @@ def native_suites() -> None:
                         "check_fails_on_non_canonical_surf_source"))
 
 
+def _checkout_baseline(directory: Path) -> Path:
+    baseline = directory.resolve()
+    run(("git", "clone", "--quiet", "--shared", "--no-checkout", str(ROOT), str(baseline)))
+    present = support._execute(("git", "cat-file", "-e", f"{BASELINE}^{{commit}}"), cwd=baseline)
+    if present.returncode != 0:
+        run(("git", "fetch", "--quiet", "--no-tags", "--depth=1",
+             BASELINE_REPOSITORY, BASELINE), cwd=baseline)
+    run(("git", "checkout", "--quiet", "--detach", BASELINE), cwd=baseline)
+    return baseline
+
+
 def main() -> int:
     target_graphs()
     negative_controls()
     with tempfile.TemporaryDirectory(prefix="chelis-syntax-baseline-") as temporary:
-        baseline = Path(temporary).resolve() / "baseline"
-        run(("git", "clone", "--quiet", "--shared", "--no-checkout", str(ROOT), str(baseline)))
-        run(("git", "checkout", "--quiet", "--detach", BASELINE), cwd=baseline)
+        baseline = _checkout_baseline(Path(temporary) / "baseline")
         previous = snapshot(baseline, native=False)
         current = snapshot(ROOT, native=True)
         compare_snapshots(previous, current)
