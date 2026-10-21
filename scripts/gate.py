@@ -470,6 +470,10 @@ EVAL_SYSTEM_ORACLE: list[str] = [
     MANAGED_PYTHON,
     "scripts/eval_system_oracle.py",
 ]
+VERSION_CORE_ORACLE: list[str] = [
+    MANAGED_PYTHON,
+    "scripts/version_core_oracle.py",
+]
 # Generated chelis-std files stay out of the index: the bundle crate's build
 # script packs the runtime, so a tracked dist pair or a lock recording the
 # bundled runtime would go stale with the first std edit. Pure git and Python.
@@ -609,6 +613,7 @@ STAGES: dict[str, list[list[str]]] = {
         UNREPRESENTABLE_DOMAIN_ORACLE,
         [MANAGED_PYTHON, "scripts/dtype_builtin_atom_closure_oracle.py"],
         EVAL_SYSTEM_ORACLE,
+        VERSION_CORE_ORACLE,
         OWNERSHIP_LEDGER_CLI_TESTS,
     ],
     "runtime-representation": [
@@ -673,6 +678,7 @@ LOCAL_STATIC_COMMANDS: list[list[str]] = [
     EMISSION_OBSERVER_TESTS,
     OWNERSHIP_LEDGER_RUNTIME_TESTS,
     OWNERSHIP_LEDGER_API_TESTS,
+    VERSION_CORE_ORACLE,
     OWNERSHIP_LEDGER_CLI_TESTS,
 ]
 

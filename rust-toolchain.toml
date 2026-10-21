@@ -28,3 +28,4 @@ channel = "1.98.0"
 # The wire publication verifier uses the matching compiler's typed MIR API.
 # rustc-dev must share this exact pin; a different compiler ABI cannot inspect it.
 components = ["rustfmt", "clippy", "rustc-dev"]
+targets = ["thumbv7em-none-eabi"]

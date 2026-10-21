@@ -120,6 +120,25 @@ the HIP and Metal commands above as **unrun** while verifying their host staging
 Its `PASS` does not claim device execution; run the two device gates on their
 respective hardware and record those results separately.
 
+## Version core portability
+
+Run `.venv/bin/python scripts/version_core_oracle.py` from the repository root.
+It needs the pinned Rust toolchain, `thumbv7em-none-eabi`, `cargo-nextest`,
+and the checkout's uv-managed Python environment.
+`python3` must execute from `PATH` for the shim fixtures.
+The target appears in the toolchain file.
+
+Success means exit zero and the final line `version core oracle: PASS`.
+The command compiles an independent target consumer, checks its dependency graph,
+and executes a host consumer with zero allocations during predicate calls.
+It also checks installer and conformance decisions, shim resolution, and failure controls.
+
+Linux integration support runs this command in its domain slice.
+macOS nightly validation runs it on workspace shard one.
+Default PR CI does not execute this complete command.
+Target compilation does not prove device execution.
+Owner: chelis#3977.
+
 ## Compiler feature acceptance gates
 
 The incremental [eval-performance suite](eval_performance.md) runs its sparse

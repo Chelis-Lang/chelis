@@ -68,3 +68,18 @@ For implementation details, see the
 [compiler pipeline inventory](docs/investigations/compiler_pipeline_inventory.md).
 For a language change, start with the owning numbered spec and follow
 [spec sync](agent-skills/spec-sync/SKILL.md).
+
+## Portable version predicates
+
+`chelis-version` uses unconditional `no_std` without allocation or package dependencies.
+Its public predicates retain their installer and conformance rules.
+Strict versions contain three nonempty ASCII digit components.
+Leading zeroes and arbitrarily long components are valid.
+Path components accept channels and Unicode text but reject separators and control characters.
+Empty names and single-dot or double-dot names are invalid.
+
+Run `.venv/bin/python scripts/version_core_oracle.py` for target compilation,
+an independent host consumer, allocation checks, and installer resolution checks.
+The [acceptance gate](docs/manual_gates.md#version-core-portability) lists prerequisites and CI owners.
+Target compilation does not prove device execution.
+
