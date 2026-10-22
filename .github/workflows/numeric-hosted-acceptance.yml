@@ -22,7 +22,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
-          ref: cb8a933b24f0c73d0d09b9ec033953cff4f007c7
+          ref: 8250eb4633b241322ab6ed93df5e24e7b86e047e
           fetch-depth: 0
       - name: Install Linux prerequisites
         if: runner.os == 'Linux'
@@ -50,7 +50,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/numeric-evidence"
-          test "$(git rev-parse HEAD)" = cb8a933b24f0c73d0d09b9ec033953cff4f007c7
+          test "$(git rev-parse HEAD)" = 8250eb4633b241322ab6ed93df5e24e7b86e047e
           .venv/bin/python - <<'PY'
           import hashlib, json, os, pathlib, platform, subprocess
           value = {'source_sha': subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(), 'workflow_sha': os.environ['GITHUB_SHA'], 'oracle_sha256': hashlib.sha256(pathlib.Path('scripts/numeric_core_oracle.py').read_bytes()).hexdigest(), 'platform': platform.platform(), 'machine': platform.machine()}
