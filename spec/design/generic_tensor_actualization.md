@@ -1,7 +1,7 @@
 # Generic tensor actualization across rank and dtype
 
 Parent tracker: [#729](https://github.com/Chelis-Lang/chelis/issues/729).
-Initial execution failures: [#1760](https://github.com/Chelis-Lang/chelis/issues/1760)
+Related reports: [#1760](https://github.com/Chelis-Lang/chelis/issues/1760)
 and [#1761](https://github.com/Chelis-Lang/chelis/issues/1761).
 
 `spec/04-type-system.md` §4.5.3 owns rank-spread instantiation and the checked
@@ -13,16 +13,14 @@ either operation's accepted language or the numeric semantics in
 
 ## The shared failure boundary
 
-The original #1760 report found a rank-zero C iteration domain for a concrete
-rank-one or rank-two Bool result from `gt(xs, xs)`. Its historical source now
-rejects an undeclared rank binder; with the required explicit binder, rank-one
-and rank-two versions pass Eval and linked C on the design PR's reviewed head.
-The original #1761 report found Bool where the numeric subtree of a nested
-`gt(where(gt(xs, xs), xs, xs), xs)` required the bound float dtype. That exact
-nested witness also passes Eval and linked C on the reviewed head. These were
-distinct historical failures at the boundary where a call's checked rank and
-precision must remain one instantiated contract. The passing replays do not
-establish either issue's complete acceptance matrix or the fixing commit.
+At a generic call boundary, checked rank and precision remain one instantiated
+contract. A comparison such as `gt(xs, xs)` retains the input's concrete axes
+while producing Bool; its C iteration domain follows those axes. In a nested
+expression such as `gt(where(gt(xs, xs), xs, xs), xs)`, the mask and final
+comparison produce Bool while the selected numeric values retain the bound
+float dtype. Recovering one node's type from an adjacent consumer can lose
+either the iteration rank or the numeric precision. The acceptance matrix
+below checks these relationships independently.
 
 This bounded design owns concrete generic-call actualization through an elementwise DAG
 and its C iteration domain. It does not own a runtime extent equality claim:
@@ -58,6 +56,16 @@ failure before C emission. The ownership
 verifier remains a consumer of this contract and continues to reject mismatched
 precisions; it is not relaxed to make either reproducer pass.
 
+Host result inference derives type-preserving operand positions from the
+builtin scheme and its declared shape-identity contract. When a scheme returns
+the same type variable as an operand, that operand supplies the complete host
+type term, including scalar precision, ordered dimensions, and unresolved rank
+or precision binders. The admitted declaration cache is shared across inference
+calls; an operation-name mirror cannot omit a producer. Shape-changing operations and
+precision-changing predicates retain their own checked result relations. A
+Boolean consumer's result annotation never supplies a missing float producer
+type.
+
 Nominal dimension arguments remain exact logical terms through field
 instantiation. They belong to the activation's dimension evidence, separately
 from type and precision substitution: an inferred caller result cannot replace
@@ -83,8 +91,8 @@ registration.
 ## Acceptance and order
 
 Write the exact positive and negative tests before changing lowering. First,
-pin each historical witness in current syntax and a generic passthrough
-control, including the bounded replays that already pass. Inspect the
+cover each reported expression with explicitly declared rank binders and a
+generic passthrough control. Inspect the
 remaining matrix for a failing consumer; close any gap by making the contract
 mandatory at the call/body boundary, migrating the affected elementwise and C
 iteration-domain consumers, and removing a reconstruction path that infers a
@@ -105,6 +113,6 @@ edges. A checker
 rejection is acceptable only for a program the controlling specs reject;
 neither reported legal program may be fenced as an implementation shortcut.
 
-This matrix is the class exit for these two leaves, alongside #729's numeric
+This matrix defines acceptance for these two issues, alongside #729's numeric
 operation oracle. It does not certify all rank-polymorphic callables or close
 #1277's extent-witness corpus.
