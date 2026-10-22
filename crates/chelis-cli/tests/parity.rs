@@ -703,6 +703,21 @@ fn parity_scalar_string_foundation() {
 #[test]
 fn parity_scalar_special_values() {
     drive_parity(&examples_root().join("scalar_special_values.ch"), true);
+    let output = Command::cargo_bin("chelis")
+        .unwrap()
+        .args(["eval", "--file"])
+        .arg(examples_root().join("scalar_special_values.ch"))
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let evaluated = String::from_utf8(output.stdout).unwrap();
+    for expected in [
+        "integer_minimum = tensor(shape=[3], data=[2, 1, 2])",
+        "floating_minimum = tensor(shape=[2, 3], data=[1.0, inf, 2.0, 2.0, 2.0, 2.0])",
+        "finite_minimum = tensor(shape=[2, 3], data=[true, false, true, true, true, true])",
+    ] {
+        assert!(evaluated.contains(expected), "{evaluated}");
+    }
 }
 
 #[test]

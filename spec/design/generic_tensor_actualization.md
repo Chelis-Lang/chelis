@@ -66,6 +66,26 @@ precision-changing predicates retain their own checked result relations. A
 Boolean consumer's result annotation never supplies a missing float producer
 type.
 
+The two extrema identities use one constructor selected by `ExtremaKind`.
+It takes the lowered operands and derives the complete output `TensorType`
+from the left operand, preserving its ordered physical axes and dtype. It
+accepts no output-type annotation: metadata with an unresolved rank spread
+cannot stand in for a scalar, and a consumer's Bool annotation cannot choose
+the numeric producer's dtype. Minimum and maximum remain distinct direct
+RISC nodes with their original operand order and source span; neither is
+implemented through negation or surrogate arithmetic.
+
+The extrema verifier requires two numeric operands and a numeric result of
+one active signed-integer or float dtype. All three have equal rank,
+including rank zero, and compatible extents at every axis. Known extents
+must agree; named or wildcard extents whose equality needs execution retain
+the existing runtime agreement guards. Labels need not be byte-identical:
+physical axis sources and independently authored logical extent claims keep
+their existing separate carriers. An authored claim never overwrites the
+constructor's physical operand shape. Helper actualization and C emission
+consume this result contract rather than repair an extrema constructor's
+speculative rank or dtype.
+
 Nominal dimension arguments remain exact logical terms through field
 instantiation. They belong to the activation's dimension evidence, separately
 from type and precision substitution: an inferred caller result cannot replace
