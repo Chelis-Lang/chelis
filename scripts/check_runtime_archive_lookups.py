@@ -1299,6 +1299,28 @@ REVIEWED: tuple[Row, ...] = (
         ),
     ),
     Row(
+        "scripts/numeric_core_oracle.py",
+        "archive-name",
+        lines=(
+            'archive = output / "libchelis_runtime.a"',
+        ),
+        disposition="not-lookup",
+        reason=(
+            "links the exact archive that `chelis build` stages in its output directory"
+        ),
+    ),
+    Row(
+        "scripts/numeric_core_oracle.py",
+        "runtime-package",
+        lines=(
+            r"""extra += f'chelis-runtime = {{ path = {json.dumps(str(workspace / "crates/chelis-runtime"))} }}\n'""",
+        ),
+        disposition="not-lookup",
+        reason=(
+            "declares an isolated Cargo dependency, not an archive lookup"
+        ),
+    ),
+    Row(
         "scripts/runtime_representation_phase1.py",
         "archive-name",
         lines=(

@@ -254,6 +254,7 @@ Owner: chelis#3989.
 
 Run `.venv/bin/python scripts/numeric_core_oracle.py` from the repository root.
 Use the pinned Rust toolchain, `thumbv7em-none-eabi`, `cargo-nextest`, Git, Clang, and the checkout's uv-managed Python.
+The toolchain also needs `clippy` and `rustc-dev` for compiled authority checks.
 Clang must support 128-bit `_BitInt` on the bare target.
 The target build also needs `llvm-ar`.
 Native consumers also need the repository's normal C build prerequisites.

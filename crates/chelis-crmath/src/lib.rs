@@ -27,7 +27,7 @@
 #[macro_use]
 extern crate std;
 
-#[cfg(target_os = "none")]
+#[cfg(any(target_os = "none", test))]
 mod freestanding;
 
 use half::{bf16, f16};

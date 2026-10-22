@@ -5,10 +5,12 @@
 //! checkout before it stages the runtime it carries (`chelis-runtime-bundle`),
 //! so it never stages a runtime older than its sources. The declared inputs
 //! are, for this crate and for each workspace crate it depends on
-//! (`chelis-abi`, `chelis-vocab`, `chelis-unord` with `ownership-ledger`, and
-//! `chelis-clarabel-provider` with `clarabel-provider`):
-//! `Cargo.toml`, `build.rs` and `include/` when present, and every file under
-//! `src/`; plus the workspace `Cargo.lock`. The Clarabel configuration records
+//! (`chelis-abi`, `chelis-vocab`, `chelis-numeric-core`, `chelis-crmath`,
+//! `chelis-unord` with `ownership-ledger`, and `chelis-clarabel-provider`
+//! with `clarabel-provider`):
+//! `Cargo.toml`, every file under `src/`, plus `build.rs`, `include/`, and
+//! `csrc/` when present, and the workspace `Cargo.lock`.
+//! The Clarabel configuration records
 //! its owned Reef manifest,
 //! which supplies its operation identity. Names beginning with `.` are not
 //! inputs. Paths are relative to the workspace root, so the record carries no
@@ -52,7 +54,13 @@ fn main() {
     let manifest_dir =
         PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR"));
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("cargo sets OUT_DIR"));
-    let mut crates = vec![RUNTIME_CRATE, "crates/chelis-abi", "crates/chelis-vocab"];
+    let mut crates = vec![
+        RUNTIME_CRATE,
+        "crates/chelis-abi",
+        "crates/chelis-crmath",
+        "crates/chelis-numeric-core",
+        "crates/chelis-vocab",
+    ];
     if env::var_os("CARGO_FEATURE_OWNERSHIP_LEDGER").is_some() {
         crates.push("crates/chelis-unord");
     }
@@ -63,6 +71,7 @@ fn main() {
     }
 
     let mut required = required_roots(&crates);
+    required.push("crates/chelis-crmath/csrc".to_owned());
     if clarabel {
         required.push(CLARABEL_MANIFEST.to_owned());
     }
@@ -141,7 +150,7 @@ fn available(root: &Path, crates: &[&str], clarabel: bool) -> String {
         if root.join(&build_script).is_file() {
             record_file(root, &build_script, &mut files);
         }
-        for name in ["src", "include"] {
+        for name in ["src", "include", "csrc"] {
             let directory = format!("{krate}/{name}");
             if root.join(&directory).is_dir() {
                 record_directory(root, &directory, &mut files);

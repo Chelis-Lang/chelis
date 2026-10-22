@@ -20,6 +20,11 @@ impl Probe {
             ));
         fs::create_dir_all(root.parent().unwrap()).unwrap();
         fs::create_dir(&root).unwrap();
+        fs::copy(
+            concat!(env!("CARGO_MANIFEST_DIR"), "/src/failure.rs"),
+            root.join("failure.rs"),
+        )
+        .expect("copy vocabulary failure module");
         Self(root)
     }
 

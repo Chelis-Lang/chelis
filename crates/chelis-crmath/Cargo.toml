@@ -22,6 +22,9 @@ libm = { version = "0.2.16", default-features = false }
 [build-dependencies]
 cc = "1"
 
+[dev-dependencies]
+libm = { version = "0.2.16", default-features = false }
+
 [[test]]
 name = "crmath_profile"
 required-features = ["std"]

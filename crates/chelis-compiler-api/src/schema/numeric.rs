@@ -153,10 +153,12 @@ fn is_key_variant(variant: &Schema) -> bool {
 
 /// The execution storage schema, including key tensors.
 pub fn execution_storage_schema(generator: &mut SchemaGenerator) -> Schema {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
     StorageWire::json_schema(generator)
 }
 
 /// A field schema with the canonical key definition name.
 pub fn key_bits_schema(generator: &mut SchemaGenerator) -> Schema {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
     generator.subschema_for::<KeyBitsSchema>()
 }

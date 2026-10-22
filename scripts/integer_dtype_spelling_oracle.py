@@ -226,7 +226,7 @@ def boundary_contract_errors() -> list[str]:
     errors: list[str] = []
     errors.extend(
         _require(
-            "crates/chelis-types/src/types.rs",
+            "crates/chelis-numeric-core/src/prim.rs",
             (
                 'Prim::Int8 => "i8"',
                 'Prim::Int64 => "i64"',

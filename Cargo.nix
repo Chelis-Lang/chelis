@@ -2586,6 +2586,13 @@ rec {
             packageId = "cc";
           }
         ];
+        devDependencies = [
+          {
+            name = "libm";
+            packageId = "libm";
+            usesDefaultFeatures = false;
+          }
+        ];
         features = {
           "default" = [ "std" ];
           "std" = [ "half/std" ];

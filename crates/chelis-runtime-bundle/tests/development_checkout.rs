@@ -15,6 +15,8 @@ use std::process::{Command, Output};
 const CRATES: &[&str] = &[
     "chelis-abi",
     "chelis-clarabel-provider",
+    "chelis-crmath",
+    "chelis-numeric-core",
     "chelis-runtime",
     "chelis-runtime-bundle",
     "chelis-runtime-bundle-macro",
@@ -100,9 +102,9 @@ fn copy_checkout(checkout: &Path) {
         if from.join("build.rs").is_file() {
             fs::copy(from.join("build.rs"), to.join("build.rs")).expect("build script");
         }
-        // Cargo validates declared test targets for every copied workspace
-        // member, even when the consumer build does not compile those tests.
-        for directory in ["src", "include", "tests"] {
+        // Cargo checks each declared example and test target.
+        // This consumer does not compile all of those targets.
+        for directory in ["src", "include", "csrc", "tests", "examples"] {
             if from.join(directory).is_dir() {
                 copy_tree(&from.join(directory), &to.join(directory));
             }
@@ -202,25 +204,33 @@ fn development_consumers_stage_only_from_their_unchanged_checkout() {
     );
     assert_eq!(receipt_mode(&fresh), "development");
 
-    let edited = "crates/chelis-vocab/src/lib.rs";
-    let mut source = fs::read(checkout.join(edited)).expect("runtime dependency source");
-    source.extend_from_slice(b"\n// edited after the consumer was built\n");
-    fs::write(checkout.join(edited), source).expect("edit");
-    let stale = scratch.path().join("stale");
-    let output = stage(&development, &stale);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(!output.status.success(), "a stale runtime stages: {stderr}");
-    assert!(stderr.contains(&format!("changed: {edited}")), "{stderr}");
-    assert!(is_empty(&stale), "a refused staging writes nothing");
+    for (index, edited) in [
+        "crates/chelis-vocab/src/lib.rs",
+        "crates/chelis-numeric-core/src/ieee.rs",
+        "crates/chelis-crmath/csrc/crmath_ffi.c",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut source = fs::read(checkout.join(edited)).expect("runtime dependency source");
+        source.extend_from_slice(b"\n// edited after the consumer was built\n");
+        fs::write(checkout.join(edited), source).expect("edit");
+        let stale = scratch.path().join(format!("stale-{index}"));
+        let output = stage(&development, &stale);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success(), "a stale runtime stages: {stderr}");
+        assert!(stderr.contains(&format!("changed: {edited}")), "{stderr}");
+        assert!(is_empty(&stale), "a refused staging writes nothing");
 
-    build_consumer(&checkout, &target, &[], &development);
-    let rebuilt = scratch.path().join("rebuilt");
-    let output = stage(&development, &rebuilt);
-    assert!(
-        output.status.success(),
-        "a rebuild records the edited source: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+        build_consumer(&checkout, &target, &[], &development);
+        let rebuilt = scratch.path().join(format!("rebuilt-{index}"));
+        let output = stage(&development, &rebuilt);
+        assert!(
+            output.status.success(),
+            "a rebuild records the edited source: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 
     // A root that did not exist when the runtime was first built, here an
     // `include/` directory in a runtime dependency, enters the record on the

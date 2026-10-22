@@ -786,8 +786,9 @@ def generated_snapshot(workspace: Path, directory: Path) -> dict:
                 "build", str(path), "--target", "c", "--output", str(output)], cwd=workspace,
                 env=workspace_environment(workspace))
             binary = output / name
-            run([native["compiler"], "-O2", *native["compile_flags"], f"{name}.c", "-L.",
-                "-lchelis_runtime", *native["link_flags"], "-o", str(binary)], cwd=output)
+            archive = output / "libchelis_runtime.a"
+            run([native["compiler"], "-O2", *native["compile_flags"], f"{name}.c",
+                str(archive), *native["link_flags"], "-o", str(binary)], cwd=output)
             result = run([str(binary)], cwd=output)
             if result.stdout != f"{expected}\nout = ()\n":
                 raise OracleFailure(f"generated C numerical mismatch for {name}: {result.stdout!r}")
@@ -1201,15 +1202,13 @@ def run_oracle() -> None:
         compare_exact(native_snapshot(baseline, old_output),
             native_snapshot(ROOT.resolve(), new_output), "native ABI and IEEE adapters")
         completed.update({"generated-c", "native-abi", "baseline"})
-        run(["cargo", "clean", "--profile", "dev"], cwd=baseline,
-            env=workspace_environment(baseline))
+        run(["cargo", "clean"], cwd=baseline, env=workspace_environment(baseline))
         surface = [
             preserved_suite_plan(baseline, package, binary, (anchor,))
             for package, binary, anchor in SURFACE_SUITES
         ]
         numeric = numeric_suite_plan(baseline)
-        run(["cargo", "clean", "--profile", "dev"], cwd=baseline,
-            env=workspace_environment(baseline))
+        run(["cargo", "clean"], cwd=baseline, env=workspace_environment(baseline))
         surface_controls(surface)
         completed.add("surface")
         run_suites(numeric)
