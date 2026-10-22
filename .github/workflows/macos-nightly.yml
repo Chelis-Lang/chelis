@@ -229,6 +229,10 @@ jobs:
         if: matrix.shard == 1
         run: .venv/bin/python scripts/shell_metadata_core_oracle.py
 
+      - name: Certificate arithmetic core portability
+        if: matrix.shard == 1
+        run: .venv/bin/python scripts/certificate_core_oracle.py
+
       - name: Verify packaged binary architecture
         if: matrix.shard == 2
         run: |

@@ -16,9 +16,9 @@
 
 use num_rational::BigRational;
 
-use super::poly::RationalPoly;
 use crate::solver::{ArithOp, CmpOp, SmtExpr, SmtSort};
 use crate::tier_b::SmtProperty;
+use chelis_certificate_core::poly::RationalPoly;
 
 /// A recognized goal: prove `poly >= 0` (or `> 0`; see [`Self::strict`]) for the
 /// single real variable `var` ranging over `[lo, hi]`.

@@ -216,6 +216,40 @@ Default PR CI does not execute the complete command.
 Target compilation does not prove device execution or allocator capacity.
 Owner: chelis#3986.
 
+## Certificate arithmetic core portability
+
+Run `.venv/bin/python scripts/certificate_core_oracle.py` from the repository root.
+It needs the pinned Rust toolchain, `thumbv7em-none-eabi`, `cargo-nextest`, Git, and the checkout's uv-managed Python environment.
+Native host checks need the platform's Clarabel BLAS provider.
+Linux uses the configured system OpenBLAS provider.
+macOS uses Accelerate.
+
+The oracle compares against the unchanged implementation at commit `724e30db000c106633031c9d5b02cf3cbd39337d`.
+A shallow checkout needs access to the canonical repository to fetch that commit.
+Missing baseline source or evidence fails acceptance.
+
+Success means exit zero and the marker `certificate core oracle: PASS`.
+The command checks:
+
+- Both independent target feature modes without target `std` features, host crates, or native solver dependencies.
+- An independent executable with an explicit allocator and exact public API results.
+- Polynomial normalization, large coefficients, singular PSD matrices, tiny negative pivots, error precedence, and affine repair.
+- Fixed-revision arithmetic, canonical host outcomes, exact evidence, and native Clarabel production parity.
+- Goal and interval binding, strict-goal rejection, and noncanonical block counts, matrix dimensions, and multipliers.
+- Mandatory core and host test execution, both Python control suites, obsolete API rejection, and acceptance failure controls.
+- Named Python control results reject an incomplete or skipped certificate suite before the PASS marker.
+
+The six specified noncanonical certificate cases intentionally differ from the baseline.
+The baseline admits these arithmetically valid certificates.
+The candidate rejects them as `Unknown@Untrusted` with no qualifiers.
+Arithmetic success alone does not authorize a proof.
+
+Linux integration support executes this command in its domain slice.
+macOS nightly validation executes it on workspace shard one.
+Default PR CI does not execute the complete command.
+Target compilation does not prove device execution, allocator capacity, or whole-pipeline portability.
+Owner: chelis#3989.
+
 ## Compiler feature acceptance gates
 
 The incremental [eval-performance suite](eval_performance.md) runs its sparse

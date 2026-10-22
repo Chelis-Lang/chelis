@@ -4673,12 +4673,30 @@ reason = "The script tests reject incomplete metadata evidence, missing mandator
 tracking_issue = "chelis#3986"
 
 [[path_rule]]
+prefix = "scripts/certificate_core_oracle.py"
+disposition = "owner"
+workflow = "heavy-e2e.yml"
+job = "integration-support"
+cadence = "daily and workflow_dispatch"
+reason = "The domain slice checks portable arithmetic, frozen-base parity, and native proof admission"
+tracking_issue = "chelis#3989"
+
+[[path_rule]]
+prefix = "scripts/test_certificate_core_oracle.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "The script tests reject incomplete arithmetic evidence and unauthorized proof admission"
+tracking_issue = "chelis#3989"
+
+[[path_rule]]
 prefix = "rust-toolchain.toml"
 disposition = "packages"
 packages = [
   "chelis-abi", "chelis-backend-c", "chelis-backend-hip",
   "chelis-backend-metal", "chelis-cli", "chelis-compiler-api",
-  "chelis-conformance", "chelis-cove", "chelis-crmath", "chelis-deep",
+  "chelis-certificate-core", "chelis-conformance", "chelis-cove", "chelis-crmath", "chelis-deep",
   "chelis-e2e",
   "chelis-effects", "chelis-image-id", "chelis-ir", "chelis-lint",
   "chelis-lsp", "chelis-macros", "chelis-pipeline-core", "chelis-pred",

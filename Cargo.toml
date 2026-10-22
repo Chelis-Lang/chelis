@@ -9,6 +9,7 @@ members = [
     "crates/chelis-repr-inventory",
     "crates/chelis-vocab",
     "crates/chelis-abi",
+    "crates/chelis-certificate-core",
     "crates/chelis-prove",
     "crates/chelis-runtime",
     "crates/chelis-runtime-bundle-macro",
@@ -68,6 +69,7 @@ chelis-syntax-host = { path = "crates/chelis-syntax-host" }
 chelis-crmath = { path = "crates/chelis-crmath" }
 chelis-vocab = { path = "crates/chelis-vocab", default-features = false }
 chelis-abi = { path = "crates/chelis-abi" }
+chelis-certificate-core = { path = "crates/chelis-certificate-core", default-features = false }
 chelis-image-id = { path = "crates/chelis-image-id" }
 chelis-deep = { path = "crates/chelis-deep" }
 chelis-pred = { path = "crates/chelis-pred" }

@@ -1,24 +1,41 @@
 # Clarabel SoS certificate engine (WI-15)
 
-Status: IMPLEMENTED (WS-6). Option (i): no frozen-seam change. BLAS decision
-(A): `clarabel/sdp` with a cfg-gated backend (sdp-openblas on Linux,
-sdp-accelerate on macOS), opt-in dev/CI feature only -- the shipped release
-binary (`--features smt`) links zero BLAS.
+`ClarabelSosEngine` proves univariate polynomial nonnegativity on a bounded interval through exact rational certificates.
+The optional `clarabel` feature enables its native solver.
+Linux uses OpenBLAS, and macOS uses Accelerate.
+The shipped `smt` release does not enable Clarabel or link BLAS.
 
-This is the design for the sum-of-squares (SoS) certificate `DischargeEngine`
-(`ClarabelSosEngine`), gated behind the `clarabel` cargo feature. It proves that
-a univariate polynomial is nonnegative on a bounded interval, `p(x) >= 0` for
-`x in [a, b]`, by producing an **exact rational** SoS certificate that an
-independent checker re-verifies exactly. The discharge is tagged
-`Qualifier::CertificateBearing` at `Soundness::Exact` -- but **only** when the
-exact rational certificate verifies. A float SDP solution alone is never a
-proof.
+The host admits a certificate only after exact goal binding, arithmetic verification, and canonical interval-layout checks.
+An admitted certificate carries `Qualifier::CertificateBearing` at `Soundness::Exact`.
+A floating-point solver result alone is not a proof.
 
 It covers the polynomial fragment cvc5's proof output cannot certify
 (`spec/design/verification_stack_master_plan.md` WI-15): cvc5 may *decide* a
 nonlinear-real-arithmetic goal but its Alethe proof output does not cover NRA,
 so there is no independently checkable artifact. An exact SoS certificate is
 that artifact.
+
+## Portable arithmetic and host admission
+
+`chelis-certificate-core` owns `poly`, `exact`, and `linalg`.
+It uses unconditional `no_std`, `alloc`, and arbitrary-precision `BigInt` and `BigRational` arithmetic.
+Public arithmetic signatures, constructor preconditions, deterministic repair, and error order remain unchanged.
+Callers import the new crate directly without old modules or compatibility re-exports.
+
+`SosCertificate::verify` checks each Gram's symmetry and PSD before it checks the combined polynomial identity.
+It does not bind the certificate to a requested goal or establish arbitrary multiplier nonnegativity.
+`RatSymMatrix::is_psd` needs a symmetric matrix.
+Its caller must establish that precondition.
+
+`chelis-prove` retains SMT extraction, canonical layout construction, floating-point conversion, Clarabel, BLAS, evidence codecs, and proof admission.
+Admission preserves exact polynomial and endpoint agreement and the existing strict-goal rejection.
+After arithmetic verification, it needs the canonical block count, matrix dimensions, and ordered interval multipliers.
+Construction and admission share canonical block definitions without a second solver-layout algorithm.
+Arithmetic error labels retain precedence over layout rejection.
+
+The [acceptance command](../manual_gates.md#certificate-arithmetic-core-portability) checks independent target consumers and fixed-revision native parity.
+Target compilation and host execution do not prove device execution, allocator capacity, or whole-pipeline portability.
+
 
 ## Goal-shape fit (Option (i), no GoalShape change)
 
@@ -70,16 +87,10 @@ claimed by Clarabel.
 
 ### Strict inequalities
 
-`Gt`/`Lt` (strict) goals are recognized but discharged conservatively. The SoS
-machinery proves `p >= 0`. A strict claim `p > 0 on [a,b]` is only entailed if
-additionally `p` has no root in `[a,b]`. The exact certificate does not by
-itself establish strictness, so a strict goal is reported proved ONLY when the
-SoS certificate is for `p - eps` for some exact rational `eps > 0` that the
-repair finds verifiable (i.e. `p >= eps > 0`). If only `p >= 0` verifies (the
-boundary touches zero), a strict goal is NOT proved -- it returns Unknown, never
-a false strict proof. This keeps the strict path fail-honest. (Initial
-implementation may decline strict goals entirely via `fitness` returning false
-for `Gt`/`Lt`; declining is sound. Pin which in the engine.)
+The engine recognizes strict `Gt` and `Lt` goals.
+It does not admit a certificate that proves only nonnegativity.
+A certificate for a different margin-adjusted polynomial also fails exact goal binding.
+Strict goals therefore remain `Unknown@Untrusted`.
 
 ## Markov-Lukacs SoS-to-SDP reduction (univariate-on-interval)
 
@@ -150,39 +161,30 @@ into an EXACT rational certificate or fails honestly.
 
 ### Exact verification is independent of Clarabel precision
 
-The soundness of the certificate rests entirely on step 2 + step 3, which are
-pure `BigRational` arithmetic. Clarabel's float precision affects only whether we
-*find* a certificate, never whether a found certificate is *valid*. The exact
-verifier (the polynomial identity check + the rational PSD test) is the trust
-anchor; it would reject a bad Gram even if Clarabel claimed success.
+Exact rational arithmetic determines whether the certificate's polynomial identity and Gram PSD checks pass.
+Clarabel precision affects whether the proposer can find such a certificate.
+Arithmetic success alone does not establish a proof.
+Host admission also needs exact goal binding and the canonical interval layout.
 
 ## Discharge mapping (honesty invariants -- soundness-critical)
 
 `Qualifier::CertificateBearing` has `min_soundness == Soundness::Exact`
 (`discharge.rs`). So:
 
-- **Exact-verified certificate** -> `Discharge::new(Soundness::Exact,
-  {CertificateBearing}, TierBResult::Proved, evidence)`. The evidence carries the
-  rational certificate (the Gram matrices and the Markov-Lukacs form) so a
-  downstream auditor can re-check it. This is the ONLY path to `Exact`.
-- **No certificate found** (Clarabel infeasible/unknown, repair fails, exact PSD
-  test fails, coefficient projection cannot reproduce `p`, boundary degeneracy
-  unrecoverable) -> `Discharge::new(Soundness::Untrusted, {}, TierBResult::Unknown,
-  evidence)`. An empty qualifier set at the bottom of the lattice. NEVER `Exact`,
-  NEVER a fabricated certificate. This is the result a failed/unverifiable cert
-  produces -- fail honest. (At WS-5 merge time a Clarabel `Unknown` falls through
-  to cvc5, whose NRA may still decide the goal; standalone, the engine returns
-  the honest Unknown.)
-- **`p` negative somewhere on `[a, b]`** -> no SoS certificate exists (the SDP is
-  infeasible) -> Unknown, never a fabricated certificate. The engine does not
-  attempt to disprove; it only certifies nonnegativity, so a negative polynomial
-  is simply not-proved (not Disproved). cvc5 owns the disproof.
+- **Admitted certificate**: `Soundness::Exact`, `{CertificateBearing}`, and `TierBResult::Proved`.
+  Evidence includes exact rational Gram matrices, interval multipliers, the polynomial, and endpoints.
+  Admission needs goal binding, successful arithmetic verification, and the canonical layout.
 
-The invariant that makes the whole thing trustworthy: a `Discharge` carrying
-`CertificateBearing` at `Soundness::Exact` exists **iff** the exact rational
-certificate in its evidence re-multiplies to `p` exactly AND every Gram matrix in
-it is exactly PSD over the rationals. The red team hammers this: "no false Exact
-cert."
+- **Missing or rejected certificate**: `Soundness::Untrusted`, no qualifiers, and `TierBResult::Unknown`.
+  Evidence records the rejection without a certificate.
+
+- **Negative polynomial**: the engine does not fabricate a certificate or claim `Disproved`.
+  A different engine can try the goal after `Unknown`.
+
+A `CertificateBearing@Exact` result needs a certificate for the exact requested polynomial and endpoints.
+Every Gram must be symmetric and exactly PSD.
+The combined polynomial identity and canonical ordered interval layout must match.
+No strict-goal nonnegativity certificate can pass as a strict proof.
 
 ## Dispatcher composition (with WS-5 fall-through)
 
@@ -206,12 +208,9 @@ until WS-5 lands.
 
 ## Feature gating
 
-`clarabel` is a cargo feature: `clarabel = ["dep:clarabel", "num-rational",
-"dep:num-bigint", "dep:num-traits"]`. The default, `smt`, `z3`, and solver-free
-builds are unaffected: the engine, the Clarabel dependency, and the registration
-are all behind `#[cfg(feature = "clarabel")]`. The solver-free gate
-(`check_is_solver_free_on_the_corpus`) stays green because nothing on the default
-path links Clarabel.
+The `clarabel` feature enables the host engine, native solver, and portable arithmetic dependency.
+Default, `smt`, `z3`, and solver-free builds do not activate this optional path.
+Independent arithmetic consumers depend directly on `chelis-certificate-core` without Clarabel or BLAS.
 
 The PSD cone needs Clarabel's `sdp` feature, which needs a BLAS/LAPACK backend
 (decision A). The per-OS backend is selected in target-specific dependency

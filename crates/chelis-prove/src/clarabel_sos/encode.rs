@@ -34,11 +34,11 @@
 
 use num_bigint::BigInt;
 use num_rational::BigRational;
-use num_traits::Zero;
+use num_traits::{One, Zero};
 
-use super::exact::{RatSymMatrix, SosBlock, SosCertificate};
-use super::linalg::RatMatrix;
-use super::poly::RationalPoly;
+use chelis_certificate_core::exact::{RatSymMatrix, SosBlock, SosCertificate};
+use chelis_certificate_core::linalg::RatMatrix;
+use chelis_certificate_core::poly::RationalPoly;
 
 /// One block of the SoS layout: a symmetric Gram of side `size`, scaled by a
 /// fixed interval multiplier polynomial.
@@ -65,6 +65,64 @@ pub struct SosLayout {
     pub n_vars: usize,
 }
 
+// Construction and admission share the same canonical block definitions.
+enum CanonicalMultiplier<'a> {
+    One,
+    Lower(&'a BigRational),
+    Upper(&'a BigRational),
+    Interval(&'a BigRational, &'a BigRational),
+}
+
+impl CanonicalMultiplier<'_> {
+    fn polynomial(self) -> RationalPoly {
+        match self {
+            Self::One => RationalPoly::from_int_coeffs(&[1]),
+            Self::Lower(lo) => RationalPoly::from_coeffs(vec![-lo.clone(), BigRational::one()]),
+            Self::Upper(hi) => RationalPoly::from_coeffs(vec![hi.clone(), -BigRational::one()]),
+            Self::Interval(lo, hi) => {
+                RationalPoly::from_coeffs(vec![-(lo * hi), lo + hi, -BigRational::one()])
+            }
+        }
+    }
+
+    fn matches(self, polynomial: &RationalPoly) -> bool {
+        match (self, polynomial.coeffs()) {
+            (Self::One, [one]) => one.is_one(),
+            (Self::Lower(lo), [constant, linear]) => linear.is_one() && constant == &-lo,
+            (Self::Upper(hi), [constant, linear]) => constant == hi && is_negative_one(linear),
+            (Self::Interval(lo, hi), [constant, linear, quadratic]) => {
+                is_negative_one(quadratic) && constant == &-(lo * hi) && linear == &(lo + hi)
+            }
+            _ => false,
+        }
+    }
+}
+
+fn is_negative_one(value: &BigRational) -> bool {
+    value.numer().sign() != value.denom().sign()
+        && value.numer().magnitude() == value.denom().magnitude()
+}
+
+fn canonical_blocks<'a>(
+    degree: usize,
+    lo: &'a BigRational,
+    hi: &'a BigRational,
+) -> impl Iterator<Item = (usize, CanonicalMultiplier<'a>)> {
+    let half_degree = degree / 2;
+    let (first, second) = if degree.is_multiple_of(2) {
+        (
+            (half_degree + 1, CanonicalMultiplier::One),
+            (half_degree > 0).then_some((half_degree, CanonicalMultiplier::Interval(lo, hi))),
+        )
+    } else {
+        (
+            (half_degree + 1, CanonicalMultiplier::Lower(lo)),
+            Some((half_degree + 1, CanonicalMultiplier::Upper(hi))),
+        )
+    };
+    std::iter::once(first).chain(second)
+}
+
 /// The number of upper-triangle entries (including the diagonal) of an
 /// `s x s` symmetric matrix.
 fn upper_tri_count(s: usize) -> usize {
@@ -86,52 +144,42 @@ fn upper_tri_index(s: usize, i: usize, j: usize) -> usize {
 }
 
 impl SosLayout {
-    /// Build the Markov-Lukacs layout for a goal polynomial of degree `degree`
-    /// nonnegative on `[lo, hi]`. The constant / linear interval multipliers are
-    /// built from `lo`, `hi`.
+    /// Build the canonical Markov-Lukacs layout for the degree and interval.
+    /// Host admission uses the same block definitions.
     pub fn for_goal(degree: usize, lo: &BigRational, hi: &BigRational) -> Self {
-        let one = RationalPoly::from_int_coeffs(&[1]);
-        // (x - a): coeffs [-a, 1]; (b - x): coeffs [b, -1].
-        let x_minus_a =
-            RationalPoly::from_coeffs(vec![-lo.clone(), BigRational::from(BigInt::from(1))]);
-        let b_minus_x =
-            RationalPoly::from_coeffs(vec![hi.clone(), -BigRational::from(BigInt::from(1))]);
-        // (x - a)(b - x).
-        let interval = x_minus_a.mul(&b_minus_x);
-
-        let mut blocks: Vec<(usize, RationalPoly)> = Vec::new();
-        if degree.is_multiple_of(2) {
-            let m = degree / 2;
-            // sigma0: SoS of degree 2m, Gram side m+1, multiplier 1.
-            blocks.push((m + 1, one));
-            // sigma1: SoS of degree 2m-2, Gram side m, multiplier (x-a)(b-x).
-            // (Only present when m >= 1; a degree-0 constant goal has just
-            // sigma0 of side 1.)
-            if m >= 1 {
-                blocks.push((m, interval));
-            }
-        } else {
-            let m = (degree - 1) / 2;
-            // sigma0 * (x - a) and sigma1 * (b - x), each SoS degree 2m, side m+1.
-            blocks.push((m + 1, x_minus_a));
-            blocks.push((m + 1, b_minus_x));
-        }
-
-        let mut specs = Vec::with_capacity(blocks.len());
+        let mut blocks = Vec::with_capacity(if degree == 0 { 1 } else { 2 });
         let mut offset = 0;
-        for (size, multiplier) in blocks {
-            specs.push(BlockSpec {
+        for (size, multiplier) in canonical_blocks(degree, lo, hi) {
+            blocks.push(BlockSpec {
                 size,
-                multiplier,
+                multiplier: multiplier.polynomial(),
                 var_offset: offset,
             });
             offset += upper_tri_count(size);
         }
         Self {
             degree,
-            blocks: specs,
+            blocks,
             n_vars: offset,
         }
+    }
+
+    pub(super) fn matches_certificate(
+        degree: usize,
+        lo: &BigRational,
+        hi: &BigRational,
+        certificate: &SosCertificate,
+    ) -> bool {
+        let mut blocks = certificate.blocks.iter();
+        for (size, multiplier) in canonical_blocks(degree, lo, hi) {
+            let Some(block) = blocks.next() else {
+                return false;
+            };
+            if block.gram.dim() != size || !multiplier.matches(&block.multiplier) {
+                return false;
+            }
+        }
+        blocks.next().is_none()
     }
 
     /// The flat variable index of upper-triangle entry `(i, j)` (`i <= j`) in
@@ -226,8 +274,8 @@ impl SosLayout {
 
 #[cfg(test)]
 mod tests {
-    use super::super::linalg::{project_onto_affine, rref};
     use super::*;
+    use chelis_certificate_core::linalg::{project_onto_affine, rref};
 
     fn ri(n: i64) -> BigRational {
         BigRational::from(BigInt::from(n))
