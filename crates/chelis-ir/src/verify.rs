@@ -2658,6 +2658,39 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                         ));
                     }
 
+                    // [05-OP-40]: extrema preserve the complete numeric
+                    // operand type, including rank zero. Check each edge:
+                    // an unknown lhs extent must not hide a known rhs/result
+                    // contradiction. Physical and logical labels may differ;
+                    // dynamic equality remains the runtime guard's job.
+                    if matches!(node.op, RiscOp::MaxElem | RiscOp::MinElem) {
+                        if [node, lhs, rhs].iter().any(|value| {
+                            !(value.output_type.precision.is_integer()
+                                || value.output_type.precision.is_float())
+                        }) {
+                            errors.push(format!(
+                                "extrema op at node {} requires a signed-integer or float dtype",
+                                node.id.0
+                            ));
+                        }
+                        for input in [lhs, rhs] {
+                            if node.output_type.precision != input.output_type.precision
+                                || node.output_type.dims.len() != input.output_type.dims.len()
+                                || node
+                                    .output_type
+                                    .dims
+                                    .iter()
+                                    .zip(&input.output_type.dims)
+                                    .any(|(out, input)| !dims_compatible(out, input))
+                            {
+                                errors.push(format!(
+                                    "extrema op at node {} output must match its input shape and dtype (input {})",
+                                    node.id.0, input.id.0
+                                ));
+                            }
+                        }
+                    }
+
                     // C2: dimension matching for binary ops.
                     let l_dims = &lhs.output_type.dims;
                     let r_dims = &rhs.output_type.dims;

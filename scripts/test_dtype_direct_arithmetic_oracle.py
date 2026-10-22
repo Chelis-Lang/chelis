@@ -113,10 +113,55 @@ class SourceContractMutationTests(unittest.TestCase):
     def test_min_surrogate_mutation_fails(self) -> None:
         self.mutate(
             "crates/chelis-ir/src/tier2.rs",
-            "add_synth(\n        owner,\n        dag,\n        RiscOp::MinElem,\n        vec![a, b],",
-            "add_synth(\n        owner,\n        dag,\n        RiscOp::MaxElem,\n        vec![a, b],",
+            "ExtremaKind::Min => RiscOp::MinElem,",
+            "ExtremaKind::Min => RiscOp::MaxElem,",
         )
-        with self.assertRaisesRegex(oracle.OracleFailure, "direct MinElem lowering"):
+        with self.assertRaisesRegex(oracle.OracleFailure, "direct paired extrema lowering"):
+            oracle.validate_source_contracts(self.repo)
+
+    def test_max_identity_mutation_fails(self) -> None:
+        self.mutate(
+            "crates/chelis-ir/src/tier2.rs",
+            "ExtremaKind::Max => RiscOp::MaxElem,",
+            "ExtremaKind::Max => RiscOp::MinElem,",
+        )
+        with self.assertRaisesRegex(oracle.OracleFailure, "direct paired extrema lowering"):
+            oracle.validate_source_contracts(self.repo)
+
+    def test_extrema_surrogate_arithmetic_mutation_fails(self) -> None:
+        self.mutate(
+            "crates/chelis-ir/src/tier2.rs",
+            "add_synth(owner, dag, op, vec![a, b], ty, parent_span)",
+            "add_synth(owner, dag, RiscOp::Sub, vec![a, b], ty, parent_span)",
+        )
+        with self.assertRaisesRegex(oracle.OracleFailure, "direct paired extrema lowering"):
+            oracle.validate_source_contracts(self.repo)
+
+    def test_extrema_operand_owned_type_mutation_fails(self) -> None:
+        self.mutate(
+            "crates/chelis-ir/src/tier2.rs",
+            'let ty = dag\n        .get(a)\n        .expect("lowered extrema operand must exist")\n        .output_type\n        .clone();',
+            "let ty = TensorType::scalar_f32();",
+        )
+        with self.assertRaisesRegex(oracle.OracleFailure, "direct paired extrema lowering"):
+            oracle.validate_source_contracts(self.repo)
+
+    def test_extrema_operand_order_mutation_fails(self) -> None:
+        self.mutate(
+            "crates/chelis-ir/src/tier2.rs",
+            "add_synth(owner, dag, op, vec![a, b], ty, parent_span)",
+            "add_synth(owner, dag, op, vec![b, a], ty, parent_span)",
+        )
+        with self.assertRaisesRegex(oracle.OracleFailure, "direct paired extrema lowering"):
+            oracle.validate_source_contracts(self.repo)
+
+    def test_extrema_span_propagation_mutation_fails(self) -> None:
+        self.mutate(
+            "crates/chelis-ir/src/tier2.rs",
+            "add_synth(owner, dag, op, vec![a, b], ty, parent_span)",
+            "add_synth(owner, dag, op, vec![a, b], ty, None)",
+        )
+        with self.assertRaisesRegex(oracle.OracleFailure, "direct paired extrema lowering"):
             oracle.validate_source_contracts(self.repo)
 
     def test_c_checked_subtraction_mutation_fails(self) -> None:

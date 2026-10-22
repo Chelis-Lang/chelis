@@ -69,7 +69,14 @@ fn min_elem_lowers_to_one_direct_selection_without_arithmetic_surrogate() {
         None,
     );
 
-    let result = tier2::lower_min_elem(decl.into(), &mut dag, left, right, &ty, Some("min.expr"));
+    let result = tier2::lower_extrema(
+        decl.into(),
+        &mut dag,
+        ExtremaKind::Min,
+        left,
+        right,
+        Some("min.expr"),
+    );
 
     assert!(verify::verify(&dag).is_empty());
     assert_eq!(dag.len(), 3, "direct min_elem adds exactly one node");

@@ -2,13 +2,17 @@
 
 Parent tracker: [#729](https://github.com/Chelis-Lang/chelis/issues/729).
 Related reports: [#1760](https://github.com/Chelis-Lang/chelis/issues/1760)
-and [#1761](https://github.com/Chelis-Lang/chelis/issues/1761).
+and [#1761](https://github.com/Chelis-Lang/chelis/issues/1761),
+[#3997](https://github.com/Chelis-Lang/chelis/issues/3997) and
+[#3998](https://github.com/Chelis-Lang/chelis/issues/3998).
 
 `spec/04-type-system.md` §4.5.3 owns rank-spread instantiation and the checked
 result type. `spec/05-risc-primitives.md` [05-OP-36] and [05-OP-53] own
 comparison and `where`: a Bool mask selects same-shape, same-dtype branches.
+[05-OP-40] owns direct extrema selection and its shape/dtype identity;
+[05-OP-20..22] own floating classification of those selected values.
 This document selects an implementation of those rules. It does not change
-either operation's accepted language or the numeric semantics in
+the operations' accepted language or the numeric semantics in
 [`dtype_semantics.md`](dtype_semantics.md).
 
 ## The shared failure boundary
@@ -66,6 +70,26 @@ precision-changing predicates retain their own checked result relations. A
 Boolean consumer's result annotation never supplies a missing float producer
 type.
 
+The two extrema identities use one constructor selected by `ExtremaKind`.
+It takes the lowered operands and derives the complete output `TensorType`
+from the left operand, preserving its ordered physical axes and dtype. It
+accepts no output-type annotation: metadata with an unresolved rank spread
+cannot stand in for a scalar, and a consumer's Bool annotation cannot choose
+the numeric producer's dtype. Minimum and maximum remain distinct direct
+RISC nodes with their original operand order and source span; neither is
+implemented through negation or surrogate arithmetic.
+
+The extrema verifier requires two numeric operands and a numeric result of
+one active signed-integer or float dtype. All three have equal rank,
+including rank zero, and compatible extents at every axis. Known extents
+must agree; named or wildcard extents whose equality needs execution retain
+the existing runtime agreement guards. Labels need not be byte-identical:
+physical axis sources and independently authored logical extent claims keep
+their existing separate carriers. An authored claim never overwrites the
+constructor's physical operand shape. Helper actualization and C emission
+consume this result contract rather than repair an extrema constructor's
+speculative rank or dtype.
+
 Nominal dimension arguments remain exact logical terms through field
 instantiation. They belong to the activation's dimension evidence, separately
 from type and precision substitution: an inferred caller result cannot replace
@@ -102,6 +126,8 @@ result rank or dtype from an adjacent operand's role.
 |---|---|---|
 | #1760 | The reported Bool result agrees on Eval and linked native C at concrete ranks 0, 1 and 2, with independent rank-spread and precision instantiations. | Incompatible shapes or a residual unresolved spread fail before C emission; a numeric-output generic control retains its original shape and dtype. |
 | #1761 | The reported nested comparison/`where` agrees at f32 and f64; the mask and final result remain Bool while selected values retain the bound float dtype. | Mixed-family branch values and incompatible shapes reject at the owning checker or lowering stage; the simpler generic `where` passthrough continues to execute. |
+| #3997 | Both extrema preserve direct numeric results at all eight active numeric dtypes, scalar surface and tensor ranks 0/1/2, including nonsquare `[2,3]` and empty `[2,0]`, named dimensions and independent bounded-precision activations. | Incompatible shapes, precisions and surfaces reject; malformed DAG result rank, extent or dtype and Bool operands reject. Constructor tests retain one direct node, operand order and source span. |
+| #3998 | Minimum through `is_nan`, `is_finite` and `is_infinite` agrees at every float width, including nonfinite inputs and local intermediates. An imported/exported f32 `[2,3]` tuple wrapper retains its minimum and finite mask. | Nonfloat classifiers and false static output claims reject; agreeing dynamic claims execute and contradictory authored/input extents trap without weakening runtime guards. |
 
 Every successful C build is compiled, linked and run. Compare exact result
 shape, dtype, iteration rank, and values with Eval, not just exit status.
@@ -113,6 +139,6 @@ edges. A checker
 rejection is acceptable only for a program the controlling specs reject;
 neither reported legal program may be fenced as an implementation shortcut.
 
-This matrix defines acceptance for these two issues, alongside #729's numeric
+This matrix defines acceptance for these issues, alongside #729's numeric
 operation oracle. It does not certify all rank-polymorphic callables or close
 #1277's extent-witness corpus.
