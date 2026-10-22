@@ -18364,16 +18364,21 @@ impl<'program> LowerCtx<'program> {
                     parent_span.as_deref(),
                 )
             }
-            "max_elem" if args.len() == 2 => {
-                let a = self.lower_expr_node(&args[0], "max_elem lhs");
-                let b = self.lower_expr_node(&args[1], "max_elem rhs");
-                let out_ty = Self::elementwise_out_ty(&self.dag, a, ty, None);
-                let node = self.dag.add_node(
+            "max_elem" | "min_elem" if args.len() == 2 => {
+                let a = self.lower_expr_node(&args[0], "extrema lhs");
+                let b = self.lower_expr_node(&args[1], "extrema rhs");
+                let kind = if func_name == "max_elem" {
+                    crate::dag::ExtremaKind::Max
+                } else {
+                    crate::dag::ExtremaKind::Min
+                };
+                let node = tier2::lower_extrema(
                     self.owner(),
-                    RiscOp::MaxElem,
-                    vec![a, b],
-                    out_ty,
-                    self.current_span_id.clone(),
+                    &mut self.dag,
+                    kind,
+                    a,
+                    b,
+                    self.current_span_id.as_deref(),
                 );
                 self.attach_reuse_hint(node, app_span, &[a, b])
             }
@@ -19232,21 +19237,6 @@ impl<'program> LowerCtx<'program> {
                     parent_span.as_deref(),
                 )
             }
-            // Direct Tier-1 minimum selection identity
-            "min_elem" if args.len() == 2 => {
-                let a = self.lower_expr_node(&args[0], "min_elem lhs");
-                let b = self.lower_expr_node(&args[1], "min_elem rhs");
-                let parent_span = self.current_span_id.clone();
-                tier2::lower_min_elem(
-                    self.owner(),
-                    &mut self.dag,
-                    a,
-                    b,
-                    ty,
-                    parent_span.as_deref(),
-                )
-            }
-
             // H2: Boolean operators
             "and" if args.len() == 2 => {
                 let a = self.lower_expr_node(&args[0], "and lhs");
@@ -21516,23 +21506,20 @@ impl<'program> LowerCtx<'program> {
                     anchor,
                 });
             let zero = self.int64_constant(0);
-            let int_ty = TensorType {
-                dims: vec![],
-                precision: Prim::Int64,
-            };
-            let nonnegative = self.dag.add_node(
-                self.owner(),
-                RiscOp::MaxElem,
-                vec![count, zero],
-                int_ty.clone(),
-                self.current_span_id.clone(),
-            );
-            let effective = tier2::lower_min_elem(
+            let nonnegative = tier2::lower_extrema(
                 self.owner(),
                 &mut self.dag,
+                crate::dag::ExtremaKind::Max,
+                count,
+                zero,
+                self.current_span_id.as_deref(),
+            );
+            let effective = tier2::lower_extrema(
+                self.owner(),
+                &mut self.dag,
+                crate::dag::ExtremaKind::Min,
                 nonnegative,
                 len,
-                &int_ty,
                 self.current_span_id.as_deref(),
             );
             return self.gather_runtime_column_element(&element, effective);
@@ -21609,19 +21596,20 @@ impl<'program> LowerCtx<'program> {
             // semantic fallback, because every invalid source index still
             // takes the retained failure branch.
             let zero = self.int64_constant(0);
-            let nonnegative_count = self.dag.add_node(
-                self.owner(),
-                RiscOp::MaxElem,
-                vec![count, zero],
-                int_ty.clone(),
-                self.current_span_id.clone(),
-            );
-            let within_view = tier2::lower_min_elem(
+            let nonnegative_count = tier2::lower_extrema(
                 self.owner(),
                 &mut self.dag,
+                crate::dag::ExtremaKind::Max,
+                count,
+                zero,
+                self.current_span_id.as_deref(),
+            );
+            let within_view = tier2::lower_extrema(
+                self.owner(),
+                &mut self.dag,
+                crate::dag::ExtremaKind::Min,
                 nonnegative_count,
                 len,
-                &int_ty,
                 self.current_span_id.as_deref(),
             );
             let raw_effective = self.dag.add_node(
@@ -21632,12 +21620,12 @@ impl<'program> LowerCtx<'program> {
                 self.current_span_id.clone(),
             );
             let last = self.int64_constant(i64::try_from(items.len()).ok()? - 1);
-            let effective = tier2::lower_min_elem(
+            let effective = tier2::lower_extrema(
                 self.owner(),
                 &mut self.dag,
+                crate::dag::ExtremaKind::Min,
                 raw_effective,
                 last,
-                &int_ty,
                 self.current_span_id.as_deref(),
             );
             return self.blend_runtime_list_items(&items, effective);
@@ -21655,19 +21643,20 @@ impl<'program> LowerCtx<'program> {
             // original count, so this guard cannot turn a rejected program
             // into a successful one.
             let zero = self.int64_constant(0);
-            let nonnegative = self.dag.add_node(
-                self.owner(),
-                RiscOp::MaxElem,
-                vec![count, zero],
-                int_ty.clone(),
-                self.current_span_id.clone(),
-            );
-            tier2::lower_min_elem(
+            let nonnegative = tier2::lower_extrema(
                 self.owner(),
                 &mut self.dag,
+                crate::dag::ExtremaKind::Max,
+                count,
+                zero,
+                self.current_span_id.as_deref(),
+            );
+            tier2::lower_extrema(
+                self.owner(),
+                &mut self.dag,
+                crate::dag::ExtremaKind::Min,
                 nonnegative,
                 len,
-                &int_ty,
                 self.current_span_id.as_deref(),
             )
         };

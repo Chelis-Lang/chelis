@@ -1,7 +1,7 @@
 //! Tier 2 decomposition helpers and direct identity lowerers.
 //!
 //! Most functions in this module decompose Tier 2 derived operations into
-//! Tier 1 RISC DAG nodes. `lower_sub` and `lower_min_elem` emit direct Tier-1 identities
+//! Tier 1 RISC DAG nodes. `lower_sub` and `lower_extrema` emit direct Tier-1 identities
 //! while retaining this module's shared span-propagation path.
 //!
 //! For decomposing helpers, span propagation follows
@@ -23,8 +23,8 @@ use chelis_types::types::Prim;
 use chelis_types::{FloatBinOp, FloatUnOp};
 
 use crate::dag::{
-    ComparisonKind, Dag, DimExpr, DimInfo, LogicalKind, NodeId, Owner, RiscOp, RtAxis, RtDim,
-    TensorType,
+    ComparisonKind, Dag, DimExpr, DimInfo, ExtremaKind, LogicalKind, NodeId, Owner, RiscOp, RtAxis,
+    RtDim, TensorType,
 };
 
 /// Canonical synthesized marker for Tier 2 decomposition sub-nodes when
@@ -463,23 +463,27 @@ pub fn lower_neq(
     lower_comparison(owner, dag, ComparisonKind::Neq, a, b, ty, parent_span)
 }
 
-/// Direct stored-bit `min_elem(a, b)` selection identity ([05-OP-40]).
-pub fn lower_min_elem(
+/// Direct stored-bit extrema selection ([05-OP-40]). Both identities derive
+/// their complete result type from the lowered operand, never an annotation
+/// whose rank spread or precision binder may still be unresolved.
+pub fn lower_extrema(
     owner: Owner,
     dag: &mut Dag,
+    kind: ExtremaKind,
     a: NodeId,
     b: NodeId,
-    ty: &TensorType,
     parent_span: Option<&str>,
 ) -> NodeId {
-    add_synth(
-        owner,
-        dag,
-        RiscOp::MinElem,
-        vec![a, b],
-        ty.clone(),
-        parent_span,
-    )
+    let ty = dag
+        .get(a)
+        .expect("lowered extrema operand must exist")
+        .output_type
+        .clone();
+    let op = match kind {
+        ExtremaKind::Max => RiscOp::MaxElem,
+        ExtremaKind::Min => RiscOp::MinElem,
+    };
+    add_synth(owner, dag, op, vec![a, b], ty, parent_span)
 }
 
 pub fn lower_and(
@@ -2334,7 +2338,7 @@ mod tests {
             scalar_f32(),
             None,
         );
-        let result = lower_min_elem(owner, &mut dag, a, b, &scalar_f32(), None);
+        let result = lower_extrema(owner, &mut dag, ExtremaKind::Min, a, b, None);
         assert!(verify::verify(&dag).is_empty());
 
         assert_eq!(dag.len(), 3);
