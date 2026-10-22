@@ -21,3 +21,7 @@ Remove the format-dependent duplicate builtin dispatch test. AST-based positive 
 Count and exact-reduction acceptance use the numeric core and retain checker coverage.
 Current policy documents name the canonical owners.
 The numeric oracle assigns the preserved schema case to the host schema suite.
+
+Keyed-randomness acceptance reads each selected target's Cargo feature requirements.
+List and run commands preserve native runtime instrumentation.
+Remove incidental command-shape assertions.
