@@ -180,6 +180,12 @@ def dependencies(workspace: Path, *, native: bool, defaults: bool = False) -> st
 
 
 def snapshot(workspace: Path, *, native: bool) -> dict:
+    environment = None
+    if not native:
+        environment = {
+            **support._environment(),
+            "CARGO_TARGET_DIR": str(workspace.resolve() / "target"),
+        }
     source = HOST_SOURCE.replace("__STACK__", ", &NativeStack" if native else "")
     source = source.replace("__NATIVE_IMPORT__", "use chelis_syntax_host::NativeStack;" if native else "")
     source = source.replace("__IDENTITY__", "chelis_syntax_host::module_identity" if native else "chelis_surf::module_identity")
@@ -191,7 +197,8 @@ def snapshot(workspace: Path, *, native: bool) -> dict:
             for name in CRATES[1:]
         ) + "\n"
     result = consumer(workspace / "crates" / CRATES[0], source,
-                      dependencies=extra + 'serde_json = "1"\nbincode = "1"\n')
+                      dependencies=extra + 'serde_json = "1"\nbincode = "1"\n',
+                      env=environment)
     records = [line.removeprefix("SYNTAX_SNAPSHOT ") for line in result.stdout.splitlines()
                if line.startswith("SYNTAX_SNAPSHOT ")]
     if len(records) != 1:

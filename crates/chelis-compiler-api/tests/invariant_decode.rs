@@ -305,7 +305,7 @@ fn wrong_scalar_type_is_structural_not_invariant() {
     let payload = ExecutionValue::Adt {
         ctor: "Probability".to_string(),
         fields: vec![wire_values::scalar_integer(
-            chelis_types::types::Prim::Int64,
+            chelis_numeric_core::prim::Prim::Int64,
             0,
         )],
     };
@@ -324,7 +324,7 @@ fn structural_and_invariant_message_prefixes_distinguish() {
         &ExecutionValue::Adt {
             ctor: "Probability".to_string(),
             fields: vec![wire_values::scalar_integer(
-                chelis_types::types::Prim::Int64,
+                chelis_numeric_core::prim::Prim::Int64,
                 0,
             )],
         },

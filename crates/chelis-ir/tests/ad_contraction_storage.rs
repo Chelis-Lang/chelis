@@ -3,7 +3,7 @@ use chelis_ir::dag::{Dag, DimInfo, NodeId, RiscOp, TensorType};
 use chelis_ir::eval::{TensorValue, eval_tensor, eval_tensor_roots_with};
 use chelis_ir::grad::grad_dag_checked;
 use chelis_ir::{tier2, tier2_ordered};
-use chelis_types::types::Prim;
+use chelis_numeric_core::prim::Prim;
 use chelis_unord::UnordMap;
 
 fn ty(shape: &[usize], precision: Prim) -> TensorType {
@@ -102,7 +102,7 @@ fn inputs([m, k, n]: [usize; 3]) -> UnordMap<String, TensorValue> {
     .collect()
 }
 fn same_bits(a: &TensorValue, b: &TensorValue) {
-    use chelis_types::dtype_semantics::StorageView;
+    use chelis_numeric_core::dtype_semantics::StorageView;
     fn bits(value: &TensorValue) -> Vec<u64> {
         match value.storage().view() {
             StorageView::F64(v) => v.iter().map(|x| x.to_bits()).collect(),

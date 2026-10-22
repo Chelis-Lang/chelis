@@ -73,7 +73,8 @@ fn delimited_handlers_are_atoms_while_record_updates_require_grouping() {
 
 #[test]
 fn every_named_cast_stage_preserves_its_mode_and_rejects_a_mismatched_descriptor() {
-    use chelis_deep::{CastMode, NamedCastMode};
+    use chelis_deep::CastMode;
+    use chelis_numeric_core::named_cast::NamedCastMode;
     use chelis_surf::ast::{Decl, Expr, PipeStageSyntax};
     for (index, mode) in NamedCastMode::ALL.iter().enumerate() {
         let keyword = mode.keyword();

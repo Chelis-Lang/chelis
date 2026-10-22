@@ -18,10 +18,10 @@ use std::collections::BTreeMap;
 
 use chelis_compiler_api::compiler::eval;
 use chelis_compiler_api::schema::{EvalRequest, ExecutionValue, SourceKind, TensorValue};
-use chelis_types::types::Prim;
-use chelis_types::{
+use chelis_numeric_core::dtype_semantics::{
     FloatBinOp, FloatUnOp, ScalarValue, TensorStorage, float_binop, float_unop, scalar_from_f64,
 };
+use chelis_numeric_core::prim::Prim;
 
 /// 2^53 + 1, the smallest positive i64 an f64 cannot hold.
 const ABOVE_F64: i64 = 9_007_199_254_740_993;

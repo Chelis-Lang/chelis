@@ -209,7 +209,7 @@ fn check_finite_floats(wire_dag: &WireDag) -> Result<(), GraphExtractError> {
     fn reject_if_non_finite(
         node: usize,
         field: &'static str,
-        value: chelis_types::ScalarValue,
+        value: chelis_numeric_core::dtype_semantics::ScalarValue,
     ) -> Result<(), GraphExtractError> {
         if !value.prim().is_float() || value.as_f64_lossy().is_finite() {
             Ok(())
@@ -352,7 +352,11 @@ fn sha256_hex(bytes: &[u8]) -> String {
 /// are name-addressed; sorting by name keeps the emitted form stable across
 /// runs regardless of caller insertion order.
 pub fn name_sorted_input_box(
-    mut dims: Vec<(String, chelis_types::ScalarValue, chelis_types::ScalarValue)>,
+    mut dims: Vec<(
+        String,
+        chelis_numeric_core::dtype_semantics::ScalarValue,
+        chelis_numeric_core::dtype_semantics::ScalarValue,
+    )>,
 ) -> IntervalBox {
     dims.sort_by(|a, b| a.0.cmp(&b.0));
     IntervalBox { dims }

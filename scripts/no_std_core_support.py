@@ -264,6 +264,7 @@ def consumer(
     features: Iterable[str] = (),
     default_features: bool = False,
     dependencies: str | None = None,
+    env: Mapping[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     with _package(
         crate,
@@ -273,7 +274,7 @@ def consumer(
         default_features=default_features,
         dependencies=dependencies,
     ) as directory:
-        return run(("cargo", "run", "--quiet"), cwd=directory)
+        return run(("cargo", "run", "--quiet"), cwd=directory, env=env)
 
 
 def _fixture_diagnostics(stdout: str, directory: Path, source: str) -> str:

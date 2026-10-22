@@ -1,13 +1,13 @@
 //! chelis#732 Phase 3 / chelis#687: executable contract for the one
 //! byte-equal-or-table-bounded numerical comparator.
 
-use chelis_types::agreement::{
+use chelis_numeric_core::agreement::{
     AgreementError, AgreementOp, AgreementOutcome, ArithmeticWidthStatus, OP_TOLERANCES,
     compare_exact_observations, compare_rendered_elements, render_spec_tolerance_table,
     tolerance_for,
 };
-use chelis_types::types::Prim;
-use chelis_types::{ElementRef, format_element};
+use chelis_numeric_core::observation::{ElementRef, format_element};
+use chelis_numeric_core::prim::Prim;
 
 fn f32_text(bits: u32) -> String {
     format_element(Prim::F32, ElementRef::F32(f32::from_bits(bits)))

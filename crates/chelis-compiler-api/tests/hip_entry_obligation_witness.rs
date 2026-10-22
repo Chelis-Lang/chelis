@@ -14,7 +14,7 @@ use chelis_compiler_api::compiler::reject_unsupported_hip_ops;
 use chelis_ir::dag::{
     Dag, DimInfo, ExtentClaim, ExtentWitnessSite, NodeId, RiscOp, RtAxis, TensorType,
 };
-use chelis_types::types::Prim;
+use chelis_numeric_core::prim::Prim;
 
 fn tensor(dims: Vec<DimInfo>, precision: Prim) -> TensorType {
     TensorType { dims, precision }

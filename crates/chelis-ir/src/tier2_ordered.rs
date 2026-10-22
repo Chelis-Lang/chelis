@@ -13,7 +13,7 @@
 //! Integer trace and einsum retain their checked host paths (chelis#3377).
 
 use chelis_abi::metadata::ShapeMetadata;
-use chelis_types::types::Prim;
+use chelis_numeric_core::prim::Prim;
 
 use crate::dag::{Dag, DimExpr, DimInfo, NodeId, Owner, RiscOp, RtAxis, RtDim, TensorType};
 use crate::tier2::add_synth;
@@ -226,7 +226,9 @@ pub fn lower_trace(
     diag_dims[axis1] = k;
     diag_dims.remove(axis2);
     let position = if axis1 < axis2 { axis1 } else { axis1 - 1 };
-    let accumulator = precision.default_reduce_sum_accumulator()?;
+    let accumulator = precision
+        .default_reduce_sum_accumulator()
+        .map_err(|error| error.to_string())?;
     let result = precision.sum_result_precision(accumulator);
     let mut out_dims = diag_dims.clone();
     out_dims.remove(position);
@@ -268,7 +270,9 @@ pub fn lower_cumsum(
         )
         .into());
     }
-    let result = p.default_reduce_sum_result_precision()?;
+    let result = p
+        .default_reduce_sum_result_precision()
+        .map_err(|error| error.to_string())?;
     Ok(add_synth(
         owner,
         dag,
@@ -323,7 +327,9 @@ pub fn lower_einsum(
     }
     let accumulator = match accumulator {
         Some(accumulator) => accumulator,
-        None => precision.default_reduce_sum_accumulator()?,
+        None => precision
+            .default_reduce_sum_accumulator()
+            .map_err(|error| error.to_string())?,
     };
     let result = precision.sum_result_precision(accumulator);
     let (inputs, output) = equation
@@ -1297,10 +1303,13 @@ mod einsum_contraction_tests {
                     .expect("contraction form");
                 let count = |dims: &[DimInfo]| dims.iter().filter_map(static_extent).product();
                 let input = |dims: &[DimInfo], salt: usize| {
-                    let storage = chelis_types::finalize_tensor(
+                    let storage = chelis_numeric_core::dtype_semantics::finalize_tensor(
                         "input",
                         p,
-                        chelis_types::RawTensor::Float(values(count(dims), salt)),
+                        chelis_numeric_core::dtype_semantics::RawTensor::Float(values(
+                            count(dims),
+                            salt,
+                        )),
                     )
                     .expect("finalized input");
                     crate::eval::TensorValue::from_storage(

@@ -18,8 +18,30 @@ from collections.abc import Collection
 from capacity_census_wire_publication import CHECK_REPORT_PROTOCOL
 
 _DEFINITION_KEYS = ("def_id", "def_path_hash", "stable_crate_id", "crate", "path")
-_SHAPE_HELPER = "chelis_compiler_api::schema::execution::shape_schema"
-_TENSOR_OWNER = "chelis_compiler_api::schema::TensorValue"
+_SCHEMA_PROJECTIONS = {
+    "chelis_compiler_api::schema::numeric::HexBits":
+        "chelis_numeric_core::dtype_semantics::wire_codec::HexBits",
+    "chelis_compiler_api::schema::numeric::KeyBitsSchema":
+        "chelis_numeric_core::dtype_semantics::wire_codec::KeyBits",
+    "chelis_compiler_api::schema::numeric::ScalarWire":
+        "chelis_numeric_core::dtype_semantics::wire_codec::ScalarWire",
+    "chelis_compiler_api::schema::numeric::StorageWire":
+        "chelis_numeric_core::dtype_semantics::wire_codec::StorageWire",
+    "chelis_compiler_api::schema::numeric::ScalarValueSchema":
+        "chelis_numeric_core::dtype_semantics::ScalarValue",
+    "chelis_compiler_api::schema::numeric::TensorStorageSchema":
+        "chelis_numeric_core::dtype_semantics::TensorStorage",
+}
+_SCHEMA_HELPERS = {
+    "chelis_compiler_api::schema::execution::shape_schema":
+        "chelis_compiler_api::schema::TensorValue",
+    "chelis_compiler_api::schema::numeric::execution_storage_schema":
+        "chelis_compiler_api::schema::TensorValue",
+    "chelis_compiler_api::schema::numeric::key_bits_schema":
+        "chelis_numeric_core::dtype_semantics::wire_codec::KeyBits",
+}
+_KEY_VARIANT_HELPER = "chelis_compiler_api::schema::numeric::is_key_variant"
+_KEY_VARIANT_CHILD = "chelis_compiler_api::schema::numeric::is_key_variant::{closure#0}"
 
 
 def check_report_publisher_owner(caller: dict, crate: dict) -> str | None:
@@ -77,9 +99,9 @@ def resolve_schema_owners(evidence: dict, graph_definition_identities: Collectio
     """Return exact caller DefPathHash -> nominal graph definition identity.
 
     Unknown schema owners, missing parents, and conflicting ancestry are errors.
-    The dedicated shape_schema edge names TensorValue only after both its exact
-    path and its concrete schemars::schema::Schema return identity are checked.
-    The caller still binds that edge to TensorValue's verified adapter.
+    Fixed schema helpers need their exact local identities and concrete
+    schemars::schema::Schema returns. Host projections also need their actual
+    JsonSchema implementation. Every resulting owner must occur in the graph.
     """
     required = {"schema_trait", "crate", "bodies", "calls", "codec_calls", "schema_calls", "dynamic_returns", "errors"}
     if not isinstance(evidence, dict) or not required <= evidence.keys():
@@ -145,6 +167,36 @@ def resolve_schema_owners(evidence: dict, graph_definition_identities: Collectio
             if ancestor in callers and callers[ancestor] != ancestors[index + 1:]:
                 raise ValueError("broken compiler parent linkage")
 
+    def schema_returns(key, label, *, required=True, optional_reference=False):
+        returns = [row["type"] for row in records[key] if "type" in row]
+        if required and not returns:
+            raise ValueError(label + " has no concrete schema return observation")
+        for result in returns:
+            nominal = result.get("nominal") if isinstance(result, dict) else None
+            if optional_reference:
+                try:
+                    term = result["shape"]
+                    schema_definition = term["arguments"][0]["inner"]["definition"]
+                except (KeyError, IndexError, TypeError) as error:
+                    raise ValueError(label + " has no concrete optional schema return") from error
+                expected = {
+                    "tag": "nominal", "definition": nominal,
+                    "arguments": [{"tag": "reference", "mutable": False, "inner": {
+                        "tag": "nominal", "definition": schema_definition, "arguments": [],
+                    }}],
+                }
+                if (
+                    _canonical(nominal) != "core::option::Option"
+                    or term != expected
+                    or type(term["arguments"][0]["mutable"]) is not bool
+                ):
+                    raise ValueError(label + " has the wrong optional schema reference")
+                nominal = schema_definition
+            if nominal is None or _canonical(nominal) != "schemars::schema::Schema":
+                raise ValueError(label + " has the wrong concrete schema return")
+            if nominal["stable_crate_id"] != schema["stable_crate_id"]:
+                raise ValueError(label + " returns a foreign schema crate")
+
     anchors, schema_scopes = {}, set()
     for key, observations in records.items():
         owners = set()
@@ -161,6 +213,20 @@ def resolve_schema_owners(evidence: dict, graph_definition_identities: Collectio
                 canonical = _canonical(nominal)
             except (KeyError, TypeError) as error:
                 raise ValueError("schema implementation has no nominal owner") from error
+            projection_owner = _SCHEMA_PROJECTIONS.get(canonical)
+            if projection_owner is not None:
+                current = record["caller"]["definition"]
+                if (
+                    _definition(nominal)[2:4] != root_identity[2:4]
+                    or _definition(current)[2:4] != root_identity[2:4]
+                ):
+                    raise ValueError("schema projection has a foreign compiler identity")
+                schema_returns(
+                    key, canonical, required=current.get("item_name") == "json_schema"
+                )
+                if projection_owner not in graph:
+                    raise ValueError("schema projection has no exact codec graph owner")
+                owners.add(projection_owner)
             if canonical in graph:
                 owners.add(canonical)
         if len(owners) > 1:
@@ -176,21 +242,33 @@ def resolve_schema_owners(evidence: dict, graph_definition_identities: Collectio
         for parent in callers[key]:
             if parent in anchors:
                 return anchors[parent]
-        # This is an exact additional owner edge, not a module/prefix rule.
+        # Each helper has one fixed owner. No module path grants ownership.
         observations = records[key]
-        if _canonical(observations[0]["caller"]["definition"]) == _SHAPE_HELPER:
-            returns = [observation["type"] for observation in observations if "type" in observation]
-            if not returns:
-                raise ValueError("shape_schema has no concrete schema return observation")
-            for result in returns:
-                nominal = result.get("nominal") if isinstance(result, dict) else None
-                if nominal is None or _canonical(nominal) != "schemars::schema::Schema":
-                    raise ValueError("shape_schema has the wrong concrete schema return")
-                if nominal["stable_crate_id"] != schema["stable_crate_id"]:
-                    raise ValueError("shape_schema returns a foreign schema crate")
-            if _TENSOR_OWNER not in graph:
-                raise ValueError("shape_schema has no TensorValue graph owner")
-            return _TENSOR_OWNER
+        current = observations[0]["caller"]["definition"]
+        helper = _canonical(current)
+        if helper == _KEY_VARIANT_CHILD:
+            parent = observations[0]["caller"]["ancestors"][0]
+            if (
+                _definition(current)[2:4] != root_identity[2:4]
+                or _definition(parent)[2:4] != root_identity[2:4]
+                or _canonical(parent) != _KEY_VARIANT_HELPER
+                or parent["def_path_hash"] not in bodies
+                or any(row["caller"].get("implementation") is not None for row in observations)
+            ):
+                raise ValueError("key variant schema child has no exact local helper")
+            schema_returns(key, helper, optional_reference=True)
+            owner = _SCHEMA_PROJECTIONS["chelis_compiler_api::schema::numeric::TensorStorageSchema"]
+            if owner not in graph:
+                raise ValueError("key variant schema child has no exact codec graph owner")
+            return owner
+        if helper in _SCHEMA_HELPERS:
+            if _definition(current)[2:4] != root_identity[2:4]:
+                raise ValueError("schema helper has a foreign compiler identity")
+            schema_returns(key, helper)
+            owner = _SCHEMA_HELPERS[helper]
+            if owner not in graph:
+                raise ValueError("schema helper has no exact codec graph owner")
+            return owner
         raise ValueError("unresolved schema publication owner: " + key)
 
     result = {}

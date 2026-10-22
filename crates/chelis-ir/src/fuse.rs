@@ -8,7 +8,7 @@
 //! **Invariant:** fusion never duplicates computation. A node with multiple
 //! consumers is never absorbed into a fused chain.
 
-use chelis_types::types::Prim;
+use chelis_numeric_core::prim::Prim;
 use chelis_unord::{UnordMap, UnordSet};
 
 use crate::dag::{Dag, DagNode, FusedInput, FusedStep, FusedStepOp, NodeId, RiscOp};
@@ -818,7 +818,7 @@ mod tests {
     fn vec_f32(n: usize) -> TensorType {
         TensorType {
             dims: vec![DimInfo::Lit(n)],
-            precision: chelis_types::types::Prim::F32,
+            precision: chelis_numeric_core::prim::Prim::F32,
         }
     }
 
@@ -829,7 +829,7 @@ mod tests {
     fn vec_i64(n: usize) -> TensorType {
         TensorType {
             dims: vec![DimInfo::Lit(n)],
-            precision: chelis_types::types::Prim::Int64,
+            precision: chelis_numeric_core::prim::Prim::Int64,
         }
     }
 

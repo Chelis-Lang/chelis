@@ -20,7 +20,7 @@ use chelis_ir::axis_sources::check_axis_sources;
 use chelis_ir::dag::{Dag, DimInfo, NodeId, RiscOp, TensorType};
 use chelis_ir::grad::grad_dag_checked;
 use chelis_ir::lower::lower_subexpr_program;
-use chelis_types::types::Prim;
+use chelis_numeric_core::prim::Prim;
 use chelis_types::unsupported::Stage;
 use chelis_unord::UnordMap;
 

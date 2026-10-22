@@ -177,12 +177,20 @@ build if ambient flags still enable fast math. A small companion C file, compile
 same unit, exposes non-static `chelis_crmath_ffi_*` shims to Rust. Those symbols live
 only inside the Rust binary; they are not a published C ABI and appear in no header.
 
+The Rust library uses unconditional `no_std`.
+Its `std` feature provides host profile and C-source services.
+`chelis-numeric-core` disables that feature.
+Bare targets compile the same kernels with Clang and 128-bit `_BitInt` support where native `__int128` is absent.
+Private Rust helpers provide the kernels' IEEE operations without a C library.
+These helpers do not change the published C ABI or generated kernel text.
+
+
 The crate's Rust API is per dtype and closed: `exp_f32`, `exp_f64`, ..., `tanh_f64`,
 plus `f16`/`bf16` forms that widen exactly to f32, call the f32 kernel, and finalize
 once through the existing `half` narrowing, as [04-NUM-8] requires. Every consumer calls
 this API and nothing else:
 
-- `crates/chelis-types/src/dtype_semantics.rs` (scalar and activation evaluation);
+- `crates/chelis-numeric-core/src/dtype_semantics.rs` (scalar and activation evaluation).
 - `crates/chelis-ir/src/optimize.rs` (constant folding computes at the declared width
   through the same kernels, so a folded literal and a run-time value cannot differ);
 - `crates/chelis-compiler-api/src/runtime/host_ops.rs` (host softmax and the other
@@ -768,7 +776,7 @@ correction reads `z = 0`, so its gradient is exactly zero.
 
 ### 12.6 Implementation surface
 
-`chelis_types::activation` holds the one definition of every §3.3 graph, `Phi`
+`chelis_numeric_core::activation` holds the one definition of every §3.3 graph, `Phi`
 included; the IR lowering (`chelis_ir::tier2`), the evaluator's scalar and tensor
 kernels, and the C host helpers (built from the `tier2` graph) all run it, so `gelu`,
 `gelu_tanh`, `silu`, and `standard_normal_cdf` have no hand-written lane copy. The graph's

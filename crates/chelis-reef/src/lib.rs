@@ -10497,7 +10497,7 @@ mod shell_type_variable_canonicalization_tests {
                 rvars: vec![],
                 body: Type::function(vec![Type::Var(TypeVar(33))], Type::Var(TypeVar(33))),
             },
-            Scheme::mono(Type::Prim(chelis_types::types::Prim::Int32)),
+            Scheme::mono(Type::Prim(chelis_numeric_core::prim::Prim::Int32)),
         ] {
             assert!(
                 canonical_shell_scheme(&scheme)
@@ -10517,7 +10517,7 @@ mod shell_type_variable_canonicalization_tests {
             tvar_restrictions: vec![(TypeVar(5), TypeVarRestriction::ActiveFloat)],
             dvars: vec![],
             rvars: vec![],
-            body: Type::Prim(chelis_types::types::Prim::Int32),
+            body: Type::Prim(chelis_numeric_core::prim::Prim::Int32),
         };
 
         assert_eq!(
@@ -10541,11 +10541,11 @@ mod shell_type_variable_canonicalization_tests {
                 rvars: vec![],
                 constraints: vec![CollectionConstraint::Len {
                     operand: Type::Var(TypeVar(element)),
-                    result: Type::Prim(chelis_types::types::Prim::Int64),
+                    result: Type::Prim(chelis_numeric_core::prim::Prim::Int64),
                 }],
                 body: Type::function(
                     vec![Type::Var(TypeVar(element))],
-                    Type::Prim(chelis_types::types::Prim::Int64),
+                    Type::Prim(chelis_numeric_core::prim::Prim::Int64),
                 ),
             }
         }
@@ -10622,11 +10622,11 @@ mod shell_type_variable_canonicalization_tests {
             rvars: vec![],
             constraints: vec![CollectionConstraint::Len {
                 operand: Type::Var(TypeVar(1)),
-                result: Type::Prim(chelis_types::types::Prim::Int64),
+                result: Type::Prim(chelis_numeric_core::prim::Prim::Int64),
             }],
             body: Type::function(
                 vec![Type::Var(TypeVar(0))],
-                Type::Prim(chelis_types::types::Prim::Int64),
+                Type::Prim(chelis_numeric_core::prim::Prim::Int64),
             ),
         };
 
@@ -10645,7 +10645,7 @@ mod shell_type_variable_canonicalization_tests {
 
         let body = Type::function(
             vec![Type::Var(TypeVar(4))],
-            Type::Prim(chelis_types::types::Prim::Int64),
+            Type::Prim(chelis_numeric_core::prim::Prim::Int64),
         );
         let obligated = |constraint: CollectionConstraint| Scheme {
             result_origin: None,
@@ -10659,13 +10659,13 @@ mod shell_type_variable_canonicalization_tests {
 
         let on_list = canonical_shell_scheme(&obligated(CollectionConstraint::Len {
             operand: Type::Var(TypeVar(4)),
-            result: Type::Prim(chelis_types::types::Prim::Int64),
+            result: Type::Prim(chelis_numeric_core::prim::Prim::Int64),
         }))
         .expect("the len-obligated scheme canonicalizes");
         let on_index = canonical_shell_scheme(&obligated(CollectionConstraint::Index {
             list: Type::Var(TypeVar(4)),
-            index: Type::Prim(chelis_types::types::Prim::Int64),
-            result: Type::Prim(chelis_types::types::Prim::Int64),
+            index: Type::Prim(chelis_numeric_core::prim::Prim::Int64),
+            result: Type::Prim(chelis_numeric_core::prim::Prim::Int64),
         }))
         .expect("the index-obligated scheme canonicalizes");
         let unconstrained = canonical_shell_scheme(&Scheme {
@@ -10875,9 +10875,13 @@ fn render_collection_obligation(
             result,
         } => CollectionObligation::FloatClassify {
             kind: match kind {
-                chelis_types::FloatClassify::Nan => chelis_shell_core::FloatClassifyKind::Nan,
-                chelis_types::FloatClassify::Finite => chelis_shell_core::FloatClassifyKind::Finite,
-                chelis_types::FloatClassify::Infinite => {
+                chelis_numeric_core::dtype_semantics::FloatClassify::Nan => {
+                    chelis_shell_core::FloatClassifyKind::Nan
+                }
+                chelis_numeric_core::dtype_semantics::FloatClassify::Finite => {
+                    chelis_shell_core::FloatClassifyKind::Finite
+                }
+                chelis_numeric_core::dtype_semantics::FloatClassify::Infinite => {
                     chelis_shell_core::FloatClassifyKind::Infinite
                 }
             },

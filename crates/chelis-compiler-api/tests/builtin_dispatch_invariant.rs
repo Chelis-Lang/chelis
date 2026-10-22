@@ -24,7 +24,8 @@ use chelis_unord::UnordSet;
 use std::fs;
 use std::path::PathBuf;
 
-use chelis_types::{BUILTIN_NAMES, FloatClassify};
+use chelis_numeric_core::dtype_semantics::FloatClassify;
+use chelis_types::BUILTIN_NAMES;
 
 /// Builtins that legitimately do not need a host-runtime arm. Document
 /// the reason per the closed vocabulary above.
@@ -187,9 +188,9 @@ fn classifier_fixture(arm: &str) -> String {
 }
 
 const CLASSIFIER_ARM: &str = r#"
-name if chelis_types::FloatClassify::from_name(name).is_some() => {
+name if chelis_numeric_core::dtype_semantics::FloatClassify::from_name(name).is_some() => {
     eval_float_classification(
-        chelis_types::FloatClassify::from_name(name).expect("classification identity"),
+        chelis_numeric_core::dtype_semantics::FloatClassify::from_name(name).expect("classification identity"),
         args,
     )
 }
@@ -220,7 +221,7 @@ fn closed_classifier_arm_covers_its_canonical_names() {
 fn absent_or_erased_classifier_handler_does_not_count() {
     assert_classifiers_present(&classifier_fixture(""), false);
     let erased = CLASSIFIER_ARM.replace(
-        "eval_float_classification(\n        chelis_types::FloatClassify::from_name(name).expect(\"classification identity\"),\n        args,\n    )",
+        "eval_float_classification(\n        chelis_numeric_core::dtype_semantics::FloatClassify::from_name(name).expect(\"classification identity\"),\n        args,\n    )",
         "unreachable!()",
     );
     assert_ne!(erased, CLASSIFIER_ARM);
@@ -235,7 +236,7 @@ fn wrong_classifier_guard_identity_or_arguments_do_not_count() {
         ("from_name(name).expect", "from_name(\"is_nan\").expect"),
         (
             ".expect(\"classification identity\")",
-            ".unwrap_or(chelis_types::FloatClassify::Nan)",
+            ".unwrap_or(chelis_numeric_core::dtype_semantics::FloatClassify::Nan)",
         ),
         ("        args,", "        other_args,"),
         ("eval_float_classification(", "different_handler("),

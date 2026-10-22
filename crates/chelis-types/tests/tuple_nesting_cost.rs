@@ -14,7 +14,8 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 
-use chelis_types::types::{Prim, Type};
+use chelis_numeric_core::prim::Prim;
+use chelis_types::types::Type;
 
 struct CountingAllocator;
 

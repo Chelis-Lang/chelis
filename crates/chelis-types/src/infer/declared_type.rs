@@ -283,14 +283,14 @@ pub(super) fn restriction_for_bound(bound: &chelis_deep::DtypeBound) -> TypeVarR
         chelis_deep::DtypeBound::Family(family) => restriction_for_family(*family),
         chelis_deep::DtypeBound::Set(members) => TypeVarRestriction::ActiveSet(
             crate::types::PrimSet::from_members(members.iter().map(|dtype| match dtype {
-                chelis_deep::BoundDtype::F32 => crate::types::Prim::F32,
-                chelis_deep::BoundDtype::F64 => crate::types::Prim::F64,
-                chelis_deep::BoundDtype::Bf16 => crate::types::Prim::Bf16,
-                chelis_deep::BoundDtype::F16 => crate::types::Prim::F16,
-                chelis_deep::BoundDtype::I8 => crate::types::Prim::Int8,
-                chelis_deep::BoundDtype::I16 => crate::types::Prim::Int16,
-                chelis_deep::BoundDtype::I32 => crate::types::Prim::Int32,
-                chelis_deep::BoundDtype::I64 => crate::types::Prim::Int64,
+                chelis_deep::BoundDtype::F32 => chelis_numeric_core::prim::Prim::F32,
+                chelis_deep::BoundDtype::F64 => chelis_numeric_core::prim::Prim::F64,
+                chelis_deep::BoundDtype::Bf16 => chelis_numeric_core::prim::Prim::Bf16,
+                chelis_deep::BoundDtype::F16 => chelis_numeric_core::prim::Prim::F16,
+                chelis_deep::BoundDtype::I8 => chelis_numeric_core::prim::Prim::Int8,
+                chelis_deep::BoundDtype::I16 => chelis_numeric_core::prim::Prim::Int16,
+                chelis_deep::BoundDtype::I32 => chelis_numeric_core::prim::Prim::Int32,
+                chelis_deep::BoundDtype::I64 => chelis_numeric_core::prim::Prim::Int64,
             })),
         ),
     }

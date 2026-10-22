@@ -9,69 +9,7 @@
 //! guard's `<prim>` slot is `i64`, because the guard finalizes an extent or
 //! an index (spec/04-type-system.md section 4.7).
 
-use std::fmt;
-
-/// The closed set of [04-NUM-9] numeric-trap kinds.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum NumericTrapKind {
-    /// An integer result outside the declared dtype's range.
-    Overflow,
-    /// An input or result outside the operation's or dtype's domain.
-    Domain,
-    /// Integer division or remainder by a zero divisor.
-    DivZero,
-}
-
-impl NumericTrapKind {
-    pub const ALL: [Self; 3] = [Self::Overflow, Self::Domain, Self::DivZero];
-
-    /// The kind's frozen spelling inside a trap line.
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Overflow => "overflow",
-            Self::Domain => "domain",
-            Self::DivZero => "division by zero",
-        }
-    }
-}
-
-/// One [04-NUM-9] numeric-trap line: `numeric trap: <kind> in <op> at <dtype>`.
-///
-/// Every lane renders its trap lines through this one formatter, so the
-/// evaluator and the compiled runtime cannot drift apart. The line has no
-/// prefix or suffix; any context is a separate line before it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct NumericTrapLine<'a> {
-    pub kind: NumericTrapKind,
-    /// The canonical name of the primitive that raised the trap.
-    pub op: &'a str,
-    /// The canonical name of the dtype the primitive was finalizing to.
-    pub dtype: &'a str,
-}
-
-impl NumericTrapLine<'_> {
-    /// The frozen prefix every trap line begins with.
-    pub const PREFIX: &'static str = "numeric trap: ";
-    /// The frozen separator before the raising primitive's name.
-    pub const OPERATION_SEPARATOR: &'static str = " in ";
-    /// The frozen separator before the dtype's name.
-    pub const DTYPE_SEPARATOR: &'static str = " at ";
-}
-
-impl fmt::Display for NumericTrapLine<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{}{}{}{}{}{}",
-            Self::PREFIX,
-            self.kind.as_str(),
-            Self::OPERATION_SEPARATOR,
-            self.op,
-            Self::DTYPE_SEPARATOR,
-            self.dtype
-        )
-    }
-}
+use chelis_vocab::failure::{NumericTrapKind, NumericTrapLine};
 
 /// The [04-NUM-9] line of a `Domain` trap in `op` that finalizes an extent,
 /// an index or a count, so its `<prim>` slot is `i64`.

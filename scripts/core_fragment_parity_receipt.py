@@ -28,7 +28,7 @@ What it does, per required case:
    expected, and their complete stderr and exit status when a trap is expected.
 
 The comparison predicate is byte equality, which is
-`chelis_types::agreement::compare_exact_observations` verbatim -- that function's
+`chelis_numeric_core::agreement::compare_exact_observations` verbatim -- that function's
 body is `reference.as_bytes() == candidate.as_bytes()`. No tolerance is applied:
 [05-OBS-3] permits one only when both lanes compute at [04-NUM-8]'s declared
 arithmetic width, and chelis#897 records that the evaluator does not, so the
@@ -448,7 +448,7 @@ def load_manifest(path: Path) -> Manifest:
 def streams_agree(reference: bytes, candidate: bytes) -> bool:
     """Byte equality: `compare_exact_observations`'s predicate, verbatim.
 
-    See that function in `crates/chelis-types/src/agreement.rs`. No tolerance
+    See that function in `crates/chelis-numeric-core/src/agreement.rs`. No tolerance
     branch exists here by design (§3.2).
     """
     return reference == candidate

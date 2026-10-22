@@ -24,7 +24,11 @@ pub fn constant_fold(dag: &mut Dag) {
     // (when distinct from the operation's) and each operand's existing
     // `merged_spans` — i.e. the operand's full provenance flowing onto
     // the folded result.
-    let mut replacements: Vec<(NodeId, chelis_types::ScalarValue, Vec<String>)> = Vec::new();
+    let mut replacements: Vec<(
+        NodeId,
+        chelis_numeric_core::dtype_semantics::ScalarValue,
+        Vec<String>,
+    )> = Vec::new();
     let claimed_producers = crate::axis_sources::claimed_producers(dag);
 
     // Direct subtraction and value extrema fold through their exact typed
@@ -36,7 +40,7 @@ pub fn constant_fold(dag: &mut Dag) {
     // chelis#856), and a result that does not finalize at the node's dtype
     // declines (never bake a trap away nor in - the runtime evaluates the
     // unfolded graph and traps with its full diagnostic).
-    let wide_image = |value: &chelis_types::ScalarValue| -> Option<f64> {
+    let wide_image = |value: &chelis_numeric_core::dtype_semantics::ScalarValue| -> Option<f64> {
         if let Some(i) = value.as_i64_exact()
             && (i as f64) as i128 != i as i128
         {
@@ -58,46 +62,80 @@ pub fn constant_fold(dag: &mut Dag) {
             {
                 let direct = match &node.op {
                     RiscOp::Sub => Some(if node.output_type.precision.is_integer() {
-                        chelis_types::int_binop(chelis_types::IntBinOp::Sub, *lval, *rval)
+                        chelis_numeric_core::dtype_semantics::int_binop(
+                            chelis_numeric_core::dtype_semantics::IntBinOp::Sub,
+                            *lval,
+                            *rval,
+                        )
                     } else {
-                        chelis_types::float_binop(chelis_types::FloatBinOp::Sub, *lval, *rval)
+                        chelis_numeric_core::dtype_semantics::float_binop(
+                            chelis_numeric_core::dtype_semantics::FloatBinOp::Sub,
+                            *lval,
+                            *rval,
+                        )
                     }),
                     RiscOp::MaxElem => Some(if node.output_type.precision.is_integer() {
-                        chelis_types::int_binop(chelis_types::IntBinOp::Max, *lval, *rval)
+                        chelis_numeric_core::dtype_semantics::int_binop(
+                            chelis_numeric_core::dtype_semantics::IntBinOp::Max,
+                            *lval,
+                            *rval,
+                        )
                     } else {
-                        chelis_types::float_binop(chelis_types::FloatBinOp::Max, *lval, *rval)
+                        chelis_numeric_core::dtype_semantics::float_binop(
+                            chelis_numeric_core::dtype_semantics::FloatBinOp::Max,
+                            *lval,
+                            *rval,
+                        )
                     }),
                     RiscOp::MinElem => Some(if node.output_type.precision.is_integer() {
-                        chelis_types::int_binop(chelis_types::IntBinOp::Min, *lval, *rval)
+                        chelis_numeric_core::dtype_semantics::int_binop(
+                            chelis_numeric_core::dtype_semantics::IntBinOp::Min,
+                            *lval,
+                            *rval,
+                        )
                     } else {
-                        chelis_types::float_binop(chelis_types::FloatBinOp::Min, *lval, *rval)
+                        chelis_numeric_core::dtype_semantics::float_binop(
+                            chelis_numeric_core::dtype_semantics::FloatBinOp::Min,
+                            *lval,
+                            *rval,
+                        )
                     }),
                     // [05-OP-79]: the declared-width correctly rounded kernel,
                     // so a folded literal carries the unfolded node's bits.
-                    RiscOp::Pow => Some(chelis_types::float_binop(
-                        chelis_types::FloatBinOp::Pow,
+                    RiscOp::Pow => Some(chelis_numeric_core::dtype_semantics::float_binop(
+                        chelis_numeric_core::dtype_semantics::FloatBinOp::Pow,
                         *lval,
                         *rval,
                     )),
                     RiscOp::Compare(kind) => Some(
-                        chelis_types::compare_scalars(
+                        chelis_numeric_core::dtype_semantics::compare_scalars(
                             match kind {
                                 ComparisonKind::CmpLt | ComparisonKind::Lt => {
-                                    chelis_types::CompareOp::Lt
+                                    chelis_numeric_core::dtype_semantics::CompareOp::Lt
                                 }
-                                ComparisonKind::Eq => chelis_types::CompareOp::Eq,
-                                ComparisonKind::Neq => chelis_types::CompareOp::Ne,
-                                ComparisonKind::Gt => chelis_types::CompareOp::Gt,
-                                ComparisonKind::Gte => chelis_types::CompareOp::Gte,
-                                ComparisonKind::Lte => chelis_types::CompareOp::Lte,
+                                ComparisonKind::Eq => {
+                                    chelis_numeric_core::dtype_semantics::CompareOp::Eq
+                                }
+                                ComparisonKind::Neq => {
+                                    chelis_numeric_core::dtype_semantics::CompareOp::Ne
+                                }
+                                ComparisonKind::Gt => {
+                                    chelis_numeric_core::dtype_semantics::CompareOp::Gt
+                                }
+                                ComparisonKind::Gte => {
+                                    chelis_numeric_core::dtype_semantics::CompareOp::Gte
+                                }
+                                ComparisonKind::Lte => {
+                                    chelis_numeric_core::dtype_semantics::CompareOp::Lte
+                                }
                             },
                             *lval,
                             *rval,
                         )
                         .and_then(|result| {
-                            Ok(chelis_types::scalar_from_i64(
+                            Ok(chelis_numeric_core::dtype_semantics::scalar_from_i64(
                                 "const",
-                                chelis_types::types::Prim::Bool,
+                                chelis_numeric_core::prim::Prim::Bool,
                                 i64::from(result),
                             )?)
                         }),
@@ -106,8 +144,8 @@ pub fn constant_fold(dag: &mut Dag) {
                         lval.as_bool_exact()
                             .zip(rval.as_bool_exact())
                             .ok_or({
-                                chelis_types::NumericKernelError::Trap(
-                                    chelis_types::NumericTrap::Domain {
+                                chelis_numeric_core::dtype_semantics::NumericKernelError::Trap(
+                                    chelis_numeric_core::dtype_semantics::NumericTrap::Domain {
                                         op: "logical",
                                         prim: node.output_type.precision,
                                     },
@@ -119,9 +157,9 @@ pub fn constant_fold(dag: &mut Dag) {
                                     RiscOp::Logical(LogicalKind::Or) => lhs || rhs,
                                     _ => unreachable!(),
                                 };
-                                Ok(chelis_types::scalar_from_i64(
+                                Ok(chelis_numeric_core::dtype_semantics::scalar_from_i64(
                                     "const",
-                                    chelis_types::types::Prim::Bool,
+                                    chelis_numeric_core::prim::Prim::Bool,
                                     i64::from(result),
                                 )?)
                             }),
@@ -150,8 +188,11 @@ pub fn constant_fold(dag: &mut Dag) {
                     _ => None,
                 };
                 if let Some(val) = result
-                    && let Ok(sealed) =
-                        chelis_types::scalar_from_f64("const", node.output_type.precision, val)
+                    && let Ok(sealed) = chelis_numeric_core::dtype_semantics::scalar_from_f64(
+                        "const",
+                        node.output_type.precision,
+                        val,
+                    )
                 {
                     let merge_spans = collect_operand_spans(node, &[l, r]);
                     replacements.push((node.id, sealed, merge_spans));
@@ -165,15 +206,15 @@ pub fn constant_fold(dag: &mut Dag) {
             // kernel, never the f64 wide image: a folded literal must carry the
             // same correctly rounded bits ([05-OP-46]) as the unfolded node.
             let transcendental = match &node.op {
-                RiscOp::Exp => Some(chelis_types::FloatUnOp::Exp),
-                RiscOp::Log => Some(chelis_types::FloatUnOp::Log),
-                RiscOp::Sin => Some(chelis_types::FloatUnOp::Sin),
-                RiscOp::Cos => Some(chelis_types::FloatUnOp::Cos),
-                RiscOp::Tan => Some(chelis_types::FloatUnOp::Tan),
-                RiscOp::Atan => Some(chelis_types::FloatUnOp::Atan),
-                RiscOp::Tanh => Some(chelis_types::FloatUnOp::Tanh),
-                RiscOp::Erf => Some(chelis_types::FloatUnOp::Erf),
-                RiscOp::Erfc => Some(chelis_types::FloatUnOp::Erfc),
+                RiscOp::Exp => Some(chelis_numeric_core::dtype_semantics::FloatUnOp::Exp),
+                RiscOp::Log => Some(chelis_numeric_core::dtype_semantics::FloatUnOp::Log),
+                RiscOp::Sin => Some(chelis_numeric_core::dtype_semantics::FloatUnOp::Sin),
+                RiscOp::Cos => Some(chelis_numeric_core::dtype_semantics::FloatUnOp::Cos),
+                RiscOp::Tan => Some(chelis_numeric_core::dtype_semantics::FloatUnOp::Tan),
+                RiscOp::Atan => Some(chelis_numeric_core::dtype_semantics::FloatUnOp::Atan),
+                RiscOp::Tanh => Some(chelis_numeric_core::dtype_semantics::FloatUnOp::Tanh),
+                RiscOp::Erf => Some(chelis_numeric_core::dtype_semantics::FloatUnOp::Erf),
+                RiscOp::Erfc => Some(chelis_numeric_core::dtype_semantics::FloatUnOp::Erfc),
                 _ => None,
             };
             if let Some(inp) = input
@@ -181,7 +222,7 @@ pub fn constant_fold(dag: &mut Dag) {
                 && let Some(op) = transcendental
             {
                 if inner.prim() == node.output_type.precision
-                    && let Ok(folded) = chelis_types::float_unop(op, *inner)
+                    && let Ok(folded) = chelis_numeric_core::dtype_semantics::float_unop(op, *inner)
                 {
                     let merge_spans = collect_operand_spans(node, &[inp]);
                     replacements.push((node.id, folded, merge_spans));
@@ -203,8 +244,11 @@ pub fn constant_fold(dag: &mut Dag) {
                     _ => None,
                 };
                 if let Some(val) = result
-                    && let Ok(sealed) =
-                        chelis_types::scalar_from_f64("const", node.output_type.precision, val)
+                    && let Ok(sealed) = chelis_numeric_core::dtype_semantics::scalar_from_f64(
+                        "const",
+                        node.output_type.precision,
+                        val,
+                    )
                 {
                     let merge_spans = collect_operand_spans(node, &[inp]);
                     replacements.push((node.id, sealed, merge_spans));
@@ -651,7 +695,8 @@ mod tests {
         Dag, DeclId, DimInfo, ExtentWitnessSite, FusedInput, FusedStep, FusedStepOp,
         ReduceWindowKind, RiscOp, RtAxis, RtDim, TensorType,
     };
-    use chelis_types::{ElementRef, scalar_from_f64, scalar_from_i64};
+    use chelis_numeric_core::dtype_semantics::{scalar_from_f64, scalar_from_i64};
+    use chelis_numeric_core::observation::ElementRef;
 
     fn scalar_f32() -> TensorType {
         TensorType::scalar_f32()
@@ -673,7 +718,7 @@ mod tests {
             vec![input],
             TensorType {
                 dims: Vec::new(),
-                precision: chelis_types::types::Prim::Int64,
+                precision: chelis_numeric_core::prim::Prim::Int64,
             },
             None,
         )
@@ -683,7 +728,7 @@ mod tests {
     fn claimed_producers_are_neither_folded_merged_nor_dropped() {
         let tensor = TensorType {
             dims: vec![DimInfo::Named("n".into(), None)],
-            precision: chelis_types::types::Prim::F32,
+            precision: chelis_numeric_core::prim::Prim::F32,
         };
 
         let mut folded = Dag::new();
@@ -728,7 +773,7 @@ mod tests {
             let cast = duplicate.add_node(
                 duplicate_decl,
                 RiscOp::Cast {
-                    new_precision: chelis_types::types::Prim::F32,
+                    new_precision: chelis_numeric_core::prim::Prim::F32,
                 },
                 vec![input],
                 tensor.clone(),
@@ -761,7 +806,7 @@ mod tests {
         let cast = dead.add_node(
             dead_decl,
             RiscOp::Cast {
-                new_precision: chelis_types::types::Prim::F32,
+                new_precision: chelis_numeric_core::prim::Prim::F32,
             },
             vec![input],
             tensor,
@@ -770,7 +815,7 @@ mod tests {
         dead.add_result_claim_dep(cast, claim);
         let root = dead.add_node(
             dead_decl,
-            RiscOp::synth_const(chelis_types::types::Prim::F32, 0.0),
+            RiscOp::synth_const(chelis_numeric_core::prim::Prim::F32, 0.0),
             Vec::new(),
             scalar_f32(),
             None,
@@ -807,18 +852,18 @@ mod tests {
         let trapping = dag.add_node(
             decl,
             RiscOp::Cast {
-                new_precision: chelis_types::types::Prim::Int32,
+                new_precision: chelis_numeric_core::prim::Prim::Int32,
             },
             vec![source],
             TensorType {
                 dims: Vec::new(),
-                precision: chelis_types::types::Prim::Int32,
+                precision: chelis_numeric_core::prim::Prim::Int32,
             },
             None,
         );
         let root = dag.add_node(
             decl,
-            RiscOp::synth_const(chelis_types::types::Prim::F32, 0.0),
+            RiscOp::synth_const(chelis_numeric_core::prim::Prim::F32, 0.0),
             Vec::new(),
             scalar_f32(),
             None,
@@ -876,7 +921,7 @@ mod tests {
     /// as what this test pins, not as what only it pins.
     #[test]
     fn every_dtype_conditional_trap_class_member_is_seeded_and_its_twin_is_not() {
-        use chelis_types::types::Prim;
+        use chelis_numeric_core::prim::Prim;
 
         fn ty(precision: Prim) -> TensorType {
             TensorType {
@@ -1105,7 +1150,7 @@ mod tests {
             (
                 "cast_trunc to integer",
                 RiscOp::NamedCast {
-                    mode: crate::dag::NamedCastMode::Trunc,
+                    mode: chelis_numeric_core::named_cast::NamedCastMode::Trunc,
                     new_precision: Prim::Int64,
                 },
                 1,
@@ -1115,7 +1160,7 @@ mod tests {
             (
                 "cast_trunc to float twin",
                 RiscOp::NamedCast {
-                    mode: crate::dag::NamedCastMode::Trunc,
+                    mode: chelis_numeric_core::named_cast::NamedCastMode::Trunc,
                     new_precision: Prim::F32,
                 },
                 1,
@@ -1237,7 +1282,7 @@ mod tests {
         );
         let one = dag.add_node(
             decl,
-            RiscOp::synth_const(chelis_types::types::Prim::F32, 1.0),
+            RiscOp::synth_const(chelis_numeric_core::prim::Prim::F32, 1.0),
             Vec::new(),
             scalar_f32(),
             None,
@@ -1246,7 +1291,7 @@ mod tests {
         let dead = dag.add_node(decl, RiscOp::Add, vec![source, one], scalar_f32(), None);
         let root = dag.add_node(
             decl,
-            RiscOp::synth_const(chelis_types::types::Prim::F32, 0.0),
+            RiscOp::synth_const(chelis_numeric_core::prim::Prim::F32, 0.0),
             Vec::new(),
             scalar_f32(),
             None,
@@ -1288,7 +1333,7 @@ mod tests {
         let result = dag.get(NodeId(2)).unwrap();
         assert_eq!(
             result.op,
-            RiscOp::synth_const(chelis_types::types::Prim::F32, 3.0)
+            RiscOp::synth_const(chelis_numeric_core::prim::Prim::F32, 3.0)
         );
         assert!(result.inputs.is_empty());
     }
@@ -1318,7 +1363,7 @@ mod tests {
         let result = dag.get(NodeId(2)).unwrap();
         assert_eq!(
             result.op,
-            RiscOp::synth_const(chelis_types::types::Prim::F32, 12.0)
+            RiscOp::synth_const(chelis_numeric_core::prim::Prim::F32, 12.0)
         );
     }
 
@@ -1340,7 +1385,7 @@ mod tests {
         let result = dag.get(NodeId(1)).unwrap();
         assert_eq!(
             result.op,
-            RiscOp::synth_const(chelis_types::types::Prim::F32, -5.0)
+            RiscOp::synth_const(chelis_numeric_core::prim::Prim::F32, -5.0)
         );
     }
 
@@ -1348,7 +1393,7 @@ mod tests {
     fn constant_fold_direct_integer_subtraction_is_exact_or_declines_overflow() {
         let scalar_i64 = TensorType {
             dims: vec![],
-            precision: chelis_types::types::Prim::Int64,
+            precision: chelis_numeric_core::prim::Prim::Int64,
         };
         let mut exact = Dag::new();
         let exact_decl = exact.declare("test");
@@ -1415,7 +1460,7 @@ mod tests {
     fn constant_fold_direct_extrema_preserves_selected_f64_bits() {
         let scalar_f64 = TensorType {
             dims: vec![],
-            precision: chelis_types::types::Prim::F64,
+            precision: chelis_numeric_core::prim::Prim::F64,
         };
         let cases = [
             (
@@ -1472,11 +1517,11 @@ mod tests {
     fn constant_fold_comparisons_obey_ieee_nan_and_signed_zero_rules() {
         let scalar_f64 = TensorType {
             dims: vec![],
-            precision: chelis_types::types::Prim::F64,
+            precision: chelis_numeric_core::prim::Prim::F64,
         };
         let scalar_bool = TensorType {
             dims: vec![],
-            precision: chelis_types::types::Prim::Bool,
+            precision: chelis_numeric_core::prim::Prim::Bool,
         };
         let nan = f64::from_bits(0x7ff8_1234_5678_9abc);
         let cases = [
@@ -1556,7 +1601,7 @@ mod tests {
     fn constant_fold_bool_logical_truth_tables() {
         let scalar_bool = TensorType {
             dims: vec![],
-            precision: chelis_types::types::Prim::Bool,
+            precision: chelis_numeric_core::prim::Prim::Bool,
         };
 
         for (kind, truth_table) in [
@@ -1659,11 +1704,11 @@ mod tests {
     fn constant_fold_where_preserves_selected_f64_bits() {
         let scalar_bool = TensorType {
             dims: vec![],
-            precision: chelis_types::types::Prim::Bool,
+            precision: chelis_numeric_core::prim::Prim::Bool,
         };
         let scalar_f64 = TensorType {
             dims: vec![],
-            precision: chelis_types::types::Prim::F64,
+            precision: chelis_numeric_core::prim::Prim::F64,
         };
         let then_bits = 0x7ff8_1234_5678_9abc;
         let else_bits = 0x8000_0000_0000_0000;
@@ -1731,12 +1776,12 @@ mod tests {
     fn constant_fold_new_ops_decline_nonconstant_and_type_invalid_inputs() {
         let scalar_bool = TensorType {
             dims: vec![],
-            precision: chelis_types::types::Prim::Bool,
+            precision: chelis_numeric_core::prim::Prim::Bool,
         };
         let scalar_f32 = scalar_f32();
         let scalar_f64 = TensorType {
             dims: vec![],
-            precision: chelis_types::types::Prim::F64,
+            precision: chelis_numeric_core::prim::Prim::F64,
         };
 
         let mut mismatched_comparison = Dag::new();
@@ -1973,7 +2018,7 @@ mod tests {
         // reject (spec/10 section 3.2, V2): CSE keeps both key operations and
         // both draws, and the two draws, as pure functions of equal keys,
         // produce equal values.
-        use chelis_types::types::Prim;
+        use chelis_numeric_core::prim::Prim;
         let mut dag = Dag::new();
         let decl = dag.declare("test");
         let template = dag.add_node(

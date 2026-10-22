@@ -11,8 +11,8 @@ use std::ops::Range;
 
 use chelis_vocab::RuntimeDType;
 
-use crate::failure::{NumericTrapKind, NumericTrapLine};
 use crate::metadata::ElementCount;
+use chelis_vocab::failure::{NumericTrapKind, NumericTrapLine};
 
 fn trap(kind: NumericTrapKind, op: &str, prim: &str, context: &str) -> String {
     let line = NumericTrapLine {

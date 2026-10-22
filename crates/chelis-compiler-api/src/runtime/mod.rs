@@ -11,10 +11,10 @@ use chelis_ir::callable_value::NormalizedCallableContract;
 type RetainedContract = Arc<NormalizedCallableContract>;
 use chelis_ir::eval::TensorValue as IrTensorValue;
 use chelis_ir::lower::top_level_lowering_map;
+use chelis_numeric_core::prim::Prim;
 use chelis_types::{
     CheckedProgram,
     manifest::{RootEntry, RootPathStep},
-    types::Prim,
 };
 
 use crate::schema::{DictEntryValue, ExecutionValue, TensorValue};
@@ -98,11 +98,11 @@ impl RuntimeTensorValue {
     pub(crate) fn from_scalars(
         prim: Prim,
         shape: Vec<usize>,
-        values: &[chelis_types::ScalarValue],
+        values: &[chelis_numeric_core::dtype_semantics::ScalarValue],
     ) -> Self {
         Self::new(IrTensorValue::from_storage(
             shape,
-            chelis_types::tensor_from_scalars(prim, values),
+            chelis_numeric_core::dtype_semantics::tensor_from_scalars(prim, values),
         ))
     }
 
@@ -139,7 +139,7 @@ pub enum TransformKind {
 /// Sealed payload for [`RuntimeValue::Scalar`] (WS-A0 RT-1 fixup C1;
 /// chelis#729 Phase 1 rebased it onto the dtype-semantics module).
 ///
-/// The payload wraps `chelis_types::dtype_semantics::ScalarValue`, whose
+/// The payload wraps `chelis_numeric_core::dtype_semantics::ScalarValue`, whose
 /// storage variant IS the dtype, so a dtype/bits mismatch is
 /// unrepresentable and every construction runs through the module's
 /// `finalize_scalar` / `scalar_from_*` chokepoints (the section C3
@@ -149,7 +149,7 @@ pub enum TransformKind {
 /// construction site, turns a key element into [`RuntimeValue::Key`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ScalarPayload {
-    value: chelis_types::ScalarValue,
+    value: chelis_numeric_core::dtype_semantics::ScalarValue,
 }
 
 impl ScalarPayload {
@@ -160,7 +160,7 @@ impl ScalarPayload {
 
     /// The sealed scalar itself, for finalize-driven flows and the
     /// observation channel (`element_ref`).
-    pub(crate) fn value(&self) -> chelis_types::ScalarValue {
+    pub(crate) fn value(&self) -> chelis_numeric_core::dtype_semantics::ScalarValue {
         self.value
     }
 
@@ -195,7 +195,7 @@ pub enum RuntimeValue {
     /// value, so it is its own variant rather than a [`Self::Scalar`]: no
     /// numeric path can read it. A `tensor[n, key]` is a [`Self::Tensor`]
     /// whose storage is a key buffer.
-    Key(chelis_types::RandomKey),
+    Key(chelis_numeric_core::dtype_semantics::RandomKey),
     Bool(bool),
     String(String),
     /// Container elements are shared, so a clone is one count increment and
@@ -335,7 +335,9 @@ impl RuntimeValue {
     /// as a rank-0 key tensor's one element, becomes a [`RuntimeValue::Key`]:
     /// a key is never a numeric [`RuntimeValue::Scalar`], so every consumer
     /// that reads a key and every renderer sees the key variant.
-    pub(crate) fn from_scalar_value(value: chelis_types::ScalarValue) -> Self {
+    pub(crate) fn from_scalar_value(
+        value: chelis_numeric_core::dtype_semantics::ScalarValue,
+    ) -> Self {
         // The payload's only construction site: a key never becomes one.
         match value.as_key() {
             Some(key) => RuntimeValue::Key(key),
@@ -349,7 +351,7 @@ impl RuntimeValue {
     /// ingress constructor cannot trap here.
     pub(crate) fn int_lit(value: i64) -> Self {
         Self::from_scalar_value(
-            chelis_types::scalar_from_i64("literal", Prim::Int32, value)
+            chelis_numeric_core::dtype_semantics::scalar_from_i64("literal", Prim::Int32, value)
                 .expect("checker range-guards int literals at their dtype"),
         )
     }
@@ -358,7 +360,7 @@ impl RuntimeValue {
     /// default to `f32` (finalize applies the f32 rounding).
     pub(crate) fn float_lit(value: f64) -> Self {
         Self::from_scalar_value(
-            chelis_types::scalar_from_f64("literal", Prim::F32, value)
+            chelis_numeric_core::dtype_semantics::scalar_from_f64("literal", Prim::F32, value)
                 .expect("float finalize is total"),
         )
     }
@@ -367,7 +369,7 @@ impl RuntimeValue {
     /// shape sizes, parsed `to_int` results). Carries dtype `i64`.
     pub(crate) fn int64(value: i64) -> Self {
         Self::from_scalar_value(
-            chelis_types::scalar_from_i64("i64", Prim::Int64, value)
+            chelis_numeric_core::dtype_semantics::scalar_from_i64("i64", Prim::Int64, value)
                 .expect("i64 ingress from i64 is total"),
         )
     }
@@ -377,7 +379,7 @@ impl RuntimeValue {
     /// `f64`.
     pub(crate) fn float64(value: f64) -> Self {
         Self::from_scalar_value(
-            chelis_types::scalar_from_f64("float64", Prim::F64, value)
+            chelis_numeric_core::dtype_semantics::scalar_from_f64("float64", Prim::F64, value)
                 .expect("f64 finalize is total"),
         )
     }
@@ -387,13 +389,13 @@ impl RuntimeValue {
     /// out-of-width integer TRAPS (chelis#680's decided contract)
     /// instead of wrapping through the deleted `from_i64_as` cast.
     pub(crate) fn scalar_like_int(template_dtype: Prim, value: i64) -> Result<Self, String> {
-        chelis_types::scalar_from_i64("arithmetic", template_dtype, value)
+        chelis_numeric_core::dtype_semantics::scalar_from_i64("arithmetic", template_dtype, value)
             .map(Self::from_scalar_value)
             .map_err(|trap| trap.to_string())
     }
 
     pub(crate) fn scalar_like_float(template_dtype: Prim, value: f64) -> Result<Self, String> {
-        chelis_types::scalar_from_f64("arithmetic", template_dtype, value)
+        chelis_numeric_core::dtype_semantics::scalar_from_f64("arithmetic", template_dtype, value)
             .map(Self::from_scalar_value)
             .map_err(|trap| trap.to_string())
     }
@@ -1324,7 +1326,7 @@ fn leaf_to_schema(value: &RuntimeValue) -> Result<ExecutionValue, String> {
         },
         // spec/10 section 3.2: a scalar key is `{"type":"key","bits":h}`.
         RuntimeValue::Key(key) => ExecutionValue::Key {
-            bits: chelis_types::KeyBits::new(*key),
+            bits: chelis_numeric_core::dtype_semantics::KeyBits::new(*key),
         },
         RuntimeValue::Bool(value) => ExecutionValue::Bool { value: *value },
         RuntimeValue::String(value) => ExecutionValue::String {

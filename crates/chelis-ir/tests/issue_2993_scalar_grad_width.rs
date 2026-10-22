@@ -13,7 +13,7 @@ use chelis_ir::host::{
     try_lower_compiled_program,
 };
 use chelis_ir::lower::lower_subexpr_program;
-use chelis_types::types::Prim;
+use chelis_numeric_core::prim::Prim;
 use chelis_unord::UnordMap;
 
 fn checked_surf(src: &str) -> chelis_types::CheckedProgram {

@@ -25,7 +25,7 @@
 mod support;
 use chelis_crmath::profile::{Output, storage_reference};
 use chelis_ir::dag::{Dag, DimInfo, NodeId, RiscOp, TensorType};
-use chelis_types::types::Prim;
+use chelis_numeric_core::prim::Prim;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;

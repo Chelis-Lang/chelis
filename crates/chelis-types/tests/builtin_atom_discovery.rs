@@ -1,5 +1,6 @@
 //! #1294: independently defend declaration and checked-shape discovery.
-use chelis_types::types::{Prim, TensorPrec, Type};
+use chelis_numeric_core::prim::Prim;
+use chelis_types::types::{TensorPrec, Type};
 use chelis_types::{
     BUILTINS, BuiltinCapabilityDecl, BuiltinSemanticDomain as Domain, BuiltinSiblingCaseDecl,
     BuiltinSiblingCaseId as Case, builtin_decl,

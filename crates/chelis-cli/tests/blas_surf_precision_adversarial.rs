@@ -26,9 +26,9 @@ use chelis_ir::host::{
     SummaryRejection, SummaryRejectionClass, SummaryRejectionDetail,
     host_program_summary_rejections, try_lower_compiled_program,
 };
+use chelis_numeric_core::prim::Prim;
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str;
-use chelis_types::types::Prim;
 use chelis_types::{check_ir_program, check_linearity};
 
 /// Drive parse → desugar → typecheck → effect → linearity → host

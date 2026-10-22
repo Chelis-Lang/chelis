@@ -1,8 +1,9 @@
 //! Developer-only observation driver for the C6 codec oracle.
 //! This is not a published runtime protocol. Python owns cases and verdicts.
 
-use chelis_types::types::Prim;
-use chelis_types::{ElementRef, ScalarValue, TensorStorage};
+use chelis_numeric_core::dtype_semantics::{ScalarValue, TensorStorage};
+use chelis_numeric_core::observation::ElementRef;
+use chelis_numeric_core::prim::Prim;
 use chelis_vocab::RuntimeDType;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};

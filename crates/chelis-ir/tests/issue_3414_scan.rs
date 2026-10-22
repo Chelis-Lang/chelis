@@ -1,9 +1,9 @@
 //! [05-OP-33] ordered scans retain first-leaf and accumulator semantics.
 use chelis_ir::dag::{Dag, DimInfo, RiscOp, ScanDirection, TensorType};
 use chelis_ir::eval::{TensorValue, eval_tensor};
-use chelis_types::dtype_semantics::cumsum_tensor_lanes;
-use chelis_types::types::Prim;
-use chelis_types::{RawTensor, finalize_tensor};
+use chelis_numeric_core::dtype_semantics::cumsum_tensor_lanes;
+use chelis_numeric_core::dtype_semantics::{RawTensor, finalize_tensor};
+use chelis_numeric_core::prim::Prim;
 use chelis_unord::UnordMap;
 fn graph(
     shape: &[usize],
@@ -47,7 +47,7 @@ fn graph(
     dag.add_root(root);
     (dag, root)
 }
-fn bits(v: &chelis_types::TensorStorage) -> Vec<u64> {
+fn bits(v: &chelis_numeric_core::dtype_semantics::TensorStorage) -> Vec<u64> {
     (0..v.len())
         .map(|i| v.scalar_at(i).as_f64_lossy().to_bits())
         .collect()
@@ -197,7 +197,7 @@ fn scan_adjoint_reverses_direction_without_zero_seed_at_all_float_widths() {
                     None,
                 );
                 let weighted = dag.add_node(owner, RiscOp::Mul, vec![scan, weights], ty, None);
-                let acc = RiscOp::default_reduce_sum_accumulator(p).unwrap();
+                let acc = p.default_reduce_sum_accumulator().unwrap();
                 let loss = dag.add_node(
                     owner,
                     RiscOp::Sum {

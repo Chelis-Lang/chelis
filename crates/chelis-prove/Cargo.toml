@@ -62,6 +62,7 @@ carcara = ["smt", "dep:carcara"]
 arb = ["dep:arb-sys"]
 
 [dependencies]
+chelis-numeric-core = { workspace = true, default-features = false, features = ["alloc", "serde"] }
 chelis-syntax-host.workspace = true
 chelis-certificate-core = { workspace = true, optional = true }
 chelis-reef.workspace = true

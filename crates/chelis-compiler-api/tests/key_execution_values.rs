@@ -185,7 +185,7 @@ fn key_decoders_are_strict() {
     )
     .expect("a well-formed key tensor decodes");
     // A graph's storage carrier holds no key literal (spec/10 section 3.2).
-    let error = serde_json::from_value::<chelis_types::TensorStorage>(
+    let error = serde_json::from_value::<chelis_numeric_core::dtype_semantics::TensorStorage>(
         json!({"dtype": "key", "bits": ["0000000000000007"]}),
     )
     .expect_err("a graph holds no key literal");

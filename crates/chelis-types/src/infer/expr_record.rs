@@ -4,7 +4,8 @@
 //! The extraction preserves control flow and diagnostic order.
 
 use super::*;
-use chelis_deep::{CastMode, NamedCastMode};
+use chelis_deep::CastMode;
+use chelis_numeric_core::named_cast::NamedCastMode;
 use std::sync::Arc;
 
 #[allow(clippy::too_many_arguments)]

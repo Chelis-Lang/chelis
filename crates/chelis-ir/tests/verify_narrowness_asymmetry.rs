@@ -19,7 +19,7 @@
 
 use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
 use chelis_ir::verify;
-use chelis_types::types::Prim;
+use chelis_numeric_core::prim::Prim;
 
 fn vec_t(n: usize, p: Prim) -> TensorType {
     TensorType {

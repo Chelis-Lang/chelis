@@ -8,7 +8,7 @@ fn f32_value(value: f64) -> ScalarValue {
 }
 
 fn i64_value(value: i64) -> ScalarValue {
-    chelis_types::dtype_semantics::scalar_from_i64("prove-test", Prim::Int64, value)
+    chelis_numeric_core::dtype_semantics::scalar_from_i64("prove-test", Prim::Int64, value)
         .expect("valid i64 test value")
 }
 

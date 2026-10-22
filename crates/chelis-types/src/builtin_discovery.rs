@@ -3,8 +3,9 @@ use crate::builtins::{
     BUILTINS, BuiltinCapabilityDecl, BuiltinDecl, BuiltinSemanticDomain as Domain,
     BuiltinSiblingCaseId as Case,
 };
-use crate::types::{Prim, Type};
+use crate::types::Type;
 use crate::unify::Subst;
+use chelis_numeric_core::prim::Prim;
 use std::collections::BTreeSet;
 
 /// A concrete identity or a finite selector awaiting its operand's type.
@@ -244,9 +245,9 @@ mod tests {
                 BuiltinCaseSelection::ByOperand(_)
             ));
             let dtype = if bound == TypeVarRestriction::IntValue {
-                crate::types::Prim::Int32
+                chelis_numeric_core::prim::Prim::Int32
             } else {
-                crate::types::Prim::F32
+                chelis_numeric_core::prim::Prim::F32
             };
             crate::unify::unify(
                 &Type::Var(variable),

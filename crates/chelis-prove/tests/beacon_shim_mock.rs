@@ -98,9 +98,12 @@ fn mutated_box_range_rejects_wrong_numeric_tag_before_subprocess() {
     let GoalShape::BoxRange { inputs, .. } = &mut goal.shape else {
         panic!("box goal shape");
     };
-    inputs.dims[0].1 =
-        chelis_types::scalar_from_f64("test bound", chelis_types::types::Prim::F32, 0.0)
-            .expect("exact f32 zero");
+    inputs.dims[0].1 = chelis_numeric_core::dtype_semantics::scalar_from_f64(
+        "test bound",
+        chelis_numeric_core::prim::Prim::F32,
+        0.0,
+    )
+    .expect("exact f32 zero");
     let discharge = shim().discharge(&goal, FAST_TIMEOUT_MS);
     assert_ne!(discharge.soundness(), Soundness::SoundApproximate);
     assert_eq!(

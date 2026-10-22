@@ -610,7 +610,9 @@ fn issue_319_distinct_precisions_not_force_merged() {
                 .expect("out root");
             match &root.value {
                 ExecutionValue::Scalar { value } => {
-                    let chelis_types::ElementRef::F32(value) = value.get().element_ref() else {
+                    let chelis_numeric_core::observation::ElementRef::F32(value) =
+                        value.get().element_ref()
+                    else {
                         panic!("expected exact f32 scalar, got {value:?}");
                     };
                     assert!(

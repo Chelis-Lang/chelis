@@ -553,12 +553,20 @@ def checkout_baseline(directory: Path) -> Path:
 
 
 def snapshot(workspace: Path, *, candidate: bool) -> dict:
+    environment = None
+    if not candidate:
+        environment = {
+            **support._environment(),
+            "CARGO_TARGET_DIR": str(workspace.resolve() / "target"),
+        }
     source = SNAPSHOT_SOURCE.replace("__MODELS__", "chelis_shell_core" if candidate else "chelis_shell")
     source = source.replace("__STACK__", ", &NativeStack" if candidate else "")
     extra = dependencies(workspace, "chelis-syntax-host", "chelis-std-bundle")
     if candidate:
         extra += dependencies(workspace, "chelis-shell-core")
-    result = consumer(workspace / "crates/chelis-shell", source, dependencies=extra + 'serde_json = "1"\nsha2 = "0.10"\nbincode = "1"\n')
+    result = consumer(workspace / "crates/chelis-shell", source,
+                      dependencies=extra + 'serde_json = "1"\nsha2 = "0.10"\nbincode = "1"\n',
+                      env=environment)
     return parse_record(result.stdout, "SHELL_SNAPSHOT ")
 
 

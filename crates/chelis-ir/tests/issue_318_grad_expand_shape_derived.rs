@@ -62,7 +62,7 @@
 use chelis_ir::dag::{Dag, DimInfo, NodeId, RiscOp, RtAxis, TensorType};
 use chelis_ir::eval::{TensorValue, eval_tensor};
 use chelis_ir::grad::{AdError, grad_dag_checked};
-use chelis_types::types::Prim;
+use chelis_numeric_core::prim::Prim;
 use chelis_unord::UnordMap;
 
 fn scalar_f32() -> TensorType {

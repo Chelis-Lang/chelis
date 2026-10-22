@@ -109,7 +109,7 @@ fn vectorize_axis0_impl(
         // one captured key to every row would consume it once per row
         // (chelis#2409).
         if captured_load
-            && node.output_type.precision == chelis_types::types::Prim::Key
+            && node.output_type.precision == chelis_numeric_core::prim::Prim::Key
             && read_nodes.contains(&node.id)
         {
             return Err(format!(
@@ -873,7 +873,7 @@ mod tests {
     use super::*;
     use crate::dag::{NodeId, RiscOp, TensorType};
     use crate::eval::{TensorValue, eval_tensor_roots_with_strict};
-    use chelis_types::types::Prim;
+    use chelis_numeric_core::prim::Prim;
     use chelis_unord::UnordMap;
 
     fn vec_f32(n: usize) -> TensorType {
@@ -949,7 +949,7 @@ mod tests {
             decl,
             RiscOp::Sum {
                 axis: 1,
-                accumulator: chelis_types::types::Prim::F32,
+                accumulator: chelis_numeric_core::prim::Prim::F32,
             },
             vec![x],
             vec_f32(2),
@@ -1060,7 +1060,7 @@ mod tests {
             decl,
             RiscOp::Sum {
                 axis: 1,
-                accumulator: chelis_types::types::Prim::F32,
+                accumulator: chelis_numeric_core::prim::Prim::F32,
             },
             vec![prod],
             mat_f32(2, 4),

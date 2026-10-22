@@ -1,7 +1,7 @@
 //! [05-MOV-1]/[04-NUM-9]: rank-preserving expansion and insertion retain identity.
 use chelis_ir::axis_sources::{ExpansionKind, expansion_kind, local_dim_guard_sites};
 use chelis_ir::dag::{Dag, DimInfo, RiscOp, RtDim, TensorType};
-use chelis_types::types::Prim;
+use chelis_numeric_core::prim::Prim;
 #[test]
 fn expansion_kind_and_local_guard_keep_the_primitive_identity() {
     for (out, expected, op) in [

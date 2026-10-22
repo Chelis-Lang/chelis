@@ -6,7 +6,7 @@ use chelis_ir::axis_sources::{
     DimClaim, derive_runtime_dim_classes, derive_unit_extent_claims, member_load_axis,
 };
 use chelis_ir::dag::{Dag, DimInfo, RiscOp, RtAxis, RtDim, TensorType};
-use chelis_types::types::Prim;
+use chelis_numeric_core::prim::Prim;
 
 fn named(name: &str) -> DimInfo {
     DimInfo::Named(name.into(), None)

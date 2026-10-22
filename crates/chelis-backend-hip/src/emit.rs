@@ -7,14 +7,16 @@ use std::collections::BTreeMap;
 
 use chelis_ir::dag::{
     ComparisonKind, DagNode, DimExpr, DimInfo, ExtremaKind, ExtremaOperand, FusedStepOp,
-    LogicalKind, NamedCastMode, NodeId, RiscOp, RtDim, TensorType,
+    LogicalKind, NodeId, RiscOp, RtDim, TensorType,
 };
 use chelis_ir::ownership::{
     HipStorageLane, StoragePlacement, VerifiedDagAction, VerifiedDagView, VerifiedStoragePlan,
 };
-use chelis_types::types::Prim;
+use chelis_numeric_core::dtype_semantics::{NumericTrap, ScalarValue};
+use chelis_numeric_core::named_cast::NamedCastMode;
+use chelis_numeric_core::observation::ElementRef;
+use chelis_numeric_core::prim::Prim;
 use chelis_types::unsupported::{Stage, Unsupported, UnsupportedKind};
-use chelis_types::{ElementRef, NumericTrap, ScalarValue};
 
 fn unsupported_verified_dag_action(node: NodeId, detail: &str) -> Unsupported {
     Unsupported::new(
@@ -130,7 +132,7 @@ pub struct HipEmitter {
     /// The emission-time key of each rank-0 key derivation, by node. One
     /// entry point's walk is one activation, so [`Self::begin_activation`]
     /// resets it per entry.
-    draw_keys: BTreeMap<NodeId, chelis_types::RandomKey>,
+    draw_keys: BTreeMap<NodeId, chelis_numeric_core::dtype_semantics::RandomKey>,
     /// The activation gate of the checking node being emitted, until its
     /// kernel launch consumes it ([`Self::activation_gate`]).
     gate: Option<HipActivationGate>,
@@ -2715,7 +2717,7 @@ impl HipEmitter {
             }
             RiscOp::Abs => {
                 let trap = node.output_type.precision.is_integer().then(|| {
-                    chelis_types::dtype_semantics::NumericTrap::Overflow {
+                    chelis_numeric_core::dtype_semantics::NumericTrap::Overflow {
                         op: "abs",
                         prim: node.output_type.precision,
                     }
@@ -3246,7 +3248,7 @@ impl HipEmitter {
     fn emit_const_tensor(
         &mut self,
         id: usize,
-        data: &chelis_types::dtype_semantics::TensorStorage,
+        data: &chelis_numeric_core::dtype_semantics::TensorStorage,
         ty: &TensorType,
     ) -> Result<(), Unsupported> {
         self.emit_slot_wrapper(id, ty);
@@ -3620,7 +3622,7 @@ impl HipEmitter {
         let key = match &node.op {
             RiscOp::KeyFromSeed => {
                 let seed = literal(node.inputs[0]).ok_or_else(|| refuse("with a runtime seed"))?;
-                chelis_types::RandomKey::from_seed(seed)
+                chelis_numeric_core::dtype_semantics::RandomKey::from_seed(seed)
                     .map_err(|error| refuse(&format!("whose seed is not an i64: {error}")))?
             }
             RiscOp::Split { branch } => {
@@ -3686,7 +3688,7 @@ impl HipEmitter {
         let (Some(low), Some(high)) = (literal(node.inputs[1]), literal(node.inputs[2])) else {
             return Err(unsupported());
         };
-        chelis_types::dtype_semantics::UniformLikeParameters::new(
+        chelis_numeric_core::dtype_semantics::UniformLikeParameters::new(
             node.output_type.precision,
             low,
             high,
@@ -6955,7 +6957,12 @@ mod tests {
             dag.add_node(
                 decl,
                 RiscOp::Const {
-                    value: chelis_types::scalar_from_i64("test", Prim::Int64, value).unwrap(),
+                    value: chelis_numeric_core::dtype_semantics::scalar_from_i64(
+                        "test",
+                        Prim::Int64,
+                        value,
+                    )
+                    .unwrap(),
                 },
                 vec![],
                 rank0(Prim::Int64),
@@ -7067,7 +7074,12 @@ mod tests {
         let seed = dag.add_node(
             decl,
             RiscOp::Const {
-                value: chelis_types::scalar_from_i64("test", Prim::Int64, 7).unwrap(),
+                value: chelis_numeric_core::dtype_semantics::scalar_from_i64(
+                    "test",
+                    Prim::Int64,
+                    7,
+                )
+                .unwrap(),
             },
             vec![],
             rank0(Prim::Int64),
@@ -7197,7 +7209,12 @@ mod tests {
         let seed = dag.add_node(
             decl,
             RiscOp::Const {
-                value: chelis_types::scalar_from_i64("test", Prim::Int64, 7).unwrap(),
+                value: chelis_numeric_core::dtype_semantics::scalar_from_i64(
+                    "test",
+                    Prim::Int64,
+                    7,
+                )
+                .unwrap(),
             },
             vec![],
             rank0(Prim::Int64),

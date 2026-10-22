@@ -19,7 +19,7 @@ runs:
     - name: Install C dependencies
       if: runner.environment == 'github-hosted'
       shell: bash
-      run: python3 scripts/ci_apt_get.py gcc g++ clang cmake libclang-dev libopenblas-dev libgmp-dev libmpfr-dev libasan8 libubsan1
+      run: python3 scripts/ci_apt_get.py gcc g++ clang llvm cmake libclang-dev libopenblas-dev libgmp-dev libmpfr-dev libasan8 libubsan1
 
     - name: Install Rust toolchain
       if: runner.environment == 'github-hosted'

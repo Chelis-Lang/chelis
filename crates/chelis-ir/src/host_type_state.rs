@@ -16,7 +16,7 @@ use chelis_deep::{DeepTag, ExprCarrier};
 use std::fmt;
 
 use chelis_deep::ast::{Atom, Expr};
-use chelis_types::types::Prim;
+use chelis_numeric_core::prim::Prim;
 
 use crate::dag::{DimInfo, TensorType};
 
@@ -26,7 +26,7 @@ use crate::dag::{DimInfo, TensorType};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CheckedBuiltinCallable {
     Admitted(chelis_types::AdmittedBuiltin),
-    FloatClassify(chelis_types::FloatClassify),
+    FloatClassify(chelis_numeric_core::dtype_semantics::FloatClassify),
     FromSeed,
     Split,
     SplitMany,
@@ -36,9 +36,15 @@ pub enum CheckedBuiltinCallable {
 impl CheckedBuiltinCallable {
     pub fn from_symbol(name: &str) -> Option<Self> {
         match name {
-            "is_nan" => Some(Self::FloatClassify(chelis_types::FloatClassify::Nan)),
-            "is_finite" => Some(Self::FloatClassify(chelis_types::FloatClassify::Finite)),
-            "is_infinite" => Some(Self::FloatClassify(chelis_types::FloatClassify::Infinite)),
+            "is_nan" => Some(Self::FloatClassify(
+                chelis_numeric_core::dtype_semantics::FloatClassify::Nan,
+            )),
+            "is_finite" => Some(Self::FloatClassify(
+                chelis_numeric_core::dtype_semantics::FloatClassify::Finite,
+            )),
+            "is_infinite" => Some(Self::FloatClassify(
+                chelis_numeric_core::dtype_semantics::FloatClassify::Infinite,
+            )),
             "key_from_seed" => Some(Self::FromSeed),
             "split_key" => Some(Self::Split),
             "split_keys" => Some(Self::SplitMany),

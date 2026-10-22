@@ -43,7 +43,7 @@ use chelis_ir::DimInfo;
 use chelis_ir::dag::{Dag, NodeId, RiscOp, TensorType};
 use chelis_ir::eval::{TensorValue, eval_tensor_with};
 use chelis_ir::grad::{AdError, AdRejectionReason, grad_dag_checked};
-use chelis_types::types::Prim;
+use chelis_numeric_core::prim::Prim;
 
 fn t(dims: Vec<usize>) -> TensorType {
     TensorType {

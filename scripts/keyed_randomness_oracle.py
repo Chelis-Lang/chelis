@@ -45,7 +45,7 @@ class Suite:
 # Reviewed finite corpus, not a discovery rule or a universal language claim.
 # Removing/renaming one of these witnesses requires reviewing its replacement.
 SUITES = (
-    Suite("chelis-types", "random_key_reference", (
+    Suite("chelis-numeric-core", "random_key_reference", (
         "key_ref_worked_values_are_the_kernels_values",
     ), ("reference",)),
     Suite("chelis-types", "key_linearity", (

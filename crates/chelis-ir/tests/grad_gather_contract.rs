@@ -32,7 +32,7 @@ use chelis_unord::UnordMap;
 use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
 use chelis_ir::eval::{TensorValue, eval_tensor_with};
 use chelis_ir::grad::grad_dag_checked;
-use chelis_types::types::Prim;
+use chelis_numeric_core::prim::Prim;
 
 fn t(dims: Vec<usize>) -> TensorType {
     TensorType {
@@ -124,7 +124,7 @@ fn gather_via_section_3_5_lowering_accumulates_duplicate_indices() {
         decl,
         RiscOp::Sum {
             axis: 1,
-            accumulator: chelis_types::types::Prim::F32,
+            accumulator: chelis_numeric_core::prim::Prim::F32,
         },
         vec![product],
         t(vec![3, 2]),
@@ -136,7 +136,7 @@ fn gather_via_section_3_5_lowering_accumulates_duplicate_indices() {
         decl,
         RiscOp::Sum {
             axis: 0,
-            accumulator: chelis_types::types::Prim::F32,
+            accumulator: chelis_numeric_core::prim::Prim::F32,
         },
         vec![gathered],
         t(vec![2]),
@@ -146,7 +146,7 @@ fn gather_via_section_3_5_lowering_accumulates_duplicate_indices() {
         decl,
         RiscOp::Sum {
             axis: 0,
-            accumulator: chelis_types::types::Prim::F32,
+            accumulator: chelis_numeric_core::prim::Prim::F32,
         },
         vec![s1],
         TensorType::scalar_f32(),
@@ -231,7 +231,7 @@ fn first_class_gather_adjoint_scatter_add_accumulates_duplicate_indices() {
         decl,
         RiscOp::Sum {
             axis: 0,
-            accumulator: chelis_types::types::Prim::F32,
+            accumulator: chelis_numeric_core::prim::Prim::F32,
         },
         vec![gathered],
         t(vec![2]),
@@ -241,7 +241,7 @@ fn first_class_gather_adjoint_scatter_add_accumulates_duplicate_indices() {
         decl,
         RiscOp::Sum {
             axis: 0,
-            accumulator: chelis_types::types::Prim::F32,
+            accumulator: chelis_numeric_core::prim::Prim::F32,
         },
         vec![s1],
         TensorType::scalar_f32(),
@@ -309,7 +309,7 @@ fn first_class_gather_axis1_adjoint_scatter_add_accumulates_duplicate_indices() 
         decl,
         RiscOp::Sum {
             axis: 0,
-            accumulator: chelis_types::types::Prim::F32,
+            accumulator: chelis_numeric_core::prim::Prim::F32,
         },
         vec![gathered],
         t(vec![4]),
@@ -319,7 +319,7 @@ fn first_class_gather_axis1_adjoint_scatter_add_accumulates_duplicate_indices() 
         decl,
         RiscOp::Sum {
             axis: 0,
-            accumulator: chelis_types::types::Prim::F32,
+            accumulator: chelis_numeric_core::prim::Prim::F32,
         },
         vec![s1],
         TensorType::scalar_f32(),

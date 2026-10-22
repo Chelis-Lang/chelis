@@ -54,7 +54,7 @@ def source_contracts() -> tuple[SourceContract, ...]:
         ),
         SourceContract(
             "sealed typed semantics",
-            "crates/chelis-types/src/dtype_semantics.rs",
+            "crates/chelis-numeric-core/src/dtype_semantics.rs",
             (
                 "pub fn float_relu(input: &TensorStorage)",
                 "pub fn float_relu_adjoint(",
@@ -156,7 +156,7 @@ def oracle_legs(python: str) -> tuple[OracleLeg, ...]:
                 "nextest",
                 "run",
                 "-p",
-                "chelis-types",
+                "chelis-numeric-core",
                 "-E",
                 "test(relu_)",
             ),

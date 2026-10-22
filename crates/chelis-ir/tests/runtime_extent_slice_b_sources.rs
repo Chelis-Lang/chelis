@@ -10,7 +10,7 @@ use chelis_ir::dag::{
     FusedStepOp, KeyBranch, LogicalKind, NodeId, ReduceWindowKind, RiscOp, RtAxis, RtDim,
     TensorType, UniformBound,
 };
-use chelis_types::types::Prim;
+use chelis_numeric_core::prim::Prim;
 use chelis_types::unsupported::Stage;
 
 fn ty(dims: Vec<DimInfo>, precision: Prim) -> TensorType {
@@ -936,7 +936,7 @@ fn every_risc_op_yields_exactly_one_source_per_output_axis() {
     ));
     nodes.push(add(
         &mut dag,
-        RiscOp::FloatClassify(chelis_types::FloatClassify::Finite),
+        RiscOp::FloatClassify(chelis_numeric_core::dtype_semantics::FloatClassify::Finite),
         vec![f],
         ty(vec![DimInfo::Lit(2), DimInfo::Lit(3)], Prim::Bool),
     ));
@@ -1014,7 +1014,7 @@ fn every_risc_op_yields_exactly_one_source_per_output_axis() {
     nodes.push(add(
         &mut dag,
         RiscOp::NamedCast {
-            mode: chelis_ir::dag::NamedCastMode::Trunc,
+            mode: chelis_numeric_core::named_cast::NamedCastMode::Trunc,
             new_precision: Prim::Int32,
         },
         vec![f],
@@ -1159,7 +1159,10 @@ fn every_risc_op_yields_exactly_one_source_per_output_axis() {
             site: chelis_ir::dag::ExtentWitnessSite::Caller,
             parameter: "f".into(),
             axis: RtAxis::Lit(0),
-            requirements: vec![chelis_types::scalar_from_i64("load", Prim::Int64, 2).unwrap()],
+            requirements: vec![
+                chelis_numeric_core::dtype_semantics::scalar_from_i64("load", Prim::Int64, 2)
+                    .unwrap(),
+            ],
             claims: Vec::new(),
         },
         vec![f],
@@ -1191,7 +1194,10 @@ fn every_risc_op_yields_exactly_one_source_per_output_axis() {
             site: chelis_ir::dag::ExtentWitnessSite::Caller,
             parameter: "unit".into(),
             axis: RtAxis::Lit(0),
-            requirements: vec![chelis_types::scalar_from_i64("load", Prim::Int64, 1).unwrap()],
+            requirements: vec![
+                chelis_numeric_core::dtype_semantics::scalar_from_i64("load", Prim::Int64, 1)
+                    .unwrap(),
+            ],
             claims: Vec::new(),
         },
         vec![operand],
@@ -1200,7 +1206,8 @@ fn every_risc_op_yields_exactly_one_source_per_output_axis() {
     let required = add(
         &mut dag,
         RiscOp::Const {
-            value: chelis_types::scalar_from_i64("reshape", Prim::Int64, 1).unwrap(),
+            value: chelis_numeric_core::dtype_semantics::scalar_from_i64("reshape", Prim::Int64, 1)
+                .unwrap(),
         },
         vec![],
         scalar(Prim::Int64),
@@ -1761,7 +1768,8 @@ fn a_named_axis_with_no_source_resolves_to_no_origin_and_is_reported() {
     let orphan = dag.add_node(
         decl,
         RiscOp::Const {
-            value: chelis_types::scalar_from_f64("test", Prim::F32, 0.0).expect("zero fill"),
+            value: chelis_numeric_core::dtype_semantics::scalar_from_f64("test", Prim::F32, 0.0)
+                .expect("zero fill"),
         },
         vec![],
         ty(vec![named("")], Prim::F32),

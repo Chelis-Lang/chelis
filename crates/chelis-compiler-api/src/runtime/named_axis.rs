@@ -6,7 +6,7 @@ use chelis_deep::ast::{Expr, Metadata};
 use chelis_ir::dag::{Dag, DimInfo, NodeId, TensorType};
 use chelis_ir::eval::{TensorInputDemand, TensorValue as IrTensorValue};
 use chelis_ir::lower::type_expr_has_rank_var;
-use chelis_types::types::Prim;
+use chelis_numeric_core::prim::Prim;
 
 use super::transforms::*;
 use super::*;
@@ -420,10 +420,14 @@ impl<'a> EvalContext<'a> {
         let element = tensor.value.storage().scalar_at(0);
         let value = match element.as_i64_exact() {
             _ if element.prim() == prim => element,
-            Some(v) => chelis_types::scalar_from_i64("named_axis", prim, v)
+            Some(v) => chelis_numeric_core::dtype_semantics::scalar_from_i64("named_axis", prim, v)
                 .map_err(|trap| trap.to_string())?,
-            None => chelis_types::scalar_from_f64("named_axis", prim, element.as_f64_lossy())
-                .map_err(|trap| trap.to_string())?,
+            None => chelis_numeric_core::dtype_semantics::scalar_from_f64(
+                "named_axis",
+                prim,
+                element.as_f64_lossy(),
+            )
+            .map_err(|trap| trap.to_string())?,
         };
         Ok(RuntimeValue::from_scalar_value(value))
     }

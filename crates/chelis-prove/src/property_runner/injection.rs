@@ -16,9 +16,9 @@ use chelis_deep::Span;
 use chelis_deep::annotations::{MetadataKey as K, MetadataValue as M, TypeSyntax};
 use chelis_deep::ast::{Atom, Expr, Metadata};
 use chelis_deep::{DeepTag, ExprCarrier};
+use chelis_numeric_core::dtype_semantics::{ScalarValue, scalar_from_f64, scalar_from_i64};
+use chelis_numeric_core::prim::Prim;
 use chelis_surf::ast::{Decl, Param, TypeExpr, Variant, VariantFields};
-use chelis_types::types::Prim;
-use chelis_types::{ScalarValue, scalar_from_f64, scalar_from_i64};
 
 use crate::composition::{
     AssumptionDischarge, AssumptionRecord, DischargeMethod, DischargeTier, FUZZ_TOLERANCE,
@@ -1924,7 +1924,7 @@ type Probability =
         let mut rng = crate::opaque::GenRng::new(9);
         let value = sample_scalar("i64", &mut rng);
 
-        assert_eq!(value.prim(), chelis_types::types::Prim::Int64);
+        assert_eq!(value.prim(), chelis_numeric_core::prim::Prim::Int64);
         assert!(value.as_i64_exact().is_some());
         assert!(value.as_bool_exact().is_none());
     }

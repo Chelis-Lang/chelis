@@ -12,7 +12,7 @@
 //! `{f32, f16, bf16, i8, i16, i32, i64, bool}` (everything
 //! except `f64`, which Apple Silicon GPUs lack ALU support for).
 
-use chelis_types::types::Prim;
+use chelis_numeric_core::prim::Prim;
 
 /// MSL spelling of the type for kernel parameters and bodies.
 ///
@@ -208,8 +208,12 @@ pub fn requires_msl_320_guard(prec: Prim) -> bool {
 /// Constant emission accepts the finalized tagged carrier. Integer widths,
 /// float bit patterns, and bool identity therefore cannot be supplied through
 /// a floating-point ingress or an independent dtype tag.
-pub fn host_const_fill_body(value: chelis_types::ScalarValue, buf: &str, n: usize) -> String {
-    use chelis_types::ElementRef;
+pub fn host_const_fill_body(
+    value: chelis_numeric_core::dtype_semantics::ScalarValue,
+    buf: &str,
+    n: usize,
+) -> String {
+    use chelis_numeric_core::observation::ElementRef;
     let (ty, literal) = match value.element_ref() {
         ElementRef::F32(value) => {
             let literal = if value.is_nan() {
@@ -409,7 +413,7 @@ mod tests {
         // F32 keeps the typed-pointer form so the byte-for-byte output is
         // identical to the pre-WS-2 emission for the default case.
         let f32_body = host_const_fill_body(
-            chelis_types::dtype_semantics::scalar_from_f64("test", Prim::F32, 2.5).unwrap(),
+            chelis_numeric_core::dtype_semantics::scalar_from_f64("test", Prim::F32, 2.5).unwrap(),
             "buf_0",
             8,
         );
@@ -426,7 +430,7 @@ mod tests {
         // literal so the `.mm` compiles under `clang++ -fobjc-arc` (which
         // has no `half`/`bfloat` host type in scope).
         let f16_body = host_const_fill_body(
-            chelis_types::dtype_semantics::scalar_from_f64("test", Prim::F16, 2.5).unwrap(),
+            chelis_numeric_core::dtype_semantics::scalar_from_f64("test", Prim::F16, 2.5).unwrap(),
             "buf_1",
             4,
         );
@@ -444,7 +448,7 @@ mod tests {
         );
 
         let bf16_body = host_const_fill_body(
-            chelis_types::dtype_semantics::scalar_from_f64("test", Prim::Bf16, 2.5).unwrap(),
+            chelis_numeric_core::dtype_semantics::scalar_from_f64("test", Prim::Bf16, 2.5).unwrap(),
             "buf_2",
             4,
         );
@@ -463,7 +467,7 @@ mod tests {
 
         // Integer dtypes carry the matching `intN_t` cast.
         let i8_body = host_const_fill_body(
-            chelis_types::dtype_semantics::scalar_from_f64("test", Prim::Int8, 5.0).unwrap(),
+            chelis_numeric_core::dtype_semantics::scalar_from_f64("test", Prim::Int8, 5.0).unwrap(),
             "buf_3",
             4,
         );
@@ -474,7 +478,8 @@ mod tests {
         assert!(i8_body.contains("(int8_t)5"), "Int8 cast: {i8_body}");
 
         let i64_body = host_const_fill_body(
-            chelis_types::dtype_semantics::scalar_from_f64("test", Prim::Int64, 7.0).unwrap(),
+            chelis_numeric_core::dtype_semantics::scalar_from_f64("test", Prim::Int64, 7.0)
+                .unwrap(),
             "buf_4",
             4,
         );
@@ -486,7 +491,7 @@ mod tests {
 
         // Bool uses the C++ literal `true`/`false`, not 0/1.
         let bool_true = host_const_fill_body(
-            chelis_types::dtype_semantics::scalar_from_f64("test", Prim::Bool, 1.0).unwrap(),
+            chelis_numeric_core::dtype_semantics::scalar_from_f64("test", Prim::Bool, 1.0).unwrap(),
             "buf_5",
             2,
         );
@@ -496,7 +501,7 @@ mod tests {
         );
         assert!(bool_true.contains("p[i] = true"), "Bool true: {bool_true}");
         let bool_false = host_const_fill_body(
-            chelis_types::dtype_semantics::scalar_from_f64("test", Prim::Bool, 0.0).unwrap(),
+            chelis_numeric_core::dtype_semantics::scalar_from_f64("test", Prim::Bool, 0.0).unwrap(),
             "buf_6",
             2,
         );
@@ -523,7 +528,7 @@ mod tests {
         ];
         for (prec, value, expected_bits) in cases {
             let body = host_const_fill_body(
-                chelis_types::dtype_semantics::scalar_from_f64("test", prec, value).unwrap(),
+                chelis_numeric_core::dtype_semantics::scalar_from_f64("test", prec, value).unwrap(),
                 "buf",
                 4,
             );
@@ -539,7 +544,7 @@ mod tests {
     #[should_panic(expected = "Metal backend rejects f64")]
     fn host_const_fill_body_panics_on_f64() {
         let _ = host_const_fill_body(
-            chelis_types::dtype_semantics::scalar_from_f64("test", Prim::F64, 1.0).unwrap(),
+            chelis_numeric_core::dtype_semantics::scalar_from_f64("test", Prim::F64, 1.0).unwrap(),
             "buf",
             1,
         );

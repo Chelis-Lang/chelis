@@ -611,18 +611,26 @@ def dependency(workspace: Path, name: str) -> str:
 
 
 def snapshot(workspace: Path, *, candidate: bool) -> dict:
+    environment = None
+    if not candidate:
+        environment = {
+            **support._environment(),
+            "CARGO_TARGET_DIR": str(workspace.resolve() / "target"),
+        }
     arithmetic_owner = "chelis_certificate_core" if candidate else "chelis_prove::clarabel_sos"
     extra = RATIONAL_DEPENDENCIES + 'serde_json = "1"\n'
     arithmetic_result = consumer(
         workspace / "crates" / (CRATE if candidate else "chelis-prove"),
         ARITHMETIC_SOURCE.replace("__ARITHMETIC__", arithmetic_owner),
         features=() if candidate else native_features(), dependencies=extra,
+        env=environment,
     )
     host_result = consumer(
         workspace / "crates/chelis-prove",
         HOST_SOURCE.replace("__ARITHMETIC__", arithmetic_owner),
         features=native_features(),
         dependencies=extra + (dependency(workspace, CRATE) if candidate else ""),
+        env=environment,
     )
     return {
         "arithmetic": parse_record(arithmetic_result.stdout, "CERTIFICATE_ARITHMETIC "),

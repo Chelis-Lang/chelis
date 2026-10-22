@@ -177,7 +177,7 @@ out = to_list(preds)
     for (i, item) in items.iter().enumerate() {
         match item {
             ExecutionValue::Scalar { value }
-                if value.get().prim() == chelis_types::types::Prim::Int64 => {}
+                if value.get().prim() == chelis_numeric_core::prim::Prim::Int64 => {}
             other => panic!("to_list element {i}: expected scalar i64, got {other:?}"),
         }
     }
@@ -186,7 +186,7 @@ out = to_list(preds)
         .iter()
         .map(|item| match item {
             ExecutionValue::Scalar { value }
-                if value.get().prim() == chelis_types::types::Prim::Int64 =>
+                if value.get().prim() == chelis_numeric_core::prim::Prim::Int64 =>
             {
                 value.get().as_i64_exact().unwrap()
             }
@@ -212,7 +212,7 @@ out = to_list(preds)
         .iter()
         .map(|item| match item {
             ExecutionValue::Scalar { value }
-                if value.get().prim() == chelis_types::types::Prim::Int64 =>
+                if value.get().prim() == chelis_numeric_core::prim::Prim::Int64 =>
             {
                 value.get().as_i64_exact().unwrap()
             }

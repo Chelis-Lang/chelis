@@ -212,7 +212,7 @@ impl Pat {
         // adding its prefix here in the same change set
         // (faithful_observation.md B2.4).
         const OBSERVATION_EXIT_SURFACES: &[&str] = &[
-            "crates/chelis-types/src/observation.rs",
+            "crates/chelis-numeric-core/src/observation.rs",
             "crates/chelis-runtime/src/",
             "crates/chelis-compiler-api/src/runtime/",
         ];
@@ -657,7 +657,7 @@ const BASELINE: &[Entry] = &[
     ),
     (
         Pat::RustFormatNarrowing,
-        "crates/chelis-types/src/observation.rs",
+        "crates/chelis-numeric-core/src/observation.rs",
         5,
         "format_element's own spec/05 8.1 escalation candidates ({:.*e}) \
          plus three {v:e} spellings inside its panic/assert DIAGNOSTIC \
@@ -689,7 +689,7 @@ const BASELINE: &[Entry] = &[
     // leaves open. -------------------------------------------------------
     (
         Pat::RustDebugNumericFormat,
-        "crates/chelis-types/src/observation.rs",
+        "crates/chelis-numeric-core/src/observation.rs",
         27,
         "the sanctioned formatter itself: format_element's F32/F64 arms \
          (the normative grammar IS Rust {:?}) plus cfg(test) grammar \

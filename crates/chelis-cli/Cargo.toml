@@ -11,6 +11,7 @@ name = "chelis"
 path = "src/main.rs"
 
 [dependencies]
+chelis-numeric-core = { workspace = true, default-features = false, features = ["alloc", "serde"] }
 chelis-unord.workspace = true
 clap = { version = "4", features = ["derive"] }
 chelis-conformance.workspace = true
@@ -86,9 +87,8 @@ required-features = ["clarabel-provider"]
 assert_cmd = "2"
 chelis-reef.workspace = true
 cargo-husky = { version = "1", default-features = false, features = ["user-hooks"] }
-# `copy_elision.rs` separates the linked correctly rounded kernel text, whose
-# bit casts are memcpy, from the code the probe's own lowering emits.
-chelis-crmath.workspace = true
+# `copy_elision.rs` tests the emitted code separately from the linked kernel text.
+chelis-crmath = { workspace = true, features = ["std"] }
 chelis-shell.workspace = true
 chelis-shell-core.workspace = true
 # `reef_setup.rs` synthesizes a chelis toolchain release tarball

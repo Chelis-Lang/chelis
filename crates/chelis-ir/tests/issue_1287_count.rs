@@ -9,8 +9,8 @@ use chelis_ir::grad::{AdError, AdRejectionReason, grad_dag_checked};
 use chelis_ir::lower::try_lower_program;
 use chelis_ir::verify;
 use chelis_ir::vmap::vectorize_axis0;
+use chelis_numeric_core::prim::Prim;
 use chelis_types::check_typed_program;
-use chelis_types::types::Prim;
 
 fn ty(dims: &[usize], precision: Prim) -> TensorType {
     TensorType {

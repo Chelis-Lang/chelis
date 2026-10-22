@@ -12,10 +12,10 @@
 //! §1.1.1 citation - which is what the spec's diagnostic contract
 //! forbids.
 
+use chelis_numeric_core::prim::Prim;
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str;
 use chelis_types::check_ir_program;
-use chelis_types::types::Prim;
 
 const DEFERRED_NAMES: &[&str] = &[
     "f8e5m2",

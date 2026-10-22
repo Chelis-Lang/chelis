@@ -5,7 +5,7 @@
 //! the target IEEE encoding. No float intermediary can introduce a second
 //! rounding, including for i64 values beyond f64's consecutive-integer range.
 
-use chelis_types::types::Prim;
+use chelis_numeric_core::prim::Prim;
 
 pub fn integer_to_float_bits(value: &str, target: Prim) -> String {
     let (fraction, bias, max_exponent, sign_bit) = match target {
@@ -51,10 +51,8 @@ pub fn integer_to_float_bits(value: &str, target: Prim) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chelis_types::{
-        ElementRef,
-        dtype_semantics::{cast_scalar, scalar_from_i64},
-    };
+    use chelis_numeric_core::dtype_semantics::{cast_scalar, scalar_from_i64};
+    use chelis_numeric_core::observation::ElementRef;
     use std::{fs, process::Command};
 
     #[test]

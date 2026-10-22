@@ -238,9 +238,9 @@ fn v7_input_axis_rejects_negative_or_out_of_range_axes_and_forbidden_owners() {
                             value: NonnegativeExtent::new(0).unwrap(),
                         },
                     )],
-                    fill: chelis_types::scalar_from_f64(
+                    fill: chelis_numeric_core::dtype_semantics::scalar_from_f64(
                         "wire_runtime_extent_test",
-                        chelis_types::types::Prim::F32,
+                        chelis_numeric_core::prim::Prim::F32,
                         0.0,
                     )
                     .expect("f32 zero"),

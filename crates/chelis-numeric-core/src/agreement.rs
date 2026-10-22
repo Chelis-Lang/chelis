@@ -7,11 +7,20 @@
 //! table can never become a blanket float fallback like the chelis#687
 //! harnesses it replaces.
 
-use std::error::Error;
-use std::fmt;
+#[cfg(feature = "alloc")]
+use core::error::Error;
+#[cfg(feature = "alloc")]
+use core::fmt;
 
+#[cfg(feature = "alloc")]
 use crate::observation::{ElementRef, format_element};
-use crate::types::Prim;
+#[cfg(feature = "alloc")]
+use crate::prim::Prim;
+#[cfg(feature = "alloc")]
+use alloc::{
+    format,
+    string::{String, ToString},
+};
 
 /// Closed operation identity used by the [05-OBS-3] comparator.
 ///
@@ -91,7 +100,7 @@ pub enum ArithmeticWidthStatus {
     /// At least one lane is known not to do so; the issue owns the repair.
     Nonconforming { issue: u32 },
 }
-
+#[cfg(feature = "alloc")]
 /// Why two rendered elements do not satisfy [05-OBS-3].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AgreementError {
@@ -155,7 +164,7 @@ pub enum AgreementError {
         compiled: String,
     },
 }
-
+#[cfg(feature = "alloc")]
 impl fmt::Display for AgreementError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -252,9 +261,9 @@ impl fmt::Display for AgreementError {
         }
     }
 }
-
+#[cfg(feature = "alloc")]
 impl Error for AgreementError {}
-
+#[cfg(feature = "alloc")]
 /// Compare arbitrary observations under the exact branch of the one Phase 3
 /// comparator. Diagnostics, shapes, envelopes, integer payloads, and any
 /// value without an authored tolerance row all use this path.
@@ -273,7 +282,7 @@ pub fn compare_exact_observations(
         })
     }
 }
-
+#[cfg(feature = "alloc")]
 /// Compare two complete, rendered scalar elements under [05-OBS-3].
 ///
 /// Integer, bool, deferred, and string dtypes never enter float parsing. For
@@ -384,7 +393,7 @@ pub fn compare_rendered_elements(
         })
     }
 }
-
+#[cfg(feature = "alloc")]
 #[derive(Debug, Clone, Copy)]
 enum FloatValue {
     F16(half::f16),
@@ -392,7 +401,7 @@ enum FloatValue {
     F32(f32),
     F64(f64),
 }
-
+#[cfg(feature = "alloc")]
 impl FloatValue {
     fn same_bits(self, other: Self) -> bool {
         match (self, other) {
@@ -432,7 +441,7 @@ impl FloatValue {
         }
     }
 }
-
+#[cfg(feature = "alloc")]
 fn reduced_float_pre_final_distance(
     op: &str,
     prim: Prim,
@@ -480,7 +489,7 @@ fn reduced_float_pre_final_distance(
         ordered_f32(eval_pre).abs_diff(ordered_f32(compiled_pre)),
     ))
 }
-
+#[cfg(feature = "alloc")]
 fn parse_canonical_float(
     lane: &'static str,
     prim: Prim,
@@ -530,7 +539,7 @@ fn parse_canonical_float(
     }
     Ok(value)
 }
-
+#[cfg(feature = "alloc")]
 fn ordered_f32(value: f32) -> u32 {
     const SIGN_MASK: u32 = 1 << 31;
     let bits = value.to_bits();
@@ -540,7 +549,7 @@ fn ordered_f32(value: f32) -> u32 {
         !bits
     }
 }
-
+#[cfg(feature = "alloc")]
 fn ordered_f64(value: f64) -> u64 {
     const SIGN_MASK: u64 = 1 << 63;
     let bits = value.to_bits();
@@ -550,7 +559,7 @@ fn ordered_f64(value: f64) -> u64 {
         !bits
     }
 }
-
+#[cfg(feature = "alloc")]
 /// Render the exact Markdown table mirrored into spec/05 §8.
 pub fn render_spec_tolerance_table() -> String {
     let mut out = String::from(

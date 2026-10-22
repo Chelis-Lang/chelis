@@ -155,8 +155,8 @@ criterion that is not yet the right one.
 
 ### 3.1 One predicate, already shipped
 
-`chelis_types::agreement::compare_exact_observations` is the exact branch of the
-one Phase 3 comparator (chelis#732). Its body is, verbatim:
+`chelis_numeric_core::agreement::compare_exact_observations` defines exact observation comparison.
+It compares the bytes directly:
 
 ```rust
 if reference.as_bytes() == candidate.as_bytes() {
@@ -166,11 +166,9 @@ if reference.as_bytes() == candidate.as_bytes() {
 }
 ```
 
-Byte equality of the two captured streams is therefore the same predicate, not
-an approximation of it. The receipt runner states that equivalence as a claim and
-`scripts/test_core_fragment_parity_receipt.py` locks it: if that function ever
-stops being byte-exact, the test fails and the runner's claim has to be re-earned
-rather than silently rotting.
+The receipt compares complete streams with the same byte-equality rule.
+Its behavior tests reject changed values, alternate numeric spellings, and extra whitespace.
+The numeric core tests exercise the production comparator.
 
 ### 3.2 No tolerance, and why this receipt cannot grant one
 

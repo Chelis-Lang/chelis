@@ -1091,6 +1091,8 @@ class ActualSchemaCodec(unittest.TestCase):
             "wrong-artifact-metadata-mirror",
             "tensor-data-codec",
             "key-bits-word",
+            "execution-storage-source",
+            "execution-storage-member",
         ):
             with self.subTest(mutation=mutation):
                 documents = copy.deepcopy(self.documents)
@@ -1099,7 +1101,22 @@ class ActualSchemaCodec(unittest.TestCase):
                     i for i in api["index"].values() if i.get("name") == "UnitInterval"
                 )
                 field = api["index"][str(number["inner"]["struct"]["kind"]["tuple"][0])]
-                if mutation.startswith("wrong-artifact-version"):
+                if mutation in {"execution-storage-source", "execution-storage-member"}:
+                    core = documents[0]
+                    module_id = next(
+                        item_id
+                        for item_id, path in core["paths"].items()
+                        if path.get("path") == [
+                            "chelis_numeric_core", "dtype_semantics", "wire_codec", "execution_storage"
+                        ]
+                    )
+                    module = core["index"][str(module_id)]["inner"]["module"]
+                    function = core["index"][str(module["items"][0])]
+                    if mutation == "execution-storage-source":
+                        function["span"]["filename"] = "arbitrary.rs"
+                    else:
+                        function["name"] = "arbitrary_codec"
+                elif mutation.startswith("wrong-artifact-version"):
                     version = next(
                         i
                         for i in api["index"].values()
@@ -1209,7 +1226,7 @@ class ActualSchemaCodec(unittest.TestCase):
                         str(tensor["inner"]["struct"]["kind"]["plain"]["fields"][1])
                     ]
                     data["attrs"] = [
-                        {"other": '#[serde(with = "chelis_types::arbitrary_storage")]'}
+                        {"other": '#[serde(with = "chelis_numeric_core::arbitrary_storage")]'}
                     ]
                 elif mutation == "key-bits-word":
                     # The scalar key carrier's opaque key replaced by a bare word.

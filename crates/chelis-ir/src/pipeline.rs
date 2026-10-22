@@ -79,7 +79,7 @@ mod tests {
     use super::*;
     use crate::dag::{DimInfo, RiscOp, TensorType};
     use crate::eval::{TensorValue, eval_tensor_roots_with_strict};
-    use chelis_types::types::Prim;
+    use chelis_numeric_core::prim::Prim;
     use chelis_unord::UnordMap;
 
     fn scalar_f32() -> TensorType {
@@ -141,7 +141,7 @@ mod tests {
             decl,
             RiscOp::Sum {
                 axis: 0,
-                accumulator: chelis_types::types::Prim::F32,
+                accumulator: chelis_numeric_core::prim::Prim::F32,
             },
             vec![neg],
             scalar_f32(),
@@ -195,7 +195,7 @@ mod tests {
             decl,
             RiscOp::Sum {
                 axis: 0,
-                accumulator: chelis_types::types::Prim::F32,
+                accumulator: chelis_numeric_core::prim::Prim::F32,
             },
             vec![neg],
             scalar_f32(),

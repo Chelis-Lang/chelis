@@ -194,7 +194,8 @@ const WITNESS_SOURCE: &str = "def fixture_literal(b: tensor[f32], x: tensor[rows
 
 fn numeric_payloads(library: &chelis_ir::lower::LoweredLibrary) -> Vec<serde_json::Value> {
     use chelis_ir::RiscOp;
-    use chelis_types::{StorageView, types::Prim};
+    use chelis_numeric_core::dtype_semantics::StorageView;
+    use chelis_numeric_core::prim::Prim;
     let mut rows = Vec::new();
     for node in library.dag().nodes() {
         let (mut row, bytes) = match &node.op {
@@ -382,9 +383,14 @@ fn historical_caches_contain_actual_old_scalar_and_storage_positional_bytes() {
             );
             if row["dtype"] == "f64" {
                 if row["kind"] == "scalar" {
-                    assert!(bincode::deserialize::<chelis_types::ScalarValue>(&payload).is_err());
+                    assert!(
+                        bincode::deserialize::<chelis_numeric_core::dtype_semantics::ScalarValue>(
+                            &payload
+                        )
+                        .is_err()
+                    );
                 } else {
-                    assert!(bincode::deserialize::<chelis_types::TensorStorage>(&payload).is_err());
+                    assert!(bincode::deserialize::<chelis_numeric_core::dtype_semantics::TensorStorage>(&payload).is_err());
                 }
             }
         }

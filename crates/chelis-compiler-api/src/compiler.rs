@@ -1,6 +1,6 @@
 use crate::schema::numbers::{NonnegativeCount, NonnegativeExtent, SourceInteger};
 use chelis_deep::DeepTag;
-use chelis_types::types::Prim;
+use chelis_numeric_core::prim::Prim;
 use chelis_unord::{UnordMap, UnordSet};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -9,9 +9,10 @@ use chelis_backend_hip::HipCodegenResult;
 use chelis_deep::Expr as DeepExpr;
 use chelis_ir::dag::{
     ComparisonKind, Dag, DimInfo, ExtremaKind, ExtremaOperand, FusedInput, FusedStepOp,
-    LogicalKind, NamedCastMode, NodeId, ReduceWindowKind, RiscOp, RtDim, TensorType,
+    LogicalKind, NodeId, ReduceWindowKind, RiscOp, RtDim, TensorType,
 };
 use chelis_ir::eval;
+use chelis_numeric_core::named_cast::NamedCastMode;
 use chelis_surf::ast::{
     BinOp, Decl, Expr, ImportKind, LetBinding, LetPattern, MatchArm, Param, Pattern, TypeExpr,
     UnaryOp, Variant, VariantFields,
@@ -5240,7 +5241,7 @@ pub fn reject_unsupported_reduce_window_precision(
             _ => continue,
         };
         let prec = node.output_type.precision;
-        if prec != chelis_types::types::Prim::F32 {
+        if prec != chelis_numeric_core::prim::Prim::F32 {
             return Err(unsupported_gate_error(
                 format!(
                     "`chelis build --target {target}` supports `{op_label}` (`{}`) on f32 \
@@ -5699,15 +5700,15 @@ pub fn reject_unsupported_metal_ops(dag: &Dag) -> std::result::Result<(), Compil
         }
 
         match node.output_type.precision {
-            chelis_types::types::Prim::F32
-            | chelis_types::types::Prim::F16
-            | chelis_types::types::Prim::Bf16
-            | chelis_types::types::Prim::Int8
-            | chelis_types::types::Prim::Int16
-            | chelis_types::types::Prim::Int32
-            | chelis_types::types::Prim::Int64
-            | chelis_types::types::Prim::Bool => {}
-            chelis_types::types::Prim::F64 => {
+            chelis_numeric_core::prim::Prim::F32
+            | chelis_numeric_core::prim::Prim::F16
+            | chelis_numeric_core::prim::Prim::Bf16
+            | chelis_numeric_core::prim::Prim::Int8
+            | chelis_numeric_core::prim::Prim::Int16
+            | chelis_numeric_core::prim::Prim::Int32
+            | chelis_numeric_core::prim::Prim::Int64
+            | chelis_numeric_core::prim::Prim::Bool => {}
+            chelis_numeric_core::prim::Prim::F64 => {
                 return Err(unsupported_gate_error(
                     format!("f64 value at lowered node {}", node.id.0),
                     "metal",
@@ -5743,7 +5744,7 @@ mod metal_runtime_dim_reject_tests {
         Dag, DimInfo, ExtremaKind, ExtremaOperand, FusedInput, FusedStep, FusedStepOp, NodeId,
         RiscOp, RtAxis, RtDim, TensorType,
     };
-    use chelis_types::types::Prim;
+    use chelis_numeric_core::prim::Prim;
 
     fn ty(dims: &[usize], precision: Prim) -> TensorType {
         TensorType {
@@ -6207,8 +6208,8 @@ pub fn reject_unsupported_hip_ops(dag: &Dag) -> std::result::Result<(), Compiler
                 let values = &dag.get(node.inputs[0]).unwrap().output_type;
                 let index_node = dag.get(node.inputs[1]).unwrap();
                 let indices = &index_node.output_type;
-                if values.precision != chelis_types::types::Prim::F32
-                    || node.output_type.precision != chelis_types::types::Prim::F32
+                if values.precision != chelis_numeric_core::prim::Prim::F32
+                    || node.output_type.precision != chelis_numeric_core::prim::Prim::F32
                 {
                     return Err(unsupported_gate_error(
                         format!(
@@ -6227,7 +6228,7 @@ pub fn reject_unsupported_hip_ops(dag: &Dag) -> std::result::Result<(), Compiler
                 }
                 if !matches!(
                     indices.precision,
-                    chelis_types::types::Prim::Int32 | chelis_types::types::Prim::Int64
+                    chelis_numeric_core::prim::Prim::Int32 | chelis_numeric_core::prim::Prim::Int64
                 ) {
                     return Err(unsupported_gate_error(
                         format!(
@@ -6292,9 +6293,9 @@ pub fn reject_unsupported_hip_ops(dag: &Dag) -> std::result::Result<(), Compiler
                 let index_node = dag.get(node.inputs[1]).unwrap();
                 let indices = &index_node.output_type;
                 let updates = &dag.get(node.inputs[2]).unwrap().output_type;
-                if target.precision != chelis_types::types::Prim::F32
-                    || updates.precision != chelis_types::types::Prim::F32
-                    || node.output_type.precision != chelis_types::types::Prim::F32
+                if target.precision != chelis_numeric_core::prim::Prim::F32
+                    || updates.precision != chelis_numeric_core::prim::Prim::F32
+                    || node.output_type.precision != chelis_numeric_core::prim::Prim::F32
                 {
                     return Err(unsupported_gate_error(
                         format!(
@@ -6315,7 +6316,7 @@ pub fn reject_unsupported_hip_ops(dag: &Dag) -> std::result::Result<(), Compiler
                 }
                 if !matches!(
                     indices.precision,
-                    chelis_types::types::Prim::Int32 | chelis_types::types::Prim::Int64
+                    chelis_numeric_core::prim::Prim::Int32 | chelis_numeric_core::prim::Prim::Int64
                 ) {
                     return Err(unsupported_gate_error(
                         format!(
@@ -6363,7 +6364,7 @@ pub fn reject_unsupported_hip_ops(dag: &Dag) -> std::result::Result<(), Compiler
         .filter(|node| {
             matches!(
                 node.output_type.precision,
-                chelis_types::types::Prim::Bf16 | chelis_types::types::Prim::F16
+                chelis_numeric_core::prim::Prim::Bf16 | chelis_numeric_core::prim::Prim::F16
             )
         })
         .filter_map(|node| match &node.op {
@@ -6395,14 +6396,14 @@ pub fn reject_unsupported_hip_ops(dag: &Dag) -> std::result::Result<(), Compiler
 
     for node in dag.nodes() {
         match node.output_type.precision {
-            chelis_types::types::Prim::F32
-            | chelis_types::types::Prim::F64
-            | chelis_types::types::Prim::Bool
-            | chelis_types::types::Prim::Int8
-            | chelis_types::types::Prim::Int16
-            | chelis_types::types::Prim::Int32
-            | chelis_types::types::Prim::Int64 => {}
-            chelis_types::types::Prim::Bf16 | chelis_types::types::Prim::F16 => {
+            chelis_numeric_core::prim::Prim::F32
+            | chelis_numeric_core::prim::Prim::F64
+            | chelis_numeric_core::prim::Prim::Bool
+            | chelis_numeric_core::prim::Prim::Int8
+            | chelis_numeric_core::prim::Prim::Int16
+            | chelis_numeric_core::prim::Prim::Int32
+            | chelis_numeric_core::prim::Prim::Int64 => {}
+            chelis_numeric_core::prim::Prim::Bf16 | chelis_numeric_core::prim::Prim::F16 => {
                 if !narrow_float_admissible.contains(&node.id) {
                     return Err(unsupported_gate_error(
                         format!(
@@ -6451,7 +6452,7 @@ fn eval_stage_error(message: String, trusted_numeric_trap: bool) -> CompilerErro
     } else if trusted_numeric_trap
         && message
             .lines()
-            .any(chelis_types::NumericTrap::is_canonical_line)
+            .any(chelis_numeric_core::dtype_semantics::NumericTrap::is_canonical_line)
     {
         GeneralKind::NumericTrap
     } else {
@@ -7777,7 +7778,7 @@ mod tests {
             vec![],
             TensorType {
                 dims: vec![],
-                precision: chelis_types::types::Prim::F32,
+                precision: chelis_numeric_core::prim::Prim::F32,
             },
             None,
         );
@@ -7999,7 +8000,10 @@ mod tests {
         );
         let requirements = [4, 4, 9]
             .into_iter()
-            .map(|value| chelis_types::scalar_from_i64("load", Prim::Int64, value).unwrap())
+            .map(|value| {
+                chelis_numeric_core::dtype_semantics::scalar_from_i64("load", Prim::Int64, value)
+                    .unwrap()
+            })
             .collect();
         let witness = dag.add_node(
             decl,
@@ -8021,7 +8025,12 @@ mod tests {
         let root = dag.add_node(
             decl,
             RiscOp::Const {
-                value: chelis_types::scalar_from_i64("load", Prim::Int64, 9).unwrap(),
+                value: chelis_numeric_core::dtype_semantics::scalar_from_i64(
+                    "load",
+                    Prim::Int64,
+                    9,
+                )
+                .unwrap(),
             },
             vec![],
             TensorType {
@@ -8051,18 +8060,22 @@ mod tests {
         let seed = dag.add_node(
             decl,
             RiscOp::Const {
-                value: chelis_types::scalar_from_i64("test", chelis_types::types::Prim::Int64, -3)
-                    .unwrap(),
+                value: chelis_numeric_core::dtype_semantics::scalar_from_i64(
+                    "test",
+                    chelis_numeric_core::prim::Prim::Int64,
+                    -3,
+                )
+                .unwrap(),
             },
             vec![],
-            ty(&[], chelis_types::types::Prim::Int64),
+            ty(&[], chelis_numeric_core::prim::Prim::Int64),
             None,
         );
         let root = dag.add_node(
             decl,
             RiscOp::KeyFromSeed,
             vec![seed],
-            ty(&[], chelis_types::types::Prim::Key),
+            ty(&[], chelis_numeric_core::prim::Prim::Key),
             None,
         );
         let left = dag.add_node(
@@ -8071,7 +8084,7 @@ mod tests {
                 branch: chelis_ir::dag::KeyBranch::Left,
             },
             vec![root],
-            ty(&[], chelis_types::types::Prim::Key),
+            ty(&[], chelis_numeric_core::prim::Prim::Key),
             None,
         );
         let right = dag.add_node(
@@ -8080,14 +8093,14 @@ mod tests {
                 branch: chelis_ir::dag::KeyBranch::Right,
             },
             vec![root],
-            ty(&[], chelis_types::types::Prim::Key),
+            ty(&[], chelis_numeric_core::prim::Prim::Key),
             None,
         );
         let folded = dag.add_node(
             decl,
             RiscOp::FoldIn,
             vec![left, seed],
-            ty(&[], chelis_types::types::Prim::Key),
+            ty(&[], chelis_numeric_core::prim::Prim::Key),
             None,
         );
         let rows = dag.add_node(
@@ -8096,7 +8109,7 @@ mod tests {
                 count: chelis_ir::dag::RtDim::Lit(3),
             },
             vec![folded],
-            ty(&[3], chelis_types::types::Prim::Key),
+            ty(&[3], chelis_numeric_core::prim::Prim::Key),
             None,
         );
         dag.add_root(rows);
@@ -8511,11 +8524,13 @@ mod tests {
         use chelis_ir::dag::{NodeId, RtAxis};
         for (invalid, expected) in [
             (
-                chelis_types::scalar_from_i64("load", Prim::Int64, -1).unwrap(),
+                chelis_numeric_core::dtype_semantics::scalar_from_i64("load", Prim::Int64, -1)
+                    .unwrap(),
                 "dimension extent must be a nonnegative int64",
             ),
             (
-                chelis_types::scalar_from_i64("load", Prim::Int32, 4).unwrap(),
+                chelis_numeric_core::dtype_semantics::scalar_from_i64("load", Prim::Int32, 4)
+                    .unwrap(),
                 "source integer requires exact int64 dtype",
             ),
         ] {
@@ -8795,14 +8810,14 @@ mod tests {
         (dir, root)
     }
 
-    fn tensor_type(dims: Vec<usize>, precision: chelis_types::types::Prim) -> TensorType {
+    fn tensor_type(dims: Vec<usize>, precision: chelis_numeric_core::prim::Prim) -> TensorType {
         TensorType {
             dims: dims.into_iter().map(DimInfo::Lit).collect(),
             precision,
         }
     }
 
-    fn hip_direct_arithmetic_dag(op: RiscOp, precision: chelis_types::types::Prim) -> Dag {
+    fn hip_direct_arithmetic_dag(op: RiscOp, precision: chelis_numeric_core::prim::Prim) -> Dag {
         let mut dag = Dag::new();
         let decl = dag.declare("test");
         let lhs = dag.add_node(
@@ -8842,8 +8857,8 @@ mod tests {
     #[test]
     fn hip_seam_accepts_supported_direct_arithmetic_cells() {
         for precision in [
-            chelis_types::types::Prim::F32,
-            chelis_types::types::Prim::F64,
+            chelis_numeric_core::prim::Prim::F32,
+            chelis_numeric_core::prim::Prim::F64,
         ] {
             for op in [
                 RiscOp::Sub,
@@ -8866,10 +8881,10 @@ mod tests {
         }
 
         for precision in [
-            chelis_types::types::Prim::F32,
-            chelis_types::types::Prim::F64,
-            chelis_types::types::Prim::F16,
-            chelis_types::types::Prim::Bf16,
+            chelis_numeric_core::prim::Prim::F32,
+            chelis_numeric_core::prim::Prim::F64,
+            chelis_numeric_core::prim::Prim::F16,
+            chelis_numeric_core::prim::Prim::Bf16,
         ] {
             for op in [RiscOp::Relu, RiscOp::ReluAdjoint] {
                 reject_unsupported_hip_ops(&hip_direct_arithmetic_dag(op, precision))
@@ -8878,10 +8893,10 @@ mod tests {
         }
 
         for precision in [
-            chelis_types::types::Prim::Int8,
-            chelis_types::types::Prim::Int16,
-            chelis_types::types::Prim::Int32,
-            chelis_types::types::Prim::Int64,
+            chelis_numeric_core::prim::Prim::Int8,
+            chelis_numeric_core::prim::Prim::Int16,
+            chelis_numeric_core::prim::Prim::Int32,
+            chelis_numeric_core::prim::Prim::Int64,
         ] {
             for op in [RiscOp::MaxElem, RiscOp::MinElem] {
                 reject_unsupported_hip_ops(&hip_direct_arithmetic_dag(op, precision))
@@ -8893,18 +8908,18 @@ mod tests {
     #[test]
     fn hip_direct_arithmetic_accepts_non_metal_issue_1306_residuals() {
         for precision in [
-            chelis_types::types::Prim::Int8,
-            chelis_types::types::Prim::Int16,
-            chelis_types::types::Prim::Int32,
-            chelis_types::types::Prim::Int64,
+            chelis_numeric_core::prim::Prim::Int8,
+            chelis_numeric_core::prim::Prim::Int16,
+            chelis_numeric_core::prim::Prim::Int32,
+            chelis_numeric_core::prim::Prim::Int64,
         ] {
             reject_unsupported_hip_ops(&hip_direct_arithmetic_dag(RiscOp::Sub, precision))
                 .expect("HIP checked integer subtraction now has a device trap channel");
         }
 
         for precision in [
-            chelis_types::types::Prim::F16,
-            chelis_types::types::Prim::Bf16,
+            chelis_numeric_core::prim::Prim::F16,
+            chelis_numeric_core::prim::Prim::Bf16,
         ] {
             for op in [
                 RiscOp::Sub,
@@ -8927,8 +8942,8 @@ mod tests {
             }],
         };
         for precision in [
-            chelis_types::types::Prim::F16,
-            chelis_types::types::Prim::Bf16,
+            chelis_numeric_core::prim::Prim::F16,
+            chelis_numeric_core::prim::Prim::Bf16,
         ] {
             reject_unsupported_hip_ops(&hip_direct_arithmetic_dag(fused_sub.clone(), precision))
                 .expect("fused narrow-float subtraction is admitted");
@@ -8939,7 +8954,7 @@ mod tests {
     fn hip_direct_arithmetic_keeps_unrelated_narrow_float_compute_typed_rejected() {
         let error = reject_unsupported_hip_ops(&hip_direct_arithmetic_dag(
             RiscOp::Add,
-            chelis_types::types::Prim::F16,
+            chelis_numeric_core::prim::Prim::F16,
         ))
         .expect_err("shipping direct arithmetic must not silently admit every narrow-float op");
         assert!(
@@ -8961,7 +8976,7 @@ mod tests {
                 name: "values".into(),
             },
             vec![],
-            tensor_type(vec![3, 2], chelis_types::types::Prim::F32),
+            tensor_type(vec![3, 2], chelis_numeric_core::prim::Prim::F32),
             None,
         );
         let indices = dag.add_node(
@@ -8970,7 +8985,7 @@ mod tests {
                 name: "indices".into(),
             },
             vec![],
-            tensor_type(vec![4], chelis_types::types::Prim::Int64),
+            tensor_type(vec![4], chelis_numeric_core::prim::Prim::Int64),
             None,
         );
         let gather = dag.add_node(
@@ -8980,7 +8995,7 @@ mod tests {
                 batch_rank: 0,
             },
             vec![values, indices],
-            tensor_type(vec![4, 2], chelis_types::types::Prim::F32),
+            tensor_type(vec![4, 2], chelis_numeric_core::prim::Prim::F32),
             None,
         );
         dag.add_root(gather);
@@ -8996,14 +9011,14 @@ mod tests {
             decl,
             RiscOp::Load { name: "x".into() },
             vec![],
-            tensor_type(vec![2, 3], chelis_types::types::Prim::Bool),
+            tensor_type(vec![2, 3], chelis_numeric_core::prim::Prim::Bool),
             None,
         );
         dag.add_node(
             decl,
             RiscOp::Count { axes: vec![1] },
             vec![input],
-            tensor_type(vec![2], chelis_types::types::Prim::Int64),
+            tensor_type(vec![2], chelis_numeric_core::prim::Prim::Int64),
             None,
         );
 
@@ -9021,7 +9036,7 @@ mod tests {
                 name: "value".into(),
             },
             vec![],
-            tensor_type(vec![], chelis_types::types::Prim::F32),
+            tensor_type(vec![], chelis_numeric_core::prim::Prim::F32),
             None,
         );
         let witness = dag.add_node(
@@ -9030,7 +9045,7 @@ mod tests {
                 name: "witness".into(),
             },
             vec![],
-            tensor_type(vec![4], chelis_types::types::Prim::F32),
+            tensor_type(vec![4], chelis_numeric_core::prim::Prim::F32),
             None,
         );
         dag.add_node(
@@ -9043,7 +9058,7 @@ mod tests {
                 },
             },
             vec![value, witness],
-            tensor_type(vec![4], chelis_types::types::Prim::F32),
+            tensor_type(vec![4], chelis_numeric_core::prim::Prim::F32),
             None,
         );
 
@@ -9061,7 +9076,7 @@ mod tests {
                 name: "value".into(),
             },
             vec![],
-            tensor_type(vec![], chelis_types::types::Prim::F32),
+            tensor_type(vec![], chelis_numeric_core::prim::Prim::F32),
             None,
         );
         let size = dag.add_node(
@@ -9070,7 +9085,7 @@ mod tests {
                 name: "size".into(),
             },
             vec![],
-            tensor_type(vec![], chelis_types::types::Prim::Int64),
+            tensor_type(vec![], chelis_numeric_core::prim::Prim::Int64),
             None,
         );
         dag.add_node(
@@ -9080,7 +9095,7 @@ mod tests {
                 size: RtDim::Node(1),
             },
             vec![value, size],
-            tensor_type(vec![4], chelis_types::types::Prim::F32),
+            tensor_type(vec![4], chelis_numeric_core::prim::Prim::F32),
             None,
         );
 
@@ -9104,7 +9119,7 @@ mod tests {
                 name: "values".into(),
             },
             vec![],
-            tensor_type(vec![3, 2], chelis_types::types::Prim::F32),
+            tensor_type(vec![3, 2], chelis_numeric_core::prim::Prim::F32),
             None,
         );
         let indices = dag.add_node(
@@ -9113,7 +9128,7 @@ mod tests {
                 name: "indices".into(),
             },
             vec![],
-            tensor_type(vec![4], chelis_types::types::Prim::F32),
+            tensor_type(vec![4], chelis_numeric_core::prim::Prim::F32),
             None,
         );
         let gather = dag.add_node(
@@ -9123,7 +9138,7 @@ mod tests {
                 batch_rank: 0,
             },
             vec![values, indices],
-            tensor_type(vec![4, 2], chelis_types::types::Prim::F32),
+            tensor_type(vec![4, 2], chelis_numeric_core::prim::Prim::F32),
             None,
         );
         dag.add_root(gather);
@@ -9141,7 +9156,7 @@ mod tests {
             decl,
             RiscOp::OneHot { vocab: 4 },
             vec![],
-            tensor_type(vec![2, 4], chelis_types::types::Prim::F32),
+            tensor_type(vec![2, 4], chelis_numeric_core::prim::Prim::F32),
             None,
         );
         dag.add_root(one_hot);
@@ -9159,14 +9174,14 @@ mod tests {
             decl,
             RiscOp::Load { name: "x".into() },
             vec![],
-            tensor_type(vec![4], chelis_types::types::Prim::F32),
+            tensor_type(vec![4], chelis_numeric_core::prim::Prim::F32),
             None,
         );
         let shape = dag.add_node(
             decl,
             RiscOp::Shape { axis: 0 },
             vec![input],
-            tensor_type(vec![], chelis_types::types::Prim::Int32),
+            tensor_type(vec![], chelis_numeric_core::prim::Prim::Int32),
             None,
         );
         dag.add_root(shape);
@@ -9186,17 +9201,17 @@ mod tests {
                 name: "values".into(),
             },
             vec![],
-            tensor_type(vec![3, 2], chelis_types::types::Prim::F32),
+            tensor_type(vec![3, 2], chelis_numeric_core::prim::Prim::F32),
             None,
         );
         let indices = dag.add_node(
             decl,
             RiscOp::synth_const(
-                tensor_type(vec![4], chelis_types::types::Prim::Int64).precision,
+                tensor_type(vec![4], chelis_numeric_core::prim::Prim::Int64).precision,
                 0.0,
             ),
             vec![],
-            tensor_type(vec![4], chelis_types::types::Prim::Int64),
+            tensor_type(vec![4], chelis_numeric_core::prim::Prim::Int64),
             None,
         );
         let gather = dag.add_node(
@@ -9206,7 +9221,7 @@ mod tests {
                 batch_rank: 0,
             },
             vec![values, indices],
-            tensor_type(vec![4, 2], chelis_types::types::Prim::F32),
+            tensor_type(vec![4, 2], chelis_numeric_core::prim::Prim::F32),
             None,
         );
         dag.add_root(gather);
@@ -9229,17 +9244,17 @@ mod tests {
                 name: "target".into(),
             },
             vec![],
-            tensor_type(vec![3, 2], chelis_types::types::Prim::F32),
+            tensor_type(vec![3, 2], chelis_numeric_core::prim::Prim::F32),
             None,
         );
         let indices = dag.add_node(
             decl,
             RiscOp::synth_const(
-                tensor_type(vec![4], chelis_types::types::Prim::Int32).precision,
+                tensor_type(vec![4], chelis_numeric_core::prim::Prim::Int32).precision,
                 0.0,
             ),
             vec![],
-            tensor_type(vec![4], chelis_types::types::Prim::Int32),
+            tensor_type(vec![4], chelis_numeric_core::prim::Prim::Int32),
             None,
         );
         let updates = dag.add_node(
@@ -9248,7 +9263,7 @@ mod tests {
                 name: "updates".into(),
             },
             vec![],
-            tensor_type(vec![4, 2], chelis_types::types::Prim::F32),
+            tensor_type(vec![4, 2], chelis_numeric_core::prim::Prim::F32),
             None,
         );
         let scatter = dag.add_node(
@@ -9258,7 +9273,7 @@ mod tests {
                 batch_rank: 0,
             },
             vec![target, indices, updates],
-            tensor_type(vec![3, 2], chelis_types::types::Prim::F32),
+            tensor_type(vec![3, 2], chelis_numeric_core::prim::Prim::F32),
             None,
         );
         dag.add_root(scatter);
@@ -9287,7 +9302,7 @@ mod tests {
             decl,
             RiscOp::Load { name: "x".into() },
             vec![],
-            tensor_type(vec![2, 8], chelis_types::types::Prim::F32),
+            tensor_type(vec![2, 8], chelis_numeric_core::prim::Prim::F32),
             None,
         );
         let rw = dag.add_node(
@@ -9300,7 +9315,7 @@ mod tests {
             vec![input],
             TensorType {
                 dims: out_dims,
-                precision: chelis_types::types::Prim::F32,
+                precision: chelis_numeric_core::prim::Prim::F32,
             },
             None,
         );
@@ -9390,7 +9405,7 @@ windowed = reduce_window_max(padded, [2i64], [1i64])
         );
     }
 
-    fn reduce_window_dag_with_precision(prec: chelis_types::types::Prim) -> Dag {
+    fn reduce_window_dag_with_precision(prec: chelis_numeric_core::prim::Prim) -> Dag {
         use chelis_ir::dag::ReduceWindowKind;
         let mut dag = Dag::new();
         let decl = dag.declare("test");
@@ -9424,7 +9439,7 @@ windowed = reduce_window_max(padded, [2i64], [1i64])
     // `internal error` panic instead of a clean diagnostic.
     #[test]
     fn reduce_window_rejects_bf16_precision_on_c_build() {
-        let bf16 = reduce_window_dag_with_precision(chelis_types::types::Prim::Bf16);
+        let bf16 = reduce_window_dag_with_precision(chelis_numeric_core::prim::Prim::Bf16);
         let err = reject_unsupported_reduce_window_precision(&bf16, BuildTarget::C)
             .expect_err("bf16 reduce_window must be rejected on the C build path");
         let message = &err.errors[0].message;
@@ -9439,10 +9454,10 @@ windowed = reduce_window_max(padded, [2i64], [1i64])
         );
 
         // f16 is rejected the same way; f32 is allowed.
-        let f16 = reduce_window_dag_with_precision(chelis_types::types::Prim::F16);
+        let f16 = reduce_window_dag_with_precision(chelis_numeric_core::prim::Prim::F16);
         reject_unsupported_reduce_window_precision(&f16, BuildTarget::C)
             .expect_err("f16 reduce_window must be rejected on the C build path");
-        let f32 = reduce_window_dag_with_precision(chelis_types::types::Prim::F32);
+        let f32 = reduce_window_dag_with_precision(chelis_numeric_core::prim::Prim::F32);
         reject_unsupported_reduce_window_precision(&f32, BuildTarget::C)
             .expect("f32 reduce_window must be allowed");
     }
@@ -9453,7 +9468,7 @@ windowed = reduce_window_max(padded, [2i64], [1i64])
     // typed `unsupported_feature` receipt before it reaches device codegen.
     #[test]
     fn hip_rejects_reduce_window_node_with_clean_message() {
-        let dag = reduce_window_dag_with_precision(chelis_types::types::Prim::F32);
+        let dag = reduce_window_dag_with_precision(chelis_numeric_core::prim::Prim::F32);
         let err =
             reject_unsupported_hip_ops(&dag).expect_err("HIP must reject reduce_window codegen");
         let message = &err.errors[0].message;
@@ -9478,14 +9493,14 @@ windowed = reduce_window_max(padded, [2i64], [1i64])
             decl,
             RiscOp::Load { name: "x".into() },
             vec![],
-            tensor_type(vec![4], chelis_types::types::Prim::F32),
+            tensor_type(vec![4], chelis_numeric_core::prim::Prim::F32),
             None,
         );
         let cotangent = dag.add_node(
             decl,
             RiscOp::Load { name: "g".into() },
             vec![],
-            tensor_type(vec![3], chelis_types::types::Prim::F32),
+            tensor_type(vec![3], chelis_numeric_core::prim::Prim::F32),
             None,
         );
         let grad = dag.add_node(
@@ -9496,7 +9511,7 @@ windowed = reduce_window_max(padded, [2i64], [1i64])
                 strides: vec![1],
             },
             vec![input, cotangent],
-            tensor_type(vec![4], chelis_types::types::Prim::F32),
+            tensor_type(vec![4], chelis_numeric_core::prim::Prim::F32),
             None,
         );
         dag.add_root(grad);
@@ -9519,7 +9534,7 @@ windowed = reduce_window_max(padded, [2i64], [1i64])
             decl,
             RiscOp::Load { name: "x".into() },
             vec![],
-            tensor_type(vec![4], chelis_types::types::Prim::F32),
+            tensor_type(vec![4], chelis_numeric_core::prim::Prim::F32),
             None,
         );
         // A rank-0 integer Load, not a `Shape` read: the seam blanket-rejects
@@ -9528,7 +9543,7 @@ windowed = reduce_window_max(padded, [2i64], [1i64])
             decl,
             RiscOp::Load { name: "m".into() },
             vec![],
-            tensor_type(vec![], chelis_types::types::Prim::Int32),
+            tensor_type(vec![], chelis_numeric_core::prim::Prim::Int32),
             None,
         );
         dag.add_node(
@@ -9537,7 +9552,7 @@ windowed = reduce_window_max(padded, [2i64], [1i64])
                 new_shape: vec![RtDim::Node(1)],
             },
             vec![x, extent],
-            tensor_type(vec![4], chelis_types::types::Prim::F32),
+            tensor_type(vec![4], chelis_numeric_core::prim::Prim::F32),
             None,
         );
         let err = reject_unsupported_hip_ops(&dag)
@@ -9564,7 +9579,7 @@ windowed = reduce_window_max(padded, [2i64], [1i64])
                 name: "target".into(),
             },
             vec![],
-            tensor_type(vec![3, 2], chelis_types::types::Prim::F64),
+            tensor_type(vec![3, 2], chelis_numeric_core::prim::Prim::F64),
             None,
         );
         let indices = dag.add_node(
@@ -9573,7 +9588,7 @@ windowed = reduce_window_max(padded, [2i64], [1i64])
                 name: "indices".into(),
             },
             vec![],
-            tensor_type(vec![4], chelis_types::types::Prim::Int64),
+            tensor_type(vec![4], chelis_numeric_core::prim::Prim::Int64),
             None,
         );
         let updates = dag.add_node(
@@ -9582,7 +9597,7 @@ windowed = reduce_window_max(padded, [2i64], [1i64])
                 name: "updates".into(),
             },
             vec![],
-            tensor_type(vec![4, 2], chelis_types::types::Prim::F64),
+            tensor_type(vec![4, 2], chelis_numeric_core::prim::Prim::F64),
             None,
         );
         let scatter = dag.add_node(
@@ -9592,7 +9607,7 @@ windowed = reduce_window_max(padded, [2i64], [1i64])
                 batch_rank: 0,
             },
             vec![target, indices, updates],
-            tensor_type(vec![3, 2], chelis_types::types::Prim::F64),
+            tensor_type(vec![3, 2], chelis_numeric_core::prim::Prim::F64),
             None,
         );
         dag.add_root(scatter);
@@ -9674,7 +9689,7 @@ def loss(x: tensor[2, 2, f32], w: tensor[2, 2, f32]) -> tensor[f32] =
         let root = compiled.dag.get(root_id).expect("troot DAG node");
         assert_eq!(
             root.output_type.precision,
-            chelis_types::types::Prim::F64,
+            chelis_numeric_core::prim::Prim::F64,
             "the lowered call root must carry mk's declared f64 return dtype"
         );
 
@@ -9715,7 +9730,7 @@ def loss(x: tensor[2, 2, f32], w: tensor[2, 2, f32]) -> tensor[f32] =
         let root = compiled.dag.get(root_id).expect("troot DAG node");
         assert_eq!(
             root.output_type.precision,
-            chelis_types::types::Prim::F32,
+            chelis_numeric_core::prim::Prim::F32,
             "the dtype handoff must preserve a real f32 return"
         );
     }

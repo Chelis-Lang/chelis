@@ -18,13 +18,13 @@
 /// Declared from Metal hardware spec (Apple Silicon): no f64 support.
 /// Declaration-only in CI (no Metal toolchain on Linux) — verified in the
 /// field via [05-UNS-1] wiring when the backend rejection path fires.
-pub const TENSOR_CAPABLE_PRIMS: &[chelis_types::types::Prim] = &[
-    chelis_types::types::Prim::F32,
-    chelis_types::types::Prim::Bool,
-    chelis_types::types::Prim::Bf16,
-    chelis_types::types::Prim::F16,
-    chelis_types::types::Prim::Int32,
-    chelis_types::types::Prim::Int64,
+pub const TENSOR_CAPABLE_PRIMS: &[chelis_numeric_core::prim::Prim] = &[
+    chelis_numeric_core::prim::Prim::F32,
+    chelis_numeric_core::prim::Prim::Bool,
+    chelis_numeric_core::prim::Prim::Bf16,
+    chelis_numeric_core::prim::Prim::F16,
+    chelis_numeric_core::prim::Prim::Int32,
+    chelis_numeric_core::prim::Prim::Int64,
 ];
 
 use chelis_unord::UnordMap;

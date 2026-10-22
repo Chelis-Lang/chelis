@@ -7,7 +7,7 @@
 
 use chelis_ir::dag::{DagNode, DimInfo, NodeId, RiscOp, RtDim, TensorType};
 use chelis_ir::ownership::{VerifiedDagAction, VerifiedDagView};
-use chelis_types::{NumericTrap, ScalarValue};
+use chelis_numeric_core::dtype_semantics::{NumericTrap, ScalarValue};
 
 /// chelis#616: the Metal lane requires compile-time movement bounds (it rejects
 /// symbolic movement shapes via `require_movement_shape`). This converter
@@ -38,11 +38,12 @@ fn metal_bound_to_usize(b: &RtDim) -> Result<usize, String> {
 mod rejection_authority_tests {
     use super::{Emitter, emit_verified_dag};
     use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
-    use chelis_types::types::Prim;
+    use chelis_numeric_core::prim::Prim;
 
     #[test]
     fn pad_fill_rejections_use_case_specific_authorities() {
-        let fill = chelis_types::scalar_from_f64("pad", Prim::F64, 0.0).unwrap();
+        let fill =
+            chelis_numeric_core::dtype_semantics::scalar_from_f64("pad", Prim::F64, 0.0).unwrap();
         let f64 = Emitter::host_scalar_literal(Prim::F64, fill).unwrap_err();
 
         assert!(f64.contains("deliberate [04-TGT-1]"), "{f64}");
@@ -50,7 +51,9 @@ mod rejection_authority_tests {
 
     #[test]
     fn int64_min_pad_fill_has_a_portable_host_literal() {
-        let fill = chelis_types::scalar_from_i64("pad", Prim::Int64, i64::MIN).unwrap();
+        let fill =
+            chelis_numeric_core::dtype_semantics::scalar_from_i64("pad", Prim::Int64, i64::MIN)
+                .unwrap();
         assert_eq!(
             Emitter::host_scalar_literal(Prim::Int64, fill).unwrap(),
             "(-9223372036854775807LL - 1LL)"
@@ -126,7 +129,7 @@ fn metal_pairs_to_usize(bounds: &[(RtDim, RtDim)]) -> Result<Vec<(usize, usize)>
         .map(|(s, e)| Ok((metal_bound_to_usize(s)?, metal_bound_to_usize(e)?)))
         .collect()
 }
-use chelis_types::types::Prim;
+use chelis_numeric_core::prim::Prim;
 use chelis_types::unsupported::{Stage, Unsupported, UnsupportedKind};
 
 use crate::blas;
@@ -1281,7 +1284,7 @@ impl<'plan> Emitter<'plan> {
     fn emit_const(
         &mut self,
         node: &DagNode,
-        value: chelis_types::dtype_semantics::ScalarValue,
+        value: chelis_numeric_core::dtype_semantics::ScalarValue,
     ) -> Result<(), String> {
         let (n, shape, prec) = self.require_static_shape(&node.output_type, "Const")?;
         let buf = format!("buf_{}", node.id.0);
@@ -1321,7 +1324,7 @@ impl<'plan> Emitter<'plan> {
     fn emit_const_tensor(
         &mut self,
         node: &DagNode,
-        data: &chelis_types::dtype_semantics::TensorStorage,
+        data: &chelis_numeric_core::dtype_semantics::TensorStorage,
     ) -> Result<(), String> {
         let (n, shape, prec) = self.require_static_shape(&node.output_type, "ConstTensor")?;
         if data.len() != n || data.prim() != prec {

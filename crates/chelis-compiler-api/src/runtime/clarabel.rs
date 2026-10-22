@@ -6,7 +6,7 @@ use chelis_clarabel_provider::{Cone, DenseMatrix, DenseVector, Problem, Settings
 use chelis_clarabel_provider::{
     PACKAGE_IDENTITY, PACKAGE_NAME, PACKAGE_VERSION, QP_SOLVE_OPERATION,
 };
-use chelis_types::types::Prim;
+use chelis_numeric_core::prim::Prim;
 use sha2::{Digest, Sha256};
 
 pub(super) const SOLVE: &str = "pkg__chelis__clarabel__Clarabel__Qp__solve";

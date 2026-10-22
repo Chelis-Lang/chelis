@@ -18,6 +18,7 @@ ownership-ledger = ["chelis-runtime/ownership-ledger"]
 clarabel-provider = ["dep:chelis-clarabel-provider", "dep:chelis-runtime-bundle", "chelis-runtime-bundle/clarabel-provider"]
 
 [dependencies]
+chelis-numeric-core = { workspace = true, default-features = false, features = ["alloc", "serde"] }
 chelis-abi.workspace = true
 chelis-clarabel-provider = { path = "../chelis-clarabel-provider", optional = true, features = ["solver"] }
 chelis-runtime-bundle = { workspace = true, optional = true }
@@ -50,7 +51,7 @@ sha2 = "0.10"
 stacker.workspace = true
 
 [dev-dependencies]
-chelis-crmath.workspace = true
+chelis-crmath = { workspace = true, features = ["std"] }
 tempfile = "3"
 # Tests that link generated C stage the runtime the bundle carries
 # (spec/08-backends.md §2.1) and link that exact archive; `ownership-ledger`

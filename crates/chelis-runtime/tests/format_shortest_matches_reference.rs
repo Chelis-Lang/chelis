@@ -1,6 +1,6 @@
 //! chelis#732 Phase 2: the byte-equality lock between the compiled lane's
 //! exact scalar-to-string boundary and the reference renderer
-//! `chelis_types::observation::format_element` (faithful_observation.md
+//! `chelis_numeric_core::observation::format_element` (faithful_observation.md
 //! section C3.3: "unit-tested against the Rust formatter over the
 //! harness's value table - byte equality is the test").
 //!
@@ -19,12 +19,12 @@
 //! `format_shortest_invalid_width.rs`.
 
 use chelis_crmath::profile::{storage_reference, Output};
+use chelis_numeric_core::observation::{format_element, ElementRef};
+use chelis_numeric_core::prim::Prim;
 use chelis_runtime::{
     chelis_scalar, chelis_scalar_from_bits, chelis_string_data, chelis_string_from_scalar,
     chelis_string_release,
 };
-use chelis_types::types::Prim;
-use chelis_types::{format_element, ElementRef};
 use chelis_vocab::RuntimeDType;
 fn scalar_from_f64(value: f64, dtype: RuntimeDType) -> chelis_scalar {
     let bits = match dtype {

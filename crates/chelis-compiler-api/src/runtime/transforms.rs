@@ -8,7 +8,8 @@ use chelis_deep::ast::{Atom, Expr, ExprCarrier, Metadata};
 use chelis_ir::dag::{DimInfo, TensorType};
 use chelis_ir::eval::{TensorInputDemand, TensorValue as IrTensorValue};
 use chelis_ir::lower::SubexprLoweringContext;
-use chelis_types::types::{NominalArg, Prim, TensorPrec, Type, TypeVar};
+use chelis_numeric_core::prim::Prim;
+use chelis_types::types::{NominalArg, TensorPrec, Type, TypeVar};
 
 use super::eval::{DeclaredResultClaim, tensor_result_producer};
 use super::host_ops::terminal_name_matches;
@@ -1366,7 +1367,7 @@ fn stage_grad_list_value(
 pub(super) fn is_numeric_trap_failure(failure: &str) -> bool {
     failure
         .lines()
-        .any(chelis_types::NumericTrap::is_canonical_line)
+        .any(chelis_numeric_core::dtype_semantics::NumericTrap::is_canonical_line)
 }
 
 #[cfg(test)]
@@ -1633,7 +1634,10 @@ pub(super) fn runtime_value_to_dag_input(
         // A scalar key enters the transformed graph as the rank-0 key tensor
         // its key `Load` reads; it carries no cotangent (spec/06 section 2.11).
         RuntimeValue::Key(key) => Ok((
-            IrTensorValue::from_storage(vec![], chelis_types::TensorStorage::from_keys(vec![*key])),
+            IrTensorValue::from_storage(
+                vec![],
+                chelis_numeric_core::dtype_semantics::TensorStorage::from_keys(vec![*key]),
+            ),
             TensorType {
                 dims: vec![],
                 precision: Prim::Key,
@@ -1649,7 +1653,10 @@ pub(super) fn runtime_value_to_dag_input(
             let value = if precision == payload.dtype() {
                 IrTensorValue::from_storage(
                     vec![],
-                    chelis_types::tensor_from_scalars(precision, &[payload.value()]),
+                    chelis_numeric_core::dtype_semantics::tensor_from_scalars(
+                        precision,
+                        &[payload.value()],
+                    ),
                 )
             } else {
                 IrTensorValue::scalar(payload.as_f64_lossy())
@@ -1669,7 +1676,10 @@ pub(super) fn runtime_value_to_dag_input(
             Ok((
                 IrTensorValue::from_storage(
                     vec![],
-                    chelis_types::tensor_from_scalars(payload.dtype(), &[payload.value()]),
+                    chelis_numeric_core::dtype_semantics::tensor_from_scalars(
+                        payload.dtype(),
+                        &[payload.value()],
+                    ),
                 ),
                 TensorType {
                     dims: vec![],

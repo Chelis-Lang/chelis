@@ -4,7 +4,7 @@
 //! Per pull request: the header's `chelis_f32_to_f16` and `chelis_f32_to_bf16`,
 //! compiled with the product profile, on every f32 storage-conversion row of the
 //! profile obligation table and on every f32 within two ulps of an f16 or bf16
-//! rounding boundary; and the evaluator's `chelis_types::{f16,bf16}_from_f64_rne` on
+//! rounding boundary, and the numeric core's f64 conversions on
 //! every f64 row and at every f64 rounding boundary. The manual gate
 //! (`docs/manual_gates.md`) checks every f32 input, through the header and through
 //! the evaluator's f64 conversion of its exact widening.
@@ -95,8 +95,8 @@ fn header_bits(program: &Path, inputs: &[u32]) -> Vec<(u16, u16)> {
 fn evaluator_bits(bits: u64, output: Output) -> u16 {
     let value = f64::from_bits(bits);
     match output {
-        Output::F16 => chelis_types::f16_from_f64_rne(value).to_bits(),
-        Output::Bf16 => chelis_types::bf16_from_f64_rne(value).to_bits(),
+        Output::F16 => chelis_numeric_core::dtype_semantics::f16_from_f64_rne(value).to_bits(),
+        Output::Bf16 => chelis_numeric_core::dtype_semantics::bf16_from_f64_rne(value).to_bits(),
         other => unreachable!("{other:?}"),
     }
 }

@@ -34,8 +34,9 @@ use chelis_compiler_api::schema::{
 };
 use chelis_compiler_api::{COMPILER_VERSION, compile_reef_context, eval_in_context_with_bindings};
 use chelis_ir::eval::TensorValue as DagTensor;
-use chelis_types::types::{Lane, Prim};
-use chelis_types::{RawTensor, finalize_tensor};
+use chelis_numeric_core::dtype_semantics::{RawTensor, finalize_tensor};
+use chelis_numeric_core::prim::Prim;
+use chelis_types::types::Lane;
 use chelis_unord::UnordMap;
 use std::collections::BTreeMap;
 

@@ -23,7 +23,7 @@
 mod support;
 use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
 use chelis_ir::eval::{TensorValue, eval_tensor_roots_with_strict};
-use chelis_types::types::Prim;
+use chelis_numeric_core::prim::Prim;
 use chelis_unord::UnordMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -159,7 +159,8 @@ int main(void) {{
 #[test]
 #[ignore]
 fn bitwise_exact_signed_width_gpu_matches_reference() {
-    use chelis_types::{BitwiseKind, bitwise_scalar, scalar_from_i64};
+    use chelis_numeric_core::dtype_semantics::scalar_from_i64;
+    use chelis_types::{BitwiseKind, bitwise_scalar};
     let kinds = [
         BitwiseKind::And,
         BitwiseKind::Or,
@@ -649,7 +650,7 @@ fn m6_full_axis_sum_reduction_matches_evaluator() {
         decl,
         RiscOp::Sum {
             axis: 0,
-            accumulator: chelis_types::types::Prim::F32,
+            accumulator: chelis_numeric_core::prim::Prim::F32,
         },
         vec![a],
         TensorType::scalar_f32(),
@@ -689,7 +690,7 @@ fn m6_full_axis_sum_reduction_non_power_of_two_matches_evaluator() {
             decl,
             RiscOp::Sum {
                 axis: 0,
-                accumulator: chelis_types::types::Prim::F32,
+                accumulator: chelis_numeric_core::prim::Prim::F32,
             },
             vec![a],
             TensorType::scalar_f32(),
@@ -835,7 +836,7 @@ fn m6_tiled_matmul_matches_evaluator() {
         decl,
         RiscOp::Sum {
             axis: 1,
-            accumulator: chelis_types::types::Prim::F32,
+            accumulator: chelis_numeric_core::prim::Prim::F32,
         },
         vec![mul],
         mat_f32(m, n),
@@ -1195,7 +1196,7 @@ fn m6_pad_1d_nonzero_fill_matches_evaluator() {
         decl,
         RiscOp::pad(
             vec![(chelis_ir::dag::RtDim::Lit(2), chelis_ir::dag::RtDim::Lit(1))],
-            chelis_types::scalar_from_f64("pad", Prim::F32, -7.5).unwrap(),
+            chelis_numeric_core::dtype_semantics::scalar_from_f64("pad", Prim::F32, -7.5).unwrap(),
         ),
         vec![x],
         vec_f32(6),
@@ -1715,7 +1716,7 @@ fn ordered_scan_prefix_suffix_bits_on_device() {
 #[ignore = "ordered scan dtype/trap device execution; docs/manual_gates.md"]
 fn ordered_scan_dtype_bits_and_integer_overflow_on_device() {
     use chelis_ir::dag::ScanDirection;
-    use chelis_types::dtype_semantics::{StorageView, TensorStorage};
+    use chelis_numeric_core::dtype_semantics::{StorageView, TensorStorage};
     fn bytes(storage: &TensorStorage) -> Vec<u8> {
         match storage.view() {
             StorageView::F32(v) => v.iter().flat_map(|x| x.to_bits().to_le_bytes()).collect(),
@@ -1828,10 +1829,12 @@ fn ordered_scan_dtype_bits_and_integer_overflow_on_device() {
                         if name == "active" {
                             Some(TensorValue::from_storage(
                                 vec![],
-                                chelis_types::finalize_tensor(
+                                chelis_numeric_core::dtype_semantics::finalize_tensor(
                                     "oracle",
                                     Prim::Bool,
-                                    chelis_types::RawTensor::Int(vec![i64::from(gate.unwrap())]),
+                                    chelis_numeric_core::dtype_semantics::RawTensor::Int(vec![
+                                        i64::from(gate.unwrap()),
+                                    ]),
                                 )
                                 .unwrap(),
                             ))

@@ -2,7 +2,8 @@
 
 use chelis_compiler_api::compiler::eval_selected;
 use chelis_compiler_api::schema::{EvalRequest, ExecutionValue, SourceKind, TensorValue};
-use chelis_types::{RawTensor, finalize_tensor, types::Prim};
+use chelis_numeric_core::dtype_semantics::{RawTensor, finalize_tensor};
+use chelis_numeric_core::prim::Prim;
 use std::collections::BTreeMap;
 
 const SOURCE: &str = "def sample(x: tensor[f32]) -> tensor[f32] = x + x\n";

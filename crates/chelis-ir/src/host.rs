@@ -21,9 +21,10 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use chelis_deep::ast::{Atom, Expr, Metadata};
 use chelis_deep::decode_effect_kind;
 use chelis_deep::node::Node;
+use chelis_numeric_core::prim::Prim;
 use chelis_types::adt::{AdtDef, AdtRegistry, TypeAliasDef};
 use chelis_types::infer::type_to_deep_expr;
-use chelis_types::types::{Dim, NominalArg, NominalParamKind, Prim, TensorPrec, Type};
+use chelis_types::types::{Dim, NominalArg, NominalParamKind, TensorPrec, Type};
 use chelis_types::{BUILTIN_NAMES, CheckedProgram};
 use chelis_vocab::EffectKind;
 
@@ -3825,7 +3826,8 @@ fn lower_host_program_with_execution(
                     match ty {
                         HostTypeTerm::Tensor(tensor) => !matches!(
                             tensor.precision,
-                            chelis_types::types::Prim::F32 | chelis_types::types::Prim::Bool
+                            chelis_numeric_core::prim::Prim::F32
+                                | chelis_numeric_core::prim::Prim::Bool
                         ),
                         HostTypeTerm::Option(inner) | HostTypeTerm::List(inner) => {
                             ty_has_non_dag_tensor(inner)
@@ -9694,8 +9696,8 @@ fn lower_host_expr_kind(
             // unfinalized decimal (#1110). A marked integer-source float
             // likewise casts directly from the exact integer, never via f64.
             let lexical_precision = match &value.kind {
-                HostExprKind::Int(_) => Some(chelis_types::types::Prim::Int64),
-                HostExprKind::Float(_) => Some(chelis_types::types::Prim::F64),
+                HostExprKind::Int(_) => Some(chelis_numeric_core::prim::Prim::Int64),
+                HostExprKind::Float(_) => Some(chelis_numeric_core::prim::Prim::F64),
                 _ => None,
             };
             if let Some(lexical_precision) = lexical_precision
@@ -10153,13 +10155,13 @@ fn lower_host_expr_kind(
                             .first()
                             .and_then(symbol_name)
                             .is_some_and(|name| {
-                                chelis_types::types::Prim::parse_name(name).is_none()
+                                chelis_numeric_core::prim::Prim::parse_name(name).is_none()
                             }) =>
                 {
                     tlist.children_slice().first().and_then(symbol_name)
                 }
                 Some(Expr::Atom(Atom::Name(name), _))
-                    if chelis_types::types::Prim::parse_name(name).is_none() =>
+                    if chelis_numeric_core::prim::Prim::parse_name(name).is_none() =>
                 {
                     Some(name.as_str())
                 }
@@ -13418,7 +13420,7 @@ fn grad_pack_plan(
                             name.into(),
                             HostTypeTerm::Tensor(TensorType {
                                 dims: vec![DimInfo::Named("*".into(), None)],
-                                precision: chelis_types::types::Prim::Int64,
+                                precision: chelis_numeric_core::prim::Prim::Int64,
                             }),
                         )))
                     })
@@ -13824,7 +13826,7 @@ fn materialize_runtime_grad_list_element(
             leaf_scope,
         ));
     }
-    if leaf_ty.precision == chelis_types::types::Prim::String {
+    if leaf_ty.precision == chelis_numeric_core::prim::Prim::String {
         return None;
     }
     let mut mapped_value = item_value;
@@ -13949,7 +13951,7 @@ fn materialize_runtime_packed_grad_leaf(
     });
     let int_tensor = HostTypeTerm::Tensor(TensorType {
         dims: vec![DimInfo::Named("*".into(), None)],
-        precision: chelis_types::types::Prim::Int64,
+        precision: chelis_numeric_core::prim::Prim::Int64,
     });
     let param = || HostParam {
         name: item_name.into(),
@@ -15014,13 +15016,13 @@ const MAX_LIST_SHAPE_RESOLUTION_DEPTH: usize = 64;
 
 /// The explicit accumulator dtype an `app` carries (spec/04 §5.7), which
 /// the checker admitted against §5.7.1's permitted pairs.
-fn explicit_accumulator(list: &Node) -> Option<chelis_types::types::Prim> {
+fn explicit_accumulator(list: &Node) -> Option<chelis_numeric_core::prim::Prim> {
     let accumulator = list.meta().accumulator()?;
     let (_, _, parts) = stamped_parts(accumulator.expression())?;
     parts
         .first()
         .and_then(symbol_name)
-        .and_then(chelis_types::types::Prim::parse_name)
+        .and_then(chelis_numeric_core::prim::Prim::parse_name)
 }
 
 /// `einsum` with an explicit accumulator `a` ([05-OP-33]): both operands
@@ -15029,7 +15031,7 @@ fn explicit_accumulator(list: &Node) -> Option<chelis_types::types::Prim> {
 /// `sum_result(p, a)`, the call's checked type `ty`.
 fn accumulated_einsum(
     mut args: Vec<HostExpr>,
-    accumulator: chelis_types::types::Prim,
+    accumulator: chelis_numeric_core::prim::Prim,
     ty: HostTypeTerm,
 ) -> HostExpr {
     let at_accumulator = |ty: HostTypeTerm| match ty {
@@ -22083,7 +22085,10 @@ fn actualize_tensor_helper_types(
         }
     }
 
-    fn precision_like(input: &TensorType, precision: chelis_types::types::Prim) -> TensorType {
+    fn precision_like(
+        input: &TensorType,
+        precision: chelis_numeric_core::prim::Prim,
+    ) -> TensorType {
         TensorType {
             dims: input.dims.clone(),
             precision,
@@ -22116,7 +22121,7 @@ fn actualize_tensor_helper_types(
     fn merge_binary_tensor_types(
         lhs: &TensorType,
         rhs: &TensorType,
-        precision: chelis_types::types::Prim,
+        precision: chelis_numeric_core::prim::Prim,
     ) -> TensorType {
         if lhs.dims.len() != rhs.dims.len() {
             return precision_like(lhs, precision);
@@ -23990,7 +23995,7 @@ fn infer_app_expr_host_type(
     {
         let mut reduced = reduce_axis_tensor_type(&tensor_ty, axis as usize);
         if matches!(name, "argmax_reduce" | "argmin_reduce") {
-            reduced.precision = chelis_types::types::Prim::Int64;
+            reduced.precision = chelis_numeric_core::prim::Prim::Int64;
         }
         return Some(HostTypeTerm::Tensor(reduced));
     }
@@ -24065,22 +24070,22 @@ fn infer_app_expr_host_type(
 /// the caller falls back to the coarse f32 default, which the C emit
 /// dispatch and the consuming tensor-helper Load both share, so the
 /// write and read sides stay consistent even in the fallback.
-fn expr_scalar_float_precision(expr: &Expr) -> Option<chelis_types::types::Prim> {
+fn expr_scalar_float_precision(expr: &Expr) -> Option<chelis_numeric_core::prim::Prim> {
     expr_scalar_primitive(expr).filter(|prim| prim.is_float())
 }
 
-fn expr_scalar_primitive(expr: &Expr) -> Option<chelis_types::types::Prim> {
+fn expr_scalar_primitive(expr: &Expr) -> Option<chelis_numeric_core::prim::Prim> {
     if let Expr::MetaExpr(meta, _) = expr {
         return expr_scalar_primitive(&meta.expr);
     }
     let (node_tag, meta, kids) = stamped_parts(expr)?;
-    let prim_of_t_prim = |type_expr: &Expr| -> Option<chelis_types::types::Prim> {
+    let prim_of_t_prim = |type_expr: &Expr| -> Option<chelis_numeric_core::prim::Prim> {
         let (DeepTag::TPrim, _, kids) = stamped_parts(type_expr)? else {
             return None;
         };
         kids.first()
             .and_then(symbol_name)
-            .and_then(chelis_types::types::Prim::parse_name)
+            .and_then(chelis_numeric_core::prim::Prim::parse_name)
     };
     if let Some(type_expr) = meta.ty().map(|ty| ty.expression())
         && let Some(prim) = prim_of_t_prim(type_expr)
@@ -24186,7 +24191,7 @@ fn infer_einsum_tensor_type(equation: &str, tensors: &[TensorType]) -> Option<Te
     let precision = tensors
         .first()
         .map(|tensor| tensor.precision)
-        .unwrap_or(chelis_types::types::Prim::F32);
+        .unwrap_or(chelis_numeric_core::prim::Prim::F32);
     Some(TensorType { dims, precision })
 }
 
@@ -25498,7 +25503,7 @@ fn conform_host_callback(callback: HostCallback, expected: &HostTypeTerm) -> Hos
 /// Keys retain their distinct existing result rules. This application owner
 /// instantiates [05-OP-20..22]'s relation only for genuine host operands; static
 /// numeric applications use the same DAG producer owner as direct calls.
-struct CheckedApplicationRelation(chelis_types::FloatClassify);
+struct CheckedApplicationRelation(chelis_numeric_core::dtype_semantics::FloatClassify);
 
 impl CheckedApplicationRelation {
     fn instantiate(
@@ -25517,7 +25522,7 @@ impl CheckedApplicationRelation {
             HostTypeTerm::Tensor(input) if input.precision.is_float() => {
                 HostTypeTerm::Tensor(TensorType {
                     dims: input.dims,
-                    precision: chelis_types::types::Prim::Bool,
+                    precision: chelis_numeric_core::prim::Prim::Bool,
                 })
             }
             HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(p)) if p.is_float() => {
@@ -26072,7 +26077,7 @@ fn infer_builtin_host_type_from_arg_tys_unchecked(
         "argmax_reduce" | "argmin_reduce" => match arg_tys.first() {
             Some(HostTypeTerm::Tensor(tensor_ty)) => Some(HostTypeTerm::Tensor(TensorType {
                 dims: tensor_ty.dims.clone(),
-                precision: chelis_types::types::Prim::Int64,
+                precision: chelis_numeric_core::prim::Prim::Int64,
             })),
             _ => Some(fresh_host_inference()),
         },
@@ -26081,7 +26086,7 @@ fn infer_builtin_host_type_from_arg_tys_unchecked(
         name if chelis_types::COMPARISON_OPS.contains(&name) => match arg_tys.first() {
             Some(HostTypeTerm::Tensor(tensor_ty)) => Some(HostTypeTerm::Tensor(TensorType {
                 dims: tensor_ty.dims.clone(),
-                precision: chelis_types::types::Prim::Bool,
+                precision: chelis_numeric_core::prim::Prim::Bool,
             })),
             Some(HostTypeTerm::PolymorphicTensor(tensor_ty)) => {
                 let mut result = tensor_ty.clone();
@@ -26158,7 +26163,7 @@ fn infer_builtin_host_type_from_arg_tys_unchecked(
                 HostTypeTerm::Tensor(tensor_ty.clone()),
                 HostTypeTerm::Tensor(TensorType {
                     dims: tensor_ty.dims.clone(),
-                    precision: chelis_types::types::Prim::Int64,
+                    precision: chelis_numeric_core::prim::Prim::Int64,
                 }),
             ])),
             _ => Some(fresh_host_inference()),
@@ -26318,10 +26323,10 @@ fn infer_builtin_host_type_from_arg_tys_unchecked(
         "debug" => arg_tys.first().cloned(),
         "tensor_to_scalar" => match arg_tys.first() {
             Some(HostTypeTerm::Tensor(tensor)) => Some(match tensor.precision {
-                chelis_types::types::Prim::Bool => HostTypeTerm::Bool,
-                chelis_types::types::Prim::Int8
-                | chelis_types::types::Prim::Int32
-                | chelis_types::types::Prim::Int64 => HostTypeTerm::Int64,
+                chelis_numeric_core::prim::Prim::Bool => HostTypeTerm::Bool,
+                chelis_numeric_core::prim::Prim::Int8
+                | chelis_numeric_core::prim::Prim::Int32
+                | chelis_numeric_core::prim::Prim::Int64 => HostTypeTerm::Int64,
                 _ => HostTypeTerm::Float64,
             }),
             _ => Some(HostTypeTerm::Float64),
@@ -26340,22 +26345,22 @@ fn infer_builtin_host_type_from_arg_tys_unchecked(
         "scalar_to_tensor" => match arg_tys.first() {
             Some(&HostTypeTerm::Int64) => Some(HostTypeTerm::Tensor(TensorType {
                 dims: vec![],
-                precision: chelis_types::types::Prim::Int64,
+                precision: chelis_numeric_core::prim::Prim::Int64,
             })),
             Some(&HostTypeTerm::Bool) => Some(HostTypeTerm::Tensor(TensorType {
                 dims: vec![],
-                precision: chelis_types::types::Prim::Bool,
+                precision: chelis_numeric_core::prim::Prim::Bool,
             })),
             Some(&HostTypeTerm::Float64) => Some(HostTypeTerm::Tensor(TensorType {
                 dims: vec![],
-                precision: chelis_types::types::Prim::F32,
+                precision: chelis_numeric_core::prim::Prim::F32,
             })),
             _ => None,
         },
         "to_tensor" => match arg_tys.first() {
             Some(HostTypeTerm::List(inner)) => match &**inner {
                 HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(precision))
-                    if *precision != chelis_types::types::Prim::String =>
+                    if *precision != chelis_numeric_core::prim::Prim::String =>
                 {
                     Some(HostTypeTerm::Tensor(TensorType {
                         dims: vec![crate::dag::DimInfo::Named("list".to_string(), None)],
@@ -26372,20 +26377,20 @@ fn infer_builtin_host_type_from_arg_tys_unchecked(
         "to_list" => match arg_tys.first() {
             Some(HostTypeTerm::Tensor(tensor)) if tensor.dims.len() == 1 => {
                 let element_ty = match tensor.precision {
-                    chelis_types::types::Prim::Bool => HostTypeTerm::Bool,
-                    chelis_types::types::Prim::Int8
-                    | chelis_types::types::Prim::Int16
-                    | chelis_types::types::Prim::Int32
-                    | chelis_types::types::Prim::Int64 => HostTypeTerm::Int64,
-                    chelis_types::types::Prim::F16
-                    | chelis_types::types::Prim::Bf16
-                    | chelis_types::types::Prim::F32
-                    | chelis_types::types::Prim::F64 => HostTypeTerm::Float64,
+                    chelis_numeric_core::prim::Prim::Bool => HostTypeTerm::Bool,
+                    chelis_numeric_core::prim::Prim::Int8
+                    | chelis_numeric_core::prim::Prim::Int16
+                    | chelis_numeric_core::prim::Prim::Int32
+                    | chelis_numeric_core::prim::Prim::Int64 => HostTypeTerm::Int64,
+                    chelis_numeric_core::prim::Prim::F16
+                    | chelis_numeric_core::prim::Prim::Bf16
+                    | chelis_numeric_core::prim::Prim::F32
+                    | chelis_numeric_core::prim::Prim::F64 => HostTypeTerm::Float64,
                     // The checked wrapper rejects this deferred dtype with
                     // `HostBuiltinInferenceError` before entering this
                     // implementation. Keep this arm non-defaulting if the
                     // match is edited independently in the future.
-                    chelis_types::types::Prim::F8e4m3 => return None,
+                    chelis_numeric_core::prim::Prim::F8e4m3 => return None,
                     _ => fresh_host_inference(),
                 };
                 Some(HostTypeTerm::List(Box::new(element_ty)))
@@ -26457,10 +26462,10 @@ fn infer_builtin_host_type_from_arg_tys_unchecked(
         "round_to" => match arg_tys.first() {
             Some(
                 term @ HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(
-                    chelis_types::types::Prim::F64
-                    | chelis_types::types::Prim::F32
-                    | chelis_types::types::Prim::F16
-                    | chelis_types::types::Prim::Bf16,
+                    chelis_numeric_core::prim::Prim::F64
+                    | chelis_numeric_core::prim::Prim::F32
+                    | chelis_numeric_core::prim::Prim::F16
+                    | chelis_numeric_core::prim::Prim::Bf16,
                 )),
             ) => Some(term.clone()),
             _ => Some(fresh_host_inference()),
@@ -28322,7 +28327,7 @@ mod tests {
         );
     }
     use crate::{DimInfo, RiscOp};
-    use chelis_types::types::Prim;
+    use chelis_numeric_core::prim::Prim;
 
     /// [05-OP-46]: a unary producer retains the actual operand's complete
     /// scalar/tensor carrier, including unresolved precision and rank rows.
@@ -28410,9 +28415,9 @@ mod tests {
     #[test]
     fn predicate_host_application_owns_actual_surface_and_axes() {
         for kind in [
-            chelis_types::FloatClassify::Nan,
-            chelis_types::FloatClassify::Finite,
-            chelis_types::FloatClassify::Infinite,
+            chelis_numeric_core::dtype_semantics::FloatClassify::Nan,
+            chelis_numeric_core::dtype_semantics::FloatClassify::Finite,
+            chelis_numeric_core::dtype_semantics::FloatClassify::Infinite,
         ] {
             for precision in [Prim::F16, Prim::Bf16, Prim::F32, Prim::F64] {
                 let axes = vec![
@@ -28457,9 +28462,9 @@ mod tests {
     #[test]
     fn predicate_shape_conformance_keeps_known_conflicts_for_rejection() {
         for kind in [
-            chelis_types::FloatClassify::Nan,
-            chelis_types::FloatClassify::Finite,
-            chelis_types::FloatClassify::Infinite,
+            chelis_numeric_core::dtype_semantics::FloatClassify::Nan,
+            chelis_numeric_core::dtype_semantics::FloatClassify::Finite,
+            chelis_numeric_core::dtype_semantics::FloatClassify::Infinite,
         ] {
             for precision in [Prim::F16, Prim::Bf16, Prim::F32, Prim::F64] {
                 let input_ty = HostTypeTerm::Tensor(TensorType {
@@ -28498,9 +28503,9 @@ mod tests {
     #[test]
     fn predicate_host_relation_rejects_wrong_family_surface_precision_rank_and_enclosing_extent() {
         for kind in [
-            chelis_types::FloatClassify::Nan,
-            chelis_types::FloatClassify::Finite,
-            chelis_types::FloatClassify::Infinite,
+            chelis_numeric_core::dtype_semantics::FloatClassify::Nan,
+            chelis_numeric_core::dtype_semantics::FloatClassify::Finite,
+            chelis_numeric_core::dtype_semantics::FloatClassify::Infinite,
         ] {
             let relation = CheckedApplicationRelation(kind);
             let input = HostExpr::new(HostExprKind::Var(
@@ -32961,7 +32966,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
             decl,
             RiscOp::Sum {
                 axis: 1,
-                accumulator: chelis_types::types::Prim::F32,
+                accumulator: chelis_numeric_core::prim::Prim::F32,
             },
             vec![product],
             TensorType {

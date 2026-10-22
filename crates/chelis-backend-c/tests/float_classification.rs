@@ -3,8 +3,8 @@ mod common;
 mod support;
 use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
 use chelis_ir::eval::{TensorValue, eval_tensor};
-use chelis_types::types::Prim;
-use chelis_types::{FloatClassify, classify_float, tensor_from_le_payload};
+use chelis_numeric_core::dtype_semantics::{FloatClassify, classify_float, tensor_from_le_payload};
+use chelis_numeric_core::prim::Prim;
 use chelis_unord::UnordMap;
 use std::{fs, process::Command};
 

@@ -8,9 +8,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use chelis_deep::DeepTag;
 use chelis_deep::ast::{Atom, Expr};
+use chelis_numeric_core::prim::Prim;
 use chelis_types::CheckedProgram;
 use chelis_types::manifest::RootManifest;
-use chelis_types::types::{Lane, Prim};
+use chelis_types::types::Lane;
 
 use crate::anonymous_dims::is_anonymous;
 use crate::dag::{DimInfo, TensorType};

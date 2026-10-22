@@ -4,7 +4,8 @@
 // The including module imports ExecutionValue so these same fixtures work
 // inside the API crate's unit tests and in external consumer test targets.
 use super::ExecutionValue;
-use chelis_types::{TensorStorage, types::Prim};
+use chelis_numeric_core::dtype_semantics::TensorStorage;
+use chelis_numeric_core::prim::Prim;
 use serde_json::json;
 
 pub fn scalar_f32(value: f32) -> ExecutionValue {
@@ -23,7 +24,7 @@ pub fn scalar_f64(value: f64) -> ExecutionValue {
 
 pub fn scalar_integer(prim: Prim, value: i64) -> ExecutionValue {
     ExecutionValue::Scalar {
-        value: chelis_types::scalar_from_i64("wire-test", prim, value)
+        value: chelis_numeric_core::dtype_semantics::scalar_from_i64("wire-test", prim, value)
             .unwrap()
             .try_into()
             .unwrap(),

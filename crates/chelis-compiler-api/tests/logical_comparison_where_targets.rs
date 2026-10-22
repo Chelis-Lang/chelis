@@ -2,7 +2,7 @@
 
 use chelis_compiler_api::compiler::{reject_unsupported_hip_ops, reject_unsupported_metal_ops};
 use chelis_ir::dag::{ComparisonKind, Dag, DimInfo, LogicalKind, RiscOp, TensorType};
-use chelis_types::types::Prim;
+use chelis_numeric_core::prim::Prim;
 use chelis_vocab::DiagnosticKind;
 
 fn vector(precision: Prim) -> TensorType {

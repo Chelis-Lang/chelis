@@ -4,9 +4,10 @@ use serde::{Deserialize, Serialize};
 
 #[doc(hidden)]
 pub use crate::session::DiagnosticSink;
-use crate::types::{Prim, Type};
+use crate::types::Type;
 use crate::unify::{TypeError, TypeErrorKind};
 use crate::unsupported::Unsupported;
+use chelis_numeric_core::prim::Prim;
 
 /// Zero-sized witness that a `Type::Error` was minted HONESTLY: either a
 /// diagnostic reached the error vector (via [`report`]) or an existing

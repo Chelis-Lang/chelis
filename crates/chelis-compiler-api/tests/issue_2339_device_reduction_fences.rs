@@ -7,10 +7,8 @@ use chelis_ir::{
     grad::grad_dag_checked,
     tier2::lower_mean,
 };
-use chelis_types::{
-    types::Prim,
-    unsupported::{RejectionAuthorityKind, Stage, UnsupportedKind},
-};
+use chelis_numeric_core::prim::Prim;
+use chelis_types::unsupported::{RejectionAuthorityKind, Stage, UnsupportedKind};
 
 fn ty(dims: &[usize], precision: Prim) -> TensorType {
     TensorType {

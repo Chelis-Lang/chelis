@@ -4189,7 +4189,7 @@ fn wire_inferred_type(ty: &Type) -> Result<WireInferredType, String> {
 #[cfg(test)]
 mod inferred_wire_extent_tests {
     use super::*;
-    use chelis_types::types::Prim;
+    use chelis_numeric_core::prim::Prim;
 
     #[test]
     fn inferred_metadata_keeps_exact_nonnegative_extents() {
@@ -13561,7 +13561,7 @@ mod runtime_dim_reject_tests {
     use super::compiler_error_messages;
     use chelis_compiler_api::compiler::reject_unsupported_hip_ops;
     use chelis_ir::dag::{Dag, RiscOp, RtDim, TensorType};
-    use chelis_types::types::Prim;
+    use chelis_numeric_core::prim::Prim;
 
     fn ty(dims: Vec<chelis_ir::dag::DimInfo>, precision: Prim) -> TensorType {
         TensorType { dims, precision }

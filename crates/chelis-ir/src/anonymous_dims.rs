@@ -268,7 +268,7 @@ pub(crate) fn anonymous_axis_identity(
 mod tests {
     use super::{AnonymousAxisName, anonymous_axis_names};
     use crate::dag::{Dag, DimInfo, RiscOp, RuntimeRecurrence, RuntimeRecurrenceSource};
-    use chelis_types::types::Prim;
+    use chelis_numeric_core::prim::Prim;
 
     #[test]
     fn runtime_fold_names_its_computed_extent_independently_of_source_length() {

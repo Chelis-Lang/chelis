@@ -25,11 +25,11 @@ use std::{
 
 use chelis_compiler_api::schema::{EvalRequest, ExecutionValue, SourceKind, TensorValue};
 use chelis_deep::ast::{Atom as DeepAtom, Expr as DeepExpr, Metadata};
+use chelis_numeric_core::prim::Prim;
 use chelis_surf::ast::{
     BinOp, Decl, Expr, LetBinding, LetPattern, Literal, Param, PropertyOption, TensorPrecision,
     TypeExpr,
 };
-use chelis_types::types::Prim;
 
 mod numeric_values;
 #[cfg(all(feature = "clarabel-provider", feature = "smt"))]
@@ -5685,9 +5685,17 @@ fn sample_argument(value: &SampleValue, ty: &TypeExpr) -> Option<ExecutionValue>
         _ => {
             let prim = Prim::parse_name(type_name)?;
             let scalar = if prim.is_integer() {
-                chelis_types::scalar_from_i64(INGRESS, prim, value.json.as_i64()?)
+                chelis_numeric_core::dtype_semantics::scalar_from_i64(
+                    INGRESS,
+                    prim,
+                    value.json.as_i64()?,
+                )
             } else if prim.is_float() {
-                chelis_types::scalar_from_f64(INGRESS, prim, value.json.as_f64()?)
+                chelis_numeric_core::dtype_semantics::scalar_from_f64(
+                    INGRESS,
+                    prim,
+                    value.json.as_f64()?,
+                )
             } else {
                 return None;
             }

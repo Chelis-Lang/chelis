@@ -8,8 +8,8 @@ use chelis_ir::eval::{TensorValue, eval_tensor};
 use chelis_ir::fuse::fuse;
 use chelis_ir::grad::{AdError, AdRejectionReason, grad_dag_checked};
 use chelis_ir::{tier2, verify};
-use chelis_types::dtype_semantics::{RawTensor, finalize_tensor};
-use chelis_types::types::Prim;
+use chelis_numeric_core::dtype_semantics::{RawTensor, finalize_tensor};
+use chelis_numeric_core::prim::Prim;
 use chelis_unord::UnordMap;
 
 fn ty(dims: &[usize], precision: Prim) -> TensorType {
@@ -1556,7 +1556,12 @@ fn verifier_rejects_shape_dependencies_that_override_operation_provenance() {
         pad_dag_decl,
         RiscOp::Pad {
             padding: vec![(RtDim::Lit(1), RtDim::Lit(0))],
-            fill: chelis_types::scalar_from_f64("pad provenance", Prim::F32, 0.0).unwrap(),
+            fill: chelis_numeric_core::dtype_semantics::scalar_from_f64(
+                "pad provenance",
+                Prim::F32,
+                0.0,
+            )
+            .unwrap(),
         },
         vec![input],
         anonymous(Prim::F32),

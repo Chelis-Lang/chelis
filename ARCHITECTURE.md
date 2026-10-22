@@ -60,6 +60,7 @@ builds; [GPU backends](docs/gpu_backends.md) covers the HIP and Metal targets.
 | Area | Primary crates |
 |---|---|
 | Source syntax and predicates | `chelis-surf`, `chelis-deep`, `chelis-pred`, `chelis-macros` |
+| Numeric values and policy | `chelis-numeric-core`, `chelis-crmath`, `chelis-vocab` |
 | Semantic pipeline | `chelis-types`, `chelis-effects`, `chelis-pipeline-core`, `chelis-compiler-api` |
 | DAG, transforms, evaluation | `chelis-ir` |
 | Native emission and runtime | `chelis-backend-c`, `chelis-backend-hip`, `chelis-backend-metal`, `chelis-runtime` |
@@ -165,6 +166,26 @@ Only host admission can produce `CertificateBearing@Exact`.
 Run `.venv/bin/python scripts/certificate_core_oracle.py` for independent target consumers, fixed-revision arithmetic comparisons, and native host admission.
 The [acceptance gate](docs/manual_gates.md#certificate-arithmetic-core-portability) defines prerequisites, evidence, and CI owners.
 Target compilation does not prove device execution, allocator capacity, or whole-pipeline portability.
+
+## Portable numeric values and operations
+
+`chelis-numeric-core` owns primitive identities, sealed scalar and tensor values, numeric operations, activation graphs, observation, and agreement.
+It uses unconditional `no_std`.
+Default `alloc` adds tensor buffers and owned text.
+Optional `serde` preserves exact stored-value transport.
+Scalar transport does not need `alloc`.
+Consumers import the canonical modules directly.
+
+`chelis-crmath` retains the shared CORE-MATH kernels.
+Its `std` feature adds host profile and C-source services.
+Bare targets use Clang, `llvm-ar`, 128-bit C integer support, and allocation-free IEEE helpers.
+Host crates retain schema projections, I/O, native allocation, and process effects.
+The runtime retains its C ABI and calls the shared IEEE conversions through private adapters.
+
+Run `.venv/bin/python scripts/numeric_core_oracle.py` for target consumers, immutable-base parity, allocation checks, and numeric authority checks.
+The [acceptance gate](docs/manual_gates.md#numeric-core-portability) states prerequisites and evidence.
+Target compilation does not prove device execution, allocator capacity, or whole-pipeline portability.
+
 
 
 

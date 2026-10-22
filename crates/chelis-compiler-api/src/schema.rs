@@ -6,6 +6,7 @@ mod directory;
 mod envelopes;
 mod execution;
 pub mod numbers;
+pub mod numeric;
 mod reports;
 pub use artifact::{ArtifactAbiVersion, CompiledArtifactManifest};
 pub use directory::{
@@ -17,11 +18,10 @@ use numbers::{NonnegativeCount, NonnegativeExtent, SourceFloat, SourceInteger, U
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use chelis_numeric_core::dtype_semantics::ScalarValue;
+use chelis_numeric_core::prim::Prim;
+use chelis_types::types::{Lane, Target};
 use chelis_types::unsupported::{Unsupported, UnsupportedIdentity};
-use chelis_types::{
-    ScalarValue,
-    types::{Lane, Prim, Target},
-};
 use chelis_vocab::DiagnosticKind;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -835,13 +835,13 @@ impl DiagnosticSpan {
 pub const EXECUTION_VALUE_SCHEMA_VERSION: u32 = 4;
 
 /// The canonical sealed storage carrier, with the exact spec/10 bit codec.
-pub type TensorElements = chelis_types::TensorStorage;
+pub type TensorElements = chelis_numeric_core::dtype_semantics::TensorStorage;
 
 #[derive(Debug, Clone, JsonSchema)]
 pub struct TensorValue {
     #[schemars(schema_with = "execution::shape_schema")]
     pub shape: Vec<i64>,
-    #[schemars(schema_with = "chelis_types::dtype_semantics::execution_storage::json_schema")]
+    #[schemars(schema_with = "numeric::execution_storage_schema")]
     pub data: TensorElements,
 }
 
@@ -871,7 +871,8 @@ pub enum ExecutionValue {
     /// spec/10 section 3.2's scalar key, `{"type":"key","bits":h}`: a key is
     /// not a number, so it has its own variant and never a scalar carrier.
     Key {
-        bits: chelis_types::KeyBits,
+        #[schemars(schema_with = "numeric::key_bits_schema")]
+        bits: chelis_numeric_core::dtype_semantics::KeyBits,
     },
     String {
         value: String,
@@ -908,7 +909,7 @@ enum ExecutionValueRef<'a> {
         value: bool,
     },
     Key {
-        bits: &'a chelis_types::KeyBits,
+        bits: &'a chelis_numeric_core::dtype_semantics::KeyBits,
     },
     String {
         value: &'a str,
@@ -942,7 +943,7 @@ enum ExecutionValueOwned {
         value: bool,
     },
     Key {
-        bits: chelis_types::KeyBits,
+        bits: chelis_numeric_core::dtype_semantics::KeyBits,
     },
     String {
         value: String,
@@ -1910,7 +1911,8 @@ pub enum WirePipeNamedCastMode {
 
 impl From<chelis_deep::CastMode> for WirePipeCastMode {
     fn from(mode: chelis_deep::CastMode) -> Self {
-        use chelis_deep::{CastMode, NamedCastMode};
+        use chelis_deep::CastMode;
+        use chelis_numeric_core::named_cast::NamedCastMode;
         match mode {
             CastMode::Checked => Self::Checked,
             CastMode::Named(mode) => Self::Named(match mode {
@@ -6301,7 +6303,7 @@ pub enum WireRiscOp {
     TruncDiv,
     Mod,
     FloatClassify {
-        classification: chelis_types::FloatClassify,
+        classification: chelis_numeric_core::dtype_semantics::FloatClassify,
     },
     Bitwise {
         bitwise: chelis_types::BitwiseKind,
@@ -6457,11 +6459,11 @@ pub enum WireRiscOp {
     },
     Const {
         /// Sealed dtype-tagged scalar (wire v9; exact stored-bit transport).
-        value: chelis_types::ScalarValue,
+        value: chelis_numeric_core::dtype_semantics::ScalarValue,
     },
     ConstTensor {
         /// Sealed per-dtype storage (wire v9; exact stored-bit transport).
-        data: chelis_types::TensorStorage,
+        data: chelis_numeric_core::dtype_semantics::TensorStorage,
     },
     Shape {
         axis: i32,
@@ -6533,7 +6535,7 @@ fn default_true() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chelis_types::types::Prim;
+    use chelis_numeric_core::prim::Prim;
 
     #[test]
     fn unsupported_sidecar_storage_is_pointer_sized() {
@@ -6747,7 +6749,7 @@ mod tests {
     #[test]
     fn wire_dag_legacy_versions_reject_typed_pad_fill_spelling() {
         let typed_fill = serde_json::to_value(
-            chelis_types::scalar_from_f64("wire_pad_test", Prim::F32, 1.5)
+            chelis_numeric_core::dtype_semantics::scalar_from_f64("wire_pad_test", Prim::F32, 1.5)
                 .expect("finite f32 fill"),
         )
         .expect("serialize typed fill");
@@ -6820,8 +6822,12 @@ mod tests {
                 id: 0,
                 op: WireRiscOp::Pad {
                     padding: vec![],
-                    fill: chelis_types::scalar_from_i64("wire_pad_test", Prim::Int64, exact)
-                        .expect("exact int64 fill"),
+                    fill: chelis_numeric_core::dtype_semantics::scalar_from_i64(
+                        "wire_pad_test",
+                        Prim::Int64,
+                        exact,
+                    )
+                    .expect("exact int64 fill"),
                 },
                 inputs: vec![],
                 output_type: WireTensorType {
@@ -7343,7 +7349,12 @@ mod tests {
         let mut constant = nodes[0].clone();
         constant.id = 1;
         constant.op = WireRiscOp::Const {
-            value: chelis_types::scalar_from_f64("wire contextual test", Prim::F32, 0.0).unwrap(),
+            value: chelis_numeric_core::dtype_semantics::scalar_from_f64(
+                "wire contextual test",
+                Prim::F32,
+                0.0,
+            )
+            .unwrap(),
         };
         constant.shape_deps = vec![0];
         nodes.push(constant);
@@ -7387,8 +7398,12 @@ mod tests {
             let mut constant = nodes[0].clone();
             constant.id = id;
             constant.op = WireRiscOp::Const {
-                value: chelis_types::scalar_from_f64("context alternatives", Prim::F32, 0.0)
-                    .unwrap(),
+                value: chelis_numeric_core::dtype_semantics::scalar_from_f64(
+                    "context alternatives",
+                    Prim::F32,
+                    0.0,
+                )
+                .unwrap(),
             };
             if id == 3 {
                 constant.shape_deps = vec![2, 1, 0];
@@ -7599,9 +7614,9 @@ mod tests {
         let mut constant = nodes[0].clone();
         constant.id = 2;
         constant.op = WireRiscOp::Const {
-            value: chelis_types::scalar_from_f64(
+            value: chelis_numeric_core::dtype_semantics::scalar_from_f64(
                 "witness fixture",
-                chelis_types::types::Prim::F32,
+                chelis_numeric_core::prim::Prim::F32,
                 0.0,
             )
             .unwrap(),
@@ -7666,9 +7681,9 @@ mod tests {
                 let mut constant = template.clone();
                 constant.id = nodes.len() as u64;
                 constant.op = WireRiscOp::Const {
-                    value: chelis_types::scalar_from_f64(
+                    value: chelis_numeric_core::dtype_semantics::scalar_from_f64(
                         "conditional observation",
-                        chelis_types::types::Prim::F32,
+                        chelis_numeric_core::prim::Prim::F32,
                         0.0,
                     )
                     .unwrap(),
@@ -7740,8 +7755,12 @@ mod tests {
             let mut constant = nodes[0].clone();
             constant.id = 2;
             constant.op = WireRiscOp::Const {
-                value: chelis_types::scalar_from_f64("conditional differential", Prim::F32, 0.0)
-                    .unwrap(),
+                value: chelis_numeric_core::dtype_semantics::scalar_from_f64(
+                    "conditional differential",
+                    Prim::F32,
+                    0.0,
+                )
+                .unwrap(),
             };
             constant.shape_deps = if variant == 0 {
                 vec![1, 0, 1]
@@ -7774,7 +7793,10 @@ mod tests {
                     unreachable!()
                 };
                 nodes[2].op = WireRiscOp::ConstTensor {
-                    data: chelis_types::tensor_from_scalars(Prim::F32, std::slice::from_ref(value)),
+                    data: chelis_numeric_core::dtype_semantics::tensor_from_scalars(
+                        Prim::F32,
+                        std::slice::from_ref(value),
+                    ),
                 };
             }
             if variant >= 6 {
@@ -7844,8 +7866,12 @@ mod tests {
             let mut constant = nodes[0].clone();
             constant.id = 2;
             constant.op = WireRiscOp::Const {
-                value: chelis_types::scalar_from_f64("conditional differential", Prim::F32, 0.0)
-                    .unwrap(),
+                value: chelis_numeric_core::dtype_semantics::scalar_from_f64(
+                    "conditional differential",
+                    Prim::F32,
+                    0.0,
+                )
+                .unwrap(),
             };
             constant.shape_deps = if variant == 0 {
                 vec![1, 0, 1]
@@ -7878,7 +7904,10 @@ mod tests {
                     unreachable!()
                 };
                 nodes[2].op = WireRiscOp::ConstTensor {
-                    data: chelis_types::tensor_from_scalars(Prim::F32, std::slice::from_ref(value)),
+                    data: chelis_numeric_core::dtype_semantics::tensor_from_scalars(
+                        Prim::F32,
+                        std::slice::from_ref(value),
+                    ),
                 };
             }
             if variant == 8 {
@@ -8127,8 +8156,12 @@ mod tests {
         let mut constant = nodes[0].clone();
         constant.id = 3;
         constant.op = WireRiscOp::Const {
-            value: chelis_types::scalar_from_f64("prefix future strict union", Prim::F32, 0.0)
-                .unwrap(),
+            value: chelis_numeric_core::dtype_semantics::scalar_from_f64(
+                "prefix future strict union",
+                Prim::F32,
+                0.0,
+            )
+            .unwrap(),
         };
         constant.shape_deps = vec![0];
         nodes.push(constant);
@@ -8200,7 +8233,10 @@ mod tests {
             unreachable!()
         };
         constant.op = WireRiscOp::ConstTensor {
-            data: chelis_types::tensor_from_scalars(Prim::F32, std::slice::from_ref(value)),
+            data: chelis_numeric_core::dtype_semantics::tensor_from_scalars(
+                Prim::F32,
+                std::slice::from_ref(value),
+            ),
         };
         dag.nodes = contextual_witness_nodes(false, false);
         dag.nodes.truncate(2);
@@ -8358,7 +8394,12 @@ mod tests {
             let mut constant = nodes[0].clone();
             constant.id = 1;
             constant.op = WireRiscOp::Const {
-                value: chelis_types::scalar_from_f64("dense active", Prim::F32, 0.0).unwrap(),
+                value: chelis_numeric_core::dtype_semantics::scalar_from_f64(
+                    "dense active",
+                    Prim::F32,
+                    0.0,
+                )
+                .unwrap(),
             };
             constant.shape_deps = vec![0];
             nodes.push(constant);
@@ -8423,8 +8464,12 @@ mod tests {
                     let mut node = nodes[0].clone();
                     node.id = nodes.len() as u64;
                     node.op = WireRiscOp::Const {
-                        value: chelis_types::scalar_from_f64("large conditional", Prim::F32, 0.0)
-                            .unwrap(),
+                        value: chelis_numeric_core::dtype_semantics::scalar_from_f64(
+                            "large conditional",
+                            Prim::F32,
+                            0.0,
+                        )
+                        .unwrap(),
                     };
                     node.shape_deps = vec![source];
                     nodes.push(node);
@@ -8476,7 +8521,12 @@ mod tests {
         let mut constant = nodes[0].clone();
         constant.id = n;
         constant.op = WireRiscOp::Const {
-            value: chelis_types::scalar_from_f64("shared choice", Prim::F32, 0.0).unwrap(),
+            value: chelis_numeric_core::dtype_semantics::scalar_from_f64(
+                "shared choice",
+                Prim::F32,
+                0.0,
+            )
+            .unwrap(),
         };
         constant.shape_deps = (0..n).collect();
         nodes.push(constant);
@@ -8592,9 +8642,9 @@ mod tests {
         let mut constant = nodes[0].clone();
         constant.id = 2;
         constant.op = WireRiscOp::Const {
-            value: chelis_types::scalar_from_f64(
+            value: chelis_numeric_core::dtype_semantics::scalar_from_f64(
                 "witness fixture",
-                chelis_types::types::Prim::F32,
+                chelis_numeric_core::prim::Prim::F32,
                 0.0,
             )
             .unwrap(),
@@ -9476,7 +9526,7 @@ mod tests {
                 if logical {
                     dag.nodes[1].output_type.precision = "bool".into();
                     dag.nodes[1].op = WireRiscOp::Const {
-                        value: chelis_types::scalar_from_i64(
+                        value: chelis_numeric_core::dtype_semantics::scalar_from_i64(
                             "contextual bool fixture",
                             Prim::Bool,
                             1,
@@ -9796,7 +9846,12 @@ mod tests {
         let mut constant = nodes[0].clone();
         constant.id = 1;
         constant.op = WireRiscOp::Const {
-            value: chelis_types::scalar_from_f64("wire cache test", Prim::F32, 0.0).unwrap(),
+            value: chelis_numeric_core::dtype_semantics::scalar_from_f64(
+                "wire cache test",
+                Prim::F32,
+                0.0,
+            )
+            .unwrap(),
         };
         constant.shape_deps = vec![0];
         nodes.push(constant);

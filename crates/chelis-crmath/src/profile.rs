@@ -25,6 +25,7 @@
 //! the rows in the Rust lanes.
 
 use std::fmt;
+use std::prelude::rust_2024::*;
 use std::sync::OnceLock;
 
 use crate::c_source::Kernel;
@@ -481,7 +482,7 @@ pub fn rows() -> &'static [Row] {
                     .filter(|line| !line.trim().is_empty() && !line.starts_with('#'))
                     .map(move |line| {
                         parse_row(name, line).unwrap_or_else(|error| {
-                            panic!("{name}: malformed obligation row `{line}`: {error}")
+                            std::panic!("{name}: malformed obligation row `{line}`: {error}")
                         })
                     })
             })
@@ -739,7 +740,7 @@ pub fn storage_reference(bits: u64, width: u32, output: Output) -> u16 {
     let (target_exponent_bits, target_fraction_bits, canonical_nan) = match output {
         Output::F16 => (5, 10, 0x7e00),
         Output::Bf16 => (8, 7, 0x7fc0),
-        other => panic!("{other:?} is not a storage format"),
+        other => std::panic!("{other:?} is not a storage format"),
     };
     let exponent_mask = (1_u64 << exponent_bits) - 1;
     let sign = (((bits >> (exponent_bits + fraction_bits)) & 1) as u16) << 15;
@@ -809,7 +810,7 @@ pub fn storage_midpoint_inputs(output: Output) -> Vec<u64> {
     let decode = |code: u16| match output {
         Output::F16 => half::f16::from_bits(code).to_f64(),
         Output::Bf16 => half::bf16::from_bits(code).to_f64(),
-        other => panic!("{other:?} is not a storage format"),
+        other => std::panic!("{other:?} is not a storage format"),
     };
     let infinity = match output {
         Output::F16 => 0x7c00,

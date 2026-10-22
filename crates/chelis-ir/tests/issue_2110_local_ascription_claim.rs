@@ -5,10 +5,10 @@ use chelis_ir::dag::{Dag, DimInfo, ExtentWitnessSite, RiscOp, RtAxis, TensorType
 use chelis_ir::eval::{TensorValue, eval_tensor_with};
 use chelis_ir::optimize::{common_subexpr_eliminate, dead_code_eliminate};
 use chelis_ir::specialize::specialize_for_exact_arithmetic;
+use chelis_numeric_core::prim::Prim;
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str;
 use chelis_types::check_ir_program;
-use chelis_types::types::Prim;
 
 fn lower(source: &str) -> chelis_ir::Dag {
     let decls = parse_str(source, &chelis_syntax_host::NativeStack).expect("Surf parse");
@@ -309,7 +309,12 @@ fn fusion_preserves_the_exact_local_site_on_the_rebuilt_initializer() {
                     parameter: String::new(),
                     axis: RtAxis::Lit(0),
                     requirements: vec![
-                        chelis_types::scalar_from_i64("test", Prim::Int64, 2).unwrap(),
+                        chelis_numeric_core::dtype_semantics::scalar_from_i64(
+                            "test",
+                            Prim::Int64,
+                            2,
+                        )
+                        .unwrap(),
                     ],
                     claims: Vec::new(),
                 },

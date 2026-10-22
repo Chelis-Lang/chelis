@@ -651,13 +651,13 @@ pub fn element_domain_violation(prim: &str, token: &str) -> Option<String> {
         "f16" => narrow_float_violation(
             t,
             "f16",
-            |d| chelis_types::f16_from_f64_rne(d).to_f64(),
+            |d| chelis_numeric_core::dtype_semantics::f16_from_f64_rne(d).to_f64(),
             |t| {
                 t.parse::<f64>().is_ok_and(|v| {
-                    let w = chelis_types::f16_from_f64_rne(v);
-                    chelis_types::observation::format_element(
-                        chelis_types::types::Prim::F16,
-                        chelis_types::observation::ElementRef::F16(w),
+                    let w = chelis_numeric_core::dtype_semantics::f16_from_f64_rne(v);
+                    chelis_numeric_core::observation::format_element(
+                        chelis_numeric_core::prim::Prim::F16,
+                        chelis_numeric_core::observation::ElementRef::F16(w),
                     ) == t
                 })
             },
@@ -665,13 +665,13 @@ pub fn element_domain_violation(prim: &str, token: &str) -> Option<String> {
         "bf16" => narrow_float_violation(
             t,
             "bf16",
-            |d| chelis_types::bf16_from_f64_rne(d).to_f64(),
+            |d| chelis_numeric_core::dtype_semantics::bf16_from_f64_rne(d).to_f64(),
             |t| {
                 t.parse::<f64>().is_ok_and(|v| {
-                    let w = chelis_types::bf16_from_f64_rne(v);
-                    chelis_types::observation::format_element(
-                        chelis_types::types::Prim::Bf16,
-                        chelis_types::observation::ElementRef::Bf16(w),
+                    let w = chelis_numeric_core::dtype_semantics::bf16_from_f64_rne(v);
+                    chelis_numeric_core::observation::format_element(
+                        chelis_numeric_core::prim::Prim::Bf16,
+                        chelis_numeric_core::observation::ElementRef::Bf16(w),
                     ) == t
                 })
             },

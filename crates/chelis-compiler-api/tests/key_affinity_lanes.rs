@@ -11,8 +11,8 @@ mod ownership_support;
 
 use chelis_compiler_api::compiler::eval_selected;
 use chelis_compiler_api::schema::{EvalRequest, SourceKind};
-use chelis_types::types::Prim;
-use chelis_types::{ElementRef, format_element};
+use chelis_numeric_core::observation::{ElementRef, format_element};
+use chelis_numeric_core::prim::Prim;
 use std::collections::BTreeMap;
 
 /// `uniform_like(key_from_seed(7), t, 0, 1)` over 2 elements.

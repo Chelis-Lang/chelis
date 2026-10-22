@@ -352,7 +352,7 @@ mod tests {
         );
         let realizability = chelis_effects::realizability::infer_realizability(
             checked.program(),
-            &[chelis_types::types::Prim::F32],
+            &[chelis_numeric_core::prim::Prim::F32],
         );
         let manifest =
             chelis_effects::realizability::compute_root_manifest(checked.program(), &realizability);

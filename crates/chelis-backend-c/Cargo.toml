@@ -7,8 +7,9 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+chelis-numeric-core = { workspace = true, default-features = false, features = ["alloc", "serde"] }
 chelis-abi.workspace = true
-chelis-crmath.workspace = true
+chelis-crmath = { workspace = true, features = ["std"] }
 chelis-unord.workspace = true
 chelis-ir = { path = "../chelis-ir" }
 chelis-types = { path = "../chelis-types" }

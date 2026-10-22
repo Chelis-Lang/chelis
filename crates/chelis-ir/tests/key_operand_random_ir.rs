@@ -11,9 +11,9 @@ use chelis_ir::dag::{Dag, DimInfo, NodeId, RiscOp, RtAxis, RtDim, TensorType, Un
 use chelis_ir::eval::{TensorValue, eval_tensor_roots_exact};
 use chelis_ir::grad::{AdError, AdRejectionReason, grad_dag_checked};
 use chelis_ir::verify::verify;
-use chelis_types::dtype_semantics::{RawTensor, finalize_tensor};
-use chelis_types::scalar_from_f64;
-use chelis_types::types::Prim;
+use chelis_numeric_core::dtype_semantics::scalar_from_f64;
+use chelis_numeric_core::dtype_semantics::{RawTensor, finalize_tensor};
+use chelis_numeric_core::prim::Prim;
 use chelis_unord::UnordMap;
 
 // ---- [05-RNG-1], [05-OP-37] and [05-OP-8], transcribed from the spec ----
@@ -98,7 +98,8 @@ fn seeded_key(dag: &mut Dag, decl: chelis_ir::dag::DeclId, seed: i64) -> NodeId 
     let seed = dag.add_node(
         decl,
         RiscOp::Const {
-            value: chelis_types::scalar_from_i64("test", Prim::Int64, seed).unwrap(),
+            value: chelis_numeric_core::dtype_semantics::scalar_from_i64("test", Prim::Int64, seed)
+                .unwrap(),
         },
         vec![],
         scalar(Prim::Int64),
@@ -560,9 +561,10 @@ fn the_verifier_rejects_a_constant_key() {
     let forged = dag.add_node(
         decl,
         RiscOp::Const {
-            value: chelis_types::ScalarValue::from_key(
-                chelis_types::RandomKey::from_seed(
-                    chelis_types::scalar_from_i64("test", Prim::Int64, 7).unwrap(),
+            value: chelis_numeric_core::dtype_semantics::ScalarValue::from_key(
+                chelis_numeric_core::dtype_semantics::RandomKey::from_seed(
+                    chelis_numeric_core::dtype_semantics::scalar_from_i64("test", Prim::Int64, 7)
+                        .unwrap(),
                 )
                 .unwrap(),
             ),

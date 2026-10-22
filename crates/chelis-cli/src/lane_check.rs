@@ -5,7 +5,7 @@
 //! authoritative pinned verdict.
 
 use chelis_backend_c::toolchain::{CodegenRequirements, strict_reference_toolchain};
-use chelis_types::agreement::compare_exact_observations;
+use chelis_numeric_core::agreement::compare_exact_observations;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -1346,7 +1346,7 @@ mod tests {
     #[cfg(unix)]
     use super::capture;
     use super::{ExecutionIdentity, check_native_execution, first_difference, is_linux_triple_for};
-    use chelis_types::agreement::compare_exact_observations;
+    use chelis_numeric_core::agreement::compare_exact_observations;
     #[cfg(unix)]
     use std::collections::BTreeMap;
     #[cfg(unix)]

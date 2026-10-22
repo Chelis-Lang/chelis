@@ -369,7 +369,7 @@ PERMITTED_RUST_FORMAT_NARROWING_PATHS: frozenset[str] = frozenset(
         "crates/chelis-prove/src/opaque.rs",
         "crates/chelis-runtime/src/format_shortest.rs",
         "crates/chelis-types/src/infer/program.rs",
-        "crates/chelis-types/src/observation.rs",
+        "crates/chelis-numeric-core/src/observation.rs",
     }
 )
 
@@ -379,7 +379,7 @@ PERMITTED_RUST_FORMAT_NARROWING_PATHS: frozenset[str] = frozenset(
 # carriers per faithful_observation.md §B2.4.
 PERMITTED_RUST_DEBUG_FORMAT_PATHS: frozenset[str] = frozenset(
     {
-        "crates/chelis-types/src/observation.rs",
+        "crates/chelis-numeric-core/src/observation.rs",
         "crates/chelis-runtime/src/format_shortest.rs",
         "crates/chelis-compiler-api/src/runtime/host_ops.rs",
         "crates/chelis-compiler-api/src/runtime/eval.rs",

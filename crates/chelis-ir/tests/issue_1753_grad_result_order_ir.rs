@@ -4,7 +4,7 @@ use chelis_ir::{
     eval::{TensorValue, eval_tensor_roots_with_strict},
     lower::try_lower_subexpr_program,
 };
-use chelis_types::types::Prim;
+use chelis_numeric_core::prim::Prim;
 use chelis_unord::UnordMap;
 
 fn pair_roots(selection: &str, batched: bool) -> Vec<Vec<f64>> {

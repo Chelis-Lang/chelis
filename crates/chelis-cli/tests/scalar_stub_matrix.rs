@@ -22,8 +22,10 @@
 #![allow(clippy::uninlined_format_args)]
 
 use assert_cmd::Command;
-use chelis_types::agreement::{AgreementOp, ArithmeticWidthStatus, compare_rendered_elements};
-use chelis_types::types::Prim;
+use chelis_numeric_core::agreement::{
+    AgreementOp, ArithmeticWidthStatus, compare_rendered_elements,
+};
+use chelis_numeric_core::prim::Prim;
 use tempfile::tempdir;
 
 #[path = "common/mod.rs"]

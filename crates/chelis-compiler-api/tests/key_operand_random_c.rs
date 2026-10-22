@@ -6,9 +6,9 @@ mod ownership_support;
 use chelis_crmath::profile::{Output, storage_reference};
 use chelis_ir::dag::{Dag, DimInfo, NodeId, RiscOp, TensorType, UniformBound};
 use chelis_ir::eval::{TensorValue, eval_tensor_roots_exact};
-use chelis_types::dtype_semantics::{RawTensor, finalize_tensor};
-use chelis_types::scalar_from_f64;
-use chelis_types::types::Prim;
+use chelis_numeric_core::dtype_semantics::scalar_from_f64;
+use chelis_numeric_core::dtype_semantics::{RawTensor, finalize_tensor};
+use chelis_numeric_core::prim::Prim;
 use chelis_unord::UnordMap;
 
 fn splitmix64(x: u64) -> u64 {

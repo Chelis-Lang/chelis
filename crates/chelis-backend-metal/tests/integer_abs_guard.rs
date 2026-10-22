@@ -1,6 +1,6 @@
 mod support;
 use chelis_ir::dag::{Dag, DimInfo, FusedInput, FusedStep, FusedStepOp, RiscOp, TensorType};
-use chelis_types::types::Prim;
+use chelis_numeric_core::prim::Prim;
 use support::try_codegen_metal;
 
 fn vec_i64(n: usize) -> TensorType {
@@ -333,10 +333,8 @@ fn literal_integer_unary_gradients_lower_without_zero_placeholders() {
 #[test]
 #[ignore = "manual gate: Apple Silicon Metal device and Xcode command-line tools"]
 fn metal_literal_gradients_and_integer_float_rounding_execute() {
-    use chelis_types::{
-        ElementRef,
-        dtype_semantics::{cast_scalar, scalar_from_i64},
-    };
+    use chelis_numeric_core::dtype_semantics::{cast_scalar, scalar_from_i64};
+    use chelis_numeric_core::observation::ElementRef;
     for op in ["abs", "floor", "ceil", "round"] {
         let result = run_metal(
             &literal_gradient_dag(op),
@@ -479,7 +477,7 @@ fn exact_integer_constants_and_abs_cover_scalar_empty_and_rank_two_shapes() {
         let constant = dag.add_node(
             decl,
             RiscOp::Const {
-                value: chelis_types::dtype_semantics::scalar_from_i64(
+                value: chelis_numeric_core::dtype_semantics::scalar_from_i64(
                     "test",
                     Prim::Int64,
                     -9_007_199_254_740_993,
@@ -508,7 +506,12 @@ fn constant_operation(shape: &[usize], value: i64, op: RiscOp) -> Dag {
     let input = dag.add_node(
         decl,
         RiscOp::Const {
-            value: chelis_types::scalar_from_i64("test", Prim::Int64, value).unwrap(),
+            value: chelis_numeric_core::dtype_semantics::scalar_from_i64(
+                "test",
+                Prim::Int64,
+                value,
+            )
+            .unwrap(),
         },
         vec![],
         input_type.clone(),

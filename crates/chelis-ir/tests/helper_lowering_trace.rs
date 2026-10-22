@@ -11,9 +11,10 @@ use chelis_ir::host::{
     try_lower_manifested_execution_program, try_lower_manifested_execution_program_with_trace,
 };
 use chelis_ir::lowering_trace::Value;
+use chelis_numeric_core::prim::Prim;
 use chelis_surf::{desugar::desugar_program, parser::parse_str};
 use chelis_types::manifest::ManifestedProgram;
-use chelis_types::types::{Prim, Target};
+use chelis_types::types::Target;
 use chelis_types::{CheckedProgram, check_linearity, check_typed_program};
 
 const C_TENSOR_PRIMS: &[Prim] = &[

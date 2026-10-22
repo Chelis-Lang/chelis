@@ -12,8 +12,8 @@
 
 use chelis_ir::dag::{Dag, DimExpr, DimInfo, NodeId, RiscOp, RtDim, TensorType, UniformBound};
 use chelis_ir::eval::{TensorValue, eval_tensor_roots_with, eval_tensor_roots_with_strict};
-use chelis_types::dtype_semantics::{RawTensor, finalize_tensor, scalar_from_i64};
-use chelis_types::types::Prim;
+use chelis_numeric_core::dtype_semantics::{RawTensor, finalize_tensor, scalar_from_i64};
+use chelis_numeric_core::prim::Prim;
 use chelis_unord::UnordMap;
 
 const HUGE: usize = 1 << 62;

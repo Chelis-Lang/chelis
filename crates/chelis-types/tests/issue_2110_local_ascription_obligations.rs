@@ -65,7 +65,7 @@ def f(x: tensor[*, f32]) -> tensor[*, f32] = {
         ascription.declared_type(),
         &Type::Tensor(
             vec![Dim::Lit(9)],
-            chelis_types::types::TensorPrec::Concrete(chelis_types::types::Prim::F32)
+            chelis_types::types::TensorPrec::Concrete(chelis_numeric_core::prim::Prim::F32)
         )
     );
     assert!(
@@ -128,7 +128,7 @@ fn hand_authored_deep_type_metadata_is_an_explicit_local_ascription() {
         ascription.declared_type(),
         &Type::Tensor(
             vec![Dim::Lit(2)],
-            chelis_types::types::TensorPrec::Concrete(chelis_types::types::Prim::F32)
+            chelis_types::types::TensorPrec::Concrete(chelis_numeric_core::prim::Prim::F32)
         )
     );
     assert_eq!(ascription.outstanding_claims().len(), 1);
@@ -234,7 +234,7 @@ def f(x: tensor[*, f32]) -> tensor[*, f32] = {
         ascription.declared_type(),
         &Type::Tensor(
             vec![Dim::Wildcard],
-            chelis_types::types::TensorPrec::Concrete(chelis_types::types::Prim::F32)
+            chelis_types::types::TensorPrec::Concrete(chelis_numeric_core::prim::Prim::F32)
         )
     );
     assert!(ascription.outstanding_claims().is_empty());

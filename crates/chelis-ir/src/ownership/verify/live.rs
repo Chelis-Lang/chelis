@@ -374,7 +374,7 @@ impl<'a> LiveSet<'a> {
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
 
-    use chelis_types::types::Prim;
+    use chelis_numeric_core::prim::Prim;
 
     use super::{LiveSet, UnitOwnerFacts};
     use crate::dag::{DimInfo, TensorType};

@@ -22,13 +22,13 @@ pub use host_emit::host_builtin_nan_inventory;
 /// set must route to the host lane. Verified by execution (issue #912 Task 1):
 /// i32/i64 DO lower through the DAG path as general tensor ops, not only
 /// as sparse indices. Only f64 is actually rejected.
-pub const TENSOR_CAPABLE_PRIMS: &[chelis_types::types::Prim] = &[
-    chelis_types::types::Prim::F32,
-    chelis_types::types::Prim::Bool,
-    chelis_types::types::Prim::Bf16,
-    chelis_types::types::Prim::F16,
-    chelis_types::types::Prim::Int32,
-    chelis_types::types::Prim::Int64,
+pub const TENSOR_CAPABLE_PRIMS: &[chelis_numeric_core::prim::Prim] = &[
+    chelis_numeric_core::prim::Prim::F32,
+    chelis_numeric_core::prim::Prim::Bool,
+    chelis_numeric_core::prim::Prim::Bf16,
+    chelis_numeric_core::prim::Prim::F16,
+    chelis_numeric_core::prim::Prim::Int32,
+    chelis_numeric_core::prim::Prim::Int64,
 ];
 
 #[cfg(test)]
@@ -419,7 +419,7 @@ mod tests {
     use super::*;
     use chelis_ir::dag::{ComparisonKind, Dag, DimInfo, RiscOp, RtDim, TensorType};
     use chelis_ir::tier2;
-    use chelis_types::types::Prim;
+    use chelis_numeric_core::prim::Prim;
     use std::io::Write;
     use std::path::PathBuf;
     use std::process::Command;
@@ -849,7 +849,7 @@ mod tests {
                 m: chelis_ir::dag::DimExpr::Concrete(2),
                 n: chelis_ir::dag::DimExpr::Concrete(4),
                 k: chelis_ir::dag::DimExpr::Concrete(3),
-                accumulator: chelis_types::types::Prim::F32,
+                accumulator: chelis_numeric_core::prim::Prim::F32,
             },
             vec![a, b],
             out_ty.clone(),
@@ -1020,7 +1020,7 @@ mod tests {
             decl,
             RiscOp::Sum {
                 axis: 1,
-                accumulator: chelis_types::types::Prim::F32,
+                accumulator: chelis_numeric_core::prim::Prim::F32,
             },
             vec![mul],
             mat_f32(2, 4),
@@ -1089,7 +1089,7 @@ mod tests {
             decl,
             RiscOp::Sum {
                 axis: 1,
-                accumulator: chelis_types::types::Prim::F32,
+                accumulator: chelis_numeric_core::prim::Prim::F32,
             },
             vec![mul],
             mat_f32(2, 4),
@@ -1902,7 +1902,7 @@ int main(void) {{
             decl,
             RiscOp::Sum {
                 axis: 0,
-                accumulator: chelis_types::types::Prim::F32,
+                accumulator: chelis_numeric_core::prim::Prim::F32,
             },
             vec![a],
             scalar_f32(),
@@ -2080,7 +2080,7 @@ int main(void) {{
             decl,
             RiscOp::Sum {
                 axis: 0,
-                accumulator: chelis_types::types::Prim::F32,
+                accumulator: chelis_numeric_core::prim::Prim::F32,
             },
             vec![e],
             scalar_f32(),
@@ -2400,7 +2400,7 @@ int main(int argc, char **argv) {{
             decl,
             RiscOp::Sum {
                 axis: 0,
-                accumulator: chelis_types::types::Prim::F32,
+                accumulator: chelis_numeric_core::prim::Prim::F32,
             },
             vec![permuted],
             vec_f32(2),
@@ -2930,7 +2930,8 @@ int main(int argc, char **argv) {{
             decl,
             RiscOp::pad(
                 vec![(RtDim::Lit(1), RtDim::Lit(2))],
-                chelis_types::scalar_from_f64("pad", Prim::F32, -1.0).unwrap(),
+                chelis_numeric_core::dtype_semantics::scalar_from_f64("pad", Prim::F32, -1.0)
+                    .unwrap(),
             ),
             vec![x],
             vec_f32(6),
@@ -3029,7 +3030,7 @@ int main(int argc, char **argv) {{
             decl,
             RiscOp::Sum {
                 axis: 0,
-                accumulator: chelis_types::types::Prim::F32,
+                accumulator: chelis_numeric_core::prim::Prim::F32,
             },
             vec![c],
             scalar_f32(),
@@ -3588,7 +3589,7 @@ int main(void) {
             decl,
             RiscOp::Sum {
                 axis: 1,
-                accumulator: chelis_types::types::Prim::F32,
+                accumulator: chelis_numeric_core::prim::Prim::F32,
             },
             vec![mul],
             mat_f32(2, 4),
@@ -3701,7 +3702,7 @@ int main(void) {
             decl,
             RiscOp::Sum {
                 axis: 1,
-                accumulator: chelis_types::types::Prim::F32,
+                accumulator: chelis_numeric_core::prim::Prim::F32,
             },
             vec![mul],
             mat_f32(2, 4),
@@ -3774,7 +3775,7 @@ int main(void) {
             decl,
             RiscOp::Sum {
                 axis: 1,
-                accumulator: chelis_types::types::Prim::F32,
+                accumulator: chelis_numeric_core::prim::Prim::F32,
             },
             vec![mul],
             mat_f32(2, 4),

@@ -77,7 +77,7 @@ fn allocations(depth: usize, steps: usize) -> usize {
     assert_eq!(
         serde_json::to_value(&result.roots[0].value).unwrap(),
         serde_json::to_value(wire_values::scalar_integer(
-            chelis_types::types::Prim::Int64,
+            chelis_numeric_core::prim::Prim::Int64,
             (steps * (steps - 1) / 2) as i64
         ))
         .unwrap(),
