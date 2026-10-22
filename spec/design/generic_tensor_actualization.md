@@ -58,6 +58,16 @@ failure before C emission. The ownership
 verifier remains a consumer of this contract and continues to reject mismatched
 precisions; it is not relaxed to make either reproducer pass.
 
+Host result inference derives type-preserving operand positions from the
+builtin scheme and its declared shape-identity contract. When a scheme returns
+the same type variable as an operand, that operand supplies the complete host
+type term, including scalar precision, ordered dimensions, and unresolved rank
+or precision binders. The admitted declaration cache is shared across inference
+calls; an operation-name mirror cannot omit a producer. Shape-changing operations and
+precision-changing predicates retain their own checked result relations. A
+Boolean consumer's result annotation never supplies a missing float producer
+type.
+
 Nominal dimension arguments remain exact logical terms through field
 instantiation. They belong to the activation's dimension evidence, separately
 from type and precision substitution: an inferred caller result cannot replace

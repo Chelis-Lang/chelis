@@ -29,3 +29,8 @@ def select_finite(flag: bool, x: tensor[4, f32]) -> tensor[4, bool] = {
 }
 selected_finite = select_finite(true, values)
 selected_finite_other = select_finite(false, values)
+def finite_magnitude[r, p: Float](x: tensor[..r, p]) -> tensor[..r, bool] = {
+  magnitude = abs(x)
+  is_finite(magnitude)
+}
+composed_finite = finite_magnitude(values)

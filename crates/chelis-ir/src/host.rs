@@ -25753,6 +25753,30 @@ fn term_matches_or_is_unresolved(
     ty.is_unresolved() || predicate(ty)
 }
 
+/// A complete builtin scheme may return exactly one operand's type. Shape
+/// identity is a separate requirement: reshape has a superficially identical
+/// scheme but a procedural output-shape rule. Use the existing cached admitted
+/// declarations, never a second operation-name list or a result annotation.
+fn type_preserving_builtin_argument(name: &str) -> Option<(usize, usize)> {
+    let operation = chelis_types::AdmittedBuiltin::resolve(name)?;
+    if operation.declaration().shape_class != chelis_types::ShapeClass::Identity {
+        return None;
+    }
+    let Type::Fn(params, result) = &operation.scheme().body else {
+        return None;
+    };
+    let Type::Var(result_var) = result.as_ref() else {
+        return None;
+    };
+    params.iter().enumerate().find_map(|(index, param)| {
+        let param = match param {
+            Type::Ref(inner) => inner.as_ref(),
+            param => param,
+        };
+        matches!(param, Type::Var(var) if var == result_var).then_some((params.len(), index))
+    })
+}
+
 /// Infer a builtin result without laundering invalid input into an anonymous
 /// type hole.  A successful unresolved result means inference genuinely
 /// needs context (for example arg-types-only `tuple-get` cannot see its index).
@@ -25901,6 +25925,17 @@ fn infer_builtin_host_type_from_arg_tys(
         _ => {}
     }
 
+    if let Some((arity, index)) = type_preserving_builtin_argument(name) {
+        if arg_tys.len() != arity {
+            return Err(invalid_builtin_inference(
+                name,
+                arg_tys,
+                format!("the checked builtin scheme requires exactly {arity} operands"),
+            ));
+        }
+        return Ok(Some(arg_tys[index].clone()));
+    }
+
     Ok(infer_builtin_host_type_from_arg_tys_unchecked(
         name, arg_tys,
     ))
@@ -25986,31 +26021,7 @@ fn infer_builtin_host_type_from_arg_tys_unchecked(
         "uniform_like" | "dropout" => {
             Some(arg_tys.get(1).cloned().unwrap_or_else(fresh_host_inference))
         }
-        "add"
-        | "sub"
-        | "mul"
-        | "div"
-        | "pow"
-        | "floor_div"
-        | "trunc_div"
-        | "neg"
-        | "exp"
-        | "log"
-        | "sin"
-        | "sqrt"
-        | "relu"
-        | "sigmoid"
-        | "tanh"
-        | "erf"
-        | "erfc"
-        | "silu"
-        | "gelu"
-        | "gelu_tanh"
-        | "standard_normal_cdf"
-        | "max_elem"
-        | "min_elem"
-        | "copy"
-        | "softmax" => {
+        "copy" | "softmax" => {
             if let Some(tensor_ty) = tensor_arg {
                 Some(HostTypeTerm::Tensor(tensor_ty))
             } else if arg_tys
@@ -28312,6 +28323,89 @@ mod tests {
     }
     use crate::{DimInfo, RiscOp};
     use chelis_types::types::Prim;
+
+    /// [05-OP-46]: a unary producer retains the actual operand's complete
+    /// scalar/tensor carrier, including unresolved precision and rank rows.
+    /// Its classification consumer must not recover that information from
+    /// the Boolean result annotation.
+    #[test]
+    fn type_preserving_builtin_host_inference_retains_actual_carrier() {
+        for name in [
+            "neg", "recip", "exp", "log", "sin", "sqrt", "cos", "tan", "atan", "tanh", "erf",
+            "erfc", "abs", "floor", "ceil", "round",
+        ] {
+            let mut inputs = Vec::new();
+            for precision in [Prim::F16, Prim::Bf16, Prim::F32, Prim::F64] {
+                inputs.push(HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(precision)));
+                for dims in [
+                    vec![],
+                    vec![DimInfo::Named("batch".into(), None), DimInfo::Lit(3)],
+                ] {
+                    inputs.push(HostTypeTerm::Tensor(TensorType { dims, precision }));
+                }
+                inputs.push(HostTypeTerm::PolymorphicTensor(HostTensorTypeTerm {
+                    shape: HostShapeTerm::Polymorphic(vec![
+                        HostShapeSlot::RankVariable("before".into()),
+                        HostShapeSlot::Dim(DimInfo::Named("seq".into(), None)),
+                        HostShapeSlot::RankVariable("after".into()),
+                    ]),
+                    precision: HostPrecisionTerm::Concrete(precision),
+                }));
+            }
+            inputs.push(HostTypeTerm::PolymorphicTensor(HostTensorTypeTerm {
+                shape: HostShapeTerm::Polymorphic(vec![HostShapeSlot::RankVariable("r".into())]),
+                precision: HostPrecisionTerm::Variable("p".into()),
+            }));
+            for input in inputs {
+                assert_eq!(
+                    must_infer_builtin_host_type_from_arg_tys(name, std::slice::from_ref(&input)),
+                    Some(input.clone()),
+                    "{name} lost actual operand {input:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn type_preserving_builtin_host_inference_requires_scheme_identity_and_arity() {
+        for name in ["abs", "cos", "recip", "floor"] {
+            assert_eq!(type_preserving_builtin_argument(name), Some((1, 0)));
+            assert!(infer_builtin_host_type_from_arg_tys(name, &[]).is_err());
+            assert!(
+                infer_builtin_host_type_from_arg_tys(
+                    name,
+                    &[HostTypeTerm::Float32, HostTypeTerm::Float32]
+                )
+                .is_err()
+            );
+        }
+        // Shape identity alone cannot turn a precision-changing predicate
+        // into its float operand, and a shared scheme variable alone cannot
+        // assert that a movement operation preserves the operand's shape.
+        for name in [
+            "is_nan",
+            "is_finite",
+            "is_infinite",
+            "cmplt",
+            "reshape",
+            "permute",
+            "sum",
+            "not_a_builtin",
+        ] {
+            assert_eq!(type_preserving_builtin_argument(name), None, "{name}");
+        }
+        let input = HostTypeTerm::Tensor(TensorType {
+            dims: vec![DimInfo::Lit(3)],
+            precision: Prim::F32,
+        });
+        assert_eq!(
+            must_infer_builtin_host_type_from_arg_tys("cmplt", &[input.clone(), input]),
+            Some(HostTypeTerm::Tensor(TensorType {
+                dims: vec![DimInfo::Lit(3)],
+                precision: Prim::Bool
+            }))
+        );
+    }
 
     #[test]
     fn predicate_host_application_owns_actual_surface_and_axes() {
