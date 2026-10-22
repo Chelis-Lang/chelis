@@ -1069,7 +1069,7 @@ pub(crate) fn explicit_accumulator_result(
     operand: Prim,
     accumulator: Prim,
 ) -> Result<Prim, String> {
-    use Prim::*;
+    use chelis_numeric_core::prim::Prim::*;
     let permitted: &[Prim] = match (operation, operand) {
         (_, Bf16 | F16 | F32) => &[F32, F64],
         (_, F64) => &[F64],

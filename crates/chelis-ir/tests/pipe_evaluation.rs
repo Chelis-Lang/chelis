@@ -8,7 +8,7 @@ use chelis_deep::Expr;
 use chelis_ir::dag::{DimInfo, NodeId, TensorType};
 use chelis_ir::eval::{TensorValue, eval_tensor_roots_with_strict};
 use chelis_ir::lower::{lower_subexpr_program, try_lower_subexpr_program};
-use chelis_types::types::Prim;
+use chelis_numeric_core::prim::Prim;
 
 fn f32_vec(n: usize) -> TensorType {
     TensorType {

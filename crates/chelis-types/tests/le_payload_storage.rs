@@ -2,9 +2,9 @@
 //! element's exact bits, NaN payloads and signaling bits included, and
 //! refuses what no element dtype stores.
 
-use chelis_types::dtype_semantics::StorageView;
-use chelis_types::tensor_from_le_payload;
-use chelis_types::types::Prim;
+use chelis_numeric_core::dtype_semantics::StorageView;
+use chelis_numeric_core::dtype_semantics::tensor_from_le_payload;
+use chelis_numeric_core::prim::Prim;
 
 fn le<T: Copy, const N: usize>(values: &[T], bytes: fn(T) -> [u8; N]) -> Vec<u8> {
     values.iter().flat_map(|value| bytes(*value)).collect()

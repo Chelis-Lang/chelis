@@ -28,7 +28,7 @@ use chelis_ir::dag::{Dag, RiscOp};
 use chelis_ir::eval::{TensorValue, eval_tensor_with};
 use chelis_ir::grad::{AdError, AdRejectionReason, grad_dag_checked};
 use chelis_ir::{DimInfo, TensorType};
-use chelis_types::types::Prim;
+use chelis_numeric_core::prim::Prim;
 
 // chelis#729 Phase 1: f64-typed fixtures. These tests pin the ONNX
 // ScatterElements COORDINATE semantics with decimal probe values (1.1,

@@ -6,7 +6,7 @@
 //! a literal the checker admits can never evaluate to an infinity.
 
 use super::*;
-use crate::{RawScalar, finalize_scalar};
+use chelis_numeric_core::dtype_semantics::{RawScalar, finalize_scalar};
 
 /// The value `atom` denotes once bound at the float primitive `prim`, or
 /// `None` when `prim` is not a float or `atom` is not numeric. An `Int` atom is

@@ -130,7 +130,7 @@ class SourceContractMutationTests(unittest.TestCase):
 
     def test_evaluator_canonical_nan_removal_fails(self) -> None:
         self.mutate(
-            "crates/chelis-types/src/dtype_semantics.rs",
+            "crates/chelis-numeric-core/src/dtype_semantics.rs",
             "fn canonical_nan_f32(value: f32) -> f32 {",
             "fn preserve_nan_f32(value: f32) -> f32 {",
         )
@@ -141,7 +141,7 @@ class SourceContractMutationTests(unittest.TestCase):
 
     def test_evaluator_canonical_nan_scope_broadening_fails(self) -> None:
         self.mutate(
-            "crates/chelis-types/src/dtype_semantics.rs",
+            "crates/chelis-numeric-core/src/dtype_semantics.rs",
             "        FloatBinOp::Max | FloatBinOp::Min => value,\n"
             "        _ => canonical_nan_f64(value),",
             "        _ => canonical_nan_f64(value),",
@@ -153,7 +153,7 @@ class SourceContractMutationTests(unittest.TestCase):
 
     def test_evaluator_subtraction_bypassing_the_finalizer_fails(self) -> None:
         self.mutate(
-            "crates/chelis-types/src/dtype_semantics.rs",
+            "crates/chelis-numeric-core/src/dtype_semantics.rs",
             "        _ => canonical_nan_f32(value),",
             "        FloatBinOp::Sub => value,\n        _ => canonical_nan_f32(value),",
         )

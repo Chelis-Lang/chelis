@@ -4,16 +4,20 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use chelis_ir::dag::{
     ComparisonKind, Dag, DagNode, DimExpr, DimInfo, ExtremaKind, ExtremaOperand, FusedInput,
-    FusedStep, FusedStepOp, LogicalKind, NamedCastMode, NodeId, ReduceWindowKind, RiscOp, RtAxis,
-    RtDim, TensorType,
+    FusedStep, FusedStepOp, LogicalKind, NodeId, ReduceWindowKind, RiscOp, RtAxis, RtDim,
+    TensorType,
 };
 use chelis_ir::ownership::{
     CStorageLane, ReusableOwnedStorage, VerifiedDagAction, VerifiedDagProgram, VerifiedDagView,
     VerifiedStoragePlan, plan_c_storage, plan_c_storage_layout,
 };
-use chelis_types::types::Prim;
+use chelis_numeric_core::dtype_semantics::{
+    CheckedCastKind, CheckedCastPlan, NumericTrap, ScalarValue,
+};
+use chelis_numeric_core::named_cast::NamedCastMode;
+use chelis_numeric_core::observation::ElementRef;
+use chelis_numeric_core::prim::Prim;
 use chelis_types::unsupported::{Stage, Unsupported, UnsupportedKind};
-use chelis_types::{CheckedCastKind, CheckedCastPlan, ElementRef, NumericTrap, ScalarValue};
 
 use crate::memory::{MemoryPlan, NodeMemoryKind};
 
@@ -131,7 +135,8 @@ pub struct CEmitter {
     /// The literal result claims each witness checks
     /// ([`chelis_ir::dag::TrapSeeds::literal_result_witness_requirements`]),
     /// derived once for the graph.
-    literal_result_witness_requirements: BTreeMap<NodeId, Vec<chelis_types::ScalarValue>>,
+    literal_result_witness_requirements:
+        BTreeMap<NodeId, Vec<chelis_numeric_core::dtype_semantics::ScalarValue>>,
     /// Claim names this function actually declares as C variables. Resolved
     /// claims compare against their numeric canonical value instead.
     declared_dim_names: chelis_unord::UnordSet<String>,
@@ -4028,7 +4033,7 @@ impl CEmitter {
     fn emit_const(
         &mut self,
         id: usize,
-        value: &chelis_types::ScalarValue,
+        value: &chelis_numeric_core::dtype_semantics::ScalarValue,
         ty: &TensorType,
     ) -> Result<(), Unsupported> {
         self.emit_slot_wrapper(id, ty);
@@ -4114,11 +4119,11 @@ impl CEmitter {
             // call per element; it just stamps the precomputed
             // pattern via `chelis_fill_bf16` / `chelis_fill_f16`.
             Prim::Bf16 => {
-                let bits = chelis_types::bf16_from_f64_rne(wide).to_bits();
+                let bits = chelis_numeric_core::dtype_semantics::bf16_from_f64_rne(wide).to_bits();
                 self.line(&format!("chelis_fill_scalar(t{id}_write_guard, chelis_scalar_from_bits(CHELIS_DTYPE_BF16, UINT16_C(0x{bits:04X})));"));
             }
             Prim::F16 => {
-                let bits = chelis_types::f16_from_f64_rne(wide).to_bits();
+                let bits = chelis_numeric_core::dtype_semantics::f16_from_f64_rne(wide).to_bits();
                 self.line(&format!("chelis_fill_scalar(t{id}_write_guard, chelis_scalar_from_bits(CHELIS_DTYPE_F16, UINT16_C(0x{bits:04X})));"));
             }
             other => {
@@ -4214,7 +4219,7 @@ impl CEmitter {
     fn emit_const_tensor(
         &mut self,
         id: usize,
-        storage: &chelis_types::TensorStorage,
+        storage: &chelis_numeric_core::dtype_semantics::TensorStorage,
         ty: &TensorType,
     ) -> Result<(), Unsupported> {
         let invalid = |detail: &str| {
@@ -5314,7 +5319,7 @@ impl CEmitter {
     fn emit_float_classification(
         &mut self,
         id: usize,
-        kind: chelis_types::FloatClassify,
+        kind: chelis_numeric_core::dtype_semantics::FloatClassify,
         inputs: &[NodeId],
         ty: &TensorType,
         dag: VerifiedDagView<'_>,
@@ -5343,11 +5348,11 @@ impl CEmitter {
         ));
         let special = format!("(bits & UINT64_C({exponent})) == UINT64_C({exponent})");
         let expression = match kind {
-            chelis_types::FloatClassify::Nan => {
+            chelis_numeric_core::dtype_semantics::FloatClassify::Nan => {
                 format!("({special}) && (bits & UINT64_C({fraction})) != 0")
             }
-            chelis_types::FloatClassify::Finite => format!("!({special})"),
-            chelis_types::FloatClassify::Infinite => {
+            chelis_numeric_core::dtype_semantics::FloatClassify::Finite => format!("!({special})"),
+            chelis_numeric_core::dtype_semantics::FloatClassify::Infinite => {
                 format!("({special}) && (bits & UINT64_C({fraction})) == 0")
             }
         };
@@ -11268,7 +11273,7 @@ mod tests {
     use super::*;
 
     use chelis_ir::dag::{ComparisonKind, Dag, DimInfo, RiscOp, RtDim, TensorType};
-    use chelis_types::types::Prim;
+    use chelis_numeric_core::prim::Prim;
 
     /// Every name is an extent, for the order tests below.
     fn any_name(_: &str) -> bool {
@@ -11983,7 +11988,8 @@ mod tests {
             ty,
             None,
         );
-        let fill = chelis_types::scalar_from_i64("pad", Prim::Int64, exact).unwrap();
+        let fill = chelis_numeric_core::dtype_semantics::scalar_from_i64("pad", Prim::Int64, exact)
+            .unwrap();
         let padded = dag.add_node(
             decl,
             RiscOp::pad(vec![(RtDim::Lit(1), RtDim::Lit(1))], fill),
@@ -12024,7 +12030,12 @@ mod tests {
             let constant = dag.add_node(
                 decl,
                 RiscOp::Const {
-                    value: chelis_types::scalar_from_i64("const", Prim::Int64, value).unwrap(),
+                    value: chelis_numeric_core::dtype_semantics::scalar_from_i64(
+                        "const",
+                        Prim::Int64,
+                        value,
+                    )
+                    .unwrap(),
                 },
                 vec![],
                 tensor_ty(&[], Prim::Int64),
@@ -12058,7 +12069,9 @@ mod tests {
                 ty.clone(),
                 None,
             );
-            let fill = chelis_types::scalar_from_i64("pad", Prim::Int64, value).unwrap();
+            let fill =
+                chelis_numeric_core::dtype_semantics::scalar_from_i64("pad", Prim::Int64, value)
+                    .unwrap();
             let padded = dag.add_node(
                 decl,
                 RiscOp::pad(vec![(RtDim::Lit(1), RtDim::Lit(1))], fill),
@@ -12255,7 +12268,7 @@ mod tests {
             decl,
             RiscOp::Sum {
                 axis: 0,
-                accumulator: chelis_types::types::Prim::F32,
+                accumulator: chelis_numeric_core::prim::Prim::F32,
             },
             vec![a],
             scalar_f32(),
@@ -13143,7 +13156,7 @@ mod tests {
             decl,
             RiscOp::Sum {
                 axis: 0,
-                accumulator: chelis_types::types::Prim::F32,
+                accumulator: chelis_numeric_core::prim::Prim::F32,
             },
             vec![a],
             scalar_f32(),
@@ -13573,7 +13586,7 @@ mod tests {
             decl,
             RiscOp::Sum {
                 axis: 1,
-                accumulator: chelis_types::types::Prim::F32,
+                accumulator: chelis_numeric_core::prim::Prim::F32,
             },
             vec![mul],
             mat_f32(2, 4),
@@ -13648,7 +13661,7 @@ mod tests {
             decl,
             RiscOp::Sum {
                 axis: 1,
-                accumulator: chelis_types::types::Prim::F32,
+                accumulator: chelis_numeric_core::prim::Prim::F32,
             },
             vec![mul],
             mat_f32(2, 4),
@@ -14595,7 +14608,7 @@ mod tests {
         use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
         let ty = |dims: Vec<DimInfo>| TensorType {
             dims,
-            precision: chelis_types::types::Prim::F32,
+            precision: chelis_numeric_core::prim::Prim::F32,
         };
         let named = |name: &str| DimInfo::Named(name.into(), None);
 
@@ -14671,7 +14684,7 @@ mod tests {
         use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
         let ty = |dims: Vec<DimInfo>| TensorType {
             dims,
-            precision: chelis_types::types::Prim::F32,
+            precision: chelis_numeric_core::prim::Prim::F32,
         };
         let named = |name: &str| DimInfo::Named(name.into(), None);
 

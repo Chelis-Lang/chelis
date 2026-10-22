@@ -95,8 +95,9 @@ fn probe_root_name(property_source: &str, property_name: &str) -> Result<String,
 
 use crate::concrete_eval::{ConcreteEnv, eval_bool};
 use crate::tier_b::SmtProperty;
+use chelis_numeric_core::dtype_semantics::{ScalarValue, scalar_from_f64, scalar_from_i64};
+use chelis_numeric_core::prim::Prim;
 use chelis_reef::EmbeddedRuntime;
-use chelis_types::{ScalarValue, scalar_from_f64, scalar_from_i64, types::Prim};
 use chelis_unord::UnordMap;
 
 /// Fuzz an SmtProperty directly via dtype-aware concrete evaluation.

@@ -76,7 +76,7 @@ def source_contracts() -> tuple[SourceContract, ...]:
         # [05-OP-40] extrema, which copy the selected operand's bits, bypass it.
         SourceContract(
             "evaluator canonical arithmetic NaNs",
-            "crates/chelis-types/src/dtype_semantics.rs",
+            "crates/chelis-numeric-core/src/dtype_semantics.rs",
             (
                 "fn canonical_nan_f32(value: f32) -> f32 {",
                 "f32::from_bits(0x7fc0_0000)",
@@ -431,7 +431,7 @@ def oracle_legs(python: str) -> tuple[OracleLeg, ...]:
                 "nextest",
                 "run",
                 "-p",
-                "chelis-types",
+                "chelis-numeric-core",
                 "-E",
                 "test(/(direct_subtraction|extrema)/)",
             ),

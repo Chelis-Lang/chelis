@@ -34,7 +34,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use chelis_deep::tag::DeepTag;
 use chelis_deep::{Atom, Expr};
-use chelis_types::types::Prim;
+use chelis_numeric_core::prim::Prim;
 use serde::{Deserialize, Serialize};
 
 #[path = "../../../tests/support/capacity_census_stdlib_tests.rs"]
@@ -92,7 +92,7 @@ enum PrimCensusClass {
     NonNumeric,
 }
 
-/// Census membership of one `chelis_types::Prim`, decided by an EXHAUSTIVE
+/// Census membership of one `chelis_numeric_core::prim::Prim`, decided by an EXHAUSTIVE
 /// match. `NUMERIC_PRIMS`/`FLOAT_PRIMS` are string lists because the
 /// desugared AST carries `(t-prim {} <name>)` SYMBOLS, not enum values, so
 /// nothing about widening `Prim` would otherwise reach this file: a new
@@ -118,7 +118,7 @@ fn prim_census_class(prim: Prim) -> PrimCensusClass {
     }
 }
 
-/// Closed enumeration of `chelis_types::Prim`, paired with the exhaustive
+/// Closed enumeration of `chelis_numeric_core::prim::Prim`, paired with the exhaustive
 /// match above: a variant added to the enum breaks the match, a variant
 /// removed from it breaks this list.
 const ALL_PRIMS: &[Prim] = &[
@@ -4865,27 +4865,27 @@ struct SemanticRegistration {
 /// final-authority registry above instead.
 const SEMANTIC_REGISTRATIONS: &[SemanticRegistration] = &[
     SemanticRegistration {
-        callable: "[compiler-kernel-numeric] chelis_types::dtype_semantics::classify_float(FloatClassify::Nan, value: ScalarValue) -> Result<ScalarValue, NumericKernelError>",
+        callable: "[compiler-kernel-numeric] chelis_numeric_core::dtype_semantics::classify_float(FloatClassify::Nan, value: ScalarValue) -> Result<ScalarValue, NumericKernelError>",
         atom: "[05-OP-20]",
     },
     SemanticRegistration {
-        callable: "[compiler-kernel-numeric] chelis_types::dtype_semantics::classify_float_tensor(FloatClassify::Nan, value: &TensorStorage) -> Result<TensorStorage, NumericKernelError>",
+        callable: "[compiler-kernel-numeric] chelis_numeric_core::dtype_semantics::classify_float_tensor(FloatClassify::Nan, value: &TensorStorage) -> Result<TensorStorage, NumericKernelError>",
         atom: "[05-OP-20]",
     },
     SemanticRegistration {
-        callable: "[compiler-kernel-numeric] chelis_types::dtype_semantics::classify_float(FloatClassify::Finite, value: ScalarValue) -> Result<ScalarValue, NumericKernelError>",
+        callable: "[compiler-kernel-numeric] chelis_numeric_core::dtype_semantics::classify_float(FloatClassify::Finite, value: ScalarValue) -> Result<ScalarValue, NumericKernelError>",
         atom: "[05-OP-21]",
     },
     SemanticRegistration {
-        callable: "[compiler-kernel-numeric] chelis_types::dtype_semantics::classify_float_tensor(FloatClassify::Finite, value: &TensorStorage) -> Result<TensorStorage, NumericKernelError>",
+        callable: "[compiler-kernel-numeric] chelis_numeric_core::dtype_semantics::classify_float_tensor(FloatClassify::Finite, value: &TensorStorage) -> Result<TensorStorage, NumericKernelError>",
         atom: "[05-OP-21]",
     },
     SemanticRegistration {
-        callable: "[compiler-kernel-numeric] chelis_types::dtype_semantics::classify_float(FloatClassify::Infinite, value: ScalarValue) -> Result<ScalarValue, NumericKernelError>",
+        callable: "[compiler-kernel-numeric] chelis_numeric_core::dtype_semantics::classify_float(FloatClassify::Infinite, value: ScalarValue) -> Result<ScalarValue, NumericKernelError>",
         atom: "[05-OP-22]",
     },
     SemanticRegistration {
-        callable: "[compiler-kernel-numeric] chelis_types::dtype_semantics::classify_float_tensor(FloatClassify::Infinite, value: &TensorStorage) -> Result<TensorStorage, NumericKernelError>",
+        callable: "[compiler-kernel-numeric] chelis_numeric_core::dtype_semantics::classify_float_tensor(FloatClassify::Infinite, value: &TensorStorage) -> Result<TensorStorage, NumericKernelError>",
         atom: "[05-OP-22]",
     },
     SemanticRegistration {
@@ -4901,19 +4901,19 @@ const SEMANTIC_REGISTRATIONS: &[SemanticRegistration] = &[
         atom: "[05-OP-54]",
     },
     SemanticRegistration {
-        callable: "[compiler-kernel-numeric] chelis_types::dtype_semantics::PreparedDropout::new(input: &TensorStorage, rate: ScalarValue) -> Result<PreparedDropout, NumericKernelError>",
+        callable: "[compiler-kernel-numeric] chelis_numeric_core::dtype_semantics::PreparedDropout::new(input: &TensorStorage, rate: ScalarValue) -> Result<PreparedDropout, NumericKernelError>",
         atom: "[05-OP-37]",
     },
     SemanticRegistration {
-        callable: "[compiler-kernel-numeric] chelis_types::dtype_semantics::PreparedDropout::apply(&self, key: RandomKey) -> Result<TensorStorage, NumericKernelError>",
+        callable: "[compiler-kernel-numeric] chelis_numeric_core::dtype_semantics::PreparedDropout::apply(&self, key: RandomKey) -> Result<TensorStorage, NumericKernelError>",
         atom: "[05-OP-37]",
     },
     SemanticRegistration {
-        callable: "[compiler-kernel-numeric] chelis_types::dtype_semantics::PreparedUniformLike::new(prim: Prim, len: usize, low: ScalarValue, high: ScalarValue) -> Result<PreparedUniformLike, NumericKernelError>",
+        callable: "[compiler-kernel-numeric] chelis_numeric_core::dtype_semantics::PreparedUniformLike::new(prim: Prim, len: usize, low: ScalarValue, high: ScalarValue) -> Result<PreparedUniformLike, NumericKernelError>",
         atom: "[05-OP-8]",
     },
     SemanticRegistration {
-        callable: "[compiler-kernel-numeric] chelis_types::dtype_semantics::PreparedUniformLike::apply(&self, key: RandomKey) -> Result<TensorStorage, NumericKernelError>",
+        callable: "[compiler-kernel-numeric] chelis_numeric_core::dtype_semantics::PreparedUniformLike::apply(&self, key: RandomKey) -> Result<TensorStorage, NumericKernelError>",
         atom: "[05-OP-8]",
     },
     SemanticRegistration {
@@ -8048,7 +8048,7 @@ fn a_reserved_shaped_declarator_name_is_rejected() {
 
 /// N1's language-side companion. `NUMERIC_PRIMS`/`FLOAT_PRIMS` are string
 /// lists because the desugared AST carries `(t-prim {} <name>)` symbols, so
-/// nothing about widening `chelis_types::Prim` would otherwise reach this
+/// nothing about widening `chelis_numeric_core::prim::Prim` would otherwise reach this
 /// file. The exhaustive match in `prim_census_class` is the compile-time
 /// half of the lock; this is the agreement half, checked in both
 /// directions.
@@ -8078,8 +8078,9 @@ fn census_prim_lists_cover_every_prim_variant() {
         }
     }
     for name in NUMERIC_PRIMS {
-        let prim = Prim::parse_name(name)
-            .unwrap_or_else(|| panic!("`{name}` is not a chelis_types::Prim spelling"));
+        let prim = Prim::parse_name(name).unwrap_or_else(|| {
+            panic!("`{name}` is not a chelis_numeric_core::prim::Prim spelling")
+        });
         assert_ne!(
             prim_census_class(prim),
             PrimCensusClass::NonNumeric,
@@ -8672,19 +8673,19 @@ fn prepared_random_kernel_boundaries_have_exact_semantic_authority() {
     let spec = fs::read_to_string(repo_root().join(CONTROLLING_SPEC_REL)).unwrap();
     for (callable, atom) in [
         (
-            "[compiler-kernel-numeric] chelis_types::dtype_semantics::PreparedDropout::new(input: &TensorStorage, rate: ScalarValue) -> Result<PreparedDropout, NumericKernelError>",
+            "[compiler-kernel-numeric] chelis_numeric_core::dtype_semantics::PreparedDropout::new(input: &TensorStorage, rate: ScalarValue) -> Result<PreparedDropout, NumericKernelError>",
             "[05-OP-37]",
         ),
         (
-            "[compiler-kernel-numeric] chelis_types::dtype_semantics::PreparedDropout::apply(&self, key: RandomKey) -> Result<TensorStorage, NumericKernelError>",
+            "[compiler-kernel-numeric] chelis_numeric_core::dtype_semantics::PreparedDropout::apply(&self, key: RandomKey) -> Result<TensorStorage, NumericKernelError>",
             "[05-OP-37]",
         ),
         (
-            "[compiler-kernel-numeric] chelis_types::dtype_semantics::PreparedUniformLike::new(prim: Prim, len: usize, low: ScalarValue, high: ScalarValue) -> Result<PreparedUniformLike, NumericKernelError>",
+            "[compiler-kernel-numeric] chelis_numeric_core::dtype_semantics::PreparedUniformLike::new(prim: Prim, len: usize, low: ScalarValue, high: ScalarValue) -> Result<PreparedUniformLike, NumericKernelError>",
             "[05-OP-8]",
         ),
         (
-            "[compiler-kernel-numeric] chelis_types::dtype_semantics::PreparedUniformLike::apply(&self, key: RandomKey) -> Result<TensorStorage, NumericKernelError>",
+            "[compiler-kernel-numeric] chelis_numeric_core::dtype_semantics::PreparedUniformLike::apply(&self, key: RandomKey) -> Result<TensorStorage, NumericKernelError>",
             "[05-OP-8]",
         ),
     ] {

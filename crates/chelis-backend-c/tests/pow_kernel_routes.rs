@@ -21,7 +21,7 @@ use std::process::Command;
 use chelis_backend_c::toolchain::{CodegenRequirements, strict_reference_toolchain};
 use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
 use chelis_ir::fuse::fuse;
-use chelis_types::types::Prim;
+use chelis_numeric_core::prim::Prim;
 use half::{bf16, f16};
 
 #[derive(Clone, Copy, Debug)]

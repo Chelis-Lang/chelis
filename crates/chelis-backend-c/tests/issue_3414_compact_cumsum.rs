@@ -4,7 +4,7 @@ use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
 use chelis_ir::eval::{TensorValue, eval_tensor};
 use chelis_ir::grad::grad_dag_checked;
 use chelis_ir::tier2_ordered::lower_cumsum;
-use chelis_types::types::Prim;
+use chelis_numeric_core::prim::Prim;
 use chelis_unord::UnordMap;
 use std::time::Instant;
 

@@ -10,7 +10,7 @@
 //! wrong precision.
 
 use chelis_ir::dag::RiscOp;
-use chelis_types::types::Prim;
+use chelis_numeric_core::prim::Prim;
 
 // ----------------------------------------------------------------
 // (d) accumulator-default resolution test
@@ -30,13 +30,15 @@ fn reduce_sum_default_accumulator_matches_spec_5_7_1_table() {
         (Prim::Int64, Prim::Int64),
     ];
     for (operand, expected) in cases {
-        let acc = RiscOp::default_reduce_sum_accumulator(*operand).unwrap_or_else(|err| {
-            panic!(
-                "operand `{}` must yield default accumulator `{}`, got err: {err}",
-                operand.name(),
-                expected.name()
-            )
-        });
+        let acc = (*operand)
+            .default_reduce_sum_accumulator()
+            .unwrap_or_else(|err| {
+                panic!(
+                    "operand `{}` must yield default accumulator `{}`, got err: {err}",
+                    operand.name(),
+                    expected.name()
+                )
+            });
         assert_eq!(
             acc,
             *expected,

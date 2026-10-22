@@ -4,8 +4,8 @@ use chelis_ir::dag::{ComparisonKind, Dag, ExtremaKind, ExtremaOperand, RiscOp, T
 use chelis_ir::eval::{TensorValue, eval_tensor};
 use chelis_ir::grad::{AdError, AdRejectionReason, grad_dag_checked};
 use chelis_ir::{tier2, verify};
-use chelis_types::dtype_semantics::{RawTensor, finalize_tensor};
-use chelis_types::types::Prim;
+use chelis_numeric_core::dtype_semantics::{RawTensor, finalize_tensor};
+use chelis_numeric_core::prim::Prim;
 
 fn scalar_f32() -> TensorType {
     TensorType::scalar_f32()

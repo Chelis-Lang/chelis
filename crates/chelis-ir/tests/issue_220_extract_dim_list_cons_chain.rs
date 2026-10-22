@@ -38,7 +38,7 @@ use chelis_unord::UnordMap;
 use chelis_deep::Expr;
 use chelis_ir::dag::{DimInfo, RiscOp, TensorType};
 use chelis_ir::lower::lower_subexpr_program;
-use chelis_types::types::Prim;
+use chelis_numeric_core::prim::Prim;
 
 /// Hand-built Deep: `reshape(x, Cons(cast(2, i64), Cons(cast(3, i64), Nil)))`.
 ///

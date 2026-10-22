@@ -15,8 +15,8 @@ use std::collections::BTreeMap;
 #[allow(deprecated)]
 use chelis_compiler_api::compiler::{PreparedEval, eval_selected, prepare_eval};
 use chelis_compiler_api::schema::{EvalRequest, EvalResult, ExecutionValue, SourceKind};
+use chelis_numeric_core::prim::Prim;
 use chelis_types::types::Lane;
-use chelis_types::types::Prim;
 
 #[path = "../../../tests/support/wire_values.rs"]
 mod wire_values;

@@ -272,7 +272,7 @@ class SerializeWithHelpers(unittest.TestCase):
                     self.PARENT + "::__SerializeWith", "__SerializeWith", "helper")}},
                 "ancestors": [definition(self.PARENT, "serialize", "parent")],
             },
-            "callee": {"crate": "chelis_types",
+            "callee": {"crate": "chelis_numeric_core",
                        "path": "::dtype_semantics::wire_codec::execution_storage::serialize"},
             "payloads": [],
         }
@@ -318,6 +318,70 @@ class SerializeWithHelpers(unittest.TestCase):
 
 
 class InvocationOwnership(unittest.TestCase):
+    def test_private_schema_owner_does_not_admit_a_private_payload(self):
+        from capacity_census_wire_invocation_owners import discharge_invocations
+
+        root, report = check_report_call()
+        codec, _, serialize_trait, _ = codec_specialization()
+        schema_trait = definition("::JsonSchema", 70, "schemars")
+        schema_method = definition(
+            "::schema::numeric::{impl#0}::json_schema", 71, item_name="json_schema"
+        )
+        schema_caller = {
+            "definition": schema_method,
+            "implementation": {
+                "trait": schema_trait,
+                "self_type": {"nominal": definition(
+                    "::schema::numeric::ScalarValueSchema", 72
+                )},
+            },
+            "ancestors": [root],
+        }
+        metadata = {
+            "caller": schema_caller,
+            "type": {"nominal": definition("::schema::Schema", 73, "schemars")},
+        }
+        raw = {
+            "crate": root,
+            "schema_trait": schema_trait,
+            "serialize_trait": serialize_trait,
+            "bodies": [
+                report["caller"]["definition"],
+                codec["caller"]["definition"],
+                schema_method,
+            ],
+            "calls": [report],
+            "codec_calls": [codec],
+            "schema_calls": [],
+            "dynamic_returns": [metadata],
+            "errors": [],
+        }
+        declarations = {
+            "chelis_compiler_api::schema::CheckResult": 0,
+            "chelis_compiler_api::schema::WireCheckResult": 0,
+            "chelis_compiler_api::schema::Envelope": 1,
+        }
+        private_owner = "chelis_numeric_core::dtype_semantics::ScalarValue"
+        graph_definitions = {*declarations, private_owner}
+        result = discharge_invocations(raw, declarations, {}, graph_definitions)
+        self.assertEqual(
+            {row["owner"] for row in result if row["section"] == "dynamic_returns"},
+            {"schema-metadata/" + private_owner},
+        )
+        with self.assertRaisesRegex(ValueError, "no exact codec graph owner"):
+            discharge_invocations(raw, declarations, {}, set(declarations))
+        for payload in (nominal(private_owner), primitive("f64")):
+            changed = copy.deepcopy(raw)
+            changed["calls"].append({
+                "caller": schema_caller,
+                "callee": definition("::to_value", 74, "serde_json"),
+                "payloads": [{"shape": payload}],
+                "serializers": [],
+                "local_callee": False,
+            })
+            with self.subTest(payload=payload), self.assertRaises(GraphError):
+                discharge_invocations(changed, declarations, {}, graph_definitions)
+
     def test_stack_grown_execution_value_codec_binds_to_its_compiled_parent(self):
         from capacity_census_wire_invocation_owners import execution_value_closure_owner
 

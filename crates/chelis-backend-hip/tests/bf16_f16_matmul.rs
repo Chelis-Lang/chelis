@@ -21,7 +21,7 @@
 
 mod support;
 use chelis_ir::dag::{Dag, DimExpr, DimInfo, RiscOp, TensorType};
-use chelis_types::types::Prim;
+use chelis_numeric_core::prim::Prim;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;

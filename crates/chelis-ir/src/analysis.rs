@@ -3,7 +3,7 @@
 use chelis_unord::UnordSet;
 use std::collections::VecDeque;
 
-use chelis_types::types::Prim;
+use chelis_numeric_core::prim::Prim;
 use serde::{Deserialize, Serialize};
 
 use crate::dag::{Dag, DimInfo, FusedInput, FusedStepOp, NodeId, RiscOp, TensorType};
@@ -252,7 +252,7 @@ fn summarize_formula_terms(terms: Vec<String>) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use chelis_types::types::Prim;
+    use chelis_numeric_core::prim::Prim;
 
     use super::*;
     use crate::dag::{Dag, DimInfo, FusedInput, FusedStep, FusedStepOp, RiscOp, TensorType};

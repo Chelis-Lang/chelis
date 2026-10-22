@@ -1,10 +1,11 @@
 //! Spec/04 §4.7: claim ownership is independent of extent-value readiness.
 use chelis_ir::axis_sources::{entry_extent_guards, local_dim_guard_sites};
 use chelis_ir::dag::{Dag, DimInfo, ExtentWitnessSite, RiscOp, RtAxis, RtDim, TensorType};
-use chelis_types::{ScalarValue, types::Prim};
+use chelis_numeric_core::dtype_semantics::ScalarValue;
+use chelis_numeric_core::prim::Prim;
 
 fn scalar(value: i64) -> ScalarValue {
-    chelis_types::scalar_from_i64("const", Prim::Int64, value).unwrap()
+    chelis_numeric_core::dtype_semantics::scalar_from_i64("const", Prim::Int64, value).unwrap()
 }
 
 fn graph(axis: i32) -> Dag {

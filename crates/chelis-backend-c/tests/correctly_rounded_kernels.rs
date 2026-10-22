@@ -25,7 +25,7 @@ use std::process::Command;
 use chelis_backend_c::toolchain::{CodegenRequirements, strict_reference_toolchain};
 use chelis_ir::dag::{Dag, DimInfo, NodeId, RiscOp, RtDim, TensorType};
 use chelis_ir::fuse::fuse;
-use chelis_types::types::Prim;
+use chelis_numeric_core::prim::Prim;
 
 /// The #2957 witnesses that are leaves of a C emission route: inputs where a
 /// libm, vForce, or constant-folded result was observed to differ from the

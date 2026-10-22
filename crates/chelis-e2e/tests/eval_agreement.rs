@@ -14,7 +14,7 @@
 //! `assert_close` path is gone. Eval values are rendered at the result
 //! dtype through `format_element`; generated C is rendered through the
 //! same Phase 2 helper used by shipped roots. The byte-equal-or-table-
-//! bounded decision then comes only from `chelis_types::agreement`.
+//! bounded decision then comes only from `chelis_numeric_core::agreement`.
 //!
 //! This file deliberately gains no i64-above-2^53 row: at this DAG level
 //! `RiscOp::Const { value: f64 }` cannot express it (chelis#684), so that
@@ -40,12 +40,12 @@ use std::process::Command;
 
 use chelis_ir::dag::{Dag, DimInfo, NodeId, RiscOp, TensorType};
 use chelis_ir::eval::eval_tensor;
-use chelis_types::agreement::{
+use chelis_numeric_core::agreement::{
     AgreementError, AgreementOp, AgreementOutcome, ArithmeticWidthStatus,
     compare_exact_observations, compare_rendered_elements,
 };
-use chelis_types::observation::{ElementRef, format_element};
-use chelis_types::types::Prim;
+use chelis_numeric_core::observation::{ElementRef, format_element};
+use chelis_numeric_core::prim::Prim;
 
 fn scalar_f32() -> TensorType {
     TensorType::scalar_f32()

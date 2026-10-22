@@ -394,7 +394,7 @@ def source_identity(root: Path) -> str:
             "Cargo.toml",
             "Cargo.lock",
             "rust-toolchain.toml",
-            "crates/chelis-types/examples/wire_codec_probe.rs",
+            "crates/chelis-numeric-core/examples/wire_codec_probe.rs",
             "spec/02-surf-syntax.md",
             "spec/03-deep-syntax.md",
             "spec/04-type-system.md",
@@ -423,12 +423,10 @@ from capacity_census_graph import (
     _serde,
 )
 
-_TYPES = "chelis_types::dtype_semantics::"
+_TYPES = "chelis_numeric_core::dtype_semantics::"
 _WIRE = _TYPES + "wire_codec::"
 _HEX = _WIRE + "HexBits"
-# spec/10 section 3.2's key digits `h` and the scalar key carrier. Neither is a
-# number: the digits are a private String, and the carrier's native payload is
-# the opaque `RandomKey`, so both add no numeric leaf.
+# Key digits carry no numeric leaf. The key carrier holds an opaque RandomKey.
 _KEY_HEX = _WIRE + "KeyHex"
 _KEY_BITS = _WIRE + "KeyBits"
 _MIRRORS = tuple(
@@ -439,7 +437,7 @@ _CARRIERS = {
     _TYPES + "ScalarValue": ("bits", "Bits", "ScalarWire"),
     _TYPES + "TensorStorage": ("buf", "Buf", "StorageWire"),
 }
-_CODEC_SOURCE = "crates/chelis-types/src/dtype_semantics/wire_codec.rs"
+_CODEC_SOURCE = "crates/chelis-numeric-core/src/dtype_semantics/wire_codec.rs"
 
 
 def _require(condition: bool, message: str):
@@ -522,6 +520,33 @@ class _CodecShapeGraph(RustdocGraph):
             "missing actual serde encoder or decoder",
         )
         return canonical(found)
+
+    def _codec_methods(self, crate, body, expected):
+        methods = {}
+        for impl_id in body.get("impls", []):
+            item = self._item(crate, impl_id)
+            implementation = item["inner"].get("impl", {})
+            if implementation.get("trait"):
+                continue
+            for method_id in implementation.get("items", []):
+                method = self._item(crate, method_id)
+                name = method.get("name")
+                if name not in expected:
+                    continue
+                _require(name not in methods, "duplicate custom codec method")
+                _require("function" in method.get("inner", {}), "invalid custom codec method")
+                _require(
+                    (item.get("span") or {}).get("filename") == _CODEC_SOURCE,
+                    "custom codec implementation source identity changed",
+                )
+                _require(
+                    (method.get("span") or {}).get("filename") == _CODEC_SOURCE,
+                    "custom codec method source identity changed",
+                )
+                _require(not _serde(method), "custom codec method gained serde options")
+                methods[name] = _CODEC_SOURCE
+        _require(set(methods) == set(expected), "missing actual custom codec method")
+        return canonical(methods)
 
     @staticmethod
     def _private(item, module):
@@ -626,8 +651,7 @@ class _CodecShapeGraph(RustdocGraph):
             return super()._definition(crate, item_id, identity)
         item = self._item(crate, item_id)
         if identity == _KEY_HEX:
-            # Transparent over a private String with a strict custom decoder,
-            # like HexBits but with no width parameter: the width is the key's.
+            # The key uses the same fixed-width hexadecimal codec as IEEE bits.
             body = item["inner"].get("struct")
             _require(
                 body is not None and not self._parameters(body),
@@ -649,8 +673,8 @@ class _CodecShapeGraph(RustdocGraph):
             _require(not _serde(field), "KeyHex payload gained serde options")
             ty = self._type(crate, field["inner"]["struct_field"], {})
             _require(
-                ty == ("atomic", "alloc::string::String"),
-                "KeyHex payload must be an exact String",
+                ty == ("reference", _HEX, (("const", "16"),)),
+                "KeyHex payload must be exact fixed-width hexadecimal",
             )
             codec = self._serde_implementations(crate, body, {"Deserialize"})
             self.definitions[identity] = Definition(
@@ -658,7 +682,7 @@ class _CodecShapeGraph(RustdocGraph):
                 "struct",
                 (),
                 (("transparent", True),),
-                (("private-string",),),
+                (("private-hex", 16),),
                 (Edge(identity + ".$0", ty, ()),),
                 "custom-shape:" + codec,
             )
@@ -713,11 +737,7 @@ class _CodecShapeGraph(RustdocGraph):
                 "HexBits const contract changed",
             )
             self._private(item, "::dtype_semantics::wire_codec")
-            _require(
-                [a for a in _attributes(item) if a.startswith("#[serde")]
-                == ["#[serde(transparent)]"],
-                "HexBits transparency changed",
-            )
+            _require(not _serde(item), "HexBits gained serde options")
             ids = body["kind"].get("tuple")
             _require(
                 isinstance(ids, list) and len(ids) == 1,
@@ -726,19 +746,19 @@ class _CodecShapeGraph(RustdocGraph):
             field = self._item(crate, ids[0])
             self._private(field, "::dtype_semantics::wire_codec")
             _require(not _serde(field), "HexBits payload gained serde options")
-            ty = self._type(crate, field["inner"]["struct_field"], {})
+            ty = self._type(crate, field["inner"]["struct_field"], {"DIGITS": "usize"})
             _require(
-                ty == ("atomic", "alloc::string::String"),
-                "HexBits payload must be an exact String",
+                ty == ("array", ("const_generic", "DIGITS"), ("primitive", "u8")),
+                "HexBits payload must be exact fixed stack bytes",
             )
-            codec = self._serde_implementations(crate, body, {"Deserialize"})
+            codec = self._serde_implementations(crate, body, {"Serialize", "Deserialize"})
             self.definitions[identity] = Definition(
                 identity,
                 "struct",
                 ("DIGITS",),
-                (("transparent", True),),
-                (("private-string",),),
-                (Edge(identity + ".$0", ty, ()),),
+                (),
+                (("private-stack-bytes",),),
+                (Edge(identity + ".$0", ("fixed-hex-bytes", ty), ()),),
                 "custom-shape:" + codec,
                 ("usize",),
             )
@@ -806,12 +826,20 @@ class _CodecShapeGraph(RustdocGraph):
         )
         binary = identity.rsplit("::", 1)[-1].startswith("Binary")
         storage = identity.endswith("StorageWire")
+        manual_scalar = identity == _WIRE + "ScalarWire"
         _require(
             definition.serde
             == (() if binary else (("deny_unknown_fields", True), ("tag", "dtype"))),
             "wire dtype discriminator contract changed",
         )
-        codec = self._serde_implementations(crate, item["inner"]["enum"], set())
+        if manual_scalar:
+            decoder = self._serde_implementations(
+                crate, item["inner"]["enum"], set(), required=frozenset({"Deserialize"})
+            )
+            methods = self._codec_methods(crate, item["inner"]["enum"], {"encode", "decode"})
+            codec = canonical((decoder, methods))
+        else:
+            codec = self._serde_implementations(crate, item["inner"]["enum"], set())
         edges = []
         order = []
         for variant, attrs, layout in definition.layout:
@@ -907,10 +935,13 @@ class _CodecShapeGraph(RustdocGraph):
         )
         self.orders[identity] = tuple(order)
         self.definitions[identity] = replace(
-            definition, edges=tuple(edges), codec="derived-shape:" + codec
+            definition, edges=tuple(edges),
+            codec=("manual-shape:" if manual_scalar else "derived-shape:") + codec,
         )
 
     def _evaluate(self, expr, origin, summaries):
+        if expr[0] == "fixed-hex-bytes":
+            return set()
         if expr[0] == "encoded-numeric":
             # The enclosing exact dtype/width relationship is checked above.
             # HexBits by itself has no dtype and receives no numeric authority.
@@ -979,7 +1010,7 @@ class VerifiedCodec:
             d
             for d in documents
             if d.get("index", {}).get(str(d.get("root")), {}).get("name")
-            == "chelis_types"
+            == "chelis_numeric_core"
         ]
         _require(
             len(matching) == 1 and canonical(matching[0]) == self.document,
@@ -1067,7 +1098,7 @@ def _verify_canonical_codec(
             "cargo",
             "clean",
             "-p",
-            "chelis-types",
+            "chelis-numeric-core",
             "-p",
             "chelis-vocab",
             *extra_packages,
@@ -1079,8 +1110,12 @@ def _verify_canonical_codec(
             "build",
             "--locked",
             "-p",
-            "chelis-types",
+            "chelis-numeric-core",
             *extra_packages,
+            "--features",
+            "chelis-numeric-core/serde",
+            "--features",
+            "chelis-numeric-core/alloc",
             *(["--examples"] if api_profile else ["--example", "wire_codec_probe"]),
         ],
         [
@@ -1088,7 +1123,9 @@ def _verify_canonical_codec(
             "rustdoc",
             "--locked",
             "-p",
-            "chelis-types",
+            "chelis-numeric-core",
+            "--features",
+            "alloc,serde",
             "--lib",
             "--",
             "--output-format",
@@ -1111,7 +1148,7 @@ def _verify_canonical_codec(
             result.returncode == 0,
             "codec artifact build failed: " + result.stderr[-8000:],
         )
-    document = json.loads((target / "doc/chelis_types.json").read_text())
+    document = json.loads((target / "doc/chelis_numeric_core.json").read_text())
     binary = target / "debug/examples/wire_codec_probe"
     binary_hash = hashlib.sha256(binary.read_bytes()).hexdigest()
 
@@ -1166,7 +1203,7 @@ def _verify_canonical_codec(
         graph_identity=discovered.identity,
         outcomes=outcomes,
         binary_sha256=binary_hash,
-        profile="compiler-api" if api_profile else "types-default",
+        profile="compiler-api" if api_profile else "numeric-core",
     ).items():
         object.__setattr__(receipt, key, value)
     return receipt

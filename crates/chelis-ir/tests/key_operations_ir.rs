@@ -18,9 +18,11 @@ use chelis_ir::grad::grad_dag_checked;
 use chelis_ir::optimize::{common_subexpr_eliminate, constant_fold, dead_code_eliminate};
 use chelis_ir::verify::verify;
 use chelis_ir::vmap::vectorize_axis0;
-use chelis_types::dtype_semantics::{RawTensor, StorageView, TensorStorage, finalize_tensor};
-use chelis_types::types::Prim;
-use chelis_types::{RandomKey, ScalarValue, scalar_from_i64};
+use chelis_numeric_core::dtype_semantics::{RandomKey, ScalarValue, scalar_from_i64};
+use chelis_numeric_core::dtype_semantics::{
+    RawTensor, StorageView, TensorStorage, finalize_tensor,
+};
+use chelis_numeric_core::prim::Prim;
 use chelis_unord::UnordMap;
 
 // ---- key_ref_ext.py: k = key(-3); (L, R) = split(k, k_decl); F = fold_in(L, -5);

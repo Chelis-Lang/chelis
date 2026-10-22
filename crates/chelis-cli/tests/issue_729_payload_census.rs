@@ -1,7 +1,7 @@
 //! The no-sixth-layer payload census (chelis#729 rework; chelis#856).
 //!
 //! The rework sealed the IR constant payloads (`RiscOp::Const` /
-//! `ConstTensor` carry `chelis_types::ScalarValue` / `TensorStorage`,
+//! `ConstTensor` carry `chelis_numeric_core::dtype_semantics::ScalarValue` / `TensorStorage`,
 //! the FIFTH storage layer of dtype_semantics.md section C3). This
 //! census makes the closure mechanical: it sweeps the two declaration
 //! surfaces that can carry numeric VALUES into execution - the IR op
@@ -96,15 +96,15 @@ fn risc_op_has_no_unsealed_numeric_payload_beyond_the_census() {
     // The fifth layer itself: the constant payloads are the SEALED
     // module types, constructed only through dtype_semantics.
     assert!(
-        block.contains("value: chelis_types::ScalarValue"),
+        block.contains("value: chelis_numeric_core::dtype_semantics::ScalarValue"),
         "RiscOp::Const must carry the sealed ScalarValue payload (chelis#856)"
     );
     assert!(
-        block.contains("data: chelis_types::TensorStorage"),
+        block.contains("data: chelis_numeric_core::dtype_semantics::TensorStorage"),
         "RiscOp::ConstTensor must carry the sealed TensorStorage payload (chelis#856)"
     );
     assert!(
-        block.contains("fill: chelis_types::ScalarValue"),
+        block.contains("fill: chelis_numeric_core::dtype_semantics::ScalarValue"),
         "RiscOp::Pad must carry the sealed ScalarValue payload (chelis#878)"
     );
 }
@@ -124,11 +124,11 @@ fn wire_risc_op_mirror_has_no_unsealed_numeric_payload_beyond_the_census() {
     );
 
     assert!(
-        block.contains("value: chelis_types::ScalarValue"),
+        block.contains("value: chelis_numeric_core::dtype_semantics::ScalarValue"),
         "WireRiscOp::Const must carry the sealed dtype-tagged payload (wire v4)"
     );
     assert!(
-        block.contains("data: chelis_types::TensorStorage"),
+        block.contains("data: chelis_numeric_core::dtype_semantics::TensorStorage"),
         "WireRiscOp::ConstTensor must carry the sealed dtype-tagged payload (wire v4)"
     );
     assert!(

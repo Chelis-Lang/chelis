@@ -4,7 +4,7 @@
 //! [`format_shortest`] is the internal float renderer used by the exact
 //! tagged scalar-to-string boundary. Its output grammar is the frozen
 //! section C1.3 / spec/05 section 8.1 contract, byte-identical to the
-//! reference renderer `chelis_types::observation::format_element`:
+//! reference renderer `chelis_numeric_core::observation::format_element`:
 //!
 //! * shortest round-trip digits AT THE VALUE'S OWN STORAGE WIDTH (`dtype`
 //!   is the `RuntimeDType` id of a float dtype; `v` carries the exact f64
@@ -77,7 +77,7 @@ pub(crate) fn format_shortest(image: f64, width: RuntimeDType) -> String {
 /// normative grammar. `image` is the exact f64 widening of the stored
 /// value, `stored_bits` its bit pattern (widened to u64), and `narrow`
 /// the parse-back narrowing (f64 -> half bits) for the width. Mirrors
-/// `chelis_types::observation::format_half`.
+/// `chelis_numeric_core::observation::format_half`.
 fn format_half(image: f64, stored_bits: u64, narrow: &dyn Fn(f64) -> u64, width: &str) -> String {
     if image.is_nan() {
         // NaN round-trips at the class level: exit text carries no payload
@@ -120,7 +120,7 @@ const HALF_MAX_DIGITS: u32 = 5;
 /// shortest in digits. Among same-length hits the numerically closest to
 /// `abs` wins; an exact tie prefers the even mantissa (deterministic,
 /// spec/05 section 8.1). Mirrors
-/// `chelis_types::observation::shortest_digits` (whose comparison through
+/// `chelis_numeric_core::observation::shortest_digits` (whose comparison through
 /// parsed f64 values is exact here: a five-digit decimal's f64 image is
 /// close enough that distinct candidates never collapse).
 fn shortest_digits(abs: f64, round_trips: &dyn Fn(&str) -> bool, width: &str) -> (String, i32) {
@@ -199,7 +199,7 @@ fn split_sci(sci: &str) -> (String, i32) {
 /// against the normative thresholds: decimal iff the rendered value `v`
 /// satisfies `1e-4 <= |v| < 1e16`, i.e. iff `-4 <= sci_exp <= 15` (zero is
 /// handled earlier and renders decimal). Mirrors
-/// `chelis_types::observation::assemble`.
+/// `chelis_numeric_core::observation::assemble`.
 fn assemble(neg: bool, digits: &str, sci_exp: i32) -> String {
     let sign = if neg { "-" } else { "" };
     let decimal_form = (-4..=15).contains(&sci_exp);

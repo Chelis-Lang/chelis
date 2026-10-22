@@ -24,11 +24,12 @@
 //!   D-STARVE "exact float equality starves by design").
 
 use crate::solver::{ArithOp, BoolOp, CmpOp, SmtExpr};
-use chelis_reef::EmbeddedRuntime;
-use chelis_types::{
+use chelis_numeric_core::dtype_semantics::{
     CompareOp, FloatBinOp, FloatUnOp, IntBinOp, IntUnOp, ScalarValue, cast_scalar, compare_scalars,
-    float_binop, float_unop, int_binop, int_unop, scalar_from_f64, scalar_from_i64, types::Prim,
+    float_binop, float_unop, int_binop, int_unop, scalar_from_f64, scalar_from_i64,
 };
+use chelis_numeric_core::prim::Prim;
+use chelis_reef::EmbeddedRuntime;
 use chelis_unord::UnordMap;
 
 /// Exact, dtype-carrying environment for concrete prover evaluation.

@@ -39,7 +39,7 @@
 
 mod support;
 use chelis_ir::dag::{Dag, DimExpr, DimInfo, RiscOp, TensorType};
-use chelis_types::types::Prim;
+use chelis_numeric_core::prim::Prim;
 use support::codegen_hip;
 
 fn t(prim: Prim, dims: Vec<usize>) -> TensorType {

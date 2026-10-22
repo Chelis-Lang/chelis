@@ -3,7 +3,7 @@
 mod support;
 
 use chelis_ir::dag::{ComparisonKind, Dag, DimInfo, LogicalKind, RiscOp, TensorType};
-use chelis_types::types::Prim;
+use chelis_numeric_core::prim::Prim;
 use chelis_types::unsupported::{RejectionAuthorityKind, Stage};
 use support::try_codegen_metal;
 

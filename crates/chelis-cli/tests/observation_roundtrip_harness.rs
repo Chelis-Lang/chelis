@@ -1848,7 +1848,7 @@ fn wire_execution_value_rendering_round_trips() {
         match back {
             ExecutionValue::Scalar { value } => assert_eq!(
                 match value.get().element_ref() {
-                    chelis_types::ElementRef::F64(value) => value.to_bits(),
+                    chelis_numeric_core::observation::ElementRef::F64(value) => value.to_bits(),
                     other => panic!("expected f64, got {other:?}"),
                 },
                 v.to_bits(),
@@ -1877,14 +1877,14 @@ fn wire_execution_value_rendering_round_trips() {
 
     for v in [i64::MAX, -i64::MAX, 9007199254740993_i64, 0] {
         let json = serde_json::to_string(&wire_values::scalar_integer(
-            chelis_types::types::Prim::Int64,
+            chelis_numeric_core::prim::Prim::Int64,
             v,
         ))
         .expect("serialize");
         let back: ExecutionValue = serde_json::from_str(&json).expect("parse");
         match back {
             ExecutionValue::Scalar { value } => {
-                assert_eq!(value.get().prim(), chelis_types::types::Prim::Int64);
+                assert_eq!(value.get().prim(), chelis_numeric_core::prim::Prim::Int64);
                 assert_eq!(
                     value.get().as_i64_exact().unwrap(),
                     v,

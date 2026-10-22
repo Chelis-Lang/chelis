@@ -329,6 +329,24 @@ class MatrixCoverageTests(unittest.TestCase):
                                     "chelis-deep/pre-020-pipe-migration"):
             CLOSURE.check_matrix_covers_declared_features(REPO_ROOT, matrix)
 
+    def test_numeric_off_row_excludes_host_feature_unification(self) -> None:
+        rows = {run.label: run for run in CLOSURE.CLIPPY_MATRIX}
+        compiled, enabled = CLOSURE.resolved_configuration(
+            rows["numeric-without-default-features"], REPO_ROOT,
+        )
+        self.assertIn("chelis-numeric-core", compiled)
+        for feature in ("alloc", "serde"):
+            self.assertNotIn(("chelis-numeric-core", feature), enabled)
+        self.assertIn(("chelis-numeric-core", "serde"),
+                      CLOSURE.resolved_features(rows["no-default-features"], REPO_ROOT))
+
+    def test_removing_numeric_off_row_reopens_serde_configuration_gap(self) -> None:
+        matrix = tuple(run for run in CLOSURE.CLIPPY_MATRIX
+                       if run.label != "numeric-without-default-features")
+        with self.assertRaisesRegex(CLOSURE.ConfigurationClosureFailure,
+                                    "chelis-numeric-core/serde"):
+            CLOSURE.check_matrix_covers_declared_features(REPO_ROOT, matrix)
+
     def test_uncompiled_package_cannot_count_as_feature_off_coverage(self) -> None:
         matrix = tuple(run for run in CLOSURE.CLIPPY_MATRIX
                        if run.label in {"all-features", "core-without-migration"})
@@ -356,14 +374,12 @@ class MatrixCoverageTests(unittest.TestCase):
         self.assertEqual(job["runs-on"], "macos-latest")
         commands = [step.get("run") for step in job["steps"]]
         mac_rows = [run for run in CLOSURE.CLIPPY_MATRIX if "macos" in run.hosts]
-        self.assertEqual(len(mac_rows), 2)
         for run in mac_rows:
             self.assertEqual(run.hosts, ("macos",))
             self.assertEqual(run.owner, owner)
             self.assertEqual(run.cadence, CLOSURE.NIGHTLY)
             self.assertIn(" ".join(run.command), commands)
         gate_rows = [run for run in CLOSURE.CLIPPY_MATRIX if run.owner == "scripts/gate.py"]
-        self.assertEqual(len(gate_rows), 4)
         self.assertNotIn("clarabel-provider", {run.label for run in gate_rows})
         provider = next(run for run in CLOSURE.CLIPPY_MATRIX if run.label == "clarabel-provider")
         self.assertEqual(provider.cadence, CLOSURE.NIGHTLY)

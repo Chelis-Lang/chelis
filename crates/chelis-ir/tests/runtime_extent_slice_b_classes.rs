@@ -41,7 +41,7 @@ use chelis_ir::axis_sources::{
     AxisSource, DimClaim, GuardPlacement, RuntimeDimClass, derive_runtime_dim_classes,
 };
 use chelis_ir::dag::{Dag, DimInfo, NodeId, RiscOp, RtAxis, RtDim, TensorType};
-use chelis_types::types::Prim;
+use chelis_numeric_core::prim::Prim;
 
 fn ty(dims: Vec<DimInfo>, precision: Prim) -> TensorType {
     TensorType { dims, precision }

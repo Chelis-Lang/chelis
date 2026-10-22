@@ -28,6 +28,7 @@ use std::sync::Mutex;
 use serde::{Deserialize, Serialize};
 
 use crate::types::*;
+use chelis_numeric_core::prim::Prim;
 
 // Counts the type nodes `Subst::apply` visits, for the chelis#2622 scaling
 // oracle: checking a nested program applies the substitution to each node's
@@ -678,7 +679,7 @@ pub(crate) enum DeferredOperandGate {
     /// gives `&settled` ([`crate::infer::expr::settled_borrow_type`]), as the
     /// eager cast would see it.
     Cast {
-        target: crate::types::Prim,
+        target: chelis_numeric_core::prim::Prim,
         mode: chelis_deep::CastMode,
         borrowed: bool,
         result: Box<Type>,

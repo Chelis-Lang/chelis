@@ -17,8 +17,8 @@
 #[path = "common/mod.rs"]
 mod common;
 
-use chelis_types::observation::{ElementRef, format_element};
-use chelis_types::types::Prim;
+use chelis_numeric_core::observation::{ElementRef, format_element};
+use chelis_numeric_core::prim::Prim;
 use common::{
     DOMAIN_PRINT_TRUNCATION_SLACK, assert_elements_in_domain, element_domain_violation,
     printed_value_tokens,

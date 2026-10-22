@@ -9,12 +9,16 @@
 //! rotation (29, 41) or a derive index (0, 1, 2) in the kernels fails
 //! both.
 
-use chelis_types::dtype_semantics::{
+#![cfg(feature = "alloc")]
+
+use chelis_numeric_core::dtype_semantics::{
     KeyHalf, PreparedDropout, PreparedUniformLike, RandomKey, StorageView, TensorStorage,
     fold_in_storage, key_from_seed_storage, split_key_storage, split_keys_storage,
 };
-use chelis_types::types::Prim;
-use chelis_types::{ScalarValue, finalize_tensor, scalar_from_f64, scalar_from_i64};
+use chelis_numeric_core::dtype_semantics::{
+    ScalarValue, finalize_tensor, scalar_from_f64, scalar_from_i64,
+};
+use chelis_numeric_core::prim::Prim;
 
 /// spec/05 [05-RNG-1] and [05-RNG-2], transcribed from the chapter text.
 mod reference {
@@ -198,7 +202,7 @@ fn storage_kernels_apply_the_scalar_derivations_element_by_element() {
     let seeds = finalize_tensor(
         "test",
         Prim::Int64,
-        chelis_types::RawTensor::Int(vec![7, -3, 0]),
+        chelis_numeric_core::dtype_semantics::RawTensor::Int(vec![7, -3, 0]),
     )
     .unwrap();
     let keys = key_from_seed_storage(&seeds).unwrap();
@@ -213,7 +217,7 @@ fn storage_kernels_apply_the_scalar_derivations_element_by_element() {
     let ns = finalize_tensor(
         "test",
         Prim::Int64,
-        chelis_types::RawTensor::Int(vec![-5, 9, i64::MIN]),
+        chelis_numeric_core::dtype_semantics::RawTensor::Int(vec![-5, 9, i64::MIN]),
     )
     .unwrap();
     let folded = fold_in_storage(&keys, &ns).unwrap();
@@ -240,7 +244,12 @@ fn key_kernels_reject_non_key_and_non_i64_operands() {
     assert!(RandomKey::from_seed(i32_scalar).is_err());
     assert!(RandomKey::from_seed(f32_scalar).is_err());
     assert!(key(1).fold_in(i32_scalar).is_err());
-    let ints = finalize_tensor("test", Prim::Int64, chelis_types::RawTensor::Int(vec![1])).unwrap();
+    let ints = finalize_tensor(
+        "test",
+        Prim::Int64,
+        chelis_numeric_core::dtype_semantics::RawTensor::Int(vec![1]),
+    )
+    .unwrap();
     assert!(split_key_storage(&ints, KeyHalf::Left).is_err());
     assert!(split_keys_storage(&ints, 2).is_err());
     assert!(fold_in_storage(&ints, &ints).is_err());
@@ -248,7 +257,7 @@ fn key_kernels_reject_non_key_and_non_i64_operands() {
     let two = finalize_tensor(
         "test",
         Prim::Int64,
-        chelis_types::RawTensor::Int(vec![1, 2]),
+        chelis_numeric_core::dtype_semantics::RawTensor::Int(vec![1, 2]),
     )
     .unwrap();
     assert!(fold_in_storage(&keys, &two).is_err(), "no broadcasting");
@@ -284,7 +293,7 @@ fn each_split_rows_scalar_draw_is_the_reference_draw() {
     let input = finalize_tensor(
         "test",
         Prim::F32,
-        chelis_types::RawTensor::Float(vec![2.0, 3.0, 4.0, 1.0]),
+        chelis_numeric_core::dtype_semantics::RawTensor::Float(vec![2.0, 3.0, 4.0, 1.0]),
     )
     .unwrap();
     let rate = scalar_from_f64("test", Prim::F32, 0.5).unwrap();
@@ -314,9 +323,15 @@ fn each_split_rows_scalar_draw_is_the_reference_draw() {
 }
 
 #[test]
+#[cfg(feature = "serde")]
 fn key_storage_has_no_literal_carrier_or_numeric_reading() {
     let keys = key_from_seed_storage(
-        &finalize_tensor("test", Prim::Int64, chelis_types::RawTensor::Int(vec![1])).unwrap(),
+        &finalize_tensor(
+            "test",
+            Prim::Int64,
+            chelis_numeric_core::dtype_semantics::RawTensor::Int(vec![1]),
+        )
+        .unwrap(),
     )
     .unwrap();
     assert!(serde_json::to_string(&keys).is_err());

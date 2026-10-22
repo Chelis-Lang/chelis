@@ -3,7 +3,7 @@
 //! generated-program lifetime mutations; they are not hardware acceptance.
 mod support;
 use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
-use chelis_types::types::Prim;
+use chelis_numeric_core::prim::Prim;
 
 #[test]
 fn device_entry_borrows_opaque_inputs_and_clones_escaping_results_at_dynamic_rank() {

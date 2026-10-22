@@ -7,7 +7,7 @@ use chelis_ir::host::{
     HostTensorHelper, HostTensorInput,
 };
 use chelis_ir::{ConcreteHostType as Ty, Dag, RiscOp, TensorType};
-use chelis_types::types::Prim;
+use chelis_numeric_core::prim::Prim;
 use std::{fs, process::Command};
 
 fn identity_result(precision: Prim, result: Ty, dims: Vec<chelis_ir::DimInfo>) -> Program {

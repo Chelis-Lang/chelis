@@ -7,7 +7,7 @@ use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
 use chelis_ir::host::{
     HostTensorInput, SparseSummaryAttempt, try_summarize_sparse_helper_for_test,
 };
-use chelis_types::types::Prim;
+use chelis_numeric_core::prim::Prim;
 
 fn mat(prim: Prim, r: usize, c: usize) -> TensorType {
     TensorType {

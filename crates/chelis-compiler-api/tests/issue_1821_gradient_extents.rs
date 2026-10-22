@@ -382,7 +382,7 @@ fn subexpression_context_does_not_replace_an_authored_binder_with_inferred_spell
     use chelis_ir::dag::{DimInfo, TensorType};
     use chelis_ir::eval::{TensorValue, eval_tensor_roots_with_strict};
     use chelis_ir::lower::SubexprLoweringContext;
-    use chelis_types::types::Prim;
+    use chelis_numeric_core::prim::Prim;
     use chelis_unord::UnordMap;
     let parse = |source: &str| {
         chelis_deep::parser::parse_str(source, &chelis_syntax_host::NativeStack)

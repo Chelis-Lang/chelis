@@ -3,7 +3,8 @@ use chelis_compiler_api::schema::{
     WIRE_DAG_SCHEMA_VERSION, WireDag, WireDagDecodeError, WireDagNode, WireDagSchemaError,
     WireDimInfo, WireRiscOp, WireTensorType,
 };
-use chelis_types::{scalar_from_i64, types::Prim};
+use chelis_numeric_core::dtype_semantics::scalar_from_i64;
+use chelis_numeric_core::prim::Prim;
 
 fn bool_input() -> WireDagNode {
     WireDagNode {

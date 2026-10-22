@@ -25,7 +25,7 @@ use chelis_ir::ownership::{
     HostSiteId, HostSiteKind, VerifiedHostAction, VerifiedHostEmission, VerifiedHostFunctionView,
     VerifiedHostSiteActionKind, VerifiedHostTensorHelperView,
 };
-use chelis_types::types::Prim;
+use chelis_numeric_core::prim::Prim;
 use chelis_types::unsupported::{RejectionAuthority, Stage, Unsupported, UnsupportedKind};
 use chelis_unord::UnordSet;
 

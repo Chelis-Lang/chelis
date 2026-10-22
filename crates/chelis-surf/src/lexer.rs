@@ -546,9 +546,11 @@ fn classify_ident(text: &str) -> TokenKind {
         "copy" => TokenKind::Copy,
         "tensor" => TokenKind::Tensor,
         "cast" => TokenKind::Cast,
-        "cast_trunc" => TokenKind::NamedCast(chelis_deep::NamedCastMode::Trunc),
-        "cast_saturate" => TokenKind::NamedCast(chelis_deep::NamedCastMode::Saturate),
-        "cast_wrap" => TokenKind::NamedCast(chelis_deep::NamedCastMode::Wrap),
+        "cast_trunc" => TokenKind::NamedCast(chelis_numeric_core::named_cast::NamedCastMode::Trunc),
+        "cast_saturate" => {
+            TokenKind::NamedCast(chelis_numeric_core::named_cast::NamedCastMode::Saturate)
+        }
+        "cast_wrap" => TokenKind::NamedCast(chelis_numeric_core::named_cast::NamedCastMode::Wrap),
         "export" => TokenKind::Export,
         "par" => TokenKind::Par,
         "do" => TokenKind::Do,
@@ -953,9 +955,9 @@ mod tests {
                 TokenKind::Copy,
                 TokenKind::Tensor,
                 TokenKind::Cast,
-                TokenKind::NamedCast(chelis_deep::NamedCastMode::Trunc),
-                TokenKind::NamedCast(chelis_deep::NamedCastMode::Saturate),
-                TokenKind::NamedCast(chelis_deep::NamedCastMode::Wrap),
+                TokenKind::NamedCast(chelis_numeric_core::named_cast::NamedCastMode::Trunc),
+                TokenKind::NamedCast(chelis_numeric_core::named_cast::NamedCastMode::Saturate),
+                TokenKind::NamedCast(chelis_numeric_core::named_cast::NamedCastMode::Wrap),
                 TokenKind::Export,
                 TokenKind::Par,
                 TokenKind::Do,

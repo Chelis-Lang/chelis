@@ -20,6 +20,7 @@ fn is_ambient_flag_variable(key: &str) -> bool {
 fn main() {
     println!("cargo:rerun-if-changed=csrc/crmath_amalgamation.c");
     println!("cargo:rerun-if-changed=csrc/crmath_ffi.c");
+    println!("cargo:rerun-if-changed=csrc/freestanding");
     for key in AMBIENT_FLAG_VARIABLES {
         println!("cargo:rerun-if-env-changed={key}");
     }
@@ -34,7 +35,16 @@ fn main() {
         unsafe { std::env::remove_var(&key) };
     }
 
-    cc::Build::new()
+    let mut build = cc::Build::new();
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("none") {
+        build
+            .compiler("clang")
+            .archiver("llvm-ar")
+            .include("csrc/freestanding")
+            .define("CHELIS_CRMATH_FREESTANDING", None)
+            .flag("-ffreestanding");
+    }
+    build
         .file("csrc/crmath_ffi.c")
         .include("csrc")
         .flag("-std=c11")

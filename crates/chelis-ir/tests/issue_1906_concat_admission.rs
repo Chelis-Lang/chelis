@@ -164,7 +164,7 @@ fn checked_matmul_producer_selects_host_for_runtime_concat_geometry() {
 #[test]
 fn forced_dynamic_concat_rejects_instead_of_fabricating_a_load() {
     use chelis_ir::dag::{DimInfo, TensorType};
-    use chelis_types::types::Prim;
+    use chelis_numeric_core::prim::Prim;
     use chelis_unord::UnordMap;
     let expr = chelis_deep::parser::parse_str("(app {} (var {} concat) (app {} (var {} Cons) (var {} x) (app {} (var {} Cons) (var {} x) (var {} Nil))) (lit {} 1))", &chelis_syntax_host::NativeStack).unwrap().remove(0);
     let scope = UnordMap::from([(

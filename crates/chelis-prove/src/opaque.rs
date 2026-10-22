@@ -19,8 +19,9 @@ use chelis_deep::{DeepTag, ExprCarrier};
 use chelis_unord::{UnordMap, UnordSet};
 
 use chelis_deep::ast::{Atom, Expr};
+use chelis_numeric_core::dtype_semantics::{ScalarValue, scalar_from_f64, scalar_from_i64};
+use chelis_numeric_core::prim::Prim;
 use chelis_pred::PredAmenability;
-use chelis_types::{ScalarValue, scalar_from_f64, scalar_from_i64, types::Prim};
 
 use crate::solver::{ArithOp, BoolOp, CmpOp, SmtExpr, SmtSort};
 
@@ -31,7 +32,7 @@ pub const TIER_B_SCALAR_CAP: usize = 64;
 
 /// Whether a primitive type NAME is one of the signed integer widths (F3 /
 /// review-5). This defers to the type system's own integer recognizer
-/// ([`chelis_types::types::Prim::is_integer`]) so the int-width set has ONE
+/// ([`chelis_numeric_core::prim::Prim::is_integer`]) so the int-width set has ONE
 /// definition for the whole workspace: a name is an int width iff it parses
 /// to a `Prim` the type system classifies as integer. Every prove-layer site
 /// that decides "is this prim an integer" / "what SMT sort" / "how to sample
@@ -39,7 +40,7 @@ pub const TIER_B_SCALAR_CAP: usize = 64;
 /// [`int_sample_bounds`]), so a new integer width added to the type system
 /// cannot silently diverge across the prove paths.
 pub fn is_int_width(prim: &str) -> bool {
-    chelis_types::types::Prim::parse_name(prim).is_some_and(|p| p.is_integer())
+    chelis_numeric_core::prim::Prim::parse_name(prim).is_some_and(|p| p.is_integer())
 }
 
 /// The SMT sort a scalar primitive type lowers to (F3 single source). Every
@@ -70,7 +71,7 @@ pub fn int_sample_bounds(prim: &str) -> Option<(i64, i64)> {
     // `Prim::integer_fuzz_bounds` (the per-width representable range clamped
     // to the [-1000, 1000] convenience window); this is a thin name-keyed
     // wrapper the prove paths call.
-    chelis_types::types::Prim::parse_name(prim)?.integer_fuzz_bounds()
+    chelis_numeric_core::prim::Prim::parse_name(prim)?.integer_fuzz_bounds()
 }
 
 /// A field of an opaque type's single record variant, in the V1 value
@@ -515,7 +516,7 @@ fn record_field_type(
 pub type ConstEnv = chelis_unord::UnordMap<String, f64>;
 
 pub(crate) fn exact_integer_constant_as_f64(integer: i64) -> Option<f64> {
-    chelis_types::dtype_semantics::integer_is_exactly_representable(integer, Prim::F64)
+    chelis_numeric_core::dtype_semantics::integer_is_exactly_representable(integer, Prim::F64)
         .then_some(integer as f64)
 }
 

@@ -18,7 +18,7 @@ use chelis_ir::host::{
     ConcreteHostParam as HostParam, ConcreteHostProgram as HostProgram, HostFunctionOrigin,
     HostTensorHelper, HostTensorInput,
 };
-use chelis_types::types::Prim;
+use chelis_numeric_core::prim::Prim;
 use support::emit_host_program;
 
 mod common;

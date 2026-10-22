@@ -2243,7 +2243,7 @@ fn a_tensor_cast_to_a_key_is_rejected() {
     let source = Type::Tensor(vec![Dim::Lit(3)], TensorPrec::Concrete(Prim::F32));
     for mode in [
         chelis_deep::CastMode::Checked,
-        chelis_deep::CastMode::Named(chelis_deep::NamedCastMode::Trunc),
+        chelis_deep::CastMode::Named(chelis_numeric_core::named_cast::NamedCastMode::Trunc),
     ] {
         let error = crate::infer::expr_record::cast_result_from_settled_source(
             source.clone(),

@@ -37,7 +37,7 @@
 #![allow(clippy::uninlined_format_args)]
 
 use assert_cmd::Command;
-use chelis_types::agreement::compare_exact_observations;
+use chelis_numeric_core::agreement::compare_exact_observations;
 use serde_json::Value;
 use tempfile::tempdir;
 

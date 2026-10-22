@@ -495,8 +495,8 @@ _TENSOR = _SCHEMA + "TensorValue"
 _TENSOR_WIRE = _SCHEMA + "execution::TensorWire"
 # spec/10 section 3.2's execution storage grammar: the storage mirrors plus the
 # key storage object. Only the tensor execution wire's `data` field uses it.
-_EXECUTION_STORAGE = "chelis_types::dtype_semantics::execution_storage"
-_EXECUTION_STORAGE_MODULE = ("chelis_types", "dtype_semantics", "wire_codec", "execution_storage")
+_EXECUTION_STORAGE = "chelis_numeric_core::dtype_semantics::execution_storage"
+_EXECUTION_STORAGE_MODULE = ("chelis_numeric_core", "dtype_semantics", "wire_codec", "execution_storage")
 _ORDERED = _SCHEMA + "OrderedInferredParameters"
 _REPORTS = {
     _SCHEMA + "CheckResult": "Diagnostic",
@@ -1414,7 +1414,7 @@ class _SchemaShapeGraph(_CodecShapeGraph):
             (name, d)
             for name, d in self.documents.items()
             if d.get("index", {}).get(str(d.get("root")), {}).get("name")
-            == "chelis_types"
+            == "chelis_numeric_core"
         ]
         _require(len(documents) == 1, "missing the stored-value codec artifact")
         crate, document = documents[0]
@@ -1432,16 +1432,16 @@ class _SchemaShapeGraph(_CodecShapeGraph):
             _require("function" in child.get("inner", {}), "execution storage codec gained a non-function member")
             span = child.get("span") or {}
             _require(
-                span.get("filename") == "crates/chelis-types/src/dtype_semantics/wire_codec.rs",
+                span.get("filename") == "crates/chelis-numeric-core/src/dtype_semantics/wire_codec.rs",
                 "execution storage codec source identity changed",
             )
             functions[child.get("name")] = child
         _require(
-            set(functions) == {"serialize", "deserialize", "json_schema"},
+            set(functions) == {"serialize", "deserialize"},
             "execution storage codec functions changed",
         )
         return tuple(
-            (label, self._schema_reference("chelis_types::dtype_semantics::wire_codec::" + name))
+            (label, self._schema_reference(_WIRE + name))
             for label, name in (("json", "StorageWire"), ("binary", "BinaryStorageWire"))
         )
 
@@ -1799,7 +1799,7 @@ def verify_schema_codecs(root: Path, target: Path) -> VerifiedSchemaCodecs:
             "PYO3_PYTHON": sys.executable,
             "VIRTUAL_ENV": sys.prefix,
         }
-        for package in ("chelis-compiler-api", "chelis-pipeline-core", "chelis-python"):
+        for package in ("chelis-types", "chelis-compiler-api", "chelis-pipeline-core", "chelis-python"):
             command = [
                 "cargo",
                 "rustdoc",
@@ -1829,7 +1829,7 @@ def verify_schema_codecs(root: Path, target: Path) -> VerifiedSchemaCodecs:
         document = json.loads((target / "doc/chelis_compiler_api.json").read_text())
         imported_documents = [
             json.loads((target / f"doc/{name}.json").read_text())
-            for name in ("chelis_pipeline_core", "chelis_python")
+            for name in ("chelis_types", "chelis_pipeline_core", "chelis_python")
         ]
         documents = [json.loads(codec.document), document, *imported_documents]
         vocabulary = json.loads(codec.vocabulary)

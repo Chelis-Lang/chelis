@@ -1320,7 +1320,7 @@ mod tests {
         TensorType,
     };
     use crate::ownership::{lower_dag_ownership, verify_ownership};
-    use chelis_types::types::Prim;
+    use chelis_numeric_core::prim::Prim;
 
     fn synthetic_candidate(provenance: StorageProvenance) -> ReuseCandidateFacts {
         ReuseCandidateFacts::complete_for_test(provenance)
@@ -1609,7 +1609,10 @@ mod tests {
                 site: ExtentWitnessSite::LiteralResultClaim,
                 parameter: String::new(),
                 axis: RtAxis::Lit(0),
-                requirements: vec![chelis_types::scalar_from_i64("test", Prim::Int64, 3).unwrap()],
+                requirements: vec![
+                    chelis_numeric_core::dtype_semantics::scalar_from_i64("test", Prim::Int64, 3)
+                        .unwrap(),
+                ],
                 claims: vec![],
             },
             vec![],

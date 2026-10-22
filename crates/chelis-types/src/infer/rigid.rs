@@ -34,8 +34,9 @@ use crate::env::Env;
 use crate::env::{free_dvars, free_rvars, free_tvars};
 use crate::errors::{CheckError, CheckErrorKind};
 use crate::session::DiagnosticSink;
-use crate::types::{Dim, Prim, RankVar, TensorPrec, Type, TypeVar, TypeVarRestriction, VarGen};
+use crate::types::{Dim, RankVar, TensorPrec, Type, TypeVar, TypeVarRestriction, VarGen};
 use crate::unify::{Subst, unify};
+use chelis_numeric_core::prim::Prim;
 
 /// Render an authored binder for a diagnostic, falling back to the internal id
 /// rather than inventing a name (the `render_declared_dim` convention).

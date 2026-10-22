@@ -14,6 +14,7 @@ use crate::deep_type::{BinderMode, DeepTypeResolver, TypeResolutionEnv, TypeUseS
 use crate::errors::ErrorWitness;
 use crate::session::DiagnosticSink;
 use crate::types::*;
+use chelis_numeric_core::prim::Prim;
 
 /// Information about a single variant of an ADT.
 #[derive(Debug, Clone, Serialize, Deserialize)]

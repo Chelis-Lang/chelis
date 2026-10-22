@@ -30,7 +30,7 @@
 
 use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
 use chelis_ir::specialize::specialize_for_blas;
-use chelis_types::types::Prim;
+use chelis_numeric_core::prim::Prim;
 
 fn mat(prim: Prim, r: usize, c: usize) -> TensorType {
     TensorType {

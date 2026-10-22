@@ -503,6 +503,7 @@ dependencies = [
  "chelis-deep",
  "chelis-effects",
  "chelis-ir",
+ "chelis-numeric-core",
  "chelis-runtime-bundle",
  "chelis-surf",
  "chelis-syntax-host",
@@ -524,6 +525,7 @@ dependencies = [
  "chelis-backend-c",
  "chelis-effects",
  "chelis-ir",
+ "chelis-numeric-core",
  "chelis-runtime-bundle",
  "chelis-surf",
  "chelis-syntax-host",
@@ -543,6 +545,7 @@ dependencies = [
  "chelis-crmath",
  "chelis-effects",
  "chelis-ir",
+ "chelis-numeric-core",
  "chelis-runtime-bundle",
  "chelis-surf",
  "chelis-syntax-host",
@@ -590,6 +593,7 @@ dependencies = [
  "chelis-lint",
  "chelis-lsp",
  "chelis-macros",
+ "chelis-numeric-core",
  "chelis-prove",
  "chelis-reef",
  "chelis-runtime",
@@ -641,6 +645,7 @@ dependencies = [
  "chelis-image-id",
  "chelis-ir",
  "chelis-macros",
+ "chelis-numeric-core",
  "chelis-pipeline-core",
  "chelis-reef",
  "chelis-runtime",
@@ -682,6 +687,7 @@ name = "chelis-cove"
 version = "0.21.1"
 dependencies = [
  "anyhow",
+ "chelis-numeric-core",
  "chelis-tide",
  "chelis-types",
  "crossterm",
@@ -697,6 +703,7 @@ version = "0.21.1"
 dependencies = [
  "cc",
  "half",
+ "libm",
 ]
 
 [[package]]
@@ -704,6 +711,7 @@ name = "chelis-deep"
 version = "0.21.1"
 dependencies = [
  "bincode",
+ "chelis-numeric-core",
  "chelis-stack-services",
  "chelis-syntax-host",
  "chelis-vocab",
@@ -726,6 +734,7 @@ dependencies = [
  "chelis-effects",
  "chelis-ir",
  "chelis-macros",
+ "chelis-numeric-core",
  "chelis-reef",
  "chelis-runtime",
  "chelis-runtime-bundle",
@@ -746,6 +755,7 @@ version = "0.21.1"
 dependencies = [
  "chelis-deep",
  "chelis-macros",
+ "chelis-numeric-core",
  "chelis-surf",
  "chelis-syntax-host",
  "chelis-types",
@@ -772,6 +782,7 @@ dependencies = [
  "chelis-deep",
  "chelis-effects",
  "chelis-macros",
+ "chelis-numeric-core",
  "chelis-surf",
  "chelis-syntax-host",
  "chelis-types",
@@ -834,12 +845,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "chelis-numeric-core"
+version = "0.21.1"
+dependencies = [
+ "bincode",
+ "chelis-crmath",
+ "chelis-vocab",
+ "half",
+ "libm",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "chelis-pipeline-core"
 version = "0.21.1"
 dependencies = [
  "chelis-deep",
  "chelis-effects",
  "chelis-ir",
+ "chelis-numeric-core",
  "chelis-syntax-host",
  "chelis-types",
  "chelis-unord",
@@ -867,6 +892,7 @@ dependencies = [
  "chelis-crmath",
  "chelis-deep",
  "chelis-ir",
+ "chelis-numeric-core",
  "chelis-pred",
  "chelis-reef",
  "chelis-std-bundle",
@@ -924,6 +950,7 @@ dependencies = [
  "chelis-effects",
  "chelis-image-id",
  "chelis-macros",
+ "chelis-numeric-core",
  "chelis-pipeline-core",
  "chelis-reef-bootstrap-core",
  "chelis-shell",
@@ -981,7 +1008,7 @@ dependencies = [
  "chelis-abi",
  "chelis-clarabel-provider",
  "chelis-crmath",
- "chelis-types",
+ "chelis-numeric-core",
  "chelis-unord",
  "chelis-vocab",
  "half",
@@ -1055,6 +1082,7 @@ version = "0.21.1"
 dependencies = [
  "chelis-deep",
  "chelis-macros",
+ "chelis-numeric-core",
  "chelis-pred",
  "chelis-stack-services",
  "chelis-syntax-host",
@@ -1104,9 +1132,9 @@ version = "0.21.1"
 dependencies = [
  "bincode",
  "chelis-abi",
- "chelis-crmath",
  "chelis-deep",
  "chelis-macros",
+ "chelis-numeric-core",
  "chelis-pred",
  "chelis-surf",
  "chelis-syntax-host",
@@ -1115,7 +1143,6 @@ dependencies = [
  "half",
  "proc-macro2",
  "quote",
- "schemars",
  "serde",
  "serde_json",
  "sha2",

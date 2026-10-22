@@ -2,7 +2,7 @@
 //! Shipped Realize transports stored bits; admitting it does not admit new arithmetic.
 use chelis_compiler_api::compiler::reject_unsupported_hip_ops;
 use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
-use chelis_types::types::Prim;
+use chelis_numeric_core::prim::Prim;
 
 fn dag(precision: Prim, materialization: bool) -> Dag {
     let mut dag = Dag::new();

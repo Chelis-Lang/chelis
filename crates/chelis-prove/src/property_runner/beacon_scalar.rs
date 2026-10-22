@@ -5,12 +5,10 @@ use super::*;
 use chelis_compiler_api::schema::{
     WIRE_DAG_SCHEMA_VERSION, WireComparisonKind, WireDag, WireDagNode, WireRiscOp, WireTensorType,
 };
+use chelis_numeric_core::activation::{ActivationGraph, DerivedActivation, lower_activation};
+use chelis_numeric_core::dtype_semantics::{FloatBinOp, FloatUnOp, scalar_from_f64};
+use chelis_numeric_core::prim::Prim;
 use chelis_surf::ast::{LetPattern, LiteralSuffix, UnaryOp};
-use chelis_types::{
-    activation::{ActivationGraph, DerivedActivation, lower_activation},
-    dtype_semantics::{FloatBinOp, FloatUnOp, scalar_from_f64},
-    types::Prim,
-};
 
 mod ad;
 

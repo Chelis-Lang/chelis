@@ -2,9 +2,9 @@ use std::collections::BTreeMap;
 
 use chelis_deep::ast::{Atom, Expr};
 use chelis_deep::span::Span;
+use chelis_numeric_core::prim::Prim;
 use chelis_types::manifest::{RootEntry, RootManifest};
 use chelis_types::types::Lane;
-use chelis_types::types::Prim;
 
 use super::OwnershipError;
 use super::classify::{HeapKind, NonHeapKind, Placement, ValueClass, classify};

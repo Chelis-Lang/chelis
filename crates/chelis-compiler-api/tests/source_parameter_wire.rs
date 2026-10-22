@@ -1,7 +1,7 @@
 //! spec/10 §3.3: source tuple indices and vmap axes retain lexical int64
 //! spelling. Transport does not normalize an axis or admit executable syntax.
 use chelis_compiler_api::schema::WireSurfExpr;
-use chelis_types::types::Prim;
+use chelis_numeric_core::prim::Prim;
 use serde_json::json;
 
 fn expression(kind: &str, field: &str, value: serde_json::Value) -> serde_json::Value {
@@ -106,7 +106,8 @@ fn pipe_stage_wire_preserves_syntax_without_synthesized_binders() {
 #[test]
 fn pipe_cast_modes_are_wire_owned_and_preserve_every_serialized_rung() {
     use chelis_compiler_api::schema::{WirePipeCastMode, WirePipeStageSyntax};
-    use chelis_deep::{CastMode, NamedCastMode};
+    use chelis_deep::CastMode;
+    use chelis_numeric_core::named_cast::NamedCastMode;
     for mode in [
         CastMode::Checked,
         CastMode::Named(NamedCastMode::Trunc),

@@ -10,6 +10,7 @@
 use crate::adt::{AdtDef, AdtRegistry, VariantInfo};
 use crate::env::Env;
 use crate::types::*;
+use chelis_numeric_core::prim::Prim;
 use std::sync::Arc;
 
 pub const BUILTIN_NAMES: &[&str] = &[
@@ -3484,9 +3485,9 @@ pub fn builtin_env() -> (Env, VarGen) {
     tensor_unop("ceil", &mut env, &mut vg);
     tensor_unop("round", &mut env, &mut vg);
     for kind in [
-        crate::FloatClassify::Nan,
-        crate::FloatClassify::Finite,
-        crate::FloatClassify::Infinite,
+        chelis_numeric_core::dtype_semantics::FloatClassify::Nan,
+        chelis_numeric_core::dtype_semantics::FloatClassify::Finite,
+        chelis_numeric_core::dtype_semantics::FloatClassify::Infinite,
     ] {
         let input = vg.fresh_tvar();
         let output = vg.fresh_tvar();

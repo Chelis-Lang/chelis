@@ -1,8 +1,10 @@
 //! Exact signed-width bitwise kernels, shared by host and tensor execution.
 //! [05-OP-47] owns every identity in this closed family.
 
-use crate::types::Prim;
-use crate::{NumericKernelError, ScalarValue, TensorStorage, scalar_from_i64, tensor_from_scalars};
+use chelis_numeric_core::dtype_semantics::{
+    NumericKernelError, ScalarValue, TensorStorage, scalar_from_i64, tensor_from_scalars,
+};
+use chelis_numeric_core::prim::Prim;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -68,7 +70,7 @@ fn signature(op: BitwiseKind, lhs: Prim, rhs: Prim) -> Result<(), BitwiseError> 
         if !actual.is_integer() {
             return Err(BitwiseError::Signature(NumericKernelError::WrongFamily {
                 op: op.name(),
-                expected: crate::NumericFamily::Int,
+                expected: chelis_numeric_core::dtype_semantics::NumericFamily::Int,
                 actual,
             }));
         }
@@ -233,7 +235,7 @@ mod tests {
         for other in [
             scalar_from_i64("test", Prim::Int64, 1).unwrap(),
             scalar_from_i64("test", Prim::Bool, 1).unwrap(),
-            crate::scalar_from_f64("test", Prim::F32, 1.0).unwrap(),
+            chelis_numeric_core::dtype_semantics::scalar_from_f64("test", Prim::F32, 1.0).unwrap(),
         ] {
             for op in [
                 BitwiseKind::And,

@@ -23,7 +23,7 @@
 mod support;
 use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
 use chelis_ir::load_store_name::LoadStoreName;
-use chelis_types::types::Prim;
+use chelis_numeric_core::prim::Prim;
 use support::codegen_metal;
 
 fn vec_f32(n: usize) -> TensorType {

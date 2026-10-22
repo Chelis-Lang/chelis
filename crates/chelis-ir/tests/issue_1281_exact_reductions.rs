@@ -5,8 +5,9 @@ use chelis_ir::eval::{TensorValue, eval_tensor};
 use chelis_ir::grad::{AdError, AdRejectionReason, grad_dag_checked};
 use chelis_ir::lower::try_lower_program;
 use chelis_ir::tier2;
-use chelis_types::types::Prim;
-use chelis_types::{RawTensor, StorageView, check_ir_program, finalize_tensor};
+use chelis_numeric_core::dtype_semantics::{RawTensor, StorageView, finalize_tensor};
+use chelis_numeric_core::prim::Prim;
+use chelis_types::check_ir_program;
 use chelis_unord::UnordMap;
 
 fn tensor_type(dims: &[usize], precision: Prim) -> TensorType {
@@ -92,10 +93,15 @@ fn extrema_and_window_extrema_preserve_first_nan_and_first_equal_bits() {
         // finalize both NaNs canonically.
         TensorValue::from_storage(
             vec![3],
-            chelis_types::tensor_from_scalars(
+            chelis_numeric_core::dtype_semantics::tensor_from_scalars(
                 Prim::F32,
                 &[first_nan, 1.0, later_nan].map(|value| {
-                    chelis_types::scalar_from_f64("test", Prim::F32, f64::from(value)).unwrap()
+                    chelis_numeric_core::dtype_semantics::scalar_from_f64(
+                        "test",
+                        Prim::F32,
+                        f64::from(value),
+                    )
+                    .unwrap()
                 }),
             ),
         ),

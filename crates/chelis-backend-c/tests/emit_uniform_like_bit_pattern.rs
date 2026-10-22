@@ -22,7 +22,7 @@
 
 mod support;
 use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
-use chelis_types::types::Prim;
+use chelis_numeric_core::prim::Prim;
 use support::emit_dag;
 
 mod common;
@@ -339,16 +339,23 @@ int main(void) {
         panic!("emitted f64 C did not compile/run");
     };
     // [05-OP-8]: the bounds have the template's dtype, as in the graph above.
-    let bound = |value| chelis_types::scalar_from_f64("test", Prim::F64, value).unwrap();
+    let bound = |value| {
+        chelis_numeric_core::dtype_semantics::scalar_from_f64("test", Prim::F64, value).unwrap()
+    };
     // The draw's key is `key_from_seed(42)`.
-    let key = chelis_types::RandomKey::from_seed(
-        chelis_types::scalar_from_i64("test", Prim::Int64, 42).unwrap(),
+    let key = chelis_numeric_core::dtype_semantics::RandomKey::from_seed(
+        chelis_numeric_core::dtype_semantics::scalar_from_i64("test", Prim::Int64, 42).unwrap(),
     )
     .unwrap();
-    let sampled = chelis_types::PreparedUniformLike::new(Prim::F64, 4, bound(2.0), bound(5.0))
-        .unwrap()
-        .apply(key)
-        .unwrap();
+    let sampled = chelis_numeric_core::dtype_semantics::PreparedUniformLike::new(
+        Prim::F64,
+        4,
+        bound(2.0),
+        bound(5.0),
+    )
+    .unwrap()
+    .apply(key)
+    .unwrap();
     let expected = (0..4)
         .map(|index| format!("{:016x}", sampled.scalar_at(index).as_f64_lossy().to_bits()))
         .collect::<Vec<_>>()

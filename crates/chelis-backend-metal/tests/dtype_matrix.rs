@@ -31,7 +31,7 @@
 mod support;
 use chelis_backend_metal::dtype;
 use chelis_ir::dag::{Dag, DagNode, DimInfo, RiscOp, TensorType};
-use chelis_types::types::Prim;
+use chelis_numeric_core::prim::Prim;
 use support::{codegen_metal, try_codegen_metal};
 
 fn vec_prec(n: usize, p: Prim) -> TensorType {

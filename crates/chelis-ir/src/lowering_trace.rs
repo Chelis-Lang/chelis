@@ -320,7 +320,7 @@ impl Collector {
 mod tests {
     use super::*;
     use crate::dag::{DimInfo, RiscOp, TensorType};
-    use chelis_types::types::Prim;
+    use chelis_numeric_core::prim::Prim;
 
     #[test]
     fn retained_helper_trace_is_send_and_sync() {

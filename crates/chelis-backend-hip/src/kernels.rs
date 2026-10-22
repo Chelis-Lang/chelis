@@ -164,7 +164,7 @@ __device__ chelis_u16 chelis_f32_to_f16(float value) {
 ";
 
 /// Device-side helpers needed only by uniform random kernels: the HIP port
-/// of `chelis_types::dtype_semantics`'s `[05-RNG-1]` word and `[05-OP-8]`
+/// of `chelis_numeric_core::dtype_semantics`'s `[05-RNG-1]` word and `[05-OP-8]`
 /// samplers (chelis#2408). A sampler takes the draw key the lowering baked,
 /// never a seed.
 pub const NUMERIC_DEVICE_HELPERS: &str = "\
@@ -688,10 +688,10 @@ pub fn binary_bitwise_typed(
     rank: usize,
     kernel_name: &str,
     kind: chelis_types::BitwiseKind,
-    precision: chelis_types::types::Prim,
+    precision: chelis_numeric_core::prim::Prim,
     gate: Option<&OperandGate>,
 ) -> String {
-    use chelis_types::types::Prim;
+    use chelis_numeric_core::prim::Prim;
     let (signed, unsigned, width) = match precision {
         Prim::Int8 => ("int8_t", "uint8_t", 8),
         Prim::Int16 => ("int16_t", "uint16_t", 16),
@@ -1382,11 +1382,11 @@ extern \"C\" __global__ void {kernel_name}(
 pub fn cast_integer_to_float(
     rank: usize,
     kernel_name: &str,
-    source: chelis_types::types::Prim,
-    target: chelis_types::types::Prim,
+    source: chelis_numeric_core::prim::Prim,
+    target: chelis_numeric_core::prim::Prim,
     gate: Option<&OperandGate>,
 ) -> String {
-    use chelis_types::types::Prim;
+    use chelis_numeric_core::prim::Prim;
     let input_ty = match source {
         Prim::Int8 => "chelis_i8",
         Prim::Int16 => "chelis_i16",
@@ -1434,10 +1434,10 @@ extern \"C\" __global__ void {kernel_name}(
 pub fn unary_checked_abs_integer(
     rank: usize,
     kernel_name: &str,
-    precision: chelis_types::types::Prim,
+    precision: chelis_numeric_core::prim::Prim,
     gate: Option<&OperandGate>,
 ) -> String {
-    use chelis_types::types::Prim;
+    use chelis_numeric_core::prim::Prim;
     let (ty, minimum) = match precision {
         Prim::Int8 => ("chelis_i8", "(-127 - 1)"),
         Prim::Int16 => ("chelis_i16", "(-32767 - 1)"),
@@ -2795,10 +2795,10 @@ pub fn ordered_scan(
     name: &str,
     axis: usize,
     reverse: bool,
-    precision: chelis_types::types::Prim,
+    precision: chelis_numeric_core::prim::Prim,
     gate: Option<&OperandGate>,
 ) -> String {
-    use chelis_types::types::Prim;
+    use chelis_numeric_core::prim::Prim;
     let f32_type = ElemKind::F32.c_type();
     let f64_type = ElemKind::F64.c_type();
     let (input, acc, output, load, store) = match precision {
@@ -2891,7 +2891,7 @@ mod tests {
     use super::*;
     use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
     use chelis_ir::ownership::{lower_dag_ownership, verify_ownership};
-    use chelis_types::types::Prim;
+    use chelis_numeric_core::prim::Prim;
 
     // chelis#2408: the HIP device helpers are a port of the C backend's
     // [05-RNG-1] word and [05-OP-8] samplers, which the CLI spec oracle holds

@@ -1,14 +1,17 @@
 //! Closed typed seed constants shared by source admission and lowering.
 //! No variables, aliases, arithmetic folding, or guessed literal dtypes.
-use crate::types::Prim;
 use chelis_deep::ast::{Atom, Expr};
 use chelis_deep::{DeepTag, ExprCarrier};
+use chelis_numeric_core::prim::Prim;
 
 /// The explicit signed literal surface in spec/02 §P5. Surf encodes a minus
 /// sign as one builtin `neg` application around the typed integer literal;
 /// Deep may carry the negative integer directly. Casts and computed seeds
 /// remain outside source admission even when lowering can evaluate them.
-pub fn literal_seed(expr: &Expr, neg_is_builtin: bool) -> Option<crate::ScalarValue> {
+pub fn literal_seed(
+    expr: &Expr,
+    neg_is_builtin: bool,
+) -> Option<chelis_numeric_core::dtype_semantics::ScalarValue> {
     match expr.carrier() {
         ExprCarrier::DecodedNode(DeepTag::Lit, _, _) => {}
         ExprCarrier::DecodedNode(DeepTag::App, _, [callee, inner]) if neg_is_builtin => {
@@ -40,7 +43,10 @@ pub fn literal_seed(expr: &Expr, neg_is_builtin: bool) -> Option<crate::ScalarVa
 /// bits under [05-RNG-1]. Source admission additionally checks §P5's literal form.
 /// The caller must identify whether lexical scope leaves `neg` as the builtin.
 /// Returning the tagged scalar preserves the seed's type across this boundary.
-pub fn constant_seed(expr: &Expr, neg_is_builtin: bool) -> Option<crate::ScalarValue> {
+pub fn constant_seed(
+    expr: &Expr,
+    neg_is_builtin: bool,
+) -> Option<chelis_numeric_core::dtype_semantics::ScalarValue> {
     let value = extract_type_checked_scalar(expr, neg_is_builtin)?;
     (value.prim() == Prim::Int64).then_some(value)
 }
@@ -101,8 +107,10 @@ fn optional_scalar_prim(expr: &Expr) -> Option<Option<Prim>> {
 /// cross-family form is an exact integer atom with one
 /// `literal_source: integer` marker at a float dtype; `scalar_from_i64`
 /// performs its one required target-width finalization without an f64 hop.
-fn extract_type_checked_literal(expr: &Expr) -> Option<crate::ScalarValue> {
-    use crate::{scalar_from_f64, scalar_from_i64};
+fn extract_type_checked_literal(
+    expr: &Expr,
+) -> Option<chelis_numeric_core::dtype_semantics::ScalarValue> {
+    use chelis_numeric_core::dtype_semantics::{scalar_from_f64, scalar_from_i64};
 
     let (metadata, kids) = match expr.carrier() {
         ExprCarrier::DecodedNode(DeepTag::Lit, metadata, kids) => (metadata, kids),
@@ -146,7 +154,10 @@ fn extract_type_checked_literal(expr: &Expr) -> Option<crate::ScalarValue> {
 /// `true` from integer `1`. A seed needs that distinction: literal payload and
 /// type metadata must agree before a wrapper can consume the value, while a
 /// successful explicit cast establishes its target dtype per [04-NUM-14].
-fn extract_type_checked_scalar(expr: &Expr, neg_is_builtin: bool) -> Option<crate::ScalarValue> {
+fn extract_type_checked_scalar(
+    expr: &Expr,
+    neg_is_builtin: bool,
+) -> Option<chelis_numeric_core::dtype_semantics::ScalarValue> {
     match expr.carrier() {
         // A BARE atom carries no type metadata, so there is nothing for the
         // payload to agree with and this fold declines it. Stamping one here
@@ -171,10 +182,13 @@ fn extract_type_checked_scalar(expr: &Expr, neg_is_builtin: bool) -> Option<crat
                 }
                 match chelis_deep::cast_mode_of(kids).ok()? {
                     chelis_deep::CastMode::Checked => {
-                        crate::CheckedCastPlan::new(inner.prim(), target)
-                            .ok()?
-                            .cast_scalar("cast", inner)
-                            .ok()
+                        chelis_numeric_core::dtype_semantics::CheckedCastPlan::new(
+                            inner.prim(),
+                            target,
+                        )
+                        .ok()?
+                        .cast_scalar("cast", inner)
+                        .ok()
                     }
                     chelis_deep::CastMode::Named(mode) => {
                         if crate::infer::expr_record::named_cast_pair_error(
@@ -186,7 +200,8 @@ fn extract_type_checked_scalar(expr: &Expr, neg_is_builtin: bool) -> Option<crat
                         {
                             return None;
                         }
-                        crate::named_cast_scalar(mode, inner, target).ok()
+                        chelis_numeric_core::dtype_semantics::named_cast_scalar(mode, inner, target)
+                            .ok()
                     }
                 }
             }
@@ -196,9 +211,17 @@ fn extract_type_checked_scalar(expr: &Expr, neg_is_builtin: bool) -> Option<crat
                 }
                 let inner = extract_type_checked_scalar(&kids[1], neg_is_builtin)?;
                 let negated = if inner.prim().is_float() {
-                    crate::float_unop(crate::FloatUnOp::Neg, inner).ok()?
+                    chelis_numeric_core::dtype_semantics::float_unop(
+                        chelis_numeric_core::dtype_semantics::FloatUnOp::Neg,
+                        inner,
+                    )
+                    .ok()?
                 } else if inner.prim().is_integer() {
-                    crate::int_unop(crate::IntUnOp::Neg, inner).ok()?
+                    chelis_numeric_core::dtype_semantics::int_unop(
+                        chelis_numeric_core::dtype_semantics::IntUnOp::Neg,
+                        inner,
+                    )
+                    .ok()?
                 } else {
                     return None;
                 };

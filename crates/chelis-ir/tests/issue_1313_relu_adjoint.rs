@@ -3,8 +3,8 @@ use chelis_ir::eval::{TensorValue, eval_tensor};
 use chelis_ir::fuse::fuse;
 use chelis_ir::grad::grad_dag_checked;
 use chelis_ir::{tier2, verify};
-use chelis_types::dtype_semantics::{RawTensor, finalize_tensor};
-use chelis_types::types::Prim;
+use chelis_numeric_core::dtype_semantics::{RawTensor, finalize_tensor};
+use chelis_numeric_core::prim::Prim;
 use chelis_unord::UnordMap;
 
 fn tensor(precision: Prim, len: usize) -> TensorType {

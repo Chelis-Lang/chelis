@@ -2576,6 +2576,11 @@ disposition = "packages"
 packages = ["chelis-cli"]
 
 [[path_rule]]
+prefix = "tests/support/wire_values.rs"
+disposition = "packages"
+packages = ["chelis-cli", "chelis-compiler-api", "chelis-prove"]
+
+[[path_rule]]
 prefix = "tests/support/helper_summary_fatal.ch"
 disposition = "packages"
 packages = ["chelis-cli", "chelis-compiler-api", "chelis-ir"]
@@ -4691,6 +4696,60 @@ reason = "The script tests reject incomplete arithmetic evidence and unauthorize
 tracking_issue = "chelis#3989"
 
 [[path_rule]]
+prefix = "scripts/numeric_core_oracle.py"
+disposition = "owner"
+workflow = "heavy-e2e.yml"
+job = "integration-support"
+cadence = "daily and workflow_dispatch"
+reason = "The domain slice checks portable numeric consumers, exact parity, allocation costs, and authority"
+tracking_issue = "chelis#3993"
+
+[[path_rule]]
+prefix = "scripts/test_numeric_core_oracle.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "The controls reject incomplete evidence, changed numeric behavior, and allocation regressions"
+tracking_issue = "chelis#3993"
+
+[[path_rule]]
+prefix = "scripts/dtype_phase1_oracle.py"
+disposition = "owner"
+workflow = "heavy-e2e.yml"
+job = "dtype-phase3-oracle"
+cadence = "daily and workflow_dispatch"
+reason = "The complete dtype oracle executes the inherited Phase 1 numeric contracts"
+tracking_issue = "chelis#3993"
+
+[[path_rule]]
+prefix = "scripts/dtype_phase2_oracle.py"
+disposition = "owner"
+workflow = "heavy-e2e.yml"
+job = "dtype-phase3-oracle"
+cadence = "daily and workflow_dispatch"
+reason = "The complete dtype oracle executes the inherited Phase 2 kernel contracts"
+tracking_issue = "chelis#3993"
+
+[[path_rule]]
+prefix = "scripts/capacity_census_wire_schema_publication.py"
+disposition = "owner"
+workflow = "heavy-e2e.yml"
+job = "dtype-phase3-oracle"
+cadence = "daily and workflow_dispatch"
+reason = "The wire census verifies exact schema metadata ownership and separate payload admission"
+tracking_issue = "chelis#3993"
+
+[[path_rule]]
+prefix = "scripts/test_capacity_census_wire_schema_publication.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "The controls reject false schema identities, owners, ancestry, and return types"
+tracking_issue = "chelis#3993"
+
+[[path_rule]]
 prefix = "rust-toolchain.toml"
 disposition = "packages"
 packages = [
@@ -4698,6 +4757,7 @@ packages = [
   "chelis-backend-metal", "chelis-cli", "chelis-compiler-api",
   "chelis-certificate-core", "chelis-conformance", "chelis-cove", "chelis-crmath", "chelis-deep",
   "chelis-e2e",
+  "chelis-numeric-core",
   "chelis-effects", "chelis-image-id", "chelis-ir", "chelis-lint",
   "chelis-lsp", "chelis-macros", "chelis-pipeline-core", "chelis-pred",
   "chelis-prove", "chelis-python", "chelis-reef", "chelis-reef-bootstrap-core", "chelis-repr-inventory",

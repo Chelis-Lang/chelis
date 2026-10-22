@@ -18,9 +18,9 @@
 //! The internal `add_synth` helper applies the rule once per node so we
 //! don't duplicate it across the ~109 `add_node` callsites.
 
-use chelis_types::activation::{ActivationGraph, DerivedActivation, lower_activation};
-use chelis_types::types::Prim;
-use chelis_types::{FloatBinOp, FloatUnOp};
+use chelis_numeric_core::activation::{ActivationGraph, DerivedActivation, lower_activation};
+use chelis_numeric_core::dtype_semantics::{FloatBinOp, FloatUnOp};
+use chelis_numeric_core::prim::Prim;
 
 use crate::dag::{
     ComparisonKind, Dag, DimExpr, DimInfo, LogicalKind, NodeId, Owner, RiscOp, RtAxis, RtDim,
@@ -78,7 +78,7 @@ pub fn lower_relu(
 
 /// Builds a section 3.3 activation graph as Tier 1 DAG nodes with `ty`'s
 /// dimensions. The graph itself is defined once, in
-/// [`chelis_types::activation`], which the evaluator's activation kernels
+/// [`chelis_numeric_core::activation`], which the evaluator's activation kernels
 /// also run, so the two lanes cannot drift.
 struct DagActivationGraph<'a> {
     owner: Owner,
@@ -1030,7 +1030,9 @@ pub(crate) fn lower_sum_to_storage(
     result_ty: &TensorType,
     parent_span: Option<&str>,
 ) -> NodeId {
-    let accumulator = RiscOp::default_reduce_sum_accumulator(result_ty.precision)
+    let accumulator = result_ty
+        .precision
+        .default_reduce_sum_accumulator()
         .expect("checked reduction dtype");
     let sum = add_synth(
         owner,
@@ -1487,7 +1489,7 @@ pub fn lower_conv(
         values
             .into_iter()
             .map(|value| {
-                chelis_types::scalar_from_i64(
+                chelis_numeric_core::dtype_semantics::scalar_from_i64(
                     "conv index",
                     Prim::Int64,
                     i64::try_from(value).expect("checked index"),
@@ -1529,7 +1531,10 @@ pub fn lower_conv(
         owner,
         dag,
         RiscOp::ConstTensor {
-            data: chelis_types::tensor_from_scalars(Prim::Int64, &to_scalars(row_terms)),
+            data: chelis_numeric_core::dtype_semantics::tensor_from_scalars(
+                Prim::Int64,
+                &to_scalars(row_terms),
+            ),
         },
         vec![],
         ty(&[contracted], Prim::Int64),
@@ -1550,7 +1555,10 @@ pub fn lower_conv(
         owner,
         dag,
         RiscOp::ConstTensor {
-            data: chelis_types::tensor_from_scalars(Prim::Int64, &to_scalars(column_terms)),
+            data: chelis_numeric_core::dtype_semantics::tensor_from_scalars(
+                Prim::Int64,
+                &to_scalars(column_terms),
+            ),
         },
         vec![],
         ty(&[columns], Prim::Int64),
@@ -1660,8 +1668,12 @@ impl ConvIndexGraph<'_> {
 
     fn constant(&mut self, value: usize) -> NodeId {
         let value = i64::try_from(value).expect("a tensor extent fits i64");
-        let value = chelis_types::scalar_from_i64("conv extent", Prim::Int64, value)
-            .expect("an i64 extent finalizes at i64");
+        let value = chelis_numeric_core::dtype_semantics::scalar_from_i64(
+            "conv extent",
+            Prim::Int64,
+            value,
+        )
+        .expect("an i64 extent finalizes at i64");
         self.node(
             RiscOp::Const { value },
             vec![],

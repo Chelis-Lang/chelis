@@ -14,11 +14,11 @@
 //! the test pins the largest value that fits AND the smallest one that
 //! does not, on both signs, from both an f32 and an f64 source.
 
-use chelis_types::dtype_semantics::{
+use chelis_numeric_core::dtype_semantics::{
     NUMERIC_TRAP_DOMAIN_KIND, NUMERIC_TRAP_OVERFLOW_KIND, NumericTrap, RawScalar, RawTensor,
     ScalarValue, cast_trunc_raw, cast_trunc_scalar, cast_trunc_tensor, scalar_from_f64,
 };
-use chelis_types::types::Prim;
+use chelis_numeric_core::prim::Prim;
 
 const INT_TARGETS: [Prim; 4] = [Prim::Int8, Prim::Int16, Prim::Int32, Prim::Int64];
 const FLOAT_SOURCES: [Prim; 2] = [Prim::F32, Prim::F64];
@@ -108,8 +108,12 @@ fn exactly_integral_values_pass_through_unchanged() {
 fn agrees_with_the_checked_default_on_integral_in_range_values() {
     for target in INT_TARGETS {
         for value in [0.0, 1.0, -1.0, 100.0, -100.0] {
-            let checked = chelis_types::cast_raw("cast", RawScalar::Float(value), target)
-                .expect("integral in-range values do not trap under the checked default");
+            let checked = chelis_numeric_core::dtype_semantics::cast_raw(
+                "cast",
+                RawScalar::Float(value),
+                target,
+            )
+            .expect("integral in-range values do not trap under the checked default");
             let truncating = cast_trunc_raw("cast_trunc", RawScalar::Float(value), target)
                 .expect("nor under the truncating rung");
             assert_eq!(
@@ -431,7 +435,8 @@ fn an_integer_source_has_no_truncating_cast() {
 #[test]
 #[should_panic(expected = "is not a float source")]
 fn a_sealed_integer_scalar_has_no_truncating_cast() {
-    let sealed = chelis_types::scalar_from_i64("test_ingress", Prim::Int32, 3)
-        .expect("an in-range i32 ingress");
+    let sealed =
+        chelis_numeric_core::dtype_semantics::scalar_from_i64("test_ingress", Prim::Int32, 3)
+            .expect("an in-range i32 ingress");
     let _ = cast_trunc_scalar("cast_trunc", sealed, Prim::Int64);
 }

@@ -118,7 +118,7 @@ fn v1_bare_array_data_fails_loudly() {
 #[test]
 fn v3_bool_and_half_payloads_round_trip() {
     for data in [
-        serde_json::from_value::<chelis_types::TensorStorage>(
+        serde_json::from_value::<chelis_numeric_core::dtype_semantics::TensorStorage>(
             serde_json::json!({"dtype":"bool","values":[true,false]}),
         )
         .unwrap(),
@@ -147,10 +147,13 @@ fn v3_bool_and_half_payloads_round_trip() {
 fn v3_numeric_scalar_variants_round_trip_at_every_dtype() {
     let payload = ExecutionValue::List {
         value: vec![
-            wire_values::scalar_integer(chelis_types::types::Prim::Int8, -8),
-            wire_values::scalar_integer(chelis_types::types::Prim::Int16, -16),
-            wire_values::scalar_integer(chelis_types::types::Prim::Int32, -32),
-            wire_values::scalar_integer(chelis_types::types::Prim::Int64, 9_007_199_254_740_993),
+            wire_values::scalar_integer(chelis_numeric_core::prim::Prim::Int8, -8),
+            wire_values::scalar_integer(chelis_numeric_core::prim::Prim::Int16, -16),
+            wire_values::scalar_integer(chelis_numeric_core::prim::Prim::Int32, -32),
+            wire_values::scalar_integer(
+                chelis_numeric_core::prim::Prim::Int64,
+                9_007_199_254_740_993,
+            ),
             serde_json::from_value(
                 serde_json::json!({"type":"scalar","value":{"dtype":"f16","bits":"3e00"}}),
             )

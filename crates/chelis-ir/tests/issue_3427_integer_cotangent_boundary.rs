@@ -7,7 +7,7 @@
 //! ([05-OP-64]), whichever integer operation it is.
 use chelis_ir::dag::{Dag, NodeId, RiscOp, TensorType};
 use chelis_ir::grad::{AdError, AdRejectionReason, grad_dag_checked};
-use chelis_types::types::Prim;
+use chelis_numeric_core::prim::Prim;
 
 fn scalar_at(precision: Prim) -> TensorType {
     TensorType {

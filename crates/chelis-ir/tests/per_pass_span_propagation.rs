@@ -20,7 +20,7 @@ use std::collections::BTreeSet;
 
 use chelis_ir::dag::{Dag, DimInfo, NodeId, RiscOp, TensorType};
 use chelis_ir::{fuse, grad, optimize, tier2, vmap};
-use chelis_types::types::Prim;
+use chelis_numeric_core::prim::Prim;
 
 fn scalar_f32() -> TensorType {
     TensorType::scalar_f32()

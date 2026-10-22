@@ -153,7 +153,7 @@ fn assert_load_order_after_rebuilding(dag: &chelis_ir::Dag, expected: &[&str]) {
 #[test]
 fn signatureless_helper_retains_assigned_abi_order() {
     use chelis_ir::dag::{DimInfo, TensorType};
-    use chelis_types::types::Prim;
+    use chelis_numeric_core::prim::Prim;
     use chelis_unord::UnordMap;
     let expr = chelis_deep::parser::parse_str(
         "(app {} (var {} add) (var {} z) (var {} a))",

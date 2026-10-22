@@ -637,7 +637,7 @@
       "flags": [
         "float-carrier"
       ],
-      "id": "chelis_types::dtype_semantics::wire_codec::BinaryScalarWire::Bf16.bits: bf16",
+      "id": "chelis_numeric_core::dtype_semantics::wire_codec::BinaryScalarWire::Bf16.bits: bf16",
       "kind": "wire-schema-numeric-field"
     },
     {
@@ -646,7 +646,7 @@
       "flags": [
         "float-carrier"
       ],
-      "id": "chelis_types::dtype_semantics::wire_codec::BinaryScalarWire::F16.bits: f16",
+      "id": "chelis_numeric_core::dtype_semantics::wire_codec::BinaryScalarWire::F16.bits: f16",
       "kind": "wire-schema-numeric-field"
     },
     {
@@ -655,7 +655,7 @@
       "flags": [
         "float-carrier"
       ],
-      "id": "chelis_types::dtype_semantics::wire_codec::BinaryScalarWire::F32.bits: f32",
+      "id": "chelis_numeric_core::dtype_semantics::wire_codec::BinaryScalarWire::F32.bits: f32",
       "kind": "wire-schema-numeric-field"
     },
     {
@@ -664,7 +664,7 @@
       "flags": [
         "float-carrier"
       ],
-      "id": "chelis_types::dtype_semantics::wire_codec::BinaryScalarWire::F64.bits: f64",
+      "id": "chelis_numeric_core::dtype_semantics::wire_codec::BinaryScalarWire::F64.bits: f64",
       "kind": "wire-schema-numeric-field"
     },
     {
@@ -673,7 +673,7 @@
       "flags": [
         "numeric-field"
       ],
-      "id": "chelis_types::dtype_semantics::wire_codec::BinaryScalarWire::I16.value: i16",
+      "id": "chelis_numeric_core::dtype_semantics::wire_codec::BinaryScalarWire::I16.value: i16",
       "kind": "wire-schema-numeric-field"
     },
     {
@@ -682,7 +682,7 @@
       "flags": [
         "numeric-field"
       ],
-      "id": "chelis_types::dtype_semantics::wire_codec::BinaryScalarWire::I32.value: i32",
+      "id": "chelis_numeric_core::dtype_semantics::wire_codec::BinaryScalarWire::I32.value: i32",
       "kind": "wire-schema-numeric-field"
     },
     {
@@ -691,7 +691,7 @@
       "flags": [
         "numeric-field"
       ],
-      "id": "chelis_types::dtype_semantics::wire_codec::BinaryScalarWire::I64.value: i64",
+      "id": "chelis_numeric_core::dtype_semantics::wire_codec::BinaryScalarWire::I64.value: i64",
       "kind": "wire-schema-numeric-field"
     },
     {
@@ -700,7 +700,7 @@
       "flags": [
         "numeric-field"
       ],
-      "id": "chelis_types::dtype_semantics::wire_codec::BinaryScalarWire::I8.value: i8",
+      "id": "chelis_numeric_core::dtype_semantics::wire_codec::BinaryScalarWire::I8.value: i8",
       "kind": "wire-schema-numeric-field"
     },
     {
@@ -709,7 +709,7 @@
       "flags": [
         "float-carrier"
       ],
-      "id": "chelis_types::dtype_semantics::wire_codec::BinaryStorageWire::Bf16.bits: bf16",
+      "id": "chelis_numeric_core::dtype_semantics::wire_codec::BinaryStorageWire::Bf16.bits: bf16",
       "kind": "wire-schema-numeric-field"
     },
     {
@@ -718,7 +718,7 @@
       "flags": [
         "float-carrier"
       ],
-      "id": "chelis_types::dtype_semantics::wire_codec::BinaryStorageWire::F16.bits: f16",
+      "id": "chelis_numeric_core::dtype_semantics::wire_codec::BinaryStorageWire::F16.bits: f16",
       "kind": "wire-schema-numeric-field"
     },
     {
@@ -727,7 +727,7 @@
       "flags": [
         "float-carrier"
       ],
-      "id": "chelis_types::dtype_semantics::wire_codec::BinaryStorageWire::F32.bits: f32",
+      "id": "chelis_numeric_core::dtype_semantics::wire_codec::BinaryStorageWire::F32.bits: f32",
       "kind": "wire-schema-numeric-field"
     },
     {
@@ -736,7 +736,7 @@
       "flags": [
         "float-carrier"
       ],
-      "id": "chelis_types::dtype_semantics::wire_codec::BinaryStorageWire::F64.bits: f64",
+      "id": "chelis_numeric_core::dtype_semantics::wire_codec::BinaryStorageWire::F64.bits: f64",
       "kind": "wire-schema-numeric-field"
     },
     {
@@ -745,7 +745,7 @@
       "flags": [
         "numeric-field"
       ],
-      "id": "chelis_types::dtype_semantics::wire_codec::BinaryStorageWire::I16.values: i16",
+      "id": "chelis_numeric_core::dtype_semantics::wire_codec::BinaryStorageWire::I16.values: i16",
       "kind": "wire-schema-numeric-field"
     },
     {
@@ -754,7 +754,7 @@
       "flags": [
         "numeric-field"
       ],
-      "id": "chelis_types::dtype_semantics::wire_codec::BinaryStorageWire::I32.values: i32",
+      "id": "chelis_numeric_core::dtype_semantics::wire_codec::BinaryStorageWire::I32.values: i32",
       "kind": "wire-schema-numeric-field"
     },
     {
@@ -763,7 +763,7 @@
       "flags": [
         "numeric-field"
       ],
-      "id": "chelis_types::dtype_semantics::wire_codec::BinaryStorageWire::I64.values: i64",
+      "id": "chelis_numeric_core::dtype_semantics::wire_codec::BinaryStorageWire::I64.values: i64",
       "kind": "wire-schema-numeric-field"
     },
     {
@@ -772,7 +772,7 @@
       "flags": [
         "numeric-field"
       ],
-      "id": "chelis_types::dtype_semantics::wire_codec::BinaryStorageWire::I8.values: i8",
+      "id": "chelis_numeric_core::dtype_semantics::wire_codec::BinaryStorageWire::I8.values: i8",
       "kind": "wire-schema-numeric-field"
     },
     {
@@ -781,7 +781,7 @@
       "flags": [
         "float-carrier"
       ],
-      "id": "chelis_types::dtype_semantics::wire_codec::ScalarWire::Bf16.bits: bf16",
+      "id": "chelis_numeric_core::dtype_semantics::wire_codec::ScalarWire::Bf16.bits: bf16",
       "kind": "wire-schema-numeric-field"
     },
     {
@@ -790,7 +790,7 @@
       "flags": [
         "float-carrier"
       ],
-      "id": "chelis_types::dtype_semantics::wire_codec::ScalarWire::F16.bits: f16",
+      "id": "chelis_numeric_core::dtype_semantics::wire_codec::ScalarWire::F16.bits: f16",
       "kind": "wire-schema-numeric-field"
     },
     {
@@ -799,7 +799,7 @@
       "flags": [
         "float-carrier"
       ],
-      "id": "chelis_types::dtype_semantics::wire_codec::ScalarWire::F32.bits: f32",
+      "id": "chelis_numeric_core::dtype_semantics::wire_codec::ScalarWire::F32.bits: f32",
       "kind": "wire-schema-numeric-field"
     },
     {
@@ -808,7 +808,7 @@
       "flags": [
         "float-carrier"
       ],
-      "id": "chelis_types::dtype_semantics::wire_codec::ScalarWire::F64.bits: f64",
+      "id": "chelis_numeric_core::dtype_semantics::wire_codec::ScalarWire::F64.bits: f64",
       "kind": "wire-schema-numeric-field"
     },
     {
@@ -817,7 +817,7 @@
       "flags": [
         "numeric-field"
       ],
-      "id": "chelis_types::dtype_semantics::wire_codec::ScalarWire::I16.value: i16",
+      "id": "chelis_numeric_core::dtype_semantics::wire_codec::ScalarWire::I16.value: i16",
       "kind": "wire-schema-numeric-field"
     },
     {
@@ -826,7 +826,7 @@
       "flags": [
         "numeric-field"
       ],
-      "id": "chelis_types::dtype_semantics::wire_codec::ScalarWire::I32.value: i32",
+      "id": "chelis_numeric_core::dtype_semantics::wire_codec::ScalarWire::I32.value: i32",
       "kind": "wire-schema-numeric-field"
     },
     {
@@ -835,7 +835,7 @@
       "flags": [
         "numeric-field"
       ],
-      "id": "chelis_types::dtype_semantics::wire_codec::ScalarWire::I64.value: i64",
+      "id": "chelis_numeric_core::dtype_semantics::wire_codec::ScalarWire::I64.value: i64",
       "kind": "wire-schema-numeric-field"
     },
     {
@@ -844,7 +844,7 @@
       "flags": [
         "numeric-field"
       ],
-      "id": "chelis_types::dtype_semantics::wire_codec::ScalarWire::I8.value: i8",
+      "id": "chelis_numeric_core::dtype_semantics::wire_codec::ScalarWire::I8.value: i8",
       "kind": "wire-schema-numeric-field"
     },
     {
@@ -853,7 +853,7 @@
       "flags": [
         "float-carrier"
       ],
-      "id": "chelis_types::dtype_semantics::wire_codec::StorageWire::Bf16.bits: bf16",
+      "id": "chelis_numeric_core::dtype_semantics::wire_codec::StorageWire::Bf16.bits: bf16",
       "kind": "wire-schema-numeric-field"
     },
     {
@@ -862,7 +862,7 @@
       "flags": [
         "float-carrier"
       ],
-      "id": "chelis_types::dtype_semantics::wire_codec::StorageWire::F16.bits: f16",
+      "id": "chelis_numeric_core::dtype_semantics::wire_codec::StorageWire::F16.bits: f16",
       "kind": "wire-schema-numeric-field"
     },
     {
@@ -871,7 +871,7 @@
       "flags": [
         "float-carrier"
       ],
-      "id": "chelis_types::dtype_semantics::wire_codec::StorageWire::F32.bits: f32",
+      "id": "chelis_numeric_core::dtype_semantics::wire_codec::StorageWire::F32.bits: f32",
       "kind": "wire-schema-numeric-field"
     },
     {
@@ -880,7 +880,7 @@
       "flags": [
         "float-carrier"
       ],
-      "id": "chelis_types::dtype_semantics::wire_codec::StorageWire::F64.bits: f64",
+      "id": "chelis_numeric_core::dtype_semantics::wire_codec::StorageWire::F64.bits: f64",
       "kind": "wire-schema-numeric-field"
     },
     {
@@ -889,7 +889,7 @@
       "flags": [
         "numeric-field"
       ],
-      "id": "chelis_types::dtype_semantics::wire_codec::StorageWire::I16.values: i16",
+      "id": "chelis_numeric_core::dtype_semantics::wire_codec::StorageWire::I16.values: i16",
       "kind": "wire-schema-numeric-field"
     },
     {
@@ -898,7 +898,7 @@
       "flags": [
         "numeric-field"
       ],
-      "id": "chelis_types::dtype_semantics::wire_codec::StorageWire::I32.values: i32",
+      "id": "chelis_numeric_core::dtype_semantics::wire_codec::StorageWire::I32.values: i32",
       "kind": "wire-schema-numeric-field"
     },
     {
@@ -907,7 +907,7 @@
       "flags": [
         "numeric-field"
       ],
-      "id": "chelis_types::dtype_semantics::wire_codec::StorageWire::I64.values: i64",
+      "id": "chelis_numeric_core::dtype_semantics::wire_codec::StorageWire::I64.values: i64",
       "kind": "wire-schema-numeric-field"
     },
     {
@@ -916,7 +916,7 @@
       "flags": [
         "numeric-field"
       ],
-      "id": "chelis_types::dtype_semantics::wire_codec::StorageWire::I8.values: i8",
+      "id": "chelis_numeric_core::dtype_semantics::wire_codec::StorageWire::I8.values: i8",
       "kind": "wire-schema-numeric-field"
     }
   ]

@@ -1,6 +1,7 @@
 //! Bounded public-ingress allocation/scaling witnesses for chelis#3231.
 use chelis_compiler_api::schema::{WIRE_DAG_SCHEMA_VERSION, WireDag};
-use chelis_types::{scalar_from_f64, types::Prim};
+use chelis_numeric_core::dtype_semantics::scalar_from_f64;
+use chelis_numeric_core::prim::Prim;
 use serde_json::{Value, json};
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::Mutex;

@@ -7,16 +7,18 @@ use chelis_ir::eval::{
     eval_tensor_roots_with,
 };
 use chelis_ir::tier2;
-use chelis_types::{
-    ArgReduceOp, BUILTIN_NAMES, CompareOp, FloatBinOp, FloatUnOp, IntBinOp, IntUnOp,
-    NumericKernelError, NumericTrap, ScalarValue, TensorReduceOp, arg_reduce_tensor_groups,
-    cast_scalar, compare_scalars, compare_tensors, cumsum_tensor_lanes, float_binop,
-    float_scalar_tensor_binop, float_tensor_binop, float_tensor_scalar_binop, float_tensor_unop,
-    float_unop, int_binop, int_scalar_tensor_binop, int_tensor_binop, int_tensor_scalar_binop,
-    int_tensor_unop, int_unop, reduce_tensor_groups, scalar_from_f64, scalar_from_i64,
-    scatter_add_tensor_groups, tensor_from_scalars, types::Prim,
+use chelis_numeric_core::dtype_semantics::{
+    ArgReduceOp, CompareOp, FloatBinOp, FloatUnOp, IntBinOp, IntUnOp, NumericKernelError,
+    NumericTrap, ScalarValue, TensorReduceOp, arg_reduce_tensor_groups, cast_scalar,
+    compare_scalars, compare_tensors, cumsum_tensor_lanes, float_binop, float_scalar_tensor_binop,
+    float_tensor_binop, float_tensor_scalar_binop, float_tensor_unop, float_unop, int_binop,
+    int_scalar_tensor_binop, int_tensor_binop, int_tensor_scalar_binop, int_tensor_unop, int_unop,
+    reduce_tensor_groups, scalar_from_f64, scalar_from_i64, scatter_add_tensor_groups,
+    tensor_from_scalars,
 };
-use chelis_types::{PreparedUniformLike, RandomKey};
+use chelis_numeric_core::dtype_semantics::{PreparedUniformLike, RandomKey};
+use chelis_numeric_core::prim::Prim;
+use chelis_types::BUILTIN_NAMES;
 
 use super::transforms::*;
 use super::*;
@@ -347,7 +349,7 @@ fn sparse_index_failure(op: &str, index: i64, axis: usize, extent: usize) -> Str
 
 fn tensor_result(
     template: &RuntimeTensorValue,
-    storage: chelis_types::TensorStorage,
+    storage: chelis_numeric_core::dtype_semantics::TensorStorage,
 ) -> RuntimeValue {
     RuntimeValue::Tensor(RuntimeTensorValue::new(IrTensorValue::from_storage(
         template.value.shape.clone(),
@@ -457,21 +459,23 @@ pub(super) fn numeric_binop(
 }
 
 pub(super) fn eval_float_classification(
-    kind: chelis_types::FloatClassify,
+    kind: chelis_numeric_core::dtype_semantics::FloatClassify,
     args: &[RuntimeValue],
 ) -> Result<RuntimeValue, String> {
     match args {
-        [RuntimeValue::Scalar(value)] => chelis_types::classify_float(kind, value.value())
-            .map(|value| {
-                RuntimeValue::Bool(
-                    value
-                        .as_bool_exact()
-                        .expect("classification result is bool"),
-                )
-            })
-            .map_err(|e| e.to_string()),
+        [RuntimeValue::Scalar(value)] => {
+            chelis_numeric_core::dtype_semantics::classify_float(kind, value.value())
+                .map(|value| {
+                    RuntimeValue::Bool(
+                        value
+                            .as_bool_exact()
+                            .expect("classification result is bool"),
+                    )
+                })
+                .map_err(|e| e.to_string())
+        }
         [RuntimeValue::Tensor(value)] => {
-            chelis_types::classify_float_tensor(kind, value.value.storage())
+            chelis_numeric_core::dtype_semantics::classify_float_tensor(kind, value.value.storage())
                 .map(|storage| tensor_result(value, storage))
                 .map_err(|e| e.to_string())
         }
@@ -788,8 +792,12 @@ pub(super) fn ingress_tensor_to_declared(
     if tensor.precision == prim {
         return Ok(tensor);
     }
-    let storage = chelis_types::finalize_tensor("param", prim, tensor.value.storage().to_raw())
-        .map_err(|trap| trap.to_string())?;
+    let storage = chelis_numeric_core::dtype_semantics::finalize_tensor(
+        "param",
+        prim,
+        tensor.value.storage().to_raw(),
+    )
+    .map_err(|trap| trap.to_string())?;
     Ok(RuntimeTensorValue::new(IrTensorValue::from_storage(
         tensor.value.shape.clone(),
         storage,
@@ -942,7 +950,7 @@ pub(super) fn cast_tensor_value(
         precision: src_prim,
     } = tensor;
     // chelis#729: one CHECKED cast ladder for both eval surfaces
-    // (`chelis_types::cast_raw` via the DAG evaluator's `cast_tensor`).
+    // (`chelis_numeric_core::dtype_semantics::cast_raw` via the DAG evaluator's `cast_tensor`).
     // Integer storage reads exactly, float targets finalize at width
     // (f16/bf16 casts genuinely round, chelis#717), and out-of-range or
     // out-of-domain elements TRAP per spec/04 section 5.2; the named
@@ -954,7 +962,7 @@ pub(super) fn cast_tensor_value(
 /// A named cast rung over a tensor, routed through the same sealed kernel
 /// the DAG evaluator uses so the two eval surfaces cannot diverge.
 pub(super) fn named_cast_tensor_value(
-    mode: chelis_deep::NamedCastMode,
+    mode: chelis_numeric_core::named_cast::NamedCastMode,
     tensor: RuntimeTensorValue,
     target_prim: Prim,
 ) -> Result<RuntimeValue, String> {
@@ -1040,7 +1048,7 @@ pub(super) fn nested_list_to_tensor_data(
 /// float element never passes through an f64 image or `finalize_tensor`.
 pub(super) enum ListTensorData {
     Int(Vec<i64>),
-    Float(Vec<chelis_types::ScalarValue>),
+    Float(Vec<chelis_numeric_core::dtype_semantics::ScalarValue>),
 }
 
 impl ListTensorData {
@@ -1050,13 +1058,17 @@ impl ListTensorData {
         self,
         op: &'static str,
         precision: Prim,
-    ) -> Result<chelis_types::TensorStorage, String> {
+    ) -> Result<chelis_numeric_core::dtype_semantics::TensorStorage, String> {
         match self {
-            ListTensorData::Int(v) => {
-                chelis_types::finalize_tensor(op, precision, chelis_types::RawTensor::Int(v))
-                    .map_err(|trap| trap.to_string())
-            }
-            ListTensorData::Float(v) => Ok(chelis_types::tensor_from_scalars(precision, &v)),
+            ListTensorData::Int(v) => chelis_numeric_core::dtype_semantics::finalize_tensor(
+                op,
+                precision,
+                chelis_numeric_core::dtype_semantics::RawTensor::Int(v),
+            )
+            .map_err(|trap| trap.to_string()),
+            ListTensorData::Float(v) => Ok(
+                chelis_numeric_core::dtype_semantics::tensor_from_scalars(precision, &v),
+            ),
         }
     }
 
@@ -1426,8 +1438,14 @@ pub(super) fn tensor_reduce_host(
             arg_reduce_tensor_groups(ArgReduceOp::Argmin, tensor.value.storage(), &groups)
         }
         ReduceOp::Sum => {
-            let accumulator = tensor.precision.default_reduce_sum_accumulator()?;
-            let result = tensor.precision.default_reduce_sum_result_precision()?;
+            let accumulator = tensor
+                .precision
+                .default_reduce_sum_accumulator()
+                .map_err(|error| error.to_string())?;
+            let result = tensor
+                .precision
+                .default_reduce_sum_result_precision()
+                .map_err(|error| error.to_string())?;
             reduce_tensor_groups(
                 TensorReduceOp::Sum {
                     accumulator,
@@ -1876,7 +1894,7 @@ pub(super) fn tensor_pad_host(
     }
     // The fill ingress-finalizes at the buffer's dtype (loud on a fill
     // outside an integer dtype's domain).
-    let fill = chelis_types::scalar_from_f64("pad", tensor.precision, fill)
+    let fill = chelis_numeric_core::dtype_semantics::scalar_from_f64("pad", tensor.precision, fill)
         .map_err(|trap| trap.to_string())?;
     // reuse_* contract: pad moves existing elements and places a
     // finalized fill (section C3, element-preserving).
@@ -2123,7 +2141,7 @@ fn extract_root(
 ) -> Result<RuntimeTensorValue, String> {
     let values =
         eval_tensor_roots_with(dag, &[root], |name| inputs.get(name).cloned()).map_err(|err| {
-            if err.starts_with(chelis_types::NUMERIC_TRAP_PREFIX) {
+            if err.starts_with(chelis_numeric_core::dtype_semantics::NUMERIC_TRAP_PREFIX) {
                 err
             } else {
                 format!("{op_label}: IR eval failed: {err}")
@@ -2348,7 +2366,7 @@ pub(super) fn tensor_concat_value(
     // element-preserving). Seed a zero-filled buffer at the shared dtype,
     // then overwrite every slot from its owning part.
     let admitted = admit_tensor("concat", &out_shape, first.precision)?;
-    let zero = chelis_types::scalar_from_i64("concat", first.precision, 0)
+    let zero = chelis_numeric_core::dtype_semantics::scalar_from_i64("concat", first.precision, 0)
         .map_err(|trap| trap.to_string())?;
     let seed = first
         .value
@@ -2828,8 +2846,10 @@ pub(super) fn tensor_sort_value(
     // elements, NaNs included, in source order.
     let raw = tensor.value.storage().to_raw();
     let order = |lhs: usize, rhs: usize| match &raw {
-        chelis_types::RawTensor::Int(values) => values[lhs].cmp(&values[rhs]),
-        chelis_types::RawTensor::Float(values) => {
+        chelis_numeric_core::dtype_semantics::RawTensor::Int(values) => {
+            values[lhs].cmp(&values[rhs])
+        }
+        chelis_numeric_core::dtype_semantics::RawTensor::Float(values) => {
             match (values[lhs].is_nan(), values[rhs].is_nan()) {
                 (true, true) => std::cmp::Ordering::Equal,
                 (true, false) => std::cmp::Ordering::Greater,
@@ -3057,7 +3077,7 @@ impl AccumulatorTree {
         };
         // A one-leaf group is still a sum ([05-OP-30]); its value finalizes like
         // any other arithmetic result, as `sum(diagonal(..))` does.
-        let total = chelis_types::canonical_nan_scalar(total);
+        let total = chelis_numeric_core::dtype_semantics::canonical_nan_scalar(total);
         cast_scalar(op, total, result).map_err(|error| error.to_string())
     }
 }
@@ -3118,8 +3138,14 @@ pub(super) fn tensor_trace_value(
         }
         groups.push(group);
     }
-    let accumulator = diagonal.precision.default_reduce_sum_accumulator()?;
-    let result = diagonal.precision.default_reduce_sum_result_precision()?;
+    let accumulator = diagonal
+        .precision
+        .default_reduce_sum_accumulator()
+        .map_err(|error| error.to_string())?;
+    let result = diagonal
+        .precision
+        .default_reduce_sum_result_precision()
+        .map_err(|error| error.to_string())?;
     let values = groups
         .iter()
         .map(|group| trace_balanced_sum(&diagonal, group, accumulator, result))
@@ -3335,8 +3361,14 @@ pub(super) fn tensor_einsum_value(
     // products of one output element are summed in the runtime's balanced
     // order, so both lanes agree bit for bit. #1290 owns moving both lanes to
     // [05-OP-33]'s canonical tree.
-    let accumulator = lhs.precision.default_reduce_sum_accumulator()?;
-    let result = lhs.precision.default_reduce_sum_result_precision()?;
+    let accumulator = lhs
+        .precision
+        .default_reduce_sum_accumulator()
+        .map_err(|error| error.to_string())?;
+    let result = lhs
+        .precision
+        .default_reduce_sum_result_precision()
+        .map_err(|error| error.to_string())?;
     // The C runtime's einsum plan checks the output's byte size after its
     // count and reports both in its own words, without a trap line; this
     // lane reports the byte size the same way. The admission behind it can
@@ -3440,7 +3472,7 @@ fn render_tensor(tensor: &RuntimeTensorValue) -> String {
     let keys = tensor.value.storage().keys();
     let element = |index: usize| match keys {
         Some(keys) => render_key(keys[index]),
-        None => chelis_types::format_element(
+        None => chelis_numeric_core::observation::format_element(
             tensor.precision,
             tensor.value.storage().element_ref(index),
         ),
@@ -3493,11 +3525,11 @@ fn schedule_render<'a>(
 // through this exact function (the [05-OBS-1] single renderer) while the
 // dtype tags still exist; see `EvaluatedRoot::display`.
 fn render_key(key: RandomKey) -> String {
-    chelis_types::format_key(key)
+    chelis_numeric_core::observation::format_key(key)
 }
 
 pub(crate) fn render_value(value: &RuntimeValue) -> String {
-    use chelis_types::{ElementRef, format_element};
+    use chelis_numeric_core::observation::{ElementRef, format_element};
     // A worklist rather than recursion, and one output buffer rather than a
     // string per level: a value nested far deeper than the native stack
     // renders in one pass (chelis#2567). Steps pop in output order.
@@ -3980,7 +4012,7 @@ mod einsum_stream_tests {
             }
             level = next;
         }
-        let total = chelis_types::canonical_nan_scalar(level[0]);
+        let total = chelis_numeric_core::dtype_semantics::canonical_nan_scalar(level[0]);
         cast_scalar("einsum", total, result).map_err(|error| error.to_string())
     }
 
@@ -3989,8 +4021,14 @@ mod einsum_stream_tests {
         lhs: &RuntimeTensorValue,
         rhs: &RuntimeTensorValue,
     ) -> Result<ScalarValue, String> {
-        let accumulator = lhs.precision.default_reduce_sum_accumulator()?;
-        let result = lhs.precision.default_reduce_sum_result_precision()?;
+        let accumulator = lhs
+            .precision
+            .default_reduce_sum_accumulator()
+            .map_err(|error| error.to_string())?;
+        let result = lhs
+            .precision
+            .default_reduce_sum_result_precision()
+            .map_err(|error| error.to_string())?;
         let mut products = Vec::new();
         for index in 0..lhs.value.len() {
             let left = cast_scalar("einsum", lhs.value.storage().scalar_at(index), accumulator)

@@ -8,8 +8,8 @@
 use std::collections::BTreeSet;
 use std::sync::OnceLock;
 
+use chelis_numeric_core::prim::Prim;
 use chelis_reef::EmbeddedRuntime;
-use chelis_types::types::Prim;
 use serde::{Deserialize, Serialize};
 
 mod generator;

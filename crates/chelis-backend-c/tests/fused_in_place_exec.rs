@@ -1,6 +1,6 @@
 mod support;
 use chelis_ir::dag::{Dag, DimInfo, FusedInput, FusedStep, FusedStepOp, RiscOp, TensorType};
-use chelis_types::types::Prim;
+use chelis_numeric_core::prim::Prim;
 use std::fs;
 use std::process::Command;
 use support::codegen;

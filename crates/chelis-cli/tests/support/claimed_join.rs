@@ -1,7 +1,7 @@
 use assert_cmd::Command;
 use chelis_ir::eval::{TensorValue, eval_tensor};
-use chelis_types::types::Prim;
-use chelis_types::{RawTensor, finalize_tensor};
+use chelis_numeric_core::prim::Prim;
+use chelis_numeric_core::dtype_semantics::{RawTensor, finalize_tensor};
 use chelis_unord::UnordMap;
 use std::path::Path;
 

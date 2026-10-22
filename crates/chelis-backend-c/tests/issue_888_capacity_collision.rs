@@ -16,7 +16,7 @@
 use chelis_backend_c::memory::{MemoryPlan, NodeMemoryKind};
 use chelis_ir::dag::{Dag, DimExpr, DimInfo, NodeId, RiscOp, TensorType};
 use chelis_ir::ownership::plan_c_storage;
-use chelis_types::types::Prim;
+use chelis_numeric_core::prim::Prim;
 mod support;
 
 /// A tail extent chosen so the *concrete* part of the shape product,

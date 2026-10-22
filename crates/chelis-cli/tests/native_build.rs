@@ -483,7 +483,7 @@ fn cpu_observation_corpus_matches_eval_exactly() {
             .output()
             .unwrap();
         assert!(expected.status.success());
-        chelis_types::agreement::compare_exact_observations(
+        chelis_numeric_core::agreement::compare_exact_observations(
             &format!("native program {index}"),
             std::str::from_utf8(&expected.stdout).unwrap(),
             std::str::from_utf8(&actual.stdout).unwrap(),
@@ -1413,7 +1413,8 @@ fn nan_atom_coverage(
         ReduceWindowKind, RiscAtomIdentity as Id, RiscOp, RtDim, RuntimeRecurrence,
         RuntimeRecurrenceBackward, RuntimeRecurrenceSource, UniformBound,
     };
-    use chelis_types::{BitwiseKind, types::Prim};
+    use chelis_numeric_core::prim::Prim;
+    use chelis_types::BitwiseKind;
     let window = |reducer| RiscOp::ReduceWindow {
         reducer,
         window_shape: vec![2],
@@ -1584,15 +1585,15 @@ fn nan_atom_coverage(
         ),
         Id::ScatterElements => (RiscOp::ScatterElements { axis: 0 }, Rows),
         Id::IsNan => (
-            RiscOp::FloatClassify(chelis_types::FloatClassify::Nan),
+            RiscOp::FloatClassify(chelis_numeric_core::dtype_semantics::FloatClassify::Nan),
             NoFloatValue,
         ),
         Id::IsFinite => (
-            RiscOp::FloatClassify(chelis_types::FloatClassify::Finite),
+            RiscOp::FloatClassify(chelis_numeric_core::dtype_semantics::FloatClassify::Finite),
             NoFloatValue,
         ),
         Id::IsInfinite => (
-            RiscOp::FloatClassify(chelis_types::FloatClassify::Infinite),
+            RiscOp::FloatClassify(chelis_numeric_core::dtype_semantics::FloatClassify::Infinite),
             NoFloatValue,
         ),
         Id::Count => (RiscOp::Count { axes: vec![0] }, NoFloatValue),
@@ -1642,21 +1643,21 @@ fn nan_atom_coverage(
         Id::Shape => (RiscOp::Shape { axis: 0 }, NoFloatValue),
         Id::CastTrunc => (
             RiscOp::NamedCast {
-                mode: chelis_ir::dag::NamedCastMode::Trunc,
+                mode: chelis_numeric_core::named_cast::NamedCastMode::Trunc,
                 new_precision: Prim::Int32,
             },
             NoFloatValue,
         ),
         Id::CastSaturate => (
             RiscOp::NamedCast {
-                mode: chelis_ir::dag::NamedCastMode::Saturate,
+                mode: chelis_numeric_core::named_cast::NamedCastMode::Saturate,
                 new_precision: Prim::Int32,
             },
             NoFloatValue,
         ),
         Id::CastWrap => (
             RiscOp::NamedCast {
-                mode: chelis_ir::dag::NamedCastMode::Wrap,
+                mode: chelis_numeric_core::named_cast::NamedCastMode::Wrap,
                 new_precision: Prim::Int32,
             },
             NoFloatValue,
@@ -2610,8 +2611,12 @@ fn phi_witness_bits(width: &NanWidth) -> Vec<u64> {
     PHI_WITNESSES
         .iter()
         .map(|x| match width.name {
-            "f16" => u64::from(chelis_types::f16_from_f64_rne(*x).to_bits()),
-            "bf16" => u64::from(chelis_types::bf16_from_f64_rne(*x).to_bits()),
+            "f16" => {
+                u64::from(chelis_numeric_core::dtype_semantics::f16_from_f64_rne(*x).to_bits())
+            }
+            "bf16" => {
+                u64::from(chelis_numeric_core::dtype_semantics::bf16_from_f64_rne(*x).to_bits())
+            }
             "f32" => u64::from((*x as f32).to_bits()),
             _ => x.to_bits(),
         })

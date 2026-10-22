@@ -1,11 +1,11 @@
 //! chelis#729 Phase 2: the numeric-trap diagnostic grammar is a public,
 //! frozen cross-lane contract rather than duplicated string literals.
 
-use chelis_types::{
+use chelis_numeric_core::dtype_semantics::{
     NUMERIC_TRAP_DIV_ZERO_KIND, NUMERIC_TRAP_DOMAIN_KIND, NUMERIC_TRAP_DTYPE_SEPARATOR,
     NUMERIC_TRAP_OPERATION_SEPARATOR, NUMERIC_TRAP_OVERFLOW_KIND, NUMERIC_TRAP_PREFIX, NumericTrap,
-    types::Prim,
 };
+use chelis_numeric_core::prim::Prim;
 
 const ALL_PRIMS: [Prim; 11] = [
     Prim::F32,

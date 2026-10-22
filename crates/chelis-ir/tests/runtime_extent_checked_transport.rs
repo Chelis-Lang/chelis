@@ -2,7 +2,8 @@
 use chelis_ir::dag::{Dag, DimInfo, NodeId, RiscOp, RtAxis, TensorType};
 use chelis_ir::eval::{TensorValue, eval_tensor_with};
 use chelis_ir::optimize::{common_subexpr_eliminate, constant_fold, dead_code_eliminate};
-use chelis_types::{scalar_from_i64, types::Prim};
+use chelis_numeric_core::dtype_semantics::scalar_from_i64;
+use chelis_numeric_core::prim::Prim;
 
 fn scalar_type() -> TensorType {
     TensorType {

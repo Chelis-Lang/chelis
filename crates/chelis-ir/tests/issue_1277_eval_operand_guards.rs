@@ -34,7 +34,7 @@
 
 use chelis_ir::dag::{Dag, DimInfo, NodeId, RiscOp, RtDim, TensorType};
 use chelis_ir::eval::{TensorValue, eval_tensor_roots_with_strict};
-use chelis_types::types::Prim;
+use chelis_numeric_core::prim::Prim;
 
 fn f32_tensor(shape: &[usize], data: &[f64]) -> TensorValue {
     TensorValue::finalize_from_wide("test", Prim::F32, shape.to_vec(), data.to_vec())

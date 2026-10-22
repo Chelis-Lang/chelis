@@ -6,7 +6,8 @@
 //! consumers (C Proof notebook, etc.) need manifests without writing their
 //! own mapping.
 
-use chelis_types::types::{Prim, Target};
+use chelis_numeric_core::prim::Prim;
+use chelis_types::types::Target;
 
 /// Metal backend capability (declared from hardware spec; no f64 on Apple
 /// Silicon). Declaration-only — verified in the field via [05-UNS-1] wiring.

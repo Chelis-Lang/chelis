@@ -338,16 +338,14 @@ pub unsafe extern "C" fn chelis_native_provider_call_v1(
     runtime_fail!("native provider unavailable in this Chelis runtime")
 }
 
-/// Fail with an [04-NUM-9] trap line rendered by
-/// `chelis_abi::failure::NumericTrapLine`, the formatter every lane shares.
-/// The line carries no prefix or suffix; a failure with context renders
-/// through a `chelis_abi::failure` renderer, which puts the context first.
+/// Fail with the shared [04-NUM-9] numeric trap line.
+/// `chelis_abi::failure` adds context before this final line.
 macro_rules! numeric_trap {
     ($kind:ident, $op:expr, $dtype:expr) => {
         runtime_fail!(
             "{}",
-            chelis_abi::failure::NumericTrapLine {
-                kind: chelis_abi::failure::NumericTrapKind::$kind,
+            chelis_vocab::failure::NumericTrapLine {
+                kind: chelis_vocab::failure::NumericTrapKind::$kind,
                 op: $op,
                 dtype: $dtype,
             }
@@ -2603,7 +2601,7 @@ pub extern "C" fn chelis_key_from_seed(seed: i64) -> chelis_key {
 
 /// [05-OBS-2]: a key's printed form, `key(` then its 64 bits as 16
 /// lowercase hex digits, then `)`. Byte-identical to the reference renderer
-/// `chelis_types::observation::format_key_bits`, locked by
+/// `chelis_numeric_core::observation::format_key_bits`, locked by
 /// `tests/format_key_matches_reference.rs`; the production staticlib keeps
 /// no checker dependency.
 fn format_key_bits(bits: u64) -> String {

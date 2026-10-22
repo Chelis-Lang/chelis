@@ -7,7 +7,7 @@
 use chelis_unord::UnordMap;
 
 use crate::dag::{Dag, DagNode, DimExpr, DimInfo, NodeId, RiscOp, RtAxis, RtDim, TensorType};
-use chelis_types::types::Prim;
+use chelis_numeric_core::prim::Prim;
 
 /// Compiler pipeline ordering around backend specialization.
 ///
@@ -943,7 +943,7 @@ fn append_node_provenance(out: &mut Dag, target: NodeId, source: &DagNode) {
 mod tests {
     use super::*;
     use crate::dag::{Dag, DeclId, DimExpr, DimInfo, TensorType};
-    use chelis_types::types::Prim;
+    use chelis_numeric_core::prim::Prim;
 
     #[test]
     fn single_axis_equivalence_preserves_resolved_values_and_symbol_identity() {
@@ -1009,7 +1009,12 @@ mod tests {
                 parameter: String::new(),
                 axis: RtAxis::Lit(axis),
                 requirements: vec![
-                    chelis_types::scalar_from_i64("test", Prim::Int64, required).unwrap(),
+                    chelis_numeric_core::dtype_semantics::scalar_from_i64(
+                        "test",
+                        Prim::Int64,
+                        required,
+                    )
+                    .unwrap(),
                 ],
                 claims: Vec::new(),
             },
@@ -1191,7 +1196,7 @@ mod tests {
             decl,
             RiscOp::Sum {
                 axis: 1,
-                accumulator: chelis_types::types::Prim::F32,
+                accumulator: chelis_numeric_core::prim::Prim::F32,
             },
             vec![mul],
             mat(2, 4),
@@ -1330,7 +1335,7 @@ mod tests {
             decl,
             RiscOp::Sum {
                 axis: 1,
-                accumulator: chelis_types::types::Prim::F32,
+                accumulator: chelis_numeric_core::prim::Prim::F32,
             },
             vec![mul],
             symbolic_mat("m", "n"),
@@ -1412,7 +1417,7 @@ mod tests {
             decl,
             RiscOp::Sum {
                 axis: 1,
-                accumulator: chelis_types::types::Prim::F32,
+                accumulator: chelis_numeric_core::prim::Prim::F32,
             },
             vec![mul],
             mat(2, 4),
@@ -1579,7 +1584,7 @@ mod tests {
             decl,
             RiscOp::Sum {
                 axis: 1,
-                accumulator: chelis_types::types::Prim::F32,
+                accumulator: chelis_numeric_core::prim::Prim::F32,
             },
             vec![product],
             mat(4, 3),
@@ -1791,7 +1796,7 @@ mod tests {
             decl,
             RiscOp::Sum {
                 axis: 2,
-                accumulator: chelis_types::types::Prim::F32,
+                accumulator: chelis_numeric_core::prim::Prim::F32,
             },
             vec![product],
             mat(4, 2),

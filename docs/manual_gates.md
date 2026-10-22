@@ -250,6 +250,37 @@ Default PR CI does not execute the complete command.
 Target compilation does not prove device execution, allocator capacity, or whole-pipeline portability.
 Owner: chelis#3989.
 
+## Numeric core portability
+
+Run `.venv/bin/python scripts/numeric_core_oracle.py` from the repository root.
+Use the pinned Rust toolchain, `thumbv7em-none-eabi`, `cargo-nextest`, Git, Clang, and the checkout's uv-managed Python.
+Clang must support 128-bit `_BitInt` on the bare target.
+The target build also needs `llvm-ar`.
+Native consumers also need the repository's normal C build prerequisites.
+
+The oracle compares against immutable commit `8ff50b201c02ec0297a89b344805ddf7aab50fef`.
+The baseline uses its own Cargo target directory.
+The command removes baseline Cargo build artifacts before candidate authority and numeric tests.
+A shallow checkout needs repository access to fetch that commit.
+Missing source, failed commands, incomplete evidence, or skipped mandatory tests fail acceptance.
+Success means exit zero and the final line `Numeric core oracle: PASS`.
+
+The command checks:
+
+- Default, no-default, `alloc`, `serde`, and combined target consumers without target `std` or host dependencies.
+- Public scalar and tensor behavior, current random keys, named casts, activation graphs, traps, and error precedence.
+- Exact wire bytes, host schema projections, observation, runtime conversions, native ABI headers, and generated C.
+- Zero scalar allocations and baseline-equivalent tensor allocation counts and requested bytes.
+- Private construction, removed imports, numeric authority, and named shared and numeric Python failure controls.
+
+Linux integration support executes the command in its domain slice.
+macOS nightly validation executes it on workspace shard one.
+Default PR CI does not execute the complete command.
+Existing ignored numeric phase work remains outside this extraction claim.
+Target compilation does not prove device execution, allocator capacity, or whole-pipeline portability.
+Owner: chelis#3993.
+
+
 ## Compiler feature acceptance gates
 
 The incremental [eval-performance suite](eval_performance.md) runs its sparse

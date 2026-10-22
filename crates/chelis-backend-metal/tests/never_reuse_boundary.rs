@@ -8,7 +8,7 @@
 mod support;
 
 use chelis_ir::dag::{Dag, DimInfo, RiscOp, RtDim, TensorType};
-use chelis_types::types::Prim;
+use chelis_numeric_core::prim::Prim;
 use chelis_types::unsupported::{RejectionAuthorityKind, Stage};
 
 fn vector(n: usize) -> TensorType {

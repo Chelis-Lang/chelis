@@ -10,12 +10,12 @@
 //! The expected values come from an independent oracle over `i128`, so a
 //! kernel that shares a mistake with the oracle is not the one under test.
 
-use chelis_deep::NamedCastMode;
-use chelis_types::dtype_semantics::{
+use chelis_numeric_core::dtype_semantics::{
     NumericTrap, RawScalar, RawTensor, named_cast_raw, named_cast_scalar, named_cast_tensor,
     scalar_from_f64, scalar_from_i64,
 };
-use chelis_types::types::Prim;
+use chelis_numeric_core::named_cast::NamedCastMode;
+use chelis_numeric_core::prim::Prim;
 
 const INT_TARGETS: [Prim; 4] = [Prim::Int8, Prim::Int16, Prim::Int32, Prim::Int64];
 const INT_SOURCES: [Prim; 4] = INT_TARGETS;
@@ -65,7 +65,7 @@ fn wrap_oracle(value: i128, target: Prim) -> i64 {
     i64::try_from(residue).expect("a target-width representative")
 }
 
-fn exact(value: chelis_types::dtype_semantics::ScalarValue, target: Prim) -> i64 {
+fn exact(value: chelis_numeric_core::dtype_semantics::ScalarValue, target: Prim) -> i64 {
     assert_eq!(value.prim(), target, "the result is at the target dtype");
     value
         .as_i64_exact()

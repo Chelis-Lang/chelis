@@ -8,7 +8,7 @@ use chelis_ir::dag::{
     ComparisonKind, Dag, DimInfo, ExtremaKind, ExtremaOperand, RiscOp, RtAxis, RtDim, TensorType,
 };
 use chelis_ir::fuse::fuse;
-use chelis_types::types::Prim;
+use chelis_numeric_core::prim::Prim;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -953,7 +953,7 @@ fn s4_sum_reduction_emits_kernel() {
         decl,
         RiscOp::Sum {
             axis: 1,
-            accumulator: chelis_types::types::Prim::F32,
+            accumulator: chelis_numeric_core::prim::Prim::F32,
         },
         vec![x],
         vec_f32(3),
@@ -1890,7 +1890,7 @@ fn s15_segmented_reduction_strategy_names_track_axis_size() {
         tiny_decl,
         RiscOp::Sum {
             axis: 1,
-            accumulator: chelis_types::types::Prim::F32,
+            accumulator: chelis_numeric_core::prim::Prim::F32,
         },
         vec![x_tiny],
         vec_f32(3),
@@ -1916,7 +1916,7 @@ fn s15_segmented_reduction_strategy_names_track_axis_size() {
         small_decl,
         RiscOp::Sum {
             axis: 1,
-            accumulator: chelis_types::types::Prim::F32,
+            accumulator: chelis_numeric_core::prim::Prim::F32,
         },
         vec![x_small],
         vec_f32(3),
@@ -1942,7 +1942,7 @@ fn s15_segmented_reduction_strategy_names_track_axis_size() {
         large_decl,
         RiscOp::Sum {
             axis: 1,
-            accumulator: chelis_types::types::Prim::F32,
+            accumulator: chelis_numeric_core::prim::Prim::F32,
         },
         vec![x_large],
         vec_f32(3),
@@ -1977,7 +1977,7 @@ fn s15_scalar_reduction_uses_staged_kernels_and_estimate() {
         decl,
         RiscOp::Sum {
             axis: 0,
-            accumulator: chelis_types::types::Prim::F32,
+            accumulator: chelis_numeric_core::prim::Prim::F32,
         },
         vec![x],
         scalar_f32(),
@@ -2040,7 +2040,7 @@ fn s15_matmul_emits_hipblas_and_link_flag() {
         decl,
         RiscOp::Sum {
             axis: 1,
-            accumulator: chelis_types::types::Prim::F32,
+            accumulator: chelis_numeric_core::prim::Prim::F32,
         },
         vec![mul],
         mat_f32(2, 4),
@@ -2355,7 +2355,7 @@ fn s15_batched_matmul_symbolic_batch_emits_strided_batched_helper() {
             m: chelis_ir::dag::DimExpr::Concrete(4),
             n: chelis_ir::dag::DimExpr::Concrete(6),
             k: chelis_ir::dag::DimExpr::Concrete(5),
-            accumulator: chelis_types::types::Prim::F32,
+            accumulator: chelis_numeric_core::prim::Prim::F32,
         },
         vec![a, b],
         out_ty,
@@ -2413,7 +2413,7 @@ fn s15_batched_matmul_symbolic_matrix_dim_uses_helper_loop_fallback() {
             m: chelis_ir::dag::DimExpr::Sym("m".into()),
             n: chelis_ir::dag::DimExpr::Sym("n".into()),
             k: chelis_ir::dag::DimExpr::Sym("k".into()),
-            accumulator: chelis_types::types::Prim::F32,
+            accumulator: chelis_numeric_core::prim::Prim::F32,
         },
         vec![a, b],
         out_ty,
@@ -2475,7 +2475,7 @@ fn s15_batched_matmul_materializes_noncontiguous_batch_layout_before_blas() {
             m: chelis_ir::dag::DimExpr::Concrete(4),
             n: chelis_ir::dag::DimExpr::Concrete(6),
             k: chelis_ir::dag::DimExpr::Concrete(5),
-            accumulator: chelis_types::types::Prim::F32,
+            accumulator: chelis_numeric_core::prim::Prim::F32,
         },
         vec![a, b],
         tensor3_f32(3, 4, 6),
@@ -2546,7 +2546,7 @@ fn s15_noncontiguous_matmul_falls_back_to_generic_reduction() {
         decl,
         RiscOp::Sum {
             axis: 1,
-            accumulator: chelis_types::types::Prim::F32,
+            accumulator: chelis_numeric_core::prim::Prim::F32,
         },
         vec![mul],
         mat_f32(2, 4),
@@ -2741,7 +2741,7 @@ fn sfr1_fused_elem_into_reduction_no_intermediate_alloc() {
         decl,
         RiscOp::Sum {
             axis: 1,
-            accumulator: chelis_types::types::Prim::F32,
+            accumulator: chelis_numeric_core::prim::Prim::F32,
         },
         vec![negated],
         vec_f32(3),
@@ -2855,7 +2855,7 @@ fn sfr3_multi_consumer_fused_elem_not_inlined() {
         decl,
         RiscOp::Sum {
             axis: 1,
-            accumulator: chelis_types::types::Prim::F32,
+            accumulator: chelis_numeric_core::prim::Prim::F32,
         },
         vec![negated],
         vec_f32(3),

@@ -2,7 +2,7 @@
 mod common;
 mod support;
 use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
-use chelis_types::types::Prim;
+use chelis_numeric_core::prim::Prim;
 use std::fs;
 use std::process::{Command, Output};
 fn compile_and_run(name: &str, source: &str, harness: &str) -> Output {

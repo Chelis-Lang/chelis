@@ -6,6 +6,10 @@
  * C ABI and appear in no header. The `raw` shims bypass the NaN canonicalization and
  * exist only so the crate's tests can show that the wrapper is what canonicalizes. */
 
+#ifdef CHELIS_CRMATH_FREESTANDING
+#include "freestanding/profile.h"
+#endif
+
 #include "crmath_amalgamation.c"
 
 #define CHELIS_CRMATH_SHIM(name, ctype)                                             \

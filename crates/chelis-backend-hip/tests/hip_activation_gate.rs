@@ -15,7 +15,7 @@
 mod support;
 
 use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
-use chelis_types::types::Prim;
+use chelis_numeric_core::prim::Prim;
 use chelis_types::unsupported::Unsupported;
 
 /// Lower `source`'s `main` as `chelis build --target hip` lowers an entry

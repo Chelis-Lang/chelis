@@ -28,7 +28,8 @@ use chelis_ir::host::{
     summarize_sparse_helper_for_test, try_summarize_sparse_helper_for_test,
 };
 use chelis_ir::{DimInfo, TensorType};
-use chelis_types::{scalar_from_i64, types::Prim};
+use chelis_numeric_core::dtype_semantics::scalar_from_i64;
+use chelis_numeric_core::prim::Prim;
 
 fn t_f32(dims: Vec<usize>) -> TensorType {
     TensorType {

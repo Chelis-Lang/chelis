@@ -12,9 +12,9 @@ use chelis_ir::dag::{Dag, NodeId, RiscOp};
 use chelis_ir::eval::{TensorValue, eval_tensor_with};
 use chelis_ir::grad::grad_dag_checked;
 use chelis_ir::lower::try_lower_program;
+use chelis_numeric_core::prim::Prim;
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str as surf_parse;
-use chelis_types::types::Prim;
 use chelis_types::{check_linearity, check_typed_program};
 
 /// Full Surf-to-DAG pipeline: parse Surf → desugar to Deep → typecheck →

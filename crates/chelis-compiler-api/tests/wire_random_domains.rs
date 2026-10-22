@@ -9,8 +9,8 @@ use chelis_compiler_api::schema::{
     WireDagDecodeError, WireDagNode, WireRiscOp,
 };
 use chelis_ir::dag::{Dag, DimInfo, KeyBranch, NodeId, RiscOp, RtDim, TensorType, UniformBound};
-use chelis_types::scalar_from_i64;
-use chelis_types::types::Prim;
+use chelis_numeric_core::dtype_semantics::scalar_from_i64;
+use chelis_numeric_core::prim::Prim;
 use serde_json::{Value, json};
 
 fn construct(value: &Value) -> WireDag {

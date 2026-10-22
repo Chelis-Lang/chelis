@@ -39,7 +39,7 @@
 //! their MSL `bfloat` use behind `#if __METAL_VERSION__ >= 320`
 //! (Apple7+ requirement).
 
-use chelis_types::types::Prim;
+use chelis_numeric_core::prim::Prim;
 
 use crate::dtype;
 
@@ -875,8 +875,9 @@ pub fn ordered_scan(name: &str, precision: Prim, reverse: bool) -> String {
     let metadata = dtype::MetalU32Metadata;
     let metadata_type = metadata.msl_type();
     let status_type = metadata.msl_atomic_type();
-    let accumulator =
-        chelis_ir::dag::RiscOp::default_reduce_sum_accumulator(precision).expect("numeric scan");
+    let accumulator = precision
+        .default_reduce_sum_accumulator()
+        .expect("numeric scan");
     let result = precision.sum_result_precision(accumulator);
     let input = dtype::msl_type(precision);
     let output = dtype::msl_type(result);

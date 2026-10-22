@@ -18,10 +18,11 @@ use chelis_ir::ownership::{
     lower_dag_ownership, lower_host_ownership, verify_ownership,
 };
 use chelis_ir::{ConcreteHostType, Dag, DimInfo, RiscOp, TensorType};
+use chelis_numeric_core::prim::Prim;
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str as surf_parse;
 use chelis_types::manifest::{ManifestedProgram, RootManifest};
-use chelis_types::types::{Prim, Target};
+use chelis_types::types::Target;
 use chelis_types::{CheckedProgram, check_linearity, check_typed_program};
 
 const C_TENSOR_PRIMS: &[Prim] = &[

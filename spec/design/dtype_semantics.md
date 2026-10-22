@@ -491,8 +491,8 @@ identical bytes):
    VALUE: the transcendentals are correctly rounded ([05-OP-46];
    `spec/design/correctly_rounded_math.md`), so the table grants no bound and
    has no rows. The table is authored in `spec/05-risc-primitives.md` §8 and
-   represented by `chelis_types::agreement::OP_TOLERANCES`; the [#687] oracle
-   consults that machine form. `sqrt` is required correctly rounded ([#719])
+   represented by `chelis_numeric_core::agreement::OP_TOLERANCES`.
+   The [#687] oracle reads that machine form. `sqrt` is correctly rounded ([#719])
    like the transcendentals. A row would be eligible only when both lanes
    compute at [04-NUM-8]'s declared arithmetic width; [#897]'s current eval
    float path is not eligible. A differing f16/bf16 result additionally
@@ -685,7 +685,7 @@ classification escapes, and this paragraph freezes its exact strength:
   `a_reserved_shaped_declarator_name_is_rejected`, with
   `known_c_type_words_still_classify_without_rejection` as the positive leg.
   The language side of the same gap is closed by an EXHAUSTIVE match over
-  `chelis_types::Prim` (`prim_census_class`): the census enumerates dtypes
+  `chelis_numeric_core::prim::Prim` (`prim_census_class`): the census enumerates dtypes
   by their `(t-prim {} <name>)` spelling, so widening `Prim` would otherwise
   never reach the census at all. A new variant now stops the tripwire
   compiling until it is classified
@@ -3177,7 +3177,7 @@ substitute fixes (needed for [#722]'s C half regardless of this plan).
 | 1 | per-dtype buffers vs finalize-on-write f64 | DECIDED 2026-07-17: per-dtype buffers. The proposal default is ratified: f64 storage cannot meet [#684] by construction, and the 2026-07 review endorsed per-dtype `TensorStorage` as the structural core | §C3 of this doc + the PR |
 | 2 | integer `mean` / bool arithmetic / int floor-ceil-round capability rows | DECIDED: [#724] reject; [#726] rejects bool arithmetic, [05-OP-29] supplies first-class `count`, and [#712]/[#715] support the integer identity rows. No cast-counting compatibility path exists. Phase 4B freezes the corresponding atom/schema bindings | capability table + spec/05 |
 | 3 | trap surface form and exact strings | Phase 2 | §C2 + `pub const` in the module |
-| 4 | crate placement | DECIDED 2026-07-17: a `chelis-types` MODULE. `Prim` already lives there (`types.rs`); the checker already consumes value-domain semantics (literal range diagnostics today, table-A acceptance at Phase 4); every §C5 consumer already depends on the crate; and §C3's privacy contract is module-scoped (`pub(in dtype_semantics)`), so the firewall is identical to a crate boundary. Constraint check passed: chelis-runtime stays dependency-light (libc+memmap2 only) - the generated helpers are emitted by chelis-backend-c, and C-side parity is enforced by tests, not a link edge. Discipline: the module stays import-clean (only `Prim` + std from the surrounding crate) so a later lift to a leaf crate remains mechanical. This also fixes [#732] Phase 1's `format_element` placement as FINAL (its §C3.1 pre-[#729] fallback is the answer - no Wave 2 -> Wave 3 migration) | §C5 + this doc + faithful_observation.md §C3.1 |
+| 4 | crate placement | `chelis-numeric-core` owns primitive identities, numeric values, kernels, activation graphs, observation, and agreement with unconditional `no_std`. Tensors and owned text need `alloc`. Callers use canonical modules directly. Private carrier representations enforce §C3. Host crates retain codecs, schema projections, native services, and C ABI adapters. | §C3 and §C5 of this document, plus faithful_observation.md §C3.1 |
 | 5 | wire-schema versioning mechanics for the storage change | DECIDED: WireDag schema v6 is explicitly present and exact-only. Versionless, v1-v5, and future payloads are rejected before node decode; there is no legacy Pad migration or additive-variant compatibility. `WireRiscOp::Count { axes }` is a v6 variant. `EXECUTION_VALUE_SCHEMA_VERSION` remains a separately typed payload contract and never substitutes for WireDag validation | spec/10 §3 + schema.rs |
 
 [#170]: https://github.com/Chelis-Lang/chelis/issues/170

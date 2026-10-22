@@ -11,7 +11,7 @@
 
 use chelis_ir::dag::{Dag, DimInfo, NodeId, RiscOp, TensorType};
 use chelis_ir::grad::grad_dag;
-use chelis_types::types::Prim;
+use chelis_numeric_core::prim::Prim;
 
 fn vec_at(precision: Prim, len: usize) -> TensorType {
     TensorType {

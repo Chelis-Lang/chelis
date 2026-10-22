@@ -2902,14 +2902,14 @@ fn issue_458_div_f32_over_i32_literal_rejected_before_eval_not_folded() {
 /// float-float, so it falls to the `_ => Err(..)` catch-all.
 #[test]
 fn issue_458_closed_binop_dispatch_rejects_mixed_f32_i32_not_folds_to_quarter() {
-    let lhs = RuntimeValue::scalar_like_float(chelis_types::types::Prim::F32, 1.0)
+    let lhs = RuntimeValue::scalar_like_float(chelis_numeric_core::prim::Prim::F32, 1.0)
         .expect("f32 scalar 1.0");
-    let rhs =
-        RuntimeValue::scalar_like_int(chelis_types::types::Prim::Int32, 4).expect("i32 scalar 4");
+    let rhs = RuntimeValue::scalar_like_int(chelis_numeric_core::prim::Prim::Int32, 4)
+        .expect("i32 scalar 4");
     let result = numeric_binop(
         &[lhs, rhs],
-        Some(chelis_types::IntBinOp::TruncDiv),
-        Some(chelis_types::FloatBinOp::Div),
+        Some(chelis_numeric_core::dtype_semantics::IntBinOp::TruncDiv),
+        Some(chelis_numeric_core::dtype_semantics::FloatBinOp::Div),
     );
     assert!(
         result.is_err(),
@@ -3159,8 +3159,10 @@ fn host_runtime_reduce_window_max_min_preserve_first_nan_bits() {
     let second_nan = f32::from_bits(0x7fc5_4321);
     // The input is stored bits, not an arithmetic result, which `from_wide`
     // would finalize to the canonical NaN.
-    let stored = [first_nan, 1.0, 2.0, second_nan]
-        .map(|value| chelis_types::scalar_from_f64("test", Prim::F32, f64::from(value)).unwrap());
+    let stored = [first_nan, 1.0, 2.0, second_nan].map(|value| {
+        chelis_numeric_core::dtype_semantics::scalar_from_f64("test", Prim::F32, f64::from(value))
+            .unwrap()
+    });
     let tensor = RuntimeTensorValue::from_scalars(Prim::F32, vec![4], &stored);
     let max = tensor_reduce_window_host(
         &tensor,
@@ -3171,7 +3173,8 @@ fn host_runtime_reduce_window_max_min_preserve_first_nan_bits() {
     )
     .expect("reduce_window max must evaluate");
     assert_eq!(max.value.shape, vec![2]);
-    let chelis_types::dtype_semantics::StorageView::F32(max_values) = max.value.storage().view()
+    let chelis_numeric_core::dtype_semantics::StorageView::F32(max_values) =
+        max.value.storage().view()
     else {
         panic!("window extrema must preserve f32 storage");
     };
@@ -3190,7 +3193,8 @@ fn host_runtime_reduce_window_max_min_preserve_first_nan_bits() {
         "reduce_window_min",
     )
     .expect("reduce_window min must evaluate");
-    let chelis_types::dtype_semantics::StorageView::F32(min_values) = min.value.storage().view()
+    let chelis_numeric_core::dtype_semantics::StorageView::F32(min_values) =
+        min.value.storage().view()
     else {
         panic!("window extrema must preserve f32 storage");
     };
@@ -4340,15 +4344,15 @@ fn scalar_construction_is_sealed_and_width_checked() {
 /// RT-1 closed finding C1, strengthened by chelis#729 Phase 1: the
 /// dtype/bits mismatch the pre-fix red team constructed is now
 /// UNREPRESENTABLE, not merely rejected. `RuntimeValue::Scalar` wraps the
-/// sealed `chelis_types::ScalarValue`, whose storage variant IS the
+/// sealed `chelis_numeric_core::dtype_semantics::ScalarValue`, whose storage variant IS the
 /// dtype; there is no (dtype, bits) pair to disagree, and the only
 /// constructors are the dtype-semantics module's finalize/ingress
 /// chokepoints. This pin documents the strengthening and asserts the
 /// module constructor reports the dtype it stored at.
 #[test]
 fn scalar_payload_dtype_is_the_storage_variant() {
-    let value =
-        chelis_types::scalar_from_f64("test", Prim::F16, 1.5).expect("1.5 finalizes at f16");
+    let value = chelis_numeric_core::dtype_semantics::scalar_from_f64("test", Prim::F16, 1.5)
+        .expect("1.5 finalizes at f16");
     assert_eq!(value.prim(), Prim::F16);
     let payload = match RuntimeValue::from_scalar_value(value) {
         RuntimeValue::Scalar(payload) => payload,
@@ -4369,11 +4373,14 @@ fn scalar_payload_dtype_is_the_storage_variant() {
 /// `element_ref` ("a random key has no observation form").
 #[test]
 fn a_key_element_is_the_key_variant_and_describes_without_panicking() {
-    let seed = chelis_types::scalar_from_i64("test", Prim::Int64, 7).expect("7 is an i64");
-    let (key, _) = chelis_types::RandomKey::from_seed(seed)
+    let seed = chelis_numeric_core::dtype_semantics::scalar_from_i64("test", Prim::Int64, 7)
+        .expect("7 is an i64");
+    let (key, _) = chelis_numeric_core::dtype_semantics::RandomKey::from_seed(seed)
         .expect("every i64 seeds a key")
         .split();
-    let value = RuntimeValue::from_scalar_value(chelis_types::ScalarValue::from_key(key));
+    let value = RuntimeValue::from_scalar_value(
+        chelis_numeric_core::dtype_semantics::ScalarValue::from_key(key),
+    );
     assert!(matches!(value, RuntimeValue::Key(inner) if inner == key));
     assert_eq!(describe_value(&value), "key(aa3896172f9a3213)");
     assert_eq!(describe_argument(Some(&value)), "key(aa3896172f9a3213)");
@@ -4382,12 +4389,12 @@ fn a_key_element_is_the_key_variant_and_describes_without_panicking() {
 fn numeric_scalar(prim: Prim, integer: i64, float: f64) -> RuntimeValue {
     if prim.is_integer() {
         RuntimeValue::from_scalar_value(
-            chelis_types::scalar_from_i64("test", prim, integer)
+            chelis_numeric_core::dtype_semantics::scalar_from_i64("test", prim, integer)
                 .expect("test integer fits its dtype"),
         )
     } else {
         RuntimeValue::from_scalar_value(
-            chelis_types::scalar_from_f64("test", prim, float)
+            chelis_numeric_core::dtype_semantics::scalar_from_f64("test", prim, float)
                 .expect("float finalization is total"),
         )
     }
@@ -5532,7 +5539,7 @@ out = run()
                     assert_eq!(
                         serde_json::to_value(&result.roots[0].value).unwrap(),
                         serde_json::to_value(crate::compiler::wire_values::scalar_integer(
-                            chelis_types::types::Prim::Int64,
+                            chelis_numeric_core::prim::Prim::Int64,
                             if combinator == "fold" {
                                 elements
                             } else {

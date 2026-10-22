@@ -16,7 +16,7 @@ use chelis_ir::{
     HostTensorTypeTerm, HostTypeDecodeError, HostTypeResolutionError, HostTypeTerm,
     decode_host_type, decode_host_type_metadata,
 };
-use chelis_types::types::Prim;
+use chelis_numeric_core::prim::Prim;
 
 #[test]
 fn every_active_narrow_scalar_remains_a_known_logical_type() {

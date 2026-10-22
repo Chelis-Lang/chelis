@@ -20,7 +20,7 @@ use chelis_ir::dag::{
 };
 use chelis_ir::eval::{TensorValue, eval_tensor_roots_with_strict};
 use chelis_ir::fuse::fuse;
-use chelis_types::types::Prim;
+use chelis_numeric_core::prim::Prim;
 use chelis_unord::UnordMap;
 use std::env;
 use std::fs;
@@ -1157,7 +1157,8 @@ fn seeded_uniform_like(
     let seed = dag.add_node(
         decl,
         RiscOp::Const {
-            value: chelis_types::scalar_from_i64("test", Prim::Int64, seed).unwrap(),
+            value: chelis_numeric_core::dtype_semantics::scalar_from_i64("test", Prim::Int64, seed)
+                .unwrap(),
         },
         vec![],
         rank0(Prim::Int64),
@@ -1236,19 +1237,27 @@ fn issue_937_uniform_like_f64_gpu_bit_exact_matches_shared_sampler() {
         vec_f64(8),
         None,
     );
-    let key = chelis_types::RandomKey::from_seed(
-        chelis_types::scalar_from_i64("test", Prim::Int64, PINNED_KEY_SEED).unwrap(),
+    let key = chelis_numeric_core::dtype_semantics::RandomKey::from_seed(
+        chelis_numeric_core::dtype_semantics::scalar_from_i64("test", Prim::Int64, PINNED_KEY_SEED)
+            .unwrap(),
     )
     .unwrap();
     let out = seeded_uniform_like(&mut dag, decl, template, vec_f64(8), PINNED_KEY_SEED);
     dag.add_root(out);
 
     let actual = compile_and_run_output_f64_bits(&dag, "uniform_like_f64");
-    let bound = |value| chelis_types::scalar_from_f64("test", Prim::F64, value).unwrap();
-    let sampled = chelis_types::PreparedUniformLike::new(Prim::F64, 8, bound(2.0), bound(5.0))
-        .unwrap()
-        .apply(key)
-        .unwrap();
+    let bound = |value| {
+        chelis_numeric_core::dtype_semantics::scalar_from_f64("test", Prim::F64, value).unwrap()
+    };
+    let sampled = chelis_numeric_core::dtype_semantics::PreparedUniformLike::new(
+        Prim::F64,
+        8,
+        bound(2.0),
+        bound(5.0),
+    )
+    .unwrap()
+    .apply(key)
+    .unwrap();
     let expected = (0..8)
         .map(|index| sampled.scalar_at(index).as_f64_lossy().to_bits())
         .collect::<Vec<_>>();
@@ -1924,7 +1933,7 @@ fn g4_sum_reduction_gpu_matches_cpu() {
         decl,
         RiscOp::Sum {
             axis: 0,
-            accumulator: chelis_types::types::Prim::F32,
+            accumulator: chelis_numeric_core::prim::Prim::F32,
         },
         vec![x],
         vec_f32(3),
@@ -1994,7 +2003,7 @@ fn g4_symbolic_row_sum_gpu_matches_cpu() {
         decl,
         RiscOp::Sum {
             axis: 1,
-            accumulator: chelis_types::types::Prim::F32,
+            accumulator: chelis_numeric_core::prim::Prim::F32,
         },
         vec![x],
         out_ty,
@@ -2776,7 +2785,7 @@ fn g13_tiny_segmented_sum_matches_eval() {
         decl,
         RiscOp::Sum {
             axis: 1,
-            accumulator: chelis_types::types::Prim::F32,
+            accumulator: chelis_numeric_core::prim::Prim::F32,
         },
         vec![x],
         vec_f32(3),
@@ -2843,7 +2852,7 @@ fn g13_large_segmented_sum_matches_eval() {
         decl,
         RiscOp::Sum {
             axis: 1,
-            accumulator: chelis_types::types::Prim::F32,
+            accumulator: chelis_numeric_core::prim::Prim::F32,
         },
         vec![x],
         vec_f32(2),
@@ -2879,7 +2888,7 @@ fn g14_staged_scalar_sum_matches_eval() {
         decl,
         RiscOp::Sum {
             axis: 0,
-            accumulator: chelis_types::types::Prim::F32,
+            accumulator: chelis_numeric_core::prim::Prim::F32,
         },
         vec![x],
         scalar_f32(),
@@ -2943,7 +2952,7 @@ fn g15_hipblas_matmul_matches_eval() {
         decl,
         RiscOp::Sum {
             axis: 1,
-            accumulator: chelis_types::types::Prim::F32,
+            accumulator: chelis_numeric_core::prim::Prim::F32,
         },
         vec![mul],
         mat_f32(2, 4),
@@ -2994,7 +3003,7 @@ fn g15_hipblas_batched_matmul_matches_eval() {
             m: chelis_ir::dag::DimExpr::Concrete(2),
             n: chelis_ir::dag::DimExpr::Concrete(2),
             k: chelis_ir::dag::DimExpr::Concrete(3),
-            accumulator: chelis_types::types::Prim::F32,
+            accumulator: chelis_numeric_core::prim::Prim::F32,
         },
         vec![a, b],
         tensor4_f32(2, 2, 2, 2),
@@ -3064,7 +3073,7 @@ fn g15_hipblas_strided_batched_symbolic_batch_matches_eval() {
             m: chelis_ir::dag::DimExpr::Concrete(2),
             n: chelis_ir::dag::DimExpr::Concrete(2),
             k: chelis_ir::dag::DimExpr::Concrete(3),
-            accumulator: chelis_types::types::Prim::F32,
+            accumulator: chelis_numeric_core::prim::Prim::F32,
         },
         vec![a, b],
         out_ty,
@@ -3149,7 +3158,7 @@ fn g15_noncontiguous_matmul_fallback_matches_eval() {
         decl,
         RiscOp::Sum {
             axis: 1,
-            accumulator: chelis_types::types::Prim::F32,
+            accumulator: chelis_numeric_core::prim::Prim::F32,
         },
         vec![mul],
         mat_f32(2, 4),
@@ -4691,7 +4700,7 @@ fn g16_pad_1d_nonzero_fill_matches_eval() {
         decl,
         RiscOp::pad(
             vec![(chelis_ir::dag::RtDim::Lit(2), chelis_ir::dag::RtDim::Lit(1))],
-            chelis_types::scalar_from_f64("pad", Prim::F32, -7.5).unwrap(),
+            chelis_numeric_core::dtype_semantics::scalar_from_f64("pad", Prim::F32, -7.5).unwrap(),
         ),
         vec![x],
         vec_f32(6),
@@ -4771,7 +4780,7 @@ fn g16_pad_over_strided_source_matches_eval() {
         decl,
         RiscOp::pad(
             vec![(chelis_ir::dag::RtDim::Lit(1), chelis_ir::dag::RtDim::Lit(1))],
-            chelis_types::scalar_from_f64("pad", Prim::F32, 9.0).unwrap(),
+            chelis_numeric_core::dtype_semantics::scalar_from_f64("pad", Prim::F32, 9.0).unwrap(),
         ),
         vec![s],
         vec_f32(5),

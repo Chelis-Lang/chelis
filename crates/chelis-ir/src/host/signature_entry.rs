@@ -332,7 +332,7 @@ mod tests {
     use super::*;
     use crate::TensorType;
     use crate::host_type_state::HostTypeTerm;
-    use chelis_types::types::Prim;
+    use chelis_numeric_core::prim::Prim;
 
     fn input(name: &str, dims: Vec<DimInfo>) -> HostTensorInput {
         HostTensorInput {

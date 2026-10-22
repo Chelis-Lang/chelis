@@ -335,16 +335,19 @@ use crate::host_abi::{
     HostAbiMatchArm as HostMatchArm, HostAbiParam as HostParam, HostAbiProgram as HostProgram,
     HostAbiType, HostAbiType as HostType, ProjectedHostProgram, ProjectedHostSite,
 };
-use chelis_ir::dag::{ComparisonKind, DimInfo, NamedCastMode, RiscOp, TensorType};
+use chelis_ir::dag::{ComparisonKind, DimInfo, RiscOp, TensorType};
 use chelis_ir::ownership::{
     HostSiteId, VerifiedApplyKind, VerifiedBlockId, VerifiedEdgeView, VerifiedHostAction,
     VerifiedHostOperation, VerifiedHostTensorHelperView, VerifiedHostTerminator,
     VerifiedOperationId, VerifiedOwnerId, VerifiedOwnershipUse, VerifiedTerminalView,
 };
+use chelis_numeric_core::dtype_semantics::{CheckedCastKind, CheckedCastPlan, NumericTrap};
+use chelis_numeric_core::named_cast::NamedCastMode;
+use chelis_numeric_core::observation::ElementRef;
+use chelis_numeric_core::prim::Prim;
 use chelis_types::manifest::{RootManifest, RootPathStep};
-use chelis_types::types::{Lane, Prim};
+use chelis_types::types::Lane;
 use chelis_types::unsupported::{Stage, Unsupported, UnsupportedKind};
-use chelis_types::{CheckedCastKind, CheckedCastPlan, ElementRef, NumericTrap};
 use chelis_unord::{UnordMap, UnordSet};
 
 thread_local! {
@@ -1869,7 +1872,7 @@ fn integer_bits(prim: Prim) -> u32 {
 /// `int64_t` C expression the caller narrows to the target's storage type.
 /// `value` reads the source element: a float source already widened out of
 /// any reduced storage, or an integer source. The DAG and host lanes share
-/// this one spelling of each rung, matching `chelis_types::named_cast_raw`.
+/// this one spelling of each rung, matching `chelis_numeric_core::dtype_semantics::named_cast_raw`.
 pub(crate) fn named_cast_c_expr(
     mode: NamedCastMode,
     source: Prim,
@@ -6782,7 +6785,7 @@ impl<'a> HostEmitter<'a> {
         let low = self.next_temp("uniform_low");
         let high = self.next_temp("uniform_high");
         let ind = self.indent.clone();
-        let trap = chelis_types::NumericTrap::Domain {
+        let trap = chelis_numeric_core::dtype_semantics::NumericTrap::Domain {
             op: "uniform_like",
             prim,
         }
@@ -10095,6 +10098,7 @@ impl<'a> HostEmitter<'a> {
                 let accumulator = lhs_ty
                     .precision
                     .default_reduce_sum_accumulator()
+                    .map_err(|error| error.to_string())
                     .and_then(|precision| {
                         precision.runtime_dtype().map_err(|error| error.to_string())
                     })
@@ -15671,8 +15675,12 @@ fn folded_float_literal_bits(value: f64, ty: &HostType) -> Option<u64> {
     match ty {
         HostType::Float64 => Some(value.to_bits()),
         HostType::Float32 => Some(u64::from((value as f32).to_bits())),
-        HostType::Float16 => Some(u64::from(chelis_types::f16_from_f64_rne(value).to_bits())),
-        HostType::BFloat16 => Some(u64::from(chelis_types::bf16_from_f64_rne(value).to_bits())),
+        HostType::Float16 => Some(u64::from(
+            chelis_numeric_core::dtype_semantics::f16_from_f64_rne(value).to_bits(),
+        )),
+        HostType::BFloat16 => Some(u64::from(
+            chelis_numeric_core::dtype_semantics::bf16_from_f64_rne(value).to_bits(),
+        )),
         _ => None,
     }
 }
@@ -16172,37 +16180,42 @@ impl BinaryElementwiseFunc {
 enum StagedBound {
     /// An untyped lexical leaf: an integer that is still exact, or a float
     /// literal that has not yet been finalized at any declared width.
-    Raw(chelis_types::RawScalar),
+    Raw(chelis_numeric_core::dtype_semantics::RawScalar),
     /// A value already finalized at a concrete dtype.
-    Typed(chelis_types::ScalarValue),
+    Typed(chelis_numeric_core::dtype_semantics::ScalarValue),
 }
 
 impl StagedBound {
     /// Finalize at `target`, going through the same `chelis_types` primitives
     /// `chelis-ir`'s typed fold uses.
-    fn finalize(self, target: Prim) -> Option<chelis_types::ScalarValue> {
+    fn finalize(self, target: Prim) -> Option<chelis_numeric_core::dtype_semantics::ScalarValue> {
         match self {
-            StagedBound::Raw(raw) => chelis_types::cast_raw("uniform_like", raw, target).ok(),
+            StagedBound::Raw(raw) => {
+                chelis_numeric_core::dtype_semantics::cast_raw("uniform_like", raw, target).ok()
+            }
             StagedBound::Typed(value) => {
-                chelis_types::cast_scalar("uniform_like", value, target).ok()
+                chelis_numeric_core::dtype_semantics::cast_scalar("uniform_like", value, target)
+                    .ok()
             }
         }
     }
 
     fn negate(self) -> Option<Self> {
         match self {
-            StagedBound::Raw(chelis_types::RawScalar::Int(v)) => Some(StagedBound::Raw(
-                chelis_types::RawScalar::Int(v.checked_neg()?),
-            )),
-            StagedBound::Raw(chelis_types::RawScalar::Float(v)) => {
-                Some(StagedBound::Raw(chelis_types::RawScalar::Float(-v)))
+            StagedBound::Raw(chelis_numeric_core::dtype_semantics::RawScalar::Int(v)) => {
+                Some(StagedBound::Raw(
+                    chelis_numeric_core::dtype_semantics::RawScalar::Int(v.checked_neg()?),
+                ))
             }
+            StagedBound::Raw(chelis_numeric_core::dtype_semantics::RawScalar::Float(v)) => Some(
+                StagedBound::Raw(chelis_numeric_core::dtype_semantics::RawScalar::Float(-v)),
+            ),
             // A finalized value negates at its own width, not through f64.
             StagedBound::Typed(value) => {
                 let prim = value.prim();
-                chelis_types::cast_raw(
+                chelis_numeric_core::dtype_semantics::cast_raw(
                     "uniform_like",
-                    chelis_types::RawScalar::Float(-value.as_f64_lossy()),
+                    chelis_numeric_core::dtype_semantics::RawScalar::Float(-value.as_f64_lossy()),
                     prim,
                 )
                 .ok()
@@ -16214,10 +16227,12 @@ impl StagedBound {
 
 fn staged_bound(expr: Option<&HostExpr>) -> Option<StagedBound> {
     match &expr?.kind {
-        HostExprKind::Float(value) => {
-            Some(StagedBound::Raw(chelis_types::RawScalar::Float(*value)))
-        }
-        HostExprKind::Int(value) => Some(StagedBound::Raw(chelis_types::RawScalar::Int(*value))),
+        HostExprKind::Float(value) => Some(StagedBound::Raw(
+            chelis_numeric_core::dtype_semantics::RawScalar::Float(*value),
+        )),
+        HostExprKind::Int(value) => Some(StagedBound::Raw(
+            chelis_numeric_core::dtype_semantics::RawScalar::Int(*value),
+        )),
         HostExprKind::Builtin { name, args, ty } if name == "cast" => {
             let inner = staged_bound(args.first())?;
             let (prim, surface) = checked_cast_abi_axis(ty).ok()?;
@@ -16963,13 +16978,15 @@ mod expression_dispatch_tests {
 
     /// [05-OP-48] and [05-OP-46] at the host scalar lane: every C helper
     /// `chelis_host_<op>_<width>` returns the evaluator's bits
-    /// (`chelis_types::float_unop`, the same `chelis_types::activation`
+    /// (`chelis_numeric_core::dtype_semantics::float_unop`, the same `chelis_numeric_core::activation`
     /// graph and `chelis-crmath` kernels) on every finite f16 input and on
     /// the witnesses at bf16, f32, and f64. NaN results compare as NaN: the
     /// caller, not the helper, applies [04-NUM-2]'s canonical NaN.
     #[test]
     fn activation_helpers_return_the_evaluator_bits() {
-        use chelis_types::{FloatUnOp, ScalarValue, float_unop, scalar_from_f64};
+        use chelis_numeric_core::dtype_semantics::{
+            FloatUnOp, ScalarValue, float_unop, scalar_from_f64,
+        };
         use half::{bf16, f16};
         let ops = [
             ("sigmoid", FloatUnOp::Sigmoid),
@@ -17003,7 +17020,7 @@ mod expression_dispatch_tests {
         let witnesses = activation_witnesses();
         for (name, _) in ops {
             for x in &witnesses {
-                let b = chelis_types::bf16_from_f64_rne(*x);
+                let b = chelis_numeric_core::dtype_semantics::bf16_from_f64_rne(*x);
                 main.push_str(&format!(
                     "    {{ float y = chelis_host_{name}_bf16(chelis_bf16_to_f32(UINT16_C(0x{:04x}))); printf(\"{name} bf16 %04x %04x\\n\", 0x{:04x}u, (unsigned)chelis_f32_to_bf16(y)); }}\n",
                     b.to_bits(),
@@ -17067,7 +17084,8 @@ mod expression_dispatch_tests {
                 "f16" => {
                     let x = f16::from_bits(u16::from_str_radix(input, 16).unwrap());
                     let want = eval(op, scalar_from_f64("test", Prim::F16, x.to_f64()).unwrap());
-                    let want = chelis_types::f16_from_f64_rne(want.as_f64_lossy());
+                    let want =
+                        chelis_numeric_core::dtype_semantics::f16_from_f64_rne(want.as_f64_lossy());
                     let got = f16::from_bits(u16::from_str_radix(got, 16).unwrap());
                     (
                         want.is_nan(),
@@ -17079,7 +17097,9 @@ mod expression_dispatch_tests {
                 "bf16" => {
                     let x = bf16::from_bits(u16::from_str_radix(input, 16).unwrap());
                     let want = eval(op, scalar_from_f64("test", Prim::Bf16, x.to_f64()).unwrap());
-                    let want = chelis_types::bf16_from_f64_rne(want.as_f64_lossy());
+                    let want = chelis_numeric_core::dtype_semantics::bf16_from_f64_rne(
+                        want.as_f64_lossy(),
+                    );
                     let got = bf16::from_bits(u16::from_str_radix(got, 16).unwrap());
                     (
                         want.is_nan(),

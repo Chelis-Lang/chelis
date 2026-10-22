@@ -986,7 +986,7 @@ fn unsupported_property_params(params: &[Param]) -> Option<String> {
 /// system's single-source recognizer (review 5): a name is an int width iff
 /// it parses to a `Prim` the type system classifies as integer.
 fn is_int_width(name: &str) -> bool {
-    chelis_types::types::Prim::parse_name(name).is_some_and(|p| p.is_integer())
+    chelis_numeric_core::prim::Prim::parse_name(name).is_some_and(|p| p.is_integer())
 }
 
 fn unsupported_type(ty: &TypeExpr) -> Option<String> {
@@ -1046,7 +1046,7 @@ fn sample_value(name: &str, ty: &TypeExpr, rng: &mut Lcg) -> Result<SampleValue,
         // the literal default; the other widths cast an i32 literal to the
         // target width so the value is well-typed.
         TypeExpr::Named(type_name, _) if is_int_width(type_name) => {
-            let (lo, hi) = chelis_types::types::Prim::parse_name(type_name)
+            let (lo, hi) = chelis_numeric_core::prim::Prim::parse_name(type_name)
                 .and_then(|p| p.integer_fuzz_bounds())
                 .expect("is_int_width implies integer_fuzz_bounds");
             let value = rng.next_i64(lo, hi);
@@ -1664,7 +1664,7 @@ fn bool_sample(name: &str, value: bool) -> SampleValue {
 }
 
 fn int_sample(name: &str, type_name: &str, value: i64) -> SampleValue {
-    let (lo, hi) = chelis_types::types::Prim::parse_name(type_name)
+    let (lo, hi) = chelis_numeric_core::prim::Prim::parse_name(type_name)
         .and_then(|p| p.integer_fuzz_bounds())
         .expect("int shrink only uses int widths");
     let value = value.clamp(lo, hi);
@@ -3235,9 +3235,10 @@ fn resolve_package_root(input: &Path, explicit: Option<&Path>) -> Option<PathBuf
 /// false today and flips on its own when that wiring lands.
 #[cfg(feature = "chelis-prove")]
 fn beacon_is_wired() -> bool {
+    use chelis_numeric_core::dtype_semantics::scalar_from_f64;
+    use chelis_numeric_core::prim::Prim;
     use chelis_prove::discharge::{Goal, IntervalBox, OutputRange};
     use chelis_prove::engine_registry::DischargeRegistry;
-    use chelis_types::{dtype_semantics::scalar_from_f64, types::Prim};
 
     let Ok(lo) = scalar_from_f64("Beacon capability bound", Prim::F64, 0.0) else {
         return false;

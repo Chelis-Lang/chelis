@@ -509,9 +509,8 @@ mod tests {
 
     #[test]
     fn nominal_callable_normalization_retains_borrowed_inputs_and_full_result() {
-        use chelis_types::types::{
-            Dim, DimVar, NominalArg, NominalParamKind, Prim, TensorPrec, Type,
-        };
+        use chelis_numeric_core::prim::Prim;
+        use chelis_types::types::{Dim, DimVar, NominalArg, NominalParamKind, TensorPrec, Type};
         let mut registry = chelis_types::adt::AdtRegistry::default();
         let parameter = DimVar(77);
         registry.aliases.insert(

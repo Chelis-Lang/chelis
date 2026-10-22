@@ -1,7 +1,7 @@
 //! Tensor-aware evaluator for the Phase 0 RISC DAG.
 //!
 //! chelis#729 Phase 1: values are stored in the sealed per-dtype
-//! [`TensorStorage`] (`chelis_types::dtype_semantics`), and every compute
+//! [`TensorStorage`] (`chelis_numeric_core::dtype_semantics`), and every compute
 //! op constructs its result through `finalize_tensor` at the node's output
 //! precision (the section C1 finalize-per-op contract). Movement ops that
 //! provably preserve elements move storage through the `reuse_*` family
@@ -23,10 +23,10 @@ use std::sync::{Arc, OnceLock};
 
 use crate::dag::{
     ComparisonKind, Dag, DagNode, DimExpr, DimInfo, ExtremaKind, ExtremaOperand, FusedInput,
-    FusedStepOp, LogicalKind, NamedCastMode, NodeId, ReduceWindowKind, RiscOp, RtAxis, RtDim,
-    RuntimeCheck, SHRINK_TO_END, TensorType, bind_symbolic_dims,
+    FusedStepOp, LogicalKind, NodeId, ReduceWindowKind, RiscOp, RtAxis, RtDim, RuntimeCheck,
+    SHRINK_TO_END, TensorType, bind_symbolic_dims,
 };
-use chelis_types::dtype_semantics::{
+use chelis_numeric_core::dtype_semantics::{
     ArgReduceOp, CheckedCastPlan, CompareOp, ExtremaOperand as KernelExtremaOperand, FloatBinOp,
     FloatExtremaOp, FloatUnOp, IndexedTrapCandidate, IntBinOp, IntUnOp, NumericTrap, RawTensor,
     ReduceWindowGradOp, TensorReduceOp, TensorStorage, arg_reduce_tensor_groups_iter,
@@ -35,12 +35,15 @@ use chelis_types::dtype_semantics::{
     integer_is_exactly_representable, reduce_tensor_groups, reduce_tensor_groups_iter,
     reduce_window_grad_tensor_groups, scatter_add_tensor_groups, tensor_from_scalars,
 };
-use chelis_types::dtype_semantics::{
+use chelis_numeric_core::dtype_semantics::{
     PreparedDropout, fold_in_storage, key_from_seed_storage, split_key_storage, split_keys_storage,
     uniform_like_bound_adjoint_rows,
 };
-use chelis_types::types::Prim;
-use chelis_types::{PreparedUniformLike, RandomKey, uniform_like_bound_adjoint};
+use chelis_numeric_core::dtype_semantics::{
+    PreparedUniformLike, RandomKey, uniform_like_bound_adjoint,
+};
+use chelis_numeric_core::named_cast::NamedCastMode;
+use chelis_numeric_core::prim::Prim;
 
 #[derive(Debug, Clone)]
 pub struct TensorValue {
@@ -189,7 +192,7 @@ impl Drop for TensorView {
 }
 
 impl TensorView {
-    fn scalar_at(&self, index: usize) -> chelis_types::ScalarValue {
+    fn scalar_at(&self, index: usize) -> chelis_numeric_core::dtype_semantics::ScalarValue {
         enum Frame<'a> {
             View(&'a TensorView, usize),
             Value(&'a TensorValue, usize),
@@ -271,10 +274,10 @@ impl TensorView {
                     let rhs = values.pop().expect("right scalar");
                     let lhs = values.pop().expect("left scalar");
                     let value = if matches!(frame, Frame::Product) {
-                        chelis_types::dtype_semantics::float_binop(FloatBinOp::Mul, lhs, rhs)
+                        chelis_numeric_core::dtype_semantics::float_binop(FloatBinOp::Mul, lhs, rhs)
                             .expect("a validated same-dtype float product is total")
                     } else {
-                        chelis_types::dtype_semantics::int_binop(IntBinOp::Add, lhs, rhs)
+                        chelis_numeric_core::dtype_semantics::int_binop(IntBinOp::Add, lhs, rhs)
                             .expect("Cartesian extrema established total integer addition")
                     };
                     values.push(value);
@@ -308,40 +311,42 @@ impl TensorView {
 // representable without visiting the matrix. The checked operation still runs
 // at Add, before a later Gather can report a domain failure.
 fn cartesian_add(lhs: &TensorValue, rhs: &TensorValue) -> Result<TensorValue, String> {
-    let extrema =
-        |value: &TensorValue| -> Option<(chelis_types::ScalarValue, chelis_types::ScalarValue)> {
-            let EvalStorage::View(view) = &value.storage else {
-                return None;
-            };
-            let TensorViewKind::Expand { source, .. } = &view.kind else {
-                return None;
-            };
-            let mut vals = (0..source.len()).map(|i| source.scalar_at(i));
-            let first = vals.next()?;
-            Some(vals.fold((first, first), |(lo, hi), v| {
-                (
-                    if v.as_i64_exact() < lo.as_i64_exact() {
-                        v
-                    } else {
-                        lo
-                    },
-                    if v.as_i64_exact() > hi.as_i64_exact() {
-                        v
-                    } else {
-                        hi
-                    },
-                )
-            }))
+    let extrema = |value: &TensorValue| -> Option<(
+        chelis_numeric_core::dtype_semantics::ScalarValue,
+        chelis_numeric_core::dtype_semantics::ScalarValue,
+    )> {
+        let EvalStorage::View(view) = &value.storage else {
+            return None;
         };
+        let TensorViewKind::Expand { source, .. } = &view.kind else {
+            return None;
+        };
+        let mut vals = (0..source.len()).map(|i| source.scalar_at(i));
+        let first = vals.next()?;
+        Some(vals.fold((first, first), |(lo, hi), v| {
+            (
+                if v.as_i64_exact() < lo.as_i64_exact() {
+                    v
+                } else {
+                    lo
+                },
+                if v.as_i64_exact() > hi.as_i64_exact() {
+                    v
+                } else {
+                    hi
+                },
+            )
+        }))
+    };
     let bounds = if lhs.is_empty() {
         None
     } else {
         let (Some((a, b)), Some((c, d))) = (extrema(lhs), extrema(rhs)) else {
             return Err("Cartesian operand is not an expansion".into());
         };
-        let lo = chelis_types::dtype_semantics::int_binop(IntBinOp::Add, a, c)
+        let lo = chelis_numeric_core::dtype_semantics::int_binop(IntBinOp::Add, a, c)
             .map_err(|e| e.to_string())?;
-        let hi = chelis_types::dtype_semantics::int_binop(IntBinOp::Add, b, d)
+        let hi = chelis_numeric_core::dtype_semantics::int_binop(IntBinOp::Add, b, d)
             .map_err(|e| e.to_string())?;
         Some((
             lo.as_i64_exact().expect("integer sum"),
@@ -486,7 +491,7 @@ impl TensorValue {
         }
     }
 
-    fn scalar_at(&self, index: usize) -> chelis_types::ScalarValue {
+    fn scalar_at(&self, index: usize) -> chelis_numeric_core::dtype_semantics::ScalarValue {
         match &self.storage {
             EvalStorage::Dense(storage) => storage.scalar_at(index),
             EvalStorage::View(view) => view.scalar_at(index),
@@ -867,7 +872,7 @@ fn cast_value(input: &TensorValue, src: Prim, dst: Prim) -> Result<TensorValue, 
         ));
     }
     let plan = CheckedCastPlan::new(src, dst).map_err(|error| error.to_string())?;
-    if plan.kind() == chelis_types::CheckedCastKind::Identity {
+    if plan.kind() == chelis_numeric_core::dtype_semantics::CheckedCastKind::Identity {
         return Ok(input.clone());
     }
 
@@ -911,13 +916,20 @@ fn named_cast_value(
     input: &TensorValue,
     dst: Prim,
 ) -> Result<TensorValue, String> {
-    let storage = chelis_types::named_cast_tensor(mode, input.storage().to_raw(), dst)
-        .map_err(|trap| trap.to_string())?;
+    let storage = chelis_numeric_core::dtype_semantics::named_cast_tensor(
+        mode,
+        input.storage().to_raw(),
+        dst,
+    )
+    .map_err(|trap| trap.to_string())?;
     Ok(TensorValue::from_storage(input.shape.clone(), storage))
 }
 
 /// Read a rank-0 value's one scalar.
-fn rank0_scalar(value: &TensorValue, what: &str) -> Result<chelis_types::ScalarValue, String> {
+fn rank0_scalar(
+    value: &TensorValue,
+    what: &str,
+) -> Result<chelis_numeric_core::dtype_semantics::ScalarValue, String> {
     if !value.shape.is_empty() || value.len() != 1 {
         return Err(format!("{what} is not a rank-0 scalar"));
     }
@@ -1177,7 +1189,7 @@ fn row_control(
     row: usize,
     shape: &[usize],
     what: &str,
-) -> Result<chelis_types::ScalarValue, String> {
+) -> Result<chelis_numeric_core::dtype_semantics::ScalarValue, String> {
     if value.shape.is_empty() {
         return rank0_scalar(value, what);
     }
@@ -1418,8 +1430,8 @@ fn eval_uniform_bound_adjoint(
     keys: KeyOperand<'_>,
 ) -> Result<TensorValue, String> {
     let bound = match bound {
-        crate::dag::UniformBound::Low => chelis_types::UniformBound::Low,
-        crate::dag::UniformBound::High => chelis_types::UniformBound::High,
+        crate::dag::UniformBound::Low => chelis_numeric_core::dtype_semantics::UniformBound::Low,
+        crate::dag::UniformBound::High => chelis_numeric_core::dtype_semantics::UniformBound::High,
     };
     match keys {
         KeyOperand::Inactive => {
@@ -1488,7 +1500,7 @@ fn eval_uniform_bound_adjoint(
 
 fn key_value(
     value: &TensorValue,
-    storage: Result<TensorStorage, chelis_types::NumericKernelError>,
+    storage: Result<TensorStorage, chelis_numeric_core::dtype_semantics::NumericKernelError>,
 ) -> Result<TensorValue, String> {
     let storage = storage.map_err(|error| error.to_string())?;
     Ok(TensorValue::from_storage(value.shape.clone(), storage))
@@ -2659,10 +2671,13 @@ fn ordered_scan(
     if direction == crate::dag::ScanDirection::Decreasing && !input.prim().is_float() {
         return Err("decreasing cumsum requires a float operand".into());
     }
-    let result = input.prim().default_reduce_sum_result_precision()?;
+    let result = input
+        .prim()
+        .default_reduce_sum_result_precision()
+        .map_err(|error| error.to_string())?;
     admit_result("cumsum", &input.shape, result)?;
     if input.is_empty() {
-        let storage = chelis_types::dtype_semantics::cumsum_tensor_lanes_iter(
+        let storage = chelis_numeric_core::dtype_semantics::cumsum_tensor_lanes_iter(
             input.storage(),
             std::iter::empty::<std::iter::Empty<usize>>(),
         )
@@ -2682,8 +2697,9 @@ fn ordered_scan(
             (lane / inner * n + k) * inner + lane % inner
         })
     });
-    let storage = chelis_types::dtype_semantics::cumsum_tensor_lanes_iter(input.storage(), lanes)
-        .map_err(|e| e.to_string())?;
+    let storage =
+        chelis_numeric_core::dtype_semantics::cumsum_tensor_lanes_iter(input.storage(), lanes)
+            .map_err(|e| e.to_string())?;
     Ok(TensorValue::from_storage(input.shape.clone(), storage))
 }
 
@@ -2739,7 +2755,7 @@ fn reduce(
         DENSE_PRODUCT_REDUCTIONS.with(|count| count.set(count.get() + 1));
         #[cfg(test)]
         PRODUCT_CELL_VISITS.with(|count| count.set(count.get() + input.len()));
-        chelis_types::dtype_semantics::sum_tensor_product_groups(
+        chelis_numeric_core::dtype_semantics::sum_tensor_product_groups(
             a.storage(),
             b.storage(),
             accumulator,
@@ -2762,7 +2778,7 @@ fn reduce(
         DENSE_PRODUCT_REDUCTIONS.with(|count| count.set(count.get() + 1));
         #[cfg(test)]
         PRODUCT_CELL_VISITS.with(|count| count.set(count.get() + input.len()));
-        chelis_types::dtype_semantics::sum_tensor_product_groups(
+        chelis_numeric_core::dtype_semantics::sum_tensor_product_groups(
             projected.lhs,
             projected.rhs,
             accumulator,
@@ -2785,7 +2801,7 @@ fn reduce(
         },
     ) = (&input.storage, op)
     {
-        chelis_types::dtype_semantics::sum_tensor_scalar_groups(
+        chelis_numeric_core::dtype_semantics::sum_tensor_scalar_groups(
             input.prim(),
             accumulator,
             result,
@@ -3196,7 +3212,7 @@ pub fn admit_padded_shape(
 fn pad(
     input: &TensorValue,
     padding: &[(usize, usize)],
-    fill: chelis_types::ScalarValue,
+    fill: chelis_numeric_core::dtype_semantics::ScalarValue,
 ) -> Result<TensorValue, String> {
     assert_eq!(padding.len(), input.shape.len());
     let out_shape = admit_padded_shape(&input.shape, padding, input.prim())?;
@@ -4303,7 +4319,7 @@ fn check_runtime_list_control(
     values: &UnordMap<NodeId, TensorValue>,
 ) -> Result<(), String> {
     use crate::lower::RuntimeListCheck;
-    let scalar = |id: NodeId| -> Result<chelis_types::ScalarValue, String> {
+    let scalar = |id: NodeId| -> Result<chelis_numeric_core::dtype_semantics::ScalarValue, String> {
         let value = values
             .get(&id)
             .ok_or("runtime List control source was not evaluated")?;
@@ -5064,7 +5080,10 @@ where
                 match value.as_i64_exact() {
                     _ if value.prim() == out_prim => TensorValue::from_storage(
                         shape,
-                        chelis_types::tensor_from_scalars(out_prim, &vec![*value; n]),
+                        chelis_numeric_core::dtype_semantics::tensor_from_scalars(
+                            out_prim,
+                            &vec![*value; n],
+                        ),
                     ),
                     Some(i) => finalize_wide_int("const", out_prim, shape, vec![i; n])?,
                     None => finalize_wide("const", out_prim, shape, vec![value.as_f64_lossy(); n])?,
@@ -5384,8 +5403,11 @@ where
             RiscOp::Abs => unary_elementwise(ElementwiseUnOp::Abs, &values[&node.inputs[0]])?,
             RiscOp::FloatClassify(kind) => {
                 let input = &values[&node.inputs[0]];
-                let storage = chelis_types::classify_float_tensor(*kind, input.storage())
-                    .map_err(|e| e.to_string())?;
+                let storage = chelis_numeric_core::dtype_semantics::classify_float_tensor(
+                    *kind,
+                    input.storage(),
+                )
+                .map_err(|e| e.to_string())?;
                 TensorValue::from_storage(input.shape.clone(), storage)
             }
             RiscOp::Floor => unary_elementwise(ElementwiseUnOp::Floor, &values[&node.inputs[0]])?,
@@ -6381,8 +6403,9 @@ fn inactive_unchecked_value(
         let prim = node.output_type.precision;
         let len = admit_result("activation", shape, prim)?;
         let storage = if prim == Prim::Key {
-            let seed = chelis_types::scalar_from_i64("activation", Prim::Int64, 0)
-                .map_err(|trap| trap.to_string())?;
+            let seed =
+                chelis_numeric_core::dtype_semantics::scalar_from_i64("activation", Prim::Int64, 0)
+                    .map_err(|trap| trap.to_string())?;
             let zero = RandomKey::from_seed(seed).map_err(|error| error.to_string())?;
             TensorStorage::from_keys(vec![zero; len])
         } else {
@@ -6646,7 +6669,7 @@ fn eval_key_select(
         value
             .storage()
             .keys()
-            .map(<[chelis_types::RandomKey]>::to_vec)
+            .map(<[chelis_numeric_core::dtype_semantics::RandomKey]>::to_vec)
             .ok_or_else(|| format!("join at node {} reads a non-key key", node.id.0))
     };
     if then_value.shape != else_value.shape {
@@ -7150,7 +7173,7 @@ mod tests {
     use crate::dag::RiscOp;
     use crate::lower::{LoweredLibrary, lower_program_to_library};
     use chelis_deep::parser::parse_str;
-    use chelis_types::types::Prim;
+    use chelis_numeric_core::prim::Prim;
 
     #[test]
     fn canonical_forward_matmul_keeps_the_dense_typed_product_kernel() {
@@ -7300,10 +7323,10 @@ mod tests {
     fn native_product_adapter_stops_at_uncached_numeric_sources() {
         let dense = TensorValue::from_storage(
             vec![3],
-            chelis_types::finalize_tensor(
+            chelis_numeric_core::dtype_semantics::finalize_tensor(
                 "mul",
                 Prim::F32,
-                chelis_types::RawTensor::Float(vec![0.25, 0.5, 0.75]),
+                chelis_numeric_core::dtype_semantics::RawTensor::Float(vec![0.25, 0.5, 0.75]),
             )
             .unwrap(),
         );
@@ -9745,7 +9768,9 @@ mod tests {
         key: RandomKey,
         prim: Prim,
     ) -> Result<TensorValue, String> {
-        let bound = |value| chelis_types::scalar_from_f64("uniform_like", prim, value);
+        let bound = |value| {
+            chelis_numeric_core::dtype_semantics::scalar_from_f64("uniform_like", prim, value)
+        };
         let prepared = PreparedUniformLike::new(
             prim,
             numel(shape),
@@ -9759,8 +9784,10 @@ mod tests {
 
     /// `[05-OP-69]`'s key of the seed 42.
     fn spec_uniform_key42() -> RandomKey {
-        RandomKey::from_seed(chelis_types::scalar_from_i64("test", Prim::Int64, 42).unwrap())
-            .unwrap()
+        RandomKey::from_seed(
+            chelis_numeric_core::dtype_semantics::scalar_from_i64("test", Prim::Int64, 42).unwrap(),
+        )
+        .unwrap()
     }
 
     /// [05-RNG-2]'s `word` and [05-RNG-1]'s unit, transcribed from the spec text.
@@ -9868,7 +9895,8 @@ mod tests {
             vec![1],
             finalize_tensor("test", Prim::Int64, RawTensor::Int(vec![7])).unwrap(),
         );
-        let fill = chelis_types::scalar_from_i64("pad", Prim::Int64, exact).unwrap();
+        let fill = chelis_numeric_core::dtype_semantics::scalar_from_i64("pad", Prim::Int64, exact)
+            .unwrap();
         let out = pad(&input, &[(1, 1)], fill).unwrap();
         assert_eq!(
             out.storage().to_i64_exact_vec(),
@@ -10115,7 +10143,12 @@ mod tests {
                         prim,
                         &values
                             .iter()
-                            .map(|&n| chelis_types::scalar_from_i64("mod", prim, n).unwrap())
+                            .map(|&n| {
+                                chelis_numeric_core::dtype_semantics::scalar_from_i64(
+                                    "mod", prim, n,
+                                )
+                                .unwrap()
+                            })
                             .collect::<Vec<_>>(),
                     ),
                 )
@@ -10389,7 +10422,7 @@ mod tests {
 mod value_reclamation {
     use super::*;
     use crate::dag::RiscOp;
-    use chelis_types::types::Prim;
+    use chelis_numeric_core::prim::Prim;
 
     fn vec3() -> TensorType {
         TensorType {

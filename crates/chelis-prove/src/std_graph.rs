@@ -21,8 +21,9 @@ use std::sync::{Mutex, OnceLock};
 
 use chelis_compiler_api::compiler;
 use chelis_compiler_api::schema::{ExecutionValue, TensorValue};
+use chelis_numeric_core::dtype_semantics::{ScalarValue, tensor_from_scalars};
+use chelis_numeric_core::prim::Prim;
 use chelis_reef::EmbeddedRuntime;
-use chelis_types::{ScalarValue, tensor_from_scalars, types::Prim};
 use sha2::{Digest, Sha256};
 
 type Memo = Mutex<BTreeMap<(String, &'static str, u64), ScalarValue>>;
@@ -206,8 +207,8 @@ fn evaluate_normal_cdf(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chelis_numeric_core::dtype_semantics::scalar_from_f64;
     use chelis_std_bundle::EMBEDDED_RUNTIME;
-    use chelis_types::scalar_from_f64;
 
     fn f32_scalar(value: f32) -> ScalarValue {
         scalar_from_f64("test", Prim::F32, f64::from(value)).unwrap()
@@ -270,7 +271,8 @@ mod tests {
     fn normal_cdf_rejects_mixed_and_non_float_batches() {
         let f64_value = scalar_from_f64("test", Prim::F64, 0.5).unwrap();
         assert!(normal_cdf_batch(&EMBEDDED_RUNTIME, &[f32_scalar(0.5), f64_value]).is_err());
-        let int = chelis_types::scalar_from_i64("test", Prim::Int32, 1).unwrap();
+        let int =
+            chelis_numeric_core::dtype_semantics::scalar_from_i64("test", Prim::Int32, 1).unwrap();
         assert!(normal_cdf(&EMBEDDED_RUNTIME, int).is_err());
     }
 }

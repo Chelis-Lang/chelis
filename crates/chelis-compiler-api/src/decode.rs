@@ -42,7 +42,7 @@
 use chelis_unord::UnordMap;
 
 use chelis_deep::ast::Expr;
-use chelis_types::types::Prim;
+use chelis_numeric_core::prim::Prim;
 
 use crate::runtime::{
     DecodeField, DecodeFieldType, InvariantEntry, RuntimeTensorValue, RuntimeValue,
@@ -615,7 +615,7 @@ type Holder = | Holder { weights: tensor[3, f32] }
                 assert_eq!(t.value.shape, vec![3]);
                 // chelis#729 Phase 1: the wire and declared field agree on
                 // f32, so decode preserves the tagged carrier exactly.
-                assert_eq!(t.value.prim(), chelis_types::types::Prim::F32);
+                assert_eq!(t.value.prim(), chelis_numeric_core::prim::Prim::F32);
                 assert_eq!(
                     t.value.to_f64_lossy_vec(),
                     vec![0.1f32 as f64, 0.2f32 as f64, 0.7f32 as f64]

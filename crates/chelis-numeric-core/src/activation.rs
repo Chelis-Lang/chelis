@@ -11,7 +11,7 @@
 //! primitives of [05-OP-46].
 
 use crate::dtype_semantics::{FloatBinOp, FloatUnOp};
-use crate::types::Prim;
+use crate::prim::Prim;
 
 /// `c = sqrt(2/pi)` in the `gelu_tanh` row of section 3.3, as its f64
 /// spelling; each lane finalizes it once at the operand dtype.
@@ -41,17 +41,17 @@ pub struct PhiConstants {
 
 /// `Phi`'s f32 constants.
 pub const PHI_F32: PhiConstants = PhiConstants {
-    c: std::f32::consts::FRAC_1_SQRT_2 as f64,
+    c: core::f32::consts::FRAC_1_SQRT_2 as f64,
     cl: 1.210_161_748_588_234_3e-8,
-    k: std::f32::consts::FRAC_2_SQRT_PI as f64,
+    k: core::f32::consts::FRAC_2_SQRT_PI as f64,
     s: 4097.0,
 };
 
 /// `Phi`'s f64 constants.
 pub const PHI_F64: PhiConstants = PhiConstants {
-    c: std::f64::consts::FRAC_1_SQRT_2,
+    c: core::f64::consts::FRAC_1_SQRT_2,
     cl: -4.833_646_656_726_457e-17,
-    k: std::f64::consts::FRAC_2_SQRT_PI,
+    k: core::f64::consts::FRAC_2_SQRT_PI,
     s: 134_217_729.0,
 };
 
@@ -271,12 +271,13 @@ fn phi_graph<G: ActivationGraph>(
     graph.binary(Mul, half, corrected)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "alloc"))]
 mod tests {
     use crate::dtype_semantics::{
         FloatUnOp, bf16_from_f64_rne, f16_from_f64_rne, float_unop, scalar_from_f64,
     };
-    use crate::types::Prim;
+    use crate::prim::Prim;
+    use alloc::{format, vec::Vec};
     use half::{bf16, f16};
 
     /// `(operation, dtype, input bits, expected bits)` from an independent
@@ -943,7 +944,8 @@ mod tests {
                 let phi = float_unop(FloatUnOp::StandardNormalCdf, scalar)
                     .unwrap()
                     .as_f64_lossy();
-                let reference = 0.5 * chelis_crmath::erfc_f64(-x * std::f64::consts::FRAC_1_SQRT_2);
+                let reference =
+                    0.5 * chelis_crmath::erfc_f64(-x * core::f64::consts::FRAC_1_SQRT_2);
                 let phi_error = (phi - reference).abs() / half_ulp(prim, reference);
                 if phi_error > phi_bound {
                     failures.push(format!("{} Phi({x}) = {phi}: {phi_error} ulp", prim.name()));

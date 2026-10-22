@@ -3,12 +3,13 @@
 mod support;
 
 use chelis_ir::dag::{ComparisonKind, Dag, DimInfo, LogicalKind, RiscOp, RtDim, TensorType};
-use chelis_types::types::Prim;
+use chelis_numeric_core::prim::Prim;
 use support::codegen_hip;
 
 #[test]
 fn generated_hip_bitwise_math_matches_exact_width_reference_on_cpu() {
-    use chelis_types::{BitwiseKind, bitwise_scalar, scalar_from_i64};
+    use chelis_numeric_core::dtype_semantics::scalar_from_i64;
+    use chelis_types::{BitwiseKind, bitwise_scalar};
     use std::process::Command;
 
     for (prim, signed, width, minimum, min_literal) in [

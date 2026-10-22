@@ -16,7 +16,7 @@
 
 mod support;
 use chelis_ir::dag::{Dag, DimExpr, DimInfo, RiscOp, TensorType};
-use chelis_types::types::Prim;
+use chelis_numeric_core::prim::Prim;
 use support::emit_dag;
 
 fn mat(r: usize, c: usize, p: Prim) -> TensorType {
@@ -171,7 +171,7 @@ fn ws_a4_c_backend_emits_int8_tensor_via_int8_t_no_silent_downgrade() {
 #[test]
 fn matmul_info_struct_carries_accumulator_field_post_ws_a1() {
     use chelis_backend_c::blas::MatmulInfo;
-    use chelis_types::types::Prim;
+    use chelis_numeric_core::prim::Prim;
     // Public struct literal — `accumulator` is now a required field.
     // If a future change drops it, the constructor errors at compile
     // time and surfaces the structural regression directly (the F1

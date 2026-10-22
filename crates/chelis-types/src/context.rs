@@ -364,8 +364,9 @@ impl TypeEnv {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{Dim, Prim, Scheme, TensorPrec, Type, TypeVarRestriction};
+    use crate::types::{Dim, Scheme, TensorPrec, Type, TypeVarRestriction};
     use crate::unify::unify;
+    use chelis_numeric_core::prim::Prim;
 
     #[test]
     fn result_origin_is_mandatory_in_schemes_and_contexts() {

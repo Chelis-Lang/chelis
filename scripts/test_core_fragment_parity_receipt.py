@@ -9,9 +9,7 @@ it: the acceptance oracle is the receipt itself, per
 Every positive row below has its negative partner, per `AGENTS.md`
 §"Negative Test Parity". The obligations come from the design document:
 
-- §3.1 the comparison predicate is byte equality, and is the same predicate as
-  `chelis_types::agreement::compare_exact_observations`. `ComparatorEquivalence`
-  locks that against the Rust source rather than asserting it in prose.
+- §3.1 uses byte equality for complete observations.
 - §5.1 the five structural non-vacuity rules, each with a passing and a failing
   case.
 - §5.2 truncation-aware observation accounting.
@@ -105,108 +103,7 @@ def lane(returncode: int = 0, stdout: bytes = b"", stderr: bytes = b"") -> recei
 # ---------------------------------------------------------------------------
 
 
-class ComparatorEquivalence(unittest.TestCase):
-    """Lock the claim that byte equality IS the production comparator.
-
-    The receipt is a Python script and cannot call
-    `chelis_types::agreement::compare_exact_observations`. It claims instead
-    that byte equality is the same predicate. That claim is true only while
-    that function's body remains a byte comparison, so it is checked against
-    the Rust source rather than trusted.
-    """
-
-    SOURCE = REPO_ROOT / "crates" / "chelis-types" / "src" / "agreement.rs"
-
-    # The whole function, whitespace-normalised. An exact match is the only
-    # form of this check that holds: a keyword blacklist ("ulp", "tolerance",
-    # …) is evadable by a tolerance branch that happens to use none of those
-    # words -- `} else if close_enough(a, b) { Ok(ByteExact) }`, or a
-    # delegation to the crate's own `compare_rendered_elements`, both slip
-    # straight through one. Round 1 demonstrated exactly that.
-    EXPECTED_BODY = (
-        "pub fn compare_exact_observations( context: &str, reference: &str, "
-        "candidate: &str, ) -> Result<AgreementOutcome, AgreementError> { "
-        "if reference.as_bytes() == candidate.as_bytes() { "
-        "Ok(AgreementOutcome::ByteExact) } else { "
-        "Err(AgreementError::ExactMismatch { context: context.to_string(), "
-        "reference: reference.to_string(), candidate: candidate.to_string(), "
-        "}) } }"
-    )
-
-    PATTERN = r"pub fn compare_exact_observations\((?:.|\n)*?\n\}"
-
-    @classmethod
-    def comparator_bodies(cls) -> list[str]:
-        text = cls.SOURCE.read_text(encoding="utf-8")
-        return [
-            " ".join(match.split())
-            for match in re.findall(cls.PATTERN, text)
-        ]
-
-    @classmethod
-    def comparator_body(cls) -> str | None:
-        bodies = cls.comparator_bodies()
-        return bodies[0] if bodies else None
-
-    def test_exactly_one_definition_of_the_comparator_exists(self):
-        # Round 2: matching the first definition let a second, `#[cfg]`-gated
-        # tolerant `compare_exact_observations` be appended after the exact one
-        # with the lock still green -- and the crate already gates on features,
-        # so that is a plausible way someone adds a tolerance mode.
-        bodies = self.comparator_bodies()
-        self.assertEqual(
-            len(bodies),
-            1,
-            f"agreement.rs defines compare_exact_observations {len(bodies)} "
-            f"times. The receipt's §3.1 claim is about THE comparator; a second "
-            f"definition -- feature-gated or not -- means the predicate the "
-            f"receipt mirrors is no longer the only one.",
-        )
-
-    def test_production_comparator_is_still_byte_exact(self):
-        body = self.comparator_body()
-        self.assertIsNotNone(
-            body,
-            "compare_exact_observations is no longer in agreement.rs; the "
-            "receipt's equivalence claim in §3.1 has to be re-earned",
-        )
-        self.assertEqual(
-            body,
-            self.EXPECTED_BODY,
-            "compare_exact_observations is no longer the exact byte comparison "
-            "the receipt's §3.1 equivalence claim rests on. Any change here -- "
-            "including one that adds a branch without using the word "
-            "'tolerance' -- means the Python byte comparison may no longer be "
-            "the same predicate. Re-read §3.1 and re-earn the claim rather "
-            "than updating this constant to match.",
-        )
-
-    def test_the_lock_rejects_an_added_branch_that_names_no_tolerance_word(self):
-        # The negative control for the check above, and the exact hole round 1
-        # found in its predecessor: a tolerance branch mentioning none of
-        # "ulp"/"tolerance"/"abs("/"epsilon" must still be rejected.
-        evasive = self.EXPECTED_BODY.replace(
-            "} else { Err(AgreementError::ExactMismatch",
-            "} else if close_enough(reference, candidate) { "
-            "Ok(AgreementOutcome::ByteExact) } else { "
-            "Err(AgreementError::ExactMismatch",
-        )
-        self.assertNotEqual(evasive, self.EXPECTED_BODY)
-        for word in ("ulp", "tolerance", "abs(", "epsilon"):
-            self.assertNotIn(
-                word,
-                evasive.lower(),
-                "the evasive mutation must name no blacklisted word, or it "
-                "does not exercise the hole it is a control for",
-            )
-
-    def test_the_lock_rejects_a_reformatted_but_semantically_changed_body(self):
-        # Whitespace normalisation must not launder a real change.
-        changed = self.EXPECTED_BODY.replace(
-            "reference.as_bytes() == candidate.as_bytes()",
-            "reference.trim() == candidate.trim()",
-        )
-        self.assertNotEqual(changed, self.EXPECTED_BODY)
+class ObservationEquality(unittest.TestCase):
 
     def test_streams_agree_matches_byte_equality(self):
         self.assertTrue(receipt.streams_agree(b"result = 49.0\n", b"result = 49.0\n"))

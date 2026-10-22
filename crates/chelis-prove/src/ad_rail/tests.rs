@@ -593,8 +593,12 @@ fn non_finite_in_gradient_dag_is_rejected_at_the_producer_boundary() {
     // (the WI-3 finite-float guard applies via box_range_goal_from_wire_dag),
     // surfacing as GoalConstruction(NonFiniteValue), not a corrupted artifact.
     let grad = single_op_grad_result(WireRiscOp::Const {
-        value: chelis_types::scalar_from_f64("test", chelis_types::types::Prim::F64, f64::INFINITY)
-            .expect("float finalize is total"),
+        value: chelis_numeric_core::dtype_semantics::scalar_from_f64(
+            "test",
+            chelis_numeric_core::prim::Prim::F64,
+            f64::INFINITY,
+        )
+        .expect("float finalize is total"),
     });
     let err = fan_out_grad_goals(
         &grad,
@@ -615,8 +619,12 @@ fn non_finite_in_gradient_dag_is_rejected_at_the_producer_boundary() {
 fn finite_gradient_dag_passes_the_producer_boundary() {
     // The positive twin: a finite gradient DAG produces a populated goal.
     let grad = single_op_grad_result(WireRiscOp::Const {
-        value: chelis_types::scalar_from_f64("test", chelis_types::types::Prim::F64, 1.0)
-            .expect("finite f64"),
+        value: chelis_numeric_core::dtype_semantics::scalar_from_f64(
+            "test",
+            chelis_numeric_core::prim::Prim::F64,
+            1.0,
+        )
+        .expect("finite f64"),
     });
     let goals = fan_out_grad_goals(
         &grad,
@@ -634,8 +642,12 @@ fn inverted_output_range_on_a_gradient_target_is_rejected_as_ill_formed() {
     // An inverted (lo > hi) range on a gradient target must surface as an
     // ill-formed goal, not a goal asserting an empty region.
     let grad = single_op_grad_result(WireRiscOp::Const {
-        value: chelis_types::scalar_from_f64("test", chelis_types::types::Prim::F64, 1.0)
-            .expect("finite f64"),
+        value: chelis_numeric_core::dtype_semantics::scalar_from_f64(
+            "test",
+            chelis_numeric_core::prim::Prim::F64,
+            1.0,
+        )
+        .expect("finite f64"),
     });
     let err = fan_out_grad_goals(
         &grad,
@@ -656,8 +668,12 @@ fn inverted_output_range_on_a_gradient_target_is_rejected_as_ill_formed() {
 fn non_current_gradient_dag_is_rejected_at_the_producer_boundary() {
     // A future-version gradient DAG must be rejected, not silently hashed.
     let mut grad = single_op_grad_result(WireRiscOp::Const {
-        value: chelis_types::scalar_from_f64("test", chelis_types::types::Prim::F64, 1.0)
-            .expect("finite f64"),
+        value: chelis_numeric_core::dtype_semantics::scalar_from_f64(
+            "test",
+            chelis_numeric_core::prim::Prim::F64,
+            1.0,
+        )
+        .expect("finite f64"),
     });
     grad.dag.schema_version = WIRE_DAG_SCHEMA_VERSION + 1;
     let err = fan_out_grad_goals(
@@ -681,8 +697,12 @@ fn unknown_target_on_constructed_grad_result_fails_the_fan_out() {
     // lowering: a target absent from grad_nodes_by_name fails with
     // UnknownGradTarget.
     let grad = single_op_grad_result(WireRiscOp::Const {
-        value: chelis_types::scalar_from_f64("test", chelis_types::types::Prim::F64, 1.0)
-            .expect("finite f64"),
+        value: chelis_numeric_core::dtype_semantics::scalar_from_f64(
+            "test",
+            chelis_numeric_core::prim::Prim::F64,
+            1.0,
+        )
+        .expect("finite f64"),
     });
     let err = fan_out_grad_goals(
         &grad,

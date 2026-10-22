@@ -38,7 +38,7 @@ use chelis_ir::host::{
     try_summarize_blas_helper_for_test,
 };
 use chelis_ir::{DimInfo, TensorType};
-use chelis_types::types::Prim;
+use chelis_numeric_core::prim::Prim;
 
 fn mat(prim: Prim, r: usize, c: usize) -> TensorType {
     TensorType {

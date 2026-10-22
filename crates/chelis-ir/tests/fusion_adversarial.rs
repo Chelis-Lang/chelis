@@ -4,8 +4,8 @@
 use chelis_ir::dag::{ComparisonKind, Dag, DimInfo, NodeId, RiscOp, TensorType};
 use chelis_ir::eval::{TensorValue, eval_tensor_roots_with_strict};
 use chelis_ir::fuse::fuse;
-use chelis_types::ElementRef;
-use chelis_types::types::Prim;
+use chelis_numeric_core::observation::ElementRef;
+use chelis_numeric_core::prim::Prim;
 use chelis_unord::UnordMap;
 
 fn vec_f32(n: usize) -> TensorType {
@@ -182,7 +182,7 @@ fn adv4_fused_and_unfused_feed_same_output() {
         decl,
         RiscOp::Sum {
             axis: 0,
-            accumulator: chelis_types::types::Prim::F32,
+            accumulator: chelis_numeric_core::prim::Prim::F32,
         },
         vec![x],
         TensorType::scalar_f32(),

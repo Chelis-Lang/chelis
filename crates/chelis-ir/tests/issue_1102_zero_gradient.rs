@@ -8,10 +8,10 @@
 
 use chelis_ir::dag::DimInfo;
 use chelis_ir::lower::{LoweredLibrary, try_lower_program_to_library};
+use chelis_numeric_core::prim::Prim;
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str as surf_parse;
 use chelis_types::check_typed_program;
-use chelis_types::types::Prim;
 
 fn surf_to_library(source: &str) -> Result<LoweredLibrary, String> {
     let decls = surf_parse(source, &chelis_syntax_host::NativeStack)
@@ -45,10 +45,16 @@ fn disconnected_top_level_actual_keeps_every_axis() {
                 (name == "x").then(|| {
                     chelis_ir::eval::TensorValue::from_storage(
                         shape.clone(),
-                        chelis_types::finalize_tensor(
+                        chelis_numeric_core::dtype_semantics::finalize_tensor(
                             "test",
                             Prim::F32,
-                            chelis_types::RawTensor::Float(vec![1.0; shape.iter().product()]),
+                            chelis_numeric_core::dtype_semantics::RawTensor::Float(vec![
+                                1.0;
+                                shape
+                                    .iter()
+                                    .product(
+                                    )
+                            ]),
                         )
                         .unwrap(),
                     )
@@ -82,10 +88,10 @@ fn disconnected_actual_still_checks_its_declared_input_extent() {
         (name == "x").then(|| {
             chelis_ir::eval::TensorValue::from_storage(
                 vec![2],
-                chelis_types::finalize_tensor(
+                chelis_numeric_core::dtype_semantics::finalize_tensor(
                     "test",
                     Prim::F32,
-                    chelis_types::RawTensor::Float(vec![1.0; 2]),
+                    chelis_numeric_core::dtype_semantics::RawTensor::Float(vec![1.0; 2]),
                 )
                 .unwrap(),
             )

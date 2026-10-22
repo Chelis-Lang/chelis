@@ -6,8 +6,8 @@
 use chelis_unord::{UnordMap, UnordSet};
 use std::fmt;
 
-pub use chelis_deep::NamedCastMode;
-use chelis_types::types::Prim;
+use chelis_numeric_core::named_cast::NamedCastMode;
+use chelis_numeric_core::prim::Prim;
 use serde::{Deserialize, Serialize};
 
 use crate::load_store_name::LoadStoreName;
@@ -725,10 +725,10 @@ pub enum KeyBranch {
 
 impl KeyBranch {
     /// The kernel half this branch computes.
-    pub const fn half(self) -> chelis_types::dtype_semantics::KeyHalf {
+    pub const fn half(self) -> chelis_numeric_core::dtype_semantics::KeyHalf {
         match self {
-            Self::Left => chelis_types::dtype_semantics::KeyHalf::Left,
-            Self::Right => chelis_types::dtype_semantics::KeyHalf::Right,
+            Self::Left => chelis_numeric_core::dtype_semantics::KeyHalf::Left,
+            Self::Right => chelis_numeric_core::dtype_semantics::KeyHalf::Right,
         }
     }
 }
@@ -994,7 +994,7 @@ pub enum RiscOp {
     /// Exact signed-width [05-OP-47] operation.
     Bitwise(chelis_types::BitwiseKind),
     /// [05-OP-20..22]: stored-width IEEE predicate.
-    FloatClassify(chelis_types::FloatClassify),
+    FloatClassify(chelis_numeric_core::dtype_semantics::FloatClassify),
     /// Identity-preserving comparison with Bool output ([05-OP-36]).
     Compare(ComparisonKind),
     /// Bool-only eager logical operation ([05-OP-26..28]).
@@ -1286,7 +1286,7 @@ pub enum RiscOp {
     },
     Pad {
         padding: Vec<(RtDim, RtDim)>,
-        fill: chelis_types::ScalarValue,
+        fill: chelis_numeric_core::dtype_semantics::ScalarValue,
     },
     Shrink {
         bounds: Vec<(RtDim, RtDim)>,
@@ -1337,7 +1337,7 @@ pub enum RiscOp {
         site: ExtentWitnessSite,
         parameter: String,
         axis: RtAxis,
-        requirements: Vec<chelis_types::ScalarValue>,
+        requirements: Vec<chelis_numeric_core::dtype_semantics::ScalarValue>,
         claims: Vec<ExtentClaim>,
     },
     /// Checks an independently computed reshape target (input 0) against
@@ -1360,20 +1360,20 @@ pub enum RiscOp {
     // --- Memory ---
     /// A scalar constant carried as a SEALED finalized value (the
     /// chelis#729 fifth storage layer, chelis#856): the payload is
-    /// `chelis_types::ScalarValue`, whose construction runs through the
+    /// `chelis_numeric_core::dtype_semantics::ScalarValue`, whose construction runs through the
     /// dtype_semantics module, so an un-finalized or dtype-collapsed
     /// numeric constant is unrepresentable in the IR. Integer literals
     /// stay exact at width (no f64 laundering above 2^53). Synthesize
     /// compiler-internal constants via [`RiscOp::synth_const`].
     Const {
-        value: chelis_types::ScalarValue,
+        value: chelis_numeric_core::dtype_semantics::ScalarValue,
     },
     /// A multi-element constant tensor stored as SEALED per-dtype
-    /// storage (`chelis_types::TensorStorage`, flat row-major).
+    /// storage (`chelis_numeric_core::dtype_semantics::TensorStorage`, flat row-major).
     /// Replaces the Const+Pad+Add tree for literal `to_tensor` calls
     /// with non-uniform data. Same fifth-layer contract as [`Self::Const`].
     ConstTensor {
-        data: chelis_types::TensorStorage,
+        data: chelis_numeric_core::dtype_semantics::TensorStorage,
     },
     Load {
         name: LoadStoreName,
@@ -1862,9 +1862,9 @@ impl RiscOp {
             Self::TruncDiv => Semantic(Id::TruncDiv),
             Self::Mod => Semantic(Id::Mod),
             Self::FloatClassify(kind) => Semantic(match kind {
-                chelis_types::FloatClassify::Nan => Id::IsNan,
-                chelis_types::FloatClassify::Finite => Id::IsFinite,
-                chelis_types::FloatClassify::Infinite => Id::IsInfinite,
+                chelis_numeric_core::dtype_semantics::FloatClassify::Nan => Id::IsNan,
+                chelis_numeric_core::dtype_semantics::FloatClassify::Finite => Id::IsFinite,
+                chelis_numeric_core::dtype_semantics::FloatClassify::Infinite => Id::IsInfinite,
             }),
             Self::Bitwise(kind) => Semantic(match kind {
                 chelis_types::BitwiseKind::And => Id::BitAnd,
@@ -1976,18 +1976,22 @@ impl RiscOp {
 
     /// Construct a pad from an already-finalized fill value. The dtype tag
     /// travels with the value, so a fill/output mismatch is verifier-visible.
-    pub fn pad(padding: Vec<(RtDim, RtDim)>, fill: chelis_types::ScalarValue) -> Self {
+    pub fn pad(
+        padding: Vec<(RtDim, RtDim)>,
+        fill: chelis_numeric_core::dtype_semantics::ScalarValue,
+    ) -> Self {
         Self::Pad { padding, fill }
     }
 
     /// Compiler-synthesized zero pad at the output dtype.
     pub fn zero_pad(prim: Prim, padding: Vec<(RtDim, RtDim)>) -> Self {
-        let fill = chelis_types::scalar_from_i64("pad", prim, 0).unwrap_or_else(|trap| {
-            panic!(
-                "internal: zero pad fill does not finalize at {}: {trap}",
-                prim.name()
-            )
-        });
+        let fill = chelis_numeric_core::dtype_semantics::scalar_from_i64("pad", prim, 0)
+            .unwrap_or_else(|trap| {
+                panic!(
+                    "internal: zero pad fill does not finalize at {}: {trap}",
+                    prim.name()
+                )
+            });
         Self::Pad { padding, fill }
     }
 
@@ -2001,43 +2005,35 @@ impl RiscOp {
     /// with a lowering diagnostic, and folds decline on trap per the
     /// section C2 fold rule.
     pub fn synth_const(prim: Prim, wide: f64) -> RiscOp {
-        let value = chelis_types::scalar_from_f64("const", prim, wide).unwrap_or_else(|trap| {
-            panic!(
-                "internal: synthesized constant {wide} does not finalize at \
+        let value = chelis_numeric_core::dtype_semantics::scalar_from_f64("const", prim, wide)
+            .unwrap_or_else(|trap| {
+                panic!(
+                    "internal: synthesized constant {wide} does not finalize at \
                  {}: {trap} (compiler-synthesized constants must be \
                  integral and in range by construction)",
-                prim.name()
-            )
-        });
+                    prim.name()
+                )
+            });
         RiscOp::Const { value }
     }
 
     /// Bulk sibling of [`RiscOp::synth_const`] for synthesized constant
     /// tensors; same contract, wide f64 element images only.
     pub fn synth_const_tensor(prim: Prim, wide: Vec<f64>) -> RiscOp {
-        let data =
-            chelis_types::finalize_tensor("const", prim, chelis_types::RawTensor::Float(wide))
-                .unwrap_or_else(|trap| {
-                    panic!(
-                        "internal: synthesized constant tensor does not finalize at \
+        let data = chelis_numeric_core::dtype_semantics::finalize_tensor(
+            "const",
+            prim,
+            chelis_numeric_core::dtype_semantics::RawTensor::Float(wide),
+        )
+        .unwrap_or_else(|trap| {
+            panic!(
+                "internal: synthesized constant tensor does not finalize at \
                      {}: {trap} (compiler-synthesized constants must be \
                      integral and in range by construction)",
-                        prim.name()
-                    )
-                });
+                prim.name()
+            )
+        });
         RiscOp::ConstTensor { data }
-    }
-
-    /// Resolve the spec §5.7.1 default reduce-sum accumulator for the
-    /// given operand precision. Thin re-export of
-    /// [`Prim::default_reduce_sum_accumulator`] so call sites inside
-    /// `chelis-ir` and downstream backends can stay `RiscOp::*`
-    /// -namespaced. The canonical table lives on `Prim` so the type
-    /// checker (`chelis-types`) can resolve the same rule without a
-    /// backward dependency on `chelis-ir`. See the chelis-types
-    /// method for the per-row mapping.
-    pub fn default_reduce_sum_accumulator(operand: Prim) -> Result<Prim, String> {
-        operand.default_reduce_sum_accumulator()
     }
 
     /// Resolve the spec §5.7.1 default matmul accumulator for the given
@@ -2078,16 +2074,6 @@ impl RiscOp {
         })
     }
 
-    /// Resolve the spec §5.7.1 user-facing result precision of
-    /// `reduce_sum` for the given operand precision. Thin re-export
-    /// of [`Prim::default_reduce_sum_result_precision`] so call sites
-    /// inside `chelis-ir` and downstream backends can stay
-    /// `RiscOp::*`-namespaced. See the chelis-types method for the
-    /// per-row table and the bf16/f16 downcast rationale.
-    pub fn default_reduce_sum_result_precision(operand: Prim) -> Result<Prim, String> {
-        operand.default_reduce_sum_result_precision()
-    }
-
     /// Construct a `Sum` op with an explicit `accumulator` precision.
     /// Verifies the spec §5.7.1 narrowness rule: `accumulator` must be
     /// at least as wide as the documented default for the operand
@@ -2097,7 +2083,9 @@ impl RiscOp {
         operand_prim: Prim,
         accumulator: Prim,
     ) -> Result<Self, String> {
-        let default = Self::default_reduce_sum_accumulator(operand_prim)?;
+        let default = operand_prim
+            .default_reduce_sum_accumulator()
+            .map_err(|error| error.to_string())?;
         if !accumulator_at_least_as_wide(operand_prim, accumulator, default) {
             return Err(format!(
                 "reduce_sum: explicit accumulator `{}` is narrower than the \
@@ -2116,7 +2104,9 @@ impl RiscOp {
     /// operand precision. This is the canonical "no explicit
     /// accumulator parameter" lowering path per §5.7.1.
     pub fn sum_default(axis: usize, operand_prim: Prim) -> Result<Self, String> {
-        let accumulator = Self::default_reduce_sum_accumulator(operand_prim)?;
+        let accumulator = operand_prim
+            .default_reduce_sum_accumulator()
+            .map_err(|error| error.to_string())?;
         Ok(RiscOp::Sum { axis, accumulator })
     }
 
@@ -2802,8 +2792,9 @@ pub enum RuntimeCheck {
 /// verifier.
 pub struct TrapSeeds<'dag> {
     dag: &'dag Dag,
-    literal_result_witness_requirements:
-        std::cell::OnceCell<std::collections::BTreeMap<NodeId, Vec<chelis_types::ScalarValue>>>,
+    literal_result_witness_requirements: std::cell::OnceCell<
+        std::collections::BTreeMap<NodeId, Vec<chelis_numeric_core::dtype_semantics::ScalarValue>>,
+    >,
     claim_sized_nodes: std::cell::OnceCell<Result<std::collections::BTreeSet<NodeId>, String>>,
 }
 
@@ -2908,7 +2899,7 @@ impl TrapSeeds<'_> {
     pub fn literal_result_witness_requirements(
         &self,
         witness: NodeId,
-    ) -> &[chelis_types::ScalarValue] {
+    ) -> &[chelis_numeric_core::dtype_semantics::ScalarValue] {
         self.literal_result_witness_requirements
             .get_or_init(|| crate::axis_sources::literal_result_witness_requirements(self.dag))
             .get(&witness)
@@ -3435,10 +3426,11 @@ impl Dag {
         let prim = node.output_type.precision;
         match &node.op {
             RiscOp::Dropout => literal(1).is_some_and(|rate| {
-                chelis_types::dtype_semantics::DropoutParameters::new(prim, rate).is_ok()
+                chelis_numeric_core::dtype_semantics::DropoutParameters::new(prim, rate).is_ok()
             }),
             RiscOp::UniformLike => literal(1).zip(literal(2)).is_some_and(|(low, high)| {
-                chelis_types::dtype_semantics::UniformLikeParameters::new(prim, low, high).is_ok()
+                chelis_numeric_core::dtype_semantics::UniformLikeParameters::new(prim, low, high)
+                    .is_ok()
             }),
             _ => false,
         }
@@ -4397,7 +4389,7 @@ mod tests {
     /// its data's literal leading dims. One negative per guard.
     mod draw_trap_guards {
         use super::*;
-        use chelis_types::types::Prim;
+        use chelis_numeric_core::prim::Prim;
 
         fn ty(dims: &[DimInfo], precision: Prim) -> TensorType {
             TensorType {
@@ -4443,7 +4435,12 @@ mod tests {
                     let seed = dag.add_node(
                         decl,
                         RiscOp::Const {
-                            value: chelis_types::scalar_from_i64("test", Prim::Int64, 7).unwrap(),
+                            value: chelis_numeric_core::dtype_semantics::scalar_from_i64(
+                                "test",
+                                Prim::Int64,
+                                7,
+                            )
+                            .unwrap(),
                         },
                         vec![],
                         ty(&[], Prim::Int64),
@@ -4642,7 +4639,12 @@ mod tests {
             let end = dag.add_node(
                 decl,
                 RiscOp::Const {
-                    value: chelis_types::scalar_from_i64("test", Prim::Int64, 1).unwrap(),
+                    value: chelis_numeric_core::dtype_semantics::scalar_from_i64(
+                        "test",
+                        Prim::Int64,
+                        1,
+                    )
+                    .unwrap(),
                 },
                 vec![],
                 TensorType {
@@ -5204,9 +5206,9 @@ mod tests {
             RiscOp::FloorDiv,
             RiscOp::TruncDiv,
             RiscOp::Mod,
-            RiscOp::FloatClassify(chelis_types::FloatClassify::Nan),
-            RiscOp::FloatClassify(chelis_types::FloatClassify::Finite),
-            RiscOp::FloatClassify(chelis_types::FloatClassify::Infinite),
+            RiscOp::FloatClassify(chelis_numeric_core::dtype_semantics::FloatClassify::Nan),
+            RiscOp::FloatClassify(chelis_numeric_core::dtype_semantics::FloatClassify::Finite),
+            RiscOp::FloatClassify(chelis_numeric_core::dtype_semantics::FloatClassify::Infinite),
             RiscOp::Bitwise(chelis_types::BitwiseKind::And),
             RiscOp::Compare(ComparisonKind::Eq),
             RiscOp::Logical(LogicalKind::And),
@@ -5642,7 +5644,10 @@ mod tests {
                 site: crate::dag::ExtentWitnessSite::Caller,
                 parameter: "x".into(),
                 axis: RtAxis::Lit(0),
-                requirements: vec![chelis_types::scalar_from_i64("load", Prim::Int64, 4).unwrap()],
+                requirements: vec![
+                    chelis_numeric_core::dtype_semantics::scalar_from_i64("load", Prim::Int64, 4)
+                        .unwrap(),
+                ],
                 claims: Vec::new(),
             },
             RiscOp::Sub,

@@ -633,7 +633,7 @@ statement that the current issue list is empty.
 [validate]: ../../../crates/chelis-validate/src/lib.rs
 [lint]: ../../../crates/chelis-lint/src/lib.rs
 [semantic]: ../../../crates/chelis-pipeline-core/src/semantic.rs
-[observation]: ../../../crates/chelis-types/src/observation.rs
+[observation]: ../../../crates/chelis-numeric-core/src/observation.rs
 [compiled-format]: ../../../crates/chelis-runtime/src/format_shortest.rs
 [observation-tests]: ../../../crates/chelis-cli/tests/observation_roundtrip_harness.rs
 [realizability]: ../../../crates/chelis-effects/src/realizability.rs

@@ -179,7 +179,7 @@ conservatively as `numeric-op`, and only the three byte-frozen
 pre-ratchet plumbing declarations named in [#729] §C6 are exempt. The
 2026-07-31 round-4 fold-in completes that entry gate: an arithmetic
 spelling the census does not recognize is a build failure rather than an
-unflagged row, and adding a `chelis_types::Prim` variant stops the
+unflagged row, and adding a `chelis_numeric_core::prim::Prim` variant stops the
 tripwire compiling until the new dtype is classified.
 
 **Wave 4 - the permanent guards.** [#729] Phase 4 delivers the capability

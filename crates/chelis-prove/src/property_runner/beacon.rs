@@ -3,8 +3,9 @@ use super::*;
 use crate::discharge::{DischargeEngine, Goal, IntervalBox, IrHandle};
 use crate::{BeaconOracleMode, BeaconShim, WireDagByteStore};
 use chelis_compiler_api::compiler;
+use chelis_numeric_core::dtype_semantics::{ScalarValue, scalar_from_f64};
+use chelis_numeric_core::prim::Prim;
 use chelis_surf::ast::{LiteralSuffix, TensorPrecision, UnaryOp};
-use chelis_types::{ScalarValue, dtype_semantics::scalar_from_f64, types::Prim};
 use sha2::{Digest, Sha256};
 use std::borrow::Cow;
 

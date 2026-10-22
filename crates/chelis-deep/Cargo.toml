@@ -11,6 +11,7 @@ repository.workspace = true
 pre-020-pipe-migration = []
 
 [dependencies]
+chelis-numeric-core = { workspace = true, default-features = false, features = ["serde"] }
 chelis-vocab = { workspace = true, default-features = false }
 chelis-stack-services.workspace = true
 serde = { version = "1", default-features = false, features = ["alloc", "derive", "rc"] }

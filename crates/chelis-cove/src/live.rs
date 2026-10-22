@@ -174,10 +174,10 @@ fn render_execution_value(value: &ExecutionValue) -> String {
         }
         ExecutionValue::Scalar { value } => {
             let scalar = value.get();
-            chelis_types::format_element(scalar.prim(), scalar.element_ref())
+            chelis_numeric_core::observation::format_element(scalar.prim(), scalar.element_ref())
         }
         ExecutionValue::Bool { value } => value.to_string(),
-        ExecutionValue::Key { bits } => chelis_types::format_key(bits.key()),
+        ExecutionValue::Key { bits } => chelis_numeric_core::observation::format_key(bits.key()),
         ExecutionValue::String { value } => value.clone(),
         ExecutionValue::List { value: items } => format!(
             "[{}]",
@@ -281,7 +281,8 @@ fn zero_bindings(source: &str) -> Result<BTreeMap<String, TensorValue>, String> 
 }
 
 fn zero_elements(precision: &str, len: usize) -> Result<TensorElements, String> {
-    use chelis_types::{RawTensor, finalize_tensor, types::Prim};
+    use chelis_numeric_core::dtype_semantics::{RawTensor, finalize_tensor};
+    use chelis_numeric_core::prim::Prim;
     let prim = Prim::parse_interchange_name(precision)
         .filter(|prim| prim.runtime_dtype().is_ok())
         .ok_or_else(|| {
@@ -347,7 +348,8 @@ mod tests {
 
     #[test]
     fn scalar_display_preserves_large_integer_and_own_width_text() {
-        use chelis_types::{scalar_from_f64, scalar_from_i64, types::Prim};
+        use chelis_numeric_core::dtype_semantics::{scalar_from_f64, scalar_from_i64};
+        use chelis_numeric_core::prim::Prim;
         for (value, text) in [
             (
                 scalar_from_i64("display-test", Prim::Int64, 9_007_199_254_740_993).unwrap(),

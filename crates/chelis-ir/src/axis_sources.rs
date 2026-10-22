@@ -39,7 +39,7 @@
 //! classes, the guard placement, and the deletion of the provenance walk are
 //! the second half of Slice B.
 
-use chelis_types::types::Prim;
+use chelis_numeric_core::prim::Prim;
 use chelis_types::unimplemented_rejection;
 use chelis_types::unsupported::{Stage, Unsupported, UnsupportedKind};
 
@@ -3971,7 +3971,7 @@ fn literal_result_interface_claims(
 ) -> Vec<(
     NodeId,
     LiteralResultInterfaceObservation,
-    chelis_types::ScalarValue,
+    chelis_numeric_core::dtype_semantics::ScalarValue,
 )> {
     let witnesses = CallerWitnesses::new(dag);
     let mut claims = Vec::new();
@@ -4029,7 +4029,7 @@ fn literal_result_interface_claims(
 /// witness, which made every seed query quadratic in the graph.
 pub fn literal_result_witness_requirements(
     dag: &Dag,
-) -> std::collections::BTreeMap<NodeId, Vec<chelis_types::ScalarValue>> {
+) -> std::collections::BTreeMap<NodeId, Vec<chelis_numeric_core::dtype_semantics::ScalarValue>> {
     let slots = InterfaceSlots::of(dag);
     let mut requirements = std::collections::BTreeMap::<NodeId, Vec<_>>::new();
     for (_, observed, required) in literal_result_interface_claims(dag) {
@@ -4649,7 +4649,10 @@ mod tests {
                 site: crate::dag::ExtentWitnessSite::LiteralResultClaim,
                 parameter: String::new(),
                 axis: RtAxis::Lit(0),
-                requirements: vec![chelis_types::scalar_from_i64("test", Prim::Int64, 4).unwrap()],
+                requirements: vec![
+                    chelis_numeric_core::dtype_semantics::scalar_from_i64("test", Prim::Int64, 4)
+                        .unwrap(),
+                ],
                 claims: Vec::new(),
             },
             Vec::new(),
@@ -4687,7 +4690,10 @@ mod tests {
                 },
                 parameter: String::new(),
                 axis: RtAxis::Lit(0),
-                requirements: vec![chelis_types::scalar_from_i64("test", Prim::Int64, 4).unwrap()],
+                requirements: vec![
+                    chelis_numeric_core::dtype_semantics::scalar_from_i64("test", Prim::Int64, 4)
+                        .unwrap(),
+                ],
                 claims: Vec::new(),
             },
             Vec::new(),

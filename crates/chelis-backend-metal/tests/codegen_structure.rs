@@ -9,7 +9,7 @@
 
 mod support;
 use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
-use chelis_types::types::Prim;
+use chelis_numeric_core::prim::Prim;
 use support::{codegen_metal, try_codegen_metal};
 
 fn vec_f32(n: usize) -> TensorType {
@@ -319,7 +319,7 @@ fn m4_sum_reduction_emits_threadgroup_memory_and_barriers() {
     let dag = build_reduce_dag(
         RiscOp::Sum {
             axis: 0,
-            accumulator: chelis_types::types::Prim::F32,
+            accumulator: chelis_numeric_core::prim::Prim::F32,
         },
         256,
     );
@@ -397,7 +397,7 @@ fn m4_oversize_reduction_returns_typed_unsupported_until_two_pass_lands() {
     let dag = build_reduce_dag(
         RiscOp::Sum {
             axis: 0,
-            accumulator: chelis_types::types::Prim::F32,
+            accumulator: chelis_numeric_core::prim::Prim::F32,
         },
         4097,
     );
@@ -479,7 +479,7 @@ fn m4_reduce_root_emits_rank_zero_scalar_alloc() {
         decl,
         RiscOp::Sum {
             axis: 0,
-            accumulator: chelis_types::types::Prim::F32,
+            accumulator: chelis_numeric_core::prim::Prim::F32,
         },
         vec![a],
         TensorType::scalar_f32(),
@@ -567,7 +567,7 @@ fn build_matmul_dag(m: usize, k: usize, n: usize) -> Dag {
         decl,
         RiscOp::Sum {
             axis: 1,
-            accumulator: chelis_types::types::Prim::F32,
+            accumulator: chelis_numeric_core::prim::Prim::F32,
         },
         vec![mul],
         mat_f32(m, n),
@@ -730,7 +730,7 @@ fn m4_axis_nonzero_reduction_is_rejected_before_codegen() {
         decl,
         RiscOp::Sum {
             axis: 1,
-            accumulator: chelis_types::types::Prim::F32,
+            accumulator: chelis_numeric_core::prim::Prim::F32,
         },
         vec![a],
         TensorType::scalar_f32(),

@@ -3,7 +3,7 @@
 mod support;
 use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
 use chelis_ir::fuse::fuse;
-use chelis_types::types::Prim;
+use chelis_numeric_core::prim::Prim;
 use support::codegen;
 
 mod common;
@@ -148,7 +148,7 @@ fn c_fused_reduce_sum_no_intermediate() {
         decl,
         RiscOp::Sum {
             axis: 1,
-            accumulator: chelis_types::types::Prim::F32,
+            accumulator: chelis_numeric_core::prim::Prim::F32,
         },
         vec![negated],
         vec_f32(3),
@@ -262,7 +262,7 @@ fn c_fused_reduce_compiles() {
         decl,
         RiscOp::Sum {
             axis: 1,
-            accumulator: chelis_types::types::Prim::F32,
+            accumulator: chelis_numeric_core::prim::Prim::F32,
         },
         vec![negated],
         vec_f32(3),

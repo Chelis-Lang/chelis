@@ -11,7 +11,7 @@ use crate::dag::{
     RiscOp, RtAxis, RtDim, TensorType,
 };
 use crate::tier2;
-use chelis_types::types::Prim;
+use chelis_numeric_core::prim::Prim;
 
 /// Result of reverse-mode AD.
 pub struct GradResult {
@@ -2409,7 +2409,7 @@ fn compute_adjoints(
             let ty = forward.get(x).unwrap().output_type.clone();
             let bool_ty = TensorType {
                 dims: ty.dims.clone(),
-                precision: chelis_types::types::Prim::Bool,
+                precision: chelis_numeric_core::prim::Prim::Bool,
             };
             let zero = fill_like(dag, node.owner, x, 0.0);
             // positive mask: x > 0  i.e. cmplt(0, x)
@@ -2854,7 +2854,9 @@ fn compute_adjoints(
             let same_rank = output_rank == source_rank;
             // The gradient sum runs over the operand precision; use the
             // spec-default accumulator so the AD path tracks WS-A0 §5.7.1.
-            let acc = RiscOp::default_reduce_sum_accumulator(source_ty.precision)
+            let acc = source_ty
+                .precision
+                .default_reduce_sum_accumulator()
                 .unwrap_or(source_ty.precision);
 
             // `Sum { axis }` over the cotangent removes `axis`. Its
@@ -4072,7 +4074,12 @@ mod tests {
             let count = dag.add_node(
                 owner,
                 RiscOp::Const {
-                    value: chelis_types::scalar_from_i64("test", Prim::Int32, 2).unwrap(),
+                    value: chelis_numeric_core::dtype_semantics::scalar_from_i64(
+                        "test",
+                        Prim::Int32,
+                        2,
+                    )
+                    .unwrap(),
                 },
                 vec![],
                 int_ty.clone(),
@@ -5097,7 +5104,7 @@ mod tests {
     /// control slots. With `data_use`, the output also adds the restored
     /// value, so the conversion has a data path as well.
     fn comparison_with_discrete_cast(
-        named: Option<crate::dag::NamedCastMode>,
+        named: Option<chelis_numeric_core::named_cast::NamedCastMode>,
         through_integer_extrema: bool,
         data_use: bool,
     ) -> (Dag, NodeId, NodeId) {
@@ -5114,7 +5121,7 @@ mod tests {
             scalar_f32(),
             None,
         );
-        let source = if named == Some(crate::dag::NamedCastMode::Wrap) {
+        let source = if named == Some(chelis_numeric_core::named_cast::NamedCastMode::Wrap) {
             dag.add_node(
                 owner,
                 RiscOp::Cast {
@@ -5205,8 +5212,12 @@ mod tests {
         (dag, x, out)
     }
 
-    fn discrete_cast_variants() -> impl Iterator<Item = (Option<crate::dag::NamedCastMode>, bool)> {
-        let rungs = crate::dag::NamedCastMode::ALL.iter().copied().map(Some);
+    fn discrete_cast_variants()
+    -> impl Iterator<Item = (Option<chelis_numeric_core::named_cast::NamedCastMode>, bool)> {
+        let rungs = chelis_numeric_core::named_cast::NamedCastMode::ALL
+            .iter()
+            .copied()
+            .map(Some);
         std::iter::once(None)
             .chain(rungs)
             .flat_map(|named| [(named, false), (named, true)])
@@ -5244,7 +5255,7 @@ mod tests {
     fn grad_conversion_with_a_data_path_still_rejects() {
         for (named, through_integer_extrema) in discrete_cast_variants() {
             let op = match named {
-                Some(crate::dag::NamedCastMode::Wrap) | None => "cast",
+                Some(chelis_numeric_core::named_cast::NamedCastMode::Wrap) | None => "cast",
                 Some(mode) => mode.keyword(),
             };
             let (dag, x, out) = comparison_with_discrete_cast(named, through_integer_extrema, true);
@@ -5486,7 +5497,7 @@ mod tests {
 
         let vec3_ty = TensorType {
             dims: vec![DimInfo::Lit(3)],
-            precision: chelis_types::types::Prim::F32,
+            precision: chelis_numeric_core::prim::Prim::F32,
         };
         let mut dag = Dag::new();
         let owner = Owner::from(dag.declare("test"));
@@ -5501,7 +5512,7 @@ mod tests {
             owner,
             RiscOp::Sum {
                 axis: 0,
-                accumulator: chelis_types::types::Prim::F32,
+                accumulator: chelis_numeric_core::prim::Prim::F32,
             },
             vec![x],
             scalar_f32(),
@@ -5585,12 +5596,12 @@ mod tests {
         );
         let f64_ty = TensorType {
             dims: vec![],
-            precision: chelis_types::types::Prim::F64,
+            precision: chelis_numeric_core::prim::Prim::F64,
         };
         let casted = dag.add_node(
             owner,
             RiscOp::Cast {
-                new_precision: chelis_types::types::Prim::F64,
+                new_precision: chelis_numeric_core::prim::Prim::F64,
             },
             vec![x],
             f64_ty,
@@ -5816,11 +5827,11 @@ mod tests {
         ] {
             let vec6_ty = TensorType {
                 dims: vec![source_dim],
-                precision: chelis_types::types::Prim::F32,
+                precision: chelis_numeric_core::prim::Prim::F32,
             };
             let mat23_ty = TensorType {
                 dims: vec![DimInfo::Lit(2), DimInfo::Lit(3)],
-                precision: chelis_types::types::Prim::F32,
+                precision: chelis_numeric_core::prim::Prim::F32,
             };
 
             let mut dag = Dag::new();
@@ -5846,12 +5857,12 @@ mod tests {
                 owner,
                 RiscOp::Sum {
                     axis: 0,
-                    accumulator: chelis_types::types::Prim::F32,
+                    accumulator: chelis_numeric_core::prim::Prim::F32,
                 },
                 vec![reshaped],
                 TensorType {
                     dims: vec![DimInfo::Lit(3)],
-                    precision: chelis_types::types::Prim::F32,
+                    precision: chelis_numeric_core::prim::Prim::F32,
                 },
                 None,
             );
@@ -5859,7 +5870,7 @@ mod tests {
                 owner,
                 RiscOp::Sum {
                     axis: 0,
-                    accumulator: chelis_types::types::Prim::F32,
+                    accumulator: chelis_numeric_core::prim::Prim::F32,
                 },
                 vec![sum0],
                 scalar_f32(),
@@ -5891,11 +5902,11 @@ mod tests {
 
         let mat23_ty = TensorType {
             dims: vec![DimInfo::Lit(2), DimInfo::Lit(3)],
-            precision: chelis_types::types::Prim::F32,
+            precision: chelis_numeric_core::prim::Prim::F32,
         };
         let mat32_ty = TensorType {
             dims: vec![DimInfo::Lit(3), DimInfo::Lit(2)],
-            precision: chelis_types::types::Prim::F32,
+            precision: chelis_numeric_core::prim::Prim::F32,
         };
 
         let mut dag = Dag::new();
@@ -5919,12 +5930,12 @@ mod tests {
             owner,
             RiscOp::Sum {
                 axis: 0,
-                accumulator: chelis_types::types::Prim::F32,
+                accumulator: chelis_numeric_core::prim::Prim::F32,
             },
             vec![transposed],
             TensorType {
                 dims: vec![DimInfo::Lit(2)],
-                precision: chelis_types::types::Prim::F32,
+                precision: chelis_numeric_core::prim::Prim::F32,
             },
             None,
         );
@@ -5932,7 +5943,7 @@ mod tests {
             owner,
             RiscOp::Sum {
                 axis: 0,
-                accumulator: chelis_types::types::Prim::F32,
+                accumulator: chelis_numeric_core::prim::Prim::F32,
             },
             vec![sum0],
             scalar_f32(),
@@ -6068,11 +6079,11 @@ mod tests {
 
         let vec3_ty = TensorType {
             dims: vec![DimInfo::Lit(3)],
-            precision: chelis_types::types::Prim::F32,
+            precision: chelis_numeric_core::prim::Prim::F32,
         };
         let mat23_ty = TensorType {
             dims: vec![DimInfo::Lit(2), DimInfo::Lit(3)],
-            precision: chelis_types::types::Prim::F32,
+            precision: chelis_numeric_core::prim::Prim::F32,
         };
 
         let mut dag = Dag::new();
@@ -6099,7 +6110,7 @@ mod tests {
             owner,
             RiscOp::Sum {
                 axis: 0,
-                accumulator: chelis_types::types::Prim::F32,
+                accumulator: chelis_numeric_core::prim::Prim::F32,
             },
             vec![expanded],
             vec3_ty.clone(),
@@ -6109,7 +6120,7 @@ mod tests {
             owner,
             RiscOp::Sum {
                 axis: 0,
-                accumulator: chelis_types::types::Prim::F32,
+                accumulator: chelis_numeric_core::prim::Prim::F32,
             },
             vec![sum0],
             scalar_f32(),
@@ -6156,15 +6167,15 @@ mod tests {
 
         let col_ty = TensorType {
             dims: vec![DimInfo::Lit(2), DimInfo::Lit(1)],
-            precision: chelis_types::types::Prim::F32,
+            precision: chelis_numeric_core::prim::Prim::F32,
         };
         let wide_ty = TensorType {
             dims: vec![DimInfo::Lit(2), DimInfo::Lit(3)],
-            precision: chelis_types::types::Prim::F32,
+            precision: chelis_numeric_core::prim::Prim::F32,
         };
         let rows_ty = TensorType {
             dims: vec![DimInfo::Lit(2)],
-            precision: chelis_types::types::Prim::F32,
+            precision: chelis_numeric_core::prim::Prim::F32,
         };
 
         let mut dag = Dag::new();
@@ -6190,7 +6201,7 @@ mod tests {
             owner,
             RiscOp::Sum {
                 axis: 1,
-                accumulator: chelis_types::types::Prim::F32,
+                accumulator: chelis_numeric_core::prim::Prim::F32,
             },
             vec![broadcast],
             rows_ty,
@@ -6200,7 +6211,7 @@ mod tests {
             owner,
             RiscOp::Sum {
                 axis: 0,
-                accumulator: chelis_types::types::Prim::F32,
+                accumulator: chelis_numeric_core::prim::Prim::F32,
             },
             vec![per_row],
             scalar_f32(),
@@ -7027,11 +7038,11 @@ mod tests {
 
         let mat23_ty = TensorType {
             dims: vec![DimInfo::Lit(2), DimInfo::Lit(3)],
-            precision: chelis_types::types::Prim::F64,
+            precision: chelis_numeric_core::prim::Prim::F64,
         };
         let vec3_ty = TensorType {
             dims: vec![DimInfo::Lit(3)],
-            precision: chelis_types::types::Prim::F64,
+            precision: chelis_numeric_core::prim::Prim::F64,
         };
 
         let mut dag = Dag::new();
@@ -7054,7 +7065,7 @@ mod tests {
             owner,
             RiscOp::Sum {
                 axis: 0,
-                accumulator: chelis_types::types::Prim::F64,
+                accumulator: chelis_numeric_core::prim::Prim::F64,
             },
             vec![maxr],
             scalar_f64(),
@@ -7134,11 +7145,11 @@ mod tests {
 
         let mat22_ty = TensorType {
             dims: vec![DimInfo::Lit(2), DimInfo::Lit(2)],
-            precision: chelis_types::types::Prim::F32,
+            precision: chelis_numeric_core::prim::Prim::F32,
         };
         let vec2_ty = TensorType {
             dims: vec![DimInfo::Lit(2)],
-            precision: chelis_types::types::Prim::F32,
+            precision: chelis_numeric_core::prim::Prim::F32,
         };
 
         let mut dag = Dag::new();
@@ -7161,7 +7172,7 @@ mod tests {
             owner,
             RiscOp::Sum {
                 axis: 0,
-                accumulator: chelis_types::types::Prim::F32,
+                accumulator: chelis_numeric_core::prim::Prim::F32,
             },
             vec![maxr],
             scalar_f32(),
@@ -7190,11 +7201,11 @@ mod tests {
 
         let mat23_ty = TensorType {
             dims: vec![DimInfo::Lit(2), DimInfo::Lit(3)],
-            precision: chelis_types::types::Prim::F64,
+            precision: chelis_numeric_core::prim::Prim::F64,
         };
         let vec2_ty = TensorType {
             dims: vec![DimInfo::Lit(2)],
-            precision: chelis_types::types::Prim::F64,
+            precision: chelis_numeric_core::prim::Prim::F64,
         };
 
         let mut dag = Dag::new();
@@ -7217,7 +7228,7 @@ mod tests {
             owner,
             RiscOp::Sum {
                 axis: 0,
-                accumulator: chelis_types::types::Prim::F64,
+                accumulator: chelis_numeric_core::prim::Prim::F64,
             },
             vec![maxr],
             scalar_f64(),
@@ -7370,11 +7381,11 @@ mod tests {
 
         let vec3_ty = TensorType {
             dims: vec![DimInfo::Lit(3)],
-            precision: chelis_types::types::Prim::F32,
+            precision: chelis_numeric_core::prim::Prim::F32,
         };
         let vec5_ty = TensorType {
             dims: vec![DimInfo::Lit(5)],
-            precision: chelis_types::types::Prim::F32,
+            precision: chelis_numeric_core::prim::Prim::F32,
         };
 
         let mut dag = Dag::new();
@@ -7389,7 +7400,7 @@ mod tests {
         let padded = dag.add_node(
             owner,
             RiscOp::zero_pad(
-                chelis_types::types::Prim::F32,
+                chelis_numeric_core::prim::Prim::F32,
                 vec![(RtDim::Lit(1), RtDim::Lit(1))],
             ),
             vec![x],
@@ -7400,7 +7411,7 @@ mod tests {
             owner,
             RiscOp::Sum {
                 axis: 0,
-                accumulator: chelis_types::types::Prim::F32,
+                accumulator: chelis_numeric_core::prim::Prim::F32,
             },
             vec![padded],
             scalar_f32(),
@@ -7426,11 +7437,11 @@ mod tests {
 
         let vec5_ty = TensorType {
             dims: vec![DimInfo::Lit(5)],
-            precision: chelis_types::types::Prim::F32,
+            precision: chelis_numeric_core::prim::Prim::F32,
         };
         let vec3_ty = TensorType {
             dims: vec![DimInfo::Lit(3)],
-            precision: chelis_types::types::Prim::F32,
+            precision: chelis_numeric_core::prim::Prim::F32,
         };
 
         let mut dag = Dag::new();
@@ -7455,7 +7466,7 @@ mod tests {
             owner,
             RiscOp::Sum {
                 axis: 0,
-                accumulator: chelis_types::types::Prim::F32,
+                accumulator: chelis_numeric_core::prim::Prim::F32,
             },
             vec![shrunk],
             scalar_f32(),
@@ -7547,11 +7558,11 @@ mod tests {
 
         let vec4_ty = TensorType {
             dims: vec![DimInfo::Lit(4)],
-            precision: chelis_types::types::Prim::F32,
+            precision: chelis_numeric_core::prim::Prim::F32,
         };
         let vec2_ty = TensorType {
             dims: vec![DimInfo::Lit(2)],
-            precision: chelis_types::types::Prim::F32,
+            precision: chelis_numeric_core::prim::Prim::F32,
         };
 
         let mut dag = Dag::new();
@@ -7576,7 +7587,7 @@ mod tests {
             owner,
             RiscOp::Sum {
                 axis: 0,
-                accumulator: chelis_types::types::Prim::F32,
+                accumulator: chelis_numeric_core::prim::Prim::F32,
             },
             vec![strided],
             scalar_f32(),
@@ -7668,7 +7679,7 @@ mod tests {
             owner,
             RiscOp::Sum {
                 axis: 0,
-                accumulator: chelis_types::types::Prim::F32,
+                accumulator: chelis_numeric_core::prim::Prim::F32,
             },
             vec![minr],
             scalar_f32(),
@@ -7823,7 +7834,7 @@ mod tests {
             owner,
             RiscOp::Sum {
                 axis: 0,
-                accumulator: chelis_types::types::Prim::F32,
+                accumulator: chelis_numeric_core::prim::Prim::F32,
             },
             vec![am],
             scalar_f64(),
@@ -7871,7 +7882,7 @@ mod tests {
             owner,
             RiscOp::Sum {
                 axis: 0,
-                accumulator: chelis_types::types::Prim::F32,
+                accumulator: chelis_numeric_core::prim::Prim::F32,
             },
             vec![am],
             scalar_f64(),
@@ -8235,7 +8246,7 @@ mod tests {
         dims.extend(rest.iter().map(|n| DimInfo::Lit(*n)));
         TensorType {
             dims,
-            precision: chelis_types::types::Prim::F32,
+            precision: chelis_numeric_core::prim::Prim::F32,
         }
     }
 
@@ -8247,12 +8258,12 @@ mod tests {
             owner,
             RiscOp::Sum {
                 axis: 0,
-                accumulator: chelis_types::types::Prim::F32,
+                accumulator: chelis_numeric_core::prim::Prim::F32,
             },
             vec![node],
             TensorType {
                 dims: mid_dims,
-                precision: chelis_types::types::Prim::F32,
+                precision: chelis_numeric_core::prim::Prim::F32,
             },
             None,
         );
@@ -8260,7 +8271,7 @@ mod tests {
             owner,
             RiscOp::Sum {
                 axis: 0,
-                accumulator: chelis_types::types::Prim::F32,
+                accumulator: chelis_numeric_core::prim::Prim::F32,
             },
             vec![mid],
             scalar_f32(),
@@ -8326,7 +8337,7 @@ mod tests {
             vec![],
             TensorType {
                 dims: vec![DimInfo::Named("n".into(), None)],
-                precision: chelis_types::types::Prim::F32,
+                precision: chelis_numeric_core::prim::Prim::F32,
             },
             None,
         );
@@ -8338,7 +8349,7 @@ mod tests {
             vec![x],
             TensorType {
                 dims: vec![DimInfo::Named("m".into(), None)],
-                precision: chelis_types::types::Prim::F32,
+                precision: chelis_numeric_core::prim::Prim::F32,
             },
             None,
         );
@@ -8346,7 +8357,7 @@ mod tests {
             owner,
             RiscOp::Sum {
                 axis: 0,
-                accumulator: chelis_types::types::Prim::F32,
+                accumulator: chelis_numeric_core::prim::Prim::F32,
             },
             vec![strided],
             scalar_f32(),
@@ -8409,7 +8420,7 @@ mod tests {
             vec![x],
             TensorType {
                 dims: vec![DimInfo::Named("batch".into(), None)],
-                precision: chelis_types::types::Prim::F32,
+                precision: chelis_numeric_core::prim::Prim::F32,
             },
             None,
         );
@@ -8417,7 +8428,7 @@ mod tests {
             owner,
             RiscOp::Sum {
                 axis: 0,
-                accumulator: chelis_types::types::Prim::F32,
+                accumulator: chelis_numeric_core::prim::Prim::F32,
             },
             vec![prod],
             scalar_f32(),
@@ -8457,7 +8468,7 @@ mod tests {
             vec![],
             TensorType {
                 dims: vec![DimInfo::Named("n".into(), None)],
-                precision: chelis_types::types::Prim::F32,
+                precision: chelis_numeric_core::prim::Prim::F32,
             },
             None,
         );
@@ -8529,7 +8540,7 @@ mod tests {
             vec![],
             TensorType {
                 dims: vec![DimInfo::Lit(4)],
-                precision: chelis_types::types::Prim::F32,
+                precision: chelis_numeric_core::prim::Prim::F32,
             },
             None,
         );
@@ -8541,7 +8552,7 @@ mod tests {
             vec![x],
             TensorType {
                 dims: vec![DimInfo::Lit(3)],
-                precision: chelis_types::types::Prim::F32,
+                precision: chelis_numeric_core::prim::Prim::F32,
             },
             None,
         );
@@ -8549,7 +8560,7 @@ mod tests {
             owner,
             RiscOp::Sum {
                 axis: 0,
-                accumulator: chelis_types::types::Prim::F32,
+                accumulator: chelis_numeric_core::prim::Prim::F32,
             },
             vec![shrunk],
             scalar_f64(),

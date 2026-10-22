@@ -438,7 +438,7 @@ def codec_specialization_owner(call, templates, serialize_trait, definitions):
 # The one serde `with` codec the schema graph admits (the tensor execution
 # wire's `data` field; see capacity_census_wire_schema._EXECUTION_STORAGE).
 _EXECUTION_STORAGE_SERIALIZE = (
-    "chelis_types::dtype_semantics::wire_codec::execution_storage::serialize"
+    "chelis_numeric_core::dtype_semantics::wire_codec::execution_storage::serialize"
 )
 
 
@@ -559,7 +559,7 @@ def execution_value_closure_owner(row, document, definitions):
     return None
 
 
-def discharge_invocations(raw, definitions, document):
+def discharge_invocations(raw, definitions, document, schema_definition_identities):
     from capacity_census_wire_schema_publication import (
         check_report_publisher_owner,
         resolve_schema_owners,
@@ -570,7 +570,9 @@ def discharge_invocations(raw, definitions, document):
         for section in ("bodies", "calls", "codec_calls", "dynamic_returns")
     ):
         raise GraphError("missing or unresolved compiled publication obligations")
-    schema_owners = resolve_schema_owners(raw, definitions)
+    # Schema metadata can describe private codec definitions.
+    # Payload publication still needs an admitted declaration.
+    schema_owners = resolve_schema_owners(raw, schema_definition_identities)
     require_check_report_protocol(definitions)
     report_call = require_check_report_call(raw["calls"], raw["crate"])
     ownership = []
@@ -682,6 +684,7 @@ class VerifiedInvocations:
 
 def verify_invocation_ownership(root, target, schema, caches):
     from capacity_census_wire_calls import build_driver, collect_library
+    from capacity_census_wire_schema import SchemaWireGraph
 
     caches.validate()
     before = source_identity(root)
@@ -690,16 +693,17 @@ def verify_invocation_ownership(root, target, schema, caches):
         json.loads(schema.document),
         *(json.loads(d) for d in schema.imported_documents),
     ]
-    schema.validate(documents)
-    # These include the exact binary obligations as well as every nominal JSON
-    # root. Actual graph/role discovery and the local derive proof ran first.
-    definitions = {d.identity: len(d.parameters) for d in schema.declarations}
+    publication = SchemaWireGraph(documents, schema).publication_graph()
+    # These include the exact binary obligations and every nominal JSON root.
+    definitions = {d.identity: len(d.parameters) for d in publication.declarations}
+    schema_definitions = {d.identity for d in publication.graph.definitions}
     if not set(COMPILER_BINARY_OWNERS) <= definitions.keys():
         raise GraphError("missing actual binary publication owners")
     driver = build_driver(root, target / "wire-invocations")
     collected = collect_library(root, target, driver)
     ownership = discharge_invocations(
-        collected["evidence"], definitions, json.loads(schema.document)
+        collected["evidence"], definitions, json.loads(schema.document),
+        schema_definitions,
     )
     files = [(str(driver), collected["binary_sha256"])]
     files.extend((row["artifact"], row["sha256"]) for row in collected["provenance"])

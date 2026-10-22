@@ -441,7 +441,7 @@ class CodecTargetLease(unittest.TestCase):
             root = Path(directory)
             target = root / "target/agents/wire-codec-rustdoc"
             (target / "doc").mkdir(parents=True)
-            (target / "doc/chelis_types.json").write_text("{}")
+            (target / "doc/chelis_numeric_core.json").write_text("{}")
             binary = target / "debug/examples/wire_codec_probe"
             binary.parent.mkdir(parents=True)
             binary.write_bytes(b"mock probe")
@@ -475,6 +475,10 @@ class CodecTargetLease(unittest.TestCase):
             self.assertEqual(calls[0][:2], ["cargo", "clean"])
             self.assertIn("--target-dir", calls[0])
             self.assertEqual(calls[0][-1], str(target.resolve()))
+            self.assertEqual(calls[1][calls[1].index("-p") + 1], "chelis-numeric-core")
+            self.assertIn("chelis-numeric-core/serde", calls[1])
+            self.assertEqual(calls[2][calls[2].index("-p") + 1], "chelis-numeric-core")
+            self.assertIn("--features", calls[2])
             self.assertTrue((target / "CACHEDIR.TAG").is_file())
 
     def test_owned_target_has_cargo_cache_marker_and_rejects_a_changed_marker(self):
@@ -574,7 +578,7 @@ class ActualCanonicalCodec(unittest.TestCase):
             ("bare-word", "native dtype/width vocabulary differs"),
             ("storage-word", "key storage payload must be KeyHex digits"),
             ("storage-first", "the key storage variant must follow every carried dtype"),
-            ("digit-word", "KeyHex payload must be an exact String"),
+            ("digit-word", "KeyHex payload must be exact fixed-width hexadecimal"),
         ):
             with self.subTest(change=change):
                 document = copy.deepcopy(self.document)
@@ -657,6 +661,10 @@ class ActualCanonicalCodec(unittest.TestCase):
             "extra-variant",
             "unknown-serde",
             "relocate-tag",
+            "manual-method-source",
+            "missing-manual-method",
+            "stack-width",
+            "stack-element",
         ):
             with self.subTest(change=change):
                 document = copy.deepcopy(self.document)
@@ -664,8 +672,29 @@ class ActualCanonicalCodec(unittest.TestCase):
                 mirror = next(
                     i for i in items.values() if i.get("name") == "ScalarWire"
                 )
-                if change == "tag":
-                    mirror["attrs"] = []
+                if change in {"manual-method-source", "missing-manual-method"}:
+                    method = next(
+                        items[str(method_id)]
+                        for impl_id in mirror["inner"]["enum"]["impls"]
+                        for method_id in items[str(impl_id)]["inner"]["impl"].get("items", [])
+                        if items[str(method_id)].get("name") == "decode"
+                    )
+                    if change == "manual-method-source":
+                        method["span"]["filename"] = "arbitrary.rs"
+                    else:
+                        method["name"] = "absent_decode"
+                elif change in {"stack-width", "stack-element"}:
+                    hex_bits = next(
+                        i for i in items.values() if i.get("name") == "HexBits"
+                    )
+                    field = items[str(hex_bits["inner"]["struct"]["kind"]["tuple"][0])]
+                    payload = field["inner"]["struct_field"]["array"]
+                    if change == "stack-width":
+                        payload["len"] = "16"
+                    else:
+                        payload["type"] = {"primitive": "u64"}
+                elif change == "tag":
+                    mirror["attrs"] = [{"other": '#[serde(tag = "changed")]'}]
                 elif change == "width":
                     variant = items[str(mirror["inner"]["enum"]["variants"][0])]
                     field = items[
@@ -697,7 +726,7 @@ class ActualCanonicalCodec(unittest.TestCase):
                     mirror["attrs"].append({"other": "#[serde(default)]"})
                 else:
                     variant = items[str(mirror["inner"]["enum"]["variants"][0])]
-                    variant["attrs"] += mirror["attrs"]
+                    variant["attrs"].append({"other": '#[serde(tag = "dtype")]'})
                     mirror["attrs"] = []
                 with self.assertRaises(GraphError):
                     CanonicalWireGraph([document], self.receipt).canonical_graph()
@@ -713,10 +742,10 @@ class ActualCanonicalCodec(unittest.TestCase):
     def test_preserved_size_and_mtime_cannot_reuse_the_old_compiled_codec(self):
         from capacity_census_wire_adapters import verify_canonical_codec
 
-        source = ROOT / "crates/chelis-types/src/dtype_semantics/wire_codec.rs"
+        source = ROOT / "crates/chelis-numeric-core/src/dtype_semantics/wire_codec.rs"
         original = source.read_bytes()
         stat = source.stat()
-        changed = original.replace(b"text.len() != DIGITS", b"text.len() == DIGITS")
+        changed = original.replace(b"0123456789abcdef", b"0123456789abcdee")
         self.assertNotEqual(changed, original)
         self.assertEqual(len(changed), len(original))
         try:
@@ -749,18 +778,18 @@ class ActualCanonicalCodec(unittest.TestCase):
                 check=True,
             ).stdout
         )
-        package = next(p for p in metadata["packages"] if p["name"] == "chelis-types")
+        package = next(p for p in metadata["packages"] if p["name"] == "chelis-numeric-core")
         target = next(t for t in package["targets"] if t["name"] == "wire_codec_probe")
         self.assertIn(package["id"], metadata["workspace_members"])
         self.assertEqual(target["kind"], ["example"])
-        self.assertFalse(target.get("required-features"))
+        self.assertEqual(set(target.get("required-features", [])), {"alloc", "serde"})
         registered = next(
             row for row in CLIPPY_MATRIX if row.label == "default-features"
         )
         self.assertIn("--workspace", registered.command)
         self.assertIn("--all-targets", registered.command)
         check_owner_invokes(registered, ROOT)
-        source = "crates/chelis-types/examples/wire_codec_probe.rs"
+        source = "crates/chelis-numeric-core/examples/wire_codec_probe.rs"
         self.assertEqual(Path(target["src_path"]), ROOT / source)
         self.assertIn(
             source,
@@ -777,7 +806,7 @@ class SourceIdentityControls(unittest.TestCase):
             root = Path(directory)
             required = (
                 "Cargo.toml", "Cargo.lock", "rust-toolchain.toml",
-                "crates/chelis-types/examples/wire_codec_probe.rs",
+                "crates/chelis-numeric-core/examples/wire_codec_probe.rs",
                 "spec/02-surf-syntax.md", "spec/03-deep-syntax.md",
                 "spec/04-type-system.md", "spec/05-risc-primitives.md",
                 "spec/10-serialization.md", "spec/11-ffi.md",
@@ -812,12 +841,12 @@ class SourceIdentityControls(unittest.TestCase):
                 "spec/10-serialization.md",
                 "spec/11-ffi.md",
             )
-            (root / "crates/chelis-types/examples").mkdir(parents=True)
+            (root / "crates/chelis-numeric-core/examples").mkdir(parents=True)
             for name in (
                 "Cargo.toml",
                 "Cargo.lock",
                 "rust-toolchain.toml",
-                "crates/chelis-types/examples/wire_codec_probe.rs",
+                "crates/chelis-numeric-core/examples/wire_codec_probe.rs",
                 *authorities,
             ):
                 (root / name).parent.mkdir(parents=True, exist_ok=True)

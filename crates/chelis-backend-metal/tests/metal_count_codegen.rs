@@ -4,7 +4,7 @@ mod support;
 
 use chelis_backend_metal::codegen_metal_host_program;
 use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
-use chelis_types::types::Prim;
+use chelis_numeric_core::prim::Prim;
 use support::{codegen_metal, lowered_host_program, try_codegen_metal};
 
 const ONE_COUNT_HELPER: &str = "\

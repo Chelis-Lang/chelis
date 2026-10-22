@@ -3,9 +3,9 @@
 use crate::dag::{
     ComparisonKind, Dag, DimExpr, DimInfo, ExtentWitnessSite, NodeId, RiscOp, RtAxis, RtDim,
 };
+use chelis_numeric_core::prim::Prim;
 #[allow(unused_imports)]
 use chelis_types::key_admission::{KeyAdmission, KeyPrimitive};
-use chelis_types::types::Prim;
 use chelis_unord::{UnordMap, UnordSet};
 
 /// Verify structural invariants of the DAG. Returns a list of error messages (empty = valid).
@@ -1508,13 +1508,13 @@ fn activation_conjuncts(graph: &impl KeyGraph, activation: usize) -> Vec<usize> 
 
 /// Whether a scalar is the Bool constant `false`, the literal that makes an
 /// activation implying it exclusive with every other.
-pub fn is_const_false(value: &chelis_types::ScalarValue) -> bool {
+pub fn is_const_false(value: &chelis_numeric_core::dtype_semantics::ScalarValue) -> bool {
     value.prim() == Prim::Bool && value.as_bool_exact() == Some(false)
 }
 
 /// Whether a scalar is the Bool constant `true`, what folding leaves of a
 /// join's arm whose condition became a constant.
-pub fn is_const_true(value: &chelis_types::ScalarValue) -> bool {
+pub fn is_const_true(value: &chelis_numeric_core::dtype_semantics::ScalarValue) -> bool {
     value.prim() == Prim::Bool && value.as_bool_exact() == Some(true)
 }
 
@@ -2030,7 +2030,7 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
             match dag.get(activation) {
                 Some(source) if activation < node.id => {
                     consumers[activation.0] += 1;
-                    if source.output_type.precision != chelis_types::types::Prim::Bool {
+                    if source.output_type.precision != chelis_numeric_core::prim::Prim::Bool {
                         errors.push(format!(
                             "{}'s activation {} is not a Bool",
                             dag.describe_node(node.id),
@@ -3670,7 +3670,7 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                     && let Some(operand_node) = dag.get(node.inputs[0])
                 {
                     let operand = operand_node.output_type.precision;
-                    match RiscOp::default_reduce_sum_accumulator(operand) {
+                    match operand.default_reduce_sum_accumulator() {
                         Ok(default) => {
                             if !crate::dag::accumulator_at_least_as_wide(
                                 operand,
@@ -6990,7 +6990,8 @@ mod tests {
             ty.clone(),
             None,
         );
-        let wrong_fill = chelis_types::scalar_from_i64("pad", Prim::Int32, 0).unwrap();
+        let wrong_fill =
+            chelis_numeric_core::dtype_semantics::scalar_from_i64("pad", Prim::Int32, 0).unwrap();
         dag.add_node(
             decl,
             RiscOp::pad(vec![(RtDim::Lit(1), RtDim::Lit(1))], wrong_fill),

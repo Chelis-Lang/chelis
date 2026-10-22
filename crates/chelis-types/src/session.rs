@@ -262,7 +262,8 @@ mod diagnostic_checkpoint_tests {
 mod rejected_signature_resolution_tests {
     use super::*;
     use crate::deep_type::{BinderMode, DeepTypeResolver, TypeResolutionEnv, TypeUseSite};
-    use crate::types::{Prim, Type, VarGen};
+    use crate::types::{Type, VarGen};
+    use chelis_numeric_core::prim::Prim;
 
     fn resolve<T>(
         source: &str,
