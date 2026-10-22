@@ -1,5 +1,4 @@
 //! Exact transport behavior.
-#![cfg(all(feature = "serde", feature = "alloc"))]
 
 use chelis_numeric_core::dtype_semantics::{ScalarValue, TensorStorage};
 use chelis_numeric_core::observation::ElementRef;

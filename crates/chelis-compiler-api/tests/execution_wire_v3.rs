@@ -125,7 +125,7 @@ fn execution_schema_excludes_boolean_scalar_and_bounds_shape_extents() {
     assert_eq!(shape["items"]["format"], json!("int64"));
 }
 #[test]
-fn published_schema_has_fixed_width_and_closed_payload_shapes() {
+fn published_schema_has_fixed_width_bits_and_closed_payload_shapes() {
     let scalar = serde_json::to_value(schemars::schema_for!(ScalarValueSchema)).unwrap();
     let storage = serde_json::to_value(schemars::schema_for!(TensorStorageSchema)).unwrap();
     for schema in [scalar, storage] {

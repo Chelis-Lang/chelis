@@ -5156,6 +5156,15 @@ reason = "relu oracle mutation controls execute in the script unit suite"
 tracking_issue = "chelis#1313"
 
 [[path_rule]]
+prefix = "scripts/dtype_count_oracle.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "Count acceptance commands and failure controls execute in the PR script-unit suite"
+tracking_issue = "chelis#1287"
+
+[[path_rule]]
 prefix = "scripts/dtype_exact_reductions_oracle.py"
 disposition = "owner"
 workflow = "ci.yml"

@@ -279,26 +279,3 @@ fn literal_dispatch_reads_only_actual_unguarded_match_patterns() {
     assert!(!names.contains("comment"));
     assert!(!names.contains("literal"));
 }
-
-#[test]
-fn removing_or_erasing_the_production_classifier_arm_is_detected() {
-    let source = fs::read_to_string(runtime_source_path()).expect("host-runtime source");
-    let actual_arm = CLASSIFIER_ARM
-        .trim()
-        .lines()
-        .map(|line| format!("            {line}"))
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert_eq!(
-        source.matches(&actual_arm).count(),
-        1,
-        "exact production arm required"
-    );
-    assert_classifiers_present(&source, true);
-    let removed = source.replacen(&actual_arm, "", 1);
-    assert_classifiers_present(&removed, false);
-    let erased_arm = actual_arm.replace("eval_float_classification(", "different_handler(");
-    assert_ne!(erased_arm, actual_arm);
-    let erased = source.replacen(&actual_arm, &erased_arm, 1);
-    assert_classifiers_present(&erased, false);
-}

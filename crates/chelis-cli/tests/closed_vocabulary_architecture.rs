@@ -172,9 +172,9 @@ const EFFECT_KIND_CRATES: &[CrateEvidence] = &[
 
 const RUNTIME_DTYPE_CRATES: &[CrateEvidence] = &[
     CrateEvidence {
-        crate_name: "chelis-types",
+        crate_name: "chelis-numeric-core",
         role: "Prim-to-runtime ABI adapter",
-        roots: &["crates/chelis-types/src"],
+        roots: &["crates/chelis-numeric-core/src"],
         required: &[
             "use chelis_vocab::RuntimeDType",
             "runtime_dtype(self)",

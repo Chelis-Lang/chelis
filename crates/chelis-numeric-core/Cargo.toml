@@ -22,6 +22,18 @@ serde = { version = "1", default-features = false, features = ["derive"], option
 bincode = "1"
 serde_json = "1"
 
+[[test]]
+name = "exact_wire_codec"
+required-features = ["alloc", "serde"]
+
+[[test]]
+name = "random_key_reference"
+required-features = ["alloc"]
+
+[[test]]
+name = "scalar_wire"
+required-features = ["serde"]
+
 [[example]]
 name = "wire_codec_probe"
 required-features = ["alloc", "serde"]

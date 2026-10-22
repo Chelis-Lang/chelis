@@ -1,5 +1,4 @@
 //! Scalar transport also works without the alloc feature.
-#![cfg(feature = "serde")]
 
 use chelis_numeric_core::dtype_semantics::{KeyBits, RandomKey, ScalarValue, scalar_from_i64};
 use chelis_numeric_core::named_cast::NamedCastMode;

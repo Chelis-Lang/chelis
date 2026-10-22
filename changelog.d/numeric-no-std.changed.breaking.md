@@ -11,3 +11,13 @@ Generated-C checks link each program with its exact staged runtime archive.
 Baseline cleanup removes the complete isolated cache.
 
 Runtime source records include numeric code and CORE-MATH C inputs. Development consumers reject stale Rust and C sources. Rebuilt consumers retain the existing staging contract.
+The CORE-MATH build script watches its complete C source directory.
+
+Pipeline dependency checks accept the numeric core and still reject host services. Numeric integration targets declare their Cargo feature prerequisites.
+Closed-vocabulary checks use the numeric core as the primitive adapter owner.
+
+Remove the format-dependent duplicate builtin dispatch test. AST-based positive and negative controls retain dispatch coverage.
+
+Count and exact-reduction acceptance use the numeric core and retain checker coverage.
+Current policy documents name the canonical owners.
+The numeric oracle assigns the preserved schema case to the host schema suite.

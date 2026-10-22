@@ -42,6 +42,8 @@ def oracle_legs(python: str) -> tuple[OracleLeg, ...]:
                 "run",
                 "-p",
                 "chelis-types",
+                "-p",
+                "chelis-numeric-core",
                 "-E",
                 "binary(issue_1287_count_checker) | test(count_tensor_groups_) | test(adjacent_pair_fold_preserves_canonical_tree) | test(count_add_traps_int64_overflow)",
             ),

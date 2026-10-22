@@ -12,17 +12,17 @@ cite), `spec/04-type-system.md` (dtype rules), and the four sibling plans.
 
 ### Dependency owner
 
-The machine form lives in `chelis-types`, which owns `Prim`, `BuiltinId`, the
-capability keys and cells, and target-independent numeric policy. Those types
-do not move to or duplicate into `chelis-vocab`. Dependency-free
-`chelis-vocab` owns only the cross-layer representation vocabulary required by
-lower layers, including `EffectKind`, `RuntimeDType`, `Repr`, and canonical C
-wire spellings. [`runtime_representation.md`](runtime_representation.md) C1
-adds `DTypeContract` as the closed [04-NUM-8] projection that binds each runtime
-dtype to its stored and arithmetic representation; it does not add an operation
-or backend-capability decision. Backends consume `chelis-types` for numeric
-identity and capability policy and `chelis-vocab` for representation
-vocabulary.
+`chelis-numeric-core` owns `Prim`, at `chelis_numeric_core::prim::Prim`.
+`chelis-types` owns `BuiltinId`, capability keys and cells, and target-independent capability policy.
+These types do not move to or duplicate into `chelis-vocab`.
+Dependency-free `chelis-vocab` owns the cross-layer representation vocabulary:
+`EffectKind`, `RuntimeDType`, `Repr`, and canonical C wire spellings.
+
+[`runtime_representation.md`](runtime_representation.md) C1 adds `DTypeContract` as the closed [04-NUM-8] projection.
+It binds each runtime dtype to its stored and arithmetic representation.
+It adds no operation or backend-capability decision.
+Backends use `chelis-numeric-core` for numeric identity.
+They use `chelis-types` for capability policy and `chelis-vocab` for representation vocabulary.
 
 The schema separates target-independent operation semantics from
 per-backend implementation status. Tables A and B cover operations; the

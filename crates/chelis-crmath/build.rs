@@ -18,9 +18,7 @@ fn is_ambient_flag_variable(key: &str) -> bool {
 }
 
 fn main() {
-    println!("cargo:rerun-if-changed=csrc/crmath_amalgamation.c");
-    println!("cargo:rerun-if-changed=csrc/crmath_ffi.c");
-    println!("cargo:rerun-if-changed=csrc/freestanding");
+    println!("cargo:rerun-if-changed=csrc");
     for key in AMBIENT_FLAG_VARIABLES {
         println!("cargo:rerun-if-env-changed={key}");
     }

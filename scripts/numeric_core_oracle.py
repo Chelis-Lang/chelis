@@ -949,7 +949,7 @@ def numeric_suite_plan(baseline: Path) -> list[Suite]:
         f"{CRATE}::prim_classification${name.rpartition('::')[2]}"
         for name in original
     )
-    schema_case = "published_schema_has_fixed_width_and_closed_payload_shapes"
+    schema_case = "published_schema_has_fixed_width_bits_and_closed_payload_shapes"
     for binary in ("random_key_reference", "exact_wire_codec"):
         original = suite_inventory(baseline, (
             "--locked", "-p", "chelis-types", "--test", binary,

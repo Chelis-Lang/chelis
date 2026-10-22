@@ -9,8 +9,6 @@
 //! rotation (29, 41) or a derive index (0, 1, 2) in the kernels fails
 //! both.
 
-#![cfg(feature = "alloc")]
-
 use chelis_numeric_core::dtype_semantics::{
     KeyHalf, PreparedDropout, PreparedUniformLike, RandomKey, StorageView, TensorStorage,
     fold_in_storage, key_from_seed_storage, split_key_storage, split_keys_storage,

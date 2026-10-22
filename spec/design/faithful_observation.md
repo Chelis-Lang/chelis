@@ -192,7 +192,7 @@ Per-dtype rules:
    two-digit exponents) must not leak. **Pinned at Phase 1**: the
    decimal/e-notation thresholds are the normative constants
    `DECIMAL_LOWER_BOUND = 1e-4` / `DECIMAL_UPPER_BOUND = 1e16`
-   (`chelis-types::observation`, rustc-locked by unit tests), decided on
+   (`chelis_numeric_core::observation`, rustc-locked by unit tests), decided on
    the RENDERED magnitude - the value the chosen shortest digits denote
    - which is rustc's actual `{:?}` behavior at straddling-ulp
    boundaries (PR #792 red-team F2); the full ratified grammar,
