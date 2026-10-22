@@ -47,6 +47,9 @@ jobs:
           echo "CC=$(brew --prefix llvm)/bin/clang" >> "$GITHUB_ENV"
           echo "AR=$(brew --prefix llvm)/bin/llvm-ar" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.98.0
+          targets: thumbv7em-none-eabi
       - uses: astral-sh/setup-uv@v8.1.0
       - name: Create uv-managed Python
         run: python3 scripts/ci_setup_uv_python.py
