@@ -57,17 +57,17 @@ def source_contracts() -> tuple[SourceContract, ...]:
             ),
         ),
         SourceContract(
-            "direct MinElem lowering",
+            "direct paired extrema lowering",
             "crates/chelis-ir/src/tier2.rs",
             (
-                "add_synth(\n"
-                "        owner,\n"
-                "        dag,\n"
-                "        RiscOp::MinElem,\n"
-                "        vec![a, b],\n"
-                "        ty.clone(),\n"
-                "        parent_span,\n"
-                "    )",
+                'let ty = dag\n'
+                '        .get(a)\n'
+                '        .expect("lowered extrema operand must exist")\n'
+                '        .output_type\n'
+                '        .clone();',
+                "ExtremaKind::Max => RiscOp::MaxElem,",
+                "ExtremaKind::Min => RiscOp::MinElem,",
+                "add_synth(owner, dag, op, vec![a, b], ty, parent_span)",
             ),
         ),
         # [04-NUM-2] finalizes every NaN that float arithmetic produces, so
@@ -328,7 +328,8 @@ def source_contracts() -> tuple[SourceContract, ...]:
             "crates/chelis-ir/src/lower.rs",
             (
                 "// Direct Tier-1 subtraction identity",
-                "// Direct Tier-1 minimum selection identity",
+                '"max_elem" | "min_elem" if args.len() == 2 => {',
+                "let node = tier2::lower_extrema(",
                 "// --- Direct Tier-1 MinElem lowering ---",
             ),
             ("// Tier 2 decompositions\n            \"sub\"",),
@@ -338,7 +339,7 @@ def source_contracts() -> tuple[SourceContract, ...]:
             "crates/chelis-ir/src/tier2.rs",
             (
                 "Most functions in this module decompose Tier 2 derived operations",
-                "`lower_sub` and `lower_min_elem` emit direct Tier-1 identities",
+                "`lower_sub` and `lower_extrema` emit direct Tier-1 identities",
             ),
             ("These functions decompose Tier 2 (derived) operations",),
         ),
