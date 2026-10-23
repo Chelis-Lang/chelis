@@ -41,4 +41,9 @@ Refresh the independent pipeline artifact fixture lock for the portable graph de
 The builtin closure reads Nextest reports from the checkout target directory.
 The Cargo artifact directory can differ.
 
+The integrated type and DAG cores remain independent.
+Shared workspace changes retain CI ownership for both portable cores.
+Both portability oracles remain in integration and nightly checks.
+The accepted [05-OP-53] contract retains explicit scan directions.
+
 This ownership change transfers no language, transform, span, serialization, or backend authority.
