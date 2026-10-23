@@ -733,6 +733,9 @@ pub(super) fn surf_expr_to_smt(expr: &Expr, ctx: &InlineCtx) -> Option<crate::so
             SB::Or,
             vec![surf_expr_to_smt(l, ctx)?, surf_expr_to_smt(r, ctx)?],
         )),
+        Expr::Unary(UnaryOp::Not, inner, _) => {
+            Some(SmtExpr::Not(Box::new(surf_expr_to_smt(inner, ctx)?)))
+        }
         Expr::Lit(Literal::Bool(v), _) => Some(SmtExpr::BoolLit(*v)),
         // A top-level call-form comparison predicate (`gte(mul(x, x), 0.0)`)
         // lowers to the same `Cmp` node as its operator-form (chelis#422).
@@ -2063,6 +2066,9 @@ fn surf_expr_to_smt_subst(
                 surf_expr_to_smt_subst(r, subst, ctx)?,
             ],
         )),
+        Expr::Unary(UnaryOp::Not, inner, _) => Some(SmtExpr::Not(Box::new(
+            surf_expr_to_smt_subst(inner, subst, ctx)?,
+        ))),
         Expr::Lit(Literal::Bool(v), _) => Some(SmtExpr::BoolLit(*v)),
         // Call-form comparison predicates lower under substitution too, so an
         // inlined predicate body written in call-form lowers to a `Cmp` node
@@ -2283,6 +2289,61 @@ mod tests {
         let decls: Vec<Decl> = Vec::new();
         let pred = apply("mystery", vec![var("x")]);
         assert!(surf_expr_to_smt(&pred, &ctx(&decls)).is_none());
+    }
+
+    #[test]
+    fn negation_forms_preserve_predicates_and_helper_substitutions() {
+        let decls = Vec::new();
+        let context = ctx(&decls);
+        let inner = apply("cmplt", vec![var("x"), float(0.0)]);
+        let expected = SmtExpr::Not(Box::new(SmtExpr::Cmp(
+            CmpOp::Lt,
+            Box::new(SmtExpr::Var("x".into())),
+            Box::new(SmtExpr::RealLit(0.0)),
+        )));
+        let substituted = SmtExpr::Not(Box::new(SmtExpr::Cmp(
+            CmpOp::Lt,
+            Box::new(SmtExpr::Var("argument".into())),
+            Box::new(SmtExpr::RealLit(0.0)),
+        )));
+        let mut subst = UnordMap::new();
+        subst.insert("x".into(), SmtExpr::Var("argument".into()));
+        // The semantic Surf view reconstructs not applications as unary nodes.
+        for expr in [
+            apply("not", vec![inner.clone()]),
+            Expr::Unary(UnaryOp::Not, Box::new(inner), sp()),
+        ] {
+            assert_eq!(surf_expr_to_smt(&expr, &context), Some(expected.clone()));
+            assert_eq!(
+                surf_expr_to_smt_subst(&expr, &subst, &context),
+                Some(substituted.clone())
+            );
+            let nested = Expr::Unary(UnaryOp::Not, Box::new(expr), sp());
+            assert_eq!(
+                surf_expr_to_smt(&nested, &context),
+                Some(SmtExpr::Not(Box::new(expected.clone())))
+            );
+            assert_eq!(
+                surf_expr_to_smt_subst(&nested, &subst, &context),
+                Some(SmtExpr::Not(Box::new(substituted.clone())))
+            );
+        }
+    }
+
+    #[test]
+    fn negation_does_not_make_unsupported_operands_lowerable() {
+        let decls = Vec::new();
+        let context = ctx(&decls);
+        let subst = UnordMap::new();
+        for inner in [apply("mystery", vec![var("x")]), float(1.0)] {
+            for expr in [
+                apply("not", vec![inner.clone()]),
+                Expr::Unary(UnaryOp::Not, Box::new(inner), sp()),
+            ] {
+                assert!(surf_expr_to_smt(&expr, &context).is_none());
+                assert!(surf_expr_to_smt_subst(&expr, &subst, &context).is_none());
+            }
+        }
     }
 
     fn param(name: &str) -> Param {
