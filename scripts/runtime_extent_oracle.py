@@ -3406,11 +3406,19 @@ _LOCAL_ASCRIPTION_PROVENANCE_REMOVED = """\
                         );
 """
 _LOCAL_ASCRIPTION_CHECKER_SOURCE = REPO_ROOT / "crates/chelis-types/src/infer/checked.rs"
+# Remove transport after the internal owner/record invariant has been checked,
+# so the public receipt must observe the missing records itself.
 _LOCAL_ASCRIPTION_CHECKER_TRANSPORT = """\
-            let mut records = product.local_ascriptions.clone();
+    validate_checked_program_totality(&checked, signature_context, errors);
+    checked
+}
 """
 _LOCAL_ASCRIPTION_CHECKER_TRANSPORT_REMOVED = """\
-            let mut records = Vec::new();
+    validate_checked_program_totality(&checked, signature_context, errors);
+    let mut checked = checked;
+    checked.local_ascriptions.clear();
+    checked
+}
 """
 _LOCAL_ASCRIPTION_LOWER_SOURCE = REPO_ROOT / "crates/chelis-ir/src/lower.rs"
 _LOCAL_ASCRIPTION_LIBRARY_CARRIER = """\
@@ -3714,7 +3722,11 @@ def _validate_controlled_mutation(
         if completed.returncode == 0:
             raise OracleFailure(f"{label} mutation escaped its executable receipt")
         if expected_failure not in output:
-            raise OracleFailure(f"{label} mutation failed for an unrelated reason")
+            raise OracleFailure(
+                f"{label} mutation failed for an unrelated reason\n"
+                f"command: {command!r}\nexit status: {completed.returncode}\n"
+                f"stdout:\n{completed.stdout}\nstderr:\n{completed.stderr}"
+            )
     finally:
         source_path.write_text(original)
     if source_path.read_text() != original:
