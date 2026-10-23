@@ -354,6 +354,26 @@ fn changed_body(source: &Source, name: &str, body: &str) -> syn::File {
 }
 
 #[test]
+fn forged_scan_direction_receipts_cannot_replace_native_comparisons() {
+    let source = contract()
+        .sources
+        .iter()
+        .find(|source| source.path.ends_with("eval_agreement.rs"))
+        .unwrap();
+    let name = "agreement_cumsum_requires_exact_prefix_and_suffix_observations";
+    let file = changed_body(
+        source,
+        name,
+        r#"{
+            record_phase3_receipt("OP53 increasing one-leaf scan", "forged");
+            record_phase3_receipt("OP53 decreasing one-leaf scan", "forged");
+        }"#,
+    );
+    let error = body_contract::validate_file(&file, &source.tests).unwrap_err();
+    assert!(error.contains(name), "{error}");
+}
+
+#[test]
 fn former_forged_receipt_witnesses_still_reject_independently() {
     let source = contract()
         .sources
