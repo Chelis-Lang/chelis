@@ -31,6 +31,168 @@ fn rejects(dag: &Dag) {
 }
 
 #[test]
+fn known_cardinality_loads_admit_empty_and_index_boundary_shapes() {
+    let large = 1usize << (usize::BITS / 2);
+    for dims in [
+        vec![],
+        vec![DimInfo::Lit(0), DimInfo::Lit(4)],
+        vec![DimInfo::Lit(usize::MAX), DimInfo::Lit(1)],
+        vec![DimInfo::Lit(large), DimInfo::Lit(large), DimInfo::Lit(0)],
+        vec![
+            DimInfo::Named("a".into(), Some(large)),
+            DimInfo::Named("b".into(), Some(large)),
+            DimInfo::Named("empty".into(), Some(0)),
+        ],
+    ] {
+        let mut dag = Dag::new();
+        dag.declare("fixture");
+        let root = load(
+            &mut dag,
+            "input",
+            TensorType {
+                dims,
+                precision: Prim::F32,
+            },
+        );
+        dag.add_root(root);
+        assert!(
+            verify::verify(&dag).is_empty(),
+            "{:?}",
+            verify::verify(&dag)
+        );
+        assert!(
+            verify::verify_ownership_input(&dag).is_empty(),
+            "{:?}",
+            verify::verify_ownership_input(&dag)
+        );
+    }
+}
+
+#[test]
+fn nonzero_cardinality_loads_reject_overflow() {
+    let large = 1usize << (usize::BITS / 2);
+    for shape in [
+        vec![large, large],
+        vec![usize::MAX, 2],
+        vec![usize::MAX, usize::MAX],
+    ] {
+        let mut dag = Dag::new();
+        dag.declare("fixture");
+        let root = load(
+            &mut dag,
+            "input",
+            TensorType {
+                dims: shape.into_iter().map(DimInfo::Lit).collect(),
+                precision: Prim::F32,
+            },
+        );
+        dag.add_root(root);
+        let expected = vec!["node 0 has an overflowing tensor shape".to_string()];
+        assert_eq!(verify::verify(&dag), expected);
+        assert_eq!(verify::verify_ownership_input(&dag), expected);
+    }
+}
+
+#[test]
+fn zero_cardinality_reshape_checks_both_products() {
+    let large = 1usize << (usize::BITS / 2);
+    for (source, target) in [
+        (vec![large, large, 0], vec![0]),
+        (vec![0], vec![large, large, 0]),
+    ] {
+        let mut dag = Dag::new();
+        let decl = dag.declare("fixture");
+        let input = load(
+            &mut dag,
+            "input",
+            TensorType {
+                dims: source.into_iter().map(DimInfo::Lit).collect(),
+                precision: Prim::F32,
+            },
+        );
+        let root = dag.add_node(
+            decl,
+            RiscOp::Reshape {
+                new_shape: target.iter().copied().map(RtDim::Lit).collect(),
+            },
+            vec![input],
+            TensorType {
+                dims: target.into_iter().map(DimInfo::Lit).collect(),
+                precision: Prim::F32,
+            },
+            None,
+        );
+        dag.add_root(root);
+        assert!(
+            verify::verify(&dag).is_empty(),
+            "{:?}",
+            verify::verify(&dag)
+        );
+        assert!(
+            verify::verify_ownership_input(&dag).is_empty(),
+            "{:?}",
+            verify::verify_ownership_input(&dag)
+        );
+        dag.node_mut(root).unwrap().op = RiscOp::Reshape {
+            new_shape: vec![RtDim::Lit(1)],
+        };
+        let errors = verify::verify(&dag);
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.contains("product mismatch 0 vs 1")),
+            "{errors:?}"
+        );
+        assert_eq!(verify::verify_ownership_input(&dag), errors);
+        dag.node_mut(root).unwrap().op = RiscOp::Reshape {
+            new_shape: vec![RtDim::Lit(large), RtDim::Lit(large)],
+        };
+        let errors = verify::verify(&dag);
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.contains("overflowing target shape")),
+            "{errors:?}"
+        );
+        assert_eq!(verify::verify_ownership_input(&dag), errors);
+    }
+}
+
+#[test]
+fn unknown_reshape_cardinality_retains_runtime_validation() {
+    let mut dag = Dag::new();
+    let decl = dag.declare("fixture");
+    let input = load(
+        &mut dag,
+        "input",
+        TensorType {
+            dims: vec![DimInfo::Named("n".into(), None), DimInfo::Lit(0)],
+            precision: Prim::F32,
+        },
+    );
+    let root = dag.add_node(
+        decl,
+        RiscOp::Reshape {
+            new_shape: vec![RtDim::Lit(1)],
+        },
+        vec![input],
+        vector(1),
+        None,
+    );
+    dag.add_root(root);
+    assert!(
+        verify::verify(&dag).is_empty(),
+        "{:?}",
+        verify::verify(&dag)
+    );
+    assert!(
+        verify::verify_ownership_input(&dag).is_empty(),
+        "{:?}",
+        verify::verify_ownership_input(&dag)
+    );
+}
+
+#[test]
 fn invalid_topology_returns_deterministic_diagnostics() {
     let mut dag = Dag::new();
     dag.declare("fixture");

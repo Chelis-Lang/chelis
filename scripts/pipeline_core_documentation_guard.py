@@ -112,8 +112,11 @@ def false_no_std_claim(line: str) -> bool:
 def validate_document(document: InventoryDocument) -> None:
     for line in document.lines:
         for statement in re.split(r"(?<=[.!?])\s+", line):
-            pipeline_subject = "chelis-pipeline-core" in statement or re.search(
-                r"\bthe core\b", statement, re.IGNORECASE
+            explicit_crates = set(re.findall(r"\bchelis-[a-z0-9-]+\b", statement.lower()))
+            pipeline_subject = (
+                not explicit_crates
+                or "chelis-pipeline-core" in explicit_crates
+                or re.search(r"\bthe (?:core|crate)\b", statement, re.IGNORECASE)
             )
             if pipeline_subject and false_no_std_claim(statement):
                 raise DocumentationBoundaryError(

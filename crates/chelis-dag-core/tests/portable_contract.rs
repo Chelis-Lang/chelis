@@ -406,7 +406,7 @@ fn dce_remaps_reuse_after_removing_an_earlier_node() {
 
 #[test]
 #[allow(clippy::disallowed_methods)]
-fn wide_image_folds_preserve_native_stored_bits() {
+fn wide_image_folds_preserve_specified_stored_bits() {
     use chelis_numeric_core::dtype_semantics::{
         FloatUnOp, ScalarValue, WideBinaryFold, WideUnaryFold, float_unop, fold_wide_binary,
         fold_wide_unary, scalar_from_f64, scalar_from_i64,
@@ -511,13 +511,21 @@ fn wide_image_folds_preserve_native_stored_bits() {
         for &input in &inputs {
             for destination in destinations {
                 let expected = image(input).and_then(|value| {
-                    let raw = match fold {
-                        WideUnaryFold::Neg => -value,
-                        WideUnaryFold::Sqrt => value.sqrt(),
-                        WideUnaryFold::Abs => value.abs(),
-                        WideUnaryFold::Floor => value.floor(),
-                        WideUnaryFold::Ceil => value.ceil(),
-                        WideUnaryFold::Round => value.round_ties_even(),
+                    let raw = if value.is_nan()
+                        && matches!(
+                            fold,
+                            WideUnaryFold::Floor | WideUnaryFold::Ceil | WideUnaryFold::Round
+                        ) {
+                        f64::from_bits(value.to_bits() | 0x0008_0000_0000_0000)
+                    } else {
+                        match fold {
+                            WideUnaryFold::Neg => -value,
+                            WideUnaryFold::Sqrt => value.sqrt(),
+                            WideUnaryFold::Abs => value.abs(),
+                            WideUnaryFold::Floor => value.floor(),
+                            WideUnaryFold::Ceil => value.ceil(),
+                            WideUnaryFold::Round => value.round_ties_even(),
+                        }
                     };
                     scalar_from_f64("const", destination, raw).ok()
                 });

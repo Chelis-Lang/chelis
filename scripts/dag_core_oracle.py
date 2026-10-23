@@ -16,6 +16,11 @@ from typing import Iterator
 
 import no_std_core_support as support
 from no_std_core_support import ROOT, TARGET, OracleFailure, compile_rejected, consumer, portable, run
+from runtime_bundle_oracle import (
+    RECEIPT_FILE_NAME,
+    read_receipt_document,
+    read_staging_receipt,
+)
 
 
 CRATE = "chelis-dag-core"
@@ -455,9 +460,11 @@ def production_snapshot(workspace: Path, path: Path, directory: Path) -> dict:
         snapshots[backend] = {"generated": generated}
         if backend == "c":
             native_binary = destination / "dag_native"
-            archive = destination / "libchelis_runtime.a"
-            if not archive.is_file():
-                raise OracleFailure("native C runtime archive is absent")
+            receipt_path = destination / RECEIPT_FILE_NAME
+            archive = destination / str(read_receipt_document(receipt_path)["archive"])
+            receipt = read_staging_receipt(receipt_path, archive, headers_dir=destination)
+            print(json.dumps({"staged_runtime": str(archive),
+                "archive_sha256": receipt["archive_sha256"]}, sort_keys=True), flush=True)
             run([native["compiler"], "-O2", *native["compile_flags"], str(destination / (stem + extension)),
                 str(archive), *native["link_flags"], "-o", str(native_binary)], cwd=destination, env=environment)
             executed = run([str(native_binary)], cwd=destination, env=environment)
@@ -747,7 +754,7 @@ def run_oracle() -> None:
         "every_rebuild_preserves_claims_owners_and_activation_edges", "malformed_declarations_activations_and_claim_edges_fail",
         "runtime_bounds_use_absolute_integer_input_slots", "symbolic_sum_adjoint_keeps_a_shape_only_load_and_scalar_seed",
         "node_json_and_positional_binary_fields_stay_stable", "top_level_names_keep_binding_identity_and_checked_wire_labels",
-        "wide_image_folds_preserve_native_stored_bits"))
+        "wide_image_folds_preserve_specified_stored_bits"))
     completed.update({"graph-contracts", "checked-names"})
     current_host_suites()
     completed.add("moved-host-tests")

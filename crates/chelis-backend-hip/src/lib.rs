@@ -97,8 +97,7 @@ pub fn runtime_dir() -> &'static str {
 /// a borrowed device input has no implicit contiguous-layout guarantee.
 ///
 /// ```compile_fail
-/// # use chelis_dag_core::dag::Dag.
-/// fn bypass(raw: &Dag) {
+/// fn bypass(raw: &chelis_dag_core::dag::Dag) {
 ///     let _ = chelis_backend_hip::codegen_hip(raw, "unchecked");
 /// }
 /// ```

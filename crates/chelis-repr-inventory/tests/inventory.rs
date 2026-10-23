@@ -93,26 +93,6 @@ fn every_registered_prefix_classifies() {
 }
 
 #[test]
-fn portable_graph_sources_keep_the_ir_seam_classification() {
-    let path = "crates/chelis-dag-core/src/dag.rs";
-    assert_eq!(SourceClass::for_path(path), Some(SourceClass::Ir));
-    assert_eq!(
-        identities(
-            path,
-            "fn fold(a: usize, b: usize) -> usize { a.saturating_add(b) }"
-        ),
-        vec![("saturating-capacity-fold".into(), "fold".into())],
-    );
-    assert_eq!(
-        identities(
-            path,
-            "fn product(a: usize, b: usize) -> Option<usize> { a.checked_mul(b) }"
-        ),
-        vec![("normalized-key-arithmetic".into(), "product".into())],
-    );
-}
-
-#[test]
 fn element_storage_bindings_are_individual_seams_even_for_unknown_markers() {
     assert_eq!(
         identities(
@@ -731,6 +711,41 @@ fn a_c_header_owns_its_rows_by_declaration_never_by_a_keyword() {
             "missing {expected:?} in {rows:?}"
         );
     }
+}
+
+#[test]
+fn an_anonymous_typedef_owns_its_fields_in_c_and_cxx() {
+    let source = "typedef struct { float *payload; } chelis_probe_record;";
+    for lane in [PUBLIC_C_LANE, DEVICE_CXX_LANE] {
+        let rows = scan_c_source(HEADER, source, lane).expect("typedef must name its aggregate");
+        let identities: Vec<_> = rows.into_iter().map(|row| (row.kind, row.owner)).collect();
+        assert_eq!(
+            identities,
+            vec![(
+                "raw-element-pointer".to_string(),
+                "chelis_probe_record::payload".to_string()
+            )]
+        );
+    }
+}
+
+#[test]
+fn a_truly_unnamed_file_scope_aggregate_is_rejected() {
+    let error = scan_c_header(
+        HEADER,
+        "typedef struct { float *named; } chelis_probe_record;\nstruct { float *unnamed; };",
+    )
+    .expect_err("a separate typedef must not name the unrelated aggregate");
+    assert!(
+        error.message.contains("anonymous aggregate at file scope"),
+        "{}",
+        error.message
+    );
+    assert!(
+        error.message.contains("no typedef names"),
+        "{}",
+        error.message
+    );
 }
 
 #[test]

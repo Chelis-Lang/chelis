@@ -27,10 +27,34 @@ class ExecutionTests(unittest.TestCase):
 
     def test_compiled_sources_union_only_after_duplicate_checks(self):
         packet = {"builtins": ["Numeric:add:TableA"], "risc": ["Numeric:add:TableA"]}
-        self.assertEqual(oracle.discover(packet), ["Numeric:add:TableA"])
-        for changed in ({}, {**packet, "risc": []}, {**packet, "builtins": packet["builtins"] * 2}):
+        self.assertEqual(oracle.discover(packet), oracle.Discovery(
+            ("Numeric:add:TableA",), frozenset({"Numeric:add:TableA"})))
+        for changed in (
+            {}, {**packet, "risc": []},
+            {**packet, "builtins": packet["builtins"] * 2},
+            {**packet, "risc": packet["risc"] * 2},
+            {**packet, "risc": ["Numeric:bad::TableA"]},
+            {**packet, "builtins": [1]},
+        ):
             with self.assertRaises(oracle.OracleError):
                 oracle.discover(changed)
+
+    def test_compiled_sources_define_public_and_internal_names_without_case_inference(self):
+        discovery = oracle.discover({
+            "builtins": ["Numeric:PublicName:TableA"],
+            "risc": ["Numeric:PublicName:TableA", "Numeric:internal_name:TableA"],
+        })
+        self.assertEqual(discovery.identities, (
+            "Numeric:PublicName:TableA", "Numeric:internal_name:TableA"))
+        self.assertEqual(discovery.callables, frozenset({"Numeric:PublicName:TableA"}))
+
+    def test_internal_primitive_obligations_match_compiled_provenance(self):
+        discovery = oracle.discover({
+            "builtins": ["Numeric:PublicName:TableA"],
+            "risc": ["Numeric:internal_name:TableA"],
+        })
+        with self.assertRaisesRegex(oracle.registry.RegistryError, "internal primitives"):
+            oracle.closure_cases(discovery, "", "", set())
 
     def test_nextest_ignored_or_zero_selection_is_not_a_pass(self):
         packet = {"rust-suites": {"types::unit": {"testcases": {

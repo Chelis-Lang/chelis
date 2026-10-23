@@ -24,7 +24,7 @@ class RegistryError(ValueError):
     pass
 
 
-def named_callables(block: str) -> set[str]:
+def named_operations(block: str) -> set[str]:
     return set(re.findall(r"`([A-Za-z][A-Za-z0-9_]*)(?:`|\()", block))
 
 
@@ -61,7 +61,7 @@ def parse_registry(text: str) -> dict[str, str]:
 
 
 def validate(discovered: Iterable[str], table: str, spec: str,
-             generated: set[str]) -> dict[str, str]:
+             generated: set[str], *, callables: Iterable[str]) -> dict[str, str]:
     identities = tuple(discovered)
     if not identities:
         raise RegistryError("empty discovery universe")
@@ -74,6 +74,9 @@ def validate(discovered: Iterable[str], table: str, spec: str,
     missing, stale = set(identities) - rows.keys(), rows.keys() - set(identities)
     if missing or stale:
         raise RegistryError(f"missing registrations={sorted(missing)}; stale registrations={sorted(stale)}")
+    public = set(callables)
+    if not public <= set(identities):
+        raise RegistryError("callable discovery is outside the identity universe")
     blocks = atom_blocks(spec)
     preamble = " ".join(spec.split("> **[05-OP-", 1)[0].split())
     if preamble.count(INCORPORATION) != 1:
@@ -84,11 +87,12 @@ def validate(discovered: Iterable[str], table: str, spec: str,
         if atom not in generated:
             raise RegistryError(f"missing generated membership {atom}")
         block = blocks[atom]
-        # The table authors the identity-to-atom relation. Its normative atom
-        # must also name the exact callable; unquoted prose and namespaced
-        # lookalikes cannot satisfy this structural check. Substantive contract
-        # clauses are checked separately by builtin_atom_semantic_contracts.
+        # Compiled builtin declarations define public callable identities.
+        # Graph-only identities name internal primitives, not public aliases.
+        # Both need an exact quoted name in their governing atom.
+        # Substantive clauses remain independent semantic obligations.
         operation = identity.split(":")[1]
-        if operation not in named_callables(block):
-            raise RegistryError(f"{atom} does not govern the callable {identity}")
+        kind = "callable" if identity in public else "internal primitive"
+        if operation not in named_operations(block):
+            raise RegistryError(f"{atom} does not govern the {kind} {identity}")
     return rows

@@ -44,9 +44,8 @@
 //! ```
 //!
 //! ```compile_fail
-//! # use chelis_dag_core::dag::Dag.
 //! use chelis_ir::ownership::DagEmissionPayload;
-//! fn forge(dag: Dag) -> DagEmissionPayload { DagEmissionPayload { dag } }
+//! fn forge(dag: chelis_dag_core::dag::Dag) -> DagEmissionPayload { DagEmissionPayload { dag } }
 //! ```
 //!
 //! A lowering call consumes the host program, so no mutable raw sibling can

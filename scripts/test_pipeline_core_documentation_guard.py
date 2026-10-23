@@ -147,6 +147,20 @@ Dependency features
 """
         )
 
+    def test_generic_false_claims_in_a_complete_inventory_are_rejected(self) -> None:
+        inventory = "\n".join(
+            (guard.REQUIRED_STATEMENT, *guard.REQUIRED_SECTIONS, *guard.REQUIRED_CRATES)
+        )
+        for claim in (
+            "The crate is `#![no_std]`.",
+            "It supports `no_std`.",
+            "This module works without std.",
+        ):
+            with self.subTest(claim=claim), self.assertRaisesRegex(
+                guard.DocumentationBoundaryError, "false current portability claim"
+            ):
+                guard.validate_text(inventory + "\n" + claim)
+
     def test_other_core_claims_do_not_change_the_pipeline_boundary(self) -> None:
         inventory = "\n".join(
             (guard.REQUIRED_STATEMENT, *guard.REQUIRED_SECTIONS, *guard.REQUIRED_CRATES)

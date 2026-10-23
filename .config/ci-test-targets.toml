@@ -2253,6 +2253,15 @@ reason = "PR script-unit executes the builtin identity governance and semantic-c
 tracking_issue = "chelis#1294"
 
 [[path_rule]]
+prefix = "scripts/builtin_atom_registry.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "The PR controls check compiled callable membership and exact atom governance"
+tracking_issue = "chelis#4003"
+
+[[path_rule]]
 prefix = "scripts/builtin_atom_semantic_contracts.py"
 disposition = "owner"
 workflow = "ci.yml"
@@ -4816,6 +4825,15 @@ workflow = "ci.yml"
 job = "script-unit"
 cadence = "pull_request and push"
 reason = "The controls check builtin closure receipts and reject incomplete or inconsistent execution"
+tracking_issue = "chelis#4003"
+
+[[path_rule]]
+prefix = "scripts/test_dtype_builtin_atom_closure_oracle.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "The PR controls reject incomplete builtin closure receipts and source selections"
 tracking_issue = "chelis#4003"
 
 [[path_rule]]

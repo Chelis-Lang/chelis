@@ -116,8 +116,7 @@ pub struct CodegenOptions {
 /// remaining DAG roots are appended afterward as `root{index}`.
 ///
 /// ```compile_fail
-/// # use chelis_dag_core::dag::Dag.
-/// fn bypass(raw: &Dag) {
+/// fn bypass(raw: &chelis_dag_core::dag::Dag) {
 ///     let _ = chelis_backend_c::codegen(raw, "unchecked");
 /// }
 /// ```

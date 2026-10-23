@@ -379,6 +379,15 @@ UNCOMPILED_EXCEPTIONS: tuple[UncompiledException, ...] = (
             "crates/chelis-types/tests/fixtures/runtime_extent_manifest/target_fixture.rs",
         ),
     ),
+    UncompiledException(
+        directory="crates/chelis-dag-core/tests/fixtures",
+        reason="standalone wire and source-owner consumers compiled by the canonical DAG oracle",
+        owning_gate="scripts/dag_core_oracle.py",
+        sources=(
+            "crates/chelis-dag-core/tests/fixtures/source_owners.rs",
+            "crates/chelis-dag-core/tests/fixtures/wire_snapshot.rs",
+        ),
+    ),
 )
 
 

@@ -2700,6 +2700,11 @@ rec {
             packageId = "serde_json";
             features = [ "float_roundtrip" ];
           }
+          {
+            name = "syn";
+            packageId = "syn 2.0.117";
+            features = [ "full" "visit" "extra-traits" ];
+          }
         ];
 
       };

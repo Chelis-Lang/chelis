@@ -4,7 +4,7 @@ These are test obligations, not semantic registrations. The numbered atoms
 remain authoritative. Changes to a decided rule update its assertion and
 negative control together, under the same semantic review.
 """
-from scripts.builtin_atom_registry import RegistryError, atom_blocks, named_callables
+from scripts.builtin_atom_registry import RegistryError, atom_blocks, named_operations
 
 # Each governed atom has substantive assertions: deleting its actual contract
 # while retaining its heading and callable names must fail. Formatting labels
@@ -130,6 +130,19 @@ CASE_CLAUSES = {
     "Container:concat:ConcatTensors": "axis:i32",
 }
 
+# Graph-only identities keep their own contracts, not public callable aliases.
+# These clauses assert behavior. Compiled discovery defines the identity kind.
+PRIMITIVE_CLAUSES = {
+    "Numeric:Cumsum:TableA": "No base value enters the scan",
+    "Numeric:DropoutReplay:TableA": "saved forward mask",
+    "Numeric:ExtremaAdjoint:TableA": "first operand on every equality",
+    "Numeric:ReduceWindowGrad:TableA": "window/stride validation",
+    "Numeric:RuntimeRecurrence:TableA": "exactly once per visited element in source order",
+    "Numeric:RuntimeRecurrenceAdjoint:TableA": "Cotangent combination follows spec/06's order",
+    "Numeric:ReluAdjoint:TableA": "including at `x = 0`",
+    "Numeric:UniformBoundAdjoint:TableA": "pathwise adjoint",
+}
+
 # A callable mentioned by more than one atom needs a discriminating contract
 # clause, not merely its name. These are semantic assertions, without atom IDs
 # or a second identity-to-atom registry. A new ambiguity without such an
@@ -185,18 +198,23 @@ def normalized(block: str) -> str:
     return " ".join(" ".join(line.removeprefix(">").strip() for line in block.splitlines()).split())
 
 
+def contract_clause(identity: str) -> str | None:
+    return CASE_CLAUSES.get(identity, PRIMITIVE_CLAUSES.get(
+        identity, CALLABLE_CLAUSES.get(identity.split(":")[1])))
+
+
 def validate_semantics(rows: dict[str, str], spec: str) -> None:
     assertions = {f"[05-OP-{n}]": clauses for n, clauses in CLAUSES.items()}
     if set(rows.values()) != set(assertions):
         raise RegistryError("governed atoms and semantic mutation obligations differ")
     blocks = {atom: normalized(block) for atom, block in atom_blocks(spec).items()}
-    callables = {atom: named_callables(block) for atom, block in blocks.items()}
+    operations = {atom: named_operations(block) for atom, block in blocks.items()}
     for identity, atom in rows.items():
         operation = identity.split(":")[1]
-        clause = CASE_CLAUSES.get(identity, CALLABLE_CLAUSES.get(operation))
-        mentions = sum(operation in names for names in callables.values())
+        clause = contract_clause(identity)
+        mentions = sum(operation in names for names in operations.values())
         if mentions > 1 and clause is None:
-            raise RegistryError(f"ambiguous callable {operation} lacks a discriminating contract clause")
+            raise RegistryError(f"ambiguous operation {operation} lacks a discriminating contract clause")
         if clause is not None and clause not in blocks[atom]:
             raise RegistryError(f"{atom} does not govern the contract of {identity}: {clause}")
     for atom, clauses in assertions.items():

@@ -6,8 +6,10 @@ Graph-only ownership normalization and drop removal also use the portable owner.
 Declaration owners, shape dependencies, roots, remaps, reuse hints, spans, valid wire data, and numeric delegation retain their contracts.
 `chelis-numeric-core::bitwise::BitwiseKind` and `chelis-numeric-core::key_admission::{KeyPrimitive, KeyAdmission}` provide the sole shared pure identities.
 The existing eight f64-image folds now use closed numeric-core APIs with sealed inputs and an explicit destination dtype.
-Their exact-integer guard, refusal behavior, and final stored bits remain unchanged.
+Their exact-integer guard, refusal behavior, and specified final stored bits retain their contracts.
 Ordinary typed numeric kernels retain their canonical NaN behavior.
+
+The fold oracle checks signaling-NaN quiet bits from the numeric contract, independent of native rounding behavior.
 
 Source lowering, evaluation, source linearity conversion, host diagnostics, ABI layout admission, target fences, and production orchestration stay in host crates.
 The embedding supplies an allocator and stack policy.
@@ -16,9 +18,21 @@ AD retains sparse adjoint storage.
 Fusion reserves lookup capacity before graph construction.
 Host comparisons use each Cargo target's declared feature requirements.
 
-Remove incidental source-layout tests from the former graph owner.
+Move the closed-enum and exhaustive semantic-match guards to the canonical graph owner.
+Remove incidental source-layout and class-dispatch assertions.
+Register both standalone fixtures with exact source compilation ownership.
 Retain the payload census and source-policy tripwire at the canonical graph owner.
 Preserve the exact moved host test source and split frozen rows without an allowance increase.
-The policy record maps each changed address to the accepted numeric base.
-The builtin closure oracle selects the portable graph library.
+
+The builtin registry uses compiled declarations to distinguish public callables from internal primitive identities.
+The native execution oracle reads the runtime owner's staging receipt and verifies the archive and public header digests.
+Compile-fail ownership examples use valid fully qualified graph types.
+The portability guard rejects generic false claims without excluding true sibling-core claims.
+
+Known empty shapes remain valid after large prefix extents.
+Known nonzero counts must fit the graph index domain.
+Cardinality uses bounded u128 intermediates without allocation.
+Runtime metadata retains extent and suffix-stride checks.
+The C inventory associates typedef owners through compiler declaration identities.
+
 This ownership change transfers no language, transform, span, serialization, or backend authority.

@@ -2189,7 +2189,7 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
             .dims
             .iter()
             .all(|dim| dim_known_size(dim).is_some())
-            && dim_product(&node.output_type.dims).is_none()
+            && dim_product(node.output_type.dims.iter().map(dim_known_size)).is_none()
         {
             errors.push(format!(
                 "node {} has an overflowing tensor shape",
@@ -4099,11 +4099,18 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
             && arity >= 1
         {
             let old_product = references_valid
-                .then(|| dim_product(&dag.get(node.inputs[0]).unwrap().output_type.dims))
+                .then(|| {
+                    dim_product(
+                        dag.get(node.inputs[0])
+                            .unwrap()
+                            .output_type
+                            .dims
+                            .iter()
+                            .map(dim_known_size),
+                    )
+                })
                 .flatten();
-            let new_product = new_shape.iter().try_fold(1usize, |acc, dim| {
-                dim.as_lit().and_then(|n| acc.checked_mul(n))
-            });
+            let new_product = dim_product(new_shape.iter().map(RtDim::as_lit));
             if new_shape.iter().all(|dim| dim.as_lit().is_some()) && new_product.is_none() {
                 errors.push(format!(
                     "reshape at node {} has an overflowing target shape",
@@ -4996,16 +5003,20 @@ fn verify_scatter_elements(
     }
 }
 
-/// Compute the product of known dimension sizes. Returns None if any dim is unknown.
-fn dim_product(dims: &[DimInfo]) -> Option<usize> {
-    let mut product = 1usize;
-    for d in dims {
-        match d {
-            DimInfo::Lit(n) | DimInfo::Named(_, Some(n)) => product = product.checked_mul(*n)?,
-            DimInfo::Named(_, None) => return None,
-        }
+/// Compute exact known cardinality, then project it to the graph index domain.
+/// Runtime metadata checks extent and suffix-stride domains separately.
+fn dim_product(mut dims: impl Iterator<Item = Option<usize>> + Clone) -> Option<usize> {
+    const { assert!(usize::BITS <= 64) };
+    // A zero count does not depend on a prefix product. Check every extent for a known size.
+    if dims.clone().any(|dim| dim == Some(0)) {
+        return dims.all(|dim| dim.is_some()).then_some(0);
     }
-    Some(product)
+    // Each retained prefix fits usize. Two usize factors fit u128 on supported targets.
+    // The usize projection bounds each prefix before the next multiplication.
+    dims.try_fold(1usize, |product, dim| {
+        let product = (product as u128) * (dim? as u128);
+        usize::try_from(product).ok()
+    })
 }
 
 fn dim_known_size(dim: &DimInfo) -> Option<usize> {

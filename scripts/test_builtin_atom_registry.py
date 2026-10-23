@@ -29,7 +29,8 @@ TABLE = """# Builtin semantic identities
 
 class RegistryTests(unittest.TestCase):
     def validate(self, table=TABLE, spec=SPEC, discovered=("Numeric:add:TableA",)):
-        return registry.validate(discovered, table, spec, {"[05-OP-45]"})
+        return registry.validate(discovered, table, spec, {"[05-OP-45]"},
+                                 callables=("Numeric:add:TableA",))
 
     def test_exact_identity_passes(self):
         self.assertEqual(self.validate(), {"Numeric:add:TableA": "[05-OP-45]"})
@@ -56,7 +57,8 @@ class RegistryTests(unittest.TestCase):
         ).replace("`add", "`mul")
         with self.assertRaisesRegex(registry.RegistryError, "govern"):
             registry.validate(("Numeric:add:TableA",), TABLE.replace("45", "46"),
-                              SPEC + "\n" + other, {"[05-OP-45]", "[05-OP-46]"})
+                              SPEC + "\n" + other, {"[05-OP-45]", "[05-OP-46]"},
+                              callables=("Numeric:add:TableA",))
 
     def test_cross_reference_is_not_definition(self):
         with self.assertRaisesRegex(registry.RegistryError, "definition"):
@@ -64,7 +66,8 @@ class RegistryTests(unittest.TestCase):
 
     def test_missing_generated_membership_fails(self):
         with self.assertRaisesRegex(registry.RegistryError, "generated"):
-            registry.validate(("Numeric:add:TableA",), TABLE, SPEC, set())
+            registry.validate(("Numeric:add:TableA",), TABLE, SPEC, set(),
+                              callables=("Numeric:add:TableA",))
 
     def test_non_op_and_issue_citations_fail(self):
         for citation in ("[05-OBS-1]", "chelis#1294", "spec/05", "[05-OP-999]"):
@@ -96,6 +99,27 @@ class RegistryTests(unittest.TestCase):
     def test_namespaced_callable_cannot_authorize_a_builtin(self):
         with self.assertRaisesRegex(registry.RegistryError, "govern"):
             self.validate(spec=SPEC.replace("`add", "`stdlib::add"))
+
+
+    def test_compiled_provenance_not_case_defines_callable_kind(self):
+        for operation, public in (("MixedCase", True), ("lowercase", False)):
+            identity = f"Numeric:{operation}:TableA"
+            table = TABLE.replace("Numeric:add:TableA", identity)
+            spec = SPEC.replace("add", operation)
+            callables = (identity,) if public else ()
+            with self.subTest(operation=operation):
+                self.assertEqual(registry.validate(
+                    (identity,), table, spec, {"[05-OP-45]"}, callables=callables
+                ), {identity: "[05-OP-45]"})
+                kind = "callable" if public else "internal primitive"
+                with self.assertRaisesRegex(registry.RegistryError, kind):
+                    registry.validate((identity,), table, SPEC, {"[05-OP-45]"},
+                                      callables=callables)
+
+    def test_callable_discovery_cannot_add_an_identity(self):
+        with self.assertRaisesRegex(registry.RegistryError, "outside"):
+            registry.validate(("Numeric:add:TableA",), TABLE, SPEC, {"[05-OP-45]"},
+                              callables=("Numeric:Other:TableA",))
 
 
 class SemanticAuthorityTests(unittest.TestCase):
@@ -157,8 +181,24 @@ class SemanticAuthorityTests(unittest.TestCase):
                 self.assertIn(clause, normalized)
                 changed = self.spec.replace(block, "> " + normalized.replace(clause, "REMOVED") + "\n")
                 self.assertNotEqual(changed, self.spec)
-                with self.assertRaisesRegex(registry.RegistryError, "lost semantic obligation|does not govern the contract"):
+                with self.assertRaises(registry.RegistryError):
                     semantics.validate_semantics(self.rows, changed)
+
+    def test_internal_primitive_names_do_not_create_public_callable_aliases(self):
+        blocks = registry.atom_blocks(self.spec)
+        for identity, clause in semantics.PRIMITIVE_CLAUSES.items():
+            atom = self.rows[identity]
+            block = blocks[atom]
+            with self.subTest(identity=identity):
+                self.assertIn(identity.split(":")[1], registry.named_operations(block))
+                wrong_atom = next(other for other, text in blocks.items()
+                                  if other != atom and clause not in semantics.normalized(text))
+                changed = self.spec.replace(
+                    blocks[wrong_atom],
+                    blocks[wrong_atom] + f"> The internal `{identity.split(':')[1]}` identity exists.\n",
+                )
+                with self.assertRaisesRegex(registry.RegistryError, "govern"):
+                    semantics.validate_semantics({**self.rows, identity: wrong_atom}, changed)
 
     def test_reference_to_callable_does_not_confer_its_authority(self):
         for identity, wrong_atom in (

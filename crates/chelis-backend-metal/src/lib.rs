@@ -203,8 +203,7 @@ pub fn runtime_dir() -> &'static str {
 /// A raw DAG cannot be passed directly to Metal:
 ///
 /// ```compile_fail
-/// # use chelis_dag_core::dag::Dag.
-/// fn bypass(raw: &Dag) {
+/// fn bypass(raw: &chelis_dag_core::dag::Dag) {
 ///     let _ = chelis_backend_metal::codegen_metal(raw, "unchecked");
 /// }
 /// ```
