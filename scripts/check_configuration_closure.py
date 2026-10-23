@@ -300,6 +300,10 @@ NIGHTLY_ONLY_SOURCES: tuple[NightlyOnlySource, ...] = (
         row="all-features",
     ),
     NightlyOnlySource(
+        path="crates/chelis-prove/tests/cross_engine_oracle.rs",
+        row="all-features",
+    ),
+    NightlyOnlySource(
         path="crates/chelis-prove/src/bin/certify_erf_envelope.rs",
         row="all-features",
     ),

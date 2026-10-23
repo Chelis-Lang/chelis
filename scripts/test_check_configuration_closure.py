@@ -403,6 +403,63 @@ class MatrixCoverageTests(unittest.TestCase):
 
 
 class SourceReconciliationTests(unittest.TestCase):
+    def cross_engine_fixture(self, root: Path) -> tuple[str, Path]:
+        source = "crates/chelis-prove/tests/cross_engine_oracle.rs"
+        subprocess.run(("git", "init", "--quiet"), cwd=root, check=True)
+        path = root / source
+        path.parent.mkdir(parents=True)
+        path.write_text("", encoding="utf-8")
+        (root / "src").mkdir()
+        (root / "src/compiled.rs").write_text("", encoding="utf-8")
+        deps = root / "target/debug/deps"
+        deps.mkdir(parents=True)
+        info = deps / "unit.d"
+        info.write_text("target/debug/deps/x.rmeta: src/compiled.rs\n", encoding="utf-8")
+        return source, info
+
+    def test_cross_engine_source_uses_the_existing_all_features_nightly_owner(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source, _ = self.cross_engine_fixture(root)
+            nightly = tuple(row for row in CLOSURE.NIGHTLY_ONLY_SOURCES if row.path == source)
+            CLOSURE.check_every_source_is_compiled(
+                (root / "target/debug",), root, exceptions=(), nightly_only=nightly
+            )
+            self.assertEqual(nightly, (CLOSURE.NightlyOnlySource(source, "all-features"),))
+            row = next(run for run in CLOSURE.CLIPPY_MATRIX if run.label == nightly[0].row)
+            self.assertEqual(row.owner, ".github/workflows/smt-full-prove.yml")
+            self.assertEqual(row.cadence, CLOSURE.NIGHTLY)
+            self.assertEqual(row.hosts, ("linux",))
+            self.assertIn("--all-features", row.command)
+            self.assertIn("--all-targets", row.command)
+            CLOSURE.check_owner_invokes(row, REPO_ROOT)
+
+    def test_cross_engine_owner_preserves_complete_and_unowned_source_rejection(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source, info = self.cross_engine_fixture(root)
+            nightly = tuple(row for row in CLOSURE.NIGHTLY_ONLY_SOURCES if row.path == source)
+            for allowance, complete in (((), False), (nightly, True)):
+                with self.subTest(complete=complete), self.assertRaisesRegex(
+                    CLOSURE.ConfigurationClosureFailure, "cross_engine_oracle.rs"
+                ):
+                    CLOSURE.check_every_source_is_compiled(
+                        (root / "target/debug",), root, exceptions=(),
+                        nightly_only=allowance, require_complete=complete,
+                    )
+            # The nightly needs dep-info for the named source before it passes.
+            info.write_text("target/debug/deps/x.rmeta: src/compiled.rs " + source + "\n")
+            CLOSURE.check_every_source_is_compiled(
+                (root / "target/debug",), root, exceptions=(),
+                nightly_only=nightly, require_complete=True,
+            )
+            # An exact allowance cannot hide another file in the same directory.
+            (root / source).with_name("unowned.rs").write_text("", encoding="utf-8")
+            with self.assertRaisesRegex(CLOSURE.ConfigurationClosureFailure, "unowned.rs"):
+                CLOSURE.check_every_source_is_compiled(
+                    (root / "target/debug",), root, exceptions=(), nightly_only=nightly
+                )
+
     def test_wire_driver_has_one_exact_executable_owner(self) -> None:
         from capacity_census_wire_calls import DRIVER
 

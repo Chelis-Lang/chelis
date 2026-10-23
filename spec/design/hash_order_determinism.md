@@ -323,12 +323,11 @@ what the Manual Gates rule requires.
 **Residual: the feature dimension.** `z3`, `carcara`, and `arb` need external
 solver toolchains
 whose per-pull-request cost this repository has already declined, so everything
-they gate is linted nightly rather than per pull request. That is three whole
-sources plus every region those three features gate inside sources the
-per-pull-request matrix does compile: `NIGHTLY_ONLY_SOURCES` names the whole
-files (`chelis-prove/src/z3_engine.rs` and the two `certify_*_envelope`
-binaries), while leg 3's reconciliation is file-granular and therefore records
-a partly-gated file as covered. The nightly `--all-features` row compiles both
+they gate is linted nightly rather than per pull request. These features gate
+whole sources and regions inside sources the per-pull-request matrix compiles.
+`NIGHTLY_ONLY_SOURCES` owns the exact whole-file inventory; leg 3's
+reconciliation is file-granular and therefore records a partly-gated file as
+covered. The nightly `--all-features` row compiles both
 kinds, and the matrix records that cadence. An entry whose file is gone is
 reported as stale. There is no automatic source-to-feature attribution or
 per-pull-request pruning: neither accumulated dep-info nor a row's resolved
