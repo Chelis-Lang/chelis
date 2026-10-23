@@ -1,9 +1,14 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
+import subprocess
 import sys
+import tempfile
+import tomllib
 import unittest
+from unittest.mock import patch
 
 import no_std_core_support as support
 
@@ -72,14 +77,102 @@ def compiler_error(target: str, source: str) -> str:
     })
 
 
+class ToolEnvironmentTests(unittest.TestCase):
+    def setUp(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.libdir = Path(temporary.name) / "lib/rustlib/test-host/lib"
+        self.libdir.mkdir(parents=True)
+        self.bindir = self.libdir.parent / "bin"
+        self.bindir.mkdir()
+        self.archiver = self.bindir / ("llvm-ar.exe" if os.name == "nt" else "llvm-ar")
+        self.archiver.touch()
+        self.archiver.chmod(0o755)
+        self.environment = {"PATH": "/existing/tools"}
+        environment_patch = patch.object(support, "oracle_environment", return_value=self.environment)
+        environment_patch.start()
+        self.addCleanup(environment_patch.stop)
+        run_patch = patch.object(support.subprocess, "run", return_value=subprocess.CompletedProcess(
+            ["rustc", "--print", "target-libdir"], 0, str(self.libdir) + "\n", "",
+        ))
+        self.run = run_patch.start()
+        self.addCleanup(run_patch.stop)
+
+    def test_pinned_toolchain_installs_llvm_tools(self) -> None:
+        with (support.ROOT / "rust-toolchain.toml").open("rb") as source:
+            self.assertIn("llvm-tools", tomllib.load(source)["toolchain"]["components"])
+
+    def test_matching_host_tools_precede_ambient_path(self) -> None:
+        environment = support._environment()
+        self.assertEqual(environment["PATH"], str(self.bindir) + os.pathsep + "/existing/tools")
+        with (support.ROOT / "rust-toolchain.toml").open("rb") as source:
+            channel = tomllib.load(source)["toolchain"]["channel"]
+        self.assertEqual(environment["RUSTUP_TOOLCHAIN"], channel)
+        self.run.assert_called_once()
+        arguments, keywords = self.run.call_args
+        self.assertEqual(arguments[0], ("rustc", "--print", "target-libdir"))
+        self.assertEqual(keywords["env"]["RUSTUP_TOOLCHAIN"], channel)
+        self.assertEqual(keywords["cwd"], support.ROOT)
+
+    def test_explicit_compiler_and_toolchain_inputs_are_preserved(self) -> None:
+        self.environment.update(RUSTC="/selected/bin/rustc", RUSTUP_TOOLCHAIN="selected",
+                                PYO3_PYTHON="/selected/python")
+        with patch.dict(os.environ, {"CARGO_TARGET_DIR": "/selected/target"}):
+            environment = support._environment()
+        self.assertEqual(environment["RUSTUP_TOOLCHAIN"], "selected")
+        self.assertEqual(environment["PYO3_PYTHON"], "/selected/python")
+        self.assertEqual(environment["CARGO_TARGET_DIR"], "/selected/target")
+        self.assertEqual(self.run.call_args.args[0][0], "/selected/bin/rustc")
+        self.assertEqual(environment["PATH"].split(os.pathsep)[0], str(self.bindir))
+
+    def test_missing_matching_archiver_rejects_even_with_ambient_tool(self) -> None:
+        self.archiver.unlink()
+        self.environment["PATH"] = str(self.bindir.parent)
+        ambient = self.bindir.parent / self.archiver.name
+        ambient.touch()
+        ambient.chmod(0o755)
+        with self.assertRaisesRegex(support.OracleFailure, "llvm-tools.*llvm-ar"):
+            support._environment()
+
+    @unittest.skipIf(os.name == "nt", "Windows executable permission uses file extension")
+    def test_nonexecutable_matching_archiver_rejects(self) -> None:
+        self.archiver.chmod(0o644)
+        with self.assertRaisesRegex(support.OracleFailure, "llvm-tools.*llvm-ar"):
+            support._environment()
+
+    def test_directory_named_as_archiver_rejects(self) -> None:
+        self.archiver.unlink()
+        self.archiver.mkdir()
+        with self.assertRaisesRegex(support.OracleFailure, "llvm-tools.*llvm-ar"):
+            support._environment()
+
+    def test_failed_compiler_discovery_rejects(self) -> None:
+        self.run.return_value = subprocess.CompletedProcess([], 1, "", "toolchain unavailable")
+        with self.assertRaisesRegex(support.OracleFailure, "LLVM tools.*toolchain unavailable"):
+            support._environment()
+
+    def test_missing_compiler_rejects(self) -> None:
+        self.run.side_effect = FileNotFoundError("compiler unavailable")
+        with self.assertRaisesRegex(support.OracleFailure, "LLVM tools.*compiler unavailable"):
+            support._environment()
+
+    def test_invalid_compiler_library_path_rejects(self) -> None:
+        for stdout in ("", "relative/lib\n", str(self.libdir) + "\nextra\n",
+                       str(self.libdir / "missing/lib") + "\n"):
+            with self.subTest(stdout=stdout):
+                self.run.return_value = subprocess.CompletedProcess([], 0, stdout, "")
+                with self.assertRaisesRegex(support.OracleFailure, "invalid.*target-libdir"):
+                    support._environment()
+
+
 class OracleFailureTests(unittest.TestCase):
     def test_failed_real_command_fails_acceptance(self) -> None:
         with self.assertRaisesRegex(support.OracleFailure, "exit 23"):
-            support.run((sys.executable, "-c", "raise SystemExit(23)"))
+            support.run((sys.executable, "-c", "raise SystemExit(23)"), env=os.environ)
 
     def test_absent_executable_fails_acceptance(self) -> None:
         with self.assertRaisesRegex(support.OracleFailure, "cannot execute"):
-            support.run(("/chelis-oracle-absent-executable",))
+            support.run(("/chelis-oracle-absent-executable",), env=os.environ)
 
     def test_normal_dependency_closure_excludes_host_tools(self) -> None:
         self.assertEqual(
