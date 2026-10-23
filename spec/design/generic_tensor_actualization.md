@@ -70,6 +70,76 @@ precision-changing predicates retain their own checked result relations. A
 Boolean consumer's result annotation never supplies a missing float producer
 type.
 
+Tuple parameters remain typed aggregate inputs when a declaration returns a
+tensor. Tuple-driven staging requires every formal to consist of fixed tuples
+and leaves accepted by the scalar/tensor input bridge. This is a whole-interface
+representation check, independent of which fields the body reads. Nominal,
+container, callable and other host payloads retain ordinary host operand routing;
+a tuple around one does not erase the provenance its producer needs. The
+independent host-produced-reshape staging trigger retains its existing admission.
+The shared host staging boundary projects an already evaluated fixed tuple once
+and bridges each numeric leaf with its actual scalar or tensor type.
+Partition validation requires exact agreement between the typed producer and
+its graph input, including dimensions and dtype. Local ascriptions restore
+that retained physical source type and keep their authored claims on separate
+witness tokens. The checked load survives partitioning so those obligations
+execute after projection and before consumers. The whole authored entry is
+checked in signature order before a staged body or capture provider executes,
+including unused nested fields; Eval uses the same cached claim patterns and
+entry plan as ordinary host calls. Nested aggregates keep their structure until
+projected; a result annotation never supplies their contents.
+
+The shared IR interface observation roster identifies each fixed tensor leaf
+by formal position, ordered tuple path and complete declared tensor type. One
+canonical traversal supplies the C entry plan and witness materialization
+from both typed host inputs and authored native tuple-call signatures. The C
+plan retains its direct-tensor authored-contract selection and its fixed
+tuple declaration order. Each graph materializes this roster before lowering
+the body, including fields the body never reads, and binds each observed axis to
+an activation-owned `ExtentWitness`. Signature order followed by tuple/axis
+order chooses the first observation of a binder. Fixed tensor projections
+reuse the roster's node by host value identity and tuple path, including through
+aggregate aliases; reading a field again does not manufacture a second input
+origin. Interface-only result comparisons therefore keep their entry placement,
+while local claims retain their initializer position. Local and result claim
+tokens refer to that witness by graph identity across partition boundaries; they do
+not acquire a declaration from the value being checked. Entry checks remain
+owned by the host interface and precede staged materialization. Native tuple
+call preparation transports local/result witnesses without taking over the
+aggregate entry-guard migration tracked by #4018. Numeric leaves retain their
+physical type independently of these logical claims.
+
+Guard-only validation cannot supply a later claim's expected extent, and
+body-projection-only transport omits unread declaring fields. Both therefore
+leave the interface contract incomplete. The observation roster supplies the
+missing declaration evidence without turning result-only/computed binders
+into input binders or relating same-spelled binders of different activations.
+Dynamic container claims retain their canonical claim-pattern owner; the fixed
+roster does not invent a path through a value-selected container.
+
+The executable class oracle pairs independent interface witness and returned
+wildcard leaves under declared results and local annotations. It covers equal
+and unequal extents (zero included), unread and nested declaring fields,
+multiple axes, parameter/path order, aliases and repeated activations with
+different extents. Positive cases require exact Eval/native-C agreement;
+negative cases require the owning extent rejection, never a successful value
+or an unresolved-witness lowering error. Existing entry-before-body,
+physical-carrier, and result-only movement-extent controls remain enabled.
+Whole-body helper result transfer uses the same declaration roster: an axis
+owned by the staged helper is excluded from the C result frame. A host-control
+body retains its result-frame owner. Transport does not duplicate a claim.
+
+The C host-control result frame also consumes the fixed roster. Each named
+result requirement captures the declaring tensor axis before entry drops can
+release parameters, following the roster's tuple path with balanced retained
+value handles. A selected body result consumes that frame; reading a witness
+at entry does not move the result guard ahead of the body. Direct tensor and
+List witnesses retain their existing frame owners. Value-selected container
+claims remain outside this fixed-interface slice and keep the #3456 owner.
+This lets tuple-carried `i64` extents feed movement operations under
+`spec/04-type-system.md` §4.7.2 while entry, local and result extent claims
+retain their separate witnesses and ordering.
+
 The two extrema identities use one constructor selected by `ExtremaKind`.
 It takes the lowered operands and derives the complete output `TensorType`
 from the left operand, preserving its ordered physical axes and dtype. It

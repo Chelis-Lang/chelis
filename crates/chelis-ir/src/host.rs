@@ -5,7 +5,10 @@ use crate::callable_value::{NormalizedCallableContract, StaticBuiltinValue};
 use callee::HostAppCallee;
 pub use callee::{HostCallee, HostCalleeView};
 use chelis_types::errors::ErrorWitness;
-pub use signature_entry::{EntryContract, EntryPattern, SignatureEntryPlan};
+pub use signature_entry::{
+    EntryContract, EntryPattern, FixedEntryObservation, FixedEntryType, SignatureEntryPlan,
+    fixed_entry_observations,
+};
 
 use chelis_deep::cons_spine::ConsSpine;
 use chelis_deep::{DeepTag, ExprCarrier};
@@ -5063,6 +5066,23 @@ pub fn host_def_kernel(
     }))
 }
 
+/// Tuple-driven staging admits an interface only when every leaf has the
+/// existing scalar/tensor bridge representation. A nominal or container leaf
+/// keeps its host producer provenance, including beside another fixed tuple.
+fn fixed_tuple_parameter_interface(params: &[HostParam]) -> bool {
+    let mut pending = params.iter().map(|param| &param.ty).collect::<Vec<_>>();
+    let mut has_tuple = false;
+    while let Some(ty) = pending.pop() {
+        if let HostTypeTerm::Tuple(items) = ty {
+            has_tuple = true;
+            pending.extend(items);
+        } else if tensor_type_from_host_input(ty).is_none() {
+            return false;
+        }
+    }
+    has_tuple
+}
+
 fn staged_def_kernel(
     program: &HostLoweringSession<'_>,
     signature: &HostDefSignature,
@@ -5102,7 +5122,11 @@ fn staged_def_kernel(
         }
         host_source |= has_control(expression);
     }
-    if !reshape || !host_source {
+    // Fixed scalar/tensor tuples keep their checked structure in the host
+    // frame and project through the existing typed bridge. Other interfaces
+    // retain their ordinary route; tuple syntax is not representation proof.
+    let aggregate_parameter = fixed_tuple_parameter_interface(&signature.params);
+    if !aggregate_parameter && (!reshape || !host_source) {
         return Ok(StagingAttempt::NotApplicable);
     }
     if def_effect_row_forbids_kernel(program, &signature.name)
@@ -6887,14 +6911,23 @@ fn lower_def_body_kernel(
 }
 
 /// The result axes a whole-body helper's lowering owns: every literal axis,
-/// and every named axis whose binder a tensor parameter witnesses, since the
-/// helper's graph carries that parameter's signature witness. A binder
-/// witnessed only outside the tensor parameters stays with the host frame.
+/// and every named axis whose binder a fixed tensor observation witnesses,
+/// since the helper graph carries the same declaration roster. Binders outside
+/// those observations stay with the host frame.
 fn record_literal_result_transfer(signature: &HostDefSignature, sink: &mut TensorHelperSink) {
+    let observations = fixed_entry_observations(
+        signature
+            .params
+            .iter()
+            .map(|param| (param.name.as_str(), &param.ty)),
+    );
     let witnessed = |binder: &str| {
-        signature.params.iter().any(|param| {
-            matches!(&param.ty, HostTypeTerm::Tensor(ty)
-                if ty.dims.iter().any(|dim| matches!(dim, crate::dag::DimInfo::Named(name, _) if name == binder)))
+        observations.iter().any(|observation| {
+            observation
+                .ty
+                .dims
+                .iter()
+                .any(|dim| matches!(dim, crate::dag::DimInfo::Named(name, _) if name == binder))
         })
     };
     sink.transferred_result_claim_axes = tensor_type_from_host_input(&signature.ret_ty)
@@ -28896,6 +28929,63 @@ mod tests {
         assert!(!top_level_fn_transfers_literal_result_claims(
             &session, "loud"
         ));
+    }
+
+    #[test]
+    fn tuple_staging_preserves_nonbridge_host_payload_routes() {
+        // A fixed tuple does not confer a scalar/tensor representation on a
+        // nominal, container or callable leaf, even when that leaf is unused.
+        // Check the real checked-signature staging decision, not a type-name
+        // predicate in isolation. Other parameters participate in admission.
+        let mut failures = Vec::new();
+        for (params, body, expected) in [
+            ("p: (tensor[1,f32],i64)", "p.0", true),
+            ("p: ((tensor[1,f32],bool),i64)", "(p.0).0", true),
+            ("p: (tensor[1,f32],Box)", "p.0", false),
+            ("p: (tensor[1,f32],(i64,Box))", "p.0", false),
+            ("p: (tensor[1,f32],List[i64])", "p.0", false),
+            ("p: (tensor[1,f32],Option[i64])", "p.0", false),
+            ("p: (tensor[1,f32],Dict[string,i64])", "p.0", false),
+            ("p: (tensor[1,f32],string)", "p.0", false),
+            ("p: (tensor[1,f32],(i64 -> i64))", "p.0", false),
+            ("p: (tensor[1,f32],i64), other: Box", "p.0", false),
+            ("p: (tensor[1,f32],i64), other: (Box,i64)", "p.0", false),
+        ] {
+            let checked = surf_check(&format!(
+                "type Box = | Box {{ value: i64 }}\ndef first({params}) -> tensor[1,f32] = {body}\n"
+            ));
+            let session = HostLoweringSession::new(&checked);
+            let (_, body) = session.def_named("first").unwrap();
+            let signature = host_def_signature("first", body, None, &session).unwrap();
+            let attempt = staged_def_kernel(&session, &signature).unwrap();
+            let admitted = matches!(attempt, staged::StagingAttempt::Ready(_));
+            if admitted != expected {
+                failures.push(format!("{params}: staged={admitted}, expected={expected}"));
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    #[test]
+    fn fixed_aggregate_result_claims_have_exactly_one_owner() {
+        let checked = surf_check(
+            "def staged[n](p: (tensor[n,f32],tensor[*,f32])) -> tensor[n,f32] = p.1\n\
+             def selected[n](p: (tensor[n,f32],tensor[*,f32]), choose: bool) -> tensor[n,f32] = if choose then p.1 else p.0\n",
+        );
+        let session = HostLoweringSession::new(&checked);
+        for (name, expected) in [
+            ("staged", vec![crate::dag::RtAxis::Lit(0)]),
+            ("selected", Vec::new()),
+        ] {
+            let (_, body) = session.def_named(name).unwrap();
+            let lowered = lower_host_function(name, body, None, &session, false)
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                lowered.function.helper_result_claim_axes, expected,
+                "{name}: staged claims transfer to the helper; host-control claims remain on the result frame"
+            );
+        }
     }
 
     #[test]

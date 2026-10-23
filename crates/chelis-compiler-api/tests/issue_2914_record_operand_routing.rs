@@ -79,6 +79,16 @@ const POSITIVE: &[Case] = &[
         name: "tuple_projection_bound_to_a_name",
         body: "def before[n](p: (Col[n], Col[n])) -> tensor[n, bool] = {\n  a = p.0\n  lt(col_days(a), col_days(p.1))\n}\ndef run(seed: i64) -> List[bool] = to_list(before((col(to_tensor([1i64, 5i64])), col(to_tensor([2i64, 3i64])))))\nresult = run(0i64)\n",
     },
+    // Tuple staging must inspect nested leaves and the whole interface, not
+    // merely find one tuple whose numeric fields can cross the bridge.
+    Case {
+        name: "nested_tuple_record_operand",
+        body: "def before[n](p: ((Col[n], i64), Col[n])) -> tensor[n, bool] = lt(col_days((p.0).0), col_days(p.1))\ndef run(seed: i64) -> List[bool] = to_list(before(((col(to_tensor([1i64, 5i64])), 7i64), col(to_tensor([2i64, 3i64])))))\nresult = run(0i64)\n",
+    },
+    Case {
+        name: "fixed_tuple_beside_record_operand",
+        body: "def before[n](p: (tensor[n,i64], i64), a: Col[n]) -> tensor[n, bool] = lt(col_days(a), p.0)\ndef run(seed: i64) -> List[bool] = to_list(before((to_tensor([2i64, 3i64]), 7i64), col(to_tensor([1i64, 5i64]))))\nresult = run(0i64)\n",
+    },
     Case {
         name: "branch_operand",
         body: "def before[n](a: Col[n], t: &tensor[n, i64]) -> tensor[n, bool] = lt(if true then col_days(a) else col_days(a), t)\ndef run(seed: i64) -> List[bool] = to_list(before(col(to_tensor([1i64, 5i64])), to_tensor([2i64, 3i64])))\nresult = run(0i64)\n",
@@ -94,6 +104,14 @@ const FIRST_OPERAND_FAILS: &[Case] = &[
     Case {
         name: "first_tuple_projection_fails",
         body: "def before[n](p: (Col[n], Col[n])) -> tensor[n, bool] = lt(checked_days(p.0), checked_days(p.1))\ndef run(seed: i64) -> List[bool] = to_list(before((col(to_tensor([1i64, -5i64])), col(to_tensor([2i64, 3i64])))))\nresult = run(0i64)\n",
+    },
+    Case {
+        name: "nested_tuple_record_operand_fails",
+        body: "def before[n](p: ((Col[n], i64), Col[n])) -> tensor[n, bool] = lt(checked_days((p.0).0), checked_days(p.1))\ndef run(seed: i64) -> List[bool] = to_list(before(((col(to_tensor([1i64, -5i64])), 7i64), col(to_tensor([2i64, 3i64])))))\nresult = run(0i64)\n",
+    },
+    Case {
+        name: "fixed_tuple_beside_record_operand_fails",
+        body: "def before[n](p: (tensor[n,i64], i64), a: Col[n]) -> tensor[n, bool] = lt(checked_days(a), p.0)\ndef run(seed: i64) -> List[bool] = to_list(before((to_tensor([2i64, 3i64]), 7i64), col(to_tensor([1i64, -5i64]))))\nresult = run(0i64)\n",
     },
     Case {
         name: "branch_operand_fails",

@@ -2876,6 +2876,16 @@ fn try_lower_subexpr_program_with_ordered_inputs_impl(
     )
 }
 
+/// An input axis owner in one signature activation. A diagnostic path need
+/// not be a lexical binding: a fixed tuple field has its own observed node.
+struct ParameterWitnessObservation<'a> {
+    parameter: &'a str,
+    input: NodeId,
+    formal_type: &'a TensorType,
+    authored_type: Option<&'a Expr>,
+    guards_entry: bool,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct StagedHostRegionLoweringOptions {
     literal_result_claim_ownership: LiteralResultClaimOwnership,
@@ -2935,8 +2945,6 @@ pub(crate) fn try_lower_staged_host_region(
             ctx.host_program = Some(program);
             ctx.host_stage_status = status.clone();
             ctx.literal_result_claim_ownership = options.literal_result_claim_ownership;
-            let mut names = Vec::new();
-            let mut types = Vec::new();
             for param in params {
                 if let Some(ty) = crate::host::tensor_type_from_host_input(&param.ty) {
                     let load = ctx.dag.add_node(
@@ -2953,8 +2961,6 @@ pub(crate) fn try_lower_staged_host_region(
                         .insert(param.name.clone(), LoweredValue::Node(load));
                     ctx.host_value_types.insert(load, param.ty.clone());
                     ctx.host_external_inputs.insert(load, param.name.clone());
-                    names.push(param.name.clone());
-                    types.push(ty);
                 } else {
                     let id = crate::host::staged::HostValueId(ctx.next_host_value);
                     ctx.next_host_value += 1;
@@ -2969,15 +2975,97 @@ pub(crate) fn try_lower_staged_host_region(
                     );
                 }
             }
-            // A staged host region's inputs are the partition's, not an author's.
-            ctx.prepare_parameter_witnesses(&names, &types, None, None, false);
+            // The interface, not the body's projection set, declares every
+            // fixed tensor observation. This is also the C entry guard roster.
+            let interface = crate::host::fixed_entry_observations(
+                params.iter().map(|param| (param.name.as_str(), &param.ty)),
+            );
+            let mut inputs = Vec::with_capacity(interface.len());
+            for observation in &interface {
+                let param = &params[observation.param];
+                let input = if observation.steps.is_empty() {
+                    ctx.bindings
+                        .get(&param.name)
+                        .and_then(LoweredValue::as_single_node)
+                        .expect("fixed direct tensor parameter")
+                } else {
+                    let LoweredValue::Host { id, .. } = ctx
+                        .bindings
+                        .get(&param.name)
+                        .expect("fixed aggregate parameter")
+                    else {
+                        unreachable!("tuple parameters remain typed host carriers")
+                    };
+                    let host_id = *id;
+                    let capture = (
+                        param.name.clone(),
+                        crate::host::staged::StageValue::Host(host_id),
+                        param.ty.clone(),
+                    );
+                    let span = expr.span();
+                    let mut projection = Expr::node(
+                        DeepTag::Var,
+                        Metadata::default(),
+                        vec![Expr::Atom(Atom::Name(param.name.clone()), span)],
+                        span,
+                    );
+                    let index_type = Metadata::from(chelis_deep::annotations::MetadataValue::Type(
+                        chelis_deep::annotations::TypeSyntax::try_new(Expr::node(
+                            DeepTag::TPrim,
+                            Metadata::default(),
+                            vec![Expr::Atom(Atom::Name("i64".into()), span)],
+                            span,
+                        ))
+                        .expect("tuple projection index type"),
+                    ));
+                    for index in &observation.steps {
+                        projection = Expr::node(
+                            DeepTag::TupleGet,
+                            Metadata::default(),
+                            vec![
+                                projection,
+                                Expr::node(
+                                    DeepTag::Lit,
+                                    index_type.clone(),
+                                    vec![Expr::Atom(
+                                        Atom::Int(
+                                            i64::try_from(*index).expect("tuple index fits i64"),
+                                        ),
+                                        span,
+                                    )],
+                                    span,
+                                ),
+                            ],
+                            span,
+                        );
+                    }
+                    let input = ctx
+                        .append_host_source(
+                            &projection,
+                            crate::host_type_state::HostTypeTerm::Tensor(observation.ty.clone()),
+                            vec![capture],
+                        )
+                        .expect_node("fixed interface tensor observation");
+                    ctx.host_interface_tensors
+                        .insert((host_id, observation.steps.clone()), input);
+                    input
+                };
+                inputs.push(ParameterWitnessObservation {
+                    parameter: &observation.path,
+                    input,
+                    formal_type: &observation.ty,
+                    authored_type: None,
+                    guards_entry: false,
+                });
+            }
+            // Host entry owns the guards. These witnesses transport the same
+            // interface's first binder observations to local/result claims.
+            ctx.prepare_observation_witnesses(&inputs, None, false);
             ctx.bindings.clear_witnesses();
             ctx.prepare_local_ascription_tokens(expr, None);
-            // Do not infer equality between repeated spellings in the machine-built
-            // parameter list above. The returned result type is nevertheless the
-            // authored declaration's claim, so resolve it against the first exact
-            // parameter witness for each binder and give an eligible same-shape
-            // producer the same ownership it has outside staging.
+            // The host interface owns entry comparisons; downstream local and
+            // result claims resolve against the same declaration's exact first
+            // witnesses, independently of which fields the body projects.
             ctx.signature_is_authored = true;
             ctx.declaration_root_claim = true;
             let result = ctx.lower_expr_with_claim(expr, Some(result_claim), true);
@@ -10068,6 +10156,11 @@ struct LowerCtx<'program> {
     host_external_inputs: BTreeMap<NodeId, String>,
     host_parameters:
         BTreeMap<crate::host::staged::HostValueId, (String, crate::host_type_state::HostTypeTerm)>,
+    /// Canonical fixed interface observations, keyed by activation-owned host
+    /// value identity and structural path rather than body names.
+    host_interface_tensors: BTreeMap<(crate::host::staged::HostValueId, Vec<usize>), NodeId>,
+    host_interface_paths:
+        BTreeMap<crate::host::staged::HostValueId, (crate::host::staged::HostValueId, Vec<usize>)>,
     next_host_value: usize,
     host_stage_status: std::rc::Rc<Cell<crate::host::staged::StagingStatus>>,
     /// chelis#2371: the first unguardable direct `fail(...)` this context
@@ -10386,6 +10479,8 @@ impl<'program> LowerCtx<'program> {
             host_value_types: BTreeMap::new(),
             host_external_inputs: BTreeMap::new(),
             host_parameters: BTreeMap::new(),
+            host_interface_tensors: BTreeMap::new(),
+            host_interface_paths: BTreeMap::new(),
             next_host_value: 0,
             unguardable_fail: None,
             host_stage_status: std::rc::Rc::new(Cell::new(
@@ -12407,8 +12502,9 @@ impl<'program> LowerCtx<'program> {
         Some(self.append_host_source(expr, ty, captures))
     }
 
-    /// Publish a typed host producer once, bridging exact i64 leaves into
-    /// the tensor graph when an extent consumer needs them.
+    /// Publish a typed host producer once. Numeric scalar and tensor leaves
+    /// retain their exact graph type; aggregates remain host values until
+    /// projected, rather than acquiring a type from a later consumer.
     fn append_host_source(
         &mut self,
         expr: &Expr,
@@ -12420,19 +12516,18 @@ impl<'program> LowerCtx<'program> {
         )>,
     ) -> LoweredValue {
         use crate::host::staged::{HostSource, HostValueId, StageValue};
-        use crate::host_type_state::{HostPrecisionTerm, HostTypeTerm};
         self.host_stage_status
             .set(crate::host::staged::StagingStatus::HasSources);
         let before = self.dag.nodes().len();
         let (value, lowered) =
-            if ty == HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(Prim::Int64)) {
+            if let Some(tensor_ty) = crate::host::tensor_type_from_host_input(&ty) {
                 let id = self.dag.add_node(
                     self.owner(),
                     RiscOp::Load {
                         name: format!("__host_source_{}", self.host_sources.len()).into(),
                     },
                     Vec::new(),
-                    crate::host::staged::scalar_type(),
+                    tensor_ty,
                     expr.span_id().map(str::to_owned),
                 );
                 self.dag.node_mut(id).expect("staged scalar").shape_deps = captures
@@ -13926,11 +14021,24 @@ impl<'program> LowerCtx<'program> {
                         .get(usize::try_from(source_axis).ok()?)
                 })
                 .cloned(),
+            Some(AxisSource::ExternalAxis { load, axis }) => {
+                // A staged source owns its physical input type before any
+                // local annotation. Preserve that exact carrier; the local
+                // extent claim is owned by its separate witness token.
+                match self
+                    .host_sources
+                    .iter()
+                    .find(|source| source.value == crate::host::staged::StageValue::Tensor(load))
+                {
+                    Some(source) => crate::host::tensor_type_from_host_input(&source.ty)
+                        .and_then(|ty| ty.dims.get(axis).cloned()),
+                    None => Some(DimInfo::Named(String::new(), None)),
+                }
+            }
             Some(
                 AxisSource::ScalarInput { .. }
                 | AxisSource::OpComputed { .. }
-                | AxisSource::ClassSupplied { .. }
-                | AxisSource::ExternalAxis { .. },
+                | AxisSource::ClassSupplied { .. },
             )
             | None => Some(DimInfo::Named(String::new(), None)),
         };
@@ -23707,19 +23815,81 @@ impl<'program> LowerCtx<'program> {
         span: Option<String>,
         authored_signature: bool,
     ) {
+        // Native aggregate calls and host-staged declarations share the fixed
+        // interface roster. Each consumes its own physical representation;
+        // neither discovers binders by walking the body or the result.
+        let mut sources = Vec::new();
+        for (index, (name, ty)) in params.iter().zip(formal_types).enumerate() {
+            let authored_type = formal_type_exprs
+                .and_then(|types| types.get(index))
+                .and_then(Option::as_ref);
+            let Some(value) = self.bindings.get(name) else {
+                continue;
+            };
+            if let Some(input) = value.as_single_node() {
+                sources.push((
+                    name.clone(),
+                    input,
+                    ty.clone(),
+                    authored_type.cloned(),
+                    true,
+                ));
+            } else if let (LoweredValue::Tuple(_), Some(authored_type)) = (value, authored_type) {
+                for observation in
+                    crate::host::fixed_entry_observations([(name.as_str(), authored_type)])
+                {
+                    let mut leaf = value.clone();
+                    for step in &observation.steps {
+                        leaf = leaf.tuple_get(*step).expect("checked fixed tuple field");
+                    }
+                    let input = leaf.expect_node("fixed native tensor observation");
+                    let formal = Self::formal_param_type_for_call(
+                        &observation.ty,
+                        &self.prec_substitutions,
+                        &self.rank_substitutions,
+                    );
+                    // This path transports local/result witnesses. Host entry
+                    // remains the aggregate entry-contract owner (#4018).
+                    sources.push((observation.path, input, formal, Some(observation.ty), false));
+                }
+            }
+        }
+        let observations = sources
+            .iter()
+            .map(
+                |(parameter, input, formal_type, authored_type, guards_entry)| {
+                    ParameterWitnessObservation {
+                        parameter,
+                        input: *input,
+                        formal_type,
+                        authored_type: authored_type.as_ref(),
+                        guards_entry: *guards_entry,
+                    }
+                },
+            )
+            .collect::<Vec<_>>();
+        self.prepare_observation_witnesses(&observations, span, authored_signature);
+    }
+
+    fn prepare_observation_witnesses(
+        &mut self,
+        observations: &[ParameterWitnessObservation<'_>],
+        span: Option<String>,
+        authored_signature: bool,
+    ) {
         self.bindings.clear_witnesses();
         self.signature_witnesses.clear();
         self.activation_witnesses.clear();
         self.signature_is_authored = authored_signature;
         self.local_unit_refinements.clear();
-        for (index, (name, formal_type)) in params.iter().zip(formal_types).enumerate() {
-            let Some(input) = self
-                .bindings
-                .get(name)
-                .and_then(LoweredValue::as_single_node)
-            else {
-                continue;
-            };
+        for observation in observations {
+            let ParameterWitnessObservation {
+                parameter: name,
+                input,
+                formal_type,
+                authored_type,
+                guards_entry,
+            } = *observation;
             let rank = self
                 .dag
                 .get(input)
@@ -23727,10 +23897,7 @@ impl<'program> LowerCtx<'program> {
                 .output_type
                 .dims
                 .len();
-            let authored_binders = match formal_type_exprs
-                .and_then(|types| types.get(index))
-                .and_then(Option::as_ref)
-            {
+            let authored_binders = match authored_type {
                 Some(expr) => authored_tensor_dim_binders(expr, &self.rank_substitutions, rank)
                     .unwrap_or_else(|message| {
                         raise_fatal_lowering_error(
@@ -23761,6 +23928,7 @@ impl<'program> LowerCtx<'program> {
                 // entry check; that checked declaration needs no second
                 // witness comparison.
                 let requirements = if authored_signature
+                    && guards_entry
                     && authored_binders.get(axis).is_some_and(Option::is_none)
                     && let Some(DimInfo::Lit(required)) = formal_type.dims.get(axis)
                     && !self.dag.get(input).is_some_and(|node| {
@@ -23782,7 +23950,7 @@ impl<'program> LowerCtx<'program> {
                     self.owner(),
                     RiscOp::ExtentWitness {
                         site: crate::dag::ExtentWitnessSite::Caller,
-                        parameter: name.clone(),
+                        parameter: name.to_owned(),
                         axis: RtAxis::Lit(i32::try_from(axis).expect("parameter rank fits i32")),
                         requirements,
                         claims: Vec::new(),
@@ -23816,12 +23984,13 @@ impl<'program> LowerCtx<'program> {
                         // synthesized multi-root kernel took `batch` and `seq`
                         // off the several definitions that produced its captured
                         // roots and trapped a correct program.
-                        Some(declared) if authored_signature => self.add_named_extent_claim(
-                            witness,
-                            declared,
-                            extent_binder_label(binder),
-                            true,
-                        ),
+                        Some(declared) if authored_signature && guards_entry => self
+                            .add_named_extent_claim(
+                                witness,
+                                declared,
+                                extent_binder_label(binder),
+                                true,
+                            ),
                         // The binder is already declared in this activation and
                         // the list is machine-built: record nothing and leave
                         // the first declaration standing.
@@ -23833,7 +24002,14 @@ impl<'program> LowerCtx<'program> {
                 self.activation_witnesses.push(witness);
                 self.invocation_witnesses.push(witness);
             }
-            self.bindings.set_witnesses(name, (input, witnesses));
+            if self
+                .bindings
+                .get(name)
+                .and_then(LoweredValue::as_single_node)
+                == Some(input)
+            {
+                self.bindings.set_witnesses(name, (input, witnesses));
+            }
         }
     }
 
@@ -25740,17 +25916,20 @@ impl<'program> LowerCtx<'program> {
         let params_and_types = params
             .iter()
             .filter_map(param_name_and_type_expr)
-            .filter_map(|(name, ty)| {
-                let input = self.bindings[&name].as_single_node()?;
+            .map(|(name, ty)| {
                 let formal = match ty {
                     Some(ty) => Self::formal_param_type_for_call(
                         ty,
                         &self.prec_substitutions,
                         &self.rank_substitutions,
                     ),
-                    None => self.dag.get(input).expect("parameter").output_type.clone(),
+                    None => self.bindings[&name]
+                        .as_single_node()
+                        .and_then(|input| self.dag.get(input))
+                        .map(|node| node.output_type.clone())
+                        .unwrap_or_else(Self::default_type),
                 };
-                Some((name, formal, ty.cloned()))
+                (name, formal, ty.cloned())
             })
             .collect::<Vec<_>>();
         let params = params_and_types
@@ -26928,6 +27107,15 @@ impl<'program> LowerCtx<'program> {
         } = &tuple
             && let Some(ty) = items.get(index)
         {
+            let (root, mut path) = self
+                .host_interface_paths
+                .get(id)
+                .cloned()
+                .unwrap_or((*id, Vec::new()));
+            path.push(index);
+            if let Some(input) = self.host_interface_tensors.get(&(root, path.clone())) {
+                return LoweredValue::Node(*input);
+            }
             // Read the already evaluated carrier. Replaying its expression
             // here would duplicate selection, effects, or ownership transfer.
             let span = kids[0].span();
@@ -26946,7 +27134,7 @@ impl<'program> LowerCtx<'program> {
                 ],
                 span,
             );
-            return self.append_host_source(
+            let projected = self.append_host_source(
                 &expression,
                 ty.clone(),
                 vec![(
@@ -26955,6 +27143,10 @@ impl<'program> LowerCtx<'program> {
                     crate::host_type_state::HostTypeTerm::Tuple(items.clone()),
                 )],
             );
+            if let LoweredValue::Host { id, .. } = &projected {
+                self.host_interface_paths.insert(*id, (root, path));
+            }
+            return projected;
         }
         tuple.tuple_get(index).unwrap_or_else(|| {
             raise_lowering_error(

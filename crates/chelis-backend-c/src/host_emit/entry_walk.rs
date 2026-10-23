@@ -23,65 +23,26 @@ use chelis_ir::host::{
     EntryPattern, HostAdtLayout, HostFunctionOrigin, HostTensorInput, SignatureEntryPlan,
 };
 
-/// One tensor the entry plan observes: a tensor parameter, or a tensor at a
-/// fixed tuple position inside a parameter.
-pub(super) struct EntryObservation {
-    pub param: usize,
-    /// The parameter path, `p.1.0`; a tensor parameter's own name.
-    pub path: String,
-    /// The tuple components from the parameter to the tensor.
-    pub steps: Vec<usize>,
-    pub ty: TensorType,
-}
+pub(super) use chelis_ir::host::FixedEntryObservation as EntryObservation;
 
-/// Every tensor at a fixed tuple position of every parameter, in signature
-/// order. Direct tensor obligations use the authored contract: a specialized
-/// call's ABI can have wildcard axes even when its callee binds them.
+/// Direct tensor obligations use the authored contract: a specialized call's
+/// ABI can have wildcard axes even when its callee binds them. The shared IR
+/// roster also owns staged witnesses, including unused tuple fields.
 pub(super) fn entry_observations(function: &HostFunction) -> Vec<EntryObservation> {
-    fn collect(
-        ty: &HostAbiType,
-        param: usize,
-        path: String,
-        steps: Vec<usize>,
-        out: &mut Vec<EntryObservation>,
-    ) {
-        match ty {
-            HostAbiType::Tensor(ty) => out.push(EntryObservation {
-                param,
-                path,
-                steps,
-                ty: ty.clone(),
-            }),
-            HostAbiType::Tuple(items) => {
-                for (index, item) in items.iter().enumerate() {
-                    let mut steps = steps.clone();
-                    steps.push(index);
-                    collect(item, param, format!("{path}.{index}"), steps, out);
-                }
-            }
-            _ => {}
-        }
-    }
-    let mut out = Vec::new();
-    for (index, param) in function.params.iter().enumerate() {
-        let declared = function
-            .entry_contract
-            .formals()
-            .get(index)
-            .filter(|formal| formal.name() == param.name)
-            .and_then(|formal| match formal.pattern() {
-                EntryPattern::Tensor(ty) => Some(ty),
-                _ => None,
-            });
-        collect(
-            declared.unwrap_or(&param.ty),
-            index,
-            param.name.clone(),
-            Vec::new(),
-            &mut out,
-        );
-    }
-    out
+    chelis_ir::host::fixed_entry_observations(function.params.iter().enumerate().map(
+        |(index, param)| {
+            let declared = function
+                .entry_contract
+                .formals()
+                .get(index)
+                .filter(|formal| formal.name() == param.name)
+                .and_then(|formal| match formal.pattern() {
+                    EntryPattern::Tensor(ty) => Some(ty),
+                    _ => None,
+                });
+            (param.name.as_str(), declared.unwrap_or(&param.ty))
+        },
+    ))
 }
 
 /// The complete signature owns entry order; helper partitioning does not.

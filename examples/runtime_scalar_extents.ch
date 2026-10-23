@@ -4,3 +4,5 @@ def padded_rows(rows: tensor[2, f32], extra: i64) = insert(rows, 0i32, add(extra
 table = horizon_table(5i64)
 days = horizon_days(5i64)
 grid = [0.5f32, 1.5f32] |> to_tensor |> padded_rows(2i64)
+def tuple_rows[a, n](values: tensor[n, f32], sizes: (i64, i64)) -> tensor[a, n, f32] = insert(values, 0i32, sizes.0)
+tuple_grid = tuple_rows(to_tensor([0.5f32, 1.5f32]), (3i64, 9i64))
