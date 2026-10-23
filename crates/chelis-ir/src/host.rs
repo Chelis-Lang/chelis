@@ -5066,6 +5066,23 @@ pub fn host_def_kernel(
     }))
 }
 
+/// Tuple-driven staging admits an interface only when every leaf has the
+/// existing scalar/tensor bridge representation. A nominal or container leaf
+/// keeps its host producer provenance, including beside another fixed tuple.
+fn fixed_tuple_parameter_interface(params: &[HostParam]) -> bool {
+    let mut pending = params.iter().map(|param| &param.ty).collect::<Vec<_>>();
+    let mut has_tuple = false;
+    while let Some(ty) = pending.pop() {
+        if let HostTypeTerm::Tuple(items) = ty {
+            has_tuple = true;
+            pending.extend(items);
+        } else if tensor_type_from_host_input(ty).is_none() {
+            return false;
+        }
+    }
+    has_tuple
+}
+
 fn staged_def_kernel(
     program: &HostLoweringSession<'_>,
     signature: &HostDefSignature,
@@ -5105,13 +5122,10 @@ fn staged_def_kernel(
         }
         host_source |= has_control(expression);
     }
-    // An aggregate formal cannot enter the flat tensor-input scope. Keep its
-    // checked structure in the host frame and project actual leaves through
-    // the same typed staging boundary as host-produced extents.
-    let aggregate_parameter = signature
-        .params
-        .iter()
-        .any(|param| matches!(param.ty, HostTypeTerm::Tuple(_)));
+    // Fixed scalar/tensor tuples keep their checked structure in the host
+    // frame and project through the existing typed bridge. Other interfaces
+    // retain their ordinary route; tuple syntax is not representation proof.
+    let aggregate_parameter = fixed_tuple_parameter_interface(&signature.params);
     if !aggregate_parameter && (!reshape || !host_source) {
         return Ok(StagingAttempt::NotApplicable);
     }
@@ -28915,6 +28929,41 @@ mod tests {
         assert!(!top_level_fn_transfers_literal_result_claims(
             &session, "loud"
         ));
+    }
+
+    #[test]
+    fn tuple_staging_preserves_nonbridge_host_payload_routes() {
+        // A fixed tuple does not confer a scalar/tensor representation on a
+        // nominal, container or callable leaf, even when that leaf is unused.
+        // Check the real checked-signature staging decision, not a type-name
+        // predicate in isolation. Other parameters participate in admission.
+        let mut failures = Vec::new();
+        for (params, body, expected) in [
+            ("p: (tensor[1,f32],i64)", "p.0", true),
+            ("p: ((tensor[1,f32],bool),i64)", "(p.0).0", true),
+            ("p: (tensor[1,f32],Box)", "p.0", false),
+            ("p: (tensor[1,f32],(i64,Box))", "p.0", false),
+            ("p: (tensor[1,f32],List[i64])", "p.0", false),
+            ("p: (tensor[1,f32],Option[i64])", "p.0", false),
+            ("p: (tensor[1,f32],Dict[string,i64])", "p.0", false),
+            ("p: (tensor[1,f32],string)", "p.0", false),
+            ("p: (tensor[1,f32],(i64 -> i64))", "p.0", false),
+            ("p: (tensor[1,f32],i64), other: Box", "p.0", false),
+            ("p: (tensor[1,f32],i64), other: (Box,i64)", "p.0", false),
+        ] {
+            let checked = surf_check(&format!(
+                "type Box = | Box {{ value: i64 }}\ndef first({params}) -> tensor[1,f32] = {body}\n"
+            ));
+            let session = HostLoweringSession::new(&checked);
+            let (_, body) = session.def_named("first").unwrap();
+            let signature = host_def_signature("first", body, None, &session).unwrap();
+            let attempt = staged_def_kernel(&session, &signature).unwrap();
+            let admitted = matches!(attempt, staged::StagingAttempt::Ready(_));
+            if admitted != expected {
+                failures.push(format!("{params}: staged={admitted}, expected={expected}"));
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 
     #[test]

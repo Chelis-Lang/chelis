@@ -71,8 +71,14 @@ Boolean consumer's result annotation never supplies a missing float producer
 type.
 
 Tuple parameters remain typed aggregate inputs when a declaration returns a
-tensor. The shared host staging boundary projects an already evaluated tuple
-once and bridges each numeric leaf with its actual scalar or tensor type.
+tensor. Tuple-driven staging requires every formal to consist of fixed tuples
+and leaves accepted by the scalar/tensor input bridge. This is a whole-interface
+representation check, independent of which fields the body reads. Nominal,
+container, callable and other host payloads retain ordinary host operand routing;
+a tuple around one does not erase the provenance its producer needs. The
+independent host-produced-reshape staging trigger retains its existing admission.
+The shared host staging boundary projects an already evaluated fixed tuple once
+and bridges each numeric leaf with its actual scalar or tensor type.
 Partition validation requires exact agreement between the typed producer and
 its graph input, including dimensions and dtype. Local ascriptions restore
 that retained physical source type and keep their authored claims on separate
