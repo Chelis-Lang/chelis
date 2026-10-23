@@ -141,6 +141,11 @@ PRIMITIVE_CLAUSES = {
     "Numeric:RuntimeRecurrenceAdjoint:TableA": "Cotangent combination follows spec/06's order",
     "Numeric:ReluAdjoint:TableA": "including at `x = 0`",
     "Numeric:UniformBoundAdjoint:TableA": "pathwise adjoint",
+    "Numeric:cast:TableA": "intermediate float image may change an integer conversion",
+    "Numeric:cast_saturate:TableA": "It never traps `Overflow`",
+    "Numeric:cast_trunc:TableA": "truncated toward zero",
+    "Numeric:cast_wrap:TableA": "source modulo `2^target_width`",
+    "Numeric:guarded_fail:TableA": "result is the fallback's stored bits unchanged",
 }
 
 # A callable mentioned by more than one atom needs a discriminating contract

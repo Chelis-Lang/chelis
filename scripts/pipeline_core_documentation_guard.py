@@ -116,7 +116,11 @@ def validate_document(document: InventoryDocument) -> None:
             pipeline_subject = (
                 not explicit_crates
                 or "chelis-pipeline-core" in explicit_crates
-                or re.search(r"\bthe (?:core|crate)\b", statement, re.IGNORECASE)
+                or re.search(
+                    r"\bthe (?:core|crate)\b(?!\s+chelis-[a-z0-9-]+\b)",
+                    statement.replace("`", ""),
+                    re.IGNORECASE,
+                )
             )
             if pipeline_subject and false_no_std_claim(statement):
                 raise DocumentationBoundaryError(

@@ -155,6 +155,7 @@ Dependency features
             "The crate is `#![no_std]`.",
             "It supports `no_std`.",
             "This module works without std.",
+            "Unlike chelis-dag-core, the crate supports no_std.",
         ):
             with self.subTest(claim=claim), self.assertRaisesRegex(
                 guard.DocumentationBoundaryError, "false current portability claim"
@@ -169,6 +170,9 @@ Dependency features
             with self.subTest(subject=subject):
                 guard.validate_text(
                     inventory + f"\n{guard.REQUIRED_STATEMENT} `{subject}` supports `no_std`."
+                )
+                guard.validate_text(
+                    inventory + f"\nThe crate `{subject}` supports `no_std`."
                 )
         with self.assertRaisesRegex(
             guard.DocumentationBoundaryError, "false current portability claim"

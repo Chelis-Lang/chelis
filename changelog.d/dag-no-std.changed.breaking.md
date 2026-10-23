@@ -25,14 +25,17 @@ Retain the payload census and source-policy tripwire at the canonical graph owne
 Preserve the exact moved host test source and split frozen rows without an allowance increase.
 
 The builtin registry uses compiled declarations to distinguish public callables from internal primitive identities.
+The semantic obligations cover every compiled internal primitive, including casts and guarded failure.
 The native execution oracle reads the runtime owner's staging receipt and verifies the archive and public header digests.
 Compile-fail ownership examples use valid fully qualified graph types.
-The portability guard rejects generic false claims without excluding true sibling-core claims.
+The portability guard keeps explicit sibling subjects.
+It rejects generic false pipeline claims, also when a comparison names a sibling.
 
 Known empty shapes remain valid after large prefix extents.
 Known nonzero counts must fit the graph index domain.
 Cardinality uses bounded u128 intermediates without allocation.
 Runtime metadata retains extent and suffix-stride checks.
 The C inventory associates typedef owners through compiler declaration identities.
+Refresh the independent pipeline artifact fixture lock for the portable graph dependencies.
 
 This ownership change transfers no language, transform, span, serialization, or backend authority.
