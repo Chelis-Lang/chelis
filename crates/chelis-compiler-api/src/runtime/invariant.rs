@@ -11,7 +11,7 @@ use chelis_unord::{UnordMap, UnordSet};
 use chelis_deep::Span;
 use chelis_deep::ast::Atom;
 use chelis_deep::ast::Expr;
-use chelis_types::types::Prim;
+use chelis_numeric_core::prim::Prim;
 
 use super::host_ops::render_value;
 use super::transforms::{extract_prim_from_type_expr, prim_from_name, var_name};
@@ -730,9 +730,9 @@ fn check_representation_finite<'a>(
 /// (`inf`/`-inf`/`NaN`, [05-OBS-2]); the pre-chelis#732 `+Inf`/`-Inf`
 /// spellings migrated with the Phase 1 grammar freeze.
 fn describe_non_finite(v: f64) -> String {
-    chelis_types::format_element(
-        chelis_types::types::Prim::F64,
-        chelis_types::ElementRef::F64(v),
+    chelis_numeric_core::observation::format_element(
+        chelis_numeric_core::prim::Prim::F64,
+        chelis_numeric_core::observation::ElementRef::F64(v),
     )
 }
 

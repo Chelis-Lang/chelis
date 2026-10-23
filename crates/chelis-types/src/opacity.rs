@@ -1019,7 +1019,7 @@ mod tests {
 
     #[test]
     fn demangle_type_rewrites_adt_names_in_signatures() {
-        use crate::types::Prim;
+        use chelis_numeric_core::prim::Prim;
         let ty = Type::function(
             vec![Type::Prim(Prim::F32)],
             Type::adt("Pkg__opq__Demo__Types__Probability".to_string(), vec![]),

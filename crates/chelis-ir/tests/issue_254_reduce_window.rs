@@ -13,7 +13,7 @@
 use chelis_ir::dag::{Dag, DimInfo, ReduceWindowKind, RiscOp, TensorType};
 use chelis_ir::eval::{TensorValue, eval_tensor};
 use chelis_ir::verify;
-use chelis_types::types::Prim;
+use chelis_numeric_core::prim::Prim;
 use chelis_unord::UnordMap;
 
 fn tensor_type(dims: &[usize]) -> TensorType {

@@ -15,9 +15,10 @@ use chelis_deep::{
     DeepTag, ExprCarrier,
     ast::{Atom, Expr, Metadata},
 };
+use chelis_numeric_core::prim::Prim;
 use chelis_types::known_tags::{LaneContribution, deep_tag_lane_contribution};
 use chelis_types::manifest::{HostReason, RootPathStep};
-use chelis_types::types::{Lane, Prim};
+use chelis_types::types::Lane;
 use chelis_types::{CheckedProgram, Realizability, builtin_decl};
 
 // ─── Public types ────────────────────────────────────────────────────────────
@@ -1273,7 +1274,7 @@ fn expr_type_metadata(expr: &Expr) -> Option<&Expr> {
 mod tests {
     use super::*;
     use chelis_deep::ast::Metadata;
-    use chelis_types::types::Prim;
+    use chelis_numeric_core::prim::Prim;
 
     fn check_program_from_source(source: &str) -> CheckedProgram {
         let decls = chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack)

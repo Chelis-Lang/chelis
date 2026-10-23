@@ -12,7 +12,7 @@
 //!  - F8e4m3 must be rejected by the IR-level default helpers too.
 
 use chelis_ir::dag::{DimExpr, RiscOp};
-use chelis_types::types::Prim;
+use chelis_numeric_core::prim::Prim;
 
 // ---------------------------------------------------------------
 // B. Per-row reduce_sum default coverage
@@ -22,7 +22,8 @@ use chelis_types::types::Prim;
 /// for reduce_sum (across all rows).
 #[test]
 fn reduce_sum_int64_default_is_int64_self_matching() {
-    let acc = RiscOp::default_reduce_sum_accumulator(Prim::Int64)
+    let acc = Prim::Int64
+        .default_reduce_sum_accumulator()
         .expect("i64 reduce_sum default must succeed");
     assert_eq!(
         acc,
@@ -34,20 +35,23 @@ fn reduce_sum_int64_default_is_int64_self_matching() {
 /// §5.7.1: bool is rejected for reduce_sum entirely.
 #[test]
 fn reduce_sum_default_bool_rejected_with_workaround_hint() {
-    let err = RiscOp::default_reduce_sum_accumulator(Prim::Bool)
-        .expect_err("bool reduce_sum has no defined default");
+    let err = Prim::Bool
+        .default_reduce_sum_accumulator()
+        .expect_err("bool reduce_sum has no defined default")
+        .to_string();
     assert!(
         err.contains("cast to i32"),
         "diagnostic must suggest the i32 cast workaround; got: {err}"
     );
 }
 
-/// §1.1.1: deferred f8e4m3 must be rejected by the IR-level default
-/// helpers (not just the type checker).
+/// §1.1.1: deferred f8e4m3 must fail the numeric reduction policy.
 #[test]
 fn reduce_sum_default_f8e4m3_rejected_with_spec_diagnostic() {
-    let err = RiscOp::default_reduce_sum_accumulator(Prim::F8e4m3)
-        .expect_err("f8e4m3 is deferred per §1.1.1");
+    let err = Prim::F8e4m3
+        .default_reduce_sum_accumulator()
+        .expect_err("f8e4m3 is deferred per §1.1.1")
+        .to_string();
     assert!(
         err.contains("§1.1.1"),
         "diagnostic must cite §1.1.1; got: {err}"

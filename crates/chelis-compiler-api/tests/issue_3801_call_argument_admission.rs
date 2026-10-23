@@ -22,7 +22,7 @@ use std::collections::BTreeMap;
 #[allow(deprecated)]
 use chelis_compiler_api::compiler::{PreparedEval, prepare_eval};
 use chelis_compiler_api::schema::{EvalRequest, ExecutionValue, SourceKind, TensorValue};
-use chelis_types::types::Prim;
+use chelis_numeric_core::prim::Prim;
 use serde_json::json;
 
 #[path = "../../../tests/support/wire_values.rs"]

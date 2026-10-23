@@ -4,7 +4,7 @@
 
 use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
 use chelis_ir::ownership::{lower_dag_ownership, plan_c_storage, verify_ownership};
-use chelis_types::types::Prim;
+use chelis_numeric_core::prim::Prim;
 
 fn shape(first: usize, second: usize) -> TensorType {
     TensorType {

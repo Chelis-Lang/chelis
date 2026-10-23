@@ -5,7 +5,7 @@
 use chelis_backend_hip::HipCodegenResult;
 mod support;
 use chelis_ir::dag::{ComparisonKind, Dag, DimInfo, RiscOp, TensorType};
-use chelis_types::types::Prim;
+use chelis_numeric_core::prim::Prim;
 use chelis_types::unsupported::{RejectionAuthorityKind, Stage, Unsupported, UnsupportedKind};
 use support::codegen_hip;
 
@@ -122,7 +122,7 @@ fn rt1_load_permute_add_sum_chain() {
         decl,
         RiscOp::Sum {
             axis: 1,
-            accumulator: chelis_types::types::Prim::F32,
+            accumulator: chelis_numeric_core::prim::Prim::F32,
         },
         vec![a],
         vec_f32(4),
@@ -438,7 +438,7 @@ fn rt7_different_reductions_different_kernels() {
         decl,
         RiscOp::Sum {
             axis: 0,
-            accumulator: chelis_types::types::Prim::F32,
+            accumulator: chelis_numeric_core::prim::Prim::F32,
         },
         vec![x],
         vec_f32(4),
@@ -448,7 +448,7 @@ fn rt7_different_reductions_different_kernels() {
         decl,
         RiscOp::Sum {
             axis: 1,
-            accumulator: chelis_types::types::Prim::F32,
+            accumulator: chelis_numeric_core::prim::Prim::F32,
         },
         vec![x],
         vec_f32(3),
@@ -940,7 +940,7 @@ fn rt14_staged_scalar_reduction_allocates_inline_scratch() {
         decl,
         RiscOp::Sum {
             axis: 0,
-            accumulator: chelis_types::types::Prim::F32,
+            accumulator: chelis_numeric_core::prim::Prim::F32,
         },
         vec![x],
         scalar_f32(),
@@ -1011,7 +1011,7 @@ fn rt15_matmul_specialization_respects_contiguity() {
         contiguous_decl,
         RiscOp::Sum {
             axis: 1,
-            accumulator: chelis_types::types::Prim::F32,
+            accumulator: chelis_numeric_core::prim::Prim::F32,
         },
         vec![mul],
         mat_f32(2, 4),
@@ -1080,7 +1080,7 @@ fn rt15_matmul_specialization_respects_contiguity() {
         fallback_decl,
         RiscOp::Sum {
             axis: 1,
-            accumulator: chelis_types::types::Prim::F32,
+            accumulator: chelis_numeric_core::prim::Prim::F32,
         },
         vec![mul],
         mat_f32(2, 4),

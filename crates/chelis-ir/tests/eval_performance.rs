@@ -1,8 +1,8 @@
 //! Incremental `eval-performance` oracle: sparse runtime indices [05-SPARSE-1].
 use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
 use chelis_ir::eval::{TensorValue, eval_tensor};
-use chelis_types::dtype_semantics::{RawTensor, finalize_tensor};
-use chelis_types::types::Prim;
+use chelis_numeric_core::dtype_semantics::{RawTensor, finalize_tensor};
+use chelis_numeric_core::prim::Prim;
 use chelis_unord::UnordMap;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -508,13 +508,20 @@ fn eval_performance_cartesian_indices_errors_and_empty_domain() {
                     (
                         "base".into(),
                         if source_prim == Prim::Key {
-                            let key = chelis_types::RandomKey::from_seed(
-                                chelis_types::scalar_from_i64("oracle", Prim::Int64, 42).unwrap(),
+                            let key = chelis_numeric_core::dtype_semantics::RandomKey::from_seed(
+                                chelis_numeric_core::dtype_semantics::scalar_from_i64(
+                                    "oracle",
+                                    Prim::Int64,
+                                    42,
+                                )
+                                .unwrap(),
                             )
                             .unwrap();
                             TensorValue::from_storage(
                                 base_shape.clone(),
-                                chelis_types::TensorStorage::from_keys(vec![key; base_len]),
+                                chelis_numeric_core::dtype_semantics::TensorStorage::from_keys(
+                                    vec![key; base_len],
+                                ),
                             )
                         } else {
                             TensorValue::from_vec(base_shape.clone(), vec![1.0; base_len])

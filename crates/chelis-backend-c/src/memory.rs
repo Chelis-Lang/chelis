@@ -5,7 +5,7 @@ use chelis_ir::ownership::{
     CStorageLane, StoragePlacement, StorageSlotPlan, VerifiedDagView, VerifiedStorageLayout,
     VerifiedStoragePlan,
 };
-use chelis_types::types::Prim;
+use chelis_numeric_core::prim::Prim;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NodeMemoryKind {

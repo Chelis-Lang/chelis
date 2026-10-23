@@ -52,7 +52,12 @@
 //! needed for scalar payloads, so the lifetime was dropped. Same name, same
 //! role, updated in both owning docs in this change set.
 
-use crate::types::Prim;
+use crate::prim::Prim;
+#[cfg(feature = "alloc")]
+use alloc::{
+    format,
+    string::{String, ToString},
+};
 
 /// Decimal-form lower threshold: a rendering whose RENDERED magnitude is
 /// below `1e-4` (and not zero) takes e-notation. Normative constant
@@ -99,7 +104,7 @@ impl ElementRef {
         }
     }
 }
-
+#[cfg(feature = "alloc")]
 /// THE printed form of one element ([05-OBS-1..2]). Exhaustive over
 /// [`Prim`] with no `_` arm (`spec/design/loud_unsupported.md` §C4.1).
 ///
@@ -184,14 +189,14 @@ pub fn format_element(prim: Prim, value: ElementRef) -> String {
         ),
     }
 }
-
+#[cfg(feature = "alloc")]
 /// THE printed form of a random key: `key(` then its 64 bits as the 16
 /// lowercase hex digits of spec/10 section 3.1's key carrier, then `)`. A
 /// key has no numeric value, so no numeric formatter renders it.
 pub fn format_key(key: crate::dtype_semantics::RandomKey) -> String {
     format_key_bits(key.bits())
 }
-
+#[cfg(feature = "alloc")]
 /// [`format_key`] over a key's stored 64 bits, for a native runtime that
 /// holds a key as its storage word ([05-OBS-2]).
 pub fn format_key_bits(bits: u64) -> String {
@@ -202,7 +207,7 @@ pub fn format_key_bits(bits: u64) -> String {
         .collect::<String>();
     format!("key({hex})")
 }
-
+#[cfg(feature = "alloc")]
 /// Shortest-round-trip rendering for a half-precision value, in the
 /// normative grammar. `image` is the exact f64 widening of the stored
 /// value, `stored_bits` its bit pattern (widened to u64), and `narrow`
@@ -233,7 +238,7 @@ fn format_half(image: f64, stored_bits: u64, narrow: &dyn Fn(f64) -> u64, width:
     let (digits, sci_exp) = shortest_digits(abs, &round_trips, width);
     assemble(neg, &digits, sci_exp)
 }
-
+#[cfg(feature = "alloc")]
 /// Find the shortest decimal digit string `D` (no trailing zeros) and
 /// scientific exponent `E` (value = `D[0].D[1..] x 10^E`) such that the
 /// signed rendering parses back to the stored bits. Searches digit counts
@@ -301,7 +306,7 @@ fn shortest_digits(abs: f64, round_trips: &dyn Fn(&str) -> bool, width: &str) ->
     // half value IS an exact f64; unreachable for finite nonzero input.
     panic!("shortest_digits: no 17-digit decimal round-trips a finite {width} value ({abs:e})")
 }
-
+#[cfg(feature = "alloc")]
 /// Split "d.ddd...e<exp>" (Rust `{:.*e}` output) into (digits, exponent).
 fn split_sci(sci: &str) -> (String, i32) {
     let (mantissa, exp) = sci
@@ -311,7 +316,7 @@ fn split_sci(sci: &str) -> (String, i32) {
     let exp: i32 = exp.parse().expect("exponent parses");
     (digits, exp)
 }
-
+#[cfg(feature = "alloc")]
 /// Assemble digits + scientific exponent into the normative grammar,
 /// choosing decimal vs e-notation from the RENDERED magnitude - the value
 /// the chosen shortest digits denote, whose decade is exactly `sci_exp` -
@@ -351,7 +356,7 @@ fn assemble(neg: bool, digits: &str, sci_exp: i32) -> String {
         format!("{sign}{mantissa}e{sci_exp}")
     }
 }
-
+#[cfg(feature = "alloc")]
 #[cfg(test)]
 mod tests {
     use super::*;

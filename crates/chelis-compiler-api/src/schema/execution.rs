@@ -1,6 +1,6 @@
 //! Admission for the stored execution carriers in spec/10 §3.2.
 
-use chelis_types::{ScalarValue, TensorStorage};
+use chelis_numeric_core::dtype_semantics::{ScalarValue, TensorStorage};
 use schemars::{JsonSchema, r#gen::SchemaGenerator, schema::Schema};
 use serde::{Deserialize, Serialize};
 
@@ -41,7 +41,7 @@ impl JsonSchema for NumericScalar {
     }
 
     fn json_schema(generator: &mut SchemaGenerator) -> Schema {
-        let mut schema = ScalarValue::json_schema(generator).into_object();
+        let mut schema = super::numeric::ScalarValueSchema::json_schema(generator).into_object();
         let variants = schema
             .subschemas
             .as_mut()
@@ -73,7 +73,7 @@ struct TensorWire {
     shape: Vec<i64>,
     /// The execution storage grammar: a key tensor's storage object is
     /// admitted here and nowhere in a graph.
-    #[serde(with = "chelis_types::dtype_semantics::execution_storage")]
+    #[serde(with = "chelis_numeric_core::dtype_semantics::execution_storage")]
     data: TensorStorage,
 }
 

@@ -20,9 +20,10 @@ use crate::env::DeclarationBinderIdentities;
 use crate::errors::{CheckError, CheckErrorKind, ErrorWitness, report_witness};
 use crate::session::{DeclarationDiagnosticOwner, DeclarationTypeDiagnosticClass, DiagnosticSink};
 use crate::types::{
-    Dim, DimVar, NominalArg, NominalParamKind, Prim, RankVar, TensorPrec, Type, TypeVar,
+    Dim, DimVar, NominalArg, NominalParamKind, RankVar, TensorPrec, Type, TypeVar,
     TypeVarRestriction, VarGen,
 };
+use chelis_numeric_core::prim::Prim;
 
 /// A type that crossed the Deep syntax boundary without a silent fallback.
 /// The tuple field is private so callers cannot assert resolution without

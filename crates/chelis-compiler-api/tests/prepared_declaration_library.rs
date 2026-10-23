@@ -76,10 +76,10 @@ fn prepared_library_keeps_globals_strings_and_tensor_bindings() {
                 "input".to_string(),
                 chelis_compiler_api::schema::TensorValue {
                     shape: vec![2],
-                    data: chelis_types::finalize_tensor(
+                    data: chelis_numeric_core::dtype_semantics::finalize_tensor(
                         "probe",
-                        chelis_types::types::Prim::F32,
-                        chelis_types::RawTensor::Float(vec![1.25, -2.5]),
+                        chelis_numeric_core::prim::Prim::F32,
+                        chelis_numeric_core::dtype_semantics::RawTensor::Float(vec![1.25, -2.5]),
                     )
                     .unwrap(),
                 },

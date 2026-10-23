@@ -9,6 +9,8 @@
 //! independent of every other section. A program's kernel text is the prelude plus the
 //! sections of the kernels it calls, in amalgamation order.
 
+use std::prelude::v1::*;
+
 /// The amalgamation, byte for byte.
 pub const AMALGAMATION: &str = include_str!("../csrc/crmath_amalgamation.c");
 

@@ -2,7 +2,8 @@
 
 use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
 use chelis_ir::eval::{TensorValue, eval_tensor_roots_with_strict, eval_tensor_with_strict};
-use chelis_types::{RawTensor, finalize_tensor, types::Prim};
+use chelis_numeric_core::dtype_semantics::{RawTensor, finalize_tensor};
+use chelis_numeric_core::prim::Prim;
 
 fn typed(shape: Vec<usize>, dtype: Prim) -> TensorValue {
     let count = shape.iter().product::<usize>();

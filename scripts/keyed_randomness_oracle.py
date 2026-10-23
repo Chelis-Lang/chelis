@@ -45,7 +45,7 @@ class Suite:
 # Reviewed finite corpus, not a discovery rule or a universal language claim.
 # Removing/renaming one of these witnesses requires reviewing its replacement.
 SUITES = (
-    Suite("chelis-types", "random_key_reference", (
+    Suite("chelis-numeric-core", "random_key_reference", (
         "key_ref_worked_values_are_the_kernels_values",
     ), ("reference",)),
     Suite("chelis-types", "key_linearity", (
@@ -185,7 +185,7 @@ def expected_tests(suites: tuple[Suite, ...]) -> set[str]:
     return set(identities)
 
 
-def nextest_command(action: str, suites: tuple[Suite, ...], config: Path) -> list[str]:
+def nextest_command(action: str, suites: tuple[Suite, ...], config: Path, root: Path) -> list[str]:
     expected_tests(suites)
     packages = {suite.package for suite in suites}
     if len(packages) != 1:
@@ -195,10 +195,21 @@ def nextest_command(action: str, suites: tuple[Suite, ...], config: Path) -> lis
         for suite in suites
     )
     package = next(iter(packages))
+    manifest = tomllib.loads((root / "crates" / package / "Cargo.toml").read_text())
+    targets = {
+        target["name"]: target.get("required-features", ())
+        for target in manifest.get("test", ())
+    }
+    features = {
+        f"{package}/{feature}"
+        for suite in suites for feature in targets.get(suite.target, ())
+    }
     command = ["cargo", "nextest", action, "--locked", "--config-file", str(config), "-p", package]
     if package == "chelis-compiler-api":
         # Native execution targets require the instrumented carried runtime.
-        command.extend(["--features", "chelis-compiler-api/ownership-ledger"])
+        features.add("chelis-compiler-api/ownership-ledger")
+    if features:
+        command.extend(["--features", ",".join(sorted(features))])
     for suite in suites:
         command.extend(["--test", suite.target])
     command.extend(["--profile", "ci-full", "--ignore-default-filter", "-E", expression])
@@ -346,13 +357,13 @@ def execute(root: Path, output: Path, environment: dict[str, str], timeout: int,
         junit = target / "nextest/ci-full/junit.xml"
         for package in dict.fromkeys(suite.package for suite in suites):
             group = tuple(suite for suite in suites if suite.package == package)
-            listed = run_command(nextest_command("list", group, config), root, environment, output,
+            listed = run_command(nextest_command("list", group, config, root), root, environment, output,
                                  f"{package}-list", timeout)
             selected = validate_listing(json.loads(listed), group, root, target)
             junit.unlink(missing_ok=True)
             run_error = None
             try:
-                run_command(nextest_command("run", group, config), root, environment, output,
+                run_command(nextest_command("run", group, config, root), root, environment, output,
                             f"{package}-run", timeout)
             except OracleFailure as error:
                 run_error = error

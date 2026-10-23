@@ -18,8 +18,9 @@ use std::cell::RefCell;
 use crate::env::{DeclarationBinderIdentities, Env, InstantiatedScheme};
 use crate::errors::{CheckError, CheckErrorKind};
 use crate::session::DiagnosticSink;
-use crate::types::{NominalArg, Prim, Scheme, Type, TypeVar, TypeVarRestriction, VarGen};
+use crate::types::{NominalArg, Scheme, Type, TypeVar, TypeVarRestriction, VarGen};
 use crate::unify::Subst;
+use chelis_numeric_core::prim::Prim;
 
 thread_local! {
     static GROUP_CTX: RefCell<Option<GroupCtx>> = const { RefCell::new(None) };

@@ -8,6 +8,8 @@ use serde::{Deserialize, Serialize};
 use crate::session::DeclarationDiagnosticOwner;
 use crate::types::*;
 use crate::unify::{GenericParameter, Subst};
+#[cfg(test)]
+use chelis_numeric_core::prim::Prim;
 
 #[cfg(feature = "generalize-sweep-oracle")]
 thread_local! {

@@ -598,7 +598,7 @@ fn single_op_dag(op: WireRiscOp) -> WireDag {
         WireRiscOp::Const { value } => value.prim(),
         WireRiscOp::ConstTensor { data } => data.prim(),
         WireRiscOp::Pad { fill, .. } => fill.prim(),
-        _ => chelis_types::types::Prim::F32,
+        _ => chelis_numeric_core::prim::Prim::F32,
     };
     let size = match &op {
         WireRiscOp::ConstTensor { data } => i64::try_from(data.len()).unwrap(),
@@ -717,8 +717,12 @@ fn finite_extreme_const_from_real_source_still_passes_and_hashes() {
     parsed
         .validate_schema_version()
         .expect("the artifact is a supported version");
-    let expected = chelis_types::scalar_from_f64("test", chelis_types::types::Prim::F64, 1e300)
-        .expect("the finite extreme has an exact tagged f64 payload");
+    let expected = chelis_numeric_core::dtype_semantics::scalar_from_f64(
+        "test",
+        chelis_numeric_core::prim::Prim::F64,
+        1e300,
+    )
+    .expect("the finite extreme has an exact tagged f64 payload");
     assert!(
         parsed
             .nodes
@@ -732,8 +736,12 @@ fn each_non_finite_const_variant_is_rejected() {
     // The wire admits all three classes exactly; BoxRange rejects them.
     for value in [f64::INFINITY, f64::NEG_INFINITY, f64::NAN] {
         let op = WireRiscOp::Const {
-            value: chelis_types::scalar_from_f64("test", chelis_types::types::Prim::F64, value)
-                .expect("float finalize is total"),
+            value: chelis_numeric_core::dtype_semantics::scalar_from_f64(
+                "test",
+                chelis_numeric_core::prim::Prim::F64,
+                value,
+            )
+            .expect("float finalize is total"),
         };
         let bytes = serde_json::to_vec(&single_op_dag(op.clone())).unwrap();
         let decoded: WireDag = serde_json::from_slice(&bytes).unwrap();
@@ -764,9 +772,9 @@ fn every_embedded_numeric_field_is_guarded() {
                         value: NonnegativeExtent::new(0).unwrap(),
                     },
                 )],
-                fill: chelis_types::scalar_from_f64(
+                fill: chelis_numeric_core::dtype_semantics::scalar_from_f64(
                     "test",
-                    chelis_types::types::Prim::F32,
+                    chelis_numeric_core::prim::Prim::F32,
                     f64::NAN,
                 )
                 .expect("f32 accepts NaN"),
@@ -775,9 +783,9 @@ fn every_embedded_numeric_field_is_guarded() {
         ),
         (
             WireRiscOp::Const {
-                value: chelis_types::scalar_from_f64(
+                value: chelis_numeric_core::dtype_semantics::scalar_from_f64(
                     "test",
-                    chelis_types::types::Prim::F64,
+                    chelis_numeric_core::prim::Prim::F64,
                     f64::INFINITY,
                 )
                 .expect("float finalize is total"),
@@ -834,12 +842,20 @@ fn finite_numeric_payloads_pass_the_proof_boundary() {
                     value: NonnegativeExtent::new(0).unwrap(),
                 },
             )],
-            fill: chelis_types::scalar_from_f64("test", chelis_types::types::Prim::F32, 0.0)
-                .expect("finite f32"),
+            fill: chelis_numeric_core::dtype_semantics::scalar_from_f64(
+                "test",
+                chelis_numeric_core::prim::Prim::F32,
+                0.0,
+            )
+            .expect("finite f32"),
         },
         WireRiscOp::Const {
-            value: chelis_types::scalar_from_f64("test", chelis_types::types::Prim::F64, 3.5)
-                .expect("finite f64"),
+            value: chelis_numeric_core::dtype_semantics::scalar_from_f64(
+                "test",
+                chelis_numeric_core::prim::Prim::F64,
+                3.5,
+            )
+            .expect("finite f64"),
         },
         WireRiscOp::ConstTensor {
             data: serde_json::from_value(

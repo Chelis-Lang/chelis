@@ -18,6 +18,7 @@ chelis-effects.workspace = true
 chelis-ir.workspace = true
 
 [dev-dependencies]
+chelis-numeric-core.workspace = true
 chelis-syntax-host.workspace = true
 
 [lints]

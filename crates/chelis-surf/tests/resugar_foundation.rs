@@ -508,7 +508,7 @@ fn semantic_resugaring_keeps_declaration_bound_literal_dtypes_before_source_elis
 
 #[test]
 fn semantic_resugaring_preserves_converting_named_and_binder_casts() {
-    use chelis_deep::NamedCastMode;
+    use chelis_numeric_core::named_cast::NamedCastMode;
     use chelis_surf::ast::{CastMode, Decl, Expr};
     use chelis_surf::resugar::resugar_program_for_analysis;
     let source = "def convert(dummy: i32) -> f64 = cast(1.1f32, f64)\ndef named(dummy: i32) -> i32 = cast_trunc(1.5, i32)\ndef binder[p: Float](dummy: p) -> p = cast(1.1, p)\n";

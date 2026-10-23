@@ -652,7 +652,7 @@ class FormatNarrowingTests(unittest.TestCase):
         source = (
             "(\n"
             "    Pat::RustDebugNumericFormat,\n"
-            '    "crates/chelis-types/src/observation.rs",\n'
+            '    "crates/chelis-numeric-core/src/observation.rs",\n'
             "    999,\n"
             '    "grown",\n'
             "),\n"

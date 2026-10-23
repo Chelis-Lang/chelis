@@ -1,7 +1,7 @@
 //! [05-OP-40]: both direct extrema preserve the complete operand type.
 use chelis_ir::dag::{Dag, DimInfo, ExtremaKind, RiscOp, TensorType};
 use chelis_ir::{tier2, verify};
-use chelis_types::types::Prim;
+use chelis_numeric_core::prim::Prim;
 
 fn ty(dims: &[usize], precision: Prim) -> TensorType {
     TensorType {

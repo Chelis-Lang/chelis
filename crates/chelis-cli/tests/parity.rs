@@ -93,7 +93,7 @@
 //! prove arithmetic reduction order, result dtypes, or other operations.
 
 use assert_cmd::Command;
-use chelis_types::agreement::compare_exact_observations;
+use chelis_numeric_core::agreement::compare_exact_observations;
 use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};

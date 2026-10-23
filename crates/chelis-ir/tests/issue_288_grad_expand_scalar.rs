@@ -46,7 +46,7 @@
 use chelis_ir::dag::{Dag, DimInfo, NodeId, RiscOp, TensorType};
 use chelis_ir::eval::{TensorValue, eval_tensor};
 use chelis_ir::grad::{AdError, grad_dag_checked};
-use chelis_types::types::Prim;
+use chelis_numeric_core::prim::Prim;
 use chelis_unord::UnordMap;
 
 fn vec_n_f32(n: usize) -> TensorType {

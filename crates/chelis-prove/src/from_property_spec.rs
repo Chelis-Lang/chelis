@@ -5,7 +5,7 @@
 
 use crate::solver::{ArithOp, BoolOp, CmpOp, SmtExpr, SmtSort};
 use crate::tier_b::SmtProperty;
-use chelis_types::types::Prim;
+use chelis_numeric_core::prim::Prim;
 use chelis_unord::UnordMap;
 use serde::Deserialize;
 

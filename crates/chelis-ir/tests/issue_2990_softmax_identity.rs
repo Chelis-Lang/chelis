@@ -1,5 +1,5 @@
 use chelis_ir::{Dag, DimInfo, RiscOp, TensorType, compositions, tier2, verify, vmap};
-use chelis_types::types::Prim;
+use chelis_numeric_core::prim::Prim;
 
 fn graph(precision: Prim, axis: usize) -> Dag {
     let mut dag = Dag::new();
@@ -109,7 +109,10 @@ fn decomposition_preserves_activation_provenance_and_nonvalue_edges() {
             site: chelis_ir::dag::ExtentWitnessSite::LiteralResultClaim,
             parameter: String::new(),
             axis: chelis_ir::dag::RtAxis::Lit(0),
-            requirements: vec![chelis_types::scalar_from_i64("test", Prim::Int64, 2).unwrap()],
+            requirements: vec![
+                chelis_numeric_core::dtype_semantics::scalar_from_i64("test", Prim::Int64, 2)
+                    .unwrap(),
+            ],
             claims: vec![],
         },
         vec![],
@@ -166,7 +169,7 @@ fn empty_axis_traps_only_when_the_retained_softmax_is_active() {
         dag::Owner,
         eval::{self, TensorValue},
     };
-    use chelis_types::dtype_semantics::{RawTensor, finalize_tensor};
+    use chelis_numeric_core::dtype_semantics::{RawTensor, finalize_tensor};
     let mut dag = Dag::new();
     let owner = dag.declare("empty");
     let active = dag.add_node(

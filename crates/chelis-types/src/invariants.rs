@@ -36,7 +36,7 @@ use chelis_pred::{PredAmenability, PredGrammarError};
 
 use crate::errors::{CheckError, CheckErrorKind};
 use crate::session::DiagnosticSink;
-use crate::types::Prim;
+use chelis_numeric_core::prim::Prim;
 
 trait DiagnosticOutput {
     fn push_error(&mut self, error: CheckError);

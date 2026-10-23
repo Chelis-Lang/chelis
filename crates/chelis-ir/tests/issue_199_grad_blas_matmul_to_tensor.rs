@@ -32,7 +32,7 @@
 use chelis_ir::dag::{Dag, DimExpr, DimInfo, NodeId, RiscOp, TensorType};
 use chelis_ir::eval::{TensorValue, eval_tensor};
 use chelis_ir::grad::{AdError, grad_dag, grad_dag_checked};
-use chelis_types::types::Prim;
+use chelis_numeric_core::prim::Prim;
 use chelis_unord::UnordMap;
 
 /// Build a forward DAG `Y = A @ B` (BlasMatmul) followed by a scalar

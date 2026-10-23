@@ -8,7 +8,7 @@
 
 use chelis_ir::dag::{DagNode, DimInfo, NodeId, RiscOp};
 use chelis_ir::ownership::VerifiedDagView;
-use chelis_types::types::Prim;
+use chelis_numeric_core::prim::Prim;
 
 /// Information about a detected matmul pattern.
 #[derive(Debug, Clone, PartialEq)]
@@ -146,7 +146,7 @@ pub fn find_all_matmuls(dag: VerifiedDagView<'_>) -> Vec<(NodeId, MatmulInfo)> {
 mod tests {
     use super::*;
     use chelis_ir::dag::{Dag, DimInfo, TensorType};
-    use chelis_types::types::Prim;
+    use chelis_numeric_core::prim::Prim;
 
     fn detect(dag: &Dag, sum: NodeId) -> Option<MatmulInfo> {
         let verified = crate::testing::verified_dag(dag)
@@ -211,7 +211,7 @@ mod tests {
             decl,
             RiscOp::Sum {
                 axis: 1,
-                accumulator: chelis_types::types::Prim::F32,
+                accumulator: chelis_numeric_core::prim::Prim::F32,
             },
             vec![mul],
             mat_f32(2, 4),
@@ -271,7 +271,7 @@ mod tests {
             decl,
             RiscOp::Sum {
                 axis: 0,
-                accumulator: chelis_types::types::Prim::F32,
+                accumulator: chelis_numeric_core::prim::Prim::F32,
             },
             vec![mul],
             mat_f32(3, 4),
@@ -324,7 +324,7 @@ mod tests {
             decl,
             RiscOp::Sum {
                 axis: 1,
-                accumulator: chelis_types::types::Prim::F32,
+                accumulator: chelis_numeric_core::prim::Prim::F32,
             },
             vec![mul],
             mat_f32(2, 4),

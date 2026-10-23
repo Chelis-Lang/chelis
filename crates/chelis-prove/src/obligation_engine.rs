@@ -18,8 +18,9 @@ use std::collections::BTreeMap;
 use chelis_compiler_api::schema::{EvalRequest, ExecutionValue, SourceKind};
 use chelis_deep::Span;
 use chelis_deep::ast::{Atom, Expr, Metadata};
-use chelis_types::types::{Prim, Type};
-use chelis_types::{ScalarValue, scalar_from_f64, scalar_from_i64};
+use chelis_numeric_core::dtype_semantics::{ScalarValue, scalar_from_f64, scalar_from_i64};
+use chelis_numeric_core::prim::Prim;
+use chelis_types::types::Type;
 
 use crate::composition::{
     AssumptionDischarge, AssumptionRecord, CompositeVerdict, DischargeMethod, FUZZ_TOLERANCE,
@@ -2088,7 +2089,9 @@ impl ProducerCall {
                                 .iter()
                                 .map(|dim| i64::try_from(*dim).expect("a sampled extent fits i64"))
                                 .collect(),
-                            data: chelis_types::tensor_from_scalars(*prim, values),
+                            data: chelis_numeric_core::dtype_semantics::tensor_from_scalars(
+                                *prim, values,
+                            ),
                         },
                     );
                 }

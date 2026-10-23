@@ -3,7 +3,8 @@
 use chelis_compiler_api::schema::numbers::{
     NonnegativeCount, SourceFloat, SourceInteger, UnitInterval,
 };
-use chelis_types::{ScalarValue, scalar_from_f64, scalar_from_i64, types::Prim};
+use chelis_numeric_core::dtype_semantics::{ScalarValue, scalar_from_f64, scalar_from_i64};
+use chelis_numeric_core::prim::Prim;
 
 #[test]
 fn float_adapters_preserve_their_exact_binary64_domain() {

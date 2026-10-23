@@ -1,0 +1,42 @@
+[package]
+name = "chelis-numeric-core"
+description = "Portable numeric values, operations, and observation policy"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = ["alloc"]
+alloc = ["serde?/alloc"]
+serde = ["dep:serde", "half/serde"]
+
+[dependencies]
+chelis-vocab = { workspace = true, default-features = false }
+chelis-crmath = { workspace = true, default-features = false }
+half = { version = "2", default-features = false }
+libm = { version = "0.2.16", default-features = false, features = ["arch"] }
+serde = { version = "1", default-features = false, features = ["derive"], optional = true }
+
+[dev-dependencies]
+bincode = "1"
+serde_json = "1"
+
+[[test]]
+name = "exact_wire_codec"
+required-features = ["alloc", "serde"]
+
+[[test]]
+name = "random_key_reference"
+required-features = ["alloc"]
+
+[[test]]
+name = "scalar_wire"
+required-features = ["serde"]
+
+[[example]]
+name = "wire_codec_probe"
+required-features = ["alloc", "serde"]
+
+[lints]
+workspace = true

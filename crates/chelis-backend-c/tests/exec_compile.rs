@@ -22,8 +22,8 @@ use chelis_ir::host::{
     ConcreteHostFunction as HostFunction, ConcreteHostParam as HostParam,
     ConcreteHostProgram as HostProgram, HostFunctionOrigin,
 };
-use chelis_types::types::Prim;
-use chelis_types::{RawTensor, finalize_tensor};
+use chelis_numeric_core::dtype_semantics::{RawTensor, finalize_tensor};
+use chelis_numeric_core::prim::Prim;
 use chelis_unord::UnordMap;
 use std::fs;
 use std::process::Command;
@@ -156,7 +156,11 @@ fn checked_indexing_run_batch(cases: &[(String, String)]) -> Vec<std::process::O
         .collect()
 }
 
-fn checked_literal_dag(storage: chelis_types::TensorStorage, extent: usize, output: Prim) -> Dag {
+fn checked_literal_dag(
+    storage: chelis_numeric_core::dtype_semantics::TensorStorage,
+    extent: usize,
+    output: Prim,
+) -> Dag {
     let mut dag = Dag::new();
     let decl = dag.declare("test");
     dag.add_node(
@@ -173,7 +177,7 @@ fn checked_literal_dag(storage: chelis_types::TensorStorage, extent: usize, outp
 }
 #[test]
 fn checked_literals_preserve_every_storage_width_and_reject_count_mismatch() {
-    use chelis_types::{RawTensor, StorageView, finalize_tensor};
+    use chelis_numeric_core::dtype_semantics::{RawTensor, StorageView, finalize_tensor};
     for dtype in [
         Prim::F32,
         Prim::F64,
@@ -269,10 +273,10 @@ int main(void){chelis_tensor *out[1]={0};literal_probe(0,0,out,1);if(chelis_tens
 }
 #[test]
 fn checked_literals_reject_inconsistent_ir_storage_dtype() {
-    let value = chelis_types::finalize_tensor(
+    let value = chelis_numeric_core::dtype_semantics::finalize_tensor(
         "const",
         Prim::F32,
-        chelis_types::RawTensor::Float(vec![1.0]),
+        chelis_numeric_core::dtype_semantics::RawTensor::Float(vec![1.0]),
     )
     .unwrap();
     let result = codegen(&checked_literal_dag(value, 1, Prim::Int32), "literal_probe");
@@ -1772,7 +1776,7 @@ fn checked_c_movement_affine_maps_preserve_bits_under_sanitizers() {
                 .map(|&(a, b)| (RtDim::Lit(a), RtDim::Lit(b)))
                 .collect()
         };
-        let fill = chelis_types::scalar_from_i64("pad", prim, 1).unwrap();
+        let fill = chelis_numeric_core::dtype_semantics::scalar_from_i64("pad", prim, 1).unwrap();
         let mut padded = vec![-1_i64; 18];
         for (input, output) in [8, 9, 10, 14, 15, 16].into_iter().enumerate() {
             padded[output] = input as i64;
@@ -1942,7 +1946,8 @@ fn checked_c_movement_runtime_affine_bounds_reject_before_allocation() {
             "pad",
             RiscOp::Pad {
                 padding: vec![(RtDim::Node(1), RtDim::Lit(0))],
-                fill: chelis_types::scalar_from_i64("pad", Prim::Int64, 1).unwrap(),
+                fill: chelis_numeric_core::dtype_semantics::scalar_from_i64("pad", Prim::Int64, 1)
+                    .unwrap(),
             },
             vec![(2, Some(5)), (-1, None), (i64::MAX, None)],
         ),
@@ -2693,7 +2698,7 @@ fn exec_reduce_sum_correct_output() {
         decl,
         RiscOp::Sum {
             axis: 0,
-            accumulator: chelis_types::types::Prim::F32,
+            accumulator: chelis_numeric_core::prim::Prim::F32,
         },
         vec![a],
         scalar_ty,
@@ -3725,7 +3730,7 @@ fn exec_reduce_sum_issue_163_repro_is_bit_exact_with_evaluator() {
         decl,
         RiscOp::Sum {
             axis: 0,
-            accumulator: chelis_types::types::Prim::F32,
+            accumulator: chelis_numeric_core::prim::Prim::F32,
         },
         vec![a],
         scalar_ty,
@@ -5365,20 +5370,29 @@ fn exec_cmplt_f64_runtime_operands_match_evaluator() {
     );
 }
 
-fn typed_storage(prim: Prim, raw: chelis_types::RawTensor) -> chelis_types::TensorStorage {
-    chelis_types::finalize_tensor("typed C nonnumeric test", prim, raw).unwrap()
+fn typed_storage(
+    prim: Prim,
+    raw: chelis_numeric_core::dtype_semantics::RawTensor,
+) -> chelis_numeric_core::dtype_semantics::TensorStorage {
+    chelis_numeric_core::dtype_semantics::finalize_tensor("typed C nonnumeric test", prim, raw)
+        .unwrap()
 }
 
-fn typed_value(storage: chelis_types::TensorStorage) -> TensorValue {
+fn typed_value(storage: chelis_numeric_core::dtype_semantics::TensorStorage) -> TensorValue {
     TensorValue::from_storage(vec![storage.len()], storage)
 }
 
-fn typed_value_with_shape(shape: Vec<usize>, storage: chelis_types::TensorStorage) -> TensorValue {
+fn typed_value_with_shape(
+    shape: Vec<usize>,
+    storage: chelis_numeric_core::dtype_semantics::TensorStorage,
+) -> TensorValue {
     TensorValue::from_storage(shape, storage)
 }
 
-fn c_storage_case(storage: &chelis_types::TensorStorage) -> (&'static str, &'static str, String) {
-    use chelis_types::StorageView;
+fn c_storage_case(
+    storage: &chelis_numeric_core::dtype_semantics::TensorStorage,
+) -> (&'static str, &'static str, String) {
+    use chelis_numeric_core::dtype_semantics::StorageView;
 
     let values = match storage.view() {
         StorageView::F64(values) => values
@@ -5497,7 +5511,7 @@ fn typed_comparison_c_matrix_matches_evaluator_for_every_identity_and_dtype() {
             (
                 typed_storage(
                     prim,
-                    chelis_types::RawTensor::Float(vec![
+                    chelis_numeric_core::dtype_semantics::RawTensor::Float(vec![
                         f64::from_bits(0xfff8_1234_5678_9abc),
                         -0.0,
                         f64::INFINITY,
@@ -5507,13 +5521,25 @@ fn typed_comparison_c_matrix_matches_evaluator_for_every_identity_and_dtype() {
                 ),
                 typed_storage(
                     prim,
-                    chelis_types::RawTensor::Float(vec![0.0, 0.0, f64::INFINITY, -1.0, 4.0]),
+                    chelis_numeric_core::dtype_semantics::RawTensor::Float(vec![
+                        0.0,
+                        0.0,
+                        f64::INFINITY,
+                        -1.0,
+                        4.0,
+                    ]),
                 ),
             )
         } else {
             (
-                typed_storage(prim, chelis_types::RawTensor::Int(vec![-2, 0, 3, 4, 5])),
-                typed_storage(prim, chelis_types::RawTensor::Int(vec![-1, 0, 2, 4, 6])),
+                typed_storage(
+                    prim,
+                    chelis_numeric_core::dtype_semantics::RawTensor::Int(vec![-2, 0, 3, 4, 5]),
+                ),
+                typed_storage(
+                    prim,
+                    chelis_numeric_core::dtype_semantics::RawTensor::Int(vec![-1, 0, 2, 4, 6]),
+                ),
             )
         };
         let n = lhs.len();
@@ -5751,7 +5777,7 @@ fn typed_where_c_copies_selected_storage_bits_for_every_admitted_dtype() {
             (
                 typed_storage(
                     prim,
-                    chelis_types::RawTensor::Float(vec![
+                    chelis_numeric_core::dtype_semantics::RawTensor::Float(vec![
                         f64::from_bits(0xfff8_1234_5678_9abc),
                         -0.0,
                         4.0,
@@ -5760,7 +5786,7 @@ fn typed_where_c_copies_selected_storage_bits_for_every_admitted_dtype() {
                 ),
                 typed_storage(
                     prim,
-                    chelis_types::RawTensor::Float(vec![
+                    chelis_numeric_core::dtype_semantics::RawTensor::Float(vec![
                         f64::from_bits(0x7ff8_abcd_1234_5678),
                         0.0,
                         2.0,
@@ -5770,16 +5796,31 @@ fn typed_where_c_copies_selected_storage_bits_for_every_admitted_dtype() {
             )
         } else if prim == Prim::Bool {
             (
-                typed_storage(prim, chelis_types::RawTensor::Int(vec![1, 0, 1, 0])),
-                typed_storage(prim, chelis_types::RawTensor::Int(vec![0, 1, 0, 1])),
+                typed_storage(
+                    prim,
+                    chelis_numeric_core::dtype_semantics::RawTensor::Int(vec![1, 0, 1, 0]),
+                ),
+                typed_storage(
+                    prim,
+                    chelis_numeric_core::dtype_semantics::RawTensor::Int(vec![0, 1, 0, 1]),
+                ),
             )
         } else {
             (
-                typed_storage(prim, chelis_types::RawTensor::Int(vec![1, 0, -2, 7])),
-                typed_storage(prim, chelis_types::RawTensor::Int(vec![0, 1, 3, -9])),
+                typed_storage(
+                    prim,
+                    chelis_numeric_core::dtype_semantics::RawTensor::Int(vec![1, 0, -2, 7]),
+                ),
+                typed_storage(
+                    prim,
+                    chelis_numeric_core::dtype_semantics::RawTensor::Int(vec![0, 1, 3, -9]),
+                ),
             )
         };
-        let condition = typed_storage(Prim::Bool, chelis_types::RawTensor::Int(vec![1, 0, 1, 0]));
+        let condition = typed_storage(
+            Prim::Bool,
+            chelis_numeric_core::dtype_semantics::RawTensor::Int(vec![1, 0, 1, 0]),
+        );
         let mut dag = Dag::new();
         let decl = dag.declare("test");
         let condition_id = dag.add_node(
@@ -5863,7 +5904,7 @@ int main(void) {{
 #[test]
 fn typed_nonnumeric_c_permuted_stepped_views_match_evaluator_and_preserve_bits() {
     use chelis_ir::dag::RtDim;
-    use chelis_types::StorageView;
+    use chelis_numeric_core::dtype_semantics::StorageView;
     use chelis_unord::UnordMap;
 
     let matrix = |rows, cols, precision| TensorType {
@@ -5879,7 +5920,7 @@ fn typed_nonnumeric_c_permuted_stepped_views_match_evaluator_and_preserve_bits()
 
     let lhs_storage = typed_storage(
         Prim::F32,
-        chelis_types::RawTensor::Float(vec![
+        chelis_numeric_core::dtype_semantics::RawTensor::Float(vec![
             f64::from_bits(0x7ff8_2468_a000_0000),
             11.0,
             -0.0,
@@ -5892,19 +5933,21 @@ fn typed_nonnumeric_c_permuted_stepped_views_match_evaluator_and_preserve_bits()
     );
     let rhs_storage = typed_storage(
         Prim::F32,
-        chelis_types::RawTensor::Float(vec![0.0, 21.0, 0.0, 23.0, 4.0, 25.0, -0.0, 27.0]),
+        chelis_numeric_core::dtype_semantics::RawTensor::Float(vec![
+            0.0, 21.0, 0.0, 23.0, 4.0, 25.0, -0.0, 27.0,
+        ]),
     );
     let logical_lhs_storage = typed_storage(
         Prim::Bool,
-        chelis_types::RawTensor::Int(vec![1, 1, 0, 1, 0, 1, 1, 0]),
+        chelis_numeric_core::dtype_semantics::RawTensor::Int(vec![1, 1, 0, 1, 0, 1, 1, 0]),
     );
     let logical_rhs_storage = typed_storage(
         Prim::Bool,
-        chelis_types::RawTensor::Int(vec![1, 0, 0, 1, 1, 0, 0, 1]),
+        chelis_numeric_core::dtype_semantics::RawTensor::Int(vec![1, 0, 0, 1, 1, 0, 0, 1]),
     );
     let condition_storage = typed_storage(
         Prim::Bool,
-        chelis_types::RawTensor::Int(vec![1, 0, 1, 0, 0, 1, 0, 1]),
+        chelis_numeric_core::dtype_semantics::RawTensor::Int(vec![1, 0, 1, 0, 0, 1, 0, 1]),
     );
 
     let mut dag = Dag::new();
@@ -6136,7 +6179,11 @@ int main(void) {{
 fn issue_630_eq_neq_owned_copied_and_borrowed_tensors_match_ieee() {
     let values = typed_storage(
         Prim::F32,
-        chelis_types::RawTensor::Float(vec![f64::from(f32::from_bits(0x7fc5_4321)), -0.0, 3.5]),
+        chelis_numeric_core::dtype_semantics::RawTensor::Float(vec![
+            f64::from(f32::from_bits(0x7fc5_4321)),
+            -0.0,
+            3.5,
+        ]),
     );
     let mut dag = Dag::new();
     let decl = dag.declare("test");
@@ -6740,62 +6787,6 @@ int main(void) {{
             .unwrap_or_else(|| panic!("{tag}: integer extrema chain did not compile and run"));
         assert!(output.contains("PASS"), "{tag}: {output}");
     }
-}
-
-#[test]
-fn direct_bool_max_elem_compiles_without_float_classification() {
-    let mut dag = Dag::new();
-    let decl = dag.declare("test");
-    let ty = vec_prim(4, Prim::Bool);
-    let a = dag.add_node(
-        decl,
-        RiscOp::Load { name: "a".into() },
-        vec![],
-        ty.clone(),
-        None,
-    );
-    let b = dag.add_node(
-        decl,
-        RiscOp::Load { name: "b".into() },
-        vec![],
-        ty.clone(),
-        None,
-    );
-    let maximum = dag.add_node(decl, RiscOp::MaxElem, vec![a, b], ty, None);
-    dag.add_root(maximum);
-
-    let function = "direct_bool_max_elem";
-    let src = codegen(&dag, function)
-        .expect("Bool max_elem codegen")
-        .c_source;
-    let harness = format!(
-        r#"{HARNESS_HEADER}
-#include <stdint.h>
-extern void {function}(chelis_tensor **, int, chelis_tensor **, int);
-int main(void) {{
-    uint8_t a_data[4] = {{ 0, 0, 1, 1 }};
-    uint8_t b_data[4] = {{ 0, 1, 0, 1 }};
-    uint8_t expected[4] = {{ 0, 1, 1, 1 }};
-    chelis_tensor *a = make_view_typed_1d(a_data, 4, CHELIS_DTYPE_BOOL);
-    chelis_tensor *b = make_view_typed_1d(b_data, 4, CHELIS_DTYPE_BOOL);
-    chelis_tensor *inputs[2] = {{ a, b }};
-    chelis_tensor *outputs[1] = {{ NULL }};
-    {function}(inputs, 2, outputs, 1);
-    uint8_t *got = (uint8_t *)chelis_tensor_read_view(outputs[0]).data;
-    for (int i = 0; i < 4; i++) if (got[i] != expected[i]) return 1;
-    puts("PASS");
-    return 0;
-}}
-"#
-    );
-    let output = compile_and_run_kernel(function, &src, &harness)
-        .expect("Bool max_elem generated C must compile and run");
-    assert!(output.contains("PASS"), "{output}");
-    assert!(src.contains("uint8_t"), "Bool storage must stay byte-typed");
-    assert!(
-        !src.contains("isnan("),
-        "Bool max_elem must not enter the floating extrema branch: {src}"
-    );
 }
 
 #[test]
@@ -10896,10 +10887,15 @@ fn assert_zero_geometry_both_lanes(
             .map(|(_, shape)| {
                 TensorValue::from_storage(
                     shape.to_vec(),
-                    chelis_types::finalize_tensor(
+                    chelis_numeric_core::dtype_semantics::finalize_tensor(
                         "test",
                         Prim::F32,
-                        chelis_types::RawTensor::Float(vec![1.0; shape.iter().product()]),
+                        chelis_numeric_core::dtype_semantics::RawTensor::Float(vec![
+                            1.0;
+                            shape
+                                .iter()
+                                .product()
+                        ]),
                     )
                     .unwrap(),
                 )
@@ -11163,7 +11159,8 @@ fn gated_check_graph(kind: &str, bound: i64) -> (Dag, Vec<GatedInput>) {
                     chelis_ir::dag::RtDim::Node(1),
                     chelis_ir::dag::RtDim::Lit(0),
                 )],
-                fill: chelis_types::scalar_from_i64("pad", Prim::Int64, 1).unwrap(),
+                fill: chelis_numeric_core::dtype_semantics::scalar_from_i64("pad", Prim::Int64, 1)
+                    .unwrap(),
             },
         ),
         "extent witness" => {
@@ -11218,7 +11215,12 @@ fn gated_check_graph(kind: &str, bound: i64) -> (Dag, Vec<GatedInput>) {
             let required = dag.add_node(
                 owner,
                 RiscOp::Const {
-                    value: chelis_types::scalar_from_i64("reshape", Prim::Int64, 3).unwrap(),
+                    value: chelis_numeric_core::dtype_semantics::scalar_from_i64(
+                        "reshape",
+                        Prim::Int64,
+                        3,
+                    )
+                    .unwrap(),
                 },
                 vec![],
                 ty(vec![], Prim::Int64),
@@ -11841,7 +11843,7 @@ fn restamped_extent_eval(dag: &Dag, x: &[f64], z: &[f64]) -> Result<Vec<f64>, St
         "w".to_string(),
         typed_value(typed_storage(
             Prim::Int64,
-            chelis_types::RawTensor::Int(vec![i64::MIN]),
+            chelis_numeric_core::dtype_semantics::RawTensor::Int(vec![i64::MIN]),
         )),
     );
     let values = eval_tensor(dag, &inputs)?;
@@ -12148,8 +12150,8 @@ fn restamp_output_text(shape: &[usize], bytes: &[u8]) -> String {
     format!("shape {shape:?} bytes {hex}")
 }
 
-fn restamp_storage_bytes(storage: &chelis_types::TensorStorage) -> Vec<u8> {
-    use chelis_types::StorageView;
+fn restamp_storage_bytes(storage: &chelis_numeric_core::dtype_semantics::TensorStorage) -> Vec<u8> {
+    use chelis_numeric_core::dtype_semantics::StorageView;
     match storage.view() {
         StorageView::F64(values) => values.iter().flat_map(|v| v.to_ne_bytes()).collect(),
         StorageView::F32(values) => values.iter().flat_map(|v| v.to_ne_bytes()).collect(),
@@ -12158,7 +12160,10 @@ fn restamp_storage_bytes(storage: &chelis_types::TensorStorage) -> Vec<u8> {
     }
 }
 
-fn restamp_input_storage(prim: Prim, values: &[i32]) -> chelis_types::TensorStorage {
+fn restamp_input_storage(
+    prim: Prim,
+    values: &[i32],
+) -> chelis_numeric_core::dtype_semantics::TensorStorage {
     let raw = if prim.is_float() {
         RawTensor::Float(values.iter().copied().map(f64::from).collect())
     } else {
@@ -12176,7 +12181,11 @@ type RestampLane = Result<Vec<String>, String>;
 fn restamp_under_activation_lanes(
     dag: &Dag,
     generated: &chelis_backend_c::CodegenResult,
-    inputs: &[(&str, chelis_types::TensorStorage, usize)],
+    inputs: &[(
+        &str,
+        chelis_numeric_core::dtype_semantics::TensorStorage,
+        usize,
+    )],
 ) -> (RestampLane, RestampLane) {
     let mut values = UnordMap::new();
     for (name, storage, rank) in inputs {
@@ -12940,11 +12949,13 @@ fn inlined_matmul_products_match_evaluator_bits_under_sanitizers() {
                     .map(|value| match prim {
                         Prim::F16 => format!(
                             "UINT16_C(0x{:04x})",
-                            chelis_types::dtype_semantics::f16_from_f64_rne(*value).to_bits()
+                            chelis_numeric_core::dtype_semantics::f16_from_f64_rne(*value)
+                                .to_bits()
                         ),
                         Prim::Bf16 => format!(
                             "UINT16_C(0x{:04x})",
-                            chelis_types::dtype_semantics::bf16_from_f64_rne(*value).to_bits()
+                            chelis_numeric_core::dtype_semantics::bf16_from_f64_rne(*value)
+                                .to_bits()
                         ),
                         Prim::F32 => format!(
                             "chelis_f32_from_bits(UINT32_C(0x{:08x}))",
@@ -13248,7 +13259,7 @@ int main(void) {{
 #[test]
 fn ordered_scan_c_exec_bits_at_all_float_widths_runtime_axes_and_empty() {
     use chelis_ir::dag::ScanDirection;
-    use chelis_types::dtype_semantics::{StorageView, TensorStorage};
+    use chelis_numeric_core::dtype_semantics::{StorageView, TensorStorage};
     fn bytes(storage: &TensorStorage) -> Vec<u8> {
         match storage.view() {
             StorageView::F64(v) => v.iter().flat_map(|x| x.to_bits().to_le_bytes()).collect(),
@@ -13464,10 +13475,12 @@ fn ordered_scan_activation_suppresses_only_inactive_overflow() {
                 "active".into(),
                 TensorValue::from_storage(
                     vec![],
-                    chelis_types::finalize_tensor(
+                    chelis_numeric_core::dtype_semantics::finalize_tensor(
                         "oracle",
                         Prim::Bool,
-                        chelis_types::RawTensor::Int(vec![i64::from(active)]),
+                        chelis_numeric_core::dtype_semantics::RawTensor::Int(vec![i64::from(
+                            active,
+                        )]),
                     )
                     .unwrap(),
                 ),

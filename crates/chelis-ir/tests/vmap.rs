@@ -3,8 +3,8 @@ use chelis_ir::eval::{TensorValue, eval_tensor_roots_with_strict};
 use chelis_ir::vmap::{
     vectorize_axis0, vectorize_axis0_with_node_map, vectorize_axis0_with_node_map_and_captures,
 };
+use chelis_numeric_core::prim::Prim;
 use chelis_types::check_ir_program;
-use chelis_types::types::Prim;
 use chelis_unord::{UnordMap, UnordSet};
 
 /// #2003: a metadata read is scalar even without a movement-bound consumer.
@@ -731,7 +731,7 @@ fn vmap_reduction_shifts_the_reduced_axis() {
         decl,
         RiscOp::Sum {
             axis: 1,
-            accumulator: chelis_types::types::Prim::F32,
+            accumulator: chelis_numeric_core::prim::Prim::F32,
         },
         vec![x],
         vec_f32(2),
@@ -840,7 +840,7 @@ fn vmap_batched_matmul_stays_in_expand_mul_sum_form() {
         decl,
         RiscOp::Sum {
             axis: 1,
-            accumulator: chelis_types::types::Prim::F32,
+            accumulator: chelis_numeric_core::prim::Prim::F32,
         },
         vec![prod],
         mat_f32(2, 4),

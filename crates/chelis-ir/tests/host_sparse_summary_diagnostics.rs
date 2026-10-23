@@ -39,7 +39,7 @@ use chelis_ir::host::{
     try_summarize_sparse_helper_for_test,
 };
 use chelis_ir::{DimInfo, TensorType};
-use chelis_types::types::Prim;
+use chelis_numeric_core::prim::Prim;
 
 fn t_f32(dims: Vec<usize>) -> TensorType {
     TensorType {

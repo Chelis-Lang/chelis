@@ -2,8 +2,8 @@
 //! no cotangent; malformed arity/dtype/rank cannot reach execution.
 use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
 use chelis_ir::eval::{TensorValue, eval_tensor_roots_with_strict};
-use chelis_types::types::Prim;
-use chelis_types::{RawTensor, finalize_tensor};
+use chelis_numeric_core::dtype_semantics::{RawTensor, finalize_tensor};
+use chelis_numeric_core::prim::Prim;
 
 fn scalar(value: i64) -> TensorValue {
     TensorValue::from_storage(
@@ -93,7 +93,7 @@ fn runtime_iota_keeps_exact_i64_values_and_independent_lengths() {
     }
 }
 
-fn scalar_storage(values: Vec<i64>) -> chelis_types::TensorStorage {
+fn scalar_storage(values: Vec<i64>) -> chelis_numeric_core::dtype_semantics::TensorStorage {
     finalize_tensor("test", Prim::Int64, RawTensor::Int(values)).unwrap()
 }
 

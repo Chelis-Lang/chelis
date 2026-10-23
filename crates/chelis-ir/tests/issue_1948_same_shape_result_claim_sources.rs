@@ -13,7 +13,8 @@ use chelis_ir::dag::{Dag, DimInfo, ExtentWitnessSite, NodeId, RiscOp, RtAxis, Te
 use chelis_ir::eval::{TensorValue, eval_tensor_with};
 use chelis_ir::optimize::dead_code_eliminate;
 use chelis_ir::verify::verify;
-use chelis_types::{scalar_from_f64, scalar_from_i64, types::Prim};
+use chelis_numeric_core::dtype_semantics::{scalar_from_f64, scalar_from_i64};
+use chelis_numeric_core::prim::Prim;
 
 #[derive(Clone, Copy)]
 enum InteriorClaim {

@@ -368,7 +368,7 @@ chelis#729 Phase 1).** The pre-Phase-1 design already selected the checked
 finalize-or-trap rung and left truncation for a future named lossy form. The
 rework replaces the split behavior in production code with that ONE authored
 rule per direction, identical on every
-eval surface: the shared ladder is `chelis_types::cast_raw`, consumed
+eval surface: the shared ladder is `chelis_numeric_core::dtype_semantics::cast_raw`, consumed
 by `chelis_ir::eval::convert_cast_data` / `cast_value` (the DAG
 evaluator and the host tensor cast's delegation) and by the host
 scalar `eval_cast` via `cast_scalar`. The CHECKED cast is the DEFAULT;
@@ -491,8 +491,8 @@ identical bytes):
    VALUE: the transcendentals are correctly rounded ([05-OP-46];
    `spec/design/correctly_rounded_math.md`), so the table grants no bound and
    has no rows. The table is authored in `spec/05-risc-primitives.md` §8 and
-   represented by `chelis_types::agreement::OP_TOLERANCES`; the [#687] oracle
-   consults that machine form. `sqrt` is required correctly rounded ([#719])
+   represented by `chelis_numeric_core::agreement::OP_TOLERANCES`.
+   The [#687] oracle reads that machine form. `sqrt` is correctly rounded ([#719])
    like the transcendentals. A row would be eligible only when both lanes
    compute at [04-NUM-8]'s declared arithmetic width; [#897]'s current eval
    float path is not eligible. A differing f16/bf16 result additionally
@@ -685,7 +685,7 @@ classification escapes, and this paragraph freezes its exact strength:
   `a_reserved_shaped_declarator_name_is_rejected`, with
   `known_c_type_words_still_classify_without_rejection` as the positive leg.
   The language side of the same gap is closed by an EXHAUSTIVE match over
-  `chelis_types::Prim` (`prim_census_class`): the census enumerates dtypes
+  `chelis_numeric_core::prim::Prim` (`prim_census_class`): the census enumerates dtypes
   by their `(t-prim {} <name>)` spelling, so widening `Prim` would otherwise
   never reach the census at all. A new variant now stops the tripwire
   compiling until it is classified
@@ -2500,7 +2500,7 @@ Phase 4 generates this same product permanently from Tables A/B rather than
 retaining a cast-specific hand list.
 
 **Implementation receipt.** The interim construction is
-`chelis_types::CheckedCastPlan`, whose exhaustive active-`Prim` product feeds
+`chelis_numeric_core::dtype_semantics::CheckedCastPlan`, whose exhaustive active-`Prim` product feeds
 sealed scalar/tensor evaluation and the shared C conversion-expression
 projection used by both emitters. Tensor evaluation reduces explicit
 `IndexedTrapCandidate` values. The C DAG emitter performs an OpenMP
@@ -2522,17 +2522,18 @@ interim generator with Tables A/B.
 
 ## Phase 4 - the capability table becomes the permanent guard
 
-The schema is owned by `spec/design/capability_table.md`. It keeps `Prim`,
-`BuiltinId`, and capability policy in `chelis-types`; separates semantic Table
-A from per-backend Table B; expands finite semantic parameters per `Prim` and
-scalar/tensor surface; routes container/boundary builtins to the exact sibling
-registry while retaining §C6's external-family semantic registries; gives
-runtime and binding callables total external target dispositions; gives exact
-effect dependencies a separate typed backend disposition; derives an exported
-stdlib definition's executability transitively from its checked body; and
-composes host ABI types through a separate constructor table.
-Phase 4 is split so table authoring, generated routing, and executable coverage
-cannot be conflated.
+`spec/design/capability_table.md` owns the schema.
+`chelis_numeric_core::prim::Prim` provides numeric primitive identity.
+`chelis-types` retains `BuiltinId` and capability policy.
+The schema separates semantic Table A from per-backend Table B.
+It expands finite semantic parameters per `Prim` and scalar/tensor surface.
+
+It routes container/boundary builtins to the exact sibling registry and retains §C6's external-family semantic registries.
+Runtime and binding callables have total external target dispositions.
+Exact effect dependencies have a separate typed backend disposition.
+An exported stdlib definition's executability depends transitively on its checked body.
+A separate constructor table composes host ABI types.
+Phase 4 keeps table authoring, generated routing, and executable coverage separate.
 
 ### Phase 4A - capacity-ratchet permanence (landed)
 
@@ -3063,14 +3064,14 @@ pass a happy-path test.
 The plans share representation identities and backend call sites but own
 different decisions:
 
-- `RuntimeDType` and `Repr` in `chelis-vocab` own stable ABI representation
-  identity. `RuntimeDType` owns numeric IDs, external spelling, and the mapping
-  to `Repr`. `Repr` describes each current physical encoding, and byte width
-  derives from it. `Repr` does not select a storage format. `Prim`,
-  `BuiltinId`, and capability policy remain in `chelis-types`; they do not
-  move to or duplicate into vocab. This document owns finalization, value
-  domains, the §C3 storage decision, cast behavior, operation legality, and
-  kernel behavior.
+- `chelis-vocab` owns `RuntimeDType` and `Repr` as stable ABI representation identities.
+  `RuntimeDType` owns numeric IDs, external spelling, and the mapping to `Repr`.
+  `Repr` describes each physical encoding. Byte width derives from `Repr`.
+  `Repr` does not select a storage format.
+
+  `chelis-numeric-core` owns `Prim`, at `chelis_numeric_core::prim::Prim`.
+  `chelis-types` retains `BuiltinId` and capability policy. These types do not move to or duplicate into vocab.
+  This document owns finalization, value domains, the §C3 storage decision, casts, operation legality, and kernel behavior.
 - [`runtime_representation.md`](runtime_representation.md) C1 adds the closed
   `DTypeContract` projection of [04-NUM-8] to that dependency-bottom vocabulary:
   exact stored representation, byte width derived from it, and arithmetic
@@ -3177,7 +3178,7 @@ substitute fixes (needed for [#722]'s C half regardless of this plan).
 | 1 | per-dtype buffers vs finalize-on-write f64 | DECIDED 2026-07-17: per-dtype buffers. The proposal default is ratified: f64 storage cannot meet [#684] by construction, and the 2026-07 review endorsed per-dtype `TensorStorage` as the structural core | §C3 of this doc + the PR |
 | 2 | integer `mean` / bool arithmetic / int floor-ceil-round capability rows | DECIDED: [#724] reject; [#726] rejects bool arithmetic, [05-OP-29] supplies first-class `count`, and [#712]/[#715] support the integer identity rows. No cast-counting compatibility path exists. Phase 4B freezes the corresponding atom/schema bindings | capability table + spec/05 |
 | 3 | trap surface form and exact strings | Phase 2 | §C2 + `pub const` in the module |
-| 4 | crate placement | DECIDED 2026-07-17: a `chelis-types` MODULE. `Prim` already lives there (`types.rs`); the checker already consumes value-domain semantics (literal range diagnostics today, table-A acceptance at Phase 4); every §C5 consumer already depends on the crate; and §C3's privacy contract is module-scoped (`pub(in dtype_semantics)`), so the firewall is identical to a crate boundary. Constraint check passed: chelis-runtime stays dependency-light (libc+memmap2 only) - the generated helpers are emitted by chelis-backend-c, and C-side parity is enforced by tests, not a link edge. Discipline: the module stays import-clean (only `Prim` + std from the surrounding crate) so a later lift to a leaf crate remains mechanical. This also fixes [#732] Phase 1's `format_element` placement as FINAL (its §C3.1 pre-[#729] fallback is the answer - no Wave 2 -> Wave 3 migration) | §C5 + this doc + faithful_observation.md §C3.1 |
+| 4 | crate placement | `chelis-numeric-core` owns primitive identities, numeric values, kernels, activation graphs, observation, and agreement with unconditional `no_std`. Tensors and owned text need `alloc`. Callers use canonical modules directly. Private carrier representations enforce §C3. Host crates retain codecs, schema projections, native services, and C ABI adapters. | §C3 and §C5 of this document, plus faithful_observation.md §C3.1 |
 | 5 | wire-schema versioning mechanics for the storage change | DECIDED: WireDag schema v6 is explicitly present and exact-only. Versionless, v1-v5, and future payloads are rejected before node decode; there is no legacy Pad migration or additive-variant compatibility. `WireRiscOp::Count { axes }` is a v6 variant. `EXECUTION_VALUE_SCHEMA_VERSION` remains a separately typed payload contract and never substitutes for WireDag validation | spec/10 §3 + schema.rs |
 
 [#170]: https://github.com/Chelis-Lang/chelis/issues/170

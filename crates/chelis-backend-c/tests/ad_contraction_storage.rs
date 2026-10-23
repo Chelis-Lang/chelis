@@ -5,9 +5,9 @@ use chelis_ir::dag::{Dag, DimInfo, NodeId, RiscOp, TensorType};
 use chelis_ir::eval::{TensorValue, eval_tensor};
 use chelis_ir::grad::grad_dag_checked;
 use chelis_ir::{tier2, tier2_ordered};
-use chelis_types::dtype_semantics::{StorageView, TensorStorage};
-use chelis_types::types::Prim;
-use chelis_types::{RawTensor, finalize_tensor};
+use chelis_numeric_core::dtype_semantics::{RawTensor, finalize_tensor};
+use chelis_numeric_core::dtype_semantics::{StorageView, TensorStorage};
+use chelis_numeric_core::prim::Prim;
 use chelis_unord::UnordMap;
 use std::{fs, process::Command};
 fn ty(shape: &[usize], precision: Prim) -> TensorType {

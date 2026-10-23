@@ -1,7 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
+use chelis_numeric_core::prim::Prim;
 use chelis_types::manifest::{RootEntry, RootManifest};
-use chelis_types::types::{Lane, Prim};
+use chelis_types::types::Lane;
 
 use crate::host::{
     ConcreteHostCallback, ConcreteHostCallbackKind, ConcreteHostExpr, ConcreteHostExprKind,

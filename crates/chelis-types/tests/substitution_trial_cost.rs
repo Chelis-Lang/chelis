@@ -16,7 +16,8 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 use std::fmt::Write as _;
 
-use chelis_types::types::{DimVar, Prim, Type, TypeVar};
+use chelis_numeric_core::prim::Prim;
+use chelis_types::types::{DimVar, Type, TypeVar};
 use chelis_types::unify::Subst;
 
 struct CountingAllocator;

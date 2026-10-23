@@ -7,10 +7,10 @@
 //!
 //! Each test pins exact-output behavior. No "errored somehow" assertions.
 
+use chelis_numeric_core::prim::Prim;
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str;
 use chelis_types::check_ir_program;
-use chelis_types::types::Prim;
 
 fn surf_to_deep(source: &str) -> Vec<chelis_deep::Expr> {
     let decls = parse_str(source, &chelis_syntax_host::NativeStack).expect("surf parse");

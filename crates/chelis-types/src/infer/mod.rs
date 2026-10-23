@@ -19,6 +19,7 @@ use chelis_deep::ast as deep;
 use chelis_deep::node::Node as DeepNode;
 use chelis_deep::role::SlotShape;
 use chelis_deep::{DeepTag, Span, decode_effect_kind};
+use chelis_numeric_core::prim::Prim;
 use chelis_vocab::EffectKind;
 
 use crate::adt::{AdtRegistry, CallShape};

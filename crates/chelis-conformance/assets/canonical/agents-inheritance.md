@@ -287,7 +287,7 @@ make your change pass is never the fix.
   selectors are numeric operations, and raw dtype selectors are forbidden. A
   conditional macro definition taints its whole connected local-include component.
   An arithmetic spelling the census does not recognize is a build failure, and so is
-  an unclassified new `chelis_types::Prim` variant. PR #956's negative controls lock
+  an unclassified new `chelis_numeric_core::prim::Prim` variant. PR #956's negative controls lock
   these rules; weakening one changes this contract and those controls together.
 - An exported stdlib `def` declares its signature via `defsig`, or stops being exported.
 

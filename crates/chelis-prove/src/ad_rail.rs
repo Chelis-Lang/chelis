@@ -69,7 +69,7 @@ use chelis_compiler_api::schema::{GradRequest, GradResult, SourceKind};
 use crate::discharge::{Discharge, IntervalBox, OutputRange};
 use crate::engine_registry::DischargeRegistry;
 use crate::graph_extract::{ExtractedGoal, GraphExtractError, box_range_goal_from_wire_dag};
-use chelis_types::ScalarValue;
+use chelis_numeric_core::dtype_semantics::ScalarValue;
 
 /// The box/range output range for one gradient target, naming the `wrt` input
 /// whose gradient (Greek) is being bounded plus the asserted `[lo, hi]`.

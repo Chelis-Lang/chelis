@@ -316,6 +316,11 @@ CLIPPY_CORE_WITHOUT_MIGRATION: list[str] = [
     "cargo", "clippy", "-p", "chelis-deep", "-p", "chelis-surf",
     "--all-targets", "--no-default-features", "--", "-D", "warnings",
 ]
+# Deep enables numeric Serde in every workspace row.
+CLIPPY_NUMERIC_NO_DEFAULT_FEATURES: list[str] = [
+    "cargo", "clippy", "-p", "chelis-numeric-core",
+    "--all-targets", "--no-default-features", "--", "-D", "warnings",
+]
 CLIPPY_SOLVER_FREE_FEATURES: list[str] = [
     "cargo", "clippy", "--workspace", "--all-targets", "--features",
     "chelis-cli/ownership-ledger,"
@@ -323,6 +328,8 @@ CLIPPY_SOLVER_FREE_FEATURES: list[str] = [
     "chelis-compiler-api/ownership-ledger,"
     "chelis-e2e/hip-local-gpu,"
     "chelis-ir/lowering-trace,"
+    "chelis-numeric-core/alloc,"
+    "chelis-numeric-core/serde,"
     "chelis-prove/clarabel,"
     "chelis-python/extension-module,"
     "chelis-runtime/ownership-ledger,"
@@ -490,6 +497,10 @@ CERTIFICATE_CORE_ORACLE: list[str] = [
     MANAGED_PYTHON,
     "scripts/certificate_core_oracle.py",
 ]
+NUMERIC_CORE_ORACLE: list[str] = [
+    MANAGED_PYTHON,
+    "scripts/numeric_core_oracle.py",
+]
 # Generated chelis-std files stay out of the index: the bundle crate's build
 # script packs the runtime, so a tracked dist pair or a lock recording the
 # bundled runtime would go stale with the first std edit. Pure git and Python.
@@ -603,6 +614,7 @@ STAGES: dict[str, list[list[str]]] = {
         CLIPPY_SOLVER_FREE_FEATURES,
         CLIPPY_NO_DEFAULT_FEATURES,
         CLIPPY_CORE_WITHOUT_MIGRATION,
+        CLIPPY_NUMERIC_NO_DEFAULT_FEATURES,
         FMT_CHECK,
         CHELIS_LINT_CHECK,
         STD_BUNDLE_REPRODUCIBILITY,
@@ -634,6 +646,7 @@ STAGES: dict[str, list[list[str]]] = {
         REEF_BOOTSTRAP_CORE_ORACLE,
         SHELL_METADATA_CORE_ORACLE,
         CERTIFICATE_CORE_ORACLE,
+        NUMERIC_CORE_ORACLE,
         OWNERSHIP_LEDGER_CLI_TESTS,
     ],
     "runtime-representation": [
@@ -703,6 +716,7 @@ LOCAL_STATIC_COMMANDS: list[list[str]] = [
     REEF_BOOTSTRAP_CORE_ORACLE,
     SHELL_METADATA_CORE_ORACLE,
     CERTIFICATE_CORE_ORACLE,
+    NUMERIC_CORE_ORACLE,
     OWNERSHIP_LEDGER_CLI_TESTS,
 ]
 

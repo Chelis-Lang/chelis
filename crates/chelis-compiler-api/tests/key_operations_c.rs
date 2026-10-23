@@ -7,9 +7,11 @@ mod ownership_support;
 
 use chelis_ir::dag::{Dag, DimInfo, KeyBranch, NodeId, RiscOp, RtDim, TensorType, UniformBound};
 use chelis_ir::eval::{TensorValue, eval_tensor_roots_exact};
-use chelis_types::dtype_semantics::{RawTensor, StorageView, TensorStorage, finalize_tensor};
-use chelis_types::types::Prim;
-use chelis_types::{RandomKey, scalar_from_i64};
+use chelis_numeric_core::dtype_semantics::{RandomKey, scalar_from_i64};
+use chelis_numeric_core::dtype_semantics::{
+    RawTensor, StorageView, TensorStorage, finalize_tensor,
+};
+use chelis_numeric_core::prim::Prim;
 use chelis_unord::UnordMap;
 
 // ---- key_ref_ext.py: k = key(-3); (L, R) = split(k); F = fold_in(L, -5);

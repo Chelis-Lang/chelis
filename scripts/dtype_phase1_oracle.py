@@ -84,7 +84,7 @@ def oracle_legs(python: str) -> tuple[OracleLeg, ...]:
                 "nextest",
                 "run",
                 "-p",
-                "chelis-types",
+                "chelis-numeric-core",
                 "-E",
                 "test(dtype_semantics::tests::)",
             ),

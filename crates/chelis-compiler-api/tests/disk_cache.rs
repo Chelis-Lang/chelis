@@ -205,7 +205,9 @@ fn cached_imports_preserve_computed_claims_and_unit_preconditions() {
                     .collect::<Vec<_>>();
                 assert_eq!(tensors.len(), 1, "{result:?}");
                 assert_eq!(tensors[0].shape, shape);
-                let chelis_types::StorageView::F32(actual) = tensors[0].data.view() else {
+                let chelis_numeric_core::dtype_semantics::StorageView::F32(actual) =
+                    tensors[0].data.view()
+                else {
                     panic!("f32 result required")
                 };
                 assert_eq!(actual, values);

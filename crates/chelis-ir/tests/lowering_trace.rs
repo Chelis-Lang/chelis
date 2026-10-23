@@ -575,18 +575,18 @@ fn full_integer_constants_keep_bits_beyond_the_f64_exact_range() {
             .expect("nonuniform complete tensor literal");
         assert_eq!(
             payload.scalar_at(0),
-            chelis_types::scalar_from_i64(
+            chelis_numeric_core::dtype_semantics::scalar_from_i64(
                 "trace test",
-                chelis_types::types::Prim::Int64,
+                chelis_numeric_core::prim::Prim::Int64,
                 9_007_199_254_740_993
             )
             .unwrap()
         );
         assert_eq!(
             payload.scalar_at(1),
-            chelis_types::scalar_from_i64(
+            chelis_numeric_core::dtype_semantics::scalar_from_i64(
                 "trace test",
-                chelis_types::types::Prim::Int64,
+                chelis_numeric_core::prim::Prim::Int64,
                 -9_007_199_254_740_993
             )
             .unwrap()

@@ -1,7 +1,7 @@
 //! Exact integer unary/Grad device emission and compiled kernel execution.
 mod support;
 use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
-use chelis_types::types::Prim;
+use chelis_numeric_core::prim::Prim;
 
 fn gradient_dag() -> Dag {
     let source = "def loss(x: tensor[4, f32], w: tensor[4, i64]) -> tensor[f32] = sum(mul(x, cast(abs(w), f32)), 0i32)\ndef main(x: tensor[4, f32], w: tensor[4, i64]) -> tensor[4, f32] = (grad(loss, wrt=x))(x, w)\n";
@@ -49,11 +49,12 @@ fn integer_constants_stay_exact_before_abs() {
             100
         };
         let scalar =
-            chelis_types::dtype_semantics::scalar_from_i64("test", precision, -value).unwrap();
+            chelis_numeric_core::dtype_semantics::scalar_from_i64("test", precision, -value)
+                .unwrap();
         let constant = dag.add_node(
             decl,
             RiscOp::ConstTensor {
-                data: chelis_types::dtype_semantics::tensor_from_scalars(
+                data: chelis_numeric_core::dtype_semantics::tensor_from_scalars(
                     precision,
                     &[scalar, scalar],
                 ),

@@ -4,7 +4,7 @@
 
 mod support;
 use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
-use chelis_types::types::Prim;
+use chelis_numeric_core::prim::Prim;
 use support::codegen;
 
 const INPUT_NAMES: [&str; 8] = [

@@ -9,7 +9,7 @@ use chelis_ir::verify::{
     BoundInput, ExtentSlot, KeyGraph, KeyRole, SlotRead, SplitCount, bound_slot_read,
     is_const_false, is_const_true, operand_extent_read, verify_key_rules, verify_random_operands,
 };
-use chelis_types::types::Prim;
+use chelis_numeric_core::prim::Prim;
 use std::borrow::Cow;
 
 type Result<T> = std::result::Result<T, WireDagContractError>;

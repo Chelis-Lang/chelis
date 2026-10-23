@@ -1,6 +1,7 @@
-//! spec/10 §3.2: transport preserves stored bits and admits exactly one grammar.
+//! Exact transport behavior.
 
-use chelis_types::{ElementRef, ScalarValue, TensorStorage};
+use chelis_numeric_core::dtype_semantics::{ScalarValue, TensorStorage};
+use chelis_numeric_core::observation::ElementRef;
 use serde_json::{Value, json};
 
 fn assert_scalar(wire: Value) {
@@ -105,27 +106,6 @@ fn positional_cache_decoder_checks_the_same_bit_grammar() {
             bincode::deserialize::<ScalarValue>(&bad).is_err(),
             "accepted {invalid}"
         );
-    }
-}
-
-#[test]
-fn published_schema_has_fixed_width_bits_and_closed_payload_shapes() {
-    let scalar = serde_json::to_value(schemars::schema_for!(ScalarValue)).unwrap();
-    let storage = serde_json::to_value(schemars::schema_for!(TensorStorage)).unwrap();
-    for schema in [scalar, storage] {
-        for digits in [4, 8, 16] {
-            let definition = &schema["definitions"][format!("IeeeBits{digits}")];
-            assert_eq!(definition["type"], "string");
-            assert_eq!(definition["minLength"], digits);
-            assert_eq!(definition["maxLength"], digits);
-            assert_eq!(definition["pattern"], format!("^[0-9a-f]{{{digits}}}$"));
-        }
-        let variants = schema["oneOf"].as_array().unwrap();
-        assert_eq!(variants.len(), 9);
-        for variant in variants {
-            assert_eq!(variant["additionalProperties"], false);
-            assert_eq!(variant["required"].as_array().unwrap().len(), 2);
-        }
     }
 }
 

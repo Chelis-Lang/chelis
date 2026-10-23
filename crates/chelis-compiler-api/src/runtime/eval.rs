@@ -11,9 +11,11 @@ use chelis_ir::dag::{Dag, DimInfo, NodeId, RiscOp, TensorType};
 use chelis_ir::eval::TensorValue as IrTensorValue;
 use chelis_ir::host::{EntryPattern, HostDefKernel, host_def_kernel};
 use chelis_ir::tier2;
-use chelis_types::{
-    CompareOp, ElementRef, FloatBinOp, FloatUnOp, IntBinOp, IntUnOp, StorageView, types::Prim,
+use chelis_numeric_core::dtype_semantics::{
+    CompareOp, FloatBinOp, FloatUnOp, IntBinOp, IntUnOp, StorageView,
 };
+use chelis_numeric_core::observation::ElementRef;
+use chelis_numeric_core::prim::Prim;
 use chelis_vocab::EffectKind;
 use chelis_vocab::EffectKindDecodeError;
 use std::borrow::Cow;
@@ -4984,9 +4986,13 @@ impl<'a> EvalContext<'a> {
         {
             let result = match value {
                 RuntimeValue::Scalar(payload) => {
-                    chelis_types::named_cast_scalar(mode, payload.value(), target_prim)
-                        .map(RuntimeValue::from_scalar_value)
-                        .map_err(|trap| trap.to_string())
+                    chelis_numeric_core::dtype_semantics::named_cast_scalar(
+                        mode,
+                        payload.value(),
+                        target_prim,
+                    )
+                    .map(RuntimeValue::from_scalar_value)
+                    .map_err(|trap| trap.to_string())
                 }
                 RuntimeValue::Tensor(tensor) => named_cast_tensor_value(mode, tensor, target_prim),
                 // The checker pins the source to a numeric scalar or
@@ -5008,7 +5014,7 @@ impl<'a> EvalContext<'a> {
                 result
             };
         }
-        // The CHECKED default ladder (`chelis_types::cast_scalar`; the
+        // The CHECKED default ladder (`chelis_numeric_core::dtype_semantics::cast_scalar`, the
         // chelis#759 one-rule-per-direction obligation), identical to
         // the tensor surfaces: out-of-range integer targets trap,
         // fractional-to-integer traps Domain instead of choosing an
@@ -5019,20 +5025,27 @@ impl<'a> EvalContext<'a> {
             (RuntimeValue::Scalar(payload), dst_dtype)
                 if dst_dtype.is_integer() || dst_dtype.is_float() || dst_dtype == Prim::Bool =>
             {
-                chelis_types::cast_scalar("cast", payload.value(), dst_dtype)
-                    .map(|cast| match cast.as_bool_exact() {
-                        Some(flag) => RuntimeValue::Bool(flag),
-                        None => RuntimeValue::from_scalar_value(cast),
-                    })
-                    .map_err(|trap| trap.to_string())
+                chelis_numeric_core::dtype_semantics::cast_scalar(
+                    "cast",
+                    payload.value(),
+                    dst_dtype,
+                )
+                .map(|cast| match cast.as_bool_exact() {
+                    Some(flag) => RuntimeValue::Bool(flag),
+                    None => RuntimeValue::from_scalar_value(cast),
+                })
+                .map_err(|trap| trap.to_string())
             }
             (RuntimeValue::Bool(value), dst_dtype)
                 if dst_dtype.is_integer() || dst_dtype.is_float() =>
             {
-                let source =
-                    chelis_types::scalar_from_i64("cast", Prim::Bool, if value { 1 } else { 0 })
-                        .expect("bool payload is always in the bool value set");
-                chelis_types::cast_scalar("cast", source, dst_dtype)
+                let source = chelis_numeric_core::dtype_semantics::scalar_from_i64(
+                    "cast",
+                    Prim::Bool,
+                    if value { 1 } else { 0 },
+                )
+                .expect("bool payload is always in the bool value set");
+                chelis_numeric_core::dtype_semantics::cast_scalar("cast", source, dst_dtype)
                     .map(RuntimeValue::from_scalar_value)
                     .map_err(|trap| trap.to_string())
             }
@@ -5269,7 +5282,7 @@ impl<'a> EvalContext<'a> {
         if result.as_ref().err().is_some_and(|message| {
             message
                 .lines()
-                .any(chelis_types::NumericTrap::is_canonical_line)
+                .any(chelis_numeric_core::dtype_semantics::NumericTrap::is_canonical_line)
         }) {
             self.failure_kind = RuntimeFailureKind::NumericTrap;
         }
@@ -5283,8 +5296,9 @@ impl<'a> EvalContext<'a> {
         let key = expect_key_arg(args, 0, "dropout")?;
         let input = expect_tensor_arg(args, 1)?;
         let rate = expect_float_control(args, 2, "dropout")?;
-        let prepared = chelis_types::PreparedDropout::new(input.value.storage(), rate)
-            .map_err(|error| error.to_string())?;
+        let prepared =
+            chelis_numeric_core::dtype_semantics::PreparedDropout::new(input.value.storage(), rate)
+                .map_err(|error| error.to_string())?;
         let storage = prepared.apply(key).map_err(|error| error.to_string())?;
         Ok(RuntimeValue::Tensor(RuntimeTensorValue::new(
             IrTensorValue::from_storage(input.value.shape.clone(), storage),
@@ -5315,8 +5329,11 @@ impl<'a> EvalContext<'a> {
                     expect_key_arg(args, 0, name)?;
                     let input = expect_tensor_arg(args, 1)?;
                     let rate = expect_float_control(args, 2, name)?;
-                    chelis_types::PreparedDropout::new(input.value.storage(), rate)
-                        .map_err(|error| error.to_string())?;
+                    chelis_numeric_core::dtype_semantics::PreparedDropout::new(
+                        input.value.storage(),
+                        rate,
+                    )
+                    .map_err(|error| error.to_string())?;
                 }
                 "uniform_like" => {
                     expect_key_arg(args, 0, name)?;
@@ -5558,7 +5575,7 @@ impl<'a> EvalContext<'a> {
         {
             // A lowered scalar key can also use a rank-zero tensor carrier.
             // Preserve its scalar operation contract using the checked type.
-            use chelis_types::dtype_semantics::{
+            use chelis_numeric_core::dtype_semantics::{
                 KeyHalf, fold_in_storage, key_from_seed_storage, split_key_storage,
                 split_keys_storage,
             };
@@ -5585,7 +5602,7 @@ impl<'a> EvalContext<'a> {
                     if shape != &index.value.shape {
                         return Err(format!(
                             "fold_in requires exactly equal key and index shapes ([05-OP-72])\n{}",
-                            chelis_types::NumericTrap::Domain {
+                            chelis_numeric_core::dtype_semantics::NumericTrap::Domain {
                                 op: "fold_in",
                                 prim: Prim::Int64,
                             }
@@ -5598,7 +5615,7 @@ impl<'a> EvalContext<'a> {
                         .as_i64_exact()
                         .ok_or("split_keys expects i64")?;
                     let count = usize::try_from(count).map_err(|_| {
-                        chelis_types::NumericTrap::Domain {
+                        chelis_numeric_core::dtype_semantics::NumericTrap::Domain {
                             op: "split_keys",
                             prim: Prim::Int64,
                         }
@@ -5621,7 +5638,7 @@ impl<'a> EvalContext<'a> {
             // value, with the kernels every lane shares.
             "key_from_seed" => {
                 let seed = expect_i64_key_operand(args, 0, "key_from_seed")?;
-                chelis_types::RandomKey::from_seed(seed)
+                chelis_numeric_core::dtype_semantics::RandomKey::from_seed(seed)
                     .map(RuntimeValue::Key)
                     .map_err(|error| error.to_string())
             }
@@ -5646,7 +5663,7 @@ impl<'a> EvalContext<'a> {
                 // [05-OP-71]: a negative count traps before allocation, as
                 // the DAG evaluator and the C lane trap.
                 let count = usize::try_from(count).map_err(|_| {
-                    chelis_types::NumericTrap::Domain {
+                    chelis_numeric_core::dtype_semantics::NumericTrap::Domain {
                         op: "split_keys",
                         prim: Prim::Int64,
                     }
@@ -5657,7 +5674,9 @@ impl<'a> EvalContext<'a> {
                 Ok(RuntimeValue::Tensor(RuntimeTensorValue::new(
                     IrTensorValue::from_storage(
                         vec![count],
-                        chelis_types::TensorStorage::from_keys(key.split_n(count)),
+                        chelis_numeric_core::dtype_semantics::TensorStorage::from_keys(
+                            key.split_n(count),
+                        ),
                     ),
                 )))
             }
@@ -5702,9 +5721,12 @@ impl<'a> EvalContext<'a> {
             "cos" => float_unop_with_tensor(args, FloatUnOp::Cos),
             "tan" => float_unop_with_tensor(args, FloatUnOp::Tan),
             "atan" => float_unop_with_tensor(args, FloatUnOp::Atan),
-            name if chelis_types::FloatClassify::from_name(name).is_some() => {
+            name if chelis_numeric_core::dtype_semantics::FloatClassify::from_name(name)
+                .is_some() =>
+            {
                 eval_float_classification(
-                    chelis_types::FloatClassify::from_name(name).expect("classification identity"),
+                    chelis_numeric_core::dtype_semantics::FloatClassify::from_name(name)
+                        .expect("classification identity"),
                     args,
                 )
             }
@@ -6202,7 +6224,7 @@ impl<'a> EvalContext<'a> {
                 // stay exact at full i64 (a scan accumulating above 2^53
                 // no longer collapses through f64 storage).
                 let mut ints: Vec<i64> = Vec::new();
-                let mut floats: Vec<chelis_types::ScalarValue> = Vec::new();
+                let mut floats: Vec<chelis_numeric_core::dtype_semantics::ScalarValue> = Vec::new();
                 let mut acc = initial;
                 let callback_type_children = arg_type_exprs
                     .get(1)
@@ -6829,7 +6851,9 @@ impl<'a> EvalContext<'a> {
                 if precision == Prim::Bool {
                     chelis_abi::mapped::check_bool_payload(payload)?;
                 }
-                let storage = chelis_types::tensor_from_le_payload(precision, payload)?;
+                let storage = chelis_numeric_core::dtype_semantics::tensor_from_le_payload(
+                    precision, payload,
+                )?;
                 Ok(RuntimeValue::Tensor(RuntimeTensorValue::new(
                     IrTensorValue::from_storage(vec![count as usize], storage),
                 )))
@@ -7129,7 +7153,7 @@ impl<'a> EvalContext<'a> {
                 }
                 let tolerance_f64 = tolerance.as_f64_lossy();
                 if !tolerance_f64.is_finite() || tolerance_f64 < 0.0 {
-                    let rendered_tolerance = chelis_types::format_element(
+                    let rendered_tolerance = chelis_numeric_core::observation::format_element(
                         tolerance.dtype(),
                         tolerance.value().element_ref(),
                     );
@@ -7185,12 +7209,18 @@ impl<'a> EvalContext<'a> {
                     let expected = expected.value.storage().scalar_at(index);
                     let either_nan = float_element_is_nan(actual.element_ref())
                         || float_element_is_nan(expected.element_ref());
-                    let rendered_actual =
-                        chelis_types::format_element(tensor_prim, actual.element_ref());
-                    let rendered_expected =
-                        chelis_types::format_element(tensor_prim, expected.element_ref());
-                    let rendered_tolerance =
-                        chelis_types::format_element(tensor_prim, tolerance.value().element_ref());
+                    let rendered_actual = chelis_numeric_core::observation::format_element(
+                        tensor_prim,
+                        actual.element_ref(),
+                    );
+                    let rendered_expected = chelis_numeric_core::observation::format_element(
+                        tensor_prim,
+                        expected.element_ref(),
+                    );
+                    let rendered_tolerance = chelis_numeric_core::observation::format_element(
+                        tensor_prim,
+                        tolerance.value().element_ref(),
+                    );
                     return Err(chelis_runtime::host_assert::close_mismatch_message(
                         &label,
                         index,
@@ -7350,7 +7380,7 @@ impl<'a> EvalContext<'a> {
                 // [05-OP-11]: an execution-time zero extent traps `Domain` as
                 // `mean` at the result dtype, before the composition runs.
                 if tensor.value.shape[axis] == 0 {
-                    return Err(chelis_types::NumericTrap::Domain {
+                    return Err(chelis_numeric_core::dtype_semantics::NumericTrap::Domain {
                         op: "mean",
                         prim: tensor.precision,
                     }
@@ -7796,20 +7826,22 @@ fn admit_host_key_result(shape: &[usize]) -> Result<(), String> {
         .and_then(|metadata| metadata.bytes().allocation().map(|_| metadata));
     let metadata = admitted.map_err(|error| {
         let trap = match error {
-            MetadataError::Domain(_) => chelis_types::NumericTrap::Domain {
+            MetadataError::Domain(_) => chelis_numeric_core::dtype_semantics::NumericTrap::Domain {
                 op: "split_keys",
                 prim: Prim::Int64,
             },
-            MetadataError::Overflow(_) => chelis_types::NumericTrap::Overflow {
-                op: "split_keys",
-                prim: Prim::Int64,
-            },
+            MetadataError::Overflow(_) => {
+                chelis_numeric_core::dtype_semantics::NumericTrap::Overflow {
+                    op: "split_keys",
+                    prim: Prim::Int64,
+                }
+            }
         };
         format!("{error}\n{trap}")
     })?;
     metadata
         .elements()
-        .scratch_len::<chelis_types::RandomKey>()
+        .scratch_len::<chelis_numeric_core::dtype_semantics::RandomKey>()
         .map_err(|_| "Domain: chelis_alloc tensor allocation failed".to_string())?;
     Ok(())
 }
@@ -7820,7 +7852,7 @@ fn expect_key_arg(
     args: &[RuntimeValue],
     index: usize,
     op: &str,
-) -> Result<chelis_types::RandomKey, String> {
+) -> Result<chelis_numeric_core::dtype_semantics::RandomKey, String> {
     match args.get(index) {
         Some(RuntimeValue::Key(key)) => Ok(*key),
         Some(RuntimeValue::Tensor(tensor)) if tensor.value.shape.is_empty() => tensor
@@ -7842,7 +7874,7 @@ fn expect_i64_key_operand(
     args: &[RuntimeValue],
     index: usize,
     op: &str,
-) -> Result<chelis_types::ScalarValue, String> {
+) -> Result<chelis_numeric_core::dtype_semantics::ScalarValue, String> {
     match args.get(index) {
         Some(RuntimeValue::Scalar(payload)) if payload.dtype() == Prim::Int64 => {
             Ok(payload.value())
@@ -7911,7 +7943,7 @@ fn stage_kernel_argument(
         // `Load` reads (spec/10 section 3.2).
         RuntimeValue::Key(key) if prim == Prim::Key => Ok(IrTensorValue::from_storage(
             vec![],
-            chelis_types::TensorStorage::from_keys(vec![*key]),
+            chelis_numeric_core::dtype_semantics::TensorStorage::from_keys(vec![*key]),
         )),
         RuntimeValue::Scalar(payload) if payload.dtype().is_integer() => {
             Ok(RuntimeTensorValue::from_wide_int(
@@ -8326,10 +8358,10 @@ mod legacy_capture_order_tests {
     fn zeros() -> RuntimeValue {
         RuntimeValue::Tensor(RuntimeTensorValue::new(IrTensorValue::from_storage(
             vec![2],
-            chelis_types::dtype_semantics::finalize_tensor(
+            chelis_numeric_core::dtype_semantics::finalize_tensor(
                 "test",
                 Prim::F32,
-                chelis_types::dtype_semantics::RawTensor::Float(vec![0.0, 0.0]),
+                chelis_numeric_core::dtype_semantics::RawTensor::Float(vec![0.0, 0.0]),
             )
             .unwrap(),
         )))
@@ -8342,8 +8374,9 @@ mod legacy_capture_order_tests {
     /// `key_from_seed(seed)` as the interpreter's key value.
     fn key(seed: i64) -> RuntimeValue {
         RuntimeValue::Key(
-            chelis_types::RandomKey::from_seed(
-                chelis_types::scalar_from_i64("test", Prim::Int64, seed).unwrap(),
+            chelis_numeric_core::dtype_semantics::RandomKey::from_seed(
+                chelis_numeric_core::dtype_semantics::scalar_from_i64("test", Prim::Int64, seed)
+                    .unwrap(),
             )
             .unwrap(),
         )

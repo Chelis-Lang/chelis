@@ -1,8 +1,9 @@
 //! One-sided real-arithmetic range goals retain the bound's typed bits.
 mod support;
 
+use chelis_numeric_core::dtype_semantics::scalar_from_f64;
+use chelis_numeric_core::prim::Prim;
 use chelis_prove::discharge::{Goal, GoalShape, IntervalBox};
-use chelis_types::{dtype_semantics::scalar_from_f64, types::Prim};
 
 #[test]
 fn upper_bound_goal_preserves_typed_threshold_and_rejects_invalid_boxes() {

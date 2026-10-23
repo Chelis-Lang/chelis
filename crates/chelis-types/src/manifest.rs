@@ -42,12 +42,24 @@ pub struct RootEntry {
 /// diagnostic emission without reaching back into the inference result.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HostReason {
-    HostOnlyBuiltin { name: String },
-    ScalarTypedOp { builtin: String },
-    PrecisionExceedsCapability { prim: crate::types::Prim },
-    StructuralForm { tag: String },
-    TransitiveCaller { callee: String },
-    UnrecognizedTag { tag: String },
+    HostOnlyBuiltin {
+        name: String,
+    },
+    ScalarTypedOp {
+        builtin: String,
+    },
+    PrecisionExceedsCapability {
+        prim: chelis_numeric_core::prim::Prim,
+    },
+    StructuralForm {
+        tag: String,
+    },
+    TransitiveCaller {
+        callee: String,
+    },
+    UnrecognizedTag {
+        tag: String,
+    },
 }
 
 /// The root manifest for a checked program against a specific target.

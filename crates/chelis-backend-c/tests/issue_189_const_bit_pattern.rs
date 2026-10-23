@@ -18,7 +18,7 @@
 
 mod support;
 use chelis_ir::dag::{Dag, RiscOp, TensorType};
-use chelis_types::types::Prim;
+use chelis_numeric_core::prim::Prim;
 use support::emit_dag;
 
 mod common;

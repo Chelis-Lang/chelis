@@ -3,8 +3,10 @@ use chelis_ir::eval::{TensorValue, eval_tensor_roots_with_strict};
 use chelis_ir::tier2::{
     lower_gelu, lower_gelu_tanh, lower_sigmoid, lower_silu, lower_standard_normal_cdf,
 };
-use chelis_types::types::Prim;
-use chelis_types::{FloatUnOp, ScalarValue, float_unop, scalar_from_f64, tensor_from_scalars};
+use chelis_numeric_core::dtype_semantics::{
+    FloatUnOp, ScalarValue, float_unop, scalar_from_f64, tensor_from_scalars,
+};
+use chelis_numeric_core::prim::Prim;
 
 type ActivationLowerer = fn(
     chelis_ir::dag::Owner,

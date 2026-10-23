@@ -115,6 +115,8 @@ def oracle_legs(python: str) -> tuple[OracleLeg, ...]:
                 "run",
                 "-p",
                 "chelis-types",
+                "-p",
+                "chelis-numeric-core",
                 "-E",
                 "test(/(issue_1281|reduce_tensor_groups|arg_reduce|window_grad)/)",
             ),

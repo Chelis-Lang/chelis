@@ -233,6 +233,16 @@ rec {
       # File a bug if you depend on any for non-debug work!
       debug = internal.debugCrate { inherit packageId; };
     };
+    "chelis-numeric-core" = rec {
+      packageId = "chelis-numeric-core";
+      build = internal.buildRustCrateWithFeatures {
+        packageId = "chelis-numeric-core";
+      };
+
+      # Debug support which might change between releases.
+      # File a bug if you depend on any for non-debug work!
+      debug = internal.debugCrate { inherit packageId; };
+    };
     "chelis-pipeline-core" = rec {
       packageId = "chelis-pipeline-core";
       build = internal.buildRustCrateWithFeatures {
@@ -1749,10 +1759,18 @@ rec {
           {
             name = "chelis-crmath";
             packageId = "chelis-crmath";
+            usesDefaultFeatures = false;
+            features = [ "std" ];
           }
           {
             name = "chelis-ir";
             packageId = "chelis-ir";
+          }
+          {
+            name = "chelis-numeric-core";
+            packageId = "chelis-numeric-core";
+            usesDefaultFeatures = false;
+            features = [ "alloc" "serde" ];
           }
           {
             name = "chelis-types";
@@ -1833,6 +1851,12 @@ rec {
             packageId = "chelis-ir";
           }
           {
+            name = "chelis-numeric-core";
+            packageId = "chelis-numeric-core";
+            usesDefaultFeatures = false;
+            features = [ "alloc" "serde" ];
+          }
+          {
             name = "chelis-types";
             packageId = "chelis-types";
           }
@@ -1894,6 +1918,12 @@ rec {
             packageId = "chelis-ir";
           }
           {
+            name = "chelis-numeric-core";
+            packageId = "chelis-numeric-core";
+            usesDefaultFeatures = false;
+            features = [ "alloc" "serde" ];
+          }
+          {
             name = "chelis-types";
             packageId = "chelis-types";
           }
@@ -1916,6 +1946,8 @@ rec {
           {
             name = "chelis-crmath";
             packageId = "chelis-crmath";
+            usesDefaultFeatures = false;
+            features = [ "std" ];
           }
           {
             name = "chelis-effects";
@@ -2056,6 +2088,12 @@ rec {
             packageId = "chelis-macros";
           }
           {
+            name = "chelis-numeric-core";
+            packageId = "chelis-numeric-core";
+            usesDefaultFeatures = false;
+            features = [ "alloc" "serde" ];
+          }
+          {
             name = "chelis-prove";
             packageId = "chelis-prove";
             optional = true;
@@ -2165,6 +2203,8 @@ rec {
           {
             name = "chelis-crmath";
             packageId = "chelis-crmath";
+            usesDefaultFeatures = false;
+            features = [ "std" ];
           }
           {
             name = "chelis-reef";
@@ -2295,6 +2335,12 @@ rec {
             packageId = "chelis-macros";
           }
           {
+            name = "chelis-numeric-core";
+            packageId = "chelis-numeric-core";
+            usesDefaultFeatures = false;
+            features = [ "alloc" "serde" ];
+          }
+          {
             name = "chelis-pipeline-core";
             packageId = "chelis-pipeline-core";
           }
@@ -2377,6 +2423,8 @@ rec {
           {
             name = "chelis-crmath";
             packageId = "chelis-crmath";
+            usesDefaultFeatures = false;
+            features = [ "std" ];
           }
           {
             name = "chelis-reef";
@@ -2472,6 +2520,12 @@ rec {
             packageId = "anyhow";
           }
           {
+            name = "chelis-numeric-core";
+            packageId = "chelis-numeric-core";
+            usesDefaultFeatures = false;
+            features = [ "alloc" "serde" ];
+          }
+          {
             name = "chelis-tide";
             packageId = "chelis-tide";
           }
@@ -2517,7 +2571,13 @@ rec {
           {
             name = "half";
             packageId = "half";
-            features = [ "serde" ];
+            usesDefaultFeatures = false;
+          }
+          {
+            name = "libm";
+            packageId = "libm";
+            usesDefaultFeatures = false;
+            target = { target, features }: ("none" == target."os" or null);
           }
         ];
         buildDependencies = [
@@ -2526,7 +2586,18 @@ rec {
             packageId = "cc";
           }
         ];
-
+        devDependencies = [
+          {
+            name = "libm";
+            packageId = "libm";
+            usesDefaultFeatures = false;
+          }
+        ];
+        features = {
+          "default" = [ "std" ];
+          "std" = [ "half/std" ];
+        };
+        resolvedDefaultFeatures = [ "std" ];
       };
       "chelis-deep" = rec {
         crateName = "chelis-deep";
@@ -2535,6 +2606,12 @@ rec {
         src = lib.cleanSourceWith { filter = sourceFilter;  src = ./crates/chelis-deep; };
         libName = "chelis_deep";
         dependencies = [
+          {
+            name = "chelis-numeric-core";
+            packageId = "chelis-numeric-core";
+            usesDefaultFeatures = false;
+            features = [ "serde" ];
+          }
           {
             name = "chelis-stack-services";
             packageId = "chelis-stack-services";
@@ -2631,6 +2708,12 @@ rec {
             packageId = "chelis-macros";
           }
           {
+            name = "chelis-numeric-core";
+            packageId = "chelis-numeric-core";
+            usesDefaultFeatures = false;
+            features = [ "alloc" "serde" ];
+          }
+          {
             name = "chelis-runtime";
             packageId = "chelis-runtime";
           }
@@ -2699,6 +2782,12 @@ rec {
           {
             name = "chelis-deep";
             packageId = "chelis-deep";
+          }
+          {
+            name = "chelis-numeric-core";
+            packageId = "chelis-numeric-core";
+            usesDefaultFeatures = false;
+            features = [ "alloc" "serde" ];
           }
           {
             name = "chelis-types";
@@ -2778,6 +2867,12 @@ rec {
           {
             name = "chelis-effects";
             packageId = "chelis-effects";
+          }
+          {
+            name = "chelis-numeric-core";
+            packageId = "chelis-numeric-core";
+            usesDefaultFeatures = false;
+            features = [ "alloc" "serde" ];
           }
           {
             name = "chelis-types";
@@ -3004,6 +3099,59 @@ rec {
         ];
 
       };
+      "chelis-numeric-core" = rec {
+        crateName = "chelis-numeric-core";
+        version = "0.21.1";
+        edition = "2024";
+        src = lib.cleanSourceWith { filter = sourceFilter;  src = ./crates/chelis-numeric-core; };
+        libName = "chelis_numeric_core";
+        dependencies = [
+          {
+            name = "chelis-crmath";
+            packageId = "chelis-crmath";
+            usesDefaultFeatures = false;
+          }
+          {
+            name = "chelis-vocab";
+            packageId = "chelis-vocab";
+            usesDefaultFeatures = false;
+          }
+          {
+            name = "half";
+            packageId = "half";
+            usesDefaultFeatures = false;
+          }
+          {
+            name = "libm";
+            packageId = "libm";
+            usesDefaultFeatures = false;
+            features = [ "arch" ];
+          }
+          {
+            name = "serde";
+            packageId = "serde";
+            optional = true;
+            usesDefaultFeatures = false;
+            features = [ "derive" ];
+          }
+        ];
+        devDependencies = [
+          {
+            name = "bincode";
+            packageId = "bincode";
+          }
+          {
+            name = "serde_json";
+            packageId = "serde_json";
+          }
+        ];
+        features = {
+          "alloc" = [ "serde?/alloc" ];
+          "default" = [ "alloc" ];
+          "serde" = [ "dep:serde" "half/serde" ];
+        };
+        resolvedDefaultFeatures = [ "alloc" "serde" ];
+      };
       "chelis-pipeline-core" = rec {
         crateName = "chelis-pipeline-core";
         version = "0.21.1";
@@ -3033,6 +3181,11 @@ rec {
           }
         ];
         devDependencies = [
+          {
+            name = "chelis-numeric-core";
+            packageId = "chelis-numeric-core";
+            usesDefaultFeatures = false;
+          }
           {
             name = "chelis-syntax-host";
             packageId = "chelis-syntax-host";
@@ -3112,6 +3265,12 @@ rec {
             packageId = "chelis-ir";
           }
           {
+            name = "chelis-numeric-core";
+            packageId = "chelis-numeric-core";
+            usesDefaultFeatures = false;
+            features = [ "alloc" "serde" ];
+          }
+          {
             name = "chelis-pred";
             packageId = "chelis-pred";
           }
@@ -3184,6 +3343,7 @@ rec {
           {
             name = "chelis-crmath";
             packageId = "chelis-crmath";
+            usesDefaultFeatures = false;
           }
           {
             name = "chelis-std-bundle";
@@ -3332,6 +3492,12 @@ rec {
           {
             name = "chelis-macros";
             packageId = "chelis-macros";
+          }
+          {
+            name = "chelis-numeric-core";
+            packageId = "chelis-numeric-core";
+            usesDefaultFeatures = false;
+            features = [ "alloc" "serde" ];
           }
           {
             name = "chelis-pipeline-core";
@@ -3547,6 +3713,11 @@ rec {
             features = [ "solver" ];
           }
           {
+            name = "chelis-numeric-core";
+            packageId = "chelis-numeric-core";
+            usesDefaultFeatures = false;
+          }
+          {
             name = "chelis-vocab";
             packageId = "chelis-vocab";
             usesDefaultFeatures = false;
@@ -3575,10 +3746,14 @@ rec {
           {
             name = "chelis-crmath";
             packageId = "chelis-crmath";
+            usesDefaultFeatures = false;
+            features = [ "std" ];
           }
           {
-            name = "chelis-types";
-            packageId = "chelis-types";
+            name = "chelis-numeric-core";
+            packageId = "chelis-numeric-core";
+            usesDefaultFeatures = false;
+            features = [ "alloc" ];
           }
           {
             name = "num-bigint";
@@ -3780,6 +3955,11 @@ rec {
             packageId = "chelis-deep";
           }
           {
+            name = "chelis-numeric-core";
+            packageId = "chelis-numeric-core";
+            usesDefaultFeatures = false;
+          }
+          {
             name = "chelis-pred";
             packageId = "chelis-pred";
           }
@@ -3953,12 +4133,14 @@ rec {
             packageId = "chelis-abi";
           }
           {
-            name = "chelis-crmath";
-            packageId = "chelis-crmath";
-          }
-          {
             name = "chelis-deep";
             packageId = "chelis-deep";
+          }
+          {
+            name = "chelis-numeric-core";
+            packageId = "chelis-numeric-core";
+            usesDefaultFeatures = false;
+            features = [ "alloc" "serde" ];
           }
           {
             name = "chelis-pred";
@@ -3972,15 +4154,6 @@ rec {
             name = "chelis-vocab";
             packageId = "chelis-vocab";
             usesDefaultFeatures = false;
-          }
-          {
-            name = "half";
-            packageId = "half";
-            features = [ "serde" ];
-          }
-          {
-            name = "schemars";
-            packageId = "schemars";
           }
           {
             name = "serde";
@@ -4016,6 +4189,11 @@ rec {
           {
             name = "chelis-syntax-host";
             packageId = "chelis-syntax-host";
+          }
+          {
+            name = "half";
+            packageId = "half";
+            features = [ "serde" ];
           }
           {
             name = "proc-macro2";
@@ -8126,6 +8304,23 @@ rec {
           }
         ];
 
+      };
+      "libm" = rec {
+        crateName = "libm";
+        version = "0.2.16";
+        edition = "2021";
+        sha256 = "10brh0a3qjmbzkr5mf5xqi887nhs5y9layvnki89ykz9xb1wxlmn";
+        authors = [
+          "Alex Crichton <alex@alexcrichton.com>"
+          "Amanieu d'Antras <amanieu@gmail.com>"
+          "Jorge Aparicio <japaricious@gmail.com>"
+          "Trevor Gross <tg@trevorgross.com>"
+        ];
+        features = {
+          "default" = [ "arch" ];
+          "unstable" = [ "unstable-intrinsics" "unstable-float" ];
+        };
+        resolvedDefaultFeatures = [ "arch" ];
       };
       "line-clipping" = rec {
         crateName = "line-clipping";

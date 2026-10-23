@@ -4,7 +4,7 @@ use chelis_ir::dag::{Dag, DimInfo, RiscOp, RtAxis, TensorType};
 use chelis_ir::eval::{TensorValue, eval_tensor_roots_with_strict};
 use chelis_ir::verify;
 use chelis_ir::vmap::vectorize_axis0;
-use chelis_types::types::Prim;
+use chelis_numeric_core::prim::Prim;
 use chelis_unord::UnordMap;
 
 fn ty(dims: Vec<DimInfo>, precision: Prim) -> TensorType {

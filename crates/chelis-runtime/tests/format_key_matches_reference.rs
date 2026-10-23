@@ -1,14 +1,14 @@
 //! chelis#2413: the byte-equality lock between the compiled lane's key text
 //! ([05-OBS-2]) and the reference renderer
-//! `chelis_types::observation::format_key_bits`, through the public C ABI
+//! `chelis_numeric_core::observation::format_key_bits`, through the public C ABI
 //! entry `chelis_string_from_key`. Recursive observation of a key tensor
 //! shares the runtime's one key formatter; the compiled roots that reach it
 //! are locked end to end in `chelis-compiler-api`'s `key_root_lanes`.
 
+use chelis_numeric_core::observation::format_key_bits;
 use chelis_runtime::{
     chelis_key, chelis_string_data, chelis_string_from_key, chelis_string_release,
 };
-use chelis_types::format_key_bits;
 
 /// Seeds, the extremes, one bit per nibble position and a 64-bit sweep.
 fn key_words() -> Vec<u64> {

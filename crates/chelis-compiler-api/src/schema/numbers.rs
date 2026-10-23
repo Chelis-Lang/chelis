@@ -3,7 +3,9 @@
 //! These adapters enforce representation and domain. Source syntax admission,
 //! report provenance, and report counter relationships remain separate checks.
 
-use chelis_types::{ElementRef, ScalarValue, scalar_from_f64, scalar_from_i64, types::Prim};
+use chelis_numeric_core::dtype_semantics::{ScalarValue, scalar_from_f64, scalar_from_i64};
+use chelis_numeric_core::observation::ElementRef;
+use chelis_numeric_core::prim::Prim;
 use schemars::{JsonSchema, r#gen::SchemaGenerator, schema::Schema};
 use serde::{Deserialize, Serialize};
 

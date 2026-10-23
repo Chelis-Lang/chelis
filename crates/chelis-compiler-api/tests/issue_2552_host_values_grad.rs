@@ -20,7 +20,7 @@ fn gradient(source: &str) -> Result<Vec<f64>, String> {
     {
         ExecutionValue::Tensor { value } => {
             assert_eq!(value.shape, vec![2]);
-            assert_eq!(value.data.prim(), chelis_types::types::Prim::F32);
+            assert_eq!(value.data.prim(), chelis_numeric_core::prim::Prim::F32);
             Ok(value.data.to_f64_lossy_vec())
         }
         other => panic!("expected tensor, got {other:?}"),

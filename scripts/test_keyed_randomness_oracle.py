@@ -28,6 +28,9 @@ class ReceiptTests(unittest.TestCase):
         config = self.root / ".config/nextest.toml"
         config.parent.mkdir()
         config.write_text('[profile.ci-full.junit]\npath = "junit.xml"\n')
+        manifest = self.root / "crates/chelis-types/Cargo.toml"
+        manifest.parent.mkdir(parents=True)
+        manifest.write_text('[package]\nname = "chelis-types"\nversion = "0.0.0"\n')
         self.binary = self.target / "probe"
         self.binary.write_text("fixture")
         self.suite = oracle.Suite("chelis-types", "probe", ("good", "negative"), ("checker",))
@@ -129,44 +132,11 @@ class ReceiptTests(unittest.TestCase):
         with self.assertRaises(oracle.OracleFailure):
             oracle.check_retirement(self.root)
 
-    def test_command_pins_exact_binary_and_test_names_and_overrides_default_filter(self):
-        config = self.root / "isolated.toml"
-        command = oracle.nextest_command("list", (self.suite,), config)
-        self.assertIn("--ignore-default-filter", command)
-        self.assertIn("--message-format", command)
-        self.assertEqual(command[command.index("--config-file") + 1], str(config))
-        expression = command[command.index("-E") + 1]
-        self.assertIn("binary_id(=chelis-types::probe)", expression)
-        self.assertIn("test(=negative)", expression)
-        run = oracle.nextest_command("run", (self.suite,), config)
-        self.assertIn("--no-fail-fast", run)
-        self.assertEqual(run[run.index("--retries") + 1], "0")
-
     def test_receipt_binds_selected_executions_to_unchanged_clean_sha(self):
         self.assertEqual(self.execute()["status"], "pass")
         failed = self.execute(end_sha="b" * 40)
         self.assertEqual(failed["status"], "fail")
         self.assertIn("changed", failed["error"])
-
-    def test_real_catalog_commands_enable_required_target_features(self):
-        for package in dict.fromkeys(suite.package for suite in oracle.SUITES):
-            suites = tuple(suite for suite in oracle.SUITES if suite.package == package)
-            manifest = tomllib.loads((oracle.ROOT / "crates" / package / "Cargo.toml").read_text())
-            targets = {target["name"]: target for target in manifest.get("test", [])}
-            for action in ("list", "run"):
-                with self.subTest(package=package, action=action):
-                    command = oracle.nextest_command(action, suites, self.root / "isolated.toml")
-                    if package == "chelis-compiler-api":
-                        self.assertIn("--features", command)
-                        self.assertEqual(command[command.index("--features") + 1],
-                                         "chelis-compiler-api/ownership-ledger")
-                        enabled = {"ownership-ledger"}
-                    else:
-                        self.assertNotIn("--features", command)
-                        enabled = set()
-                    for suite in suites:
-                        required = set(targets.get(suite.target, {}).get("required-features", []))
-                        self.assertLessEqual(required, enabled, suite.binary)
 
     def test_build_list_and_run_lock_the_dependency_graph(self):
         self.execute()

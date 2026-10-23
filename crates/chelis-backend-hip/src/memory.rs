@@ -4,7 +4,7 @@ use chelis_unord::UnordMap;
 
 use chelis_ir::dag::{DimExpr, NodeId, RiscOp};
 use chelis_ir::ownership::{HipStorageLane, LiveByteBound, StoragePlacement, VerifiedStoragePlan};
-use chelis_types::types::Prim;
+use chelis_numeric_core::prim::Prim;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NodeMemoryKind {

@@ -19,7 +19,7 @@ assertion failures unless an explicit different success condition is given.
 | `ordered_scan_prefix_suffix_bits_on_device`, `ordered_scan_dtype_bits_and_integer_overflow_on_device` | `chelis-backend-metal` | `cargo nextest run -p chelis-backend-metal --test gpu_correctness --run-ignored only -E 'test(ordered_scan)'` | Apple Silicon Metal device and Command Line Tools; default CI does not run them. Expected: empty/singleton/odd f32 scans on leading/trailing axes and f16/bf16/f32 default-accumulator scans match stored bits, including non-finite values and signed-zero suffixes; signed integer widths match forward scans, i32/i64 intermediate overflow traps, and active/inactive i32 overflow controls. | Ordered scans ([05-OP-33], chelis#3414) |
 | `metal_native_library_executes_tensor_kernel` | `chelis-cli` | `cargo test -p chelis-cli --test native_build -- --ignored --test-threads=1` | macOS with Command Line Tools and a real Metal device. Builds a native tensor library, links a driver against the carried runtime, and executes a vector-add kernel. CPU acceptance is `cargo test -p chelis-cli --test native_build`; HIP runtime testing is deferred to the user and is not a readiness gate. | chelis#2828 |
 | `every_binary32_input_is_correctly_rounded` | `chelis-crmath` | `cargo test -p chelis-crmath --test crmath_exhaustive_binary32 -- --ignored --nocapture` | Default toolchain and `gmpy2` (MPFR) in the checkout's `.venv` (`uv pip install --python .venv/bin/python gmpy2`). Expected: zero mismatches over 2^32 inputs for each of `exp`, `log`, `sin`, `cos`, `tan`, `atan`, `tanh`, `erf`, and `erfc` through the `chelis-crmath` API, with the inputs the binary64 kernel cannot decide resolved against MPFR. Run it when the vendored CORE-MATH kernels or the amalgamation change. Expected result: zero misrounded inputs per function. The built-executable lane of this gate is listed under Not yet wired. | chelis#2957 |
-| `half_dtype_phi_and_gelu_error_bounds_hold_on_every_input` | `chelis-types` | `cargo nextest run -p chelis-types --lib --run-ignored only -E 'test(half_dtype_phi_and_gelu_error_bounds_hold_on_every_input)'` | Default toolchain. Expected: over every finite f16 and bf16 input, `standard_normal_cdf` is monotone and within half a unit in the last place plus `1.5 * 2^-13` (f16) or `1.5 * 2^-16` (bf16) units of the f64 reference `0.5 * erfc(-x/sqrt(2))`, and `gelu` is within half a unit of its result plus `\|x\|` times that `Phi` error (`spec/design/correctly_rounded_math.md` §12.3). Run it when the spec/05 §3.3 `Phi` graph, its constants, or the `erfc` kernel change. | chelis#2957 |
+| `half_dtype_phi_and_gelu_error_bounds_hold_on_every_input` | `chelis-numeric-core` | `cargo nextest run -p chelis-numeric-core --lib --run-ignored only -E 'test(half_dtype_phi_and_gelu_error_bounds_hold_on_every_input)'` | Use the default toolchain to check every finite f16 and bf16 input. `standard_normal_cdf` must be monotone and approximate the f64 reference `0.5 * erfc(-x/sqrt(2))`. Its error must not exceed half an ulp plus `1.5 * 2^-13` for f16 or `1.5 * 2^-16` for bf16. `gelu` error must not exceed half a result ulp plus `\|x\|` times that `Phi` error (`spec/design/correctly_rounded_math.md` §12.3). Run after changes to the spec/05 §3.3 `Phi` graph, its constants, or the `erfc` kernel. | chelis#2957 |
 | `every_f32_narrows_once_to_f16_and_bf16_storage` | `chelis-runtime` | `cargo nextest run -p chelis-runtime --test runtime_storage_narrowing --run-ignored only` | Default C toolchain (`cc`). Expected: zero mismatches over 2^32 f32 inputs between the runtime header's `chelis_f32_to_f16`/`chelis_f32_to_bf16` (compiled with the product profile), the evaluator's `{f16,bf16}_from_f64_rne` on each input's exact f64 widening, and the integer reference `chelis_crmath::profile::storage_reference`. `CHELIS_NARROWING_THREADS` sets the workers. Run it when any f16 or bf16 conversion changes. | chelis#2957 |
 | `every_f32_finalizes_once_to_f16_and_bf16_storage` | `chelis-runtime` | `cargo nextest run -p chelis-runtime --lib --run-ignored only -E 'test(every_f32_finalizes_once_to_f16_and_bf16_storage)'` | Default toolchain. Expected: zero mismatches over 2^32 f32 inputs between the runtime's f32 and f64 accumulator finalization to f16 and bf16 storage and `storage_reference`. Run it when any f16 or bf16 conversion changes. | chelis#2957 |
 | `every_f32_widening_narrows_once_to_f16_and_bf16_storage` | `chelis-backend-c` | `cargo nextest run -p chelis-backend-c --lib --run-ignored only -E 'test(every_f32_widening_narrows_once_to_f16_and_bf16_storage)'` | Default C toolchain. Expected: zero mismatches over 2^32 f32 inputs between generated C's `chelis_host_f64_to_f16`/`chelis_host_f64_to_bf16` on each input's exact f64 widening and `storage_reference`. Run it when any f16 or bf16 conversion changes. | chelis#2957 |
@@ -249,6 +249,38 @@ macOS nightly validation executes it on workspace shard one.
 Default PR CI does not execute the complete command.
 Target compilation does not prove device execution, allocator capacity, or whole-pipeline portability.
 Owner: chelis#3989.
+
+## Numeric core portability
+
+Run `.venv/bin/python scripts/numeric_core_oracle.py` from the repository root.
+Use the pinned Rust toolchain, `thumbv7em-none-eabi`, `cargo-nextest`, Git, Clang, and the checkout's uv-managed Python.
+The toolchain also needs `clippy` and `rustc-dev` for compiled authority checks.
+Clang must support 128-bit `_BitInt` on the bare target.
+The target build also needs `llvm-ar`.
+Native consumers also need the repository's normal C build prerequisites.
+
+The oracle compares against immutable commit `8ff50b201c02ec0297a89b344805ddf7aab50fef`.
+The baseline uses its own Cargo target directory.
+The command removes baseline Cargo build artifacts before candidate authority and numeric tests.
+A shallow checkout needs repository access to fetch that commit.
+Missing source, failed commands, incomplete evidence, or skipped mandatory tests fail acceptance.
+Success means exit zero and the final line `Numeric core oracle: PASS`.
+
+The command checks:
+
+- Default, no-default, `alloc`, `serde`, and combined target consumers without target `std` or host dependencies.
+- Public scalar and tensor behavior, current random keys, named casts, activation graphs, traps, and error precedence.
+- Exact wire bytes, host schema projections, observation, runtime conversions, native ABI headers, and generated C.
+- Zero scalar allocations and baseline-equivalent tensor allocation counts and requested bytes.
+- Private construction, removed imports, numeric authority, and named shared and numeric Python failure controls.
+
+Linux integration support executes the command in its domain slice.
+macOS nightly validation executes it on workspace shard one.
+Default PR CI does not execute the complete command.
+Existing ignored numeric phase work remains outside this extraction claim.
+Target compilation does not prove device execution, allocator capacity, or whole-pipeline portability.
+Owner: chelis#3993.
+
 
 ## Compiler feature acceptance gates
 

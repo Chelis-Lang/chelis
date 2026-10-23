@@ -17,7 +17,7 @@ mod support;
 use chelis_backend_metal::dtype;
 use chelis_crmath::profile::{Output, storage_reference};
 use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
-use chelis_types::types::Prim;
+use chelis_numeric_core::prim::Prim;
 use support::codegen_metal;
 
 fn vec_prec(n: usize, prec: Prim) -> TensorType {
@@ -151,7 +151,7 @@ fn rt_metal_host_sizeof_and_const_fill_agree_on_host_safe_types() {
             "{prec:?}: host_sizeof_expr returned `{sz}`, expected `{expect_sizeof}`"
         );
         let body = dtype::host_const_fill_body(
-            chelis_types::dtype_semantics::scalar_from_f64("test", prec, 1.0).unwrap(),
+            chelis_numeric_core::dtype_semantics::scalar_from_f64("test", prec, 1.0).unwrap(),
             "buf_0",
             4,
         );
@@ -184,7 +184,7 @@ fn rt_metal_const_f16_bf16_pathological_values_emit_correct_bit_pattern() {
     ];
     for (prec, value, expected_bits) in cases {
         let body = dtype::host_const_fill_body(
-            chelis_types::dtype_semantics::scalar_from_f64("test", prec, value).unwrap(),
+            chelis_numeric_core::dtype_semantics::scalar_from_f64("test", prec, value).unwrap(),
             "buf",
             4,
         );
@@ -205,7 +205,7 @@ fn rt_metal_const_f16_bf16_pathological_values_emit_correct_bit_pattern() {
 #[test]
 fn rt_metal_emit_const_f32_nan_does_not_emit_invalid_c_literal_nanf() {
     let body = dtype::host_const_fill_body(
-        chelis_types::dtype_semantics::scalar_from_f64("test", Prim::F32, f64::NAN).unwrap(),
+        chelis_numeric_core::dtype_semantics::scalar_from_f64("test", Prim::F32, f64::NAN).unwrap(),
         "buf",
         4,
     );
@@ -222,7 +222,8 @@ fn rt_metal_emit_const_f32_nan_does_not_emit_invalid_c_literal_nanf() {
 #[test]
 fn rt_metal_emit_const_f32_infinity_does_not_emit_invalid_c_literal_inff() {
     let body = dtype::host_const_fill_body(
-        chelis_types::dtype_semantics::scalar_from_f64("test", Prim::F32, f64::INFINITY).unwrap(),
+        chelis_numeric_core::dtype_semantics::scalar_from_f64("test", Prim::F32, f64::INFINITY)
+            .unwrap(),
         "buf",
         4,
     );
@@ -242,7 +243,7 @@ fn rt_metal_emit_const_f32_infinity_does_not_emit_invalid_c_literal_inff() {
 #[test]
 fn rt_metal_emit_const_f32_negative_infinity_emits_negated_infinity_macro() {
     let body = dtype::host_const_fill_body(
-        chelis_types::dtype_semantics::scalar_from_f64("test", Prim::F32, f64::NEG_INFINITY)
+        chelis_numeric_core::dtype_semantics::scalar_from_f64("test", Prim::F32, f64::NEG_INFINITY)
             .unwrap(),
         "buf",
         4,
@@ -276,7 +277,7 @@ fn rt_metal_emit_const_f16_bf16_nan_inf_emit_well_formed_integer_literal() {
     ];
     for (prec, value, expected_bits) in cases {
         let body = dtype::host_const_fill_body(
-            chelis_types::dtype_semantics::scalar_from_f64("test", prec, value).unwrap(),
+            chelis_numeric_core::dtype_semantics::scalar_from_f64("test", prec, value).unwrap(),
             "buf",
             4,
         );
@@ -296,7 +297,7 @@ fn rt_metal_emit_const_f16_bf16_nan_inf_emit_well_formed_integer_literal() {
 #[test]
 fn rt_metal_emit_const_f32_finite_value_keeps_typed_float_literal_form() {
     let body = dtype::host_const_fill_body(
-        chelis_types::dtype_semantics::scalar_from_f64("test", Prim::F32, 2.5).unwrap(),
+        chelis_numeric_core::dtype_semantics::scalar_from_f64("test", Prim::F32, 2.5).unwrap(),
         "buf",
         4,
     );

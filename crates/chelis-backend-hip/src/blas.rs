@@ -107,7 +107,7 @@ fn extract_matmul_dims(
 mod tests {
     use super::*;
     use chelis_ir::dag::{Dag, DimInfo, TensorType};
-    use chelis_types::types::Prim;
+    use chelis_numeric_core::prim::Prim;
 
     fn detect(dag: &Dag, sum: NodeId) -> Option<MatmulInfo> {
         let verified = chelis_ir::ownership::verify_ownership(
@@ -175,7 +175,7 @@ mod tests {
             decl,
             RiscOp::Sum {
                 axis: 1,
-                accumulator: chelis_types::types::Prim::F32,
+                accumulator: chelis_numeric_core::prim::Prim::F32,
             },
             vec![mul],
             mat_f32(2, 4),

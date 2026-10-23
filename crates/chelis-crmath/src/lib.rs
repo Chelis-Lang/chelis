@@ -21,9 +21,20 @@
 //! The workspace `clippy.toml` disallows `f32::exp` and the other libm-backed float
 //! methods everywhere else, so a new caller cannot bypass these kernels.
 
+#![no_std]
+
+#[cfg(feature = "std")]
+#[macro_use]
+extern crate std;
+
+#[cfg(any(target_os = "none", test))]
+mod freestanding;
+
 use half::{bf16, f16};
 
+#[cfg(feature = "std")]
 pub mod c_source;
+#[cfg(feature = "std")]
 pub mod profile;
 
 mod ffi {
@@ -148,5 +159,5 @@ pub fn pow_bf16(x: bf16, y: bf16) -> bf16 {
     bf16::from_f32(pow_f32(x.to_f32(), y.to_f32()))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "std"))]
 mod tests;

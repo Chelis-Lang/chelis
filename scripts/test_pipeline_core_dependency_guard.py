@@ -88,6 +88,25 @@ class PipelineCoreDependencyGuardTests(unittest.TestCase):
         ):
             guard.validate_fixture(manifest_with(*APPROVED_DEPENDENCIES), graph)
 
+    def test_numeric_leaf_preserves_denied_and_unapproved_host_paths(self) -> None:
+        for dependency, classification in (
+            ("chelis-compiler-api", "forbidden"),
+            ("chelis-conformance", "unapproved workspace"),
+        ):
+            with self.subTest(dependency=dependency):
+                graph = approved_graph()
+                graph["chelis-deep"].append("chelis-numeric-core")
+                graph["chelis-numeric-core"] = [dependency]
+                graph[dependency] = []
+                with self.assertRaisesRegex(
+                    guard.DependencyBoundaryError,
+                    f"{classification} dependency path: chelis-pipeline-core"
+                    f" -> chelis-deep -> chelis-numeric-core -> {dependency}",
+                ):
+                    guard.validate_fixture(
+                        manifest_with(*APPROVED_DEPENDENCIES), graph
+                    )
+
     def test_metadata_excludes_dev_only_edges(self) -> None:
         raw = {
             "packages": [

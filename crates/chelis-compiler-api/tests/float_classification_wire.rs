@@ -1,5 +1,5 @@
 use chelis_compiler_api::schema::{WIRE_DAG_SCHEMA_VERSION, WireDag, WireRiscOp};
-use chelis_types::FloatClassify;
+use chelis_numeric_core::dtype_semantics::FloatClassify;
 use serde_json::{Value, json};
 
 fn graph(precision: &str, kind: &str) -> Value {

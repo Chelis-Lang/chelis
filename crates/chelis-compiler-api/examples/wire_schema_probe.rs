@@ -12,7 +12,8 @@ use chelis_compiler_api::schema::{
     WireDagNode, WireDeepErrorPath, WireDiagnostic, WireInferredDim, WireInferredParameter,
     WireInferredPrecision, WireInferredSignature, WireInferredType,
 };
-use chelis_types::{ElementRef, ScalarValue, TensorStorage};
+use chelis_numeric_core::dtype_semantics::{ScalarValue, TensorStorage};
+use chelis_numeric_core::observation::ElementRef;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use std::io::{self, BufRead, Write};
@@ -102,7 +103,7 @@ struct TensorInput {
     shape: Vec<i64>,
     // The execution storage grammar, so a constructed key tensor is admitted
     // exactly as the tensor execution value's own decoder admits it.
-    #[serde(with = "chelis_types::dtype_semantics::execution_storage")]
+    #[serde(with = "chelis_numeric_core::dtype_semantics::execution_storage")]
     data: TensorStorage,
 }
 fn tensor(request: &Request) -> Result<Value, String> {

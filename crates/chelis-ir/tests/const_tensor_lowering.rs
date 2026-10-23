@@ -53,7 +53,7 @@ def main() -> tensor[2, f32] =
         .iter()
         .find_map(|n| match &n.op {
             RiscOp::ConstTensor { data } => match data.element_ref(0) {
-                chelis_types::ElementRef::F32(v) => Some(v.to_bits()),
+                chelis_numeric_core::observation::ElementRef::F32(v) => Some(v.to_bits()),
                 _ => None,
             },
             _ => None,
@@ -84,10 +84,10 @@ def main() -> tensor[2, bf16] =
             _ => None,
         })
         .expect("non-uniform literal takes the ConstTensor path");
-    let expected = chelis_types::finalize_scalar(
+    let expected = chelis_numeric_core::dtype_semantics::finalize_scalar(
         "test",
-        chelis_types::types::Prim::Bf16,
-        chelis_types::RawScalar::Int(18_084_767_253_659_649),
+        chelis_numeric_core::prim::Prim::Bf16,
+        chelis_numeric_core::dtype_semantics::RawScalar::Int(18_084_767_253_659_649),
     )
     .expect("in-range integer finalize");
     assert_eq!(
@@ -321,7 +321,7 @@ def main() -> tensor[3, f32] =
     // spec/04 section 9 [04-NUM-1..2]). The pre-refactor expectation kept
     // raw f64 values inside an f32 tensor, which is the chelis#717 defect
     // class this phase ends; bit-exactness is now AT THE DTYPE.
-    assert_eq!(result.prim(), chelis_types::types::Prim::F32);
+    assert_eq!(result.prim(), chelis_numeric_core::prim::Prim::F32);
     assert_eq!(
         result.to_f64_lossy_vec(),
         vec![0.1f32 as f64, 0.2f32 as f64, 0.3f32 as f64]

@@ -1,8 +1,9 @@
 //! [10] §3: exact claim, invocation dependency and provenance transport.
 use chelis_compiler_api::schema::*;
-use chelis_types::{scalar_from_i64, types::Prim};
+use chelis_numeric_core::dtype_semantics::scalar_from_i64;
+use chelis_numeric_core::prim::Prim;
 
-fn integer(value: i64) -> chelis_types::ScalarValue {
+fn integer(value: i64) -> chelis_numeric_core::dtype_semantics::ScalarValue {
     scalar_from_i64("load", Prim::Int64, value).unwrap()
 }
 
@@ -10,7 +11,7 @@ fn extent(value: i64) -> numbers::NonnegativeExtent {
     numbers::NonnegativeExtent::new(value).unwrap()
 }
 
-fn boolean(value: bool) -> chelis_types::ScalarValue {
+fn boolean(value: bool) -> chelis_numeric_core::dtype_semantics::ScalarValue {
     scalar_from_i64("load", Prim::Bool, i64::from(value)).unwrap()
 }
 
@@ -148,7 +149,12 @@ fn local_ascription_with_activation_fixture() -> WireDag {
                         WireRtDim::Lit { value: extent(0) },
                         WireRtDim::Lit { value: extent(0) },
                     )],
-                    fill: chelis_types::scalar_from_f64("pad", Prim::F32, 0.0).unwrap(),
+                    fill: chelis_numeric_core::dtype_semantics::scalar_from_f64(
+                        "pad",
+                        Prim::F32,
+                        0.0,
+                    )
+                    .unwrap(),
                 },
                 inputs: vec![0],
                 output_type: WireTensorType {
@@ -346,7 +352,7 @@ fn local_ascription_site_roundtrips_exact_identity_and_rejects_missing_or_unknow
             WireRtDim::Lit { value: extent(0) },
             WireRtDim::Lit { value: extent(0) },
         )],
-        fill: chelis_types::scalar_from_f64("pad", Prim::F32, 0.0).unwrap(),
+        fill: chelis_numeric_core::dtype_semantics::scalar_from_f64("pad", Prim::F32, 0.0).unwrap(),
     };
     dag.nodes[2].inputs = vec![0];
     dag.nodes[2].output_type = WireTensorType {

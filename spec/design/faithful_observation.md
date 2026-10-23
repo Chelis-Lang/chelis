@@ -53,7 +53,7 @@ landed, and deliberately so: an f64 value field would have reintroduced the
 above-2^53 integer loss that [#856]'s exact i64 lane exists to prevent.
 Integer leaves therefore stay on the exact lane and only float leaves are
 finalized. Phase 3 authors the [05-OBS-3] table, moves both value harnesses and
-the rejected-cell corpus onto `chelis_types::agreement`, and supplies one
+the rejected-cell corpus onto `chelis_numeric_core::agreement`, and supplies one
 executable acceptance oracle. Both phase oracles pass on the 2026-08-05
 revision; their exact commands and continuous-execution boundaries are stated
 in their phase sections below. Tracking issue: [#732].
@@ -192,7 +192,7 @@ Per-dtype rules:
    two-digit exponents) must not leak. **Pinned at Phase 1**: the
    decimal/e-notation thresholds are the normative constants
    `DECIMAL_LOWER_BOUND = 1e-4` / `DECIMAL_UPPER_BOUND = 1e16`
-   (`chelis-types::observation`, rustc-locked by unit tests), decided on
+   (`chelis_numeric_core::observation`, rustc-locked by unit tests), decided on
    the RENDERED magnitude - the value the chosen shortest digits denote
    - which is rustc's actual `{:?}` behavior at straddling-ulp
    boundaries (PR #792 red-team F2); the full ratified grammar,
@@ -356,7 +356,7 @@ For every dtype and every storable value:
    [#716]'s cells, green after Phase 2, and permanent thereafter.
 2. **The per-op value-tolerance table** is a MACHINE artifact first
    (2026-07 review integration): its authoritative form is `const` Rust
-   at `chelis_types::agreement::OP_TOLERANCES`, beside the future
+   at `chelis_numeric_core::agreement::OP_TOLERANCES`, beside the future
    capability table (the same no-second-parser resolution as that doc's
    open question 1), consumed directly by the [#687] oracle
    and by [#754]'s shell-facing gate; the `spec/05-risc-primitives.md`
@@ -454,7 +454,7 @@ For every dtype and every storable value:
    compiler sees (round-2 F3's executed evasion, closed). The
    sanctioned implementations -
    the only sites where the grammar may be spelled directly - are
-   `chelis-types/src/observation.rs` (`format_element`) and
+   `chelis-numeric-core/src/observation.rs` (`format_element`) and
    `chelis-runtime/src/format_shortest.rs` (`chelis_format_shortest`);
    their baseline rows say so. Declared residue the token instruments
    cannot see, each with its owner per §B2.8: derived-`Debug`

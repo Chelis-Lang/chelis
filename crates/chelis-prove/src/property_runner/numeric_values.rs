@@ -3,8 +3,9 @@
 use crate::solver::{CmpOp, SmtExpr};
 use chelis_deep::ast::{Atom, Expr as DeepExpr};
 use chelis_deep::{DeepTag, ExprCarrier};
+use chelis_numeric_core::dtype_semantics::{scalar_from_f64, scalar_from_i64};
+use chelis_numeric_core::prim::Prim;
 use chelis_surf::ast::{Decl, Expr, Param, TypeExpr, UnaryOp};
-use chelis_types::{scalar_from_f64, scalar_from_i64, types::Prim};
 
 /// An immutable semantic view prepared once from the full declaration set.
 /// Binding dtypes come from canonical whole-program desugaring, never a second

@@ -19,6 +19,14 @@ impl Probe {
             ));
         fs::create_dir_all(directory.parent().unwrap()).unwrap();
         fs::create_dir(&directory).unwrap();
+        fs::copy(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../chelis-vocab/src/failure.rs"
+            ),
+            directory.join("failure.rs"),
+        )
+        .expect("copy vocabulary failure module");
         Self(directory)
     }
 

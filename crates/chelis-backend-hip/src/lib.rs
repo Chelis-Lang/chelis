@@ -7,14 +7,14 @@
 /// Declared from hardware spec + local HIP environment verification.
 /// Declaration-only in CI (no HIP toolchain) — verified in the field via
 /// [05-UNS-1] wiring when the backend rejection path fires.
-pub const TENSOR_CAPABLE_PRIMS: &[chelis_types::types::Prim] = &[
-    chelis_types::types::Prim::F32,
-    chelis_types::types::Prim::F64,
-    chelis_types::types::Prim::Bool,
-    chelis_types::types::Prim::Bf16,
-    chelis_types::types::Prim::F16,
-    chelis_types::types::Prim::Int32,
-    chelis_types::types::Prim::Int64,
+pub const TENSOR_CAPABLE_PRIMS: &[chelis_numeric_core::prim::Prim] = &[
+    chelis_numeric_core::prim::Prim::F32,
+    chelis_numeric_core::prim::Prim::F64,
+    chelis_numeric_core::prim::Prim::Bool,
+    chelis_numeric_core::prim::Prim::Bf16,
+    chelis_numeric_core::prim::Prim::F16,
+    chelis_numeric_core::prim::Prim::Int32,
+    chelis_numeric_core::prim::Prim::Int64,
 ];
 
 use chelis_unord::UnordMap;
@@ -321,7 +321,7 @@ mod preparation_tests {
     use chelis_ir::ownership::{
         StoragePlacement, lower_dag_ownership, plan_hip_storage, verify_ownership,
     };
-    use chelis_types::types::Prim;
+    use chelis_numeric_core::prim::Prim;
 
     fn matrix_program(precision: Prim) -> Dag {
         let mut dag = Dag::new();

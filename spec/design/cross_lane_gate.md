@@ -24,7 +24,7 @@ timeout, and toolchain-contradiction case failing loudly rather than passing.
 already holds: [#732] Phase 2 made both lanes render through one frozen [05-OBS]
 grammar, and [#729] Phase 3 returned the former [#751]/[#761] curated gaps to
 ordinary regression rows. The production exact comparator is
-`chelis_types::agreement::compare_exact_observations`.
+`chelis_numeric_core::agreement::compare_exact_observations`.
 
 The missing decisions are how the command receives its pinned Nix identity and
 how it compiles C without inheriting the product build's native/ambient
@@ -36,7 +36,7 @@ that the unimplemented command or Nix acceptance check passes.
 
 | Need | Existing artifact | Note |
 |---|---|---|
-| Exact comparator | `chelis_types::agreement::compare_exact_observations` | Accepts UTF-8 text; compare complete stdout without the lossy decoding and line splitting in `parity.rs`. |
+| Exact comparator | `chelis_numeric_core::agreement::compare_exact_observations` | Compare complete UTF-8 stdout without lossy decoding or line splits. |
 | Eval lane | `chelis eval --file <program> --target c` | `--target c` selects the same target-aware root manifest as the C build. |
 | C emit lane | `chelis build <program> --target c --emit-c --output <dir>` | Emits C, headers, and a staged runtime; its printed `Compile:` recipe uses the non-reference product profile. |
 | Build/link/run patterns | `crates/chelis-cli/tests/parity.rs`; `scripts/core_fragment_parity_receipt.py` | The former uses the shared resolver; the latter runs the emitted recipe through a shell. Neither is a hermetic runner to copy unchanged. |

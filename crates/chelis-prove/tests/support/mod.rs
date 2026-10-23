@@ -5,15 +5,23 @@ pub fn isolate() {
 }
 
 #[allow(dead_code)]
-pub fn tagged_f64(value: f64) -> chelis_types::ScalarValue {
-    chelis_types::scalar_from_f64("test box bound", chelis_types::types::Prim::F64, value)
-        .expect("f64 is a valid tagged test bound")
+pub fn tagged_f64(value: f64) -> chelis_numeric_core::dtype_semantics::ScalarValue {
+    chelis_numeric_core::dtype_semantics::scalar_from_f64(
+        "test box bound",
+        chelis_numeric_core::prim::Prim::F64,
+        value,
+    )
+    .expect("f64 is a valid tagged test bound")
 }
 
 #[allow(dead_code)]
 pub fn tagged_dims(
     dims: Vec<(String, f64, f64)>,
-) -> Vec<(String, chelis_types::ScalarValue, chelis_types::ScalarValue)> {
+) -> Vec<(
+    String,
+    chelis_numeric_core::dtype_semantics::ScalarValue,
+    chelis_numeric_core::dtype_semantics::ScalarValue,
+)> {
     dims.into_iter()
         .map(|(name, lo, hi)| (name, tagged_f64(lo), tagged_f64(hi)))
         .collect()

@@ -160,6 +160,8 @@ CLIPPY_MATRIX: tuple[ClippyRun, ...] = (
             "chelis-compiler-api/ownership-ledger,"
             "chelis-e2e/hip-local-gpu,"
             "chelis-ir/lowering-trace,"
+            "chelis-numeric-core/alloc,"
+            "chelis-numeric-core/serde,"
             "chelis-prove/clarabel,"
             "chelis-python/extension-module,"
             "chelis-runtime/ownership-ledger,"
@@ -194,6 +196,16 @@ CLIPPY_MATRIX: tuple[ClippyRun, ...] = (
         label="core-without-migration",
         command=(
             "cargo", "clippy", "-p", "chelis-deep", "-p", "chelis-surf",
+            "--all-targets", "--no-default-features", "--", "-D", "warnings",
+        ),
+        owner="scripts/gate.py",
+        hosts=("linux",),
+        cadence=PER_PULL_REQUEST,
+    ),
+    ClippyRun(
+        label="numeric-without-default-features",
+        command=(
+            "cargo", "clippy", "-p", "chelis-numeric-core",
             "--all-targets", "--no-default-features", "--", "-D", "warnings",
         ),
         owner="scripts/gate.py",

@@ -21,9 +21,10 @@
 use std::collections::BTreeSet;
 
 use chelis_deep::Expr;
+use chelis_numeric_core::prim::Prim;
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str as parse_surf;
-use chelis_types::types::{Prim, TensorPrec, Type, TypeVar};
+use chelis_types::types::{TensorPrec, Type, TypeVar};
 use chelis_types::{BUILTINS, ShapeClass, builtin_env, check_ir_program};
 
 const DTYPES: [&str; 3] = ["f32", "i32", "bool"];

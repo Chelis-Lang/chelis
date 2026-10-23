@@ -912,12 +912,13 @@ use chelis_deep::cons_spine::{ConsSpine, ConsSpineNode};
 use chelis_deep::{
     DeepTag, Span, decode_dtype_bounds, decode_effect_kind, exact_type_variable_name,
 };
-use chelis_types::unsupported::{Stage, Unsupported, UnsupportedKind};
-use chelis_types::{
-    BUILTIN_NAMES, CheckedProgram, CompareOp, FloatBinOp, FloatUnOp, IntBinOp, IntUnOp,
-    LibraryProofId, LinearityInfo, ScalarValue, cast_scalar, compare_scalars, float_binop,
-    float_unop, int_binop, int_unop, scalar_from_i64, types::Prim,
+use chelis_numeric_core::dtype_semantics::{
+    CompareOp, FloatBinOp, FloatUnOp, IntBinOp, IntUnOp, ScalarValue, cast_scalar, compare_scalars,
+    float_binop, float_unop, int_binop, int_unop, scalar_from_i64,
 };
+use chelis_numeric_core::prim::Prim;
+use chelis_types::unsupported::{Stage, Unsupported, UnsupportedKind};
+use chelis_types::{BUILTIN_NAMES, CheckedProgram, LibraryProofId, LinearityInfo};
 use chelis_vocab::EffectKind;
 
 use crate::dag::{
@@ -4888,7 +4889,7 @@ pub fn top_level_expr_is_lowered(
 /// `infer_realizability` instead of the syntactic predicate.
 pub fn top_level_lowering_map_from_realizability(
     program: &chelis_types::CheckedProgram,
-    target_prims: &[chelis_types::types::Prim],
+    target_prims: &[chelis_numeric_core::prim::Prim],
 ) -> BTreeMap<String, bool> {
     let result = chelis_effects::realizability::infer_realizability(program, target_prims);
     result
@@ -4973,27 +4974,27 @@ fn ty_expr_to_deep(ty: &TensorType) -> Expr {
     use chelis_deep::ast::{Atom, Metadata};
     let span = Span::new(0, 0);
     let prim = match ty.precision {
-        chelis_types::types::Prim::F32 => "f32",
-        chelis_types::types::Prim::F64 => "f64",
-        chelis_types::types::Prim::F16 => "f16",
-        chelis_types::types::Prim::Bf16 => "bf16",
+        chelis_numeric_core::prim::Prim::F32 => "f32",
+        chelis_numeric_core::prim::Prim::F64 => "f64",
+        chelis_numeric_core::prim::Prim::F16 => "f16",
+        chelis_numeric_core::prim::Prim::Bf16 => "bf16",
         // E2 (WS-A0 RT-1 fixup): per spec/04-type-system.md §1.1.1
         // f8e4m3 is deferred and the type checker must reject it
         // before lowering. If a TensorType reaches this Deep
         // re-encoder with f8e4m3 precision, the upstream rejection
         // has a hole — panic rather than emit a `(t-prim {} f8e4m3)`
         // node into lowered IR.
-        chelis_types::types::Prim::F8e4m3 => panic!(
+        chelis_numeric_core::prim::Prim::F8e4m3 => panic!(
             "f8e4m3 is deferred per spec/04-type-system.md §1.1.1 and \
              should have been rejected upstream"
         ),
-        chelis_types::types::Prim::Int8 => "i8",
-        chelis_types::types::Prim::Int16 => "i16",
-        chelis_types::types::Prim::Int32 => "i32",
-        chelis_types::types::Prim::Int64 => "i64",
-        chelis_types::types::Prim::Bool => "bool",
-        chelis_types::types::Prim::String => "string",
-        chelis_types::types::Prim::Key => "key",
+        chelis_numeric_core::prim::Prim::Int8 => "i8",
+        chelis_numeric_core::prim::Prim::Int16 => "i16",
+        chelis_numeric_core::prim::Prim::Int32 => "i32",
+        chelis_numeric_core::prim::Prim::Int64 => "i64",
+        chelis_numeric_core::prim::Prim::Bool => "bool",
+        chelis_numeric_core::prim::Prim::String => "string",
+        chelis_numeric_core::prim::Prim::Key => "key",
     };
     // Decode-once (chelis#731 Phase 3): this is a PROGRAMMATIC producer
     // running in the lowerer, downstream of the stamper and the desugarer,
@@ -6030,8 +6031,10 @@ pub(crate) fn admitted_builtin_callable(
 fn float_predicate_callable(
     expr: &Expr,
     declarations: &BTreeMap<String, Expr>,
-) -> Option<chelis_types::FloatClassify> {
-    chelis_types::FloatClassify::from_name(admitted_builtin_callable(expr, declarations)?.symbol())
+) -> Option<chelis_numeric_core::dtype_semantics::FloatClassify> {
+    chelis_numeric_core::dtype_semantics::FloatClassify::from_name(
+        admitted_builtin_callable(expr, declarations)?.symbol(),
+    )
 }
 
 fn def_is_lowered(
@@ -8026,7 +8029,7 @@ struct LiteralToTensor {
 /// One extracted literal leaf, staged for `emit_literal_tensor`.
 ///
 /// chelis#1116: the staging carrier keeps the dtype with the value. A
-/// `Typed` leaf is the sealed [`chelis_types::ScalarValue`] the checked
+/// `Typed` leaf is the sealed [`chelis_numeric_core::dtype_semantics::ScalarValue`] the checked
 /// ladder produced - the tag is never discarded into an untagged f64
 /// ([04-NUM-11]: a value survives transport at its declared dtype). A
 /// `Raw` leaf has no checked dtype of its own (bare atom, metadata-free
@@ -8034,8 +8037,8 @@ struct LiteralToTensor {
 /// behavior.
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum StagedScalar {
-    Typed(chelis_types::ScalarValue),
-    Raw(chelis_types::RawScalar),
+    Typed(chelis_numeric_core::dtype_semantics::ScalarValue),
+    Raw(chelis_numeric_core::dtype_semantics::RawScalar),
 }
 
 /// Stable per-dtype ordinal for `emit_literal_tensor`'s uniformity key.
@@ -8246,7 +8249,7 @@ impl LowerCtx<'_> {
 ///     negated inner value. Nested casts and lits are handled by the
 ///     recursive call.
 fn extract_numeric_leaf(expr: &Expr) -> Option<StagedScalar> {
-    use chelis_types::RawScalar;
+    use chelis_numeric_core::dtype_semantics::RawScalar;
     match expr.carrier() {
         ExprCarrier::Atom(Atom::Int(n)) => Some(StagedScalar::Raw(RawScalar::Int(*n))),
         ExprCarrier::Atom(Atom::Float(f)) => Some(StagedScalar::Raw(RawScalar::Float(*f))),
@@ -8273,7 +8276,9 @@ fn extract_numeric_leaf(expr: &Expr) -> Option<StagedScalar> {
                 let declared = expr_type_metadata(expr).and_then(LowerCtx::try_extract_prim);
                 match (raw, declared) {
                     (RawScalar::Float(_), Some(prim)) if prim.is_float() => {
-                        let finalized = chelis_types::cast_raw("lit", raw, prim).ok()?;
+                        let finalized =
+                            chelis_numeric_core::dtype_semantics::cast_raw("lit", raw, prim)
+                                .ok()?;
                         Some(StagedScalar::Typed(finalized))
                     }
                     _ => Some(StagedScalar::Raw(raw)),
@@ -8297,18 +8302,24 @@ fn extract_numeric_leaf(expr: &Expr) -> Option<StagedScalar> {
                 let cast = match chelis_deep::cast_mode_of(kids).ok()? {
                     chelis_deep::CastMode::Checked => match extract_numeric_leaf(inner)? {
                         StagedScalar::Raw(raw) => {
-                            chelis_types::cast_raw("cast", raw, target).ok()?
+                            chelis_numeric_core::dtype_semantics::cast_raw("cast", raw, target)
+                                .ok()?
                         }
                         StagedScalar::Typed(value) => {
-                            chelis_types::cast_scalar("cast", value, target).ok()?
+                            chelis_numeric_core::dtype_semantics::cast_scalar("cast", value, target)
+                                .ok()?
                         }
                     },
                     chelis_deep::CastMode::Named(mode) => match extract_numeric_leaf(inner)? {
                         StagedScalar::Raw(raw) => {
-                            chelis_types::named_cast_raw(mode, raw, target).ok()?
+                            chelis_numeric_core::dtype_semantics::named_cast_raw(mode, raw, target)
+                                .ok()?
                         }
                         StagedScalar::Typed(value) => {
-                            chelis_types::named_cast_scalar(mode, value, target).ok()?
+                            chelis_numeric_core::dtype_semantics::named_cast_scalar(
+                                mode, value, target,
+                            )
+                            .ok()?
                         }
                     },
                 };
@@ -8334,9 +8345,15 @@ fn extract_numeric_leaf(expr: &Expr) -> Option<StagedScalar> {
                     }
                     StagedScalar::Typed(value) => {
                         let negated = if value.prim().is_float() {
-                            chelis_types::float_unop(chelis_types::FloatUnOp::Neg, value)
+                            chelis_numeric_core::dtype_semantics::float_unop(
+                                chelis_numeric_core::dtype_semantics::FloatUnOp::Neg,
+                                value,
+                            )
                         } else {
-                            chelis_types::int_unop(chelis_types::IntUnOp::Neg, value)
+                            chelis_numeric_core::dtype_semantics::int_unop(
+                                chelis_numeric_core::dtype_semantics::IntUnOp::Neg,
+                                value,
+                            )
                         };
                         StagedScalar::Typed(negated.ok()?)
                     }
@@ -8356,7 +8373,7 @@ fn extract_numeric_leaf(expr: &Expr) -> Option<StagedScalar> {
 /// default; all other polarities finalize at the substituted target.
 fn binder_float_literal_source_default(
     meta: &Metadata,
-    raw: chelis_types::RawScalar,
+    raw: chelis_numeric_core::dtype_semantics::RawScalar,
     substitutions: &UnordMap<String, Prim>,
 ) -> Option<Prim> {
     let binder = extract_scalar_precision_var_name(meta.ty()?.expression())?;
@@ -8365,11 +8382,14 @@ fn binder_float_literal_source_default(
     {
         return None;
     }
-    matches!(raw, chelis_types::RawScalar::Float(_))
-        .then(|| substitutions.get(&binder).copied())
-        .flatten()
-        .filter(Prim::is_integer)
-        .map(|_| Prim::F32)
+    matches!(
+        raw,
+        chelis_numeric_core::dtype_semantics::RawScalar::Float(_)
+    )
+    .then(|| substitutions.get(&binder).copied())
+    .flatten()
+    .filter(Prim::is_integer)
+    .map(|_| Prim::F32)
 }
 
 /// Return true iff any element of `dims` is a wildcard placeholder
@@ -13987,17 +14007,21 @@ impl<'program> LowerCtx<'program> {
         };
         match claim.required_extent() {
             chelis_types::types::Dim::Lit(required) => {
-                let value = chelis_types::scalar_from_i64("shape", Prim::Int64, *required)
-                    .unwrap_or_else(|trap| {
-                        raise_fatal_lowering_error(
-                            format!(
-                                "local tensor ascription `{}` has an invalid extent: {trap}",
-                                ascription.binding_name()
-                            ),
-                            Some(ascription.ascription_span()),
-                            None,
-                        )
-                    });
+                let value = chelis_numeric_core::dtype_semantics::scalar_from_i64(
+                    "shape",
+                    Prim::Int64,
+                    *required,
+                )
+                .unwrap_or_else(|trap| {
+                    raise_fatal_lowering_error(
+                        format!(
+                            "local tensor ascription `{}` has an invalid extent: {trap}",
+                            ascription.binding_name()
+                        ),
+                        Some(ascription.ascription_span()),
+                        None,
+                    )
+                });
                 self.dag.add_node(
                     self.owner(),
                     RiscOp::ExtentWitness {
@@ -14099,10 +14123,10 @@ impl<'program> LowerCtx<'program> {
         self.dag.add_node(
             self.owner(),
             RiscOp::Const {
-                value: chelis_types::finalize_scalar(
+                value: chelis_numeric_core::dtype_semantics::finalize_scalar(
                     "eq",
                     Prim::Bool,
-                    chelis_types::RawScalar::Int(i64::from(value)),
+                    chelis_numeric_core::dtype_semantics::RawScalar::Int(i64::from(value)),
                 )
                 .expect("exact boolean"),
             },
@@ -14127,14 +14151,22 @@ impl<'program> LowerCtx<'program> {
         // ascribed dtype is a loud lowering diagnostic, not a wrap.
         let raw = if let Some(val_expr) = kids.first() {
             match val_expr {
-                Expr::Atom(Atom::Int(n), _) => chelis_types::RawScalar::Int(*n),
-                Expr::Atom(Atom::Float(f), _) => chelis_types::RawScalar::Float(*f),
-                Expr::Atom(Atom::Bool(true), _) => chelis_types::RawScalar::Int(1),
-                Expr::Atom(Atom::Bool(false), _) => chelis_types::RawScalar::Int(0),
-                _ => chelis_types::RawScalar::Int(0),
+                Expr::Atom(Atom::Int(n), _) => {
+                    chelis_numeric_core::dtype_semantics::RawScalar::Int(*n)
+                }
+                Expr::Atom(Atom::Float(f), _) => {
+                    chelis_numeric_core::dtype_semantics::RawScalar::Float(*f)
+                }
+                Expr::Atom(Atom::Bool(true), _) => {
+                    chelis_numeric_core::dtype_semantics::RawScalar::Int(1)
+                }
+                Expr::Atom(Atom::Bool(false), _) => {
+                    chelis_numeric_core::dtype_semantics::RawScalar::Int(0)
+                }
+                _ => chelis_numeric_core::dtype_semantics::RawScalar::Int(0),
             }
         } else {
-            chelis_types::RawScalar::Int(0)
+            chelis_numeric_core::dtype_semantics::RawScalar::Int(0)
         };
         // §5.6: a decimal actualized across families keeps the §5.3 f32
         // source default; the surrounding Cast applies [04-NUM-14]. Integer
@@ -14152,7 +14184,8 @@ impl<'program> LowerCtx<'program> {
             };
             return LoweredValue::HostConstant(HostConstant::String(value.clone()));
         }
-        let value = match chelis_types::finalize_scalar("const", prim, raw) {
+        let value = match chelis_numeric_core::dtype_semantics::finalize_scalar("const", prim, raw)
+        {
             Ok(value) => value,
             Err(trap) => raise_lowering_error(
                 format!(
@@ -18501,9 +18534,12 @@ impl<'program> LowerCtx<'program> {
                     self.attach_reuse_hint(node, app_span, &[x])
                 }
             }
-            name if args.len() == 1 && chelis_types::FloatClassify::from_name(name).is_some() => {
-                let kind =
-                    chelis_types::FloatClassify::from_name(name).expect("classification identity");
+            name if args.len() == 1
+                && chelis_numeric_core::dtype_semantics::FloatClassify::from_name(name)
+                    .is_some() =>
+            {
+                let kind = chelis_numeric_core::dtype_semantics::FloatClassify::from_name(name)
+                    .expect("classification identity");
                 let x = self.lower_expr_node(&args[0], "float classification input");
                 let result_ty = TensorType {
                     dims: self
@@ -20092,15 +20128,27 @@ impl<'program> LowerCtx<'program> {
                 // default (chelis#776, chelis#3389). The `None` arm is a true
                 // structural default: no fill was given, so pad with zeros.
                 let fill = match args.get(2) {
-                    None => chelis_types::scalar_from_i64("pad", ty.precision, 0)
-                        .expect("zero is a member of every active pad dtype"),
+                    None => chelis_numeric_core::dtype_semantics::scalar_from_i64(
+                        "pad",
+                        ty.precision,
+                        0,
+                    )
+                    .expect("zero is a member of every active pad dtype"),
                     Some(fill) => {
                         let value = match extract_numeric_leaf(fill) {
                             Some(StagedScalar::Raw(raw)) => {
-                                chelis_types::cast_raw("pad", raw, ty.precision)
+                                chelis_numeric_core::dtype_semantics::cast_raw(
+                                    "pad",
+                                    raw,
+                                    ty.precision,
+                                )
                             }
                             Some(StagedScalar::Typed(value)) => {
-                                chelis_types::cast_scalar("pad", value, ty.precision)
+                                chelis_numeric_core::dtype_semantics::cast_scalar(
+                                    "pad",
+                                    value,
+                                    ty.precision,
+                                )
                             }
                             None => return self.lower_runtime_fill_pad(inputs, padding, fill, ty),
                         };
@@ -20670,7 +20718,7 @@ impl<'program> LowerCtx<'program> {
     /// shape (the metadata's symbolic `Named("list", None)` dim is
     /// not usable here).
     fn emit_literal_tensor(&mut self, literal: &LiteralToTensor, ty: &TensorType) -> NodeId {
-        use chelis_types::RawScalar;
+        use chelis_numeric_core::dtype_semantics::RawScalar;
         let shape: Vec<DimInfo> = literal.shape.iter().map(|n| DimInfo::Lit(*n)).collect();
         let precision = ty.precision;
         let tensor_ty = TensorType {
@@ -20686,7 +20734,9 @@ impl<'program> LowerCtx<'program> {
         // 2^53). An out-of-domain literal is a loud lowering
         // diagnostic; cast leaves already applied the checked ladder
         // (or declined static recognition) in `extract_numeric_leaf`.
-        let raise_on = |trap: chelis_types::NumericTrap, span_id: Option<String>| -> ! {
+        let raise_on = |trap: chelis_numeric_core::dtype_semantics::NumericTrap,
+                        span_id: Option<String>|
+         -> ! {
             raise_lowering_error(
                 format!(
                     "tensor literal does not finalize at its ascribed dtype \
@@ -20699,8 +20749,12 @@ impl<'program> LowerCtx<'program> {
             )
         };
         let finalize_staged = |staged: &StagedScalar| match staged {
-            StagedScalar::Raw(raw) => chelis_types::finalize_scalar("const", precision, *raw),
-            StagedScalar::Typed(value) => chelis_types::cast_scalar("const", *value, precision),
+            StagedScalar::Raw(raw) => {
+                chelis_numeric_core::dtype_semantics::finalize_scalar("const", precision, *raw)
+            }
+            StagedScalar::Typed(value) => {
+                chelis_numeric_core::dtype_semantics::cast_scalar("const", *value, precision)
+            }
         };
 
         // Uniform-value fast path (bit-level key so NaN-uniform lists
@@ -20759,7 +20813,7 @@ impl<'program> LowerCtx<'program> {
                 Err(trap) => raise_on(trap, self.current_span_id.clone()),
             }
         }
-        let data = chelis_types::tensor_from_scalars(precision, &values);
+        let data = chelis_numeric_core::dtype_semantics::tensor_from_scalars(precision, &values);
         self.dag.add_node(
             self.owner(),
             RiscOp::ConstTensor { data },
@@ -23714,7 +23768,7 @@ impl<'program> LowerCtx<'program> {
                             && node.output_type.dims.get(axis) == Some(&DimInfo::Lit(*required))
                     }) {
                     vec![
-                        chelis_types::scalar_from_i64(
+                        chelis_numeric_core::dtype_semantics::scalar_from_i64(
                             "load",
                             Prim::Int64,
                             i64::try_from(*required).expect("checked extent fits i64"),
@@ -23877,7 +23931,8 @@ impl<'program> LowerCtx<'program> {
                 witness
             }
         };
-        let one = chelis_types::scalar_from_i64("load", Prim::Int64, 1).expect("unit extent");
+        let one = chelis_numeric_core::dtype_semantics::scalar_from_i64("load", Prim::Int64, 1)
+            .expect("unit extent");
         let RiscOp::ExtentWitness { requirements, .. } =
             &mut self.dag.node_mut(witness).expect("witness").op
         else {
@@ -23962,7 +24017,7 @@ impl<'program> LowerCtx<'program> {
                 self.dag.add_node(
                     self.owner(),
                     RiscOp::Const {
-                        value: chelis_types::scalar_from_i64(
+                        value: chelis_numeric_core::dtype_semantics::scalar_from_i64(
                             "reshape",
                             Prim::Int64,
                             i64::try_from(*required).expect("checked extent fits i64"),
@@ -24584,7 +24639,7 @@ impl<'program> LowerCtx<'program> {
         if self.literal_result_claim_is_entailed(witness, required) {
             return true;
         }
-        let required = chelis_types::scalar_from_i64(
+        let required = chelis_numeric_core::dtype_semantics::scalar_from_i64(
             "load",
             Prim::Int64,
             i64::try_from(required).expect("checked extent fits i64"),
@@ -24995,7 +25050,7 @@ impl<'program> LowerCtx<'program> {
                 fill_ty.precision.name()
             ));
         }
-        let zero = chelis_types::scalar_from_i64("pad", ty.precision, 0)
+        let zero = chelis_numeric_core::dtype_semantics::scalar_from_i64("pad", ty.precision, 0)
             .unwrap_or_else(|trap| fail(trap.to_string()));
         let owner = self.owner();
         let span = self.current_span_id.clone();
@@ -25024,7 +25079,8 @@ impl<'program> LowerCtx<'program> {
             owner,
             RiscOp::pad(
                 padding,
-                chelis_types::scalar_from_i64("pad", Prim::Bool, 1).expect("true is a bool scalar"),
+                chelis_numeric_core::dtype_semantics::scalar_from_i64("pad", Prim::Bool, 1)
+                    .expect("true is a bool scalar"),
             ),
             mask_inputs,
             TensorType {
@@ -25145,8 +25201,12 @@ impl<'program> LowerCtx<'program> {
                     self.dag.add_node(
                         self.owner(),
                         RiscOp::Const {
-                            value: chelis_types::scalar_from_i64("reshape", Prim::Int64, value)
-                                .expect("exact i64 target"),
+                            value: chelis_numeric_core::dtype_semantics::scalar_from_i64(
+                                "reshape",
+                                Prim::Int64,
+                                value,
+                            )
+                            .expect("exact i64 target"),
                         },
                         Vec::new(),
                         TensorType {
@@ -25887,7 +25947,7 @@ impl<'program> LowerCtx<'program> {
                 format!(
                     "`{selector}` is not a recognized cast mode selector; the \
                      named rungs are {}",
-                    chelis_deep::NamedCastMode::ALL
+                    chelis_numeric_core::named_cast::NamedCastMode::ALL
                         .iter()
                         .map(|named| format!("`{}` ({})", named.deep_selector(), named.atom()))
                         .collect::<Vec<_>>()
@@ -28072,7 +28132,12 @@ mod fused_zero_tests {
             let integer = dag.add_node(
                 decl,
                 RiscOp::Const {
-                    value: chelis_types::scalar_from_i64("test", Prim::Int64, n).unwrap(),
+                    value: chelis_numeric_core::dtype_semantics::scalar_from_i64(
+                        "test",
+                        Prim::Int64,
+                        n,
+                    )
+                    .unwrap(),
                 },
                 vec![],
                 tensor_type(&[], Prim::Int64),
@@ -28303,11 +28368,16 @@ mod fused_zero_tests {
     fn value(shape: &[usize], precision: Prim, values: &[f64]) -> TensorValue {
         TensorValue::from_storage(
             shape.to_vec(),
-            chelis_types::dtype_semantics::tensor_from_scalars(
+            chelis_numeric_core::dtype_semantics::tensor_from_scalars(
                 precision,
                 &values
                     .iter()
-                    .map(|value| chelis_types::scalar_from_f64("test", precision, *value).unwrap())
+                    .map(|value| {
+                        chelis_numeric_core::dtype_semantics::scalar_from_f64(
+                            "test", precision, *value,
+                        )
+                        .unwrap()
+                    })
                     .collect::<Vec<_>>(),
             ),
         )
@@ -28456,7 +28526,12 @@ mod fused_zero_tests {
                 dag.add_node(
                     decl,
                     RiscOp::Const {
-                        value: chelis_types::scalar_from_i64("test", Prim::Int64, n).unwrap(),
+                        value: chelis_numeric_core::dtype_semantics::scalar_from_i64(
+                            "test",
+                            Prim::Int64,
+                            n,
+                        )
+                        .unwrap(),
                     },
                     vec![],
                     int.clone(),
@@ -28478,7 +28553,12 @@ mod fused_zero_tests {
             let forward = dag.add_node(
                 decl,
                 RiscOp::Const {
-                    value: chelis_types::scalar_from_i64("test", Prim::Int64, 7).unwrap(),
+                    value: chelis_numeric_core::dtype_semantics::scalar_from_i64(
+                        "test",
+                        Prim::Int64,
+                        7,
+                    )
+                    .unwrap(),
                 },
                 vec![],
                 int,
@@ -28608,7 +28688,9 @@ mod tests {
             .find(|node| {
                 matches!(
                     node.op,
-                    RiscOp::FloatClassify(chelis_types::FloatClassify::Finite)
+                    RiscOp::FloatClassify(
+                        chelis_numeric_core::dtype_semantics::FloatClassify::Finite
+                    )
                 )
             })
             .unwrap();
@@ -29158,9 +29240,9 @@ mod tests {
             Arc::new(BTreeMap::new()),
         );
         for kind in [
-            chelis_types::FloatClassify::Nan,
-            chelis_types::FloatClassify::Finite,
-            chelis_types::FloatClassify::Infinite,
+            chelis_numeric_core::dtype_semantics::FloatClassify::Nan,
+            chelis_numeric_core::dtype_semantics::FloatClassify::Finite,
+            chelis_numeric_core::dtype_semantics::FloatClassify::Infinite,
         ] {
             for precision in [Prim::F16, Prim::Bf16, Prim::F32, Prim::F64] {
                 let expr = chelis_deep::parser::parse_str("(app {type: (t-tensor {} (d-name {} *) (d-name {} *) (t-prim {} bool))} (var {} f) (var {} x))", &chelis_syntax_host::NativeStack).unwrap().remove(0);
@@ -29935,8 +30017,12 @@ mod tests {
         );
         let cast = Expr::node(DeepTag::Cast, meta, vec![literal, i64], span);
 
-        let expected = chelis_types::scalar_from_i64("test", Prim::Int64, 9_007_199_254_740_993)
-            .expect("in-range i64");
+        let expected = chelis_numeric_core::dtype_semantics::scalar_from_i64(
+            "test",
+            Prim::Int64,
+            9_007_199_254_740_993,
+        )
+        .expect("in-range i64");
         assert_eq!(
             extract_numeric_leaf(&cast),
             Some(StagedScalar::Typed(expected)),
@@ -30061,7 +30147,7 @@ mod tests {
     /// rejected on the build path by `reject_symbolic_windowed_reduce`.)
     #[test]
     fn compute_reduce_window_out_dims_refines_named_sized_windowed_axis() {
-        let f32 = chelis_types::types::Prim::F32;
+        let f32 = chelis_numeric_core::prim::Prim::F32;
         let fallback = TensorType {
             dims: vec![DimInfo::Lit(1), DimInfo::Lit(1)],
             precision: f32,
@@ -30149,7 +30235,12 @@ mod tests {
         let actual = ctx.dag.add_node(
             ctx.owner(),
             RiscOp::Const {
-                value: chelis_types::scalar_from_i64("reshape", Prim::Int64, 2).unwrap(),
+                value: chelis_numeric_core::dtype_semantics::scalar_from_i64(
+                    "reshape",
+                    Prim::Int64,
+                    2,
+                )
+                .unwrap(),
             },
             vec![],
             TensorType {
@@ -30416,7 +30507,7 @@ mod tests {
     fn lower_with_bound_x(size: usize, expr_src: &str) -> Dag {
         let x_ty = TensorType {
             dims: vec![DimInfo::Lit(size)],
-            precision: chelis_types::types::Prim::F32,
+            precision: chelis_numeric_core::prim::Prim::F32,
         };
         let mut ctx = LowerCtx::new(
             BTreeMap::new(),
@@ -30654,7 +30745,7 @@ mod tests {
     fn lower_body_with_bound_x(size: usize, body_src: &str) -> Dag {
         let x_ty = TensorType {
             dims: vec![DimInfo::Lit(size)],
-            precision: chelis_types::types::Prim::F32,
+            precision: chelis_numeric_core::prim::Prim::F32,
         };
         let mut ctx = LowerCtx::new(
             BTreeMap::new(),
@@ -30878,7 +30969,7 @@ mod tests {
                 vec![],
                 TensorType {
                     dims: vec![],
-                    precision: chelis_types::types::Prim::Int64,
+                    precision: chelis_numeric_core::prim::Prim::Int64,
                 },
                 None,
             );
@@ -31105,7 +31196,12 @@ mod tests {
                 let scalar = ctx.dag.add_node(
                     ctx.owner(),
                     RiscOp::Const {
-                        value: chelis_types::scalar_from_i64("const", Prim::Int64, 7).unwrap(),
+                        value: chelis_numeric_core::dtype_semantics::scalar_from_i64(
+                            "const",
+                            Prim::Int64,
+                            7,
+                        )
+                        .unwrap(),
                     },
                     vec![],
                     TensorType {
@@ -33614,7 +33710,7 @@ mod regression_tests {
     use super::*;
     use crate::dag::{DimInfo, NodeId, RiscOp};
     use crate::verify;
-    use chelis_types::types::Prim;
+    use chelis_numeric_core::prim::Prim;
 
     /// E2 (WS-A0 RT-1 fixup): `ty_expr_to_deep` must panic on
     /// f8e4m3 with the §1.1.1 message rather than emitting a
@@ -34072,7 +34168,7 @@ mod regression_tests {
         );
     }
 
-    fn pad_fill(dag: &Dag) -> chelis_types::ScalarValue {
+    fn pad_fill(dag: &Dag) -> chelis_numeric_core::dtype_semantics::ScalarValue {
         dag.nodes()
             .iter()
             .find_map(|node| match &node.op {
@@ -35280,7 +35376,7 @@ mod regression_tests {
         program_defs.insert("loss".to_string(), fn_expr);
         let input_ty = crate::dag::TensorType {
             dims: vec![crate::dag::DimInfo::Lit(1)],
-            precision: chelis_types::types::Prim::F32,
+            precision: chelis_numeric_core::prim::Prim::F32,
         };
         let scoped_types = UnordMap::from([("input".to_string(), input_ty)]);
         // lower_subexpr_program starts with a fresh LowerCtx (no local_callables).
@@ -35335,7 +35431,7 @@ mod regression_tests {
         program_defs.insert("loss".to_string(), fn_expr);
         let input_ty = crate::dag::TensorType {
             dims: vec![crate::dag::DimInfo::Lit(1)],
-            precision: chelis_types::types::Prim::F32,
+            precision: chelis_numeric_core::prim::Prim::F32,
         };
         let scoped_types = UnordMap::from([("input".to_string(), input_ty)]);
         let dag = lower_subexpr_program(&app_expr, scoped_types, UnordMap::new(), program_defs);
@@ -35399,7 +35495,7 @@ mod regression_tests {
         program_defs.insert("loss".to_string(), fn_expr);
         let input_ty = crate::dag::TensorType {
             dims: vec![crate::dag::DimInfo::Lit(1)],
-            precision: chelis_types::types::Prim::F32,
+            precision: chelis_numeric_core::prim::Prim::F32,
         };
         let scoped_types = UnordMap::from([("input".to_string(), input_ty.clone())]);
         let dag = lower_subexpr_program(&app_expr, scoped_types, UnordMap::new(), program_defs);

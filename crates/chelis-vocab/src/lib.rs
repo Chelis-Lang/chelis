@@ -10,6 +10,8 @@
 #![no_std]
 #![forbid(unsafe_code)]
 
+pub mod failure;
+
 use core::error::Error;
 use core::fmt;
 

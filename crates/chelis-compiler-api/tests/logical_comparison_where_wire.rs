@@ -2,7 +2,7 @@ use chelis_compiler_api::schema::{
     WIRE_DAG_SCHEMA_VERSION, WireComparisonKind, WireDag, WireDagDecodeError, WireLogicalKind,
     WireRiscOp,
 };
-use chelis_types::types::Prim;
+use chelis_numeric_core::prim::Prim;
 
 fn payload(op: serde_json::Value, inputs: Vec<u64>, precision: &str) -> String {
     let mut nodes = vec![
@@ -532,7 +532,12 @@ fn wire_v15_rejects_operation_provenance_laundering() {
         "WireDag Compare node 3 requires two same-shape, same-precision active numeric or bool operands and a same-shape Bool output; ordered comparisons require active numeric operands",
     );
 
-    let fill = chelis_types::scalar_from_f64("wire Pad provenance", Prim::F32, 0.0).unwrap();
+    let fill = chelis_numeric_core::dtype_semantics::scalar_from_f64(
+        "wire Pad provenance",
+        Prim::F32,
+        0.0,
+    )
+    .unwrap();
     let nonidentity_pad = wire_dag_payload(
         vec![
             wire_node(0, "input", named_dims("", None), "f32", vec![]),

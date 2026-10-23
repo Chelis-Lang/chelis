@@ -20,7 +20,7 @@ mod support;
 use chelis_backend_c::CodegenOptions;
 use chelis_ir::dag::{Dag, DimExpr, DimInfo, RiscOp, TensorType};
 use chelis_ir::load_store_name::LoadStoreName;
-use chelis_types::types::Prim;
+use chelis_numeric_core::prim::Prim;
 use support::codegen_with_options;
 use support::emit_dag;
 

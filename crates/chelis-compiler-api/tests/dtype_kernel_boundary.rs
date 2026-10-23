@@ -1,6 +1,6 @@
 //! Structural locks for chelis#729 Phase 2's typed host-runtime boundary.
 
-use chelis_types::{
+use chelis_numeric_core::dtype_semantics::{
     ArgReduceOp, FloatBinOp, FloatUnOp, IntBinOp, IntUnOp, NumericKernelError, ReduceWindowGradOp,
     ScalarValue, TensorReduceOp, TensorStorage, arg_reduce_tensor_groups, float_binop,
     float_tensor_binop, float_tensor_unop, float_unop, int_binop, int_tensor_binop,

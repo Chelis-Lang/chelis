@@ -907,13 +907,11 @@ checker. These are the permitted edges:
 | `chelis-ir` | `chelis-vocab`; IR and host lowering dispatch | its existing types/Deep edges remain above vocab |
 | `chelis-compiler-api` | `chelis-vocab`; evaluator dispatch and wire adapters | already sits above effects/IR/types |
 | `chelis-runtime` | `chelis-vocab`; immediate FFI dtype decoding | vocab adds no libc/runtime edge |
-| C/HIP/Metal backends | `chelis-types` for `Prim`/`BuiltinId`/capability policy; `chelis-vocab` for `RuntimeDType`/`Repr`/C wire spellings | all already sit above IR/types; vocab has no reverse edge |
+| C/HIP/Metal backends | `chelis-numeric-core` for `Prim`. `chelis-types` for `BuiltinId` and capability policy. `chelis-vocab` for `RuntimeDType`, `Repr`, and C wire spellings. | These edges point from the backends to their dependencies. |
 | `chelis-python` | `chelis-vocab`; remove the local `CHELIS_F32 = 0` copy | already sits above compiler-api/backend C |
 
-The capability-table identity types `Prim` and `BuiltinId`, and all Table-A
-and Table-B policy, remain in `chelis-types`. `chelis-vocab` owns only the
-dependency-bottom representation identities named above. No
-Deep/runtime/backend edge points upward from vocab.
+`chelis-numeric-core` owns `Prim`, and `chelis-types` owns `BuiltinId` and Table-A and Table-B policy.
+`chelis-vocab` owns the dependency-bottom representation identities above, with no dependency on Deep, runtime, or backend crates.
 
 The effect consumer set is exhaustive for the current tree:
 

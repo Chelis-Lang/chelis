@@ -2,7 +2,8 @@
 use chelis_compiler_api::schema::{
     WIRE_DAG_SCHEMA_VERSION, WireDag, WireDagNode, WireNamedCastMode, WireRiscOp, WireTensorType,
 };
-use chelis_types::{scalar_from_i64, types::Prim};
+use chelis_numeric_core::dtype_semantics::scalar_from_i64;
+use chelis_numeric_core::prim::Prim;
 use serde::Deserialize;
 
 // Capture the actual serde decoder's closed vocabulary, rather than maintaining

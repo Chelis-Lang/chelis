@@ -468,7 +468,7 @@ mod tests {
     use super::*;
     use chelis_ir::host::{HostFunctionOrigin, HostParam};
     use chelis_ir::{Dag, TensorType};
-    use chelis_types::types::Prim;
+    use chelis_numeric_core::prim::Prim;
 
     fn verified_host_from_source(source: &str) -> chelis_ir::ownership::VerifiedHostProgram {
         let declarations = chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack)

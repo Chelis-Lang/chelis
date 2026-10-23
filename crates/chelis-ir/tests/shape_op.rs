@@ -8,7 +8,7 @@ use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
 use chelis_ir::eval::{TensorValue, eval_tensor_with};
 use chelis_ir::grad::grad_dag_checked;
 use chelis_ir::verify;
-use chelis_types::types::Prim;
+use chelis_numeric_core::prim::Prim;
 
 // End-to-end lowering (`shape(x, axis)` value -> `RiscOp::Shape` -> eval / C
 // backend) is covered by the CLI integration suite in

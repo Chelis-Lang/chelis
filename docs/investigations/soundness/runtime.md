@@ -64,7 +64,7 @@ admission of `[04-DTYPE-1]` and `[04-DTYPE-2]` is shared with the language chapt
 | `[04-NUM-11]` | Storage and transport preserve exact bits and dtype. Tensor descriptors have dynamic rank with int32 rank and int64 extents, strides, element counts, and byte capacity. Checked address-domain projection does not replace semantic metadata. | Runtime descriptors are substantially coupled and private. Legacy GPU/Python descriptor paths and foreign assumptions remain separate obligations. A `Vec<f64>` image is not exact transport for all int64 values or NaN payloads. |
 | `[04-NUM-14]`, `[04-NUM-16]` | Explicit checked casts obey the complete source/target product. Float-to-int requires finite integral input and distinguishes domain from range failures. Truncating, saturating, and wrapping casts are distinct names, never recovery defaults. Float-to-float AD follows the specified inverse cast. | `CheckedCastPlan`, typed cast dispatch, and finalizers implement a central path. Every decoder, list/tensor conversion, fold, Python import, and backend emitter must preserve that distinction. |
 
-Sources: [typed numeric kernels](../../../crates/chelis-types/src/dtype_semantics.rs),
+Sources: [typed numeric kernels](../../../crates/chelis-numeric-core/src/dtype_semantics.rs),
 [runtime element representations](../../../crates/chelis-runtime/src/element.rs),
 [runtime metadata](../../../crates/chelis-runtime/src/metadata.rs), and
 [runtime ABI implementation](../../../crates/chelis-runtime/src/lib.rs).
@@ -101,7 +101,7 @@ rules remain part of the obligation.
 | `[05-OP-31]`, `[05-OP-32]`, `[05-OP-33]`, `[05-OP-34]`, `[05-OP-35]`, `[05-OP-44]`, `[05-OP-45]` | Exact C/binding/stdlib identities and their full declared domains are normative, including arithmetic metadata, aggregate fields, allocation, indexing, and lifetime calls. | The incorporated registries are expanded by structural domain in §2.3; runtime/lifetime and Python boundaries are traced in §§5–6. |
 
 The main source dispatch points are
-[numeric kernels](../../../crates/chelis-types/src/dtype_semantics.rs),
+[numeric kernels](../../../crates/chelis-numeric-core/src/dtype_semantics.rs),
 [IR evaluation](../../../crates/chelis-ir/src/eval.rs),
 [builtin declarations](../../../crates/chelis-types/src/builtins.rs),
 [runtime implementation](../../../crates/chelis-runtime/src/lib.rs), and the

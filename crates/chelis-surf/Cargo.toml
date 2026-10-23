@@ -15,6 +15,7 @@ name = "pipe_sugar_contract"
 required-features = ["pre-020-pipe-migration"]
 
 [dependencies]
+chelis-numeric-core = { workspace = true, default-features = false }
 chelis-stack-services.workspace = true
 chelis-unord.workspace = true
 chelis-deep.workspace = true

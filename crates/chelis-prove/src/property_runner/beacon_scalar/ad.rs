@@ -5,7 +5,7 @@
 use super::*;
 use chelis_ir::dag::{ComparisonKind, Dag, NodeId, RiscOp, TensorType};
 use chelis_ir::grad::grad_dag_checked;
-use chelis_types::dtype_semantics::scalar_from_f64;
+use chelis_numeric_core::dtype_semantics::scalar_from_f64;
 
 pub(super) fn lower(
     outer: &mut ScalarGraph<'_>,

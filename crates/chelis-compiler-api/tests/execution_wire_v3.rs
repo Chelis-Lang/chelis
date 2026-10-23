@@ -1,5 +1,6 @@
 //! spec/10 §3.2: one stored-value codec and checked tensor reconstruction.
 
+use chelis_compiler_api::schema::numeric::{ScalarValueSchema, TensorStorageSchema};
 use chelis_compiler_api::schema::{EvalResult, ExecutionValue, TensorValue};
 use serde_json::json;
 
@@ -122,6 +123,26 @@ fn execution_schema_excludes_boolean_scalar_and_bounds_shape_extents() {
     assert_eq!(shape["maxItems"], json!(i32::MAX));
     assert_eq!(shape["items"]["minimum"], json!(0.0));
     assert_eq!(shape["items"]["format"], json!("int64"));
+}
+#[test]
+fn published_schema_has_fixed_width_bits_and_closed_payload_shapes() {
+    let scalar = serde_json::to_value(schemars::schema_for!(ScalarValueSchema)).unwrap();
+    let storage = serde_json::to_value(schemars::schema_for!(TensorStorageSchema)).unwrap();
+    for schema in [scalar, storage] {
+        for digits in [4, 8, 16] {
+            let definition = &schema["definitions"][format!("IeeeBits{digits}")];
+            assert_eq!(definition["type"], "string");
+            assert_eq!(definition["minLength"], digits);
+            assert_eq!(definition["maxLength"], digits);
+            assert_eq!(definition["pattern"], format!("^[0-9a-f]{{{digits}}}$"));
+        }
+        let variants = schema["oneOf"].as_array().unwrap();
+        assert_eq!(variants.len(), 9);
+        for variant in variants {
+            assert_eq!(variant["additionalProperties"], false);
+            assert_eq!(variant["required"].as_array().unwrap().len(), 2);
+        }
+    }
 }
 
 #[test]

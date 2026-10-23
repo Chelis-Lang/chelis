@@ -10,7 +10,7 @@ use chelis_compiler_api::compiler::{compile, eval};
 use chelis_compiler_api::schema::{
     CompileRequest, CompileTarget, EvalRequest, ExecutionValue, SourceKind,
 };
-use chelis_types::types::Prim;
+use chelis_numeric_core::prim::Prim;
 
 const LOSS: &str = r#"
 def loss(x: tensor[2, f32], w: tensor[2, f32]) -> f32 =

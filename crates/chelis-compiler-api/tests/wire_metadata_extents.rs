@@ -29,7 +29,8 @@ fn observed_extents_reject_negative_fractional_and_out_of_range_values() {
 #[test]
 fn extent_carrier_requires_exact_int64_and_checks_all_ingress() {
     use chelis_compiler_api::schema::numbers::NonnegativeExtent;
-    use chelis_types::{scalar_from_f64, scalar_from_i64, types::Prim};
+    use chelis_numeric_core::dtype_semantics::{scalar_from_f64, scalar_from_i64};
+    use chelis_numeric_core::prim::Prim;
     for value in [0, 9_007_199_254_740_993, i64::MAX] {
         let extent = NonnegativeExtent::new(value).unwrap();
         assert_eq!(extent.scalar().prim(), Prim::Int64);

@@ -17,7 +17,7 @@ mod support;
 use chelis_ir::dag::{
     Dag, DimInfo, FusedInput, FusedStep, FusedStepOp, NodeId, RiscOp, TensorType,
 };
-use chelis_types::types::Prim;
+use chelis_numeric_core::prim::Prim;
 use support::codegen_hip;
 
 fn vec_lit_f32(n: usize) -> TensorType {

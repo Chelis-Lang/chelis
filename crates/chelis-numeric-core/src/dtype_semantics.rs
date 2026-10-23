@@ -19,13 +19,10 @@
 //!
 //! ## Import discipline (decided, open question 4)
 //!
-//! This module stays import-clean with respect to the checker machinery:
-//! it uses only [`Prim`] from `types`, [`ElementRef`] from the sibling
-//! `observation` module (the two modules lift to the same future leaf
-//! crate together; `faithful_observation.md` section C3.1 places the
-//! formatter "beside the dtype definitions"), the `half` crate, and std.
-//! No env / infer / errors imports, so a later crate lift stays
-//! mechanical.
+//! This module uses the shared primitive vocabulary, the activation graph,
+//! observation elements, and portable math. Scalar operations need no allocator.
+//! Tensor operations need the `alloc` feature. The `serde` feature preserves
+//! stored bits without arithmetic finalization.
 //!
 //! ## Landed-signature notes (recorded in `dtype_semantics.md`)
 //!
@@ -44,17 +41,23 @@
 //! kernel raised the trap after lowering; composed evaluation forwards the
 //! message unchanged.
 
-use std::borrow::Borrow;
+use crate::ieee::round_shift_even_u64;
+use crate::math::FloatMath;
+#[cfg(feature = "alloc")]
+use alloc::{format, string::String, vec, vec::Vec};
+#[cfg(feature = "alloc")]
+use core::borrow::Borrow;
 
 use crate::activation::{ActivationGraph, DerivedActivation, lower_activation};
+use crate::named_cast::NamedCastMode;
 use crate::observation::ElementRef;
-use crate::types::Prim;
-use chelis_abi::failure::{NumericTrapKind, NumericTrapLine};
-use chelis_deep::NamedCastMode;
+use crate::prim::Prim;
+use chelis_vocab::failure::{NumericTrapKind, NumericTrapLine};
 
 /// Frozen prefix shared by every [04-NUM-9] numeric-trap diagnostic.
 pub const NUMERIC_TRAP_PREFIX: &str = NumericTrapLine::PREFIX;
 
+#[cfg(feature = "alloc")]
 /// Why a key buffer or key scalar refuses every numeric read: a key has no
 /// arithmetic, comparison, or cast (spec/04 §1.1), and the IR verifier keeps
 /// keys out of every numeric operation, so reaching one is a compiler defect.
@@ -100,13 +103,13 @@ impl NumericTrap {
     }
 }
 
-impl std::fmt::Display for NumericTrap {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for NumericTrap {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         self.line().fmt(f)
     }
 }
 
-impl std::error::Error for NumericTrap {}
+impl core::error::Error for NumericTrap {}
 
 impl NumericTrap {
     /// Recognize one complete [04-NUM-9] trap line at the boundary where an
@@ -191,7 +194,7 @@ pub enum RawScalar {
     Int(i64),
     Float(f64),
 }
-
+#[cfg(feature = "alloc")]
 /// Bulk form of [`RawScalar`] for tensor finalize.
 #[derive(Debug, Clone, PartialEq)]
 pub enum RawTensor {
@@ -223,8 +226,8 @@ pub enum CheckedCastPlanError {
     UnsupportedTarget(Prim),
 }
 
-impl std::fmt::Display for CheckedCastPlanError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for CheckedCastPlanError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::UnsupportedSource(prim) => write!(
                 f,
@@ -240,7 +243,7 @@ impl std::fmt::Display for CheckedCastPlanError {
     }
 }
 
-impl std::error::Error for CheckedCastPlanError {}
+impl core::error::Error for CheckedCastPlanError {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CheckedCastFamily {
@@ -777,6 +780,7 @@ impl ReduceWindowGradOp {
         "reduce_window_grad"
     }
 
+    #[cfg(feature = "alloc")]
     const fn forward_op(self) -> TensorReduceOp {
         match self {
             Self::Sum => TensorReduceOp::ReduceWindowSum,
@@ -795,6 +799,7 @@ impl ArgReduceOp {
         }
     }
 
+    #[cfg(feature = "alloc")]
     const fn compare(self) -> CompareOp {
         match self {
             Self::Argmax => CompareOp::Gt,
@@ -845,8 +850,8 @@ impl From<NumericTrap> for NumericKernelError {
     }
 }
 
-impl std::fmt::Display for NumericKernelError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for NumericKernelError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Trap(trap) => trap.fmt(f),
             Self::WrongFamily {
@@ -884,7 +889,7 @@ impl std::fmt::Display for NumericKernelError {
     }
 }
 
-impl std::error::Error for NumericKernelError {}
+impl core::error::Error for NumericKernelError {}
 
 fn require_family(
     op: &'static str,
@@ -1057,6 +1062,7 @@ fn select_float_min_first<T: Copy + PartialOrd>(lhs: T, rhs: T, is_nan: impl Fn(
     }
 }
 
+#[cfg(feature = "alloc")]
 fn extrema_selects_left<T: Copy + PartialOrd>(
     op: FloatExtremaOp,
     lhs: T,
@@ -1105,7 +1111,7 @@ fn apply_float_binop_f32(op: FloatBinOp, lhs: f32, rhs: f32) -> f32 {
         FloatBinOp::Mul => lhs * rhs,
         FloatBinOp::Div => lhs / rhs,
         FloatBinOp::Pow => chelis_crmath::pow_f32(lhs, rhs),
-        FloatBinOp::FloorDiv => (lhs / rhs).floor(),
+        FloatBinOp::FloorDiv => FloatMath::floor(lhs / rhs),
         FloatBinOp::Rem => lhs % rhs,
         FloatBinOp::Max => select_float_max_first(lhs, rhs, f32::is_nan),
         FloatBinOp::Min => select_float_min_first(lhs, rhs, f32::is_nan),
@@ -1123,7 +1129,7 @@ fn apply_float_binop_f64(op: FloatBinOp, lhs: f64, rhs: f64) -> f64 {
         FloatBinOp::Mul => lhs * rhs,
         FloatBinOp::Div => lhs / rhs,
         FloatBinOp::Pow => chelis_crmath::pow_f64(lhs, rhs),
-        FloatBinOp::FloorDiv => (lhs / rhs).floor(),
+        FloatBinOp::FloorDiv => FloatMath::floor(lhs / rhs),
         FloatBinOp::Rem => lhs % rhs,
         FloatBinOp::Max => select_float_max_first(lhs, rhs, f64::is_nan),
         FloatBinOp::Min => select_float_min_first(lhs, rhs, f64::is_nan),
@@ -1172,7 +1178,7 @@ fn apply_float_unop_f32(op: FloatUnOp, value: f32) -> f32 {
         FloatUnOp::Exp => chelis_crmath::exp_f32(value),
         FloatUnOp::Log => chelis_crmath::log_f32(value),
         FloatUnOp::Sin => chelis_crmath::sin_f32(value),
-        FloatUnOp::Sqrt => value.sqrt(),
+        FloatUnOp::Sqrt => FloatMath::sqrt(value),
         FloatUnOp::Cos => chelis_crmath::cos_f32(value),
         FloatUnOp::Tan => chelis_crmath::tan_f32(value),
         FloatUnOp::Atan => chelis_crmath::atan_f32(value),
@@ -1180,9 +1186,9 @@ fn apply_float_unop_f32(op: FloatUnOp, value: f32) -> f32 {
         FloatUnOp::Erf => chelis_crmath::erf_f32(value),
         FloatUnOp::Erfc => chelis_crmath::erfc_f32(value),
         FloatUnOp::Abs => value.abs(),
-        FloatUnOp::Floor => value.floor(),
-        FloatUnOp::Ceil => value.ceil(),
-        FloatUnOp::Round => value.round_ties_even(),
+        FloatUnOp::Floor => FloatMath::floor(value),
+        FloatUnOp::Ceil => FloatMath::ceil(value),
+        FloatUnOp::Round => FloatMath::round_ties_even(value),
         FloatUnOp::Relu
         | FloatUnOp::Sigmoid
         | FloatUnOp::Silu
@@ -1201,7 +1207,7 @@ fn apply_float_unop_f64(op: FloatUnOp, value: f64) -> f64 {
         FloatUnOp::Exp => chelis_crmath::exp_f64(value),
         FloatUnOp::Log => chelis_crmath::log_f64(value),
         FloatUnOp::Sin => chelis_crmath::sin_f64(value),
-        FloatUnOp::Sqrt => value.sqrt(),
+        FloatUnOp::Sqrt => FloatMath::sqrt(value),
         FloatUnOp::Cos => chelis_crmath::cos_f64(value),
         FloatUnOp::Tan => chelis_crmath::tan_f64(value),
         FloatUnOp::Atan => chelis_crmath::atan_f64(value),
@@ -1209,9 +1215,9 @@ fn apply_float_unop_f64(op: FloatUnOp, value: f64) -> f64 {
         FloatUnOp::Erf => chelis_crmath::erf_f64(value),
         FloatUnOp::Erfc => chelis_crmath::erfc_f64(value),
         FloatUnOp::Abs => value.abs(),
-        FloatUnOp::Floor => value.floor(),
-        FloatUnOp::Ceil => value.ceil(),
-        FloatUnOp::Round => value.round_ties_even(),
+        FloatUnOp::Floor => FloatMath::floor(value),
+        FloatUnOp::Ceil => FloatMath::ceil(value),
+        FloatUnOp::Round => FloatMath::round_ties_even(value),
         FloatUnOp::Relu
         | FloatUnOp::Sigmoid
         | FloatUnOp::Silu
@@ -1232,9 +1238,9 @@ fn activation_constant(
 }
 
 #[cfg(test)]
-thread_local! {
-    static SCALAR_ACTIVATION_CALL_COUNT: std::cell::Cell<usize> = const {
-        std::cell::Cell::new(0)
+std::thread_local! {
+    static SCALAR_ACTIVATION_CALL_COUNT: core::cell::Cell<usize> = const {
+        core::cell::Cell::new(0)
     };
 }
 
@@ -1369,7 +1375,7 @@ pub fn compare_scalars(
     };
     Ok(result)
 }
-
+#[cfg(feature = "alloc")]
 /// Sealed per-dtype element buffer (section C3's storage decision:
 /// per-dtype buffers, not finalize-on-write over `Vec<f64>`; f64 storage
 /// cannot represent exact i64 above 2^53, chelis#684).
@@ -1390,8 +1396,9 @@ enum Buf {
 }
 
 /// Stored-width IEEE classification ([05-OP-20..22]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum FloatClassify {
     Nan,
     Finite,
@@ -1451,7 +1458,7 @@ pub fn classify_float(
         bits: Bits::Bool(answer),
     })
 }
-
+#[cfg(feature = "alloc")]
 pub fn classify_float_tensor(
     op: FloatClassify,
     value: &TensorStorage,
@@ -1468,7 +1475,7 @@ pub fn classify_float_tensor(
         .collect::<Result<Vec<_>, _>>()?;
     Ok(tensor_from_scalars(Prim::Bool, &values))
 }
-
+#[cfg(feature = "alloc")]
 /// Read-only borrowed view of a [`TensorStorage`] buffer at its own
 /// width (section C3: reads are free-form; only construction is gated).
 #[derive(Debug, Clone, Copy)]
@@ -1486,14 +1493,14 @@ pub enum StorageView<'a> {
     /// Opaque random keys.
     Key(&'a [RandomKey]),
 }
-
+#[cfg(feature = "alloc")]
 /// A finalized element buffer at its dtype's own width. Construct via
 /// [`finalize_tensor`] or the `reuse_*` element-preserving family.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TensorStorage {
     buf: Buf,
 }
-
+#[cfg(feature = "alloc")]
 impl TensorStorage {
     /// The dtype of every element, from the buffer variant itself.
     pub fn prim(&self) -> Prim {
@@ -1652,12 +1659,12 @@ impl TensorStorage {
     pub fn reuse_gather_iter<I>(&self, indices: I) -> TensorStorage
     where
         I: IntoIterator,
-        I::Item: std::borrow::Borrow<usize>,
+        I::Item: core::borrow::Borrow<usize>,
     {
         fn pick<T: Copy, I>(src: &[T], indices: I) -> Vec<T>
         where
             I: IntoIterator,
-            I::Item: std::borrow::Borrow<usize>,
+            I::Item: core::borrow::Borrow<usize>,
         {
             indices.into_iter().map(|i| src[*i.borrow()]).collect()
         }
@@ -1711,8 +1718,8 @@ impl TensorStorage {
             (buf_other, bits_other) => unreachable!(
                 "reuse_fill_gather: prim equality was asserted above, yet buffer {:?} \
                  met fill {:?}",
-                std::mem::discriminant(buf_other),
-                std::mem::discriminant(&bits_other)
+                core::mem::discriminant(buf_other),
+                core::mem::discriminant(&bits_other)
             ),
         };
         TensorStorage { buf }
@@ -1757,82 +1764,12 @@ impl TensorStorage {
             (dst_other, src_other) => unreachable!(
                 "reuse_overwrite: prim equality was asserted above, yet target {:?} \
                  met source {:?}",
-                std::mem::discriminant(&*dst_other),
-                std::mem::discriminant(src_other)
+                core::mem::discriminant(&*dst_other),
+                core::mem::discriminant(src_other)
             ),
         }
         out
     }
-}
-
-fn round_shift_even_u64(value: u64, shift: u32) -> u64 {
-    match shift {
-        0 => value,
-        1..=63 => {
-            let quotient = value >> shift;
-            let remainder = value & ((1_u64 << shift) - 1);
-            let halfway = 1_u64 << (shift - 1);
-            quotient + u64::from(remainder > halfway || (remainder == halfway && quotient & 1 == 1))
-        }
-        64 => u64::from(value > (1_u64 << 63)),
-        _ => 0,
-    }
-}
-
-/// Round one binary64 value directly into a binary16-shaped IEEE encoding.
-///
-/// The source significand remains intact until the one target-width
-/// round-to-nearest-ties-to-even step. In particular, this must not delegate
-/// through f32 or a converter which truncates the low binary64 significand
-/// bits before rounding: doing so loses which side of an f16/bf16 midpoint the
-/// original f64 occupied ([04-NUM-14]).
-fn f64_to_ieee16_bits(value: f64, exponent_bits: u32, mantissa_bits: u32, bias: i32) -> u16 {
-    let source = value.to_bits();
-    let sign = ((source >> 48) & 0x8000) as u16;
-    let source_exponent = ((source >> 52) & 0x7ff) as u32;
-    let source_mantissa = source & 0x000f_ffff_ffff_ffff;
-    let target_exponent_max = (1_u32 << exponent_bits) - 1;
-    let target_exponent_bits = (target_exponent_max << mantissa_bits) as u16;
-
-    if source_exponent == 0x7ff {
-        if source_mantissa == 0 {
-            return sign | target_exponent_bits;
-        }
-        // [04-NUM-2]: every NaN becomes the canonical quiet NaN, whatever its
-        // sign and payload.
-        return target_exponent_bits | (1_u16 << (mantissa_bits - 1));
-    }
-    if source_exponent == 0 {
-        // Every finite binary64 subnormal is below half of the least f16 or
-        // bf16 subnormal. This includes signed zero and preserves its sign.
-        return sign;
-    }
-
-    let mut exponent = source_exponent as i32 - 1023;
-    let significand = (1_u64 << 52) | source_mantissa;
-    let minimum_exponent = 1 - bias;
-    let maximum_exponent = target_exponent_max as i32 - 1 - bias;
-    if exponent > maximum_exponent {
-        return sign | target_exponent_bits;
-    }
-
-    if exponent >= minimum_exponent {
-        let mut rounded = round_shift_even_u64(significand, 52 - mantissa_bits);
-        if rounded == (1_u64 << (mantissa_bits + 1)) {
-            rounded >>= 1;
-            exponent += 1;
-            if exponent > maximum_exponent {
-                return sign | target_exponent_bits;
-            }
-        }
-        let target_exponent = ((exponent + bias) as u16) << mantissa_bits;
-        let target_mantissa = (rounded & ((1_u64 << mantissa_bits) - 1)) as u16;
-        return sign | target_exponent | target_mantissa;
-    }
-
-    let shift = (52 - mantissa_bits) + (minimum_exponent - exponent) as u32;
-    let rounded = round_shift_even_u64(significand, shift);
-    sign | rounded as u16
 }
 
 fn i64_to_ieee16_bits(value: i64, exponent_bits: u32, mantissa_bits: u32, bias: i32) -> u16 {
@@ -1868,12 +1805,12 @@ fn i64_to_ieee16_bits(value: i64, exponent_bits: u32, mantissa_bits: u32, bias: 
 
 /// Canonical one-step binary64-to-f16 conversion ([04-NUM-14]).
 pub fn f16_from_f64_rne(value: f64) -> half::f16 {
-    half::f16::from_bits(f64_to_ieee16_bits(value, 5, 10, 15))
+    half::f16::from_bits(crate::ieee::f64_to_f16_bits_rne(value))
 }
 
 /// Canonical one-step binary64-to-bf16 conversion ([04-NUM-14]).
 pub fn bf16_from_f64_rne(value: f64) -> half::bf16 {
-    half::bf16::from_bits(f64_to_ieee16_bits(value, 8, 7, 127))
+    half::bf16::from_bits(crate::ieee::f64_to_bf16_bits_rne(value))
 }
 
 fn f16_from_i64_rne(value: i64) -> half::f16 {
@@ -1888,7 +1825,7 @@ fn f16_from_i64_rne(value: i64) -> half::f16 {
 fn bf16_from_i64_rne(value: i64) -> half::bf16 {
     half::bf16::from_bits(i64_to_ieee16_bits(value, 8, 7, 127))
 }
-
+#[cfg(feature = "alloc")]
 fn require_same_storage_shape(
     op: &'static str,
     lhs: &TensorStorage,
@@ -1910,7 +1847,7 @@ fn require_same_storage_shape(
     }
     Ok(())
 }
-
+#[cfg(feature = "alloc")]
 fn zip_map<T: Copy, U>(lhs: &[T], rhs: &[T], mut op: impl FnMut(T, T) -> U) -> Vec<U> {
     lhs.iter()
         .copied()
@@ -1918,7 +1855,7 @@ fn zip_map<T: Copy, U>(lhs: &[T], rhs: &[T], mut op: impl FnMut(T, T) -> U) -> V
         .map(|(lhs, rhs)| op(lhs, rhs))
         .collect()
 }
-
+#[cfg(feature = "alloc")]
 fn zip_try_map<T: Copy, U, E>(
     lhs: &[T],
     rhs: &[T],
@@ -1931,6 +1868,7 @@ fn zip_try_map<T: Copy, U, E>(
         .collect()
 }
 
+#[cfg(feature = "alloc")]
 macro_rules! int_tensor_binop_at_width {
     ($op:expr, $prim:expr, $lhs:expr, $rhs:expr, $variant:ident) => {{
         let overflow = || NumericTrap::Overflow {
@@ -1985,7 +1923,7 @@ macro_rules! int_tensor_binop_at_width {
         })
     }};
 }
-
+#[cfg(feature = "alloc")]
 /// Bulk integer binary kernel. Operation dispatch happens once outside a
 /// monomorphized loop for the storage width, never once per element.
 pub fn int_tensor_binop(
@@ -2025,6 +1963,7 @@ pub fn int_tensor_binop(
     }
 }
 
+#[cfg(feature = "alloc")]
 macro_rules! int_tensor_unop_at_width {
     ($op:expr, $prim:expr, $values:expr, $variant:ident) => {{
         let overflow = || NumericTrap::Overflow {
@@ -2049,7 +1988,7 @@ macro_rules! int_tensor_unop_at_width {
         })
     }};
 }
-
+#[cfg(feature = "alloc")]
 /// Bulk integer unary kernel with one operation dispatch per buffer.
 pub fn int_tensor_unop(
     op: IntUnOp,
@@ -2070,7 +2009,7 @@ pub fn int_tensor_unop(
         _ => unreachable!("family check makes the integer buffer exhaustive"),
     }
 }
-
+#[cfg(feature = "alloc")]
 fn float_vec_binop_f32<T: Copy + PartialOrd>(
     op: FloatBinOp,
     lhs: &[T],
@@ -2096,7 +2035,7 @@ fn float_vec_binop_f32<T: Copy + PartialOrd>(
         }),
     }
 }
-
+#[cfg(feature = "alloc")]
 fn float_vec_binop_f64(op: FloatBinOp, lhs: &[f64], rhs: &[f64]) -> Vec<f64> {
     match op {
         FloatBinOp::Add
@@ -2114,7 +2053,7 @@ fn float_vec_binop_f64(op: FloatBinOp, lhs: &[f64], rhs: &[f64]) -> Vec<f64> {
         }),
     }
 }
-
+#[cfg(feature = "alloc")]
 /// Bulk float binary kernel with native f64/f32 arithmetic and one final
 /// half-width conversion per element.
 pub fn float_tensor_binop(
@@ -2166,7 +2105,7 @@ pub fn float_tensor_binop(
     };
     Ok(TensorStorage { buf })
 }
-
+#[cfg(feature = "alloc")]
 /// Materialize one operand cotangent for the exact [05-OP-40] extrema
 /// selection rule. Each output element is the complete incoming cotangent
 /// when that operand was selected, otherwise exact positive zero at the
@@ -2230,7 +2169,7 @@ pub fn float_extrema_adjoint(
         _ => unreachable!("same-dtype checks make float extrema adjoint exhaustive"),
     }
 }
-
+#[cfg(feature = "alloc")]
 /// Evaluate [05-OP-43] ReLU without re-encoding retained elements. Negative
 /// values become exact positive zero; positive values, both signed zeros, and
 /// NaNs retain their stored bits exactly.
@@ -2265,7 +2204,7 @@ pub fn float_relu(input: &TensorStorage) -> Result<TensorStorage, NumericKernelE
         _ => unreachable!("family check makes float relu exhaustive"),
     }
 }
-
+#[cfg(feature = "alloc")]
 /// Evaluate [05-OP-43]'s dedicated ReLU adjoint. The complete incoming
 /// cotangent is selected only where `0 < input`; every other row constructs
 /// exact positive zero, including both input zeros and NaN. Selection rather
@@ -2309,7 +2248,7 @@ pub fn float_relu_adjoint(
         _ => unreachable!("same-dtype checks make float relu adjoint exhaustive"),
     }
 }
-
+#[cfg(feature = "alloc")]
 fn float_vec_unop_f32<T: Copy>(
     op: FloatUnOp,
     values: &[T],
@@ -2352,7 +2291,7 @@ fn float_vec_unop_f32<T: Copy>(
         }
     }
 }
-
+#[cfg(feature = "alloc")]
 fn float_vec_unop_f64(op: FloatUnOp, values: &[f64]) -> Vec<f64> {
     macro_rules! map {
         ($body:expr) => {
@@ -2390,7 +2329,7 @@ fn float_vec_unop_f64(op: FloatUnOp, values: &[f64]) -> Vec<f64> {
         }
     }
 }
-
+#[cfg(feature = "alloc")]
 trait ActivationElement: Copy {
     const PRIM: Prim;
     fn constant(value: f64) -> Self;
@@ -2404,6 +2343,7 @@ trait ActivationElement: Copy {
 // finalization. Only f32 and f64 elements run natively: a section 3.3 graph
 // never changes their dtype, while `Phi` at f16 and bf16 widens to f32, so
 // those elements run the scalar lane's graph.
+#[cfg(feature = "alloc")]
 macro_rules! impl_native_activation_element {
     ($ty:ty, $prim:expr, $unop:ident, $binop:ident) => {
         impl ActivationElement for $ty {
@@ -2428,17 +2368,19 @@ macro_rules! impl_native_activation_element {
     };
 }
 
+#[cfg(feature = "alloc")]
 impl_native_activation_element!(f32, Prim::F32, apply_float_unop_f32, apply_float_binop_f32);
+#[cfg(feature = "alloc")]
 impl_native_activation_element!(f64, Prim::F64, apply_float_unop_f64, apply_float_binop_f64);
-
+#[cfg(feature = "alloc")]
 /// Evaluates each section 3.3 primitive on one f32 or f64 tensor element as
 /// it is reached.
-struct ElementActivationGraph<T>(std::marker::PhantomData<T>);
-
+struct ElementActivationGraph<T>(core::marker::PhantomData<T>);
+#[cfg(feature = "alloc")]
 impl<T: ActivationElement> ActivationGraph for ElementActivationGraph<T> {
     type Value = T;
     type Predicate = bool;
-    type Error = std::convert::Infallible;
+    type Error = core::convert::Infallible;
 
     fn operand_prim(&self) -> Prim {
         T::PRIM
@@ -2476,11 +2418,11 @@ impl<T: ActivationElement> ActivationGraph for ElementActivationGraph<T> {
         )
     }
 }
-
+#[cfg(feature = "alloc")]
 fn float_vec_activation<T: ActivationElement>(op: FloatUnOp, values: &[T]) -> Vec<T> {
     let activation = DerivedActivation::from_float_unop(op)
         .expect("float_vec_activation requires a section 3.3 activation selector");
-    let mut graph = ElementActivationGraph(std::marker::PhantomData);
+    let mut graph = ElementActivationGraph(core::marker::PhantomData);
     values
         .iter()
         .map(
@@ -2491,7 +2433,7 @@ fn float_vec_activation<T: ActivationElement>(op: FloatUnOp, values: &[T]) -> Ve
         )
         .collect()
 }
-
+#[cfg(feature = "alloc")]
 /// An f16 or bf16 activation, one element at a time through the scalar lane.
 fn half_vec_activation<T: Copy>(
     op: FloatUnOp,
@@ -2504,7 +2446,7 @@ fn half_vec_activation<T: Copy>(
         .map(|&value| float_activation(op, to_scalar(value)).map(&from_scalar))
         .collect()
 }
-
+#[cfg(feature = "alloc")]
 /// Bulk float unary kernel with one operation dispatch per buffer.
 pub fn float_tensor_unop(
     op: FloatUnOp,
@@ -2569,7 +2511,7 @@ pub fn float_tensor_unop(
     };
     Ok(TensorStorage { buf })
 }
-
+#[cfg(feature = "alloc")]
 fn reduction_arithmetic_prim(prim: Prim) -> Option<Prim> {
     match prim {
         Prim::F16 | Prim::Bf16 => Some(Prim::F32),
@@ -2577,7 +2519,7 @@ fn reduction_arithmetic_prim(prim: Prim) -> Option<Prim> {
         Prim::Bool | Prim::String | Prim::Key | Prim::F8e4m3 => None,
     }
 }
-
+#[cfg(feature = "alloc")]
 fn valid_sum_accumulator(input: Prim, accumulator: Prim) -> bool {
     matches!(
         (input, accumulator),
@@ -2589,7 +2531,7 @@ fn valid_sum_accumulator(input: Prim, accumulator: Prim) -> bool {
             | (Prim::Int64, Prim::Int64)
     )
 }
-
+#[cfg(feature = "alloc")]
 fn reduction_signature(
     op: TensorReduceOp,
     input: Prim,
@@ -2662,7 +2604,7 @@ fn reduction_signature(
     }
     Ok((accumulator, result))
 }
-
+#[cfg(feature = "alloc")]
 fn scalar_at_reduction_width(
     op: TensorReduceOp,
     input: &TensorStorage,
@@ -2696,7 +2638,7 @@ fn scalar_at_reduction_width(
         actual: value.prim(),
     })
 }
-
+#[cfg(feature = "alloc")]
 fn reduction_seed(
     op: TensorReduceOp,
     prim: Prim,
@@ -2710,6 +2652,7 @@ fn reduction_seed(
     }
 }
 
+#[cfg(feature = "alloc")]
 macro_rules! checked_reduce_int {
     ($op:expr, $prim:expr, $lhs:expr, $rhs:expr, $method:ident, $variant:ident) => {{
         let value = $lhs.$method($rhs).ok_or(NumericTrap::Overflow {
@@ -2721,7 +2664,7 @@ macro_rules! checked_reduce_int {
         })
     }};
 }
-
+#[cfg(feature = "alloc")]
 fn reduction_add(
     op: TensorReduceOp,
     lhs: ScalarValue,
@@ -2750,7 +2693,7 @@ fn reduction_add(
         _ => unreachable!("validated reduction accumulators are exact-width int or f32/f64"),
     }
 }
-
+#[cfg(feature = "alloc")]
 fn reduction_mul(
     op: TensorReduceOp,
     lhs: ScalarValue,
@@ -2779,7 +2722,7 @@ fn reduction_mul(
         _ => unreachable!("validated reduction accumulators are exact-width int or f32/f64"),
     }
 }
-
+#[cfg(feature = "alloc")]
 fn reduction_div_float(
     op: TensorReduceOp,
     lhs: ScalarValue,
@@ -2802,7 +2745,7 @@ fn reduction_div_float(
         }),
     }
 }
-
+#[cfg(feature = "alloc")]
 fn reduction_extreme(
     op: TensorReduceOp,
     lhs: ScalarValue,
@@ -2821,11 +2764,11 @@ fn reduction_extreme(
         Ok(lhs)
     }
 }
-
+#[cfg(feature = "alloc")]
 fn scalar_is_nan(value: ScalarValue) -> bool {
     value.prim().is_float() && value.as_f64_lossy().is_nan()
 }
-
+#[cfg(feature = "alloc")]
 fn reduce_sum_group(
     op: TensorReduceOp,
     input: &TensorStorage,
@@ -2838,7 +2781,7 @@ fn reduce_sum_group(
         accumulator,
     )
 }
-
+#[cfg(feature = "alloc")]
 fn reduce_sum_values(
     op: TensorReduceOp,
     values: impl Iterator<Item = Result<ScalarValue, NumericKernelError>>,
@@ -2894,7 +2837,7 @@ pub fn canonical_nan_scalar(value: ScalarValue) -> ScalarValue {
         _ => value,
     }
 }
-
+#[cfg(feature = "alloc")]
 fn reduce_group(
     op: TensorReduceOp,
     input: &TensorStorage,
@@ -2914,7 +2857,7 @@ fn reduce_group(
         | TensorReduceOp::ReduceWindowMin => reduce_extreme_group(op, input, group),
     }
 }
-
+#[cfg(feature = "alloc")]
 fn reduce_arithmetic_group(
     op: TensorReduceOp,
     input: &TensorStorage,
@@ -2954,7 +2897,7 @@ fn reduce_arithmetic_group(
         | TensorReduceOp::ReduceWindowMin => unreachable!("extrema reduce in reduce_extreme_group"),
     }
 }
-
+#[cfg(feature = "alloc")]
 fn reduce_extreme_group(
     op: TensorReduceOp,
     input: &TensorStorage,
@@ -2997,7 +2940,7 @@ fn reduce_extreme_group(
         }
     }
 }
-
+#[cfg(feature = "alloc")]
 fn reduction_result_scalar(
     op: TensorReduceOp,
     value: ScalarValue,
@@ -3026,7 +2969,7 @@ fn reduction_result_scalar(
         })
     }
 }
-
+#[cfg(feature = "alloc")]
 /// Fold one level at a time by combining adjacent pairs and carrying an odd
 /// final element unchanged. This is the canonical balanced reduction tree for
 /// [05-OP-29]; leaf order is exactly the caller-provided group order.
@@ -3048,7 +2991,7 @@ fn checked_adjacent_pair_fold<T, E>(
     }
     Ok(level.pop())
 }
-
+#[cfg(feature = "alloc")]
 fn checked_count_add(left: i64, right: i64) -> Result<i64, NumericKernelError> {
     left.checked_add(right)
         .ok_or(NumericKernelError::Trap(NumericTrap::Overflow {
@@ -3056,7 +2999,7 @@ fn checked_count_add(left: i64, right: i64) -> Result<i64, NumericKernelError> {
             prim: Prim::Int64,
         }))
 }
-
+#[cfg(feature = "alloc")]
 /// Count true elements in explicitly ordered groups through the closed typed
 /// kernel boundary. The input must use exact Bool storage and the result is
 /// exact i64. Empty groups produce the specified zero identity.
@@ -3101,7 +3044,7 @@ pub fn count_tensor_groups(
     }
     finalize_tensor("count", Prim::Int64, RawTensor::Int(values)).map_err(Into::into)
 }
-
+#[cfg(feature = "alloc")]
 /// Reduce explicitly ordered groups of input indices through one closed,
 /// dtype-keyed kernel. Callers own shape/index planning; arithmetic order,
 /// accumulator width, trap identity, and final storage are enforced here.
@@ -3112,7 +3055,7 @@ pub fn reduce_tensor_groups(
 ) -> Result<TensorStorage, NumericKernelError> {
     reduce_tensor_groups_iter(op, input, groups)
 }
-
+#[cfg(feature = "alloc")]
 /// Ordered groups and coordinates supplied on demand. Arithmetic and
 /// finalization are identical to [`reduce_tensor_groups`].
 pub fn reduce_tensor_groups_iter<G, I>(
@@ -3124,7 +3067,7 @@ where
     G: IntoIterator<Item = I>,
     I: IntoIterator,
     I::IntoIter: ExactSizeIterator,
-    I::Item: std::borrow::Borrow<usize>,
+    I::Item: core::borrow::Borrow<usize>,
 {
     let (accumulator, result) = reduction_signature(op, input.prim())?;
     let values = groups
@@ -3142,12 +3085,12 @@ where
     // selected NaN's payload, sign or signaling bit.
     Ok(tensor_from_scalars(result, &values))
 }
-
+#[cfg(feature = "alloc")]
 // The same adjacent-pair tree as reduce_sum_values, after a single typed
 // storage dispatch. Only float accumulators use this infallible native core.
 fn native_sum<T>(values: impl Iterator<Item = T>) -> T
 where
-    T: Copy + Default + std::ops::Add<Output = T>,
+    T: Copy + Default + core::ops::Add<Output = T>,
 {
     let mut levels = [None; usize::BITS as usize];
     for mut carry in values {
@@ -3167,7 +3110,7 @@ where
     }
     right.unwrap_or_default()
 }
-
+#[cfg(feature = "alloc")]
 /// Exact stored-operand products followed by ordered sums ([05-OP-33],
 /// [05-OP-30]). Dtype dispatch occurs once; products finalize at their own
 /// dtype before widening into the accumulator. Coordinates remain indices,
@@ -3291,7 +3234,7 @@ where
         }),
     }
 }
-
+#[cfg(feature = "alloc")]
 /// Sum ordered groups of already tagged leaves. A streamed producer retains
 /// its own per-operation finalization before a leaf enters the same checked
 /// accumulator tree as stored tensor input ([05-OP-30]).
@@ -3329,7 +3272,7 @@ where
         .collect::<Result<Vec<_>, NumericKernelError>>()?;
     Ok(tensor_from_scalars(result, &values))
 }
-
+#[cfg(feature = "alloc")]
 /// One [05-OP-33] addition at the operands' arithmetic width: integers
 /// exactly, trapping on overflow under `op`'s name; f32 and f64 natively; f16
 /// and bf16 through f32, rounded once into storage.
@@ -3350,7 +3293,7 @@ fn width_add(
         other => other,
     })
 }
-
+#[cfg(feature = "alloc")]
 /// Convert within one numeric family where the value set of `value` is a
 /// subset of `prim`'s (an accumulator widening), or round a float once into
 /// a narrower storage dtype.
@@ -3378,7 +3321,7 @@ fn within_family(
         })
     }
 }
-
+#[cfg(feature = "alloc")]
 /// [05-OP-33] `cumsum` over explicitly ordered lanes. In lane order the first
 /// input, converted to §5.7.1's default sum-accumulator dtype and finalized
 /// like a one-leaf sum, is the first prefix; each later input is added to the
@@ -3391,7 +3334,7 @@ pub fn cumsum_tensor_lanes(
 ) -> Result<TensorStorage, NumericKernelError> {
     cumsum_tensor_lanes_iter(input, lanes.iter().map(|lane| lane.iter().copied()))
 }
-
+#[cfg(feature = "alloc")]
 /// Ordered lanes with source-sized output and no retained coordinate matrix.
 pub fn cumsum_tensor_lanes_iter<G, I>(
     input: &TensorStorage,
@@ -3440,7 +3383,7 @@ where
     }
     Ok(tensor_from_scalars(result, &values))
 }
-
+#[cfg(feature = "alloc")]
 /// [05-OP-33] add-mode `scatter`. `leaves[d]` lists, in row-major update
 /// order, the update indices that target destination `d`. A targeted
 /// destination's leaf sequence is its base value followed by those updates,
@@ -3479,7 +3422,7 @@ pub fn scatter_add_tensor_groups(
         .iter()
         .enumerate()
         .map(|(destination, targeting)| {
-            let level = std::iter::once(base.scalar_at(destination))
+            let level = core::iter::once(base.scalar_at(destination))
                 .chain(targeting.iter().map(|&index| updates.scalar_at(index)))
                 .collect();
             checked_adjacent_pair_fold(level, |left, right| width_add(OP, left, right))
@@ -3488,7 +3431,7 @@ pub fn scatter_add_tensor_groups(
         .collect::<Result<Vec<_>, _>>()?;
     Ok(tensor_from_scalars(prim, &values))
 }
-
+#[cfg(feature = "alloc")]
 /// Reduce explicitly ordered groups to exact i64 winner indices. Values
 /// are compared at their stored dtype and never cross binary64 for integer
 /// inputs; first-seen wins ties.
@@ -3499,7 +3442,7 @@ pub fn arg_reduce_tensor_groups(
 ) -> Result<TensorStorage, NumericKernelError> {
     arg_reduce_tensor_groups_iter(op, input, groups)
 }
-
+#[cfg(feature = "alloc")]
 /// Argument reduction over ordered coordinate iterators, with the same
 /// stored-width comparisons and first-winner rule as the slice boundary.
 pub fn arg_reduce_tensor_groups_iter<G, I>(
@@ -3510,7 +3453,7 @@ pub fn arg_reduce_tensor_groups_iter<G, I>(
 where
     G: IntoIterator<Item = I>,
     I: IntoIterator,
-    I::Item: std::borrow::Borrow<usize>,
+    I::Item: core::borrow::Borrow<usize>,
 {
     if !input.prim().is_integer() && !input.prim().is_float() {
         return Err(NumericKernelError::WrongFamily {
@@ -3546,7 +3489,7 @@ where
     }
     finalize_tensor(op.name(), Prim::Int64, RawTensor::Int(indices)).map_err(Into::into)
 }
-
+#[cfg(feature = "alloc")]
 /// Apply the reverse-mode window adjoint to explicitly ordered source-index
 /// groups. Each group corresponds to one cotangent element. Selection,
 /// scaling, overlap accumulation, and finalization all execute at the input
@@ -3660,7 +3603,7 @@ pub fn reduce_window_grad_tensor_groups(
         .collect::<Result<Vec<_>, NumericKernelError>>()?;
     Ok(tensor_from_scalars(prim, &values))
 }
-
+#[cfg(feature = "alloc")]
 fn splat_storage(value: ScalarValue, len: usize) -> TensorStorage {
     let buf = match value.bits {
         Bits::I8(value) => Buf::I8(vec![value; len]),
@@ -3676,7 +3619,7 @@ fn splat_storage(value: ScalarValue, len: usize) -> TensorStorage {
     };
     TensorStorage { buf }
 }
-
+#[cfg(feature = "alloc")]
 pub fn int_tensor_scalar_binop(
     op: IntBinOp,
     tensor: &TensorStorage,
@@ -3684,7 +3627,7 @@ pub fn int_tensor_scalar_binop(
 ) -> Result<TensorStorage, NumericKernelError> {
     int_tensor_binop(op, tensor, &splat_storage(scalar, tensor.len()))
 }
-
+#[cfg(feature = "alloc")]
 pub fn int_scalar_tensor_binop(
     op: IntBinOp,
     scalar: ScalarValue,
@@ -3692,7 +3635,7 @@ pub fn int_scalar_tensor_binop(
 ) -> Result<TensorStorage, NumericKernelError> {
     int_tensor_binop(op, &splat_storage(scalar, tensor.len()), tensor)
 }
-
+#[cfg(feature = "alloc")]
 pub fn float_tensor_scalar_binop(
     op: FloatBinOp,
     tensor: &TensorStorage,
@@ -3700,7 +3643,7 @@ pub fn float_tensor_scalar_binop(
 ) -> Result<TensorStorage, NumericKernelError> {
     float_tensor_binop(op, tensor, &splat_storage(scalar, tensor.len()))
 }
-
+#[cfg(feature = "alloc")]
 pub fn float_scalar_tensor_binop(
     op: FloatBinOp,
     scalar: ScalarValue,
@@ -3708,7 +3651,7 @@ pub fn float_scalar_tensor_binop(
 ) -> Result<TensorStorage, NumericKernelError> {
     float_tensor_binop(op, &splat_storage(scalar, tensor.len()), tensor)
 }
-
+#[cfg(feature = "alloc")]
 fn compare_vec<T: Copy + PartialEq + PartialOrd>(op: CompareOp, lhs: &[T], rhs: &[T]) -> Vec<u8> {
     match op {
         CompareOp::Eq => zip_map(lhs, rhs, |lhs, rhs| u8::from(lhs == rhs)),
@@ -3719,7 +3662,7 @@ fn compare_vec<T: Copy + PartialEq + PartialOrd>(op: CompareOp, lhs: &[T], rhs: 
         CompareOp::Gte => zip_map(lhs, rhs, |lhs, rhs| u8::from(lhs >= rhs)),
     }
 }
-
+#[cfg(feature = "alloc")]
 /// Compare two finalized buffers at their shared storage width and return
 /// sealed bool storage.
 pub fn compare_tensors(
@@ -3744,7 +3687,7 @@ pub fn compare_tensors(
         buf: Buf::Bool(values),
     })
 }
-
+#[cfg(feature = "alloc")]
 pub fn compare_tensor_scalar(
     op: CompareOp,
     tensor: &TensorStorage,
@@ -3752,7 +3695,7 @@ pub fn compare_tensor_scalar(
 ) -> Result<TensorStorage, NumericKernelError> {
     compare_tensors(op, tensor, &splat_storage(scalar, tensor.len()))
 }
-
+#[cfg(feature = "alloc")]
 pub fn compare_scalar_tensor(
     op: CompareOp,
     scalar: ScalarValue,
@@ -3872,13 +3815,13 @@ fn int_wide(op: &'static str, prim: Prim, raw: RawScalar) -> Result<i64, Numeric
     match raw {
         RawScalar::Int(i) => Ok(i),
         RawScalar::Float(x) => {
-            if !x.is_finite() || x.fract() != 0.0 {
+            if !x.is_finite() || FloatMath::fract(x) != 0.0 {
                 return Err(NumericTrap::Domain { op, prim });
             }
             // Any integral f64 strictly below 2^63 is exactly
             // representable in i64; 2^63 itself (= the f64 image of many
             // out-of-range integers) is not.
-            if x < -(2f64.powi(63)) || x >= 2f64.powi(63) {
+            if x < -(9_223_372_036_854_775_808.0) || x >= 9_223_372_036_854_775_808.0 {
                 return Err(NumericTrap::Overflow { op, prim });
             }
             Ok(x as i64)
@@ -4030,6 +3973,7 @@ impl RandomKey {
     }
 
     /// `[05-OP-71]` `split_keys`: row `j` is `derive(derive(k, 2), j)`.
+    #[cfg(feature = "alloc")]
     pub fn split_n(self, count: usize) -> Vec<Self> {
         (0..count as u64).map(|j| self.fold_in_word(j)).collect()
     }
@@ -4052,7 +3996,7 @@ pub enum KeyHalf {
     /// `derive(k, 1)`.
     Right,
 }
-
+#[cfg(feature = "alloc")]
 impl TensorStorage {
     /// Key storage from keys a key kernel produced. A key has no literal, so
     /// this is the only construction path for a key buffer.
@@ -4070,7 +4014,7 @@ impl TensorStorage {
         }
     }
 }
-
+#[cfg(feature = "alloc")]
 fn key_operand<'a>(
     op: &'static str,
     storage: &'a TensorStorage,
@@ -4081,7 +4025,7 @@ fn key_operand<'a>(
         rhs: storage.prim(),
     })
 }
-
+#[cfg(feature = "alloc")]
 /// `[05-OP-69]` element by element over a `tensor[D, i64]` of seeds.
 pub fn key_from_seed_storage(seeds: &TensorStorage) -> Result<TensorStorage, NumericKernelError> {
     let keys = (0..seeds.len())
@@ -4089,7 +4033,7 @@ pub fn key_from_seed_storage(seeds: &TensorStorage) -> Result<TensorStorage, Num
         .collect::<Result<Vec<_>, _>>()?;
     Ok(TensorStorage::from_keys(keys))
 }
-
+#[cfg(feature = "alloc")]
 /// One half of `[05-OP-70]` element by element over a `tensor[D, key]`.
 pub fn split_key_storage(
     keys: &TensorStorage,
@@ -4104,7 +4048,7 @@ pub fn split_key_storage(
         keys.iter().map(|key| key.derive(index)).collect(),
     ))
 }
-
+#[cfg(feature = "alloc")]
 /// `[05-OP-72]` element by element over a `tensor[D, key]` and a
 /// `tensor[D, i64]` of exactly equal length; there is no broadcasting.
 pub fn fold_in_storage(
@@ -4126,7 +4070,7 @@ pub fn fold_in_storage(
         .collect::<Result<Vec<_>, _>>()?;
     Ok(TensorStorage::from_keys(folded))
 }
-
+#[cfg(feature = "alloc")]
 /// `[05-OP-71]` over a `tensor[D, key]`: the result is `tensor[D ++ [count],
 /// key]` in row-major order, so element `(i, j)` is row `j` of key `i`. The
 /// caller admits that result's extents under `[05-OP-33]` first, as the DAG
@@ -4140,7 +4084,7 @@ pub fn split_keys_storage(
         keys.iter().flat_map(|key| key.split_n(count)).collect(),
     ))
 }
-
+#[cfg(feature = "alloc")]
 /// The row of flat element `index` when `len` elements split into
 /// `rows` equal rows, and the element's index within its row. A batched
 /// draw (`spec/10-serialization.md` §3.2) keys row `b` by `keys[b]` and
@@ -4149,7 +4093,7 @@ fn batched_row(index: usize, len: usize, rows: usize) -> (usize, u64) {
     let row_len = len / rows;
     (index / row_len, (index % row_len) as u64)
 }
-
+#[cfg(feature = "alloc")]
 fn require_row_split(op: &'static str, len: usize, rows: usize) -> Result<(), NumericKernelError> {
     // Zero rows split only zero elements.
     let divides = len.is_multiple_of(rows);
@@ -4163,7 +4107,7 @@ fn require_row_split(op: &'static str, len: usize, rows: usize) -> Result<(), Nu
         })
     }
 }
-
+#[cfg(feature = "alloc")]
 /// Validated, borrowed input to the pure `[05-OP-37]` dropout value kernel.
 ///
 /// Preparation performs every dtype/rate guard without drawing or allocating.
@@ -4172,7 +4116,7 @@ fn require_row_split(op: &'static str, len: usize, rows: usize) -> Result<(), Nu
 /// replay provenance.
 ///
 /// ```
-/// use chelis_types::dtype_semantics::{PreparedDropout, RandomKey};
+/// use chelis_numeric_core::dtype_semantics::{PreparedDropout, RandomKey};
 /// fn draw(prepared: &PreparedDropout<'_>, key: RandomKey) {
 ///     let _ = prepared.apply(key);
 /// }
@@ -4182,15 +4126,15 @@ fn require_row_split(op: &'static str, len: usize, rows: usize) -> Result<(), Nu
 /// thing it knows about the stream it draws from.
 ///
 /// ```compile_fail
-/// use chelis_types::dtype_semantics::PreparedDropout;
+/// use chelis_numeric_core::dtype_semantics::PreparedDropout;
 /// fn draw(prepared: &PreparedDropout<'_>) {
 ///     let _ = prepared.apply(42, 0);
 /// }
 /// ```
 ///
 /// ```compile_fail
-/// use chelis_types::dtype_semantics::{DropoutParameters, PreparedDropout};
-/// fn bypass<'a>(input: &'a chelis_types::TensorStorage, rate: chelis_types::ScalarValue)
+/// use chelis_numeric_core::dtype_semantics::{DropoutParameters, PreparedDropout};
+/// fn bypass<'a>(input: &'a chelis_numeric_core::dtype_semantics::TensorStorage, rate: chelis_numeric_core::dtype_semantics::ScalarValue)
 ///     -> PreparedDropout<'a> {
 ///     let parameters = DropoutParameters::new(input.prim(), rate).unwrap();
 ///     PreparedDropout { input, parameters }
@@ -4198,8 +4142,8 @@ fn require_row_split(op: &'static str, len: usize, rows: usize) -> Result<(), Nu
 /// ```
 ///
 /// ```compile_fail
-/// use chelis_types::dtype_semantics::DropoutParameters;
-/// fn bypass(rate: chelis_types::ScalarValue) -> DropoutParameters {
+/// use chelis_numeric_core::dtype_semantics::DropoutParameters;
+/// fn bypass(rate: chelis_numeric_core::dtype_semantics::ScalarValue) -> DropoutParameters {
 ///     DropoutParameters { rate }
 /// }
 /// ```
@@ -4208,7 +4152,7 @@ pub struct PreparedDropout<'a> {
     input: &'a TensorStorage,
     parameters: DropoutParameters,
 }
-
+#[cfg(feature = "alloc")]
 impl<'a> PreparedDropout<'a> {
     pub fn new(input: &'a TensorStorage, rate: ScalarValue) -> Result<Self, NumericKernelError> {
         Ok(Self {
@@ -4312,6 +4256,7 @@ impl UniformLikeParameters {
         self.high
     }
 
+    #[cfg(feature = "alloc")]
     /// The `[05-OP-8]` sample of flat element `index` of the draw keyed by
     /// `key`, stored at `p`. f64 computes the one f64 fused multiply-add from
     /// the bounds' exact f64 images; every other `p` computes the one f32
@@ -4321,34 +4266,34 @@ impl UniformLikeParameters {
         let unit = random_unit(key.bits, index);
         let (low, high) = (self.low.as_f64_lossy(), self.high.as_f64_lossy());
         let value = if self.prim == Prim::F64 {
-            (high - low).mul_add(unit, low)
+            FloatMath::mul_add(high - low, unit, low)
         } else {
             let (low, high) = (low as f32, high as f32);
-            f64::from((high - low).mul_add(unit as f32, low))
+            f64::from(FloatMath::mul_add(high - low, unit as f32, low))
         };
         scalar_from_f64("uniform_like", self.prim, value).map_err(Into::into)
     }
 }
-
+#[cfg(feature = "alloc")]
 /// Validated input to the pure `[05-OP-8]` sampler for a template of `len`
 /// elements. The template's element values are never observed.
 ///
 /// ```
-/// use chelis_types::dtype_semantics::{PreparedUniformLike, RandomKey};
+/// use chelis_numeric_core::dtype_semantics::{PreparedUniformLike, RandomKey};
 /// fn draw(prepared: &PreparedUniformLike, key: RandomKey) {
 ///     let _ = prepared.apply(key);
 /// }
 /// ```
 ///
 /// ```compile_fail
-/// use chelis_types::dtype_semantics::uniform_sample;
+/// use chelis_numeric_core::dtype_semantics::uniform_sample;
 /// ```
 #[derive(Debug, Clone, Copy)]
 pub struct PreparedUniformLike {
     len: usize,
     parameters: UniformLikeParameters,
 }
-
+#[cfg(feature = "alloc")]
 impl PreparedUniformLike {
     pub fn new(
         prim: Prim,
@@ -4381,7 +4326,7 @@ pub enum UniformBound {
     Low,
     High,
 }
-
+#[cfg(feature = "alloc")]
 /// The `[05-OP-8]` pathwise adjoint of one bound under the forward draw keyed
 /// by `key`, for the output cotangent `cotangent` of dtype `p`.
 ///
@@ -4401,7 +4346,7 @@ pub fn uniform_like_bound_adjoint(
         random_unit(key.bits, index as u64)
     })
 }
-
+#[cfg(feature = "alloc")]
 /// [`uniform_like_bound_adjoint`] of a row-batched draw whose rows share one
 /// bound: the cotangent's elements split into `keys.len()` equal rows, the
 /// unit of flat element `i` comes from its row's key at its index within the
@@ -4419,7 +4364,7 @@ pub fn uniform_like_bound_adjoint_rows(
         random_unit(keys[row].bits, element)
     })
 }
-
+#[cfg(feature = "alloc")]
 fn uniform_like_bound_adjoint_by(
     cotangent: &TensorStorage,
     bound: UniformBound,
@@ -4485,6 +4430,7 @@ fn random_derive(key: u64, j: u64) -> u64 {
     random_splitmix64(key ^ random_splitmix64(j).rotate_left(29))
 }
 
+#[cfg(feature = "alloc")]
 /// `[05-RNG-2]`'s source word for flat element `index` of the draw keyed by
 /// `key`: `word(key, index) = splitmix64(key XOR rotl64(splitmix64(index), 41))`,
 /// which [05-RNG-1] reads for element `index`.
@@ -4497,6 +4443,7 @@ fn random_word(key: u64, index: u64) -> u64 {
     random_splitmix64(key ^ random_splitmix64(index).rotate_left(41))
 }
 
+#[cfg(feature = "alloc")]
 /// `[05-RNG-1]`'s unit value: the word's high 53 bits over `2^53`, which f64
 /// represents exactly.
 fn random_unit(key: u64, index: u64) -> f64 {
@@ -4581,7 +4528,7 @@ pub fn cast_trunc_raw(
     // every finite f64, so the single finalize below is the only place a
     // value can be rejected: `int_wide` sees a finite integral float and
     // the width check raises `Overflow`.
-    finalize_scalar(op, dst, RawScalar::Float(x.trunc()))
+    finalize_scalar(op, dst, RawScalar::Float(FloatMath::trunc(x)))
 }
 
 /// [`cast_trunc_raw`] over a sealed scalar: a float source reads through
@@ -4596,7 +4543,7 @@ pub fn cast_trunc_scalar(
     assert_float_trunc_source(op, value.prim());
     cast_trunc_raw(op, RawScalar::Float(value.as_f64_lossy()), dst)
 }
-
+#[cfg(feature = "alloc")]
 /// Bulk [`cast_trunc_raw`]: one truncation pass, then the monomorphized
 /// [`finalize_tensor`] loop (the section C5 performance contract). Traps
 /// on the first offending element, identically to the scalar surface.
@@ -4667,7 +4614,7 @@ pub fn named_cast_scalar(
         }
     }
 }
-
+#[cfg(feature = "alloc")]
 /// [`named_cast_raw`] over a tensor buffer. Every rung traps on the first
 /// offending element in order, identically to the scalar surface.
 pub fn named_cast_tensor(
@@ -4740,7 +4687,7 @@ pub fn cast_saturate_raw(
         // inside both, the truncated value is an exact i64.
         RawScalar::Float(value) if value <= min as f64 => min,
         RawScalar::Float(value) if value >= max as f64 => max,
-        RawScalar::Float(value) => value.trunc() as i64,
+        RawScalar::Float(value) => FloatMath::trunc(value) as i64,
     };
     finalize_scalar(op, dst, RawScalar::Int(clamped))
 }
@@ -4819,9 +4766,13 @@ fn assert_float_trunc_source(op: &'static str, src: Prim) {
 
 // Stored-value serialization is a checked bit transport, separate from arithmetic
 // finalization. The private child module retains access to the sealed carriers.
+#[cfg(feature = "serde")]
 mod wire_codec;
-pub use wire_codec::{KeyBits, execution_storage};
-
+#[cfg(feature = "serde")]
+pub use wire_codec::KeyBits;
+#[cfg(all(feature = "serde", feature = "alloc"))]
+pub use wire_codec::execution_storage;
+#[cfg(feature = "alloc")]
 /// Bulk finalize: one monomorphized loop per dtype, never per-element
 /// dynamic dispatch (the section C5 performance contract). Traps on the
 /// first offending element.
@@ -4893,7 +4844,7 @@ pub fn finalize_tensor(
     };
     Ok(TensorStorage { buf })
 }
-
+#[cfg(feature = "alloc")]
 /// Shared integer-width bulk finalize: exact wide reads, per-width range
 /// check, narrow store.
 fn int_buf<T>(op: &'static str, prim: Prim, raw: RawTensor) -> Result<Vec<T>, NumericTrap>
@@ -4922,7 +4873,7 @@ where
     }
     Ok(out)
 }
-
+#[cfg(feature = "alloc")]
 /// [05-OP-80]: storage whose element bits are the bits of a contiguous
 /// little-endian payload, least significant byte first. Insertion is not a
 /// numeric op: every float bit pattern, NaN payloads and signaling bits
@@ -4975,7 +4926,7 @@ pub fn tensor_from_le_payload(prim: Prim, bytes: &[u8]) -> Result<TensorStorage,
     };
     Ok(TensorStorage { buf })
 }
-
+#[cfg(feature = "alloc")]
 /// Build sealed storage from ALREADY-finalized scalars, exactly.
 ///
 /// The transport companion of [`finalize_tensor`] for values that carry
@@ -5161,7 +5112,7 @@ pub fn tensor_from_scalars(prim: Prim, values: &[ScalarValue]) -> TensorStorage 
     };
     TensorStorage { buf }
 }
-
+#[cfg(feature = "alloc")]
 #[cfg(test)]
 // Tests only: Rust std functions on the clippy disallowed list compute
 // reference or input values here; the list holds production code to
@@ -5169,7 +5120,8 @@ pub fn tensor_from_scalars(prim: Prim, values: &[ScalarValue]) -> TensorStorage 
 #[allow(clippy::disallowed_methods)]
 mod tests {
     use super::*;
-    use std::collections::BTreeSet;
+    use alloc::collections::BTreeSet;
+    use alloc::string::ToString;
 
     fn fin(prim: Prim, x: f64) -> Result<ScalarValue, NumericTrap> {
         finalize_scalar("test_op", prim, RawScalar::Float(x))
@@ -5577,7 +5529,7 @@ mod tests {
     // adjacent pairs with an odd trailing element carried up unchanged, then
     // narrowed once to `p`.
     fn spec_bound_adjoint(prim: Prim, cotangent: &[f64], key_bits: u64, high: bool) -> f64 {
-        fn tree<T: Copy + std::ops::Add<Output = T>>(mut level: Vec<T>, zero: T) -> T {
+        fn tree<T: Copy + core::ops::Add<Output = T>>(mut level: Vec<T>, zero: T) -> T {
             if level.is_empty() {
                 return zero;
             }
@@ -6230,14 +6182,14 @@ mod tests {
         );
         // 2^63 exactly (the f64 image of i64 overflow) is out of range.
         assert_eq!(
-            fin(Prim::Int64, 2f64.powi(63)),
+            fin(Prim::Int64, 9_223_372_036_854_775_808.0),
             Err(NumericTrap::Overflow {
                 op: "test_op",
                 prim: Prim::Int64
             })
         );
         // The largest integral f64 strictly below 2^63 is in range.
-        let below = 2f64.powi(63) - 1024.0;
+        let below = 9_223_372_036_854_775_808.0 - 1024.0;
         assert_eq!(
             fin(Prim::Int64, below).unwrap().as_i64_exact(),
             Some(9223372036854774784)
@@ -6449,7 +6401,7 @@ mod tests {
                 let output = reduce_tensor_groups_iter(
                     TensorReduceOp::ProdReduce,
                     &input,
-                    std::iter::once(0..3),
+                    core::iter::once(0..3),
                 );
                 if factor == 1 {
                     assert_eq!(output.unwrap().to_i64_exact_vec(), Some(vec![0]));
@@ -6540,7 +6492,7 @@ mod tests {
             Err(NumericKernelError::InvalidReductionSignature { .. })
         ));
         let empty =
-            sum_tensor_product_groups(&a, &a, Prim::F32, Prim::F32, [std::iter::empty()]).unwrap();
+            sum_tensor_product_groups(&a, &a, Prim::F32, Prim::F32, [core::iter::empty()]).unwrap();
         assert_eq!(
             empty.scalar_at(0),
             scalar_from_f64("oracle", Prim::F32, 0.0).unwrap()
@@ -6574,7 +6526,7 @@ mod tests {
                 prim,
                 accumulator,
                 prim,
-                std::iter::once((0..5).map(|i| input.scalar_at(i))),
+                core::iter::once((0..5).map(|i| input.scalar_at(i))),
             )
             .unwrap();
             assert_eq!(actual, expected);
@@ -6589,7 +6541,7 @@ mod tests {
             })
         );
         assert!(
-            sum_tensor_scalar_groups(Prim::F32, Prim::F16, Prim::F16, [std::iter::empty()])
+            sum_tensor_scalar_groups(Prim::F32, Prim::F16, Prim::F16, [core::iter::empty()])
                 .is_err()
         );
     }
@@ -7026,7 +6978,7 @@ mod tests {
             .map(str::to_string)
             .collect();
         let tree = checked_adjacent_pair_fold(leaves, |left, right| {
-            Ok::<_, std::convert::Infallible>(format!("({left}+{right})"))
+            Ok::<_, core::convert::Infallible>(format!("({left}+{right})"))
         })
         .expect("infallible trace fold")
         .expect("non-empty trace");

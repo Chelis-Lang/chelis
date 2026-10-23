@@ -22,7 +22,7 @@
 use chelis_backend_c::blas::detect_matmul_pattern as detect_verified_matmul_pattern;
 use chelis_ir::dag::{Dag, DimExpr, DimInfo, RiscOp, TensorType};
 use chelis_ir::specialize::specialize_for_blas;
-use chelis_types::types::Prim;
+use chelis_numeric_core::prim::Prim;
 mod support;
 
 fn detect_matmul_pattern(
@@ -103,7 +103,7 @@ fn canonical_matmul_pattern_is_detected() {
         decl,
         RiscOp::Sum {
             axis: 1,
-            accumulator: chelis_types::types::Prim::F32,
+            accumulator: chelis_numeric_core::prim::Prim::F32,
         },
         vec![mul],
         mat(2, 4),
@@ -185,7 +185,7 @@ fn cast_perturbed_matmul_specializes_after_noop_cleanup() {
         decl,
         RiscOp::Sum {
             axis: 1,
-            accumulator: chelis_types::types::Prim::F32,
+            accumulator: chelis_numeric_core::prim::Prim::F32,
         },
         vec![mul],
         mat(2, 4),
@@ -285,7 +285,7 @@ fn internal_one_hot_gather_tree_specializes_to_sparse_gather() {
         decl,
         RiscOp::Sum {
             axis: 1,
-            accumulator: chelis_types::types::Prim::F32,
+            accumulator: chelis_numeric_core::prim::Prim::F32,
         },
         vec![product],
         mat(4, 2),

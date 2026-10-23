@@ -3,9 +3,10 @@
 //! Only the table's recomputation checks call it; the prove lane reads the
 //! committed table.
 
-use chelis_types::{
-    FloatBinOp, FloatUnOp, ScalarValue, float_binop, float_unop, scalar_from_f64, types::Prim,
+use chelis_numeric_core::dtype_semantics::{
+    FloatBinOp, FloatUnOp, ScalarValue, float_binop, float_unop, scalar_from_f64,
 };
+use chelis_numeric_core::prim::Prim;
 
 use super::*;
 

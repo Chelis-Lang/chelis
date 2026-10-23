@@ -34,7 +34,7 @@ fn scalar_f32() -> TensorType {
 fn scalar_f64() -> TensorType {
     TensorType {
         dims: vec![],
-        precision: chelis_types::types::Prim::F64,
+        precision: chelis_numeric_core::prim::Prim::F64,
     }
 }
 
@@ -886,7 +886,7 @@ def per_example_grad(xs: tensor[batch, features, f32]) -> tensor[batch, features
         vec![],
         TensorType {
             dims: vec![chelis_ir::dag::DimInfo::Lit(4)],
-            precision: chelis_types::types::Prim::F32,
+            precision: chelis_numeric_core::prim::Prim::F32,
         },
         None,
     );
@@ -896,7 +896,7 @@ def per_example_grad(xs: tensor[batch, features, f32]) -> tensor[batch, features
         vec![x, x],
         TensorType {
             dims: vec![chelis_ir::dag::DimInfo::Lit(4)],
-            precision: chelis_types::types::Prim::F32,
+            precision: chelis_numeric_core::prim::Prim::F32,
         },
         None,
     );
@@ -904,7 +904,7 @@ def per_example_grad(xs: tensor[batch, features, f32]) -> tensor[batch, features
         single_decl,
         RiscOp::Sum {
             axis: 0,
-            accumulator: chelis_types::types::Prim::F32,
+            accumulator: chelis_numeric_core::prim::Prim::F32,
         },
         vec![sq],
         TensorType::scalar_f32(),

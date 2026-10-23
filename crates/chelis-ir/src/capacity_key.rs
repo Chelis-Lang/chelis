@@ -593,7 +593,7 @@ mod tests {
     use super::*;
     use crate::dag::{Dag, DimInfo, RiscOp, TensorType};
     use crate::ownership::{lower_dag_ownership, verify_ownership};
-    use chelis_types::types::Prim;
+    use chelis_numeric_core::prim::Prim;
 
     fn literal(value: u128) -> CapacityExpr {
         CapacityExpr::Literal(BigUint::from(value))

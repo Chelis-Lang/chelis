@@ -27,7 +27,8 @@
 //! authoring such goals yet (no producer exists; none is promised this phase).
 
 use crate::tier_b::{SmtProperty, TierBResult};
-use chelis_types::{ScalarValue, types::Prim};
+use chelis_numeric_core::dtype_semantics::ScalarValue;
+use chelis_numeric_core::prim::Prim;
 
 /// A content-addressed back-reference to a serialized exact-version `WireDag` artifact.
 ///
@@ -134,7 +135,7 @@ pub enum GoalShape {
     /// See `docs/design/beacon_scalar_range.md`.
     ScalarUpperBound {
         inputs: IntervalBox,
-        upper: chelis_types::ScalarValue,
+        upper: chelis_numeric_core::dtype_semantics::ScalarValue,
     },
 }
 
@@ -176,7 +177,7 @@ fn interval_is_non_empty(lo: ScalarValue, hi: ScalarValue) -> bool {
 
 #[cfg(test)]
 pub(crate) fn test_f64(value: f64) -> ScalarValue {
-    chelis_types::scalar_from_f64("test box bound", Prim::F64, value)
+    chelis_numeric_core::dtype_semantics::scalar_from_f64("test box bound", Prim::F64, value)
         .expect("f64 is a valid tagged test bound")
 }
 
@@ -191,7 +192,7 @@ impl Goal {
     /// Construct a finite named scalar box and a one-sided output bound.
     pub fn scalar_upper_bound(
         inputs: IntervalBox,
-        upper: chelis_types::ScalarValue,
+        upper: chelis_numeric_core::dtype_semantics::ScalarValue,
     ) -> Result<Self, GoalError> {
         let mut names = std::collections::BTreeSet::new();
         for (name, lo, hi) in &inputs.dims {
@@ -208,7 +209,8 @@ impl Goal {
                 )));
             }
         }
-        if upper.prim() != chelis_types::types::Prim::F64 || !upper.as_f64_lossy().is_finite() {
+        if upper.prim() != chelis_numeric_core::prim::Prim::F64 || !upper.as_f64_lossy().is_finite()
+        {
             return Err(GoalError::IllFormed(
                 "scalar upper bound must be a finite tagged f64".into(),
             ));
@@ -847,7 +849,8 @@ mod tests {
     #[test]
     fn box_range_rejects_other_numeric_tags_and_infinite_bounds() {
         let f32_bound =
-            chelis_types::scalar_from_f64("test bound", Prim::F32, 0.0).expect("exact f32 zero");
+            chelis_numeric_core::dtype_semantics::scalar_from_f64("test bound", Prim::F32, 0.0)
+                .expect("exact f32 zero");
         for invalid in [f32_bound, test_f64(f64::INFINITY)] {
             let error = Goal::box_range(
                 IntervalBox {

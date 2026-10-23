@@ -120,7 +120,7 @@ pub(crate) fn partition(
                     || external_inputs.contains_key(&id)
                     || source.ty
                         != super::HostTypeTerm::Scalar(super::HostPrecisionTerm::Concrete(
-                            chelis_types::types::Prim::Int64,
+                            chelis_numeric_core::prim::Prim::Int64,
                         ))
                     || logical.get(id).is_none_or(|node| {
                         node.output_type != scalar_type() || !matches!(node.op, RiscOp::Load { .. })
@@ -410,7 +410,7 @@ impl Partition<'_> {
                 // A key is never a dependency (spec/10 section 3.2, V4): its
                 // consumer, retained here, reads it, and the draw executes
                 // with its segment.
-                node.output_type.precision != chelis_types::types::Prim::Key
+                node.output_type.precision != chelis_numeric_core::prim::Prim::Key
                     && !matches!(
                         node.op,
                         RiscOp::ExtentWitness {
@@ -431,8 +431,12 @@ impl Partition<'_> {
         let completed = dag.add_node(
             completion_decl,
             RiscOp::Const {
-                value: chelis_types::scalar_from_i64("const", chelis_types::types::Prim::Int64, 0)
-                    .expect("exact completion value"),
+                value: chelis_numeric_core::dtype_semantics::scalar_from_i64(
+                    "const",
+                    chelis_numeric_core::prim::Prim::Int64,
+                    0,
+                )
+                .expect("exact completion value"),
             },
             Vec::new(),
             scalar_type(),
@@ -454,7 +458,7 @@ impl Partition<'_> {
 pub(crate) fn scalar_type() -> TensorType {
     TensorType {
         dims: Vec::new(),
-        precision: chelis_types::types::Prim::Int64,
+        precision: chelis_numeric_core::prim::Prim::Int64,
     }
 }
 
@@ -655,7 +659,8 @@ mod tests {
     use super::*;
     use crate::dag::{DimInfo, RtAxis, RtDim};
     use crate::host_type_state::HostPrecisionTerm;
-    use chelis_types::{scalar_from_i64, types::Prim};
+    use chelis_numeric_core::dtype_semantics::scalar_from_i64;
+    use chelis_numeric_core::prim::Prim;
 
     fn fixture(
         with_literal_result_claim: bool,

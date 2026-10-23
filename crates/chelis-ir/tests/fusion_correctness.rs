@@ -5,7 +5,7 @@
 
 use chelis_ir::dag::{Dag, DimInfo, NodeId, RiscOp, TensorType};
 use chelis_ir::eval::{TensorValue, eval_tensor_roots_with_strict};
-use chelis_types::types::Prim;
+use chelis_numeric_core::prim::Prim;
 use chelis_unord::UnordMap;
 
 // ---------------------------------------------------------------------------
@@ -238,7 +238,7 @@ fn f5_elementwise_into_reduction_fuses() {
         decl,
         RiscOp::Sum {
             axis: 1,
-            accumulator: chelis_types::types::Prim::F32,
+            accumulator: chelis_numeric_core::prim::Prim::F32,
         },
         vec![added],
         vec_f32(3),
@@ -270,7 +270,7 @@ fn f5_neg_reduction_into_elementwise_does_not_fuse() {
         decl,
         RiscOp::Sum {
             axis: 1,
-            accumulator: chelis_types::types::Prim::F32,
+            accumulator: chelis_numeric_core::prim::Prim::F32,
         },
         vec![x],
         vec_f32(3),
@@ -678,7 +678,7 @@ fn fr1_reduction_inlined_identifies_fused_elem_into_sum() {
         decl,
         RiscOp::Sum {
             axis: 1,
-            accumulator: chelis_types::types::Prim::F32,
+            accumulator: chelis_numeric_core::prim::Prim::F32,
         },
         vec![added],
         vec_f32(3),
@@ -736,7 +736,7 @@ fn fr2_multi_consumer_fused_elem_not_inlined() {
         decl,
         RiscOp::Sum {
             axis: 1,
-            accumulator: chelis_types::types::Prim::F32,
+            accumulator: chelis_numeric_core::prim::Prim::F32,
         },
         vec![negated],
         vec_f32(3),
@@ -774,7 +774,7 @@ fn fr3_chain_into_sum_correctness() {
         decl,
         RiscOp::Sum {
             axis: 1,
-            accumulator: chelis_types::types::Prim::F32,
+            accumulator: chelis_numeric_core::prim::Prim::F32,
         },
         vec![negated],
         vec_f32(3),

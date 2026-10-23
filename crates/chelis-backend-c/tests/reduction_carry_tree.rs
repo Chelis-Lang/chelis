@@ -14,9 +14,9 @@ mod support;
 use chelis_ir::dag::{Dag, DimInfo, NodeId, ReduceWindowKind, RiscOp, RtAxis, RtDim, TensorType};
 use chelis_ir::eval::{TensorValue, eval_tensor};
 use chelis_ir::tier2;
-use chelis_types::dtype_semantics::{StorageView, TensorStorage};
-use chelis_types::types::Prim;
-use chelis_types::{RawTensor, finalize_tensor};
+use chelis_numeric_core::dtype_semantics::{RawTensor, finalize_tensor};
+use chelis_numeric_core::dtype_semantics::{StorageView, TensorStorage};
+use chelis_numeric_core::prim::Prim;
 use chelis_unord::UnordMap;
 use std::fs;
 use std::process::Command;
@@ -341,23 +341,23 @@ fn materialized_sums_match_the_evaluator_and_allocate_per_kernel_not_per_output(
         (Prim::F64, Prim::F64),
         (
             Prim::F16,
-            RiscOp::default_reduce_sum_accumulator(Prim::F16).unwrap(),
+            Prim::F16.default_reduce_sum_accumulator().unwrap(),
         ),
         (
             Prim::Bf16,
-            RiscOp::default_reduce_sum_accumulator(Prim::Bf16).unwrap(),
+            Prim::Bf16.default_reduce_sum_accumulator().unwrap(),
         ),
         (
             Prim::Int8,
-            RiscOp::default_reduce_sum_accumulator(Prim::Int8).unwrap(),
+            Prim::Int8.default_reduce_sum_accumulator().unwrap(),
         ),
         (
             Prim::Int32,
-            RiscOp::default_reduce_sum_accumulator(Prim::Int32).unwrap(),
+            Prim::Int32.default_reduce_sum_accumulator().unwrap(),
         ),
         (
             Prim::Int64,
-            RiscOp::default_reduce_sum_accumulator(Prim::Int64).unwrap(),
+            Prim::Int64.default_reduce_sum_accumulator().unwrap(),
         ),
     ] {
         let mut dag = Dag::new();
@@ -485,7 +485,7 @@ fn materialized_sums_match_the_evaluator_and_allocate_per_kernel_not_per_output(
 fn inlined_contractions_match_the_evaluator_and_allocate_per_kernel_not_per_output() {
     let mut kernels = Vec::new();
     for precision in [Prim::F32, Prim::F64, Prim::F16, Prim::Bf16] {
-        let accumulator = RiscOp::default_reduce_sum_accumulator(precision).unwrap();
+        let accumulator = precision.default_reduce_sum_accumulator().unwrap();
         // `[m, k] x [k, n]`: the eight-column blocked kernel.
         let mut dag = Dag::new();
         let owner = dag.declare("test");

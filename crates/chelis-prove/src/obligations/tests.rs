@@ -38,7 +38,7 @@ fn issue_872_declared_function_alias_retains_erased_opaque_return() {
         let sigs = BTreeMap::from([(
             "make".to_string(),
             Type::function(
-                vec![Type::Prim(chelis_types::types::Prim::F32)],
+                vec![Type::Prim(chelis_numeric_core::prim::Prim::F32)],
                 Type::adt(
                     "Option".into(),
                     vec![Type::Var(chelis_types::types::TypeVar(0))],
@@ -455,7 +455,7 @@ fn decompose_option_of_tuple() {
     // Option[(Probability, f32)]
     let ty = opt(Type::tuple(vec![
         adt("Probability"),
-        Type::Prim(chelis_types::types::Prim::F32),
+        Type::Prim(chelis_numeric_core::prim::Prim::F32),
     ]));
     let pos = decompose_return(&ty, "Probability", &empty_records())
         .unwrap()
@@ -480,7 +480,7 @@ fn decompose_unsupported_container_rejects() {
 fn decompose_type_absent_is_none() {
     assert_eq!(
         decompose_return(
-            &Type::Prim(chelis_types::types::Prim::F32),
+            &Type::Prim(chelis_numeric_core::prim::Prim::F32),
             "Probability",
             &empty_records()
         )

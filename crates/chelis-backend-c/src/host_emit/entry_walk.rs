@@ -1612,7 +1612,7 @@ mod entry_contract_tests {
     use super::*;
     use chelis_ir::host::{EntryContract, HostFunctionOrigin, HostParam};
     use chelis_ir::host_type_state::HostTypeTerm;
-    use chelis_types::types::Prim;
+    use chelis_numeric_core::prim::Prim;
 
     fn function() -> HostFunction {
         let literal = TensorType {

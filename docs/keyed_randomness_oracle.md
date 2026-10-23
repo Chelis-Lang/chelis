@@ -22,9 +22,10 @@ changed/dirty candidate fails. Tests outside the catalog are not this oracle's
 coverage. The required `chelis-compiler-api::key_tensor_forms` target is never
 optional: a tree without the tensor-key implementation cannot pass.
 
-Build, list and run commands use `--locked`. The compiler-api list and run
-commands enable `chelis-compiler-api/ownership-ledger`, required by the native
-execution targets; the other selected packages need no additional feature.
+Build, list, and run commands use `--locked`.
+List and run commands enable each selected target's Cargo `required-features`.
+Compiler-api commands also enable `chelis-compiler-api/ownership-ledger` for native execution.
+The numeric-core reference target declares `alloc`.
 
 Each invocation uses `target/agents/2413-keyed-oracle`, locks that target, and
 writes a new `run-*` directory containing `receipt.json`, command arguments,

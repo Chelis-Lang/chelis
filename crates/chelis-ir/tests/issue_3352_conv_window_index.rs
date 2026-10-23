@@ -13,7 +13,7 @@ use chelis_ir::dag::{Dag, DimInfo, NodeId, Owner, RiscOp, TensorType};
 use chelis_ir::eval::{TensorValue, eval_tensor};
 use chelis_ir::tier2::lower_conv;
 use chelis_ir::verify;
-use chelis_types::types::Prim;
+use chelis_numeric_core::prim::Prim;
 
 struct Case {
     input: Vec<usize>,

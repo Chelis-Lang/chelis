@@ -5,7 +5,7 @@ use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
 use chelis_ir::ownership::{
     LiveByteBound, lower_dag_ownership, plan_hip_storage, verify_ownership,
 };
-use chelis_types::types::Prim;
+use chelis_numeric_core::prim::Prim;
 
 #[test]
 fn physical_peak_estimate_matches_retained_slot_formula() {

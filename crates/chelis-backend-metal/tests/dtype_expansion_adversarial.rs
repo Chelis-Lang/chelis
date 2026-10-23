@@ -14,7 +14,7 @@ mod support;
 use chelis_backend_metal::dtype as metal_dtype;
 use chelis_backend_metal::kernels;
 use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
-use chelis_types::types::Prim;
+use chelis_numeric_core::prim::Prim;
 use support::{codegen_metal, try_codegen_metal};
 
 // ---------------------------------------------------------------------------

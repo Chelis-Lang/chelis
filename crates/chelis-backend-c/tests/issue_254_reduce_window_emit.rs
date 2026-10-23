@@ -11,7 +11,7 @@
 
 mod support;
 use chelis_ir::dag::{Dag, DimInfo, ReduceWindowKind, RiscOp, TensorType};
-use chelis_types::types::Prim;
+use chelis_numeric_core::prim::Prim;
 use support::codegen;
 
 fn tensor_4d(shape: [usize; 4]) -> TensorType {
