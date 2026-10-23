@@ -12,6 +12,7 @@ generalize-sweep-oracle = []
 
 [dependencies]
 chelis-numeric-core = { workspace = true, default-features = false, features = ["alloc", "serde"] }
+chelis-type-core = { workspace = true, features = ["serde"] }
 chelis-unord.workspace = true
 chelis-deep.workspace = true
 chelis-pred.workspace = true
@@ -25,6 +26,7 @@ stacker.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+chelis-type-core = { workspace = true, features = ["serde", "test-instrumentation"] }
 half.workspace = true
 chelis-syntax-host.workspace = true
 serde_json = "1"

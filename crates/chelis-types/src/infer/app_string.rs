@@ -18,6 +18,7 @@
 //! family included: it validates each argument and then returns `bool`.
 
 use super::*;
+use crate::errors::ErrorWitness;
 
 /// Decide a string-operand route, or hand the name back.
 ///
@@ -29,13 +30,13 @@ use super::*;
 pub(super) fn string_route_result(
     fname: &str,
     node: &DeepNode,
-    arg_tys: &[Type],
-    result_ty: &Type,
+    arg_tys: &[Type<ErrorWitness>],
+    result_ty: &Type<ErrorWitness>,
     site: &UnresolvedOperandSite<'_>,
     product: &mut InferenceProduct,
-    subst: &mut Subst,
+    subst: &mut Subst<ErrorWitness>,
     errors: &mut DiagnosticSink<'_>,
-) -> Option<Type> {
+) -> Option<Type<ErrorWitness>> {
     match fname {
         "char_code" => {
             if let Some(first_arg) = arg_tys.first() {

@@ -5,6 +5,7 @@
 //! expression inference from becoming a second declaration owner.
 
 use super::*;
+use crate::errors::ErrorWitness;
 
 /// A declaration's resolved type together with its dtype-family bounds and one
 /// role-complete binder-identity object.
@@ -18,7 +19,7 @@ use super::*;
 /// rigidity checks run after instantiation, so all three variable kinds must
 /// cross that boundary together.
 pub(super) struct ResolvedDeclaredType {
-    pub(super) ty: Type,
+    pub(super) ty: Type<ErrorWitness>,
     pub(super) bounds: Vec<(TypeVar, TypeVarRestriction)>,
     pub(super) binder_identities: DeclarationBinderIdentities,
 }
@@ -36,7 +37,7 @@ pub(super) fn resolve_deep_type(
     use_site: TypeUseSite,
     binder_mode: BinderMode<'_>,
     errors: &mut DiagnosticSink<'_>,
-) -> Result<Type, ErrorWitness> {
+) -> Result<Type<ErrorWitness>, ErrorWitness> {
     resolve_deep_type_with_diagnostic_owner(expr, vg, adt_reg, use_site, binder_mode, None, errors)
 }
 
@@ -48,7 +49,7 @@ pub(super) fn resolve_deep_type_with_diagnostic_owner(
     binder_mode: BinderMode<'_>,
     diagnostic_owner: Option<&DeclarationDiagnosticOwner>,
     errors: &mut DiagnosticSink<'_>,
-) -> Result<Type, ErrorWitness> {
+) -> Result<Type<ErrorWitness>, ErrorWitness> {
     let resolved = resolve_deep_type_with_binder_identities(
         expr,
         vg,
@@ -243,7 +244,7 @@ pub(super) fn declaration_dtype_bounds(
 /// generalization re-quantifies them onto the scheme.
 pub(super) fn install_declared_bounds(
     bounds: &[(TypeVar, TypeVarRestriction)],
-    subst: &mut Subst,
+    subst: &mut Subst<ErrorWitness>,
     declaration: &str,
     errors: &mut DiagnosticSink<'_>,
 ) -> Result<(), ErrorWitness> {
@@ -282,7 +283,7 @@ pub(super) fn restriction_for_bound(bound: &chelis_deep::DtypeBound) -> TypeVarR
     match bound {
         chelis_deep::DtypeBound::Family(family) => restriction_for_family(*family),
         chelis_deep::DtypeBound::Set(members) => TypeVarRestriction::ActiveSet(
-            crate::types::PrimSet::from_members(members.iter().map(|dtype| match dtype {
+            chelis_type_core::PrimSet::from_members(members.iter().map(|dtype| match dtype {
                 chelis_deep::BoundDtype::F32 => chelis_numeric_core::prim::Prim::F32,
                 chelis_deep::BoundDtype::F64 => chelis_numeric_core::prim::Prim::F64,
                 chelis_deep::BoundDtype::Bf16 => chelis_numeric_core::prim::Prim::Bf16,

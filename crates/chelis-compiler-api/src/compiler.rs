@@ -1,6 +1,7 @@
 use crate::schema::numbers::{NonnegativeCount, NonnegativeExtent, SourceInteger};
 use chelis_deep::DeepTag;
 use chelis_numeric_core::prim::Prim;
+use chelis_types::errors::ErrorWitness;
 use chelis_unord::{UnordMap, UnordSet};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -2769,11 +2770,11 @@ fn admit_call(
 /// [05-OBS-9] admits that this boundary does not implement.
 fn admit_argument(
     value: &ExecutionValue,
-    ty: &chelis_types::types::Type,
+    ty: &chelis_type_core::Type<ErrorWitness>,
     root: &str,
     param: &str,
 ) -> Result<RuntimeValue> {
-    use chelis_types::types::Type;
+    use chelis_type_core::Type;
     let declared = match ty {
         Type::Ref(inner) => inner.as_ref(),
         other => other,
@@ -2867,8 +2868,8 @@ fn unimplemented_call_input(what: String) -> CompilerError {
 
 /// Whether a tensor parameter's type is literal: a concrete precision and
 /// every extent a literal size.
-fn tensor_type_is_literal(ty: &chelis_types::types::Type) -> bool {
-    use chelis_types::types::{Dim, TensorPrec, Type};
+fn tensor_type_is_literal(ty: &chelis_type_core::Type<ErrorWitness>) -> bool {
+    use chelis_type_core::{Dim, TensorPrec, Type};
     match ty {
         Type::Ref(inner) => tensor_type_is_literal(inner),
         Type::Tensor(dims, TensorPrec::Concrete(_)) => {
@@ -2884,9 +2885,9 @@ fn tensor_type_is_literal(ty: &chelis_types::types::Type) -> bool {
 /// or extent differs. The caller admits only literal tensor parameter types.
 fn admit_tensor_binding(
     binding: &crate::schema::TensorValue,
-    ty: &chelis_types::types::Type,
+    ty: &chelis_type_core::Type<ErrorWitness>,
 ) -> std::result::Result<(), String> {
-    use chelis_types::types::{Dim, TensorPrec, Type};
+    use chelis_type_core::{Dim, TensorPrec, Type};
     let declared = match ty {
         Type::Ref(inner) => inner.as_ref(),
         other => other,
@@ -4365,10 +4366,10 @@ fn selected_host_input_demand(
     })
 }
 
-fn type_is_tensor_runtime_input(ty: &chelis_types::types::Type) -> bool {
+fn type_is_tensor_runtime_input(ty: &chelis_type_core::Type<ErrorWitness>) -> bool {
     match ty {
-        chelis_types::types::Type::Tensor(_, _) => true,
-        chelis_types::types::Type::Ref(inner) => type_is_tensor_runtime_input(inner),
+        chelis_type_core::Type::Tensor(_, _) => true,
+        chelis_type_core::Type::Ref(inner) => type_is_tensor_runtime_input(inner),
         _ => false,
     }
 }

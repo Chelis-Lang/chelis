@@ -6,6 +6,7 @@
 //! groups and run them.
 
 use super::*;
+use crate::errors::ErrorWitness;
 use std::sync::Arc;
 
 /// The hoist order: the total order the body-inference schedule used before
@@ -467,8 +468,8 @@ pub(super) fn prebind_cyclic_component_schemes(
     metadata_prebound_names: &UnordSet<String>,
     env: &mut Env,
     vg: &mut VarGen,
-    subst: &Subst,
-) -> UnordMap<usize, Type> {
+    subst: &Subst<ErrorWitness>,
+) -> UnordMap<usize, Type<ErrorWitness>> {
     let mut provisional = UnordMap::new();
     env.begin_group_level(subst.current_level());
     for index in indices {

@@ -1,3 +1,4 @@
+use crate::errors::ErrorWitness;
 use chelis_deep::role::{AritySpec, ChildStampRole, arity_contract, child_stamp_role};
 use chelis_deep::{DeepTag, ExprCarrier};
 use chelis_unord::{ScopedMap, UnordMap, UnordSet};
@@ -16,7 +17,7 @@ use crate::cancel::CancelToken;
 use crate::errors::{CheckError, CheckErrorKind};
 use crate::infer::SignatureInferenceMetadata;
 use crate::key_admission::{KeyAdmission, KeyRefusal, TagKeys, builtin_key_operand, tag_keys};
-use crate::types::{NominalParamKind, Type, TypeVar};
+use chelis_type_core::{NominalParamKind, Type, TypeVar};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LinearityInfo {
@@ -193,7 +194,7 @@ impl LatestSet {
 #[derive(Clone)]
 enum ShapeArg<'a> {
     Deep(&'a Expr),
-    Checked(Type, Vec<(TypeVar, ShapeArg<'a>)>),
+    Checked(Type<ErrorWitness>, Vec<(TypeVar, ShapeArg<'a>)>),
 }
 
 /// What a use leaves in its owner's copy leaves ([`BindingRecord::copy_leaves`]).
@@ -962,7 +963,7 @@ struct Checker {
     /// annotations in `top_level_types`, but this map matches by `Type`
     /// (the inferencer's own metadata), so it covers user functions whose
     /// parameters were auto-borrow-inferred.
-    available_signatures: UnordMap<String, Type>,
+    available_signatures: UnordMap<String, Type<ErrorWitness>>,
     type_headers: crate::deep_type::TypeResolutionEnv,
     /// The owner whose projection chain `check_projection_use` already
     /// checked against its dropped components ([04-LIN-11]), while the walk
@@ -1558,7 +1559,9 @@ pub fn check_linearity_with_context(
     }
 }
 
-fn display_signatures(inference: &SignatureInferenceMetadata) -> UnordMap<String, Type> {
+fn display_signatures(
+    inference: &SignatureInferenceMetadata,
+) -> UnordMap<String, Type<ErrorWitness>> {
     inference
         .functions
         .iter()

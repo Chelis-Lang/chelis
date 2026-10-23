@@ -1,6 +1,7 @@
 //! Static builtin values retain identity and every independent contract frame.
 
 use chelis_deep::{DeepTag, Expr};
+use chelis_types::errors::ErrorWitness;
 use std::cell::Cell;
 use std::sync::Arc;
 
@@ -90,7 +91,7 @@ impl<C: CallableContractFrame> ResolvedBuiltinValue<C> {
     pub fn symbol(&self) -> &'static str {
         self.operation.symbol()
     }
-    pub fn scheme(&self) -> &chelis_types::types::Scheme {
+    pub fn scheme(&self) -> &chelis_type_core::Scheme<ErrorWitness> {
         self.operation.scheme()
     }
     pub fn declaration(&self) -> &chelis_types::BuiltinDecl {
@@ -510,7 +511,7 @@ mod tests {
     #[test]
     fn nominal_callable_normalization_retains_borrowed_inputs_and_full_result() {
         use chelis_numeric_core::prim::Prim;
-        use chelis_types::types::{Dim, DimVar, NominalArg, NominalParamKind, TensorPrec, Type};
+        use chelis_type_core::{Dim, DimVar, NominalArg, NominalParamKind, TensorPrec, Type};
         let mut registry = chelis_types::adt::AdtRegistry::default();
         let parameter = DimVar(77);
         registry.aliases.insert(

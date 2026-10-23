@@ -13,6 +13,7 @@
 
 use chelis_deep::annotations::{MetadataKey as K, MetadataValue as M, TypeSyntax};
 use chelis_deep::{DeepTag, ExprCarrier};
+use chelis_types::errors::ErrorWitness;
 use std::collections::BTreeMap;
 
 use chelis_compiler_api::schema::{EvalRequest, ExecutionValue, SourceKind};
@@ -20,7 +21,7 @@ use chelis_deep::Span;
 use chelis_deep::ast::{Atom, Expr, Metadata};
 use chelis_numeric_core::dtype_semantics::{ScalarValue, scalar_from_f64, scalar_from_i64};
 use chelis_numeric_core::prim::Prim;
-use chelis_types::types::Type;
+use chelis_type_core::Type;
 
 use crate::composition::{
     AssumptionDischarge, AssumptionRecord, CompositeVerdict, DischargeMethod, FUZZ_TOLERANCE,
@@ -421,7 +422,8 @@ pub fn run_surf_decls_obligations(
 ) -> Result<ObligationRunResult, String> {
     let exprs = chelis_surf::desugar::desugar_program(decls, &chelis_syntax_host::NativeStack)
         .map_err(|e| format!("desugar: {e}"))?;
-    let sigs: BTreeMap<String, Type> = match chelis_types::check_typed_program(&exprs) {
+    let sigs: BTreeMap<String, Type<ErrorWitness>> = match chelis_types::check_typed_program(&exprs)
+    {
         Ok(checked) => checked
             .signature_inference()
             .functions
@@ -470,7 +472,8 @@ pub fn run_deep_source_obligations(
 ) -> Result<ObligationRunResult, String> {
     let exprs = chelis_deep::parse_and_stamp_file(source, &chelis_syntax_host::NativeStack)
         .map_err(|error| format!("parse: {error}"))?;
-    let sigs: BTreeMap<String, Type> = match chelis_types::check_typed_program(&exprs) {
+    let sigs: BTreeMap<String, Type<ErrorWitness>> = match chelis_types::check_typed_program(&exprs)
+    {
         Ok(checked) => checked
             .signature_inference()
             .functions
@@ -501,7 +504,7 @@ pub fn run_deep_source_obligations(
 /// obligation plus one `Error` outcome per collection error.
 pub fn run_module_obligations(
     exprs: &[Expr],
-    sigs: &BTreeMap<String, Type>,
+    sigs: &BTreeMap<String, Type<ErrorWitness>>,
     options: &ObligationRunOptions,
 ) -> Vec<ObligationOutcome> {
     let (invariants, rejections) = crate::opaque::collect_opaque_invariants_and_rejections(exprs);
@@ -580,7 +583,7 @@ fn run_one(
     inv: &OpaqueInvariant,
     invariants: &[OpaqueInvariant],
     ob: &ObligationProperty,
-    sigs: &BTreeMap<String, Type>,
+    sigs: &BTreeMap<String, Type<ErrorWitness>>,
     consts: &ConstEnv,
     options: &ObligationRunOptions,
 ) -> ObligationOutcome {
@@ -762,7 +765,7 @@ fn run_tier_c(
     inv: &OpaqueInvariant,
     invariants: &[OpaqueInvariant],
     ob: &ObligationProperty,
-    sigs: &BTreeMap<String, Type>,
+    sigs: &BTreeMap<String, Type<ErrorWitness>>,
     consts: &ConstEnv,
     options: &ObligationRunOptions,
 ) -> ObligationOutcome {
@@ -819,7 +822,7 @@ fn run_tier_c(
                 let lit_dims: Option<Vec<usize>> = dims
                     .iter()
                     .map(|d| match d {
-                        chelis_types::types::Dim::Lit(n) if *n >= 0 => Some(*n as usize),
+                        chelis_type_core::Dim::Lit(n) if *n >= 0 => Some(*n as usize),
                         _ => None,
                     })
                     .collect();
@@ -1409,7 +1412,8 @@ pub fn generation_producers_for(
     exprs: &[Expr],
     input_inv: &OpaqueInvariant,
 ) -> Vec<crate::opaque::GenProducer> {
-    let sigs: BTreeMap<String, Type> = match chelis_types::check_typed_program(exprs) {
+    let sigs: BTreeMap<String, Type<ErrorWitness>> = match chelis_types::check_typed_program(exprs)
+    {
         Ok(checked) => checked
             .signature_inference()
             .functions
@@ -1426,7 +1430,7 @@ pub fn generation_producers_for(
 /// type) whose result is the input type, with scalar/tensor params.
 fn generation_producers(
     exprs: &[Expr],
-    sigs: &BTreeMap<String, Type>,
+    sigs: &BTreeMap<String, Type<ErrorWitness>>,
     input_inv: &OpaqueInvariant,
 ) -> Vec<crate::opaque::GenProducer> {
     use crate::opaque::{GenParamKind, GenProducer};
@@ -1458,7 +1462,7 @@ fn generation_producers(
                     let lit: Option<Vec<usize>> = dims
                         .iter()
                         .map(|d| match d {
-                            chelis_types::types::Dim::Lit(n) if *n >= 0 => Some(*n as usize),
+                            chelis_type_core::Dim::Lit(n) if *n >= 0 => Some(*n as usize),
                             _ => None,
                         })
                         .collect();
@@ -1559,7 +1563,7 @@ fn outcome_with_assumptions(
 }
 
 fn producer_param_types(
-    sigs: &BTreeMap<String, Type>,
+    sigs: &BTreeMap<String, Type<ErrorWitness>>,
     producer: &str,
     invariants: &[OpaqueInvariant],
 ) -> Vec<(String, ProducerParamType)> {

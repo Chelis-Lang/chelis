@@ -34,9 +34,11 @@ def approved_graph() -> dict[str, list[str]]:
     return {
         "chelis-pipeline-core": list(APPROVED_DEPENDENCIES),
         "chelis-deep": [],
-        "chelis-types": ["chelis-deep"],
+        "chelis-types": ["chelis-deep", "chelis-type-core"],
         "chelis-effects": ["chelis-deep", "chelis-types"],
         "chelis-ir": ["chelis-deep", "chelis-types"],
+        "chelis-type-core": ["chelis-numeric-core"],
+        "chelis-numeric-core": [],
         "chelis-unord": [],
     }
 
@@ -88,24 +90,25 @@ class PipelineCoreDependencyGuardTests(unittest.TestCase):
         ):
             guard.validate_fixture(manifest_with(*APPROVED_DEPENDENCIES), graph)
 
-    def test_numeric_leaf_preserves_denied_and_unapproved_host_paths(self) -> None:
-        for dependency, classification in (
-            ("chelis-compiler-api", "forbidden"),
-            ("chelis-conformance", "unapproved workspace"),
-        ):
-            with self.subTest(dependency=dependency):
-                graph = approved_graph()
-                graph["chelis-deep"].append("chelis-numeric-core")
-                graph["chelis-numeric-core"] = [dependency]
-                graph[dependency] = []
-                with self.assertRaisesRegex(
-                    guard.DependencyBoundaryError,
-                    f"{classification} dependency path: chelis-pipeline-core"
-                    f" -> chelis-deep -> chelis-numeric-core -> {dependency}",
-                ):
-                    guard.validate_fixture(
-                        manifest_with(*APPROVED_DEPENDENCIES), graph
-                    )
+    def test_portable_cores_preserve_denied_and_unapproved_host_paths(self) -> None:
+        for core in ("chelis-numeric-core", "chelis-type-core"):
+            for dependency, classification in (
+                ("chelis-compiler-api", "forbidden"),
+                ("chelis-conformance", "unapproved workspace"),
+            ):
+                with self.subTest(core=core, dependency=dependency):
+                    graph = approved_graph()
+                    graph["chelis-deep"].append(core)
+                    graph[core] = [dependency]
+                    graph[dependency] = []
+                    with self.assertRaisesRegex(
+                        guard.DependencyBoundaryError,
+                        f"{classification} dependency path: chelis-pipeline-core"
+                        f" -> chelis-deep -> {core} -> {dependency}",
+                    ):
+                        guard.validate_fixture(
+                            manifest_with(*APPROVED_DEPENDENCIES), graph
+                        )
 
     def test_metadata_excludes_dev_only_edges(self) -> None:
         raw = {

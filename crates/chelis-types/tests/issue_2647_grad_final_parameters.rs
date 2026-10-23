@@ -3,6 +3,7 @@
 
 use chelis_surf::{desugar::desugar_program, parser::parse_str};
 use chelis_types::check_typed_program;
+use chelis_types::errors::ErrorWitness;
 
 fn check(source: &str, accepted: bool) {
     let parsed = parse_str(source, &chelis_syntax_host::NativeStack).expect("fixture parses");
@@ -619,7 +620,7 @@ fn checked_library_round_trip_preserves_result_constraint_origins() {
         let restored: TypeEnv =
             bincode::deserialize(&bincode::serialize(&context).unwrap()).unwrap();
         let arity = match &context.scheme("forward_grad").unwrap().body {
-            chelis_types::types::Type::Fn(params, _) => params.len(),
+            chelis_type_core::Type::<ErrorWitness>::Fn(params, _) => params.len(),
             _ => unreachable!(),
         };
         let flag = if arity == 2 { ", true" } else { "" };
@@ -1205,7 +1206,7 @@ fn restricted_result_origins_publish_a_coherent_scheme() {
                 "{source}: restriction must quantify a published variable: {scheme:?}"
             );
             assert!(
-                chelis_types::env::free_tvars(&scheme.body).contains(variable),
+                chelis_type_core::free_tvars(&scheme.body).contains(variable),
                 "{source}: restriction must occur in the published body: {scheme:?}"
             );
         }
@@ -1274,7 +1275,7 @@ fn origin_dtype_restrictions_survive_representative_changes_and_serialization() 
         .as_object_mut()
         .unwrap()
         .remove("tvar_restrictions");
-    assert!(serde_json::from_value::<chelis_types::types::Scheme>(wire).is_err());
+    assert!(serde_json::from_value::<chelis_type_core::Scheme<ErrorWitness>>(wire).is_err());
     let restored: TypeEnv = bincode::deserialize(&bincode::serialize(&live).unwrap()).unwrap();
     for context in [&live, &restored] {
         for (source, accepted) in [

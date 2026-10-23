@@ -5,13 +5,14 @@
 
 use super::*;
 use crate::unsupported::{SpanRef, Stage, Unsupported, UnsupportedKind};
+use chelis_type_core::decisions::borrow::{copy_result_from_source, settled_borrow_type};
 
 /// Exact ownership record for a root expression consumer that resolves its
 /// own `type:` metadata. `infer_let` uses this instead of inferring ownership
 /// from a generic `Type::Error`: an unrelated RHS failure must not suppress an
 /// independently malformed let ascription.
 pub(super) enum OwnedTypeMetadataResolution {
-    Resolved(Type),
+    Resolved(Type<ErrorWitness>),
     Failed(ErrorWitness),
 }
 
@@ -59,11 +60,11 @@ fn infer_copy(
     node: &DeepNode,
     env: &mut Env,
     vg: &mut VarGen,
-    subst: &mut Subst,
+    subst: &mut Subst<ErrorWitness>,
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
     product: &mut InferenceProduct,
-) -> Type {
+) -> Type<ErrorWitness> {
     let kids = node.children_slice();
     if let Some(inner) = kids.first() {
         let inner_ty = infer_expr(inner, env, vg, subst, adt_reg, errors, product);
@@ -88,7 +89,8 @@ fn infer_copy(
                     tv,
                     DeferredOperandGate::Copy {
                         result: Box::new(result.clone()),
-                        location: TypeDiagnosticLocation::from_expr(expr),
+                        location: TypeDiagnosticLocation::from_expr(expr)
+                            .map(TypeDiagnosticLocation::into_source_label),
                     },
                 );
                 result
@@ -97,47 +99,6 @@ fn infer_copy(
         }
     } else {
         malformed_form(node, "copy", "one wrapped expression", errors)
-    }
-}
-
-/// The type `&x` has once `x`'s type is settled: a reference stays itself,
-/// a tensor or tensor-carrying value (or an error) is borrowed, and anything
-/// else is no borrow (`None`), which the caller reports. The eager `borrow`
-/// arm and the discharge of a cast suspended on `&v` (chelis#3101) both
-/// decide through it, so the two cannot disagree.
-pub(crate) fn settled_borrow_type(resolved: Type) -> Option<Type> {
-    match resolved {
-        Type::Ref(_) => Some(resolved),
-        Type::Tensor(_, _)
-        | Type::Adt(_, _)
-        | Type::KindedAdt(_, _)
-        | Type::Tuple(_)
-        | Type::Error(_) => Some(Type::reference(resolved)),
-        _ => None,
-    }
-}
-
-/// The source-side decision `copy` makes, factored out so the eager arm and
-/// the suspended constraint's discharge run *the same code* (chelis#1489).
-///
-/// spec/04 section 8.2: `copy(x)` accepts an owned `T` or a borrowed `&T`
-/// for every `T` and yields a fresh owned `T`, so every settled operand has
-/// a result and there is no rejection to share. [04-LIN-9]'s refusal of a
-/// key-carrying operand belongs to the linearity checker, which owns every
-/// use of a key. The callers decide only a settled operand: one that is still
-/// an inference variable may yet be bound to a borrow.
-///
-/// This exists because the decision previously lived in three places: two
-/// identical eager arms and a re-derivation in the pass that decided the
-/// deferrals. They agreed, but nothing made them agree, and every defect on
-/// chelis#1489 has been some path disagreeing with another. A comment even
-/// claimed this function existed before it did, which is worse than the
-/// duplication: a reviewer reading it would stop looking.
-pub(crate) fn copy_result_from_source(settled: &Type) -> Type {
-    match settled {
-        // `copy(&t)` yields `t`, not `&t`.
-        Type::Ref(referent) => referent.as_ref().clone(),
-        owned => owned.clone(),
     }
 }
 
@@ -155,11 +116,11 @@ pub(super) fn infer_expr(
     expr: &deep::Expr,
     env: &mut Env,
     vg: &mut VarGen,
-    subst: &mut Subst,
+    subst: &mut Subst<ErrorWitness>,
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
     product: &mut InferenceProduct,
-) -> Type {
+) -> Type<ErrorWitness> {
     infer_expr_with_type_metadata_ownership(
         expr, env, vg, subst, adt_reg, errors, product, None, None, None,
     )
@@ -170,12 +131,12 @@ pub(super) fn infer_expr_with_declaration_diagnostic_owner(
     expr: &deep::Expr,
     env: &mut Env,
     vg: &mut VarGen,
-    subst: &mut Subst,
+    subst: &mut Subst<ErrorWitness>,
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
     product: &mut InferenceProduct,
     declaration_diagnostic_owner: Option<&DeclarationDiagnosticOwner>,
-) -> Type {
+) -> Type<ErrorWitness> {
     infer_expr_with_type_metadata_ownership(
         expr,
         env,
@@ -193,14 +154,14 @@ pub(super) fn infer_expr_with_declaration_diagnostic_owner(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn infer_expr_with_expected(
     expr: &deep::Expr,
-    expected: &Type,
+    expected: &Type<ErrorWitness>,
     env: &mut Env,
     vg: &mut VarGen,
-    subst: &mut Subst,
+    subst: &mut Subst<ErrorWitness>,
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
     product: &mut InferenceProduct,
-) -> Type {
+) -> Type<ErrorWitness> {
     infer_expr_with_type_metadata_ownership(
         expr,
         env,
@@ -220,7 +181,7 @@ pub(super) fn infer_expr_with_expected(
 /// at the direct Deep literal-metadata boundary.
 pub(super) fn check_opaque_literal_ascription(
     expr: &deep::Expr,
-    declared: &Type,
+    declared: &Type<ErrorWitness>,
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
 ) -> bool {
@@ -246,14 +207,14 @@ pub(super) fn infer_expr_with_type_metadata_ownership(
     expr: &deep::Expr,
     env: &mut Env,
     vg: &mut VarGen,
-    subst: &mut Subst,
+    subst: &mut Subst<ErrorWitness>,
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
     product: &mut InferenceProduct,
-    expected_result: Option<&Type>,
+    expected_result: Option<&Type<ErrorWitness>>,
     type_metadata_resolution: Option<&mut Option<OwnedTypeMetadataResolution>>,
     declaration_diagnostic_owner: Option<&DeclarationDiagnosticOwner>,
-) -> Type {
+) -> Type<ErrorWitness> {
     // Bail before a deeply-nested `app` tree exhausts the native stack and
     // aborts the process (this is the gdb-pinned real-pricer crash site):
     // when the budget is gone we record the located bail in `STACK_EXHAUSTED`
@@ -668,11 +629,11 @@ pub(super) fn infer_handle_effect(
     node: &DeepNode,
     env: &mut Env,
     vg: &mut VarGen,
-    subst: &mut Subst,
+    subst: &mut Subst<ErrorWitness>,
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
     product: &mut InferenceProduct,
-) -> Type {
+) -> Type<ErrorWitness> {
     let kids = node.children_slice();
     // Structural arity: spec/03-deep-syntax.md gives `handle-effect` EXACTLY
     // two children -- `(handle-effect {effect: K} <handler> <body>)`. Any other
@@ -753,7 +714,7 @@ pub(super) fn infer_handle_effect(
 /// another value ([05-UNS-1]; chelis#730). Reporting here says the same thing
 /// at the lane that is the oracle, and re-types the site `Type::Error` so it
 /// sits back under the Phase 2 `ErrorWitness` guard (chelis#731 §C3).
-pub(super) fn infer_atom(atom: &deep::Atom, errors: &mut DiagnosticSink<'_>) -> Type {
+pub(super) fn infer_atom(atom: &deep::Atom, errors: &mut DiagnosticSink<'_>) -> Type<ErrorWitness> {
     match atom {
         // D1 (WS-A0 RT-1 fixup): per spec/04-type-system.md §5.3 the
         // lexer parses unsuffixed integer tokens at i64 so that
@@ -796,7 +757,11 @@ pub(super) fn infer_atom(atom: &deep::Atom, errors: &mut DiagnosticSink<'_>) -> 
 /// is key-free, so instantiating it at a key-carrying type is refused and
 /// names the builtin. A user binding that shadows a builtin name is a
 /// generic whose variables generalization already made key-free.
-fn forbid_keys_a_builtin_value_does_not_admit(name: &str, ty: &Type, subst: &Subst) {
+fn forbid_keys_a_builtin_value_does_not_admit(
+    name: &str,
+    ty: &Type<ErrorWitness>,
+    subst: &Subst<ErrorWitness>,
+) {
     let Some(decl) = crate::builtins::builtin_decl(name) else {
         return;
     };
@@ -813,10 +778,10 @@ fn forbid_keys_a_builtin_value_does_not_admit(name: &str, ty: &Type, subst: &Sub
         if crate::key_admission::builtin_key_operand(name, &cases, index).is_ok() {
             continue;
         }
-        for var in crate::env::free_tvars(param) {
+        for var in chelis_type_core::scheme::free_tvars(param) {
             subst.forbid_key_instantiation(
                 var,
-                crate::unify::GenericParameter {
+                chelis_type_core::unify::GenericParameter {
                     generic: Some(name.to_string()),
                     binder: None,
                     value: false,
@@ -833,7 +798,7 @@ fn forbid_keys_a_builtin_value_does_not_admit(name: &str, ty: &Type, subst: &Sub
 /// an argument, a callback, an aggregate element, or a result.
 fn reject_builtin_applicable_only_by_name(
     name: &str,
-    scheme: &Scheme,
+    scheme: &Scheme<ErrorWitness>,
     node: &DeepNode,
 ) -> Option<CheckError> {
     if !crate::builtins::builtin_env_names().contains(name) {
@@ -874,11 +839,11 @@ pub(super) fn infer_var(
     node: &DeepNode,
     env: &mut Env,
     vg: &mut VarGen,
-    subst: &mut Subst,
+    subst: &mut Subst<ErrorWitness>,
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
     product: &mut InferenceProduct,
-) -> Type {
+) -> Type<ErrorWitness> {
     let called = std::mem::take(&mut product.callee_reference);
     let kids = node.children_slice();
     if let Some(name) = kids.first().and_then(|e| symbol_name(e)) {
@@ -948,7 +913,10 @@ pub(super) fn infer_var(
             let (instantiated, copies) = if sibling {
                 super::group_link::sibling_instance(&scheme, env, vg, subst)
             } else {
-                (env.instantiate_scheme(&scheme, vg, subst), Vec::new())
+                (
+                    chelis_type_core::scheme::instantiate_scheme(&scheme, vg, subst),
+                    Vec::new(),
+                )
             };
             product.import_result_constraints(subst);
             if !called {
@@ -1054,7 +1022,7 @@ pub(super) fn infer_lit(
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
     type_metadata_resolution: Option<&mut Option<OwnedTypeMetadataResolution>>,
-) -> Type {
+) -> Type<ErrorWitness> {
     let meta = node.meta();
     let kids = node.children_slice();
 

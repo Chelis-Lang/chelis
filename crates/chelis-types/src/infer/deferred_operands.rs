@@ -5,6 +5,7 @@
 //! unification already reached -- and it owns no decision.
 
 use super::*;
+use crate::errors::ErrorWitness;
 
 /// chelis#1489: report the operand constraints that failed, and the ones that
 /// never became decidable.
@@ -41,20 +42,20 @@ use super::*;
 /// emitting an exported entry point on that basis. Suspending the decision is
 /// safe; dropping it is not.
 pub(super) fn validate_deferred_tensor_operands(
-    subst: &mut Subst,
+    subst: &mut Subst<ErrorWitness>,
     declared_type_names: &UnordMap<TypeVar, String>,
     errors: &mut DiagnosticSink<'_>,
 ) {
     for failure in subst.take_operand_gate_failures() {
         match failure {
-            OperandGateFailure::Decision { error } => errors.push(error),
+            OperandGateFailure::Decision { error } => errors.push(error.into()),
             OperandGateFailure::ResultMismatch {
                 gate,
                 expected,
                 settled,
             } => {
                 let mut error = CheckError::with_types(
-                    gate.kind(),
+                    gate.kind().into(),
                     format!(
                         "{} result does not match the type this call produces once its \
                          operand is known: expected {expected}, got {settled}",
@@ -65,7 +66,7 @@ pub(super) fn validate_deferred_tensor_operands(
                     gate.suggestions(),
                 );
                 if let Some(location) = gate.location() {
-                    error = location.attach(error);
+                    error = TypeDiagnosticLocation::attach_source_label(location, error);
                 }
                 errors.push(error);
             }
@@ -73,7 +74,7 @@ pub(super) fn validate_deferred_tensor_operands(
                 let subject = subject_for(&resolved, declared_type_names);
                 let expected = gate.expected_operand();
                 let mut error = CheckError::with_types(
-                    gate.kind(),
+                    gate.kind().into(),
                     format!(
                         "{}; argument 1: expected {expected}, got {subject}",
                         gate.message(&subject)
@@ -83,7 +84,7 @@ pub(super) fn validate_deferred_tensor_operands(
                     gate.suggestions(),
                 );
                 if let Some(location) = gate.location() {
-                    error = location.attach(error);
+                    error = TypeDiagnosticLocation::attach_source_label(location, error);
                 }
                 errors.push(error);
             }
@@ -121,7 +122,7 @@ pub(super) fn validate_deferred_tensor_operands(
         let subject = subject_for(&resolved, declared_type_names);
         let expected = gate.expected_operand();
         let mut error = CheckError::with_types(
-            gate.kind(),
+            gate.kind().into(),
             format!(
                 "{}; argument 1: expected {expected}, got {subject}",
                 gate.message(&subject)
@@ -131,7 +132,7 @@ pub(super) fn validate_deferred_tensor_operands(
             gate.suggestions(),
         );
         if let Some(location) = gate.location() {
-            error = location.attach(error);
+            error = TypeDiagnosticLocation::attach_source_label(location, error);
         }
         errors.push(error);
     }
@@ -142,7 +143,10 @@ pub(super) fn validate_deferred_tensor_operands(
 /// is both what carries the recorded name and what the diagnostic would
 /// otherwise print. [04-FIT-10]: with no recorded name the internal identity
 /// still renders rather than acquiring an invented one.
-fn subject_for(resolved: &Type, declared_type_names: &UnordMap<TypeVar, String>) -> String {
+fn subject_for(
+    resolved: &Type<ErrorWitness>,
+    declared_type_names: &UnordMap<TypeVar, String>,
+) -> String {
     match resolved {
         Type::Var(resolved_var) => match declared_type_names.get(resolved_var) {
             Some(name) => format!("`{name}`"),

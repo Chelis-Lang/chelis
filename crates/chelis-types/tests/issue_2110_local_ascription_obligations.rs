@@ -1,8 +1,9 @@
 use chelis_deep::printer::print_expr;
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str;
+use chelis_type_core::{Dim, Type};
 use chelis_types::errors::CheckErrorKind;
-use chelis_types::types::{Dim, Type};
+use chelis_types::errors::ErrorWitness;
 use chelis_types::{
     CheckedProgram, LocalAscriptionOrigin, build_compiled_library_context, check_ir_program,
     check_ir_with_context, check_linearity,
@@ -63,9 +64,9 @@ def f(x: tensor[*, f32]) -> tensor[*, f32] = {
     );
     assert_eq!(
         ascription.declared_type(),
-        &Type::Tensor(
+        &Type::<ErrorWitness>::Tensor(
             vec![Dim::Lit(9)],
-            chelis_types::types::TensorPrec::Concrete(chelis_numeric_core::prim::Prim::F32)
+            chelis_type_core::TensorPrec::Concrete(chelis_numeric_core::prim::Prim::F32)
         )
     );
     assert!(
@@ -126,9 +127,9 @@ fn hand_authored_deep_type_metadata_is_an_explicit_local_ascription() {
     assert_eq!(ascription.binding_name(), "y");
     assert_eq!(
         ascription.declared_type(),
-        &Type::Tensor(
+        &Type::<ErrorWitness>::Tensor(
             vec![Dim::Lit(2)],
-            chelis_types::types::TensorPrec::Concrete(chelis_numeric_core::prim::Prim::F32)
+            chelis_type_core::TensorPrec::Concrete(chelis_numeric_core::prim::Prim::F32)
         )
     );
     assert_eq!(ascription.outstanding_claims().len(), 1);
@@ -232,9 +233,9 @@ def f(x: tensor[*, f32]) -> tensor[*, f32] = {
     };
     assert_eq!(
         ascription.declared_type(),
-        &Type::Tensor(
+        &Type::<ErrorWitness>::Tensor(
             vec![Dim::Wildcard],
-            chelis_types::types::TensorPrec::Concrete(chelis_numeric_core::prim::Prim::F32)
+            chelis_type_core::TensorPrec::Concrete(chelis_numeric_core::prim::Prim::F32)
         )
     );
     assert!(ascription.outstanding_claims().is_empty());
@@ -496,7 +497,7 @@ fn callable_owner_distinguishes_deep_surf_and_inferred_binding_metadata() {
                     }
                 );
                 assert!(
-                    matches!(record.declared_type(), Type::Fn(_, _)),
+                    matches!(record.declared_type(), Type::<ErrorWitness>::Fn(_, _)),
                     "complete Fn type: {record:?}"
                 );
                 assert!(print_expr(record.authored_type()).contains("(d-lit {} 2)"));
@@ -546,7 +547,7 @@ fn callable_owner_retains_result_only_and_nested_adapter_sources_once() {
     );
     assert_ne!(records[0].id(), records[1].id());
     assert!(
-        matches!(records[0].declared_type(), Type::Fn(_, result) if matches!(result.as_ref(), Type::Tensor(dims, _) if dims == &[Dim::Lit(2)]))
+        matches!(records[0].declared_type(), Type::<ErrorWitness>::Fn(_, result) if matches!(result.as_ref(), Type::<ErrorWitness>::Tensor(dims, _) if dims == &[Dim::Lit(2)]))
     );
 }
 

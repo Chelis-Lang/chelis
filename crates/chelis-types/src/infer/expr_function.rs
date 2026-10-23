@@ -4,6 +4,8 @@
 //! The extraction preserves control flow and diagnostic order.
 
 use super::*;
+use crate::errors::ErrorWitness;
+use chelis_type_core::decisions::shape::sum_result_widening_note;
 
 /// Recover the exact Surf source range stamped onto a desugared Deep node.
 ///
@@ -38,12 +40,12 @@ pub(super) fn infer_fn(
     node: &DeepNode,
     env: &mut Env,
     vg: &mut VarGen,
-    subst: &mut Subst,
+    subst: &mut Subst<ErrorWitness>,
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
     product: &mut InferenceProduct,
     declaration_diagnostic_owner: Option<&DeclarationDiagnosticOwner>,
-) -> Type {
+) -> Type<ErrorWitness> {
     let kids = node.children_slice();
     if kids.is_empty() {
         return malformed_form(node, "fn", "parameters and a body", errors);
@@ -79,7 +81,7 @@ pub(super) fn infer_fn(
     // distinct) still type-check.
     let mut declared_dvars: Vec<DimVar> = Vec::new();
     for t in &param_types {
-        for dv in crate::env::free_dvars(t) {
+        for dv in chelis_type_core::free_dvars(t) {
             if !declared_dvars.contains(&dv) {
                 declared_dvars.push(dv);
             }
@@ -103,7 +105,8 @@ pub(super) fn infer_fn(
     // than inventing a name.
     check_declared_dvars_rigid(None, &declared_dvars, &UnordMap::new(), subst, errors);
 
-    let resolved_params: Vec<Type> = param_types.iter().map(|t| subst.apply(t)).collect();
+    let resolved_params: Vec<Type<ErrorWitness>> =
+        param_types.iter().map(|t| subst.apply(t)).collect();
     let resolved_body = subst.apply(&body_ty);
 
     Type::function(resolved_params, resolved_body)
@@ -173,17 +176,17 @@ pub(super) fn classify_property_parameter_annotations(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn infer_declared_def_body(
     body: &deep::Expr,
-    decl_ty: &Type,
+    decl_ty: &Type<ErrorWitness>,
     declaration_meta: &deep::Metadata,
     declared_signature: Option<&DeclaredSigMetadata>,
     env: &mut Env,
     vg: &mut VarGen,
-    subst: &mut Subst,
+    subst: &mut Subst<ErrorWitness>,
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
     product: &mut InferenceProduct,
     declaration_diagnostic_owner: Option<&DeclarationDiagnosticOwner>,
-) -> Type {
+) -> Type<ErrorWitness> {
     let property_has_quantifier_carriers = declaration_meta
         .chelis_role()
         .is_some_and(|role| role.value() == "property")
@@ -228,16 +231,16 @@ pub(super) fn infer_declared_def_body(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn infer_def_body_with_sig(
     body: &deep::Expr,
-    decl_ty: &Type,
+    decl_ty: &Type<ErrorWitness>,
     parameter_annotation_ownership: &DefParameterAnnotationOwnership,
     env: &mut Env,
     vg: &mut VarGen,
-    subst: &mut Subst,
+    subst: &mut Subst<ErrorWitness>,
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
     product: &mut InferenceProduct,
     declaration_diagnostic_owner: Option<&DeclarationDiagnosticOwner>,
-) -> Type {
+) -> Type<ErrorWitness> {
     // Match: body is `(fn (params ...) body-expr)` AND decl is `Fn(args, ret)`.
     let Some((DeepTag::Fn, _, kids)) = stamped_parts(body) else {
         return infer_expr_with_declaration_diagnostic_owner(
@@ -302,7 +305,7 @@ pub(super) fn infer_def_body_with_sig(
     // it. Running it only at the caller also avoids double-reporting.
     // Annotated parameters have their own fresh resolution IDs; protecting
     // only the separate defsig instantiation would be too late for the body.
-    subst.protect_dimensions(param_types.iter().flat_map(crate::env::free_dvars));
+    subst.protect_dimensions(param_types.iter().flat_map(chelis_type_core::free_dvars));
     let body_expr = &kids[1];
     let body_ty = infer_expr_with_expected(
         body_expr,
@@ -315,7 +318,8 @@ pub(super) fn infer_def_body_with_sig(
         product,
     );
 
-    let resolved_params: Vec<Type> = param_types.iter().map(|t| subst.apply(t)).collect();
+    let resolved_params: Vec<Type<ErrorWitness>> =
+        param_types.iter().map(|t| subst.apply(t)).collect();
     let resolved_body = subst.apply(&body_ty);
 
     Type::function(resolved_params, resolved_body)
@@ -360,7 +364,7 @@ fn extract_params_with_ownership(
     errors: &mut DiagnosticSink<'_>,
     binder_mode: BinderMode<'_>,
     declaration_diagnostic_owner: Option<&DeclarationDiagnosticOwner>,
-) -> Vec<(String, Option<Type>)> {
+) -> Vec<(String, Option<Type<ErrorWitness>>)> {
     let Some(elems) = parameter_elements(expr) else {
         return Vec::new();
     };
@@ -431,11 +435,11 @@ pub(super) fn infer_let(
     node: &DeepNode,
     env: &mut Env,
     vg: &mut VarGen,
-    subst: &mut Subst,
+    subst: &mut Subst<ErrorWitness>,
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
     product: &mut InferenceProduct,
-) -> Type {
+) -> Type<ErrorWitness> {
     let kids = node.children_slice();
     if kids.len() < 2 {
         return malformed_form(node, "let", "bindings and a body", errors);
@@ -660,9 +664,9 @@ pub(super) fn infer_let(
 /// One function makes the two positions one rule; only the position named in
 /// the diagnostic differs.
 pub(super) fn require_bool_condition(
-    cond_ty: &Type,
+    cond_ty: &Type<ErrorWitness>,
     position: &str,
-    subst: &mut Subst,
+    subst: &mut Subst<ErrorWitness>,
     errors: &mut DiagnosticSink<'_>,
 ) {
     if unify(cond_ty, &Type::Prim(Prim::Bool), subst).is_err() {
@@ -680,11 +684,11 @@ pub(super) fn infer_if(
     node: &DeepNode,
     env: &mut Env,
     vg: &mut VarGen,
-    subst: &mut Subst,
+    subst: &mut Subst<ErrorWitness>,
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
     product: &mut InferenceProduct,
-) -> Type {
+) -> Type<ErrorWitness> {
     let kids = node.children_slice();
     if kids.len() < 3 {
         return malformed_form(

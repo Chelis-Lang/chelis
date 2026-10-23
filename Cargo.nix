@@ -413,6 +413,16 @@ rec {
       # File a bug if you depend on any for non-debug work!
       debug = internal.debugCrate { inherit packageId; };
     };
+    "chelis-type-core" = rec {
+      packageId = "chelis-type-core";
+      build = internal.buildRustCrateWithFeatures {
+        packageId = "chelis-type-core";
+      };
+
+      # Debug support which might change between releases.
+      # File a bug if you depend on any for non-debug work!
+      debug = internal.debugCrate { inherit packageId; };
+    };
     "chelis-types" = rec {
       packageId = "chelis-types";
       build = internal.buildRustCrateWithFeatures {
@@ -2128,6 +2138,12 @@ rec {
             packageId = "chelis-tide";
           }
           {
+            name = "chelis-type-core";
+            packageId = "chelis-type-core";
+            usesDefaultFeatures = false;
+            features = [ "serde" ];
+          }
+          {
             name = "chelis-types";
             packageId = "chelis-types";
           }
@@ -2364,6 +2380,12 @@ rec {
           {
             name = "chelis-syntax-host";
             packageId = "chelis-syntax-host";
+          }
+          {
+            name = "chelis-type-core";
+            packageId = "chelis-type-core";
+            usesDefaultFeatures = false;
+            features = [ "serde" ];
           }
           {
             name = "chelis-types";
@@ -2790,6 +2812,12 @@ rec {
             features = [ "alloc" "serde" ];
           }
           {
+            name = "chelis-type-core";
+            packageId = "chelis-type-core";
+            usesDefaultFeatures = false;
+            features = [ "serde" ];
+          }
+          {
             name = "chelis-types";
             packageId = "chelis-types";
           }
@@ -2873,6 +2901,12 @@ rec {
             packageId = "chelis-numeric-core";
             usesDefaultFeatures = false;
             features = [ "alloc" "serde" ];
+          }
+          {
+            name = "chelis-type-core";
+            packageId = "chelis-type-core";
+            usesDefaultFeatures = false;
+            features = [ "serde" ];
           }
           {
             name = "chelis-types";
@@ -3287,6 +3321,12 @@ rec {
             packageId = "chelis-syntax-host";
           }
           {
+            name = "chelis-type-core";
+            packageId = "chelis-type-core";
+            usesDefaultFeatures = false;
+            features = [ "serde" ];
+          }
+          {
             name = "chelis-types";
             packageId = "chelis-types";
           }
@@ -3522,6 +3562,12 @@ rec {
           {
             name = "chelis-syntax-host";
             packageId = "chelis-syntax-host";
+          }
+          {
+            name = "chelis-type-core";
+            packageId = "chelis-type-core";
+            usesDefaultFeatures = false;
+            features = [ "serde" ];
           }
           {
             name = "chelis-types";
@@ -4121,6 +4167,64 @@ rec {
         };
         resolvedDefaultFeatures = [ "smt" ];
       };
+      "chelis-type-core" = rec {
+        crateName = "chelis-type-core";
+        version = "0.21.1";
+        edition = "2024";
+        src = lib.cleanSourceWith { filter = sourceFilter;  src = ./crates/chelis-type-core; };
+        libName = "chelis_type_core";
+        dependencies = [
+          {
+            name = "chelis-deep";
+            packageId = "chelis-deep";
+            usesDefaultFeatures = false;
+          }
+          {
+            name = "chelis-numeric-core";
+            packageId = "chelis-numeric-core";
+            usesDefaultFeatures = false;
+            features = [ "alloc" ];
+          }
+          {
+            name = "chelis-unord";
+            packageId = "chelis-unord";
+            usesDefaultFeatures = false;
+          }
+          {
+            name = "serde";
+            packageId = "serde";
+            optional = true;
+            usesDefaultFeatures = false;
+            features = [ "alloc" "derive" "rc" ];
+          }
+          {
+            name = "spin";
+            packageId = "spin";
+            usesDefaultFeatures = false;
+            features = [ "mutex" "spin_mutex" ];
+          }
+        ];
+        devDependencies = [
+          {
+            name = "bincode";
+            packageId = "bincode";
+          }
+          {
+            name = "postcard";
+            packageId = "postcard";
+            usesDefaultFeatures = false;
+            features = [ "alloc" ];
+          }
+          {
+            name = "serde_json";
+            packageId = "serde_json";
+          }
+        ];
+        features = {
+          "serde" = [ "dep:serde" "chelis-unord/serde" "chelis-numeric-core/serde" ];
+        };
+        resolvedDefaultFeatures = [ "serde" "test-instrumentation" ];
+      };
       "chelis-types" = rec {
         crateName = "chelis-types";
         version = "0.21.1";
@@ -4145,6 +4249,12 @@ rec {
           {
             name = "chelis-pred";
             packageId = "chelis-pred";
+          }
+          {
+            name = "chelis-type-core";
+            packageId = "chelis-type-core";
+            usesDefaultFeatures = false;
+            features = [ "serde" ];
           }
           {
             name = "chelis-unord";
@@ -4191,6 +4301,12 @@ rec {
             packageId = "chelis-syntax-host";
           }
           {
+            name = "chelis-type-core";
+            packageId = "chelis-type-core";
+            usesDefaultFeatures = false;
+            features = [ "serde" "test-instrumentation" ];
+          }
+          {
             name = "half";
             packageId = "half";
             features = [ "serde" ];
@@ -4226,6 +4342,7 @@ rec {
           {
             name = "serde";
             packageId = "serde";
+            optional = true;
             usesDefaultFeatures = false;
             features = [ "alloc" ];
           }
@@ -4241,7 +4358,11 @@ rec {
             features = [ "full" "visit" "extra-traits" ];
           }
         ];
-
+        features = {
+          "default" = [ "serde" ];
+          "serde" = [ "dep:serde" ];
+        };
+        resolvedDefaultFeatures = [ "default" "serde" ];
       };
       "chelis-validate" = rec {
         crateName = "chelis-validate";
@@ -4676,6 +4797,30 @@ rec {
           "serde" = [ "dep:serde" "dep:serde_json" "dep:serde-big-array" ];
         };
         resolvedDefaultFeatures = [ "default" "serde" ];
+      };
+      "cobs" = rec {
+        crateName = "cobs";
+        version = "0.3.0";
+        edition = "2021";
+        sha256 = "18f0kxxa1fqb8pz2dxwssnhsrvhrs5j4p8xllgin5d7h36sn3a8g";
+        authors = [
+          "Allen Welkie <>"
+          "James Munns <james@onevariable.com>"
+        ];
+        dependencies = [
+          {
+            name = "thiserror";
+            packageId = "thiserror 2.0.18";
+            usesDefaultFeatures = false;
+          }
+        ];
+        features = {
+          "default" = [ "std" ];
+          "defmt" = [ "dep:defmt" ];
+          "serde" = [ "dep:serde" ];
+          "std" = [ "alloc" "thiserror/std" ];
+          "use_std" = [ "std" ];
+        };
       };
       "colorchoice" = rec {
         crateName = "colorchoice";
@@ -5772,6 +5917,33 @@ rec {
           "use_std" = [ "std" ];
         };
         resolvedDefaultFeatures = [ "std" "use_std" ];
+      };
+      "embedded-io 0.4.0" = rec {
+        crateName = "embedded-io";
+        version = "0.4.0";
+        edition = "2021";
+        sha256 = "1v9wrc5nsgaaady7i3ya394sik5251j0iq5rls7mrx7fv696h6pg";
+        libName = "embedded_io";
+        features = {
+          "defmt" = [ "dep:defmt" ];
+          "futures" = [ "std" "async" "dep:futures" ];
+          "log" = [ "dep:log" ];
+          "std" = [ "alloc" "futures?/std" ];
+          "tokio" = [ "std" "async" "dep:tokio" ];
+        };
+        resolvedDefaultFeatures = [ "alloc" ];
+      };
+      "embedded-io 0.6.1" = rec {
+        crateName = "embedded-io";
+        version = "0.6.1";
+        edition = "2021";
+        sha256 = "0v901xykajh3zffn6x4cnn4fhgfw3c8qpjwbsk6gai3gaccg3l7d";
+        libName = "embedded_io";
+        features = {
+          "defmt-03" = [ "dep:defmt-03" ];
+          "std" = [ "alloc" ];
+        };
+        resolvedDefaultFeatures = [ "alloc" ];
       };
       "encoding_rs" = rec {
         crateName = "encoding_rs";
@@ -9257,6 +9429,59 @@ rec {
         };
         resolvedDefaultFeatures = [ "default" "fallback" "require-cas" "std" ];
       };
+      "postcard" = rec {
+        crateName = "postcard";
+        version = "1.1.3";
+        edition = "2021";
+        sha256 = "094srff139n7m8g5ssq36ag6s29ikf7fgpz660x2hkj5vnsw6r37";
+        authors = [
+          "James Munns <james@onevariable.com>"
+        ];
+        dependencies = [
+          {
+            name = "cobs";
+            packageId = "cobs";
+            usesDefaultFeatures = false;
+          }
+          {
+            name = "embedded-io";
+            packageId = "embedded-io 0.4.0";
+            rename = "embedded-io-04";
+            optional = true;
+          }
+          {
+            name = "embedded-io";
+            packageId = "embedded-io 0.6.1";
+            rename = "embedded-io-06";
+            optional = true;
+          }
+          {
+            name = "serde";
+            packageId = "serde";
+            usesDefaultFeatures = false;
+            features = [ "derive" ];
+          }
+        ];
+        features = {
+          "alloc" = [ "serde/alloc" "embedded-io-04?/alloc" "embedded-io-06?/alloc" ];
+          "crc" = [ "dep:crc" ];
+          "default" = [ "heapless-cas" ];
+          "defmt" = [ "dep:defmt" ];
+          "embedded-io" = [ "dep:embedded-io-04" ];
+          "embedded-io-04" = [ "dep:embedded-io-04" ];
+          "embedded-io-06" = [ "dep:embedded-io-06" ];
+          "experimental-derive" = [ "postcard-derive" ];
+          "heapless" = [ "dep:heapless" ];
+          "heapless-cas" = [ "heapless" "dep:heapless" "heapless/cas" ];
+          "nalgebra-v0_33" = [ "nalgebra_v0_33" ];
+          "nalgebra_v0_33" = [ "dep:nalgebra_v0_33" ];
+          "postcard-derive" = [ "dep:postcard-derive" ];
+          "use-crc" = [ "crc" ];
+          "use-defmt" = [ "defmt" ];
+          "use-std" = [ "serde/std" "alloc" ];
+        };
+        resolvedDefaultFeatures = [ "alloc" ];
+      };
       "potential_utf" = rec {
         crateName = "potential_utf";
         version = "0.1.5";
@@ -12065,6 +12290,30 @@ rec {
         ];
         features = {
         };
+      };
+      "spin" = rec {
+        crateName = "spin";
+        version = "0.10.1";
+        edition = "2015";
+        sha256 = "1lvxq2sdaissp7dzij94fsbrkxl9mmh2bcw0hr1vr38kncf22fh2";
+        authors = [
+          "Mathijs van de Nes <git@mathijs.vd-nes.nl>"
+          "John Ericson <git@JohnEricson.me>"
+          "Joshua Barretto <joshua.s.barretto@gmail.com>"
+        ];
+        features = {
+          "barrier" = [ "mutex" ];
+          "default" = [ "lock_api" "mutex" "spin_mutex" "rwlock" "once" "lazy" "barrier" ];
+          "fair_mutex" = [ "mutex" ];
+          "lazy" = [ "once" ];
+          "lock_api" = [ "dep:lock_api_crate" ];
+          "portable-atomic" = [ "dep:portable-atomic" ];
+          "portable_atomic" = [ "portable-atomic" ];
+          "spin_mutex" = [ "mutex" ];
+          "ticket_mutex" = [ "mutex" ];
+          "use_ticket_mutex" = [ "mutex" "ticket_mutex" ];
+        };
+        resolvedDefaultFeatures = [ "mutex" "spin_mutex" ];
       };
       "stable_deref_trait" = rec {
         crateName = "stable_deref_trait";

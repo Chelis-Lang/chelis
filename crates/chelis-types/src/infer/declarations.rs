@@ -415,7 +415,7 @@ pub(super) fn collect_authored_signature_types(
     exprs: &[deep::Expr],
     type_headers: &TypeResolutionEnv,
     errors: &mut DiagnosticSink<'_>,
-) -> UnordMap<String, Type> {
+) -> UnordMap<String, Type<ErrorWitness>> {
     let mut signatures = UnordMap::new();
     for expr in top_level_decl_items(exprs) {
         let Some((DeepTag::Defsig, _, kids)) = stamped_parts(expr) else {
@@ -451,7 +451,7 @@ pub(super) fn collect_authored_signature_types(
 pub(crate) fn param_has_consuming_use(
     expr: &deep::Expr,
     param: &str,
-    available_signatures: &UnordMap<String, Type>,
+    available_signatures: &UnordMap<String, Type<ErrorWitness>>,
     type_env: &BTreeMap<String, deep::Expr>,
     type_headers: &TypeResolutionEnv,
 ) -> Result<bool, InferResult> {
@@ -467,7 +467,7 @@ pub(crate) fn param_has_consuming_use(
 pub(crate) fn param_has_consuming_use_in_session(
     expr: &deep::Expr,
     param: &str,
-    available_signatures: &UnordMap<String, Type>,
+    available_signatures: &UnordMap<String, Type<ErrorWitness>>,
     type_env: &BTreeMap<String, deep::Expr>,
     type_headers: &TypeResolutionEnv,
     errors: &mut DiagnosticSink<'_>,
@@ -485,7 +485,7 @@ pub(crate) fn param_has_consuming_use_in_session(
 pub(super) fn param_has_consuming_use_with_headers(
     expr: &deep::Expr,
     param: &str,
-    available_signatures: &UnordMap<String, Type>,
+    available_signatures: &UnordMap<String, Type<ErrorWitness>>,
     type_env: &BTreeMap<String, deep::Expr>,
     type_headers: &TypeResolutionEnv,
     errors: &mut DiagnosticSink<'_>,
@@ -506,7 +506,7 @@ pub(super) fn param_has_consuming_use_inner(
     expr: &deep::Expr,
     param: &str,
     bound: &mut BoundNames,
-    available_signatures: &UnordMap<String, Type>,
+    available_signatures: &UnordMap<String, Type<ErrorWitness>>,
     type_env: &BTreeMap<String, deep::Expr>,
     type_headers: &TypeResolutionEnv,
     errors: &mut DiagnosticSink<'_>,
@@ -693,7 +693,7 @@ pub(super) fn param_nested_consuming_use(
     expr: &deep::Expr,
     param: &str,
     bound: &mut BoundNames,
-    available_signatures: &UnordMap<String, Type>,
+    available_signatures: &UnordMap<String, Type<ErrorWitness>>,
     type_env: &BTreeMap<String, deep::Expr>,
     type_headers: &TypeResolutionEnv,
     errors: &mut DiagnosticSink<'_>,
@@ -716,7 +716,7 @@ pub(super) fn app_consumes_param(
     node: &DeepNode,
     param: &str,
     bound: &mut BoundNames,
-    available_signatures: &UnordMap<String, Type>,
+    available_signatures: &UnordMap<String, Type<ErrorWitness>>,
     type_env: &BTreeMap<String, deep::Expr>,
     type_headers: &TypeResolutionEnv,
     errors: &mut DiagnosticSink<'_>,
@@ -774,7 +774,7 @@ pub(super) fn app_consumes_param(
 pub(super) fn callee_arg_is_borrowed(
     callee: Option<&str>,
     index: usize,
-    available_signatures: &UnordMap<String, Type>,
+    available_signatures: &UnordMap<String, Type<ErrorWitness>>,
     type_env: &BTreeMap<String, deep::Expr>,
     type_headers: &TypeResolutionEnv,
     errors: &mut DiagnosticSink<'_>,
@@ -848,7 +848,7 @@ pub(super) fn type_from_deep_expr(
     expr: &deep::Expr,
     headers: &TypeResolutionEnv,
     errors: &mut DiagnosticSink<'_>,
-) -> Option<Type> {
+) -> Option<Type<ErrorWitness>> {
     let mut vg = VarGen::default();
     DeepTypeResolver::new(
         TypeUseSite::CompilerMetadata,
@@ -862,7 +862,7 @@ pub(super) fn type_from_deep_expr(
     .map(|ty| ty.into_type())
 }
 
-pub(super) fn type_contains_tensor(ty: &Type) -> bool {
+pub(super) fn type_contains_tensor(ty: &Type<ErrorWitness>) -> bool {
     match ty {
         Type::Tensor(_, _) => true,
         Type::Ref(inner) => type_contains_tensor(inner),
@@ -876,7 +876,7 @@ pub(super) fn type_contains_tensor(ty: &Type) -> bool {
 
 /// [04-LIN-9]: does `ty` mention the `key` dtype, as a scalar, a tensor
 /// element, or inside a tuple, reference, or data type argument?
-pub(super) fn type_mentions_key(ty: &Type) -> bool {
+pub(super) fn type_mentions_key(ty: &Type<ErrorWitness>) -> bool {
     match ty {
         Type::Prim(prim) => *prim == Prim::Key,
         Type::Tensor(_, precision) => matches!(precision, TensorPrec::Concrete(Prim::Key)),
@@ -898,7 +898,10 @@ pub(super) fn type_mentions_key(ty: &Type) -> bool {
 /// by-name decision — it only sees the `Type::Adt` shell, not the
 /// variant fields — which is exactly why the deferred-borrow gate must
 /// be handed the carrier set rather than trust an args-only check.
-pub(super) fn type_carries_tensor_with_carriers(ty: &Type, carriers: &UnordSet<String>) -> bool {
+pub(super) fn type_carries_tensor_with_carriers(
+    ty: &Type<ErrorWitness>,
+    carriers: &UnordSet<String>,
+) -> bool {
     match ty {
         Type::Tensor(_, _) => true,
         Type::Ref(inner) => type_carries_tensor_with_carriers(inner, carriers),
@@ -987,7 +990,7 @@ pub(super) fn adt_carrier_set(adt_reg: &AdtRegistry) -> UnordSet<String> {
 ///     only after the borrow arm ran (so the arm's own `_ => TypeMismatch`
 ///     could not fire). Reject.
 pub(super) fn validate_deferred_borrow_vars(
-    subst: &Subst,
+    subst: &Subst<ErrorWitness>,
     adt_reg: &AdtRegistry,
     declared_type_names: &UnordMap<TypeVar, String>,
     errors: &mut DiagnosticSink<'_>,
@@ -1068,7 +1071,7 @@ pub(super) fn validate_deferred_borrow_vars(
 /// prevents one def's deferrals from leaking into the next,
 /// mirroring `validate_deferred_borrow_vars`.
 pub(super) fn validate_deferred_opaque_uses(
-    subst: &Subst,
+    subst: &Subst<ErrorWitness>,
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
 ) {
@@ -1080,8 +1083,10 @@ pub(super) fn validate_deferred_opaque_uses(
             peeled = inner.as_ref();
         }
         let action = match use_kind {
-            crate::unify::DeferredOpaqueUse::Access => crate::opacity::OpaqueAction::FieldAccess,
-            crate::unify::DeferredOpaqueUse::RecordUpdate => {
+            chelis_type_core::DeferredOpaqueUse::Access => {
+                crate::opacity::OpaqueAction::FieldAccess
+            }
+            chelis_type_core::DeferredOpaqueUse::RecordUpdate => {
                 crate::opacity::OpaqueAction::RecordUpdate
             }
         };

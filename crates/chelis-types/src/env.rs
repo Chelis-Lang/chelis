@@ -5,9 +5,10 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
+use crate::errors::ErrorWitness;
 use crate::session::DeclarationDiagnosticOwner;
-use crate::types::*;
-use crate::unify::{GenericParameter, Subst};
+use chelis_type_core::*;
+
 #[cfg(test)]
 use chelis_numeric_core::prim::Prim;
 
@@ -149,13 +150,13 @@ struct TypeResolutionScope {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ConstructorBinding {
     owner: String,
-    scheme: Scheme,
+    scheme: Scheme<ErrorWitness>,
 }
 
 /// Private structure used only to check the body of a rejected declaration.
 #[derive(Debug, Clone)]
 pub(crate) struct RejectedSignature {
-    pub(crate) scheme: Scheme,
+    pub(crate) scheme: Scheme<ErrorWitness>,
     pub(crate) witness: crate::errors::ErrorWitness,
 }
 
@@ -181,7 +182,7 @@ pub(crate) struct BindingFacts {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(transparent)]
 struct ValueBinding {
-    scheme: Arc<Scheme>,
+    scheme: Arc<Scheme<ErrorWitness>>,
     #[serde(skip)]
     facts: BindingFacts,
 }
@@ -224,7 +225,7 @@ pub struct Env {
     /// [05-OP-35] stdlib wrapper whose runtime-axis shape proof is owned by
     /// #1298. Never serialized or exposed to entry source.
     #[serde(skip)]
-    exact_stdlib_expected_result: Option<Type>,
+    exact_stdlib_expected_result: Option<Type<ErrorWitness>>,
     /// Checker identities introduced while each `defsig` was resolved, keyed
     /// by definition name.
     ///
@@ -240,7 +241,7 @@ pub struct Env {
     /// [`Self::bind_holed_group_member`] bound it at, shared with its binding
     /// so a lexical snapshot does not copy it.
     #[serde(skip)]
-    holed_group_members: UnordMap<String, Arc<Scheme>>,
+    holed_group_members: UnordMap<String, Arc<Scheme<ErrorWitness>>>,
     /// The declared dtype-family bound of each binder variable those members
     /// share, read from the header when it was bound. The group's completion
     /// can identify the variable with a sibling's copy of it before the
@@ -286,7 +287,7 @@ pub struct Env {
     /// value's own declaration the outer binding is still the one in scope,
     /// so lookup falls back here rather than reporting the name unbound.
     #[serde(skip)]
-    shadowed_prior_bindings: PersistentMap<String, Scheme>,
+    shadowed_prior_bindings: PersistentMap<String, Scheme<ErrorWitness>>,
     /// Flattened declaration index currently being inferred. Set by the
     /// driver loop at each scheduled declaration and inherited by every
     /// lexical clone, so nested scopes compare against the declaration that
@@ -312,21 +313,9 @@ pub(crate) enum TopLevelValueVisibility<'a> {
     Visible,
     /// The name belongs to a top-level eager value declared after the
     /// declaration being inferred, carrying the outer binding it shadows.
-    NotYetDeclared { shadowed: Option<&'a Scheme> },
-}
-
-/// An instantiated scheme body, paired with the original-to-fresh renaming of
-/// each kind of quantifier that a caller can need to read back.
-///
-/// The type-variable renaming maps to a `Type` because a quantified type
-/// variable may instantiate to any type. Dimension and rank quantifiers each
-/// instantiate to a fresh variable of the same kind.
-#[derive(Clone)]
-pub(crate) struct InstantiatedScheme {
-    pub(crate) ty: Type,
-    pub(crate) tvars: Vec<(TypeVar, Type)>,
-    pub(crate) dvars: Vec<(DimVar, DimVar)>,
-    pub(crate) rvars: Vec<(RankVar, RankVar)>,
+    NotYetDeclared {
+        shadowed: Option<&'a Scheme<ErrorWitness>>,
+    },
 }
 
 impl Env {
@@ -344,14 +333,14 @@ impl Env {
     }
 
     /// Look up a name. Returns None if unbound.
-    pub fn lookup(&self, name: &str) -> Option<&Scheme> {
+    pub fn lookup(&self, name: &str) -> Option<&Scheme<ErrorWitness>> {
         self.bindings
             .get(name)
             .map(|binding| binding.scheme.as_ref())
     }
 
     /// Look up the active constructor owner and scheme for an exact name.
-    pub(crate) fn lookup_constructor(&self, name: &str) -> Option<(&str, &Scheme)> {
+    pub(crate) fn lookup_constructor(&self, name: &str) -> Option<(&str, &Scheme<ErrorWitness>)> {
         self.constructor_bindings
             .get(name)
             .and_then(|bindings| bindings.last())
@@ -362,7 +351,7 @@ impl Env {
     pub(crate) fn lookup_constructors(
         &self,
         name: &str,
-    ) -> impl DoubleEndedIterator<Item = (&str, &Scheme)> {
+    ) -> impl DoubleEndedIterator<Item = (&str, &Scheme<ErrorWitness>)> {
         self.constructor_bindings
             .get(name)
             .into_iter()
@@ -395,11 +384,11 @@ impl Env {
         self.type_resolution_scope.diagnostic_owner.as_ref()
     }
 
-    pub(crate) fn set_exact_stdlib_expected_result(&mut self, result: Option<Type>) {
+    pub(crate) fn set_exact_stdlib_expected_result(&mut self, result: Option<Type<ErrorWitness>>) {
         self.exact_stdlib_expected_result = result;
     }
 
-    pub(crate) fn exact_stdlib_expected_result(&self) -> Option<&Type> {
+    pub(crate) fn exact_stdlib_expected_result(&self) -> Option<&Type<ErrorWitness>> {
         self.exact_stdlib_expected_result.as_ref()
     }
 
@@ -440,14 +429,18 @@ impl Env {
             .any(|(_, binding)| type_carries_dim_name(&binding.scheme.body, name))
     }
 
-    pub(crate) fn tensor_carries_dim_with_subst(&self, name: &str, subst: &Subst) -> bool {
+    pub(crate) fn tensor_carries_dim_with_subst(
+        &self,
+        name: &str,
+        subst: &Subst<ErrorWitness>,
+    ) -> bool {
         self.bindings.to_sorted().into_iter().any(|(_, binding)| {
             type_carries_dim_name(&subst.semantic_type(&binding.scheme.body), name)
         })
     }
 
     /// Look up an imported or qualified name by its unique terminal segment.
-    pub fn lookup_terminal_unique(&self, name: &str) -> Option<&Scheme> {
+    pub fn lookup_terminal_unique(&self, name: &str) -> Option<&Scheme<ErrorWitness>> {
         let mut matches = self
             .bindings
             .to_sorted()
@@ -458,22 +451,32 @@ impl Env {
     }
 
     /// Extend the environment with a new binding.
-    pub fn bind(&mut self, name: String, scheme: Scheme) {
+    pub fn bind(&mut self, name: String, scheme: Scheme<ErrorWitness>) {
         self.bind_shared(name, Arc::new(scheme));
     }
 
     /// Extend the environment with a binding whose value carries `facts`.
-    pub(crate) fn bind_with_facts(&mut self, name: String, scheme: Scheme, facts: BindingFacts) {
+    pub(crate) fn bind_with_facts(
+        &mut self,
+        name: String,
+        scheme: Scheme<ErrorWitness>,
+        facts: BindingFacts,
+    ) {
         self.insert_binding(name, Arc::new(scheme), facts);
     }
 
-    fn bind_shared(&mut self, name: String, scheme: Arc<Scheme>) {
+    fn bind_shared(&mut self, name: String, scheme: Arc<Scheme<ErrorWitness>>) {
         self.insert_binding(name, scheme, BindingFacts::default());
     }
 
     /// The one way a value binding enters the environment. The new entry
     /// replaces the name's previous entry together with its facts.
-    fn insert_binding(&mut self, name: String, scheme: Arc<Scheme>, facts: BindingFacts) {
+    fn insert_binding(
+        &mut self,
+        name: String,
+        scheme: Arc<Scheme<ErrorWitness>>,
+        facts: BindingFacts,
+    ) {
         self.rejected_signatures.remove(&name);
         self.bindings.insert(name, ValueBinding { scheme, facts });
     }
@@ -482,12 +485,12 @@ impl Env {
         &mut self,
         name: String,
         recovery: crate::deep_type::RejectedSignatureType,
-        subst: &mut Subst,
+        subst: &mut Subst<ErrorWitness>,
     ) {
         let scheme = self.generalize(&recovery.ty, subst);
         self.bind(
             name.clone(),
-            Scheme::mono(crate::errors::propagate(&recovery.witness)),
+            Scheme::<ErrorWitness>::mono(crate::errors::propagate(&recovery.witness)),
         );
         self.rejected_signatures.insert(
             name,
@@ -504,7 +507,12 @@ impl Env {
 
     /// Bind a constructor in both structural constructor position and the
     /// ordinary value environment used by bare/nullary references.
-    pub(crate) fn bind_constructor(&mut self, name: String, owner: String, scheme: Scheme) {
+    pub(crate) fn bind_constructor(
+        &mut self,
+        name: String,
+        owner: String,
+        scheme: Scheme<ErrorWitness>,
+    ) {
         self.insert_binding(
             name.clone(),
             Arc::new(scheme.clone()),
@@ -518,7 +526,7 @@ impl Env {
     /// Extend the environment with a binding introduced by ordinary lexical
     /// scope. Unlike [`Self::bind`], this also records that builtin callable
     /// dispatch must not claim the name while this environment lives.
-    pub(crate) fn bind_lexical(&mut self, name: String, scheme: Scheme) {
+    pub(crate) fn bind_lexical(&mut self, name: String, scheme: Scheme<ErrorWitness>) {
         self.bind_lexical_with_facts(name, scheme, BindingFacts::default());
     }
 
@@ -526,7 +534,7 @@ impl Env {
     pub(crate) fn bind_lexical_with_facts(
         &mut self,
         name: String,
-        scheme: Scheme,
+        scheme: Scheme<ErrorWitness>,
         facts: BindingFacts,
     ) {
         self.lexical_bindings.insert(name.clone());
@@ -557,7 +565,7 @@ impl Env {
         &mut self,
         name: String,
         ordinal: usize,
-        shadowed: Option<Scheme>,
+        shadowed: Option<Scheme<ErrorWitness>>,
     ) {
         if let Some(prior) = shadowed {
             self.shadowed_prior_bindings.insert(name.clone(), prior);
@@ -679,7 +687,7 @@ impl Env {
         &mut self,
         name: &str,
         var_gen: &mut VarGen,
-        inference_subst: &Subst,
+        inference_subst: &Subst<ErrorWitness>,
     ) -> bool {
         let Some(header) = self.lookup(name).cloned() else {
             return false;
@@ -726,7 +734,7 @@ impl Env {
         // records no obligation, because the header's constraints are not
         // passed to it; they are renamed onto the provisional scheme instead,
         // which each in-group use then owes.
-        let shared = self.instantiate_scheme(
+        let shared = instantiate_scheme(
             &Scheme {
                 result_origin: None,
                 constraints: Vec::new(),
@@ -735,7 +743,7 @@ impl Env {
             var_gen,
             inference_subst,
         );
-        let mut renaming = Subst::new();
+        let mut renaming = Subst::<ErrorWitness>::new();
         for (from, to) in &shared.tvars {
             renaming
                 .insert_type(*from, to.clone())
@@ -752,7 +760,7 @@ impl Env {
             .iter()
             .filter(|(from, _)| !binder_tvars.contains(from))
             .filter_map(|(_, to)| match to {
-                Type::Var(fresh) => Some(*fresh),
+                Type::<ErrorWitness>::Var(fresh) => Some(*fresh),
                 _ => None,
             })
             .collect::<Vec<_>>();
@@ -791,7 +799,7 @@ impl Env {
         if let Some(original) = binders {
             let mut repointed = DeclarationBinderIdentities::default();
             for (source_name, var) in original.type_vars.to_sorted() {
-                if let Some((_, Type::Var(fresh))) =
+                if let Some((_, Type::<ErrorWitness>::Var(fresh))) =
                     shared.tvars.iter().find(|(from, _)| from == var)
                 {
                     repointed.type_vars.insert(source_name.clone(), *fresh);
@@ -851,7 +859,11 @@ impl Env {
     /// Whether a reference to `name` that resolved to `scheme` is an in-group
     /// reference to a member bound by [`Self::bind_holed_group_member`], and
     /// not to a local binding that shadows it.
-    pub(crate) fn is_holed_group_reference(&self, name: &str, scheme: &Scheme) -> bool {
+    pub(crate) fn is_holed_group_reference(
+        &self,
+        name: &str,
+        scheme: &Scheme<ErrorWitness>,
+    ) -> bool {
         self.holed_group_members
             .get(name)
             .is_some_and(|provisional| {
@@ -908,7 +920,7 @@ impl Env {
     pub(crate) fn declared_binder_bound(
         &self,
         var: TypeVar,
-        subst: &Subst,
+        subst: &Subst<ErrorWitness>,
     ) -> Option<TypeVarRestriction> {
         match self.holed_declared_bounds.get(&var) {
             Some(declared) => *declared,
@@ -929,7 +941,7 @@ impl Env {
         &self,
         name: &str,
         binder_names: &UnordSet<String>,
-        instantiation: Option<&InstantiatedScheme>,
+        instantiation: Option<&InstantiatedScheme<ErrorWitness>>,
         var_gen: &mut VarGen,
     ) -> DeclarationBinderIdentities {
         let mut resolved = DeclarationBinderIdentities::default();
@@ -943,7 +955,7 @@ impl Env {
             (self.declared_binder_identities.get(name), instantiation)
         {
             for (source_name, original_var) in original.type_vars.to_sorted() {
-                if let Some(Type::Var(fresh)) = instantiation
+                if let Some(Type::<ErrorWitness>::Var(fresh)) = instantiation
                     .tvars
                     .iter()
                     .find_map(|(from, to)| (*from == *original_var).then_some(to))
@@ -1003,12 +1015,15 @@ impl Env {
     pub(crate) fn authored_type_binder(
         &self,
         var: TypeVar,
-        subst: &Subst,
+        subst: &Subst<ErrorWitness>,
     ) -> Option<(&str, Option<TypeVarRestriction>)> {
         self.active_declared_type_names
             .to_sorted()
             .into_iter()
-            .find(|(declared, _)| subst.apply(&Type::Var(**declared)) == Type::Var(var))
+            .find(|(declared, _)| {
+                subst.apply(&Type::<ErrorWitness>::Var(**declared))
+                    == Type::<ErrorWitness>::Var(var)
+            })
             .map(|(declared, name)| {
                 let bound = self
                     .active_declared_type_bounds
@@ -1019,253 +1034,51 @@ impl Env {
             })
     }
 
-    /// Instantiate a scheme into the caller's inference substitution so
-    /// quantified semantic restrictions follow the fresh variables.
-    pub fn instantiate(
-        &self,
-        scheme: &Scheme,
-        var_gen: &mut VarGen,
-        inference_subst: &Subst,
-    ) -> Type {
-        self.instantiate_scheme(scheme, var_gen, inference_subst).ty
-    }
-
-    /// Instantiate a scheme and return the fresh type minted for each
-    /// quantified type variable, in quantifier order. The uniform recursive
-    /// instantiation check (spec/04 §3.1.1) records this mapping for
-    /// in-group references so the group's final substitution can be
-    /// compared against the caller's own instantiation.
-    pub fn instantiate_with_tvar_mapping(
-        &self,
-        scheme: &Scheme,
-        var_gen: &mut VarGen,
-        inference_subst: &Subst,
-    ) -> (Type, Vec<(TypeVar, Type)>) {
-        let instantiated = self.instantiate_scheme(scheme, var_gen, inference_subst);
-        (instantiated.ty, instantiated.tvars)
-    }
-
-    /// The one instantiation mechanism (chelis#260 / chelis#1292).
-    ///
-    /// Every quantifier is renamed here and nowhere else, so the consumers
-    /// cannot drift apart: #1292's installation of quantified type-variable
-    /// restrictions and the original-to-fresh type/dimension/rank pairings
-    /// needed for declaration-owned binder identity.
-    ///
-    /// Keeping them in one body is deliberate. Both were separately-authored
-    /// copies of this loop at one point, and a second copy is exactly how a
-    /// scheme gets instantiated with its restrictions dropped: the omission
-    /// compiles, and the only symptom is a program that should have been
-    /// rejected type-checking.
-    ///
-    /// Callable directly by sites that need the complete instantiation,
-    /// which is why it is crate-visible rather than another projection beside
-    /// the ones above.
-    pub(crate) fn instantiate_scheme(
-        &self,
-        scheme: &Scheme,
-        var_gen: &mut VarGen,
-        inference_subst: &Subst,
-    ) -> InstantiatedScheme {
-        let origin = scheme.result_origin.as_ref();
-        let mut tvars = origin.map_or(&scheme.tvars, |origin| &origin.tvars).clone();
-        let mut dvars = origin.map_or(&scheme.dvars, |origin| &origin.dvars).clone();
-        let mut rvars = origin.map_or(&scheme.rvars, |origin| &origin.rvars).clone();
-        // The raw graph owns shared identity. A recursive group's solved
-        // signature may mention additional variables, but must not freshen a
-        // variable the origin deliberately kept shared with its producer.
-        let carried_origin = origin.map(|origin| {
-            Type::Tuple(
-                std::iter::once(origin.body.clone())
-                    .chain(
-                        origin
-                            .equations
-                            .iter()
-                            .flat_map(|equation| equation.types())
-                            .cloned(),
-                    )
-                    .collect(),
-            )
-        });
-        let shared_tvars = carried_origin.as_ref().map(free_tvars).unwrap_or_default();
-        let shared_dvars = carried_origin.as_ref().map(free_dvars).unwrap_or_default();
-        let shared_rvars = carried_origin.as_ref().map(free_rvars).unwrap_or_default();
-        for var in &scheme.tvars {
-            if !tvars.contains(var) && !shared_tvars.contains(var) {
-                tvars.push(*var);
-            }
-        }
-        for var in &scheme.dvars {
-            if !dvars.contains(var) && !shared_dvars.contains(var) {
-                dvars.push(*var);
-            }
-        }
-        for var in &scheme.rvars {
-            if !rvars.contains(var) && !shared_rvars.contains(var) {
-                rvars.push(*var);
-            }
-        }
-        let mut subst = Subst::new();
-        let mut tvar_mapping = Vec::with_capacity(tvars.len());
-        for &tv in &tvars {
-            let fresh = var_gen.fresh_type();
-            subst
-                .insert_type(tv, fresh.clone())
-                .expect("a fresh quantified type-variable renaming is valid");
-            if let Type::Var(fresh_var) = fresh {
-                // Raw origins and published signatures can use different
-                // representatives. Rename both restriction ledgers with the
-                // same quantifiers; neither view may erase the other's domain.
-                for (_, restriction) in scheme
-                    .tvar_restrictions
-                    .iter()
-                    .chain(
-                        origin
-                            .into_iter()
-                            .flat_map(|origin| &origin.tvar_restrictions),
-                    )
-                    .filter(|(restricted, _)| *restricted == tv)
-                {
-                    inference_subst
-                        .narrow_tvar_restriction(fresh_var, *restriction)
-                        .expect("a checked scheme's restriction ledgers are compatible");
-                }
-            }
-            // [04-LIN-10]: a generic's type parameter stays key-free at every
-            // instantiation. The mark lives on the quantified variable, which
-            // generalization marked, so a builtin or constructor scheme, never
-            // generalized, carries none.
-            if let Type::Var(fresh_var) = fresh
-                && let Some(origin) = inference_subst.key_free_origin(tv)
-            {
-                inference_subst.forbid_key_instantiation(fresh_var, origin);
-            }
-            tvar_mapping.push((tv, fresh));
-        }
-        // chelis#1654: renaming the quantifiers is exactly what turns a
-        // scheme-level obligation into one this USE owes, so it is done here,
-        // in the one instantiation mechanism, for the reason stated above:
-        // a second copy of this loop that dropped the obligations would
-        // compile, and the only symptom would be a program that should have
-        // been rejected type-checking.
-        //
-        // The renaming is applied AFTER the dimension and rank quantifiers are
-        // inserted below, so a constraint whose carried type mentions one gets
-        // that variable renamed too.
-        let mut dvar_mapping = Vec::with_capacity(scheme.dvars.len());
-        for &dv in &dvars {
-            // Mint the variable directly rather than destructuring
-            // `fresh_dim()`: that is `Dim::Var(fresh_dvar())` today, but a
-            // pattern match would silently drop the mapping entry (and the
-            // name with it) if it ever returned another shape.
-            let fresh_dv = var_gen.fresh_dvar();
-            dvar_mapping.push((dv, fresh_dv));
-            subst.insert_dim(dv, Dim::Var(fresh_dv));
-            if let Some(axis) = inference_subst.mapped_axis(dv) {
-                // The renaming substitution must recognize the old identity
-                // while rewriting the scheme body, and the active inference
-                // substitution must recognize the fresh identity afterward.
-                subst.mark_mapped_axis(dv, axis);
-                inference_subst.mark_mapped_axis(fresh_dv, axis);
-            } else {
-                inference_subst.copy_dimension_label(dv, fresh_dv);
-            }
-        }
-        let mut rvar_mapping = Vec::with_capacity(scheme.rvars.len());
-        for &rv in &rvars {
-            // Each rank var instantiates to a fresh sole-`Rank` shape so every
-            // call site gets its own rank (Tier-2 rank polymorphism).
-            let fresh_rv = var_gen.fresh_rvar();
-            rvar_mapping.push((rv, fresh_rv));
-            subst.insert_rank(rv, vec![Dim::Rank(fresh_rv)]);
-        }
-        for constraint in &scheme.constraints {
-            let renamed = constraint.map_types(|ty| subst.apply(ty));
-            inference_subst.record_collection_contract(renamed);
-        }
-        if let Some(origin) = origin {
-            for equation in &origin.equations {
-                inference_subst.record_result_constraint(equation.map_types(|ty| subst.apply(ty)));
-            }
-            // Origin controls when an equation may supply input evidence; it
-            // never replaces the checked signature's required equalities.
-            // Instantiate both views together and retain their compatibility
-            // as a result constraint, so it cannot admit an unresolved Grad.
-            if origin.body != scheme.body {
-                inference_subst.record_result_constraint(
-                    crate::types::ResultConstraint::Annotation {
-                        actual: subst.apply(&origin.body),
-                        declared: subst.apply(&scheme.body),
-                    },
-                );
-            }
-        }
-        InstantiatedScheme {
-            ty: subst.apply(origin.map_or(&scheme.body, |origin| &origin.body)),
-            tvars: tvar_mapping,
-            dvars: dvar_mapping,
-            rvars: rvar_mapping,
-        }
-    }
-
     /// Collect all free type variables across all bindings in the environment.
     #[cfg(any(test, feature = "generalize-sweep-oracle"))]
-    pub fn free_tvars(&self, subst: &Subst) -> UnordSet<TypeVar> {
-        let mut result = UnordSet::new();
-        for (_, binding) in self.bindings.to_sorted() {
-            let scheme = &binding.scheme;
-            #[cfg(feature = "generalize-sweep-oracle")]
-            note_generalize_sweep_env_visit();
-            let ty = subst.apply_scheme(scheme);
-            let body_vars = free_tvars(&ty);
-            for v in body_vars {
-                if !scheme.tvars.contains(&v) {
-                    result.insert(v);
-                }
-            }
-        }
-        result
+    pub fn free_tvars(&self, subst: &Subst<ErrorWitness>) -> UnordSet<TypeVar> {
+        chelis_type_core::free_scheme_tvars(
+            self.bindings.to_sorted().into_iter().map(|(_, binding)| {
+                #[cfg(feature = "generalize-sweep-oracle")]
+                note_generalize_sweep_env_visit();
+                binding.scheme.as_ref()
+            }),
+            subst,
+        )
     }
 
     /// Collect all free dimension variables across all bindings in the environment.
     #[cfg(any(test, feature = "generalize-sweep-oracle"))]
-    pub fn free_dvars(&self, subst: &Subst) -> UnordSet<DimVar> {
-        let mut result = UnordSet::new();
-        for (_, binding) in self.bindings.to_sorted() {
-            let scheme = &binding.scheme;
-            #[cfg(feature = "generalize-sweep-oracle")]
-            note_generalize_sweep_env_visit();
-            let ty = subst.apply_scheme(scheme);
-            let body_dvars = free_dvars(&ty);
-            for v in body_dvars {
-                if !scheme.dvars.contains(&v) {
-                    result.insert(v);
-                }
-            }
-        }
-        result
+    pub fn free_dvars(&self, subst: &Subst<ErrorWitness>) -> UnordSet<DimVar> {
+        chelis_type_core::free_scheme_dvars(
+            self.bindings.to_sorted().into_iter().map(|(_, binding)| {
+                #[cfg(feature = "generalize-sweep-oracle")]
+                note_generalize_sweep_env_visit();
+                binding.scheme.as_ref()
+            }),
+            subst,
+        )
     }
 
     /// Free rank variables in the environment (Tier-2 rank polymorphism).
     #[cfg(any(test, feature = "generalize-sweep-oracle"))]
-    pub fn free_rvars(&self, subst: &Subst) -> UnordSet<RankVar> {
-        let mut result = UnordSet::new();
-        for (_, binding) in self.bindings.to_sorted() {
-            let scheme = &binding.scheme;
-            #[cfg(feature = "generalize-sweep-oracle")]
-            note_generalize_sweep_env_visit();
-            let ty = subst.apply_scheme(scheme);
-            for v in free_rvars(&ty) {
-                if !scheme.rvars.contains(&v) {
-                    result.insert(v);
-                }
-            }
-        }
-        result
+    pub fn free_rvars(&self, subst: &Subst<ErrorWitness>) -> UnordSet<RankVar> {
+        chelis_type_core::free_scheme_rvars(
+            self.bindings.to_sorted().into_iter().map(|(_, binding)| {
+                #[cfg(feature = "generalize-sweep-oracle")]
+                note_generalize_sweep_env_visit();
+                binding.scheme.as_ref()
+            }),
+            subst,
+        )
     }
 
     /// Generalize a type over variables not free in the environment.
-    pub fn generalize(&self, ty: &Type, subst: &Subst) -> Scheme {
+    pub fn generalize(
+        &self,
+        ty: &Type<ErrorWitness>,
+        subst: &Subst<ErrorWitness>,
+    ) -> Scheme<ErrorWitness> {
         self.generalize_owned(ty, subst, None, &[])
     }
 
@@ -1277,10 +1090,10 @@ impl Env {
     /// driver records each member's exact instance IDs and supplies them here.
     pub(crate) fn generalize_with_collection_contracts(
         &self,
-        ty: &Type,
-        subst: &Subst,
-        owned_contracts: &[crate::unify::CollectionContractId],
-    ) -> Scheme {
+        ty: &Type<ErrorWitness>,
+        subst: &Subst<ErrorWitness>,
+        owned_contracts: &[chelis_type_core::CollectionContractId],
+    ) -> Scheme<ErrorWitness> {
         self.generalize_owned(ty, subst, Some(owned_contracts), &[])
     }
 
@@ -1289,215 +1102,60 @@ impl Env {
     /// a fresh instantiation must never copy only part of that component.
     pub(crate) fn generalize_with_result_constraints(
         &self,
-        ty: &Type,
-        subst: &Subst,
-        owned_contracts: Option<&[crate::unify::CollectionContractId]>,
-        equations: &[ResultConstraint],
-    ) -> Scheme {
+        ty: &Type<ErrorWitness>,
+        subst: &Subst<ErrorWitness>,
+        owned_contracts: Option<&[chelis_type_core::CollectionContractId]>,
+        equations: &[ResultConstraint<ErrorWitness>],
+    ) -> Scheme<ErrorWitness> {
         self.generalize_owned(ty, subst, owned_contracts, equations)
     }
 
     fn generalize_owned(
         &self,
-        ty: &Type,
-        subst: &Subst,
-        owned_contracts: Option<&[crate::unify::CollectionContractId]>,
-        equations: &[ResultConstraint],
-    ) -> Scheme {
-        // The deferred equalities are generalized with the type: a component
-        // that keeps any variable shared is kept shared whole.
-        let result_scope = crate::result_scope::ResultScope::new(equations);
-        let (mut level_scheme, ledger_removals) =
-            self.generalize_by_levels(ty, subst, owned_contracts);
-        result_scope.retain_closed_quantifiers(&mut level_scheme);
+        ty: &Type<ErrorWitness>,
+        subst: &Subst<ErrorWitness>,
+        owned_contracts: Option<&[chelis_type_core::CollectionContractId]>,
+        equations: &[ResultConstraint<ErrorWitness>],
+    ) -> Scheme<ErrorWitness> {
         #[cfg(feature = "generalize-sweep-oracle")]
-        GENERALIZE_SWEEP_ORACLE_ENABLED.with(|enabled| {
-            if enabled.get() {
-                let (mut sweep_scheme, _) = self.generalize_by_sweep(ty, subst, owned_contracts);
-                result_scope.retain_closed_quantifiers(&mut sweep_scheme);
-                assert_eq!(
-                    level_scheme.constraints, sweep_scheme.constraints,
-                    "level-based collection obligations diverged from the reference environment sweep"
-                );
-                assert_eq!(
-                    level_scheme.tvars, sweep_scheme.tvars,
-                    "level-based type quantifiers diverged from the reference environment sweep"
-                );
-                assert_eq!(
-                    level_scheme.tvar_restrictions, sweep_scheme.tvar_restrictions,
-                    "level-based type-variable restrictions diverged from the reference environment sweep"
-                );
-                assert_eq!(
-                    level_scheme.dvars, sweep_scheme.dvars,
-                    "level-based dimension quantifiers diverged from the reference environment sweep"
-                );
-                assert_eq!(
-                    level_scheme.rvars, sweep_scheme.rvars,
-                    "level-based rank quantifiers diverged from the reference environment sweep"
-                );
-                assert_eq!(
-                    level_scheme.body, sweep_scheme.body,
-                    "level-based scheme body diverged from the reference environment sweep"
-                );
-            }
-        });
-        // Transport contracts this scheme now owns have moved off the
-        // inference-local contract ledger. Each later instantiation installs a
-        // fresh renamed instance with its own application identity.
-        //
-        // The exact instance IDs come back from the split. Removing by relation
-        // equality could erase a monomorphic recursive sibling's identical
-        // contract, which belongs to a different value.
-        if !ledger_removals.is_empty() {
-            subst.take_collection_contracts(&ledger_removals);
-        }
-        // [04-LIN-10]: an authored generic stays key-free. A checked key
-        // operation's closed relation alone may select a key-carrying value.
-        // Raw origin quantifiers also include equation-local intermediates;
-        // their caller marks the solved public parameters after publication.
-        if equations.is_empty() {
-            let closed_key_variables = closed_key_relation_variables(&level_scheme);
-            for tv in &level_scheme.tvars {
-                if !closed_key_variables.contains(tv) {
-                    subst.forbid_key_instantiation(*tv, GenericParameter::default());
-                }
-            }
-        }
-        level_scheme
-    }
-
-    /// chelis#1654: split the pending collection constraints into the ones
-    /// this generalization quantifies and the variables the rest must keep
-    /// monomorphic.
-    ///
-    /// Only relations already owned by a checked function value reach this
-    /// split. Their complete variable footprint must be visible in the value's
-    /// type; there are no hidden intermediate variables and no body-inferred
-    /// relation graph. Consumed application instances are absent from
-    /// `pending_collection_contracts` and therefore cannot be republished.
-    fn collection_constraints_to_quantify(
-        body: &Type,
-        body_variables: &[TypeVar],
-        body_candidates: &[TypeVar],
-        subst: &Subst,
-        owned_contracts: Option<&[crate::unify::CollectionContractId]>,
-    ) -> CollectionQuantification {
-        let mut split = CollectionQuantification::default();
-        let pending = subst.pending_collection_contracts();
-        if pending.is_empty() {
-            return split;
-        }
-        let visible = body_variables.iter().copied().collect::<UnordSet<_>>();
-        let candidates = body_candidates.iter().copied().collect::<UnordSet<_>>();
-        let current_level = subst.current_level();
-        for (id, level, constraint) in pending {
-            let owned = match owned_contracts {
-                Some(owned) => owned.contains(&id),
-                None => level > current_level,
-            };
-            if !owned {
-                continue;
-            }
-            let mut footprint = UnordSet::default();
-            for carried in constraint.carried_types() {
-                footprint.extend(free_tvars(carried));
-            }
-            let footprint = footprint.into_sorted();
-            let owned = if footprint.is_empty() {
-                crate::unify::collection_contract_visible_in_type(&constraint, body)
-            } else {
-                footprint.iter().all(|var| candidates.contains(var))
-            };
-            if owned {
-                split.ledger_removals.push(id);
-                if !split.constraints.contains(&constraint) {
-                    split.constraints.push(constraint);
-                }
-            } else if footprint.is_empty() || footprint.iter().all(|var| !visible.contains(var)) {
-                // The expression discarded the function-bearing subvalue:
-                // `(len, 1).1` and `ignore(len)` must not leave the detached
-                // contract behind to reject an unrelated result.
-                split.ledger_removals.push(id);
-            } else {
-                split
-                    .pinned
-                    .extend(footprint.into_iter().filter(|var| candidates.contains(var)));
-            }
-        }
-        split
-    }
-
-    fn generalize_by_levels(
-        &self,
-        ty: &Type,
-        subst: &Subst,
-        owned_contracts: Option<&[crate::unify::CollectionContractId]>,
-    ) -> (Scheme, Vec<crate::unify::CollectionContractId>) {
-        let ty = subst.apply(ty);
-        let ty_tvars = free_tvars(&ty);
-        let ty_dvars = free_dvars(&ty);
-        let ty_rvars = free_rvars(&ty);
-        let level = subst.current_level();
-        // chelis#1489: a variable still tied to a pending operand gate, as its
-        // operand or its result, stays monomorphic until the gate discharges;
-        // see `Subst::pending_gate_vars`. Levels cannot see that tie -- it
-        // lives in the gate ledger, not in any unification.
-        let (pending_t, pending_d, pending_r) = subst.pending_gate_vars();
-        // spec/04 §3.1.1: a variable minted for an in-group recursive
-        // instantiation stays monomorphic while its group is inferred, so a
-        // let-bound alias of a group member cannot smuggle in polymorphic
-        // recursion.
-        let generalizable = |v: TypeVar| {
-            subst.level_of_tvar(v) > level
-                && !crate::infer::recursion::tvar_pinned(v)
-                && !pending_t.contains(&v)
-        };
-        let mut tvars = ty_tvars
-            .iter()
-            .copied()
-            .filter(|v| generalizable(*v))
-            .collect::<Vec<_>>();
-        // Move only already-checked transport contracts whose complete
-        // variable footprint belongs to this generalized function value.
-        let split = Self::collection_constraints_to_quantify(
-            &ty,
-            &ty_tvars,
-            &tvars,
-            subst,
-            owned_contracts,
-        );
-        tvars.retain(|v| !split.pinned.contains(v));
-        let constraints = split.constraints;
-        let tvar_restrictions = tvars
-            .iter()
-            .filter_map(|v| {
-                subst
-                    .tvar_restriction(*v)
-                    .map(|restriction| (*v, restriction))
+        let reference = GENERALIZE_SWEEP_ORACLE_ENABLED.with(|enabled| {
+            enabled.get().then(|| {
+                let (mut scheme, _) = self.generalize_by_sweep(ty, subst, owned_contracts);
+                ResultScope::new(equations).retain_closed_quantifiers(&mut scheme);
+                scheme
             })
-            .collect();
-        (
-            Scheme {
-                result_origin: None,
-                tvars,
-                tvar_restrictions,
-                dvars: ty_dvars
-                    .into_iter()
-                    .filter(|v| {
-                        subst.level_of_dvar(*v) > level
-                            && !pending_d.contains(v)
-                            && matches!(subst.constraint_dim(&Dim::Var(*v)), Dim::Var(_))
-                    })
-                    .collect(),
-                rvars: ty_rvars
-                    .into_iter()
-                    .filter(|v| subst.level_of_rvar(*v) > level && !pending_r.contains(v))
-                    .collect(),
-                constraints,
-                body: ty,
-            },
-            split.ledger_removals,
-        )
+        });
+        let scheme = crate::infer::recursion::with_pinned_tvars(|excluded| {
+            chelis_type_core::generalize(ty, subst, excluded, owned_contracts, equations)
+        });
+        #[cfg(feature = "generalize-sweep-oracle")]
+        if let Some(reference) = reference {
+            assert_eq!(
+                scheme.constraints, reference.constraints,
+                "level-based collection obligations diverged from the reference environment sweep"
+            );
+            assert_eq!(
+                scheme.tvars, reference.tvars,
+                "level-based type quantifiers diverged from the reference environment sweep"
+            );
+            assert_eq!(
+                scheme.tvar_restrictions, reference.tvar_restrictions,
+                "level-based type-variable restrictions diverged from the reference environment sweep"
+            );
+            assert_eq!(
+                scheme.dvars, reference.dvars,
+                "level-based dimension quantifiers diverged from the reference environment sweep"
+            );
+            assert_eq!(
+                scheme.rvars, reference.rvars,
+                "level-based rank quantifiers diverged from the reference environment sweep"
+            );
+            assert_eq!(
+                scheme.body, reference.body,
+                "level-based scheme body diverged from the reference environment sweep"
+            );
+        }
+        scheme
     }
 
     /// The pre-#1207 environment-sweep implementation, kept as the reference
@@ -1526,10 +1184,13 @@ impl Env {
     #[cfg(feature = "generalize-sweep-oracle")]
     fn generalize_by_sweep(
         &self,
-        ty: &Type,
-        subst: &Subst,
-        owned_contracts: Option<&[crate::unify::CollectionContractId]>,
-    ) -> (Scheme, Vec<crate::unify::CollectionContractId>) {
+        ty: &Type<ErrorWitness>,
+        subst: &Subst<ErrorWitness>,
+        owned_contracts: Option<&[chelis_type_core::CollectionContractId]>,
+    ) -> (
+        Scheme<ErrorWitness>,
+        Vec<chelis_type_core::CollectionContractId>,
+    ) {
         let ty = subst.apply(ty);
         let env_tvars = self.free_tvars(subst);
         let env_dvars = self.free_dvars(subst);
@@ -1570,170 +1231,59 @@ impl Env {
                 && !group_level.is_some_and(|group| subst.level_of_tvar(v) <= group)
         };
         let ty_tvars = free_tvars(&ty);
-        let mut tvars = ty_tvars
+        let tvars = ty_tvars
             .iter()
             .copied()
             .filter(|v| generalizable(*v))
             .collect::<Vec<_>>();
-        // Mirror the checked-contract split in the reference generalizer.
-        let split = Self::collection_constraints_to_quantify(
-            &ty,
-            &ty_tvars,
-            &tvars,
-            subst,
-            owned_contracts,
-        );
-        tvars.retain(|v| !split.pinned.contains(v));
-        let constraints = split.constraints;
-        let tvar_restrictions = tvars
-            .iter()
-            .filter_map(|v| {
-                subst
-                    .tvar_restriction(*v)
-                    .map(|restriction| (*v, restriction))
+        let dvars = free_dvars(&ty)
+            .into_iter()
+            .filter(|v| {
+                !env_dvars.contains(v)
+                    && !pending_d.contains(v)
+                    && !(active_dvars.contains(v) && subst.level_of_dvar(*v) <= current_level)
+                    && matches!(subst.constraint_dim(&Dim::Var(*v)), Dim::Var(_))
             })
             .collect();
-        (
-            Scheme {
-                result_origin: None,
-                tvars,
-                tvar_restrictions,
-                dvars: free_dvars(&ty)
-                    .into_iter()
-                    .filter(|v| {
-                        !env_dvars.contains(v)
-                            && !pending_d.contains(v)
-                            && !(active_dvars.contains(v)
-                                && subst.level_of_dvar(*v) <= current_level)
-                            && matches!(subst.constraint_dim(&Dim::Var(*v)), Dim::Var(_))
-                    })
-                    .collect(),
-                rvars: free_rvars(&ty)
-                    .into_iter()
-                    .filter(|v| {
-                        !env_rvars.contains(v)
-                            && !pending_r.contains(v)
-                            && !(active_rvars.contains(v)
-                                && subst.level_of_rvar(*v) <= current_level)
-                    })
-                    .collect(),
-                constraints,
-                body: ty,
-            },
-            split.ledger_removals,
+        let rvars = free_rvars(&ty)
+            .into_iter()
+            .filter(|v| {
+                !env_rvars.contains(v)
+                    && !pending_r.contains(v)
+                    && !(active_rvars.contains(v) && subst.level_of_rvar(*v) <= current_level)
+            })
+            .collect();
+        chelis_type_core::generalize_candidates(
+            ty,
+            subst,
+            &ty_tvars,
+            tvars,
+            dvars,
+            rvars,
+            owned_contracts,
         )
     }
-}
-
-/// Variables selected solely by a checked key operation's closed relation.
-/// A relation with no matching callable in the value, or a variable also used
-/// outside that callable, cannot grant any exception to [04-LIN-10].
-pub(crate) fn closed_key_relation_variables(scheme: &Scheme) -> UnordSet<TypeVar> {
-    fn outside_callable(ty: &Type, callable: &Type, outside: &mut UnordSet<TypeVar>) -> bool {
-        if ty == callable {
-            return true;
-        }
-        match ty {
-            Type::Fn(args, ret) => {
-                let mut found = outside_callable(ret, callable, outside);
-                for arg in args.iter() {
-                    found |= outside_callable(arg, callable, outside);
-                }
-                found
-            }
-            Type::Ref(inner) => outside_callable(inner, callable, outside),
-            Type::Adt(_, args) | Type::Tuple(args) => {
-                let mut found = false;
-                for arg in args.iter() {
-                    found |= outside_callable(arg, callable, outside);
-                }
-                found
-            }
-            Type::KindedAdt(_, args) => {
-                let mut found = false;
-                for arg in args.iter() {
-                    if let NominalArg::Type(arg) = arg {
-                        found |= outside_callable(arg, callable, outside);
-                    }
-                }
-                found
-            }
-            other => {
-                outside.extend(free_tvars(other));
-                false
-            }
-        }
-    }
-
-    let mut closed = UnordSet::new();
-    for relation in &scheme.constraints {
-        if !matches!(
-            relation,
-            CollectionConstraint::FloatClassify { .. }
-                | CollectionConstraint::KeyFromSeed { .. }
-                | CollectionConstraint::SplitKey { .. }
-                | CollectionConstraint::SplitKeys { .. }
-                | CollectionConstraint::FoldIn { .. }
-        ) {
-            continue;
-        }
-        let callable = crate::unify::collection_contract_callable_type(relation);
-        let mut outside = UnordSet::new();
-        if !outside_callable(&scheme.body, &callable, &mut outside) {
-            continue;
-        }
-        // The scheme can own several checked collection relations whose
-        // variables unify. A variable carried by another relation is not
-        // selected solely by this key operation, even when that other
-        // callable is absent from the scheme body's visible shape.
-        for other in &scheme.constraints {
-            if std::ptr::eq(other, relation) {
-                continue;
-            }
-            for carried in other.carried_types() {
-                outside.extend(free_tvars(carried));
-            }
-        }
-        for var in free_tvars(&callable) {
-            if scheme.tvars.contains(&var) && !outside.contains(&var) {
-                closed.insert(var);
-            }
-        }
-    }
-    closed
-}
-
-/// chelis#1654: what one generalization decided about the pending collection
-/// obligations. See [`Env::collection_constraints_to_quantify`].
-#[derive(Default)]
-struct CollectionQuantification {
-    /// Obligations this scheme now owns, in ledger order.
-    constraints: Vec<CollectionConstraint>,
-    /// Exact ledger entries either moved into the scheme or discarded with a
-    /// function-bearing subvalue no longer visible in the generalized type.
-    ledger_removals: Vec<crate::unify::CollectionContractId>,
-    /// Body variables that must stay monomorphic because an obligation this
-    /// scheme does NOT own still carries them.
-    pinned: UnordSet<TypeVar>,
 }
 
 /// True when `ty` contains a tensor whose shape carries the named
 /// dimension `name` (chelis#397/#469). Walks the same compound-type
 /// structure as the free-var collectors above.
-fn type_carries_dim_name(ty: &Type, name: &str) -> bool {
+fn type_carries_dim_name(ty: &Type<ErrorWitness>, name: &str) -> bool {
     match ty {
-        Type::Tensor(dims, _) => dims.iter().any(|d| matches!(d, Dim::Name(n) if n == name)),
-        Type::Fn(args, ret) => {
+        Type::<ErrorWitness>::Tensor(dims, _) => {
+            dims.iter().any(|d| matches!(d, Dim::Name(n) if n == name))
+        }
+        Type::<ErrorWitness>::Fn(args, ret) => {
             args.iter().any(|a| type_carries_dim_name(a, name)) || type_carries_dim_name(ret, name)
         }
-        Type::Ref(inner) => type_carries_dim_name(inner, name),
-        Type::Adt(_, args) | Type::Tuple(args) => {
+        Type::<ErrorWitness>::Ref(inner) => type_carries_dim_name(inner, name),
+        Type::<ErrorWitness>::Adt(_, args) | Type::<ErrorWitness>::Tuple(args) => {
             args.iter().any(|a| type_carries_dim_name(a, name))
         }
-        Type::KindedAdt(_, args) => args.iter().any(|argument| match argument {
-            NominalArg::Type(ty) => type_carries_dim_name(ty, name),
-            NominalArg::Dimension(Dim::Name(found)) => found == name,
-            NominalArg::Dimension(_) => false,
+        Type::<ErrorWitness>::KindedAdt(_, args) => args.iter().any(|argument| match argument {
+            NominalArg::<ErrorWitness>::Type(ty) => type_carries_dim_name(ty, name),
+            NominalArg::<ErrorWitness>::Dimension(Dim::Name(found)) => found == name,
+            NominalArg::<ErrorWitness>::Dimension(_) => false,
         }),
         _ => false,
     }
@@ -1750,58 +1300,6 @@ fn terminal_name(name: &str) -> &str {
         .unwrap_or(name)
 }
 
-/// Collect all free type variables in a type.
-pub fn free_tvars(ty: &Type) -> Vec<TypeVar> {
-    let mut vars = Vec::new();
-    collect_tvars(ty, &mut vars);
-    vars.sort_by_key(|v| v.0);
-    vars.dedup_by_key(|v| v.0);
-    vars
-}
-
-fn collect_tvars(ty: &Type, vars: &mut Vec<TypeVar>) {
-    match ty {
-        Type::Var(v) => vars.push(*v),
-        Type::Fn(args, ret) => {
-            for a in args.iter() {
-                collect_tvars(a, vars);
-            }
-            collect_tvars(ret, vars);
-        }
-        Type::Ref(inner) => collect_tvars(inner, vars),
-        Type::Adt(_, args) => {
-            for a in args.iter() {
-                collect_tvars(a, vars);
-            }
-        }
-        Type::KindedAdt(_, args) => {
-            for argument in args.iter() {
-                if let NominalArg::Type(ty) = argument {
-                    collect_tvars(ty, vars);
-                }
-            }
-        }
-        Type::Tuple(ts) => {
-            for t in ts.iter() {
-                collect_tvars(t, vars);
-            }
-        }
-        // WS-A5 (spec/04-type-system.md §5.8): the tensor precision
-        // slot may carry a TypeVar (precision polymorphism). The slot
-        // must participate in free-var collection so generalization
-        // can pin precision-quantified vars in the resulting Scheme;
-        // missing this means each call site reuses the SAME var
-        // across instantiations and the second call's precision
-        // collides with the first call's binding.
-        Type::Tensor(_, prec) => {
-            if let TensorPrec::Var(v) = prec {
-                vars.push(*v);
-            }
-        }
-        Type::Prim(_) | Type::Unit | Type::Error(_) => {}
-    }
-}
-
 #[cfg(test)]
 mod module_scope_tests {
     use super::*;
@@ -1811,7 +1309,7 @@ mod module_scope_tests {
         let mut env = Env::new();
         env.bind(
             "pkg__demo__Provider__borrowed".to_string(),
-            Scheme::mono(Type::Prim(Prim::Int64)),
+            Scheme::<ErrorWitness>::mono(Type::<ErrorWitness>::Prim(Prim::Int64)),
         );
 
         assert!(env.lookup("borrowed").is_none());
@@ -1822,21 +1320,21 @@ mod module_scope_tests {
     fn same_level_monomorphic_contracts_keep_distinct_declaration_owners() {
         let env = Env::new();
         let mut var_gen = VarGen::default();
-        let mut subst = Subst::new();
-        let list = Type::adt(
+        let mut subst = Subst::<ErrorWitness>::new();
+        let list = Type::<ErrorWitness>::adt(
             "List".to_string(),
-            vec![Type::Tensor(
+            vec![Type::<ErrorWitness>::Tensor(
                 vec![Dim::Lit(2), Dim::Lit(3)],
                 TensorPrec::Concrete(Prim::F32),
             )],
         );
-        let result = Type::Tensor(
+        let result = Type::<ErrorWitness>::Tensor(
             vec![Dim::Wildcard, Dim::Wildcard],
             TensorPrec::Concrete(Prim::F32),
         );
-        let constraint = CollectionConstraint::Concat {
+        let constraint = CollectionConstraint::<ErrorWitness>::Concat {
             lhs: list.clone(),
-            rhs: Type::Prim(Prim::Int32),
+            rhs: Type::<ErrorWitness>::Prim(Prim::Int32),
             result: result.clone(),
         };
         let checked = Scheme {
@@ -1846,15 +1344,18 @@ mod module_scope_tests {
             dvars: Vec::new(),
             rvars: Vec::new(),
             constraints: vec![constraint.clone()],
-            body: Type::function(vec![list, Type::Prim(Prim::Int32)], result),
+            body: Type::<ErrorWitness>::function(
+                vec![list, Type::<ErrorWitness>::Prim(Prim::Int32)],
+                result,
+            ),
         };
 
         let component = subst.enter_level(&var_gen);
         let first_mark = subst.collection_contract_mark();
-        let first_ty = env.instantiate(&checked, &mut var_gen, &subst);
+        let first_ty = instantiate(&checked, &mut var_gen, &subst);
         let first_ids = subst.collection_contract_ids_since(first_mark);
         let second_mark = subst.collection_contract_mark();
-        let second_ty = env.instantiate(&checked, &mut var_gen, &subst);
+        let second_ty = instantiate(&checked, &mut var_gen, &subst);
         let second_ids = subst.collection_contract_ids_since(second_mark);
         subst.leave_level(component, &var_gen);
 
@@ -1878,7 +1379,7 @@ mod module_scope_tests {
     fn authored_binders_stay_monomorphic_inside_their_declaration_then_generalize_at_boundary() {
         let mut env = Env::new();
         let mut var_gen = VarGen::default();
-        let mut subst = Subst::new();
+        let mut subst = Subst::<ErrorWitness>::new();
 
         let declaration = subst.enter_level(&var_gen);
         let authored_type = var_gen.fresh_tvar();
@@ -1893,9 +1394,9 @@ mod module_scope_tests {
             .rank_vars
             .insert("shape".to_string(), authored_rank);
         env.set_type_resolution_scope(Some(&identities), None);
-        let ty = Type::tuple(vec![
-            Type::Var(authored_type),
-            Type::Tensor(
+        let ty = Type::<ErrorWitness>::tuple(vec![
+            Type::<ErrorWitness>::Var(authored_type),
+            Type::<ErrorWitness>::Tensor(
                 vec![Dim::Var(authored), Dim::Rank(authored_rank)],
                 TensorPrec::Concrete(Prim::F32),
             ),
@@ -1906,10 +1407,10 @@ mod module_scope_tests {
         let nested_local = var_gen.fresh_dvar();
         let nested_rank = var_gen.fresh_rvar();
         subst.leave_level(nested, &var_gen);
-        let nested_ty = Type::tuple(vec![
+        let nested_ty = Type::<ErrorWitness>::tuple(vec![
             ty.clone(),
-            Type::Var(nested_type),
-            Type::Tensor(
+            Type::<ErrorWitness>::Var(nested_type),
+            Type::<ErrorWitness>::Tensor(
                 vec![Dim::Var(nested_local), Dim::Rank(nested_rank)],
                 TensorPrec::Concrete(Prim::F32),
             ),
@@ -1940,10 +1441,13 @@ mod module_scope_tests {
         // [04-INF-5]: a provisional group hole is monomorphic inside its
         // group and can be quantified after closure if Γ does not own it.
         let mut var_gen = VarGen::default();
-        let mut subst = Subst::new();
+        let mut subst = Subst::<ErrorWitness>::new();
         let group = subst.enter_level(&var_gen);
         let body_var = var_gen.fresh_tvar();
-        let body = Type::function(vec![Type::Var(body_var)], Type::Var(body_var));
+        let body = Type::<ErrorWitness>::function(
+            vec![Type::<ErrorWitness>::Var(body_var)],
+            Type::<ErrorWitness>::Var(body_var),
+        );
         let mut captured = Env::new();
         captured.begin_group_level(subst.current_level());
         let in_group = captured.generalize(&body, &subst);
@@ -1956,7 +1460,10 @@ mod module_scope_tests {
         // Installing a monomorphic outer binding also lowers its free
         // variable to that binding's level, as ordinary inference does.
         subst.lower_type_to_current(&body);
-        captured.bind("outer".to_string(), Scheme::mono(Type::Var(body_var)));
+        captured.bind(
+            "outer".to_string(),
+            Scheme::<ErrorWitness>::mono(Type::<ErrorWitness>::Var(body_var)),
+        );
         let captured_scheme = captured.generalize(&body, &subst);
         assert!(captured_scheme.tvars.is_empty());
     }
@@ -1968,16 +1475,30 @@ mod module_scope_tests {
         // instantiating `day` in the scrutinee mints join intermediates in the
         // declaration scope, beside the pattern variable `found`. The
         // destructure's `let` then carries those joins with its own body.
-        let pair = || Type::tuple(vec![Type::Prim(Prim::Int64), Type::Prim(Prim::Int64)]);
-        let option = |ty: Type| Type::adt("Option".to_string(), vec![ty]);
-        let carried = |body: Type, equations: &[ResultConstraint]| {
-            Type::Tuple(
+        let pair = || {
+            Type::<ErrorWitness>::tuple(vec![
+                Type::<ErrorWitness>::Prim(Prim::Int64),
+                Type::<ErrorWitness>::Prim(Prim::Int64),
+            ])
+        };
+        let option =
+            |ty: Type<ErrorWitness>| Type::<ErrorWitness>::adt("Option".to_string(), vec![ty]);
+        let carried = |body: Type<ErrorWitness>, equations: &[ResultConstraint<ErrorWitness>]| {
+            Type::<ErrorWitness>::Tuple(
                 std::iter::once(body)
-                    .chain(equations.iter().flat_map(ResultConstraint::types).cloned())
+                    .chain(
+                        equations
+                            .iter()
+                            .flat_map(ResultConstraint::<ErrorWitness>::types)
+                            .cloned(),
+                    )
                     .collect(),
             )
         };
-        let published = |env: &Env, subst: &Subst, body: Type, equations: &[ResultConstraint]| {
+        let published = |env: &Env,
+                         subst: &Subst<ErrorWitness>,
+                         body: Type<ErrorWitness>,
+                         equations: &[ResultConstraint<ErrorWitness>]| {
             let mut tvars = env
                 .generalize_with_result_constraints(
                     &carried(body, equations),
@@ -1991,24 +1512,33 @@ mod module_scope_tests {
         };
 
         let mut var_gen = VarGen::default();
-        let mut subst = Subst::new();
+        let mut subst = Subst::<ErrorWitness>::new();
         let declaration = subst.enter_level(&var_gen);
         let inner_join = var_gen.fresh_tvar();
         let outer_join = var_gen.fresh_tvar();
         let found = var_gen.fresh_tvar();
         let scrutinee_joins = vec![
-            ResultConstraint::Join {
-                inputs: vec![option(pair()), option(Type::Var(inner_join))],
-                result: option(Type::Var(outer_join)),
+            ResultConstraint::<ErrorWitness>::Join {
+                inputs: vec![
+                    option(pair()),
+                    option(Type::<ErrorWitness>::Var(inner_join)),
+                ],
+                result: option(Type::<ErrorWitness>::Var(outer_join)),
             },
-            ResultConstraint::Join {
-                inputs: vec![option(pair()), option(Type::Var(outer_join))],
-                result: option(Type::Var(found)),
+            ResultConstraint::<ErrorWitness>::Join {
+                inputs: vec![
+                    option(pair()),
+                    option(Type::<ErrorWitness>::Var(outer_join)),
+                ],
+                result: option(Type::<ErrorWitness>::Var(found)),
             },
         ];
         let mut env = Env::new();
-        subst.lower_type_to_current(&Type::Var(found));
-        env.bind("found".to_string(), Scheme::mono(Type::Var(found)));
+        subst.lower_type_to_current(&Type::<ErrorWitness>::Var(found));
+        env.bind(
+            "found".to_string(),
+            Scheme::<ErrorWitness>::mono(Type::<ErrorWitness>::Var(found)),
+        );
 
         let binding = subst.enter_level(&var_gen);
         let shared_hole = var_gen.fresh_tvar();
@@ -2019,20 +1549,31 @@ mod module_scope_tests {
 
         // `tmp = found`: the scrutinee's joins reach `found`, which Γ owns, so
         // none of their intermediates may be freshened for this binding.
-        assert!(published(&env, &subst, Type::Var(found), &scrutinee_joins).is_empty());
+        assert!(
+            published(
+                &env,
+                &subst,
+                Type::<ErrorWitness>::Var(found),
+                &scrutinee_joins
+            )
+            .is_empty()
+        );
 
         // `again = if e then Some(found) else None`: variables minted for this
         // binding share one component with `found`, so they stay shared too.
         let mut through_found = scrutinee_joins.clone();
-        through_found.push(ResultConstraint::Join {
-            inputs: vec![option(Type::Var(found)), option(Type::Var(shared_hole))],
-            result: option(Type::Var(shared_result)),
+        through_found.push(ResultConstraint::<ErrorWitness>::Join {
+            inputs: vec![
+                option(Type::<ErrorWitness>::Var(found)),
+                option(Type::<ErrorWitness>::Var(shared_hole)),
+            ],
+            result: option(Type::<ErrorWitness>::Var(shared_result)),
         });
         assert!(
             published(
                 &env,
                 &subst,
-                option(Type::Var(shared_result)),
+                option(Type::<ErrorWitness>::Var(shared_result)),
                 &through_found
             )
             .is_empty()
@@ -2040,150 +1581,20 @@ mod module_scope_tests {
 
         // `fresh = if e then Some(pair) else None`: a component wholly owned by
         // the binding is quantified whole.
-        let own = [ResultConstraint::Join {
-            inputs: vec![option(pair()), option(Type::Var(own_hole))],
-            result: option(Type::Var(own_result)),
+        let own = [ResultConstraint::<ErrorWitness>::Join {
+            inputs: vec![option(pair()), option(Type::<ErrorWitness>::Var(own_hole))],
+            result: option(Type::<ErrorWitness>::Var(own_result)),
         }];
         assert_eq!(
-            published(&env, &subst, option(Type::Var(own_result)), &own),
+            published(
+                &env,
+                &subst,
+                option(Type::<ErrorWitness>::Var(own_result)),
+                &own
+            ),
             vec![own_hole, own_result]
         );
         subst.leave_level(declaration, &var_gen);
-    }
-}
-
-/// Collect all free dimension variables in a type.
-pub fn free_dvars(ty: &Type) -> Vec<DimVar> {
-    let mut vars = Vec::new();
-    collect_dvars(ty, &mut vars);
-    vars.sort_by_key(|v| v.0);
-    vars.dedup_by_key(|v| v.0);
-    vars
-}
-
-fn collect_dvars(ty: &Type, vars: &mut Vec<DimVar>) {
-    match ty {
-        Type::Tensor(dims, _) => {
-            for d in dims {
-                if let Dim::Var(v) = d {
-                    vars.push(*v);
-                }
-            }
-        }
-        Type::Fn(args, ret) => {
-            for a in args.iter() {
-                collect_dvars(a, vars);
-            }
-            collect_dvars(ret, vars);
-        }
-        Type::Ref(inner) => collect_dvars(inner, vars),
-        Type::Adt(_, args) => {
-            for a in args.iter() {
-                collect_dvars(a, vars);
-            }
-        }
-        Type::KindedAdt(_, args) => {
-            for argument in args.iter() {
-                match argument {
-                    NominalArg::Type(ty) => collect_dvars(ty, vars),
-                    NominalArg::Dimension(Dim::Var(var)) => vars.push(*var),
-                    NominalArg::Dimension(_) => {}
-                }
-            }
-        }
-        Type::Tuple(ts) => {
-            for t in ts.iter() {
-                collect_dvars(t, vars);
-            }
-        }
-        _ => {}
-    }
-}
-
-/// Collect every dimension occurring in tensor positions of `ty`,
-/// in traversal order, duplicates preserved. Used by the chelis#273
-/// return-position rigidity guard to compare a return-only declared
-/// dim parameter's resolution against the dims of the declared
-/// parameter positions.
-pub fn collect_dims(ty: &Type, dims: &mut Vec<Dim>) {
-    match ty {
-        Type::Tensor(ds, _) => {
-            dims.extend(ds.iter().cloned());
-        }
-        Type::Fn(args, ret) => {
-            for a in args.iter() {
-                collect_dims(a, dims);
-            }
-            collect_dims(ret, dims);
-        }
-        Type::Ref(inner) => collect_dims(inner, dims),
-        Type::Adt(_, args) => {
-            for a in args.iter() {
-                collect_dims(a, dims);
-            }
-        }
-        Type::KindedAdt(_, args) => {
-            for argument in args.iter() {
-                match argument {
-                    NominalArg::Type(ty) => collect_dims(ty, dims),
-                    NominalArg::Dimension(dim) => dims.push(dim.clone()),
-                }
-            }
-        }
-        Type::Tuple(ts) => {
-            for t in ts.iter() {
-                collect_dims(t, dims);
-            }
-        }
-        _ => {}
-    }
-}
-
-/// Collect all free rank variables in a type (Tier-2 rank polymorphism).
-pub fn free_rvars(ty: &Type) -> Vec<RankVar> {
-    let mut vars = Vec::new();
-    collect_rvars(ty, &mut vars);
-    vars.sort_by_key(|v| v.0);
-    vars.dedup_by_key(|v| v.0);
-    vars
-}
-
-fn collect_rvars(ty: &Type, vars: &mut Vec<RankVar>) {
-    match ty {
-        Type::Tensor(dims, _) => {
-            for d in dims {
-                if let Dim::Rank(r) = d {
-                    vars.push(*r);
-                }
-            }
-        }
-        Type::Fn(args, ret) => {
-            for a in args.iter() {
-                collect_rvars(a, vars);
-            }
-            collect_rvars(ret, vars);
-        }
-        Type::Ref(inner) => collect_rvars(inner, vars),
-        Type::Adt(_, args) => {
-            for a in args.iter() {
-                collect_rvars(a, vars);
-            }
-        }
-        Type::KindedAdt(_, args) => {
-            for argument in args.iter() {
-                match argument {
-                    NominalArg::Type(ty) => collect_rvars(ty, vars),
-                    NominalArg::Dimension(Dim::Rank(var)) => vars.push(*var),
-                    NominalArg::Dimension(_) => {}
-                }
-            }
-        }
-        Type::Tuple(ts) => {
-            for t in ts.iter() {
-                collect_rvars(t, vars);
-            }
-        }
-        _ => {}
     }
 }
 
@@ -2217,13 +1628,13 @@ mod tests {
 
     #[test]
     fn closed_key_variables_require_the_exact_owned_callable() {
-        let operand = Type::Var(TypeVar(1));
-        let result = Type::Var(TypeVar(2));
-        let relation = CollectionConstraint::KeyFromSeed {
+        let operand = Type::<ErrorWitness>::Var(TypeVar(1));
+        let result = Type::<ErrorWitness>::Var(TypeVar(2));
+        let relation = CollectionConstraint::<ErrorWitness>::KeyFromSeed {
             operand: operand.clone(),
             result: result.clone(),
         };
-        let callable = crate::unify::collection_contract_callable_type(&relation);
+        let callable = chelis_type_core::collection_contract_callable_type(&relation);
         let mut scheme = Scheme {
             tvars: vec![TypeVar(1), TypeVar(2)],
             tvar_restrictions: vec![],
@@ -2241,7 +1652,7 @@ mod tests {
         // A function that also exposes the operation's result variable as
         // ordinary data has authored a generic key-carrying surface. The
         // checked relation grants no exception to that occurrence.
-        scheme.body = Type::tuple(vec![callable.clone(), result]);
+        scheme.body = Type::<ErrorWitness>::tuple(vec![callable.clone(), result]);
         assert_eq!(
             closed_key_relation_variables(&scheme).into_sorted(),
             vec![TypeVar(1)]
@@ -2256,16 +1667,16 @@ mod tests {
     fn shared_collection_constraint_keeps_key_relation_variable_key_free() {
         let env = Env::new();
         let mut var_gen = VarGen::default();
-        let mut subst = Subst::new();
+        let mut subst = Subst::<ErrorWitness>::new();
         let level = subst.enter_level(&var_gen);
         let operand = var_gen.fresh_type();
         let result = var_gen.fresh_type();
-        let key_relation = CollectionConstraint::SplitKey {
+        let key_relation = CollectionConstraint::<ErrorWitness>::SplitKey {
             operand: operand.clone(),
             result: result.clone(),
         };
-        let list = Type::adt("List".to_string(), vec![operand.clone()]);
-        let append_relation = CollectionConstraint::Append {
+        let list = Type::<ErrorWitness>::adt("List".to_string(), vec![operand.clone()]);
+        let append_relation = CollectionConstraint::<ErrorWitness>::Append {
             list: list.clone(),
             value: operand.clone(),
             result: list,
@@ -2275,14 +1686,14 @@ mod tests {
         subst.leave_level(level, &var_gen);
 
         let scheme = env.generalize(
-            &crate::unify::collection_contract_callable_type(&key_relation),
+            &chelis_type_core::collection_contract_callable_type(&key_relation),
             &subst,
         );
         assert_eq!(scheme.constraints, vec![key_relation, append_relation]);
-        let Type::Var(operand_var) = operand else {
+        let Type::<ErrorWitness>::Var(operand_var) = operand else {
             unreachable!()
         };
-        let Type::Var(result_var) = result else {
+        let Type::<ErrorWitness>::Var(result_var) = result else {
             unreachable!()
         };
         assert_eq!(
@@ -2300,7 +1711,7 @@ mod tests {
     /// type variable and none on the other, so a route that drops
     /// restrictions and a route that installs them indiscriminately are both
     /// distinguishable from the correct one.
-    fn restricted_scheme() -> Scheme {
+    fn restricted_scheme() -> Scheme<ErrorWitness> {
         Scheme {
             result_origin: None,
             constraints: vec![],
@@ -2308,9 +1719,9 @@ mod tests {
             tvar_restrictions: vec![(TypeVar(2), TypeVarRestriction::ActiveFloat)],
             dvars: vec![DimVar(3), DimVar(4)],
             rvars: vec![RankVar(5)],
-            body: Type::tuple(vec![
-                Type::Var(TypeVar(1)),
-                Type::Tensor(
+            body: Type::<ErrorWitness>::tuple(vec![
+                Type::<ErrorWitness>::Var(TypeVar(1)),
+                Type::<ErrorWitness>::Tensor(
                     vec![
                         Dim::Var(DimVar(3)),
                         Dim::Var(DimVar(4)),
@@ -2335,15 +1746,14 @@ mod tests {
     #[test]
     fn dvar_mapping_instantiation_matches_plain_instantiation() {
         let scheme = restricted_scheme();
-        let env = Env::new();
 
-        let plain_subst = Subst::new();
+        let plain_subst = Subst::<ErrorWitness>::new();
         let mut plain_gen = VarGen::default();
-        let plain = env.instantiate(&scheme, &mut plain_gen, &plain_subst);
+        let plain = instantiate(&scheme, &mut plain_gen, &plain_subst);
 
-        let mapped_subst = Subst::new();
+        let mapped_subst = Subst::<ErrorWitness>::new();
         let mut mapped_gen = VarGen::default();
-        let mapped = env.instantiate_scheme(&scheme, &mut mapped_gen, &mapped_subst);
+        let mapped = instantiate_scheme(&scheme, &mut mapped_gen, &mapped_subst);
 
         assert_eq!(
             plain, mapped.ty,
@@ -2381,20 +1791,20 @@ mod tests {
             tvar_restrictions: vec![],
             dvars: vec![quantified],
             rvars: vec![quantified_rank],
-            body: Type::Tensor(
+            body: Type::<ErrorWitness>::Tensor(
                 vec![Dim::Rank(quantified_rank), Dim::Var(quantified)],
                 TensorPrec::Concrete(Prim::F32),
             ),
         };
-        let env = Env::new();
-        let inference_subst = Subst::new();
+
+        let inference_subst = Subst::<ErrorWitness>::new();
         inference_subst.mark_mapped_axis(quantified, 1);
         let mut var_gen = VarGen::default();
-        let instantiated = env.instantiate_scheme(&scheme, &mut var_gen, &inference_subst);
+        let instantiated = instantiate_scheme(&scheme, &mut var_gen, &inference_subst);
         let fresh = instantiated.dvars[0].1;
 
         assert_eq!(inference_subst.mapped_axis(fresh), Some(1));
-        let Type::Tensor(dims, _) = instantiated.ty else {
+        let Type::<ErrorWitness>::Tensor(dims, _) = instantiated.ty else {
             panic!("mapped scheme body must remain a tensor")
         };
         assert!(
@@ -2421,13 +1831,12 @@ mod tests {
     #[test]
     fn every_instantiation_route_installs_quantified_restrictions() {
         let scheme = restricted_scheme();
-        let env = Env::new();
 
         // Every route instantiates the same scheme from the same starting
         // generator state, so all three mint the same fresh variables and the
         // observed restriction sets are directly comparable.
-        let restrictions_after = |instantiate: &dyn Fn(&Subst, &mut VarGen)| {
-            let subst = Subst::new();
+        let restrictions_after = |instantiate: &dyn Fn(&Subst<ErrorWitness>, &mut VarGen)| {
+            let subst = Subst::<ErrorWitness>::new();
             let mut var_gen = VarGen::default();
             instantiate(&subst, &mut var_gen);
             (0..64)
@@ -2437,13 +1846,13 @@ mod tests {
         };
 
         let via_instantiate = restrictions_after(&|subst, var_gen| {
-            env.instantiate(&scheme, var_gen, subst);
+            instantiate(&scheme, var_gen, subst);
         });
         let via_tvar_mapping = restrictions_after(&|subst, var_gen| {
-            env.instantiate_with_tvar_mapping(&scheme, var_gen, subst);
+            instantiate_with_tvar_mapping(&scheme, var_gen, subst);
         });
         let via_instantiate_scheme = restrictions_after(&|subst, var_gen| {
-            env.instantiate_scheme(&scheme, var_gen, subst);
+            instantiate_scheme(&scheme, var_gen, subst);
         });
 
         assert_eq!(
@@ -2484,7 +1893,7 @@ mod tests {
             },
         );
         let instantiation = InstantiatedScheme {
-            ty: Type::Unit,
+            ty: Type::<ErrorWitness>::Unit,
             tvars: vec![],
             dvars: vec![(DimVar(3), DimVar(90))],
             rvars: vec![],
@@ -2512,16 +1921,19 @@ mod tests {
     #[test]
     fn lexical_value_shadowing_does_not_replace_constructor_authority() {
         let mut env = Env::new();
-        let constructor = Scheme::mono(Type::function(
-            vec![Type::Prim(Prim::F64)],
-            Type::adt("Box".to_string(), Vec::new()),
+        let constructor = Scheme::<ErrorWitness>::mono(Type::<ErrorWitness>::function(
+            vec![Type::<ErrorWitness>::Prim(Prim::F64)],
+            Type::<ErrorWitness>::adt("Box".to_string(), Vec::new()),
         ));
         env.bind_constructor("N".to_string(), "Box".to_string(), constructor.clone());
-        env.bind_lexical("N".to_string(), Scheme::mono(Type::Prim(Prim::F64)));
+        env.bind_lexical(
+            "N".to_string(),
+            Scheme::<ErrorWitness>::mono(Type::<ErrorWitness>::Prim(Prim::F64)),
+        );
 
         assert_eq!(
             env.lookup("N").map(|scheme| &scheme.body),
-            Some(&Type::Prim(Prim::F64))
+            Some(&Type::<ErrorWitness>::Prim(Prim::F64))
         );
         let (owner, active_constructor) = env
             .lookup_constructor("N")
@@ -2539,9 +1951,15 @@ mod tests {
         env.bind_constructor(
             "Some".to_string(),
             "Option".to_string(),
-            Scheme::mono(Type::adt("Option".to_string(), Vec::new())),
+            Scheme::<ErrorWitness>::mono(Type::<ErrorWitness>::adt(
+                "Option".to_string(),
+                Vec::new(),
+            )),
         );
-        let wrapper_scheme = Scheme::mono(Type::adt("Wrapper".to_string(), Vec::new()));
+        let wrapper_scheme = Scheme::<ErrorWitness>::mono(Type::<ErrorWitness>::adt(
+            "Wrapper".to_string(),
+            Vec::new(),
+        ));
         env.bind_constructor(
             "Some".to_string(),
             "Wrapper".to_string(),
@@ -2580,9 +1998,9 @@ mod tests {
             tvar_restrictions: vec![],
             dvars: vec![quantified_dim],
             rvars: vec![quantified_rank],
-            body: Type::tuple(vec![
-                Type::Var(quantified_type),
-                Type::Tensor(
+            body: Type::<ErrorWitness>::tuple(vec![
+                Type::<ErrorWitness>::Var(quantified_type),
+                Type::<ErrorWitness>::Tensor(
                     vec![Dim::Var(quantified_dim), Dim::Rank(quantified_rank)],
                     TensorPrec::Var(quantified_type),
                 ),
@@ -2590,9 +2008,9 @@ mod tests {
         };
         let mut env = Env::new();
         env.bind("generic".to_string(), scheme);
-        let mut subst = Subst::new();
+        let mut subst = Subst::<ErrorWitness>::new();
         subst
-            .insert_type(quantified_type, Type::Prim(Prim::F32))
+            .insert_type(quantified_type, Type::<ErrorWitness>::Prim(Prim::F32))
             .expect("unrestricted test substitution accepts f32");
         subst.insert_dim(quantified_dim, Dim::Lit(3));
         subst.insert_rank(quantified_rank, vec![Dim::Lit(4)]);
@@ -2617,9 +2035,9 @@ mod tests {
             tvar_restrictions: vec![],
             dvars: vec![quantified_dim],
             rvars: vec![quantified_rank],
-            body: Type::tuple(vec![
-                Type::Var(outer_type),
-                Type::Tensor(
+            body: Type::<ErrorWitness>::tuple(vec![
+                Type::<ErrorWitness>::Var(outer_type),
+                Type::<ErrorWitness>::Tensor(
                     vec![Dim::Var(outer_dim), Dim::Rank(outer_rank)],
                     TensorPrec::Concrete(Prim::F32),
                 ),
@@ -2627,12 +2045,12 @@ mod tests {
         };
         let mut env = Env::new();
         env.bind("generic".to_string(), scheme);
-        let mut subst = Subst::new();
+        let mut subst = Subst::<ErrorWitness>::new();
         subst
-            .insert_type(outer_type, Type::Var(quantified_type))
+            .insert_type(outer_type, Type::<ErrorWitness>::Var(quantified_type))
             .expect("unrestricted test substitution accepts an alias");
         subst
-            .insert_type(quantified_type, Type::Prim(Prim::F64))
+            .insert_type(quantified_type, Type::<ErrorWitness>::Prim(Prim::F64))
             .expect("unrestricted test substitution accepts f64");
         subst.insert_dim(outer_dim, Dim::Var(quantified_dim));
         subst.insert_dim(quantified_dim, Dim::Lit(5));
@@ -2659,9 +2077,9 @@ mod tests {
             tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
-            body: Type::tuple(vec![
-                Type::Var(source_type),
-                Type::Tensor(
+            body: Type::<ErrorWitness>::tuple(vec![
+                Type::<ErrorWitness>::Var(source_type),
+                Type::<ErrorWitness>::Tensor(
                     vec![Dim::Var(source_dim), Dim::Rank(source_rank)],
                     TensorPrec::Concrete(Prim::F32),
                 ),
@@ -2669,9 +2087,9 @@ mod tests {
         };
         let mut env = Env::new();
         env.bind("monomorphic".to_string(), scheme);
-        let mut subst = Subst::new();
+        let mut subst = Subst::<ErrorWitness>::new();
         subst
-            .insert_type(source_type, Type::Var(target_type))
+            .insert_type(source_type, Type::<ErrorWitness>::Var(target_type))
             .expect("unrestricted test substitution accepts an alias");
         subst.insert_dim(source_dim, Dim::Var(target_dim));
         subst.insert_rank(source_rank, vec![Dim::Rank(target_rank)]);

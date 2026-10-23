@@ -3,8 +3,9 @@
 
 use chelis_numeric_core::prim::Prim;
 use chelis_surf::parser::parse_str;
+use chelis_type_core::Type;
 use chelis_types::check_ir_program;
-use chelis_types::types::Type;
+use chelis_types::errors::ErrorWitness;
 
 fn error_messages(program: &[chelis_deep::Expr]) -> Vec<String> {
     match check_ir_program(program) {
@@ -27,7 +28,7 @@ fn language_and_interchange_integer_names_are_distinct() {
     ] {
         assert_eq!(Prim::parse_name(language_name), Some(prim));
         assert_eq!(prim.name(), language_name);
-        assert_eq!(Type::Prim(prim).to_string(), language_name);
+        assert_eq!(Type::<ErrorWitness>::Prim(prim).to_string(), language_name);
         assert_eq!(prim.interchange_name(), interchange_name);
         assert_eq!(Prim::parse_interchange_name(interchange_name), Some(prim));
         assert_eq!(

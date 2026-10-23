@@ -5,6 +5,9 @@
 
 use super::*;
 use chelis_deep::cons_spine::{ConsSpine, ConsSpineTail};
+use chelis_type_core::decisions::shape::{
+    SumResultSlot, shape_route_result, sum_result_widening_note,
+};
 use std::sync::Arc;
 
 /// Observe a decoded vocabulary node's tag, metadata and children.
@@ -39,7 +42,7 @@ pub(super) fn malformed_form(
     tag: &str,
     expected: &str,
     errors: &mut DiagnosticSink<'_>,
-) -> Type {
+) -> Type<ErrorWitness> {
     let found = node.child_count();
     report(
         errors,
@@ -63,7 +66,9 @@ pub(super) fn malformed_form(
 /// caller falls through to its normal typing. The witness is threaded from
 /// the real upstream `report`, keeping the cascade provably downstream of a
 /// reported error.
-pub(super) fn propagate_if_error<'a>(tys: impl IntoIterator<Item = &'a Type>) -> Option<Type> {
+pub(super) fn propagate_if_error<'a>(
+    tys: impl IntoIterator<Item = &'a Type<ErrorWitness>>,
+) -> Option<Type<ErrorWitness>> {
     tys.into_iter().find_map(|ty| match ty {
         Type::Error(w) => Some(propagate(w)),
         _ => None,
@@ -99,7 +104,7 @@ pub(super) fn report_at_check_site(
     errors: &mut DiagnosticSink<'_>,
     error: CheckError,
     site: CheckSite<'_>,
-) -> Type {
+) -> Type<ErrorWitness> {
     match site {
         CheckSite::Expr(expr) => report(errors, at_check_site(expr, error)),
         CheckSite::Node(node) => report(errors, at_check_node(Some(node), error)),
@@ -132,7 +137,7 @@ pub(super) fn report_builtin_arity_range(
     builtin: &str,
     expected: &str,
     got: usize,
-) -> Type {
+) -> Type<ErrorWitness> {
     report_at_check_site(
         errors,
         CheckError::with_types(
@@ -156,7 +161,7 @@ pub(super) fn report_builtin_arity(
     builtin: &str,
     expected: usize,
     got: usize,
-) -> Type {
+) -> Type<ErrorWitness> {
     report_at_check_site(
         errors,
         CheckError::with_types(
@@ -314,7 +319,11 @@ pub(super) fn constructor_for_shape<'env, 'adt>(
     call_shape: CallShape,
     env: &'env Env,
     adt_reg: &'adt AdtRegistry,
-) -> Option<(&'env str, &'env Scheme, &'adt crate::adt::VariantInfo)> {
+) -> Option<(
+    &'env str,
+    &'env Scheme<ErrorWitness>,
+    &'adt crate::adt::VariantInfo,
+)> {
     let want_named = matches!(call_shape, CallShape::Record);
     let mut fallback = None;
     for (owner, scheme) in env.lookup_constructors(name).rev() {
@@ -345,7 +354,7 @@ pub(super) fn constructor_for_shape<'env, 'adt>(
 pub(super) fn pattern_constructor_for_scrutinee<'adt>(
     name: &str,
     call_shape: CallShape,
-    scrutinee_ty: &Type,
+    scrutinee_ty: &Type<ErrorWitness>,
     env: &Env,
     adt_reg: &'adt AdtRegistry,
 ) -> Option<(
@@ -438,7 +447,11 @@ pub(super) fn extract_string_literal(expr: &deep::Expr) -> Option<String> {
 ///   value-parameter-derived" (unsafe).
 ///
 /// - `Dim::Name`, `Dim::Rank`, existing `Var`/`Lit` in `ty` — preserved.
-pub(super) fn narrow_wildcards_with(ty: &Type, template: &Type, param_dims: &[Dim]) -> Type {
+pub(super) fn narrow_wildcards_with(
+    ty: &Type<ErrorWitness>,
+    template: &Type<ErrorWitness>,
+    param_dims: &[Dim],
+) -> Type<ErrorWitness> {
     match (ty, template) {
         (Type::Tensor(dims, prec), Type::Tensor(tmpl_dims, _)) if dims.len() == tmpl_dims.len() => {
             let new_dims = dims
@@ -511,7 +524,7 @@ pub(super) fn narrow_wildcards_with(ty: &Type, template: &Type, param_dims: &[Di
 /// wildcard may be safely narrowed to its declared binder. A non-`Fn`
 /// type (or one whose params carry no dimension binders) yields the empty
 /// set, so narrowing falls back to the literal-only behavior.
-pub(super) fn param_bound_dims(decl_ty: &Type) -> Vec<Dim> {
+pub(super) fn param_bound_dims(decl_ty: &Type<ErrorWitness>) -> Vec<Dim> {
     let mut out = Vec::new();
     let Type::Fn(params, _) = decl_ty else {
         return out;
@@ -558,18 +571,18 @@ pub(super) fn param_bound_dims(decl_ty: &Type) -> Vec<Dim> {
 /// exactly as the `copy`/`cast` gates do, so the expression's type cannot
 /// depend on when the operand resolved.
 pub(crate) fn decide_shape_route(
-    route: crate::unify::ShapeRoute,
-    operand: &Type,
+    route: chelis_type_core::unify::ShapeRoute<ErrorWitness>,
+    operand: &Type<ErrorWitness>,
     node: &DeepNode,
     vg: &mut VarGen,
-    subst: &mut Subst,
+    subst: &mut Subst<ErrorWitness>,
     errors: &mut DiagnosticSink<'_>,
-) -> Type {
+) -> Type<ErrorWitness> {
     if let Type::Var(tv) = operand {
         let result = vg.fresh_type();
         subst.record_deferred_tensor_operand(
             *tv,
-            crate::unify::DeferredOperandGate::ShapeRoute {
+            chelis_type_core::unify::DeferredOperandGate::ShapeRoute {
                 route,
                 result: Box::new(result.clone()),
             },
@@ -580,12 +593,12 @@ pub(crate) fn decide_shape_route(
         &route,
         operand,
         SumResultSlot::Fresh(vg),
-        TypeDiagnosticLocation::from_node(node),
+        TypeDiagnosticLocation::from_node(node).map(TypeDiagnosticLocation::into_source_label),
         subst,
     ) {
         Ok((result, updates)) => {
             if let Some(expected_updates) = updates
-                && let crate::unify::ShapeRoute::Gather {
+                && let chelis_type_core::unify::ShapeRoute::Gather {
                     updates: Some(actual),
                     ..
                 } = &route
@@ -604,524 +617,6 @@ pub(crate) fn decide_shape_route(
             ),
         ),
     }
-}
-
-/// Decide a shape-computing call (chelis#1489).
-///
-/// THE decision function for `gather`, `scatter`, `scatter_replace` and
-/// `trace`. The eager arm calls it with the operand it just resolved; a
-/// suspended [`crate::unify::DeferredOperandGate::ShapeRoute`] calls it with
-/// the operand the binding just settled. One implementation, so the two cannot
-/// disagree -- an earlier revision hand-copied the arm's tail here instead and
-/// silently lost `scatter`'s mode check and the borrow normalization.
-///
-/// Everything the call decides happens HERE, not in the arm: the operand is
-/// normalized through one borrow where the route's arm does so, the axis is
-/// normalized against the operand's own rank, and the mode string is
-/// validated. The arm's remaining job is to report the `Err`, and to unify the
-/// updates obligation this returns.
-///
-/// These routes only COPY the operand's dims into their result, so a dim that
-/// is still a variable when this runs passes through and resolves later.
-/// `concat` and `diagonal` compute a new extent from those dims and are NOT
-/// decided here: see the deferred-operand ledger's doc in `unify.rs`.
-///
-/// Returns `(result type, updates obligation)`. The updates unification is the
-/// caller's because discharge runs inside unification while the eager arm has
-/// a `&mut Subst`; the DECISION of what updates must equal is here.
-///
-/// A `trace` whose result precision waits on an inference variable publishes
-/// a type from `slot`, gated to the decided result ([`publish_sum_result`]).
-pub(crate) fn shape_route_result(
-    route: &crate::unify::ShapeRoute,
-    operand: &Type,
-    slot: SumResultSlot<'_>,
-    location: Option<TypeDiagnosticLocation>,
-    subst: &Subst,
-) -> Result<(Type, Option<Type>), String> {
-    use crate::unify::ShapeRoute;
-    // Strip one borrow only for the routes whose arms do, so a deferred
-    // `gather(&t, ..)` accepts what the eager one accepts WITHOUT widening
-    // `scatter`/`scatter_replace`, which reject a borrowed operand.
-    let operand = match operand {
-        Type::Ref(inner) if route.normalizes_borrow() => inner.as_ref(),
-        other => other,
-    };
-    match route {
-        ShapeRoute::Gather {
-            op,
-            indices,
-            raw_axis,
-            updates,
-            mode,
-        } => {
-            // Axis bounds first, then the mode string: the order the eager arm
-            // had, so a call that is wrong in both ways reports the same one.
-            let axis = settled_axis(op, operand, *raw_axis, 0)?;
-            if let Some(mode) = mode
-                && !matches!(mode.as_str(), "replace" | "add")
-            {
-                return Err(format!("{op} mode must be \"replace\" or \"add\""));
-            }
-            let result = infer_gather_result_type(op, operand, indices.as_ref(), axis)?;
-            match updates {
-                // `scatter` returns the BASE tensor; the gathered shape is what
-                // its updates operand must equal.
-                Some(_) => Ok((operand.clone(), Some(result))),
-                None => Ok((result, None)),
-            }
-        }
-        ShapeRoute::Trace {
-            raw_axis1,
-            raw_axis2,
-        } => {
-            let axis1 = settled_axis("trace", operand, *raw_axis1, 0)?;
-            let axis2 = settled_axis("trace", operand, *raw_axis2, 1)?;
-            Ok((
-                infer_trace_result_type(operand, axis1, axis2, slot, location, subst)?,
-                None,
-            ))
-        }
-    }
-}
-
-/// Normalize a raw axis against the operand's rank (chelis#1489).
-///
-/// The eager resolvers, with the same message text. `default` is the axis the
-/// call uses when none was written, matching their fallback.
-///
-/// A non-tensor operand yields `default` rather than an error, exactly as the
-/// eager resolvers do: the route's own helper rejects it, and it does so AFTER
-/// `scatter`'s mode check. Rejecting here instead made a call that is wrong in
-/// both ways report the operand error where it had reported the mode error.
-fn settled_axis(
-    op: &str,
-    operand: &Type,
-    raw: Option<i64>,
-    default: usize,
-) -> Result<usize, String> {
-    let Type::Tensor(dims, _) = operand else {
-        return Ok(default);
-    };
-    match raw {
-        Some(raw) => normalize_static_axis(dims.len(), raw)
-            .ok_or_else(|| format!("{op} axis {raw} out of bounds for rank {}", dims.len())),
-        None => Ok(default),
-    }
-}
-
-pub(super) fn infer_gather_result_type(
-    op: &str,
-    tensor_ty: &Type,
-    indices_ty: &Type,
-    axis: usize,
-) -> Result<Type, String> {
-    let Type::Tensor(tensor_dims, tensor_precision) = tensor_ty else {
-        return Err(format!("{op} expects tensor input, got {tensor_ty}"));
-    };
-    let Type::Tensor(index_dims, index_precision) = indices_ty else {
-        return Err(format!(
-            "{op} expects integer tensor indices, got {indices_ty}"
-        ));
-    };
-    if !index_precision.is_integer() {
-        return Err(format!(
-            "{op} expects integer tensor indices, got tensor[..., {}]",
-            index_precision.name()
-        ));
-    }
-    if axis >= tensor_dims.len() {
-        return Err(format!(
-            "{op} axis {axis} out of bounds for rank {}",
-            tensor_dims.len()
-        ));
-    }
-    let mut out_dims = tensor_dims[..axis].to_vec();
-    out_dims.extend(index_dims.clone());
-    out_dims.extend_from_slice(&tensor_dims[axis + 1..]);
-    Ok(Type::Tensor(out_dims, tensor_precision.clone()))
-}
-
-pub(super) fn infer_trace_result_type(
-    tensor_ty: &Type,
-    axis1: usize,
-    axis2: usize,
-    slot: SumResultSlot<'_>,
-    location: Option<TypeDiagnosticLocation>,
-    subst: &Subst,
-) -> Result<Type, String> {
-    let Type::Tensor(dims, precision) = tensor_ty else {
-        return Err(format!("trace expects tensor input, got {tensor_ty}"));
-    };
-    if axis1 >= dims.len() || axis2 >= dims.len() || axis1 == axis2 {
-        return Err(format!(
-            "trace expects distinct in-bounds axes, got {axis1} and {axis2} for rank {}",
-            dims.len()
-        ));
-    }
-    let out_dims = dims
-        .iter()
-        .enumerate()
-        .filter_map(|(index, dim)| ((index != axis1) && (index != axis2)).then_some(dim.clone()))
-        .collect();
-    let precision = default_sum_result_precision("trace", precision, subst)?;
-    Ok(publish_sum_result(
-        "trace", out_dims, precision, slot, location, subst,
-    ))
-}
-
-/// The result of `einsum(equation, left, right)` under [05-OP-33], for two
-/// settled tensor operands whose precisions the caller has already unified:
-/// each output label takes the extent of its first occurrence scanning left
-/// then right, at `sum_result(p, default(p))`. An equation outside the
-/// grammar, a label count that differs from an operand's rank, an output
-/// label absent from both inputs or repeated, and a rank-spread operand,
-/// whose rank no fixed equation can match at every instantiation, are each
-/// rejected; there is no undecided outcome.
-pub(super) fn infer_einsum_result_type(
-    equation: &str,
-    left: &Type,
-    right: &Type,
-    slot: SumResultSlot<'_>,
-    location: Option<TypeDiagnosticLocation>,
-    subst: &Subst,
-) -> Result<Type, String> {
-    let (Type::Tensor(left_dims, precision), Type::Tensor(right_dims, _)) = (left, right) else {
-        return Err(format!(
-            "einsum expects two tensor operands, got {left} and {right}"
-        ));
-    };
-    let grammar = || {
-        format!(
-            "einsum equation `{equation}` must match `[a-z]*,[a-z]*->[a-z]*` \
-             (spec/05-risc-primitives.md [05-OP-33])"
-        )
-    };
-    let Some((inputs, output)) = equation.split_once("->") else {
-        return Err(grammar());
-    };
-    let Some((left_labels, right_labels)) = inputs.split_once(',') else {
-        return Err(grammar());
-    };
-    if [left_labels, right_labels, output]
-        .iter()
-        .any(|labels| !labels.chars().all(|label| label.is_ascii_lowercase()))
-    {
-        return Err(grammar());
-    }
-    for (side, labels, dims) in [
-        ("left", left_labels, left_dims),
-        ("right", right_labels, right_dims),
-    ] {
-        if dims.iter().any(|dim| matches!(dim, Dim::Rank(_))) {
-            return Err(format!(
-                "einsum equation `{equation}` fixes the {side} operand's rank at {}, but \
-                 the operand has a rank spread, which denotes every rank \
-                 ([05-OP-33], [04-INF-6])",
-                labels.len()
-            ));
-        }
-        if labels.len() != dims.len() {
-            return Err(format!(
-                "einsum equation `{equation}` gives the {side} operand {} labels, but it \
-                 has rank {} ([05-OP-33])",
-                labels.len(),
-                dims.len()
-            ));
-        }
-    }
-    let mut dims = Vec::with_capacity(output.len());
-    for (index, label) in output.chars().enumerate() {
-        if output.chars().take(index).any(|earlier| earlier == label) {
-            return Err(format!(
-                "einsum output label `{label}` must occur exactly once in `{equation}` \
-                 ([05-OP-33])"
-            ));
-        }
-        let dim = left_labels
-            .chars()
-            .position(|candidate| candidate == label)
-            .map(|position| &left_dims[position])
-            .or_else(|| {
-                right_labels
-                    .chars()
-                    .position(|candidate| candidate == label)
-                    .map(|position| &right_dims[position])
-            })
-            .ok_or_else(|| {
-                format!(
-                    "einsum output label `{label}` must occur in an input of `{equation}` \
-                     ([05-OP-33])"
-                )
-            })?;
-        dims.push(dim.clone());
-    }
-    let precision = default_sum_result_precision("einsum", precision, subst)?;
-    Ok(publish_sum_result(
-        "einsum", dims, precision, slot, location, subst,
-    ))
-}
-
-/// How a `sum`-family call's result precision stands when the call is checked.
-pub(super) enum SumResultPrecision {
-    /// The result precision is known now.
-    Decided(TensorPrec),
-    /// The operand's precision is an inference variable whose dtypes have no
-    /// single result. The call publishes its own result type and a
-    /// [`crate::unify::DeferredOperandGate::SumResult`] decides it once the
-    /// variable binds, or at the declaration boundary.
-    Pending(TypeVar),
-}
-
-/// `sum_result(p, default(p))`, spec/04 §5.7.1: the result dtype of an
-/// operation that accumulates with the default sum accumulator (`sum`,
-/// `cumsum`, `trace`, `einsum`). i8 and i16 widen to i32; a dtype with no
-/// default accumulator, such as bool, is rejected.
-///
-/// Over a precision variable the result is decided now when one type covers
-/// every dtype the variable admits ([`bound_sum_result_precision`]).
-/// Otherwise it waits for the variable: inference may still bind it (a hole,
-/// or a lambda parameter's precision), and an authored binder is decided at
-/// the declaration boundary over every dtype its bound admits ([04-INF-6]).
-pub(super) fn default_sum_result_precision(
-    op: &str,
-    precision: &TensorPrec,
-    subst: &Subst,
-) -> Result<SumResultPrecision, String> {
-    match precision {
-        TensorPrec::Concrete(prim) => settled_sum_result_precision(op, &Type::Prim(*prim))
-            .map(|result| SumResultPrecision::Decided(TensorPrec::Concrete(result))),
-        TensorPrec::Var(variable) => Ok(match bound_sum_result_precision(op, *variable, subst) {
-            Ok(result) => SumResultPrecision::Decided(result),
-            Err(_) => SumResultPrecision::Pending(*variable),
-        }),
-    }
-}
-
-/// Where a waiting `sum`-family result gets the type it publishes.
-pub(crate) enum SumResultSlot<'a> {
-    /// The checked call: publish `dims` at a fresh precision variable, so a
-    /// consumer sees the result's shape before its precision is decided.
-    Fresh(&'a mut VarGen),
-    /// A deferred decision: publish the type the call already handed out.
-    Existing(&'a Type),
-}
-
-/// The result tensor a `sum`-family call publishes: `dims` at the decided
-/// precision, or, while the precision waits, a type from `slot` with a gate
-/// that unifies `dims` at the decided precision into it later.
-pub(super) fn publish_sum_result(
-    op: &str,
-    dims: Vec<Dim>,
-    precision: SumResultPrecision,
-    slot: SumResultSlot<'_>,
-    location: Option<TypeDiagnosticLocation>,
-    subst: &Subst,
-) -> Type {
-    match precision {
-        SumResultPrecision::Decided(precision) => Type::Tensor(dims, precision),
-        SumResultPrecision::Pending(variable) => {
-            let published = match slot {
-                SumResultSlot::Fresh(vg) => {
-                    Type::Tensor(dims.clone(), TensorPrec::Var(vg.fresh_tvar()))
-                }
-                SumResultSlot::Existing(published) => published.clone(),
-            };
-            subst.record_deferred_tensor_operand(
-                variable,
-                crate::unify::DeferredOperandGate::SumResult {
-                    op: op.to_string(),
-                    dims,
-                    result: Box::new(published.clone()),
-                    location,
-                },
-            );
-            published
-        }
-    }
-}
-
-/// `sum_result(p, default(p))` for a settled precision.
-pub(crate) fn settled_sum_result_precision(op: &str, resolved: &Type) -> Result<Prim, String> {
-    match resolved {
-        Type::Prim(prim) => prim
-            .default_reduce_sum_result_precision()
-            .map_err(|message| {
-                format!(
-                    "{op} expects a tensor precision with a default sum accumulator, so that its \
-                 result sum_result(p, default(p)) exists (spec/04-type-system.md §5.7.1), \
-                 got {}; {message}",
-                    prim.name()
-                )
-            }),
-        other => Err(format!(
-            "{op} expects a tensor precision with a default sum accumulator, so that its \
-             result sum_result(p, default(p)) exists (spec/04-type-system.md §5.7.1), \
-             got {other}"
-        )),
-    }
-}
-
-/// `sum_result(p, default(p))` over every dtype the precision variable admits
-/// ([04-INF-6]): the variable itself when sum_result keeps each one (a
-/// float, i32 or i64 bound), one concrete dtype when it maps them all there
-/// (`{i8, i16}` gives i32), and otherwise no single type.
-pub(crate) fn bound_sum_result_precision(
-    op: &str,
-    variable: TypeVar,
-    subst: &Subst,
-) -> Result<TensorPrec, String> {
-    let restriction = subst.tvar_restriction(variable);
-    let members = Prim::ACTIVE_FLOATS
-        .into_iter()
-        .chain(Prim::ACTIVE_INTEGERS)
-        .chain([Prim::Bool])
-        .filter(|prim| restriction.is_none_or(|bound| bound.admits(*prim)))
-        .collect::<Vec<_>>();
-    let results = members
-        .iter()
-        .map(|member| member.default_reduce_sum_result_precision().ok())
-        .collect::<Vec<_>>();
-    if members
-        .iter()
-        .zip(&results)
-        .all(|(member, result)| *result == Some(*member))
-    {
-        return Ok(TensorPrec::Var(variable));
-    }
-    if let Some((Some(first), rest)) = results.split_first()
-        && rest.iter().all(|result| *result == Some(*first))
-    {
-        return Ok(TensorPrec::Concrete(*first));
-    }
-    let bound = match restriction {
-        Some(bound) => format!("its bound `{}`", bound.bound_spelling()),
-        None => "an unbounded variable".to_string(),
-    };
-    Err(format!(
-        "{op} over a tensor whose precision is a type variable has no single result dtype, \
-         because spec/04 §5.7.1 sums an i8 or i16 operand in i32 and returns that i32 total \
-         but returns i32, i64 and the floats at their own dtype, so sum_result(p, default(p)) \
-         is not one dtype across the dtypes {bound} admits ([04-INF-6]); bound the variable to dtypes that \
-         share one result (`Float`, `{{i32, i64}}`, or `{{i8, i16}}` with an i32 result), \
-         or cast the operand to a concrete dtype and declare the widened result"
-    ))
-}
-
-/// The spec/04 §5.7.1 repair note for a mismatch between a dtype `p` that
-/// `sum`, `cumsum`, `trace` and `einsum` widen (i8, i16) and the dtype they
-/// return for it (i32), in either order. `op` names the operation when the
-/// mismatched expression is known to be one; otherwise the note names all
-/// four conditionally. A function type compares its results, so a def whose
-/// body mismatches its declared signature gets the note too.
-pub(crate) fn sum_result_widening_note(
-    op: Option<&str>,
-    left: &Type,
-    right: &Type,
-) -> Option<String> {
-    fn result_prim(ty: &Type) -> Option<Prim> {
-        match ty {
-            Type::Prim(prim) | Type::Tensor(_, TensorPrec::Concrete(prim)) => Some(*prim),
-            Type::Fn(_, result) => result_prim(result),
-            _ => None,
-        }
-    }
-    let (left, right) = (result_prim(left)?, result_prim(right)?);
-    let widened = |operand: Prim, result: Prim| {
-        operand.default_reduce_sum_result_precision() == Ok(result) && operand != result
-    };
-    let (operand, result) = if widened(left, right) {
-        (left.name(), right.name())
-    } else if widened(right, left) {
-        (right.name(), left.name())
-    } else {
-        return None;
-    };
-    Some(match op {
-        Some(op @ ("sum" | "einsum")) => format!(
-            "`{op}` over {operand} returns {result}, because spec/04 §5.7.1 sums {operand} in \
-             {result} and returns that {result} total; declare the result as {result} (or pass \
-             `accumulator=i64` and declare i64), or narrow it explicitly with \
-             `cast(..., {operand})`"
-        ),
-        Some(op) => format!(
-            "`{op}` over {operand} returns {result}, because spec/04 §5.7.1 sums {operand} in \
-             {result} and returns that {result} total; declare the result as {result}, or \
-             narrow it explicitly with `cast(..., {operand})`"
-        ),
-        None => format!(
-            "if the {result} value is the result of `sum`, `cumsum`, `trace` or `einsum` over \
-             {operand}, spec/04 §5.7.1 widened it, because those operations sum {operand} in \
-             {result} and return that {result} total; declare the result as {result} (or, for \
-             `sum` and `einsum`, pass `accumulator=i64` and declare i64), or narrow it \
-             explicitly with `cast(..., {operand})`"
-        ),
-    })
-}
-
-/// spec/04 §5.7.1's permitted-pairs table for an explicit accumulator:
-/// the result dtype of `operation` (`matmul`, `sum` or `einsum`) over
-/// operand dtype `operand` accumulating in `accumulator`, or the diagnostic
-/// for a pair the table omits. `sum` and `einsum` return
-/// `sum_result(p, a)`; `matmul` returns its operand dtype.
-pub(crate) fn explicit_accumulator_result(
-    operation: &str,
-    operand: Prim,
-    accumulator: Prim,
-) -> Result<Prim, String> {
-    use chelis_numeric_core::prim::Prim::*;
-    let permitted: &[Prim] = match (operation, operand) {
-        (_, Bf16 | F16 | F32) => &[F32, F64],
-        (_, F64) => &[F64],
-        ("matmul", _) => &[],
-        (_, Int8 | Int16 | Int32) => &[Int32, Int64],
-        (_, Int64) => &[Int64],
-        _ => &[],
-    };
-    if permitted.contains(&accumulator) {
-        return Ok(match (operation, operand) {
-            ("matmul", _) | (_, Bf16 | F16) => operand,
-            _ => accumulator,
-        });
-    }
-    let names = permitted
-        .iter()
-        .map(|prim| format!("`accumulator={}`", prim.name()))
-        .collect::<Vec<_>>();
-    if names.is_empty() {
-        return Err(format!(
-            "`{operation}` over {} admits no accumulator (spec/04 §5.7.1)",
-            operand.name()
-        ));
-    }
-    let reason = if accumulator.is_integer() != operand.is_integer()
-        || accumulator.is_float() != operand.is_float()
-    {
-        "an accumulator has its operand's numeric kind"
-    } else {
-        "an accumulator is at least as wide as its operand and its default"
-    };
-    Err(format!(
-        "`{operation}` over {} does not admit `accumulator={}`, because {reason} \
-         (spec/04 §5.7.1); omit the argument to accumulate in the default, or write {}",
-        operand.name(),
-        accumulator.name(),
-        names.join(" or ")
-    ))
-}
-
-/// The spec/04 §5.7.1 note for a binder bounded to admit i8 or i16 that a
-/// body instantiated at `prim`, the i32 that `sum`, `cumsum`, `trace` and
-/// `einsum` return for those operands.
-pub(crate) fn sum_result_bound_note(admits_small_integer: bool, prim: Prim) -> Option<String> {
-    (admits_small_integer && prim == Prim::Int32).then(|| {
-        "if this i32 is the result of `sum`, `cumsum`, `trace` or `einsum` over i8 or i16, \
-         spec/04 §5.7.1 widened it, because those operations sum i8 and i16 in i32 and return \
-         that i32 total; declare that result as i32 (or, for `sum` and `einsum`, pass \
-         `accumulator=i64` and declare i64), or bound the binder to dtypes that share one \
-         sum result"
-            .to_string()
-    })
 }
 
 /// The `sum`-family operation `expr` evaluates to directly: a call to `sum`,
@@ -1184,7 +679,11 @@ pub(super) struct DiagonalExtent {
 /// Callers that need the bound read it through [`diagonal_result_bound`], which
 /// maps the pair position back onto the operand's axes. Both readers go through
 /// this one function so the eager and deferred shape routes cannot drift.
-pub(super) fn select_diagonal_extent(a: &Dim, b: &Dim, subst: &Subst) -> DiagonalExtent {
+pub(super) fn select_diagonal_extent(
+    a: &Dim,
+    b: &Dim,
+    subst: &Subst<ErrorWitness>,
+) -> DiagonalExtent {
     let left = subst.observe_dim(a);
     let right = subst.observe_dim(b);
     let same_name = left.name().is_some() && left.name() == right.name();
@@ -1217,10 +716,10 @@ pub(super) fn select_diagonal_extent(a: &Dim, b: &Dim, subst: &Subst) -> Diagona
 /// axis is not the source axis: `diagonal` removes `axis2`, so a retained
 /// `axis1` after it shifts down by one.
 pub(super) fn diagonal_result_bound(
-    tensor_ty: &Type,
+    tensor_ty: &Type<ErrorWitness>,
     axis1: usize,
     axis2: usize,
-    subst: &Subst,
+    subst: &Subst<ErrorWitness>,
 ) -> Option<(usize, usize, i64)> {
     let Type::Tensor(dims, _) = tensor_ty else {
         return None;
@@ -1235,11 +734,11 @@ pub(super) fn diagonal_result_bound(
 }
 
 pub(super) fn infer_diagonal_result_type(
-    tensor_ty: &Type,
+    tensor_ty: &Type<ErrorWitness>,
     axis1: usize,
     axis2: usize,
-    subst: &Subst,
-) -> Result<Type, String> {
+    subst: &Subst<ErrorWitness>,
+) -> Result<Type<ErrorWitness>, String> {
     let Type::Tensor(dims, precision) = tensor_ty else {
         return Err(format!("diagonal expects tensor input, got {tensor_ty}"));
     };
@@ -1287,7 +786,7 @@ pub(super) fn macro_source(expr: &deep::Expr) -> Option<String> {
 pub(super) struct AliasExpansionSession<'a> {
     adt_reg: &'a AdtRegistry,
     vg: &'a mut VarGen,
-    cache: Vec<(String, Vec<NominalArg>, Type)>,
+    cache: Vec<(String, Vec<NominalArg<ErrorWitness>>, Type<ErrorWitness>)>,
 }
 
 impl<'a> AliasExpansionSession<'a> {
@@ -1299,15 +798,19 @@ impl<'a> AliasExpansionSession<'a> {
         }
     }
 
-    pub(super) fn resolve(&mut self, ty: &Type) -> Type {
+    pub(super) fn resolve(&mut self, ty: &Type<ErrorWitness>) -> Type<ErrorWitness> {
         let mut seen = UnordSet::new();
         self.resolve_inner(ty, &mut seen)
     }
 
-    fn resolve_inner(&mut self, ty: &Type, seen: &mut UnordSet<String>) -> Type {
+    fn resolve_inner(
+        &mut self,
+        ty: &Type<ErrorWitness>,
+        seen: &mut UnordSet<String>,
+    ) -> Type<ErrorWitness> {
         match ty {
             Type::Adt(name, args) => {
-                let resolved_args: Vec<Type> = args
+                let resolved_args: Vec<Type<ErrorWitness>> = args
                     .iter()
                     .map(|arg| self.resolve_inner(arg, seen))
                     .collect();
@@ -1331,8 +834,10 @@ impl<'a> AliasExpansionSession<'a> {
                 let Some(alias) = self.adt_reg.resolve_alias(name) else {
                     return Type::adt(name.clone(), resolved_args);
                 };
-                let Some((type_subst, dim_subst)) =
-                    crate::adt::nominal_substitutions(&alias.param_args, &nominal_args)
+                let Some(crate::adt::NominalSubstitutions {
+                    types: type_subst,
+                    dimensions: dim_subst,
+                }) = crate::adt::nominal_substitutions(&alias.param_args, &nominal_args)
                 else {
                     return Type::adt(name.clone(), resolved_args);
                 };
@@ -1348,30 +853,30 @@ impl<'a> AliasExpansionSession<'a> {
                 // signatures or inference levels.
                 let protected_tvars: UnordSet<_> = resolved_args
                     .iter()
-                    .flat_map(crate::env::free_tvars)
+                    .flat_map(chelis_type_core::scheme::free_tvars)
                     .collect();
                 let protected_dvars: UnordSet<_> = resolved_args
                     .iter()
-                    .flat_map(crate::env::free_dvars)
+                    .flat_map(chelis_type_core::scheme::free_dvars)
                     .collect();
                 let protected_rvars: UnordSet<_> = resolved_args
                     .iter()
-                    .flat_map(crate::env::free_rvars)
+                    .flat_map(chelis_type_core::scheme::free_rvars)
                     .collect();
                 let mut renaming = Subst::new();
-                for var in crate::env::free_tvars(&substituted) {
+                for var in chelis_type_core::scheme::free_tvars(&substituted) {
                     if !protected_tvars.contains(&var) {
                         renaming
                             .insert_type(var, self.vg.fresh_type())
                             .expect("fresh alias-body type renaming is valid");
                     }
                 }
-                for var in crate::env::free_dvars(&substituted) {
+                for var in chelis_type_core::scheme::free_dvars(&substituted) {
                     if !protected_dvars.contains(&var) {
                         renaming.insert_dim(var, self.vg.fresh_dim());
                     }
                 }
-                for var in crate::env::free_rvars(&substituted) {
+                for var in chelis_type_core::scheme::free_rvars(&substituted) {
                     if !protected_rvars.contains(&var) {
                         renaming.insert_rank(var, vec![Dim::Rank(self.vg.fresh_rvar())]);
                     }
@@ -1406,8 +911,10 @@ impl<'a> AliasExpansionSession<'a> {
                 let Some(alias) = self.adt_reg.resolve_alias(name) else {
                     return Type::kinded_adt(name.clone(), resolved_args);
                 };
-                let Some((type_subst, dim_subst)) =
-                    crate::adt::nominal_substitutions(&alias.param_args, &resolved_args)
+                let Some(crate::adt::NominalSubstitutions {
+                    types: type_subst,
+                    dimensions: dim_subst,
+                }) = crate::adt::nominal_substitutions(&alias.param_args, &resolved_args)
                 else {
                     return Type::kinded_adt(name.clone(), resolved_args);
                 };
@@ -1417,12 +924,12 @@ impl<'a> AliasExpansionSession<'a> {
                 let protected_tvars = resolved_args
                     .iter()
                     .filter_map(NominalArg::as_type)
-                    .flat_map(crate::env::free_tvars)
+                    .flat_map(chelis_type_core::scheme::free_tvars)
                     .collect::<UnordSet<_>>();
                 let protected_dvars = resolved_args
                     .iter()
                     .flat_map(|argument| match argument {
-                        NominalArg::Type(ty) => crate::env::free_dvars(ty),
+                        NominalArg::Type(ty) => chelis_type_core::scheme::free_dvars(ty),
                         NominalArg::Dimension(Dim::Var(var)) => vec![*var],
                         NominalArg::Dimension(_) => Vec::new(),
                     })
@@ -1430,25 +937,25 @@ impl<'a> AliasExpansionSession<'a> {
                 let protected_rvars = resolved_args
                     .iter()
                     .flat_map(|argument| match argument {
-                        NominalArg::Type(ty) => crate::env::free_rvars(ty),
+                        NominalArg::Type(ty) => chelis_type_core::scheme::free_rvars(ty),
                         NominalArg::Dimension(Dim::Rank(var)) => vec![*var],
                         NominalArg::Dimension(_) => Vec::new(),
                     })
                     .collect::<UnordSet<_>>();
                 let mut renaming = Subst::new();
-                for var in crate::env::free_tvars(&substituted) {
+                for var in chelis_type_core::scheme::free_tvars(&substituted) {
                     if !protected_tvars.contains(&var) {
                         renaming
                             .insert_type(var, self.vg.fresh_type())
                             .expect("fresh alias-body type renaming is valid");
                     }
                 }
-                for var in crate::env::free_dvars(&substituted) {
+                for var in chelis_type_core::scheme::free_dvars(&substituted) {
                     if !protected_dvars.contains(&var) {
                         renaming.insert_dim(var, self.vg.fresh_dim());
                     }
                 }
-                for var in crate::env::free_rvars(&substituted) {
+                for var in chelis_type_core::scheme::free_rvars(&substituted) {
                     if !protected_rvars.contains(&var) {
                         renaming.insert_rank(var, vec![Dim::Rank(self.vg.fresh_rvar())]);
                     }
@@ -1482,7 +989,11 @@ impl<'a> AliasExpansionSession<'a> {
     }
 }
 
-pub(super) fn resolve_type_aliases(ty: &Type, adt_reg: &AdtRegistry, vg: &mut VarGen) -> Type {
+pub(super) fn resolve_type_aliases(
+    ty: &Type<ErrorWitness>,
+    adt_reg: &AdtRegistry,
+    vg: &mut VarGen,
+) -> Type<ErrorWitness> {
     AliasExpansionSession::new(adt_reg, vg).resolve(ty)
 }
 
@@ -1493,14 +1004,17 @@ pub(super) fn resolve_type_aliases(ty: &Type, adt_reg: &AdtRegistry, vg: &mut Va
 /// `Option<Type>`: `Some(ty)` means rejected, with `ty` recorded as the call's
 /// type, and `None` means the check had nothing to say and the caller
 /// continues to the next one.
-pub(super) fn reject(errors: &mut DiagnosticSink<'_>, error: CheckError) -> Option<Type> {
+pub(super) fn reject(
+    errors: &mut DiagnosticSink<'_>,
+    error: CheckError,
+) -> Option<Type<ErrorWitness>> {
     Some(report(errors, error))
 }
 
 // ── Tier-2 rank-polymorphism Body Discipline ─────────────────────
 
 /// True if any tensor inside `ty` carries a `Dim::Rank` (a rank variable).
-pub(super) fn type_contains_rank(ty: &Type) -> bool {
+pub(super) fn type_contains_rank(ty: &Type<ErrorWitness>) -> bool {
     match ty {
         Type::Tensor(dims, _) => dims.iter().any(|d| matches!(d, Dim::Rank(_))),
         Type::Fn(args, ret) => args.iter().any(type_contains_rank) || type_contains_rank(ret),
@@ -1546,7 +1060,7 @@ pub(super) fn is_exact_op35_wrapper(name: &str) -> bool {
 /// whose shape relations are not yet expressible through ordinary inference.
 fn install_exact_op35_dependency_contracts(
     name: &str,
-    declared_ty: Option<&Type>,
+    declared_ty: Option<&Type<ErrorWitness>>,
     env: &mut Env,
     vg: &mut VarGen,
 ) {
@@ -1569,7 +1083,7 @@ fn install_exact_op35_dependency_contracts(
         let tensor = vg.fresh_tvar();
         env.bind(
             helper.to_string(),
-            Scheme {
+            Scheme::<ErrorWitness> {
                 result_origin: None,
                 constraints: vec![],
                 tvars: vec![tensor],
@@ -1597,8 +1111,8 @@ fn install_exact_op35_dependency_contracts(
 /// inferred and generalized together.
 pub(super) struct DeferredRecursiveBinding {
     pub(super) name: String,
-    pub(super) ty: Type,
-    pub(super) owned_contracts: Vec<crate::unify::CollectionContractId>,
+    pub(super) ty: Type<ErrorWitness>,
+    pub(super) owned_contracts: Vec<chelis_type_core::unify::CollectionContractId>,
     /// The authored binders of the member's declaration, so [04-LIN-10]'s
     /// diagnostic can name the parameter a key reached.
     pub(super) binder_names: UnordMap<TypeVar, String>,
@@ -1608,9 +1122,9 @@ pub(super) struct DeferredRecursiveBinding {
 pub(super) fn generalize_deferred_recursive_binding(
     binding: DeferredRecursiveBinding,
     env: &Env,
-    subst: &Subst,
+    subst: &Subst<ErrorWitness>,
     product: &mut InferenceProduct,
-) -> (String, Scheme) {
+) -> (String, Scheme<ErrorWitness>) {
     let mut scheme =
         env.generalize_with_collection_contracts(&binding.ty, subst, &binding.owned_contracts);
     if let Some(raw) = product.group_result_origins.remove(&binding.name) {
@@ -1631,7 +1145,7 @@ pub(super) fn infer_top_level(
     expr: &deep::Expr,
     env: &mut Env,
     vg: &mut VarGen,
-    subst: &mut Subst,
+    subst: &mut Subst<ErrorWitness>,
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
     product: &mut InferenceProduct,
@@ -1678,7 +1192,7 @@ pub(super) fn infer_top_level(
         let ordinary_level = (!defer_recursive_binding).then(|| subst.enter_level(vg));
         let collection_contract_mark = subst.collection_contract_mark();
         let recursive_expected =
-            recursion::PreparedRecursiveExpected::prepare(recursive_expected, env, vg, subst);
+            recursion::PreparedRecursiveExpected::prepare(recursive_expected, vg, subst);
         let provisional_recursive_type = recursive_expected.expected_type();
 
         // Save declared type from defsig BEFORE inferring (it may get overwritten)
@@ -1764,7 +1278,7 @@ pub(super) fn infer_top_level(
 
         let body_diagnostic_checkpoint = errors.checkpoint();
         if let Some(Type::Fn(params, _)) = &declared_ty {
-            subst.protect_dimensions(params.iter().flat_map(crate::env::free_dvars));
+            subst.protect_dimensions(params.iter().flat_map(chelis_type_core::scheme::free_dvars));
         }
         // WS-A7: when the body is a bare-arg `(fn (params) body)` and the
         // declared signature gives concrete param types, seed the body's
@@ -2109,7 +1623,7 @@ pub(super) fn infer_top_level(
 
 /// The literal-dtype repair note for a declaration's body: a value's own
 /// literal, or a function's literal result body.
-fn declared_literal_hint(body: &deep::Expr, declared: &Type) -> Option<String> {
+fn declared_literal_hint(body: &deep::Expr, declared: &Type<ErrorWitness>) -> Option<String> {
     match (declared, stamped_parts(body)) {
         (Type::Fn(_, result), Some((DeepTag::Fn, _, [_, function_body]))) => {
             super::literal_width::literal_dtype_hint(function_body, result)

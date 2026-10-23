@@ -3,7 +3,8 @@
 use super::*;
 use chelis_deep::node::Node;
 use chelis_deep::role::{ChildStampRole, child_stamp_role};
-use chelis_types::types::{NominalArg, TensorPrec, Type, TypeVar};
+use chelis_type_core::{NominalArg, TensorPrec, Type, TypeVar};
+use chelis_types::errors::ErrorWitness;
 use chelis_types::{DeclaredSignature, DeclaredTypeSurface};
 use std::collections::VecDeque;
 
@@ -50,7 +51,7 @@ impl Capacity {
 struct Declaration {
     params: BTreeMap<TypeVar, usize>,
     names: BTreeMap<TypeVar, String>,
-    bodies: Vec<Type>,
+    bodies: Vec<Type<ErrorWitness>>,
     nominal: bool,
 }
 
@@ -67,7 +68,7 @@ struct Closure {
 impl Closure {
     fn new(surface: &DeclaredTypeSurface) -> Self {
         fn params(
-            args: &[NominalArg],
+            args: &[NominalArg<ErrorWitness>],
             names: &[String],
         ) -> (BTreeMap<TypeVar, usize>, BTreeMap<TypeVar, String>) {
             let mut positions = BTreeMap::new();
@@ -131,7 +132,7 @@ impl Closure {
         // Every changed transfer function schedules its consumers. The finite
         // sets only grow: no recursion depth limit and no cycle-as-empty exit.
         let mut consumers: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-        fn dependencies(ty: &Type, out: &mut BTreeSet<String>) {
+        fn dependencies(ty: &Type<ErrorWitness>, out: &mut BTreeSet<String>) {
             match ty {
                 Type::Adt(name, args) => {
                     out.insert(name.clone());
@@ -217,7 +218,7 @@ impl Closure {
 
     fn capacity(
         &self,
-        ty: &Type,
+        ty: &Type<ErrorWitness>,
         bare: bool,
         params: &BTreeMap<TypeVar, usize>,
         names: &BTreeMap<TypeVar, String>,
@@ -284,7 +285,7 @@ impl Closure {
     fn application(
         &self,
         name: &str,
-        args: &[Option<&Type>],
+        args: &[Option<&Type<ErrorWitness>>],
         bare: bool,
         params: &BTreeMap<TypeVar, usize>,
         names: &BTreeMap<TypeVar, String>,

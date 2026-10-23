@@ -18,13 +18,14 @@
 //! A row whose scheme yields no generatable call fails, rather than being
 //! skipped.
 
+use chelis_types::errors::ErrorWitness;
 use std::collections::BTreeSet;
 
 use chelis_deep::Expr;
 use chelis_numeric_core::prim::Prim;
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str as parse_surf;
-use chelis_types::types::{TensorPrec, Type, TypeVar};
+use chelis_type_core::{TensorPrec, Type, TypeVar};
 use chelis_types::{BUILTINS, ShapeClass, builtin_env, check_ir_program};
 
 const DTYPES: [&str; 3] = ["f32", "i32", "bool"];
@@ -76,13 +77,13 @@ enum Slot {
     Operand(TypeVar),
 }
 
-fn tensor_precision_vars(ty: &Type, out: &mut BTreeSet<TypeVar>) {
+fn tensor_precision_vars(ty: &Type<ErrorWitness>, out: &mut BTreeSet<TypeVar>) {
     match ty {
-        Type::Tensor(_, TensorPrec::Var(var)) => {
+        Type::<ErrorWitness>::Tensor(_, TensorPrec::Var(var)) => {
             out.insert(*var);
         }
-        Type::Ref(inner) => tensor_precision_vars(inner, out),
-        Type::Fn(params, ret) => {
+        Type::<ErrorWitness>::Ref(inner) => tensor_precision_vars(inner, out),
+        Type::<ErrorWitness>::Fn(params, ret) => {
             params
                 .iter()
                 .for_each(|param| tensor_precision_vars(param, out));
@@ -97,7 +98,7 @@ fn slots(name: &str) -> Vec<Slot> {
     let scheme = env
         .lookup(name)
         .unwrap_or_else(|| panic!("`{name}` has a BUILTINS row but no scheme"));
-    let Type::Fn(params, _) = &scheme.body else {
+    let Type::<ErrorWitness>::Fn(params, _) = &scheme.body else {
         panic!("`{name}`: scheme is not a function, so no call can be generated");
     };
     let mut precision = BTreeSet::new();
@@ -106,16 +107,18 @@ fn slots(name: &str) -> Vec<Slot> {
         .iter()
         .map(|param| {
             let param = match param {
-                Type::Ref(inner) => inner.as_ref(),
+                Type::<ErrorWitness>::Ref(inner) => inner.as_ref(),
                 other => other,
             };
             match param {
-                Type::Prim(prim) => Slot::Literal(prim_literal(prim).unwrap_or_else(|| {
-                    panic!("`{name}`: no generatable literal for a {prim:?} argument")
-                })),
-                Type::Tensor(_, TensorPrec::Var(var)) => Slot::Tensor(*var),
-                Type::Var(var) if precision.contains(var) => Slot::Scalar(*var),
-                Type::Var(var) => Slot::Operand(*var),
+                Type::<ErrorWitness>::Prim(prim) => {
+                    Slot::Literal(prim_literal(prim).unwrap_or_else(|| {
+                        panic!("`{name}`: no generatable literal for a {prim:?} argument")
+                    }))
+                }
+                Type::<ErrorWitness>::Tensor(_, TensorPrec::Var(var)) => Slot::Tensor(*var),
+                Type::<ErrorWitness>::Var(var) if precision.contains(var) => Slot::Scalar(*var),
+                Type::<ErrorWitness>::Var(var) => Slot::Operand(*var),
                 other => panic!("`{name}`: no generatable argument for {other:?}"),
             }
         })

@@ -83,7 +83,10 @@ pub(super) fn non_finite_literal_error(atom: &deep::Atom, prim: Prim) -> CheckEr
 /// the note names the suffixed spelling. When a literal stands inside the
 /// value, a declaration states no dtype for it: only a literal that is the
 /// whole initializer takes the declared dtype.
-pub(super) fn literal_dtype_hint(value: &deep::Expr, declared: &Type) -> Option<String> {
+pub(super) fn literal_dtype_hint(
+    value: &deep::Expr,
+    declared: &Type<ErrorWitness>,
+) -> Option<String> {
     let Type::Prim(prim) = declared else {
         return None;
     };

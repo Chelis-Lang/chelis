@@ -1337,7 +1337,7 @@ fn signature_entry_inventory(
     signature: &chelis_types::infer::FunctionSignatureInference,
     c_parameters: &[String],
 ) -> Vec<EntryGuardReceipt> {
-    use chelis_types::types::{Dim, Type};
+    use chelis_type_core::{Dim, Type};
     let ty = signature
         .authored_signature_type
         .as_ref()

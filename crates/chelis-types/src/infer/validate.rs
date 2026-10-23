@@ -5,6 +5,7 @@
 
 use super::shape_honesty::*;
 use super::*;
+use crate::errors::ErrorWitness;
 use chelis_deep::cons_spine::{ConsSpine, ConsSpineTail};
 
 #[cfg(test)]
@@ -967,7 +968,7 @@ fn reject_unknown_metadata_forms(expr: &deep::Expr, errors: &mut DiagnosticSink<
 ///
 /// Lowering consumers use this boundary when they need the checker's
 /// alias-resolved ADT field types without reparsing authored declarations.
-pub fn type_to_deep_expr(ty: &Type) -> deep::Expr {
+pub fn type_to_deep_expr(ty: &Type<ErrorWitness>) -> deep::Expr {
     type_to_deep_expr_with(ty, stamped_node_expr, None)
         .expect("recovering type materialization is infallible")
 }
@@ -975,7 +976,7 @@ pub fn type_to_deep_expr(ty: &Type) -> deep::Expr {
 /// Required aliases reject recovery types, and declaration-owned substitutions
 /// retain the actual checked syntax instead of reminting its variable names.
 pub(crate) fn type_to_deep_expr_with_arguments(
-    ty: &Type,
+    ty: &Type<ErrorWitness>,
     types: &UnordMap<TypeVar, deep::Expr>,
     dimensions: &UnordMap<DimVar, deep::Expr>,
 ) -> Result<deep::Expr, String> {
@@ -989,7 +990,7 @@ type ActualSyntax<'a> = (
 );
 
 fn type_to_deep_expr_with(
-    ty: &Type,
+    ty: &Type<ErrorWitness>,
     make_node: NodeBuilder,
     actuals: Option<ActualSyntax<'_>>,
 ) -> Result<deep::Expr, String> {
@@ -1716,7 +1717,7 @@ pub(super) fn totality_invariant_traces(sig: &SignatureInferenceMetadata) -> Vec
 }
 
 /// True if `ty` is, or structurally contains, a `Type::Error`.
-pub(super) fn type_carries_error(ty: &Type) -> bool {
+pub(super) fn type_carries_error(ty: &Type<ErrorWitness>) -> bool {
     match ty {
         Type::Error(_) => true,
         Type::Fn(args, ret) => args.iter().any(type_carries_error) || type_carries_error(ret),

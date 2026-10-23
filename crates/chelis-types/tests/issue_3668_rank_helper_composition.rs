@@ -3,11 +3,11 @@
 
 use chelis_deep::Expr;
 use chelis_surf::{desugar::desugar_program, parser::parse_str};
+use chelis_type_core::Type;
 use chelis_types::errors::CheckErrorKind;
 use chelis_types::infer::{
     FunctionSignatureInference, ParamSignatureInference, SignatureInferenceMetadata,
 };
-use chelis_types::types::Type;
 use chelis_types::{
     CheckedProgram, InferResult, TypeEnv, build_compiled_library_context,
     build_compiled_library_context_with_base, check_ir_program, check_ir_with_context,

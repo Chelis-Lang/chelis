@@ -8,6 +8,7 @@ use chelis_surf::ast::{
     PropertyOption, TypeExpr, TypeInvariant, Variant, VariantFields,
 };
 use chelis_syntax_host::module_identity::validate_module_path;
+use chelis_types::errors::ErrorWitness;
 use chelis_unord::{UnordMap, UnordSet};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -10347,10 +10348,11 @@ impl ShellTypeVariableRenamer {
 mod shell_type_variable_canonicalization_tests {
     use super::{canonical_shell_scheme, canonical_shell_type_repr};
     use chelis_shell_core::{TypeVariableDomain, TypeVariableRestriction};
-    use chelis_types::infer::type_to_deep_expr;
-    use chelis_types::types::{
+    use chelis_type_core::{
         Dim, DimVar, RankVar, Scheme, TensorPrec, Type, TypeVar, TypeVarRestriction,
     };
+    use chelis_types::errors::ErrorWitness;
+    use chelis_types::infer::type_to_deep_expr;
 
     #[test]
     fn key_operation_relations_are_part_of_published_scheme_identity() {
@@ -10371,7 +10373,7 @@ mod shell_type_variable_canonicalization_tests {
         }
     }
 
-    fn representative_type(t_first: u32, t_second: u32, dim: u32, rank: u32) -> Type {
+    fn representative_type(t_first: u32, t_second: u32, dim: u32, rank: u32) -> Type<ErrorWitness> {
         Type::function(
             vec![
                 Type::Var(TypeVar(t_first)),
@@ -10530,9 +10532,9 @@ mod shell_type_variable_canonicalization_tests {
     /// alpha-canonical identities as the exported function type.
     #[test]
     fn alpha_equivalent_obligated_schemes_canonicalize_identically() {
-        use chelis_types::types::CollectionConstraint;
+        use chelis_type_core::CollectionConstraint;
 
-        fn checked_len(element: u32) -> Scheme {
+        fn checked_len(element: u32) -> Scheme<ErrorWitness> {
             Scheme {
                 result_origin: None,
                 tvars: vec![TypeVar(element)],
@@ -10575,7 +10577,7 @@ mod shell_type_variable_canonicalization_tests {
 
     #[test]
     fn published_collection_obligations_are_sorted_and_deduplicated() {
-        use chelis_types::types::CollectionConstraint;
+        use chelis_type_core::CollectionConstraint;
 
         let append = CollectionConstraint::Append {
             list: Type::Var(TypeVar(0)),
@@ -10612,7 +10614,7 @@ mod shell_type_variable_canonicalization_tests {
 
     #[test]
     fn hidden_collection_contract_variables_are_rejected() {
-        use chelis_types::types::CollectionConstraint;
+        use chelis_type_core::CollectionConstraint;
 
         let scheme = Scheme {
             result_origin: None,
@@ -10641,13 +10643,13 @@ mod shell_type_variable_canonicalization_tests {
     /// must not be rejected.
     #[test]
     fn a_changed_obligation_changes_the_exported_identity() {
-        use chelis_types::types::CollectionConstraint;
+        use chelis_type_core::CollectionConstraint;
 
         let body = Type::function(
             vec![Type::Var(TypeVar(4))],
             Type::Prim(chelis_numeric_core::prim::Prim::Int64),
         );
-        let obligated = |constraint: CollectionConstraint| Scheme {
+        let obligated = |constraint: CollectionConstraint<ErrorWitness>| Scheme {
             result_origin: None,
             tvars: vec![TypeVar(4)],
             tvar_restrictions: vec![],
@@ -10740,25 +10742,25 @@ fn exported_function_type(
 /// operation and canonical operand/result types and deduplicated, matching the
 /// strict CHB trust-boundary invariant.
 fn canonical_shell_scheme(
-    scheme: &chelis_types::types::Scheme,
+    scheme: &chelis_type_core::Scheme<ErrorWitness>,
 ) -> Result<CanonicalExportedType, String> {
+    use chelis_type_core::TypeVarRestriction;
     use chelis_types::infer::type_to_deep_expr;
-    use chelis_types::types::TypeVarRestriction;
 
     let mut renamer = SchemeVariableRenamer::default();
     let canonical_body = renamer.rewrite_type(&scheme.body);
-    let body_tvars = chelis_types::env::free_tvars(&scheme.body)
+    let body_tvars = chelis_type_core::free_tvars(&scheme.body)
         .into_iter()
         .collect::<UnordSet<_>>();
-    let body_dvars = chelis_types::env::free_dvars(&scheme.body)
+    let body_dvars = chelis_type_core::free_dvars(&scheme.body)
         .into_iter()
         .collect::<UnordSet<_>>();
-    let body_rvars = chelis_types::env::free_rvars(&scheme.body)
+    let body_rvars = chelis_type_core::free_rvars(&scheme.body)
         .into_iter()
         .collect::<UnordSet<_>>();
     for constraint in &scheme.constraints {
         for carried in constraint.carried_types() {
-            for variable in chelis_types::env::free_tvars(carried) {
+            for variable in chelis_type_core::free_tvars(carried) {
                 if !body_tvars.contains(&variable) {
                     return Err(format!(
                         "checker scheme collection contract names type variable ?{} absent from its body",
@@ -10766,7 +10768,7 @@ fn canonical_shell_scheme(
                     ));
                 }
             }
-            for variable in chelis_types::env::free_dvars(carried) {
+            for variable in chelis_type_core::free_dvars(carried) {
                 if !body_dvars.contains(&variable) {
                     return Err(format!(
                         "checker scheme collection contract names dimension variable d{} absent from its body",
@@ -10774,7 +10776,7 @@ fn canonical_shell_scheme(
                     ));
                 }
             }
-            for variable in chelis_types::env::free_rvars(carried) {
+            for variable in chelis_type_core::free_rvars(carried) {
                 if !body_rvars.contains(&variable) {
                     return Err(format!(
                         "checker scheme collection contract names rank variable r{} absent from its body",
@@ -10855,11 +10857,11 @@ fn canonical_shell_scheme(
 
 /// Preserve the rule's fixed fields and the shared scheme variable names.
 fn render_collection_obligation(
-    constraint: &chelis_types::types::CollectionConstraint,
+    constraint: &chelis_type_core::CollectionConstraint<ErrorWitness>,
     renamer: &mut SchemeVariableRenamer,
 ) -> CollectionObligation {
+    use chelis_type_core::CollectionConstraint;
     use chelis_types::infer::type_to_deep_expr;
-    use chelis_types::types::CollectionConstraint;
 
     let mut render = |ty| {
         let canonical = type_to_deep_expr(&renamer.rewrite_type(ty));
@@ -10948,14 +10950,17 @@ fn render_collection_obligation(
 
 #[derive(Default)]
 struct SchemeVariableRenamer {
-    type_vars: UnordMap<chelis_types::types::TypeVar, chelis_types::types::TypeVar>,
-    dim_vars: UnordMap<chelis_types::types::DimVar, chelis_types::types::DimVar>,
-    rank_vars: UnordMap<chelis_types::types::RankVar, chelis_types::types::RankVar>,
+    type_vars: UnordMap<chelis_type_core::TypeVar, chelis_type_core::TypeVar>,
+    dim_vars: UnordMap<chelis_type_core::DimVar, chelis_type_core::DimVar>,
+    rank_vars: UnordMap<chelis_type_core::RankVar, chelis_type_core::RankVar>,
 }
 
 impl SchemeVariableRenamer {
-    fn rewrite_type(&mut self, ty: &chelis_types::types::Type) -> chelis_types::types::Type {
-        use chelis_types::types::{NominalArg, TensorPrec, Type};
+    fn rewrite_type(
+        &mut self,
+        ty: &chelis_type_core::Type<ErrorWitness>,
+    ) -> chelis_type_core::Type<ErrorWitness> {
+        use chelis_type_core::{NominalArg, TensorPrec, Type};
 
         match ty {
             Type::Prim(prim) => Type::Prim(*prim),
@@ -11008,11 +11013,8 @@ impl SchemeVariableRenamer {
         }
     }
 
-    fn rewrite_dimension(
-        &mut self,
-        dimension: &chelis_types::types::Dim,
-    ) -> chelis_types::types::Dim {
-        use chelis_types::types::Dim;
+    fn rewrite_dimension(&mut self, dimension: &chelis_type_core::Dim) -> chelis_type_core::Dim {
+        use chelis_type_core::Dim;
 
         match dimension {
             Dim::Name(name) => Dim::Name(name.clone()),
@@ -11023,27 +11025,21 @@ impl SchemeVariableRenamer {
         }
     }
 
-    fn type_variable(
-        &mut self,
-        variable: chelis_types::types::TypeVar,
-    ) -> chelis_types::types::TypeVar {
-        let next = chelis_types::types::TypeVar(self.type_vars.len() as u32);
+    fn type_variable(&mut self, variable: chelis_type_core::TypeVar) -> chelis_type_core::TypeVar {
+        let next = chelis_type_core::TypeVar(self.type_vars.len() as u32);
         *self.type_vars.entry(variable).or_insert(next)
     }
 
     fn dimension_variable(
         &mut self,
-        variable: chelis_types::types::DimVar,
-    ) -> chelis_types::types::DimVar {
-        let next = chelis_types::types::DimVar(self.dim_vars.len() as u32);
+        variable: chelis_type_core::DimVar,
+    ) -> chelis_type_core::DimVar {
+        let next = chelis_type_core::DimVar(self.dim_vars.len() as u32);
         *self.dim_vars.entry(variable).or_insert(next)
     }
 
-    fn rank_variable(
-        &mut self,
-        variable: chelis_types::types::RankVar,
-    ) -> chelis_types::types::RankVar {
-        let next = chelis_types::types::RankVar(self.rank_vars.len() as u32);
+    fn rank_variable(&mut self, variable: chelis_type_core::RankVar) -> chelis_type_core::RankVar {
+        let next = chelis_type_core::RankVar(self.rank_vars.len() as u32);
         *self.rank_vars.entry(variable).or_insert(next)
     }
 }

@@ -27,6 +27,7 @@
 //! The wire aggregate requires final authority and execution receipts;
 //! relabeling JSON cannot claim an enumerator or mutation oracle exists.
 
+use chelis_types::errors::ErrorWitness;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -5999,12 +6000,12 @@ use stdlib_discovery::{scan_deftypes, stdlib_rows};
 // ---------------------------------------------------------------------------
 
 /// Deterministic census rendering of one prelude ADT field type. Not the
-/// Deep printer (a Rust-registered `chelis_types::Type` never passes
+/// Deep printer (a Rust-registered `chelis_type_core::Type` never passes
 /// through Deep), but the same identity discipline: type name, variant
 /// list, and per-field type spelling, so any change to a numeric field's
 /// position or dtype changes the row id and fails the diff.
-fn render_prelude_census_type(ty: &chelis_types::types::Type) -> String {
-    use chelis_types::types::Type;
+fn render_prelude_census_type(ty: &chelis_type_core::Type<ErrorWitness>) -> String {
+    use chelis_type_core::Type;
     match ty {
         Type::Prim(p) => p.name().to_string(),
         Type::Adt(name, args) => {
@@ -6048,8 +6049,11 @@ fn render_prelude_census_type(ty: &chelis_types::types::Type) -> String {
 /// Collect the numeric primitive spellings reachable in one prelude ADT
 /// field type, the resolved stdlib traversal counterpart for
 /// Rust-registered types.
-fn collect_prelude_numeric_prims(ty: &chelis_types::types::Type, prims: &mut BTreeSet<String>) {
-    use chelis_types::types::{TensorPrec, Type};
+fn collect_prelude_numeric_prims(
+    ty: &chelis_type_core::Type<ErrorWitness>,
+    prims: &mut BTreeSet<String>,
+) {
+    use chelis_type_core::{TensorPrec, Type};
     match ty {
         Type::Prim(p) => {
             if NUMERIC_PRIMS.contains(&p.name()) {
@@ -8624,8 +8628,8 @@ fn a_spliced_line_directive_is_caught_by_the_ban_itself() {
 /// `register_prelude_adts` source.
 #[test]
 fn planted_prelude_adt_with_f64_variant_is_detected() {
+    use chelis_type_core::Type;
     use chelis_types::adt::{AdtDef, VariantInfo};
-    use chelis_types::types::Type;
     let planted = AdtDef {
         name: "Planted".to_string(),
         type_params: Vec::new(),

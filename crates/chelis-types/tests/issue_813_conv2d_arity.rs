@@ -12,8 +12,8 @@ use chelis_deep::Expr;
 use chelis_deep::parser::parse_str as parse_deep_lenient;
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str as parse_surf;
+use chelis_type_core::Type;
 use chelis_types::errors::CheckErrorKind;
-use chelis_types::types::Type;
 use chelis_types::{BUILTIN_NAMES, builtin_env, check_ir_fitness};
 
 fn surf_to_deep(source: &str) -> Vec<Expr> {

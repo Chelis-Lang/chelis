@@ -4,6 +4,7 @@ pub mod staged;
 use crate::callable_value::{NormalizedCallableContract, StaticBuiltinValue};
 use callee::HostAppCallee;
 pub use callee::{HostCallee, HostCalleeView};
+use chelis_types::errors::ErrorWitness;
 pub use signature_entry::{EntryContract, EntryPattern, SignatureEntryPlan};
 
 use chelis_deep::cons_spine::ConsSpine;
@@ -22,9 +23,9 @@ use chelis_deep::ast::{Atom, Expr, Metadata};
 use chelis_deep::decode_effect_kind;
 use chelis_deep::node::Node;
 use chelis_numeric_core::prim::Prim;
+use chelis_type_core::{Dim, NominalArg, NominalParamKind, TensorPrec, Type};
 use chelis_types::adt::{AdtDef, AdtRegistry, TypeAliasDef};
 use chelis_types::infer::type_to_deep_expr;
-use chelis_types::types::{Dim, NominalArg, NominalParamKind, TensorPrec, Type};
 use chelis_types::{BUILTIN_NAMES, CheckedProgram};
 use chelis_vocab::EffectKind;
 
@@ -491,7 +492,7 @@ struct DefLaneFacts {
     program_defs: RefCell<Option<Arc<BTreeMap<String, Expr>>>>,
     resolved_builtin_values: RefCell<Option<Arc<BTreeMap<String, StaticBuiltinValue>>>>,
     /// Program-wide: the checker's effect row per definition.
-    def_effect_rows: RefCell<Option<Arc<BTreeMap<String, chelis_types::types::EffectSet>>>>,
+    def_effect_rows: RefCell<Option<Arc<BTreeMap<String, chelis_type_core::EffectSet>>>>,
     /// Program-wide: the subexpression lowering context kernel lowering reads.
     subexpr_lowering_context: RefCell<Option<crate::lower::SubexprLoweringContext>>,
     /// Program-wide: which definitions reach `dropout`.
@@ -514,7 +515,7 @@ struct SharedProgramFacts {
     call_graph_facts: OnceLock<Arc<CallGraphFacts>>,
     program_defs: OnceLock<Arc<BTreeMap<String, Expr>>>,
     resolved_builtin_values: OnceLock<Arc<BTreeMap<String, StaticBuiltinValue>>>,
-    def_effect_rows: OnceLock<Arc<BTreeMap<String, chelis_types::types::EffectSet>>>,
+    def_effect_rows: OnceLock<Arc<BTreeMap<String, chelis_type_core::EffectSet>>>,
     dropout_reaching_defs: OnceLock<Arc<UnordSet<String>>>,
     tensor_helper_def_summaries: OnceLock<Arc<BTreeMap<String, TensorHelperDefSummary>>>,
     subexpr_lowering_context: OnceLock<crate::lower::SubexprLoweringContext>,
@@ -813,7 +814,7 @@ impl<'program> HostLoweringSession<'program> {
     /// The complete checked signature of the declaration this reference
     /// resolves to. Authored syntax separately owns invocation obligations;
     /// its inference holes are not executable representation or admission.
-    fn checked_function_signature(&self, name: &str) -> Option<&'program Type> {
+    fn checked_function_signature(&self, name: &str) -> Option<&'program Type<ErrorWitness>> {
         let (canonical, _) = self.def_named(name)?;
         self.program
             .signature_inference()
@@ -5170,9 +5171,9 @@ fn def_effect_row_forbids_kernel(program: &HostLoweringSession<'_>, name: &str) 
             row.iter().any(|effect| {
                 matches!(
                     effect,
-                    chelis_types::types::Effect::Io
-                        | chelis_types::types::Effect::Test
-                        | chelis_types::types::Effect::Resource(_)
+                    chelis_type_core::Effect::Io
+                        | chelis_type_core::Effect::Test
+                        | chelis_type_core::Effect::Resource(_)
                 )
             })
         })
@@ -5180,7 +5181,7 @@ fn def_effect_row_forbids_kernel(program: &HostLoweringSession<'_>, name: &str) 
 
 fn cached_def_effect_rows(
     program: &HostLoweringSession<'_>,
-) -> Arc<BTreeMap<String, chelis_types::types::EffectSet>> {
+) -> Arc<BTreeMap<String, chelis_type_core::EffectSet>> {
     program_fact(
         &program.facts.def_effect_rows,
         program.shared.map(|shared| &shared.def_effect_rows),
@@ -21021,7 +21022,7 @@ fn top_level_fn_is_nested_rank_polymorphic(program: &HostLoweringSession<'_>, na
 fn checked_authored_function_signature<'a>(
     program: &'a HostLoweringSession<'a>,
     name: &str,
-) -> Option<&'a Type> {
+) -> Option<&'a Type<ErrorWitness>> {
     if let Some(inference) = program.signature_inference().functions.get(name)
         && inference.authored_signature
     {
@@ -21061,7 +21062,7 @@ fn checked_authored_function_signature<'a>(
 fn scan_checked_authored_function_signature<'a>(
     program: &'a HostLoweringSession<'a>,
     name: &str,
-) -> Option<&'a Type> {
+) -> Option<&'a Type<ErrorWitness>> {
     if let Some(inference) = program.signature_inference().functions.get(name)
         && inference.authored_signature
     {
@@ -21093,7 +21094,7 @@ fn scan_checked_authored_function_signature<'a>(
 }
 
 fn checker_type_has_stored_variable(
-    ty: &Type,
+    ty: &Type<ErrorWitness>,
     registry: &AdtRegistry,
     visiting: &mut UnordSet<(String, usize)>,
 ) -> bool {
@@ -21145,13 +21146,13 @@ fn checker_type_has_stored_variable(
     }
 }
 
-fn checker_type_has_variable(ty: &Type) -> bool {
+fn checker_type_has_variable(ty: &Type<ErrorWitness>) -> bool {
     match ty {
         Type::Var(_) | Type::Tensor(_, TensorPrec::Var(_)) => true,
         Type::Tensor(dims, TensorPrec::Concrete(_)) => dims.iter().any(|dim| {
             matches!(
                 dim,
-                chelis_types::types::Dim::Var(_) | chelis_types::types::Dim::Rank(_)
+                chelis_type_core::Dim::Var(_) | chelis_type_core::Dim::Rank(_)
             )
         }),
         Type::Fn(params, ret) => {
@@ -21170,7 +21171,7 @@ fn checker_type_has_variable(ty: &Type) -> bool {
 }
 
 fn checker_type_has_erased_adt_variable(
-    ty: &Type,
+    ty: &Type<ErrorWitness>,
     registry: &AdtRegistry,
     visiting: &mut UnordSet<(String, usize)>,
 ) -> bool {
@@ -26931,8 +26932,8 @@ fn checker_adt_parameter_is_stored(
 }
 
 fn checker_type_stores_variable(
-    ty: &Type,
-    target: chelis_types::types::TypeVar,
+    ty: &Type<ErrorWitness>,
+    target: chelis_type_core::TypeVar,
     registry: &AdtRegistry,
     visiting: &mut UnordSet<(String, usize)>,
 ) -> bool {

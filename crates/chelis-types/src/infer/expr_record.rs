@@ -6,6 +6,11 @@
 use super::*;
 use chelis_deep::CastMode;
 use chelis_numeric_core::named_cast::NamedCastMode;
+use chelis_type_core::decisions::cast::{
+    binder_cast_result_from_settled_source, cast_mode_atom, cast_result_from_settled_source,
+    key_cast_source_error, named_cast_source_family, named_cast_source_noun,
+    read_through_tensor_borrow, require_cast_source_family,
+};
 use std::sync::Arc;
 
 #[allow(clippy::too_many_arguments)]
@@ -13,13 +18,13 @@ pub(super) fn infer_tuple(
     node: &DeepNode,
     env: &mut Env,
     vg: &mut VarGen,
-    subst: &mut Subst,
+    subst: &mut Subst<ErrorWitness>,
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
     product: &mut InferenceProduct,
-) -> Type {
+) -> Type<ErrorWitness> {
     let kids = node.children_slice();
-    let elems: Vec<Type> = kids
+    let elems: Vec<Type<ErrorWitness>> = kids
         .iter()
         .map(|e| infer_expr(e, env, vg, subst, adt_reg, errors, product))
         .collect();
@@ -79,11 +84,11 @@ pub(super) fn infer_tuple_get(
     node: &DeepNode,
     env: &mut Env,
     vg: &mut VarGen,
-    subst: &mut Subst,
+    subst: &mut Subst<ErrorWitness>,
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
     product: &mut InferenceProduct,
-) -> Type {
+) -> Type<ErrorWitness> {
     let kids = node.children_slice();
     if kids.len() < 2 {
         return malformed_form(node, "tuple-get", "a tuple expression and an index", errors);
@@ -228,11 +233,11 @@ pub(super) fn infer_record(
     node: &DeepNode,
     env: &mut Env,
     vg: &mut VarGen,
-    subst: &mut Subst,
+    subst: &mut Subst<ErrorWitness>,
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
     product: &mut InferenceProduct,
-) -> Type {
+) -> Type<ErrorWitness> {
     let kids = node.children_slice();
     let Some(head) = kids.first().and_then(symbol_name) else {
         return malformed_form(
@@ -435,7 +440,7 @@ pub(super) fn instantiate_variant_of(
     adt_def: &crate::adt::AdtDef,
     variant: &crate::adt::VariantInfo,
     vg: &mut VarGen,
-) -> (Vec<Type>, Type) {
+) -> (Vec<Type<ErrorWitness>>, Type<ErrorWitness>) {
     let mut type_vars = adt_def.param_vars.clone();
     let mut dim_vars = adt_def
         .param_args
@@ -447,17 +452,17 @@ pub(super) fn instantiate_variant_of(
         .collect::<Vec<_>>();
     let mut rank_vars = Vec::new();
     for (_, field_type) in &variant.fields {
-        for var in crate::env::free_tvars(field_type) {
+        for var in chelis_type_core::scheme::free_tvars(field_type) {
             if !type_vars.contains(&var) {
                 type_vars.push(var);
             }
         }
-        for var in crate::env::free_dvars(field_type) {
+        for var in chelis_type_core::scheme::free_dvars(field_type) {
             if !dim_vars.contains(&var) {
                 dim_vars.push(var);
             }
         }
-        for var in crate::env::free_rvars(field_type) {
+        for var in chelis_type_core::scheme::free_rvars(field_type) {
             if !rank_vars.contains(&var) {
                 rank_vars.push(var);
             }
@@ -477,7 +482,7 @@ pub(super) fn instantiate_variant_of(
         renaming.insert_rank(var, vec![Dim::Rank(vg.fresh_rvar())]);
     }
 
-    let args: Vec<Type> = variant
+    let args: Vec<Type<ErrorWitness>> = variant
         .fields
         .iter()
         .map(|(_, field_type)| renaming.apply(field_type))
@@ -514,11 +519,11 @@ pub(super) fn instantiate_variant_of(
 pub(super) fn instantiated_field_types(
     adt_name: &str,
     variant: &crate::adt::VariantInfo,
-    target_ty: &Type,
+    target_ty: &Type<ErrorWitness>,
     adt_reg: &AdtRegistry,
     vg: &mut VarGen,
-    subst: &mut Subst,
-) -> Vec<Type> {
+    subst: &mut Subst<ErrorWitness>,
+) -> Vec<Type<ErrorWitness>> {
     let Some(adt_def) = adt_reg.lookup(adt_name) else {
         return Vec::new();
     };
@@ -534,11 +539,11 @@ pub(super) fn infer_access(
     node: &DeepNode,
     env: &mut Env,
     vg: &mut VarGen,
-    subst: &mut Subst,
+    subst: &mut Subst<ErrorWitness>,
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
     product: &mut InferenceProduct,
-) -> Type {
+) -> Type<ErrorWitness> {
     let kids = node.children_slice();
     if kids.len() < 2 {
         return malformed_form(
@@ -663,7 +668,8 @@ pub(super) fn infer_access(
             // pinned", an explicit typed rule (the alternative chelis#755
             // sanctions) rather than an exemption. Unification narrows it, and
             // the deferred ledger still catches an out-of-module opaque pin.
-            subst.record_deferred_opaque_use(tv, crate::unify::DeferredOpaqueUse::Access);
+            subst
+                .record_deferred_opaque_use(tv, chelis_type_core::unify::DeferredOpaqueUse::Access);
             // chelis#1836: the fresh variable is also TIED to the field the
             // target turns out to carry. The opacity ledger above revisits the
             // TARGET when it binds; it says nothing about the projected field
@@ -699,14 +705,14 @@ pub(super) fn infer_access(
 /// Constructor field occurrences are inputs; their equality is owned by
 /// the resulting record. Construction and update use the same relation.
 fn split_record_result_origin(
-    fields: &mut Vec<Type>,
-    result: &Type,
+    fields: &mut Vec<Type<ErrorWitness>>,
+    result: &Type<ErrorWitness>,
     vg: &mut VarGen,
-    subst: &Subst,
+    subst: &Subst<ErrorWitness>,
     product: &mut InferenceProduct,
 ) {
     let signature = Type::function(fields.clone(), result.clone());
-    let variables = crate::env::free_tvars(&signature)
+    let variables = chelis_type_core::scheme::free_tvars(&signature)
         .into_iter()
         .collect::<Vec<_>>();
     if let Some(origin) = ResultOrigin::aggregate(&signature, &variables, &[], &[], vg) {
@@ -727,11 +733,11 @@ pub(super) fn infer_record_update(
     node: &DeepNode,
     env: &mut Env,
     vg: &mut VarGen,
-    subst: &mut Subst,
+    subst: &mut Subst<ErrorWitness>,
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
     product: &mut InferenceProduct,
-) -> Type {
+) -> Type<ErrorWitness> {
     let kids = node.children_slice();
     if kids.is_empty() {
         return malformed_form(
@@ -744,7 +750,7 @@ pub(super) fn infer_record_update(
     let target_ty = infer_expr(&kids[0], env, vg, subst, adt_reg, errors, product);
     // Infer the update values regardless of target resolution so
     // nested errors surface exactly once.
-    let mut kv_pairs: Vec<(&str, Type)> = Vec::new();
+    let mut kv_pairs: Vec<(&str, Type<ErrorWitness>)> = Vec::new();
     for kv_expr in kids.iter().skip(1) {
         // chelis#1107: same carrier-preserving read as `infer_record` above --
         // a stamped `kv` arrives as `Expr::Node` and a `List`-only destructure
@@ -870,7 +876,10 @@ pub(super) fn infer_record_update(
             subst.apply(&updated)
         }
         Type::Var(tv) => {
-            subst.record_deferred_opaque_use(tv, crate::unify::DeferredOpaqueUse::RecordUpdate);
+            subst.record_deferred_opaque_use(
+                tv,
+                chelis_type_core::unify::DeferredOpaqueUse::RecordUpdate,
+            );
             // The update returns the target's (still-unresolved) type.
             Type::Var(tv)
         }
@@ -892,11 +901,11 @@ pub(super) fn infer_cast(
     node: &DeepNode,
     env: &mut Env,
     vg: &mut VarGen,
-    subst: &mut Subst,
+    subst: &mut Subst<ErrorWitness>,
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
     product: &mut InferenceProduct,
-) -> Type {
+) -> Type<ErrorWitness> {
     let kids = node.children_slice();
     if kids.len() < 2 {
         return malformed_form(node, "cast", "an expression and a target type", errors);
@@ -1016,7 +1025,7 @@ pub(super) fn infer_cast(
         return target_ty;
     }
     if let Some(error) = key_cast_source_error(&resolved) {
-        return report(errors, error);
+        return report(errors, error.into());
     }
 
     let new_prec = match target_ty {
@@ -1099,7 +1108,8 @@ pub(super) fn infer_cast(
                                 DeferredOperandGate::CastToBinder {
                                     target,
                                     result: Box::new(result.clone()),
-                                    location: TypeDiagnosticLocation::from_expr(expr),
+                                    location: TypeDiagnosticLocation::from_expr(expr)
+                                        .map(TypeDiagnosticLocation::into_source_label),
                                 },
                             );
                             result
@@ -1111,7 +1121,7 @@ pub(super) fn infer_cast(
                 settled if mode == CastMode::Checked => {
                     match binder_cast_result_from_settled_source(settled, target, subst) {
                         Ok(result) => result,
-                        Err(error) => report(errors, *error),
+                        Err(error) => report(errors, (*error).into()),
                     }
                 }
                 Type::Tensor(dims, source) if subst.tvar_restriction(target).is_some() => {
@@ -1205,197 +1215,15 @@ pub(super) fn infer_cast(
     cast_result_from_source(expr, resolved, new_prec, mode, subst, vg, errors)
 }
 
-/// The [05-OP-6] source-side decision for a source whose type is already
-/// settled (chelis#1489).
-///
-/// The tensor/scalar split, the per-shape precision validity check and the
-/// `cast_trunc` pair rule. NOT the whole of what `cast` decides: `infer_cast`
-/// also runs the `CastOut` opacity check on the peeled source before reaching
-/// here, and discharge does not re-run it.
-///
-/// It takes no `VarGen` and no `DiagnosticSink`, which is the point: a
-/// suspended `Cast` constraint discharges from inside unification, where
-/// neither is in hand, and it must reach the same verdict as the eager call
-/// that has both. The substitution it does take is used only to record a
-/// `cast_trunc` source's float requirement on a precision variable
-/// ([`require_cast_source_family`]), which unification's own restriction
-/// table carries.
-///
-/// A `Type::Var` source is not settled and does not reach here from discharge,
-/// which only runs once the variable is bound. `infer_cast` has its own
-/// earlier arm for a quantified target, which constrains a variable source
-/// rather than suspending it.
-/// Spec/04 section 1.1: a key has no cast in either direction, so a `cast` or
-/// `cast_trunc` whose source is a scalar key or a key tensor is refused,
-/// whatever its target is: a concrete dtype, or a declaration's dtype binder.
-/// One decision for every target kind, so no target arm can admit a key
-/// source by not asking.
-fn key_cast_source_error(source: &Type) -> Option<CheckError> {
-    let mut peeled = source;
-    while let Type::Ref(inner) = peeled {
-        peeled = inner.as_ref();
-    }
-    matches!(
-        peeled,
-        Type::Prim(Prim::Key) | Type::Tensor(_, TensorPrec::Concrete(Prim::Key))
-    )
-    .then(|| {
-        CheckError::new(
-            CheckErrorKind::UnsupportedTensorPrecision,
-            format!(
-                "cast has no `key` source: a random key has no numeric value to convert \
-                 (spec/04-type-system.md section 1.1), got {source}"
-            ),
-            vec!["Derive keys with `split_key`, `split_keys` or `fold_in` instead".to_string()],
-        )
-    })
-}
-
-/// chelis#3101: a cast's tensor source is a read-only `&tensor[D, p]`
-/// parameter (spec/05 section 1.3.1), so an explicit borrow of a tensor reads
-/// as the tensor. Any other `&` source is kept, and refused by the caller.
-/// The eager cast and both suspended discharges read the source through this
-/// one function, so they cannot disagree about a borrowed source.
-fn read_through_tensor_borrow(source: Type, subst: &Subst) -> Type {
-    match source {
-        Type::Ref(inner) if matches!(subst.apply(&inner), Type::Tensor(..)) => subst.apply(&inner),
-        other => other,
-    }
-}
-
-pub(crate) fn cast_result_from_settled_source(
-    resolved: Type,
-    new_prec: Prim,
-    mode: CastMode,
-    subst: &Subst,
-) -> Result<Type, Box<CheckError>> {
-    let resolved = read_through_tensor_borrow(resolved, subst);
-    // spec/04 section 1.1: a key has no cast in either direction. The target
-    // rules below refuse a key target; this refuses a key source, scalar or
-    // tensor, before any target is considered. A suspended cast discharges
-    // here without passing through `infer_cast`, so the refusal is repeated.
-    if let Some(error) = key_cast_source_error(&resolved) {
-        return Err(Box::new(error));
-    }
-    match resolved {
-        Type::Tensor(dims, src_prec) => {
-            // spec/04 §1.1: a key has no cast, so a cast target is a data
-            // element dtype.
-            if !new_prec.is_data_element_dtype() {
-                return Err(Box::new(unsupported_precision_error(
-                    new_prec, /* tensor = */ true,
-                )));
-            }
-            if let Some(named) = mode.named() {
-                let source = match src_prec {
-                    TensorPrec::Concrete(p) => Some(p),
-                    TensorPrec::Var(_) => None,
-                };
-                if let Some(error) = named_cast_pair_error(named, source, new_prec) {
-                    return Err(Box::new(error));
-                }
-                // chelis#2158: a precision variable is constrained here rather
-                // than admitted. An authored binder never binds, so admitting
-                // it until "unification binds it" admitted an `Int`-bounded
-                // tensor for good.
-                if let TensorPrec::Var(precision) = src_prec
-                    && let Some(error) = require_cast_source_family(
-                        precision,
-                        named_cast_source_family(named),
-                        mode,
-                        subst,
-                    )
-                {
-                    return Err(Box::new(error));
-                }
-            }
-            Ok(Type::Tensor(dims, TensorPrec::Concrete(new_prec)))
-        }
-        Type::Prim(src_prec) => {
-            if !new_prec.is_valid_scalar_cast_target() {
-                return Err(Box::new(unsupported_precision_error(
-                    new_prec, /* tensor = */ false,
-                )));
-            }
-            // chelis#2524, [05-OP-63]: the source domain is [04-NUM-14]'s
-            // active dtypes, the numeric ones and `bool`. A `string` source is
-            // no cast, whether it is written directly or bound later through a
-            // lambda parameter, since both reach this one decision.
-            if !src_prec.is_data_element_dtype() {
-                return Err(Box::new(CheckError::with_types(
-                    CheckErrorKind::CastNonTensor,
-                    format!(
-                        "cast argument 1: expected numeric or bool scalar, got {} ([05-OP-63])",
-                        src_prec.name()
-                    ),
-                    "numeric or bool scalar".to_string(),
-                    src_prec.name().to_string(),
-                    vec![],
-                )));
-            }
-            if let Some(named) = mode.named()
-                && let Some(error) = named_cast_pair_error(named, Some(src_prec), new_prec)
-            {
-                return Err(Box::new(error));
-            }
-            Ok(Type::Prim(new_prec))
-        }
-        Type::Error(w) => Ok(propagate(&w)),
-        other => Err(Box::new(CheckError::with_types(
-            CheckErrorKind::CastNonTensor,
-            format!("cast argument 1: expected tensor or numeric/bool scalar, got {other}"),
-            "tensor or numeric/bool scalar".to_string(),
-            other.to_string(),
-            vec![],
-        ))),
-    }
-}
-
-/// chelis#2534: the [05-OP-63] decision for a checked `cast` whose target is
-/// the declaration's dtype binder `target`, on a source whose type is settled.
-///
-/// The eager arm of `infer_cast` calls it for a settled source, and discharge
-/// of a [`DeferredOperandGate::CastToBinder`] calls it once a source that was a
-/// variable at the cast binds, so the two cannot disagree. A tensor source
-/// keeps its dimensions and takes the binder as its precision when the binder
-/// carries a dtype-family bound; a scalar source must be a numeric or `bool`
-/// primitive, and the result is the binder.
-pub(crate) fn binder_cast_result_from_settled_source(
-    resolved: Type,
-    target: TypeVar,
-    subst: &Subst,
-) -> Result<Type, Box<CheckError>> {
-    match read_through_tensor_borrow(resolved, subst) {
-        // [05-OP-63]: a dtype change preserves every dimension. The
-        // declaration's [04-DTYPE-2] bound is retained on the precision
-        // variable and checked at each instantiation.
-        Type::Tensor(dims, _) if subst.tvar_restriction(target).is_some() => {
-            Ok(Type::Tensor(dims, TensorPrec::Var(target)))
-        }
-        // [04-NUM-14] and [05-OP-63] admit a numeric or `bool` scalar source.
-        Type::Prim(source) if source.is_data_element_dtype() => Ok(Type::Var(target)),
-        Type::Error(_) => Ok(Type::Var(target)),
-        other => Err(Box::new(CheckError::with_types(
-            CheckErrorKind::CastNonTensor,
-            format!(
-                "cast argument 1: expected numeric or bool scalar, got {other} (quantified target)"
-            ),
-            "numeric or bool scalar".to_string(),
-            other.to_string(),
-            vec![],
-        ))),
-    }
-}
-
 pub(super) fn cast_result_from_source(
     site: &deep::Expr,
-    resolved: Type,
+    resolved: Type<ErrorWitness>,
     new_prec: Prim,
     mode: CastMode,
-    subst: &mut Subst,
+    subst: &mut Subst<ErrorWitness>,
     vg: &mut VarGen,
     errors: &mut DiagnosticSink<'_>,
-) -> Type {
+) -> Type<ErrorWitness> {
     match resolved {
         // chelis#1489: the source may simply not be resolved YET. Deciding
         // here bound the verdict to inference order rather than to the
@@ -1424,7 +1252,8 @@ pub(super) fn cast_result_from_source(
                     mode,
                     borrowed: false,
                     result: Box::new(result.clone()),
-                    location: TypeDiagnosticLocation::from_expr(site),
+                    location: TypeDiagnosticLocation::from_expr(site)
+                        .map(TypeDiagnosticLocation::into_source_label),
                 },
             );
             result
@@ -1445,7 +1274,8 @@ pub(super) fn cast_result_from_source(
                     mode,
                     borrowed: true,
                     result: Box::new(result.clone()),
-                    location: TypeDiagnosticLocation::from_expr(site),
+                    location: TypeDiagnosticLocation::from_expr(site)
+                        .map(TypeDiagnosticLocation::into_source_label),
                 },
             );
             result
@@ -1470,182 +1300,10 @@ pub(super) fn cast_result_from_source(
                             .suggestions
                             .push(crate::errors::list_to_tensor_hint(Some(new_prec.name())));
                     }
-                    report(errors, at_check_site(site, *error))
+                    report(errors, at_check_site(site, (*error).into()))
                 }
             }
         }
-    }
-}
-
-/// The [05-OP-6] / [05-OP-63] decision for a scalar source whose type is a
-/// variable carrying a declared dtype-family bound (chelis#2151), when that
-/// decision is final. Its only caller is `unify::discharge_bounded_scalar_casts`.
-///
-/// It mirrors the `Type::Prim` arm of [`cast_result_from_settled_source`], with
-/// the bound standing in for the concrete source. It returns `None` when the
-/// answer could still depend on how the variable is later bound, and the
-/// caller then suspends as before:
-///
-/// - The scalar-target check and the `cast_trunc` integer-target check read
-///   only the target, so rejecting on them now is order-independent.
-/// - Every accepting answer is final: the result is the named primitive
-///   whatever the source becomes, and a `Float` bound admits only float
-///   sources.
-/// - `cast_trunc` from an `Int` or `Numeric` bound would reject on the SOURCE.
-///   For an inference variable that later binds to a float, rejecting now would
-///   refuse a valid program, so it is not decided here.
-pub(crate) fn bounded_scalar_cast_result(
-    bound: TypeVarRestriction,
-    new_prec: Prim,
-    mode: CastMode,
-) -> Option<Result<Type, Box<CheckError>>> {
-    if !new_prec.is_valid_scalar_cast_target() {
-        return Some(Err(Box::new(unsupported_precision_error(
-            new_prec, /* tensor = */ false,
-        ))));
-    }
-    if let Some(named) = mode.named() {
-        if let Some(error) = named_cast_pair_error(named, None, new_prec) {
-            return Some(Err(Box::new(error)));
-        }
-        // Each rung wants a source in its family at every instantiation,
-        // which is a question about what the bound admits, not about which
-        // §5.9 form spells it: for [05-OP-6], `{f32, f64}` satisfies it and
-        // `{f32, i32}` does not.
-        if !bound.admits_only_within(named_cast_source_family(named)) {
-            return None;
-        }
-    }
-    Some(Ok(Type::Prim(new_prec)))
-}
-
-/// The source dtype family a named cast rung admits: [05-OP-6]'s
-/// `cast_trunc` reads a float, [05-OP-23]'s `cast_saturate` a signed integer
-/// or a float, and [05-OP-24]'s `cast_wrap` a signed integer.
-pub(crate) fn named_cast_source_family(mode: NamedCastMode) -> TypeVarRestriction {
-    match mode {
-        NamedCastMode::Trunc => TypeVarRestriction::ActiveFloat,
-        NamedCastMode::Saturate => TypeVarRestriction::ActiveNumeric,
-        NamedCastMode::Wrap => TypeVarRestriction::ActiveInt,
-    }
-}
-
-/// [`named_cast_source_family`], spelled for a diagnostic.
-fn named_cast_source_noun(mode: NamedCastMode) -> &'static str {
-    match mode {
-        NamedCastMode::Trunc => "a float",
-        NamedCastMode::Saturate => "a signed integer or float",
-        NamedCastMode::Wrap => "a signed integer",
-    }
-}
-
-/// The source/target contract of a named cast rung: an integer target and a
-/// source in the rung's family. Every other pair is a check-time type error
-/// naming the checked `cast` as the remedy, so no program reaches a lane that
-/// has no semantics for it.
-///
-/// `source == None` means the operand's tensor precision is still a
-/// variable, and this function decides only the target for it. Its callers
-/// record the source's family requirement on that variable with
-/// [`require_cast_source_family`] (chelis#2158): an authored binder is never
-/// bound, so no later binding would re-check it.
-pub(crate) fn named_cast_pair_error(
-    mode: NamedCastMode,
-    source: Option<Prim>,
-    target: Prim,
-) -> Option<CheckError> {
-    let keyword = mode.keyword();
-    let hint = match mode {
-        NamedCastMode::Trunc => "`cast_trunc` truncates a float toward zero into an integer \
-                                 width ([05-OP-6]); use `cast` for every other conversion"
-            .to_string(),
-        NamedCastMode::Saturate => "`cast_saturate` clamps a signed integer or a float \
-                                    truncated toward zero into an integer width ([05-OP-23]); \
-                                    use `cast` for every other conversion"
-            .to_string(),
-        NamedCastMode::Wrap => "`cast_wrap` wraps a signed integer into an integer width \
-                                ([05-OP-24]); use `cast_saturate` for a float source and \
-                                `cast` for every other conversion"
-            .to_string(),
-    };
-    if !target.is_integer() {
-        return Some(CheckError::new(
-            CheckErrorKind::CastNonTensor,
-            format!(
-                "`{keyword}` target `{}` is not an integer dtype",
-                target.name()
-            ),
-            vec![hint],
-        ));
-    }
-    match source {
-        Some(prim) if !named_cast_source_family(mode).admits(prim) => Some(CheckError::new(
-            CheckErrorKind::CastNonTensor,
-            format!(
-                "`{keyword}` source `{}` is not {} dtype",
-                prim.name(),
-                named_cast_source_noun(mode)
-            ),
-            vec![hint],
-        )),
-        _ => None,
-    }
-}
-
-/// chelis#2158: record a cast's dtype-family requirement on the variable that
-/// stands for its source dtype, the precision of a tensor source or the type
-/// of a scalar one.
-///
-/// The requirement travels with the variable like every other family policy
-/// (chelis#1805). An inference variable is checked at whichever binding
-/// reaches it, so the verdict does not depend on inference order (chelis#1489),
-/// and an authored binder whose declared bound admits more than the cast
-/// accepts is reported against its declaration by
-/// `check_declared_dtype_bounds`, with the bound to declare. Only a variable
-/// whose family shares no dtype with the requirement is rejected here.
-pub(crate) fn require_cast_source_family(
-    variable: TypeVar,
-    required: TypeVarRestriction,
-    mode: CastMode,
-    subst: &Subst,
-) -> Option<CheckError> {
-    let operation = mode.keyword();
-    let atom = cast_mode_atom(mode);
-    let hint = format!(
-        "Declare the source's binder with the `{}` bound, or convert the source with `cast` \
-         first ({atom})",
-        required.bound_spelling()
-    );
-    match subst.apply(&Type::Var(variable)) {
-        Type::Var(variable) => {
-            if subst.narrow_tvar_restriction(variable, required).is_ok() {
-                return None;
-            }
-            // A failed narrowing leaves the variable's own family in place.
-            let bound = subst.tvar_restriction(variable)?;
-            Some(CheckError::new(
-                CheckErrorKind::PrecisionMismatch,
-                format!(
-                    "`{operation}` requires a source of dtype family `{}` ({atom}), but the \
-                     source dtype is bounded by {} ({}), which shares no dtype \
-                     with it (spec/04-type-system.md §5.9 [04-DTYPE-2])",
-                    required.bound_spelling(),
-                    bound.bound_description(),
-                    bound.membership_gloss(),
-                ),
-                vec![hint],
-            ))
-        }
-        Type::Prim(prim) if !required.admits(prim) => Some(CheckError::new(
-            CheckErrorKind::PrecisionMismatch,
-            format!(
-                "`{operation}` requires a source of dtype family `{}` ({atom}), got `{}`",
-                required.bound_spelling(),
-                prim.name(),
-            ),
-            vec![hint],
-        )),
-        _ => None,
     }
 }
 
@@ -1659,11 +1317,11 @@ pub(crate) fn require_cast_source_family(
 /// signature ([04-INF-6]). The same shape as a family-policy operation's
 /// verdict on a bounded precision variable (chelis#1805).
 fn authored_cast_source_rejection(
-    source: &Type,
+    source: &Type<ErrorWitness>,
     required: TypeVarRestriction,
     mode: CastMode,
     env: &Env,
-    subst: &Subst,
+    subst: &Subst<ErrorWitness>,
 ) -> Option<CheckError> {
     let variable = match source {
         Type::Tensor(_, TensorPrec::Var(precision)) => *precision,
@@ -1702,15 +1360,6 @@ fn authored_cast_source_rejection(
     ))
 }
 
-/// The atom a cast diagnostic cites: the named rung's, or [05-OP-63] for the
-/// checked default.
-fn cast_mode_atom(mode: CastMode) -> &'static str {
-    match mode {
-        CastMode::Checked => "[05-OP-63]",
-        CastMode::Named(named) => named.atom(),
-    }
-}
-
 /// [`authored_cast_source_rejection`], then [`require_cast_source_family`]:
 /// the whole source-dtype decision where the declaration's binders are in
 /// scope.
@@ -1719,10 +1368,10 @@ fn constrain_cast_source(
     required: TypeVarRestriction,
     mode: CastMode,
     env: &Env,
-    subst: &Subst,
+    subst: &Subst<ErrorWitness>,
 ) -> Option<CheckError> {
     authored_cast_source_rejection(&Type::Var(variable), required, mode, env, subst)
-        .or_else(|| require_cast_source_family(variable, required, mode, subst))
+        .or_else(|| require_cast_source_family(variable, required, mode, subst).map(Into::into))
 }
 
 pub(super) fn cast_target_nominal_name(name: &str, adt_reg: &AdtRegistry) -> Option<String> {
@@ -1744,7 +1393,7 @@ pub(super) fn report_unknown_cast_target(
     errors: &mut DiagnosticSink<'_>,
     name: &str,
     location: Option<&TypeDiagnosticLocation>,
-) -> Type {
+) -> Type<ErrorWitness> {
     let error = CheckError::with_types(
         CheckErrorKind::CastNonTensor,
         format!(
@@ -1766,46 +1415,4 @@ pub(super) fn report_unknown_cast_target(
             None => error,
         },
     )
-}
-
-/// Build the canonical "unsupported precision" rejection for either a
-/// tensor element or a scalar cast target. The deferred `f8e4m3` dtype
-/// (`spec/04-type-system.md` §1.1.1) gets a specific diagnostic citing the
-/// owning spec section so producers can resolve the deferral state without
-/// guessing.
-///
-/// This returns the rejection rather than pushing it, because `cast` is
-/// decided in two places -- when its source is already known, and when a
-/// suspended constraint discharges because the source just became known --
-/// and only the first of those has a `DiagnosticSink`. Building the error
-/// separately from reporting it is what lets both run the same decision
-/// (chelis#1489). chelis#731 Phase 2 (§C3) owns the witness-carrying return.
-pub(super) fn unsupported_precision_error(new_prec: Prim, tensor: bool) -> CheckError {
-    let surface = if tensor { "tensor element" } else { "scalar" };
-    let active_set = "f32, f64, bf16, f16, bool, i8, i16, i32, i64";
-    if matches!(new_prec, Prim::F8e4m3) {
-        CheckError::new(
-            CheckErrorKind::UnsupportedTensorPrecision,
-            format!(
-                "cannot cast {surface} to `f8e4m3`: f8e4m3 is deferred per \
-                 spec/04-type-system.md §1.1.1 and is not part of the active \
-                 numeric primitive set ({active_set})"
-            ),
-            vec![format!(
-                "f8e4m3 has no active backend in this cycle; cast to one of \
-                 {active_set} instead, or follow spec/04-type-system.md §1.1.1 \
-                 for the deferral rationale"
-            )],
-        )
-    } else {
-        CheckError::new(
-            CheckErrorKind::UnsupportedTensorPrecision,
-            format!(
-                "cannot cast {surface} to unsupported precision `{}` \
-                 (supported: {active_set})",
-                new_prec.name()
-            ),
-            vec![format!("Use a supported {surface} precision")],
-        )
-    }
 }

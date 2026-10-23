@@ -1,6 +1,7 @@
 //! Checked-builtin inference-route ownership and fail-loud diagnostics.
 
 use super::*;
+use crate::errors::ErrorWitness;
 
 pub(super) fn checked_inference_rule(name: Option<&str>) -> Option<builtins::BuiltinInferenceRule> {
     name.and_then(|name| {
@@ -14,7 +15,7 @@ pub(super) fn checked_inference_rule(name: Option<&str>) -> Option<builtins::Bui
 pub(super) fn reject_unregistered_checked_route(
     name: Option<&str>,
     errors: &mut DiagnosticSink<'_>,
-) -> Option<Type> {
+) -> Option<Type<ErrorWitness>> {
     let name = name?;
     let decl = builtins::builtin_decl(name)?;
     let builtins::InferenceDisposition::Checked(rule) = decl.inference else {

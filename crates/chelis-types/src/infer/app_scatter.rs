@@ -1,17 +1,18 @@
 //! Shape and dtype inference for elementwise scatter.
 
 use super::*;
+use crate::errors::ErrorWitness;
 
 /// Enforce [05-SPARSE-1]. Unlike `scatter`, indices and updates keep the data
 /// rank and share one shape; the result always has the data type.
 pub(super) fn check_scatter_elements(
     node: &DeepNode,
     kids: &[deep::Expr],
-    arg_tys: &[Type],
-    pending_ty: Type,
-    subst: &mut Subst,
+    arg_tys: &[Type<ErrorWitness>],
+    pending_ty: Type<ErrorWitness>,
+    subst: &mut Subst<ErrorWitness>,
     errors: &mut DiagnosticSink<'_>,
-) -> Type {
+) -> Type<ErrorWitness> {
     if arg_tys.len() != 4 {
         return report_builtin_arity(
             errors,

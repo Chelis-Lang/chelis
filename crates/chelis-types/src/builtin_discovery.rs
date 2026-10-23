@@ -3,9 +3,10 @@ use crate::builtins::{
     BUILTINS, BuiltinCapabilityDecl, BuiltinDecl, BuiltinSemanticDomain as Domain,
     BuiltinSiblingCaseId as Case,
 };
-use crate::types::Type;
-use crate::unify::Subst;
+use crate::errors::ErrorWitness;
 use chelis_numeric_core::prim::Prim;
+use chelis_type_core::Subst;
+use chelis_type_core::Type;
 use std::collections::BTreeSet;
 
 /// A concrete identity or a finite selector awaiting its operand's type.
@@ -21,13 +22,13 @@ pub enum BuiltinCaseSelection {
 #[derive(Clone, Debug, PartialEq)]
 pub struct BuiltinCaseObligation {
     builtin: &'static str,
-    arguments: Vec<Type>,
+    arguments: Vec<Type<ErrorWitness>>,
 }
 
 impl BuiltinCaseSelection {
     /// Apply the owner's ordinary substitution, preserving any still-symbolic
     /// dependency. Each concrete instantiation selects one declared identity.
-    pub fn resolve(&self, subst: &Subst) -> Result<Self, String> {
+    pub fn resolve(&self, subst: &Subst<ErrorWitness>) -> Result<Self, String> {
         match self {
             Self::Resolved(_) => Ok(self.clone()),
             Self::ByOperand(obligation) => crate::builtins::builtin_decl(obligation.builtin)
@@ -66,8 +67,8 @@ impl BuiltinDecl {
     /// Resolve a checked operand shape to its declared semantic case.
     /// Classification does not grant language acceptance: rejected shapes
     /// retain exact identities governed by the same operation atom.
-    pub fn semantic_case(&self, arguments: &[Type]) -> Result<String, String> {
-        match self.semantic_selection(arguments, &Subst::new())? {
+    pub fn semantic_case(&self, arguments: &[Type<ErrorWitness>]) -> Result<String, String> {
+        match self.semantic_selection(arguments, &Subst::<ErrorWitness>::new())? {
             BuiltinCaseSelection::Resolved(identity) => Ok(identity),
             BuiltinCaseSelection::ByOperand(_) => {
                 Err("semantic case requires operand substitution".into())
@@ -78,12 +79,12 @@ impl BuiltinDecl {
     /// Select using the checked operand types and their actual dtype bounds.
     pub fn semantic_selection(
         &self,
-        arguments: &[Type],
-        subst: &Subst,
+        arguments: &[Type<ErrorWitness>],
+        subst: &Subst<ErrorWitness>,
     ) -> Result<BuiltinCaseSelection, String> {
         self.capability.validate()?;
         let arguments: Vec<_> = arguments.iter().map(|ty| subst.apply(ty)).collect();
-        let operand = |index| -> Result<&Type, String> {
+        let operand = |index| -> Result<&Type<ErrorWitness>, String> {
             let mut ty = arguments
                 .get(index)
                 .ok_or("application has no governing operand")?;
@@ -225,7 +226,7 @@ pub fn builtin_semantic_identities() -> Result<Vec<String>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{TypeVar, TypeVarRestriction};
+    use chelis_type_core::{TypeVar, TypeVarRestriction};
 
     #[test]
     fn operation_value_bounds_do_not_choose_a_scalar_case_before_binding() {
@@ -235,7 +236,7 @@ mod tests {
             TypeVarRestriction::NumericValue,
         ] {
             let variable = TypeVar(1234);
-            let mut subst = Subst::new();
+            let mut subst = Subst::<ErrorWitness>::new();
             subst.narrow_tvar_restriction(variable, bound).unwrap();
             let builtin = crate::builtins::builtin_decl("to_string").unwrap();
             assert!(matches!(
@@ -249,9 +250,9 @@ mod tests {
             } else {
                 chelis_numeric_core::prim::Prim::F32
             };
-            crate::unify::unify(
+            chelis_type_core::unify(
                 &Type::Var(variable),
-                &Type::Tensor(vec![], crate::types::TensorPrec::Concrete(dtype)),
+                &Type::Tensor(vec![], chelis_type_core::TensorPrec::Concrete(dtype)),
                 &mut subst,
             )
             .unwrap();
@@ -272,7 +273,7 @@ mod tests {
             TypeVarRestriction::ActiveNumeric,
         ] {
             let variable = TypeVar(1234);
-            let mut subst = Subst::new();
+            let mut subst = Subst::<ErrorWitness>::new();
             subst.narrow_tvar_restriction(variable, bound).unwrap();
             for name in ["eq", "neq", "to_string"] {
                 let expected = if name == "to_string" {

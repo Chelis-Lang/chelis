@@ -14,7 +14,8 @@
 //! most 2.5 times: linear growth gives about 2, quadratic about 4.
 
 use super::*;
-use crate::unify::take_apply_visits;
+use crate::errors::ErrorWitness;
+use chelis_type_core::take_apply_visits;
 
 const DEPTHS: [usize; 4] = [64, 128, 256, 512];
 
@@ -98,7 +99,10 @@ fn issue_2622_a_deep_annotated_type_applies_linearly() {
 fn issue_2622_the_detector_rejects_a_semantic_view_that_reapplies_per_level() {
     // Negative control: the removed algorithm, which applied the substitution
     // to the whole type and then again to each child it walked into.
-    fn reapply_per_level(subst: &Subst, ty: &Type) -> Type {
+    fn reapply_per_level(
+        subst: &Subst<ErrorWitness>,
+        ty: &Type<ErrorWitness>,
+    ) -> Type<ErrorWitness> {
         match subst.apply(ty) {
             Type::Tuple(items) => Type::Tuple(
                 items
@@ -112,12 +116,12 @@ fn issue_2622_the_detector_rejects_a_semantic_view_that_reapplies_per_level() {
     // Each level holds a free variable: applying returns a ground child
     // without walking it (chelis#3819), so a ground chain would not show
     // the per-level cost.
-    fn nested(depth: usize) -> Type {
+    fn nested(depth: usize) -> Type<ErrorWitness> {
         (0..depth).fold(Type::Prim(Prim::Int32), |inner, level| {
             Type::tuple(vec![Type::Var(TypeVar(level as u32)), inner])
         })
     }
-    let subst = Subst::new();
+    let subst = Subst::<ErrorWitness>::new();
     let mut visits = Vec::new();
     for depth in [256, 512] {
         let ty = nested(depth);

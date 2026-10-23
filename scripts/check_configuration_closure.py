@@ -213,6 +213,16 @@ CLIPPY_MATRIX: tuple[ClippyRun, ...] = (
         cadence=PER_PULL_REQUEST,
     ),
     ClippyRun(
+        label="type-without-default-features",
+        command=(
+            "cargo", "clippy", "-p", "chelis-type-core",
+            "--all-targets", "--no-default-features", "--", "-D", "warnings",
+        ),
+        owner="scripts/gate.py",
+        hosts=("linux",),
+        cadence=PER_PULL_REQUEST,
+    ),
+    ClippyRun(
         label="clarabel-provider",
         command=(
             "cargo", "clippy", "--workspace", "--all-targets", "--features",
@@ -328,6 +338,12 @@ UNCOMPILED_EXCEPTIONS: tuple[UncompiledException, ...] = (
         reason="exact positive and rejection fixtures compiled by the cache publication verifier",
         owning_gate="scripts/capacity_census_cache_publication.py",
         sources=tuple(case.fixture for case in CACHE_COMPILE_CASES),
+    ),
+    UncompiledException(
+        directory="scripts/fixtures/type_unification_core",
+        reason="standalone host parity consumer compiled by the portable type oracle",
+        owning_gate="scripts/type_unification_core_oracle.py",
+        sources=("scripts/fixtures/type_unification_core/host.rs",),
     ),
     UncompiledException(
         directory="scripts/fixtures/capacity_graph",

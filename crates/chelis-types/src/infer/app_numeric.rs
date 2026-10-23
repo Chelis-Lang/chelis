@@ -1,6 +1,7 @@
 //! Numeric operation rules and precision diagnostics.
 
 use super::*;
+use chelis_type_core::decisions::shape::normalize_static_axis;
 
 pub(super) const TENSOR_OPS: &[&str] = &[
     "add",
@@ -316,7 +317,7 @@ pub(super) fn precision_variable_verdict(
     fname: &str,
     var: TypeVar,
     name: &str,
-    subst: &Subst,
+    subst: &Subst<ErrorWitness>,
 ) -> PrecisionVerdict {
     let Some(required) = operand_family_policy(fname) else {
         return PrecisionVerdict::Admit;
@@ -349,9 +350,9 @@ pub(super) fn decide_precision_variable_operand(
     fname: &str,
     var: TypeVar,
     env: &Env,
-    subst: &Subst,
+    subst: &Subst<ErrorWitness>,
     errors: &mut DiagnosticSink<'_>,
-) -> Option<Type> {
+) -> Option<Type<ErrorWitness>> {
     let authored = env
         .active_declared_type_names()
         .to_sorted()
@@ -385,7 +386,7 @@ pub(super) fn decide_precision_variable_operand(
 /// checked restriction through ordinary unification; no callee-body walk is used.
 pub(super) fn operand_dtype_rejection(
     fname: &str,
-    resolved: &Type,
+    resolved: &Type<ErrorWitness>,
 ) -> Option<(CheckErrorKind, String, Vec<String>)> {
     let bool_operand = matches!(
         resolved,
@@ -594,16 +595,16 @@ pub(super) fn validate_numeric_and_reduction_arguments(
     node: &DeepNode,
     kids: &[deep::Expr],
     func_name: &Option<String>,
-    arg_tys: &[Type],
+    arg_tys: &[Type<ErrorWitness>],
     env: &Env,
-    subst: &Subst,
+    subst: &Subst<ErrorWitness>,
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
     route_observed: &mut bool,
     suspension: Option<&DtypeAdmissibilitySite<'_>>,
-    result_ty: &Type,
+    result_ty: &Type<ErrorWitness>,
     product: &mut InferenceProduct,
-) -> Option<Type> {
+) -> Option<Type<ErrorWitness>> {
     macro_rules! reject {
         ($($arg:tt)*) => {
             return Some(report($($arg)*))
@@ -808,14 +809,14 @@ pub(super) fn validate_numeric_and_reduction_arguments(
 pub(super) fn integer_binop_result_type(
     node: &DeepNode,
     func_name: Option<&str>,
-    arg_tys: &[Type],
+    arg_tys: &[Type<ErrorWitness>],
     vg: &mut VarGen,
-    subst: &mut Subst,
+    subst: &mut Subst<ErrorWitness>,
     errors: &mut DiagnosticSink<'_>,
     suspension: Option<&DtypeAdmissibilitySite<'_>>,
-    result_ty: &Type,
+    result_ty: &Type<ErrorWitness>,
     product: &mut InferenceProduct,
-) -> Option<Type> {
+) -> Option<Type<ErrorWitness>> {
     if let Some(fname) = func_name
         && INT_BINOPS.contains(&fname)
     {
@@ -986,15 +987,15 @@ pub(super) fn integer_binop_result_type(
 fn integer_tensor_operands(
     node: &DeepNode,
     fname: &str,
-    lhs: &Type,
-    rhs: &Type,
-    arg_tys: &[Type],
-    subst: &mut Subst,
+    lhs: &Type<ErrorWitness>,
+    rhs: &Type<ErrorWitness>,
+    arg_tys: &[Type<ErrorWitness>],
+    subst: &mut Subst<ErrorWitness>,
     errors: &mut DiagnosticSink<'_>,
     suspension: Option<&DtypeAdmissibilitySite<'_>>,
-    result_ty: &Type,
+    result_ty: &Type<ErrorWitness>,
     product: &mut InferenceProduct,
-) -> Option<Type> {
+) -> Option<Type<ErrorWitness>> {
     let refuse = |errors: &mut DiagnosticSink<'_>, kind: CheckErrorKind, message: String| {
         reject(
             errors,

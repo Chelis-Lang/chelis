@@ -23,20 +23,21 @@
 //! the declaration-owned identity maps because the binder list never includes
 //! `_`.
 
+use crate::errors::ErrorWitness;
+use chelis_type_core::decisions::shape::sum_result_bound_note;
 use chelis_unord::UnordMap;
 
 use super::checked::{InferenceProduct, PostAppCall, PostAppReplay};
-use super::common::sum_result_bound_note;
 use super::expr_pattern::family_members;
 use super::type_derivation::{DerivationStep, TypeDerivation, resolve_type_derivation};
 use crate::adt::AdtRegistry;
 use crate::env::Env;
-use crate::env::{free_dvars, free_rvars, free_tvars};
 use crate::errors::{CheckError, CheckErrorKind};
 use crate::session::DiagnosticSink;
-use crate::types::{Dim, RankVar, TensorPrec, Type, TypeVar, TypeVarRestriction, VarGen};
-use crate::unify::{Subst, unify};
 use chelis_numeric_core::prim::Prim;
+use chelis_type_core::{Dim, RankVar, TensorPrec, Type, TypeVar, TypeVarRestriction, VarGen};
+use chelis_type_core::{Subst, unify};
+use chelis_type_core::{free_dvars, free_rvars, free_tvars};
 
 /// Render an authored binder for a diagnostic, falling back to the internal id
 /// rather than inventing a name (the `render_declared_dim` convention).
@@ -84,7 +85,7 @@ pub(super) fn check_declared_tvars_rigid(
     declaration: &str,
     type_names: &UnordMap<TypeVar, String>,
     declared_bounds: &UnordMap<TypeVar, Option<TypeVarRestriction>>,
-    subst: &Subst,
+    subst: &Subst<ErrorWitness>,
     errors: &mut DiagnosticSink<'_>,
 ) {
     if type_names.is_empty() {
@@ -173,7 +174,7 @@ pub(super) fn check_declared_tvars_rigid(
 pub(super) fn check_declared_rvars_rigid(
     declaration: &str,
     rank_names: &UnordMap<RankVar, String>,
-    subst: &Subst,
+    subst: &Subst<ErrorWitness>,
     errors: &mut DiagnosticSink<'_>,
 ) {
     let mut binders = rank_names
@@ -237,7 +238,7 @@ pub(super) fn check_declared_dtype_bounds(
     declaration: &str,
     type_names: &UnordMap<TypeVar, String>,
     declared_bounds: &UnordMap<TypeVar, Option<TypeVarRestriction>>,
-    subst: &Subst,
+    subst: &Subst<ErrorWitness>,
     errors: &mut DiagnosticSink<'_>,
 ) {
     for (binder, _) in type_names.to_sorted() {
@@ -341,7 +342,7 @@ enum RigidInstantiation {
 /// type stands for them all: `()` does not, because `eq` admits unit but not a
 /// function ([05-OP-36]). It is replayed at [`RigidInstantiation::Arbitrary`]
 /// instead.
-fn rigid_instantiations(var: TypeVar, subst: &Subst) -> Vec<RigidInstantiation> {
+fn rigid_instantiations(var: TypeVar, subst: &Subst<ErrorWitness>) -> Vec<RigidInstantiation> {
     match subst.tvar_restriction(var) {
         Some(restriction) => family_members(restriction.precision_family())
             .map(RigidInstantiation::Member)
@@ -395,13 +396,13 @@ enum ReplayOutcome {
 #[allow(clippy::too_many_arguments)]
 pub(super) fn decide_at_boundary(
     obligation: BoundaryObligation<'_>,
-    arg_tys: &[Type],
-    result_ty: &Type,
+    arg_tys: &[Type<ErrorWitness>],
+    result_ty: &Type<ErrorWitness>,
     shape_rule_operands: &[TypeVar],
     declaration: Option<&str>,
     env: &Env,
     vg: &VarGen,
-    subst: &Subst,
+    subst: &Subst<ErrorWitness>,
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
 ) {
@@ -520,15 +521,15 @@ pub(super) fn decide_at_boundary(
 #[allow(clippy::too_many_arguments)]
 fn replay_at_instantiation(
     obligation: BoundaryObligation<'_>,
-    arg_tys: &[Type],
-    result_ty: &Type,
+    arg_tys: &[Type<ErrorWitness>],
+    result_ty: &Type<ErrorWitness>,
     assignment: &[(&BoundaryOperand<'_>, RigidInstantiation)],
     vg: &VarGen,
-    subst: &Subst,
+    subst: &Subst<ErrorWitness>,
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
 ) -> ReplayOutcome {
-    let instantiate = |target: &mut Subst| {
+    let instantiate = |target: &mut Subst<ErrorWitness>| {
         assignment
             .iter()
             .all(|(operand, instantiation)| match instantiation {
@@ -538,11 +539,11 @@ fn replay_at_instantiation(
                 RigidInstantiation::Arbitrary => true,
             })
     };
-    let mut instantiation = Subst::default();
+    let mut instantiation = Subst::<ErrorWitness>::default();
     if !instantiate(&mut instantiation) {
         return ReplayOutcome::Admitted;
     }
-    let settled: Vec<Type> = arg_tys
+    let settled: Vec<Type<ErrorWitness>> = arg_tys
         .iter()
         .map(|ty| instantiation.apply(&subst.apply(ty)))
         .collect();
@@ -553,7 +554,7 @@ fn replay_at_instantiation(
         free_tvars(ty).is_empty() && free_dvars(ty).is_empty() && free_rvars(ty).is_empty()
     });
     let mut trial_subst = if ground {
-        Subst::default()
+        Subst::<ErrorWitness>::default()
     } else {
         let mut trial_subst = subst.clone();
         if !instantiate(&mut trial_subst) {

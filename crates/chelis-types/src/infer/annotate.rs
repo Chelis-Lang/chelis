@@ -4,6 +4,7 @@
 //! The extraction preserves control flow and diagnostic order.
 
 use super::*;
+use crate::errors::ErrorWitness;
 
 /// Explicit annotation-time declaration context. The declared signature map
 /// belongs to one annotation unit; `current_type_binders` is narrowed to the
@@ -634,7 +635,7 @@ pub(super) fn annotate_fn_children(
     declared_param_type_exprs: Option<&[deep::Expr]>,
     annotation_context: AnnotationResolutionContext<'_>,
     errors: &mut DiagnosticSink<'_>,
-) -> (Vec<deep::Expr>, Type) {
+) -> (Vec<deep::Expr>, Type<ErrorWitness>) {
     let deep::ExprCarrier::DecodedNode(DeepTag::Fn, _, kids) = fn_expr.carrier() else {
         return (vec![], Type::Unit);
     };
@@ -733,7 +734,7 @@ pub(super) fn annotated_node_meta_with_override(
     tag: DeepTag,
     meta: &deep::Metadata,
     expr: &deep::Expr,
-    precomputed_ty: Option<Type>,
+    precomputed_ty: Option<Type<ErrorWitness>>,
     product: &InferenceProduct,
     errors: &mut DiagnosticSink<'_>,
 ) -> deep::Metadata {
@@ -761,8 +762,8 @@ pub(super) fn annotated_node_meta_with_override(
 /// never replaces existing metadata; a safe resolved candidate may refresh it.
 fn write_type_metadata_monotone(
     metadata: &mut deep::Metadata,
-    ty: Type,
-    encode: fn(&Type) -> deep::Expr,
+    ty: Type<ErrorWitness>,
+    encode: fn(&Type<ErrorWitness>) -> deep::Expr,
 ) {
     let write = if metadata.ty().is_some() {
         type_is_safe_annotation_stamp(&ty)
@@ -777,7 +778,7 @@ fn write_type_metadata_monotone(
     }
 }
 
-fn type_is_safe_annotation_stamp(ty: &Type) -> bool {
+fn type_is_safe_annotation_stamp(ty: &Type<ErrorWitness>) -> bool {
     match ty {
         Type::Prim(_) | Type::Unit => true,
         Type::Fn(args, ret) => {

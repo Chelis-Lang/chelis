@@ -5,6 +5,7 @@
 
 use super::*;
 use crate::context::LibraryProofId;
+use crate::errors::ErrorWitness;
 
 mod deferred_shape;
 mod result_origin;
@@ -86,8 +87,8 @@ pub(super) struct InferenceProduct {
     /// parameter types are revealed later, rather than snapshotting its holes.
     result_type_constraints: Vec<ResultTypeConstraint>,
     result_inputs_closed: bool,
-    closing_group_types: Vec<Type>,
-    pub(super) group_result_origins: BTreeMap<String, Scheme>,
+    closing_group_types: Vec<Type<ErrorWitness>>,
+    pub(super) group_result_origins: BTreeMap<String, Scheme<ErrorWitness>>,
     /// [04-PAT-1]: a literal pattern first seen against a flexible type must
     /// be decided after its enclosing declaration has supplied the type.
     deferred_literal_patterns: Vec<DeferredLiteralPattern>,
@@ -154,7 +155,7 @@ pub(super) struct InferenceProduct {
     /// provisional scheme, decided when the component completes
     /// (`group_link::link_group_references`).
     group_references: Vec<GroupReference>,
-    group_member_types: Vec<(String, Type)>,
+    group_member_types: Vec<(String, Type<ErrorWitness>)>,
     /// The references to a sibling member of the recursive group being
     /// inferred, each typed at a fresh copy of the member's provisional type
     /// and linked to it when the group completes (`group_link::SiblingLink`).
@@ -163,7 +164,7 @@ pub(super) struct InferenceProduct {
     /// of the recursive group being inferred whose declaration writes no
     /// signature. The member's own body and references share it; a sibling's
     /// reference copies it. Dropped when the group completes.
-    group_provisional_types: Vec<(String, Type)>,
+    group_provisional_types: Vec<(String, Type<ErrorWitness>)>,
 }
 
 struct InferredAdmissionContract {
@@ -178,11 +179,11 @@ struct InferredAdmissionContract {
 }
 
 impl InferredAdmissionContract {
-    fn unmet_families(&self, subst: &Subst) -> Vec<(TypeVar, TypeVarRestriction)> {
+    fn unmet_families(&self, subst: &Subst<ErrorWitness>) -> Vec<(TypeVar, TypeVarRestriction)> {
         if self.failed_application.is_some() {
             return Vec::new();
         }
-        crate::env::free_tvars(&subst.apply(&Type::Var(self.variable)))
+        chelis_type_core::free_tvars(&subst.apply(&Type::Var(self.variable)))
             .into_iter()
             .filter_map(|variable| {
                 let required = subst.tvar_restriction(variable)?;
@@ -202,8 +203,8 @@ impl InferredAdmissionContract {
 
 #[derive(Clone)]
 struct ResultTypeConstraint {
-    actual: Type,
-    declared: Type,
+    actual: Type<ErrorWitness>,
+    declared: Type<ErrorWitness>,
 }
 
 #[derive(Clone)]
@@ -211,7 +212,7 @@ pub(super) enum DeferredShapeRule {
     /// Branch results agree after their semantic producers settle. The
     /// published type carries only structure common to both branches.
     ResultJoin {
-        last_propagated: Option<Type>,
+        last_propagated: Option<Type<ErrorWitness>>,
     },
     Matmul {
         location: Option<TypeDiagnosticLocation>,
@@ -315,14 +316,14 @@ pub(super) struct DeferredShapeCheck {
     owner: Option<String>,
     rule: DeferredShapeRule,
     arg_exprs: Vec<deep::Expr>,
-    arg_tys: Vec<Type>,
-    result_ty: Type,
+    arg_tys: Vec<Type<ErrorWitness>>,
+    result_ty: Type<ErrorWitness>,
 }
 
 struct DeferredLiteralPattern {
     owner: Option<String>,
     pattern: deep::Expr,
-    scrutinee_ty: Type,
+    scrutinee_ty: Type<ErrorWitness>,
     scrutinee_name: Option<String>,
 }
 
@@ -339,17 +340,17 @@ pub(super) struct StampRequirement {
 }
 
 pub(super) struct OwnerTypeWrite {
-    ty: Type,
+    ty: Type<ErrorWitness>,
     source: &'static str,
 }
 
 pub(super) struct FinalOwnerType {
     epoch: u64,
-    ty: Type,
+    ty: Type<ErrorWitness>,
 }
 
 impl FinalOwnerType {
-    pub(super) fn ty(&self) -> &Type {
+    pub(super) fn ty(&self) -> &Type<ErrorWitness> {
         &self.ty
     }
 }
@@ -377,8 +378,8 @@ impl InferenceProduct {
         ascription_span: Span,
         initializer_span: Span,
         authored_type: deep::Expr,
-        declared_type: Type,
-        rhs_type_before_ascription: &Type,
+        declared_type: Type<ErrorWitness>,
+        rhs_type_before_ascription: &Type<ErrorWitness>,
         errors: &mut DiagnosticSink<'_>,
     ) {
         let claims = if matches!(declared_type, Type::Fn(..)) {
@@ -581,7 +582,7 @@ impl InferenceProduct {
     pub(super) fn record_group_reference(
         &mut self,
         callee: &str,
-        ty: Type,
+        ty: Type<ErrorWitness>,
         span_id: Option<String>,
         span_offset: Option<usize>,
     ) {
@@ -604,7 +605,11 @@ impl InferenceProduct {
     /// Whether a reference to `name` that resolved to `scheme` is an in-group
     /// reference to a member that writes no signature, and not to a local
     /// binding that shadows it.
-    pub(super) fn is_unsigned_group_reference(&self, name: &str, scheme: &Scheme) -> bool {
+    pub(super) fn is_unsigned_group_reference(
+        &self,
+        name: &str,
+        scheme: &Scheme<ErrorWitness>,
+    ) -> bool {
         scheme.tvars.is_empty()
             && scheme.dvars.is_empty()
             && scheme.rvars.is_empty()
@@ -620,8 +625,8 @@ impl InferenceProduct {
     pub(super) fn record_sibling_link(
         &mut self,
         callee: &str,
-        ty: Type,
-        own: Type,
+        ty: Type<ErrorWitness>,
+        own: Type<ErrorWitness>,
         copies: Vec<(Variable, Variable)>,
         awaits: bool,
         span_id: Option<String>,
@@ -641,7 +646,7 @@ impl InferenceProduct {
 
     /// chelis#2590: the instance of `name`'s provisional scheme that its own
     /// body is inferred against.
-    pub(super) fn record_group_member_type(&mut self, name: &str, ty: Type) {
+    pub(super) fn record_group_member_type(&mut self, name: &str, ty: Type<ErrorWitness>) {
         self.group_member_types.push((name.to_string(), ty));
     }
 
@@ -649,7 +654,7 @@ impl InferenceProduct {
     /// recursive group about to be inferred that write no signature.
     pub(super) fn record_group_provisional_types(
         &mut self,
-        types: impl IntoIterator<Item = (String, Type)>,
+        types: impl IntoIterator<Item = (String, Type<ErrorWitness>)>,
     ) {
         self.group_provisional_types.extend(types);
     }
@@ -672,7 +677,11 @@ impl InferenceProduct {
     /// A variable anywhere inside those types qualifies, not only the whole
     /// type of a parameter or result: a tuple component, a list element or a
     /// tensor's precision is linked just the same.
-    pub(super) fn awaits_group_completion(&self, ty: &Type, subst: &Subst) -> bool {
+    pub(super) fn awaits_group_completion(
+        &self,
+        ty: &Type<ErrorWitness>,
+        subst: &Subst<ErrorWitness>,
+    ) -> bool {
         let Type::Var(var) = subst.apply(ty) else {
             return false;
         };
@@ -685,7 +694,7 @@ impl InferenceProduct {
                     .filter(|link| link.awaits)
                     .map(|link| &link.ty),
             )
-            .any(|linked| crate::env::free_tvars(&resolved(linked, subst)).contains(&var))
+            .any(|linked| chelis_type_core::free_tvars(&resolved(linked, subst)).contains(&var))
     }
 
     pub(super) fn group_links_in_progress(&self) -> bool {
@@ -703,11 +712,17 @@ impl InferenceProduct {
     /// of an in-group reference's instance of a member's omitted types. A body
     /// sees each of these unbound by any sibling, in every declaration order,
     /// so the answer is the same in every order.
-    pub(super) fn group_variable_owner(&self, ty: &Type, subst: &Subst) -> Option<&str> {
+    pub(super) fn group_variable_owner(
+        &self,
+        ty: &Type<ErrorWitness>,
+        subst: &Subst<ErrorWitness>,
+    ) -> Option<&str> {
         let Type::Var(var) = subst.apply(ty) else {
             return None;
         };
-        let holds = |linked: &Type| crate::env::free_tvars(&resolved(linked, subst)).contains(&var);
+        let holds = |linked: &Type<ErrorWitness>| {
+            chelis_type_core::free_tvars(&resolved(linked, subst)).contains(&var)
+        };
         self.group_provisional_types
             .iter()
             .find(|(_, provisional)| holds(provisional))
@@ -728,9 +743,7 @@ impl InferenceProduct {
 
     /// The component's in-group references, member types and sibling links,
     /// taken for its completion.
-    pub(super) fn take_group_links(
-        &mut self,
-    ) -> (Vec<GroupReference>, Vec<(String, Type)>, Vec<SiblingLink>) {
+    pub(super) fn take_group_links(&mut self) -> group_link::GroupLinks {
         self.closing_group_types = self
             .group_provisional_types
             .iter()
@@ -744,11 +757,11 @@ impl InferenceProduct {
             .chain(self.sibling_links.iter().map(|link| link.ty.clone()))
             .collect();
         self.group_provisional_types.clear();
-        (
-            std::mem::take(&mut self.group_references),
-            std::mem::take(&mut self.group_member_types),
-            std::mem::take(&mut self.sibling_links),
-        )
+        group_link::GroupLinks {
+            references: std::mem::take(&mut self.group_references),
+            members: std::mem::take(&mut self.group_member_types),
+            siblings: std::mem::take(&mut self.sibling_links),
+        }
     }
 
     /// The authored-binder contracts still to decide, without taking them.
@@ -771,7 +784,7 @@ impl InferenceProduct {
     pub(super) fn defer_literal_pattern(
         &mut self,
         pattern: &deep::Expr,
-        scrutinee_ty: &Type,
+        scrutinee_ty: &Type<ErrorWitness>,
         site: PatternSite<'_>,
     ) {
         let scrutinee_name = match site {
@@ -791,7 +804,7 @@ impl InferenceProduct {
     pub(super) fn has_pending_literal_pattern_since(
         &self,
         checkpoint: usize,
-        subst: &Subst,
+        subst: &Subst<ErrorWitness>,
     ) -> bool {
         self.deferred_literal_patterns[checkpoint..]
             .iter()
@@ -801,7 +814,7 @@ impl InferenceProduct {
     pub(super) fn finish_deferred_literal_patterns(
         &mut self,
         env: &Env,
-        subst: &Subst,
+        subst: &Subst<ErrorWitness>,
         adt_reg: &AdtRegistry,
         errors: &mut DiagnosticSink<'_>,
     ) {
@@ -824,11 +837,11 @@ impl InferenceProduct {
     pub(super) fn record_inferred_contract(
         &mut self,
         subject: &str,
-        ty: &Type,
+        ty: &Type<ErrorWitness>,
         env: &Env,
-        subst: &Subst,
+        subst: &Subst<ErrorWitness>,
     ) {
-        let variables = crate::env::free_tvars(&subst.apply(ty))
+        let variables = chelis_type_core::free_tvars(&subst.apply(ty))
             .into_iter()
             .filter(|variable| {
                 // Explicit binders have their own rigidity/entailment check.
@@ -869,17 +882,17 @@ impl InferenceProduct {
     /// Merely transporting a function value never passes through this edge.
     pub(super) fn record_call_operand_contracts(
         &mut self,
-        callee: &Type,
+        callee: &Type<ErrorWitness>,
         name: Option<&str>,
-        arguments: &[Type],
+        arguments: &[Type<ErrorWitness>],
         env: &Env,
-        subst: &Subst,
+        subst: &Subst<ErrorWitness>,
     ) {
         let Type::Fn(parameters, _) = subst.apply(callee) else {
             return;
         };
         for (index, (parameter, argument)) in parameters.iter().zip(arguments).enumerate() {
-            if crate::env::free_tvars(parameter)
+            if chelis_type_core::free_tvars(parameter)
                 .iter()
                 .any(|variable| subst.tvar_restriction(*variable).is_some())
             {
@@ -899,10 +912,10 @@ impl InferenceProduct {
 
     pub(super) fn record_call_result_contracts(
         &mut self,
-        callee: &Type,
+        callee: &Type<ErrorWitness>,
         name: Option<&str>,
         env: &Env,
-        subst: &Subst,
+        subst: &Subst<ErrorWitness>,
     ) {
         let Type::Fn(_, result) = subst.apply(callee) else {
             return;
@@ -946,14 +959,18 @@ impl InferenceProduct {
     pub(super) fn has_pending_admission_contract_since(
         &self,
         checkpoint: usize,
-        subst: &Subst,
+        subst: &Subst<ErrorWitness>,
     ) -> bool {
         self.inferred_admission_contracts[checkpoint..]
             .iter()
             .any(|contract| !contract.unmet_families(subst).is_empty())
     }
 
-    fn finish_admission_contracts(&mut self, subst: &Subst, errors: &mut DiagnosticSink<'_>) {
+    fn finish_admission_contracts(
+        &mut self,
+        subst: &Subst<ErrorWitness>,
+        errors: &mut DiagnosticSink<'_>,
+    ) {
         let mut reported = BTreeSet::new();
         for contract in self.inferred_admission_contracts.drain(..) {
             for (variable, required) in contract.unmet_families(subst) {
@@ -982,15 +999,25 @@ impl InferenceProduct {
         }
     }
 
-    pub(super) fn record_canonical(&mut self, expr: &deep::Expr, ty: Type) {
+    pub(super) fn record_canonical(&mut self, expr: &deep::Expr, ty: Type<ErrorWitness>) {
         self.record(expr, ty, "canonical infer_expr traversal");
     }
 
-    pub(super) fn record_bypass(&mut self, expr: &deep::Expr, ty: Type, source: &'static str) {
+    pub(super) fn record_bypass(
+        &mut self,
+        expr: &deep::Expr,
+        ty: Type<ErrorWitness>,
+        source: &'static str,
+    ) {
         self.record(expr, ty, source);
     }
 
-    pub(super) fn record(&mut self, expr: &deep::Expr, ty: Type, source: &'static str) {
+    pub(super) fn record(
+        &mut self,
+        expr: &deep::Expr,
+        ty: Type<ErrorWitness>,
+        source: &'static str,
+    ) {
         let Some(epoch) = self.active_epoch.as_mut() else {
             return;
         };
@@ -1022,7 +1049,11 @@ impl InferenceProduct {
     /// Resolve after enclosing calls have unified their operands. Generic
     /// bodies preserve a type-indexed selection; they do not pick a sibling
     /// until their existing owner type is instantiated.
-    fn resolve_builtin_selections(&mut self, subst: &Subst, errors: &mut DiagnosticSink<'_>) {
+    fn resolve_builtin_selections(
+        &mut self,
+        subst: &Subst<ErrorWitness>,
+        errors: &mut DiagnosticSink<'_>,
+    ) {
         for index in std::mem::take(&mut self.pending_builtin_selections) {
             let selection = &mut self.builtin_selections[index];
             match selection.resolve(subst) {
@@ -1044,7 +1075,11 @@ impl InferenceProduct {
         }
     }
 
-    pub(super) fn finish_root(&mut self, subst: &Subst, errors: &mut DiagnosticSink<'_>) {
+    pub(super) fn finish_root(
+        &mut self,
+        subst: &Subst<ErrorWitness>,
+        errors: &mut DiagnosticSink<'_>,
+    ) {
         if errors.is_empty() {
             self.resolve_builtin_selections(subst, errors);
         }
@@ -1059,7 +1094,7 @@ impl InferenceProduct {
         // Each node's recorded type shares its children with the types
         // recorded inside it, so one memo across the epoch applies each
         // distinct subtree once.
-        let mut memo = crate::unify::ApplyMemo::default();
+        let mut memo = chelis_type_core::ApplyMemo::default();
         for (key, requirement) in epoch.owners.into_sorted() {
             let Some(writes) = epoch.writes.get(&key) else {
                 // Missing owners are diagnosed at the exact annotation lookup,
@@ -1098,7 +1133,7 @@ impl InferenceProduct {
     /// Most stamps are already concrete when their root finishes, but a
     /// variable an earlier root left open can be bound by a later one, so
     /// every stamp gets one final resolution before annotation.
-    pub(super) fn resolve_owner_types(&mut self, subst: &Subst) {
+    pub(super) fn resolve_owner_types(&mut self, subst: &Subst<ErrorWitness>) {
         let keys = self
             .owner_types
             .to_sorted()
@@ -1126,7 +1161,7 @@ impl InferenceProduct {
         expr: &deep::Expr,
         role: &'static str,
         errors: &mut DiagnosticSink<'_>,
-    ) -> Option<Type> {
+    ) -> Option<Type<ErrorWitness>> {
         match self.owner_types.get(&expr_key(expr)) {
             Some(owner) => {
                 let _owning_epoch = owner.epoch;
@@ -1152,9 +1187,9 @@ impl InferenceProduct {
     pub(super) fn current_owner_type(
         &self,
         expr: &deep::Expr,
-        subst: &Subst,
+        subst: &Subst<ErrorWitness>,
         errors: &mut DiagnosticSink<'_>,
-    ) -> Option<Type> {
+    ) -> Option<Type<ErrorWitness>> {
         let Some(epoch) = self.active_epoch.as_ref() else {
             errors.push(internal_owner_stamp_error(
                 "canonical inference requested a stamp outside an active epoch".to_string(),
@@ -1209,8 +1244,11 @@ pub(super) fn expr_key(expr: &deep::Expr) -> usize {
     std::ptr::from_ref(expr).addr()
 }
 
-pub(super) fn owner_types_compatible(left: &Type, right: &Type) -> bool {
-    let mut compatibility_subst = Subst::new();
+pub(super) fn owner_types_compatible(
+    left: &Type<ErrorWitness>,
+    right: &Type<ErrorWitness>,
+) -> bool {
+    let mut compatibility_subst = Subst::<ErrorWitness>::new();
     unify(left, right, &mut compatibility_subst).is_ok()
 }
 
@@ -1323,7 +1361,7 @@ pub(crate) fn run_reconcile_mutation_case(
     errors: &mut DiagnosticSink<'_>,
 ) -> (String, bool) {
     let tensor = |dim: i64| Type::Tensor(vec![Dim::Lit(dim)], TensorPrec::Concrete(Prim::F32));
-    let mut subst = Subst::new();
+    let mut subst = Subst::<ErrorWitness>::new();
     let mut vg = VarGen::default();
     let published = match case {
         ReconcileMutationCase::Disagrees => tensor(3),
@@ -1369,20 +1407,20 @@ pub(crate) fn run_type_stamp_mutation_case(
     product.begin_root(&owner);
     match case {
         TypeStampMutationCase::Missing => {
-            product.finish_root(&Subst::new(), errors);
+            product.finish_root(&Subst::<ErrorWitness>::new(), errors);
             product.owner_type(&owner, "test owner", errors).is_none()
         }
         TypeStampMutationCase::CompatibleRepeat => {
             let ty = Type::Prim(Prim::Int64);
             product.record_canonical(&owner, ty.clone());
             product.record_bypass(&owner, ty.clone(), "compatible test repeat");
-            product.finish_root(&Subst::new(), errors);
+            product.finish_root(&Subst::<ErrorWitness>::new(), errors);
             product.owner_type(&owner, "test owner", errors) == Some(ty)
         }
         TypeStampMutationCase::IncompatibleRepeat => {
             product.record_canonical(&owner, Type::Prim(Prim::Int64));
             product.record_bypass(&owner, Type::Prim(Prim::String), "incompatible test repeat");
-            product.finish_root(&Subst::new(), errors);
+            product.finish_root(&Subst::<ErrorWitness>::new(), errors);
             true
         }
         TypeStampMutationCase::UnregisteredSynthesized => {
@@ -1393,7 +1431,7 @@ pub(crate) fn run_type_stamp_mutation_case(
                 "unregistered synthesized test node",
             );
             product.record_canonical(&owner, Type::Prim(Prim::Int64));
-            product.finish_root(&Subst::new(), errors);
+            product.finish_root(&Subst::<ErrorWitness>::new(), errors);
             product
                 .owner_type(&synthesized, "synthesized test node", errors)
                 .is_none()
@@ -1407,7 +1445,7 @@ pub(crate) fn run_type_stamp_mutation_case(
                 stamped_parts(&root).expect("`stamped_node_expr` builds a decoded node");
             let runtime_child = &root_children[0];
             product.record_canonical(runtime_child, Type::Prim(Prim::Int64));
-            product.current_owner_type(runtime_child, &Subst::new(), errors)
+            product.current_owner_type(runtime_child, &Subst::<ErrorWitness>::new(), errors)
                 == Some(Type::Prim(Prim::Int64))
         }
     }
@@ -1433,7 +1471,7 @@ pub(crate) fn run_finalization_mutation_case(
             let mut product = InferenceProduct::default();
             product.begin_root(&runtime);
             product.record_canonical(&runtime, crate::errors::error_sentinel_for_test());
-            product.finish_root(&Subst::new(), errors);
+            product.finish_root(&Subst::<ErrorWitness>::new(), errors);
             annotate_ir_program(std::slice::from_ref(&runtime), &product, errors)
         }
         FinalizationMutationCase::SilentErrorSignature => {
@@ -1603,7 +1641,7 @@ pub struct CheckedLocalAscription {
     ascription_span: Span,
     initializer_span: Span,
     authored_type: deep::Expr,
-    declared_type: Type,
+    declared_type: Type<ErrorWitness>,
     claims: LocalAscriptionClaims,
 }
 
@@ -1646,7 +1684,7 @@ impl CheckedLocalAscription {
         &self.authored_type
     }
 
-    pub fn declared_type(&self) -> &Type {
+    pub fn declared_type(&self) -> &Type<ErrorWitness> {
         &self.declared_type
     }
 
@@ -1878,7 +1916,7 @@ pub fn compose_local_ascriptions(
     })
 }
 
-fn tensor_dims(ty: &Type) -> Option<&[Dim]> {
+fn tensor_dims(ty: &Type<ErrorWitness>) -> Option<&[Dim]> {
     match ty {
         Type::Tensor(dims, _) => Some(dims),
         Type::Ref(inner) => tensor_dims(inner),
@@ -1887,8 +1925,8 @@ fn tensor_dims(ty: &Type) -> Option<&[Dim]> {
 }
 
 fn outstanding_local_ascription_claims(
-    declared_type: &Type,
-    rhs_type_before_ascription: &Type,
+    declared_type: &Type<ErrorWitness>,
+    rhs_type_before_ascription: &Type<ErrorWitness>,
 ) -> Option<Vec<LocalAscriptionAxisClaim>> {
     let declared_dims = tensor_dims(declared_type)?;
     let rhs_dims = tensor_dims(rhs_type_before_ascription);
@@ -2426,10 +2464,10 @@ pub struct FunctionSignatureInference {
     ///
     /// Lowering consumes this record instead of reparsing `defsig` syntax.
     #[serde(default)]
-    pub authored_signature_type: Option<Type>,
+    pub authored_signature_type: Option<Type<ErrorWitness>>,
     pub recursive_cycle: bool,
-    pub checked_signature: Type,
-    pub display_signature: Type,
+    pub checked_signature: Type<ErrorWitness>,
+    pub display_signature: Type<ErrorWitness>,
     pub params: Vec<ParamSignatureInference>,
 }
 
@@ -2439,8 +2477,8 @@ pub struct ParamSignatureInference {
     pub name: String,
     pub written: bool,
     pub inferred_read_only: bool,
-    pub checked_type: Type,
-    pub display_type: Type,
+    pub checked_type: Type<ErrorWitness>,
+    pub display_type: Type<ErrorWitness>,
 }
 
 pub(crate) fn checked_program_with_effect_annotations_in_session(

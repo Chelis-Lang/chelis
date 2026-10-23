@@ -16,7 +16,7 @@
 //! times: linear growth gives about 2, quadratic about 4.
 
 use super::*;
-use crate::unify::take_apply_visits;
+use chelis_type_core::take_apply_visits;
 
 const DEPTHS: [usize; 4] = [64, 128, 256, 512];
 
@@ -114,7 +114,7 @@ fn issue_3819_an_open_constructor_chain_applies_at_most_quadratically() {
 
 /// A tuple chain `depth` deep with a free variable at every level, which
 /// applying cannot skip as ground.
-fn open_chain(depth: usize, first: u32) -> Type {
+fn open_chain(depth: usize, first: u32) -> Type<ErrorWitness> {
     (0..depth).fold(Type::Prim(Prim::Int32), |inner, level| {
         Type::tuple(vec![Type::Var(TypeVar(first + level as u32)), inner])
     })
@@ -127,7 +127,7 @@ fn issue_3819_one_occurs_check_visits_the_type_once() {
     let mut visits = Vec::new();
     for depth in DEPTHS {
         let ty = open_chain(depth, 1);
-        let mut subst = Subst::new();
+        let mut subst = Subst::<ErrorWitness>::new();
         let _ = take_apply_visits();
         unify(&Type::Var(TypeVar(0)), &ty, &mut subst).expect("the binding is acyclic");
         visits.push(take_apply_visits());
@@ -142,7 +142,7 @@ fn issue_3819_one_occurs_check_visits_the_type_once() {
     // The check still finds the variable at any depth.
     let deepest = DEPTHS[DEPTHS.len() - 1];
     let cyclic = open_chain(deepest, 1);
-    let mut subst = Subst::new();
+    let mut subst = Subst::<ErrorWitness>::new();
     let error = unify(&Type::Var(TypeVar(deepest as u32)), &cyclic, &mut subst)
         .expect_err("the variable occurs at the bottom of the chain");
     assert!(
@@ -158,7 +158,7 @@ fn issue_3819_a_ground_child_is_returned_without_a_walk() {
     let ground = (0..DEPTHS[DEPTHS.len() - 1]).fold(Type::Prim(Prim::Int32), |inner, _| {
         Type::tuple(vec![Type::Prim(Prim::Int32), inner])
     });
-    let subst = Subst::new();
+    let subst = Subst::<ErrorWitness>::new();
     let _ = take_apply_visits();
     let applied = subst.apply(&ground);
     let first = take_apply_visits();
@@ -188,14 +188,14 @@ fn issue_3819_a_ground_child_is_returned_without_a_walk() {
 fn issue_3819_the_detector_rejects_an_occurs_check_that_reapplies_per_level() {
     // Negative control: the removed occurs check, which applied the
     // substitution again at every level of the type it searched.
-    fn occurs_reapplying(v: TypeVar, ty: &Type, subst: &Subst) -> bool {
+    fn occurs_reapplying(v: TypeVar, ty: &Type<ErrorWitness>, subst: &Subst<ErrorWitness>) -> bool {
         match subst.apply(ty) {
             Type::Var(found) => found == v,
             Type::Tuple(items) => items.iter().any(|item| occurs_reapplying(v, item, subst)),
             _ => false,
         }
     }
-    let subst = Subst::new();
+    let subst = Subst::<ErrorWitness>::new();
     let visits = DEPTHS.map(|depth| {
         let ty = open_chain(depth, 1);
         let _ = take_apply_visits();

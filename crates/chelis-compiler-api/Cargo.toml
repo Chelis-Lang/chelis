@@ -18,6 +18,7 @@ ownership-ledger = ["chelis-runtime/ownership-ledger"]
 clarabel-provider = ["dep:chelis-clarabel-provider", "dep:chelis-runtime-bundle", "chelis-runtime-bundle/clarabel-provider"]
 
 [dependencies]
+chelis-type-core = { workspace = true, default-features = false, features = ["serde"] }
 chelis-numeric-core = { workspace = true, default-features = false, features = ["alloc", "serde"] }
 chelis-abi.workspace = true
 chelis-clarabel-provider = { path = "../chelis-clarabel-provider", optional = true, features = ["solver"] }

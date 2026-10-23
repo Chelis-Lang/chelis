@@ -18,9 +18,10 @@
 
 use chelis_deep::ast::{Atom, Expr, Metadata};
 use chelis_deep::{DeepTag, ExprCarrier};
+use chelis_type_core::{Dim, NominalArg, TensorPrec, Type};
 use chelis_types::adt::AdtRegistry;
+use chelis_types::errors::ErrorWitness;
 use chelis_types::infer::type_to_deep_expr;
-use chelis_types::types::{Dim, NominalArg, TensorPrec, Type};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
@@ -772,7 +773,7 @@ fn canonical(expr: &Expr) -> String {
 /// variables (`t7`, `d3`); map each to the application's argument.
 fn parameter_substitution(
     name: &str,
-    param_args: &[NominalArg],
+    param_args: &[NominalArg<ErrorWitness>],
     args: &[Expr],
 ) -> Result<BTreeMap<String, Expr>, ClaimPatternError> {
     if param_args.len() != args.len() {
@@ -842,11 +843,11 @@ fn substitute(ty: &Expr, substitution: &BTreeMap<String, Expr>) -> Expr {
 
 /// The declaration variable of each parameter, aligned with `param_args`.
 enum Param {
-    Type(chelis_types::types::TypeVar),
-    Dim(chelis_types::types::DimVar),
+    Type(chelis_type_core::TypeVar),
+    Dim(chelis_type_core::DimVar),
 }
 
-fn params(param_args: &[NominalArg]) -> Vec<Option<Param>> {
+fn params(param_args: &[NominalArg<ErrorWitness>]) -> Vec<Option<Param>> {
     param_args
         .iter()
         .map(|argument| match argument {
@@ -857,7 +858,7 @@ fn params(param_args: &[NominalArg]) -> Vec<Option<Param>> {
         .collect()
 }
 
-fn mentions(ty: &Type, param: &Param) -> bool {
+fn mentions(ty: &Type<ErrorWitness>, param: &Param) -> bool {
     match ty {
         Type::Var(var) => matches!(param, Param::Type(p) if p == var),
         Type::Tensor(dims, prec) => {
@@ -878,7 +879,7 @@ fn mentions(ty: &Type, param: &Param) -> bool {
     }
 }
 
-fn is_exactly(arg: &NominalArg, param: &Param) -> bool {
+fn is_exactly(arg: &NominalArg<ErrorWitness>, param: &Param) -> bool {
     match (arg, param) {
         (NominalArg::Type(Type::Var(v)), Param::Type(p)) => v == p,
         (NominalArg::Dimension(Dim::Var(v)), Param::Dim(p)) => v == p,
@@ -887,7 +888,10 @@ fn is_exactly(arg: &NominalArg, param: &Param) -> bool {
 }
 
 /// Every nominal application inside `ty`, with its arguments.
-fn applications<'t>(ty: &'t Type, out: &mut Vec<(&'t str, Vec<NominalArg>)>) {
+fn applications<'t>(
+    ty: &'t Type<ErrorWitness>,
+    out: &mut Vec<(&'t str, Vec<NominalArg<ErrorWitness>>)>,
+) {
     match ty {
         Type::Adt(name, args) => {
             out.push((name, args.iter().cloned().map(NominalArg::Type).collect()));
@@ -1014,7 +1018,7 @@ fn non_regular_declarations(registry: &AdtRegistry) -> BTreeSet<String> {
 /// arguments, as the least fixed point over field references. A tensor an
 /// argument supplies is found in the argument itself.
 fn carrying_declarations(registry: &AdtRegistry) -> BTreeSet<String> {
-    fn direct(ty: &Type, carrying: &BTreeSet<String>) -> bool {
+    fn direct(ty: &Type<ErrorWitness>, carrying: &BTreeSet<String>) -> bool {
         match ty {
             Type::Tensor(_, _) => true,
             Type::Adt(name, args) => {

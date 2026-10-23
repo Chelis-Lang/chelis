@@ -4,6 +4,7 @@
 //! The extraction preserves control flow and diagnostic order.
 
 use super::*;
+use crate::errors::ErrorWitness;
 use chelis_deep::cons_spine::ConsSpine;
 
 /// Extract the static shape of a `to_tensor` argument when the
@@ -191,7 +192,7 @@ fn definition_binds_dimension(env: &Env, name: &str) -> bool {
 /// of the enclosing definition, or a dimension a tensor type in scope carries
 /// (spec/04-type-system.md section 4.7.2, "an in-scope symbolic dimension may
 /// preserve its name").
-pub(super) fn definition_dimension(env: &Env, name: &str, subst: &Subst) -> bool {
+pub(super) fn definition_dimension(env: &Env, name: &str, subst: &Subst<ErrorWitness>) -> bool {
     definition_binds_dimension(env, name) || env.tensor_carries_dim_with_subst(name, subst)
 }
 
@@ -210,7 +211,7 @@ pub(super) fn ambiguous_size_name_error(
     builtin: &str,
     size: &deep::Expr,
     env: &Env,
-    subst: &Subst,
+    subst: &Subst<ErrorWitness>,
 ) -> Option<CheckError> {
     crate::linearity::free_runtime_variables(size)
         .into_iter()
@@ -311,9 +312,9 @@ pub(super) fn render_declared_dim(dim_names: &UnordMap<DimVar, String>, dv: DimV
 /// universal contract has been narrowed and the declaration is rejected.
 pub(super) fn check_authored_dvars_rigid(
     declaration: &str,
-    decl_ty: &Type,
+    decl_ty: &Type<ErrorWitness>,
     dim_names: &UnordMap<DimVar, String>,
-    subst: &Subst,
+    subst: &Subst<ErrorWitness>,
     errors: &mut DiagnosticSink<'_>,
 ) {
     let Type::Fn(decl_params, decl_ret) = decl_ty else {
@@ -333,14 +334,14 @@ pub(super) fn check_authored_dvars_rigid(
 
     let mut param_dvars = Vec::new();
     for ty in decl_params.iter() {
-        for dv in crate::env::free_dvars(ty) {
+        for dv in chelis_type_core::free_dvars(ty) {
             if !param_dvars.contains(&dv) {
                 param_dvars.push(dv);
             }
         }
     }
     let mut return_only_dvars = Vec::new();
-    for dv in crate::env::free_dvars(decl_ret) {
+    for dv in chelis_type_core::free_dvars(decl_ret) {
         if dim_names.contains_key(&dv)
             && !param_dvars.contains(&dv)
             && !return_only_dvars.contains(&dv)
@@ -367,7 +368,7 @@ pub(super) fn check_authored_dvars_rigid(
     let render = |dv: DimVar| render_declared_dim(dim_names, dv);
     let mut param_dims = Vec::new();
     for ty in decl_params.iter() {
-        crate::env::collect_dims(ty, &mut param_dims);
+        chelis_type_core::collect_dims(ty, &mut param_dims);
     }
     let resolved_param_dims = param_dims
         .iter()
@@ -472,7 +473,7 @@ pub(super) fn check_declared_dvars_rigid(
     declaration: Option<&str>,
     declared_dvars: &[DimVar],
     dim_names: &UnordMap<DimVar, String>,
-    subst: &Subst,
+    subst: &Subst<ErrorWitness>,
     errors: &mut DiagnosticSink<'_>,
 ) {
     let render = |dv: DimVar| render_declared_dim(dim_names, dv);
@@ -563,8 +564,8 @@ pub(super) fn check_declared_dvars_rigid(
 /// inner `List[tensor[k]]` holds at every depth; a single-level check
 /// left the same #272 soundness gap one `List` deeper.
 pub(super) fn check_list_elem_rigid_dim_vs_wildcard(
-    decl_ty: &Type,
-    body_ty: &Type,
+    decl_ty: &Type<ErrorWitness>,
+    body_ty: &Type<ErrorWitness>,
     dim_names: &UnordMap<DimVar, String>,
     errors: &mut DiagnosticSink<'_>,
 ) {

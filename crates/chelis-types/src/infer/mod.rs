@@ -35,8 +35,7 @@ use crate::env::{BindingFacts, DeclarationBinderIdentities, Env, TopLevelValueVi
 use crate::errors::*;
 use crate::linearity::LinearityInfo;
 use crate::session::{DeclarationDiagnosticOwner, DeclarationTypeDiagnosticClass, DiagnosticSink};
-use crate::types::*;
-use crate::unify::*;
+use chelis_type_core::*;
 
 trait DiagnosticOutput {
     fn push(&mut self, error: CheckError);
@@ -169,19 +168,12 @@ use app_tensor::*;
 use binder_literal::*;
 use checked::*;
 use common::*;
-pub(crate) use common::{
-    SumResultSlot, bound_sum_result_precision, decide_shape_route, settled_sum_result_precision,
-    shape_route_result, sum_result_bound_note, sum_result_widening_note,
-};
 use declaration_close::*;
 use declaration_collect::*;
 use declaration_graph::*;
 use declared_type::*;
 // chelis#1654: the settled decision for transported checked collection
 // contracts. Direct syntactic calls keep the better-informed eager routes.
-pub(crate) use app_collection::{
-    CollectionCallEvidence, TensorConcatCallEvidence, decide_collection_constraint,
-};
 use declarations::*;
 use deferred_operands::*;
 use expr::*;

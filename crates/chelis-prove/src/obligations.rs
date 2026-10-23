@@ -18,10 +18,11 @@
 //! silent skip, since one uncovered producer collapses D-SOUND.
 
 use chelis_deep::{DeepTag, ExprCarrier};
+use chelis_types::errors::ErrorWitness;
 use std::collections::{BTreeMap, BTreeSet};
 
 use chelis_deep::ast::{Atom, Expr};
-use chelis_types::types::Type;
+use chelis_type_core::Type;
 
 use crate::opaque::OpaqueInvariant;
 
@@ -244,9 +245,9 @@ fn proof_declarations(exprs: &[Expr]) -> ProofDeclarations<'_> {
 /// Decompose a checked return through the same total proof-type graph used
 /// by collection. Unsupported containers and resource exhaustion are errors.
 pub fn decompose_return(
-    ty: &Type,
+    ty: &Type<ErrorWitness>,
     type_name: &str,
-    records: &BTreeMap<String, Vec<Type>>,
+    records: &BTreeMap<String, Vec<Type<ErrorWitness>>>,
 ) -> Result<Option<ProducedPosition>, String> {
     let fields = records
         .iter()
@@ -289,7 +290,7 @@ fn is_opaque(expr: &Expr) -> bool {
 pub fn collect_obligations(
     exprs: &[Expr],
     invariants: &[OpaqueInvariant],
-    sigs: &BTreeMap<String, Type>,
+    sigs: &BTreeMap<String, Type<ErrorWitness>>,
 ) -> ObligationCollection {
     collect_with_budget(exprs, invariants, sigs, traversal::DEFAULT_BUDGET)
 }
@@ -297,7 +298,7 @@ pub fn collect_obligations(
 fn collect_with_budget(
     exprs: &[Expr],
     invariants: &[OpaqueInvariant],
-    sigs: &BTreeMap<String, Type>,
+    sigs: &BTreeMap<String, Type<ErrorWitness>>,
     limit: usize,
 ) -> ObligationCollection {
     let exports = collect_exports(exprs);
@@ -341,7 +342,7 @@ fn collect_with_budget(
 fn collect_one<'a>(
     inv: &OpaqueInvariant,
     name: &str,
-    ty: &'a Type,
+    ty: &'a Type<ErrorWitness>,
     declared: Option<&'a Expr>,
     has_body: bool,
     graph: &mut ProofTypes<'a>,

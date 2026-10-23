@@ -14,13 +14,14 @@
 //! Reference generalization sweeps are excluded from the measured production
 //! path; feature builds check each identical program again with parity enabled.
 
+use chelis_types::errors::ErrorWitness;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 use std::fmt::Write as _;
 
 use chelis_numeric_core::prim::Prim;
-use chelis_types::types::{DimVar, Type, TypeVar};
-use chelis_types::unify::Subst;
+use chelis_type_core::Subst;
+use chelis_type_core::{DimVar, Type, TypeVar};
 
 struct CountingAllocator;
 
@@ -56,16 +57,13 @@ fn grows_linearly(small: usize, large: usize) -> bool {
 }
 
 /// A substitution binding `count` type and dimension variables.
-fn substitution(count: u32) -> Subst {
-    let mut subst = Subst::new();
+fn substitution(count: u32) -> Subst<ErrorWitness> {
+    let mut subst = Subst::<ErrorWitness>::new();
     for index in 0..count {
         subst
-            .insert_type(TypeVar(index), Type::Prim(Prim::F32))
+            .insert_type(TypeVar(index), Type::<ErrorWitness>::Prim(Prim::F32))
             .expect("a fresh variable binds");
-        subst.insert_dim(
-            DimVar(index),
-            chelis_types::types::Dim::Lit(i64::from(index)),
-        );
+        subst.insert_dim(DimVar(index), chelis_type_core::Dim::Lit(i64::from(index)));
     }
     subst
 }
@@ -172,7 +170,7 @@ fn the_detector_rejects_a_substitution_copied_per_definition() {
     // Negative control: what the removed copies did, the whole substitution
     // copied once per definition.
     fn copy_per_definition(n: u32) -> usize {
-        let mut subst = Subst::new();
+        let mut subst = Subst::<ErrorWitness>::new();
         let mut copies = 0;
         for index in 0..n {
             subst

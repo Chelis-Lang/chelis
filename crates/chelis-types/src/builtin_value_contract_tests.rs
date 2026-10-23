@@ -24,6 +24,7 @@
 //! result-origin relation, or declaring an incomplete scheme complete, fails
 //! one of the two properties.
 
+use crate::errors::ErrorWitness;
 use std::collections::BTreeMap;
 
 use chelis_surf::desugar::desugar_program;
@@ -33,7 +34,7 @@ use crate::builtins::{
     BUILTINS, builtin_decl, builtin_env, builtin_env_names, builtin_value_contract_carried,
 };
 use crate::context::TypeEnv;
-use crate::types::{Dim, Scheme, TensorPrec, Type};
+use chelis_type_core::{Dim, Scheme, TensorPrec, Type};
 
 const ROUTE: &str = "builtin_value_route";
 
@@ -86,8 +87,8 @@ const PRECISION: &[Pick] = &[
     },
 ];
 
-fn render(ty: &Type, picks: &BTreeMap<u32, Pick>, nested: bool) -> Option<String> {
-    let list = |types: &[Type]| {
+fn render(ty: &Type<ErrorWitness>, picks: &BTreeMap<u32, Pick>, nested: bool) -> Option<String> {
+    let list = |types: &[Type<ErrorWitness>]| {
         types
             .iter()
             .map(|ty| render(ty, picks, false))
@@ -133,7 +134,7 @@ fn render(ty: &Type, picks: &BTreeMap<u32, Pick>, nested: bool) -> Option<String
     })
 }
 
-fn collect_vars(ty: &Type, whole: &mut Vec<u32>, precision: &mut Vec<u32>) {
+fn collect_vars(ty: &Type<ErrorWitness>, whole: &mut Vec<u32>, precision: &mut Vec<u32>) {
     match ty {
         Type::Var(var) if !whole.contains(&var.0) => whole.push(var.0),
         Type::Ref(inner) => collect_vars(inner, whole, precision),
@@ -170,7 +171,10 @@ const JOINT: &[Pick] = &[
 /// fixed first candidate, plus the diagonal in which all take the same one.
 /// When the result mentions a variable no parameter does, the variables also
 /// range jointly over a small pool, so a relation-carried result can be met.
-fn assignments(params: &[Type], result: &Type) -> Vec<BTreeMap<u32, Pick>> {
+fn assignments(
+    params: &[Type<ErrorWitness>],
+    result: &Type<ErrorWitness>,
+) -> Vec<BTreeMap<u32, Pick>> {
     let (mut whole, mut precision) = (Vec::new(), Vec::new());
     params
         .iter()
@@ -242,7 +246,7 @@ fn declared_results(result: &str) -> Vec<String> {
     out
 }
 
-fn route_env(scheme: &Scheme) -> TypeEnv {
+fn route_env(scheme: &Scheme<ErrorWitness>) -> TypeEnv {
     TypeEnv::empty().with_test_binding(ROUTE, scheme.clone())
 }
 
@@ -332,7 +336,7 @@ struct Comparison {
 /// refused builtin has no such route, so the comparison binds its bare scheme
 /// under a name no builtin route claims; that stops at the first
 /// disagreement, which settles it.
-fn compare(name: &str, scheme: &Scheme, admitted: bool) -> Comparison {
+fn compare(name: &str, scheme: &Scheme<ErrorWitness>, admitted: bool) -> Comparison {
     let stop_at_disagreement = !admitted;
     let env = route_env(scheme);
     let mut comparison = Comparison {

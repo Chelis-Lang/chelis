@@ -5,14 +5,15 @@
 
 use super::*;
 use crate::context::LibraryProofId;
+use crate::errors::ErrorWitness;
 
 /// Transactional owner for one cyclic full-reference component's inference
 /// level, provisional visibility capability, and temporary bindings. It
 /// snapshots every member binding before provisional prebinding so normal and
 /// cancelled exits both restore the surrounding environment exactly.
 struct ComponentLevelScope {
-    level: crate::unify::LevelToken,
-    members: Vec<(String, Option<Scheme>)>,
+    level: chelis_type_core::LevelToken,
+    members: Vec<(String, Option<Scheme<ErrorWitness>>)>,
     prior_active_component: UnordSet<String>,
 }
 
@@ -82,7 +83,7 @@ fn take_recursive_abort_observation() -> Option<RecursiveAbortObservation> {
 }
 
 #[cfg(test)]
-fn schemes_match(left: &Scheme, right: &Scheme) -> bool {
+fn schemes_match(left: &Scheme<ErrorWitness>, right: &Scheme<ErrorWitness>) -> bool {
     left.tvars == right.tvars
         && left.tvar_restrictions == right.tvar_restrictions
         && left.dvars == right.dvars
@@ -100,7 +101,7 @@ impl ComponentLevelScope {
         cycle_precedence_names: &[String],
         env: &mut Env,
         var_gen: &VarGen,
-        subst: &mut Subst,
+        subst: &mut Subst<ErrorWitness>,
     ) -> Self {
         let mut seen = UnordSet::new();
         let members = indices
@@ -130,7 +131,7 @@ impl ComponentLevelScope {
 
     /// Normal completion deliberately does not restore prior defsig/metadata
     /// bindings: completed generalized member schemes replace them below.
-    fn complete(mut self, env: &mut Env, var_gen: &VarGen, subst: &mut Subst) {
+    fn complete(mut self, env: &mut Env, var_gen: &VarGen, subst: &mut Subst<ErrorWitness>) {
         self.remove_temporary_bindings(env);
         env.end_holed_group();
         let _finished_component = env
@@ -138,7 +139,7 @@ impl ComponentLevelScope {
         subst.leave_level(self.level, var_gen);
     }
 
-    fn abort(mut self, env: &mut Env, var_gen: &VarGen, subst: &mut Subst) {
+    fn abort(mut self, env: &mut Env, var_gen: &VarGen, subst: &mut Subst<ErrorWitness>) {
         #[cfg(test)]
         let prior_members = self.members.clone();
         super::recursion::abort_group();
@@ -192,7 +193,7 @@ fn sweep_recursive_collection_contracts(
     cycle_precedence_names: &[String],
     env: &mut Env,
     var_gen: &mut VarGen,
-    subst: &mut Subst,
+    subst: &mut Subst<ErrorWitness>,
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
     declared_signatures: &UnordMap<String, DeclaredSigMetadata>,
@@ -445,7 +446,7 @@ pub(super) fn infer_program_with_product_in_session(
     // can never produce a silent green / partial result.
     let stack_scope = StackExhaustionScope::enter();
     let (mut env, mut vg) = builtins::builtin_env();
-    let mut subst = Subst::new();
+    let mut subst = Subst::<ErrorWitness>::new();
     let mut adt_reg = AdtRegistry::new();
     builtins::register_prelude_adts(&mut env, &mut vg, &mut adt_reg);
     let mut product = InferenceProduct::default();
@@ -1877,7 +1878,7 @@ fn prebind_defsig_less_function_body_types(
     declaration_diagnostic_owners: &[Option<DeclarationDiagnosticOwner>],
     env: &mut Env,
     vg: &mut VarGen,
-    subst: &mut Subst,
+    subst: &mut Subst<ErrorWitness>,
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
 ) -> (UnordSet<String>, UnordMap<usize, ErrorWitness>) {
@@ -1938,7 +1939,7 @@ fn prebind_literal_external_input_for_declaration(
     declaration_diagnostic_owner: Option<&DeclarationDiagnosticOwner>,
     env: &mut Env,
     vg: &mut VarGen,
-    subst: &mut Subst,
+    subst: &mut Subst<ErrorWitness>,
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
 ) -> Option<ErrorWitness> {
@@ -2044,7 +2045,7 @@ mod component_level_scope_tests {
             Scheme::mono(Type::Prim(Prim::Int64)),
         );
         let mut var_gen = VarGen::default();
-        let mut subst = Subst::new();
+        let mut subst = Subst::<ErrorWitness>::new();
 
         env.note_top_level_value_ordinal("right".to_string(), 1, None);
         env.note_top_level_value_ordinal("outside".to_string(), 2, None);
@@ -2082,7 +2083,7 @@ mod component_level_scope_tests {
             &subst,
         );
         for (_, ty) in provisional.to_sorted() {
-            for var in crate::env::free_tvars(ty) {
+            for var in chelis_type_core::free_tvars(ty) {
                 assert_eq!(subst.level_of_tvar(var), 1);
             }
         }
@@ -2124,7 +2125,7 @@ mod component_level_scope_tests {
             Scheme::mono(Type::Prim(Prim::Int64)),
         );
         let mut var_gen = VarGen::default();
-        let mut subst = Subst::new();
+        let mut subst = Subst::<ErrorWitness>::new();
         env.note_top_level_value_ordinal("right".to_string(), 1, None);
         env.note_top_level_value_ordinal("outside".to_string(), 2, None);
         env.note_top_level_value_ordinal("precedence".to_string(), 3, None);

@@ -11,11 +11,12 @@
 //! threads cannot reach it. Doubling the depth must grow the bytes by at most
 //! 2.5 times: linear growth gives about 2, quadratic about 4.
 
+use chelis_types::errors::ErrorWitness;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 
 use chelis_numeric_core::prim::Prim;
-use chelis_types::types::Type;
+use chelis_type_core::Type;
 
 struct CountingAllocator;
 
@@ -105,9 +106,11 @@ fn checking_a_variable_tuple_chain_allocates_linearly() {
 
 /// What an owned child representation pays: one full copy of each level's
 /// type, the record a node kept of its subtree.
-fn owned_copy(ty: &Type) -> Type {
+fn owned_copy(ty: &Type<ErrorWitness>) -> Type<ErrorWitness> {
     match ty {
-        Type::Tuple(items) => Type::tuple(items.iter().map(owned_copy).collect()),
+        Type::<ErrorWitness>::Tuple(items) => {
+            Type::<ErrorWitness>::tuple(items.iter().map(owned_copy).collect())
+        }
         other => other.clone(),
     }
 }
@@ -115,11 +118,14 @@ fn owned_copy(ty: &Type) -> Type {
 #[test]
 fn the_detector_rejects_a_full_copy_per_level() {
     fn copies_per_level(depth: usize) -> usize {
-        let mut ty = Type::Prim(Prim::Int32);
+        let mut ty = Type::<ErrorWitness>::Prim(Prim::Int32);
         let mut records = Vec::new();
         let (_, bytes) = allocated(|| {
             for _ in 0..depth {
-                ty = Type::tuple(vec![Type::Prim(Prim::Int32), ty.clone()]);
+                ty = Type::<ErrorWitness>::tuple(vec![
+                    Type::<ErrorWitness>::Prim(Prim::Int32),
+                    ty.clone(),
+                ]);
                 records.push(owned_copy(&ty));
             }
         });
@@ -133,11 +139,14 @@ fn the_detector_rejects_a_full_copy_per_level() {
     );
     // A shared record per level, what the checker now keeps, passes.
     fn shares_per_level(depth: usize) -> usize {
-        let mut ty = Type::Prim(Prim::Int32);
+        let mut ty = Type::<ErrorWitness>::Prim(Prim::Int32);
         let mut records = Vec::new();
         let (_, bytes) = allocated(|| {
             for _ in 0..depth {
-                ty = Type::tuple(vec![Type::Prim(Prim::Int32), ty.clone()]);
+                ty = Type::<ErrorWitness>::tuple(vec![
+                    Type::<ErrorWitness>::Prim(Prim::Int32),
+                    ty.clone(),
+                ]);
                 records.push(ty.clone());
             }
         });

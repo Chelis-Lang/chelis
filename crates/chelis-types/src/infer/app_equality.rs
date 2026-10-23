@@ -17,6 +17,7 @@
 
 use super::*;
 use crate::adt::AdtDef;
+use crate::errors::ErrorWitness;
 use std::sync::Arc;
 
 /// The verdict [05-OP-36]'s domain gives one operand type.
@@ -27,7 +28,7 @@ pub(super) enum EqualityDomain {
     /// verdict waits for it to bind.
     Awaits,
     /// The first function or resource handle the type reaches.
-    Rejected(Type),
+    Rejected(Type<ErrorWitness>),
 }
 
 /// The language's resource-handle types: `mmap_file` returns the only one.
@@ -38,20 +39,23 @@ fn is_resource_handle(name: &str) -> bool {
 /// What a walk over one type reached.
 #[derive(Default)]
 struct Reach {
-    incomparable: Option<Type>,
+    incomparable: Option<Type<ErrorWitness>>,
     variables: Vec<TypeVar>,
 }
 
 /// What one data type definition's own fields reach, for any arguments.
 #[derive(Clone, Default, PartialEq)]
 struct Summary {
-    incomparable: Option<Type>,
+    incomparable: Option<Type<ErrorWitness>>,
     /// Positions in the definition's parameter list whose argument a field
     /// reaches.
     parameters: BTreeSet<usize>,
 }
 
-fn type_arguments(name: &str, args: &[Type]) -> (String, Vec<NominalArg>) {
+fn type_arguments(
+    name: &str,
+    args: &[Type<ErrorWitness>],
+) -> (String, Vec<NominalArg<ErrorWitness>>) {
     (
         name.to_string(),
         args.iter().cloned().map(NominalArg::Type).collect(),
@@ -60,7 +64,7 @@ fn type_arguments(name: &str, args: &[Type]) -> (String, Vec<NominalArg>) {
 
 /// Walk `ty` without descending into a definition: a registered data type
 /// contributes its summary, and an unregistered one (`Dict`) every argument.
-fn reach(ty: &Type, summaries: &BTreeMap<String, Summary>) -> Reach {
+fn reach(ty: &Type<ErrorWitness>, summaries: &BTreeMap<String, Summary>) -> Reach {
     let mut reached = Reach::default();
     let mut pending = vec![ty.clone()];
     while let Some(ty) = pending.pop() {
@@ -117,7 +121,10 @@ fn reach(ty: &Type, summaries: &BTreeMap<String, Summary>) -> Reach {
 }
 
 /// The data type names `ty` reaches by name, through arguments and fields.
-fn reachable_definitions<'a>(ty: &Type, adt_reg: &'a AdtRegistry) -> BTreeMap<String, &'a AdtDef> {
+fn reachable_definitions<'a>(
+    ty: &Type<ErrorWitness>,
+    adt_reg: &'a AdtRegistry,
+) -> BTreeMap<String, &'a AdtDef> {
     let mut definitions = BTreeMap::new();
     let mut pending = vec![ty.clone()];
     while let Some(ty) = pending.pop() {
@@ -167,7 +174,7 @@ fn reachable_definitions<'a>(ty: &Type, adt_reg: &'a AdtRegistry) -> BTreeMap<St
 
 /// Summarize every definition `ty` reaches, as the least fixed point over
 /// them: a summary only grows, and each is bounded by its definition.
-fn summaries(ty: &Type, adt_reg: &AdtRegistry) -> BTreeMap<String, Summary> {
+fn summaries(ty: &Type<ErrorWitness>, adt_reg: &AdtRegistry) -> BTreeMap<String, Summary> {
     let definitions = reachable_definitions(ty, adt_reg);
     let mut summaries: BTreeMap<String, Summary> = definitions
         .keys()
@@ -213,7 +220,11 @@ fn summaries(ty: &Type, adt_reg: &AdtRegistry) -> BTreeMap<String, Summary> {
 /// A variable reached through a field is admitted when a dtype family
 /// restricts it, since every member is a comparable scalar, and otherwise
 /// leaves the verdict waiting on it.
-pub(super) fn equality_domain(ty: &Type, subst: &Subst, adt_reg: &AdtRegistry) -> EqualityDomain {
+pub(super) fn equality_domain(
+    ty: &Type<ErrorWitness>,
+    subst: &Subst<ErrorWitness>,
+    adt_reg: &AdtRegistry,
+) -> EqualityDomain {
     let ty = subst.apply(ty);
     let reached = reach(&ty, &summaries(&ty, adt_reg));
     if let Some(incomparable) = reached.incomparable {
@@ -234,8 +245,8 @@ pub(super) fn equality_domain(ty: &Type, subst: &Subst, adt_reg: &AdtRegistry) -
 /// exactly that condition.
 pub(super) fn equality_call_awaits_binding(
     func_name: &str,
-    arg_tys: &[Type],
-    subst: &Subst,
+    arg_tys: &[Type<ErrorWitness>],
+    subst: &Subst<ErrorWitness>,
     adt_reg: &AdtRegistry,
 ) -> bool {
     matches!(func_name, "eq" | "neq")
@@ -248,8 +259,8 @@ pub(super) fn equality_call_awaits_binding(
 /// resource handle.
 pub(super) fn equality_domain_rejection(
     fname: &str,
-    operand: &Type,
-    incomparable: &Type,
+    operand: &Type<ErrorWitness>,
+    incomparable: &Type<ErrorWitness>,
 ) -> (CheckErrorKind, String, Vec<String>) {
     let what = if matches!(incomparable, Type::Fn(..)) {
         "function"
