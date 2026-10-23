@@ -11,6 +11,8 @@
 //! measured check runs on one measuring thread, so the harness's other
 //! threads cannot reach it. Doubling the definitions must grow the bytes by
 //! at most 2.5 times: linear growth gives about 2, quadratic about 4.
+//! Reference generalization sweeps are excluded from the measured production
+//! path; feature builds check each identical program again with parity enabled.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
@@ -96,8 +98,14 @@ fn check_bytes(source: &str) -> usize {
     let program =
         chelis_surf::desugar::desugar_program(&declarations, &chelis_syntax_host::NativeStack)
             .expect("the probe desugars");
-    let (checked, bytes) = allocated(|| chelis_types::check_typed_program(&program));
+    let measure = || allocated(|| chelis_types::check_typed_program(&program));
+    #[cfg(feature = "generalize-sweep-oracle")]
+    let (checked, bytes) = chelis_types::env::without_generalize_sweep_oracle(measure);
+    #[cfg(not(feature = "generalize-sweep-oracle"))]
+    let (checked, bytes) = measure();
     checked.expect("the probe checks");
+    #[cfg(feature = "generalize-sweep-oracle")]
+    chelis_types::check_typed_program(&program).expect("the same probe passes level/sweep parity");
     bytes
 }
 

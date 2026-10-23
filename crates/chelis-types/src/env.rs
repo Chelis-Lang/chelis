@@ -23,10 +23,11 @@ fn note_generalize_sweep_env_visit() {
 }
 
 /// Run `f` through the production level path without invoking the reference
-/// sweep. Used by the structural elimination test in the authoritative
-/// parity-oracle build.
-#[cfg(all(test, feature = "generalize-sweep-oracle"))]
-pub(crate) fn without_generalize_sweep_oracle<R>(f: impl FnOnce() -> R) -> R {
+/// sweep. Oracle-build structural and allocation tests use this scoped
+/// measurement boundary, then exercise parity separately. The previous state
+/// is restored on return or unwind, and other threads retain their own state.
+#[cfg(feature = "generalize-sweep-oracle")]
+pub fn without_generalize_sweep_oracle<R>(f: impl FnOnce() -> R) -> R {
     struct Restore(bool);
     impl Drop for Restore {
         fn drop(&mut self) {
@@ -2189,6 +2190,30 @@ fn collect_rvars(ty: &Type, vars: &mut Vec<RankVar>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "generalize-sweep-oracle")]
+    #[test]
+    fn production_measurement_scope_restores_nested_and_panicking_oracle_state() {
+        assert!(GENERALIZE_SWEEP_ORACLE_ENABLED.with(std::cell::Cell::get));
+        without_generalize_sweep_oracle(|| {
+            assert!(!GENERALIZE_SWEEP_ORACLE_ENABLED.with(std::cell::Cell::get));
+            without_generalize_sweep_oracle(|| {
+                assert!(!GENERALIZE_SWEEP_ORACLE_ENABLED.with(std::cell::Cell::get));
+            });
+            assert!(!GENERALIZE_SWEEP_ORACLE_ENABLED.with(std::cell::Cell::get));
+            std::thread::spawn(|| {
+                assert!(GENERALIZE_SWEEP_ORACLE_ENABLED.with(std::cell::Cell::get));
+            })
+            .join()
+            .unwrap();
+        });
+        assert!(GENERALIZE_SWEEP_ORACLE_ENABLED.with(std::cell::Cell::get));
+        let panicked = std::panic::catch_unwind(|| {
+            without_generalize_sweep_oracle(|| panic!("measurement aborted"));
+        });
+        assert!(panicked.is_err());
+        assert!(GENERALIZE_SWEEP_ORACLE_ENABLED.with(std::cell::Cell::get));
+    }
 
     #[test]
     fn closed_key_variables_require_the_exact_owned_callable() {
