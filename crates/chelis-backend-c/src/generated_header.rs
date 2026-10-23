@@ -100,6 +100,12 @@ impl GeneratedHeader {
         self.declarations.get(source_name)
     }
 
+    /// Enumerate every public declaration in exact Chelis identity order.
+    /// Validate the paired source before using these records as ABI evidence.
+    pub fn declarations(&self) -> impl Iterator<Item = &GeneratedDeclaration> {
+        self.declarations.values()
+    }
+
     /// Require this exact generated source, program identity, and export manifest.
     pub fn validate_source(&self, source: &str) -> Result<(), GeneratedHeaderError> {
         self.validate_source_with(source, &mut None)
@@ -2305,6 +2311,112 @@ mod tests {
             &header,
         )
         .expect("valid generated artifact")
+    }
+
+    fn abi_projection(header: &GeneratedHeader) -> Vec<(&str, &str, &str)> {
+        header
+            .declarations()
+            .map(|entry| (entry.source_name(), entry.symbol(), entry.declaration()))
+            .collect()
+    }
+
+    #[test]
+    fn generated_abi_projection_preserves_declarations_across_resealed_bodies() {
+        let (source, header) = sealed_fixture(
+            "demo",
+            "alpha",
+            "chelis_fn_616c706861",
+            "int chelis_fn_616c706861(int x);",
+            "int chelis_fn_616c706861(int x) { return x + 1; }",
+            "",
+        );
+        let parsed = GeneratedHeader::parse(&header).unwrap();
+        parsed.validate_source(&source).unwrap();
+        let (changed_source, changed_header) = sealed_fixture(
+            "demo",
+            "alpha",
+            "chelis_fn_616c706861",
+            "int chelis_fn_616c706861(int x);",
+            "int chelis_fn_616c706861(int x) { return x - 1; }",
+            "",
+        );
+        let changed = GeneratedHeader::parse(&changed_header).unwrap();
+        changed.validate_source(&changed_source).unwrap();
+        assert_ne!(header, changed_header);
+        assert_eq!(abi_projection(&parsed), abi_projection(&changed));
+        assert_eq!(
+            abi_projection(&parsed),
+            vec![(
+                "alpha",
+                "chelis_fn_616c706861",
+                "int chelis_fn_616c706861(int x);"
+            ),]
+        );
+        let (_, two_headers) = two_export_fixture();
+        let two = GeneratedHeader::parse(&two_headers).unwrap();
+        assert_eq!(
+            abi_projection(&two),
+            vec![
+                (
+                    "alpha",
+                    "chelis_fn_616c706861",
+                    "int chelis_fn_616c706861(int x);"
+                ),
+                (
+                    "beta",
+                    "chelis_fn_62657461",
+                    "int chelis_fn_62657461(int x);"
+                ),
+            ]
+        );
+        assert!(parsed.validate_source(&changed_source).is_err());
+        assert!(changed.validate_source(&source).is_err());
+        assert!(parsed.validate_source(&format!("{source}\n")).is_err());
+        let forged_source = source.replace("return x + 1;", "return x - 1;");
+        let forged_header = rewrite_source_digest(&header, &forged_source);
+        assert!(
+            GeneratedHeader::parse(&forged_header)
+                .unwrap()
+                .validate_source(&forged_source)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn generated_abi_projection_detects_signature_and_export_changes() {
+        let (source, header) = sealed_fixture(
+            "demo",
+            "alpha",
+            "chelis_fn_616c706861",
+            "int chelis_fn_616c706861(int x);",
+            "int chelis_fn_616c706861(int x) { return x; }",
+            "",
+        );
+        let parsed = GeneratedHeader::parse(&header).unwrap();
+        parsed.validate_source(&source).unwrap();
+        for (name, symbol, declaration, definition) in [
+            (
+                "alpha",
+                "chelis_fn_616c706861",
+                "long chelis_fn_616c706861(long x);",
+                "long chelis_fn_616c706861(long x) { return x; }",
+            ),
+            (
+                "beta",
+                "chelis_fn_62657461",
+                "int chelis_fn_62657461(int x);",
+                "int chelis_fn_62657461(int x) { return x; }",
+            ),
+        ] {
+            let (other_source, other_header) =
+                sealed_fixture("demo", name, symbol, declaration, definition, "");
+            let other = GeneratedHeader::parse(&other_header).unwrap();
+            other.validate_source(&other_source).unwrap();
+            assert_ne!(abi_projection(&parsed), abi_projection(&other));
+        }
+        let (_, extra_header) = two_export_fixture();
+        let extra = GeneratedHeader::parse(&extra_header).unwrap();
+        assert_ne!(abi_projection(&parsed), abi_projection(&extra));
     }
 
     fn rewrite_source_digest(header: &str, source: &str) -> String {

@@ -270,7 +270,8 @@ The command checks:
 
 - Default, no-default, `alloc`, `serde`, and combined target consumers without target `std` or host dependencies.
 - Public scalar and tensor behavior, current random keys, named casts, activation graphs, traps, and error precedence.
-- Exact wire bytes, host schema projections, observation, runtime conversions, native ABI headers, and generated C.
+- Exact wire bytes, host schema projections, observation, runtime conversions, runtime header bytes, and generated-C stdout.
+- Each generated source/header pair under [01-CID-1], using the backend artifact validator. The validated program identity and complete source-name, symbol, and declaration map compare exactly across revisions. Source and definition commitments bind each artifact pair's implementation bytes.
 - Zero scalar allocations and baseline-equivalent tensor allocation counts and requested bytes.
 - Private construction, removed imports, numeric authority, and named shared and numeric Python failure controls.
 
