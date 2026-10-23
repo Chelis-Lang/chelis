@@ -2893,6 +2893,9 @@ enum HostResultRequirement {
         claim: String,
         parameter: String,
         prepared: String,
+        /// Fixed tuple path from the prepared formal to the declaring tensor.
+        /// Empty for an already prepared direct tensor binding.
+        steps: Vec<usize>,
         axis: usize,
     },
     /// The first available witness may be a List element or a later direct
@@ -2924,6 +2927,7 @@ impl HostResultClaim {
                             claim: claim.clone(),
                             parameter: source.clone(),
                             prepared: prepared.clone(),
+                            steps: Vec::new(),
                             axis: *axis,
                         },
                         HostResultRequirementPlan::NamedList { state } => {
@@ -2936,24 +2940,23 @@ impl HostResultClaim {
         }
     }
 
-    /// A named axis resolves to the binder's first witness among the tensor
-    /// parameters, in signature order: the canonical side of the entry plan's
-    /// comparisons. A binder no tensor parameter declares adds nothing.
+    /// A named axis resolves to the binder's first fixed tensor observation,
+    /// in signature and tuple order: the canonical side of entry comparisons.
+    /// A binder outside the fixed roster retains its separate owner.
     fn of(function: &HostFunction) -> Option<Self> {
         let HostAbiType::Tensor(ty) = &function.ret_ty else {
             return None;
         };
         let named_lists = function.entry_contract.named_list_binders().to_vec();
+        let observations = entry_walk::entry_observations(function);
         let witness = |binder: &str| {
-            function.params.iter().find_map(|param| {
-                let HostAbiType::Tensor(param_ty) = &param.ty else {
-                    return None;
-                };
-                param_ty
+            observations.iter().find_map(|observation| {
+                observation
+                    .ty
                     .dims
                     .iter()
                     .position(|dim| matches!(dim, DimInfo::Named(name, _) if name == binder))
-                    .map(|axis| (param.name.clone(), axis))
+                    .map(|axis| (observation, axis))
             })
         };
         let axes = ty
@@ -2973,13 +2976,14 @@ impl HostResultClaim {
                     if let Some(state) = named_lists.iter().position(|name| name == binder) {
                         return Some((axis, HostResultRequirement::NamedList { state }));
                     }
-                    let (parameter, source_axis) = witness(binder)?;
+                    let (observation, source_axis) = witness(binder)?;
                     Some((
                         axis,
                         HostResultRequirement::Named {
                             claim: chelis_ir::lower::extent_binder_label(binder),
-                            prepared: parameter.clone(),
-                            parameter,
+                            prepared: function.params[observation.param].name.clone(),
+                            parameter: observation.path.clone(),
+                            steps: observation.steps.clone(),
                             axis: source_axis,
                         },
                     ))
@@ -3002,19 +3006,61 @@ impl HostResultClaim {
         claims_name: Option<&str>,
         outer_claims_first: bool,
     ) -> Vec<String> {
+        // Snapshot the declaration's exact fixed observations before verified
+        // entry drops. Entry-work temporaries can live inside a delegated
+        // receipt branch, so a result frame follows the shared roster path
+        // from the still-live formal rather than borrowing those temporaries.
+        let mut lines = Vec::new();
+        let mut extents = std::collections::BTreeMap::new();
+        for (result_axis, requirement) in &self.axes {
+            let HostResultRequirement::Named {
+                prepared,
+                steps,
+                axis,
+                ..
+            } = requirement
+            else {
+                continue;
+            };
+            if steps.is_empty() {
+                extents.insert(
+                    *result_axis,
+                    format!("chelis_tensor_shape({}, {axis})", c_ident(prepared)),
+                );
+                continue;
+            }
+            let prefix = format!("{axes_name}_source_{result_axis}");
+            let mut tuple = c_ident(prepared).into_owned();
+            let mut held = Vec::new();
+            for (depth, step) in steps.iter().enumerate() {
+                let value = format!("{prefix}_value_{depth}");
+                lines.push(format!(
+                    "{indent}chelis_value {value} = chelis_tuple_get({tuple}, {step});"
+                ));
+                tuple = format!("chelis_tuple_borrow_value({value})");
+                held.push(value);
+            }
+            let tensor = held.last().expect("nonempty fixed tensor path");
+            let extent = format!("{prefix}_extent");
+            lines.push(format!("{indent}const int64_t {extent} = chelis_tensor_shape(chelis_tensor_borrow_value({tensor}), {axis});"));
+            for value in held.iter().rev() {
+                lines.push(format!("{indent}chelis_value_release({value});"));
+            }
+            extents.insert(*result_axis, extent);
+        }
         if self
             .axes
             .iter()
             .any(|(_, requirement)| matches!(requirement, HostResultRequirement::NamedList { .. }))
         {
             let count = format!("{axes_name}_count");
-            let mut lines = vec![
+            lines.extend([
                 format!(
                     "{indent}__chelis_host_result_axis {axes_name}[{}];",
                     self.axes.len()
                 ),
                 format!("{indent}int64_t {count} = 0;"),
-            ];
+            ]);
             for (axis, requirement) in &self.axes {
                 match requirement {
                     HostResultRequirement::Literal(required) => lines.push(format!(
@@ -3023,11 +3069,11 @@ impl HostResultClaim {
                     HostResultRequirement::Named {
                         claim,
                         parameter,
-                        prepared,
                         axis: source_axis,
+                        ..
                     } => lines.push(format!(
-                        "{indent}{axes_name}[{count}++] = (__chelis_host_result_axis){{ {axis}, chelis_tensor_shape({}, {source_axis}), {}, {}, {source_axis} }};",
-                        c_ident(prepared),
+                        "{indent}{axes_name}[{count}++] = (__chelis_host_result_axis){{ {axis}, {}, {}, {}, {source_axis} }};",
+                        extents[axis],
                         c_string_literal(claim),
                         c_string_literal(parameter),
                     )),
@@ -3053,9 +3099,9 @@ impl HostResultClaim {
             }
             return lines;
         }
-        let mut lines = vec![format!(
+        lines.push(format!(
             "{indent}const __chelis_host_result_axis {axes_name}[] = {{"
-        )];
+        ));
         for (axis, requirement) in &self.axes {
             lines.push(match requirement {
                 HostResultRequirement::Literal(required) => {
@@ -3064,15 +3110,17 @@ impl HostResultClaim {
                 HostResultRequirement::Named {
                     claim,
                     parameter,
-                    prepared,
                     axis: source_axis,
+                    ..
                 } => format!(
-                    "{indent}    {{ {axis}, chelis_tensor_shape({}, {source_axis}), {}, {}, {source_axis} }},",
-                    c_ident(prepared),
+                    "{indent}    {{ {axis}, {}, {}, {}, {source_axis} }},",
+                    extents[axis],
                     c_string_literal(claim),
                     c_string_literal(parameter),
                 ),
-                HostResultRequirement::NamedList { .. } => unreachable!("dynamic frame handled above"),
+                HostResultRequirement::NamedList { .. } => {
+                    unreachable!("dynamic frame handled above")
+                }
             });
         }
         lines.push(format!("{indent}}};"));

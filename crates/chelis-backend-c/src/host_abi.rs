@@ -75,6 +75,24 @@ pub(crate) enum HostAbiType {
     Unit,
 }
 
+impl chelis_ir::host::FixedEntryType for HostAbiType {
+    type Tensor = chelis_ir::TensorType;
+
+    fn entry_tensor(&self) -> Option<&chelis_ir::TensorType> {
+        match self {
+            Self::Tensor(ty) => Some(ty),
+            _ => None,
+        }
+    }
+
+    fn entry_tuple(&self) -> Option<&[Self]> {
+        match self {
+            Self::Tuple(items) => Some(items),
+            _ => None,
+        }
+    }
+}
+
 impl chelis_ir::host::AccumulatorTypeIdentity for HostAbiType {
     fn accumulator_nominal_identity(&self) -> Option<&str> {
         match self {

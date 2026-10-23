@@ -5,7 +5,10 @@ use crate::callable_value::{NormalizedCallableContract, StaticBuiltinValue};
 use callee::HostAppCallee;
 pub use callee::{HostCallee, HostCalleeView};
 use chelis_types::errors::ErrorWitness;
-pub use signature_entry::{EntryContract, EntryPattern, SignatureEntryPlan};
+pub use signature_entry::{
+    EntryContract, EntryPattern, FixedEntryObservation, FixedEntryType, SignatureEntryPlan,
+    fixed_entry_observations,
+};
 
 use chelis_deep::cons_spine::ConsSpine;
 use chelis_deep::{DeepTag, ExprCarrier};
@@ -6894,14 +6897,23 @@ fn lower_def_body_kernel(
 }
 
 /// The result axes a whole-body helper's lowering owns: every literal axis,
-/// and every named axis whose binder a tensor parameter witnesses, since the
-/// helper's graph carries that parameter's signature witness. A binder
-/// witnessed only outside the tensor parameters stays with the host frame.
+/// and every named axis whose binder a fixed tensor observation witnesses,
+/// since the helper graph carries the same declaration roster. Binders outside
+/// those observations stay with the host frame.
 fn record_literal_result_transfer(signature: &HostDefSignature, sink: &mut TensorHelperSink) {
+    let observations = fixed_entry_observations(
+        signature
+            .params
+            .iter()
+            .map(|param| (param.name.as_str(), &param.ty)),
+    );
     let witnessed = |binder: &str| {
-        signature.params.iter().any(|param| {
-            matches!(&param.ty, HostTypeTerm::Tensor(ty)
-                if ty.dims.iter().any(|dim| matches!(dim, crate::dag::DimInfo::Named(name, _) if name == binder)))
+        observations.iter().any(|observation| {
+            observation
+                .ty
+                .dims
+                .iter()
+                .any(|dim| matches!(dim, crate::dag::DimInfo::Named(name, _) if name == binder))
         })
     };
     sink.transferred_result_claim_axes = tensor_type_from_host_input(&signature.ret_ty)
@@ -28903,6 +28915,28 @@ mod tests {
         assert!(!top_level_fn_transfers_literal_result_claims(
             &session, "loud"
         ));
+    }
+
+    #[test]
+    fn fixed_aggregate_result_claims_have_exactly_one_owner() {
+        let checked = surf_check(
+            "def staged[n](p: (tensor[n,f32],tensor[*,f32])) -> tensor[n,f32] = p.1\n\
+             def selected[n](p: (tensor[n,f32],tensor[*,f32]), choose: bool) -> tensor[n,f32] = if choose then p.1 else p.0\n",
+        );
+        let session = HostLoweringSession::new(&checked);
+        for (name, expected) in [
+            ("staged", vec![crate::dag::RtAxis::Lit(0)]),
+            ("selected", Vec::new()),
+        ] {
+            let (_, body) = session.def_named(name).unwrap();
+            let lowered = lower_host_function(name, body, None, &session, false)
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                lowered.function.helper_result_claim_axes, expected,
+                "{name}: staged claims transfer to the helper; host-control claims remain on the result frame"
+            );
+        }
     }
 
     #[test]

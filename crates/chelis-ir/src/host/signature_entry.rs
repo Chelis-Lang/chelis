@@ -6,6 +6,98 @@ use crate::host_type_state::{HostShapeSlot, HostShapeTerm, HostTypeTerm, decode_
 use crate::{Dag, DimInfo, NodeId, RiscOp};
 use chelis_deep::ast::Expr;
 
+/// The fixed tensor/tuple portion of a checked interface type. Runtime-selected
+/// containers retain their separate claim-pattern traversal.
+pub trait FixedEntryType: Sized {
+    type Tensor: Clone;
+    fn entry_tensor(&self) -> Option<&Self::Tensor>;
+    fn entry_tuple(&self) -> Option<&[Self]>;
+}
+
+impl FixedEntryType for HostTypeTerm {
+    type Tensor = crate::TensorType;
+
+    fn entry_tensor(&self) -> Option<&crate::TensorType> {
+        match self {
+            Self::Tensor(ty) => Some(ty),
+            _ => None,
+        }
+    }
+
+    fn entry_tuple(&self) -> Option<&[Self]> {
+        match self {
+            Self::Tuple(items) => Some(items),
+            _ => None,
+        }
+    }
+}
+
+impl FixedEntryType for Expr {
+    type Tensor = Expr;
+
+    fn entry_tensor(&self) -> Option<&Expr> {
+        use chelis_deep::DeepTag;
+        match self.carrier() {
+            chelis_deep::ast::ExprCarrier::DecodedNode(DeepTag::TTensor, _, _) => Some(self),
+            chelis_deep::ast::ExprCarrier::DecodedNode(DeepTag::TRef, _, [inner]) => {
+                inner.entry_tensor()
+            }
+            chelis_deep::ast::ExprCarrier::MetadataExpression(meta) => meta.expr.entry_tensor(),
+            _ => None,
+        }
+    }
+
+    fn entry_tuple(&self) -> Option<&[Expr]> {
+        use chelis_deep::DeepTag;
+        match self.carrier() {
+            chelis_deep::ast::ExprCarrier::DecodedNode(DeepTag::TTuple, _, items) => Some(items),
+            chelis_deep::ast::ExprCarrier::DecodedNode(DeepTag::TRef, _, [inner]) => {
+                inner.entry_tuple()
+            }
+            chelis_deep::ast::ExprCarrier::MetadataExpression(meta) => meta.expr.entry_tuple(),
+            _ => None,
+        }
+    }
+}
+
+/// One declaration-owned tensor observation, independent of body data use.
+/// `param` and `steps` identify the input; `path` is only its diagnostic label.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FixedEntryObservation<T = crate::TensorType> {
+    pub param: usize,
+    pub path: String,
+    pub steps: Vec<usize>,
+    pub ty: T,
+}
+
+/// The canonical fixed interface roster for entry guards and graph witnesses:
+/// signature order, then depth-first tuple order. No result type participates.
+pub fn fixed_entry_observations<'a, T: FixedEntryType + 'a>(
+    params: impl IntoIterator<Item = (&'a str, &'a T)>,
+) -> Vec<FixedEntryObservation<T::Tensor>> {
+    let mut out = Vec::new();
+    for (param, (name, ty)) in params.into_iter().enumerate() {
+        let mut pending = vec![(name.to_owned(), Vec::new(), ty)];
+        while let Some((path, steps, ty)) = pending.pop() {
+            if let Some(ty) = ty.entry_tensor() {
+                out.push(FixedEntryObservation {
+                    param,
+                    path,
+                    steps,
+                    ty: ty.clone(),
+                });
+            } else if let Some(items) = ty.entry_tuple() {
+                for (index, item) in items.iter().enumerate().rev() {
+                    let mut child_steps = steps.clone();
+                    child_steps.push(index);
+                    pending.push((format!("{path}.{index}"), child_steps, item));
+                }
+            }
+        }
+    }
+    out
+}
+
 /// The tensor-bearing shape of one authored formal. `Other` retains its
 /// position, so a later List cannot become the first formal by filtering.
 /// Tuple and ADT admission have separate owners.
@@ -342,6 +434,78 @@ mod tests {
                 precision: Prim::F32,
             },
         }
+    }
+
+    #[test]
+    fn fixed_roster_preserves_paths_types_and_declared_order() {
+        let tensor = |dims, precision| HostTypeTerm::Tensor(TensorType { dims, precision });
+        let n = DimInfo::Named("n".into(), None);
+        let params = [
+            HostParam {
+                name: "z".into(),
+                ty: HostTypeTerm::Tuple(vec![
+                    HostTypeTerm::Int64,
+                    HostTypeTerm::Tuple(vec![
+                        tensor(vec![n.clone(), DimInfo::Lit(0)], Prim::F32),
+                        tensor(Vec::new(), Prim::Bool),
+                    ]),
+                ]),
+            },
+            HostParam {
+                name: "a".into(),
+                ty: tensor(vec![n], Prim::F64),
+            },
+            // Value-selected carriers and scalars do not become fixed paths.
+            HostParam {
+                name: "xs".into(),
+                ty: HostTypeTerm::List(Box::new(tensor(vec![DimInfo::Lit(2)], Prim::Int64))),
+            },
+        ];
+        let roster = fixed_entry_observations(params.iter().map(|p| (p.name.as_str(), &p.ty)));
+        assert_eq!(
+            roster
+                .iter()
+                .map(|r| (r.param, r.path.as_str(), r.steps.as_slice()))
+                .collect::<Vec<_>>(),
+            vec![
+                (0, "z.1.0", &[1, 0][..]),
+                (0, "z.1.1", &[1, 1][..]),
+                (1, "a", &[][..])
+            ]
+        );
+        assert_eq!(
+            roster[0].ty,
+            TensorType {
+                dims: vec![DimInfo::Named("n".into(), None), DimInfo::Lit(0)],
+                precision: Prim::F32
+            }
+        );
+        assert_eq!(
+            roster[1].ty,
+            TensorType {
+                dims: Vec::new(),
+                precision: Prim::Bool
+            }
+        );
+        assert_eq!(roster[2].ty.precision, Prim::F64);
+        let plan = SignatureEntryPlan::new(roster.into_iter().map(|r| HostTensorInput {
+            name: r.path,
+            ty: r.ty,
+        }));
+        assert_eq!(
+            plan.guards(),
+            &[
+                EntryExtentGuard::Literal {
+                    required: 0,
+                    observed: (NodeId(0), 1)
+                },
+                EntryExtentGuard::Named {
+                    claim: "n".into(),
+                    canonical: (NodeId(0), 0),
+                    observed: (NodeId(2), 0)
+                },
+            ]
+        );
     }
 
     #[test]
