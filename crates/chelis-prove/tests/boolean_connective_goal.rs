@@ -237,6 +237,105 @@ fn negation_control_goal_lowers_to_smt_and_proves() {
 
 #[cfg(feature = "smt")]
 #[test]
+fn negation_spellings_and_nested_goals_keep_smt_under_auto_and_smt_only() {
+    crate::support::isolate();
+    for body in [
+        "(not ((x * x) < 0.0f32))",
+        "(!((x * x) < 0.0f32))",
+        "not((x * x) < 0.0f32)",
+        "not(cmplt(mul(x, x), 0.0f32))",
+        "not(not((x * x) >= 0.0f32))",
+        "(not(x < 0.0f32) || (x < 0.0f32))",
+        "(not((x * x) < 0.0f32) && ((x * x) >= 0.0f32))",
+    ] {
+        let source = format!("module M\n@property negation forall(x: f32):\n  {body}\n");
+        for tier in ["auto", "smt-only"] {
+            let outcome = one(&source, tier, 16);
+            assert_eq!(
+                outcome.status,
+                PropertyStatus::Passed,
+                "{body}: {outcome:?}"
+            );
+            assert_eq!(outcome.proof_tier, PropertyTier::Smt, "{body}: {outcome:?}");
+            assert_eq!(
+                outcome.composite_verdict,
+                CompositeVerdict::ProvenModuloRealArithmetic,
+                "{body}: {outcome:?}"
+            );
+        }
+    }
+}
+
+#[cfg(feature = "smt")]
+#[test]
+fn false_negation_spellings_and_nested_goals_are_disproved() {
+    crate::support::isolate();
+    for body in [
+        "(not ((x * x) >= 0.0f32))",
+        "(!((x * x) >= 0.0f32))",
+        "not((x * x) >= 0.0f32)",
+        "not(gte(mul(x, x), 0.0f32))",
+        "not(not((x * x) < 0.0f32))",
+        "(not((x * x) >= 0.0f32) || ((x * x) < 0.0f32))",
+        "(not(x < 0.0f32) && (x < 0.0f32))",
+    ] {
+        let source = format!("module M\n@property negation forall(x: f32):\n  {body}\n");
+        for tier in ["auto", "smt-only"] {
+            let outcome = one(&source, tier, 16);
+            assert_eq!(
+                outcome.status,
+                PropertyStatus::Failed,
+                "{body}: {outcome:?}"
+            );
+            assert_eq!(outcome.proof_tier, PropertyTier::Smt, "{body}: {outcome:?}");
+            assert_eq!(
+                outcome.composite_verdict,
+                CompositeVerdict::Failed,
+                "{body}: {outcome:?}"
+            );
+            assert!(outcome.counterexample.is_some(), "{body}: {outcome:?}");
+        }
+    }
+}
+
+#[cfg(feature = "smt")]
+#[test]
+fn negation_in_inlined_helper_condition_preserves_arguments() {
+    crate::support::isolate();
+    for (goal, expected_status) in [
+        ("select_nonnegative(x) >= 0.0f32", PropertyStatus::Passed),
+        ("select_nonnegative(x) < 0.0f32", PropertyStatus::Failed),
+    ] {
+        let source = format!(
+            "module M\ndef select_nonnegative(value: f32) -> f32 = if not(value < 0.0f32) then value else 0.0f32\n@property negation forall(x: f32):\n  {goal}\n"
+        );
+        let outcome = one(&source, "smt-only", 0);
+        assert_eq!(outcome.status, expected_status, "{outcome:?}");
+        assert_eq!(outcome.proof_tier, PropertyTier::Smt, "{outcome:?}");
+    }
+}
+
+#[cfg(feature = "smt")]
+#[test]
+fn negation_keeps_unsupported_inner_operations_at_the_capability_boundary() {
+    crate::support::isolate();
+    let source =
+        "module M\n@property negation forall(x: f32) where x > 0.0f32:\n  not(log(x) > x)\n";
+    let smt = one(source, "smt-only", 0);
+    assert_eq!(smt.status, PropertyStatus::Unsupported, "{smt:?}");
+    assert!(!is_proven_badge(smt.composite_verdict), "{smt:?}");
+    let auto = one(source, "auto", 16);
+    assert_eq!(auto.status, PropertyStatus::Passed, "{auto:?}");
+    assert_eq!(auto.proof_tier, PropertyTier::Fuzz, "{auto:?}");
+    assert_eq!(
+        auto.composite_verdict,
+        CompositeVerdict::FuzzValidatedEmpirical,
+        "{auto:?}"
+    );
+}
+
+#[cfg(feature = "smt")]
+#[test]
 fn false_conjunction_is_disproved_at_smt_with_counterexample() {
     crate::support::isolate();
     let outcome = one(CONJ_FALSE, "smt-only", 0);

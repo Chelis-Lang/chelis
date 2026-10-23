@@ -204,6 +204,13 @@ and validates every inner and outer selector. Valid nested transforms reach
 their existing property-local capability boundaries without changing supported
 numerical siblings or their guard plans.
 
+Boolean negation follows `spec/05` [05-OP-28] through both its application
+form and the unary node reconstructed by semantic resugaring. Direct goals
+and substituted helper conditions lower either form to the same SMT `not`
+term, recursively preserving the operand; an unsupported operand remains
+unsupported. For example, `not((x * x) < 0.0f32)` lowers as a negated
+comparison, including inside `&&` and `||` goals.
+
 Tier B interprets numeric literals through the canonical Surf-to-Deep literal
 boundary (`spec/03` §6.4, `spec/04` [04-LIT-2], §5.6). A checked cast that
 states an unsuffixed literal's numeric dtype denotes that literal, including
