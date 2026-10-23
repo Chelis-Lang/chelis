@@ -10,7 +10,9 @@
 //! tests are disposition locks that already passed there; they show the
 //! admission leaves ordinary extents alone.
 
-use chelis_ir::dag::{Dag, DimExpr, DimInfo, NodeId, RiscOp, RtDim, TensorType, UniformBound};
+use chelis_dag_core::dag::{
+    Dag, DimExpr, DimInfo, NodeId, RiscOp, RtDim, TensorType, UniformBound,
+};
 use chelis_ir::eval::{TensorValue, eval_tensor_roots_with, eval_tensor_roots_with_strict};
 use chelis_numeric_core::dtype_semantics::{RawTensor, finalize_tensor, scalar_from_i64};
 use chelis_numeric_core::prim::Prim;
@@ -28,7 +30,7 @@ fn lit(extents: &[usize]) -> Vec<DimInfo> {
 
 fn add(
     dag: &mut Dag,
-    decl: chelis_ir::dag::DeclId,
+    decl: chelis_dag_core::dag::DeclId,
     op: RiscOp,
     inputs: Vec<NodeId>,
     dims: Vec<DimInfo>,
@@ -48,7 +50,7 @@ fn add(
 
 fn load(
     dag: &mut Dag,
-    decl: chelis_ir::dag::DeclId,
+    decl: chelis_dag_core::dag::DeclId,
     name: &str,
     dims: Vec<DimInfo>,
     prim: Prim,
@@ -63,7 +65,7 @@ fn load(
     )
 }
 
-fn i64_const(dag: &mut Dag, decl: chelis_ir::dag::DeclId, value: i64) -> NodeId {
+fn i64_const(dag: &mut Dag, decl: chelis_dag_core::dag::DeclId, value: i64) -> NodeId {
     let value = scalar_from_i64("test", Prim::Int64, value).unwrap();
     add(
         dag,
@@ -628,7 +630,7 @@ fn a_gather_past_the_count_domain_traps_overflow() {
 /// `n` and `k`.
 fn matmul(
     dag: &mut Dag,
-    decl: chelis_ir::dag::DeclId,
+    decl: chelis_dag_core::dag::DeclId,
     [lhs, rhs]: [NodeId; 2],
     batch: Vec<DimExpr>,
     [m, n, k]: [DimExpr; 3],

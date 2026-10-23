@@ -3,8 +3,8 @@
 //! ordinary scalar Beacon call. Both translations are deliberately closed.
 
 use super::*;
-use chelis_ir::dag::{ComparisonKind, Dag, NodeId, RiscOp, TensorType};
-use chelis_ir::grad::grad_dag_checked;
+use chelis_dag_core::dag::{ComparisonKind, Dag, NodeId, RiscOp, TensorType};
+use chelis_dag_core::grad::grad_dag_checked;
 use chelis_numeric_core::dtype_semantics::scalar_from_f64;
 
 pub(super) fn lower(

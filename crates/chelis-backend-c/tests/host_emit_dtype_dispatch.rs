@@ -10,8 +10,8 @@ use std::fs;
 use std::process::Command;
 
 mod support;
+use chelis_dag_core::dag::{Dag, DimInfo, RiscOp, TensorType};
 use chelis_ir::ConcreteHostType as HostType;
-use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
 use chelis_ir::host::{
     ConcreteHostBinding as HostBinding, ConcreteHostExpr as HostExpr,
     ConcreteHostExprKind as HostExprKind, ConcreteHostFunction as HostFunction,

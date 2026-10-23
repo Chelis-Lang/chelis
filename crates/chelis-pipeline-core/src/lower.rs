@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use chelis_ir::Dag;
+use chelis_dag_core::Dag;
 use chelis_ir::lower::{LowerDiagnostic, LoweredLibrary as IrLoweredLibrary};
 
 use crate::artifacts::RootBindingMode;
@@ -316,7 +316,7 @@ fn finish_lowering(
 
 #[cfg(test)]
 mod tests {
-    use chelis_ir::dag::NodeId;
+    use chelis_dag_core::dag::NodeId;
 
     use super::*;
     use crate::{

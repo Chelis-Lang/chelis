@@ -9,7 +9,7 @@
 //! it reaches a backend or test fixture that might tolerate the
 //! wrong precision.
 
-use chelis_ir::dag::RiscOp;
+use chelis_dag_core::dag::RiscOp;
 use chelis_numeric_core::prim::Prim;
 
 // ----------------------------------------------------------------
@@ -105,7 +105,7 @@ fn sum_default_constructor_pins_accumulator_into_node() {
 
 #[test]
 fn matmul_default_constructor_pins_accumulator_into_node() {
-    use chelis_ir::dag::DimExpr;
+    use chelis_dag_core::dag::DimExpr;
     let op = RiscOp::matmul_default(
         vec![],
         DimExpr::Concrete(2),
@@ -128,7 +128,7 @@ fn matmul_default_constructor_pins_accumulator_into_node() {
 
 #[test]
 fn integer_matmul_rejected_per_spec_5_7_2() {
-    use chelis_ir::dag::DimExpr;
+    use chelis_dag_core::dag::DimExpr;
     for operand in [Prim::Int8, Prim::Int16, Prim::Int32, Prim::Int64] {
         let result = RiscOp::matmul_default(
             vec![],
@@ -160,7 +160,7 @@ fn integer_matmul_rejected_per_spec_5_7_2() {
 
 #[test]
 fn matmul_with_accumulator_also_rejects_integer_operands() {
-    use chelis_ir::dag::DimExpr;
+    use chelis_dag_core::dag::DimExpr;
     let result = RiscOp::matmul_with_accumulator(
         vec![],
         DimExpr::Concrete(2),

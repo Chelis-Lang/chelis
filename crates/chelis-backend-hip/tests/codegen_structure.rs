@@ -4,10 +4,10 @@
 //! a GPU or HIP runtime. They run in default CI.
 
 mod support;
-use chelis_ir::dag::{
+use chelis_dag_core::dag::{
     ComparisonKind, Dag, DimInfo, ExtremaKind, ExtremaOperand, RiscOp, RtAxis, RtDim, TensorType,
 };
-use chelis_ir::fuse::fuse;
+use chelis_dag_core::fuse::fuse;
 use chelis_numeric_core::prim::Prim;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -1011,7 +1011,7 @@ fn s5_reshape_materializes_logical_order() {
     let r = dag.add_node(
         decl,
         RiscOp::Reshape {
-            new_shape: vec![chelis_ir::dag::RtDim::Lit(6)],
+            new_shape: vec![chelis_dag_core::dag::RtDim::Lit(6)],
         },
         vec![x],
         vec_f32(6),
@@ -1068,7 +1068,7 @@ fn s5_expand_no_kernel_launch() {
         decl,
         RiscOp::Expand {
             axis: 0,
-            size: chelis_ir::dag::RtDim::Lit(4),
+            size: chelis_dag_core::dag::RtDim::Lit(4),
         },
         vec![x],
         mat_f32(4, 3),
@@ -1162,7 +1162,7 @@ fn s5_realize_materializes_with_kernel_not_view() {
         let s = dag.add_node(
             decl,
             RiscOp::Stride {
-                strides: vec![chelis_ir::dag::RtDim::Lit(2)],
+                strides: vec![chelis_dag_core::dag::RtDim::Lit(2)],
             },
             vec![x],
             output_ty.clone(),
@@ -2019,7 +2019,7 @@ fn s15_matmul_emits_hipblas_and_link_flag() {
         decl,
         RiscOp::Expand {
             axis: 2,
-            size: chelis_ir::dag::RtDim::Lit(4),
+            size: chelis_dag_core::dag::RtDim::Lit(4),
         },
         vec![a],
         tensor3_f32(2, 3, 4),
@@ -2029,7 +2029,7 @@ fn s15_matmul_emits_hipblas_and_link_flag() {
         decl,
         RiscOp::Expand {
             axis: 0,
-            size: chelis_ir::dag::RtDim::Lit(2),
+            size: chelis_dag_core::dag::RtDim::Lit(2),
         },
         vec![b],
         tensor3_f32(2, 3, 4),
@@ -2288,7 +2288,7 @@ fn s15_batched_matmul_emits_hipblas_strided_batched_helper_and_link_flag() {
         b_ty.clone(),
         None,
     );
-    let out = chelis_ir::tier2::lower_matmul(decl.into(), &mut dag, a, b, &a_ty, &b_ty, None);
+    let out = chelis_dag_core::tier2::lower_matmul(decl.into(), &mut dag, a, b, &a_ty, &b_ty, None);
     dag.add_root(out);
     let result = codegen_hip(&dag, "test_hipblas_batched_matmul").unwrap();
 
@@ -2351,10 +2351,10 @@ fn s15_batched_matmul_symbolic_batch_emits_strided_batched_helper() {
     let out = dag.add_node(
         decl,
         RiscOp::BlasMatmul {
-            batch_dims: vec![chelis_ir::dag::DimExpr::Sym("batch".into())],
-            m: chelis_ir::dag::DimExpr::Concrete(4),
-            n: chelis_ir::dag::DimExpr::Concrete(6),
-            k: chelis_ir::dag::DimExpr::Concrete(5),
+            batch_dims: vec![chelis_dag_core::dag::DimExpr::Sym("batch".into())],
+            m: chelis_dag_core::dag::DimExpr::Concrete(4),
+            n: chelis_dag_core::dag::DimExpr::Concrete(6),
+            k: chelis_dag_core::dag::DimExpr::Concrete(5),
             accumulator: chelis_numeric_core::prim::Prim::F32,
         },
         vec![a, b],
@@ -2409,10 +2409,10 @@ fn s15_batched_matmul_symbolic_matrix_dim_uses_helper_loop_fallback() {
     let out = dag.add_node(
         decl,
         RiscOp::BlasMatmul {
-            batch_dims: vec![chelis_ir::dag::DimExpr::Sym("batch".into())],
-            m: chelis_ir::dag::DimExpr::Sym("m".into()),
-            n: chelis_ir::dag::DimExpr::Sym("n".into()),
-            k: chelis_ir::dag::DimExpr::Sym("k".into()),
+            batch_dims: vec![chelis_dag_core::dag::DimExpr::Sym("batch".into())],
+            m: chelis_dag_core::dag::DimExpr::Sym("m".into()),
+            n: chelis_dag_core::dag::DimExpr::Sym("n".into()),
+            k: chelis_dag_core::dag::DimExpr::Sym("k".into()),
             accumulator: chelis_numeric_core::prim::Prim::F32,
         },
         vec![a, b],
@@ -2455,7 +2455,7 @@ fn s15_batched_matmul_materializes_noncontiguous_batch_layout_before_blas() {
         decl,
         RiscOp::Expand {
             axis: 0,
-            size: chelis_ir::dag::RtDim::Lit(3),
+            size: chelis_dag_core::dag::RtDim::Lit(3),
         },
         vec![base_a],
         tensor3_f32(3, 4, 5),
@@ -2471,10 +2471,10 @@ fn s15_batched_matmul_materializes_noncontiguous_batch_layout_before_blas() {
     let out = dag.add_node(
         decl,
         RiscOp::BlasMatmul {
-            batch_dims: vec![chelis_ir::dag::DimExpr::Concrete(3)],
-            m: chelis_ir::dag::DimExpr::Concrete(4),
-            n: chelis_ir::dag::DimExpr::Concrete(6),
-            k: chelis_ir::dag::DimExpr::Concrete(5),
+            batch_dims: vec![chelis_dag_core::dag::DimExpr::Concrete(3)],
+            m: chelis_dag_core::dag::DimExpr::Concrete(4),
+            n: chelis_dag_core::dag::DimExpr::Concrete(6),
+            k: chelis_dag_core::dag::DimExpr::Concrete(5),
             accumulator: chelis_numeric_core::prim::Prim::F32,
         },
         vec![a, b],
@@ -2525,7 +2525,7 @@ fn s15_noncontiguous_matmul_falls_back_to_generic_reduction() {
         decl,
         RiscOp::Expand {
             axis: 2,
-            size: chelis_ir::dag::RtDim::Lit(4),
+            size: chelis_dag_core::dag::RtDim::Lit(4),
         },
         vec![a],
         tensor3_f32(2, 3, 4),
@@ -2535,7 +2535,7 @@ fn s15_noncontiguous_matmul_falls_back_to_generic_reduction() {
         decl,
         RiscOp::Expand {
             axis: 0,
-            size: chelis_ir::dag::RtDim::Lit(2),
+            size: chelis_dag_core::dag::RtDim::Lit(2),
         },
         vec![b],
         tensor3_f32(2, 3, 4),
@@ -2939,7 +2939,10 @@ fn s8a_pad_emits_kernel_and_launch_not_view() {
         decl,
         RiscOp::zero_pad(
             Prim::F32,
-            vec![(chelis_ir::dag::RtDim::Lit(1), chelis_ir::dag::RtDim::Lit(1))],
+            vec![(
+                chelis_dag_core::dag::RtDim::Lit(1),
+                chelis_dag_core::dag::RtDim::Lit(1),
+            )],
         ),
         vec![x],
         vec_f32(6),
@@ -2979,7 +2982,10 @@ fn s8a_shrink_emits_kernel_and_launch_not_view() {
     let s = dag.add_node(
         decl,
         RiscOp::Shrink {
-            bounds: vec![(chelis_ir::dag::RtDim::Lit(1), chelis_ir::dag::RtDim::Lit(5))],
+            bounds: vec![(
+                chelis_dag_core::dag::RtDim::Lit(1),
+                chelis_dag_core::dag::RtDim::Lit(5),
+            )],
         },
         vec![x],
         vec_f32(4),
@@ -3017,7 +3023,10 @@ fn s8a_pad_f64_uses_dtype_suffix() {
         decl,
         RiscOp::zero_pad(
             Prim::F64,
-            vec![(chelis_ir::dag::RtDim::Lit(1), chelis_ir::dag::RtDim::Lit(1))],
+            vec![(
+                chelis_dag_core::dag::RtDim::Lit(1),
+                chelis_dag_core::dag::RtDim::Lit(1),
+            )],
         ),
         vec![x],
         TensorType {
@@ -3054,7 +3063,10 @@ fn s8a_shrink_i32_uses_dtype_suffix() {
     let s = dag.add_node(
         decl,
         RiscOp::Shrink {
-            bounds: vec![(chelis_ir::dag::RtDim::Lit(1), chelis_ir::dag::RtDim::Lit(5))],
+            bounds: vec![(
+                chelis_dag_core::dag::RtDim::Lit(1),
+                chelis_dag_core::dag::RtDim::Lit(5),
+            )],
         },
         vec![x],
         vec_i32(4),
@@ -3144,7 +3156,7 @@ fn s2b_unit_extent_claim_is_guarded_in_the_hip_host_prologue() {
 
 #[test]
 fn ordered_scan_emits_one_kernel_for_thousands_of_prefixes() {
-    use chelis_ir::dag::ScanDirection;
+    use chelis_dag_core::dag::ScanDirection;
     let mut lengths = Vec::new();
     for n in [5, 4096] {
         let mut dag = Dag::new();

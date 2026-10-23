@@ -14,13 +14,13 @@ use chelis_types::manifest::RootManifest;
 use chelis_types::types::Lane;
 
 use crate::anonymous_dims::is_anonymous;
-use crate::dag::{DimInfo, TensorType};
 use crate::host::{
     ConcreteHostCallback, ConcreteHostCallbackKind, ConcreteHostExpr, ConcreteHostExprKind,
     ConcreteHostFunction, ConcreteHostMatchArm, ConcreteHostProgram, HostBinding, HostCallee,
     HostCalleeView, HostDisplayRoot, HostExpr, HostExprKind, HostFunctionOrigin, HostTensorHelper,
 };
 use crate::host_type_state::{ConcreteHostType, HostShapeSlot};
+use chelis_dag_core::dag::{DimInfo, TensorType};
 
 use super::classify::{ClassifyError, NonHeapKind, Placement, ValueClass, classify, render_type};
 use super::error::OwnershipError;
@@ -548,7 +548,7 @@ pub(super) fn lower(
             .flat_map(|binding| {
                 [
                     binding.name.clone(),
-                    crate::LoadStoreName::top_level(&binding.name)
+                    chelis_dag_core::LoadStoreName::top_level(&binding.name)
                         .as_str()
                         .to_string(),
                 ]
@@ -1769,7 +1769,7 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
         if let Some(owner) = self.captures.get(name) {
             return Ok(Value::Named(*owner));
         }
-        let source = crate::LoadStoreName::top_level_source_for_label(name)
+        let source = chelis_dag_core::LoadStoreName::top_level_source_for_label(name)
             .map_err(|_| OwnershipError::UnboundName {
                 unit: self.unit_name.clone(),
                 name: name.to_string(),
@@ -1844,7 +1844,7 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
                 };
                 return Ok(self.info(owner)?.ty.clone());
             }
-            let source = crate::LoadStoreName::top_level_source_for_label(name)
+            let source = chelis_dag_core::LoadStoreName::top_level_source_for_label(name)
                 .ok()
                 .flatten()
                 .unwrap_or_else(|| name.clone());
@@ -3149,7 +3149,7 @@ fn lower_roots(
             lowerer.bind(&binding.name, value)?;
             if let Some(place) = lowerer.lookup(&binding.name) {
                 lowerer.scope_mut()?.names.insert(
-                    crate::LoadStoreName::top_level(&binding.name)
+                    chelis_dag_core::LoadStoreName::top_level(&binding.name)
                         .as_str()
                         .to_string(),
                     place,
@@ -3250,7 +3250,7 @@ fn lower_roots(
     let captured = crate::host::captured_global_names(ctx.host);
     lowerer.with_site(HostSiteKind::FunctionReturn, |lowerer| {
         for binding in ctx.host.globals.iter().rev() {
-            let label = crate::LoadStoreName::top_level(&binding.name);
+            let label = chelis_dag_core::LoadStoreName::top_level(&binding.name);
             if !captured
                 .iter()
                 .any(|name| *name == binding.name || name == label.as_str())

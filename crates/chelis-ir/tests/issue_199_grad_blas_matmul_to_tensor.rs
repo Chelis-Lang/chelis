@@ -29,9 +29,9 @@
 //! #218 captures the full failure surface as design requirements for
 //! a coordinated future implementation.
 
-use chelis_ir::dag::{Dag, DimExpr, DimInfo, NodeId, RiscOp, TensorType};
+use chelis_dag_core::dag::{Dag, DimExpr, DimInfo, NodeId, RiscOp, TensorType};
+use chelis_dag_core::grad::{AdError, grad_dag, grad_dag_checked};
 use chelis_ir::eval::{TensorValue, eval_tensor};
-use chelis_ir::grad::{AdError, grad_dag, grad_dag_checked};
 use chelis_numeric_core::prim::Prim;
 use chelis_unord::UnordMap;
 

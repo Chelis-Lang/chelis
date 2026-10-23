@@ -2,7 +2,7 @@ use chelis_compiler_api::compiler::{
     BuildTarget, CompilerError, reject_inexact_device_reduction_cells, reject_unsupported_hip_ops,
     reject_unsupported_metal_ops,
 };
-use chelis_ir::{
+use chelis_dag_core::{
     dag::{Dag, DimInfo, ReduceWindowKind, RiscOp, TensorType},
     grad::grad_dag_checked,
     tier2::lower_mean,

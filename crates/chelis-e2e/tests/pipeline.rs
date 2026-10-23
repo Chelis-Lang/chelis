@@ -99,7 +99,7 @@ fn pipeline_tier2_relu_preserves_identity() {
     let has_relu = dag
         .nodes()
         .iter()
-        .any(|n| matches!(n.op, chelis_ir::dag::RiscOp::Relu));
+        .any(|n| matches!(n.op, chelis_dag_core::dag::RiscOp::Relu));
     assert!(has_relu, "pipeline erased the dedicated ReLU identity");
 }
 

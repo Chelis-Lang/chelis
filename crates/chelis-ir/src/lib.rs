@@ -22,9 +22,8 @@ pub const EVAL_TENSOR_CAPABLE_PRIMS: &[chelis_numeric_core::prim::Prim] = &[
     chelis_numeric_core::prim::Prim::Int64,
 ];
 
-pub mod analysis;
 pub mod anonymous_dims;
-pub mod axis_sources;
+pub mod axis_admission;
 pub mod callable_value;
 #[expect(
     dead_code,
@@ -34,33 +33,20 @@ pub mod capacity_key;
 pub mod claim_pattern;
 pub mod compositions;
 pub mod contraction_views;
-pub mod dag;
+pub mod device_admission;
 pub mod eval;
-pub mod fuse;
-pub mod grad;
 pub mod host;
 pub mod host_type_state;
-pub mod load_store_name;
 pub mod lower;
 #[cfg(feature = "lowering-trace")]
 pub mod lowering_trace;
-pub mod optimize;
+pub mod ordered_layout;
 pub mod ownership;
 pub mod pipeline;
-pub mod span_merge;
 pub mod span_sanitize;
 pub mod specialize;
-pub mod tier2;
-pub mod tier2_ordered;
-pub mod verify;
 pub mod vmap;
 
-pub use analysis::{
-    CopyCostSummary, FunctionCopyCost, analyze_copy_costs, analyze_copy_costs_for_roots,
-};
-pub use axis_sources::{AxisSource, check_axis_sources, node_scopes, output_axis_sources};
-pub use dag::{Dag, DagNode, DimInfo, NodeId, RiscOp, TensorType};
-pub use grad::{AdError, AdRejectionReason};
 pub use host::{
     BlasDimRole, BlasSummaryAttempt, CompiledProgram, HelperPath, HelperSummaryRejection,
     PayloadRole, SparseOpKind, SummaryRejection, SummaryRejectionClass, SummaryRejectionDetail,
@@ -71,7 +57,6 @@ pub use host_type_state::{
     HostTensorTypeTerm, HostTypeDecodeError, HostTypeResolutionError, HostTypeTerm,
     decode_host_type, decode_host_type_metadata,
 };
-pub use load_store_name::{LoadStoreName, LoadStoreNameError};
 pub use lower::{
     LoweredLibrary, lower_program, lower_program_to_library, lower_program_with_context,
     lower_subexpr_program, tensor_type_from_deep, try_lower_program, try_lower_program_to_library,

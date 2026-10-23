@@ -2,7 +2,7 @@
 
 use chelis_unord::UnordMap;
 
-use chelis_ir::dag::{DimExpr, NodeId, RiscOp};
+use chelis_dag_core::dag::{DimExpr, NodeId, RiscOp};
 use chelis_ir::ownership::{HipStorageLane, LiveByteBound, StoragePlacement, VerifiedStoragePlan};
 use chelis_numeric_core::prim::Prim;
 
@@ -211,7 +211,7 @@ fn render_dim_expr_sum(terms: &[DimExpr]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chelis_ir::dag::{Dag, DimInfo, TensorType};
+    use chelis_dag_core::dag::{Dag, DimInfo, TensorType};
     use chelis_ir::ownership::{lower_dag_ownership, plan_hip_storage, verify_ownership};
 
     fn vec_f32(elements: usize) -> TensorType {

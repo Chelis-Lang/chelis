@@ -12,6 +12,11 @@
 //! passes (CSE, constant fold, fusion) can apply the same rule without
 //! re-implementing the dedup/sort/None-no-op logic.
 
+use alloc::borrow::ToOwned;
+use alloc::string::String;
+#[cfg(test)]
+use alloc::vec;
+
 use crate::dag::{Dag, NodeId};
 
 /// Append a single span to an existing node's `merged_spans`, lex-sorted

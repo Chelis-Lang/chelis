@@ -133,15 +133,15 @@ fn tensor_helper_retains_declaring_parameter_order() {
     assert_load_order_after_rebuilding(&dag, &["b", "z", "a"]);
 }
 
-fn assert_load_order_after_rebuilding(dag: &chelis_ir::Dag, expected: &[&str]) {
-    let mut dag = chelis_ir::optimize::dead_code_eliminate(dag);
-    chelis_ir::optimize::constant_fold(&mut dag);
-    let dag = chelis_ir::optimize::dead_code_eliminate(&dag);
+fn assert_load_order_after_rebuilding(dag: &chelis_dag_core::Dag, expected: &[&str]) {
+    let mut dag = chelis_dag_core::optimize::dead_code_eliminate(dag);
+    chelis_dag_core::optimize::constant_fold(&mut dag);
+    let dag = chelis_dag_core::optimize::dead_code_eliminate(&dag);
     let names = dag
         .nodes()
         .iter()
         .filter_map(|node| match &node.op {
-            chelis_ir::RiscOp::Load { name } => Some(name.as_str()),
+            chelis_dag_core::RiscOp::Load { name } => Some(name.as_str()),
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -152,7 +152,7 @@ fn assert_load_order_after_rebuilding(dag: &chelis_ir::Dag, expected: &[&str]) {
 /// Reversing insertion into its unordered scope must not reverse that ABI.
 #[test]
 fn signatureless_helper_retains_assigned_abi_order() {
-    use chelis_ir::dag::{DimInfo, TensorType};
+    use chelis_dag_core::dag::{DimInfo, TensorType};
     use chelis_numeric_core::prim::Prim;
     use chelis_unord::UnordMap;
     let expr = chelis_deep::parser::parse_str(

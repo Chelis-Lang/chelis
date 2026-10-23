@@ -1,9 +1,9 @@
 use chelis_deep::DeepTag;
 use chelis_unord::UnordMap;
 
+use chelis_dag_core::dag::{Dag, DimInfo, NodeId, TensorType};
 use chelis_deep::Span;
 use chelis_deep::ast::{Expr, Metadata};
-use chelis_ir::dag::{Dag, DimInfo, NodeId, TensorType};
 use chelis_ir::eval::{TensorInputDemand, TensorValue as IrTensorValue};
 use chelis_ir::lower::type_expr_has_rank_var;
 use chelis_numeric_core::prim::Prim;
@@ -440,7 +440,7 @@ impl<'a> EvalContext<'a> {
         demand: TensorInputDemand,
         staged_inputs: &UnordMap<String, IrTensorValue>,
     ) -> Result<Option<IrTensorValue>, String> {
-        let top_level_source = chelis_ir::LoadStoreName::top_level_source_for_label(name)?;
+        let top_level_source = chelis_dag_core::LoadStoreName::top_level_source_for_label(name)?;
         if top_level_source.is_none() {
             if let Some(value) = staged_inputs.get(name) {
                 return Ok(Some(value.clone()));

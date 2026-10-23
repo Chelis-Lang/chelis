@@ -6,7 +6,7 @@
 
 use chelis_backend_c::CodegenOptions;
 mod support;
-use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
+use chelis_dag_core::dag::{Dag, DimInfo, RiscOp, TensorType};
 use chelis_numeric_core::prim::Prim;
 use support::codegen_with_options;
 
@@ -40,7 +40,7 @@ fn f64_matmul_subgraph_stays_off_blas_path_in_c_backend() {
         decl,
         RiscOp::Expand {
             axis: 2,
-            size: chelis_ir::dag::RtDim::Lit(4),
+            size: chelis_dag_core::dag::RtDim::Lit(4),
         },
         vec![a],
         t(Prim::F64, vec![8, 16, 4]),
@@ -50,7 +50,7 @@ fn f64_matmul_subgraph_stays_off_blas_path_in_c_backend() {
         decl,
         RiscOp::Expand {
             axis: 0,
-            size: chelis_ir::dag::RtDim::Lit(8),
+            size: chelis_dag_core::dag::RtDim::Lit(8),
         },
         vec![b],
         t(Prim::F64, vec![8, 16, 4]),
@@ -132,7 +132,7 @@ fn f32_matmul_subgraph_preserves_canonical_arithmetic_in_c_backend() {
         decl,
         RiscOp::Expand {
             axis: 2,
-            size: chelis_ir::dag::RtDim::Lit(4),
+            size: chelis_dag_core::dag::RtDim::Lit(4),
         },
         vec![a],
         t(Prim::F32, vec![8, 16, 4]),
@@ -142,7 +142,7 @@ fn f32_matmul_subgraph_preserves_canonical_arithmetic_in_c_backend() {
         decl,
         RiscOp::Expand {
             axis: 0,
-            size: chelis_ir::dag::RtDim::Lit(8),
+            size: chelis_dag_core::dag::RtDim::Lit(8),
         },
         vec![b],
         t(Prim::F32, vec![8, 16, 4]),
@@ -204,7 +204,7 @@ fn matmul_dag(prim: Prim, [m, k, n]: [usize; 3], observe_product: bool) -> Dag {
     );
     let expand = |axis, size| RiscOp::Expand {
         axis,
-        size: chelis_ir::dag::RtDim::Lit(size),
+        size: chelis_dag_core::dag::RtDim::Lit(size),
     };
     let ea = dag.add_node(decl, expand(2, n), vec![a], t(prim, vec![m, k, n]), None);
     let eb = dag.add_node(decl, expand(0, m), vec![b], t(prim, vec![m, k, n]), None);

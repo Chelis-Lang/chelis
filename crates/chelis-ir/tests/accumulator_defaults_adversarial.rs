@@ -11,7 +11,7 @@
 //!    backend BlasMatmul detectors.
 //!  - F8e4m3 must be rejected by the IR-level default helpers too.
 
-use chelis_ir::dag::{DimExpr, RiscOp};
+use chelis_dag_core::dag::{DimExpr, RiscOp};
 use chelis_numeric_core::prim::Prim;
 
 // ---------------------------------------------------------------

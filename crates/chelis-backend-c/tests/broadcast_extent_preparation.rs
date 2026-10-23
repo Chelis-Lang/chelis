@@ -2,10 +2,10 @@
 //! size source, the operand's unit precondition, and numeric result claims.
 
 use chelis_backend_c::{CodegenOptions, prepare_dag_for_codegen};
-use chelis_ir::axis_sources::{
+use chelis_dag_core::axis_sources::{
     DimClaim, derive_runtime_dim_classes, derive_unit_extent_claims, member_load_axis,
 };
-use chelis_ir::dag::{Dag, DimInfo, RiscOp, RtAxis, RtDim, TensorType};
+use chelis_dag_core::dag::{Dag, DimInfo, RiscOp, RtAxis, RtDim, TensorType};
 use chelis_numeric_core::prim::Prim;
 
 fn named(name: &str) -> DimInfo {
@@ -23,7 +23,7 @@ fn fixture(
     operand: Vec<DimInfo>,
     result: Vec<DimInfo>,
     size: RtDim,
-) -> (Dag, chelis_ir::dag::NodeId) {
+) -> (Dag, chelis_dag_core::dag::NodeId) {
     let mut dag = Dag::new();
     let decl = dag.declare("test");
     let x = dag.add_node(

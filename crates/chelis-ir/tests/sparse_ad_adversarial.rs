@@ -39,10 +39,10 @@
 
 use chelis_unord::UnordMap;
 
-use chelis_ir::DimInfo;
-use chelis_ir::dag::{Dag, NodeId, RiscOp, TensorType};
+use chelis_dag_core::DimInfo;
+use chelis_dag_core::dag::{Dag, NodeId, RiscOp, TensorType};
+use chelis_dag_core::grad::{AdError, AdRejectionReason, grad_dag_checked};
 use chelis_ir::eval::{TensorValue, eval_tensor_with};
-use chelis_ir::grad::{AdError, AdRejectionReason, grad_dag_checked};
 use chelis_numeric_core::prim::Prim;
 
 fn t(dims: Vec<usize>) -> TensorType {
@@ -61,7 +61,7 @@ fn t_i32(dims: Vec<usize>) -> TensorType {
 
 fn build_gather_scalar(
     dag: &mut Dag,
-    decl: chelis_ir::dag::DeclId,
+    decl: chelis_dag_core::dag::DeclId,
     table_dims: Vec<usize>,
     indices_data: Vec<f64>,
     indices_shape: Vec<usize>,
@@ -589,7 +589,7 @@ fn scatter_ad_rejects_regardless_of_wrt_subset() {
         None,
     );
 
-    fn assert_rejects(result: Result<chelis_ir::grad::GradResult, AdError>, label: &str) {
+    fn assert_rejects(result: Result<chelis_dag_core::grad::GradResult, AdError>, label: &str) {
         match result {
             Ok(_) => panic!("{label}: scatter AD must fail-closed but returned Ok(_)"),
             Err(err) => assert!(

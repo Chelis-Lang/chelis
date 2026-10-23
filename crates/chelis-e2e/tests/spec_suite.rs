@@ -11,11 +11,11 @@ use chelis_unord::UnordMap;
 use std::io::Write;
 use std::process::Command;
 
+use chelis_dag_core::dag::{Dag, RiscOp, TensorType};
+use chelis_dag_core::grad::grad_dag;
 use chelis_deep::ast::Expr;
 use chelis_e2e::pipeline::compile_surf;
-use chelis_ir::dag::{Dag, RiscOp, TensorType};
 use chelis_ir::eval::{TensorValue, eval_scalar, eval_tensor, eval_tensor_roots_with_strict};
-use chelis_ir::grad::grad_dag;
 use chelis_types::errors::CheckErrorKind;
 
 // ---------------------------------------------------------------------------
@@ -885,7 +885,7 @@ def per_example_grad(xs: tensor[batch, features, f32]) -> tensor[batch, features
         RiscOp::Load { name: "x".into() },
         vec![],
         TensorType {
-            dims: vec![chelis_ir::dag::DimInfo::Lit(4)],
+            dims: vec![chelis_dag_core::dag::DimInfo::Lit(4)],
             precision: chelis_numeric_core::prim::Prim::F32,
         },
         None,
@@ -895,7 +895,7 @@ def per_example_grad(xs: tensor[batch, features, f32]) -> tensor[batch, features
         RiscOp::Mul,
         vec![x, x],
         TensorType {
-            dims: vec![chelis_ir::dag::DimInfo::Lit(4)],
+            dims: vec![chelis_dag_core::dag::DimInfo::Lit(4)],
             precision: chelis_numeric_core::prim::Prim::F32,
         },
         None,

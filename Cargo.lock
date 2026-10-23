@@ -500,6 +500,7 @@ version = "0.21.1"
 dependencies = [
  "chelis-abi",
  "chelis-crmath",
+ "chelis-dag-core",
  "chelis-deep",
  "chelis-effects",
  "chelis-ir",
@@ -523,6 +524,7 @@ name = "chelis-backend-hip"
 version = "0.21.1"
 dependencies = [
  "chelis-backend-c",
+ "chelis-dag-core",
  "chelis-effects",
  "chelis-ir",
  "chelis-numeric-core",
@@ -543,6 +545,7 @@ version = "0.21.1"
 dependencies = [
  "chelis-backend-c",
  "chelis-crmath",
+ "chelis-dag-core",
  "chelis-effects",
  "chelis-ir",
  "chelis-numeric-core",
@@ -587,6 +590,7 @@ dependencies = [
  "chelis-conformance",
  "chelis-cove",
  "chelis-crmath",
+ "chelis-dag-core",
  "chelis-deep",
  "chelis-effects",
  "chelis-ir",
@@ -641,6 +645,7 @@ dependencies = [
  "chelis-backend-hip",
  "chelis-clarabel-provider",
  "chelis-crmath",
+ "chelis-dag-core",
  "chelis-deep",
  "chelis-effects",
  "chelis-image-id",
@@ -709,6 +714,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "chelis-dag-core"
+version = "0.21.1"
+dependencies = [
+ "bincode",
+ "chelis-numeric-core",
+ "chelis-unord",
+ "hashbrown 0.16.1",
+ "rustc-hash",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "chelis-deep"
 version = "0.21.1"
 dependencies = [
@@ -732,6 +750,7 @@ dependencies = [
  "assert_cmd",
  "chelis-backend-c",
  "chelis-compiler-api",
+ "chelis-dag-core",
  "chelis-deep",
  "chelis-effects",
  "chelis-ir",
@@ -782,6 +801,7 @@ version = "0.21.1"
 dependencies = [
  "bincode",
  "chelis-abi",
+ "chelis-dag-core",
  "chelis-deep",
  "chelis-effects",
  "chelis-macros",
@@ -865,6 +885,7 @@ dependencies = [
 name = "chelis-pipeline-core"
 version = "0.21.1"
 dependencies = [
+ "chelis-dag-core",
  "chelis-deep",
  "chelis-effects",
  "chelis-ir",
@@ -894,6 +915,7 @@ dependencies = [
  "chelis-certificate-core",
  "chelis-compiler-api",
  "chelis-crmath",
+ "chelis-dag-core",
  "chelis-deep",
  "chelis-ir",
  "chelis-numeric-core",

@@ -420,3 +420,37 @@ active Devenv shell unless the command itself tests shell entry.
 - [`spec/design/phase1a_kernel_codegen.md`](../spec/design/phase1a_kernel_codegen.md) — owning HIP gate spec
 - [`spec/design/chelis_phase2_plan.md`](../spec/design/chelis_phase2_plan.md) — Phase 2 manual gate descriptions
 - [`spec/design/chelis_phase3_plan.md`](../spec/design/chelis_phase3_plan.md) — Phase 3 manual gate descriptions
+
+## DAG-core portability
+
+Command:
+
+```sh
+uv run --managed-python --python 3.11 --no-project python scripts/dag_core_oracle.py
+```
+
+The DAG extraction owns this gate.
+Run the same command on hosted Linux and macOS after the edit phase.
+Success means that every acceptance lane exits zero.
+Missing prerequisites or missing evidence fail the command.
+
+Prerequisites include managed Python 3.11, the repository Rust toolchain, `thumbv7em-none-eabi`, native C tools, and the numeric-core target toolchain.
+The immutable source base is `3ca99faa7a46158eb6a0d90c2c812a7e3a5f44c1`.
+Use isolated target directories under this worktree.
+The oracle creates separate baseline and standalone consumer graphs.
+
+Evidence includes default and no-default Thumb builds, standalone `alloc`, an explicit allocator, dependency features, and negative dependency controls.
+Real host graphs test AD against `2*x`, fusion, ownership, symbolic shape edges, declaration owners, roots, remaps, spans, reuse, copies, and drops.
+Malformed graph and checked-name fixtures test rejection before execution.
+JSON, bincode, numeric payloads, diagnostics, transform outputs, graph scale, and per-pass allocation costs retain fixed-base comparison.
+Public binding maps retain `chelis_unord`.
+Hash-based graph lookups use fixed hashes.
+
+The production lanes compare native C execution and C/HIP/Metal source, headers, span comments, and admission diagnostics.
+Build lanes use `--emit-c` and compare native compiler flags.
+Raw logs retain build paths and archive hashes.
+Host suite commands use the Cargo feature requirements from each source manifest.
+HIP and Metal source evidence does not establish GPU device execution.
+Thumb compilation does not establish microcontroller execution, stack capacity, or allocator capacity.
+Source lowering, evaluation, host diagnostics, ABI layout admission, and production stage order remain host responsibilities.
+

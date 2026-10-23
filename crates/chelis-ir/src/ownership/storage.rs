@@ -8,7 +8,7 @@ use chelis_vocab::Repr;
 use crate::capacity_key::{
     CapacityKey, CapacityKeyBuild, capacity_key_for_node, shape_capacity_keys_for_node,
 };
-use crate::dag::{DimExpr, DimInfo, NodeId, RiscOp};
+use chelis_dag_core::dag::{DimExpr, DimInfo, NodeId, RiscOp};
 
 use super::{LiveByteBound, OwnershipError, VerifiedDagProgram, VerifiedDagView};
 
@@ -345,7 +345,7 @@ enum ReuseProofRejection {
 /// ```
 ///
 /// ```compile_fail
-/// # use chelis_ir::dag::NodeId;
+/// # use chelis_dag_core::dag::NodeId.
 /// use chelis_ir::ownership::ReusableOwnedStorage;
 /// fn forge(source: NodeId, consumer: NodeId) -> ReusableOwnedStorage {
 ///     ReusableOwnedStorage { source, storage: todo!(), consumer }
@@ -591,7 +591,7 @@ fn build_storage_plan(
         StorageLaneKind::C => skipped.extend(
             dag.reduction_inlined_products()
                 .iter()
-                .flat_map(crate::fuse::InlinedProduct::skipped),
+                .flat_map(chelis_dag_core::fuse::InlinedProduct::skipped),
         ),
         StorageLaneKind::Hip => skipped.extend(hip_emission_literals(dag)),
     }
@@ -1315,11 +1315,11 @@ fn exact_physical_live_bytes(slots: &[StorageSlotPlan]) -> Result<LiveByteBound,
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dag::{
+    use crate::ownership::{lower_dag_ownership, verify_ownership};
+    use chelis_dag_core::dag::{
         Dag, FusedInput, FusedStep, FusedStepOp, RuntimeRecurrence, RuntimeRecurrenceSource,
         TensorType,
     };
-    use crate::ownership::{lower_dag_ownership, verify_ownership};
     use chelis_numeric_core::prim::Prim;
 
     fn synthetic_candidate(provenance: StorageProvenance) -> ReuseCandidateFacts {
@@ -1381,10 +1381,13 @@ mod tests {
 
     #[test]
     fn hip_reshape_materializes_independent_storage_while_permute_retains_source() {
-        let mut dag = crate::dag::Dag::new();
+        let mut dag = chelis_dag_core::dag::Dag::new();
         let decl = dag.declare("test");
         let ty = TensorType {
-            dims: vec![crate::dag::DimInfo::Lit(2), crate::dag::DimInfo::Lit(3)],
+            dims: vec![
+                chelis_dag_core::dag::DimInfo::Lit(2),
+                chelis_dag_core::dag::DimInfo::Lit(3),
+            ],
             precision: Prim::F32,
         };
         let input = dag.add_node(decl, RiscOp::Load { name: "x".into() }, vec![], ty, None);
@@ -1393,7 +1396,10 @@ mod tests {
             RiscOp::Permute { axes: vec![1, 0] },
             vec![input],
             TensorType {
-                dims: vec![crate::dag::DimInfo::Lit(3), crate::dag::DimInfo::Lit(2)],
+                dims: vec![
+                    chelis_dag_core::dag::DimInfo::Lit(3),
+                    chelis_dag_core::dag::DimInfo::Lit(2),
+                ],
                 precision: Prim::F32,
             },
             None,
@@ -1401,7 +1407,7 @@ mod tests {
         let reshape = dag.add_node(
             decl,
             RiscOp::Reshape {
-                new_shape: vec![crate::dag::RtDim::Lit(6)],
+                new_shape: vec![chelis_dag_core::dag::RtDim::Lit(6)],
             },
             vec![permute],
             vector(6, Prim::F32),
@@ -1425,7 +1431,7 @@ mod tests {
 
     fn vector(elements: usize, precision: Prim) -> TensorType {
         TensorType {
-            dims: vec![crate::dag::DimInfo::Lit(elements)],
+            dims: vec![chelis_dag_core::dag::DimInfo::Lit(elements)],
             precision,
         }
     }
@@ -1440,8 +1446,8 @@ mod tests {
     fn matrix(rows: usize, columns: usize, precision: Prim) -> TensorType {
         TensorType {
             dims: vec![
-                crate::dag::DimInfo::Lit(rows),
-                crate::dag::DimInfo::Lit(columns),
+                chelis_dag_core::dag::DimInfo::Lit(rows),
+                chelis_dag_core::dag::DimInfo::Lit(columns),
             ],
             precision,
         }
@@ -1516,7 +1522,7 @@ mod tests {
                 owner,
                 RiscOp::Expand {
                     axis: 0,
-                    size: crate::dag::RtDim::Node(1),
+                    size: chelis_dag_core::dag::RtDim::Node(1),
                 },
                 vec![source, bound],
                 vector(3, Prim::F32),
@@ -1593,7 +1599,7 @@ mod tests {
 
     #[test]
     fn deferred_product_keeps_result_claim_witness_live() {
-        use crate::dag::{ExtentWitnessSite, RtAxis};
+        use chelis_dag_core::dag::{ExtentWitnessSite, RtAxis};
         let mut dag = Dag::new();
         let owner = dag.declare("test");
         let source = dag.add_node(

@@ -4,7 +4,7 @@
 
 use chelis_backend_hip::HipCodegenResult;
 mod support;
-use chelis_ir::dag::{ComparisonKind, Dag, DimInfo, RiscOp, TensorType};
+use chelis_dag_core::dag::{ComparisonKind, Dag, DimInfo, RiscOp, TensorType};
 use chelis_numeric_core::prim::Prim;
 use chelis_types::unsupported::{RejectionAuthorityKind, Stage, Unsupported, UnsupportedKind};
 use support::codegen_hip;
@@ -338,7 +338,7 @@ fn rt5_stride_op_multiplies_strides() {
     let _s = dag.add_node(
         decl,
         RiscOp::Stride {
-            strides: vec![chelis_ir::dag::RtDim::Lit(2)],
+            strides: vec![chelis_dag_core::dag::RtDim::Lit(2)],
         },
         vec![x],
         vec_f32(3),
@@ -549,7 +549,7 @@ fn rt9_expand_sets_stride_zero() {
         decl,
         RiscOp::Expand {
             axis: 0,
-            size: chelis_ir::dag::RtDim::Lit(4),
+            size: chelis_dag_core::dag::RtDim::Lit(4),
         },
         vec![x],
         mat_f32(4, 3),
@@ -593,7 +593,7 @@ fn rt10_reshape_view_correct() {
     let r = dag.add_node(
         decl,
         RiscOp::Reshape {
-            new_shape: vec![chelis_ir::dag::RtDim::Lit(6)],
+            new_shape: vec![chelis_dag_core::dag::RtDim::Lit(6)],
         },
         vec![x],
         vec_f32(6),
@@ -984,7 +984,7 @@ fn rt15_matmul_specialization_respects_contiguity() {
         contiguous_decl,
         RiscOp::Expand {
             axis: 2,
-            size: chelis_ir::dag::RtDim::Lit(4),
+            size: chelis_dag_core::dag::RtDim::Lit(4),
         },
         vec![a],
         tensor3_f32(2, 3, 4),
@@ -994,7 +994,7 @@ fn rt15_matmul_specialization_respects_contiguity() {
         contiguous_decl,
         RiscOp::Expand {
             axis: 0,
-            size: chelis_ir::dag::RtDim::Lit(2),
+            size: chelis_dag_core::dag::RtDim::Lit(2),
         },
         vec![b],
         tensor3_f32(2, 3, 4),
@@ -1053,7 +1053,7 @@ fn rt15_matmul_specialization_respects_contiguity() {
         fallback_decl,
         RiscOp::Expand {
             axis: 2,
-            size: chelis_ir::dag::RtDim::Lit(4),
+            size: chelis_dag_core::dag::RtDim::Lit(4),
         },
         vec![a_perm],
         tensor3_f32(2, 3, 4),
@@ -1063,7 +1063,7 @@ fn rt15_matmul_specialization_respects_contiguity() {
         fallback_decl,
         RiscOp::Expand {
             axis: 0,
-            size: chelis_ir::dag::RtDim::Lit(2),
+            size: chelis_dag_core::dag::RtDim::Lit(2),
         },
         vec![b],
         tensor3_f32(2, 3, 4),

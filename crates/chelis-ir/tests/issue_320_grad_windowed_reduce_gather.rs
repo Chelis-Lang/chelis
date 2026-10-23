@@ -28,10 +28,10 @@
 //! This file therefore owns the `mean` end-to-end coverage plus the
 //! LITERAL-shape negative-parity regression guards for all three verbs.
 
-use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
+use chelis_dag_core::dag::{Dag, DimInfo, RiscOp, TensorType};
+use chelis_dag_core::grad::grad_dag_checked;
+use chelis_dag_core::tier2;
 use chelis_ir::eval::{TensorValue, eval_tensor};
-use chelis_ir::grad::grad_dag_checked;
-use chelis_ir::tier2;
 use chelis_numeric_core::prim::Prim;
 use chelis_unord::UnordMap;
 

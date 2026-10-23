@@ -1,6 +1,6 @@
 //! Spec/04 §4.7: claim ownership is independent of extent-value readiness.
-use chelis_ir::axis_sources::{entry_extent_guards, local_dim_guard_sites};
-use chelis_ir::dag::{Dag, DimInfo, ExtentWitnessSite, RiscOp, RtAxis, RtDim, TensorType};
+use chelis_dag_core::axis_sources::{entry_extent_guards, local_dim_guard_sites};
+use chelis_dag_core::dag::{Dag, DimInfo, ExtentWitnessSite, RiscOp, RtAxis, RtDim, TensorType};
 use chelis_numeric_core::dtype_semantics::ScalarValue;
 use chelis_numeric_core::prim::Prim;
 
@@ -109,7 +109,7 @@ fn missing_result_axis_is_a_checked_error() {
         })
         .unwrap_err();
         assert!(runtime_error.contains("producer axis"), "{runtime_error}");
-        let errors = chelis_ir::verify::verify(&graph(axis));
+        let errors = chelis_dag_core::verify::verify(&graph(axis));
         assert!(
             errors
                 .iter()
@@ -132,7 +132,7 @@ fn malformed_administrative_producer_is_a_checked_error() {
 
 #[test]
 fn forwarded_axis_observation_and_physical_claim_keep_their_owners() {
-    use chelis_ir::axis_sources::{LocalGuardObservation, result_extent_sites};
+    use chelis_dag_core::axis_sources::{LocalGuardObservation, result_extent_sites};
     for token in [false, true] {
         let mut dag = graph(1);
         let decl = dag.nodes()[0].owner.decl;

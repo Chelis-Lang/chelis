@@ -3,7 +3,7 @@
 //! These verify the fusion pass produces correct DAGs and that fused evaluation
 //! matches unfused evaluation via the IR evaluator.
 
-use chelis_ir::dag::{Dag, DimInfo, NodeId, RiscOp, TensorType};
+use chelis_dag_core::dag::{Dag, DimInfo, NodeId, RiscOp, TensorType};
 use chelis_ir::eval::{TensorValue, eval_tensor_roots_with_strict};
 use chelis_numeric_core::prim::Prim;
 use chelis_unord::UnordMap;
@@ -30,7 +30,7 @@ fn mat_f32(rows: usize, cols: usize) -> TensorType {
     }
 }
 
-fn const_vec(dag: &mut Dag, decl: chelis_ir::dag::DeclId, value: f64, n: usize) -> NodeId {
+fn const_vec(dag: &mut Dag, decl: chelis_dag_core::dag::DeclId, value: f64, n: usize) -> NodeId {
     dag.add_node(
         decl,
         RiscOp::synth_const(Prim::F32, value),
@@ -40,7 +40,7 @@ fn const_vec(dag: &mut Dag, decl: chelis_ir::dag::DeclId, value: f64, n: usize) 
     )
 }
 
-fn load(dag: &mut Dag, decl: chelis_ir::dag::DeclId, name: &str, ty: TensorType) -> NodeId {
+fn load(dag: &mut Dag, decl: chelis_dag_core::dag::DeclId, name: &str, ty: TensorType) -> NodeId {
     dag.add_node(decl, RiscOp::Load { name: name.into() }, vec![], ty, None)
 }
 
@@ -87,7 +87,7 @@ fn f1_add_neg_fuses() {
     let d = dag.add_node(decl, RiscOp::Neg, vec![c], vec_f32(4), None);
     dag.add_root(d);
 
-    let fused = chelis_ir::fuse::fuse(&dag);
+    let fused = chelis_dag_core::fuse::fuse(&dag);
 
     // The add→neg chain should be fused into fewer nodes than the original
     assert!(
@@ -131,7 +131,7 @@ fn f2_three_way_chain_fuses() {
     let e = dag.add_node(decl, RiscOp::Mul, vec![relu, d], vec_f32(4), None);
     dag.add_root(e);
 
-    let fused = chelis_ir::fuse::fuse(&dag);
+    let fused = chelis_dag_core::fuse::fuse(&dag);
 
     // Should have at least one FusedElem
     let fused_count = fused
@@ -156,7 +156,7 @@ fn f3_fused_matches_unfused_evaluator() {
     let negated = dag.add_node(decl, RiscOp::Neg, vec![added], vec_f32(4), None);
     dag.add_root(negated);
 
-    let fused = chelis_ir::fuse::fuse(&dag);
+    let fused = chelis_dag_core::fuse::fuse(&dag);
 
     let inputs: UnordMap<String, TensorValue> = [(
         "x".to_string(),
@@ -188,7 +188,7 @@ fn f4_multi_consumer_not_fused() {
     let out = dag.add_node(decl, RiscOp::Add, vec![left, right], vec_f32(4), None);
     dag.add_root(out);
 
-    let fused = chelis_ir::fuse::fuse(&dag);
+    let fused = chelis_dag_core::fuse::fuse(&dag);
 
     // `shared` has 2 consumers → must NOT be fused into either chain
     // Verify by evaluating: if fusion duplicated computation, output would still
@@ -246,7 +246,7 @@ fn f5_elementwise_into_reduction_fuses() {
     );
     dag.add_root(summed);
 
-    let fused = chelis_ir::fuse::fuse(&dag);
+    let fused = chelis_dag_core::fuse::fuse(&dag);
 
     // Verify correctness: fused matches unfused
     let inputs: UnordMap<String, TensorValue> = [(
@@ -279,7 +279,7 @@ fn f5_neg_reduction_into_elementwise_does_not_fuse() {
     let negated = dag.add_node(decl, RiscOp::Neg, vec![summed], vec_f32(3), None);
     dag.add_root(negated);
 
-    let fused = chelis_ir::fuse::fuse(&dag);
+    let fused = chelis_dag_core::fuse::fuse(&dag);
 
     // Reduction→elementwise should NOT fuse (iteration space changed)
     // The sum and neg should remain separate
@@ -307,7 +307,10 @@ fn f6_movement_ops_pass_through() {
     let reshaped = dag.add_node(
         decl,
         RiscOp::Reshape {
-            new_shape: vec![chelis_ir::dag::RtDim::Lit(2), chelis_ir::dag::RtDim::Lit(3)],
+            new_shape: vec![
+                chelis_dag_core::dag::RtDim::Lit(2),
+                chelis_dag_core::dag::RtDim::Lit(3),
+            ],
         },
         vec![x],
         mat_f32(2, 3),
@@ -324,7 +327,7 @@ fn f6_movement_ops_pass_through() {
     let negated = dag.add_node(decl, RiscOp::Neg, vec![added], mat_f32(2, 3), None);
     dag.add_root(negated);
 
-    let fused = chelis_ir::fuse::fuse(&dag);
+    let fused = chelis_dag_core::fuse::fuse(&dag);
 
     // add→neg should still fuse (reshape is metadata-only, doesn't break chain)
     let inputs: UnordMap<String, TensorValue> = [(
@@ -361,7 +364,7 @@ fn f7_mnist_fusion_reduces_nodes() {
     dag.add_root(d);
 
     let original_len = dag.len();
-    let fused = chelis_ir::fuse::fuse(&dag);
+    let fused = chelis_dag_core::fuse::fuse(&dag);
 
     assert!(
         fused.len() < original_len,
@@ -388,7 +391,7 @@ fn f8_trivial_dag_unchanged() {
     );
     dag.add_root(c);
 
-    let fused = chelis_ir::fuse::fuse(&dag);
+    let fused = chelis_dag_core::fuse::fuse(&dag);
 
     assert_eq!(
         fused.len(),
@@ -427,7 +430,7 @@ fn f10_multi_consumer_downstream_chain_fuses() {
     dag.add_root(c);
     dag.add_root(d);
 
-    let fused = chelis_ir::fuse::fuse(&dag);
+    let fused = chelis_dag_core::fuse::fuse(&dag);
 
     // B->C should fuse into a FusedElem (A is external input, not absorbed)
     let fused_elems: Vec<_> = fused
@@ -483,7 +486,7 @@ fn f11_double_multi_consumer_no_fusion() {
     dag.add_root(d);
     dag.add_root(e);
 
-    let fused = chelis_ir::fuse::fuse(&dag);
+    let fused = chelis_dag_core::fuse::fuse(&dag);
 
     // A has 2 consumers, B has 2 consumers — no node can be part of a 2+ chain
     // (each starts a chain of length 1 that gets discarded)
@@ -533,7 +536,7 @@ fn f12_multi_consumer_at_chain_tail() {
     dag.add_root(c);
     dag.add_root(d);
 
-    let fused = chelis_ir::fuse::fuse(&dag);
+    let fused = chelis_dag_core::fuse::fuse(&dag);
 
     // A->B should fuse: A has 1 consumer, B is the chain tail.
     // B has 2 consumers but that only prevents the chain from EXTENDING past B.
@@ -590,7 +593,7 @@ fn f13_multi_consumer_as_external_input() {
     dag.add_root(d);
     dag.add_root(e);
 
-    let fused = chelis_ir::fuse::fuse(&dag);
+    let fused = chelis_dag_core::fuse::fuse(&dag);
 
     // A->B should fuse (A has 1 consumer). Chain stops at B (2 consumers).
     // C->D should fuse (C has 1 consumer, D has 1 consumer). B is external input.
@@ -637,7 +640,7 @@ fn f9_fan_in_two_inputs() {
     let negated = dag.add_node(decl, RiscOp::Neg, vec![added], vec_f32(4), None);
     dag.add_root(negated);
 
-    let fused = chelis_ir::fuse::fuse(&dag);
+    let fused = chelis_dag_core::fuse::fuse(&dag);
 
     let inputs: UnordMap<String, TensorValue> = [
         (
@@ -686,8 +689,8 @@ fn fr1_reduction_inlined_identifies_fused_elem_into_sum() {
     );
     dag.add_root(summed);
 
-    let fused = chelis_ir::fuse::fuse(&dag);
-    let inlined = chelis_ir::fuse::reduction_inlined_fused_elems(&fused);
+    let fused = chelis_dag_core::fuse::fuse(&dag);
+    let inlined = chelis_dag_core::fuse::reduction_inlined_fused_elems(&fused);
 
     // The add was the only elementwise op, so it might or might not form a FusedElem
     // (chains need >= 2 nodes). But whatever the DAG structure, if a FusedElem feeds
@@ -745,8 +748,8 @@ fn fr2_multi_consumer_fused_elem_not_inlined() {
     dag.add_root(negated);
     dag.add_root(summed);
 
-    let fused = chelis_ir::fuse::fuse(&dag);
-    let inlined = chelis_ir::fuse::reduction_inlined_fused_elems(&fused);
+    let fused = chelis_dag_core::fuse::fuse(&dag);
+    let inlined = chelis_dag_core::fuse::reduction_inlined_fused_elems(&fused);
 
     // The FusedElem has 2 consumers (root + sum) → should NOT be inlined.
     assert!(
@@ -782,8 +785,8 @@ fn fr3_chain_into_sum_correctness() {
     );
     dag.add_root(summed);
 
-    let fused = chelis_ir::fuse::fuse(&dag);
-    let inlined = chelis_ir::fuse::reduction_inlined_fused_elems(&fused);
+    let fused = chelis_dag_core::fuse::fuse(&dag);
+    let inlined = chelis_dag_core::fuse::reduction_inlined_fused_elems(&fused);
 
     // add→neg should fuse into FusedElem, which feeds sum with 1 consumer → inlined.
     assert!(
@@ -813,7 +816,7 @@ fn fr4_realize_is_fusion_barrier() {
     let negated = dag.add_node(decl, RiscOp::Neg, vec![realized], vec_f32(4), None);
     dag.add_root(negated);
 
-    let fused = chelis_ir::fuse::fuse(&dag);
+    let fused = chelis_dag_core::fuse::fuse(&dag);
 
     assert!(
         fused

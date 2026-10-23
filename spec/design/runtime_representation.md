@@ -2167,6 +2167,59 @@ semantics change, and no numbered representation semantics move. The
 amendment moves `FREEZE_SHA256` and the Phase 1 `MANIFEST_SHA256`; accepting it
 re-acknowledges both.
 
+### DAG source ownership amendment
+
+This amendment changes source ownership only. It transfers no representation or language authority.
+The source move changes these exact paths from `crates/chelis-ir/src/` to `crates/chelis-dag-core/src/`.
+Each row keeps its `normalized-key-arithmetic` kind, owner, deletion phase, sample, and active or retired state.
+No path-prefix rule, suffix rule, missing-source exception, or new final form applies.
+
+| Source file | Exact owner | Ledger state |
+| --- | --- | --- |
+| `analysis.rs` | `analyze_copy_costs_for_roots` | Active |
+| `analysis.rs` | `analyze_function_copy_cost_for_roots` | Active |
+| `analysis.rs` | `tensor_bytes` | Active |
+| `dag.rs` | `DimExpr::as_concrete` | Active |
+| `dag.rs` | `DimExpr::evaluate` | Active |
+| `dag.rs` | `DimExpr::normalized_key` | Retired |
+| `dag.rs` | `normalize_dim_product::take_factor` | Retired |
+| `dag.rs` | `push_product_atoms` | Retired |
+| `tier2.rs` | `align_matmul_operand` | Active |
+| `tier2.rs` | `lower_conv2d` | Retired |
+| `tier2.rs` | `lower_layer_norm` | Active |
+| `verify.rs` | `verify_with_dangling_policy` | Active |
+
+The twelve foundation rows and eight active rows change only their exact source paths.
+The foundation retains 374 rows, and active debt retains 227 rows.
+The retired-file record stays unchanged. A retired owner remains forbidden at its new path.
+`capacity_key.rs` and its test commands remain in `chelis-ir` under the host storage owner.
+
+Three witnesses target `crates/chelis-dag-core/src/dag.rs`: `phase0.mutate_normalized_key_arithmetic`,
+`phase0.mutate_retired_capacity_normalizer`, and `phase0.mutate_rust_path_module`.
+Their implementations, implementation digests, kinds, owner checks, failures, commands, and file-creation flags remain unchanged.
+The source universe adds `crates/chelis-dag-core/src/**/*.rs`, with directory `crates/chelis-dag-core/src`,
+and `crates/chelis-dag-core/build.rs`, with directory `crates/chelis-dag-core`.
+Every previous root and directory remains mandatory. The real scanner applies the unchanged graph classification to the new owner.
+
+The Phase 0 freeze digest changes from
+`18641a6b120ec86ea788314f9261c73fdea401165049343961ca64f1e1a12670` to
+`5cffc9354ead58a3d2b79e7e6435123c971a712168b5ec9c813cd715ed40f5ea`.
+This path-only amendment uses no inventory regeneration and grants no new debt.
+Source closure, exact mutation contracts, stale-debt rejection, retired-owner rejection, and all execution obligations remain mandatory.
+The Phase 1 test floor and digest remain unchanged because no mandatory test identity or command changes.
+
+The live coverage manifest names all eleven exact source moves.
+The oracle rejects missing or empty canonical files and any surviving old source file.
+Its real parsed scan must retain the eight active identities and reject the four retired identities.
+The separate DAG source-boundary lane checks the canonical Rust definitions and rejects duplicate old and new definitions.
+These checks grant no new classifier exception and do not change the frozen mutation contract.
+
+Acceptance needs the complete Phase 0 and Phase 1 commands after the source move.
+The Phase 0 command must execute the real scan, all mutations, and all registered non-hardware legs.
+The Phase 1 command must retain its existing test floor and execution receipts.
+No build, test, mutation, or oracle execution supports this amendment at edit time.
+
+
 ## B2. Invariants at every phase boundary
 
 1. The public C ABI remains [05-OP-31]/[05-OP-44]-exact and

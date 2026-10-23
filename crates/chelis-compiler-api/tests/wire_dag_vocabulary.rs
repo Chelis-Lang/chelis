@@ -198,7 +198,7 @@ fn wire_dag_accepts_current_version_and_rejects_missing_old_and_future_versions(
 
 #[test]
 fn resolved_global_load_has_a_v22_wire_identity() {
-    let global = chelis_ir::LoadStoreName::top_level("Lib.weights");
+    let global = chelis_dag_core::LoadStoreName::top_level("Lib.weights");
     let dag = WireDag {
         schema_version: 30,
         declarations: vec!["entry".to_string()],

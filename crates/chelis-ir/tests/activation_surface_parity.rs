@@ -1,50 +1,50 @@
-use chelis_ir::dag::{Dag, RiscOp, TensorType};
-use chelis_ir::eval::{TensorValue, eval_tensor_roots_with_strict};
-use chelis_ir::tier2::{
+use chelis_dag_core::dag::{Dag, RiscOp, TensorType};
+use chelis_dag_core::tier2::{
     lower_gelu, lower_gelu_tanh, lower_sigmoid, lower_silu, lower_standard_normal_cdf,
 };
+use chelis_ir::eval::{TensorValue, eval_tensor_roots_with_strict};
 use chelis_numeric_core::dtype_semantics::{
     FloatUnOp, ScalarValue, float_unop, scalar_from_f64, tensor_from_scalars,
 };
 use chelis_numeric_core::prim::Prim;
 
 type ActivationLowerer = fn(
-    chelis_ir::dag::Owner,
+    chelis_dag_core::dag::Owner,
     &mut Dag,
-    chelis_ir::dag::NodeId,
+    chelis_dag_core::dag::NodeId,
     &TensorType,
     Option<&str>,
-) -> chelis_ir::dag::NodeId;
+) -> chelis_dag_core::dag::NodeId;
 
 // `tanh` is the [05-OP-46] Tier 1 primitive, not a Tier 2 lowering.
 fn lower_tanh(
-    owner: chelis_ir::dag::Owner,
+    owner: chelis_dag_core::dag::Owner,
     dag: &mut Dag,
-    x: chelis_ir::dag::NodeId,
+    x: chelis_dag_core::dag::NodeId,
     ty: &TensorType,
     _parent_span: Option<&str>,
-) -> chelis_ir::dag::NodeId {
+) -> chelis_dag_core::dag::NodeId {
     dag.add_node(owner, RiscOp::Tanh, vec![x], ty.clone(), None)
 }
 
 // `erf` and `erfc` are [05-OP-46] Tier 1 primitives too.
 fn lower_erf(
-    owner: chelis_ir::dag::Owner,
+    owner: chelis_dag_core::dag::Owner,
     dag: &mut Dag,
-    x: chelis_ir::dag::NodeId,
+    x: chelis_dag_core::dag::NodeId,
     ty: &TensorType,
     _parent_span: Option<&str>,
-) -> chelis_ir::dag::NodeId {
+) -> chelis_dag_core::dag::NodeId {
     dag.add_node(owner, RiscOp::Erf, vec![x], ty.clone(), None)
 }
 
 fn lower_erfc(
-    owner: chelis_ir::dag::Owner,
+    owner: chelis_dag_core::dag::Owner,
     dag: &mut Dag,
-    x: chelis_ir::dag::NodeId,
+    x: chelis_dag_core::dag::NodeId,
     ty: &TensorType,
     _parent_span: Option<&str>,
-) -> chelis_ir::dag::NodeId {
+) -> chelis_dag_core::dag::NodeId {
     dag.add_node(owner, RiscOp::Erfc, vec![x], ty.clone(), None)
 }
 

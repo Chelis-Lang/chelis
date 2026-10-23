@@ -1,16 +1,16 @@
 //! chelis#2110: authored local tensor ascriptions become producer-owned
 //! runtime obligations without being confused with inferred type metadata.
 
-use chelis_ir::dag::{Dag, DimInfo, ExtentWitnessSite, RiscOp, RtAxis, TensorType};
+use chelis_dag_core::dag::{Dag, DimInfo, ExtentWitnessSite, RiscOp, RtAxis, TensorType};
+use chelis_dag_core::optimize::{common_subexpr_eliminate, dead_code_eliminate};
 use chelis_ir::eval::{TensorValue, eval_tensor_with};
-use chelis_ir::optimize::{common_subexpr_eliminate, dead_code_eliminate};
 use chelis_ir::specialize::specialize_for_exact_arithmetic;
 use chelis_numeric_core::prim::Prim;
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str;
 use chelis_types::check_ir_program;
 
-fn lower(source: &str) -> chelis_ir::Dag {
+fn lower(source: &str) -> chelis_dag_core::Dag {
     let decls = parse_str(source, &chelis_syntax_host::NativeStack).expect("Surf parse");
     let checked = check_ir_program(
         &desugar_program(&decls, &chelis_syntax_host::NativeStack)
@@ -33,7 +33,7 @@ fn checked(source: &str) -> chelis_types::CheckedProgram {
     })
 }
 
-fn local_claims(dag: &chelis_ir::Dag) -> Vec<(usize, u64, String, String, i32)> {
+fn local_claims(dag: &chelis_dag_core::Dag) -> Vec<(usize, u64, String, String, i32)> {
     dag.nodes()
         .iter()
         .filter_map(|node| {
@@ -43,7 +43,7 @@ fn local_claims(dag: &chelis_ir::Dag) -> Vec<(usize, u64, String, String, i32)> 
                         ascription_id,
                         binding,
                         claim,
-                        axis: chelis_ir::dag::RtAxis::Lit(axis),
+                        axis: chelis_dag_core::dag::RtAxis::Lit(axis),
                     },
                 ..
             } = &node.op
@@ -95,7 +95,7 @@ fn runtime_bool(value: bool) -> TensorValue {
 #[test]
 fn untaken_runtime_branch_does_not_execute_its_local_ascription_guard() {
     let dag = lower(runtime_branch_source());
-    let token = chelis_ir::dag::NodeId(local_claims(&dag)[0].0);
+    let token = chelis_dag_core::dag::NodeId(local_claims(&dag)[0].0);
     let owner = dag
         .nodes()
         .iter()
@@ -113,9 +113,9 @@ fn untaken_runtime_branch_does_not_execute_its_local_ascription_guard() {
         "a path-local claim has one exact scalar Bool activation"
     );
     assert!(
-        chelis_ir::verify::verify(&dag).is_empty(),
+        chelis_dag_core::verify::verify(&dag).is_empty(),
         "{:?}",
-        chelis_ir::verify::verify(&dag)
+        chelis_dag_core::verify::verify(&dag)
     );
     let values = eval_tensor_with(&dag, |name| match name {
         "flag" => Some(runtime_bool(false)),
@@ -221,7 +221,7 @@ fn lowering_matches_the_authored_binding_and_attaches_one_exact_site_to_its_init
     assert_eq!(claims[0].3, "2");
     assert_eq!(claims[0].4, 0);
 
-    let token = chelis_ir::dag::NodeId(claims[0].0);
+    let token = chelis_dag_core::dag::NodeId(claims[0].0);
     let owners = dag
         .nodes()
         .iter()
@@ -344,7 +344,7 @@ fn fusion_preserves_the_exact_local_site_on_the_rebuilt_initializer() {
 
     let unclaimed = fusion_dag(false);
     assert!(
-        chelis_ir::fuse::fuse(&unclaimed)
+        chelis_dag_core::fuse::fuse(&unclaimed)
             .nodes()
             .iter()
             .any(|node| matches!(node.op, RiscOp::FusedElem { .. })),
@@ -352,14 +352,14 @@ fn fusion_preserves_the_exact_local_site_on_the_rebuilt_initializer() {
     );
 
     let original = fusion_dag(true);
-    let fused = dead_code_eliminate(&chelis_ir::fuse::fuse(&original));
+    let fused = dead_code_eliminate(&chelis_dag_core::fuse::fuse(&original));
     let claims = local_claims(&fused);
     assert_eq!(
         claims.len(),
         1,
         "fusion must retain one exact site: {fused:?}"
     );
-    let token = chelis_ir::dag::NodeId(claims[0].0);
+    let token = chelis_dag_core::dag::NodeId(claims[0].0);
     let owners = fused
         .nodes()
         .iter()
@@ -397,8 +397,8 @@ fn grad_pruning_preserves_a_dead_except_for_trap_local_site() {
         .find(|node| matches!(&node.op, RiscOp::Load { name } if name == "x"))
         .expect("input load")
         .id;
-    let differentiated =
-        chelis_ir::grad::grad_dag_checked(&original, output, &[input]).expect("gradient lowering");
+    let differentiated = chelis_dag_core::grad::grad_dag_checked(&original, output, &[input])
+        .expect("gradient lowering");
     assert_eq!(
         local_claims(&differentiated.dag).len(),
         1,
@@ -412,7 +412,7 @@ fn ownership_lowering_keeps_the_claim_live_through_its_initializer_owner() {
         "y: tensor[2, f32] = pad(x, [[0i64, 0i64]], 0.0f32)\n  y",
     ));
     let claims = local_claims(&dag);
-    let token = chelis_ir::dag::NodeId(claims[0].0);
+    let token = chelis_dag_core::dag::NodeId(claims[0].0);
     let owner = dag
         .nodes()
         .iter()
@@ -496,7 +496,7 @@ fn each_inlined_activation_gets_a_distinct_one_owner_local_claim() {
         assert_eq!(binding, "y");
         assert_eq!(claim, "2");
         assert_eq!(axis, 0);
-        let token = chelis_ir::dag::NodeId(token);
+        let token = chelis_dag_core::dag::NodeId(token);
         assert_eq!(
             dag.nodes()
                 .iter()
@@ -523,9 +523,9 @@ fn vmap_shifts_the_local_claim_and_initializer_axis_together() {
     assert_eq!(claims[0].3, "2");
     assert_eq!(claims[0].4, 1, "the prepended batch axis shifts the claim");
     assert!(
-        chelis_ir::verify::verify(&dag).is_empty(),
+        chelis_dag_core::verify::verify(&dag).is_empty(),
         "{:?}",
-        chelis_ir::verify::verify(&dag)
+        chelis_dag_core::verify::verify(&dag)
     );
 }
 
@@ -564,9 +564,9 @@ fn inserted_output_axis_and_observed_source_axis_are_independently_exact() {
          are separate coordinates: {dag:#?}"
     );
     assert!(
-        chelis_ir::verify::verify(&dag).is_empty(),
+        chelis_dag_core::verify::verify(&dag).is_empty(),
         "{:?}",
-        chelis_ir::verify::verify(&dag)
+        chelis_dag_core::verify::verify(&dag)
     );
 }
 
@@ -575,8 +575,8 @@ fn malformed_local_claim_roles_are_rejected_by_the_native_verifier() {
     let direct = lower(&direct_source(
         "y: tensor[2, f32] = pad(x, [[0i64, 0i64]], 0.0f32)\n  y",
     ));
-    let token = chelis_ir::dag::NodeId(local_claims(&direct)[0].0);
-    assert!(chelis_ir::verify::verify(&direct).is_empty());
+    let token = chelis_dag_core::dag::NodeId(local_claims(&direct)[0].0);
+    assert!(chelis_dag_core::verify::verify(&direct).is_empty());
     for mutation in 0..7 {
         let mut dag = direct.clone();
         let decl = dag.nodes()[0].owner.decl;
@@ -609,21 +609,21 @@ fn malformed_local_claim_roles_are_rejected_by_the_native_verifier() {
                 else {
                     unreachable!()
                 };
-                *axis = chelis_ir::dag::RtAxis::Lit(1);
+                *axis = chelis_dag_core::dag::RtAxis::Lit(1);
             }
             3 => {
                 let RiscOp::ExtentWitness { axis, .. } = &mut dag.node_mut(token).unwrap().op
                 else {
                     unreachable!()
                 };
-                *axis = chelis_ir::dag::RtAxis::Lit(1);
+                *axis = chelis_dag_core::dag::RtAxis::Lit(1);
             }
             4 => {
                 let RiscOp::ExtentWitness { claims, .. } = &mut dag.node_mut(token).unwrap().op
                 else {
                     unreachable!()
                 };
-                claims.push(chelis_ir::dag::ExtentClaim {
+                claims.push(chelis_dag_core::dag::ExtentClaim {
                     claim: "forbidden-entry-claim".into(),
                     requirement_declares: false,
                 });
@@ -650,7 +650,7 @@ fn malformed_local_claim_roles_are_rejected_by_the_native_verifier() {
             }
             _ => unreachable!(),
         }
-        let errors = chelis_ir::verify::verify(&dag);
+        let errors = chelis_dag_core::verify::verify(&dag);
         assert!(
             !errors.is_empty(),
             "malformed local role {mutation} was accepted"
@@ -663,7 +663,7 @@ fn malformed_local_claim_roles_are_rejected_by_the_native_verifier() {
          y\n\
          }\n",
     );
-    let named_token = chelis_ir::dag::NodeId(local_claims(&named)[0].0);
+    let named_token = chelis_dag_core::dag::NodeId(local_claims(&named)[0].0);
     let mut missing_declaration_identity = named;
     let RiscOp::ExtentWitness { parameter, .. } = &mut missing_declaration_identity
         .node_mut(named_token)
@@ -674,7 +674,7 @@ fn malformed_local_claim_roles_are_rejected_by_the_native_verifier() {
     };
     parameter.clear();
     assert!(
-        !chelis_ir::verify::verify(&missing_declaration_identity).is_empty(),
+        !chelis_dag_core::verify::verify(&missing_declaration_identity).is_empty(),
         "a named local claim must retain its declaring parameter identity"
     );
 }
@@ -683,21 +683,21 @@ fn malformed_local_claim_roles_are_rejected_by_the_native_verifier() {
 fn claim_carrier_and_site(
     source: &str,
 ) -> (
-    chelis_ir::Dag,
-    chelis_ir::dag::NodeId,
-    chelis_ir::axis_sources::LocalGuardClaim,
+    chelis_dag_core::Dag,
+    chelis_dag_core::dag::NodeId,
+    chelis_dag_core::axis_sources::LocalGuardClaim,
 ) {
     let dag = lower(source);
     let claims = local_claims(&dag);
     assert_eq!(claims.len(), 1, "{dag:#?}");
-    let token = chelis_ir::dag::NodeId(claims[0].0);
+    let token = chelis_dag_core::dag::NodeId(claims[0].0);
     let carrier = dag
         .nodes()
         .iter()
         .find(|node| node.shape_deps.contains(&token))
         .expect("a claim token has its carrier")
         .id;
-    let sites = chelis_ir::axis_sources::local_dim_guard_sites(&dag).unwrap();
+    let sites = chelis_dag_core::axis_sources::local_dim_guard_sites(&dag).unwrap();
     let [(_, site)] = sites.as_slice() else {
         panic!("{sites:#?}");
     };

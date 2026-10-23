@@ -541,7 +541,7 @@ extern "C" __global__ void {name}(
 /// whose activation is false computes a value but checks nothing, so where
 /// an output element's row is inactive, each operand read takes the value
 /// `inactive` names for its slot, one every check of the operation accepts
-/// (`chelis_ir::dag::DagNode::inactive_operand`, the values the evaluator
+/// (`chelis_dag_core::dag::DagNode::inactive_operand`, the values the evaluator
 /// and the C lane substitute). The check and the computation stay as they
 /// are; only what they read changes. A kernel built without a gate is
 /// byte-identical to its ungated form.
@@ -687,7 +687,7 @@ extern \"C\" __global__ void {kernel_name}(
 pub fn binary_bitwise_typed(
     rank: usize,
     kernel_name: &str,
-    kind: chelis_types::BitwiseKind,
+    kind: chelis_numeric_core::bitwise::BitwiseKind,
     precision: chelis_numeric_core::prim::Prim,
     gate: Option<&OperandGate>,
 ) -> String {
@@ -702,13 +702,13 @@ pub fn binary_bitwise_typed(
     let a = OperandGate::read(gate, 0, "a[idx_a]", signed);
     let b = OperandGate::read(gate, 1, "b[idx_b]", signed);
     let result = match kind {
-        chelis_types::BitwiseKind::And => "av & bv".to_string(),
-        chelis_types::BitwiseKind::Or => "av | bv".to_string(),
-        chelis_types::BitwiseKind::Xor => "av ^ bv".to_string(),
-        chelis_types::BitwiseKind::ShiftLeft => {
+        chelis_numeric_core::bitwise::BitwiseKind::And => "av & bv".to_string(),
+        chelis_numeric_core::bitwise::BitwiseKind::Or => "av | bv".to_string(),
+        chelis_numeric_core::bitwise::BitwiseKind::Xor => "av ^ bv".to_string(),
+        chelis_numeric_core::bitwise::BitwiseKind::ShiftLeft => {
             format!("count >= {width} ? ({unsigned})0 : ({unsigned})(av << count)")
         }
-        chelis_types::BitwiseKind::ShiftRight => format!(
+        chelis_numeric_core::bitwise::BitwiseKind::ShiftRight => format!(
             "count >= {width} ? (a_signed < 0 ? ({unsigned})~({unsigned})0 : ({unsigned})0) : \
              (count == 0 ? av : ({unsigned})((av >> count) | \
              (a_signed < 0 ? (({unsigned})~({unsigned})0 << ({width} - count)) : ({unsigned})0)))"
@@ -2010,10 +2010,10 @@ extern \"C\" __global__ void {kernel_name}(
     )
 }
 
-/// Resolve a [`chelis_ir::dag::FusedInput`] to a C expression. Shared
+/// Resolve a [`chelis_dag_core::dag::FusedInput`] to a C expression. Shared
 /// between [`fused_elementwise`] and [`reduce_fused`].
-fn resolve_fused_input(input: &chelis_ir::dag::FusedInput) -> String {
-    use chelis_ir::dag::FusedInput;
+fn resolve_fused_input(input: &chelis_dag_core::dag::FusedInput) -> String {
+    use chelis_dag_core::dag::FusedInput;
     match input {
         FusedInput::External(i) => format!("ext{i}[idx_ext{i}]"),
         FusedInput::PreviousStep(j) => format!("v{j}"),
@@ -2024,11 +2024,11 @@ fn resolve_fused_input(input: &chelis_ir::dag::FusedInput) -> String {
 /// `kind` selects the libm function names (e.g. `expf` vs `exp`) and the
 /// register type.
 fn fused_step_lines(
-    steps: &[chelis_ir::dag::FusedStep],
+    steps: &[chelis_dag_core::dag::FusedStep],
     kind: ElemKind,
     indent: &str,
 ) -> Vec<String> {
-    use chelis_ir::dag::FusedStepOp;
+    use chelis_dag_core::dag::FusedStepOp;
     let ty = kind.c_type();
     let one = kind.one_lit_bool();
     let mut step_lines = Vec::new();
@@ -2176,7 +2176,7 @@ pub fn reduce_fused(
     rank: usize,
     kernel_name: &str,
     axis: usize,
-    steps: &[chelis_ir::dag::FusedStep],
+    steps: &[chelis_dag_core::dag::FusedStep],
     n_external: usize,
     reduce_kind: ReduceKind,
     kind: ElemKind,
@@ -2272,10 +2272,10 @@ pub enum ReduceKind {
 }
 
 fn fused_reduced_step_lines(
-    steps: &[chelis_ir::dag::FusedStep],
+    steps: &[chelis_dag_core::dag::FusedStep],
     kind: ReducedFloatKind,
 ) -> Vec<String> {
-    use chelis_ir::dag::FusedStepOp;
+    use chelis_dag_core::dag::FusedStepOp;
     let decode = kind.decode();
     let encode = kind.encode();
     let mut lines = Vec::new();
@@ -2315,7 +2315,7 @@ fn fused_reduced_step_lines(
 pub fn fused_elementwise_reduced(
     rank: usize,
     kernel_name: &str,
-    steps: &[chelis_ir::dag::FusedStep],
+    steps: &[chelis_dag_core::dag::FusedStep],
     n_external: usize,
     in_place_aliased_ext: Option<usize>,
     kind: ReducedFloatKind,
@@ -2391,7 +2391,7 @@ extern \"C\" __global__ void {kernel_name}(
 pub fn fused_elementwise(
     rank: usize,
     kernel_name: &str,
-    steps: &[chelis_ir::dag::FusedStep],
+    steps: &[chelis_dag_core::dag::FusedStep],
     n_external: usize,
     in_place_aliased_ext: Option<usize>,
     kind: ElemKind,
@@ -2889,7 +2889,7 @@ extern "C" __global__ void {name}(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
+    use chelis_dag_core::dag::{Dag, DimInfo, RiscOp, TensorType};
     use chelis_ir::ownership::{lower_dag_ownership, verify_ownership};
     use chelis_numeric_core::prim::Prim;
 

@@ -6,7 +6,9 @@
 
 use chelis_unord::UnordMap;
 
-use crate::dag::{Dag, DagNode, DimExpr, DimInfo, NodeId, RiscOp, RtAxis, RtDim, TensorType};
+use chelis_dag_core::dag::{
+    Dag, DagNode, DimExpr, DimInfo, NodeId, RiscOp, RtAxis, RtDim, TensorType,
+};
 use chelis_numeric_core::prim::Prim;
 
 /// Compiler pipeline ordering around backend specialization.
@@ -33,7 +35,7 @@ pub fn specialize_for_blas(dag: &Dag) -> Dag {
     let gathered = replace_dense_gather_patterns(&cleaned);
     let lowered = lower_unmatched_one_hot(&gathered);
     let specialized = replace_matmul_patterns(&lowered);
-    crate::optimize::dead_code_eliminate(&specialized)
+    chelis_dag_core::optimize::dead_code_eliminate(&specialized)
 }
 
 /// Preserve primitive arithmetic while applying the structural rewrites.
@@ -47,7 +49,7 @@ pub fn specialize_for_exact_arithmetic(dag: &Dag) -> Dag {
     let cleaned = eliminate_closed_list_noops(&decomposed);
     let gathered = replace_dense_gather_patterns(&cleaned);
     let lowered = lower_unmatched_one_hot(&gathered);
-    crate::optimize::dead_code_eliminate(&lowered)
+    chelis_dag_core::optimize::dead_code_eliminate(&lowered)
 }
 
 /// Eliminate only the M1 closed-list no-ops:
@@ -56,7 +58,7 @@ pub fn eliminate_closed_list_noops(dag: &Dag) -> Dag {
     let mut out = Dag::new();
     out.inherit_declarations(dag);
     let mut id_map: UnordMap<NodeId, NodeId> = UnordMap::new();
-    let claimed_producers = crate::axis_sources::claimed_producers(dag);
+    let claimed_producers = chelis_dag_core::axis_sources::claimed_producers(dag);
 
     for node in dag.nodes() {
         let remapped_inputs: Vec<NodeId> = node.inputs.iter().map(|id| id_map[id]).collect();
@@ -147,7 +149,7 @@ fn replace_matmul_patterns(dag: &Dag) -> Dag {
     let mut out = Dag::new();
     out.inherit_declarations(dag);
     let mut id_map: UnordMap<NodeId, NodeId> = UnordMap::new();
-    let claimed_producers = crate::axis_sources::claimed_producers(dag);
+    let claimed_producers = chelis_dag_core::axis_sources::claimed_producers(dag);
 
     for node in dag.nodes() {
         if let Some(info) = detect_matmul_pattern(dag, node.id)
@@ -225,7 +227,7 @@ fn replace_dense_gather_patterns(dag: &Dag) -> Dag {
     let mut out = Dag::new();
     out.inherit_declarations(dag);
     let mut id_map: UnordMap<NodeId, NodeId> = UnordMap::new();
-    let claimed_producers = crate::axis_sources::claimed_producers(dag);
+    let claimed_producers = chelis_dag_core::axis_sources::claimed_producers(dag);
 
     for node in dag.nodes() {
         if let Some(info) = detect_dense_gather_pattern(dag, node.id)
@@ -332,7 +334,7 @@ fn lower_unmatched_one_hot(dag: &Dag) -> Dag {
 
 fn lower_one_hot_node(
     out: &mut Dag,
-    owner: crate::dag::Owner,
+    owner: chelis_dag_core::dag::Owner,
     indices: NodeId,
     source: &DagNode,
     vocab: usize,
@@ -369,7 +371,7 @@ fn lower_one_hot_node(
         );
         let eq_bool = out.add_node(
             owner,
-            RiscOp::Compare(crate::dag::ComparisonKind::Eq),
+            RiscOp::Compare(chelis_dag_core::dag::ComparisonKind::Eq),
             vec![indices, class_id],
             bool_ty.clone(),
             source.span_id.clone(),
@@ -935,14 +937,14 @@ fn append_dense_gather_provenance(
 }
 
 fn append_node_provenance(out: &mut Dag, target: NodeId, source: &DagNode) {
-    crate::span_merge::append_span_to_node(out, target, source.span_id.as_deref());
-    crate::span_merge::append_spans_to_node(out, target, &source.merged_spans);
+    chelis_dag_core::span_merge::append_span_to_node(out, target, source.span_id.as_deref());
+    chelis_dag_core::span_merge::append_spans_to_node(out, target, &source.merged_spans);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dag::{Dag, DeclId, DimExpr, DimInfo, TensorType};
+    use chelis_dag_core::dag::{Dag, DeclId, DimExpr, DimInfo, TensorType};
     use chelis_numeric_core::prim::Prim;
 
     #[test]
@@ -1005,7 +1007,7 @@ mod tests {
         dag.add_node(
             decl,
             RiscOp::ExtentWitness {
-                site: crate::dag::ExtentWitnessSite::LiteralResultClaim,
+                site: chelis_dag_core::dag::ExtentWitnessSite::LiteralResultClaim,
                 parameter: String::new(),
                 axis: RtAxis::Lit(axis),
                 requirements: vec![
@@ -1054,7 +1056,7 @@ mod tests {
             let claim = dag.add_node(
                 decl,
                 RiscOp::ExtentWitness {
-                    site: crate::dag::ExtentWitnessSite::ResultClaim {
+                    site: chelis_dag_core::dag::ExtentWitnessSite::ResultClaim {
                         claim: "n".into(),
                         axis: RtAxis::Lit(0),
                     },
@@ -1248,10 +1250,11 @@ mod tests {
             b_ty.clone(),
             None,
         );
-        let result = crate::tier2::lower_matmul(decl.into(), &mut dag, a, b, &a_ty, &b_ty, None);
+        let result =
+            chelis_dag_core::tier2::lower_matmul(decl.into(), &mut dag, a, b, &a_ty, &b_ty, None);
         dag.add_shape_dep(result, claim);
         dag.add_root(result);
-        assert!(crate::verify::verify(&dag).is_empty());
+        assert!(chelis_dag_core::verify::verify(&dag).is_empty());
 
         let inputs = chelis_unord::UnordMap::from([
             (
@@ -1271,7 +1274,7 @@ mod tests {
             matches!(
                 node.op,
                 RiscOp::ExtentWitness {
-                    site: crate::dag::ExtentWitnessSite::LiteralResultClaim,
+                    site: chelis_dag_core::dag::ExtentWitnessSite::LiteralResultClaim,
                     ..
                 }
             )
@@ -1454,7 +1457,8 @@ mod tests {
             b_ty.clone(),
             None,
         );
-        let out = crate::tier2::lower_matmul(decl.into(), &mut dag, a, b, &a_ty, &b_ty, None);
+        let out =
+            chelis_dag_core::tier2::lower_matmul(decl.into(), &mut dag, a, b, &a_ty, &b_ty, None);
         dag.add_root(out);
 
         let specialized = specialize_for_blas(&dag);
@@ -1502,7 +1506,8 @@ mod tests {
             b_ty.clone(),
             None,
         );
-        let out = crate::tier2::lower_matmul(decl.into(), &mut dag, a, b, &a_ty, &b_ty, None);
+        let out =
+            chelis_dag_core::tier2::lower_matmul(decl.into(), &mut dag, a, b, &a_ty, &b_ty, None);
         let mul = dag
             .nodes()
             .iter()
@@ -1513,7 +1518,7 @@ mod tests {
         dag.add_root(out);
 
         let specialized = specialize_for_blas(&dag);
-        let fused = crate::fuse::fuse(&specialized);
+        let fused = chelis_dag_core::fuse::fuse(&specialized);
         assert!(
             fused
                 .nodes()
@@ -1610,7 +1615,7 @@ mod tests {
             "dense one-hot gather must become Gather before matmul recognition"
         );
         assert!(
-            crate::verify::verify(&specialized).is_empty(),
+            chelis_dag_core::verify::verify(&specialized).is_empty(),
             "specialized gather DAG must verify"
         );
 
@@ -1704,7 +1709,7 @@ mod tests {
         );
         dag.add_shape_dep(gathered, claim);
         dag.add_root(gathered);
-        assert!(crate::verify::verify(&dag).is_empty());
+        assert!(chelis_dag_core::verify::verify(&dag).is_empty());
 
         let inputs = chelis_unord::UnordMap::from([
             (
@@ -1727,7 +1732,7 @@ mod tests {
             matches!(
                 node.op,
                 RiscOp::ExtentWitness {
-                    site: crate::dag::ExtentWitnessSite::LiteralResultClaim,
+                    site: chelis_dag_core::dag::ExtentWitnessSite::LiteralResultClaim,
                     ..
                 }
             )
@@ -1821,7 +1826,7 @@ mod tests {
             "the non-matching internal OneHot should still lower before backend codegen"
         );
         assert!(
-            crate::verify::verify(&specialized).is_empty(),
+            chelis_dag_core::verify::verify(&specialized).is_empty(),
             "fallback-lowered non-gather DAG must verify"
         );
     }
@@ -1860,7 +1865,7 @@ mod tests {
             "fallback lowering must remove unmatched OneHot"
         );
         assert!(
-            crate::verify::verify(&specialized).is_empty(),
+            chelis_dag_core::verify::verify(&specialized).is_empty(),
             "lowered one_hot DAG must verify"
         );
 
@@ -1906,7 +1911,7 @@ mod tests {
         );
         dag.add_shape_dep(one_hot, claim);
         dag.add_root(one_hot);
-        assert!(crate::verify::verify(&dag).is_empty());
+        assert!(chelis_dag_core::verify::verify(&dag).is_empty());
 
         let inputs = chelis_unord::UnordMap::from([(
             "indices".to_string(),
@@ -1920,7 +1925,7 @@ mod tests {
             matches!(
                 node.op,
                 RiscOp::ExtentWitness {
-                    site: crate::dag::ExtentWitnessSite::LiteralResultClaim,
+                    site: chelis_dag_core::dag::ExtentWitnessSite::LiteralResultClaim,
                     ..
                 }
             )

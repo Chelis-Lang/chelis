@@ -6,7 +6,7 @@
 //! `kernels::matmul_tiled_kernel` (16x16 tiled MSL kernel) and dispatches
 //! via `chelis_metal_launch2d`.
 
-use chelis_ir::dag::{DagNode, DimInfo, NodeId, RiscOp};
+use chelis_dag_core::dag::{DagNode, DimInfo, NodeId, RiscOp};
 use chelis_ir::ownership::VerifiedDagView;
 use chelis_numeric_core::prim::Prim;
 
@@ -145,7 +145,7 @@ pub fn find_all_matmuls(dag: VerifiedDagView<'_>) -> Vec<(NodeId, MatmulInfo)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chelis_ir::dag::{Dag, DimInfo, TensorType};
+    use chelis_dag_core::dag::{Dag, DimInfo, TensorType};
     use chelis_numeric_core::prim::Prim;
 
     fn detect(dag: &Dag, sum: NodeId) -> Option<MatmulInfo> {
@@ -190,7 +190,7 @@ mod tests {
             decl,
             RiscOp::Expand {
                 axis: 2,
-                size: chelis_ir::dag::RtDim::Lit(4),
+                size: chelis_dag_core::dag::RtDim::Lit(4),
             },
             vec![a],
             tensor3_f32(2, 3, 4),
@@ -200,7 +200,7 @@ mod tests {
             decl,
             RiscOp::Expand {
                 axis: 0,
-                size: chelis_ir::dag::RtDim::Lit(2),
+                size: chelis_dag_core::dag::RtDim::Lit(2),
             },
             vec![b],
             tensor3_f32(2, 3, 4),
@@ -249,7 +249,7 @@ mod tests {
             decl,
             RiscOp::Expand {
                 axis: 2,
-                size: chelis_ir::dag::RtDim::Lit(4),
+                size: chelis_dag_core::dag::RtDim::Lit(4),
             },
             vec![a],
             tensor3_f32(2, 3, 4),
@@ -259,7 +259,7 @@ mod tests {
             decl,
             RiscOp::Expand {
                 axis: 0,
-                size: chelis_ir::dag::RtDim::Lit(2),
+                size: chelis_dag_core::dag::RtDim::Lit(2),
             },
             vec![b],
             tensor3_f32(2, 3, 4),
@@ -303,7 +303,7 @@ mod tests {
             decl,
             RiscOp::Expand {
                 axis: 2,
-                size: chelis_ir::dag::RtDim::Lit(4),
+                size: chelis_dag_core::dag::RtDim::Lit(4),
             },
             vec![a],
             tensor3_f32(2, 3, 4),
@@ -313,7 +313,7 @@ mod tests {
             decl,
             RiscOp::Expand {
                 axis: 0,
-                size: chelis_ir::dag::RtDim::Lit(2),
+                size: chelis_dag_core::dag::RtDim::Lit(2),
             },
             vec![b],
             tensor3_f32(2, 5, 4),
@@ -372,7 +372,7 @@ mod tests {
             decl,
             RiscOp::Expand {
                 axis: 2,
-                size: chelis_ir::dag::RtDim::Lit(4),
+                size: chelis_dag_core::dag::RtDim::Lit(4),
             },
             vec![a],
             tensor3_prec(2, 3, 4, prec),
@@ -382,7 +382,7 @@ mod tests {
             decl,
             RiscOp::Expand {
                 axis: 0,
-                size: chelis_ir::dag::RtDim::Lit(2),
+                size: chelis_dag_core::dag::RtDim::Lit(2),
             },
             vec![b],
             tensor3_prec(2, 3, 4, prec),
@@ -463,7 +463,7 @@ mod tests {
             decl,
             RiscOp::Expand {
                 axis: 2,
-                size: chelis_ir::dag::RtDim::Lit(4),
+                size: chelis_dag_core::dag::RtDim::Lit(4),
             },
             vec![a],
             tensor3_prec(2, 3, 4, Prim::F32),
@@ -473,7 +473,7 @@ mod tests {
             decl,
             RiscOp::Expand {
                 axis: 0,
-                size: chelis_ir::dag::RtDim::Lit(2),
+                size: chelis_dag_core::dag::RtDim::Lit(2),
             },
             vec![b],
             tensor3_prec(2, 3, 4, Prim::F16),

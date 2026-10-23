@@ -10,12 +10,12 @@
 //! `slice2_ref.py` (independent transcriptions of [05-RNG-2] and [05-OP-8]),
 //! through `briefs/keys-b-b3-probes/b3_ref.py`, never from an evaluator.
 
-use chelis_ir::dag::{
+use chelis_dag_core::dag::{
     Dag, DimInfo, KeyBranch, LogicalKind, NodeId, Owner, RiscOp, RtDim, TensorType,
 };
+use chelis_dag_core::grad::grad_dag_checked;
+use chelis_dag_core::verify::verify;
 use chelis_ir::eval::{TensorValue, eval_tensor_roots_exact};
-use chelis_ir::grad::grad_dag_checked;
-use chelis_ir::verify::verify;
 use chelis_ir::vmap::vectorize_axis0;
 use chelis_numeric_core::dtype_semantics::{RandomKey, scalar_from_i64};
 use chelis_numeric_core::dtype_semantics::{
@@ -65,7 +65,7 @@ fn ty(dims: &[usize], prim: Prim) -> TensorType {
 
 fn node(
     dag: &mut Dag,
-    decl: chelis_ir::dag::DeclId,
+    decl: chelis_dag_core::dag::DeclId,
     op: RiscOp,
     inputs: Vec<NodeId>,
     dims: &[usize],
@@ -74,7 +74,7 @@ fn node(
     dag.add_node(decl, op, inputs, ty(dims, prim), None)
 }
 
-fn i64_const(dag: &mut Dag, decl: chelis_ir::dag::DeclId, value: i64) -> NodeId {
+fn i64_const(dag: &mut Dag, decl: chelis_dag_core::dag::DeclId, value: i64) -> NodeId {
     node(
         dag,
         decl,
@@ -87,7 +87,7 @@ fn i64_const(dag: &mut Dag, decl: chelis_ir::dag::DeclId, value: i64) -> NodeId 
     )
 }
 
-fn bool_const(dag: &mut Dag, decl: chelis_ir::dag::DeclId, value: bool) -> NodeId {
+fn bool_const(dag: &mut Dag, decl: chelis_dag_core::dag::DeclId, value: bool) -> NodeId {
     node(
         dag,
         decl,
@@ -100,7 +100,7 @@ fn bool_const(dag: &mut Dag, decl: chelis_ir::dag::DeclId, value: bool) -> NodeI
     )
 }
 
-fn f32_const(dag: &mut Dag, decl: chelis_ir::dag::DeclId, value: f64) -> NodeId {
+fn f32_const(dag: &mut Dag, decl: chelis_dag_core::dag::DeclId, value: f64) -> NodeId {
     node(
         dag,
         decl,
@@ -113,7 +113,7 @@ fn f32_const(dag: &mut Dag, decl: chelis_ir::dag::DeclId, value: f64) -> NodeId 
 
 fn load(
     dag: &mut Dag,
-    decl: chelis_ir::dag::DeclId,
+    decl: chelis_dag_core::dag::DeclId,
     name: &str,
     dims: &[usize],
     prim: Prim,
@@ -128,12 +128,12 @@ fn load(
     )
 }
 
-fn key7(dag: &mut Dag, decl: chelis_ir::dag::DeclId) -> NodeId {
+fn key7(dag: &mut Dag, decl: chelis_dag_core::dag::DeclId) -> NodeId {
     let seed = i64_const(dag, decl, 7);
     node(dag, decl, RiscOp::KeyFromSeed, vec![seed], &[], Prim::Key)
 }
 
-fn not(dag: &mut Dag, decl: chelis_ir::dag::DeclId, value: NodeId) -> NodeId {
+fn not(dag: &mut Dag, decl: chelis_dag_core::dag::DeclId, value: NodeId) -> NodeId {
     node(
         dag,
         decl,
@@ -144,7 +144,7 @@ fn not(dag: &mut Dag, decl: chelis_ir::dag::DeclId, value: NodeId) -> NodeId {
     )
 }
 
-fn and(dag: &mut Dag, decl: chelis_ir::dag::DeclId, left: NodeId, right: NodeId) -> NodeId {
+fn and(dag: &mut Dag, decl: chelis_dag_core::dag::DeclId, left: NodeId, right: NodeId) -> NodeId {
     node(
         dag,
         decl,
@@ -158,7 +158,7 @@ fn and(dag: &mut Dag, decl: chelis_ir::dag::DeclId, left: NodeId, right: NodeId)
 /// A rank-0 key operation over `key`, under the activation `active`.
 fn key_op(
     dag: &mut Dag,
-    decl: chelis_ir::dag::DeclId,
+    decl: chelis_dag_core::dag::DeclId,
     op: RiscOp,
     key: NodeId,
     active: Option<NodeId>,
@@ -208,7 +208,7 @@ fn split_two() -> RiscOp {
 /// two elements, under `active`.
 fn draw(
     dag: &mut Dag,
-    decl: chelis_ir::dag::DeclId,
+    decl: chelis_dag_core::dag::DeclId,
     key: NodeId,
     active: Option<NodeId>,
 ) -> NodeId {
@@ -322,7 +322,7 @@ enum Kind {
 /// of every key it derives; returns the nodes to root.
 fn consume(
     dag: &mut Dag,
-    decl: chelis_ir::dag::DeclId,
+    decl: chelis_dag_core::dag::DeclId,
     kind: Kind,
     key: NodeId,
     active: NodeId,
@@ -903,7 +903,7 @@ const DROP_LEFT_7: [u64; 2] = [0x4000_0000, 0x4000_0000];
 /// A branch's join of two rank-0 keys under its own activation `under`.
 fn join(
     dag: &mut Dag,
-    decl: chelis_ir::dag::DeclId,
+    decl: chelis_dag_core::dag::DeclId,
     keys: [NodeId; 2],
     actives: [NodeId; 2],
     under: Option<NodeId>,
@@ -920,7 +920,12 @@ fn join(
 /// `if c then fold_in(k, 3) else split_key(k).0` as a graph: each arm
 /// derives from the shared key under its activation, and the join consumes
 /// each arm's key under that arm. Returns the join.
-fn joined_arms(dag: &mut Dag, decl: chelis_ir::dag::DeclId, key: NodeId, c: NodeId) -> NodeId {
+fn joined_arms(
+    dag: &mut Dag,
+    decl: chelis_dag_core::dag::DeclId,
+    key: NodeId,
+    c: NodeId,
+) -> NodeId {
     let not_c = not(dag, decl, c);
     let folded = key_op(dag, decl, RiscOp::FoldIn, key, Some(c));
     let half = key_op(dag, decl, left(), key, Some(not_c));
@@ -1115,7 +1120,7 @@ fn a_joins_arms_are_its_own_activation_conjoined_with_a_condition() {
     // `under(dag, decl, q)` names the join's own activation; the arms are
     // `q And x` and `q And Not(x)`. The joined key is drawn under the join's
     // own activation.
-    type Under = dyn Fn(&mut Dag, chelis_ir::dag::DeclId, NodeId) -> Option<NodeId>;
+    type Under = dyn Fn(&mut Dag, chelis_dag_core::dag::DeclId, NodeId) -> Option<NodeId>;
     let build = |under: &Under| {
         let mut dag = Dag::new();
         let decl = dag.declare("test");

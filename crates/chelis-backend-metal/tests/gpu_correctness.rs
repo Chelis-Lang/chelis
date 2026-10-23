@@ -21,7 +21,7 @@
 #![allow(clippy::disallowed_methods)]
 
 mod support;
-use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
+use chelis_dag_core::dag::{Dag, DimInfo, RiscOp, TensorType};
 use chelis_ir::eval::{TensorValue, eval_tensor_roots_with_strict};
 use chelis_numeric_core::prim::Prim;
 use chelis_unord::UnordMap;
@@ -35,7 +35,7 @@ use support::codegen_metal;
 #[cfg(target_os = "macos")]
 fn run_bitwise_gpu_case(
     prim: Prim,
-    kinds: &[chelis_types::BitwiseKind],
+    kinds: &[chelis_numeric_core::bitwise::BitwiseKind],
     rhs: &[i64],
 ) -> std::process::Output {
     let n = rhs.len();
@@ -159,8 +159,9 @@ int main(void) {{
 #[test]
 #[ignore]
 fn bitwise_exact_signed_width_gpu_matches_reference() {
+    use chelis_numeric_core::bitwise::BitwiseKind;
     use chelis_numeric_core::dtype_semantics::scalar_from_i64;
-    use chelis_types::{BitwiseKind, bitwise_scalar};
+    use chelis_types::bitwise_scalar;
     let kinds = [
         BitwiseKind::And,
         BitwiseKind::Or,
@@ -231,7 +232,7 @@ fn bitwise_first_negative_shift_gpu_reports_exact_count() {
     for prim in [Prim::Int8, Prim::Int16, Prim::Int32, Prim::Int64] {
         let run = run_bitwise_gpu_case(
             prim,
-            &[chelis_types::BitwiseKind::ShiftRight],
+            &[chelis_numeric_core::bitwise::BitwiseKind::ShiftRight],
             &[-3, -7, 1, 2],
         );
         assert!(!run.status.success(), "negative count must trap");
@@ -815,7 +816,7 @@ fn m6_tiled_matmul_matches_evaluator() {
         decl,
         RiscOp::Expand {
             axis: 2,
-            size: chelis_ir::dag::RtDim::Lit(n),
+            size: chelis_dag_core::dag::RtDim::Lit(n),
         },
         vec![a],
         tensor3_f32(m, k, n),
@@ -825,7 +826,7 @@ fn m6_tiled_matmul_matches_evaluator() {
         decl,
         RiscOp::Expand {
             axis: 0,
-            size: chelis_ir::dag::RtDim::Lit(m),
+            size: chelis_dag_core::dag::RtDim::Lit(m),
         },
         vec![b],
         tensor3_f32(m, k, n),
@@ -985,7 +986,7 @@ fn m6_span_attributed_program_compiles_and_matches_evaluator() {
 #[test]
 #[ignore]
 fn metal_const_f16_bf16_compiles_under_objc_arc_and_produces_exact_bits() {
-    use chelis_ir::dag::RiscOp;
+    use chelis_dag_core::dag::RiscOp;
 
     fn vec_prec(n: usize, prec: Prim) -> TensorType {
         TensorType {
@@ -1167,7 +1168,10 @@ fn m6_pad_1d_zero_fill_matches_evaluator() {
         decl,
         RiscOp::zero_pad(
             Prim::F32,
-            vec![(chelis_ir::dag::RtDim::Lit(1), chelis_ir::dag::RtDim::Lit(1))],
+            vec![(
+                chelis_dag_core::dag::RtDim::Lit(1),
+                chelis_dag_core::dag::RtDim::Lit(1),
+            )],
         ),
         vec![x],
         vec_f32(6),
@@ -1195,7 +1199,10 @@ fn m6_pad_1d_nonzero_fill_matches_evaluator() {
     let p = dag.add_node(
         decl,
         RiscOp::pad(
-            vec![(chelis_ir::dag::RtDim::Lit(2), chelis_ir::dag::RtDim::Lit(1))],
+            vec![(
+                chelis_dag_core::dag::RtDim::Lit(2),
+                chelis_dag_core::dag::RtDim::Lit(1),
+            )],
             chelis_numeric_core::dtype_semantics::scalar_from_f64("pad", Prim::F32, -7.5).unwrap(),
         ),
         vec![x],
@@ -1226,8 +1233,14 @@ fn m6_pad_2d_asymmetric_matches_evaluator() {
         RiscOp::zero_pad(
             Prim::F32,
             vec![
-                (chelis_ir::dag::RtDim::Lit(1), chelis_ir::dag::RtDim::Lit(0)),
-                (chelis_ir::dag::RtDim::Lit(0), chelis_ir::dag::RtDim::Lit(2)),
+                (
+                    chelis_dag_core::dag::RtDim::Lit(1),
+                    chelis_dag_core::dag::RtDim::Lit(0),
+                ),
+                (
+                    chelis_dag_core::dag::RtDim::Lit(0),
+                    chelis_dag_core::dag::RtDim::Lit(2),
+                ),
             ],
         ),
         vec![x],
@@ -1260,7 +1273,10 @@ fn m6_shrink_1d_matches_evaluator() {
     let s = dag.add_node(
         decl,
         RiscOp::Shrink {
-            bounds: vec![(chelis_ir::dag::RtDim::Lit(1), chelis_ir::dag::RtDim::Lit(5))],
+            bounds: vec![(
+                chelis_dag_core::dag::RtDim::Lit(1),
+                chelis_dag_core::dag::RtDim::Lit(5),
+            )],
         },
         vec![x],
         vec_f32(4),
@@ -1289,8 +1305,14 @@ fn m6_shrink_2d_matches_evaluator() {
         decl,
         RiscOp::Shrink {
             bounds: vec![
-                (chelis_ir::dag::RtDim::Lit(1), chelis_ir::dag::RtDim::Lit(3)),
-                (chelis_ir::dag::RtDim::Lit(0), chelis_ir::dag::RtDim::Lit(2)),
+                (
+                    chelis_dag_core::dag::RtDim::Lit(1),
+                    chelis_dag_core::dag::RtDim::Lit(3),
+                ),
+                (
+                    chelis_dag_core::dag::RtDim::Lit(0),
+                    chelis_dag_core::dag::RtDim::Lit(2),
+                ),
             ],
         },
         vec![x],
@@ -1326,7 +1348,10 @@ fn m6_pad_then_shrink_roundtrip_matches_evaluator() {
         decl,
         RiscOp::zero_pad(
             Prim::F32,
-            vec![(chelis_ir::dag::RtDim::Lit(2), chelis_ir::dag::RtDim::Lit(2))],
+            vec![(
+                chelis_dag_core::dag::RtDim::Lit(2),
+                chelis_dag_core::dag::RtDim::Lit(2),
+            )],
         ),
         vec![x],
         vec_f32(8),
@@ -1335,7 +1360,10 @@ fn m6_pad_then_shrink_roundtrip_matches_evaluator() {
     let s = dag.add_node(
         decl,
         RiscOp::Shrink {
-            bounds: vec![(chelis_ir::dag::RtDim::Lit(2), chelis_ir::dag::RtDim::Lit(6))],
+            bounds: vec![(
+                chelis_dag_core::dag::RtDim::Lit(2),
+                chelis_dag_core::dag::RtDim::Lit(6),
+            )],
         },
         vec![p],
         vec_f32(4),
@@ -1663,7 +1691,7 @@ fn count_input_with_a_non_bool_payload_traps_at_the_runtime_write_boundary() {
 #[test]
 #[ignore = "ordered scan device execution; docs/manual_gates.md"]
 fn ordered_scan_prefix_suffix_bits_on_device() {
-    use chelis_ir::dag::ScanDirection;
+    use chelis_dag_core::dag::ScanDirection;
     for direction in [ScanDirection::Increasing, ScanDirection::Decreasing] {
         for data in [
             vec![],
@@ -1715,7 +1743,7 @@ fn ordered_scan_prefix_suffix_bits_on_device() {
 #[test]
 #[ignore = "ordered scan dtype/trap device execution; docs/manual_gates.md"]
 fn ordered_scan_dtype_bits_and_integer_overflow_on_device() {
-    use chelis_ir::dag::ScanDirection;
+    use chelis_dag_core::dag::ScanDirection;
     use chelis_numeric_core::dtype_semantics::{StorageView, TensorStorage};
     fn bytes(storage: &TensorStorage) -> Vec<u8> {
         match storage.view() {
@@ -1815,7 +1843,7 @@ fn ordered_scan_dtype_bits_and_integer_overflow_on_device() {
                         None,
                     );
                     let root = dag.add_node(
-                        chelis_ir::dag::Owner::new(owner, activation),
+                        chelis_dag_core::dag::Owner::new(owner, activation),
                         RiscOp::Cumsum { axis: 0, direction },
                         vec![x],
                         TensorType {

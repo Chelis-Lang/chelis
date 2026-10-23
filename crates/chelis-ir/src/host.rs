@@ -32,14 +32,14 @@ use chelis_types::infer::type_to_deep_expr;
 use chelis_types::{BUILTIN_NAMES, CheckedProgram};
 use chelis_vocab::EffectKind;
 
-use crate::LoadStoreName;
-use crate::dag::{DimExpr, DimInfo, RiscOp, TensorType};
 use crate::host_type_state::{
     CheckedBuiltinCallable, ConcreteHostType, HostBuiltinIdentity, HostInferenceVar,
     HostPrecisionTerm, HostShapeSlot, HostShapeTerm, HostTensorTypeTerm, HostTypeDecodeError,
     HostTypeTerm, decode_host_type,
 };
 use crate::lower::top_level_lowering_map;
+use chelis_dag_core::LoadStoreName;
+use chelis_dag_core::dag::{DimExpr, DimInfo, RiscOp, TensorType};
 
 thread_local! {
     // A checked Reef provider binding is installed only around one host
@@ -908,7 +908,7 @@ pub fn host_elementwise_loop_admits(builtin: &str, precision: Prim) -> Option<bo
 /// randomness is drawn (chelis#2734, chelis#2318).
 fn elementwise_function_of_operands(builtin: &str) -> bool {
     chelis_types::shape_class(builtin) == Some(chelis_types::ShapeClass::Identity)
-        && chelis_types::key_admission::KeyPrimitive::of_builtin(builtin).is_none()
+        && chelis_numeric_core::key_admission::KeyPrimitive::of_builtin(builtin).is_none()
         && !chelis_types::COMPARISON_OPS.contains(&builtin)
 }
 
@@ -1096,7 +1096,7 @@ impl Drop for TensorHelperPreflightGuard {
 
 #[derive(Debug, Clone)]
 pub struct CompiledProgram {
-    pub dag: Option<crate::Dag>,
+    pub dag: Option<chelis_dag_core::Dag>,
     pub host: Option<ConcreteHostProgram>,
 }
 
@@ -1287,7 +1287,7 @@ impl HostExecutionPlan {
 #[derive(Debug)]
 struct TensorHelperSink {
     forwarding: Option<RetainedForwardingTarget>,
-    transferred_result_claim_axes: Vec<crate::dag::RtAxis>,
+    transferred_result_claim_axes: Vec<chelis_dag_core::dag::RtAxis>,
     helpers: Vec<HostTensorHelper>,
     products: Vec<HelperExecutionProduct>,
     /// Checked declaration whose body is currently being lowered. Local
@@ -1509,7 +1509,7 @@ pub enum HostFunctionOrigin {
 pub struct HostFunction<T = HostTypeTerm> {
     /// Exact authored literal axes whose obligations lowering installed in
     /// this body's tensor helpers. Empty means the host owns those claims.
-    pub helper_result_claim_axes: Vec<crate::dag::RtAxis>,
+    pub helper_result_claim_axes: Vec<chelis_dag_core::dag::RtAxis>,
     /// The authored result's claims on tensors it nests in an aggregate or
     /// nominal value (runtime_extents.md C6.5), derived before body
     /// refinement. `None` owes nothing beyond a top-level tensor claim.
@@ -1570,7 +1570,7 @@ impl<T> HostFunction<T> {
 #[derive(Debug, Clone)]
 pub struct HostTensorHelper {
     pub name: String,
-    pub dag: crate::Dag,
+    pub dag: chelis_dag_core::Dag,
     pub inputs: Vec<HostTensorInput>,
     pub output: TensorType,
     pub specialization: Option<HostTensorSpecialization>,
@@ -2342,7 +2342,7 @@ impl<T> HostExpr<T> {
     }
 
     /// Append a single span to this node's `merged_spans`, lex-sorted and
-    /// deduped, with the same no-op rules as `crate::span_merge::append_span_to_node`:
+    /// deduped, with the same no-op rules as `chelis_dag_core::span_merge::append_span_to_node`:
     ///   * `span` is `None` (passthrough),
     ///   * the node's `span_id` already equals `span`,
     ///   * `merged_spans` already contains `span`.
@@ -3045,14 +3045,16 @@ pub fn try_lower_compiled_program_with_manifest(
 /// fixed-control C tensor helpers. Ordinary host lowering remains unchanged.
 pub fn try_lower_manifested_execution_program(
     program: &chelis_types::manifest::ManifestedProgram,
-) -> Result<(Option<crate::Dag>, Option<HostExecutionPlan>), crate::lower::LowerDiagnostic> {
+) -> Result<(Option<chelis_dag_core::Dag>, Option<HostExecutionPlan>), crate::lower::LowerDiagnostic>
+{
     lower_execution_program(program.checked(), Some(program.manifest()), false)
 }
 
 #[cfg(feature = "lowering-trace")]
 pub fn try_lower_manifested_execution_program_with_trace(
     program: &chelis_types::manifest::ManifestedProgram,
-) -> Result<(Option<crate::Dag>, Option<HostExecutionPlan>), crate::lower::LowerDiagnostic> {
+) -> Result<(Option<chelis_dag_core::Dag>, Option<HostExecutionPlan>), crate::lower::LowerDiagnostic>
+{
     lower_execution_program(program.checked(), Some(program.manifest()), true)
 }
 
@@ -3060,7 +3062,8 @@ pub fn try_lower_manifested_execution_program_with_trace(
 pub fn try_lower_execution_program_with_manifest(
     program: &CheckedProgram,
     manifest: &chelis_types::manifest::RootManifest,
-) -> Result<(Option<crate::Dag>, Option<HostExecutionPlan>), crate::lower::LowerDiagnostic> {
+) -> Result<(Option<chelis_dag_core::Dag>, Option<HostExecutionPlan>), crate::lower::LowerDiagnostic>
+{
     lower_execution_program(program, Some(manifest), false)
 }
 
@@ -3068,7 +3071,8 @@ pub fn try_lower_execution_program_with_manifest(
 pub fn try_lower_execution_program_with_manifest_and_trace(
     program: &CheckedProgram,
     manifest: &chelis_types::manifest::RootManifest,
-) -> Result<(Option<crate::Dag>, Option<HostExecutionPlan>), crate::lower::LowerDiagnostic> {
+) -> Result<(Option<chelis_dag_core::Dag>, Option<HostExecutionPlan>), crate::lower::LowerDiagnostic>
+{
     lower_execution_program(program, Some(manifest), true)
 }
 
@@ -3076,7 +3080,8 @@ fn lower_execution_program(
     program: &CheckedProgram,
     manifest: Option<&chelis_types::manifest::RootManifest>,
     collect_trace: bool,
-) -> Result<(Option<crate::Dag>, Option<HostExecutionPlan>), crate::lower::LowerDiagnostic> {
+) -> Result<(Option<chelis_dag_core::Dag>, Option<HostExecutionPlan>), crate::lower::LowerDiagnostic>
+{
     let (compiled, execution) =
         try_lower_compiled_program_with_lane_overrides(program, manifest, true, collect_trace)?;
     Ok((
@@ -3479,7 +3484,10 @@ fn named_tensor_entry_lowering_inputs(
     Some((body_expr, scope, result_claim))
 }
 
-pub fn lower_named_tensor_entry_dag(program: &CheckedProgram, name: &str) -> Option<crate::Dag> {
+pub fn lower_named_tensor_entry_dag(
+    program: &CheckedProgram,
+    name: &str,
+) -> Option<chelis_dag_core::Dag> {
     // A whole-program entry owns its session, so nothing outside this crate
     // has to know one exists (chelis#1835).
     let session = HostLoweringSession::new(program);
@@ -3511,7 +3519,7 @@ pub fn lower_named_tensor_entry_dag(program: &CheckedProgram, name: &str) -> Opt
 pub fn lower_named_tensor_entry_dags<'a>(
     program: &'a CheckedProgram,
     names: &'a [String],
-) -> impl Iterator<Item = Option<crate::Dag>> + 'a {
+) -> impl Iterator<Item = Option<chelis_dag_core::Dag>> + 'a {
     let session = HostLoweringSession::new(program);
     let context = std::cell::OnceCell::new();
     names.iter().map(move |name| {
@@ -3530,7 +3538,10 @@ pub fn lower_named_tensor_entry_dags<'a>(
 pub fn lower_named_tensor_entry_dag_with_trace(
     program: &CheckedProgram,
     name: &str,
-) -> Option<(crate::Dag, crate::lowering_trace::HelperLoweringTrace)> {
+) -> Option<(
+    chelis_dag_core::Dag,
+    crate::lowering_trace::HelperLoweringTrace,
+)> {
     let session = HostLoweringSession::new(program);
     lower_named_tensor_entry_with(
         &session,
@@ -3651,7 +3662,7 @@ fn lower_host_program(
 fn lower_host_program_with_execution(
     program: &HostLoweringSession<'_>,
     lowered_names: &BTreeMap<String, bool>,
-    specialized_function_entry: Option<crate::dag::DeclId>,
+    specialized_function_entry: Option<chelis_dag_core::dag::DeclId>,
     c_execution_lane: bool,
     collect_trace: bool,
 ) -> Result<(HostProgram, HostExecutionMetadata), crate::lower::LowerDiagnostic> {
@@ -4833,7 +4844,7 @@ fn host_body_has_call_matching<T>(
 /// and `Err` a kernel decision whose lowering failed.
 #[derive(Debug, Clone)]
 pub struct HostDefKernel {
-    pub dag: crate::Dag,
+    pub dag: chelis_dag_core::Dag,
     /// Ordered host scalar sources and checked tensor helpers, when this
     /// activation cannot execute as one tensor kernel.
     pub staged: Option<staged::HostStagedPlan>,
@@ -6927,7 +6938,7 @@ fn record_literal_result_transfer(signature: &HostDefSignature, sink: &mut Tenso
                 .ty
                 .dims
                 .iter()
-                .any(|dim| matches!(dim, crate::dag::DimInfo::Named(name, _) if name == binder))
+                .any(|dim| matches!(dim, chelis_dag_core::dag::DimInfo::Named(name, _) if name == binder))
         })
     };
     sink.transferred_result_claim_axes = tensor_type_from_host_input(&signature.ret_ty)
@@ -6935,11 +6946,15 @@ fn record_literal_result_transfer(signature: &HostDefSignature, sink: &mut Tenso
         .flat_map(|ty| ty.dims.into_iter().enumerate())
         .filter_map(|(axis, dim)| {
             let owned = match &dim {
-                crate::dag::DimInfo::Lit(_) => true,
-                crate::dag::DimInfo::Named(binder, _) => binder != "*" && witnessed(binder),
+                chelis_dag_core::dag::DimInfo::Lit(_) => true,
+                chelis_dag_core::dag::DimInfo::Named(binder, _) => {
+                    binder != "*" && witnessed(binder)
+                }
             };
             owned.then(|| {
-                crate::dag::RtAxis::Lit(i32::try_from(axis).expect("declared rank fits i32"))
+                chelis_dag_core::dag::RtAxis::Lit(
+                    i32::try_from(axis).expect("declared rank fits i32"),
+                )
             })
         })
         .collect();
@@ -6949,7 +6964,7 @@ fn record_literal_result_transfer(signature: &HostDefSignature, sink: &mut Tenso
 /// builtin as a free variable; emitting that DAG would reference a symbol
 /// that does not exist.
 fn kernel_dag_loads_builtin(
-    dag: &crate::Dag,
+    dag: &chelis_dag_core::Dag,
     scope: &UnordMap<String, HostTypeTerm>,
 ) -> Option<String> {
     crate::lower::builtin_loads(dag)
@@ -6972,7 +6987,7 @@ fn lower_kernel_dag(
     declaring_params: Option<&[HostParam]>,
     expected: &TensorType,
     transfer_literal_result_claims: bool,
-) -> Result<crate::Dag, crate::lower::LowerDiagnostic> {
+) -> Result<chelis_dag_core::Dag, crate::lower::LowerDiagnostic> {
     let context = tensor_helper_context(program, scope);
     let scope_types = kernel_scope_types(program, scope, declaring_params);
     let dag = if transfer_literal_result_claims {
@@ -7494,7 +7509,7 @@ fn try_lower_tensor_helper_call_inner(
 }
 
 fn identity_tensor_helper_matches_expected(
-    dag: &crate::Dag,
+    dag: &chelis_dag_core::Dag,
     expected: &TensorType,
     scope: &UnordMap<String, HostTypeTerm>,
 ) -> bool {
@@ -8044,7 +8059,7 @@ fn lower_tensor_helper_dag(
     expected: &TensorType,
     context: &crate::lower::SubexprLoweringContext,
     root_operation: Option<StaticBuiltinValue>,
-) -> Option<crate::Dag> {
+) -> Option<chelis_dag_core::Dag> {
     let context = bind_tensor_helper_payloads(context.clone(), scope);
     lower_tensor_helper_with(expr, program, || {
         let dag = crate::lower::try_lower_tensor_helper_program_with_ordered_inputs(
@@ -8060,7 +8075,7 @@ fn lower_tensor_helper_dag(
 }
 
 struct LoweredTensorHelper {
-    dag: crate::Dag,
+    dag: chelis_dag_core::Dag,
     #[cfg(feature = "lowering-trace")]
     trace: Option<crate::lowering_trace::HelperLoweringTrace>,
 }
@@ -8139,7 +8154,7 @@ fn lower_tensor_helper_dag_with_controls(
 }
 
 fn finish_tensor_helper_call(
-    dag: crate::Dag,
+    dag: chelis_dag_core::Dag,
     program: &HostLoweringSession<'_>,
     scope: &UnordMap<String, HostTypeTerm>,
     tensor_helpers: &mut TensorHelperSink,
@@ -8157,7 +8172,7 @@ fn finish_tensor_helper_call(
 }
 
 fn finish_tensor_helper_product(
-    dag: crate::Dag,
+    dag: chelis_dag_core::Dag,
     #[cfg(feature = "lowering-trace")] trace: Option<crate::lowering_trace::HelperLoweringTrace>,
     program: &HostLoweringSession<'_>,
     scope: &UnordMap<String, HostTypeTerm>,
@@ -8502,7 +8517,7 @@ pub enum BlasSummaryAttempt {
 /// `try_lower_compiled_program` pipeline.
 #[doc(hidden)]
 pub fn try_summarize_blas_helper_for_test(
-    dag: &crate::Dag,
+    dag: &chelis_dag_core::Dag,
     inputs: &[HostTensorInput],
     output: &TensorType,
 ) -> Result<HostBlasMatmulSummary, BlasSummaryAttempt> {
@@ -8528,7 +8543,7 @@ pub fn try_summarize_blas_helper_for_test(
 ///
 /// `NotEligible` means the helper has no BLAS-near shape to diagnose.
 fn try_summarize_blas_helper(
-    dag: &crate::Dag,
+    dag: &chelis_dag_core::Dag,
     inputs: &[HostTensorInput],
     output: &TensorType,
 ) -> Result<HostBlasMatmulSummary, BlasSummaryAttempt> {
@@ -8730,7 +8745,7 @@ fn try_summarize_blas_helper(
 /// constructs a synthetic helper DAG and calls through here.
 #[doc(hidden)]
 pub fn summarize_sparse_helper_for_test(
-    dag: &crate::Dag,
+    dag: &chelis_dag_core::Dag,
     inputs: &[HostTensorInput],
     output: &TensorType,
 ) -> Option<HostTensorSpecialization> {
@@ -8744,7 +8759,7 @@ pub fn summarize_sparse_helper_for_test(
 /// rejection case.
 #[doc(hidden)]
 pub fn try_summarize_sparse_helper_for_test(
-    dag: &crate::Dag,
+    dag: &chelis_dag_core::Dag,
     inputs: &[HostTensorInput],
     output: &TensorType,
 ) -> Result<HostTensorSpecialization, SparseSummaryAttempt> {
@@ -8777,7 +8792,7 @@ pub enum SparseSummaryAttempt {
 /// `summarize_sparse_helper_for_test` IR-level test entry point and
 /// by any code path that does not consume the structured rejection.
 fn summarize_sparse_helper_from_parts(
-    dag: &crate::Dag,
+    dag: &chelis_dag_core::Dag,
     inputs: &[HostTensorInput],
     output: &TensorType,
 ) -> Option<HostTensorSpecialization> {
@@ -8785,10 +8800,10 @@ fn summarize_sparse_helper_from_parts(
 }
 
 fn literal_result_claim_owner_input<'a>(
-    dag: &'a crate::Dag,
-    root: &'a crate::dag::DagNode,
+    dag: &'a chelis_dag_core::Dag,
+    root: &'a chelis_dag_core::dag::DagNode,
     literal_result_claim_producers: &[bool],
-) -> Option<&'a crate::dag::DagNode> {
+) -> Option<&'a chelis_dag_core::dag::DagNode> {
     if !matches!(root.op, RiscOp::Copy)
         || root.inputs.len() != 1
         || root.shape_deps.is_empty()
@@ -8796,7 +8811,7 @@ fn literal_result_claim_owner_input<'a>(
             matches!(
                 dag.get(*dependency).map(|node| &node.op),
                 Some(RiscOp::ExtentWitness {
-                    site: crate::dag::ExtentWitnessSite::LiteralResultClaim,
+                    site: chelis_dag_core::dag::ExtentWitnessSite::LiteralResultClaim,
                     ..
                 })
             ) || literal_result_claim_producers
@@ -8835,7 +8850,7 @@ fn literal_result_claim_owner_input<'a>(
 /// * `PayloadDTypeMismatch` — values / target / updates precision disagrees
 ///   with output precision.
 fn try_summarize_sparse_helper(
-    dag: &crate::Dag,
+    dag: &chelis_dag_core::Dag,
     inputs: &[HostTensorInput],
     output: &TensorType,
 ) -> Result<HostTensorSpecialization, SparseSummaryAttempt> {
@@ -8898,7 +8913,8 @@ fn try_summarize_sparse_helper(
         }));
     }
     let input_tys = inputs.iter().map(|i| i.ty.clone()).collect::<Vec<_>>();
-    let literal_result_claim_producers = crate::axis_sources::literal_result_claim_producers(dag);
+    let literal_result_claim_producers =
+        chelis_dag_core::axis_sources::literal_result_claim_producers(dag);
     let mut root = returned_root;
     while let Some(input) =
         literal_result_claim_owner_input(dag, root, &literal_result_claim_producers)
@@ -9150,7 +9166,7 @@ fn try_summarize_sparse_helper(
 /// Returns `false` for everything else (elementwise helpers,
 /// pure-sparse helpers, etc.). Those produce `NotEligible` rather
 /// than a structured rejection.
-fn is_matmul_near(dag: &crate::Dag, root_node: &crate::DagNode) -> bool {
+fn is_matmul_near(dag: &chelis_dag_core::Dag, root_node: &chelis_dag_core::DagNode) -> bool {
     if matches!(&root_node.op, RiscOp::BlasMatmul { .. }) {
         return true;
     }
@@ -9258,8 +9274,8 @@ fn tensor_type_has_wildcard_dim(ty: &TensorType) -> bool {
 }
 
 fn helper_load_input_index(
-    dag: &crate::Dag,
-    id: crate::dag::NodeId,
+    dag: &chelis_dag_core::Dag,
+    id: chelis_dag_core::dag::NodeId,
     inputs: &[HostTensorInput],
 ) -> Option<usize> {
     let node = dag.get(id)?;
@@ -15476,7 +15492,7 @@ fn einsum_lowers_to_contraction(
     ) else {
         return false;
     };
-    crate::tier2_ordered::einsum_contraction(equation, &lhs, &rhs, explicit_accumulator(list))
+    crate::ordered_layout::einsum_contraction(equation, &lhs, &rhs, explicit_accumulator(list))
         .is_some()
 }
 
@@ -19156,13 +19172,13 @@ fn write_canonical_host_type_key(ty: &HostTypeTerm, out: &mut String) {
             out.push_str("tensor[");
             for dim in &tensor.dims {
                 match dim {
-                    crate::dag::DimInfo::Lit(extent) => {
+                    chelis_dag_core::dag::DimInfo::Lit(extent) => {
                         let _ = write!(out, "{extent}");
                     }
-                    crate::dag::DimInfo::Named(name, Some(extent)) => {
+                    chelis_dag_core::dag::DimInfo::Named(name, Some(extent)) => {
                         let _ = write!(out, "{name}={extent}");
                     }
-                    crate::dag::DimInfo::Named(name, None) => out.push_str(name),
+                    chelis_dag_core::dag::DimInfo::Named(name, None) => out.push_str(name),
                 }
                 out.push(',');
             }
@@ -21889,12 +21905,12 @@ fn top_level_value_host_type(
         .or_else(|| Some(expr_host_type(value, program, &UnordMap::new())))
 }
 
-fn tensor_helper_inputs(dag: &crate::Dag) -> Vec<HostTensorInput> {
+fn tensor_helper_inputs(dag: &chelis_dag_core::Dag) -> Vec<HostTensorInput> {
     let mut seen = UnordSet::new();
     dag.nodes()
         .iter()
         .filter_map(|node| match &node.op {
-            crate::RiscOp::Load { name } if seen.insert(name.as_str().to_string()) => {
+            chelis_dag_core::RiscOp::Load { name } if seen.insert(name.as_str().to_string()) => {
                 Some(HostTensorInput {
                     name: name.as_str().to_string(),
                     ty: node.output_type.clone(),
@@ -21912,10 +21928,10 @@ fn tensor_helper_inputs(dag: &crate::Dag) -> Vec<HostTensorInput> {
 /// a typed refusal raised while actualizing is returned here rather than
 /// unwinding past the caller as a payload no handler renders (chelis#3340).
 fn remap_tensor_helper_dim_symbols(
-    dag: &crate::Dag,
+    dag: &chelis_dag_core::Dag,
     scope: &UnordMap<String, HostTypeTerm>,
     expected_output: &TensorType,
-) -> Result<crate::Dag, crate::lower::LowerDiagnostic> {
+) -> Result<chelis_dag_core::Dag, crate::lower::LowerDiagnostic> {
     crate::lower::catch_lowering_diagnostic(
         crate::lower::UnrollBudget::Unbounded,
         std::panic::AssertUnwindSafe(|| {
@@ -21925,13 +21941,13 @@ fn remap_tensor_helper_dim_symbols(
 }
 
 fn remap_tensor_helper_dim_symbols_raising(
-    dag: &crate::Dag,
+    dag: &chelis_dag_core::Dag,
     scope: &UnordMap<String, HostTypeTerm>,
     expected_output: &TensorType,
-) -> crate::Dag {
+) -> chelis_dag_core::Dag {
     fn tensor_type_has_synthetic_dims(tensor_ty: &TensorType) -> bool {
         tensor_ty.dims.iter().any(|dim| {
-            matches!(dim, crate::dag::DimInfo::Named(name, None) if {
+            matches!(dim, chelis_dag_core::dag::DimInfo::Named(name, None) if {
                 let mut chars = name.chars();
                 matches!(chars.next(), Some('d')) && chars.all(|ch| ch.is_ascii_digit())
             })
@@ -21947,26 +21963,26 @@ fn remap_tensor_helper_dim_symbols_raising(
         loop {
             let node = dag.get(returned).expect("helper root belongs to DAG");
             for dependency in &node.shape_deps {
-                if let Some(crate::dag::DagNode {
+                if let Some(chelis_dag_core::dag::DagNode {
                     op:
-                        crate::dag::RiscOp::ExtentWitness {
-                            site: crate::dag::ExtentWitnessSite::LiteralResultClaim,
-                            axis: crate::dag::RtAxis::Lit(axis),
+                        chelis_dag_core::dag::RiscOp::ExtentWitness {
+                            site: chelis_dag_core::dag::ExtentWitnessSite::LiteralResultClaim,
+                            axis: chelis_dag_core::dag::RtAxis::Lit(axis),
                             ..
                         },
                     ..
                 }) = dag.get(*dependency)
                     && let Some(dim) = expected_output.dims.get_mut(*axis as usize)
-                    && matches!(dim, crate::dag::DimInfo::Lit(_))
+                    && matches!(dim, chelis_dag_core::dag::DimInfo::Lit(_))
                 {
-                    *dim = crate::dag::DimInfo::Named("*".into(), None);
+                    *dim = chelis_dag_core::dag::DimInfo::Named("*".into(), None);
                 }
             }
             if !matches!(
                 node.op,
-                crate::dag::RiscOp::Copy
-                    | crate::dag::RiscOp::Cast { .. }
-                    | crate::dag::RiscOp::NamedCast { .. }
+                chelis_dag_core::dag::RiscOp::Copy
+                    | chelis_dag_core::dag::RiscOp::Cast { .. }
+                    | chelis_dag_core::dag::RiscOp::NamedCast { .. }
             ) {
                 break;
             }
@@ -22002,7 +22018,7 @@ fn remap_tensor_helper_dim_symbols_raising(
         formal_params.push(root.output_type.clone());
         let actual_output = if tensor_type_has_synthetic_dims(expected_output) {
             match root.op {
-                crate::dag::RiscOp::Permute { ref axes } => root
+                chelis_dag_core::dag::RiscOp::Permute { ref axes } => root
                     .inputs
                     .first()
                     .and_then(|id| dag.get(*id))
@@ -22015,7 +22031,8 @@ fn remap_tensor_helper_dim_symbols_raising(
                         output
                     })
                     .unwrap_or_else(|| expected_output.clone()),
-                crate::dag::RiscOp::UniformLike | crate::dag::RiscOp::Dropout => root
+                chelis_dag_core::dag::RiscOp::UniformLike
+                | chelis_dag_core::dag::RiscOp::Dropout => root
                     .inputs
                     .first()
                     .and_then(|id| dag.get(*id))
@@ -22045,8 +22062,8 @@ fn remap_tensor_helper_dim_symbols_raising(
         && let Some(root) = remapped.get(*root_id)
         && root.output_type.dims.len() == actual_output.dims.len()
     {
-        let is_anon = |dim: &crate::dag::DimInfo| matches!(dim, crate::dag::DimInfo::Named(name, None) if name.is_empty() || name == "*");
-        let declarable = crate::dag::op_declarable_axes(&remapped, root);
+        let is_anon = |dim: &chelis_dag_core::dag::DimInfo| matches!(dim, chelis_dag_core::dag::DimInfo::Named(name, None) if name.is_empty() || name == "*");
+        let declarable = chelis_dag_core::dag::op_declarable_axes(&remapped, root);
         let mut output = root.output_type.clone();
         let mut changed = false;
         for (axis, (dim, actual_dim)) in output
@@ -22105,9 +22122,9 @@ fn raise_conflicting_checker_dimension(
 }
 
 fn actualize_tensor_helper_types(
-    dag: &crate::Dag,
+    dag: &chelis_dag_core::Dag,
     scope: &UnordMap<String, HostTypeTerm>,
-) -> crate::Dag {
+) -> chelis_dag_core::Dag {
     fn inferred_load_type(
         name: &str,
         scope: &UnordMap<String, HostTypeTerm>,
@@ -22131,21 +22148,24 @@ fn actualize_tensor_helper_types(
 
     fn synthetic_dims(tensor_ty: &TensorType) -> bool {
         tensor_ty.dims.iter().any(|dim| {
-            matches!(dim, crate::dag::DimInfo::Named(name, None) if {
+            matches!(dim, chelis_dag_core::dag::DimInfo::Named(name, None) if {
                 let mut chars = name.chars();
                 matches!(chars.next(), Some('d')) && chars.all(|ch| ch.is_ascii_digit())
             })
         })
     }
 
-    fn synthetic_dim(dim: &crate::dag::DimInfo) -> bool {
-        matches!(dim, crate::dag::DimInfo::Named(name, None) if {
+    fn synthetic_dim(dim: &chelis_dag_core::dag::DimInfo) -> bool {
+        matches!(dim, chelis_dag_core::dag::DimInfo::Named(name, None) if {
             let mut chars = name.chars();
             matches!(chars.next(), Some('d')) && chars.all(|ch| ch.is_ascii_digit())
         })
     }
 
-    fn merge_dim(lhs: &crate::dag::DimInfo, rhs: &crate::dag::DimInfo) -> crate::dag::DimInfo {
+    fn merge_dim(
+        lhs: &chelis_dag_core::dag::DimInfo,
+        rhs: &chelis_dag_core::dag::DimInfo,
+    ) -> chelis_dag_core::dag::DimInfo {
         match (synthetic_dim(lhs), synthetic_dim(rhs)) {
             (true, false) => rhs.clone(),
             _ => lhs.clone(),
@@ -22174,7 +22194,7 @@ fn actualize_tensor_helper_types(
     fn reserve_runtime_dim_name(
         occupied: &mut UnordSet<String>,
         operation: &str,
-        node: crate::dag::NodeId,
+        node: chelis_dag_core::dag::NodeId,
         axis: usize,
     ) -> String {
         let base = format!("_rt_{operation}_dim_{}_{}", node.0, axis);
@@ -22189,51 +22209,50 @@ fn actualize_tensor_helper_types(
 
     /// The operations whose result shape is their first operand's, read the
     /// same way by the first inference pass and by the refinement below.
-    fn forwards_first_input_shape(op: &crate::dag::RiscOp) -> bool {
+    fn forwards_first_input_shape(op: &chelis_dag_core::dag::RiscOp) -> bool {
         matches!(
             op,
-            crate::dag::RiscOp::Neg
-                | crate::dag::RiscOp::Relu
-                | crate::dag::RiscOp::Softmax { .. }
-                | crate::dag::RiscOp::Exp
-                | crate::dag::RiscOp::Log
-                | crate::dag::RiscOp::Sin
-                | crate::dag::RiscOp::Sqrt
-                | crate::dag::RiscOp::Cos
-                | crate::dag::RiscOp::Tan
-                | crate::dag::RiscOp::Atan
-                | crate::dag::RiscOp::Tanh
-                | crate::dag::RiscOp::Erf
-                | crate::dag::RiscOp::Erfc
-                | crate::dag::RiscOp::Abs
-                | crate::dag::RiscOp::Floor
-                | crate::dag::RiscOp::Ceil
-                | crate::dag::RiscOp::FloatClassify(_)
-                | crate::dag::RiscOp::Round
-                | crate::dag::RiscOp::Recip
-                | crate::dag::RiscOp::UniformLike
-                | crate::dag::RiscOp::Dropout
-                | crate::dag::RiscOp::Copy
-                | crate::dag::RiscOp::Drop
-                | crate::dag::RiscOp::Realize
-                | crate::dag::RiscOp::Cast { .. }
-                | crate::dag::RiscOp::NamedCast { .. }
-                | crate::dag::RiscOp::FusedElem { .. }
+            chelis_dag_core::dag::RiscOp::Neg
+                | chelis_dag_core::dag::RiscOp::Relu
+                | chelis_dag_core::dag::RiscOp::Softmax { .. }
+                | chelis_dag_core::dag::RiscOp::Exp
+                | chelis_dag_core::dag::RiscOp::Log
+                | chelis_dag_core::dag::RiscOp::Sin
+                | chelis_dag_core::dag::RiscOp::Sqrt
+                | chelis_dag_core::dag::RiscOp::Cos
+                | chelis_dag_core::dag::RiscOp::Tan
+                | chelis_dag_core::dag::RiscOp::Atan
+                | chelis_dag_core::dag::RiscOp::Tanh
+                | chelis_dag_core::dag::RiscOp::Erf
+                | chelis_dag_core::dag::RiscOp::Erfc
+                | chelis_dag_core::dag::RiscOp::Abs
+                | chelis_dag_core::dag::RiscOp::Floor
+                | chelis_dag_core::dag::RiscOp::Ceil
+                | chelis_dag_core::dag::RiscOp::FloatClassify(_)
+                | chelis_dag_core::dag::RiscOp::Round
+                | chelis_dag_core::dag::RiscOp::Recip
+                | chelis_dag_core::dag::RiscOp::UniformLike
+                | chelis_dag_core::dag::RiscOp::Dropout
+                | chelis_dag_core::dag::RiscOp::Copy
+                | chelis_dag_core::dag::RiscOp::Drop
+                | chelis_dag_core::dag::RiscOp::Realize
+                | chelis_dag_core::dag::RiscOp::Cast { .. }
+                | chelis_dag_core::dag::RiscOp::NamedCast { .. }
+                | chelis_dag_core::dag::RiscOp::FusedElem { .. }
         )
     }
 
-    fn known_extent(dim: &crate::dag::DimInfo) -> Option<usize> {
+    fn known_extent(dim: &chelis_dag_core::dag::DimInfo) -> Option<usize> {
         match dim {
-            crate::dag::DimInfo::Lit(value) | crate::dag::DimInfo::Named(_, Some(value)) => {
-                Some(*value)
-            }
-            crate::dag::DimInfo::Named(_, None) => None,
+            chelis_dag_core::dag::DimInfo::Lit(value)
+            | chelis_dag_core::dag::DimInfo::Named(_, Some(value)) => Some(*value),
+            chelis_dag_core::dag::DimInfo::Named(_, None) => None,
         }
     }
 
     fn rank_preserving_movement_type(
-        op: &crate::dag::RiscOp,
-        node_id: crate::dag::NodeId,
+        op: &chelis_dag_core::dag::RiscOp,
+        node_id: chelis_dag_core::dag::NodeId,
         input: &TensorType,
         fallback: &TensorType,
         occupied_dim_names: &mut UnordSet<String>,
@@ -22245,26 +22264,26 @@ fn actualize_tensor_helper_types(
         // to checker metadata whose rank predates helper actualization.
         fn unresolved_axis(
             operation: &str,
-            node_id: crate::dag::NodeId,
+            node_id: chelis_dag_core::dag::NodeId,
             axis: usize,
             input_rank: usize,
             fallback: &TensorType,
             occupied_dim_names: &mut UnordSet<String>,
-        ) -> crate::dag::DimInfo {
+        ) -> chelis_dag_core::dag::DimInfo {
             if fallback.dims.len() == input_rank
                 && let Some(dim) = fallback.dims.get(axis)
-                && !matches!(dim, crate::dag::DimInfo::Named(name, None) if name.is_empty() || name == "*")
+                && !matches!(dim, chelis_dag_core::dag::DimInfo::Named(name, None) if name.is_empty() || name == "*")
             {
                 return dim.clone();
             }
-            crate::dag::DimInfo::Named(
+            chelis_dag_core::dag::DimInfo::Named(
                 reserve_runtime_dim_name(occupied_dim_names, operation, node_id, axis),
                 None,
             )
         }
 
         let dims = match op {
-            crate::dag::RiscOp::Pad { padding, .. } => {
+            chelis_dag_core::dag::RiscOp::Pad { padding, .. } => {
                 if padding.len() != input.dims.len() {
                     return None;
                 }
@@ -22274,25 +22293,27 @@ fn actualize_tensor_helper_types(
                     .enumerate()
                     .map(
                         |(axis, ((before, after), input_dim))| match (before, after) {
-                            (crate::dag::RtDim::Lit(0), crate::dag::RtDim::Lit(0)) => {
-                                Some(input_dim.clone())
-                            }
-                            (crate::dag::RtDim::Lit(before), crate::dag::RtDim::Lit(after)) => {
-                                known_extent(input_dim)
-                                    .and_then(|extent| extent.checked_add(*before))
-                                    .and_then(|extent| extent.checked_add(*after))
-                                    .map(crate::dag::DimInfo::Lit)
-                                    .or_else(|| {
-                                        Some(unresolved_axis(
-                                            "pad",
-                                            node_id,
-                                            axis,
-                                            input.dims.len(),
-                                            fallback,
-                                            occupied_dim_names,
-                                        ))
-                                    })
-                            }
+                            (
+                                chelis_dag_core::dag::RtDim::Lit(0),
+                                chelis_dag_core::dag::RtDim::Lit(0),
+                            ) => Some(input_dim.clone()),
+                            (
+                                chelis_dag_core::dag::RtDim::Lit(before),
+                                chelis_dag_core::dag::RtDim::Lit(after),
+                            ) => known_extent(input_dim)
+                                .and_then(|extent| extent.checked_add(*before))
+                                .and_then(|extent| extent.checked_add(*after))
+                                .map(chelis_dag_core::dag::DimInfo::Lit)
+                                .or_else(|| {
+                                    Some(unresolved_axis(
+                                        "pad",
+                                        node_id,
+                                        axis,
+                                        input.dims.len(),
+                                        fallback,
+                                        occupied_dim_names,
+                                    ))
+                                }),
                             // Any RUNTIME bound. chelis#1397's rule, which
                             // the `Shrink` arm below states and this arm
                             // did not apply: minting a fresh symbol over an
@@ -22319,7 +22340,8 @@ fn actualize_tensor_helper_types(
                             // on both lanes as a value binding and trapped as
                             // an inlined root.
                             _ => {
-                                if crate::axis_sources::op_computed_axis_extent(op, axis).is_some()
+                                if chelis_dag_core::axis_sources::op_computed_axis_extent(op, axis)
+                                    .is_some()
                                 {
                                     Some(unresolved_axis(
                                         "pad",
@@ -22330,7 +22352,7 @@ fn actualize_tensor_helper_types(
                                         occupied_dim_names,
                                     ))
                                 } else {
-                                    Some(crate::dag::DimInfo::Named(
+                                    Some(chelis_dag_core::dag::DimInfo::Named(
                                         reserve_runtime_dim_name(
                                             occupied_dim_names,
                                             "pad",
@@ -22345,7 +22367,7 @@ fn actualize_tensor_helper_types(
                     )
                     .collect::<Option<Vec<_>>>()?
             }
-            crate::dag::RiscOp::Shrink { bounds } => {
+            chelis_dag_core::dag::RiscOp::Shrink { bounds } => {
                 if bounds.len() != input.dims.len() {
                     return None;
                 }
@@ -22367,14 +22389,18 @@ fn actualize_tensor_helper_types(
                         // A `start > end` range is invalid and `verify`'s
                         // "has invalid bounds" check rejects it; `checked_sub`
                         // declines deliberately instead of wrapping.
-                        (crate::dag::RtDim::Lit(start), crate::dag::RtDim::Lit(end)) => {
-                            end.checked_sub(*start).map(crate::dag::DimInfo::Lit)
-                        }
+                        (
+                            chelis_dag_core::dag::RtDim::Lit(start),
+                            chelis_dag_core::dag::RtDim::Lit(end),
+                        ) => end
+                            .checked_sub(*start)
+                            .map(chelis_dag_core::dag::DimInfo::Lit),
                         // The `SHRINK_TO_END` full-axis sentinel: the slice is
                         // the whole axis, so it keeps the input axis identity.
-                        (crate::dag::RtDim::Lit(0), crate::dag::RtDim::ToEnd) => {
-                            Some(input_dim.clone())
-                        }
+                        (
+                            chelis_dag_core::dag::RtDim::Lit(0),
+                            chelis_dag_core::dag::RtDim::ToEnd,
+                        ) => Some(input_dim.clone()),
                         // A sentinel under a nonzero or runtime start is
                         // malformed, and since chelis#1480 every stage that
                         // validates a bound rejects it by name: `verify`'s
@@ -22409,13 +22435,28 @@ fn actualize_tensor_helper_types(
                         // pair keeps its pairing through the shift. Declining
                         // here is consistency with a rule enforced elsewhere,
                         // not a gap being papered over.
-                        (crate::dag::RtDim::Lit(_), crate::dag::RtDim::ToEnd)
-                        | (crate::dag::RtDim::Node(_), crate::dag::RtDim::ToEnd) => None,
+                        (
+                            chelis_dag_core::dag::RtDim::Lit(_),
+                            chelis_dag_core::dag::RtDim::ToEnd,
+                        )
+                        | (
+                            chelis_dag_core::dag::RtDim::Node(_),
+                            chelis_dag_core::dag::RtDim::ToEnd,
+                        ) => None,
                         // At least one bound is only known at run time, so the
                         // extent is an op-declared runtime dimension.
-                        (crate::dag::RtDim::Node(_), crate::dag::RtDim::Node(_))
-                        | (crate::dag::RtDim::Node(_), crate::dag::RtDim::Lit(_))
-                        | (crate::dag::RtDim::Lit(_), crate::dag::RtDim::Node(_)) => {
+                        (
+                            chelis_dag_core::dag::RtDim::Node(_),
+                            chelis_dag_core::dag::RtDim::Node(_),
+                        )
+                        | (
+                            chelis_dag_core::dag::RtDim::Node(_),
+                            chelis_dag_core::dag::RtDim::Lit(_),
+                        )
+                        | (
+                            chelis_dag_core::dag::RtDim::Lit(_),
+                            chelis_dag_core::dag::RtDim::Node(_),
+                        ) => {
                             // chelis#1397: a DECLARED extent on this axis is
                             // a claim, and minting a fresh symbol over it
                             // discards the claim rather than discharging it.
@@ -22437,7 +22478,9 @@ fn actualize_tensor_helper_types(
                             // one admitted owner - so removing `shrink` from
                             // admission would have kept the claim with nothing
                             // to enforce it, silently.
-                            if crate::axis_sources::op_computed_axis_extent(op, axis).is_some() {
+                            if chelis_dag_core::axis_sources::op_computed_axis_extent(op, axis)
+                                .is_some()
+                            {
                                 Some(unresolved_axis(
                                     "shrink",
                                     node_id,
@@ -22447,7 +22490,7 @@ fn actualize_tensor_helper_types(
                                     occupied_dim_names,
                                 ))
                             } else {
-                                Some(crate::dag::DimInfo::Named(
+                                Some(chelis_dag_core::dag::DimInfo::Named(
                                     reserve_runtime_dim_name(
                                         occupied_dim_names,
                                         "shrink",
@@ -22462,15 +22505,15 @@ fn actualize_tensor_helper_types(
                         // `Reshape` target only; and `InputAxis` belongs only
                         // to `Expand`/`Reshape`. `verify` rejects all three
                         // misplaced carriers in a `Shrink` bound.
-                        (crate::dag::RtDim::ToEnd, _)
-                        | (crate::dag::RtDim::Sym(_), _)
-                        | (crate::dag::RtDim::InputAxis { .. }, _)
-                        | (_, crate::dag::RtDim::Sym(_))
-                        | (_, crate::dag::RtDim::InputAxis { .. }) => None,
+                        (chelis_dag_core::dag::RtDim::ToEnd, _)
+                        | (chelis_dag_core::dag::RtDim::Sym(_), _)
+                        | (chelis_dag_core::dag::RtDim::InputAxis { .. }, _)
+                        | (_, chelis_dag_core::dag::RtDim::Sym(_))
+                        | (_, chelis_dag_core::dag::RtDim::InputAxis { .. }) => None,
                     })
                     .collect::<Option<Vec<_>>>()?
             }
-            crate::dag::RiscOp::Stride { strides } => {
+            chelis_dag_core::dag::RiscOp::Stride { strides } => {
                 if strides.len() != input.dims.len() {
                     return None;
                 }
@@ -22479,10 +22522,12 @@ fn actualize_tensor_helper_types(
                     .zip(input.dims.iter())
                     .enumerate()
                     .map(|(axis, (stride, input_dim))| match stride {
-                        crate::dag::RtDim::Lit(0) => None,
-                        crate::dag::RtDim::Lit(1) => Some(input_dim.clone()),
-                        crate::dag::RtDim::Lit(stride) => known_extent(input_dim)
-                            .map(|extent| crate::dag::DimInfo::Lit(extent.div_ceil(*stride)))
+                        chelis_dag_core::dag::RtDim::Lit(0) => None,
+                        chelis_dag_core::dag::RtDim::Lit(1) => Some(input_dim.clone()),
+                        chelis_dag_core::dag::RtDim::Lit(stride) => known_extent(input_dim)
+                            .map(|extent| {
+                                chelis_dag_core::dag::DimInfo::Lit(extent.div_ceil(*stride))
+                            })
                             .or_else(|| {
                                 Some(unresolved_axis(
                                     "stride",
@@ -22493,14 +22538,16 @@ fn actualize_tensor_helper_types(
                                     occupied_dim_names,
                                 ))
                             }),
-                        crate::dag::RtDim::Node(_) => {
+                        chelis_dag_core::dag::RtDim::Node(_) => {
                             // A runtime step computes a fresh extent, but a
                             // declared fallback dimension is a claim that the
                             // local `StrideSpan` guard must retain and check.
                             // Mint only when there is no usable declaration,
                             // exactly as the admitted pad and shrink owners do
                             // above.
-                            if crate::axis_sources::op_computed_axis_extent(op, axis).is_some() {
+                            if chelis_dag_core::axis_sources::op_computed_axis_extent(op, axis)
+                                .is_some()
+                            {
                                 Some(unresolved_axis(
                                     "stride",
                                     node_id,
@@ -22510,7 +22557,7 @@ fn actualize_tensor_helper_types(
                                     occupied_dim_names,
                                 ))
                             } else {
-                                Some(crate::dag::DimInfo::Named(
+                                Some(chelis_dag_core::dag::DimInfo::Named(
                                     reserve_runtime_dim_name(
                                         occupied_dim_names,
                                         "stride",
@@ -22521,9 +22568,9 @@ fn actualize_tensor_helper_types(
                                 ))
                             }
                         }
-                        crate::dag::RtDim::ToEnd
-                        | crate::dag::RtDim::Sym(_)
-                        | crate::dag::RtDim::InputAxis { .. } => None,
+                        chelis_dag_core::dag::RtDim::ToEnd
+                        | chelis_dag_core::dag::RtDim::Sym(_)
+                        | chelis_dag_core::dag::RtDim::InputAxis { .. } => None,
                     })
                     .collect::<Option<Vec<_>>>()?
             }
@@ -22535,14 +22582,14 @@ fn actualize_tensor_helper_types(
         })
     }
 
-    let mut inferred = UnordMap::<crate::dag::NodeId, TensorType>::new();
-    let mut authoritative_shape_nodes = UnordSet::<crate::dag::NodeId>::new();
+    let mut inferred = UnordMap::<chelis_dag_core::dag::NodeId, TensorType>::new();
+    let mut authoritative_shape_nodes = UnordSet::<chelis_dag_core::dag::NodeId>::new();
     // Generated runtime extents share the `DimInfo::Named` carrier with
     // source dimensions. Reserve the canonical complete DAG namespace plus
     // names that host-scope actualization can introduce later, then mint by
     // insertion into that finite set. A prefix convention alone is not an
     // identity boundary (chelis#1137 red-team rounds 2-3).
-    let mut occupied_dim_names = crate::dag::dimension_identity_names(dag);
+    let mut occupied_dim_names = chelis_dag_core::dag::dimension_identity_names(dag);
     // `to_sorted` here is an order-insensitive drain, not an order claim:
     // every element lands in a set whose membership is what the minting
     // loop below reads.
@@ -22556,11 +22603,12 @@ fn actualize_tensor_helper_types(
             })
             .flat_map(|tensor| tensor.dims.iter())
             .filter_map(|dim| match dim {
-                crate::dag::DimInfo::Named(name, _) => Some(name.clone()),
-                crate::dag::DimInfo::Lit(_) => None,
+                chelis_dag_core::dag::DimInfo::Named(name, _) => Some(name.clone()),
+                chelis_dag_core::dag::DimInfo::Lit(_) => None,
             }),
     );
-    let mut uses = UnordMap::<crate::dag::NodeId, Vec<crate::dag::NodeId>>::new();
+    let mut uses =
+        UnordMap::<chelis_dag_core::dag::NodeId, Vec<chelis_dag_core::dag::NodeId>>::new();
     for node in dag.nodes() {
         for input in &node.inputs {
             uses.entry(*input).or_default().push(node.id);
@@ -22568,18 +22616,18 @@ fn actualize_tensor_helper_types(
     }
     for node in dag.nodes() {
         let actual = match &node.op {
-            crate::dag::RiscOp::Load { name } => {
+            chelis_dag_core::dag::RiscOp::Load { name } => {
                 Some(inferred_load_type(name.as_str(), scope, &node.output_type))
             }
-            crate::dag::RiscOp::Add
-            | crate::dag::RiscOp::Sub
-            | crate::dag::RiscOp::Mul
-            | crate::dag::RiscOp::Div
-            | crate::dag::RiscOp::Pow
-            | crate::dag::RiscOp::FloorDiv
-            | crate::dag::RiscOp::TruncDiv
-            | crate::dag::RiscOp::MaxElem
-            | crate::dag::RiscOp::MinElem => node
+            chelis_dag_core::dag::RiscOp::Add
+            | chelis_dag_core::dag::RiscOp::Sub
+            | chelis_dag_core::dag::RiscOp::Mul
+            | chelis_dag_core::dag::RiscOp::Div
+            | chelis_dag_core::dag::RiscOp::Pow
+            | chelis_dag_core::dag::RiscOp::FloorDiv
+            | chelis_dag_core::dag::RiscOp::TruncDiv
+            | chelis_dag_core::dag::RiscOp::MaxElem
+            | chelis_dag_core::dag::RiscOp::MinElem => node
                 .inputs
                 .first()
                 .and_then(|lhs| inferred.get(lhs))
@@ -22590,7 +22638,7 @@ fn actualize_tensor_helper_types(
                         .map(|rhs| merge_binary_tensor_types(lhs, rhs, node.output_type.precision))
                         .unwrap_or_else(|| precision_like(lhs, node.output_type.precision))
                 }),
-            crate::dag::RiscOp::ExtremaAdjoint { .. } => node
+            chelis_dag_core::dag::RiscOp::ExtremaAdjoint { .. } => node
                 .inputs
                 .first()
                 .and_then(|lhs| inferred.get(lhs))
@@ -22613,7 +22661,7 @@ fn actualize_tensor_helper_types(
                         })
                         .unwrap_or(forward)
                 }),
-            crate::dag::RiscOp::ReluAdjoint => node
+            chelis_dag_core::dag::RiscOp::ReluAdjoint => node
                 .inputs
                 .first()
                 .and_then(|input| inferred.get(input))
@@ -22631,12 +22679,12 @@ fn actualize_tensor_helper_types(
                 .first()
                 .and_then(|id| inferred.get(id))
                 .map(|input| precision_like(input, node.output_type.precision)),
-            crate::dag::RiscOp::Sum { axis, .. }
-            | crate::dag::RiscOp::MaxReduce { axis }
-            | crate::dag::RiscOp::MinReduce { axis }
-            | crate::dag::RiscOp::ProdReduce { axis }
-            | crate::dag::RiscOp::Argmax { axis }
-            | crate::dag::RiscOp::Argmin { axis } => node
+            chelis_dag_core::dag::RiscOp::Sum { axis, .. }
+            | chelis_dag_core::dag::RiscOp::MaxReduce { axis }
+            | chelis_dag_core::dag::RiscOp::MinReduce { axis }
+            | chelis_dag_core::dag::RiscOp::ProdReduce { axis }
+            | chelis_dag_core::dag::RiscOp::Argmax { axis }
+            | chelis_dag_core::dag::RiscOp::Argmin { axis } => node
                 .inputs
                 .first()
                 .and_then(|id| inferred.get(id))
@@ -22649,7 +22697,7 @@ fn actualize_tensor_helper_types(
                         .collect(),
                     precision: node.output_type.precision,
                 }),
-            crate::dag::RiscOp::Count { axes } => node
+            chelis_dag_core::dag::RiscOp::Count { axes } => node
                 .inputs
                 .first()
                 .and_then(|id| inferred.get(id))
@@ -22662,7 +22710,7 @@ fn actualize_tensor_helper_types(
                         .collect(),
                     precision: Prim::Int64,
                 }),
-            crate::dag::RiscOp::Permute { axes } => node
+            chelis_dag_core::dag::RiscOp::Permute { axes } => node
                 .inputs
                 .first()
                 .and_then(|id| inferred.get(id))
@@ -22673,7 +22721,7 @@ fn actualize_tensor_helper_types(
                         .collect(),
                     precision: node.output_type.precision,
                 }),
-            crate::dag::RiscOp::Expand { axis, size } => node
+            chelis_dag_core::dag::RiscOp::Expand { axis, size } => node
                 .inputs
                 .first()
                 .and_then(|id| inferred.get(id))
@@ -22690,20 +22738,23 @@ fn actualize_tensor_helper_types(
                         return None;
                     }
                     let extent = match size {
-                        crate::dag::RtDim::Lit(value) => crate::dag::DimInfo::Lit(*value),
-                        crate::dag::RtDim::InputAxis {
+                        chelis_dag_core::dag::RtDim::Lit(value) => {
+                            chelis_dag_core::dag::DimInfo::Lit(*value)
+                        }
+                        chelis_dag_core::dag::RtDim::InputAxis {
                             tensor,
-                            axis: crate::dag::RtAxis::Lit(source_axis),
+                            axis: chelis_dag_core::dag::RtAxis::Lit(source_axis),
                         } => {
                             let source_id = *node.inputs.get(*tensor)?;
                             let source = inferred.get(&source_id)?;
                             let source_axis = usize::try_from(*source_axis).ok()?;
                             source.dims.get(source_axis)?.clone()
                         }
-                        crate::dag::RtDim::Node(_) | crate::dag::RtDim::Sym(_) => {
+                        chelis_dag_core::dag::RtDim::Node(_)
+                        | chelis_dag_core::dag::RtDim::Sym(_) => {
                             node.output_type.dims.get(*axis)?.clone()
                         }
-                        crate::dag::RtDim::ToEnd => return None,
+                        chelis_dag_core::dag::RtDim::ToEnd => return None,
                     };
                     if inserts {
                         dims.insert(*axis, extent);
@@ -22715,9 +22766,9 @@ fn actualize_tensor_helper_types(
                         precision: node.output_type.precision,
                     })
                 }),
-            crate::dag::RiscOp::Pad { .. }
-            | crate::dag::RiscOp::Shrink { .. }
-            | crate::dag::RiscOp::Stride { .. } => node
+            chelis_dag_core::dag::RiscOp::Pad { .. }
+            | chelis_dag_core::dag::RiscOp::Shrink { .. }
+            | chelis_dag_core::dag::RiscOp::Stride { .. } => node
                 .inputs
                 .first()
                 .and_then(|id| inferred.get(id))
@@ -22753,7 +22804,7 @@ fn actualize_tensor_helper_types(
     loop {
         let mut changed = false;
         for node in dag.nodes() {
-            if !matches!(node.op, crate::dag::RiscOp::Expand { .. })
+            if !matches!(node.op, chelis_dag_core::dag::RiscOp::Expand { .. })
                 || !synthetic_dims(&node.output_type)
             {
                 continue;
@@ -22807,7 +22858,7 @@ fn actualize_tensor_helper_types(
         .iter()
         .map(|node| node.id)
         .collect::<Vec<_>>();
-    let mut synthetic_renames = UnordMap::<String, crate::dag::DimInfo>::new();
+    let mut synthetic_renames = UnordMap::<String, chelis_dag_core::dag::DimInfo>::new();
     for id in node_ids {
         let Some(node) = actualized.get(id).cloned() else {
             continue;
@@ -22833,11 +22884,11 @@ fn actualize_tensor_helper_types(
             .zip(actual.dims.clone())
             .enumerate()
         {
-            if let crate::dag::DimInfo::Named(name, None) = old_dim
+            if let chelis_dag_core::dag::DimInfo::Named(name, None) = old_dim
                 && synthetic_dim(old_dim)
                 && old_dim != &new_dim
             {
-                if matches!(&new_dim, crate::dag::DimInfo::Named(unknown, None) if unknown.is_empty() || unknown == "*")
+                if matches!(&new_dim, chelis_dag_core::dag::DimInfo::Named(unknown, None) if unknown.is_empty() || unknown == "*")
                 {
                     // An unknown axis carries no competing extent. Keep
                     // the checker's shared dim until a witnessed use
@@ -24042,7 +24093,7 @@ fn infer_app_expr_host_type(
         let mut dims = tensor_ty.dims.clone();
         let axis = axis as usize;
         if axis <= dims.len() {
-            dims.insert(axis, crate::dag::DimInfo::Lit(size as usize));
+            dims.insert(axis, chelis_dag_core::dag::DimInfo::Lit(size as usize));
             return Some(HostTypeTerm::Tensor(TensorType {
                 dims,
                 precision: tensor_ty.precision,
@@ -24186,7 +24237,7 @@ fn host_type_has_synthetic_tensor_dims(ty: &HostTypeTerm) -> bool {
 
     match ty {
         HostTypeTerm::Tensor(tensor_ty) => tensor_ty.dims.iter().any(
-            |dim| matches!(dim, crate::dag::DimInfo::Named(name, None) if synthetic_dim_name(name)),
+            |dim| matches!(dim, chelis_dag_core::dag::DimInfo::Named(name, None) if synthetic_dim_name(name)),
         ),
         HostTypeTerm::Tuple(items) => items.iter().any(host_type_has_synthetic_tensor_dims),
         HostTypeTerm::List(inner) | HostTypeTerm::Option(inner) => {
@@ -24203,7 +24254,7 @@ fn infer_einsum_tensor_type(equation: &str, tensors: &[TensorType]) -> Option<Te
         return None;
     }
 
-    let mut labels = UnordMap::<char, crate::dag::DimInfo>::new();
+    let mut labels = UnordMap::<char, chelis_dag_core::dag::DimInfo>::new();
     for (spec, tensor) in input_specs.iter().zip(tensors.iter()) {
         let axes = spec
             .chars()
@@ -24281,7 +24332,7 @@ fn normalize_host_axis(rank: usize, raw: i64) -> Option<usize> {
 /// per-node anon dim in the C emitter and is sized from the runtime
 /// `chelis_tensor_concat` result, so helper signatures stay honest.
 fn concat_host_tensor_type(element: &TensorType, axis: Option<usize>) -> HostTypeTerm {
-    let anon = || crate::dag::DimInfo::Named("*".to_string(), None);
+    let anon = || chelis_dag_core::dag::DimInfo::Named("*".to_string(), None);
     let mut dims = element.dims.clone();
     match axis {
         Some(axis) if axis < dims.len() => dims[axis] = anon(),
@@ -26397,7 +26448,10 @@ fn infer_builtin_host_type_from_arg_tys_unchecked(
                     if *precision != chelis_numeric_core::prim::Prim::String =>
                 {
                     Some(HostTypeTerm::Tensor(TensorType {
-                        dims: vec![crate::dag::DimInfo::Named("list".to_string(), None)],
+                        dims: vec![chelis_dag_core::dag::DimInfo::Named(
+                            "list".to_string(),
+                            None,
+                        )],
                         precision: *precision,
                     }))
                 }
@@ -26442,8 +26496,8 @@ fn infer_builtin_host_type_from_arg_tys_unchecked(
                     {
                         Some(HostTypeTerm::Tensor(TensorType {
                             dims: vec![
-                                crate::dag::DimInfo::Named("batch".to_string(), None),
-                                crate::dag::DimInfo::Named("seq".to_string(), None),
+                                chelis_dag_core::dag::DimInfo::Named("batch".to_string(), None),
+                                chelis_dag_core::dag::DimInfo::Named("seq".to_string(), None),
                             ],
                             precision,
                         }))
@@ -27947,10 +28001,10 @@ mod tests {
     /// definition's shared-row entry, even behind a wider callable formal.
     #[test]
     fn retained_definition_entry_precedes_body_only_helper_reduction() {
-        use crate::axis_sources::{
+        use chelis_dag_core::axis_sources::{
             EntryExtentGuard, ExtentRecord, entry_extent_guards, witness_entry_obligations,
         };
-        use crate::dag::{NodeId, RtAxis};
+        use chelis_dag_core::dag::{NodeId, RtAxis};
         fn shared_rank(guards: &[EntryExtentGuard]) -> bool {
             guards.iter().any(|guard| {
                 matches!(guard, EntryExtentGuard::Named {
@@ -28360,7 +28414,7 @@ mod tests {
             "another tensor formal keeps its independent entry checks"
         );
     }
-    use crate::{DimInfo, RiscOp};
+    use chelis_dag_core::{DimInfo, RiscOp};
     use chelis_numeric_core::prim::Prim;
 
     /// [05-OP-46]: a unary producer retains the actual operand's complete
@@ -28834,7 +28888,7 @@ mod tests {
     #[test]
     fn kernel_builtin_load_rejection_requires_a_typed_lexical_input() {
         for name in ["mean", "fold", "map"] {
-            let mut dag = crate::Dag::new();
+            let mut dag = chelis_dag_core::Dag::new();
             let decl = dag.declare("test");
             dag.add_node(
                 decl,
@@ -28974,7 +29028,7 @@ mod tests {
         );
         let session = HostLoweringSession::new(&checked);
         for (name, expected) in [
-            ("staged", vec![crate::dag::RtAxis::Lit(0)]),
+            ("staged", vec![chelis_dag_core::dag::RtAxis::Lit(0)]),
             ("selected", Vec::new()),
         ] {
             let (_, body) = session.def_named(name).unwrap();
@@ -28995,7 +29049,7 @@ mod tests {
             dims: vec![DimInfo::Lit(2)],
             precision: Prim::F32,
         };
-        let mut dag = crate::Dag::new();
+        let mut dag = chelis_dag_core::Dag::new();
         let decl = dag.declare("test");
         let root = dag.add_node(
             decl,
@@ -30228,7 +30282,7 @@ def main[n](x: tensor[n, f32], unused: tensor[n, f32]) -> tensor[n, f32] =
             .nodes()
             .iter()
             .filter_map(|node| match &node.op {
-                crate::dag::RiscOp::Load { name } => Some(name.as_str()),
+                chelis_dag_core::dag::RiscOp::Load { name } => Some(name.as_str()),
                 _ => None,
             })
             .collect::<Vec<_>>();
@@ -30239,7 +30293,7 @@ def main[n](x: tensor[n, f32], unused: tensor[n, f32]) -> tensor[n, f32] =
         );
         assert!(dag.nodes().iter().any(|node| matches!(
             &node.op,
-            crate::dag::RiscOp::ExtentWitness { parameter, claims, .. }
+            chelis_dag_core::dag::RiscOp::ExtentWitness { parameter, claims, .. }
                 if parameter == "unused" && !claims.is_empty()
         )));
     }
@@ -30257,11 +30311,11 @@ def main(x: tensor[4, f32], rate: f32) -> tensor[4, f32] =
         let dropout = dag
             .nodes()
             .iter()
-            .find(|node| matches!(node.op, crate::dag::RiscOp::Dropout))
+            .find(|node| matches!(node.op, chelis_dag_core::dag::RiscOp::Dropout))
             .expect("the entry draws");
         assert!(matches!(
             &dag.get(dropout.inputs[1]).expect("rate operand").op,
-            crate::dag::RiscOp::Load { name } if name.as_str() == "rate"
+            chelis_dag_core::dag::RiscOp::Load { name } if name.as_str() == "rate"
         ));
     }
 
@@ -32206,7 +32260,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
     /// classifying the deferred dtype as Float64.
     #[test]
     fn to_list_classifier_rejects_f8e4m3_tensor_per_spec_1_1_1() {
-        let f8_tensor = HostTypeTerm::Tensor(crate::dag::TensorType {
+        let f8_tensor = HostTypeTerm::Tensor(chelis_dag_core::dag::TensorType {
             dims: vec![DimInfo::Lit(4)],
             precision: Prim::F8e4m3,
         });
@@ -32863,7 +32917,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
             HostTypeTerm::Tensor(tensor) => {
                 assert_eq!(
                     tensor.dims,
-                    vec![crate::dag::DimInfo::Named("n".into(), None)]
+                    vec![chelis_dag_core::dag::DimInfo::Named("n".into(), None)]
                 );
                 assert_eq!(tensor.precision, Prim::F32);
             }
@@ -32873,7 +32927,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
 
     #[test]
     fn helper_dimension_rebinding_boundary_has_a_nonidentity_discriminator() {
-        use crate::dag::{Dag, DimInfo, RiscOp, TensorType};
+        use chelis_dag_core::dag::{Dag, DimInfo, RiscOp, TensorType};
 
         let symbolic = TensorType {
             dims: vec![DimInfo::Named("n".into(), None)],
@@ -32944,7 +32998,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
 
     #[test]
     fn host_permutation_retains_ordered_physical_axes() {
-        use crate::dag::{DimInfo, TensorType};
+        use chelis_dag_core::dag::{DimInfo, TensorType};
         for name in ["n", "d77"] {
             for dimension in [
                 DimInfo::Named(name.into(), None),
@@ -32982,7 +33036,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
 
     #[test]
     fn tensor_helper_actualization_merges_matmul_synthetic_expand_dims() {
-        use crate::dag::{Dag, DimInfo, RiscOp, RtAxis, RtDim, TensorType};
+        use chelis_dag_core::dag::{Dag, DimInfo, RiscOp, RtAxis, RtDim, TensorType};
 
         let batch = DimInfo::Named("batch".into(), None);
         let in_dim = DimInfo::Named("in_dim".into(), None);
@@ -33100,7 +33154,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
     /// input slot and axis.
     #[test]
     fn tensor_helper_actualization_preserves_structural_expand_size() {
-        use crate::dag::{Dag, DimInfo, RiscOp, RtAxis, RtDim, TensorType};
+        use chelis_dag_core::dag::{Dag, DimInfo, RiscOp, RtAxis, RtDim, TensorType};
 
         let n = DimInfo::Named("n".into(), None);
         let d47 = DimInfo::Named("d47".into(), None);
@@ -33185,7 +33239,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
             },
             "actualization must preserve the structural witness slot"
         );
-        let errors = crate::verify::verify(&actualized);
+        let errors = chelis_dag_core::verify::verify(&actualized);
         assert!(
             errors.is_empty(),
             "actualized helper must verify: {errors:?}"
@@ -33195,7 +33249,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
     /// Negative parity: an already user-facing witness remains unchanged.
     #[test]
     fn tensor_helper_actualization_leaves_user_facing_input_axis_alone() {
-        use crate::dag::{Dag, DimInfo, RiscOp, RtAxis, RtDim, TensorType};
+        use chelis_dag_core::dag::{Dag, DimInfo, RiscOp, RtAxis, RtDim, TensorType};
 
         let batch = DimInfo::Named("batch".into(), None);
         let mut dag = Dag::new();
@@ -33274,7 +33328,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
 
     #[test]
     fn tensor_helper_actualization_repairs_shrink_rank_from_bounds() {
-        use crate::dag::{Dag, DimInfo, RiscOp, RtDim, TensorType};
+        use chelis_dag_core::dag::{Dag, DimInfo, RiscOp, RtDim, TensorType};
 
         let mut dag = Dag::new();
         let decl = dag.declare("test");
@@ -33334,7 +33388,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
     /// first extent.
     #[test]
     fn conflicting_checker_dimension_is_a_typed_refusal() {
-        use crate::dag::{Dag, DimInfo, RiscOp, TensorType};
+        use chelis_dag_core::dag::{Dag, DimInfo, RiscOp, TensorType};
 
         let shared = DimInfo::Named("d7".into(), None);
         let mut dag = Dag::new();
@@ -33433,7 +33487,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
 
     #[test]
     fn tensor_helper_actualization_preserves_full_axis_shrink_extent() {
-        use crate::dag::{Dag, DimInfo, RiscOp, RtDim, TensorType};
+        use chelis_dag_core::dag::{Dag, DimInfo, RiscOp, RtDim, TensorType};
 
         let batch = DimInfo::Named("batch".into(), None);
         let mut dag = Dag::new();
@@ -33499,7 +33553,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
     /// extent 4 for a slice that starts at 1.
     #[test]
     fn tensor_helper_actualization_declines_a_nonzero_start_shrink_sentinel() {
-        use crate::dag::{Dag, DimInfo, RiscOp, RtDim, TensorType};
+        use chelis_dag_core::dag::{Dag, DimInfo, RiscOp, RtDim, TensorType};
 
         let mut dag = Dag::new();
         let decl = dag.declare("test");
@@ -33553,7 +33607,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
     /// declared type until verification reports the malformed carrier.
     #[test]
     fn tensor_helper_actualization_declines_input_axis_for_shrink_and_stride() {
-        use crate::dag::{Dag, DimInfo, RiscOp, RtAxis, RtDim, TensorType};
+        use chelis_dag_core::dag::{Dag, DimInfo, RiscOp, RtAxis, RtDim, TensorType};
 
         let mut dag = Dag::new();
         let decl = dag.declare("test");
@@ -33634,10 +33688,10 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
     }
 
     fn runtime_shrink_bound_nodes(
-        dag: &mut crate::dag::Dag,
-        decl: crate::dag::DeclId,
-    ) -> (crate::dag::NodeId, crate::dag::NodeId) {
-        use crate::dag::{RiscOp, TensorType};
+        dag: &mut chelis_dag_core::dag::Dag,
+        decl: chelis_dag_core::dag::DeclId,
+    ) -> (chelis_dag_core::dag::NodeId, chelis_dag_core::dag::NodeId) {
+        use chelis_dag_core::dag::{RiscOp, TensorType};
 
         let scalar_i64 = TensorType {
             dims: vec![],
@@ -33662,7 +33716,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
 
     #[test]
     fn runtime_shrink_name_reserves_scope_actualized_base_and_suffixes() {
-        use crate::dag::{Dag, DimInfo, RiscOp, RtDim, TensorType};
+        use chelis_dag_core::dag::{Dag, DimInfo, RiscOp, RtDim, TensorType};
 
         let mut dag = Dag::new();
         let decl = dag.declare("test");
@@ -33725,7 +33779,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
 
     #[test]
     fn runtime_shrink_name_reserves_op_internal_symbols_in_both_node_orders() {
-        use crate::dag::{Dag, DimInfo, RiscOp, RtDim, TensorType};
+        use chelis_dag_core::dag::{Dag, DimInfo, RiscOp, RtDim, TensorType};
 
         for internal_before_shrink in [false, true] {
             let mut dag = Dag::new();
@@ -33801,7 +33855,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
 
     #[test]
     fn multiple_runtime_shrinks_keep_distinct_names_through_fanout_consumers() {
-        use crate::dag::{Dag, DimInfo, RiscOp, RtDim, TensorType};
+        use chelis_dag_core::dag::{Dag, DimInfo, RiscOp, RtDim, TensorType};
 
         let mut dag = Dag::new();
         let decl = dag.declare("test");

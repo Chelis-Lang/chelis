@@ -6,7 +6,7 @@
 //! gradient is unknown until call-site specialization and must remain
 //! rootless rather than being fabricated as zero.
 
-use chelis_ir::dag::DimInfo;
+use chelis_dag_core::dag::DimInfo;
 use chelis_ir::lower::{LoweredLibrary, try_lower_program_to_library};
 use chelis_numeric_core::prim::Prim;
 use chelis_surf::desugar::desugar_program;

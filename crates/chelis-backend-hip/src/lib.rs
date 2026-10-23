@@ -19,7 +19,7 @@ pub const TENSOR_CAPABLE_PRIMS: &[chelis_numeric_core::prim::Prim] = &[
 
 use chelis_unord::UnordMap;
 
-use chelis_ir::dag::DimExpr;
+use chelis_dag_core::dag::DimExpr;
 
 pub mod blas;
 mod emit;
@@ -97,7 +97,7 @@ pub fn runtime_dir() -> &'static str {
 /// a borrowed device input has no implicit contiguous-layout guarantee.
 ///
 /// ```compile_fail
-/// # use chelis_ir::dag::Dag;
+/// # use chelis_dag_core::dag::Dag.
 /// fn bypass(raw: &Dag) {
 ///     let _ = chelis_backend_hip::codegen_hip(raw, "unchecked");
 /// }
@@ -110,7 +110,10 @@ pub fn codegen_hip(
     // the specialized DAG the emitter actually consumes.
     dag.emission()
         .check_axis_sources(chelis_types::unsupported::Stage::Codegen("hip"))?;
-    chelis_ir::dag::reject_device_correctly_rounded_ops(dag.emission().nodes(), "hip")?;
+    chelis_ir::device_admission::reject_device_correctly_rounded_ops(
+        dag.emission().nodes(),
+        "hip",
+    )?;
     let h_header = format!(
         "#include \"chelis_device_owner.h\"\nextern \"C\" void {func_name}(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);\nextern \"C\" void {func_name}_device(const chelis_device_tensor_owner *const *inputs, chelis_device_rank n_in, chelis_device_tensor_owner **outputs, chelis_device_rank n_out);"
     );
@@ -168,8 +171,8 @@ pub fn codegen_hip(
 /// lowering. This pass is idempotent. Explicit Realize nodes make all temporary
 /// bytes and lifetimes visible to the shared storage planner, including when a
 /// device caller supplies noncontiguous inputs.
-pub fn prepare_dag_for_codegen(dag: chelis_ir::dag::Dag) -> chelis_ir::dag::Dag {
-    use chelis_ir::dag::{Dag, NodeId, RiscOp};
+pub fn prepare_dag_for_codegen(dag: chelis_dag_core::dag::Dag) -> chelis_dag_core::dag::Dag {
+    use chelis_dag_core::dag::{Dag, NodeId, RiscOp};
     let selected = chelis_ir::specialize::specialize_for_blas(&dag);
     let mut out = Dag::new();
     out.inherit_declarations(&selected);
@@ -248,7 +251,7 @@ pub fn codegen_hip_host_program(
                 .dag
                 .nodes()
                 .iter()
-                .any(|node| matches!(node.op, chelis_ir::dag::RiscOp::Count { .. }))
+                .any(|node| matches!(node.op, chelis_dag_core::dag::RiscOp::Count { .. }))
         })
         .collect::<Vec<_>>();
     let external_names = count_helpers
@@ -280,7 +283,7 @@ pub fn codegen_hip_host_program(
 /// lowered: HIP payload selection, ownership lowering, then verification.
 fn verified_host_helper_dag(
     helper_name: &str,
-    dag: chelis_ir::dag::Dag,
+    dag: chelis_dag_core::dag::Dag,
 ) -> Result<chelis_ir::ownership::VerifiedDagProgram, chelis_types::unsupported::Unsupported> {
     let selected = prepare_dag_for_codegen(dag);
     let unsupported = |error: chelis_ir::ownership::OwnershipError| {
@@ -307,7 +310,7 @@ pub(crate) mod testing {
     use chelis_ir::ownership::{OwnershipError, VerifiedDagProgram};
 
     pub(crate) fn verified_dag(
-        dag: &chelis_ir::dag::Dag,
+        dag: &chelis_dag_core::dag::Dag,
     ) -> Result<VerifiedDagProgram, OwnershipError> {
         let selected = crate::prepare_dag_for_codegen(dag.clone());
         chelis_ir::ownership::verify_ownership(chelis_ir::ownership::lower_dag_ownership(selected)?)
@@ -317,7 +320,7 @@ pub(crate) mod testing {
 #[cfg(test)]
 mod preparation_tests {
     use super::*;
-    use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
+    use chelis_dag_core::dag::{Dag, DimInfo, RiscOp, TensorType};
     use chelis_ir::ownership::{
         StoragePlacement, lower_dag_ownership, plan_hip_storage, verify_ownership,
     };

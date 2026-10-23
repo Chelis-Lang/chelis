@@ -1,5 +1,5 @@
 //! Incremental `eval-performance` oracle: sparse runtime indices [05-SPARSE-1].
-use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
+use chelis_dag_core::dag::{Dag, DimInfo, RiscOp, TensorType};
 use chelis_ir::eval::{TensorValue, eval_tensor};
 use chelis_numeric_core::dtype_semantics::{RawTensor, finalize_tensor};
 use chelis_numeric_core::prim::Prim;
@@ -56,9 +56,9 @@ fn shaped_ty(shape: &[usize], precision: Prim) -> TensorType {
 
 #[test]
 fn eval_performance_streamed_contraction_bits_and_scratch() {
-    use chelis_ir::dag::Owner;
+    use chelis_dag_core::dag::Owner;
+    use chelis_dag_core::tier2::lower_matmul_with_accumulator;
     use chelis_ir::eval::eval_tensor_roots_with;
-    use chelis_ir::tier2::lower_matmul_with_accumulator;
     for prim in [Prim::F16, Prim::Bf16, Prim::F32, Prim::F64] {
         for accumulator in [Prim::F32, Prim::F64] {
             for runtime in [false, true] {
@@ -113,7 +113,7 @@ fn eval_performance_streamed_contraction_bits_and_scratch() {
                     assert!(dag.nodes().iter().any(|node| matches!(
                         node.op,
                         RiscOp::Expand {
-                            size: chelis_ir::dag::RtDim::InputAxis { .. },
+                            size: chelis_dag_core::dag::RtDim::InputAxis { .. },
                             ..
                         }
                     ) && node.inputs.len() > 1));
@@ -197,9 +197,9 @@ fn eval_performance_streamed_contraction_bits_and_scratch() {
 
 #[test]
 fn eval_performance_streamed_convolution_bits_and_scratch() {
-    use chelis_ir::dag::Owner;
+    use chelis_dag_core::dag::Owner;
+    use chelis_dag_core::tier2::{lower_conv, lower_conv_runtime};
     use chelis_ir::eval::eval_tensor_roots_with;
-    use chelis_ir::tier2::{lower_conv, lower_conv_runtime};
     for prim in [Prim::F16, Prim::Bf16, Prim::F32, Prim::F64] {
         for runtime in [false, true] {
             let mut dag = Dag::new();
@@ -259,7 +259,7 @@ fn eval_performance_streamed_convolution_bits_and_scratch() {
                 )
             };
             assert_eq!(
-                chelis_ir::fuse::cartesian_gather_indices(&dag).len(),
+                chelis_dag_core::fuse::cartesian_gather_indices(&dag).len(),
                 1,
                 "Cartesian descriptor runtime={runtime}"
             );
@@ -326,9 +326,9 @@ fn eval_performance_streamed_convolution_bits_and_scratch() {
 #[test]
 #[ignore = "model-sized contraction witness; docs/manual_gates.md eval-performance"]
 fn eval_performance_pointwise_pair_witness() {
-    use chelis_ir::dag::Owner;
+    use chelis_dag_core::dag::Owner;
+    use chelis_dag_core::tier2::{lower_gelu, lower_matmul};
     use chelis_ir::eval::eval_tensor_roots_with;
-    use chelis_ir::tier2::{lower_gelu, lower_matmul};
     let mut dag = Dag::new();
     let owner = Owner::from(dag.declare("pointwise pair"));
     let a_ty = shaped_ty(&[3136, 128], Prim::F32);
@@ -415,7 +415,7 @@ fn eval_performance_pointwise_pair_witness() {
 
 #[test]
 fn eval_performance_cartesian_indices_errors_and_empty_domain() {
-    use chelis_ir::dag::RtDim;
+    use chelis_dag_core::dag::RtDim;
     use chelis_ir::eval::eval_tensor_roots_with;
     for source_prim in [Prim::F32, Prim::Key] {
         for tail_empty in [false, true] {
@@ -565,10 +565,10 @@ fn eval_performance_cartesian_indices_errors_and_empty_domain() {
 
 #[test]
 fn eval_performance_streamed_convolution_gradients() {
-    use chelis_ir::dag::Owner;
+    use chelis_dag_core::dag::Owner;
+    use chelis_dag_core::grad::grad_dag_checked;
+    use chelis_dag_core::tier2::lower_conv;
     use chelis_ir::eval::eval_tensor_roots_with;
-    use chelis_ir::grad::grad_dag_checked;
-    use chelis_ir::tier2::lower_conv;
     let mut dag = Dag::new();
     let owner = Owner::from(dag.declare("convolution gradient"));
     let xt = shaped_ty(&[1, 1, 4, 4], Prim::F32);
@@ -652,9 +652,9 @@ fn eval_performance_streamed_convolution_gradients() {
 
 #[test]
 fn eval_performance_streamed_contraction_nonfinite_bits() {
-    use chelis_ir::dag::Owner;
+    use chelis_dag_core::dag::Owner;
+    use chelis_dag_core::tier2::lower_matmul;
     use chelis_ir::eval::eval_tensor_roots_with;
-    use chelis_ir::tier2::lower_matmul;
     for prim in [Prim::F16, Prim::Bf16, Prim::F32, Prim::F64] {
         for values in [
             vec![-0.0, -0.0, -0.0],
@@ -711,8 +711,8 @@ fn eval_performance_streamed_contraction_nonfinite_bits() {
 
 #[test]
 fn eval_performance_many_contraction_plans() {
-    use chelis_ir::dag::Owner;
-    use chelis_ir::tier2::lower_matmul;
+    use chelis_dag_core::dag::Owner;
+    use chelis_dag_core::tier2::lower_matmul;
     for count in [16, 256, 4096] {
         let mut dag = Dag::new();
         let owner = Owner::from(dag.declare("many contractions"));
@@ -736,7 +736,7 @@ fn eval_performance_many_contraction_plans() {
             dag.add_root(root);
         }
         let start = Instant::now();
-        let plans = chelis_ir::fuse::reduction_inlined_products(&dag);
+        let plans = chelis_dag_core::fuse::reduction_inlined_products(&dag);
         assert_eq!(plans.len(), count);
         eprintln!(
             "eval-performance planner contractions={count} nodes={} wall={:?} PASS",
@@ -748,9 +748,9 @@ fn eval_performance_many_contraction_plans() {
 
 #[test]
 fn eval_performance_contraction_dense_control() {
-    use chelis_ir::dag::Owner;
+    use chelis_dag_core::dag::Owner;
+    use chelis_dag_core::tier2::lower_matmul;
     use chelis_ir::eval::eval_tensor_roots_with;
-    use chelis_ir::tier2::lower_matmul;
     let mut dag = Dag::new();
     let owner = Owner::from(dag.declare("dense timing control"));
     let at = shaped_ty(&[196, 128], Prim::F32);
@@ -864,7 +864,7 @@ fn coordinate_case(
 
 #[test]
 fn eval_performance_regular_movement_coordinates() {
-    use chelis_ir::dag::RtDim;
+    use chelis_dag_core::dag::RtDim;
     coordinate_case(
         &[32, 64, 512],
         &[512, 32, 64],
@@ -1084,7 +1084,7 @@ fn eval_performance_large_gather_coordinates() {
 #[test]
 #[ignore = "large movement witness; docs/manual_gates.md eval-performance"]
 fn eval_performance_large_window_movement_coordinates() {
-    use chelis_ir::dag::RtDim;
+    use chelis_dag_core::dag::RtDim;
     coordinate_case(
         &[1, 128, 56, 56, 7, 7],
         &[1, 128, 56, 7, 56, 7],
@@ -1463,9 +1463,9 @@ fn sparse_consumers(prim: Prim, invalid: bool) {
 #[test]
 #[ignore = "full convolution witness; docs/manual_gates.md eval-performance"]
 fn eval_performance_convolution_index_witness() {
-    use chelis_ir::dag::Owner;
+    use chelis_dag_core::dag::Owner;
+    use chelis_dag_core::tier2::lower_conv;
     use chelis_ir::eval::eval_tensor_roots_with;
-    use chelis_ir::tier2::lower_conv;
     let tensor = |shape: &[usize]| TensorType {
         dims: shape.iter().copied().map(DimInfo::Lit).collect(),
         precision: Prim::F32,
@@ -1571,8 +1571,8 @@ fn eval_performance_convolution_index_witness() {
 
 #[test]
 fn eval_performance_ordered_scan_gradient_linear_storage() {
-    use chelis_ir::grad::grad_dag_checked;
-    use chelis_ir::tier2_ordered::lower_cumsum;
+    use chelis_dag_core::grad::grad_dag_checked;
+    use chelis_dag_core::tier2_ordered::lower_cumsum;
     for n in [4096, 65536] {
         let mut dag = Dag::new();
         let owner = dag.declare("scan oracle");

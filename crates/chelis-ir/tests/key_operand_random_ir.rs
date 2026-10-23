@@ -7,10 +7,10 @@
 //! `grad` through the key edge, and the `RandomSelectionParameter` rejection
 //! of chelis#2421.
 
-use chelis_ir::dag::{Dag, DimInfo, NodeId, RiscOp, RtAxis, RtDim, TensorType, UniformBound};
+use chelis_dag_core::dag::{Dag, DimInfo, NodeId, RiscOp, RtAxis, RtDim, TensorType, UniformBound};
+use chelis_dag_core::grad::{AdError, AdRejectionReason, grad_dag_checked};
+use chelis_dag_core::verify::verify;
 use chelis_ir::eval::{TensorValue, eval_tensor_roots_exact};
-use chelis_ir::grad::{AdError, AdRejectionReason, grad_dag_checked};
-use chelis_ir::verify::verify;
 use chelis_numeric_core::dtype_semantics::scalar_from_f64;
 use chelis_numeric_core::dtype_semantics::{RawTensor, finalize_tensor};
 use chelis_numeric_core::prim::Prim;
@@ -79,11 +79,11 @@ fn scalar(prim: Prim) -> TensorType {
     }
 }
 
-fn load(dag: &mut Dag, decl: chelis_ir::dag::DeclId, name: &str, ty: TensorType) -> NodeId {
+fn load(dag: &mut Dag, decl: chelis_dag_core::dag::DeclId, name: &str, ty: TensorType) -> NodeId {
     dag.add_node(decl, RiscOp::Load { name: name.into() }, vec![], ty, None)
 }
 
-fn constant(dag: &mut Dag, decl: chelis_ir::dag::DeclId, prim: Prim, value: f64) -> NodeId {
+fn constant(dag: &mut Dag, decl: chelis_dag_core::dag::DeclId, prim: Prim, value: f64) -> NodeId {
     dag.add_node(
         decl,
         RiscOp::synth_const(prim, value),
@@ -94,7 +94,7 @@ fn constant(dag: &mut Dag, decl: chelis_ir::dag::DeclId, prim: Prim, value: f64)
 }
 
 /// `key_from_seed(seed)`: a rank-0 key whose bits are the seed's.
-fn seeded_key(dag: &mut Dag, decl: chelis_ir::dag::DeclId, seed: i64) -> NodeId {
+fn seeded_key(dag: &mut Dag, decl: chelis_dag_core::dag::DeclId, seed: i64) -> NodeId {
     let seed = dag.add_node(
         decl,
         RiscOp::Const {
@@ -116,7 +116,7 @@ fn seeded_key(dag: &mut Dag, decl: chelis_ir::dag::DeclId, seed: i64) -> NodeId 
 
 fn dropout(
     dag: &mut Dag,
-    decl: chelis_ir::dag::DeclId,
+    decl: chelis_dag_core::dag::DeclId,
     x: NodeId,
     rate: NodeId,
     seed: i64,
@@ -130,7 +130,7 @@ fn dropout(
 
 fn uniform(
     dag: &mut Dag,
-    decl: chelis_ir::dag::DeclId,
+    decl: chelis_dag_core::dag::DeclId,
     template: NodeId,
     low: NodeId,
     high: NodeId,
@@ -170,7 +170,7 @@ fn f64_bits(values: &[f64]) -> Vec<u64> {
 
 // ---- grad ----
 
-fn loss_of(dag: &mut Dag, decl: chelis_ir::dag::DeclId, value: NodeId, prim: Prim) -> NodeId {
+fn loss_of(dag: &mut Dag, decl: chelis_dag_core::dag::DeclId, value: NodeId, prim: Prim) -> NodeId {
     let accumulator = if prim == Prim::F64 {
         Prim::F64
     } else {
@@ -290,7 +290,9 @@ fn uniform_bound_adjoints_match_the_05_op_8_transcription() {
     }
 }
 
-fn rejection(result: Result<chelis_ir::grad::GradResult, AdError>) -> Option<AdRejectionReason> {
+fn rejection(
+    result: Result<chelis_dag_core::grad::GradResult, AdError>,
+) -> Option<AdRejectionReason> {
     match result {
         Ok(_) => None,
         Err(AdError::NotSupported { reason, .. }) => Some(reason),

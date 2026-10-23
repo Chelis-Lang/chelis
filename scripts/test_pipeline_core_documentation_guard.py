@@ -27,6 +27,7 @@ Dependency features
 `chelis-effects`
 `chelis-ir`
 `chelis-unord`
+`chelis-dag-core`
 """
         )
 
@@ -142,8 +143,25 @@ Dependency features
 `chelis-effects`
 `chelis-ir`
 `chelis-unord`
+`chelis-dag-core`
 """
         )
+
+    def test_other_core_claims_do_not_change_the_pipeline_boundary(self) -> None:
+        inventory = "\n".join(
+            (guard.REQUIRED_STATEMENT, *guard.REQUIRED_SECTIONS, *guard.REQUIRED_CRATES)
+        )
+        for subject in ("chelis-dag-core", "chelis-numeric-core"):
+            with self.subTest(subject=subject):
+                guard.validate_text(
+                    inventory + f"\n{guard.REQUIRED_STATEMENT} `{subject}` supports `no_std`."
+                )
+        with self.assertRaisesRegex(
+            guard.DocumentationBoundaryError, "false current portability claim"
+        ):
+            guard.validate_text(
+                inventory + "\n`chelis-pipeline-core` supports `no_std`."
+            )
 
 
 if __name__ == "__main__":

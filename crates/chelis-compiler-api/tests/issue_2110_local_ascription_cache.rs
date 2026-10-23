@@ -4,7 +4,7 @@
 use chelis_compiler_api::{
     LibraryContext, StdLibContext, build_library_context, build_stdlib_context, pipeline,
 };
-use chelis_ir::dag::{ExtentWitnessSite, RiscOp};
+use chelis_dag_core::dag::{ExtentWitnessSite, RiscOp};
 use chelis_surf::{desugar::desugar_program, parser::parse_str};
 use chelis_types::{CheckedProgram, check_ir_with_context};
 

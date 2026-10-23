@@ -1,10 +1,10 @@
 //! Executable acceptance leg for chelis#1281 exact evaluator and AD semantics.
 
-use chelis_ir::dag::{Dag, DimInfo, ReduceWindowKind, RiscOp, TensorType};
+use chelis_dag_core::dag::{Dag, DimInfo, ReduceWindowKind, RiscOp, TensorType};
+use chelis_dag_core::grad::{AdError, AdRejectionReason, grad_dag_checked};
+use chelis_dag_core::tier2;
 use chelis_ir::eval::{TensorValue, eval_tensor};
-use chelis_ir::grad::{AdError, AdRejectionReason, grad_dag_checked};
 use chelis_ir::lower::try_lower_program;
-use chelis_ir::tier2;
 use chelis_numeric_core::dtype_semantics::{RawTensor, StorageView, finalize_tensor};
 use chelis_numeric_core::prim::Prim;
 use chelis_types::check_ir_program;
@@ -32,7 +32,7 @@ fn evaluate_single_input(
     dag: &Dag,
     name: &str,
     input: TensorValue,
-) -> Result<chelis_unord::UnordMap<chelis_ir::NodeId, TensorValue>, String> {
+) -> Result<chelis_unord::UnordMap<chelis_dag_core::NodeId, TensorValue>, String> {
     let mut inputs = UnordMap::new();
     inputs.insert(name.to_string(), input);
     eval_tensor(dag, &inputs)

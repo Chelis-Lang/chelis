@@ -2,12 +2,12 @@
 
 use chelis_unord::UnordMap;
 
-use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
+use chelis_dag_core::dag::{Dag, DimInfo, RiscOp, TensorType};
+use chelis_dag_core::fuse::fuse;
+use chelis_dag_core::grad::{AdError, AdRejectionReason, grad_dag_checked};
+use chelis_dag_core::verify;
 use chelis_ir::eval::{TensorValue, eval_tensor};
-use chelis_ir::fuse::fuse;
-use chelis_ir::grad::{AdError, AdRejectionReason, grad_dag_checked};
 use chelis_ir::lower::try_lower_program;
-use chelis_ir::verify;
 use chelis_ir::vmap::vectorize_axis0;
 use chelis_numeric_core::prim::Prim;
 use chelis_types::check_typed_program;
@@ -52,7 +52,7 @@ fn evaluator_counts_multi_axis_groups_in_original_row_major_order() {
     )
     .expect("bool fixture");
     let values = eval_tensor(&dag, &UnordMap::from([("x".into(), input)])).expect("count eval");
-    let output = &values[&chelis_ir::dag::NodeId(1)];
+    let output = &values[&chelis_dag_core::dag::NodeId(1)];
     assert_eq!(output.shape, vec![3]);
     assert_eq!(output.to_f64_lossy_vec(), vec![3.0, 3.0, 2.0]);
     assert_eq!(output.prim(), Prim::Int64);
@@ -66,7 +66,7 @@ fn evaluator_returns_zero_for_a_selected_zero_extent() {
         .expect("empty bool fixture");
     let values = eval_tensor(&dag, &UnordMap::from([("x".into(), input)])).expect("count eval");
     assert_eq!(
-        values[&chelis_ir::dag::NodeId(1)].to_f64_lossy_vec(),
+        values[&chelis_dag_core::dag::NodeId(1)].to_f64_lossy_vec(),
         vec![0.0; 6]
     );
 }
@@ -223,7 +223,7 @@ fn grad_rejects_a_live_count_with_a_structured_reason() {
         None,
     );
     dag.add_root(output);
-    let err = match grad_dag_checked(&dag, output, &[chelis_ir::dag::NodeId(0)]) {
+    let err = match grad_dag_checked(&dag, output, &[chelis_dag_core::dag::NodeId(0)]) {
         Ok(_) => panic!("count has no adjoint"),
         Err(err) => err,
     };

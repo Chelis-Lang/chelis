@@ -23,12 +23,15 @@
 //! the allowed set, so non-ASCII identifiers like `σ` are rejected.
 //! Empty strings are rejected.
 //!
-//! [`LoadStoreName::new`] rejects names outside this grammar. Serialized
-//! IR can bypass the constructor, so emission sites also sanitize names
-//! for their destination context.
+//! Construction and deserialization use the same checked grammar.
+//! Host emission also applies destination-specific name sanitization.
 
-use std::borrow::Borrow;
-use std::fmt;
+use alloc::{
+    string::{String, ToString},
+    vec::Vec,
+};
+use core::borrow::Borrow;
+use core::fmt;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
@@ -108,7 +111,7 @@ impl fmt::Display for LoadStoreNameError {
     }
 }
 
-impl std::error::Error for LoadStoreNameError {}
+impl core::error::Error for LoadStoreNameError {}
 
 #[inline]
 fn is_name_start(b: u8) -> bool {
@@ -157,7 +160,7 @@ impl LoadStoreName {
         Self::validate(source).expect("top-level declaration name is parser validated");
         let mut label = String::from(GLOBAL_PREFIX);
         for byte in source.as_bytes() {
-            use std::fmt::Write;
+            use core::fmt::Write;
             write!(&mut label, "{byte:02x}").expect("writing to String cannot fail");
         }
         Self {
@@ -280,11 +283,13 @@ impl Serialize for LoadStoreName {
 impl<'de> Deserialize<'de> for LoadStoreName {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let label = String::deserialize(deserializer)?;
-        let source = Self::top_level_source_for_label(&label).map_err(serde::de::Error::custom)?;
-        Ok(Self {
-            label,
-            origin: source.map_or(LoadOrigin::Ordinary, LoadOrigin::TopLevel),
-        })
+        match Self::top_level_source_for_label(&label).map_err(serde::de::Error::custom)? {
+            Some(source) => Ok(Self {
+                label,
+                origin: LoadOrigin::TopLevel(source),
+            }),
+            None => Self::new(label).map_err(serde::de::Error::custom),
+        }
     }
 }
 
@@ -372,6 +377,7 @@ impl PartialEq<LoadStoreName> for String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::format;
 
     #[test]
     fn top_level_read_has_a_distinct_reversible_binding_identity() {
@@ -720,19 +726,30 @@ mod tests {
 
     #[test]
     fn deserialize_rejects_invalid_grammar() {
-        // Serde transparency means we accept the raw String shape on the
-        // wire. We do NOT re-validate on deserialize — the
-        // construction-side trust boundary is the in-process boundary.
-        // Cached/network data is assumed to come from a trusted
-        // chelis-ir construction. Lock this so the contract is explicit.
-        let bad = "\"x\\nINJECT\"";
-        let n: LoadStoreName = serde_json::from_str(bad).expect(
-            "deserialize is transparent and does NOT re-validate; \
-             trust boundary is at construction, not deserialization",
-        );
-        // The struct holds the bad bytes — but the only way to get here
-        // is via deserialize from already-trusted persisted IR.
-        assert_eq!(n.as_str(), "x\nINJECT");
+        for bad in [
+            "",
+            "9name",
+            "x\0",
+            "x\nINJECT",
+            "x\r",
+            "x\t",
+            "x\u{7f}",
+            "x%",
+            "x/",
+            "σ",
+            "xσ",
+        ] {
+            let expected = LoadStoreName::new(bad).unwrap_err().to_string();
+            let json = serde_json::to_string(bad).unwrap();
+            let json_error = serde_json::from_str::<LoadStoreName>(&json).unwrap_err();
+            assert!(json_error.to_string().contains(&expected), "{json_error}");
+            let bytes = bincode::serialize(bad).unwrap();
+            let binary_error = bincode::deserialize::<LoadStoreName>(&bytes).unwrap_err();
+            assert!(
+                binary_error.to_string().contains(&expected),
+                "{binary_error}"
+            );
+        }
     }
 
     #[test]

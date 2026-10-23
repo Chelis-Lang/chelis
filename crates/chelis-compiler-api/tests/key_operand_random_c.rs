@@ -4,7 +4,7 @@
 mod ownership_support;
 
 use chelis_crmath::profile::{Output, storage_reference};
-use chelis_ir::dag::{Dag, DimInfo, NodeId, RiscOp, TensorType, UniformBound};
+use chelis_dag_core::dag::{Dag, DimInfo, NodeId, RiscOp, TensorType, UniformBound};
 use chelis_ir::eval::{TensorValue, eval_tensor_roots_exact};
 use chelis_numeric_core::dtype_semantics::scalar_from_f64;
 use chelis_numeric_core::dtype_semantics::{RawTensor, finalize_tensor};
@@ -79,12 +79,12 @@ fn scalar(prim: Prim) -> TensorType {
     }
 }
 
-fn load(dag: &mut Dag, decl: chelis_ir::dag::DeclId, name: &str, ty: TensorType) -> NodeId {
+fn load(dag: &mut Dag, decl: chelis_dag_core::dag::DeclId, name: &str, ty: TensorType) -> NodeId {
     dag.add_node(decl, RiscOp::Load { name: name.into() }, vec![], ty, None)
 }
 
 /// `key_from_seed` of the rank-0 i64 `seed` node.
-fn key(dag: &mut Dag, decl: chelis_ir::dag::DeclId, seed: NodeId) -> NodeId {
+fn key(dag: &mut Dag, decl: chelis_dag_core::dag::DeclId, seed: NodeId) -> NodeId {
     dag.add_node(
         decl,
         RiscOp::KeyFromSeed,
@@ -336,14 +336,14 @@ fn native_replay_and_bound_adjoints_match_eval() {
             None,
         );
         dag.add_root(loss);
-        let grad = chelis_ir::grad::grad_dag_checked(&dag, loss, &[x, low, high]).unwrap();
+        let grad = chelis_dag_core::grad::grad_dag_checked(&dag, loss, &[x, low, high]).unwrap();
         let mut backward = grad.dag.clone();
         backward.set_roots(vec![
             grad.grad_nodes[&x],
             grad.grad_nodes[&low],
             grad.grad_nodes[&high],
         ]);
-        let backward = chelis_ir::optimize::dead_code_eliminate(&backward);
+        let backward = chelis_dag_core::optimize::dead_code_eliminate(&backward);
         assert!(
             backward
                 .nodes()

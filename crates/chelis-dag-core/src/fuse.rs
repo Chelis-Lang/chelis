@@ -8,6 +8,12 @@
 //! **Invariant:** fusion never duplicates computation. A node with multiple
 //! consumers is never absorbed into a fused chain.
 
+#[cfg(test)]
+use alloc::format;
+use alloc::vec;
+use alloc::vec::Vec;
+
+use crate::collections::HashMap;
 use chelis_numeric_core::prim::Prim;
 use chelis_unord::{UnordMap, UnordSet};
 
@@ -55,14 +61,8 @@ pub fn fuse_with_remap(dag: &Dag) -> FuseResult {
 fn build_consumer_counts(dag: &Dag) -> Vec<usize> {
     let mut counts = vec![0usize; dag.len()];
     for node in dag.nodes() {
-        for &input in &node.inputs {
+        for input in node.dependencies() {
             counts[input.0] += 1;
-        }
-        // An activation is read by the node it owns, so a node that is some
-        // node's activation stays materialized rather than being absorbed
-        // into a chain as an intermediate.
-        if let Some(activation) = node.owner.activation {
-            counts[activation.0] += 1;
         }
     }
     // Roots count as consumers (they must be materialized).
@@ -205,15 +205,13 @@ fn find_chains(dag: &Dag, consumer_count: &[usize]) -> Vec<Chain> {
 /// Rebuild the DAG, replacing chain nodes with FusedElem nodes.
 fn rebuild_with_fusion(dag: &Dag, chains: &[Chain]) -> (Dag, UnordMap<NodeId, NodeId>) {
     // Map old node ID → chain index (if part of a chain).
-    let mut node_to_chain: UnordMap<usize, usize> = UnordMap::new();
-    // For each chain, which node is the "representative" (last node, produces output).
-    let mut chain_output: UnordMap<usize, NodeId> = UnordMap::new();
+    let chain_node_count = chains.iter().map(|chain| chain.nodes.len()).sum();
+    let mut node_to_chain: HashMap<usize, usize> = HashMap::with_capacity(chain_node_count);
 
     for (ci, chain) in chains.iter().enumerate() {
         for &nid in &chain.nodes {
             node_to_chain.insert(nid.0, ci);
         }
-        chain_output.insert(ci, *chain.nodes.last().unwrap());
     }
 
     let mut new_dag = Dag::new();
@@ -226,7 +224,7 @@ fn rebuild_with_fusion(dag: &Dag, chains: &[Chain]) -> (Dag, UnordMap<NodeId, No
 
         if let Some(&ci) = node_to_chain.get(&old_id) {
             // This node is part of a chain.
-            let chain_out = chain_output[&ci];
+            let chain_out = *chains[ci].nodes.last().unwrap();
             if node.id != chain_out {
                 // Not the output node of the chain — skip (will be absorbed).
                 continue;
@@ -273,14 +271,22 @@ fn rebuild_with_fusion(dag: &Dag, chains: &[Chain]) -> (Dag, UnordMap<NodeId, No
                     .unwrap_or_else(|| panic!("unmapped reusable input {reusable:?} in fusion"));
                 new_dag.set_reusable_input(new_id, mapped);
             }
-            // Carry the first contributor's pre-existing merged_spans
-            // verbatim onto the FusedElem (they already belong to the
-            // canonical contributor's audit chain).
-            if !first.merged_spans.is_empty()
-                && let Some(new_node) = new_dag.node_mut(new_id)
-            {
-                new_node.merged_spans = first.merged_spans.clone();
+            for &contributor in &chain.nodes {
+                let contributor = dag.get(contributor).expect("contributor exists");
+                for dependency in &contributor.shape_deps {
+                    let mapped = *id_map.get(&dependency.0).unwrap_or_else(|| {
+                        panic!("unmapped shape dependency {dependency:?} in fusion")
+                    });
+                    new_dag.add_shape_dep(new_id, mapped);
+                }
+                for dependency in &contributor.result_claim_deps {
+                    let mapped = *id_map.get(&dependency.0).unwrap_or_else(|| {
+                        panic!("unmapped result claim dependency {dependency:?} in fusion")
+                    });
+                    new_dag.add_result_claim_dep(new_id, mapped);
+                }
             }
+            crate::span_merge::append_spans_to_node(&mut new_dag, new_id, &first.merged_spans);
             // Append every other contributor's full provenance —
             // canonical span_id + pre-existing merged_spans — onto the
             // FusedElem's merged_spans (the shared helper handles
@@ -386,26 +392,26 @@ fn build_fused_elem(
     chain: &Chain,
     _id_map: &UnordMap<usize, NodeId>,
 ) -> (RiscOp, Vec<NodeId>) {
-    let chain_set: chelis_unord::UnordSet<usize> = chain.nodes.iter().map(|n| n.0).collect();
-
     // Collect external inputs: inputs to chain nodes that are NOT other chain nodes.
     let mut external_inputs: Vec<NodeId> = Vec::new();
-    let mut ext_index: UnordMap<usize, usize> = UnordMap::new(); // old_id → index in external_inputs
+    let mut ext_index: HashMap<usize, usize> = HashMap::new(); // old_id → index in external_inputs
 
-    // Also track: for each chain node, its step index.
-    let mut step_index: UnordMap<usize, usize> = UnordMap::new();
-
-    let mut steps: Vec<FusedStep> = Vec::new();
-
+    // One table holds chain membership and step indices.
+    let mut step_index: HashMap<usize, usize> = HashMap::with_capacity(chain.nodes.len());
     for (si, &nid) in chain.nodes.iter().enumerate() {
         step_index.insert(nid.0, si);
+    }
+
+    let mut steps: Vec<FusedStep> = Vec::with_capacity(chain.nodes.len());
+
+    for (si, &nid) in chain.nodes.iter().enumerate() {
         let node = dag.get(nid).unwrap();
 
-        let mut input_indices = Vec::new();
+        let mut input_indices = Vec::with_capacity(node.inputs.len());
         for &inp in &node.inputs {
-            if chain_set.contains(&inp.0) {
-                // Reference to a previous chain node.
-                let prev_step = step_index[&inp.0];
+            if let Some(&prev_step) = step_index.get(&inp.0) {
+                // Keep the former lookup failure for a later chain step.
+                assert!(prev_step <= si, "no entry found for key");
                 input_indices.push(FusedInput::PreviousStep(prev_step));
             } else {
                 // External input.
@@ -579,7 +585,7 @@ pub fn reduction_inlined_products(dag: &Dag) -> Vec<InlinedProduct> {
         }
         for (slot, id) in node.inputs.iter().enumerate() {
             consumer[id.0] = Some(node.id);
-            if crate::contraction_views::payload_slot(node, slot) {
+            if node.reads_input_payload(slot) {
                 payload_readers[id.0] += 1;
             }
         }

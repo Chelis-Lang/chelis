@@ -3,7 +3,7 @@
 //! Mirrors the CPU backend's expand+mul+sum detector so the HIP backend can
 //! specialize the same lowered matmul subgraph to `hipblasSgemm`.
 
-use chelis_ir::dag::{DagNode, DimInfo, NodeId, RiscOp};
+use chelis_dag_core::dag::{DagNode, DimInfo, NodeId, RiscOp};
 use chelis_ir::ownership::VerifiedDagView;
 
 /// Information about a detected matmul pattern.
@@ -106,7 +106,7 @@ fn extract_matmul_dims(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chelis_ir::dag::{Dag, DimInfo, TensorType};
+    use chelis_dag_core::dag::{Dag, DimInfo, TensorType};
     use chelis_numeric_core::prim::Prim;
 
     fn detect(dag: &Dag, sum: NodeId) -> Option<MatmulInfo> {
@@ -154,7 +154,7 @@ mod tests {
             decl,
             RiscOp::Expand {
                 axis: 2,
-                size: chelis_ir::dag::RtDim::Lit(4),
+                size: chelis_dag_core::dag::RtDim::Lit(4),
             },
             vec![a],
             tensor3_f32(2, 3, 4),
@@ -164,7 +164,7 @@ mod tests {
             decl,
             RiscOp::Expand {
                 axis: 0,
-                size: chelis_ir::dag::RtDim::Lit(2),
+                size: chelis_dag_core::dag::RtDim::Lit(2),
             },
             vec![b],
             tensor3_f32(2, 3, 4),

@@ -3,7 +3,7 @@
 //! these results do not establish installed-SDK or GPU compatibility.
 mod support;
 
-use chelis_ir::dag::{Dag, DimInfo, RiscOp, RtDim, TensorType};
+use chelis_dag_core::dag::{Dag, DimInfo, RiscOp, RtDim, TensorType};
 use chelis_numeric_core::prim::Prim;
 use std::{env, fs, path::PathBuf, process::Command};
 
@@ -127,7 +127,7 @@ fn sparse_model(operation: usize, index_precision: Prim) -> String {
 }
 
 fn blas_model() -> String {
-    use chelis_ir::dag::DimExpr;
+    use chelis_dag_core::dag::DimExpr;
     let mut dag = Dag::new();
     let decl = dag.declare("test");
     let tensor = |rows, columns| TensorType {

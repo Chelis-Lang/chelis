@@ -35,8 +35,8 @@
 
 use chelis_unord::UnordMap;
 
+use chelis_dag_core::dag::{DimInfo, RiscOp, TensorType};
 use chelis_deep::Expr;
-use chelis_ir::dag::{DimInfo, RiscOp, TensorType};
 use chelis_ir::lower::lower_subexpr_program;
 use chelis_numeric_core::prim::Prim;
 
@@ -67,7 +67,7 @@ fn cons_chain_reshape_expr() -> Expr {
     exprs.pop().unwrap()
 }
 
-fn lower_with_x_bound() -> chelis_ir::dag::Dag {
+fn lower_with_x_bound() -> chelis_dag_core::dag::Dag {
     let mut scoped = UnordMap::new();
     scoped.insert(
         "x".to_string(),
@@ -135,7 +135,10 @@ fn reshape_cons_chain_extracts_integer_dim_list() {
     };
     assert_eq!(
         new_shape,
-        &vec![chelis_ir::dag::RtDim::Lit(2), chelis_ir::dag::RtDim::Lit(3)],
+        &vec![
+            chelis_dag_core::dag::RtDim::Lit(2),
+            chelis_dag_core::dag::RtDim::Lit(3)
+        ],
         "reshape new_shape did not match the integer Cons-chain head \
          literals; got {new_shape:?}",
     );

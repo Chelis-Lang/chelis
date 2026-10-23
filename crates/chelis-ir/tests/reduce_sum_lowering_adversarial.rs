@@ -11,11 +11,11 @@
 //! type-checker spec divergence pinned in
 //! crates/chelis-types/tests/numeric_dtype_buildout_adversarial.rs.
 
+use chelis_dag_core::verify;
 use chelis_ir::lower::lower_program;
-use chelis_ir::verify;
 use chelis_types::check_ir_program;
 
-fn lower_surf(src: &str) -> Result<chelis_ir::dag::Dag, String> {
+fn lower_surf(src: &str) -> Result<chelis_dag_core::dag::Dag, String> {
     let decls = chelis_surf::parser::parse_str(src, &chelis_syntax_host::NativeStack)
         .map_err(|e| format!("parse: {e:?}"))?;
     let exprs = chelis_macros::expand_program(

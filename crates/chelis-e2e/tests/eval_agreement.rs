@@ -38,7 +38,7 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::process::Command;
 
-use chelis_ir::dag::{Dag, DimInfo, NodeId, RiscOp, ScanDirection, TensorType};
+use chelis_dag_core::dag::{Dag, DimInfo, NodeId, RiscOp, ScanDirection, TensorType};
 use chelis_ir::eval::eval_tensor;
 use chelis_numeric_core::agreement::{
     AgreementError, AgreementOp, AgreementOutcome, ArithmeticWidthStatus,
@@ -407,14 +407,14 @@ fn agreement_operation_identity_is_derived_from_ir() {
         (
             RiscOp::Cumsum {
                 axis: 0,
-                direction: chelis_ir::dag::ScanDirection::Increasing,
+                direction: chelis_dag_core::dag::ScanDirection::Increasing,
             },
             AgreementOp::Exact,
         ),
         (
             RiscOp::Cumsum {
                 axis: 0,
-                direction: chelis_ir::dag::ScanDirection::Decreasing,
+                direction: chelis_dag_core::dag::ScanDirection::Decreasing,
             },
             AgreementOp::Exact,
         ),

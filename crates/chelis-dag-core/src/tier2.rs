@@ -18,6 +18,14 @@
 //! The internal `add_synth` helper applies the rule once per node so we
 //! don't duplicate it across the ~109 `add_node` callsites.
 
+use alloc::borrow::ToOwned;
+use alloc::boxed::Box;
+use alloc::format;
+#[cfg(test)]
+use alloc::string::String;
+use alloc::vec;
+use alloc::vec::Vec;
+
 use chelis_numeric_core::activation::{ActivationGraph, DerivedActivation, lower_activation};
 use chelis_numeric_core::dtype_semantics::{FloatBinOp, FloatUnOp};
 use chelis_numeric_core::prim::Prim;
@@ -114,7 +122,7 @@ impl DagActivationGraph<'_> {
 impl ActivationGraph for DagActivationGraph<'_> {
     type Value = NodeId;
     type Predicate = NodeId;
-    type Error = std::convert::Infallible;
+    type Error = core::convert::Infallible;
 
     fn operand_prim(&self) -> Prim {
         self.ty.precision

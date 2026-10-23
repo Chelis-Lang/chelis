@@ -8,8 +8,8 @@
 //! know that order and must reject the pattern rather than bind written
 //! order.
 
+use chelis_dag_core::dag::{Dag, RiscOp};
 use chelis_deep::ast::Expr;
-use chelis_ir::dag::{Dag, RiscOp};
 use chelis_ir::lower::{
     SubexprLoweringContext, try_lower_subexpr_program, try_lower_subexpr_program_with_context,
 };

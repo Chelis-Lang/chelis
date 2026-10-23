@@ -10,8 +10,8 @@
 //! must apply the format-string sanitizer.
 
 mod support;
-use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
-use chelis_ir::load_store_name::LoadStoreName;
+use chelis_dag_core::dag::{Dag, DimInfo, RiscOp, TensorType};
+use chelis_dag_core::load_store_name::LoadStoreName;
 use chelis_numeric_core::prim::Prim;
 use support::codegen_hip;
 

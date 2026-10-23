@@ -14,7 +14,7 @@
 
 mod support;
 
-use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
+use chelis_dag_core::dag::{Dag, DimInfo, RiscOp, TensorType};
 use chelis_numeric_core::prim::Prim;
 use chelis_types::unsupported::Unsupported;
 
@@ -32,8 +32,8 @@ fn lowered(source: &str) -> Dag {
     let checked = chelis_types::check_linearity(&checked).expect("linearity");
     let dag = chelis_ir::host::lower_named_tensor_entry_dag(&checked, "main")
         .expect("`main` lowers as a tensor entry");
-    let dag = chelis_ir::optimize::dead_code_eliminate(&dag);
-    chelis_ir::fuse::fuse(&chelis_ir::specialize::specialize_for_blas(&dag))
+    let dag = chelis_dag_core::optimize::dead_code_eliminate(&dag);
+    chelis_dag_core::fuse::fuse(&chelis_ir::specialize::specialize_for_blas(&dag))
 }
 
 fn emit(source: &str) -> Result<String, Unsupported> {
@@ -409,7 +409,7 @@ fn an_untaken_arms_reduction_check_is_refused_and_its_unconditional_twin_compile
             .nodes()
             .iter()
             .filter(|node| seeds.is_activation_gated(node))
-            .map(|node| chelis_ir::grad::risc_op_name(&node.op))
+            .map(|node| chelis_dag_core::grad::risc_op_name(&node.op))
             .collect::<Vec<_>>();
         assert!(
             gated
@@ -463,7 +463,7 @@ fn an_untaken_arms_restamp_is_refused() {
                 precision: Prim::Bool,
             },
         );
-        let under_a = chelis_ir::dag::Owner::new(decl, Some(a));
+        let under_a = chelis_dag_core::dag::Owner::new(decl, Some(a));
         let operands = if matches!(op, RiscOp::Neg) {
             vec![x]
         } else {

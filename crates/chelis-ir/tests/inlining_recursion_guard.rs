@@ -38,8 +38,8 @@
 
 use chelis_unord::UnordMap;
 
+use chelis_dag_core::dag::{DimInfo, NodeId, TensorType};
 use chelis_deep::Expr;
-use chelis_ir::dag::{DimInfo, NodeId, TensorType};
 use chelis_ir::eval::{TensorValue, eval_tensor_roots_with_strict};
 use chelis_ir::lower::{lower_subexpr_program, try_lower_subexpr_program};
 use chelis_numeric_core::prim::Prim;

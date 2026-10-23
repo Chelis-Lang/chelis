@@ -26,6 +26,7 @@ REQUIRED_CRATES = (
     "`chelis-effects`",
     "`chelis-ir`",
     "`chelis-unord`",
+    "`chelis-dag-core`",
 )
 
 
@@ -110,10 +111,14 @@ def false_no_std_claim(line: str) -> bool:
 
 def validate_document(document: InventoryDocument) -> None:
     for line in document.lines:
-        if false_no_std_claim(line):
-            raise DocumentationBoundaryError(
-                f"false current portability claim: {line.strip()}"
+        for statement in re.split(r"(?<=[.!?])\s+", line):
+            pipeline_subject = "chelis-pipeline-core" in statement or re.search(
+                r"\bthe core\b", statement, re.IGNORECASE
             )
+            if pipeline_subject and false_no_std_claim(statement):
+                raise DocumentationBoundaryError(
+                    f"false current portability claim: {statement.strip()}"
+                )
 
     if REQUIRED_STATEMENT not in document.text:
         raise DocumentationBoundaryError(

@@ -1,6 +1,6 @@
 //! #2530/#2531: every DAG input is validated at entry in ABI slot order.
 
-use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
+use chelis_dag_core::dag::{Dag, DimInfo, RiscOp, TensorType};
 use chelis_ir::eval::{TensorValue, eval_tensor_roots_with_strict, eval_tensor_with_strict};
 use chelis_numeric_core::dtype_semantics::{RawTensor, finalize_tensor};
 use chelis_numeric_core::prim::Prim;
@@ -17,11 +17,11 @@ fn typed(shape: Vec<usize>, dtype: Prim) -> TensorValue {
 
 fn load(
     dag: &mut Dag,
-    decl: chelis_ir::dag::DeclId,
+    decl: chelis_dag_core::dag::DeclId,
     name: &str,
     dims: Vec<DimInfo>,
     dtype: Prim,
-) -> chelis_ir::dag::NodeId {
+) -> chelis_dag_core::dag::NodeId {
     dag.add_node(
         decl,
         RiscOp::Load { name: name.into() },
@@ -188,7 +188,7 @@ fn unverified_conflicting_live_loads_cannot_reuse_one_admitted_dtype() {
     dag.add_root(first);
     dag.add_root(second);
     assert!(
-        chelis_ir::verify::verify(&dag)
+        chelis_dag_core::verify::verify(&dag)
             .iter()
             .any(|error| error.contains("parameter `x` of `test` has inconsistent tensor types"))
     );

@@ -1,6 +1,6 @@
 //! Private lowering ownership: numerical root order, independent of API repacking.
+use chelis_dag_core::dag::{DimInfo, TensorType};
 use chelis_ir::{
-    dag::{DimInfo, TensorType},
     eval::{TensorValue, eval_tensor_roots_with_strict},
     lower::try_lower_subexpr_program,
 };

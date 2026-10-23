@@ -15,10 +15,10 @@
 //! `chelis-cli`'s `issue_368_runtime_symbolic_window_grad_is_half_everywhere`.
 //! These fixtures pin the lowering property that test depends on, directly.
 
+use chelis_dag_core::dag::{Dag, DimInfo, NodeId, RiscOp, TensorType};
+use chelis_dag_core::grad::grad_dag_checked;
 use chelis_deep::Expr;
-use chelis_ir::axis_sources::check_axis_sources;
-use chelis_ir::dag::{Dag, DimInfo, NodeId, RiscOp, TensorType};
-use chelis_ir::grad::grad_dag_checked;
+use chelis_ir::axis_admission::check_axis_sources;
 use chelis_ir::lower::lower_subexpr_program;
 use chelis_numeric_core::prim::Prim;
 use chelis_types::unsupported::Stage;

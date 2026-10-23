@@ -1,7 +1,7 @@
 //! Public capability admission/rejection coverage for #1284 target cells.
 
 use chelis_compiler_api::compiler::{reject_unsupported_hip_ops, reject_unsupported_metal_ops};
-use chelis_ir::dag::{ComparisonKind, Dag, DimInfo, LogicalKind, RiscOp, TensorType};
+use chelis_dag_core::dag::{ComparisonKind, Dag, DimInfo, LogicalKind, RiscOp, TensorType};
 use chelis_numeric_core::prim::Prim;
 use chelis_vocab::DiagnosticKind;
 

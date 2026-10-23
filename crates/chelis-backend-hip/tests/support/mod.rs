@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
 use chelis_backend_hip::HipCodegenResult;
-use chelis_ir::dag::Dag;
+use chelis_dag_core::dag::Dag;
 use chelis_types::unsupported::Unsupported;
 
 pub fn codegen_hip(dag: &Dag, name: &str) -> Result<HipCodegenResult, Unsupported> {

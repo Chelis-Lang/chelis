@@ -11,9 +11,11 @@
 mod common;
 mod support;
 
-use chelis_ir::dag::{Dag, DimInfo, NodeId, ReduceWindowKind, RiscOp, RtAxis, RtDim, TensorType};
+use chelis_dag_core::dag::{
+    Dag, DimInfo, NodeId, ReduceWindowKind, RiscOp, RtAxis, RtDim, TensorType,
+};
+use chelis_dag_core::tier2;
 use chelis_ir::eval::{TensorValue, eval_tensor};
-use chelis_ir::tier2;
 use chelis_numeric_core::dtype_semantics::{RawTensor, finalize_tensor};
 use chelis_numeric_core::dtype_semantics::{StorageView, TensorStorage};
 use chelis_numeric_core::prim::Prim;
@@ -328,7 +330,7 @@ fn assert_flat_allocations(label: &str, counts: &[usize]) {
     );
 }
 
-fn load(dag: &mut Dag, owner: chelis_ir::dag::DeclId, name: &str, ty: TensorType) -> NodeId {
+fn load(dag: &mut Dag, owner: chelis_dag_core::dag::DeclId, name: &str, ty: TensorType) -> NodeId {
     dag.add_node(owner, RiscOp::Load { name: name.into() }, vec![], ty, None)
 }
 
@@ -417,7 +419,7 @@ fn materialized_sums_match_the_evaluator_and_allocate_per_kernel_not_per_output(
             None,
         );
         dag.add_root(sum);
-        let dag = chelis_ir::fuse::fuse(&dag);
+        let dag = chelis_dag_core::fuse::fuse(&dag);
         let sum = dag.roots()[0];
         let fused = support::codegen(&dag, "fused").unwrap().c_source;
         assert!(

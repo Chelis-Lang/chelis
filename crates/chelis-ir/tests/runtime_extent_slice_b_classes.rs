@@ -37,10 +37,10 @@
 //! traversal by binding name, which is exactly what the legacy grouping did.
 //! Several tests below discriminate the slot key from name order.
 
-use chelis_ir::axis_sources::{
+use chelis_dag_core::axis_sources::{
     AxisSource, DimClaim, GuardPlacement, RuntimeDimClass, derive_runtime_dim_classes,
 };
-use chelis_ir::dag::{Dag, DimInfo, NodeId, RiscOp, RtAxis, RtDim, TensorType};
+use chelis_dag_core::dag::{Dag, DimInfo, NodeId, RiscOp, RtAxis, RtDim, TensorType};
 use chelis_numeric_core::prim::Prim;
 
 fn ty(dims: Vec<DimInfo>, precision: Prim) -> TensorType {
@@ -51,7 +51,12 @@ fn named(name: &str) -> DimInfo {
     DimInfo::Named(name.into(), None)
 }
 
-fn f32_load(dag: &mut Dag, decl: chelis_ir::dag::DeclId, name: &str, dims: Vec<DimInfo>) -> NodeId {
+fn f32_load(
+    dag: &mut Dag,
+    decl: chelis_dag_core::dag::DeclId,
+    name: &str,
+    dims: Vec<DimInfo>,
+) -> NodeId {
     dag.add_node(
         decl,
         RiscOp::Load { name: name.into() },
@@ -419,7 +424,7 @@ fn a_member_whose_rtdim_slot_is_absent_is_a_typed_receipt_not_a_panic() {
     );
 
     // And the malformed slot is reported where the rule puts it.
-    let receipt = chelis_ir::axis_sources::check_axis_sources(
+    let receipt = chelis_ir::axis_admission::check_axis_sources(
         &dag,
         chelis_types::unsupported::Stage::Runtime,
     )
@@ -838,7 +843,7 @@ fn classes_survive_bind_symbolic_dims_unchanged() {
     );
     dag.add_root(joined);
     let before = derive_runtime_dim_classes(&dag);
-    let bound = chelis_ir::dag::bind_symbolic_dims(
+    let bound = chelis_dag_core::dag::bind_symbolic_dims(
         &dag,
         &chelis_unord::UnordMap::from([("n".to_string(), 4usize)]),
         &chelis_unord::UnordSet::new(),
@@ -999,7 +1004,7 @@ fn assert_rebuild_preserves_classes(
 /// Two witnesses of `nn` joined into one rooted result: the smallest graph
 /// that derives a class at all. Each pass fixture below extends it with the
 /// structure that makes that pass rewrite.
-fn two_witness_base(dag: &mut Dag, decl: chelis_ir::dag::DeclId) -> (NodeId, NodeId, NodeId) {
+fn two_witness_base(dag: &mut Dag, decl: chelis_dag_core::dag::DeclId) -> (NodeId, NodeId, NodeId) {
     let x = f32_load(dag, decl, "x", vec![named("nn")]);
     let y = f32_load(dag, decl, "y", vec![named("nn")]);
     let joined = dag.add_node(
@@ -1071,7 +1076,7 @@ fn every_rebuild_pass_preserves_the_derived_classes() {
         "the base fixture must derive its claim before any pass runs",
     );
 
-    let bound = chelis_ir::dag::bind_symbolic_dims(
+    let bound = chelis_dag_core::dag::bind_symbolic_dims(
         &dag,
         &chelis_unord::UnordMap::from([("nn".to_string(), 4usize)]),
         &chelis_unord::UnordSet::new(),
@@ -1125,7 +1130,7 @@ fn every_rebuild_pass_preserves_the_derived_classes() {
     );
     folding.add_root(scaled);
     let mut folded = folding.clone();
-    chelis_ir::optimize::constant_fold(&mut folded);
+    chelis_dag_core::optimize::constant_fold(&mut folded);
     assert_rebuild_preserves_classes("constant_fold", &folding, &folded, "y", "nn", 0, &[]);
     assert_eq!(
         members_of(
@@ -1151,7 +1156,7 @@ fn every_rebuild_pass_preserves_the_derived_classes() {
         ty(vec![named("nn")], Prim::F32),
         None,
     );
-    let live = chelis_ir::optimize::dead_code_eliminate(&with_dead);
+    let live = chelis_dag_core::optimize::dead_code_eliminate(&with_dead);
     assert_rebuild_preserves_classes("dead_code_eliminate", &with_dead, &live, "y", "nn", 0, &[]);
 
     // `common_subexpr_eliminate` needs two structurally identical nodes.
@@ -1180,7 +1185,7 @@ fn every_rebuild_pass_preserves_the_derived_classes() {
         None,
     );
     with_duplicate.add_root(combined);
-    let deduplicated = chelis_ir::optimize::common_subexpr_eliminate(&with_duplicate);
+    let deduplicated = chelis_dag_core::optimize::common_subexpr_eliminate(&with_duplicate);
     assert_rebuild_preserves_classes(
         "common_subexpr_eliminate",
         &with_duplicate,
@@ -1204,7 +1209,7 @@ fn every_rebuild_pass_preserves_the_derived_classes() {
         None,
     );
     chained.add_root(exponentiated);
-    let fused = chelis_ir::fuse::fuse(&chained);
+    let fused = chelis_dag_core::fuse::fuse(&chained);
     assert_rebuild_preserves_classes("fuse", &chained, &fused, "y", "nn", 0, &[]);
 
     // `specialize_for_blas` needs tier2 lowering's `Sum(Mul(Expand, Expand))`
@@ -1369,7 +1374,7 @@ fn a_const_named_axis_reports_the_claim_supplied_source_kind() {
         None,
     );
     assert_eq!(
-        chelis_ir::axis_sources::output_axis_sources(&dag, fill),
+        chelis_dag_core::axis_sources::output_axis_sources(&dag, fill),
         vec![AxisSource::ClassSupplied { op: fill, axis: 0 }],
     );
 }
@@ -1399,7 +1404,7 @@ fn symbolic_params_follow_assigned_slots_not_binding_names() {
     let x = f32_load(&mut dag, decl, "x", vec![named("n"), named("m")]);
     dag.add_root(x);
     assert_eq!(
-        chelis_ir::dag::symbolic_params(&dag),
+        chelis_dag_core::dag::symbolic_params(&dag),
         vec!["n".to_string(), "m".to_string()],
         "`n` is axis 0 of the only input, so it comes first; name order would \
          report `m` first, which is the traversal section 4.7 forbids",
@@ -1521,7 +1526,7 @@ fn a_claim_on_a_dead_local_intermediate_owes_no_guard() {
     );
     // Only `x` is a root; the ascribed intermediate reaches nothing.
     dag.add_root(x);
-    let pruned = chelis_ir::optimize::dead_code_eliminate(&dag);
+    let pruned = chelis_dag_core::optimize::dead_code_eliminate(&dag);
     let classes = derive_runtime_dim_classes(&pruned);
     assert!(
         classes.is_empty(),
@@ -1564,7 +1569,7 @@ fn the_same_claim_on_a_live_local_intermediate_keeps_its_guard() {
         None,
     );
     dag.add_root(joined);
-    let pruned = chelis_ir::optimize::dead_code_eliminate(&dag);
+    let pruned = chelis_dag_core::optimize::dead_code_eliminate(&dag);
     let classes = derive_runtime_dim_classes(&pruned);
     assert_eq!(
         members_of(&classes, DimClaim::Name("n".into())).len(),
@@ -1728,7 +1733,7 @@ fn a_cast_of_computed_arithmetic_takes_the_arithmetics_placement() {
 
 /// The guard sites of `dag`, as `(node, axis, claim, op)`.
 fn guard_sites(dag: &Dag) -> Vec<(usize, usize, String, &'static str)> {
-    chelis_ir::axis_sources::local_dim_guard_sites(dag)
+    chelis_dag_core::axis_sources::local_dim_guard_sites(dag)
         .unwrap()
         .into_iter()
         .map(|((node, axis), claim)| (node, axis, claim.claim, claim.op))
@@ -1875,7 +1880,7 @@ fn an_expand_sized_from_a_computed_tensor_is_a_local_guard_site() {
     // The carrier is no longer readable through a public helper: the derivation
     // states it in the site, which is the point of the unification. So the
     // assertion reads the site's own read instruction.
-    let observed = chelis_ir::axis_sources::local_dim_guard_sites(&dag)
+    let observed = chelis_dag_core::axis_sources::local_dim_guard_sites(&dag)
         .unwrap()
         .into_iter()
         .find(|((node, axis), _)| *node == inserted.0 && *axis == 0)
@@ -1884,7 +1889,7 @@ fn an_expand_sized_from_a_computed_tensor_is_a_local_guard_site() {
     assert!(
         matches!(
             observed,
-            chelis_ir::axis_sources::LocalGuardObservation::Carrier(RtDim::InputAxis { .. })
+            chelis_dag_core::axis_sources::LocalGuardObservation::Carrier(RtDim::InputAxis { .. })
         ),
         "and the derivation hands both lanes the carrier to evaluate, not a \
          realized shape read: {observed:?}",
@@ -1947,7 +1952,7 @@ fn every_local_class_site_carries_the_carrier_its_source_names() {
         ty(vec![named("n")], Prim::F32),
         None,
     );
-    let sites = chelis_ir::axis_sources::local_dim_guard_sites(&dag).unwrap();
+    let sites = chelis_dag_core::axis_sources::local_dim_guard_sites(&dag).unwrap();
     assert!(
         !sites.is_empty(),
         "the fixture must produce sites for the property to say anything",
@@ -1955,21 +1960,23 @@ fn every_local_class_site_carries_the_carrier_its_source_names() {
     let _ = expanded;
     for ((node, axis), claim) in sites {
         match claim.observed {
-            chelis_ir::axis_sources::LocalGuardObservation::Carrier(_) => {}
-            chelis_ir::axis_sources::LocalGuardObservation::RealizedExtent
-            | chelis_ir::axis_sources::LocalGuardObservation::ComputedExtent(_) => {
+            chelis_dag_core::axis_sources::LocalGuardObservation::Carrier(_) => {}
+            chelis_dag_core::axis_sources::LocalGuardObservation::RealizedExtent
+            | chelis_dag_core::axis_sources::LocalGuardObservation::ComputedExtent(_) => {
                 // A unit-extent site legitimately has no carrier, and an
                 // op-computed site legitimately computes its own; this fixture
                 // builds neither, so reaching here means the class loop took
                 // the wrong branch.
                 panic!("node {node} axis {axis} is a class site with no carrier");
             }
-            chelis_ir::axis_sources::LocalGuardObservation::SameShapeAgreement(_) => {
+            chelis_dag_core::axis_sources::LocalGuardObservation::SameShapeAgreement(_) => {
                 panic!(
                     "node {node} axis {axis} is a producer-owned result site, not a local class site"
                 );
             }
-            chelis_ir::axis_sources::LocalGuardObservation::MalformedSameShapeAgreement(reason) => {
+            chelis_dag_core::axis_sources::LocalGuardObservation::MalformedSameShapeAgreement(
+                reason,
+            ) => {
                 panic!("node {node} axis {axis} has a malformed same-shape relation: {reason}");
             }
         }
@@ -2022,7 +2029,7 @@ fn a_resolved_canonical_traps_on_eval_against_its_literal() {
         ty(vec![named("n")], Prim::F32),
         None,
     );
-    let sites = chelis_ir::axis_sources::local_dim_guard_sites(&dag).unwrap();
+    let sites = chelis_dag_core::axis_sources::local_dim_guard_sites(&dag).unwrap();
     assert_eq!(
         sites
             .iter()
@@ -2031,7 +2038,7 @@ fn a_resolved_canonical_traps_on_eval_against_its_literal() {
         vec![(
             reshaped.0,
             0,
-            chelis_ir::axis_sources::CanonicalExtent::Resolved(4)
+            chelis_dag_core::axis_sources::CanonicalExtent::Resolved(4)
         )],
         "the checker resolved the claim, so the canonical value is that literal",
     );

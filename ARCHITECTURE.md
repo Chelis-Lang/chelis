@@ -34,9 +34,9 @@ them through the compiler API for desugaring and macro expansion. For
 `chelis reef build`, Reef expands linked declarations and uses the semantic
 core directly.
 
-`chelis-ir` owns the compact RISC DAG, transforms, verification, and the local
-evaluator. Backend preparation verifies the DAG and applies target-specific
-checks before emission.
+`chelis-dag-core` owns graph models, structural verification, and graph-only transforms.
+`chelis-ir` retains source lowering, evaluation, host state, and target admission.
+Backend preparation verifies the DAG and applies target-specific checks before emission.
 
 ## Execution and build paths
 
@@ -63,7 +63,8 @@ builds; [GPU backends](docs/gpu_backends.md) covers the HIP and Metal targets.
 | Numeric values and policy | `chelis-numeric-core`, `chelis-crmath`, `chelis-vocab` |
 | Type models and unification | `chelis-type-core` |
 | Semantic pipeline | `chelis-types`, `chelis-effects`, `chelis-pipeline-core`, `chelis-compiler-api` |
-| DAG, transforms, evaluation | `chelis-ir` |
+| DAG models and graph transforms | `chelis-dag-core` |
+| Source lowering and evaluation | `chelis-ir` |
 | Native emission and runtime | `chelis-backend-c`, `chelis-backend-hip`, `chelis-backend-metal`, `chelis-runtime` |
 | User entrypoints and packages | `chelis-cli`, `chelis-reef`, `chelisup` |
 
@@ -223,6 +224,38 @@ The runtime retains its C ABI and calls the shared IEEE conversions through priv
 Run `.venv/bin/python scripts/numeric_core_oracle.py` for target consumers, immutable-base parity, allocation checks, and numeric authority checks.
 The [acceptance gate](docs/manual_gates.md#numeric-core-portability) states prerequisites and evidence.
 Target compilation does not prove device execution, allocator capacity, or whole-pipeline portability.
+
+## Portable graph models and transforms
+
+`chelis-dag-core` uses unconditional `no_std` with `alloc`.
+It owns graph models, checked names, structural verification, axis-source derivation, Tier-2 decomposition, reverse AD, fusion, pure optimization, spans, and graph-only ownership.
+Graph consumers import these modules directly from `chelis_dag_core`.
+The old IR modules and root graph exports do not exist.
+Declaration owners, shape-only edges, roots, remaps, reuse metadata, numeric payloads, and valid wire data retain their current contracts.
+
+The embedding supplies an allocator and a stack policy.
+Public binding and remap maps retain `chelis_unord`.
+Hash-based graph lookups use fixed portable hashes.
+Adjoint storage is sparse.
+Ordered outputs use node order, root order, or explicit sorted exits.
+
+Numeric carriers and operations come directly from `chelis-numeric-core`.
+Its `bitwise` and `key_admission` modules also own the shared pure operation identities.
+The existing f64-image folds use `dtype_semantics::{fold_wide_unary, fold_wide_binary}` with closed operation types, sealed operands, and an explicit destination dtype.
+The numeric owner retains their exact-integer image guard, refusal behavior, NaN payloads, and finalization.
+
+Host lowering converts source linearity into graph reuse metadata before ownership normalization.
+`chelis_ir::axis_admission` creates host diagnostics with the selected stage.
+`chelis_ir::device_admission` retains target fences and Metal precision admission.
+`chelis_ir::ordered_layout` applies existing ABI layout checks to portable contraction candidates.
+Evaluation, source conversion, stack growth, host state, backend selection, and production pass order stay outside the portable crate.
+
+Run `uv run --managed-python --python 3.11 --no-project python scripts/dag_core_oracle.py` for the complete acceptance command.
+The [acceptance gate](docs/manual_gates.md#dag-core-portability) states prerequisites and evidence.
+The oracle uses immutable source revision `3ca99faa7a46158eb6a0d90c2c812a7e3a5f44c1`.
+Target compilation proves neither device execution nor allocator capacity.
+The numbered language, transform, span, and serialization specifications retain authority.
+
 
 
 

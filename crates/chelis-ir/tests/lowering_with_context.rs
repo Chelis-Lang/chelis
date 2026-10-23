@@ -11,8 +11,8 @@
 
 use chelis_unord::UnordMap;
 
+use chelis_dag_core::dag::{Dag, NodeId};
 use chelis_deep::Expr;
-use chelis_ir::dag::{Dag, NodeId};
 use chelis_ir::eval::{TensorValue, eval_tensor_roots_with};
 use chelis_ir::{
     LoweredLibrary, lower_program, lower_program_to_library, lower_program_with_context,
@@ -80,7 +80,7 @@ fn eval_named_roots(
     // and pick out matching names by matching the Store name OR (for non-Store
     // roots) by re-running the DAG and indexing under the bare def name in
     // root-document-order.
-    use chelis_ir::dag::RiscOp;
+    use chelis_dag_core::dag::RiscOp;
 
     let roots = dag.roots();
     let values = eval_tensor_roots_with(dag, roots, |name| inputs.get(name).cloned())

@@ -1,6 +1,6 @@
 //! [05-OP-54]: the integer sequence source is exact, runtime-sized and has
 //! no cotangent; malformed arity/dtype/rank cannot reach execution.
-use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
+use chelis_dag_core::dag::{Dag, DimInfo, RiscOp, TensorType};
 use chelis_ir::eval::{TensorValue, eval_tensor_roots_with_strict};
 use chelis_numeric_core::dtype_semantics::{RawTensor, finalize_tensor};
 use chelis_numeric_core::prim::Prim;
@@ -52,7 +52,7 @@ fn program_with_activation(active: Option<bool>) -> Dag {
         )
     });
     let output = dag.add_node(
-        chelis_ir::dag::Owner::new(owner, activation),
+        chelis_dag_core::dag::Owner::new(owner, activation),
         RiscOp::Iota,
         vec![start, end],
         TensorType {
@@ -68,7 +68,7 @@ fn program_with_activation(active: Option<bool>) -> Dag {
 #[test]
 fn runtime_iota_keeps_exact_i64_values_and_independent_lengths() {
     let dag = program();
-    assert!(chelis_ir::verify::verify(&dag).is_empty());
+    assert!(chelis_dag_core::verify::verify(&dag).is_empty());
     let root = dag.roots()[0];
     for (start, end, expected) in [
         (0, 3, vec![0, 1, 2]),
@@ -124,7 +124,7 @@ fn runtime_iota_rejects_malformed_integer_sources() {
         let mut dag = program();
         let input = dag.nodes()[0].clone();
         dag.replace_node(input.id, input.op, input.inputs, malformed);
-        assert!(!chelis_ir::verify::verify(&dag).is_empty());
+        assert!(!chelis_dag_core::verify::verify(&dag).is_empty());
     }
 }
 
@@ -153,12 +153,12 @@ fn runtime_iota_rejects_a_false_result_extent_claim() {
 
 #[test]
 fn runtime_iota_rejects_missing_endpoints_and_wrong_result_dtype() {
-    for inputs in [vec![], vec![chelis_ir::dag::NodeId(0)]] {
+    for inputs in [vec![], vec![chelis_dag_core::dag::NodeId(0)]] {
         let mut dag = program();
         let root = dag.roots()[0];
         let output = dag.get(root).unwrap().clone();
         dag.replace_node(root, output.op, inputs, output.output_type);
-        assert!(!chelis_ir::verify::verify(&dag).is_empty());
+        assert!(!chelis_dag_core::verify::verify(&dag).is_empty());
     }
     let mut dag = program();
     let root = dag.roots()[0];
@@ -172,7 +172,7 @@ fn runtime_iota_rejects_missing_endpoints_and_wrong_result_dtype() {
             precision: Prim::F32,
         },
     );
-    assert!(!chelis_ir::verify::verify(&dag).is_empty());
+    assert!(!chelis_dag_core::verify::verify(&dag).is_empty());
 }
 
 #[test]
@@ -203,7 +203,7 @@ fn anonymous_batch_comparisons_keep_physical_input_authority() {
     );
     let comparison = scalar.add_node(
         owner,
-        RiscOp::Compare(chelis_ir::dag::ComparisonKind::Eq),
+        RiscOp::Compare(chelis_dag_core::dag::ComparisonKind::Eq),
         vec![value, selected],
         TensorType {
             dims: vec![],
@@ -219,13 +219,13 @@ fn anonymous_batch_comparisons_keep_physical_input_authority() {
     )
     .unwrap();
     assert!(
-        chelis_ir::verify::verify(&batched).is_empty(),
+        chelis_dag_core::verify::verify(&batched).is_empty(),
         "{:?}",
-        chelis_ir::verify::verify(&batched)
+        chelis_dag_core::verify::verify(&batched)
     );
     let root = batched.roots()[0];
     batched.node_mut(root).unwrap().shape_deps.clear();
-    assert!(!chelis_ir::verify::verify(&batched).is_empty());
+    assert!(!chelis_dag_core::verify::verify(&batched).is_empty());
 }
 
 #[test]
@@ -235,7 +235,7 @@ fn runtime_iota_rejects_a_per_row_activation() {
     let active = dag.get(root).unwrap().owner.activation.unwrap();
     dag.node_mut(active).unwrap().output_type.dims = vec![DimInfo::Lit(2)];
     assert!(
-        chelis_ir::verify::verify(&dag)
+        chelis_dag_core::verify::verify(&dag)
             .iter()
             .any(|error| error.contains("requires scalar activation"))
     );
@@ -300,7 +300,7 @@ fn ordered_cotangent_tree_rounds_at_each_active_float_width() {
         (Prim::F64, 1.0e20, 3.0),
     ] {
         let dag = ordered_sum_program(precision, vec![1], &[1]);
-        assert!(chelis_ir::verify::verify(&dag).is_empty());
+        assert!(chelis_dag_core::verify::verify(&dag).is_empty());
         // spec/06 §2.4 has no base leaf: (large + -large) + small = small,
         // and no contribution is exact +0.
         for (data, expected) in [(vec![large, -large, small], small), (vec![], 0.0)] {
@@ -342,7 +342,7 @@ fn ordered_cotangent_rejects_malformed_groups_and_dtype_rank() {
         (Prim::Int64, vec![1], vec![1]),
     ] {
         let dag = ordered_sum_program(precision, groups, &ranks);
-        assert!(!chelis_ir::verify::verify(&dag).is_empty());
+        assert!(!chelis_dag_core::verify::verify(&dag).is_empty());
     }
     let dag = ordered_sum_program(Prim::F32, vec![2], &[1, 1]);
     let error = eval_tensor_roots_with_strict(&dag, dag.roots(), |name| {
@@ -352,7 +352,8 @@ fn ordered_cotangent_rejects_malformed_groups_and_dtype_rank() {
     .unwrap_err();
     assert!(error.contains("different lengths"), "{error}");
     assert!(
-        chelis_ir::grad::grad_dag(&dag, dag.roots()[0], &[chelis_ir::dag::NodeId(0)]).is_none(),
+        chelis_dag_core::grad::grad_dag(&dag, dag.roots()[0], &[chelis_dag_core::dag::NodeId(0)])
+            .is_none(),
         "higher-order accumulation must not fall back to ordinary Sum"
     );
     let error = chelis_ir::vmap::vectorize_axis0(&dag, DimInfo::Lit(2)).unwrap_err();
@@ -394,7 +395,7 @@ fn list_capture_has_an_actual_axis_and_rejects_a_false_claim() {
         None,
     );
     dag.add_root(root);
-    assert!(chelis_ir::verify::verify(&dag).is_empty());
+    assert!(chelis_dag_core::verify::verify(&dag).is_empty());
     for count in [0, 2, 3, 4] {
         let result = eval_tensor_roots_with_strict(&dag, dag.roots(), |name| match name {
             "s" => Some(TensorValue::scalar(2.0)),
@@ -416,11 +417,11 @@ fn list_capture_has_an_actual_axis_and_rejects_a_false_claim() {
     for inputs in [vec![source], vec![carrier, source]] {
         let mut malformed = dag.clone();
         malformed.node_mut(root).unwrap().inputs = inputs;
-        assert!(!chelis_ir::verify::verify(&malformed).is_empty());
+        assert!(!chelis_dag_core::verify::verify(&malformed).is_empty());
     }
     let mut malformed = dag.clone();
     malformed.node_mut(root).unwrap().op = RiscOp::ListMapCapture { first: false };
-    assert!(!chelis_ir::verify::verify(&malformed).is_empty());
+    assert!(!chelis_dag_core::verify::verify(&malformed).is_empty());
     let second = dag.add_node(
         owner,
         RiscOp::ListMapCapture { first: true },
@@ -429,7 +430,7 @@ fn list_capture_has_an_actual_axis_and_rejects_a_false_claim() {
         None,
     );
     dag.add_root(second);
-    let optimized = chelis_ir::optimize::common_subexpr_eliminate(&dag);
+    let optimized = chelis_dag_core::optimize::common_subexpr_eliminate(&dag);
     assert_eq!(
         optimized
             .nodes()
@@ -452,7 +453,7 @@ fn list_capture_has_an_actual_axis_and_rejects_a_false_claim() {
         },
         None,
     );
-    let gradient = chelis_ir::grad::grad_dag(&dag, loss, &[root, source]).unwrap();
+    let gradient = chelis_dag_core::grad::grad_dag(&dag, loss, &[root, source]).unwrap();
     let values =
         eval_tensor_roots_with_strict(&gradient.dag, gradient.dag.roots(), |name| match name {
             "s" => Some(TensorValue::scalar(2.0)),

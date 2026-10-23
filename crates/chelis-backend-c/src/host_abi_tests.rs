@@ -6,7 +6,8 @@
 //! position-restricted constructor and have no standalone/opaque C spelling.
 
 use crate::host_abi::HostAbiType;
-use chelis_ir::{ConcreteHostType, DimInfo, TensorType};
+use chelis_dag_core::{DimInfo, TensorType};
+use chelis_ir::ConcreteHostType;
 use chelis_numeric_core::prim::Prim;
 use chelis_types::unsupported::{RejectionAuthorityKind, Stage, Unsupported, UnsupportedKind};
 
@@ -339,7 +340,7 @@ fn public_backend_emission_edges_cannot_borrow_raw_payloads() {
         }) {
             assert!(
                 !signature.contains("&Dag")
-                    && !signature.contains("&chelis_ir::dag::Dag")
+                    && !signature.contains("&chelis_dag_core::dag::Dag")
                     && !signature.contains("&ConcreteHostProgram")
                     && !signature.contains("&chelis_ir::host::ConcreteHostProgram"),
                 "{backend} exposes a public borrowed raw emission payload:\n{signature}"
@@ -888,14 +889,14 @@ fn abi_projection_preserves_exact_verified_site_and_nested_dag_cursors() {
         .host
         .expect("aggregate tensor fixture uses host lane");
     let helper_ty = TensorType {
-        dims: vec![chelis_ir::DimInfo::Lit(2)],
+        dims: vec![chelis_dag_core::DimInfo::Lit(2)],
         precision: Prim::F32,
     };
-    let mut helper_dag = chelis_ir::Dag::new();
+    let mut helper_dag = chelis_dag_core::Dag::new();
     let helper_dag_decl = helper_dag.declare("test");
     let helper_root = helper_dag.add_node(
         helper_dag_decl,
-        chelis_ir::RiscOp::Load { name: "x".into() },
+        chelis_dag_core::RiscOp::Load { name: "x".into() },
         Vec::new(),
         helper_ty.clone(),
         None,

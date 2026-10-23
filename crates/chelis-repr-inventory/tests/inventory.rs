@@ -80,6 +80,7 @@ fn every_registered_prefix_classifies() {
         "crates/chelis-runtime/src/lib.rs",
         "crates/chelis-vocab/src/lib.rs",
         "crates/chelis-ir/src/dag.rs",
+        "crates/chelis-dag-core/src/dag.rs",
         "crates/chelis-python/src/lib.rs",
         "crates/chelis-backend-metal/src/emit.rs",
     ] {
@@ -89,6 +90,26 @@ fn every_registered_prefix_classifies() {
         );
     }
     assert!(SourceClass::for_path("crates/chelis-surf/src/lib.rs").is_none());
+}
+
+#[test]
+fn portable_graph_sources_keep_the_ir_seam_classification() {
+    let path = "crates/chelis-dag-core/src/dag.rs";
+    assert_eq!(SourceClass::for_path(path), Some(SourceClass::Ir));
+    assert_eq!(
+        identities(
+            path,
+            "fn fold(a: usize, b: usize) -> usize { a.saturating_add(b) }"
+        ),
+        vec![("saturating-capacity-fold".into(), "fold".into())],
+    );
+    assert_eq!(
+        identities(
+            path,
+            "fn product(a: usize, b: usize) -> Option<usize> { a.checked_mul(b) }"
+        ),
+        vec![("normalized-key-arithmetic".into(), "product".into())],
+    );
 }
 
 #[test]

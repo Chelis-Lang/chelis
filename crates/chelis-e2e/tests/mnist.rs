@@ -1,7 +1,7 @@
+use chelis_dag_core::verify;
 use chelis_e2e::data::*;
 use chelis_e2e::train::*;
 use chelis_ir::grad_then_fuse;
-use chelis_ir::verify;
 
 #[test]
 #[ignore = "manual gate: MNIST e2e smoke exceeds the default inner-loop budget"]

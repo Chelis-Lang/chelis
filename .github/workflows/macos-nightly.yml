@@ -237,6 +237,10 @@ jobs:
         if: matrix.shard == 1
         run: .venv/bin/python scripts/type_unification_core_oracle.py
 
+      - name: DAG core portability
+        if: matrix.shard == 1
+        run: uv run --managed-python --python 3.11 --no-project python scripts/dag_core_oracle.py
+
       - name: Verify packaged binary architecture
         if: matrix.shard == 2
         run: |

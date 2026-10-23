@@ -283,7 +283,9 @@ impl SourceClass {
             Some(Self::Runtime)
         } else if path.starts_with("crates/chelis-vocab/") {
             Some(Self::Vocab)
-        } else if path.starts_with("crates/chelis-ir/") {
+        } else if path.starts_with("crates/chelis-ir/")
+            || path.starts_with("crates/chelis-dag-core/")
+        {
             Some(Self::Ir)
         } else if path.starts_with("crates/chelis-python/") {
             Some(Self::Python)

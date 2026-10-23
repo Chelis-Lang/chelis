@@ -20,7 +20,7 @@
 //! The codegen-only tests do not need a GPU and are not `#[ignore]`d.
 
 mod support;
-use chelis_ir::dag::{Dag, DimExpr, DimInfo, RiscOp, TensorType};
+use chelis_dag_core::dag::{Dag, DimExpr, DimInfo, RiscOp, TensorType};
 use chelis_numeric_core::prim::Prim;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -125,7 +125,7 @@ fn bf16_plus_f32_add_is_rejected_by_ir_validation() {
         None,
     );
 
-    let errors = chelis_ir::verify::verify(&dag);
+    let errors = chelis_dag_core::verify::verify(&dag);
     assert!(
         !errors.is_empty(),
         "IR validation must reject bf16 + f32 elementwise Add per spec §5.4 \

@@ -197,7 +197,7 @@ admits only *name-trackable* ops (elementwise + named reductions) — positional
 `permute`/`reshape`/`matmul` stay rejected in a `..r` body. Any new arm (#339
 expand, etc.) must preserve all of this and ship with positive+negative parity.
 
-**Backend invariant.** The IR `DimInfo` (`crates/chelis-ir/src/dag.rs`) has no
+**Backend invariant.** The IR `DimInfo` (`crates/chelis-dag-core/src/dag.rs`) has no
 rank variant, so no `Dim::Rank` can reach a backend by construction — a
 successful lowering *is* a successful monomorphization. The
 `tensor_dim_substitutions` *different-rank guard* (`lower.rs` ~901) is

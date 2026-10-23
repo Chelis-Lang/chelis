@@ -2615,7 +2615,7 @@ impl WireDag {
             wire_ingress_work!(validation_node_visits);
             match &node.op {
                 WireRiscOp::Load { name } => {
-                    let resolved = chelis_ir::LoadStoreName::top_level_source_for_label(name)
+                    let resolved = chelis_dag_core::LoadStoreName::top_level_source_for_label(name)
                         .map_err(|reason| {
                             WireDagContractError::new(format!(
                                 "WireDag Load node {} has invalid binding origin: {reason}",
@@ -2623,7 +2623,7 @@ impl WireDag {
                             ))
                         })?;
                     if resolved.is_none() {
-                        chelis_ir::LoadStoreName::new(name.clone()).map_err(|reason| {
+                        chelis_dag_core::LoadStoreName::new(name.clone()).map_err(|reason| {
                             WireDagContractError::new(format!(
                                 "WireDag Load node {} has invalid graph input name: {reason}",
                                 node.id
@@ -2632,7 +2632,7 @@ impl WireDag {
                     }
                 }
                 WireRiscOp::Store { name } => {
-                    chelis_ir::LoadStoreName::new(name.clone()).map_err(|reason| {
+                    chelis_dag_core::LoadStoreName::new(name.clone()).map_err(|reason| {
                         WireDagContractError::new(format!(
                             "WireDag Store node {} requires an ordinary name: {reason}",
                             node.id
@@ -6222,7 +6222,7 @@ pub enum WireLogicalKind {
     Not,
 }
 
-/// chelis#616: wire form of `chelis_ir::dag::RtDim` for movement-op bounds
+/// chelis#616: wire form of `chelis_dag_core::dag::RtDim` for movement-op bounds
 /// and reshape targets. `Node(i)` indexes the owning op's `inputs` (the
 /// rank-0 integer bound scalars); `to_end` is the full-axis sentinel; `sym`
 /// is a symbolic dim declared elsewhere (reshape targets only).
@@ -6306,7 +6306,7 @@ pub enum WireRiscOp {
         classification: chelis_numeric_core::dtype_semantics::FloatClassify,
     },
     Bitwise {
-        bitwise: chelis_types::BitwiseKind,
+        bitwise: chelis_numeric_core::bitwise::BitwiseKind,
     },
     Compare {
         comparison: WireComparisonKind,
@@ -6414,7 +6414,7 @@ pub enum WireRiscOp {
     },
     ReduceWindow {
         /// One of "max" / "min" / "sum" / "mean", matching the Surf
-        /// builtin name suffix and `chelis_ir::dag::ReduceWindowKind`.
+        /// builtin name suffix and `chelis_dag_core::dag::ReduceWindowKind`.
         reducer: String,
         window_shape: Vec<NonnegativeExtent>,
         strides: Vec<NonnegativeExtent>,

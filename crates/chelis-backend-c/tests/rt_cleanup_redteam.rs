@@ -24,7 +24,7 @@
 
 mod support;
 use chelis_crmath::profile::{Output, storage_reference};
-use chelis_ir::dag::{Dag, DimInfo, NodeId, RiscOp, TensorType};
+use chelis_dag_core::dag::{Dag, DimInfo, NodeId, RiscOp, TensorType};
 use chelis_numeric_core::prim::Prim;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -548,7 +548,7 @@ int main(void) {{
 /// still emit element-wise `chelis_bf16_to_f32` conversion in the generated C.
 #[test]
 fn bf16_matmul_with_f32_output_still_routes_through_convert_wrapper() {
-    use chelis_ir::dag::DimExpr;
+    use chelis_dag_core::dag::DimExpr;
     let mut dag = Dag::new();
     let decl = dag.declare("test");
     let a = dag.add_node(
@@ -601,7 +601,7 @@ fn bf16_matmul_with_f32_output_still_routes_through_convert_wrapper() {
 
 #[test]
 fn f16_matmul_with_f32_output_still_routes_through_convert_wrapper() {
-    use chelis_ir::dag::DimExpr;
+    use chelis_dag_core::dag::DimExpr;
     let mut dag = Dag::new();
     let decl = dag.declare("test");
     let a = dag.add_node(
@@ -724,7 +724,7 @@ fn assert_matmul_scratch_lifetime(src: &str, names: &[&str]) {
 
 #[test]
 fn bf16_matmul_wrapper_balances_scratch_alloc_and_free_when_output_is_bf16() {
-    use chelis_ir::dag::DimExpr;
+    use chelis_dag_core::dag::DimExpr;
     let mut dag = Dag::new();
     let decl = dag.declare("test");
     let a = dag.add_node(
@@ -756,7 +756,7 @@ fn bf16_matmul_wrapper_balances_scratch_alloc_and_free_when_output_is_bf16() {
 
 #[test]
 fn bf16_matmul_wrapper_balances_scratch_alloc_and_free_when_output_is_f32() {
-    use chelis_ir::dag::DimExpr;
+    use chelis_dag_core::dag::DimExpr;
     let mut dag = Dag::new();
     let decl = dag.declare("test");
     let a = dag.add_node(
@@ -1362,7 +1362,7 @@ fn sibling_sweep_no_em_dash_in_string_literals_in_touched_crates() {
 
 #[test]
 fn scratch_cleanup_controls_reject_conditional_or_in_loop_release() {
-    use chelis_ir::dag::DimExpr;
+    use chelis_dag_core::dag::DimExpr;
     let mut dag = Dag::new();
     let decl = dag.declare("test");
     let a = dag.add_node(

@@ -1,16 +1,17 @@
 //! spec/08 §2 and [05-OP-31]: helper result tensors materialize at the
 //! resolved host type, preserving dtype, rank and ownership.
 mod support;
+use chelis_dag_core::{Dag, RiscOp, TensorType};
+use chelis_ir::ConcreteHostType as Ty;
 use chelis_ir::host::{
     ConcreteHostExpr as Expr, ConcreteHostExprKind as Kind, ConcreteHostFunction as Function,
     ConcreteHostParam as Param, ConcreteHostProgram as Program, HostFunctionOrigin,
     HostTensorHelper, HostTensorInput,
 };
-use chelis_ir::{ConcreteHostType as Ty, Dag, RiscOp, TensorType};
 use chelis_numeric_core::prim::Prim;
 use std::{fs, process::Command};
 
-fn identity_result(precision: Prim, result: Ty, dims: Vec<chelis_ir::DimInfo>) -> Program {
+fn identity_result(precision: Prim, result: Ty, dims: Vec<chelis_dag_core::DimInfo>) -> Program {
     let tensor = TensorType { dims, precision };
     let mut dag = Dag::new();
     let owner = dag.declare("identity");
@@ -171,7 +172,11 @@ fn rank_zero_tensor_result_keeps_its_owned_tensor_identity() {
 #[test]
 fn nonscalar_helper_cannot_materialize_as_a_scalar() {
     let result = support::codegen_host_program(
-        identity_result(Prim::F32, Ty::Float32, vec![chelis_ir::DimInfo::Lit(1)]),
+        identity_result(
+            Prim::F32,
+            Ty::Float32,
+            vec![chelis_dag_core::DimInfo::Lit(1)],
+        ),
         "invalid_rank",
     );
     assert!(

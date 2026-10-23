@@ -1,6 +1,6 @@
 use chelis_unord::UnordMap;
 
-use chelis_ir::dag::{Dag, NodeId};
+use chelis_dag_core::dag::{Dag, NodeId};
 
 pub struct PipelineResult {
     pub dag: Dag,

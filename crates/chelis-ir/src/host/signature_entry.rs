@@ -1,9 +1,9 @@
 //! Signature-owned extent obligations, independent of tensor-helper partitioning.
 
 use super::{HostParam, HostTensorInput};
-use crate::axis_sources::EntryExtentGuard;
 use crate::host_type_state::{HostShapeSlot, HostShapeTerm, HostTypeTerm, decode_host_type};
-use crate::{Dag, DimInfo, NodeId, RiscOp};
+use chelis_dag_core::axis_sources::EntryExtentGuard;
+use chelis_dag_core::{Dag, DimInfo, NodeId, RiscOp, TensorType};
 use chelis_deep::ast::Expr;
 
 /// The fixed tensor/tuple portion of a checked interface type. Runtime-selected
@@ -15,9 +15,9 @@ pub trait FixedEntryType: Sized {
 }
 
 impl FixedEntryType for HostTypeTerm {
-    type Tensor = crate::TensorType;
+    type Tensor = TensorType;
 
-    fn entry_tensor(&self) -> Option<&crate::TensorType> {
+    fn entry_tensor(&self) -> Option<&TensorType> {
         match self {
             Self::Tensor(ty) => Some(ty),
             _ => None,
@@ -63,7 +63,7 @@ impl FixedEntryType for Expr {
 /// One declaration-owned tensor observation, independent of body data use.
 /// `param` and `steps` identify the input; `path` is only its diagnostic label.
 #[derive(Debug, Clone, PartialEq)]
-pub struct FixedEntryObservation<T = crate::TensorType> {
+pub struct FixedEntryObservation<T = TensorType> {
     pub param: usize,
     pub path: String,
     pub steps: Vec<usize>,
@@ -363,9 +363,13 @@ impl SignatureEntryPlan {
             let label = input.name;
             // A dynamic List observation has a display path such as `xs[1]`,
             // which is not a Load identifier. Keep the path off the DAG name.
-            let load_name = crate::LoadStoreName::new(label.clone()).unwrap_or_else(|_| {
-                crate::LoadStoreName::must(format!("__entry_observation_{}", labels.len()))
-            });
+            let load_name =
+                chelis_dag_core::LoadStoreName::new(label.clone()).unwrap_or_else(|_| {
+                    chelis_dag_core::LoadStoreName::must(format!(
+                        "__entry_observation_{}",
+                        labels.len()
+                    ))
+                });
             let load = observations.add_node(
                 decl,
                 RiscOp::Load { name: load_name },
@@ -422,8 +426,8 @@ impl SignatureEntryPlan {
 mod tests {
     use super::super::HostParam;
     use super::*;
-    use crate::TensorType;
     use crate::host_type_state::HostTypeTerm;
+    use chelis_dag_core::TensorType;
     use chelis_numeric_core::prim::Prim;
 
     fn input(name: &str, dims: Vec<DimInfo>) -> HostTensorInput {

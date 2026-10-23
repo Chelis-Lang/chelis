@@ -14,12 +14,12 @@
 //! Manual gate per AGENTS.md: not part of default CI.
 
 mod support;
-use chelis_ir::dag::{
+use chelis_dag_core::dag::{
     ComparisonKind, Dag, DimInfo, ExtremaKind, ExtremaOperand, NodeId, RiscOp, RtAxis, RtDim,
     TensorType,
 };
+use chelis_dag_core::fuse::fuse;
 use chelis_ir::eval::{TensorValue, eval_tensor_roots_with_strict};
-use chelis_ir::fuse::fuse;
 use chelis_numeric_core::prim::Prim;
 use chelis_unord::UnordMap;
 use std::env;
@@ -1145,7 +1145,7 @@ const PINNED_KEY_SEED: i64 = 0x5072_f63b_9b5f_c46b;
 /// the HIP lane computes at emission.
 fn seeded_uniform_like(
     dag: &mut Dag,
-    decl: chelis_ir::dag::DeclId,
+    decl: chelis_dag_core::dag::DeclId,
     template: NodeId,
     ty: TensorType,
     seed: i64,
@@ -2048,7 +2048,7 @@ fn g4_symbolic_matmul_gpu_matches_cpu() {
         b_ty.clone(),
         None,
     );
-    let out = chelis_ir::tier2::lower_matmul(decl.into(), &mut dag, a, b, &a_ty, &b_ty, None);
+    let out = chelis_dag_core::tier2::lower_matmul(decl.into(), &mut dag, a, b, &a_ty, &b_ty, None);
     dag.add_root(out);
     assert_gpu_matches_eval(
         &dag,
@@ -2087,7 +2087,7 @@ fn g4_symbolic_matmul_gpu_reuses_one_artifact_for_multiple_batch_sizes() {
         b_ty.clone(),
         None,
     );
-    let out = chelis_ir::tier2::lower_matmul(decl.into(), &mut dag, a, b, &a_ty, &b_ty, None);
+    let out = chelis_dag_core::tier2::lower_matmul(decl.into(), &mut dag, a, b, &a_ty, &b_ty, None);
     dag.add_root(out);
 
     let actual = compile_and_run_output_cases(
@@ -2129,7 +2129,7 @@ fn g5_expand_add_stride_zero() {
         decl,
         RiscOp::Expand {
             axis: 0,
-            size: chelis_ir::dag::RtDim::Lit(4),
+            size: chelis_dag_core::dag::RtDim::Lit(4),
         },
         vec![x],
         mat_f32(4, 3),
@@ -2373,7 +2373,7 @@ fn g10_realize_materializes_view_on_gpu() {
     let s = dag.add_node(
         decl,
         RiscOp::Stride {
-            strides: vec![chelis_ir::dag::RtDim::Lit(2)],
+            strides: vec![chelis_dag_core::dag::RtDim::Lit(2)],
         },
         vec![x],
         vec_f32(3),
@@ -2661,11 +2661,11 @@ fn compiled_value_ownership_caller_bytes_unchanged() {
     let fused = dag.add_node(
         decl,
         RiscOp::FusedElem {
-            ops: vec![chelis_ir::dag::FusedStep {
-                op: chelis_ir::dag::FusedStepOp::Mul,
+            ops: vec![chelis_dag_core::dag::FusedStep {
+                op: chelis_dag_core::dag::FusedStepOp::Mul,
                 input_indices: vec![
-                    chelis_ir::dag::FusedInput::External(0),
-                    chelis_ir::dag::FusedInput::External(1),
+                    chelis_dag_core::dag::FusedInput::External(0),
+                    chelis_dag_core::dag::FusedInput::External(1),
                 ],
             }],
         },
@@ -2721,11 +2721,11 @@ fn compiled_value_ownership_program_owned_reuse() {
     let fused = dag.add_node(
         decl,
         RiscOp::FusedElem {
-            ops: vec![chelis_ir::dag::FusedStep {
-                op: chelis_ir::dag::FusedStepOp::Mul,
+            ops: vec![chelis_dag_core::dag::FusedStep {
+                op: chelis_dag_core::dag::FusedStepOp::Mul,
                 input_indices: vec![
-                    chelis_ir::dag::FusedInput::External(0),
-                    chelis_ir::dag::FusedInput::External(1),
+                    chelis_dag_core::dag::FusedInput::External(0),
+                    chelis_dag_core::dag::FusedInput::External(1),
                 ],
             }],
         },
@@ -2931,7 +2931,7 @@ fn g15_hipblas_matmul_matches_eval() {
         decl,
         RiscOp::Expand {
             axis: 2,
-            size: chelis_ir::dag::RtDim::Lit(4),
+            size: chelis_dag_core::dag::RtDim::Lit(4),
         },
         vec![a],
         tensor3_f32(2, 3, 4),
@@ -2941,7 +2941,7 @@ fn g15_hipblas_matmul_matches_eval() {
         decl,
         RiscOp::Expand {
             axis: 0,
-            size: chelis_ir::dag::RtDim::Lit(2),
+            size: chelis_dag_core::dag::RtDim::Lit(2),
         },
         vec![b],
         tensor3_f32(2, 3, 4),
@@ -2997,12 +2997,12 @@ fn g15_hipblas_batched_matmul_matches_eval() {
         decl,
         RiscOp::BlasMatmul {
             batch_dims: vec![
-                chelis_ir::dag::DimExpr::Concrete(2),
-                chelis_ir::dag::DimExpr::Concrete(2),
+                chelis_dag_core::dag::DimExpr::Concrete(2),
+                chelis_dag_core::dag::DimExpr::Concrete(2),
             ],
-            m: chelis_ir::dag::DimExpr::Concrete(2),
-            n: chelis_ir::dag::DimExpr::Concrete(2),
-            k: chelis_ir::dag::DimExpr::Concrete(3),
+            m: chelis_dag_core::dag::DimExpr::Concrete(2),
+            n: chelis_dag_core::dag::DimExpr::Concrete(2),
+            k: chelis_dag_core::dag::DimExpr::Concrete(3),
             accumulator: chelis_numeric_core::prim::Prim::F32,
         },
         vec![a, b],
@@ -3069,10 +3069,10 @@ fn g15_hipblas_strided_batched_symbolic_batch_matches_eval() {
     let out = dag.add_node(
         decl,
         RiscOp::BlasMatmul {
-            batch_dims: vec![chelis_ir::dag::DimExpr::Sym("batch".into())],
-            m: chelis_ir::dag::DimExpr::Concrete(2),
-            n: chelis_ir::dag::DimExpr::Concrete(2),
-            k: chelis_ir::dag::DimExpr::Concrete(3),
+            batch_dims: vec![chelis_dag_core::dag::DimExpr::Sym("batch".into())],
+            m: chelis_dag_core::dag::DimExpr::Concrete(2),
+            n: chelis_dag_core::dag::DimExpr::Concrete(2),
+            k: chelis_dag_core::dag::DimExpr::Concrete(3),
             accumulator: chelis_numeric_core::prim::Prim::F32,
         },
         vec![a, b],
@@ -3137,7 +3137,7 @@ fn g15_noncontiguous_matmul_fallback_matches_eval() {
         decl,
         RiscOp::Expand {
             axis: 2,
-            size: chelis_ir::dag::RtDim::Lit(4),
+            size: chelis_dag_core::dag::RtDim::Lit(4),
         },
         vec![a],
         tensor3_f32(2, 3, 4),
@@ -3147,7 +3147,7 @@ fn g15_noncontiguous_matmul_fallback_matches_eval() {
         decl,
         RiscOp::Expand {
             axis: 0,
-            size: chelis_ir::dag::RtDim::Lit(2),
+            size: chelis_dag_core::dag::RtDim::Lit(2),
         },
         vec![b],
         tensor3_f32(2, 3, 4),
@@ -3811,7 +3811,7 @@ fn g20d_prod_reduce_f64_gpu_matches_cpu() {
 #[test]
 #[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
 fn g21_matmul_f64_gpu_matches_cpu() {
-    use chelis_ir::dag::DimExpr;
+    use chelis_dag_core::dag::DimExpr;
 
     let mut dag = Dag::new();
     let decl = dag.declare("test");
@@ -3873,7 +3873,7 @@ fn g21_matmul_f64_gpu_matches_cpu() {
 // explicitly excludes integer matmul).
 #[test]
 fn ws_a2_hip_f1_still_rejects_i8_matmul() {
-    use chelis_ir::dag::DimExpr;
+    use chelis_dag_core::dag::DimExpr;
     let mut dag = Dag::new();
     let decl = dag.declare("test");
     let i8_ty = TensorType {
@@ -3929,7 +3929,7 @@ fn ws_a2_hip_f1_still_rejects_i8_matmul() {
 // the host-source emitter reaches the dgemm helper without panicking.
 #[test]
 fn ws_a2_hip_f1_admits_f64_matmul_at_codegen() {
-    use chelis_ir::dag::DimExpr;
+    use chelis_dag_core::dag::DimExpr;
     let mut dag = Dag::new();
     let decl = dag.declare("test");
     let a = dag.add_node(
@@ -4383,8 +4383,8 @@ fn ws_a4_i8_reduce_sum_gpu_promotes_to_i32() {
         },
         None,
     );
-    let sum_op =
-        chelis_ir::dag::RiscOp::sum_default(0, Prim::Int8).expect("i8 sum_default must succeed");
+    let sum_op = chelis_dag_core::dag::RiscOp::sum_default(0, Prim::Int8)
+        .expect("i8 sum_default must succeed");
     let out = dag.add_node(
         decl,
         sum_op,
@@ -4425,8 +4425,8 @@ fn ws_a4_i16_reduce_sum_gpu_promotes_to_i32() {
         },
         None,
     );
-    let sum_op =
-        chelis_ir::dag::RiscOp::sum_default(0, Prim::Int16).expect("i16 sum_default must succeed");
+    let sum_op = chelis_dag_core::dag::RiscOp::sum_default(0, Prim::Int16)
+        .expect("i16 sum_default must succeed");
     let out = dag.add_node(
         decl,
         sum_op,
@@ -4611,8 +4611,8 @@ fn ws_a4_i8_reduce_sum_emits_promoted_kernel_name() {
         },
         None,
     );
-    let sum_op =
-        chelis_ir::dag::RiscOp::sum_default(0, Prim::Int8).expect("i8 sum_default must succeed");
+    let sum_op = chelis_dag_core::dag::RiscOp::sum_default(0, Prim::Int8)
+        .expect("i8 sum_default must succeed");
     let out = dag.add_node(
         decl,
         sum_op,
@@ -4670,7 +4670,10 @@ fn g16_pad_1d_zero_fill_matches_eval() {
         decl,
         RiscOp::zero_pad(
             Prim::F32,
-            vec![(chelis_ir::dag::RtDim::Lit(1), chelis_ir::dag::RtDim::Lit(1))],
+            vec![(
+                chelis_dag_core::dag::RtDim::Lit(1),
+                chelis_dag_core::dag::RtDim::Lit(1),
+            )],
         ),
         vec![x],
         vec_f32(6),
@@ -4699,7 +4702,10 @@ fn g16_pad_1d_nonzero_fill_matches_eval() {
     let p = dag.add_node(
         decl,
         RiscOp::pad(
-            vec![(chelis_ir::dag::RtDim::Lit(2), chelis_ir::dag::RtDim::Lit(1))],
+            vec![(
+                chelis_dag_core::dag::RtDim::Lit(2),
+                chelis_dag_core::dag::RtDim::Lit(1),
+            )],
             chelis_numeric_core::dtype_semantics::scalar_from_f64("pad", Prim::F32, -7.5).unwrap(),
         ),
         vec![x],
@@ -4733,8 +4739,14 @@ fn g16_pad_2d_asymmetric_matches_eval() {
             // before/after per axis: row axis (1,0), col axis (0,2) →
             // output is 3x5.
             vec![
-                (chelis_ir::dag::RtDim::Lit(1), chelis_ir::dag::RtDim::Lit(0)),
-                (chelis_ir::dag::RtDim::Lit(0), chelis_ir::dag::RtDim::Lit(2)),
+                (
+                    chelis_dag_core::dag::RtDim::Lit(1),
+                    chelis_dag_core::dag::RtDim::Lit(0),
+                ),
+                (
+                    chelis_dag_core::dag::RtDim::Lit(0),
+                    chelis_dag_core::dag::RtDim::Lit(2),
+                ),
             ],
         ),
         vec![x],
@@ -4770,7 +4782,7 @@ fn g16_pad_over_strided_source_matches_eval() {
     let s = dag.add_node(
         decl,
         RiscOp::Stride {
-            strides: vec![chelis_ir::dag::RtDim::Lit(2)],
+            strides: vec![chelis_dag_core::dag::RtDim::Lit(2)],
         },
         vec![x],
         vec_f32(3),
@@ -4779,7 +4791,10 @@ fn g16_pad_over_strided_source_matches_eval() {
     let p = dag.add_node(
         decl,
         RiscOp::pad(
-            vec![(chelis_ir::dag::RtDim::Lit(1), chelis_ir::dag::RtDim::Lit(1))],
+            vec![(
+                chelis_dag_core::dag::RtDim::Lit(1),
+                chelis_dag_core::dag::RtDim::Lit(1),
+            )],
             chelis_numeric_core::dtype_semantics::scalar_from_f64("pad", Prim::F32, 9.0).unwrap(),
         ),
         vec![s],
@@ -4809,7 +4824,10 @@ fn g16_shrink_1d_matches_eval() {
     let s = dag.add_node(
         decl,
         RiscOp::Shrink {
-            bounds: vec![(chelis_ir::dag::RtDim::Lit(1), chelis_ir::dag::RtDim::Lit(5))],
+            bounds: vec![(
+                chelis_dag_core::dag::RtDim::Lit(1),
+                chelis_dag_core::dag::RtDim::Lit(5),
+            )],
         },
         vec![x],
         vec_f32(4),
@@ -4840,8 +4858,14 @@ fn g16_shrink_2d_matches_eval() {
         RiscOp::Shrink {
             // keep rows [1,3) and cols [0,2) → 2x2 interior crop.
             bounds: vec![
-                (chelis_ir::dag::RtDim::Lit(1), chelis_ir::dag::RtDim::Lit(3)),
-                (chelis_ir::dag::RtDim::Lit(0), chelis_ir::dag::RtDim::Lit(2)),
+                (
+                    chelis_dag_core::dag::RtDim::Lit(1),
+                    chelis_dag_core::dag::RtDim::Lit(3),
+                ),
+                (
+                    chelis_dag_core::dag::RtDim::Lit(0),
+                    chelis_dag_core::dag::RtDim::Lit(2),
+                ),
             ],
         },
         vec![x],
@@ -4880,7 +4904,10 @@ fn g16_pad_then_shrink_roundtrip_matches_eval() {
         decl,
         RiscOp::zero_pad(
             Prim::F32,
-            vec![(chelis_ir::dag::RtDim::Lit(2), chelis_ir::dag::RtDim::Lit(2))],
+            vec![(
+                chelis_dag_core::dag::RtDim::Lit(2),
+                chelis_dag_core::dag::RtDim::Lit(2),
+            )],
         ),
         vec![x],
         vec_f32(8),
@@ -4889,7 +4916,10 @@ fn g16_pad_then_shrink_roundtrip_matches_eval() {
     let s = dag.add_node(
         decl,
         RiscOp::Shrink {
-            bounds: vec![(chelis_ir::dag::RtDim::Lit(2), chelis_ir::dag::RtDim::Lit(6))],
+            bounds: vec![(
+                chelis_dag_core::dag::RtDim::Lit(2),
+                chelis_dag_core::dag::RtDim::Lit(6),
+            )],
         },
         vec![p],
         vec_f32(4),
@@ -5143,7 +5173,7 @@ stderr: {stderr}"
 #[test]
 #[ignore = "ordered scan device execution; docs/manual_gates.md"]
 fn ordered_scan_prefix_suffix_bits_on_device() {
-    use chelis_ir::dag::ScanDirection;
+    use chelis_dag_core::dag::ScanDirection;
     for direction in [ScanDirection::Increasing, ScanDirection::Decreasing] {
         for data in [
             vec![-0.0_f32; 5],

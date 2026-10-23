@@ -2076,7 +2076,7 @@ fn execution_host_requires_host_backend(
 }
 
 type CliLoweredBuildProgram = (
-    chelis_ir::Dag,
+    chelis_dag_core::Dag,
     Option<chelis_ir::host::ConcreteHostProgram>,
     Option<chelis_ir::host::HostExecutionPlan>,
 );
@@ -2152,7 +2152,7 @@ fn lower_build_program_for_cli(
 }
 
 fn verified_dag_codegen_program(
-    dag: chelis_ir::dag::Dag,
+    dag: chelis_dag_core::dag::Dag,
 ) -> Result<chelis_ir::ownership::VerifiedDagProgram, Box<dyn std::error::Error>> {
     let lowered = chelis_ir::ownership::lower_dag_ownership(dag)?;
     Ok(chelis_ir::ownership::verify_ownership(lowered)?)
@@ -2582,7 +2582,7 @@ fn cmd_cost(file: &Path, json: bool) -> Result<(), Box<dyn std::error::Error>> {
 /// never consumes its input pays nothing for it, so `copy_count` can be
 /// smaller than the number of repairs.
 struct CopyCostReport {
-    summary: chelis_ir::analysis::CopyCostSummary,
+    summary: chelis_dag_core::analysis::CopyCostSummary,
     repairs: Vec<chelis_types::CopyRepair>,
 }
 
@@ -2695,7 +2695,7 @@ fn copy_cost_for_checked(
     checked: &chelis_types::CheckedProgram,
     program_exprs: &[DeepExpr],
     entry_exprs: &[DeepExpr],
-) -> Result<chelis_ir::analysis::CopyCostSummary, Box<dyn std::error::Error>> {
+) -> Result<chelis_dag_core::analysis::CopyCostSummary, Box<dyn std::error::Error>> {
     let mut entry_names = Vec::new();
     for expr in entry_exprs {
         if let Some(name) = deep_top_level_expr_name(expr) {
@@ -2717,7 +2717,7 @@ fn copy_cost_for_checked(
             if roots.is_empty() {
                 continue;
             }
-            let summary = chelis_ir::analysis::analyze_copy_costs_for_roots(
+            let summary = chelis_dag_core::analysis::analyze_copy_costs_for_roots(
                 &dag,
                 &[(display_root_name(name), roots)],
             );
@@ -2752,7 +2752,7 @@ fn copy_cost_for_checked(
                     .flatten()
             })
             .collect::<Vec<_>>();
-        return Ok(chelis_ir::analysis::analyze_copy_costs_for_roots(
+        return Ok(chelis_dag_core::analysis::analyze_copy_costs_for_roots(
             &dag, &roots,
         ));
     }
@@ -2761,8 +2761,8 @@ fn copy_cost_for_checked(
 }
 
 fn summarize_copy_cost_functions(
-    functions: Vec<chelis_ir::analysis::FunctionCopyCost>,
-) -> chelis_ir::analysis::CopyCostSummary {
+    functions: Vec<chelis_dag_core::analysis::FunctionCopyCost>,
+) -> chelis_dag_core::analysis::CopyCostSummary {
     let total_copy_count = functions.iter().map(|function| function.copy_count).sum();
     let total_bytes_copied = functions.iter().try_fold(0usize, |acc, function| {
         function.bytes_copied.map(|bytes| acc.saturating_add(bytes))
@@ -2774,7 +2774,7 @@ fn summarize_copy_cost_functions(
         .cloned()
         .collect::<Vec<_>>();
     let total_byte_formula = (!formula_terms.is_empty()).then(|| formula_terms.join(" + "));
-    chelis_ir::analysis::CopyCostSummary {
+    chelis_dag_core::analysis::CopyCostSummary {
         functions,
         total_copy_count,
         total_bytes_copied,
@@ -4636,7 +4636,7 @@ fn build_prepared_file(
     if !entry_root_names.is_empty() {
         dag.set_roots(selected);
     }
-    dag = chelis_ir::optimize::dead_code_eliminate(&dag);
+    dag = chelis_dag_core::optimize::dead_code_eliminate(&dag);
     let func_name = file
         .file_stem()
         .and_then(|s| s.to_str())
@@ -4761,7 +4761,7 @@ fn build_prepared_file(
                 )?;
                 apply_shared_window_gates(&dag, BuildTarget::C)?;
                 let specialized = chelis_ir::specialize::specialize_for_exact_arithmetic(&dag);
-                let fused = chelis_ir::fuse::fuse(&specialized);
+                let fused = chelis_dag_core::fuse::fuse(&specialized);
                 cmd_build_c(
                     fused,
                     &c_name,
@@ -4847,7 +4847,7 @@ fn build_prepared_file(
                 } else {
                     lower_checked_for_cli(checked_compilation.clone(), compiled_host.as_ref())?
                 };
-                hip_dag = chelis_ir::optimize::dead_code_eliminate(&hip_dag);
+                hip_dag = chelis_dag_core::optimize::dead_code_eliminate(&hip_dag);
                 shared_compiler_gate(
                     chelis_compiler_api::compiler::reject_unsupported_effect_ops(
                         &hip_dag,
@@ -4858,7 +4858,7 @@ fn build_prepared_file(
                 shared_compiler_gate(chelis_compiler_api::compiler::reject_unsupported_hip_ops(
                     &specialized,
                 ))?;
-                let fused = chelis_ir::fuse::fuse(&specialized);
+                let fused = chelis_dag_core::fuse::fuse(&specialized);
                 cmd_build_hip(
                     fused,
                     func_name,
@@ -4937,7 +4937,7 @@ fn build_prepared_file(
                 } else {
                     lower_checked_for_cli(checked_compilation.clone(), compiled_host.as_ref())?
                 };
-                metal_dag = chelis_ir::optimize::dead_code_eliminate(&metal_dag);
+                metal_dag = chelis_dag_core::optimize::dead_code_eliminate(&metal_dag);
                 shared_compiler_gate(
                     chelis_compiler_api::compiler::reject_unsupported_effect_ops(
                         &metal_dag,
@@ -4954,8 +4954,8 @@ fn build_prepared_file(
                 // `Emitter::require_metal_admissible` in the backend is
                 // the third). Each independently enforces the same target
                 // boundary; this typed gate owns the public early diagnostic.
-                chelis_ir::verify::validate_metal_admissible_precisions(&metal_dag)?;
-                let fused = chelis_ir::fuse::fuse(&metal_dag);
+                chelis_ir::device_admission::validate_metal_admissible_precisions(&metal_dag)?;
+                let fused = chelis_dag_core::fuse::fuse(&metal_dag);
                 cmd_build_metal(
                     fused,
                     func_name,
@@ -5046,7 +5046,7 @@ fn cmd_build_deep(
     if !entry_root_names.is_empty() {
         dag.set_roots(selected);
     }
-    dag = chelis_ir::optimize::dead_code_eliminate(&dag);
+    dag = chelis_dag_core::optimize::dead_code_eliminate(&dag);
     let func_name = file
         .file_stem()
         .and_then(|s| s.to_str())
@@ -5124,7 +5124,7 @@ fn cmd_build_deep(
                 )?;
                 apply_shared_window_gates(&dag, BuildTarget::C)?;
                 let specialized = chelis_ir::specialize::specialize_for_exact_arithmetic(&dag);
-                let fused = chelis_ir::fuse::fuse(&specialized);
+                let fused = chelis_dag_core::fuse::fuse(&specialized);
                 cmd_build_c(
                     fused,
                     &c_name,
@@ -5205,7 +5205,7 @@ fn cmd_build_deep(
                 } else {
                     lower_checked_for_cli(checked_compilation.clone(), compiled_host.as_ref())?
                 };
-                hip_dag = chelis_ir::optimize::dead_code_eliminate(&hip_dag);
+                hip_dag = chelis_dag_core::optimize::dead_code_eliminate(&hip_dag);
                 shared_compiler_gate(
                     chelis_compiler_api::compiler::reject_unsupported_effect_ops(
                         &hip_dag,
@@ -5216,7 +5216,7 @@ fn cmd_build_deep(
                 shared_compiler_gate(chelis_compiler_api::compiler::reject_unsupported_hip_ops(
                     &specialized,
                 ))?;
-                let fused = chelis_ir::fuse::fuse(&specialized);
+                let fused = chelis_dag_core::fuse::fuse(&specialized);
                 cmd_build_hip(
                     fused,
                     func_name,
@@ -5290,7 +5290,7 @@ fn cmd_build_deep(
                 } else {
                     lower_checked_for_cli(checked_compilation.clone(), compiled_host.as_ref())?
                 };
-                metal_dag = chelis_ir::optimize::dead_code_eliminate(&metal_dag);
+                metal_dag = chelis_dag_core::optimize::dead_code_eliminate(&metal_dag);
                 shared_compiler_gate(
                     chelis_compiler_api::compiler::reject_unsupported_effect_ops(
                         &metal_dag,
@@ -5304,8 +5304,8 @@ fn cmd_build_deep(
                 // rationale. This is the same surface from the Deep
                 // ingestion path so symbolic-dim and span-attributed
                 // Deep get the same f64 rejection behavior.
-                chelis_ir::verify::validate_metal_admissible_precisions(&metal_dag)?;
-                let fused = chelis_ir::fuse::fuse(&metal_dag);
+                chelis_ir::device_admission::validate_metal_admissible_precisions(&metal_dag)?;
+                let fused = chelis_dag_core::fuse::fuse(&metal_dag);
                 cmd_build_metal(
                     fused,
                     func_name,
@@ -8447,7 +8447,7 @@ fn shared_compiler_gate(
 }
 
 fn apply_shared_window_gates(
-    dag: &chelis_ir::Dag,
+    dag: &chelis_dag_core::Dag,
     target: BuildTarget,
 ) -> Result<(), Box<dyn std::error::Error>> {
     shared_compiler_gate(
@@ -11542,7 +11542,7 @@ fn cmd_validate(
 }
 
 fn cmd_build_c(
-    dag: chelis_ir::dag::Dag,
+    dag: chelis_dag_core::dag::Dag,
     c_name: &c_source_name::CSourceName,
     output: Option<&std::path::Path>,
     symbolic_dims_hint: &[String],
@@ -11958,7 +11958,7 @@ fn tensor_manifest_root_names(
 }
 
 fn cmd_build_hip(
-    dag: chelis_ir::dag::Dag,
+    dag: chelis_dag_core::dag::Dag,
     func_name: &str,
     output: Option<&std::path::Path>,
     symbolic_dims_hint: &[String],
@@ -12050,7 +12050,7 @@ fn cmd_build_hip(
 }
 
 fn cmd_build_metal(
-    dag: chelis_ir::dag::Dag,
+    dag: chelis_dag_core::dag::Dag,
     func_name: &str,
     output: Option<&std::path::Path>,
     symbolic_dims_hint: &[String],
@@ -12488,7 +12488,7 @@ fn expanded_desugared_program(
 fn lower_checked_for_cli(
     checked: chelis_compiler_api::pipeline::CheckedCompilation,
     host_program: Option<&chelis_ir::host::ConcreteHostProgram>,
-) -> Result<chelis_ir::Dag, Box<dyn std::error::Error>> {
+) -> Result<chelis_dag_core::Dag, Box<dyn std::error::Error>> {
     lower_checked_compilation_for_cli(checked, host_program)
         .map(chelis_compiler_api::pipeline::LoweredCompilation::into_dag)
 }
@@ -12522,7 +12522,7 @@ fn format_effect_errors(errors: &[chelis_effects::EffectError]) -> String {
 }
 
 fn fallback_symbolic_dims(
-    dag: &chelis_ir::dag::Dag,
+    dag: &chelis_dag_core::dag::Dag,
     preferred: &[String],
     hint: &[String],
 ) -> Vec<String> {
@@ -12533,7 +12533,7 @@ fn fallback_symbolic_dims(
     } else {
         // chelis#616: only Load-bound dims are caller-suppliable;
         // op-declared dims are computed at run time by their owning op.
-        chelis_ir::dag::symbolic_params(dag)
+        chelis_dag_core::dag::symbolic_params(dag)
     }
 }
 
@@ -13561,24 +13561,28 @@ mod batch_fallback_reason_tests {
 mod runtime_dim_reject_tests {
     use super::compiler_error_messages;
     use chelis_compiler_api::compiler::reject_unsupported_hip_ops;
-    use chelis_ir::dag::{Dag, RiscOp, RtDim, TensorType};
+    use chelis_dag_core::dag::{Dag, RiscOp, RtDim, TensorType};
     use chelis_numeric_core::prim::Prim;
 
-    fn ty(dims: Vec<chelis_ir::dag::DimInfo>, precision: Prim) -> TensorType {
+    fn ty(dims: Vec<chelis_dag_core::dag::DimInfo>, precision: Prim) -> TensorType {
         TensorType { dims, precision }
     }
 
-    fn lit_dims(sizes: &[usize]) -> Vec<chelis_ir::dag::DimInfo> {
+    fn lit_dims(sizes: &[usize]) -> Vec<chelis_dag_core::dag::DimInfo> {
         sizes
             .iter()
-            .map(|n| chelis_ir::dag::DimInfo::Lit(*n))
+            .map(|n| chelis_dag_core::dag::DimInfo::Lit(*n))
             .collect()
     }
 
     /// Load x: [4] f32 plus a rank-0 i32 Load scalar (not a `Shape` read;
     /// the HIP seam blanket-rejects `Shape` first and these tests must
     /// exercise the movement/reshape arms).
-    fn dag_with_scalar() -> (Dag, chelis_ir::dag::NodeId, chelis_ir::dag::NodeId) {
+    fn dag_with_scalar() -> (
+        Dag,
+        chelis_dag_core::dag::NodeId,
+        chelis_dag_core::dag::NodeId,
+    ) {
         let mut dag = Dag::new();
         let decl = dag.declare("test");
         let x = dag.add_node(

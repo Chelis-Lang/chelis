@@ -1,7 +1,7 @@
 //! [05-OP-20..22] classify raw stored bits, including signed/payload NaNs.
 mod common;
 mod support;
-use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
+use chelis_dag_core::dag::{Dag, DimInfo, RiscOp, TensorType};
 use chelis_ir::eval::{TensorValue, eval_tensor};
 use chelis_numeric_core::dtype_semantics::{FloatClassify, classify_float, tensor_from_le_payload};
 use chelis_numeric_core::prim::Prim;
@@ -215,6 +215,6 @@ fn invalid_ir_classification_shapes_and_dtypes_are_rejected() {
             },
             None,
         );
-        assert!(!chelis_ir::verify::verify(&dag).is_empty());
+        assert!(!chelis_dag_core::verify::verify(&dag).is_empty());
     }
 }

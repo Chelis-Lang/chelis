@@ -1,8 +1,8 @@
 //! [05-OP-33]: storage changes preserve the primitive AD graph and its trees.
-use chelis_ir::dag::{Dag, DimInfo, NodeId, RiscOp, TensorType};
+use chelis_dag_core::dag::{Dag, DimInfo, NodeId, RiscOp, TensorType};
+use chelis_dag_core::grad::grad_dag_checked;
+use chelis_dag_core::{tier2, tier2_ordered};
 use chelis_ir::eval::{TensorValue, eval_tensor, eval_tensor_roots_with};
-use chelis_ir::grad::grad_dag_checked;
-use chelis_ir::{tier2, tier2_ordered};
 use chelis_numeric_core::prim::Prim;
 use chelis_unord::UnordMap;
 
@@ -199,7 +199,7 @@ fn ad_views_admit_metadata_readers_but_keep_exposed_products_dense() {
         assert!(readers.iter().any(|node| matches!(
             &node.op,
             RiscOp::Expand {
-                size: chelis_ir::dag::RtDim::InputAxis { tensor: 1, .. },
+                size: chelis_dag_core::dag::RtDim::InputAxis { tensor: 1, .. },
                 ..
             }
         ) && node.inputs[1] == product));
@@ -271,7 +271,7 @@ fn shared_numeric_diamonds_have_a_materialization_boundary() {
         let reshaped = dag.add_node(
             owner,
             RiscOp::Reshape {
-                new_shape: vec![chelis_ir::dag::RtDim::Lit(17)],
+                new_shape: vec![chelis_dag_core::dag::RtDim::Lit(17)],
             },
             vec![moved],
             tensor.clone(),

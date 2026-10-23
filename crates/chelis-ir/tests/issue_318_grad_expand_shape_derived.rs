@@ -59,9 +59,9 @@
 //! ranks (`[]` and `[1]`). Both reviewers confirmed the adjoint is
 //! correct and unchanged; this is the regression lock for that property.
 
-use chelis_ir::dag::{Dag, DimInfo, NodeId, RiscOp, RtAxis, TensorType};
+use chelis_dag_core::dag::{Dag, DimInfo, NodeId, RiscOp, RtAxis, TensorType};
+use chelis_dag_core::grad::{AdError, grad_dag_checked};
 use chelis_ir::eval::{TensorValue, eval_tensor};
-use chelis_ir::grad::{AdError, grad_dag_checked};
 use chelis_numeric_core::prim::Prim;
 use chelis_unord::UnordMap;
 
@@ -164,9 +164,9 @@ fn build_forward(extent: Extent, source_shape: &[usize]) -> (Dag, NodeId, NodeId
 
     // expand(c, axis=0, size) -> vector type (symbolic for shape-derived).
     let (size, inputs) = match extent {
-        Extent::Literal => (chelis_ir::dag::RtDim::Lit(2), vec![c]),
+        Extent::Literal => (chelis_dag_core::dag::RtDim::Lit(2), vec![c]),
         Extent::ShapeDerived => (
-            chelis_ir::dag::RtDim::InputAxis {
+            chelis_dag_core::dag::RtDim::InputAxis {
                 tensor: 1,
                 axis: RtAxis::Lit(0),
             },

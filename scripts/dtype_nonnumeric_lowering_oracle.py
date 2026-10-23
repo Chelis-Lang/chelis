@@ -45,7 +45,7 @@ def source_contracts() -> tuple[SourceContract, ...]:
     return (
         SourceContract(
             "direct identities and fusion barriers",
-            "crates/chelis-ir/src/dag.rs",
+            "crates/chelis-dag-core/src/dag.rs",
             (
                 "Compare(ComparisonKind)",
                 "Logical(LogicalKind)",

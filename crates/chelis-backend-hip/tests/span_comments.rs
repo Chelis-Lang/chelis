@@ -18,8 +18,8 @@
 //! the grep but break the C/HIP source.
 
 mod support;
-use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
-use chelis_ir::fuse::fuse;
+use chelis_dag_core::dag::{Dag, DimInfo, RiscOp, TensorType};
+use chelis_dag_core::fuse::fuse;
 use chelis_numeric_core::prim::Prim;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -152,7 +152,7 @@ fn s4_hip_canonical_span_id_emitted_host_side() {
         vec_f32(4),
         Some("op.neg".into()),
     );
-    dag.add_root(chelis_ir::dag::NodeId(1));
+    dag.add_root(chelis_dag_core::dag::NodeId(1));
 
     let result = codegen_hip(&dag, "s4_hip_canonical").unwrap();
     let src = &result.c_source;

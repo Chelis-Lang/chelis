@@ -4,13 +4,13 @@ use chelis_unord::UnordMap;
 use std::hash::{Hash, Hasher};
 use std::path::Path;
 
+use chelis_dag_core::dag::{Dag, DimInfo, NodeId, RiscOp, TensorType};
+use chelis_dag_core::tier2;
 use chelis_deep::ast::{Atom, Expr, ExprCarrier};
 use chelis_deep::cons_spine::{ConsSpine, ConsSpineTail};
 use chelis_ir::claim_pattern::{ClaimNode, ClaimNodeId, ClaimPattern, ClaimStep};
-use chelis_ir::dag::{Dag, DimInfo, NodeId, RiscOp, TensorType};
 use chelis_ir::eval::TensorValue as IrTensorValue;
 use chelis_ir::host::{EntryPattern, HostDefKernel, host_def_kernel};
-use chelis_ir::tier2;
 use chelis_numeric_core::dtype_semantics::{
     CompareOp, FloatBinOp, FloatUnOp, IntBinOp, IntUnOp, StorageView,
 };
@@ -30,7 +30,7 @@ use super::transforms::*;
 use super::*;
 
 pub(super) fn tensor_result_producer(dag: &Dag, root: NodeId) -> Option<ResultProducer> {
-    let sites = chelis_ir::axis_sources::result_extent_sites(dag, root);
+    let sites = chelis_dag_core::axis_sources::result_extent_sites(dag, root);
     let operation = sites.first()?.operation();
     sites
         .iter()
@@ -955,7 +955,7 @@ fn check_signature_entry_plan(
     let read =
         |(node, axis): (NodeId, usize)| (entry_plan.label(node), axis, entry_shapes[node.0][axis]);
     for guard in entry_plan.guards() {
-        use chelis_ir::axis_sources::EntryExtentGuard;
+        use chelis_dag_core::axis_sources::EntryExtentGuard;
         let (left, right, context) = match guard {
             EntryExtentGuard::Named {
                 claim,
@@ -2072,7 +2072,7 @@ impl<'a> EvalContext<'a> {
         let mut staged: UnordMap<String, IrTensorValue> = UnordMap::new();
         for input in &kernel.inputs {
             let top_level_source =
-                chelis_ir::LoadStoreName::top_level_source_for_label(&input.name)?;
+                chelis_dag_core::LoadStoreName::top_level_source_for_label(&input.name)?;
             let param_index = top_level_source.as_ref().map_or_else(
                 || {
                     kernel
@@ -2137,7 +2137,7 @@ impl<'a> EvalContext<'a> {
                                 "declared result extent is outside the admitted range".to_string()
                             })?,
                             source: axis.source.as_ref().map(|source| {
-                                chelis_ir::axis_sources::ClaimSource {
+                                chelis_dag_core::axis_sources::ClaimSource {
                                     claim: source.claim.clone(),
                                     parameter: source.parameter.to_string(),
                                     axis: source.axis,
@@ -3600,7 +3600,7 @@ impl<'a> EvalContext<'a> {
                                 "declared result extent is outside the admitted range".to_string()
                             })?,
                             source: axis.source.as_ref().map(|source| {
-                                chelis_ir::axis_sources::ClaimSource {
+                                chelis_dag_core::axis_sources::ClaimSource {
                                     claim: source.claim.clone(),
                                     parameter: source.parameter.to_string(),
                                     axis: source.axis,
@@ -4026,21 +4026,21 @@ impl<'a> EvalContext<'a> {
                     .to_string(),
             );
         }
-        let producer_operation = match chelis_ir::axis_sources::local_dim_guard_sites(dag)?.first()
-        {
-            Some((_, claim)) => claim.op,
-            // An ascription at its binder's first producing site owes no
-            // comparison and so has no guard site; its value's producer still
-            // names the operation a later result claim reports.
-            None => chelis_ir::axis_sources::result_extent_sites(dag, roots[0])
-                .first()
-                .map(|site| site.operation())
-                .ok_or_else(|| {
-                    "host runtime: checked local tensor ascription produced neither a local \
+        let producer_operation =
+            match chelis_dag_core::axis_sources::local_dim_guard_sites(dag)?.first() {
+                Some((_, claim)) => claim.op,
+                // An ascription at its binder's first producing site owes no
+                // comparison and so has no guard site; its value's producer still
+                // names the operation a later result claim reports.
+                None => chelis_dag_core::axis_sources::result_extent_sites(dag, roots[0])
+                    .first()
+                    .map(|site| site.operation())
+                    .ok_or_else(|| {
+                        "host runtime: checked local tensor ascription produced neither a local \
                      guard site nor a producing operation"
-                        .to_string()
-                })?,
-        };
+                            .to_string()
+                    })?,
+            };
         let prepared = chelis_ir::eval::prepare_tensor_roots_inputs_with_demand(
             dag,
             &roots,
@@ -5853,11 +5853,11 @@ impl<'a> EvalContext<'a> {
                 }
                 _ => bool_unop(args, |value| !value),
             },
-            "bitand" => bitwise_binop(args, chelis_types::BitwiseKind::And),
-            "bitor" => bitwise_binop(args, chelis_types::BitwiseKind::Or),
-            "bitxor" => bitwise_binop(args, chelis_types::BitwiseKind::Xor),
-            "shl" => bitwise_binop(args, chelis_types::BitwiseKind::ShiftLeft),
-            "shr" => bitwise_binop(args, chelis_types::BitwiseKind::ShiftRight),
+            "bitand" => bitwise_binop(args, chelis_numeric_core::bitwise::BitwiseKind::And),
+            "bitor" => bitwise_binop(args, chelis_numeric_core::bitwise::BitwiseKind::Or),
+            "bitxor" => bitwise_binop(args, chelis_numeric_core::bitwise::BitwiseKind::Xor),
+            "shl" => bitwise_binop(args, chelis_numeric_core::bitwise::BitwiseKind::ShiftLeft),
+            "shr" => bitwise_binop(args, chelis_numeric_core::bitwise::BitwiseKind::ShiftRight),
             "string_len" => {
                 let value = expect_string_arg(args, 0)?;
                 Ok(RuntimeValue::int64(value.chars().count() as i64))

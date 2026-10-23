@@ -8,7 +8,9 @@ use chelis_compiler_api::schema::{
     CheckRequest, GradRequest, LowerRequest, SourceKind, WIRE_DAG_SCHEMA_VERSION, WireDag,
     WireDagDecodeError, WireDagNode, WireRiscOp,
 };
-use chelis_ir::dag::{Dag, DimInfo, KeyBranch, NodeId, RiscOp, RtDim, TensorType, UniformBound};
+use chelis_dag_core::dag::{
+    Dag, DimInfo, KeyBranch, NodeId, RiscOp, RtDim, TensorType, UniformBound,
+};
 use chelis_numeric_core::dtype_semantics::scalar_from_i64;
 use chelis_numeric_core::prim::Prim;
 use serde_json::{Value, json};
@@ -1463,7 +1465,7 @@ fn tensor(axes: &[Axis], precision: Prim) -> TensorType {
 
 fn ir_node(
     dag: &mut Dag,
-    decl: chelis_ir::dag::DeclId,
+    decl: chelis_dag_core::dag::DeclId,
     op: RiscOp,
     inputs: Vec<NodeId>,
     ty: TensorType,
@@ -1535,7 +1537,7 @@ fn wire_of(dag: &Dag) -> Value {
 }
 
 /// Keys `split_n(key(7), 3)`: nodes 0 to 2.
-fn three_keys(dag: &mut Dag, decl: chelis_ir::dag::DeclId) -> NodeId {
+fn three_keys(dag: &mut Dag, decl: chelis_dag_core::dag::DeclId) -> NodeId {
     let seed = ir_node(
         dag,
         decl,
@@ -1563,7 +1565,7 @@ fn three_keys(dag: &mut Dag, decl: chelis_ir::dag::DeclId) -> NodeId {
     )
 }
 
-fn f32_bound(dag: &mut Dag, decl: chelis_ir::dag::DeclId, value: f64) -> NodeId {
+fn f32_bound(dag: &mut Dag, decl: chelis_dag_core::dag::DeclId, value: f64) -> NodeId {
     ir_node(
         dag,
         decl,
@@ -1692,10 +1694,13 @@ fn the_verifier_and_the_codec_share_one_operand_rule() {
         ),
     ];
     for (divergent, agreeing, sentence) in cases {
-        let errors = chelis_ir::verify::verify(&divergent);
+        let errors = chelis_dag_core::verify::verify(&divergent);
         assert!(errors.iter().any(|error| error == sentence), "{errors:?}");
         rejects_domain(&wire_of(&divergent), sentence);
-        assert_eq!(chelis_ir::verify::verify(&agreeing), Vec::<String>::new());
+        assert_eq!(
+            chelis_dag_core::verify::verify(&agreeing),
+            Vec::<String>::new()
+        );
         accepts(&wire_of(&agreeing));
     }
 }

@@ -21,7 +21,7 @@ use std::borrow::Cow;
 use std::collections::BTreeSet;
 use std::sync::{Arc, OnceLock};
 
-use crate::dag::{
+use chelis_dag_core::dag::{
     ComparisonKind, Dag, DagNode, DimExpr, DimInfo, ExtremaKind, ExtremaOperand, FusedInput,
     FusedStepOp, LogicalKind, NodeId, ReduceWindowKind, RiscOp, RtAxis, RtDim, RuntimeCheck,
     SHRINK_TO_END, TensorType, bind_symbolic_dims,
@@ -1013,7 +1013,7 @@ fn neutral_rows(value: &TensorValue, rows: &[bool], neutral: i64) -> Result<Tens
     where_elementwise(&mask, value, &fill)
 }
 
-/// Replace the operands of a gated `node` ([`crate::dag::TrapSeeds::is_activation_gated`],
+/// Replace the operands of a gated `node` ([`chelis_dag_core::dag::TrapSeeds::is_activation_gated`],
 /// `gated`) whose activation is false, in the rows where it is false, with
 /// values its checks accept ([`DagNode::inactive_operand`]), so the node
 /// computes a value and reports nothing.
@@ -1129,7 +1129,7 @@ fn leading_row(row: usize, rows: usize, len: usize) -> usize {
 }
 
 /// A key-operand random primitive's keys, under the node's own activation
-/// ([`crate::dag::Owner::activation`]). A key that has no value under an
+/// ([`chelis_dag_core::dag::Owner::activation`]). A key that has no value under an
 /// active primitive is a malformed graph.
 fn draw_keys<'a>(
     node: &DagNode,
@@ -1425,13 +1425,17 @@ fn eval_uniform_like(
 fn eval_uniform_bound_adjoint(
     node: &DagNode,
     g: &TensorValue,
-    bound: crate::dag::UniformBound,
+    bound: chelis_dag_core::dag::UniformBound,
     prim: Prim,
     keys: KeyOperand<'_>,
 ) -> Result<TensorValue, String> {
     let bound = match bound {
-        crate::dag::UniformBound::Low => chelis_numeric_core::dtype_semantics::UniformBound::Low,
-        crate::dag::UniformBound::High => chelis_numeric_core::dtype_semantics::UniformBound::High,
+        chelis_dag_core::dag::UniformBound::Low => {
+            chelis_numeric_core::dtype_semantics::UniformBound::Low
+        }
+        chelis_dag_core::dag::UniformBound::High => {
+            chelis_numeric_core::dtype_semantics::UniformBound::High
+        }
     };
     match keys {
         KeyOperand::Inactive => {
@@ -1585,10 +1589,10 @@ impl ElementwiseBinOp {
 /// rendering is the one every lane shares.
 /// The failure of `node`'s operand agreement between `lhs` and `rhs`: a
 /// `Domain` trap in the node's operation, or in `matmul` when the node is
-/// matmul's decomposed product ([`crate::tier2::is_matmul_product`]), with
+/// matmul's decomposed product ([`chelis_dag_core::tier2::is_matmul_product`]), with
 /// the operands as written.
 fn agreement_failure(dag: &Dag, node: &DagNode, lhs: &TensorValue, rhs: &TensorValue) -> String {
-    if crate::tier2::is_matmul_product(node, |id| dag.get(id)) {
+    if chelis_dag_core::tier2::is_matmul_product(node, |id| dag.get(id)) {
         let exact = |shape: &[usize]| {
             shape
                 .iter()
@@ -1600,7 +1604,7 @@ fn agreement_failure(dag: &Dag, node: &DagNode, lhs: &TensorValue, rhs: &TensorV
             &exact(&rhs.shape),
         );
     }
-    shape_disagreement(crate::grad::risc_op_name(&node.op), lhs, rhs)
+    shape_disagreement(chelis_dag_core::grad::risc_op_name(&node.op), lhs, rhs)
 }
 
 /// A scatter's updates disagree at run time with the gathered shape they must
@@ -1630,7 +1634,7 @@ fn shape_disagreement(op: &str, lhs: &TensorValue, rhs: &TensorValue) -> String 
 fn same_shape_agreement_extent(
     dag: &Dag,
     node: &DagNode,
-    agreement: &crate::axis_sources::SameShapeAgreement,
+    agreement: &chelis_dag_core::axis_sources::SameShapeAgreement,
     axis: usize,
     values: &UnordMap<NodeId, TensorValue>,
 ) -> Result<usize, String> {
@@ -2660,7 +2664,7 @@ fn projected_product(input: &TensorValue) -> Option<ProjectedProduct<'_>> {
 fn ordered_scan(
     input: &TensorValue,
     axis: usize,
-    direction: crate::dag::ScanDirection,
+    direction: chelis_dag_core::dag::ScanDirection,
 ) -> Result<TensorValue, String> {
     if axis >= input.shape.len() {
         return Err(format!(
@@ -2668,7 +2672,7 @@ fn ordered_scan(
             input.shape.len()
         ));
     }
-    if direction == crate::dag::ScanDirection::Decreasing && !input.prim().is_float() {
+    if direction == chelis_dag_core::dag::ScanDirection::Decreasing && !input.prim().is_float() {
         return Err("decreasing cumsum requires a float operand".into());
     }
     let result = input
@@ -2689,7 +2693,7 @@ fn ordered_scan(
     let n = input.shape[axis];
     let lanes = (0..outer * inner).map(|lane| {
         (0..n).map(move |k| {
-            let k = if direction == crate::dag::ScanDirection::Decreasing {
+            let k = if direction == chelis_dag_core::dag::ScanDirection::Decreasing {
                 n - 1 - k
             } else {
                 k
@@ -3022,7 +3026,7 @@ fn resolve_eval_bound(
         }
         RtDim::InputAxis {
             tensor,
-            axis: crate::dag::RtAxis::Lit(axis),
+            axis: chelis_dag_core::dag::RtAxis::Lit(axis),
         } => {
             let source_id = node.inputs.get(*tensor).ok_or_else(|| {
                 format!(
@@ -3077,9 +3081,9 @@ fn negative_bound_failure(
             // the expansion below decides.
             let input_rank = values.get(node.inputs.first()?)?.shape.len();
             let op = if node.output_type.dims.len() == input_rank + 1 {
-                crate::axis_sources::ExpansionKind::Insert
+                chelis_dag_core::axis_sources::ExpansionKind::Insert
             } else {
-                crate::axis_sources::ExpansionKind::Expand
+                chelis_dag_core::axis_sources::ExpansionKind::Expand
             };
             Some(chelis_abi::failure::negative_target_extent(
                 op.primitive_name(),
@@ -3515,7 +3519,7 @@ fn verify_bound_movement_node(dag: &Dag, node: &DagNode) -> Result<(), String> {
 /// The pre-eval bindings for every runtime extent a caller supplies.
 ///
 /// chelis#1566: this reads the scoped derivation
-/// ([`crate::axis_sources::derive_dim_witnesses`]), which is the same
+/// ([`chelis_dag_core::axis_sources::derive_dim_witnesses`]), which is the same
 /// derivation the C and HIP prologues declare and guard from, so the three
 /// lanes cannot disagree about which axes are one extent. The legacy
 /// name-keyed grouping it replaces put two independent signatures that merely
@@ -3523,7 +3527,7 @@ fn verify_bound_movement_node(dag: &Dag, node: &DagNode) -> Result<(), String> {
 /// `split_by_scope` separates them by the results they reach.
 ///
 /// **One structural limit, stated rather than papered over.** The map
-/// [`crate::dag::bind_symbolic_dims`] consumes is keyed by NAME, so two
+/// [`chelis_dag_core::dag::bind_symbolic_dims`] consumes is keyed by NAME, so two
 /// scopes of one name that resolve to DIFFERENT extents cannot both be
 /// represented. The honest rule is therefore: bind the name once when the
 /// scopes agree, and bind nothing for it when they disagree. Nothing is lost
@@ -3616,7 +3620,7 @@ fn infer_symbolic_bindings_from_inputs(
     // In particular fallback cannot overrule deliberately differing scopes.
     for (name, origin) in &selection.fallback {
         match *origin {
-            crate::axis_sources::ExtentOrigin::ExternalAxis { load, axis } => {
+            chelis_dag_core::axis_sources::ExtentOrigin::ExternalAxis { load, axis } => {
                 let Some(RiscOp::Load { name: label }) = dag.get(load).map(|node| &node.op) else {
                     continue;
                 };
@@ -3629,13 +3633,13 @@ fn infer_symbolic_bindings_from_inputs(
                     bindings.insert(name.clone(), *extent);
                 }
             }
-            crate::axis_sources::ExtentOrigin::Literal(extent) => {
+            chelis_dag_core::axis_sources::ExtentOrigin::Literal(extent) => {
                 if let Ok(extent) = usize::try_from(extent) {
                     bindings.insert(name.clone(), extent);
                 }
             }
-            crate::axis_sources::ExtentOrigin::OpComputed { .. } => {}
-            crate::axis_sources::ExtentOrigin::ScalarInput { .. } => {
+            chelis_dag_core::axis_sources::ExtentOrigin::OpComputed { .. } => {}
+            chelis_dag_core::axis_sources::ExtentOrigin::ScalarInput { .. } => {
                 // A node-valued reshape/expand target has no entry value to
                 // bind. `bind_symbolic_dims` may leave its output type
                 // symbolic; `op_declared_axes_by_node` binds the exact
@@ -3651,7 +3655,7 @@ fn infer_symbolic_bindings_from_inputs(
 #[derive(Default)]
 struct SymbolicInputSelection {
     witnesses: Vec<Result<SymbolicWitnesses, String>>,
-    fallback: Vec<(String, crate::axis_sources::ExtentOrigin)>,
+    fallback: Vec<(String, chelis_dag_core::axis_sources::ExtentOrigin)>,
     required_shape_inputs: UnordSet<String>,
 }
 
@@ -3681,10 +3685,10 @@ fn select_symbolic_inputs(
             _ => None,
         })
         .collect::<UnordSet<_>>();
-    let op_declared = crate::dag::op_declared_dim_names(dag);
+    let op_declared = chelis_dag_core::dag::op_declared_dim_names(dag);
     let mut claimed = UnordSet::new();
-    for class in crate::axis_sources::derive_dim_witnesses(dag) {
-        let crate::axis_sources::DimClaim::Name(name) = class.claim else {
+    for class in chelis_dag_core::axis_sources::derive_dim_witnesses(dag) {
+        let chelis_dag_core::axis_sources::DimClaim::Name(name) = class.claim else {
             continue;
         };
         if !required_symbols.contains(&name) {
@@ -3694,7 +3698,7 @@ fn select_symbolic_inputs(
             .members
             .iter()
             .filter_map(|member| {
-                let (load, axis) = crate::axis_sources::member_load_axis(dag, member)?;
+                let (load, axis) = chelis_dag_core::axis_sources::member_load_axis(dag, member)?;
                 let RiscOp::Load { name: label } = &dag.get(load)?.op else {
                     return None;
                 };
@@ -3704,8 +3708,8 @@ fn select_symbolic_inputs(
         let has_live_local_source = class.members.iter().any(|member| {
             matches!(
                 member.source,
-                crate::axis_sources::AxisSource::OpComputed { .. }
-                    | crate::axis_sources::AxisSource::ScalarInput { .. }
+                chelis_dag_core::axis_sources::AxisSource::OpComputed { .. }
+                    | chelis_dag_core::axis_sources::AxisSource::ScalarInput { .. }
             ) && live.is_none_or(|mask| mask[member.node.0])
         });
         let live_witnesses = witnesses
@@ -3752,7 +3756,7 @@ fn select_symbolic_inputs(
                 .collect(),
         }));
     }
-    selected.fallback = crate::axis_sources::dim_extent_origins(dag)
+    selected.fallback = chelis_dag_core::axis_sources::dim_extent_origins(dag)
         .into_iter()
         .filter(|(name, _)| required_symbols.contains(name) && !claimed.contains(name))
         .collect();
@@ -3760,7 +3764,7 @@ fn select_symbolic_inputs(
     // source could demand an otherwise unselected input.
     let mut prebinding = None;
     for (name, origin) in &selected.fallback {
-        let crate::axis_sources::ExtentOrigin::ExternalAxis { load, .. } = origin else {
+        let chelis_dag_core::axis_sources::ExtentOrigin::ExternalAxis { load, .. } = origin else {
             continue;
         };
         let Some(RiscOp::Load { name: label }) = dag.get(*load).map(|node| &node.op) else {
@@ -3768,7 +3772,7 @@ fn select_symbolic_inputs(
         };
         if !live_loads.contains(label.as_str())
             && prebinding
-                .get_or_insert_with(|| crate::dag::required_prebinding_symbols(dag))
+                .get_or_insert_with(|| chelis_dag_core::dag::required_prebinding_symbols(dag))
                 .contains(name)
         {
             selected
@@ -3888,7 +3892,7 @@ where
 }
 
 /// The nodes `roots` need, with every observable root
-/// ([`crate::dag::TrapSeeds::is_observable_root`]) of a declaration the selection enters.
+/// ([`chelis_dag_core::dag::TrapSeeds::is_observable_root`]) of a declaration the selection enters.
 fn live_mask_for_roots(dag: &Dag, roots: &[NodeId]) -> Vec<bool> {
     let unselected = dag.outside_selection(roots);
     live_mask_from(dag, roots.to_vec(), &unselected)
@@ -3914,7 +3918,7 @@ pub fn required_load_names(dag: &Dag, roots: &[NodeId]) -> BTreeSet<String> {
 }
 
 /// Whether an evaluation of `roots` runs a node none of their values reads:
-/// an observable root ([`crate::dag::TrapSeeds::is_observable_root`]) of a
+/// an observable root ([`chelis_dag_core::dag::TrapSeeds::is_observable_root`]) of a
 /// declaration the selection enters that sits outside every root's value
 /// graph, such as the trap of a discarded `let` (spec/06 §5.2, spec/03
 /// §4.4), or a node only such a root reads. It compares the evaluator's own
@@ -3936,7 +3940,7 @@ fn live_mask_from(dag: &Dag, mut stack: Vec<NodeId>, unselected: &[bool]) -> Vec
     // chelis#2368: effect nodes are live because they are effects, not
     // because a value reaches them; chelis#2440 and chelis#2413: so is a
     // potentially trapping node, numeric or random. One predicate names the
-    // class ([`crate::dag::TrapSeeds::is_observable_root`]).
+    // class ([`chelis_dag_core::dag::TrapSeeds::is_observable_root`]).
     //
     // chelis#2476 scopes it to the selection ([`Dag::outside_selection`]).
     // An abort, or a trap, in a declaration this evaluation does not enter is
@@ -4067,8 +4071,8 @@ struct EvaluatedValues {
 /// - a producer's declared-result obligation names its witness through
 ///   `result_claim_deps`;
 /// - a local extent guard reads its `activation`, its declaring
-///   [`crate::axis_sources::CanonicalExtent::Witness`], and every member of a
-///   [`crate::axis_sources::SameShapeAgreement`], all by node id rather than
+///   [`chelis_dag_core::axis_sources::CanonicalExtent::Witness`], and every member of a
+///   [`chelis_dag_core::axis_sources::SameShapeAgreement`], all by node id rather than
 ///   through the site node's operand list.
 ///
 /// Every one of those is a read, so every one of them extends a lifetime here.
@@ -4089,7 +4093,10 @@ fn value_free_schedule(
     dag: &Dag,
     order: &[NodeId],
     live: Option<&[bool]>,
-    local_guard_sites: &UnordMap<NodeId, Vec<(usize, crate::axis_sources::LocalGuardClaim)>>,
+    local_guard_sites: &UnordMap<
+        NodeId,
+        Vec<(usize, chelis_dag_core::axis_sources::LocalGuardClaim)>,
+    >,
     retain: &[NodeId],
 ) -> Vec<Vec<NodeId>> {
     let mut last_use: Vec<Option<usize>> = vec![None; dag.len()];
@@ -4124,11 +4131,12 @@ fn value_free_schedule(
                     if let Some(activation) = claim.activation.node() {
                         read(activation);
                     }
-                    if let crate::axis_sources::CanonicalExtent::Witness(witness) = &claim.canonical
+                    if let chelis_dag_core::axis_sources::CanonicalExtent::Witness(witness) =
+                        &claim.canonical
                     {
                         read(*witness);
                     }
-                    if let crate::axis_sources::LocalGuardObservation::SameShapeAgreement(
+                    if let chelis_dag_core::axis_sources::LocalGuardObservation::SameShapeAgreement(
                         agreement,
                     ) = &claim.observed
                     {
@@ -4189,7 +4197,7 @@ where
     // chelis#1277 C4.1: eval is a production path, so the source check runs
     // here too, before `bind_symbolic_dims` resolves any extent.
     if let Err(unsupported) =
-        crate::axis_sources::check_axis_sources(dag, chelis_types::unsupported::Stage::Runtime)
+        crate::axis_admission::check_axis_sources(dag, chelis_types::unsupported::Stage::Runtime)
     {
         return Err(unsupported.to_string());
     }
@@ -4290,7 +4298,7 @@ pub struct InheritedResultClaim {
 pub struct InheritedResultAxis {
     pub axis: usize,
     pub required: usize,
-    pub source: Option<crate::axis_sources::ClaimSource>,
+    pub source: Option<chelis_dag_core::axis_sources::ClaimSource>,
 }
 
 fn eval_tensor_internal_with_result_claims<F>(
@@ -4396,7 +4404,7 @@ where
     }
     // Reject an incomplete claim/producer relationship before any input
     // preparation or entry guard can observe runtime state.
-    let declared_local_guard_sites = crate::axis_sources::local_dim_guard_sites(dag)?;
+    let declared_local_guard_sites = chelis_dag_core::axis_sources::local_dim_guard_sites(dag)?;
     let live = scope.live();
     let PreparedTensorInputs {
         inputs: mut resolved_inputs,
@@ -4413,13 +4421,15 @@ where
     // already compares is checked there, once (spec/04 §4.7). The claim stays
     // in the graph because it is also what retains a declared-but-unread
     // parameter's interface witness.
-    let entry_covered = crate::axis_sources::entry_covered_witness_claims(dag);
+    let entry_covered = chelis_dag_core::axis_sources::entry_covered_witness_claims(dag);
     // One IR plan supplies the same slot/axis order to Eval and direct C.
     // Freeze tagged/raw values at entry, before symbolic binding or body
     // execution; a Load later reads only its admitted value.
-    for step in crate::axis_sources::entry_validation_plan_for_resolved_loads(dag, &resolved_loads)
-    {
-        use crate::axis_sources::{EntryExtentGuard, EntryValidationStep};
+    for step in chelis_dag_core::axis_sources::entry_validation_plan_for_resolved_loads(
+        dag,
+        &resolved_loads,
+    ) {
+        use chelis_dag_core::axis_sources::{EntryExtentGuard, EntryValidationStep};
         match step {
             EntryValidationStep::DType { load } => {
                 let node = dag.get(load).expect("entry input");
@@ -4522,7 +4532,7 @@ where
         // though their nodes cannot execute under this root mask. Live names
         // are never defaulted: they were inferred above or failed loudly.
         if live.is_some() {
-            for name in crate::axis_sources::rendered_dim_names(dag) {
+            for name in chelis_dag_core::axis_sources::rendered_dim_names(dag) {
                 if !required_symbols.contains(&name) {
                     bindings.entry(name).or_insert(1);
                 }
@@ -4565,7 +4575,7 @@ where
     // extent when its declaring node evaluates, seeded with the Load-bound
     // dims so a declared-vs-computed disagreement errs loudly (the eval
     // mirror of the C backend's runtime equality-abort guard).
-    let op_declared_axes = crate::dag::op_declared_axes_by_node(&bound_dag);
+    let op_declared_axes = chelis_dag_core::dag::op_declared_axes_by_node(&bound_dag);
     // chelis#1277 C1.3: the eval lane's LOCAL guards, from the same
     // `local_dim_guard_sites` the C emitter reads (C2.5). Derived from `dag`
     // and not from `bound_dag` for the same reason the entry guards are:
@@ -4576,10 +4586,12 @@ where
     // `bind_symbolic_dims`, which rebuilds the graph to preserve them, so a
     // site derived here addresses the node the loop below evaluates.
     // The extent each claim states for the node it sizes
-    // ([`crate::axis_sources::GuardActivation::sized_axis`]): the extent that
+    // ([`chelis_dag_core::axis_sources::GuardActivation::sized_axis`]): the extent that
     // node declares at that axis where, inactive, it produces zeros.
-    let mut claimed_extents: UnordMap<NodeId, Vec<(usize, crate::axis_sources::CanonicalExtent)>> =
-        UnordMap::new();
+    let mut claimed_extents: UnordMap<
+        NodeId,
+        Vec<(usize, chelis_dag_core::axis_sources::CanonicalExtent)>,
+    > = UnordMap::new();
     for (_, claim) in &declared_local_guard_sites {
         if let Some(axis) = claim.activation.sized_axis() {
             claimed_extents
@@ -4590,7 +4602,7 @@ where
     }
     let mut local_guard_sites: UnordMap<
         NodeId,
-        Vec<(usize, crate::axis_sources::LocalGuardClaim)>,
+        Vec<(usize, chelis_dag_core::axis_sources::LocalGuardClaim)>,
     > = UnordMap::new();
     for ((node, axis), claim) in declared_local_guard_sites {
         local_guard_sites
@@ -4604,7 +4616,7 @@ where
             .get(root)
             .expect("claim roots validated before input preparation");
         let rank = node.output_type.dims.len();
-        let result_sites = crate::axis_sources::result_extent_sites(dag, root);
+        let result_sites = chelis_dag_core::axis_sources::result_extent_sites(dag, root);
         if claim.rank == rank {
             for site in &result_sites {
                 let RtAxis::Lit(output_axis) = site.output_axis();
@@ -4618,15 +4630,17 @@ where
                 };
                 local_guard_sites.entry(site.producer()).or_default().push((
                     producer_axis as usize,
-                    crate::axis_sources::LocalGuardClaim {
+                    chelis_dag_core::axis_sources::LocalGuardClaim {
                         claim: axis.source.as_ref().map_or_else(
                             || axis.required.to_string(),
                             |source| source.claim.clone(),
                         ),
-                        canonical: crate::axis_sources::CanonicalExtent::Resolved(axis.required),
+                        canonical: chelis_dag_core::axis_sources::CanonicalExtent::Resolved(
+                            axis.required,
+                        ),
                         op: site.operation(),
                         observed: site.observation().clone(),
-                        activation: crate::axis_sources::GuardActivation::sizing(
+                        activation: chelis_dag_core::axis_sources::GuardActivation::sizing(
                             dag,
                             site.producer(),
                             producer_axis as usize,
@@ -4667,7 +4681,7 @@ where
         for node in dag.nodes() {
             virtual_nodes[node.id.0] = views.is_deferred(node.id);
         }
-        for product in crate::fuse::reduction_inlined_products(dag) {
+        for product in chelis_dag_core::fuse::reduction_inlined_products(dag) {
             if product.skipped().iter().any(|node| roots.contains(node)) {
                 continue;
             }
@@ -4679,7 +4693,7 @@ where
                 }
             }
         }
-        for indices in crate::fuse::cartesian_gather_indices(dag) {
+        for indices in chelis_dag_core::fuse::cartesian_gather_indices(dag) {
             let skipped = [indices.index_sum, indices.views[0], indices.views[1]];
             if skipped.iter().any(|node| roots.contains(node)) {
                 continue;
@@ -4800,10 +4814,10 @@ where
                 // than falling through a wildcard and disappearing from this
                 // lane while the C lane keeps emitting it.
                 let observed = match &claim.observed {
-                    crate::axis_sources::LocalGuardObservation::Carrier(carrier) => {
+                    chelis_dag_core::axis_sources::LocalGuardObservation::Carrier(carrier) => {
                         resolve_eval_bound(carrier, node, &values, 0, *axis)?
                     }
-                    crate::axis_sources::LocalGuardObservation::ComputedExtent(computed) => {
+                    chelis_dag_core::axis_sources::LocalGuardObservation::ComputedExtent(computed) => {
                         match computed_axis_extent_value(
                             computed,
                             node,
@@ -4822,15 +4836,15 @@ where
                             None => continue,
                         }
                     }
-                    crate::axis_sources::LocalGuardObservation::SameShapeAgreement(agreement) => {
+                    chelis_dag_core::axis_sources::LocalGuardObservation::SameShapeAgreement(agreement) => {
                         same_shape_agreement_extent(dag, node, agreement, *axis, &values)?
                     }
-                    crate::axis_sources::LocalGuardObservation::MalformedSameShapeAgreement(
+                    chelis_dag_core::axis_sources::LocalGuardObservation::MalformedSameShapeAgreement(
                         reason,
                     ) => return Err(reason.clone()),
                     // Read only after the node has produced its value; taken
                     // by the loop at the foot of the body.
-                    crate::axis_sources::LocalGuardObservation::RealizedExtent => continue,
+                    chelis_dag_core::axis_sources::LocalGuardObservation::RealizedExtent => continue,
                 };
                 local_guard_verdict(*axis, claim, observed, &mut runtime_dims, &values)?;
             }
@@ -4864,8 +4878,8 @@ where
             RiscOp::RuntimeRecurrence(recurrence) => {
                 let source = &values[&node.inputs[0]];
                 let count = match &recurrence.source {
-                    crate::dag::RuntimeRecurrenceSource::Tensor { .. } => source.shape[0],
-                    crate::dag::RuntimeRecurrenceSource::Columns { .. } => {
+                    chelis_dag_core::dag::RuntimeRecurrenceSource::Tensor { .. } => source.shape[0],
+                    chelis_dag_core::dag::RuntimeRecurrenceSource::Columns { .. } => {
                         let length = source
                             .storage()
                             .to_i64_exact_vec()
@@ -5121,7 +5135,7 @@ where
                 finalize_wide_int("shape", out_prim, vec![], vec![extent as i64])?
             }
             RiscOp::ExtentWitness {
-                site: crate::dag::ExtentWitnessSite::LiteralResultClaim,
+                site: chelis_dag_core::dag::ExtentWitnessSite::LiteralResultClaim,
                 requirements,
                 ..
             } => finalize_wide_int(
@@ -5135,7 +5149,7 @@ where
                 ],
             )?,
             RiscOp::ExtentWitness {
-                site: crate::dag::ExtentWitnessSite::LocalAscriptionClaim { .. },
+                site: chelis_dag_core::dag::ExtentWitnessSite::LocalAscriptionClaim { .. },
                 requirements,
                 ..
             } if !requirements.is_empty() => finalize_wide_int(
@@ -5156,26 +5170,30 @@ where
                 claims,
             } => {
                 let operation = match site {
-                    crate::dag::ExtentWitnessSite::Caller => "load",
-                    crate::dag::ExtentWitnessSite::LocalExpand => "expand",
-                    crate::dag::ExtentWitnessSite::ResultClaim { .. } => "shape",
-                    crate::dag::ExtentWitnessSite::LocalAscriptionClaim { .. } => "shape",
-                    crate::dag::ExtentWitnessSite::LiteralResultClaim => {
+                    chelis_dag_core::dag::ExtentWitnessSite::Caller => "load",
+                    chelis_dag_core::dag::ExtentWitnessSite::LocalExpand => "expand",
+                    chelis_dag_core::dag::ExtentWitnessSite::ResultClaim { .. } => "shape",
+                    chelis_dag_core::dag::ExtentWitnessSite::LocalAscriptionClaim { .. } => "shape",
+                    chelis_dag_core::dag::ExtentWitnessSite::LiteralResultClaim => {
                         unreachable!("literal role handled above")
                     }
                 };
                 let parameter = match site {
-                    crate::dag::ExtentWitnessSite::Caller => parameter.clone(),
-                    crate::dag::ExtentWitnessSite::ResultClaim { .. } => parameter.clone(),
-                    crate::dag::ExtentWitnessSite::LocalAscriptionClaim { .. } => parameter.clone(),
-                    crate::dag::ExtentWitnessSite::LiteralResultClaim => {
+                    chelis_dag_core::dag::ExtentWitnessSite::Caller => parameter.clone(),
+                    chelis_dag_core::dag::ExtentWitnessSite::ResultClaim { .. } => {
+                        parameter.clone()
+                    }
+                    chelis_dag_core::dag::ExtentWitnessSite::LocalAscriptionClaim { .. } => {
+                        parameter.clone()
+                    }
+                    chelis_dag_core::dag::ExtentWitnessSite::LiteralResultClaim => {
                         unreachable!("literal role handled above")
                     }
-                    crate::dag::ExtentWitnessSite::LocalExpand => {
+                    chelis_dag_core::dag::ExtentWitnessSite::LocalExpand => {
                         format!("node {}", node.inputs[0].0)
                     }
                 };
-                let crate::dag::RtAxis::Lit(axis) = axis;
+                let chelis_dag_core::dag::RtAxis::Lit(axis) = axis;
                 let input = &values[&node.inputs[0]];
                 let observed = *input
                     .shape
@@ -5209,7 +5227,7 @@ where
                         match &dag.get(*edge).ok_or("missing extent claim edge")?.op {
                             RiscOp::ExtentWitness {
                                 parameter,
-                                axis: crate::dag::RtAxis::Lit(axis),
+                                axis: chelis_dag_core::dag::RtAxis::Lit(axis),
                                 ..
                             } => (parameter.clone(), *axis),
                             _ => return Err("extent claim requires a witness edge".into()),
@@ -5243,7 +5261,7 @@ where
             }
             RiscOp::CheckedReshapeExtent {
                 claims,
-                axis: crate::dag::RtAxis::Lit(axis),
+                axis: chelis_dag_core::dag::RtAxis::Lit(axis),
             } => {
                 let actual = values[&node.inputs[0]]
                     .storage()
@@ -5300,7 +5318,8 @@ where
                 let (lhs, rhs) = (&values[&node.inputs[0]], &values[&node.inputs[1]]);
                 // A disagreement inside matmul's decomposed product is
                 // matmul's own `Domain` trap (spec/04 section 4.7).
-                if lhs.shape != rhs.shape && crate::tier2::is_matmul_product(node, |id| dag.get(id))
+                if lhs.shape != rhs.shape
+                    && chelis_dag_core::tier2::is_matmul_product(node, |id| dag.get(id))
                 {
                     return Err(agreement_failure(dag, node, lhs, rhs));
                 }
@@ -5673,8 +5692,14 @@ where
                     ty.clone(),
                     None,
                 );
-                let result =
-                    crate::tier2::decompose_softmax(owner.into(), &mut graph, x, *axis, &ty, None);
+                let result = chelis_dag_core::tier2::decompose_softmax(
+                    owner.into(),
+                    &mut graph,
+                    x,
+                    *axis,
+                    &ty,
+                    None,
+                );
                 graph.add_root(result);
                 let mut load = |_: &str| Some(input.clone());
                 let load: &mut dyn FnMut(&str) -> Option<TensorValue> = &mut load;
@@ -5894,7 +5919,7 @@ where
                         ));
                     }
                     out_shape.insert(*axis, size_value);
-                    crate::axis_sources::ExpansionKind::Insert
+                    chelis_dag_core::axis_sources::ExpansionKind::Insert
                 } else if node.output_type.dims.len() == input.shape.len() {
                     let target = out_shape.get_mut(*axis).ok_or_else(|| {
                         format!(
@@ -5905,7 +5930,7 @@ where
                         )
                     })?;
                     *target = size_value;
-                    crate::axis_sources::ExpansionKind::Expand
+                    chelis_dag_core::axis_sources::ExpansionKind::Expand
                 } else {
                     return Err(format!(
                         "expand at node {}: output rank {} must equal input rank {} or {}",
@@ -5917,7 +5942,7 @@ where
                 };
                 if virtual_nodes[node.id.0] {
                     let len = admit_result(kind.primitive_name(), &out_shape, input.prim())?;
-                    let suffix = if kind == crate::axis_sources::ExpansionKind::Expand {
+                    let suffix = if kind == chelis_dag_core::axis_sources::ExpansionKind::Expand {
                         *axis + 1
                     } else {
                         *axis
@@ -5930,7 +5955,7 @@ where
                     let block = if len == 0 { 1 } else { size_value * inner };
                     let source_block = if len == 0 {
                         1
-                    } else if kind == crate::axis_sources::ExpansionKind::Expand {
+                    } else if kind == chelis_dag_core::axis_sources::ExpansionKind::Expand {
                         input.shape[*axis] * inner
                     } else {
                         inner
@@ -6252,7 +6277,7 @@ where
             for (axis, claim) in sites {
                 if !matches!(
                     claim.observed,
-                    crate::axis_sources::LocalGuardObservation::RealizedExtent
+                    chelis_dag_core::axis_sources::LocalGuardObservation::RealizedExtent
                 ) {
                     continue;
                 }
@@ -6371,7 +6396,7 @@ fn inactive_disagreeing_elementwise(
 /// checking anything (spec/10 §3.2), for the classes that check an extent or
 /// a bound rather than an operand's values ([`RuntimeCheck`]), and for a
 /// node whose declared extent rests on a claim checked under its activation
-/// (`claim_sized`, [`crate::dag::TrapSeeds::is_claim_sized`]); `None` for a
+/// (`claim_sized`, [`chelis_dag_core::dag::TrapSeeds::is_claim_sized`]). `None` for a
 /// node that computes from its operands as usual.
 ///
 /// A movement node reads no bound and produces zeros of its declared type,
@@ -6386,7 +6411,7 @@ fn inactive_disagreeing_elementwise(
 fn inactive_unchecked_value(
     node: &DagNode,
     claim_sized: bool,
-    claimed: &[(usize, crate::axis_sources::CanonicalExtent)],
+    claimed: &[(usize, chelis_dag_core::axis_sources::CanonicalExtent)],
     source: &Dag,
     values: &UnordMap<NodeId, TensorValue>,
     runtime_dims: &UnordMap<String, usize>,
@@ -6420,12 +6445,12 @@ fn inactive_unchecked_value(
             .iter()
             .find(|(claimed_axis, _)| *claimed_axis == axis)
             .and_then(|(_, canonical)| match canonical {
-                crate::axis_sources::CanonicalExtent::Resolved(extent) => Some(*extent),
-                crate::axis_sources::CanonicalExtent::Witness(witness) => {
+                chelis_dag_core::axis_sources::CanonicalExtent::Resolved(extent) => Some(*extent),
+                chelis_dag_core::axis_sources::CanonicalExtent::Witness(witness) => {
                     usize::try_from(values.get(witness)?.storage().scalar_at(0).as_i64_exact()?)
                         .ok()
                 }
-                crate::axis_sources::CanonicalExtent::Binder(name) => {
+                chelis_dag_core::axis_sources::CanonicalExtent::Binder(name) => {
                     runtime_dims.get(name).copied()
                 }
             })
@@ -6469,9 +6494,10 @@ fn inactive_unchecked_value(
             // An unbound name no claim states takes what the node's own
             // carrier for its axis reads, an operand's axis or a scalar
             // operand, as the C lane declares it before the node's branch.
-            let sources = crate::axis_sources::output_axis_sources(source, node.id);
+            let sources = chelis_dag_core::axis_sources::output_axis_sources(source, node.id);
             let restores_admitted_shape =
-                crate::axis_sources::reshape_restored_shape_source(source.nodes(), node).is_some();
+                chelis_dag_core::axis_sources::reshape_restored_shape_source(source.nodes(), node)
+                    .is_some();
             let operand = |input: &usize| node.inputs.get(*input).and_then(|id| values.get(id));
             let carried = |axis: usize| match sources.get(axis)? {
                 // No target is executed in an untaken reshape. An anonymous
@@ -6483,14 +6509,14 @@ fn inactive_unchecked_value(
                 _ if matches!(node.op, RiscOp::Reshape { .. }) && !restores_admitted_shape => {
                     Some(0)
                 }
-                crate::axis_sources::AxisSource::InputAxis {
+                chelis_dag_core::axis_sources::AxisSource::InputAxis {
                     input,
                     axis: RtAxis::Lit(read),
                 } => operand(input)?
                     .shape
                     .get(usize::try_from(*read).ok()?)
                     .copied(),
-                crate::axis_sources::AxisSource::ScalarInput { input } => {
+                chelis_dag_core::axis_sources::AxisSource::ScalarInput { input } => {
                     usize::try_from(operand(input)?.storage().scalar_at(0).as_i64_exact()?).ok()
                 }
                 _ => None,
@@ -6554,7 +6580,7 @@ fn inactive_unchecked_value(
 }
 
 fn local_guard_is_active(
-    claim: &crate::axis_sources::LocalGuardClaim,
+    claim: &chelis_dag_core::axis_sources::LocalGuardClaim,
     values: &UnordMap<NodeId, TensorValue>,
 ) -> Result<bool, String> {
     let Some(activation) = claim.activation.node() else {
@@ -6609,26 +6635,28 @@ fn local_guard_is_active(
 /// between the two consumers is removed here instead of being re-recorded.
 fn local_guard_verdict(
     axis: usize,
-    claim: &crate::axis_sources::LocalGuardClaim,
+    claim: &chelis_dag_core::axis_sources::LocalGuardClaim,
     observed: usize,
     runtime_dims: &mut UnordMap<String, usize>,
     values: &UnordMap<NodeId, TensorValue>,
 ) -> Result<(), String> {
     let claimed = match &claim.canonical {
-        crate::axis_sources::CanonicalExtent::Resolved(value) => *value,
-        crate::axis_sources::CanonicalExtent::Witness(witness) => values
+        chelis_dag_core::axis_sources::CanonicalExtent::Resolved(value) => *value,
+        chelis_dag_core::axis_sources::CanonicalExtent::Witness(witness) => values
             .get(witness)
             .filter(|value| value.shape.is_empty() && value.len() == 1)
             .and_then(|value| value.storage().scalar_at(0).as_i64_exact())
             .and_then(|value| usize::try_from(value).ok())
             .ok_or_else(|| format!("missing or invalid declaring extent witness {}", witness.0))?,
-        crate::axis_sources::CanonicalExtent::Binder(name) => match runtime_dims.get(name) {
-            Some(value) => *value,
-            None => {
-                runtime_dims.insert(name.clone(), observed);
-                observed
+        chelis_dag_core::axis_sources::CanonicalExtent::Binder(name) => {
+            match runtime_dims.get(name) {
+                Some(value) => *value,
+                None => {
+                    runtime_dims.insert(name.clone(), observed);
+                    observed
+                }
             }
-        },
+        }
     };
     if observed != claimed {
         let canonical = match &claim.source {
@@ -6699,7 +6727,7 @@ fn eval_key_select(
 }
 
 /// Whether a key operation's own activation (spec/10 §3.2,
-/// [`crate::dag::Owner::activation`]) holds in some row: absent, or a Bool
+/// [`chelis_dag_core::dag::Owner::activation`]) holds in some row: absent, or a Bool
 /// with at least one true element. A key operation whose activation holds in
 /// no row reads no count.
 fn key_operation_is_live(
@@ -6849,13 +6877,13 @@ where
 /// twice: C builds the movement plan before the guard site runs, so
 /// `ShapeMetadata::shrunk` rejects the bounds and the guard never executes.
 fn computed_axis_extent_value(
-    computed: &crate::axis_sources::ComputedAxisExtent,
+    computed: &chelis_dag_core::axis_sources::ComputedAxisExtent,
     node: &DagNode,
     values: &UnordMap<NodeId, TensorValue>,
     resolved_stride_steps: Option<&[std::num::NonZeroUsize]>,
 ) -> Result<Option<usize>, String> {
     match computed {
-        crate::axis_sources::ComputedAxisExtent::RangeSpan => {
+        chelis_dag_core::axis_sources::ComputedAxisExtent::RangeSpan => {
             let start = values[&node.inputs[0]]
                 .storage()
                 .scalar_at(0)
@@ -6879,7 +6907,7 @@ fn computed_axis_extent_value(
             };
             Ok(usize::try_from(count).ok())
         }
-        crate::axis_sources::ComputedAxisExtent::ShrinkSpan {
+        chelis_dag_core::axis_sources::ComputedAxisExtent::ShrinkSpan {
             start,
             end,
             operand_axis,
@@ -6909,7 +6937,7 @@ fn computed_axis_extent_value(
             }
             Ok(end.checked_sub(start))
         }
-        crate::axis_sources::ComputedAxisExtent::PadSpan {
+        chelis_dag_core::axis_sources::ComputedAxisExtent::PadSpan {
             before,
             after,
             operand_axis,
@@ -6940,7 +6968,7 @@ fn computed_axis_extent_value(
                 .checked_add(before)
                 .and_then(|widened| widened.checked_add(after)))
         }
-        crate::axis_sources::ComputedAxisExtent::StrideSpan { step, operand_axis } => {
+        chelis_dag_core::axis_sources::ComputedAxisExtent::StrideSpan { step, operand_axis } => {
             // Preserve the operand-axis identity and the signed step carrier
             // through the shared observation. The complete stride vector was
             // resolved at the node boundary before ANY local claim, so a
@@ -7170,8 +7198,8 @@ pub fn eval_scalar(dag: &Dag, inputs: &UnordMap<String, f64>) -> UnordMap<NodeId
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dag::RiscOp;
     use crate::lower::{LoweredLibrary, lower_program_to_library};
+    use chelis_dag_core::dag::RiscOp;
     use chelis_deep::parser::parse_str;
     use chelis_numeric_core::prim::Prim;
 
@@ -7205,7 +7233,7 @@ mod tests {
             } else {
                 a
             };
-            let output = crate::tier2::lower_matmul_with_accumulator(
+            let output = chelis_dag_core::tier2::lower_matmul_with_accumulator(
                 owner.into(),
                 &mut dag,
                 lhs,
@@ -7443,7 +7471,7 @@ mod tests {
             matrix.clone(),
             None,
         );
-        let y = crate::tier2::lower_matmul_with_accumulator(
+        let y = chelis_dag_core::tier2::lower_matmul_with_accumulator(
             owner.into(),
             &mut dag,
             a,
@@ -7477,7 +7505,7 @@ mod tests {
             TensorType::scalar_f32(),
             None,
         );
-        let result = crate::grad::grad_dag_checked(&dag, loss, &[a, b]).unwrap();
+        let result = chelis_dag_core::grad::grad_dag_checked(&dag, loss, &[a, b]).unwrap();
         let inputs: UnordMap<String, TensorValue> = [
             (
                 "a".into(),
@@ -7535,7 +7563,7 @@ mod tests {
             matrix.clone(),
             None,
         );
-        let y = crate::tier2_ordered::lower_einsum(
+        let y = chelis_dag_core::tier2_ordered::lower_einsum(
             owner.into(),
             &mut dag,
             "ij,jk->ik",
@@ -7568,7 +7596,7 @@ mod tests {
             TensorType::scalar_f32(),
             None,
         );
-        let result = crate::grad::grad_dag_checked(&dag, loss, &[a, b]).unwrap();
+        let result = chelis_dag_core::grad::grad_dag_checked(&dag, loss, &[a, b]).unwrap();
         let inputs: UnordMap<String, TensorValue> = [
             (
                 "a".into(),
@@ -7748,8 +7776,8 @@ mod tests {
 
     #[test]
     fn runtime_recurrence_columns_reverse_each_visited_field_and_check_length() {
-        use crate::dag::{Owner, RuntimeRecurrence, RuntimeRecurrenceSource};
-        use crate::grad::grad_dag_checked;
+        use chelis_dag_core::dag::{Owner, RuntimeRecurrence, RuntimeRecurrenceSource};
+        use chelis_dag_core::grad::grad_dag_checked;
 
         let mut callback = Dag::new();
         let owner = Owner::from(callback.declare("column_step"));
@@ -7840,7 +7868,7 @@ mod tests {
             None,
         );
         dag.add_root(result);
-        assert!(crate::verify::verify(&dag).is_empty());
+        assert!(chelis_dag_core::verify::verify(&dag).is_empty());
         let gradient = grad_dag_checked(&dag, result, &[weights, biases]).expect("column VJP");
         let inputs = |n| {
             UnordMap::from([
@@ -8405,7 +8433,7 @@ mod tests {
         let add = dag.add_node(decl, RiscOp::Add, vec![a, one], ty.clone(), None);
         let mul = dag.add_node(decl, RiscOp::Mul, vec![add, one], ty, None);
         dag.add_root(mul);
-        let fused = crate::fuse::fuse(&dag);
+        let fused = chelis_dag_core::fuse::fuse(&dag);
         assert!(
             fused
                 .nodes()
@@ -8618,7 +8646,7 @@ mod tests {
             decl,
             RiscOp::Expand {
                 axis: 0,
-                size: crate::dag::RtDim::Lit(4),
+                size: chelis_dag_core::dag::RtDim::Lit(4),
             },
             vec![x],
             out_ty,
@@ -8800,7 +8828,7 @@ mod tests {
             );
             let cond = dag.add_node(
                 g_decl,
-                RiscOp::Compare(crate::dag::ComparisonKind::Gt),
+                RiscOp::Compare(chelis_dag_core::dag::ComparisonKind::Gt),
                 vec![z, z],
                 bool_ty,
                 None,
@@ -9129,7 +9157,7 @@ mod tests {
             );
             let cond = dag.add_node(
                 g_decl,
-                RiscOp::Compare(crate::dag::ComparisonKind::Gt),
+                RiscOp::Compare(chelis_dag_core::dag::ComparisonKind::Gt),
                 vec![z, z],
                 TensorType {
                     dims: vec![DimInfo::Lit(3)],
@@ -9206,7 +9234,7 @@ mod tests {
         );
         let cond = dag.add_node(
             main_decl,
-            RiscOp::Compare(crate::dag::ComparisonKind::Gt),
+            RiscOp::Compare(chelis_dag_core::dag::ComparisonKind::Gt),
             vec![x, x],
             TensorType {
                 dims: vec![DimInfo::Lit(3)],
@@ -9344,9 +9372,9 @@ mod tests {
             decl,
             RiscOp::Expand {
                 axis: 0,
-                size: crate::dag::RtDim::InputAxis {
+                size: chelis_dag_core::dag::RtDim::InputAxis {
                     tensor: 1,
-                    axis: crate::dag::RtAxis::Lit(0),
+                    axis: chelis_dag_core::dag::RtAxis::Lit(0),
                 },
             },
             vec![one, x],
@@ -9394,9 +9422,9 @@ mod tests {
             decl,
             RiscOp::Expand {
                 axis: 0,
-                size: crate::dag::RtDim::InputAxis {
+                size: chelis_dag_core::dag::RtDim::InputAxis {
                     tensor: 1,
-                    axis: crate::dag::RtAxis::Lit(0),
+                    axis: chelis_dag_core::dag::RtAxis::Lit(0),
                 },
             },
             vec![one, x],
@@ -9444,9 +9472,9 @@ mod tests {
             decl,
             RiscOp::Expand {
                 axis: 0,
-                size: crate::dag::RtDim::InputAxis {
+                size: chelis_dag_core::dag::RtDim::InputAxis {
                     tensor: 1,
-                    axis: crate::dag::RtAxis::Lit(0),
+                    axis: chelis_dag_core::dag::RtAxis::Lit(0),
                 },
             },
             vec![one, required],
@@ -9500,9 +9528,9 @@ mod tests {
             decl,
             RiscOp::Expand {
                 axis: 0,
-                size: crate::dag::RtDim::InputAxis {
+                size: chelis_dag_core::dag::RtDim::InputAxis {
                     tensor: 1,
-                    axis: crate::dag::RtAxis::Lit(1),
+                    axis: chelis_dag_core::dag::RtAxis::Lit(1),
                 },
             },
             vec![one, shape_source],
@@ -10055,7 +10083,7 @@ mod tests {
     /// for the new reduction variants. Mirrors the existing c3_sum check.
     #[test]
     fn adv_new_reductions_reject_out_of_range_axis() {
-        use crate::verify::verify;
+        use chelis_dag_core::verify::verify;
         for op in [
             RiscOp::MinReduce { axis: 7 },
             RiscOp::ProdReduce { axis: 7 },
@@ -10268,7 +10296,7 @@ mod tests {
             None,
         );
         dag.add_root(e);
-        let fused = crate::fuse::fuse(&dag);
+        let fused = chelis_dag_core::fuse::fuse(&dag);
         assert!(
             fused
                 .nodes()
@@ -10421,7 +10449,7 @@ mod tests {
 #[cfg(test)]
 mod value_reclamation {
     use super::*;
-    use crate::dag::RiscOp;
+    use chelis_dag_core::dag::RiscOp;
     use chelis_numeric_core::prim::Prim;
 
     fn vec3() -> TensorType {
@@ -10919,11 +10947,11 @@ mod value_reclamation {
     }
 
     fn guard_claim(
-        canonical: crate::axis_sources::CanonicalExtent,
-        observed: crate::axis_sources::LocalGuardObservation,
-        activation: crate::axis_sources::GuardActivation,
-    ) -> crate::axis_sources::LocalGuardClaim {
-        crate::axis_sources::LocalGuardClaim {
+        canonical: chelis_dag_core::axis_sources::CanonicalExtent,
+        observed: chelis_dag_core::axis_sources::LocalGuardObservation,
+        activation: chelis_dag_core::axis_sources::GuardActivation,
+    ) -> chelis_dag_core::axis_sources::LocalGuardClaim {
+        chelis_dag_core::axis_sources::LocalGuardClaim {
             claim: "n".to_string(),
             canonical,
             op: "expand",
@@ -10936,7 +10964,7 @@ mod value_reclamation {
     fn schedule_with_guard(
         dag: &Dag,
         site: NodeId,
-        claim: crate::axis_sources::LocalGuardClaim,
+        claim: chelis_dag_core::axis_sources::LocalGuardClaim,
         retain: &[NodeId],
     ) -> Vec<Vec<NodeId>> {
         let mut sites = UnordMap::new();
@@ -10950,13 +10978,13 @@ mod value_reclamation {
         // The guard at `late` is checked under the activation of the node
         // its claim is about, `a`'s: `x`, which `a` already reads earlier.
         dag.node_mut(a).expect("a").owner.activation = Some(x);
-        let activation = crate::axis_sources::GuardActivation::reading(&dag, a).unwrap();
+        let activation = chelis_dag_core::axis_sources::GuardActivation::reading(&dag, a).unwrap();
         let schedule = schedule_with_guard(
             &dag,
             late,
             guard_claim(
-                crate::axis_sources::CanonicalExtent::Resolved(3),
-                crate::axis_sources::LocalGuardObservation::RealizedExtent,
+                chelis_dag_core::axis_sources::CanonicalExtent::Resolved(3),
+                chelis_dag_core::axis_sources::LocalGuardObservation::RealizedExtent,
                 activation,
             ),
             &[late],
@@ -10975,9 +11003,9 @@ mod value_reclamation {
             &dag,
             late,
             guard_claim(
-                crate::axis_sources::CanonicalExtent::Witness(x),
-                crate::axis_sources::LocalGuardObservation::RealizedExtent,
-                crate::axis_sources::GuardActivation::sizing(&dag, late, 0).unwrap(),
+                chelis_dag_core::axis_sources::CanonicalExtent::Witness(x),
+                chelis_dag_core::axis_sources::LocalGuardObservation::RealizedExtent,
+                chelis_dag_core::axis_sources::GuardActivation::sizing(&dag, late, 0).unwrap(),
             ),
             &[late],
         );
@@ -11022,7 +11050,7 @@ mod value_reclamation {
     #[test]
     fn a_same_shape_agreement_member_extends_the_lifetime_it_reads() {
         let (dag, x, mix, late) = agreement_graph();
-        let agreement = crate::axis_sources::same_shape_result_agreement(&dag, mix)
+        let agreement = chelis_dag_core::axis_sources::same_shape_result_agreement(&dag, mix)
             .expect("a same-shape producer")
             .expect("positive rank");
         assert_eq!(agreement.members(), &[x, NodeId(1)]);
@@ -11033,9 +11061,9 @@ mod value_reclamation {
             &dag,
             late,
             guard_claim(
-                crate::axis_sources::CanonicalExtent::Resolved(3),
-                crate::axis_sources::LocalGuardObservation::SameShapeAgreement(agreement),
-                crate::axis_sources::GuardActivation::sizing(&dag, late, 0).unwrap(),
+                chelis_dag_core::axis_sources::CanonicalExtent::Resolved(3),
+                chelis_dag_core::axis_sources::LocalGuardObservation::SameShapeAgreement(agreement),
+                chelis_dag_core::axis_sources::GuardActivation::sizing(&dag, late, 0).unwrap(),
             ),
             &[late],
         );

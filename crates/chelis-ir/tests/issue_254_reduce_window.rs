@@ -10,9 +10,9 @@
 //! panic from the evaluator's defensive asserts (which the type checker
 //! is responsible for rejecting before that point).
 
-use chelis_ir::dag::{Dag, DimInfo, ReduceWindowKind, RiscOp, TensorType};
+use chelis_dag_core::dag::{Dag, DimInfo, ReduceWindowKind, RiscOp, TensorType};
+use chelis_dag_core::verify;
 use chelis_ir::eval::{TensorValue, eval_tensor};
-use chelis_ir::verify;
 use chelis_numeric_core::prim::Prim;
 use chelis_unord::UnordMap;
 
@@ -59,7 +59,7 @@ fn eval_with_input(dag: &Dag, name: &str, shape: Vec<usize>, data: Vec<f64>) -> 
     let values = eval_tensor(dag, &inputs).expect("eval succeeds");
     // The output is the second node (id = 1).
     values
-        .get(&chelis_ir::dag::NodeId(1))
+        .get(&chelis_dag_core::dag::NodeId(1))
         .expect("output node present")
         .clone()
 }
@@ -289,7 +289,7 @@ fn reduce_window_panics_when_window_arity_exceeds_rank() {
 /// every window that covers it).
 #[test]
 fn reduce_window_grad_lowers_to_adjoint_and_evaluates() {
-    use chelis_ir::grad::grad_dag_checked;
+    use chelis_dag_core::grad::grad_dag_checked;
 
     // x[4] -> reduce_window_sum(window=[2], stride=[1]) -> out[3] -> sum -> scalar
     let mut dag = Dag::default();

@@ -17,7 +17,7 @@
 //! loads, but neither target mechanic is capacity authority.
 
 use chelis_backend_hip::memory::{MemoryPlan, NodeMemoryKind};
-use chelis_ir::dag::{Dag, DimExpr, DimInfo, NodeId, RiscOp, TensorType};
+use chelis_dag_core::dag::{Dag, DimExpr, DimInfo, NodeId, RiscOp, TensorType};
 use chelis_ir::ownership::plan_hip_storage;
 use chelis_numeric_core::prim::Prim;
 mod support;

@@ -17,7 +17,7 @@
 //! span-bearing case added in S4.3.
 
 mod support;
-use chelis_ir::dag::{Dag, DimInfo, NodeId, RiscOp, TensorType};
+use chelis_dag_core::dag::{Dag, DimInfo, NodeId, RiscOp, TensorType};
 use chelis_numeric_core::prim::Prim;
 use support::codegen_metal;
 

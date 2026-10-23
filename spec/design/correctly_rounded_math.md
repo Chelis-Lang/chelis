@@ -191,7 +191,7 @@ once through the existing `half` narrowing, as [04-NUM-8] requires. Every consum
 this API and nothing else:
 
 - `crates/chelis-numeric-core/src/dtype_semantics.rs` (scalar and activation evaluation).
-- `crates/chelis-ir/src/optimize.rs` (constant folding computes at the declared width
+- `crates/chelis-dag-core/src/optimize.rs` (constant folding computes at the declared width
   through the same kernels, so a folded literal and a run-time value cannot differ);
 - `crates/chelis-compiler-api/src/runtime/host_ops.rs` (host softmax and the other
   host-lane numerics);
@@ -776,10 +776,11 @@ correction reads `z = 0`, so its gradient is exactly zero.
 
 ### 12.6 Implementation surface
 
-`chelis_numeric_core::activation` holds the one definition of every §3.3 graph, `Phi`
-included; the IR lowering (`chelis_ir::tier2`), the evaluator's scalar and tensor
-kernels, and the C host helpers (built from the `tier2` graph) all run it, so `gelu`,
-`gelu_tanh`, `silu`, and `standard_normal_cdf` have no hand-written lane copy. The graph's
+`chelis_numeric_core::activation` owns every §3.3 graph, including `Phi`.
+DAG decomposition (`chelis_dag_core::tier2`), evaluator kernels, and generated C host helpers execute that graph.
+These lanes contain no separate copies of `gelu`, `gelu_tanh`, `silu`, or `standard_normal_cdf`.
+
+The graph's
 steps are `neg`, `abs`, `exp`, `erfc`, `recip`, `add`, `sub`, `mul`, `cmplt`, `where`,
 and the f16/bf16 `cast`s. `erf` and `erfc` are wired wherever `tanh` is: the
 evaluator, IR evaluation and fusion, the adjoint, C kernel and host emission, the wire

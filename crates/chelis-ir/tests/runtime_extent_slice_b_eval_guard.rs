@@ -34,7 +34,7 @@
 //! the node's value is produced, which is after the allocation the rule puts
 //! it before.
 
-use chelis_ir::dag::{Dag, DimInfo, NodeId, RiscOp, RtAxis, RtDim, TensorType};
+use chelis_dag_core::dag::{Dag, DimInfo, NodeId, RiscOp, RtAxis, RtDim, TensorType};
 use chelis_ir::eval::{TensorValue, eval_tensor_roots_with_strict};
 use chelis_numeric_core::prim::Prim;
 
@@ -46,7 +46,12 @@ fn named(name: &str) -> DimInfo {
     DimInfo::Named(name.into(), None)
 }
 
-fn load(dag: &mut Dag, decl: chelis_ir::dag::DeclId, name: &str, dims: Vec<DimInfo>) -> NodeId {
+fn load(
+    dag: &mut Dag,
+    decl: chelis_dag_core::dag::DeclId,
+    name: &str,
+    dims: Vec<DimInfo>,
+) -> NodeId {
     dag.add_node(
         decl,
         RiscOp::Load { name: name.into() },
@@ -251,8 +256,8 @@ fn two_roots_spelling_one_binder_are_two_claims_not_one_class() {
     dag.add_root(from_x);
     dag.add_root(from_y);
 
-    for class in chelis_ir::axis_sources::derive_runtime_dim_classes(&dag) {
-        let chelis_ir::axis_sources::DimClaim::Name(name) = &class.claim else {
+    for class in chelis_dag_core::axis_sources::derive_runtime_dim_classes(&dag) {
+        let chelis_dag_core::axis_sources::DimClaim::Name(name) = &class.claim else {
             continue;
         };
         assert_ne!(

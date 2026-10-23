@@ -12,6 +12,7 @@ lowering-trace = []
 
 [dependencies]
 chelis-type-core = { workspace = true, default-features = false, features = ["serde"] }
+chelis-dag-core.workspace = true
 chelis-numeric-core = { workspace = true, default-features = false, features = ["alloc", "serde"] }
 chelis-abi.workspace = true
 chelis-unord.workspace = true

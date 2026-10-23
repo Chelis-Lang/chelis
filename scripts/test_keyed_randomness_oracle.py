@@ -117,16 +117,18 @@ class ReceiptTests(unittest.TestCase):
             oracle.validate_junit(self.xml, self.expected)
 
     def test_retirement_scan_accepts_current_shape_and_refuses_old_dispatch_markers(self):
-        for package in ("chelis-ir", "chelis-compiler-api"):
+        for package in ("chelis-ir", "chelis-dag-core", "chelis-compiler-api"):
             folder = self.root / "crates" / package / "src"
             folder.mkdir(parents=True)
             (folder / "lib.rs").write_text("pub fn run() {}\n")
         oracle.check_retirement(self.root)
-        for marker in oracle.RETIRED:
-            path = self.root / "crates/chelis-ir/src/lib.rs"
-            path.write_text(f"fn {marker}() {{}}\n")
-            with self.subTest(marker=marker), self.assertRaises(oracle.OracleFailure):
-                oracle.check_retirement(self.root)
+        for package in ("chelis-ir", "chelis-dag-core", "chelis-compiler-api"):
+            path = self.root / "crates" / package / "src/lib.rs"
+            for marker in oracle.RETIRED:
+                path.write_text(f"fn {marker}() {{}}\n")
+                with self.subTest(package=package, marker=marker), self.assertRaises(oracle.OracleFailure):
+                    oracle.check_retirement(self.root)
+            path.write_text("pub fn run() {}\n")
 
     def test_retirement_scan_refuses_missing_source_roots(self):
         with self.assertRaises(oracle.OracleFailure):

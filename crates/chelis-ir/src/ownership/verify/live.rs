@@ -377,7 +377,6 @@ mod tests {
     use chelis_numeric_core::prim::Prim;
 
     use super::{LiveSet, UnitOwnerFacts};
-    use crate::dag::{DimInfo, TensorType};
     use crate::host_type_state::ConcreteHostType;
     use crate::ownership::LiveByteBound;
     use crate::ownership::classify::{Placement, classify};
@@ -385,6 +384,7 @@ mod tests {
     use crate::ownership::ir::{
         BlockId, OwnerId, OwnerInfo, OwnerOrigin, ScheduleState, Unit, UnitId, UnitKind,
     };
+    use chelis_dag_core::dag::{DimInfo, TensorType};
 
     fn tensor(elements: usize, precision: Prim) -> OwnerInfo {
         let ty = ConcreteHostType::Tensor(TensorType {

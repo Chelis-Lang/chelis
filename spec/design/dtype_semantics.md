@@ -247,6 +247,17 @@ pub fn scalar_from_f64(prim: Prim, v: f64) -> Result<ScalarValue, NumericTrap>;
 pub enum RawScalar { Int(i64), Float(f64) }   // what kernels produce
 ```
 
+The DAG extraction places the existing f64-image folds in `chelis_numeric_core::dtype_semantics`.
+`fold_wide_unary(WideUnaryFold, ScalarValue, Prim)` accepts only Neg, Sqrt, Abs, Floor, Ceil, and Round.
+`fold_wide_binary(WideBinaryFold, ScalarValue, ScalarValue, Prim)` accepts only Add and Mul.
+Both APIs reject inexact integer images and decline results that fail `scalar_from_f64` finalization.
+
+These folds retain their existing stored-image behavior without changing ordinary typed-kernel NaN canonicalization.
+Floor, Ceil, and Round quiet signaling NaNs while preserving sign and payload.
+Neg and Abs retain their native signaling behavior.
+All other inputs use the existing numeric evaluators and private math provider.
+This transfers implementation ownership without expanding fold eligibility or changing numeric authority.
+
 **Tensors.** The element buffer becomes private and per-dtype:
 
 ```rust

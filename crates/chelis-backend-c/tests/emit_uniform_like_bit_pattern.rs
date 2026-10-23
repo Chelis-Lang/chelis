@@ -21,7 +21,7 @@
 //! `chelis_fill_f32_bits` mechanism.
 
 mod support;
-use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
+use chelis_dag_core::dag::{Dag, DimInfo, RiscOp, TensorType};
 use chelis_numeric_core::prim::Prim;
 use support::emit_dag;
 

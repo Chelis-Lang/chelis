@@ -30,7 +30,7 @@
 
 mod support;
 use chelis_backend_metal::dtype;
-use chelis_ir::dag::{Dag, DagNode, DimInfo, RiscOp, TensorType};
+use chelis_dag_core::dag::{Dag, DagNode, DimInfo, RiscOp, TensorType};
 use chelis_numeric_core::prim::Prim;
 use support::{codegen_metal, try_codegen_metal};
 
@@ -193,7 +193,7 @@ fn build_matmul_dag(prec: Prim) -> Dag {
         decl,
         RiscOp::Expand {
             axis: 2,
-            size: chelis_ir::dag::RtDim::Lit(n),
+            size: chelis_dag_core::dag::RtDim::Lit(n),
         },
         vec![a],
         cube(m, k, n),
@@ -203,7 +203,7 @@ fn build_matmul_dag(prec: Prim) -> Dag {
         decl,
         RiscOp::Expand {
             axis: 0,
-            size: chelis_ir::dag::RtDim::Lit(m),
+            size: chelis_dag_core::dag::RtDim::Lit(m),
         },
         vec![b],
         cube(m, k, n),

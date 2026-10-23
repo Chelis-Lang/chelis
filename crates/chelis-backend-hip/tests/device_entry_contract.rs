@@ -2,7 +2,7 @@
 //! These emission controls supplement the executed device-owner fixture and
 //! generated-program lifetime mutations; they are not hardware acceptance.
 mod support;
-use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
+use chelis_dag_core::dag::{Dag, DimInfo, RiscOp, TensorType};
 use chelis_numeric_core::prim::Prim;
 
 #[test]

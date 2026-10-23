@@ -159,8 +159,8 @@ def require_wire_payload(shape, definitions):
 
 
 _API = "chelis_compiler_api::"
-_NODE = _nominal("chelis_ir::dag::NodeId")
-_TYPE = _nominal("chelis_ir::dag::TensorType")
+_NODE = _nominal("chelis_dag_core::dag::NodeId")
+_TYPE = _nominal("chelis_dag_core::dag::TensorType")
 _DEEP = _nominal("chelis_deep::ast::Expr")
 _LOCAL_TENSOR_ASCRIPTION = _nominal(
     "chelis_types::infer::checked::CheckedLocalAscription"
@@ -221,7 +221,7 @@ _BINARY_CALLS = {
         {
             # Comparison-only native codec uses. The cache publication proof
             # owns compatibility; neither payload acquires wire authority.
-            _nominal("chelis_ir::dag::Dag"),
+            _nominal("chelis_dag_core::dag::Dag"),
             ("slice", _LOCAL_TENSOR_ASCRIPTION),
         },
     ),

@@ -8,11 +8,11 @@
 //! must ignore the scalar's empty shape, use the positive-rank result extent,
 //! and report `add` as the primitive that produced the returned value.
 
-use chelis_ir::axis_sources::same_shape_result_agreement;
-use chelis_ir::dag::{Dag, DimInfo, ExtentWitnessSite, NodeId, RiscOp, RtAxis, TensorType};
+use chelis_dag_core::axis_sources::same_shape_result_agreement;
+use chelis_dag_core::dag::{Dag, DimInfo, ExtentWitnessSite, NodeId, RiscOp, RtAxis, TensorType};
+use chelis_dag_core::optimize::dead_code_eliminate;
+use chelis_dag_core::verify::verify;
 use chelis_ir::eval::{TensorValue, eval_tensor_with};
-use chelis_ir::optimize::dead_code_eliminate;
-use chelis_ir::verify::verify;
 use chelis_numeric_core::dtype_semantics::{scalar_from_f64, scalar_from_i64};
 use chelis_numeric_core::prim::Prim;
 
@@ -53,7 +53,7 @@ fn vec_i32(len: usize) -> TensorType {
 
 fn interior_claim_token(
     dag: &mut Dag,
-    decl: chelis_ir::dag::DeclId,
+    decl: chelis_dag_core::dag::DeclId,
     claim: InteriorClaim,
     required: i64,
 ) -> Option<NodeId> {
@@ -151,7 +151,7 @@ fn blas_pattern(claim: InteriorClaim) -> Dag {
         decl,
         RiscOp::Expand {
             axis: 2,
-            size: chelis_ir::dag::RtDim::Lit(4),
+            size: chelis_dag_core::dag::RtDim::Lit(4),
         },
         vec![a],
         tensor3_f32(2, 3, 4),
@@ -161,7 +161,7 @@ fn blas_pattern(claim: InteriorClaim) -> Dag {
         decl,
         RiscOp::Expand {
             axis: 0,
-            size: chelis_ir::dag::RtDim::Lit(2),
+            size: chelis_dag_core::dag::RtDim::Lit(2),
         },
         vec![b],
         tensor3_f32(2, 3, 4),
@@ -234,7 +234,7 @@ fn dense_gather_pattern(claim: InteriorClaim) -> Dag {
         decl,
         RiscOp::Expand {
             axis: 2,
-            size: chelis_ir::dag::RtDim::Lit(3),
+            size: chelis_dag_core::dag::RtDim::Lit(3),
         },
         vec![one_hot],
         tensor3_f32(4, 2, 3),
@@ -244,7 +244,7 @@ fn dense_gather_pattern(claim: InteriorClaim) -> Dag {
         decl,
         RiscOp::Expand {
             axis: 0,
-            size: chelis_ir::dag::RtDim::Lit(4),
+            size: chelis_dag_core::dag::RtDim::Lit(4),
         },
         vec![values],
         tensor3_f32(4, 2, 3),
@@ -654,7 +654,7 @@ fn agreeing_named_result_claim_survives_specialization_and_dce() {
 #[test]
 fn named_result_claim_traps_after_fusion_and_dce() {
     let (unclaimed, _) = named_claim_fusion_dag(false, false);
-    let unclaimed = chelis_ir::fuse::fuse(&unclaimed);
+    let unclaimed = chelis_dag_core::fuse::fuse(&unclaimed);
     assert!(
         unclaimed
             .nodes()
@@ -671,7 +671,7 @@ fn named_result_claim_traps_after_fusion_and_dce() {
          numeric trap: domain in add at i64"
     );
 
-    let fused = dead_code_eliminate(&chelis_ir::fuse::fuse(&dag));
+    let fused = dead_code_eliminate(&chelis_dag_core::fuse::fuse(&dag));
     assert!(verify(&fused).is_empty());
     let retained_add = fused
         .nodes()
@@ -698,7 +698,7 @@ fn named_result_claim_traps_after_fusion_and_dce() {
 #[test]
 fn agreeing_named_result_claim_survives_fusion_and_dce() {
     let (dag, _) = named_claim_fusion_dag(true, false);
-    let fused = dead_code_eliminate(&chelis_ir::fuse::fuse(&dag));
+    let fused = dead_code_eliminate(&chelis_dag_core::fuse::fuse(&dag));
     assert!(verify(&fused).is_empty());
     let retained_add = fused
         .nodes()
@@ -713,7 +713,7 @@ fn agreeing_named_result_claim_survives_fusion_and_dce() {
 fn an_interior_named_result_claim_splits_the_fusion_chain() {
     let (unclaimed, _) = named_claim_fusion_dag(false, true);
     assert!(
-        chelis_ir::fuse::fuse(&unclaimed)
+        chelis_dag_core::fuse::fuse(&unclaimed)
             .nodes()
             .iter()
             .any(|node| matches!(node.op, RiscOp::FusedElem { .. })),
@@ -721,7 +721,7 @@ fn an_interior_named_result_claim_splits_the_fusion_chain() {
     );
 
     let (claimed, _) = named_claim_fusion_dag(true, true);
-    let fused = dead_code_eliminate(&chelis_ir::fuse::fuse(&claimed));
+    let fused = dead_code_eliminate(&chelis_dag_core::fuse::fuse(&claimed));
     let retained_add = fused
         .nodes()
         .iter()

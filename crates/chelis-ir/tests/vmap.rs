@@ -1,4 +1,4 @@
-use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
+use chelis_dag_core::dag::{Dag, DimInfo, RiscOp, TensorType};
 use chelis_ir::eval::{TensorValue, eval_tensor_roots_with_strict};
 use chelis_ir::vmap::{
     vectorize_axis0, vectorize_axis0_with_node_map, vectorize_axis0_with_node_map_and_captures,
@@ -82,8 +82,8 @@ fn vmap_ordinary_shape_roots_and_consumers_keep_the_scalar_operation() {
         assert_eq!(reads.len(), 1);
         assert!(reads[0].output_type.dims.is_empty());
         assert!(matches!(reads[0].op, RiscOp::Shape { axis: 1 }));
-        assert!(chelis_ir::verify::verify(&mapped).is_empty());
-        chelis_ir::axis_sources::check_axis_sources(
+        assert!(chelis_dag_core::verify::verify(&mapped).is_empty());
+        chelis_ir::axis_admission::check_axis_sources(
             &mapped,
             chelis_types::unsupported::Stage::Runtime,
         )
@@ -212,7 +212,7 @@ fn vmap_gather_reduces_each_row_and_preserves_result_rank() {
             batch_rank: 1
         }
     ));
-    let errors = chelis_ir::verify::verify(&mapped);
+    let errors = chelis_dag_core::verify::verify(&mapped);
     assert!(errors.is_empty(), "{errors:?}");
     let value = eval_root(
         &mapped,
@@ -349,7 +349,7 @@ fn vmap_scatter_family_shifts_the_target_axis() {
             ),
             "{op:?}"
         );
-        let errors = chelis_ir::verify::verify(&mapped);
+        let errors = chelis_dag_core::verify::verify(&mapped);
         assert!(errors.is_empty(), "{op:?}: {errors:?}");
         let value = eval_root(
             &mapped,
@@ -400,7 +400,7 @@ fn vmap_one_hot_keeps_the_vocabulary_axis_last() {
     );
     dag.add_root(one_hot);
     let mapped = vectorize_axis0(&dag, DimInfo::Lit(2)).unwrap();
-    assert!(chelis_ir::verify::verify(&mapped).is_empty());
+    assert!(chelis_dag_core::verify::verify(&mapped).is_empty());
     let value = eval_root(
         &mapped,
         &UnordMap::from([(
@@ -464,7 +464,7 @@ fn nested_vmap_pairs_each_sparse_batch_axis_once() {
             batch_rank: 2
         }
     ));
-    let errors = chelis_ir::verify::verify(&outer);
+    let errors = chelis_dag_core::verify::verify(&outer);
     assert!(errors.is_empty(), "{errors:?}");
     let value = eval_root(
         &outer,
@@ -521,7 +521,7 @@ fn sparse_paired_prefix_must_match_in_verifier() {
         None,
     );
     dag.add_root(gather);
-    let errors = chelis_ir::verify::verify(&dag);
+    let errors = chelis_dag_core::verify::verify(&dag);
     assert!(
         errors
             .iter()
@@ -590,7 +590,7 @@ fn vmap_capture_keeps_authored_load_rank_and_maps_to_explicit_insert() {
             lifted.op,
             RiscOp::Expand {
                 axis: 0,
-                size: chelis_ir::dag::RtDim::Lit(3)
+                size: chelis_dag_core::dag::RtDim::Lit(3)
             }
         ),
         "capture identity must be an explicit rank-inserting movement: {lifted:?}"
@@ -606,7 +606,7 @@ fn vmap_capture_keeps_authored_load_rank_and_maps_to_explicit_insert() {
         mat_f32(3, 2),
         "an actual mapped formal still receives the batch axis"
     );
-    assert!(chelis_ir::verify::verify(&mapped).is_empty());
+    assert!(chelis_dag_core::verify::verify(&mapped).is_empty());
 
     let value = eval_root(
         &mapped,
@@ -660,7 +660,7 @@ fn vmap_broadcasts_nonshared_constant_tensors_with_a_real_batched_identity() {
             mapped_node.op,
             RiscOp::Expand {
                 axis: 0,
-                size: chelis_ir::dag::RtDim::Lit(2)
+                size: chelis_dag_core::dag::RtDim::Lit(2)
             }
         ),
         "the original constant identity must map to its batch broadcast, got {mapped_node:?}"
@@ -673,9 +673,9 @@ fn vmap_broadcasts_nonshared_constant_tensors_with_a_real_batched_identity() {
         "the raw payload must retain its original unbatched type and cardinality"
     );
     assert!(
-        chelis_ir::verify::verify(&mapped).is_empty(),
+        chelis_dag_core::verify::verify(&mapped).is_empty(),
         "mapped graph must satisfy structural verification: {:?}",
-        chelis_ir::verify::verify(&mapped)
+        chelis_dag_core::verify::verify(&mapped)
     );
 
     let value = eval_root(
@@ -706,7 +706,7 @@ fn vmap_rejects_a_shape_dependency_without_a_mapped_identity() {
     dag.node_mut(value)
         .expect("constant")
         .shape_deps
-        .push(chelis_ir::dag::NodeId(99));
+        .push(chelis_dag_core::dag::NodeId(99));
     dag.add_root(value);
 
     let error = vectorize_axis0_with_node_map(&dag, DimInfo::Lit(2)).unwrap_err();
@@ -804,7 +804,7 @@ fn vmap_batched_matmul_stays_in_expand_mul_sum_form() {
         decl,
         RiscOp::Expand {
             axis: 2,
-            size: chelis_ir::dag::RtDim::Lit(4),
+            size: chelis_dag_core::dag::RtDim::Lit(4),
         },
         vec![a],
         TensorType {
@@ -817,7 +817,7 @@ fn vmap_batched_matmul_stays_in_expand_mul_sum_form() {
         decl,
         RiscOp::Expand {
             axis: 0,
-            size: chelis_ir::dag::RtDim::Lit(2),
+            size: chelis_dag_core::dag::RtDim::Lit(2),
         },
         vec![b],
         TensorType {
@@ -1131,7 +1131,7 @@ fn issue524_explicit_nonzero_constant_vmap_axis_via_surf_lowers() {
 /// cannot silently return a map that has drifted from its own DAG.
 #[test]
 fn the_vmap_node_map_names_every_input_nodes_batched_id() {
-    use chelis_ir::dag::{NodeId, RtDim};
+    use chelis_dag_core::dag::{NodeId, RtDim};
     use chelis_ir::vmap::vectorize_axis0_with_node_map;
 
     let int64_scalar = TensorType {

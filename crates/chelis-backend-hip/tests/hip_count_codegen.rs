@@ -3,7 +3,7 @@
 mod support;
 
 use chelis_backend_hip::codegen_hip_host_program;
-use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
+use chelis_dag_core::dag::{Dag, DimInfo, RiscOp, TensorType};
 use chelis_numeric_core::prim::Prim;
 use support::{codegen_hip, lowered_host_program};
 

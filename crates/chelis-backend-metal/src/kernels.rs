@@ -123,8 +123,8 @@ pub fn output_param(idx: usize, ty: &str, name: &str) -> String {
 /// when the unsigned result has the signed tensor's representation. Shift
 /// failure records the first logical index; the synchronized host then reads
 /// that exact right operand from its typed buffer for the required diagnostic.
-pub fn bitwise_body(kind: chelis_types::BitwiseKind, prec: Prim) -> String {
-    use chelis_types::BitwiseKind;
+pub fn bitwise_body(kind: chelis_numeric_core::bitwise::BitwiseKind, prec: Prim) -> String {
+    use chelis_numeric_core::bitwise::BitwiseKind;
     let (signed, unsigned, width) = match prec {
         Prim::Int8 => ("char", "uchar", 8),
         Prim::Int16 => ("short", "ushort", 16),
@@ -198,11 +198,11 @@ pub fn integer_abs_body(precision: Prim) -> String {
 /// will widen the Metal-specific f32 tolerance for transcendental-heavy
 /// kernels, and switch individual call sites to `precise::exp` etc. when
 /// numerical agreement requires it.
-pub fn unary_func(op: &chelis_ir::dag::RiscOp, precision: Prim) -> Option<&'static str> {
+pub fn unary_func(op: &chelis_dag_core::dag::RiscOp, precision: Prim) -> Option<&'static str> {
     if !precision.is_float() {
         return None;
     }
-    use chelis_ir::dag::RiscOp;
+    use chelis_dag_core::dag::RiscOp;
     match op {
         RiscOp::Neg => Some("-"),
         RiscOp::Exp => Some("exp"),
@@ -227,8 +227,8 @@ pub fn unary_func(op: &chelis_ir::dag::RiscOp, precision: Prim) -> Option<&'stat
 }
 
 /// MSL spelling for a binary elementwise operator.
-pub fn binary_op(op: &chelis_ir::dag::RiscOp) -> Option<&'static str> {
-    use chelis_ir::dag::RiscOp;
+pub fn binary_op(op: &chelis_dag_core::dag::RiscOp) -> Option<&'static str> {
+    use chelis_dag_core::dag::RiscOp;
     match op {
         RiscOp::Add => Some("+"),
         RiscOp::Mul => Some("*"),

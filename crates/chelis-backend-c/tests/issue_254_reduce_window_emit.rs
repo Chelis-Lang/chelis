@@ -10,7 +10,7 @@
 //! is the authoritative oracle per `spec/05-risc-primitives.md` §6.
 
 mod support;
-use chelis_ir::dag::{Dag, DimInfo, ReduceWindowKind, RiscOp, TensorType};
+use chelis_dag_core::dag::{Dag, DimInfo, ReduceWindowKind, RiscOp, TensorType};
 use chelis_numeric_core::prim::Prim;
 use support::codegen;
 

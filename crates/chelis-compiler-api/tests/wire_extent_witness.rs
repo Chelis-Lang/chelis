@@ -779,11 +779,11 @@ fn remainder_wire_roundtrip_requires_exact_integer_operands() {
 #[test]
 fn bitwise_wire_roundtrip_rejects_wrong_shape_dtype_and_identity() {
     for kind in [
-        chelis_types::BitwiseKind::And,
-        chelis_types::BitwiseKind::Or,
-        chelis_types::BitwiseKind::Xor,
-        chelis_types::BitwiseKind::ShiftLeft,
-        chelis_types::BitwiseKind::ShiftRight,
+        chelis_numeric_core::bitwise::BitwiseKind::And,
+        chelis_numeric_core::bitwise::BitwiseKind::Or,
+        chelis_numeric_core::bitwise::BitwiseKind::Xor,
+        chelis_numeric_core::bitwise::BitwiseKind::ShiftLeft,
+        chelis_numeric_core::bitwise::BitwiseKind::ShiftRight,
     ] {
         for prim in ["int8", "int16", "int32", "int64"] {
             let mut dag = fixture();

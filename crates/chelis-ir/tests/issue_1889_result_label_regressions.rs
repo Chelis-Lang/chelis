@@ -3,8 +3,8 @@
 //! helper activation or with another physical axis of a rank-polymorphic
 //! argument.
 
-use chelis_ir::axis_sources::{EntryExtentGuard, entry_extent_guards};
-use chelis_ir::dag::{RiscOp, RtAxis};
+use chelis_dag_core::axis_sources::{EntryExtentGuard, entry_extent_guards};
+use chelis_dag_core::dag::{RiscOp, RtAxis};
 use chelis_ir::eval::{TensorValue, eval_tensor_with};
 
 type NamedAxis = (String, usize);
@@ -35,12 +35,12 @@ fn checked_surf(source: &str) -> chelis_types::CheckedProgram {
     chelis_types::check_linearity(&checked).expect("linearity")
 }
 
-fn named_entry(source: &str, name: &str) -> chelis_ir::Dag {
+fn named_entry(source: &str, name: &str) -> chelis_dag_core::Dag {
     chelis_ir::host::lower_named_tensor_entry_dag(&checked_surf(source), name)
         .expect("named tensor entry lowers")
 }
 
-fn compiled_dags(source: &str) -> Vec<chelis_ir::Dag> {
+fn compiled_dags(source: &str) -> Vec<chelis_dag_core::Dag> {
     let compiled = chelis_ir::host::try_lower_compiled_program(&checked_surf(source))
         .expect("compiled host program lowers");
     let mut dags = compiled.dag.into_iter().collect::<Vec<_>>();
@@ -62,19 +62,22 @@ fn compiled_dags(source: &str) -> Vec<chelis_ir::Dag> {
         .collect()
 }
 
-fn load_axis(dag: &chelis_ir::Dag, endpoint: (chelis_ir::dag::NodeId, usize)) -> (String, usize) {
+fn load_axis(
+    dag: &chelis_dag_core::Dag,
+    endpoint: (chelis_dag_core::dag::NodeId, usize),
+) -> (String, usize) {
     let RiscOp::Load { name } = &dag.get(endpoint.0).expect("guard load").op else {
         panic!("entry guard endpoint is not a load: {endpoint:?}\n{dag:#?}");
     };
     (name.as_ref().to_owned(), endpoint.1)
 }
 
-fn caller_named_claims(dag: &chelis_ir::Dag) -> Vec<CallerNamedClaim> {
+fn caller_named_claims(dag: &chelis_dag_core::Dag) -> Vec<CallerNamedClaim> {
     dag.nodes()
         .iter()
         .flat_map(|node| {
             let RiscOp::ExtentWitness {
-                site: chelis_ir::dag::ExtentWitnessSite::Caller,
+                site: chelis_dag_core::dag::ExtentWitnessSite::Caller,
                 parameter,
                 axis: RtAxis::Lit(axis),
                 claims,
@@ -88,7 +91,7 @@ fn caller_named_claims(dag: &chelis_ir::Dag) -> Vec<CallerNamedClaim> {
                 .zip(node.inputs.iter().skip(1))
                 .filter_map(|(claim, required)| {
                     let RiscOp::ExtentWitness {
-                        site: chelis_ir::dag::ExtentWitnessSite::Caller,
+                        site: chelis_dag_core::dag::ExtentWitnessSite::Caller,
                         parameter: required_parameter,
                         axis: RtAxis::Lit(required_axis),
                         ..

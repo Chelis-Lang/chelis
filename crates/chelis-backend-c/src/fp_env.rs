@@ -98,8 +98,8 @@ pub(crate) fn canonical_nan_helper(is_f64: bool) -> &'static str {
 /// operation that produces no float value of its own (integer, bool, key and
 /// shape operations, and data movement that transports stored bits). The match
 /// is exhaustive, so a new operation does not compile until it is classified.
-pub fn risc_nan_finalization(op: &chelis_ir::dag::RiscOp) -> Option<NanFinalization> {
-    use chelis_ir::dag::RiscOp;
+pub fn risc_nan_finalization(op: &chelis_dag_core::dag::RiscOp) -> Option<NanFinalization> {
+    use chelis_dag_core::dag::RiscOp;
     match op {
         RiscOp::Add
         | RiscOp::Sub
@@ -157,10 +157,10 @@ pub fn risc_nan_finalization(op: &chelis_ir::dag::RiscOp) -> Option<NanFinalizat
         | RiscOp::ReluAdjoint
         | RiscOp::ExtremaAdjoint { .. } => Some(NanFinalization::BitPreserving),
         RiscOp::ReduceWindow { reducer, .. } => Some(match reducer {
-            chelis_ir::dag::ReduceWindowKind::Max | chelis_ir::dag::ReduceWindowKind::Min => {
+            chelis_dag_core::dag::ReduceWindowKind::Max | chelis_dag_core::dag::ReduceWindowKind::Min => {
                 NanFinalization::BitPreserving
             }
-            chelis_ir::dag::ReduceWindowKind::Sum | chelis_ir::dag::ReduceWindowKind::Mean => {
+            chelis_dag_core::dag::ReduceWindowKind::Sum | chelis_dag_core::dag::ReduceWindowKind::Mean => {
                 NanFinalization::Canonical
             }
         }),
@@ -211,8 +211,8 @@ pub fn risc_nan_finalization(op: &chelis_ir::dag::RiscOp) -> Option<NanFinalizat
 
 /// The NaN finalization of one fused elementwise step: arithmetic canonical,
 /// [05-OP-40] extrema bit-preserving. Exhaustive like [`risc_nan_finalization`].
-pub fn fused_step_nan_finalization(op: &chelis_ir::dag::FusedStepOp) -> NanFinalization {
-    use chelis_ir::dag::FusedStepOp;
+pub fn fused_step_nan_finalization(op: &chelis_dag_core::dag::FusedStepOp) -> NanFinalization {
+    use chelis_dag_core::dag::FusedStepOp;
     match op {
         FusedStepOp::MaxElem | FusedStepOp::MinElem => NanFinalization::BitPreserving,
         FusedStepOp::Add

@@ -1,12 +1,21 @@
 //! DAG structural verification.
 
 use crate::dag::{
-    ComparisonKind, Dag, DimExpr, DimInfo, ExtentWitnessSite, NodeId, RiscOp, RtAxis, RtDim,
+    ComparisonKind, Dag, DimExpr, DimInfo, ExtentWitnessSite, FusedInput, FusedStepOp, NodeId,
+    RiscOp, RtAxis, RtDim,
 };
-use chelis_numeric_core::prim::Prim;
+#[cfg(test)]
+use alloc::boxed::Box;
+use alloc::{
+    format,
+    string::{String, ToString},
+    vec,
+    vec::Vec,
+};
 #[allow(unused_imports)]
-use chelis_types::key_admission::{KeyAdmission, KeyPrimitive};
-use chelis_unord::{UnordMap, UnordSet};
+use chelis_numeric_core::key_admission::{KeyAdmission, KeyPrimitive};
+use chelis_numeric_core::prim::Prim;
+use chelis_unord::UnordMap;
 
 /// Verify structural invariants of the DAG. Returns a list of error messages (empty = valid).
 // `collapsible_match` (rust 1.95+) flags `match { X => { if cond { ... } } }` patterns.
@@ -22,7 +31,7 @@ pub fn verify(dag: &Dag) -> Vec<String> {
 /// producers are intentionally admitted here because the ownership plan
 /// attaches their required `ScopeDrop`; every other DAG invariant remains
 /// identical to [`verify`].
-pub(crate) fn verify_ownership_input(dag: &Dag) -> Vec<String> {
+pub fn verify_ownership_input(dag: &Dag) -> Vec<String> {
     verify_with_dangling_policy(dag, false)
 }
 
@@ -275,7 +284,7 @@ fn static_axis_extent(
 
 /// The origin `left`'s and `right`'s extents on `axis` both resolve to, when
 /// it is one and the same origin.
-pub(crate) fn shared_axis_origin(
+pub fn shared_axis_origin(
     dag: &Dag,
     left: NodeId,
     right: NodeId,
@@ -291,7 +300,7 @@ pub(crate) fn shared_axis_origin(
 /// same dimension expression, the same witnessed origin, or the same static
 /// extent. Where's operand-agreement rule reads it per axis, and so does the
 /// runtime `if`'s join condition (`lower.rs`, `join_condition_extents`).
-pub(crate) fn axis_extents_semantically_equivalent(
+pub fn axis_extents_semantically_equivalent(
     dag: &Dag,
     left: NodeId,
     right: NodeId,
@@ -355,7 +364,7 @@ fn anonymous_output_has_input_authority(dag: &Dag, node: &crate::dag::DagNode) -
 /// lowering. These are typed node identities, not positional guesses:
 /// vectorization and splice both may insert nodes and therefore must provide
 /// explicit maps for every authored carrier.
-pub(crate) struct MappedGradientClosure<'a> {
+pub struct MappedGradientClosure<'a> {
     pub source: &'a Dag,
     pub mapped: &'a Dag,
     pub node_map: &'a [NodeId],
@@ -371,9 +380,7 @@ pub(crate) struct MappedGradientClosure<'a> {
 /// Fail closed after the mapped-gradient splice if any authored entry
 /// witness, root, shape-only dependency, rendered extent origin, forward
 /// activation, or cotangent loses its typed identity.
-pub(crate) fn verify_mapped_gradient_closure(
-    closure: MappedGradientClosure<'_>,
-) -> Result<(), String> {
+pub fn verify_mapped_gradient_closure(closure: MappedGradientClosure<'_>) -> Result<(), String> {
     let MappedGradientClosure {
         source,
         mapped,
@@ -394,7 +401,7 @@ pub(crate) fn verify_mapped_gradient_closure(
             source.len()
         ));
     }
-    let mut mapped_identities = UnordSet::new();
+    let mut mapped_identities = crate::collections::HashSet::new();
     for source_node in source.nodes() {
         let mapped_id = node_map[source_node.id.0];
         let Some(mapped_node) = mapped.get(mapped_id) else {
@@ -650,11 +657,8 @@ pub(crate) fn verify_mapped_gradient_closure(
     // may be supplied only by the caller actual introduced by splice. Validate
     // rendered identifiers at the post-splice artifact boundary, where that
     // correspondence must be complete.
-    crate::axis_sources::check_rendered_dim_origins(
-        spliced,
-        chelis_types::unsupported::Stage::Lowering,
-    )
-    .map_err(|error| format!("spliced rendered dimension origin is unresolved: {error}"))?;
+    crate::axis_sources::check_rendered_dim_origins(spliced)
+        .map_err(|error| format!("spliced rendered dimension origin is unresolved: {error}"))?;
     Ok(())
 }
 
@@ -686,17 +690,29 @@ pub(crate) fn verify_mapped_gradient_closure(
 /// Dims compare exactly, name and extent alike. The messages are the wire
 /// decoder's, each naming its node.
 pub fn verify_random_operands(graph: &impl KeyGraph, errors: &mut Vec<String>) {
+    verify_random_operands_with_references(graph, true, errors);
+}
+
+fn verify_random_operands_with_references(
+    graph: &impl KeyGraph,
+    references_valid: bool,
+    errors: &mut Vec<String>,
+) {
     for node in 0..graph.node_count() {
         match graph.role(node) {
             role @ (KeyRole::KeyFromSeed
             | KeyRole::Split { .. }
             | KeyRole::FoldIn
-            | KeyRole::SplitN { .. }) => key_operation_operands(graph, node, role, errors),
+            | KeyRole::SplitN { .. }) => {
+                key_operation_operands(graph, node, role, references_valid, errors)
+            }
             role @ (KeyRole::Dropout
             | KeyRole::DropoutReplay
             | KeyRole::UniformLike
-            | KeyRole::UniformBoundAdjoint) => random_node_operands(graph, node, role, errors),
-            KeyRole::KeySelect => key_select_operands(graph, node, errors),
+            | KeyRole::UniformBoundAdjoint) => {
+                random_node_operands(graph, node, role, references_valid, errors)
+            }
+            KeyRole::KeySelect => key_select_operands(graph, node, references_valid, errors),
             _ => {}
         }
     }
@@ -715,7 +731,12 @@ fn own_activation_is_per_row(graph: &impl KeyGraph, node: usize, batch: &[DimInf
 
 /// A join's operands: two keys of its own exact type, then two Bool
 /// activations, each shaped like a leading part of that type's dims.
-fn key_select_operands(graph: &impl KeyGraph, node: usize, errors: &mut Vec<String>) {
+fn key_select_operands(
+    graph: &impl KeyGraph,
+    node: usize,
+    references_valid: bool,
+    errors: &mut Vec<String>,
+) {
     let described = graph.describe_node(node);
     let inputs = (0..)
         .map_while(|slot| graph.input(node, slot))
@@ -733,10 +754,15 @@ fn key_select_operands(graph: &impl KeyGraph, node: usize, errors: &mut Vec<Stri
     let key_ok = |input: usize| {
         graph.dtype(input) == Some(Prim::Key) && graph.dims(input).is_some_and(|key| key == dims)
     };
-    if graph.dtype(node) != Some(Prim::Key) || !key_ok(inputs[0]) || !key_ok(inputs[1]) {
+    if graph.dtype(node) != Some(Prim::Key)
+        || (references_valid && (!key_ok(inputs[0]) || !key_ok(inputs[1])))
+    {
         errors.push(format!(
             "{described} must read two keys of its own exact shape and produce a key"
         ));
+    }
+    if !references_valid {
+        return;
     }
     let active_ok = |input: usize| {
         graph.dtype(input) == Some(Prim::Bool)
@@ -755,6 +781,7 @@ fn key_operation_operands(
     graph: &impl KeyGraph,
     node: usize,
     role: KeyRole,
+    references_valid: bool,
     errors: &mut Vec<String>,
 ) {
     let at = graph.describe_node(node);
@@ -776,10 +803,15 @@ fn key_operation_operands(
         ));
         return;
     }
-    if graph.dtype(inputs[0]) != Some(operand) || graph.dtype(node) != Some(Prim::Key) {
+    if (references_valid && graph.dtype(inputs[0]) != Some(operand))
+        || graph.dtype(node) != Some(Prim::Key)
+    {
         errors.push(format!(
             "{at}: key operation reads the wrong operand dtype or does not produce keys"
         ));
+    }
+    if !references_valid {
+        return;
     }
     let (Some(key), Some(dims)) = (graph.dims(inputs[0]), graph.dims(node)) else {
         errors.push(format!("{at}: key operation has an operand without dims"));
@@ -823,6 +855,7 @@ fn random_node_operands(
     graph: &impl KeyGraph,
     node: usize,
     role: KeyRole,
+    references_valid: bool,
     errors: &mut Vec<String>,
 ) {
     let at = graph.describe_node(node);
@@ -852,21 +885,21 @@ fn random_node_operands(
     // operand of a primitive whose key is missing or no key is rank 0, which
     // is its own error below.
     let batch = match key_slot
-        .filter(|slot| dtype(*slot) == Some(Prim::Key))
+        .filter(|slot| references_valid && dtype(*slot) == Some(Prim::Key))
         .and_then(dims)
     {
         Some(batch) => batch,
-        None => std::borrow::Cow::Borrowed(&[][..]),
+        None => alloc::borrow::Cow::Borrowed(&[][..]),
     };
-    let per_row = |value: Option<std::borrow::Cow<'_, [DimInfo]>>| {
+    let per_row = |value: Option<alloc::borrow::Cow<'_, [DimInfo]>>| {
         value.is_some_and(|value| batch.starts_with(&value))
     };
-    if !own_activation_is_per_row(graph, node, &batch) {
+    if references_valid && !own_activation_is_per_row(graph, node, &batch) {
         errors.push(format!(
             "{at}: random operation's activation must be a Bool shaped like a leading part of its key's shape"
         ));
     }
-    if let Some(slot) = key_slot {
+    if references_valid && let Some(slot) = key_slot {
         let data = usize::from(role == KeyRole::UniformBoundAdjoint);
         if dtype(slot) != Some(Prim::Key)
             || !dims(data).is_some_and(|data| data.starts_with(&batch))
@@ -881,7 +914,8 @@ fn random_node_operands(
     // Whether input `slot` is a control of dtype `draw` ([05-OP-8]'s bounds,
     // [05-OP-37]'s rate), shaped like a leading part of the key.
     let control = |slot: usize, draw: Option<Prim>| {
-        per_row(dims(slot)) && dtype(slot).is_some_and(|prim| Some(prim) == draw)
+        !references_valid
+            || (per_row(dims(slot)) && dtype(slot).is_some_and(|prim| Some(prim) == draw))
     };
     let control_error = || {
         format!(
@@ -889,7 +923,9 @@ fn random_node_operands(
         )
     };
     let same_as = |slot: usize| {
-        dtype(slot) == output && dims(slot).is_some_and(|dims| graph.dims(node) == Some(dims))
+        !references_valid
+            || (dtype(slot) == output
+                && dims(slot).is_some_and(|dims| graph.dims(node) == Some(dims)))
     };
     match role {
         KeyRole::UniformLike => {
@@ -913,8 +949,12 @@ fn random_node_operands(
             }
         }
         KeyRole::UniformBoundAdjoint => {
-            let cotangent_ok = dtype(1) == dtype(0) && dims(1).is_some_and(|g| dims(0) == Some(g));
-            if !float(output) || !per_row(graph.dims(node)) || dtype(0) != output || !cotangent_ok {
+            let cotangent_ok = !references_valid
+                || (dtype(1) == dtype(0) && dims(1).is_some_and(|g| dims(0) == Some(g)));
+            if !float(output)
+                || (references_valid
+                    && (!per_row(graph.dims(node)) || dtype(0) != output || !cotangent_ok))
+            {
                 errors.push(format!(
                     "{at}: a uniform bound adjoint is a value of its template's dtype, shaped like a leading part of its key's shape, over a cotangent of its template's exact type"
                 ));
@@ -992,7 +1032,7 @@ impl KeyRole {
     }
 
     /// The allow-list entry this node's operation is
-    /// (`chelis_types::key_admission`), which the checker reads too, or
+    /// (`chelis_numeric_core::key_admission`), which the checker reads too, or
     /// `None` for an operation that takes no key. Exhaustive, with no
     /// wildcard arm.
     pub fn admission(self) -> Option<KeyAdmission> {
@@ -1228,7 +1268,7 @@ pub fn slot_read(op: &RiscOp, slot: usize) -> SlotRead {
     match op {
         RiscOp::Shape { .. } => operand_extent_read(ExtentSlot::Shape, slot),
         RiscOp::ExtentWitness { .. } => operand_extent_read(ExtentSlot::ExtentWitness, slot),
-        RiscOp::Expand { size, .. } => bounds(ExtentSlot::ExpandSize, &mut std::iter::once(size)),
+        RiscOp::Expand { size, .. } => bounds(ExtentSlot::ExpandSize, &mut core::iter::once(size)),
         RiscOp::Reshape { new_shape } => bounds(ExtentSlot::ReshapeTarget, &mut new_shape.iter()),
         RiscOp::Pad { padding, .. } => bounds(
             ExtentSlot::PadBound,
@@ -1239,7 +1279,7 @@ pub fn slot_read(op: &RiscOp, slot: usize) -> SlotRead {
             &mut pairs.iter().flat_map(|(start, end)| [start, end]),
         ),
         RiscOp::Stride { strides } => bounds(ExtentSlot::StrideStep, &mut strides.iter()),
-        RiscOp::SplitN { count } => bounds(ExtentSlot::SplitCount, &mut std::iter::once(count)),
+        RiscOp::SplitN { count } => bounds(ExtentSlot::SplitCount, &mut core::iter::once(count)),
         RiscOp::RuntimeRecurrence(_)
         | RiscOp::RuntimeRecurrenceAdjoint { .. }
         | RiscOp::ListMapCapture { .. }
@@ -1372,7 +1412,7 @@ pub trait KeyGraph {
     fn same_declaration(&self, left: usize, right: usize) -> bool;
     /// The dims `node` produces, or `None` when no node or when its dims
     /// have no IR reading.
-    fn dims(&self, node: usize) -> Option<std::borrow::Cow<'_, [DimInfo]>>;
+    fn dims(&self, node: usize) -> Option<alloc::borrow::Cow<'_, [DimInfo]>>;
 
     /// How a key-rule diagnostic names the key `node` produces (spec/10
     /// §3.2): a parameter by its name and declaration, "key `k` of `f`",
@@ -1483,9 +1523,9 @@ impl KeyGraph for Dag {
         self.nodes()[left].owner.decl == self.nodes()[right].owner.decl
     }
 
-    fn dims(&self, node: usize) -> Option<std::borrow::Cow<'_, [DimInfo]>> {
+    fn dims(&self, node: usize) -> Option<alloc::borrow::Cow<'_, [DimInfo]>> {
         self.get(NodeId(node))
-            .map(|node| std::borrow::Cow::Borrowed(node.output_type.dims.as_slice()))
+            .map(|node| alloc::borrow::Cow::Borrowed(node.output_type.dims.as_slice()))
     }
 }
 
@@ -1995,16 +2035,98 @@ fn verify_confinement(
     }
 }
 
+/// Check references before any graph derivation can index or follow them.
+fn reference_errors(dag: &Dag) -> Vec<String> {
+    let mut errors = Vec::new();
+    for (index, node) in dag.nodes().iter().enumerate() {
+        if node.id.0 != index {
+            errors.push(format!("node at position {index} has id {}", node.id.0));
+        }
+        if node.owner.decl.0 as usize >= dag.declarations().len() {
+            errors.push(format!(
+                "node {} references nonexistent declaration {}",
+                node.id.0, node.owner.decl.0
+            ));
+        }
+        if let Some(activation) = node.owner.activation
+            && (activation.0 >= index || dag.get(activation).is_none())
+        {
+            errors.push(format!(
+                "{}'s activation {} is not an earlier node of the graph",
+                dag.describe_node(node.id),
+                activation.0
+            ));
+        }
+        for &input_id in &node.inputs {
+            if input_id.0 >= node.id.0 {
+                errors.push(format!(
+                    "node {} references non-earlier node {}",
+                    node.id.0, input_id.0
+                ));
+            }
+            if dag.get(input_id).is_none() {
+                errors.push(format!(
+                    "node {} references nonexistent node {}",
+                    node.id.0, input_id.0
+                ));
+            }
+        }
+        for &dependency in node.shape_deps.iter().chain(&node.result_claim_deps) {
+            if dependency.0 >= node.id.0 {
+                errors.push(format!(
+                    "node {} references non-earlier dependency {}",
+                    node.id.0, dependency.0
+                ));
+            }
+            if dag.get(dependency).is_none() {
+                errors.push(format!(
+                    "node {} references nonexistent dependency {}",
+                    node.id.0, dependency.0
+                ));
+            }
+        }
+        if let Some(reused) = node.reusable_input {
+            if reused.0 >= index {
+                errors.push(format!(
+                    "node {} reuses non-earlier node {}",
+                    node.id.0, reused.0
+                ));
+            }
+            if dag.get(reused).is_none() {
+                errors.push(format!(
+                    "node {} reuses nonexistent node {}",
+                    node.id.0, reused.0
+                ));
+            }
+        }
+    }
+    for root in dag.roots() {
+        if dag.get(*root).is_none() {
+            errors.push(format!(
+                "DAG root {} references nonexistent node {}",
+                root.0, root.0
+            ));
+        }
+    }
+    errors
+}
+
 #[allow(clippy::collapsible_match)]
 fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> {
-    let mut errors = Vec::new();
+    let mut errors = reference_errors(dag);
+    let references_valid = errors.is_empty();
+    // Keep node-local diagnostics independent of reference validity.
+    // Graph-derived checks need valid references.
     let mut consumers = vec![0usize; dag.len()];
-    let seeds = dag.trap_seeds();
+    let seeds = references_valid.then(|| dag.trap_seeds());
     // chelis#2413: a `Load` reads its declaration's parameter, so two
     // declarations may each name a parameter `x` with its own type.
     let mut load_types =
-        chelis_unord::UnordMap::<(crate::dag::DeclId, String), &crate::dag::TensorType>::new();
+        crate::collections::HashMap::<(crate::dag::DeclId, String), &crate::dag::TensorType>::new();
     for node in dag.nodes() {
+        if !references_valid {
+            break;
+        }
         for &input_id in &node.inputs {
             if input_id.0 < consumers.len() {
                 consumers[input_id.0] += 1;
@@ -2062,54 +2184,37 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
     }
 
     for node in dag.nodes() {
-        // Check that inputs reference valid, earlier nodes.
-        for &input_id in &node.inputs {
-            if input_id.0 >= node.id.0 {
-                errors.push(format!(
-                    "node {} references non-earlier node {}",
-                    node.id.0, input_id.0
-                ));
-            }
-            if dag.get(input_id).is_none() {
-                errors.push(format!(
-                    "node {} references nonexistent node {}",
-                    node.id.0, input_id.0
-                ));
-            }
+        if node
+            .output_type
+            .dims
+            .iter()
+            .all(|dim| dim_known_size(dim).is_some())
+            && dim_product(&node.output_type.dims).is_none()
+        {
+            errors.push(format!(
+                "node {} has an overflowing tensor shape",
+                node.id.0
+            ));
         }
-        for &dependency in node.shape_deps.iter().chain(&node.result_claim_deps) {
-            if dependency.0 >= node.id.0 {
-                errors.push(format!(
-                    "node {} references non-earlier dependency {}",
-                    node.id.0, dependency.0
-                ));
-            }
-            if dag.get(dependency).is_none() {
-                errors.push(format!(
-                    "node {} references nonexistent dependency {}",
-                    node.id.0, dependency.0
-                ));
-            }
-        }
-
         // Check arity.
         let arity = node.inputs.len();
         match &node.op {
             RiscOp::FloatClassify(kind) => {
                 if arity != 1
                     || node.output_type.precision != Prim::Bool
-                    || node
-                        .inputs
-                        .first()
-                        .and_then(|id| dag.get(*id))
-                        .is_none_or(|input| {
-                            !input.output_type.precision.is_float()
-                                || input.output_type.dims.len() != node.output_type.dims.len()
-                                || extents_contradict(
-                                    &input.output_type.dims,
-                                    &node.output_type.dims,
-                                )
-                        })
+                    || (references_valid
+                        && node
+                            .inputs
+                            .first()
+                            .and_then(|id| dag.get(*id))
+                            .is_none_or(|input| {
+                                !input.output_type.precision.is_float()
+                                    || input.output_type.dims.len() != node.output_type.dims.len()
+                                    || extents_contradict(
+                                        &input.output_type.dims,
+                                        &node.output_type.dims,
+                                    )
+                            }))
                 {
                     errors.push(format!(
                         "{} at node {} requires one float input and same-shape bool output",
@@ -2150,116 +2255,121 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                                             )
                                     })
                         })
-                    && recurrence
-                        .captures
-                        .iter()
-                        .enumerate()
-                        .all(|(index, (capture, _))| {
+                    && (!references_valid
+                        || recurrence.captures.iter().enumerate().all(|(index, (capture, _))| {
                             let outer = node
                                 .inputs
                                 .get(index + recurrence.capture_input_offset())
                                 .and_then(|input| dag.get(*input));
                             recurrence.callback.nodes().iter().any(|load| {
-                            matches!(&load.op, RiscOp::Load { name } if name.as_str() == capture)
-                                && outer.is_some_and(|outer| {
-                                    load.output_type.precision == outer.output_type.precision
-                                        && !extents_contradict(
-                                            &load.output_type.dims,
-                                            &outer.output_type.dims,
-                                        )
-                                })
-                        })
-                        });
-                let source_valid = match &recurrence.source {
-                    crate::dag::RuntimeRecurrenceSource::Tensor { item } => node
-                        .inputs
-                        .first()
-                        .and_then(|input| dag.get(*input))
-                        .is_some_and(|source| {
-                            !source.output_type.dims.is_empty()
-                                && recurrence.callback.get(*item).is_some_and(|load| {
-                                    load.output_type.precision == source.output_type.precision
-                                        && load.output_type.dims.len() + 1
-                                            == source.output_type.dims.len()
-                                        && !extents_contradict(
-                                            &load.output_type.dims,
-                                            &source.output_type.dims[1..],
-                                        )
-                                })
-                                && (!recurrence.scan
-                                    || node.output_type.dims.first().is_some_and(|leading| {
-                                        !extents_contradict(
-                                            &source.output_type.dims[..1],
-                                            std::slice::from_ref(leading),
-                                        )
-                                    }))
-                        }),
-                    crate::dag::RuntimeRecurrenceSource::Columns { items } => {
-                        node.inputs
-                            .first()
-                            .and_then(|input| dag.get(*input))
-                            .is_some_and(|length| {
-                                length.output_type.dims.is_empty()
-                                    && length.output_type.precision == Prim::Int64
-                            })
-                            && items.iter().enumerate().all(|(index, load)| {
-                                node.inputs
-                                    .get(index + 2)
-                                    .and_then(|input| dag.get(*input))
-                                    .is_some_and(|column| {
-                                        !column.output_type.dims.is_empty()
-                                            && recurrence.callback.get(*load).is_some_and(|item| {
-                                                item.output_type.precision
-                                                    == column.output_type.precision
-                                                    && item.output_type.dims.len() + 1
-                                                        == column.output_type.dims.len()
-                                                    && !extents_contradict(
-                                                        &item.output_type.dims,
-                                                        &column.output_type.dims[1..],
-                                                    )
-                                                    && (!recurrence.scan
-                                                        || node
-                                                            .output_type
-                                                            .dims
-                                                            .first()
-                                                            .is_some_and(|leading| {
-                                                                !extents_contradict(
-                                                                    &column.output_type.dims[..1],
-                                                                    std::slice::from_ref(leading),
-                                                                )
-                                                            }))
-                                            })
+                                matches!(&load.op, RiscOp::Load { name } if name.as_str() == capture)
+                                    && outer.is_some_and(|outer| {
+                                        load.output_type.precision == outer.output_type.precision
+                                            && !extents_contradict(
+                                                &load.output_type.dims,
+                                                &outer.output_type.dims,
+                                            )
                                     })
                             })
-                    }
-                };
+                        }));
+                let source_valid = !references_valid
+                    || match &recurrence.source {
+                        crate::dag::RuntimeRecurrenceSource::Tensor { item } => node
+                            .inputs
+                            .first()
+                            .and_then(|input| dag.get(*input))
+                            .is_some_and(|source| {
+                                !source.output_type.dims.is_empty()
+                                    && recurrence.callback.get(*item).is_some_and(|load| {
+                                        load.output_type.precision == source.output_type.precision
+                                            && load.output_type.dims.len() + 1
+                                                == source.output_type.dims.len()
+                                            && !extents_contradict(
+                                                &load.output_type.dims,
+                                                &source.output_type.dims[1..],
+                                            )
+                                    })
+                                    && (!recurrence.scan
+                                        || node.output_type.dims.first().is_some_and(|leading| {
+                                            !extents_contradict(
+                                                &source.output_type.dims[..1],
+                                                core::slice::from_ref(leading),
+                                            )
+                                        }))
+                            }),
+                        crate::dag::RuntimeRecurrenceSource::Columns { items } => {
+                            node.inputs
+                                .first()
+                                .and_then(|input| dag.get(*input))
+                                .is_some_and(|length| {
+                                    length.output_type.dims.is_empty()
+                                        && length.output_type.precision == Prim::Int64
+                                })
+                                && items.iter().enumerate().all(|(index, load)| {
+                                    node.inputs
+                                        .get(index + 2)
+                                        .and_then(|input| dag.get(*input))
+                                        .is_some_and(|column| {
+                                            !column.output_type.dims.is_empty()
+                                                && recurrence.callback.get(*load).is_some_and(
+                                                    |item| {
+                                                        item.output_type.precision
+                                                            == column.output_type.precision
+                                                            && item.output_type.dims.len() + 1
+                                                                == column.output_type.dims.len()
+                                                            && !extents_contradict(
+                                                                &item.output_type.dims,
+                                                                &column.output_type.dims[1..],
+                                                            )
+                                                            && (!recurrence.scan
+                                                                || node
+                                                                    .output_type
+                                                                    .dims
+                                                                    .first()
+                                                                    .is_some_and(|leading| {
+                                                                        !extents_contradict(
+                                                                            &column
+                                                                                .output_type
+                                                                                .dims[..1],
+                                                                            core::slice::from_ref(
+                                                                                leading,
+                                                                            ),
+                                                                        )
+                                                                    }))
+                                                    },
+                                                )
+                                        })
+                                })
+                        }
+                    };
                 if arity != recurrence.captures.len() + recurrence.capture_input_offset()
                     || !source_valid
                     || !callback_valid
-                    || !node
-                        .inputs
-                        .get(1)
-                        .and_then(|input| dag.get(*input))
-                        .is_some_and(|state| {
-                            state.output_type.precision == node.output_type.precision
-                                && state.output_type.dims.len() + usize::from(recurrence.scan)
-                                    == node.output_type.dims.len()
-                                && recurrence
-                                    .callback
-                                    .get(recurrence.state)
-                                    .is_some_and(|load| {
-                                        load.output_type.precision == state.output_type.precision
-                                            && !extents_contradict(
-                                                &load.output_type.dims,
-                                                &state.output_type.dims,
-                                            )
-                                    })
-                        })
+                    || (references_valid
+                        && !node
+                            .inputs
+                            .get(1)
+                            .and_then(|input| dag.get(*input))
+                            .is_some_and(|state| {
+                                state.output_type.precision == node.output_type.precision
+                                    && state.output_type.dims.len() + usize::from(recurrence.scan)
+                                        == node.output_type.dims.len()
+                                    && recurrence.callback.get(recurrence.state).is_some_and(
+                                        |load| {
+                                            load.output_type.precision
+                                                == state.output_type.precision
+                                                && !extents_contradict(
+                                                    &load.output_type.dims,
+                                                    &state.output_type.dims,
+                                                )
+                                        },
+                                    )
+                            }))
                 {
                     errors.push(format!(
                         "runtime recurrence at node {} requires a tensor List source, a matching state, and one input per capture (inputs: {:?}, output: {:?}, captures: {})",
                         node.id.0,
-                        node.inputs.iter().map(|id| dag.get(*id).map(|node| &node.output_type)).collect::<Vec<_>>(),
+                        node.inputs.iter().map(|id| references_valid.then(|| dag.get(*id)).flatten().map(|node| &node.output_type)).collect::<Vec<_>>(),
                         node.output_type,
                         recurrence.captures.len(),
                     ));
@@ -2279,11 +2389,15 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                     || backward.targets.first() != Some(&1)
                     || backward.targets.len() != backward.dag.roots().len()
                     || !backward.targets.contains(target)
-                    || !dag.get(node.inputs[*target + 1]).is_some_and(|source| {
-                        source.output_type.precision == node.output_type.precision
-                            && source.output_type.dims.len() == node.output_type.dims.len()
-                            && !extents_contradict(&source.output_type.dims, &node.output_type.dims)
-                    })
+                    || (references_valid
+                        && !dag.get(node.inputs[*target + 1]).is_some_and(|source| {
+                            source.output_type.precision == node.output_type.precision
+                                && source.output_type.dims.len() == node.output_type.dims.len()
+                                && !extents_contradict(
+                                    &source.output_type.dims,
+                                    &node.output_type.dims,
+                                )
+                        }))
                 {
                     errors.push(format!(
                         "runtime recurrence adjoint at node {} has an invalid target or output type",
@@ -2301,15 +2415,15 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                 let valid = arity == 2
                     && node.output_type.dims.len() == 1
                     && node.output_type.precision.is_float()
-                    && dag.get(node.inputs[0]).is_some_and(|source| {
-                        source.output_type.dims.is_empty()
-                            && source.output_type.precision == node.output_type.precision
-                    })
-                    && dag.get(node.inputs[1]).is_some_and(|carrier| {
-                        carrier.output_type.dims.len() == 1
-                            && (*first
-                                || matches!(carrier.op, RiscOp::ListMapCapture { first: true }))
-                    });
+                    && (!references_valid
+                        || (dag.get(node.inputs[0]).is_some_and(|source| {
+                            source.output_type.dims.is_empty()
+                                && source.output_type.precision == node.output_type.precision
+                        }) && dag.get(node.inputs[1]).is_some_and(|carrier| {
+                            carrier.output_type.dims.len() == 1
+                                && (*first
+                                    || matches!(carrier.op, RiscOp::ListMapCapture { first: true }))
+                        })));
                 if !valid {
                     errors.push(format!("ListMapCapture at node {} requires a float scalar and rank-one invocation carrier", node.id.0));
                 }
@@ -2324,7 +2438,7 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                         != Some(arity)
                 {
                     errors.push(format!("OrderedAdjointSum at node {} has invalid group arity or scalar float output", node.id.0));
-                } else {
+                } else if references_valid {
                     let mut offset = 0;
                     for &width in groups {
                         let inputs = &node.inputs[offset..offset + width];
@@ -2342,11 +2456,12 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                 }
             }
             RiscOp::Iota => {
-                if node
-                    .owner
-                    .activation
-                    .and_then(|id| dag.get(id))
-                    .is_some_and(|active| !active.output_type.dims.is_empty())
+                if references_valid
+                    && node
+                        .owner
+                        .activation
+                        .and_then(|id| dag.get(id))
+                        .is_some_and(|active| !active.output_type.dims.is_empty())
                 {
                     errors.push(format!(
                         "iota at node {} requires scalar activation",
@@ -2357,7 +2472,8 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                     errors.push(format!("iota at node {} requires two inputs", node.id.0));
                 }
                 for &input in &node.inputs {
-                    if let Some(input) = dag.get(input)
+                    if references_valid
+                        && let Some(input) = dag.get(input)
                         && (input.output_type.precision != Prim::Int64
                             || !input.output_type.dims.is_empty())
                     {
@@ -2381,43 +2497,49 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                         "comparison at node {} has {} inputs (expected 2)",
                         node.id.0, arity
                     ));
-                } else if let (Some(lhs), Some(rhs)) =
-                    (dag.get(node.inputs[0]), dag.get(node.inputs[1]))
-                {
-                    if lhs.output_type.precision != rhs.output_type.precision {
-                        errors.push(format!(
-                            "comparison at node {} has mismatched precision {:?} vs {:?}",
-                            node.id.0, lhs.output_type.precision, rhs.output_type.precision
-                        ));
-                    }
-                    if extents_contradict(&lhs.output_type.dims, &rhs.output_type.dims) {
-                        errors.push(format!(
-                            "comparison at node {} has contradicting operand shapes",
-                            node.id.0
-                        ));
-                    }
-                    let active_numeric = lhs.output_type.precision.is_numeric()
-                        && lhs.output_type.precision.is_admissible_active();
-                    if !active_numeric && lhs.output_type.precision != Prim::Bool {
-                        errors.push(format!(
-                            "comparison {} at node {} requires active numeric or bool operands",
-                            kind.surf_name(),
-                            node.id.0
-                        ));
-                    } else if matches!(
-                        kind,
-                        ComparisonKind::CmpLt
-                            | ComparisonKind::Lt
-                            | ComparisonKind::Gt
-                            | ComparisonKind::Gte
-                            | ComparisonKind::Lte
-                    ) && !active_numeric
-                    {
-                        errors.push(format!(
-                            "ordered comparison {} at node {} requires active numeric operands",
-                            kind.surf_name(),
-                            node.id.0
-                        ));
+                } else {
+                    let operands = references_valid.then(|| {
+                        (
+                            dag.get(node.inputs[0]).unwrap(),
+                            dag.get(node.inputs[1]).unwrap(),
+                        )
+                    });
+                    if let Some((lhs, rhs)) = operands {
+                        if lhs.output_type.precision != rhs.output_type.precision {
+                            errors.push(format!(
+                                "comparison at node {} has mismatched precision {:?} vs {:?}",
+                                node.id.0, lhs.output_type.precision, rhs.output_type.precision
+                            ));
+                        }
+                        if extents_contradict(&lhs.output_type.dims, &rhs.output_type.dims) {
+                            errors.push(format!(
+                                "comparison at node {} has contradicting operand shapes",
+                                node.id.0
+                            ));
+                        }
+                        let active_numeric = lhs.output_type.precision.is_numeric()
+                            && lhs.output_type.precision.is_admissible_active();
+                        if !active_numeric && lhs.output_type.precision != Prim::Bool {
+                            errors.push(format!(
+                                "comparison {} at node {} requires active numeric or bool operands",
+                                kind.surf_name(),
+                                node.id.0
+                            ));
+                        } else if matches!(
+                            kind,
+                            ComparisonKind::CmpLt
+                                | ComparisonKind::Lt
+                                | ComparisonKind::Gt
+                                | ComparisonKind::Gte
+                                | ComparisonKind::Lte
+                        ) && !active_numeric
+                        {
+                            errors.push(format!(
+                                "ordered comparison {} at node {} requires active numeric operands",
+                                kind.surf_name(),
+                                node.id.0
+                            ));
+                        }
                     }
                     if node.output_type.precision != Prim::Bool {
                         errors.push(format!(
@@ -2427,9 +2549,10 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                             node.output_type.precision
                         ));
                     }
-                    if !anonymous_output_has_input_authority(dag, node)
-                        || extents_contradict(&node.output_type.dims, &lhs.output_type.dims)
-                        || extents_contradict(&node.output_type.dims, &rhs.output_type.dims)
+                    if let Some((lhs, rhs)) = operands
+                        && (!anonymous_output_has_input_authority(dag, node)
+                            || extents_contradict(&node.output_type.dims, &lhs.output_type.dims)
+                            || extents_contradict(&node.output_type.dims, &rhs.output_type.dims))
                     {
                         errors.push(format!(
                             "comparison at node {} output shape must match its operands",
@@ -2449,33 +2572,35 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                         expected
                     ));
                 } else {
-                    let inputs = node
-                        .inputs
-                        .iter()
-                        .filter_map(|input| dag.get(*input))
-                        .collect::<Vec<_>>();
-                    for input in &inputs {
-                        if input.output_type.precision != Prim::Bool {
+                    if references_valid {
+                        let inputs = node
+                            .inputs
+                            .iter()
+                            .filter_map(|input| dag.get(*input))
+                            .collect::<Vec<_>>();
+                        for input in &inputs {
+                            if input.output_type.precision != Prim::Bool {
+                                errors.push(format!(
+                                    "logical {} at node {} requires bool operands",
+                                    kind.surf_name(),
+                                    node.id.0
+                                ));
+                            }
+                        }
+                        let shapes = inputs
+                            .iter()
+                            .map(|input| input.output_type.dims.as_slice())
+                            .chain(core::iter::once(node.output_type.dims.as_slice()))
+                            .collect::<Vec<_>>();
+                        if !anonymous_output_has_input_authority(dag, node)
+                            || any_extents_contradict(&shapes)
+                        {
                             errors.push(format!(
-                                "logical {} at node {} requires bool operands",
+                                "logical {} at node {} output shape must match its operands",
                                 kind.surf_name(),
                                 node.id.0
                             ));
                         }
-                    }
-                    let shapes = inputs
-                        .iter()
-                        .map(|input| input.output_type.dims.as_slice())
-                        .chain(std::iter::once(node.output_type.dims.as_slice()))
-                        .collect::<Vec<_>>();
-                    if !anonymous_output_has_input_authority(dag, node)
-                        || any_extents_contradict(&shapes)
-                    {
-                        errors.push(format!(
-                            "logical {} at node {} output shape must match its operands",
-                            kind.surf_name(),
-                            node.id.0
-                        ));
                     }
                     if node.output_type.precision != Prim::Bool {
                         errors.push(format!(
@@ -2496,8 +2621,9 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                         "guarded_fail at node {} has {} inputs (expected 2)",
                         node.id.0, arity
                     ));
-                } else if let (Some(condition), Some(_)) =
-                    (dag.get(node.inputs[0]), dag.get(node.inputs[1]))
+                } else if references_valid
+                    && let (Some(condition), Some(_)) =
+                        (dag.get(node.inputs[0]), dag.get(node.inputs[1]))
                 {
                     if condition.output_type.precision != Prim::Bool {
                         errors.push(format!(
@@ -2548,11 +2674,13 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                         "where at node {} has {} inputs (expected 3)",
                         node.id.0, arity
                     ));
-                } else if let (Some(condition), Some(then_value), Some(else_value)) = (
-                    dag.get(node.inputs[0]),
-                    dag.get(node.inputs[1]),
-                    dag.get(node.inputs[2]),
-                ) {
+                } else if references_valid
+                    && let (Some(condition), Some(then_value), Some(else_value)) = (
+                        dag.get(node.inputs[0]),
+                        dag.get(node.inputs[1]),
+                        dag.get(node.inputs[2]),
+                    )
+                {
                     if condition.output_type.precision != Prim::Bool {
                         errors.push(format!(
                             "where at node {} condition must be Bool",
@@ -2631,7 +2759,8 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                 }
 
                 // C1: precision consistency check for binary ops.
-                if arity == 2
+                if references_valid
+                    && arity == 2
                     && let (Some(lhs), Some(rhs)) =
                         (dag.get(node.inputs[0]), dag.get(node.inputs[1]))
                 {
@@ -2733,13 +2862,9 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                         node.id.0, arity
                     ));
                 } else {
-                    let inputs = node
-                        .inputs
-                        .iter()
-                        .filter_map(|input| dag.get(*input))
-                        .collect::<Vec<_>>();
-                    if inputs.len() == 3 {
-                        for input in &inputs {
+                    if references_valid {
+                        for input in &node.inputs {
+                            let input = dag.get(*input).unwrap();
                             if input.output_type != node.output_type {
                                 errors.push(format!(
                                     "extrema adjoint at node {} has input type {:?}, expected {:?}",
@@ -2747,12 +2872,12 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                                 ));
                             }
                         }
-                        if !node.output_type.precision.is_float() {
-                            errors.push(format!(
-                                "extrema adjoint at node {} requires a float dtype, found {:?}",
-                                node.id.0, node.output_type.precision
-                            ));
-                        }
+                    }
+                    if !node.output_type.precision.is_float() {
+                        errors.push(format!(
+                            "extrema adjoint at node {} requires a float dtype, found {:?}",
+                            node.id.0, node.output_type.precision
+                        ));
                     }
                 }
             }
@@ -2769,23 +2894,28 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                         node.id.0, arity
                     ));
                 }
-                if arity == 2
-                    && let (Some(lhs), Some(rhs)) =
-                        (dag.get(node.inputs[0]), dag.get(node.inputs[1]))
-                {
-                    if lhs.output_type.precision != rhs.output_type.precision {
-                        errors.push(format!(
-                            "blas matmul at node {} has mismatched precisions: {:?} vs {:?}",
-                            node.id.0, lhs.output_type.precision, rhs.output_type.precision
-                        ));
-                    }
-                    if lhs.output_type.dims.len() < 2 || rhs.output_type.dims.len() < 2 {
-                        errors.push(format!(
+                if arity == 2 {
+                    let operands = references_valid.then(|| {
+                        (
+                            dag.get(node.inputs[0]).unwrap(),
+                            dag.get(node.inputs[1]).unwrap(),
+                        )
+                    });
+                    if let Some((lhs, rhs)) = operands {
+                        if lhs.output_type.precision != rhs.output_type.precision {
+                            errors.push(format!(
+                                "blas matmul at node {} has mismatched precisions: {:?} vs {:?}",
+                                node.id.0, lhs.output_type.precision, rhs.output_type.precision
+                            ));
+                        }
+                        if lhs.output_type.dims.len() < 2 || rhs.output_type.dims.len() < 2 {
+                            errors.push(format!(
                             "blas matmul at node {} expects rank >= 2 inputs, got rank {} and {}",
                             node.id.0,
                             lhs.output_type.dims.len(),
                             rhs.output_type.dims.len()
                         ));
+                        }
                     }
                     if node.output_type.dims.len() < 2 {
                         errors.push(format!(
@@ -2831,7 +2961,10 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                             ));
                         }
                     }
-                    if lhs.output_type.dims.len() >= 2 && rhs.output_type.dims.len() >= 2 {
+                    if let Some((lhs, rhs)) = operands
+                        && lhs.output_type.dims.len() >= 2
+                        && rhs.output_type.dims.len() >= 2
+                    {
                         let lhs_dims = lhs
                             .output_type
                             .dims
@@ -2864,7 +2997,8 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                         node.id.0, arity
                     ));
                 }
-                if arity == 2
+                if references_valid
+                    && arity == 2
                     && let (Some(values), Some(indices)) =
                         (dag.get(node.inputs[0]), dag.get(node.inputs[1]))
                 {
@@ -2914,7 +3048,14 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                 }
             }
             RiscOp::ScatterAdd { axis, batch_rank } => {
-                verify_scatter_like(node, dag, *axis, *batch_rank, "scatter_add", &mut errors);
+                verify_scatter_like(
+                    node,
+                    references_valid.then_some(dag),
+                    *axis,
+                    *batch_rank,
+                    "scatter_add",
+                    &mut errors,
+                );
             }
             RiscOp::Scatter { axis, batch_rank } => {
                 // Replace-scatter (last-write-wins) shares the input
@@ -2924,7 +3065,7 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                 // concern not a structural one.
                 verify_scatter_like(
                     node,
-                    dag,
+                    references_valid.then_some(dag),
                     *axis,
                     *batch_rank,
                     "scatter_replace",
@@ -2936,7 +3077,7 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                 // spec §3.5.1) has a distinct shape contract
                 // (indices.dims == updates.dims; output.dims ==
                 // data.dims; shared rank), so it verifies separately.
-                verify_scatter_elements(node, dag, *axis, &mut errors);
+                verify_scatter_elements(node, references_valid.then_some(dag), *axis, &mut errors);
             }
             RiscOp::Count { axes } => {
                 if arity != 1 {
@@ -2957,21 +3098,22 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                         node.id.0
                     ));
                 }
-                if arity == 1
-                    && let Some(input) = dag.get(node.inputs[0])
-                {
-                    let rank = input.output_type.dims.len();
-                    if axes.iter().any(|&axis| axis >= rank) {
-                        errors.push(format!(
-                            "count at node {} has an axis out of range for rank {}",
-                            node.id.0, rank
-                        ));
-                    }
-                    if input.output_type.precision != Prim::Bool {
-                        errors.push(format!(
-                            "count at node {} requires bool input, got {:?}",
-                            node.id.0, input.output_type.precision
-                        ));
+                if arity == 1 {
+                    let input = references_valid.then(|| dag.get(node.inputs[0]).unwrap());
+                    if let Some(input) = input {
+                        let rank = input.output_type.dims.len();
+                        if axes.iter().any(|&axis| axis >= rank) {
+                            errors.push(format!(
+                                "count at node {} has an axis out of range for rank {}",
+                                node.id.0, rank
+                            ));
+                        }
+                        if input.output_type.precision != Prim::Bool {
+                            errors.push(format!(
+                                "count at node {} requires bool input, got {:?}",
+                                node.id.0, input.output_type.precision
+                            ));
+                        }
                     }
                     if node.output_type.precision != Prim::Int64 {
                         errors.push(format!(
@@ -2979,21 +3121,24 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                             node.id.0, node.output_type.precision
                         ));
                     }
-                    if axes.iter().all(|&axis| axis < rank) {
-                        let expected: Vec<_> = input
-                            .output_type
-                            .dims
-                            .iter()
-                            .enumerate()
-                            .filter_map(|(axis, dim)| {
-                                (!axes.contains(&axis)).then_some(dim.clone())
-                            })
-                            .collect();
-                        if node.output_type.dims != expected {
-                            errors.push(format!(
-                                "count at node {} has output shape {:?}, expected {:?}",
-                                node.id.0, node.output_type.dims, expected
-                            ));
+                    if let Some(input) = input {
+                        let rank = input.output_type.dims.len();
+                        if axes.iter().all(|&axis| axis < rank) {
+                            let expected: Vec<_> = input
+                                .output_type
+                                .dims
+                                .iter()
+                                .enumerate()
+                                .filter_map(|(axis, dim)| {
+                                    (!axes.contains(&axis)).then_some(dim.clone())
+                                })
+                                .collect();
+                            if node.output_type.dims != expected {
+                                errors.push(format!(
+                                    "count at node {} has output shape {:?}, expected {:?}",
+                                    node.id.0, node.output_type.dims, expected
+                                ));
+                            }
                         }
                     }
                 }
@@ -3091,7 +3236,7 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
             // `verify_random_operands`, which the wire decoder shares; only
             // the IR's own bound carrier is checked here.
             RiscOp::SplitN { count } => check_bound_source(
-                dag,
+                references_valid.then_some(dag),
                 node,
                 count,
                 &format!("split_keys at node {}", node.id.0),
@@ -3172,16 +3317,52 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                 if ops.is_empty() {
                     errors.push(format!("fused elem at node {} has no steps", node.id.0));
                 }
+                for (step_index, step) in ops.iter().enumerate() {
+                    let expected = match step.op {
+                        FusedStepOp::Add
+                        | FusedStepOp::Sub
+                        | FusedStepOp::Mul
+                        | FusedStepOp::Div
+                        | FusedStepOp::Pow
+                        | FusedStepOp::FloorDiv
+                        | FusedStepOp::TruncDiv
+                        | FusedStepOp::MaxElem
+                        | FusedStepOp::MinElem => 2,
+                        _ => 1,
+                    };
+                    if step.input_indices.len() != expected {
+                        errors.push(format!(
+                            "fused elem at node {} step {} has {} inputs (expected {})",
+                            node.id.0,
+                            step_index,
+                            step.input_indices.len(),
+                            expected
+                        ));
+                    }
+                    for input in &step.input_indices {
+                        let valid = match input {
+                            FusedInput::External(slot) => *slot < arity,
+                            FusedInput::PreviousStep(previous) => *previous < step_index,
+                        };
+                        if !valid {
+                            errors.push(format!(
+                                "fused elem at node {} step {} has invalid input {:?}",
+                                node.id.0, step_index, input
+                            ));
+                        }
+                    }
+                }
             }
         }
 
         if let RiscOp::Softmax { axis } = node.op
             && (!node.output_type.precision.is_float()
-                || node
-                    .inputs
-                    .first()
-                    .and_then(|id| dag.get(*id))
-                    .is_some_and(|input| input.output_type != node.output_type)
+                || (references_valid
+                    && node
+                        .inputs
+                        .first()
+                        .and_then(|id| dag.get(*id))
+                        .is_some_and(|input| input.output_type != node.output_type))
                 || axis >= node.output_type.dims.len())
         {
             errors.push(format!(
@@ -3197,7 +3378,8 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                 ));
             }
             for input in &node.inputs {
-                if let Some(input) = dag.get(*input)
+                if references_valid
+                    && let Some(input) = dag.get(*input)
                     && (input.output_type != node.output_type
                         || !input.output_type.precision.is_float())
                 {
@@ -3210,6 +3392,7 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
         }
 
         if let RiscOp::Cumsum { direction, .. } = &node.op
+            && references_valid
             && arity == 1
             && let Some(input) = dag.get(node.inputs[0])
         {
@@ -3232,7 +3415,8 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
             | RiscOp::ProdReduce { axis }
             | RiscOp::Argmax { axis }
             | RiscOp::Argmin { axis } => {
-                if arity == 1
+                if references_valid
+                    && arity == 1
                     && let Some(input) = dag.get(node.inputs[0])
                 {
                     let ndims = input.output_type.dims.len();
@@ -3252,7 +3436,8 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
         // scalar (the runtime extent). A different output type would
         // misdeclare the value node to the backend or narrow its carrier.
         if let RiscOp::Shape { axis } = &node.op {
-            if arity == 1
+            if references_valid
+                && arity == 1
                 && let Some(input) = dag.get(node.inputs[0])
             {
                 let ndims = input.output_type.dims.len();
@@ -3297,11 +3482,12 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                 let RiscOp::ExtentWitness { parameter, .. } = &node.op else {
                     unreachable!()
                 };
-                let owners = dag
-                    .nodes()
-                    .iter()
-                    .filter(|owner| owner.shape_deps.contains(&node.id))
-                    .collect::<Vec<_>>();
+                let owners = references_valid.then(|| {
+                    dag.nodes()
+                        .iter()
+                        .filter(|owner| owner.shape_deps.contains(&node.id))
+                        .count()
+                });
                 let literal = node.inputs.is_empty()
                     && node.shape_deps.is_empty()
                     && matches!(&node.op, RiscOp::ExtentWitness { parameter, .. } if parameter.is_empty())
@@ -3310,16 +3496,17 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                     && node.inputs.len() == 1
                     && node.shape_deps.len() == 1
                     && !parameter.is_empty()
-                    && dag.get(node.shape_deps[0]).is_some_and(|declared| {
-                        matches!(declared.op, RiscOp::ExtentWitness {
+                    && (!references_valid
+                        || dag.get(node.shape_deps[0]).is_some_and(|declared| {
+                            matches!(declared.op, RiscOp::ExtentWitness {
                             site: crate::dag::ExtentWitnessSite::Caller
                                 | crate::dag::ExtentWitnessSite::LocalExpand,
                             axis: crate::dag::RtAxis::Lit(observed),
                             ..
                         } if observed == *axis)
-                            && declared.inputs.first() == node.inputs.first()
-                            && declared.id.0 < node.id.0
-                    });
+                                && declared.inputs.first() == node.inputs.first()
+                                && declared.id.0 < node.id.0
+                        }));
                 if binding.is_empty()
                     || claim.is_empty()
                     || *claimed_axis < 0
@@ -3330,7 +3517,7 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                     // validated against its own tensor below.
                     || (literal && claimed_axis != axis)
                     || !claims.is_empty()
-                    || owners.len() != 1
+                    || owners.is_some_and(|count| count != 1)
                     || (!literal && !named)
                     || requirements.iter().any(|value| {
                         value.prim() != Prim::Int64
@@ -3347,15 +3534,16 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                 continue;
             }
             if matches!(site, crate::dag::ExtentWitnessSite::LiteralResultClaim) {
-                let owners = dag
-                    .nodes()
-                    .iter()
-                    .filter(|owner| {
-                        owner.shape_deps.contains(&node.id)
-                            || owner.result_claim_deps.contains(&node.id)
-                    })
-                    .count();
-                if owners != 1 {
+                let owners = references_valid.then(|| {
+                    dag.nodes()
+                        .iter()
+                        .filter(|owner| {
+                            owner.shape_deps.contains(&node.id)
+                                || owner.result_claim_deps.contains(&node.id)
+                        })
+                        .count()
+                });
+                if owners.is_some_and(|count| count != 1) {
                     errors.push(format!(
                         "literal result claim at node {} requires exactly one producing owner",
                         node.id.0
@@ -3392,7 +3580,9 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                 {
                     errors.push(format!("result claim witness at node {} requires a nonempty label, normalized axis, and no entry obligations", node.id.0));
                 }
-                if matches!(site, crate::dag::ExtentWitnessSite::ResultClaim { .. }) {
+                if references_valid
+                    && matches!(site, crate::dag::ExtentWitnessSite::ResultClaim { .. })
+                {
                     let declared = node
                         .shape_deps
                         .as_slice()
@@ -3413,7 +3603,7 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                 // also strictly earlier, which is what keeps the check due "at
                 // the later of its two witnesses" (spec/04 §4.7) and the topology
                 // acyclic.
-                if arity == claims.len() + 1 {
+                if references_valid && arity == claims.len() + 1 {
                     for edge in node.inputs.iter().skip(1) {
                         let earlier = edge.0 < node.id.0;
                         let witness = dag.get(*edge).is_some_and(|edge| {
@@ -3435,7 +3625,8 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                         node.id.0
                     ));
                 }
-                if arity >= 1
+                if references_valid
+                    && arity >= 1
                     && let Some(input) = dag.get(node.inputs[0])
                     && usize::try_from(*axis)
                         .map_or(true, |axis| axis >= input.output_type.dims.len())
@@ -3464,6 +3655,9 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
         }
 
         for required in node.shape_deps.iter().chain(&node.result_claim_deps) {
+            if !references_valid {
+                break;
+            }
             if let Some(crate::dag::DagNode {
                 op:
                     RiscOp::ExtentWitness {
@@ -3562,7 +3756,9 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                 errors.push(format!("result claim at node {} requires an earlier witness and a supported producing axis", node.id.0));
             }
         }
-        if let Err(reason) = crate::axis_sources::same_shape_result_agreement(dag, node.id) {
+        if references_valid
+            && let Err(reason) = crate::axis_sources::same_shape_result_agreement(dag, node.id)
+        {
             errors.push(reason);
         }
         if !node.result_claim_deps.is_empty() {
@@ -3573,6 +3769,9 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                 ));
             }
             for dependency in &node.result_claim_deps {
+                if !references_valid {
+                    break;
+                }
                 if !matches!(
                     dag.get(*dependency).map(|claim| &claim.op),
                     Some(RiscOp::ExtentWitness {
@@ -3603,10 +3802,11 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
             let scalar =
                 |ty: &crate::dag::TensorType| ty.dims.is_empty() && ty.precision == Prim::Int64;
             if !scalar(&node.output_type)
-                || node.inputs.iter().any(|input| {
-                    dag.get(*input)
-                        .is_none_or(|input| !scalar(&input.output_type))
-                })
+                || (references_valid
+                    && node.inputs.iter().any(|input| {
+                        dag.get(*input)
+                            .is_none_or(|input| !scalar(&input.output_type))
+                    }))
             {
                 errors.push(format!(
                     "checked reshape extent at node {} requires scalar i64 inputs and output",
@@ -3617,6 +3817,7 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
         if let RiscOp::CheckedUnitAxis {
             axis: crate::dag::RtAxis::Lit(axis),
         } = node.op
+            && references_valid
         {
             let valid = (|| {
                 let [input, witness] = node.inputs.as_slice() else {
@@ -3699,7 +3900,8 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                 // hand-built test) bypasses it; the verify-layer
                 // check is the defense-in-depth that prevents a
                 // narrow accumulator from reaching the backend.
-                if arity == 1
+                if references_valid
+                    && arity == 1
                     && let Some(operand_node) = dag.get(node.inputs[0])
                 {
                     let operand = operand_node.output_type.precision;
@@ -3728,7 +3930,8 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                 }
             }
             RiscOp::BlasMatmul { accumulator, .. } => {
-                if arity == 2
+                if references_valid
+                    && arity == 2
                     && let Some(lhs) = dag.get(node.inputs[0])
                 {
                     let operand = lhs.output_type.precision;
@@ -3827,7 +4030,8 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
             | RiscOp::Floor
             | RiscOp::Ceil
             | RiscOp::Round => {
-                if arity == 1
+                if references_valid
+                    && arity == 1
                     && let Some(input) = dag.get(node.inputs[0])
                     && !input.output_type.precision.is_float()
                 {
@@ -3838,7 +4042,8 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                 }
             }
             RiscOp::Abs => {
-                if arity == 1
+                if references_valid
+                    && arity == 1
                     && let Some(input) = dag.get(node.inputs[0])
                     && !input.output_type.precision.is_float()
                     && !input.output_type.precision.is_integer()
@@ -3854,6 +4059,7 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
 
         // C6: Permute validation.
         if let RiscOp::Permute { axes } = &node.op
+            && references_valid
             && arity == 1
         {
             let input = dag.get(node.inputs[0]).unwrap();
@@ -3892,11 +4098,18 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
         if let RiscOp::Reshape { new_shape } = &node.op
             && arity >= 1
         {
-            let input = dag.get(node.inputs[0]).unwrap();
-            let old_product = dim_product(&input.output_type.dims);
-            let new_product = new_shape
-                .iter()
-                .try_fold(1usize, |acc, dim| dim.as_lit().map(|n| acc * n));
+            let old_product = references_valid
+                .then(|| dim_product(&dag.get(node.inputs[0]).unwrap().output_type.dims))
+                .flatten();
+            let new_product = new_shape.iter().try_fold(1usize, |acc, dim| {
+                dim.as_lit().and_then(|n| acc.checked_mul(n))
+            });
+            if new_shape.iter().all(|dim| dim.as_lit().is_some()) && new_product.is_none() {
+                errors.push(format!(
+                    "reshape at node {} has an overflowing target shape",
+                    node.id.0
+                ));
+            }
             if let (Some(old), Some(new)) = (old_product, new_product)
                 && old != new
             {
@@ -3907,7 +4120,7 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
             }
             for (axis, dim) in new_shape.iter().enumerate() {
                 check_bound_source(
-                    dag,
+                    references_valid.then_some(dag),
                     node,
                     dim,
                     &format!("reshape at node {} target axis {}", node.id.0, axis),
@@ -3930,9 +4143,11 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
         if let RiscOp::Cast { new_precision } | RiscOp::NamedCast { new_precision, .. } = &node.op
             && arity == 1
         {
-            let input = dag.get(node.inputs[0]).unwrap();
-            if input.output_type.dims != node.output_type.dims {
-                errors.push(format!("cast at node {}: dims changed", node.id.0));
+            if references_valid {
+                let input = dag.get(node.inputs[0]).unwrap();
+                if input.output_type.dims != node.output_type.dims {
+                    errors.push(format!("cast at node {}: dims changed", node.id.0));
+                }
             }
             if node.output_type.precision != *new_precision {
                 errors.push(format!(
@@ -3950,7 +4165,7 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
             | RiscOp::ProdReduce { .. }
             | RiscOp::Argmax { .. }
             | RiscOp::Argmin { .. } => {
-                if arity == 1 {
+                if references_valid && arity == 1 {
                     let input = dag.get(node.inputs[0]).unwrap();
                     let expected_rank = input.output_type.dims.len().saturating_sub(1);
                     if node.output_type.dims.len() != expected_rank {
@@ -3994,13 +4209,13 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                     ));
                 }
                 check_bound_source(
-                    dag,
+                    references_valid.then_some(dag),
                     node,
                     size,
                     &format!("Expand at node {}", node.id.0),
                     &mut errors,
                 );
-                if arity >= 1 {
+                if references_valid && arity >= 1 {
                     let input = dag.get(node.inputs[0]).unwrap();
                     let input_rank = input.output_type.dims.len();
                     let output_rank = node.output_type.dims.len();
@@ -4098,11 +4313,13 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
             }
             RiscOp::OneHot { vocab } => {
                 if arity == 1 {
-                    let input = dag.get(node.inputs[0]).unwrap();
+                    let input = references_valid.then(|| dag.get(node.inputs[0]).unwrap());
                     if *vocab == 0 {
                         errors.push(format!("one_hot at node {}: vocab must be > 0", node.id.0));
                     }
-                    if !matches!(input.output_type.precision, Prim::Int32 | Prim::Int64) {
+                    if let Some(input) = input
+                        && !matches!(input.output_type.precision, Prim::Int32 | Prim::Int64)
+                    {
                         errors.push(format!(
                             "one_hot at node {} requires i32/i64 indices, got {:?}",
                             node.id.0, input.output_type.precision
@@ -4114,33 +4331,37 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                             node.id.0, node.output_type.precision
                         ));
                     }
-                    let mut expected = input.output_type.dims.clone();
-                    expected.push(DimInfo::Lit(*vocab));
-                    if node.output_type.dims != expected {
-                        errors.push(format!(
-                            "one_hot at node {} has output dims {:?}, expected {:?}",
-                            node.id.0, node.output_type.dims, expected
-                        ));
+                    if let Some(input) = input {
+                        let mut expected = input.output_type.dims.clone();
+                        expected.push(DimInfo::Lit(*vocab));
+                        if node.output_type.dims != expected {
+                            errors.push(format!(
+                                "one_hot at node {} has output dims {:?}, expected {:?}",
+                                node.id.0, node.output_type.dims, expected
+                            ));
+                        }
                     }
                 }
             }
             RiscOp::Pad { padding, fill } => {
                 if !node.inputs.is_empty() {
-                    let input = dag.get(node.inputs[0]).unwrap();
-                    let input_rank = input.output_type.dims.len();
-                    if padding.len() != input_rank {
-                        errors.push(format!(
-                            "pad at node {}: padding len {} != input rank {}",
-                            node.id.0,
-                            padding.len(),
-                            input_rank
-                        ));
-                    }
-                    if node.output_type.precision != input.output_type.precision {
-                        errors.push(format!(
-                            "pad at node {}: output precision {:?} != input precision {:?}",
-                            node.id.0, node.output_type.precision, input.output_type.precision
-                        ));
+                    let input = references_valid.then(|| dag.get(node.inputs[0]).unwrap());
+                    if let Some(input) = input {
+                        let input_rank = input.output_type.dims.len();
+                        if padding.len() != input_rank {
+                            errors.push(format!(
+                                "pad at node {}: padding len {} != input rank {}",
+                                node.id.0,
+                                padding.len(),
+                                input_rank
+                            ));
+                        }
+                        if node.output_type.precision != input.output_type.precision {
+                            errors.push(format!(
+                                "pad at node {}: output precision {:?} != input precision {:?}",
+                                node.id.0, node.output_type.precision, input.output_type.precision
+                            ));
+                        }
                     }
                     if fill.prim() != node.output_type.precision {
                         errors.push(format!(
@@ -4154,14 +4375,14 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                     // shrink-only.
                     for (axis, (before, after)) in padding.iter().enumerate() {
                         check_bound_source(
-                            dag,
+                            references_valid.then_some(dag),
                             node,
                             before,
                             &format!("pad at node {} axis {} before", node.id.0, axis),
                             &mut errors,
                         );
                         check_bound_source(
-                            dag,
+                            references_valid.then_some(dag),
                             node,
                             after,
                             &format!("pad at node {} axis {} after", node.id.0, axis),
@@ -4196,6 +4417,10 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                         "pad",
                         &mut errors,
                     );
+                    let Some(input) = input else {
+                        continue;
+                    };
+                    let input_rank = input.output_type.dims.len();
                     if node.output_type.dims.len() != input_rank {
                         errors.push(format!(
                             "pad at node {}: output rank {} != input rank {}",
@@ -4213,7 +4438,16 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                             if let (Some(before), Some(after)) = (before.as_lit(), after.as_lit())
                                 && let Some(in_size) = dim_known_size(in_dim)
                             {
-                                let expected = in_size + before + after;
+                                let Some(expected) = in_size
+                                    .checked_add(before)
+                                    .and_then(|size| size.checked_add(after))
+                                else {
+                                    errors.push(format!(
+                                        "pad at node {}: output axis {} overflows",
+                                        node.id.0, axis
+                                    ));
+                                    continue;
+                                };
                                 if let Some(out_size) = dim_known_size(&node.output_type.dims[axis])
                                     && out_size != expected
                                 {
@@ -4229,34 +4463,36 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
             }
             RiscOp::Shrink { bounds } => {
                 if !node.inputs.is_empty() {
-                    let input = dag.get(node.inputs[0]).unwrap();
-                    let input_rank = input.output_type.dims.len();
-                    if bounds.len() != input_rank {
-                        errors.push(format!(
-                            "shrink at node {}: bounds len {} != input rank {}",
-                            node.id.0,
-                            bounds.len(),
-                            input_rank
-                        ));
-                    }
-                    if node.output_type.precision != input.output_type.precision {
-                        errors.push(format!(
-                            "shrink at node {}: output precision {:?} != input precision {:?}",
-                            node.id.0, node.output_type.precision, input.output_type.precision
-                        ));
+                    let input = references_valid.then(|| dag.get(node.inputs[0]).unwrap());
+                    if let Some(input) = input {
+                        let input_rank = input.output_type.dims.len();
+                        if bounds.len() != input_rank {
+                            errors.push(format!(
+                                "shrink at node {}: bounds len {} != input rank {}",
+                                node.id.0,
+                                bounds.len(),
+                                input_rank
+                            ));
+                        }
+                        if node.output_type.precision != input.output_type.precision {
+                            errors.push(format!(
+                                "shrink at node {}: output precision {:?} != input precision {:?}",
+                                node.id.0, node.output_type.precision, input.output_type.precision
+                            ));
+                        }
                     }
                     // chelis#616: validate node-valued bound sources; a `ToEnd`
                     // start is malformed (the sentinel is an `end`-only marker).
                     for (axis, (start, end)) in bounds.iter().enumerate() {
                         check_bound_source(
-                            dag,
+                            references_valid.then_some(dag),
                             node,
                             start,
                             &format!("shrink at node {} axis {} start", node.id.0, axis),
                             &mut errors,
                         );
                         check_bound_source(
-                            dag,
+                            references_valid.then_some(dag),
                             node,
                             end,
                             &format!("shrink at node {} axis {} end", node.id.0, axis),
@@ -4303,6 +4539,10 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                         "shrink",
                         &mut errors,
                     );
+                    let Some(input) = input else {
+                        continue;
+                    };
+                    let input_rank = input.output_type.dims.len();
                     if node.output_type.dims.len() != input_rank {
                         errors.push(format!(
                             "shrink at node {}: output rank {} != input rank {}",
@@ -4350,27 +4590,29 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
             }
             RiscOp::Stride { strides } => {
                 if !node.inputs.is_empty() {
-                    let input = dag.get(node.inputs[0]).unwrap();
-                    let input_rank = input.output_type.dims.len();
-                    if strides.len() != input_rank {
-                        errors.push(format!(
-                            "stride at node {}: strides len {} != input rank {}",
-                            node.id.0,
-                            strides.len(),
-                            input_rank
-                        ));
-                    }
-                    if node.output_type.precision != input.output_type.precision {
-                        errors.push(format!(
-                            "stride at node {}: output precision {:?} != input precision {:?}",
-                            node.id.0, node.output_type.precision, input.output_type.precision
-                        ));
+                    let input = references_valid.then(|| dag.get(node.inputs[0]).unwrap());
+                    if let Some(input) = input {
+                        let input_rank = input.output_type.dims.len();
+                        if strides.len() != input_rank {
+                            errors.push(format!(
+                                "stride at node {}: strides len {} != input rank {}",
+                                node.id.0,
+                                strides.len(),
+                                input_rank
+                            ));
+                        }
+                        if node.output_type.precision != input.output_type.precision {
+                            errors.push(format!(
+                                "stride at node {}: output precision {:?} != input precision {:?}",
+                                node.id.0, node.output_type.precision, input.output_type.precision
+                            ));
+                        }
                     }
                     // chelis#616: validate node-valued step sources; `ToEnd` is
                     // never a valid stride step.
                     for (axis, step) in strides.iter().enumerate() {
                         check_bound_source(
-                            dag,
+                            references_valid.then_some(dag),
                             node,
                             step,
                             &format!("stride at node {} axis {} step", node.id.0, axis),
@@ -4398,6 +4640,10 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                         }
                     }
                     check_exact_bound_inputs(node, strides, "stride", &mut errors);
+                    let Some(input) = input else {
+                        continue;
+                    };
+                    let input_rank = input.output_type.dims.len();
                     if node.output_type.dims.len() != input_rank {
                         errors.push(format!(
                             "stride at node {}: output rank {} != input rank {}",
@@ -4450,6 +4696,11 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
             ));
         }
 
+        // Graph-derived checks need valid references.
+        if !references_valid {
+            continue;
+        }
+
         if matches!(node.op, RiscOp::Drop) {
             if dag.is_root(node.id) {
                 errors.push(format!(
@@ -4478,7 +4729,7 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
             // `spec/06-transformations.md` §5.2) rather than carving an
             // exception out of it.
             && !matches!(node.op, RiscOp::Store { .. } | RiscOp::Drop)
-            && !seeds.is_observable_root(node)
+            && !seeds.as_ref().is_some_and(|seeds| seeds.is_observable_root(node))
         {
             errors.push(format!(
                 "node {} is dangling: it has no consumers and is not a DAG root",
@@ -4487,7 +4738,11 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
         }
     }
 
-    verify_random_operands(dag, &mut errors);
+    verify_random_operands_with_references(dag, references_valid, &mut errors);
+    if !references_valid {
+        return errors;
+    }
+
     verify_key_rules(dag, &mut errors);
     verify_declaration_sharing(dag, &mut errors);
 
@@ -4495,9 +4750,7 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
     // source. `verify` is one of the production paths this runs on, not the
     // only one: it runs in tests and at the end of `grad_dag`, while eval
     // and the three codegen entries call `check_axis_sources` themselves.
-    if let Err(unsupported) =
-        crate::axis_sources::check_axis_sources(dag, chelis_types::unsupported::Stage::Lowering)
-    {
+    if let Err(unsupported) = crate::axis_sources::check_axis_sources(dag) {
         errors.push(unsupported.to_string());
     }
 
@@ -4567,7 +4820,7 @@ fn verify_sparse_batch_prefix(
 /// of that update shape is a structural error (chelis#3029).
 fn verify_scatter_like(
     node: &crate::dag::DagNode,
-    dag: &Dag,
+    dag: Option<&Dag>,
     axis: usize,
     batch_rank: usize,
     label: &str,
@@ -4581,6 +4834,9 @@ fn verify_scatter_like(
         ));
         return;
     }
+    let Some(dag) = dag else {
+        return;
+    };
     if let (Some(target), Some(indices), Some(updates)) = (
         dag.get(node.inputs[0]),
         dag.get(node.inputs[1]),
@@ -4675,7 +4931,7 @@ fn any_extents_contradict(shapes: &[&[DimInfo]]) -> bool {
 /// data.dims`.
 fn verify_scatter_elements(
     node: &crate::dag::DagNode,
-    dag: &Dag,
+    dag: Option<&Dag>,
     axis: usize,
     errors: &mut Vec<String>,
 ) {
@@ -4688,6 +4944,9 @@ fn verify_scatter_elements(
         ));
         return;
     }
+    let Some(dag) = dag else {
+        return;
+    };
     if let (Some(data), Some(indices), Some(updates)) = (
         dag.get(node.inputs[0]),
         dag.get(node.inputs[1]),
@@ -4742,8 +5001,7 @@ fn dim_product(dims: &[DimInfo]) -> Option<usize> {
     let mut product = 1usize;
     for d in dims {
         match d {
-            DimInfo::Lit(n) => product *= n,
-            DimInfo::Named(_, Some(n)) => product *= n,
+            DimInfo::Lit(n) | DimInfo::Named(_, Some(n)) => product = product.checked_mul(*n)?,
             DimInfo::Named(_, None) => return None,
         }
     }
@@ -4762,7 +5020,7 @@ fn dim_known_size(dim: &DimInfo) -> Option<usize> {
 /// `RtDim::Node(i)` must reference a rank-0 i64 input; `InputAxis` must
 /// reference a tensor input and a normalized in-range axis.
 fn check_bound_source(
-    dag: &Dag,
+    dag: Option<&Dag>,
     node: &crate::dag::DagNode,
     bound: &RtDim,
     label: &str,
@@ -4779,6 +5037,9 @@ fn check_bound_source(
                 ));
                 return;
             }
+            let Some(dag) = dag else {
+                return;
+            };
             let src = dag.get(node.inputs[i]).unwrap();
             if !src.output_type.dims.is_empty() {
                 errors.push(format!(
@@ -4805,11 +5066,14 @@ fn check_bound_source(
                 ));
                 return;
             }
-            let source = dag.get(node.inputs[*tensor]).unwrap();
             let Ok(axis) = usize::try_from(*axis) else {
                 errors.push(format!("{label}: InputAxis axis {axis} is not normalized"));
                 return;
             };
+            let Some(dag) = dag else {
+                return;
+            };
+            let source = dag.get(node.inputs[*tensor]).unwrap();
             if axis >= source.output_type.dims.len() {
                 errors.push(format!(
                     "{label}: InputAxis axis {axis} out of bounds for rank {} tensor in input slot {tensor}",
@@ -4836,7 +5100,7 @@ fn check_exact_bound_inputs<'a>(
             RtDim::Node(input) | RtDim::InputAxis { tensor: input, .. } => Some(*input),
             RtDim::Lit(_) | RtDim::ToEnd | RtDim::Sym(_) => None,
         })
-        .collect::<std::collections::BTreeSet<_>>();
+        .collect::<alloc::collections::BTreeSet<_>>();
     for input in 1..node.inputs.len() {
         if !owned.contains(&input) {
             errors.push(format!(
@@ -4845,59 +5109,6 @@ fn check_exact_bound_inputs<'a>(
             ));
         }
     }
-}
-
-/// IR validation pass for the Metal target's admissible dtype matrix.
-///
-/// Per spec/04-type-system.md §1.1.3 the Metal backend rejects f64
-/// because Apple Silicon GPUs lack FP64 ALUs (software emulation is
-/// explicitly out of scope). The spec names three rejection surfaces:
-/// the CLI gate, the IR validation pass, and the codegen entry. This
-/// function is the IR validation pass; the CLI gate is
-/// `chelis-cli::reject_unsupported_metal_ops` and the codegen entry is
-/// `chelis-backend-metal::emit::Emitter::require_metal_admissible`.
-/// All three surfaces emit the same diagnostic text so a regression
-/// in one is caught by the same string-match tests used by the
-/// others.
-///
-/// Returns `Ok(())` if every node's tensor precision is admissible on
-/// Metal, or `Err(message)` with the spec-pinned diagnostic for the
-/// first f64 / unsupported-precision node encountered. The message
-/// uses the same wording as the CLI gate and codegen entry so the
-/// three surfaces speak with one voice.
-pub fn validate_metal_admissible_precisions(dag: &Dag) -> Result<(), String> {
-    for node in dag.nodes() {
-        match node.output_type.precision {
-            Prim::F32
-            | Prim::F16
-            | Prim::Bf16
-            | Prim::Int8
-            | Prim::Int16
-            | Prim::Int32
-            | Prim::Int64
-            | Prim::Bool => {}
-            Prim::F64 => {
-                return Err(format!(
-                    "IR validation rejects FP64 for `--target metal` (node {}): \
-                     Apple Silicon GPUs lack FP64 ALUs; use `--target c` or \
-                     `--target hip` for f64 workloads. \
-                     See spec/04-type-system.md §1.1.3.",
-                    node.id.0
-                ));
-            }
-            other => {
-                return Err(format!(
-                    "IR validation rejects precision `{}` for `--target metal` \
-                     (node {}). The Metal backend admits the active dtype set \
-                     per spec/04-type-system.md §1.1.3 except f64; supported: \
-                     f32/f16/bf16/i8/i16/i32/i64/bool.",
-                    other.name(),
-                    node.id.0
-                ));
-            }
-        }
-    }
-    Ok(())
 }
 
 /// Check if two dimension descriptors are compatible.
@@ -6265,63 +6476,6 @@ mod tests {
         assert!(
             errs.is_empty(),
             "well-formed Div(binary) and Recip(unary) must verify clean; got {errs:?}"
-        );
-    }
-
-    /// F4: the IR validation pass for Metal must accept admissible
-    /// dtypes and reject f64 with the spec-pinned diagnostic.
-    #[test]
-    fn metal_validation_accepts_admissible_dtypes() {
-        for prec in [
-            Prim::F32,
-            Prim::F16,
-            Prim::Bf16,
-            Prim::Int8,
-            Prim::Int16,
-            Prim::Int32,
-            Prim::Int64,
-            Prim::Bool,
-        ] {
-            let mut dag = Dag::new();
-            let decl = dag.declare("test");
-            dag.add_node(
-                decl,
-                RiscOp::Load { name: "x".into() },
-                vec![],
-                tensor_ty(&[4], prec),
-                None,
-            );
-            assert!(
-                validate_metal_admissible_precisions(&dag).is_ok(),
-                "{prec:?} should be admissible on Metal"
-            );
-        }
-    }
-
-    #[test]
-    fn metal_validation_rejects_f64_with_spec_diagnostic() {
-        let mut dag = Dag::new();
-        let decl = dag.declare("test");
-        dag.add_node(
-            decl,
-            RiscOp::Load { name: "x".into() },
-            vec![],
-            tensor_ty(&[4], Prim::F64),
-            None,
-        );
-        let err =
-            validate_metal_admissible_precisions(&dag).expect_err("f64 must be rejected on Metal");
-        assert!(
-            err.contains("FP64") && err.contains("Apple Silicon"),
-            "diagnostic must cite the spec hardware constraint: {err}"
-        );
-        assert!(
-            err.contains("§1.1.3"),
-            "diagnostic must cite spec section: {err}"
-        );
-        assert!(
-            err.contains("--target c") || err.contains("--target hip"),
-            "diagnostic must point at the alternate targets: {err}"
         );
     }
 

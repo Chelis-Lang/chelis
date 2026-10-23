@@ -5,7 +5,7 @@
 
 use std::collections::BTreeMap;
 
-use chelis_ir::dag::{
+use chelis_dag_core::dag::{
     ComparisonKind, DagNode, DimExpr, DimInfo, ExtremaKind, ExtremaOperand, FusedStepOp,
     LogicalKind, NodeId, RiscOp, RtDim, TensorType,
 };
@@ -50,7 +50,7 @@ fn unsupported_storage_plan(error: chelis_ir::ownership::OwnershipError) -> Unsu
 fn hip_bound_to_usize(b: &RtDim) -> usize {
     match b {
         RtDim::Lit(n) => *n,
-        RtDim::ToEnd => chelis_ir::dag::SHRINK_TO_END,
+        RtDim::ToEnd => chelis_dag_core::dag::SHRINK_TO_END,
         RtDim::Node(_) => panic!(
             "HIP backend reached a node-valued (runtime) movement bound; \
              reject_unsupported_hip_ops must reject it before codegen (chelis#616)"
@@ -75,16 +75,15 @@ fn hip_pairs_to_usize(bounds: &[(RtDim, RtDim)]) -> Vec<(usize, usize)> {
 
 /// The input tensor axis a HIP prologue declaration reads.
 ///
-/// The HIP lane only supports extents the function entry supplies, and since
-/// chelis#665 that is the only thing a [`chelis_ir::dag::SymbolicDimSource`]
-/// can be: `symbolic_bindings_interface` mints an occurrence from a class
-/// member that resolves to an input tensor's axis and from nothing else. A
-/// node-valued movement bound or runtime reshape target reaches no
-/// occurrence at all, and `reject_unsupported_hip_ops` still refuses it
-/// before codegen. This function used to carry a defensive `panic!` arm for
-/// a variant that no longer exists.
-fn require_load_source(occurrence: &chelis_ir::dag::SymbolicDimOccurrence) -> (&String, usize) {
-    let chelis_ir::dag::SymbolicDimSource::Load { input_label, axis } = &occurrence.source;
+/// The HIP entry supplies every extent.
+/// A [`chelis_dag_core::dag::SymbolicDimSource`] names an input tensor axis.
+/// `symbolic_bindings_interface` supplies only input-axis occurrences.
+/// Runtime movement bounds and reshape targets have no occurrence.
+/// `reject_unsupported_hip_ops` rejects them before emission.
+fn require_load_source(
+    occurrence: &chelis_dag_core::dag::SymbolicDimOccurrence,
+) -> (&String, usize) {
+    let chelis_dag_core::dag::SymbolicDimSource::Load { input_label, axis } = &occurrence.source;
     (input_label, *axis)
 }
 
@@ -137,11 +136,11 @@ pub struct HipEmitter {
     /// kernel launch consumes it ([`Self::activation_gate`]).
     gate: Option<HipActivationGate>,
     /// Per node id, whether it checks nothing where its activation is false
-    /// ([`chelis_ir::dag::TrapSeeds::is_activation_gated`]), from one seed
+    /// ([`chelis_dag_core::dag::TrapSeeds::is_activation_gated`]), from one seed
     /// query over the graph.
     activation_gated: Vec<bool>,
     /// Per node id, whether its declared extent rests on a claim checked
-    /// under its activation ([`chelis_ir::dag::TrapSeeds::is_claim_sized`]),
+    /// under its activation ([`chelis_dag_core::dag::TrapSeeds::is_claim_sized`]),
     /// which this lane has no zero value for.
     claim_sized: Vec<bool>,
 }
@@ -266,7 +265,7 @@ impl HipEmitter {
 
     /// The activation gate of `node` (spec/10 section 3.2), as the C lane's
     /// `emit_activation_gate` derives it: a gated node
-    /// ([`chelis_ir::dag::TrapSeeds::is_activation_gated`]) whose operation checks its
+    /// ([`chelis_dag_core::dag::TrapSeeds::is_activation_gated`]) whose operation checks its
     /// operands' values reads every operand through the gate, taking
     /// [`DagNode::inactive_operand`]'s value for its slot where the
     /// activation is false. `None` for a node that is not gated, and for a
@@ -315,7 +314,7 @@ impl HipEmitter {
     /// its activation is false (spec/10 section 3.2), so it is refused.
     fn ungated_check_unsupported(node: &DagNode, detail: &str) -> Unsupported {
         Unsupported::new(
-            UnsupportedKind::Op(chelis_ir::grad::risc_op_name(&node.op).to_string()),
+            UnsupportedKind::Op(chelis_dag_core::grad::risc_op_name(&node.op).to_string()),
             format!(
                 "a checking operation under an activation at HIP DAG node {}: {detail}",
                 node.id.0
@@ -330,7 +329,7 @@ impl HipEmitter {
     }
 
     /// Set [`Self::gate`] for `node` before its emitter runs. A gated node
-    /// ([`chelis_ir::dag::TrapSeeds::is_activation_gated`], the one declaration every lane
+    /// ([`chelis_dag_core::dag::TrapSeeds::is_activation_gated`], the one declaration every lane
     /// reads) whose check this lane cannot gate by operand substitution is
     /// refused here, so a newly gated kind compiles only once its HIP
     /// emitter takes the gate.
@@ -1214,12 +1213,12 @@ impl HipEmitter {
                 continue;
             };
             for obligation in obligations {
-                let render = |record: &chelis_ir::axis_sources::ExtentRecord| match record {
-                    chelis_ir::axis_sources::ExtentRecord::Claimed(required) => Some((
+                let render = |record: &chelis_dag_core::axis_sources::ExtentRecord| match record {
+                    chelis_dag_core::axis_sources::ExtentRecord::Claimed(required) => Some((
                         "claimed = %lld".to_string(),
                         format!("(long long){required}"),
                     )),
-                    chelis_ir::axis_sources::ExtentRecord::Read {
+                    chelis_dag_core::axis_sources::ExtentRecord::Read {
                         load,
                         axis,
                         parameter,
@@ -1236,11 +1235,11 @@ impl HipEmitter {
                         ))
                     }
                 };
-                let compare = |record: &chelis_ir::axis_sources::ExtentRecord| match record {
-                    chelis_ir::axis_sources::ExtentRecord::Claimed(required) => {
+                let compare = |record: &chelis_dag_core::axis_sources::ExtentRecord| match record {
+                    chelis_dag_core::axis_sources::ExtentRecord::Claimed(required) => {
                         Some(required.to_string())
                     }
-                    chelis_ir::axis_sources::ExtentRecord::Read { load, axis, .. } => {
+                    chelis_dag_core::axis_sources::ExtentRecord::Read { load, axis, .. } => {
                         let RiscOp::Load { name } = &dag.get(*load)?.op else {
                             return None;
                         };
@@ -1675,9 +1674,9 @@ impl HipEmitter {
             // [05-OP-79]: fenced before emission
             // (`reject_device_correctly_rounded_ops`); never a vendor `powf`.
             RiscOp::Pow => {
-                return Err(chelis_ir::dag::device_correctly_rounded_rejection(
-                    "pow", "hip",
-                ));
+                return Err(
+                    chelis_ir::device_admission::device_correctly_rounded_rejection("pow", "hip"),
+                );
             }
             RiscOp::Abs => Some(format!(
                 "kernel_abs{}",
@@ -2169,7 +2168,7 @@ impl HipEmitter {
                 self.kernel_rank,
                 name,
                 *axis,
-                *direction == chelis_ir::dag::ScanDirection::Decreasing,
+                *direction == chelis_dag_core::dag::ScanDirection::Decreasing,
                 operand_prec(),
                 take_gate(),
             ),
@@ -2424,7 +2423,7 @@ impl HipEmitter {
     }
 
     /// Extract the fused steps and number of external inputs from a FusedElem op.
-    fn extract_fused_steps(op: &RiscOp) -> (&[chelis_ir::dag::FusedStep], usize) {
+    fn extract_fused_steps(op: &RiscOp) -> (&[chelis_dag_core::dag::FusedStep], usize) {
         match op {
             RiscOp::FusedElem { ops } => {
                 // Count unique external inputs referenced by the steps
@@ -2432,7 +2431,7 @@ impl HipEmitter {
                     .iter()
                     .flat_map(|s| &s.input_indices)
                     .filter_map(|fi| match fi {
-                        chelis_ir::dag::FusedInput::External(i) => Some(i),
+                        chelis_dag_core::dag::FusedInput::External(i) => Some(i),
                         _ => None,
                     })
                     .max()
@@ -2711,9 +2710,9 @@ impl HipEmitter {
                 &node.output_type,
             ),
             RiscOp::Pow => {
-                return Err(chelis_ir::dag::device_correctly_rounded_rejection(
-                    "pow", "hip",
-                ));
+                return Err(
+                    chelis_ir::device_admission::device_correctly_rounded_rejection("pow", "hip"),
+                );
             }
             RiscOp::Abs => {
                 let trap = node.output_type.precision.is_integer().then(|| {
@@ -2762,7 +2761,7 @@ impl HipEmitter {
             | RiscOp::SplitN { .. }
             | RiscOp::KeySelect => {
                 return Err(Unsupported::new(
-                    UnsupportedKind::Op(chelis_ir::grad::risc_op_name(&node.op).to_string()),
+                    UnsupportedKind::Op(chelis_dag_core::grad::risc_op_name(&node.op).to_string()),
                     "a key-operand random node in the HIP DAG emitter",
                     Stage::Codegen("hip"),
                     chelis_types::unimplemented_rejection!(
@@ -3569,7 +3568,7 @@ impl HipEmitter {
             };
             if node.output_type.precision == Prim::Key {
                 return Err(Unsupported::new(
-                    UnsupportedKind::Op(chelis_ir::grad::risc_op_name(&node.op).to_string()),
+                    UnsupportedKind::Op(chelis_dag_core::grad::risc_op_name(&node.op).to_string()),
                     "a key result in the HIP DAG emitter",
                     Stage::Codegen("hip"),
                     chelis_types::unimplemented_rejection!(
@@ -3592,7 +3591,7 @@ impl HipEmitter {
         node: &DagNode,
         dag: VerifiedDagView<'_>,
     ) -> Result<(), Unsupported> {
-        let name = chelis_ir::grad::risc_op_name(&node.op);
+        let name = chelis_dag_core::grad::risc_op_name(&node.op);
         let refuse = |reason: &str| {
             Unsupported::new(
                 UnsupportedKind::Op(name.to_string()),
@@ -3628,8 +3627,8 @@ impl HipEmitter {
             RiscOp::Split { branch } => {
                 let (left, right) = parent(self)?.split();
                 match branch {
-                    chelis_ir::dag::KeyBranch::Left => left,
-                    chelis_ir::dag::KeyBranch::Right => right,
+                    chelis_dag_core::dag::KeyBranch::Left => left,
+                    chelis_dag_core::dag::KeyBranch::Right => right,
                 }
             }
             RiscOp::FoldIn => {
@@ -4203,7 +4202,7 @@ impl HipEmitter {
         id: usize,
         kernel_name: &str,
         inputs: &[NodeId],
-        _ops: &[chelis_ir::dag::FusedStep],
+        _ops: &[chelis_dag_core::dag::FusedStep],
         ty: &TensorType,
         in_place: Option<FusedReuseMechanics>,
     ) {
@@ -6141,7 +6140,7 @@ mod tests {
             "-INT64_C(9007199254740993)"
         );
     }
-    use chelis_ir::dag::{Dag, FusedInput, FusedStep, FusedStepOp};
+    use chelis_dag_core::dag::{Dag, FusedInput, FusedStep, FusedStepOp};
 
     fn vec_f32(n: usize) -> TensorType {
         TensorType {
@@ -6708,7 +6707,7 @@ mod tests {
     /// the HIP lane computes at emission.
     fn seeded_uniform(
         dag: &mut Dag,
-        decl: chelis_ir::dag::DeclId,
+        decl: chelis_dag_core::dag::DeclId,
         template: NodeId,
         ty: TensorType,
         (low, high): (f64, f64),
@@ -6923,7 +6922,7 @@ mod tests {
             None,
         );
         let draw = dag.add_node(
-            chelis_ir::dag::Owner::new(decl, Some(active)),
+            chelis_dag_core::dag::Owner::new(decl, Some(active)),
             RiscOp::UniformLike,
             vec![like, low, high, key],
             vec_f32(8),
@@ -6944,7 +6943,7 @@ mod tests {
     /// key_from_seed(seed)).1, index)`, every operand a literal.
     fn derived_uniform(
         dag: &mut Dag,
-        decl: chelis_ir::dag::DeclId,
+        decl: chelis_dag_core::dag::DeclId,
         ty: TensorType,
         seed: i64,
         index: i64,
@@ -6989,7 +6988,7 @@ mod tests {
         let right = dag.add_node(
             decl,
             RiscOp::Split {
-                branch: chelis_ir::dag::KeyBranch::Right,
+                branch: chelis_dag_core::dag::KeyBranch::Right,
             },
             vec![root],
             rank0(Prim::Key),
@@ -6998,7 +6997,7 @@ mod tests {
         let left = dag.add_node(
             decl,
             RiscOp::Split {
-                branch: chelis_ir::dag::KeyBranch::Left,
+                branch: chelis_dag_core::dag::KeyBranch::Left,
             },
             vec![root],
             rank0(Prim::Key),

@@ -42,13 +42,13 @@ def source_contracts() -> tuple[SourceContract, ...]:
     return (
         SourceContract(
             "dedicated lowering",
-            "crates/chelis-ir/src/tier2.rs",
+            "crates/chelis-dag-core/src/tier2.rs",
             ("add_synth(owner, dag, RiscOp::Relu, vec![x], ty.clone(), parent_span)",),
             ("lower_max_elem(owner, dag, x, zero",),
         ),
         SourceContract(
             "dedicated adjoint",
-            "crates/chelis-ir/src/grad.rs",
+            "crates/chelis-dag-core/src/grad.rs",
             ("let dx = dag.add_node(node.owner, RiscOp::ReluAdjoint, vec![x, g]",),
             ("RiscOp::MaxElem => \"max_elem\",\n        RiscOp::Relu =>",),
         ),

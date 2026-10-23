@@ -103,7 +103,7 @@ class SourceContractMutationTests(unittest.TestCase):
 
     def test_sub_surrogate_mutation_fails(self) -> None:
         self.mutate(
-            "crates/chelis-ir/src/tier2.rs",
+            "crates/chelis-dag-core/src/tier2.rs",
             "add_synth(owner, dag, RiscOp::Sub, vec![a, b], ty.clone(), parent_span)",
             "lower_add(owner, dag, a, lower_neg(owner, dag, b, ty, parent_span), ty, parent_span)",
         )
@@ -112,7 +112,7 @@ class SourceContractMutationTests(unittest.TestCase):
 
     def test_min_surrogate_mutation_fails(self) -> None:
         self.mutate(
-            "crates/chelis-ir/src/tier2.rs",
+            "crates/chelis-dag-core/src/tier2.rs",
             "ExtremaKind::Min => RiscOp::MinElem,",
             "ExtremaKind::Min => RiscOp::MaxElem,",
         )
@@ -121,7 +121,7 @@ class SourceContractMutationTests(unittest.TestCase):
 
     def test_max_identity_mutation_fails(self) -> None:
         self.mutate(
-            "crates/chelis-ir/src/tier2.rs",
+            "crates/chelis-dag-core/src/tier2.rs",
             "ExtremaKind::Max => RiscOp::MaxElem,",
             "ExtremaKind::Max => RiscOp::MinElem,",
         )
@@ -130,7 +130,7 @@ class SourceContractMutationTests(unittest.TestCase):
 
     def test_extrema_surrogate_arithmetic_mutation_fails(self) -> None:
         self.mutate(
-            "crates/chelis-ir/src/tier2.rs",
+            "crates/chelis-dag-core/src/tier2.rs",
             "add_synth(owner, dag, op, vec![a, b], ty, parent_span)",
             "add_synth(owner, dag, RiscOp::Sub, vec![a, b], ty, parent_span)",
         )
@@ -139,7 +139,7 @@ class SourceContractMutationTests(unittest.TestCase):
 
     def test_extrema_operand_owned_type_mutation_fails(self) -> None:
         self.mutate(
-            "crates/chelis-ir/src/tier2.rs",
+            "crates/chelis-dag-core/src/tier2.rs",
             'let ty = dag\n        .get(a)\n        .expect("lowered extrema operand must exist")\n        .output_type\n        .clone();',
             "let ty = TensorType::scalar_f32();",
         )
@@ -148,7 +148,7 @@ class SourceContractMutationTests(unittest.TestCase):
 
     def test_extrema_operand_order_mutation_fails(self) -> None:
         self.mutate(
-            "crates/chelis-ir/src/tier2.rs",
+            "crates/chelis-dag-core/src/tier2.rs",
             "add_synth(owner, dag, op, vec![a, b], ty, parent_span)",
             "add_synth(owner, dag, op, vec![b, a], ty, parent_span)",
         )
@@ -157,7 +157,7 @@ class SourceContractMutationTests(unittest.TestCase):
 
     def test_extrema_span_propagation_mutation_fails(self) -> None:
         self.mutate(
-            "crates/chelis-ir/src/tier2.rs",
+            "crates/chelis-dag-core/src/tier2.rs",
             "add_synth(owner, dag, op, vec![a, b], ty, parent_span)",
             "add_synth(owner, dag, op, vec![a, b], ty, None)",
         )
@@ -477,7 +477,7 @@ class SourceContractMutationTests(unittest.TestCase):
             oracle.validate_source_contracts(self.repo)
 
     def test_retired_timing_identity_restoration_fails(self) -> None:
-        current = '"chelis-ir::tier2::tests::or_produces_max_elem":'
+        current = '"chelis-dag-core::tier2::tests::or_produces_max_elem":'
         self.mutate(
             "scripts/test_timing_baseline.json",
             current,

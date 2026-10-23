@@ -1,8 +1,8 @@
 //! Slice A executable contract for chelis#1277.
 
-use chelis_ir::dag::{Dag, DimInfo, RiscOp, RtAxis, TensorType};
+use chelis_dag_core::dag::{Dag, DimInfo, RiscOp, RtAxis, TensorType};
+use chelis_dag_core::verify;
 use chelis_ir::eval::{TensorValue, eval_tensor_roots_with_strict};
-use chelis_ir::verify;
 use chelis_ir::vmap::vectorize_axis0;
 use chelis_numeric_core::prim::Prim;
 use chelis_unord::UnordMap;
@@ -41,7 +41,7 @@ fn input_axis_expand_verifies_and_evaluates_from_shape_metadata() {
         decl,
         RiscOp::Expand {
             axis: 0,
-            size: chelis_ir::dag::RtDim::InputAxis {
+            size: chelis_dag_core::dag::RtDim::InputAxis {
                 tensor: 1,
                 axis: RtAxis::Lit(0),
             },
@@ -89,7 +89,7 @@ fn node_expand_verifies_and_evaluates_from_int64_scalar_input() {
         decl,
         RiscOp::Expand {
             axis: 0,
-            size: chelis_ir::dag::RtDim::Node(1),
+            size: chelis_dag_core::dag::RtDim::Node(1),
         },
         vec![value, extent],
         ty(vec![DimInfo::Named("n".into(), None)], Prim::F32),
@@ -125,7 +125,7 @@ fn zero_literal_expand_is_valid_and_empty() {
         decl,
         RiscOp::Expand {
             axis: 0,
-            size: chelis_ir::dag::RtDim::Lit(0),
+            size: chelis_dag_core::dag::RtDim::Lit(0),
         },
         vec![value],
         ty(vec![DimInfo::Lit(0)], Prim::F32),
@@ -158,11 +158,11 @@ fn input_axis_owner_and_slot_validation_fail_closed() {
         RiscOp::zero_pad(
             Prim::F32,
             vec![(
-                chelis_ir::dag::RtDim::InputAxis {
+                chelis_dag_core::dag::RtDim::InputAxis {
                     tensor: 1,
                     axis: RtAxis::Lit(0),
                 },
-                chelis_ir::dag::RtDim::Lit(0),
+                chelis_dag_core::dag::RtDim::Lit(0),
             )],
         ),
         vec![x],
@@ -212,7 +212,7 @@ fn movement_ops_reject_unowned_runtime_extent_inputs() {
     dag.add_node(
         decl,
         RiscOp::Reshape {
-            new_shape: vec![chelis_ir::dag::RtDim::Node(1)],
+            new_shape: vec![chelis_dag_core::dag::RtDim::Node(1)],
         },
         vec![value, extent, unowned],
         ty(vec![DimInfo::Lit(3)], Prim::F32),
@@ -250,8 +250,8 @@ fn vmap_keeps_shape_bound_shared_and_shifts_its_axis() {
         decl,
         RiscOp::Shrink {
             bounds: vec![(
-                chelis_ir::dag::RtDim::Lit(1),
-                chelis_ir::dag::RtDim::Node(1),
+                chelis_dag_core::dag::RtDim::Lit(1),
+                chelis_dag_core::dag::RtDim::Node(1),
             )],
         },
         vec![x, end],
@@ -300,8 +300,8 @@ fn vmap_shares_shape_extent_across_bound_and_ordinary_uses() {
         decl,
         RiscOp::Shrink {
             bounds: vec![(
-                chelis_ir::dag::RtDim::Lit(0),
-                chelis_ir::dag::RtDim::Node(1),
+                chelis_dag_core::dag::RtDim::Lit(0),
+                chelis_dag_core::dag::RtDim::Node(1),
             )],
         },
         vec![x, extent],
@@ -360,8 +360,8 @@ fn vmap_rejects_element_derived_extent() {
         decl,
         RiscOp::Shrink {
             bounds: vec![(
-                chelis_ir::dag::RtDim::Lit(0),
-                chelis_ir::dag::RtDim::Node(1),
+                chelis_dag_core::dag::RtDim::Lit(0),
+                chelis_dag_core::dag::RtDim::Node(1),
             )],
         },
         vec![x, extent],
@@ -403,7 +403,7 @@ fn input_axis_vmap_shifts_literal_axis() {
         decl,
         RiscOp::Expand {
             axis: 0,
-            size: chelis_ir::dag::RtDim::InputAxis {
+            size: chelis_dag_core::dag::RtDim::InputAxis {
                 tensor: 1,
                 axis: RtAxis::Lit(0),
             },
@@ -418,7 +418,7 @@ fn input_axis_vmap_shifts_literal_axis() {
     assert!(matches!(
         vmapped.get(expanded).unwrap().op,
         RiscOp::Expand {
-            size: chelis_ir::dag::RtDim::InputAxis {
+            size: chelis_dag_core::dag::RtDim::InputAxis {
                 tensor: 1,
                 axis: RtAxis::Lit(1)
             },

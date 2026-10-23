@@ -121,7 +121,7 @@ and Mul, false for Sum. Proof: `sum` on `tensor[2,2,int64]` and on
 f32 kernel.
 
 That also bypasses `RiscOp::Sum`'s `accumulator: Prim` field
-(`crates/chelis-ir/src/dag.rs:719-735`), which is documented as implementing
+(`crates/chelis-dag-core/src/dag.rs:719-735`), which is documented as implementing
 spec §5.7's precision-widening rule and is checked by `verify`.
 
 Lesson: the one op an agent cleared by reading a comment was the one extra bug.

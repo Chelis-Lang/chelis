@@ -1,6 +1,6 @@
 //! HIP mechanics for a shared-planner-authorized fused storage reuse.
 
-use chelis_ir::dag::NodeId;
+use chelis_dag_core::dag::NodeId;
 use chelis_ir::ownership::ReusableOwnedStorage;
 
 /// Backend-private owner of the one linear storage-reuse authority.

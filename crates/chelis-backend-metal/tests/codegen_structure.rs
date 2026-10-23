@@ -8,7 +8,7 @@
 //! coverage; M4 reductions; M5 matmul.
 
 mod support;
-use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
+use chelis_dag_core::dag::{Dag, DimInfo, RiscOp, TensorType};
 use chelis_numeric_core::prim::Prim;
 use support::{codegen_metal, try_codegen_metal};
 
@@ -546,7 +546,7 @@ fn build_matmul_dag(m: usize, k: usize, n: usize) -> Dag {
         decl,
         RiscOp::Expand {
             axis: 2,
-            size: chelis_ir::dag::RtDim::Lit(n),
+            size: chelis_dag_core::dag::RtDim::Lit(n),
         },
         vec![a],
         tensor3_f32(m, k, n),
@@ -556,7 +556,7 @@ fn build_matmul_dag(m: usize, k: usize, n: usize) -> Dag {
         decl,
         RiscOp::Expand {
             axis: 0,
-            size: chelis_ir::dag::RtDim::Lit(m),
+            size: chelis_dag_core::dag::RtDim::Lit(m),
         },
         vec![b],
         tensor3_f32(m, k, n),
@@ -656,7 +656,7 @@ fn build_matmul_dag_prec(m: usize, k: usize, n: usize, prec: Prim) -> Dag {
         decl,
         RiscOp::Expand {
             axis: 2,
-            size: chelis_ir::dag::RtDim::Lit(n),
+            size: chelis_dag_core::dag::RtDim::Lit(n),
         },
         vec![a],
         tensor3_prec(m, k, n, prec),
@@ -666,7 +666,7 @@ fn build_matmul_dag_prec(m: usize, k: usize, n: usize, prec: Prim) -> Dag {
         decl,
         RiscOp::Expand {
             axis: 0,
-            size: chelis_ir::dag::RtDim::Lit(m),
+            size: chelis_dag_core::dag::RtDim::Lit(m),
         },
         vec![b],
         tensor3_prec(m, k, n, prec),
@@ -765,7 +765,7 @@ fn m4_axis_nonzero_reduction_is_rejected_before_codegen() {
 /// `tests/gpu_correctness.rs`.
 #[test]
 fn ws2_emit_const_f16_bf16_use_uint16_bit_pattern_not_msl_kernel_types() {
-    use chelis_ir::dag::RiscOp;
+    use chelis_dag_core::dag::RiscOp;
 
     fn vec_prec(n: usize, prec: Prim) -> TensorType {
         TensorType {
@@ -872,7 +872,7 @@ fn ws2_emit_const_f16_bf16_use_uint16_bit_pattern_not_msl_kernel_types() {
 /// route F32 through the bit-pattern path.
 #[test]
 fn ws2_emit_const_f32_integer_bool_paths_unchanged() {
-    use chelis_ir::dag::RiscOp;
+    use chelis_dag_core::dag::RiscOp;
 
     fn vec_prec(n: usize, prec: Prim) -> TensorType {
         TensorType {
@@ -1007,7 +1007,10 @@ fn ws8a_pad_emits_msl_kernel_and_two_uniform_launch() {
         decl,
         RiscOp::zero_pad(
             Prim::F32,
-            vec![(chelis_ir::dag::RtDim::Lit(1), chelis_ir::dag::RtDim::Lit(1))],
+            vec![(
+                chelis_dag_core::dag::RtDim::Lit(1),
+                chelis_dag_core::dag::RtDim::Lit(1),
+            )],
         ),
         vec![x],
         vec_f32(6),
@@ -1056,7 +1059,10 @@ fn ws8a_shrink_emits_msl_kernel_and_single_uniform_launch() {
     let s = dag.add_node(
         decl,
         RiscOp::Shrink {
-            bounds: vec![(chelis_ir::dag::RtDim::Lit(1), chelis_ir::dag::RtDim::Lit(5))],
+            bounds: vec![(
+                chelis_dag_core::dag::RtDim::Lit(1),
+                chelis_dag_core::dag::RtDim::Lit(5),
+            )],
         },
         vec![x],
         vec_f32(4),
@@ -1103,8 +1109,14 @@ fn ws8a_pad_2d_uses_movement_dims() {
         RiscOp::zero_pad(
             Prim::F32,
             vec![
-                (chelis_ir::dag::RtDim::Lit(1), chelis_ir::dag::RtDim::Lit(0)),
-                (chelis_ir::dag::RtDim::Lit(0), chelis_ir::dag::RtDim::Lit(2)),
+                (
+                    chelis_dag_core::dag::RtDim::Lit(1),
+                    chelis_dag_core::dag::RtDim::Lit(0),
+                ),
+                (
+                    chelis_dag_core::dag::RtDim::Lit(0),
+                    chelis_dag_core::dag::RtDim::Lit(2),
+                ),
             ],
         ),
         vec![x],
@@ -1135,7 +1147,7 @@ fn ws8a_pad_2d_uses_movement_dims() {
 
 #[test]
 fn ordered_scan_emits_one_kernel_for_thousands_of_prefixes() {
-    use chelis_ir::dag::ScanDirection;
+    use chelis_dag_core::dag::ScanDirection;
     let mut lengths = Vec::new();
     for n in [5, 4096] {
         let mut dag = Dag::new();

@@ -1,15 +1,15 @@
 //! [04] §4.7 / [06] §5.2: literal claims retain independent call witnesses.
-use chelis_ir::dag::{Dag, DimInfo, RiscOp, RtAxis, TensorType};
+use chelis_dag_core::dag::{Dag, DimInfo, RiscOp, RtAxis, TensorType};
+use chelis_dag_core::optimize::dead_code_eliminate;
 use chelis_ir::eval::{TensorValue, eval_tensor_with};
-use chelis_ir::optimize::dead_code_eliminate;
 use chelis_numeric_core::dtype_semantics::scalar_from_i64;
 use chelis_numeric_core::prim::Prim;
 
 fn claimed_witness(
     dag: &mut Dag,
-    decl: chelis_ir::dag::DeclId,
+    decl: chelis_dag_core::dag::DeclId,
     required: &[i64],
-) -> chelis_ir::dag::NodeId {
+) -> chelis_dag_core::dag::NodeId {
     let x = dag.add_node(
         decl,
         RiscOp::Load {
@@ -25,7 +25,7 @@ fn claimed_witness(
     dag.add_node(
         decl,
         RiscOp::ExtentWitness {
-            site: chelis_ir::dag::ExtentWitnessSite::Caller,
+            site: chelis_dag_core::dag::ExtentWitnessSite::Caller,
             parameter: "x".into(),
             axis: RtAxis::Lit(0),
             requirements: required
@@ -160,7 +160,7 @@ fn malformed_witnesses_are_rejected() {
         let decl = dag.declare("test");
         let witness = claimed_witness(&mut dag, decl, &[4]);
         dag.add_root(witness);
-        assert!(chelis_ir::verify::verify(&dag).is_empty());
+        assert!(chelis_dag_core::verify::verify(&dag).is_empty());
         let node = dag.node_mut(witness).unwrap();
         match malformed {
             0 => node.output_type.precision = Prim::F32,
@@ -178,7 +178,7 @@ fn malformed_witnesses_are_rejected() {
             _ => unreachable!(),
         }
         assert!(
-            !chelis_ir::verify::verify(&dag).is_empty(),
+            !chelis_dag_core::verify::verify(&dag).is_empty(),
             "malformed case {malformed}"
         );
     }
@@ -186,7 +186,7 @@ fn malformed_witnesses_are_rejected() {
 
 #[test]
 fn graph_rebuilds_preserve_witness_claims_and_call_provenance() {
-    use chelis_ir::optimize::{common_subexpr_eliminate, constant_fold};
+    use chelis_dag_core::optimize::{common_subexpr_eliminate, constant_fold};
     for actual in [4, 5] {
         let mut dag = Dag::new();
         let decl = dag.declare("test");
@@ -282,7 +282,7 @@ fn gradient_retains_primal_shape_checks() {
         dag.node_mut(output).unwrap().shape_deps.push(witness);
         dag.add_root(output);
         let gradient =
-            chelis_ir::grad::grad_dag(&dag, output, &[input]).expect("differentiable sum");
+            chelis_dag_core::grad::grad_dag(&dag, output, &[input]).expect("differentiable sum");
         let outcome = eval_tensor_with(&gradient.dag, |_| {
             Some(TensorValue::from_vec(vec![actual], vec![7.0; actual]))
         });

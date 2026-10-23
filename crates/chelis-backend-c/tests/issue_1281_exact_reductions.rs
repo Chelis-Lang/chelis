@@ -6,10 +6,10 @@
 mod common;
 mod support;
 
-use chelis_ir::dag::{Dag, DimInfo, ReduceWindowKind, RiscOp, TensorType};
+use chelis_dag_core::dag::{Dag, DimInfo, ReduceWindowKind, RiscOp, TensorType};
+use chelis_dag_core::grad::grad_dag_checked;
+use chelis_dag_core::tier2;
 use chelis_ir::eval::{TensorValue, eval_tensor};
-use chelis_ir::grad::grad_dag_checked;
-use chelis_ir::tier2;
 use chelis_numeric_core::dtype_semantics::{RawTensor, StorageView, finalize_tensor};
 use chelis_numeric_core::prim::Prim;
 use chelis_unord::UnordMap;
@@ -326,7 +326,7 @@ int main(void) {{
     }
 }
 
-fn mean_dag(input_ty: TensorType) -> (Dag, chelis_ir::NodeId) {
+fn mean_dag(input_ty: TensorType) -> (Dag, chelis_dag_core::NodeId) {
     let mut dag = Dag::new();
     let decl = dag.declare("test");
     let x = dag.add_node(

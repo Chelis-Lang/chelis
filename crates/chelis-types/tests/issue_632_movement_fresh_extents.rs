@@ -9,7 +9,7 @@
 //! (the pass-through unified `u := n`). The identity cases — stride step
 //! 1, zero pad — MUST keep passing the symbol through (the
 //! `issue_513_symbolic_axis_adjoints` contract), mirroring the IR-side
-//! identity-only rule in `chelis_ir::dag::shape_source_for_axis`.
+//! identity-only rule in `chelis_dag_core::dag::shape_source_for_axis`.
 //! `shrink` never passed symbols through (literal bounds produce
 //! `Lit(end-start)`, runtime bounds a wildcard), so it is unaffected.
 //!

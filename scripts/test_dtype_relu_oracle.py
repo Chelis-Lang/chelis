@@ -58,7 +58,7 @@ class SourceContractMutationTests(unittest.TestCase):
         oracle.validate_source_contracts(self.repo)
 
     def test_surrogate_lowering_mutation_fails(self) -> None:
-        path = self.repo / "crates/chelis-ir/src/tier2.rs"
+        path = self.repo / "crates/chelis-dag-core/src/tier2.rs"
         source = path.read_text()
         path.write_text(
             source.replace(
@@ -71,7 +71,7 @@ class SourceContractMutationTests(unittest.TestCase):
             oracle.validate_source_contracts(self.repo)
 
     def test_gradient_alias_mutation_fails(self) -> None:
-        path = self.repo / "crates/chelis-ir/src/grad.rs"
+        path = self.repo / "crates/chelis-dag-core/src/grad.rs"
         source = path.read_text()
         path.write_text(
             source.replace(

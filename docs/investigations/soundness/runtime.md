@@ -228,8 +228,8 @@ Five different facts must not be substituted for one another:
 | Valid runtime metadata | All extents/strides/counts/bytes have checked signed semantic domains, even when total element count is zero. | Private `ShapeMetadata`, `ElementCount`, `ByteCount`, `IterationSpace`, `ReductionMetadata`. |
 | Safe physical access | Target address-space conversion, byte capacity, alignment, initialization, index bounds, provenance, and live ownership all hold now. | `AllocationBytes`, runtime descriptor/storage validation, checked index plans, and read/write ownership state. |
 
-Relevant sources are [DAG carriers](../../../crates/chelis-ir/src/dag.rs),
-[axis sources](../../../crates/chelis-ir/src/axis_sources.rs),
+Relevant sources are [DAG carriers](../../../crates/chelis-dag-core/src/dag.rs),
+[axis sources](../../../crates/chelis-dag-core/src/axis_sources.rs),
 [lowering](../../../crates/chelis-ir/src/lower.rs),
 [capacity keys](../../../crates/chelis-ir/src/capacity_key.rs), and
 [checked metadata](../../../crates/chelis-runtime/src/metadata.rs).
@@ -301,7 +301,7 @@ executed graph and its numeric choices.
 | Effects and randomness | AD is not an effect handler. Preserve forward effect multiplicity/order; seeded forward/reverse execution uses the prescribed stream and saved random source choices. `with device` selects a checked resource boundary, not another DAG transform. | Random progress, checked effects, and operation adjoints are separate mechanisms. The RNG algorithm discrepancies in §2 preclude deriving this guarantee from stream bookkeeping alone. |
 | Checkpointing | Recompute the same required primal values without changing effects, random choices, traps, aliasing, or derivative semantics. | The specification supplies the obligation; a complete checkpoint implementation/path census and execution proof were not established here. |
 
-Sources: [grad.rs](../../../crates/chelis-ir/src/grad.rs),
+Sources: [grad.rs](../../../crates/chelis-dag-core/src/grad.rs),
 [grad gather contract tests](../../../crates/chelis-ir/tests/grad_gather_contract.rs),
 [low-precision gradient tests](../../../crates/chelis-ir/tests/bf16_f16_grad.rs), and
 [stdlib adjoint integration tests](../../../crates/chelis-cli/tests/issue_1293_stdlib_adjoints.rs).
@@ -357,7 +357,7 @@ an expression by a mathematical identity is not generally legal under IEEE
 exceptions or checked integer overflow. Reassociation needs the operation's
 permission, not just a performance rationale.
 
-The inspected [optimizer](../../../crates/chelis-ir/src/optimize.rs) exposes three
+The inspected [optimizer](../../../crates/chelis-dag-core/src/optimize.rs) exposes three
 important boundaries:
 
 - Constant folding routes direct subtraction/extrema through typed kernels, but

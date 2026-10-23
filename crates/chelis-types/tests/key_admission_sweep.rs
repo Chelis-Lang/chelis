@@ -16,14 +16,13 @@
 //! passed; see the per-test notes.
 
 use chelis_deep::DeepTag;
+use chelis_numeric_core::key_admission::{KeyAdmission, KeyPrimitive};
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str;
 use chelis_type_core::Type;
 use chelis_types::errors::ErrorWitness;
 use chelis_types::errors::{CheckError, CheckErrorKind};
-use chelis_types::key_admission::{
-    KeyAdmission, KeyPrimitive, TagKeys, builtin_key_operand, tag_keys,
-};
+use chelis_types::key_admission::{TagKeys, builtin_key_operand, tag_keys};
 use chelis_types::{
     BUILTINS, BuiltinSiblingCaseId, builtin_env, check_linearity, check_typed_program,
 };

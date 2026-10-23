@@ -32,7 +32,7 @@
 //!   lock, green on `3b0e5b1b2`; watched failing under the mutation that
 //!   broadcasts any rank-1 operand, so it discriminates the rank-0 bound.
 
-use chelis_ir::dag::{Dag, DimInfo, NodeId, RiscOp, RtDim, TensorType};
+use chelis_dag_core::dag::{Dag, DimInfo, NodeId, RiscOp, RtDim, TensorType};
 use chelis_ir::eval::{TensorValue, eval_tensor_roots_with_strict};
 use chelis_numeric_core::prim::Prim;
 
@@ -41,11 +41,16 @@ fn f32_tensor(shape: &[usize], data: &[f64]) -> TensorValue {
         .expect("finalize")
 }
 
-fn load(dag: &mut Dag, decl: chelis_ir::dag::DeclId, name: &str, extent: usize) -> NodeId {
+fn load(dag: &mut Dag, decl: chelis_dag_core::dag::DeclId, name: &str, extent: usize) -> NodeId {
     load_shaped(dag, decl, name, &[extent])
 }
 
-fn load_shaped(dag: &mut Dag, decl: chelis_ir::dag::DeclId, name: &str, shape: &[usize]) -> NodeId {
+fn load_shaped(
+    dag: &mut Dag,
+    decl: chelis_dag_core::dag::DeclId,
+    name: &str,
+    shape: &[usize],
+) -> NodeId {
     dag.add_node(
         decl,
         RiscOp::Load { name: name.into() },

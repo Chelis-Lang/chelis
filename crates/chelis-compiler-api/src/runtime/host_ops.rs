@@ -1,12 +1,12 @@
 use chelis_unord::UnordMap;
 
+use chelis_dag_core::dag::{Dag, DeclId, DimInfo, NodeId, RiscOp, TensorType};
+use chelis_dag_core::tier2;
 use chelis_deep::ast::{Atom, Expr, ExprCarrier};
-use chelis_ir::dag::{Dag, DeclId, DimInfo, NodeId, RiscOp, TensorType};
 use chelis_ir::eval::{
     AdmittedResult, TensorValue as IrTensorValue, admit_padded_shape, admit_result, admit_tensor,
     eval_tensor_roots_with,
 };
-use chelis_ir::tier2;
 use chelis_numeric_core::dtype_semantics::{
     ArgReduceOp, CompareOp, FloatBinOp, FloatUnOp, IntBinOp, IntUnOp, NumericKernelError,
     NumericTrap, ScalarValue, TensorReduceOp, arg_reduce_tensor_groups, cast_scalar,
@@ -545,7 +545,7 @@ pub(super) fn eval_trunc_div(args: &[RuntimeValue]) -> Result<RuntimeValue, Stri
 
 pub(super) fn bitwise_binop(
     args: &[RuntimeValue],
-    op: chelis_types::BitwiseKind,
+    op: chelis_numeric_core::bitwise::BitwiseKind,
 ) -> Result<RuntimeValue, String> {
     match (args.first(), args.get(1)) {
         (Some(RuntimeValue::Scalar(lhs)), Some(RuntimeValue::Scalar(rhs))) => {
@@ -1382,7 +1382,7 @@ impl ReduceOp {
 }
 
 /// Reducer selector for the host-runtime `reduce_window_*` family.
-/// Mirrors `chelis_ir::dag::ReduceWindowKind` so host-runtime eval and
+/// Mirrors `chelis_dag_core::dag::ReduceWindowKind` so host-runtime eval and
 /// IR-evaluator paths agree on the operational meaning of each builtin
 /// name. See `spec/05-risc-primitives.md` §2.3.1.
 #[derive(Clone, Copy)]

@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
 use chelis_backend_metal::MetalCodegenResult;
-use chelis_ir::dag::Dag;
+use chelis_dag_core::dag::Dag;
 use chelis_types::unsupported::Unsupported;
 
 pub fn codegen_metal(dag: &Dag, name: &str) -> MetalCodegenResult {

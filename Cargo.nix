@@ -153,6 +153,16 @@ rec {
       # File a bug if you depend on any for non-debug work!
       debug = internal.debugCrate { inherit packageId; };
     };
+    "chelis-dag-core" = rec {
+      packageId = "chelis-dag-core";
+      build = internal.buildRustCrateWithFeatures {
+        packageId = "chelis-dag-core";
+      };
+
+      # Debug support which might change between releases.
+      # File a bug if you depend on any for non-debug work!
+      debug = internal.debugCrate { inherit packageId; };
+    };
     "chelis-deep" = rec {
       packageId = "chelis-deep";
       build = internal.buildRustCrateWithFeatures {
@@ -1773,6 +1783,11 @@ rec {
             features = [ "std" ];
           }
           {
+            name = "chelis-dag-core";
+            packageId = "chelis-dag-core";
+            usesDefaultFeatures = false;
+          }
+          {
             name = "chelis-ir";
             packageId = "chelis-ir";
           }
@@ -1857,6 +1872,11 @@ rec {
             packageId = "chelis-backend-c";
           }
           {
+            name = "chelis-dag-core";
+            packageId = "chelis-dag-core";
+            usesDefaultFeatures = false;
+          }
+          {
             name = "chelis-ir";
             packageId = "chelis-ir";
           }
@@ -1922,6 +1942,11 @@ rec {
           {
             name = "chelis-backend-c";
             packageId = "chelis-backend-c";
+          }
+          {
+            name = "chelis-dag-core";
+            packageId = "chelis-dag-core";
+            usesDefaultFeatures = false;
           }
           {
             name = "chelis-ir";
@@ -2072,6 +2097,11 @@ rec {
           {
             name = "chelis-cove";
             packageId = "chelis-cove";
+          }
+          {
+            name = "chelis-dag-core";
+            packageId = "chelis-dag-core";
+            usesDefaultFeatures = false;
           }
           {
             name = "chelis-deep";
@@ -2329,6 +2359,11 @@ rec {
             packageId = "chelis-clarabel-provider";
             optional = true;
             features = [ "solver" ];
+          }
+          {
+            name = "chelis-dag-core";
+            packageId = "chelis-dag-core";
+            usesDefaultFeatures = false;
           }
           {
             name = "chelis-deep";
@@ -2621,6 +2656,53 @@ rec {
         };
         resolvedDefaultFeatures = [ "std" ];
       };
+      "chelis-dag-core" = rec {
+        crateName = "chelis-dag-core";
+        version = "0.21.1";
+        edition = "2024";
+        src = lib.cleanSourceWith { filter = sourceFilter;  src = ./crates/chelis-dag-core; };
+        libName = "chelis_dag_core";
+        dependencies = [
+          {
+            name = "chelis-numeric-core";
+            packageId = "chelis-numeric-core";
+            usesDefaultFeatures = false;
+            features = [ "alloc" "serde" ];
+          }
+          {
+            name = "chelis-unord";
+            packageId = "chelis-unord";
+          }
+          {
+            name = "hashbrown";
+            packageId = "hashbrown 0.16.1";
+            usesDefaultFeatures = false;
+          }
+          {
+            name = "rustc-hash";
+            packageId = "rustc-hash";
+            usesDefaultFeatures = false;
+          }
+          {
+            name = "serde";
+            packageId = "serde";
+            usesDefaultFeatures = false;
+            features = [ "alloc" "derive" ];
+          }
+        ];
+        devDependencies = [
+          {
+            name = "bincode";
+            packageId = "bincode";
+          }
+          {
+            name = "serde_json";
+            packageId = "serde_json";
+            features = [ "float_roundtrip" ];
+          }
+        ];
+
+      };
       "chelis-deep" = rec {
         crateName = "chelis-deep";
         version = "0.21.1";
@@ -2712,6 +2794,11 @@ rec {
           {
             name = "chelis-compiler-api";
             packageId = "chelis-compiler-api";
+          }
+          {
+            name = "chelis-dag-core";
+            packageId = "chelis-dag-core";
+            usesDefaultFeatures = false;
           }
           {
             name = "chelis-deep";
@@ -2887,6 +2974,11 @@ rec {
           {
             name = "chelis-abi";
             packageId = "chelis-abi";
+          }
+          {
+            name = "chelis-dag-core";
+            packageId = "chelis-dag-core";
+            usesDefaultFeatures = false;
           }
           {
             name = "chelis-deep";
@@ -3194,6 +3286,11 @@ rec {
         libName = "chelis_pipeline_core";
         dependencies = [
           {
+            name = "chelis-dag-core";
+            packageId = "chelis-dag-core";
+            usesDefaultFeatures = false;
+          }
+          {
             name = "chelis-deep";
             packageId = "chelis-deep";
           }
@@ -3289,6 +3386,11 @@ rec {
           {
             name = "chelis-compiler-api";
             packageId = "chelis-compiler-api";
+          }
+          {
+            name = "chelis-dag-core";
+            packageId = "chelis-dag-core";
+            usesDefaultFeatures = false;
           }
           {
             name = "chelis-deep";

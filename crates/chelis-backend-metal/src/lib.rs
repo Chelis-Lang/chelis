@@ -29,8 +29,8 @@ pub const TENSOR_CAPABLE_PRIMS: &[chelis_numeric_core::prim::Prim] = &[
 
 use chelis_unord::UnordMap;
 
-use chelis_ir::dag::DimExpr;
-use chelis_ir::dag::NodeId;
+use chelis_dag_core::dag::DimExpr;
+use chelis_dag_core::dag::NodeId;
 use chelis_ir::ownership::{VerifiedDagProgram, VerifiedDagView};
 use chelis_types::unsupported::Unsupported;
 
@@ -203,7 +203,7 @@ pub fn runtime_dir() -> &'static str {
 /// A raw DAG cannot be passed directly to Metal:
 ///
 /// ```compile_fail
-/// # use chelis_ir::dag::Dag;
+/// # use chelis_dag_core::dag::Dag.
 /// fn bypass(raw: &Dag) {
 ///     let _ = chelis_backend_metal::codegen_metal(raw, "unchecked");
 /// }
@@ -265,7 +265,7 @@ pub fn codegen_metal(
     func_name: &str,
 ) -> Result<MetalCodegenResult, Unsupported> {
     let dag = plan.dag();
-    chelis_ir::dag::reject_device_correctly_rounded_ops(dag.nodes(), "metal")?;
+    chelis_ir::device_admission::reject_device_correctly_rounded_ops(dag.nodes(), "metal")?;
     let input_labels = emit::input_labels(dag);
     let output_labels = emit::output_labels(dag);
     let symbolic_dims = dag.symbolic_params();
@@ -336,7 +336,7 @@ pub fn codegen_metal_host_program(
                 .dag
                 .nodes()
                 .iter()
-                .any(|node| matches!(node.op, chelis_ir::dag::RiscOp::Count { .. }))
+                .any(|node| matches!(node.op, chelis_dag_core::dag::RiscOp::Count { .. }))
         })
         .collect::<Vec<_>>();
     let external_names = count_helpers
@@ -368,7 +368,7 @@ pub fn codegen_metal_host_program(
 /// lowered: ownership lowering, then verification.
 fn verified_host_helper_dag(
     helper_name: &str,
-    dag: chelis_ir::dag::Dag,
+    dag: chelis_dag_core::dag::Dag,
 ) -> Result<VerifiedDagProgram, Unsupported> {
     let unsupported = |error: chelis_ir::ownership::OwnershipError| {
         Unsupported::new(
@@ -394,7 +394,7 @@ pub(crate) mod testing {
     use chelis_ir::ownership::{OwnershipError, VerifiedDagProgram};
 
     pub(crate) fn verified_dag(
-        dag: &chelis_ir::dag::Dag,
+        dag: &chelis_dag_core::dag::Dag,
     ) -> Result<VerifiedDagProgram, OwnershipError> {
         chelis_ir::ownership::verify_ownership(chelis_ir::ownership::lower_dag_ownership(
             dag.clone(),

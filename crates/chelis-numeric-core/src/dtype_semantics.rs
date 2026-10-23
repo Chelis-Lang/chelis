@@ -1122,8 +1122,8 @@ fn apply_float_binop_f32(op: FloatBinOp, lhs: f32, rhs: f32) -> f32 {
     }
 }
 
-fn apply_float_binop_f64(op: FloatBinOp, lhs: f64, rhs: f64) -> f64 {
-    let value = match op {
+fn apply_float_binop_f64_raw(op: FloatBinOp, lhs: f64, rhs: f64) -> f64 {
+    match op {
         FloatBinOp::Add => lhs + rhs,
         FloatBinOp::Sub => lhs - rhs,
         FloatBinOp::Mul => lhs * rhs,
@@ -1133,7 +1133,11 @@ fn apply_float_binop_f64(op: FloatBinOp, lhs: f64, rhs: f64) -> f64 {
         FloatBinOp::Rem => lhs % rhs,
         FloatBinOp::Max => select_float_max_first(lhs, rhs, f64::is_nan),
         FloatBinOp::Min => select_float_min_first(lhs, rhs, f64::is_nan),
-    };
+    }
+}
+
+fn apply_float_binop_f64(op: FloatBinOp, lhs: f64, rhs: f64) -> f64 {
+    let value = apply_float_binop_f64_raw(op, lhs, rhs);
     match op {
         FloatBinOp::Max | FloatBinOp::Min => value,
         _ => canonical_nan_f64(value),
@@ -1201,7 +1205,11 @@ fn apply_float_unop_f32(op: FloatUnOp, value: f32) -> f32 {
 }
 
 fn apply_float_unop_f64(op: FloatUnOp, value: f64) -> f64 {
-    canonical_nan_f64(match op {
+    canonical_nan_f64(apply_float_unop_f64_raw(op, value))
+}
+
+fn apply_float_unop_f64_raw(op: FloatUnOp, value: f64) -> f64 {
+    match op {
         FloatUnOp::Neg => -value,
         FloatUnOp::Recip => value.recip(),
         FloatUnOp::Exp => chelis_crmath::exp_f64(value),
@@ -1226,7 +1234,7 @@ fn apply_float_unop_f64(op: FloatUnOp, value: f64) -> f64 {
         | FloatUnOp::StandardNormalCdf => {
             unreachable!("derived activations decompose before the unary primitive kernel")
         }
-    })
+    }
 }
 
 fn activation_constant(
@@ -3841,6 +3849,87 @@ pub fn scalar_from_i64(op: &'static str, prim: Prim, v: i64) -> Result<ScalarVal
 /// targets domain-check (section C3).
 pub fn scalar_from_f64(op: &'static str, prim: Prim, v: f64) -> Result<ScalarValue, NumericTrap> {
     finalize_scalar(op, prim, RawScalar::Float(v))
+}
+
+/// Closed unary operation set for the optimizer's existing f64-image folds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WideUnaryFold {
+    Neg,
+    Sqrt,
+    Abs,
+    Floor,
+    Ceil,
+    Round,
+}
+
+/// Closed binary operation set for the optimizer's existing f64-image folds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WideBinaryFold {
+    Add,
+    Mul,
+}
+
+fn fold_wide_image(value: ScalarValue) -> Option<f64> {
+    if let Some(integer) = value.as_i64_exact()
+        && (integer as f64) as i128 != integer as i128
+    {
+        return None;
+    }
+    Some(value.as_f64_lossy())
+}
+
+/// Evaluate an existing optimizer fold on an exact f64 image, then finalize
+/// at `destination` through [`scalar_from_f64`].
+///
+/// Inexact integer images and results that fail finalization decline the fold.
+/// These historical fold images preserve native NaN payloads and signs rather
+/// than the canonical NaNs of the ordinary typed arithmetic kernels.
+/// Floor, Ceil, and Round quiet signaling NaNs while retaining their sign
+/// and payload, matching the transferred native folds.
+pub fn fold_wide_unary(
+    op: WideUnaryFold,
+    value: ScalarValue,
+    destination: Prim,
+) -> Option<ScalarValue> {
+    let value = fold_wide_image(value)?;
+    let primitive = match op {
+        WideUnaryFold::Neg => FloatUnOp::Neg,
+        WideUnaryFold::Sqrt => FloatUnOp::Sqrt,
+        WideUnaryFold::Abs => FloatUnOp::Abs,
+        WideUnaryFold::Floor => FloatUnOp::Floor,
+        WideUnaryFold::Ceil => FloatUnOp::Ceil,
+        WideUnaryFold::Round => FloatUnOp::Round,
+    };
+    let result = if matches!(
+        op,
+        WideUnaryFold::Floor | WideUnaryFold::Ceil | WideUnaryFold::Round
+    ) && value.is_nan()
+    {
+        f64::from_bits(value.to_bits() | (1_u64 << (f64::MANTISSA_DIGITS - 2)))
+    } else {
+        apply_float_unop_f64_raw(primitive, value)
+    };
+    scalar_from_f64("const", destination, result).ok()
+}
+
+/// Evaluate one of the existing binary f64-image folds.
+///
+/// Both inputs must pass the exact-integer image guard. Finalization and
+/// refusal follow [`fold_wide_unary`], without widening the optimizer's fold set.
+pub fn fold_wide_binary(
+    op: WideBinaryFold,
+    lhs: ScalarValue,
+    rhs: ScalarValue,
+    destination: Prim,
+) -> Option<ScalarValue> {
+    let lhs = fold_wide_image(lhs)?;
+    let rhs = fold_wide_image(rhs)?;
+    let primitive = match op {
+        WideBinaryFold::Add => FloatBinOp::Add,
+        WideBinaryFold::Mul => FloatBinOp::Mul,
+    };
+    let result = apply_float_binop_f64_raw(primitive, lhs, rhs);
+    scalar_from_f64("const", destination, result).ok()
 }
 
 /// Return whether `value` is exactly representable by the float dtype

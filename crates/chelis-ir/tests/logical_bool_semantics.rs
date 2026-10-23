@@ -1,13 +1,13 @@
 //! Authoritative IR oracle for chelis#1284, chelis#630, and chelis#666.
 
-use chelis_ir::dag::{
+use chelis_dag_core::dag::{
     ComparisonKind, Dag, DimInfo, ExtentClaim, ExtentWitnessSite, LogicalKind, RiscOp, RtAxis,
     RtDim, TensorType,
 };
+use chelis_dag_core::fuse::fuse;
+use chelis_dag_core::grad::{AdError, AdRejectionReason, grad_dag_checked};
+use chelis_dag_core::{tier2, verify};
 use chelis_ir::eval::{TensorValue, eval_tensor};
-use chelis_ir::fuse::fuse;
-use chelis_ir::grad::{AdError, AdRejectionReason, grad_dag_checked};
-use chelis_ir::{tier2, verify};
 use chelis_numeric_core::dtype_semantics::{RawTensor, finalize_tensor};
 use chelis_numeric_core::prim::Prim;
 use chelis_unord::UnordMap;
@@ -73,13 +73,13 @@ fn scalar_bits(value: &TensorValue, index: usize) -> serde_json::Value {
 #[test]
 fn tier2_preserves_every_comparison_and_logical_identity() {
     type ComparisonLowerer = fn(
-        chelis_ir::dag::Owner,
+        chelis_dag_core::dag::Owner,
         &mut Dag,
-        chelis_ir::dag::NodeId,
-        chelis_ir::dag::NodeId,
+        chelis_dag_core::dag::NodeId,
+        chelis_dag_core::dag::NodeId,
         &TensorType,
         Option<&str>,
-    ) -> chelis_ir::dag::NodeId;
+    ) -> chelis_dag_core::dag::NodeId;
     let comparisons: [(ComparisonKind, ComparisonLowerer); 7] = [
         (ComparisonKind::CmpLt, tier2::lower_cmplt),
         (ComparisonKind::Lt, tier2::lower_lt),
@@ -948,7 +948,7 @@ fn verifier_compares_resolved_extents_semantically_without_merging_unresolved_sy
     let reshaped = runtime_actualized.add_node(
         runtime_actualized_decl,
         RiscOp::Reshape {
-            new_shape: vec![chelis_ir::dag::RtDim::Node(1)],
+            new_shape: vec![chelis_dag_core::dag::RtDim::Node(1)],
         },
         vec![source, extent],
         TensorType {
@@ -1811,7 +1811,7 @@ fn logical_random_activation_is_control_only_during_grad() {
         None,
     );
     let output = dag.add_node(
-        chelis_ir::dag::Owner::new(decl, Some(activation)),
+        chelis_dag_core::dag::Owner::new(decl, Some(activation)),
         RiscOp::UniformLike,
         vec![template, low, high, key],
         scalar_f64,

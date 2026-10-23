@@ -1,15 +1,16 @@
 //! Slice B executable contract for chelis#1277: one checked source per
 //! realized output axis (`spec/design/runtime_extents.md` C4).
 
-use chelis_ir::axis_sources::{
-    AxisSource, ExtentOrigin, check_axis_sources, dim_extent_origins, output_axis_sources,
-    resolve_axis_extent, unresolved_dim_names,
+use chelis_dag_core::axis_sources::{
+    AxisSource, ExtentOrigin, dim_extent_origins, output_axis_sources, resolve_axis_extent,
+    unresolved_dim_names,
 };
-use chelis_ir::dag::{
+use chelis_dag_core::dag::{
     ComparisonKind, Dag, DimExpr, DimInfo, ExtremaKind, ExtremaOperand, FusedInput, FusedStep,
     FusedStepOp, KeyBranch, LogicalKind, NodeId, ReduceWindowKind, RiscOp, RtAxis, RtDim,
     TensorType, UniformBound,
 };
+use chelis_ir::axis_admission::check_axis_sources;
 use chelis_numeric_core::prim::Prim;
 use chelis_types::unsupported::Stage;
 
@@ -25,7 +26,12 @@ fn named(name: &str) -> DimInfo {
     DimInfo::Named(name.to_string(), None)
 }
 
-fn load(dag: &mut Dag, decl: chelis_ir::dag::DeclId, name: &str, dims: Vec<DimInfo>) -> NodeId {
+fn load(
+    dag: &mut Dag,
+    decl: chelis_dag_core::dag::DeclId,
+    name: &str,
+    dims: Vec<DimInfo>,
+) -> NodeId {
     dag.add_node(
         decl,
         RiscOp::Load { name: name.into() },
@@ -924,7 +930,7 @@ fn every_risc_op_yields_exactly_one_source_per_output_axis() {
     ));
     nodes.push(add(
         &mut dag,
-        RiscOp::Bitwise(chelis_types::BitwiseKind::Xor),
+        RiscOp::Bitwise(chelis_numeric_core::bitwise::BitwiseKind::Xor),
         vec![ints, more_ints],
         ty(vec![DimInfo::Lit(2), DimInfo::Lit(3)], Prim::Int32),
     ));
@@ -1156,7 +1162,7 @@ fn every_risc_op_yields_exactly_one_source_per_output_axis() {
     nodes.push(add(
         &mut dag,
         RiscOp::ExtentWitness {
-            site: chelis_ir::dag::ExtentWitnessSite::Caller,
+            site: chelis_dag_core::dag::ExtentWitnessSite::Caller,
             parameter: "f".into(),
             axis: RtAxis::Lit(0),
             requirements: vec![
@@ -1191,7 +1197,7 @@ fn every_risc_op_yields_exactly_one_source_per_output_axis() {
     let witness = add(
         &mut dag,
         RiscOp::ExtentWitness {
-            site: chelis_ir::dag::ExtentWitnessSite::Caller,
+            site: chelis_dag_core::dag::ExtentWitnessSite::Caller,
             parameter: "unit".into(),
             axis: RtAxis::Lit(0),
             requirements: vec![
@@ -1386,7 +1392,7 @@ fn every_risc_op_yields_exactly_one_source_per_output_axis() {
         &mut dag,
         RiscOp::Cumsum {
             axis: 1,
-            direction: chelis_ir::dag::ScanDirection::Increasing,
+            direction: chelis_dag_core::dag::ScanDirection::Increasing,
         },
         vec![f],
         f32_23(),
@@ -1455,7 +1461,7 @@ fn to_end_shrink_end_requires_a_literal_zero_start() {
     // The one well-formed spelling: the identity slice of a symbolic
     // bystander axis.
     assert!(
-        chelis_ir::verify::verify(&full_axis(RtDim::Lit(0))).is_empty(),
+        chelis_dag_core::verify::verify(&full_axis(RtDim::Lit(0))).is_empty(),
         "the full-axis sentinel is the legal ToEnd spelling"
     );
 
@@ -1463,7 +1469,7 @@ fn to_end_shrink_end_requires_a_literal_zero_start() {
     // rejected it: `verify` constrained only the START carrier, and
     // `bind_symbolic_dims` resolved `(Lit(1), ToEnd)` into `(Lit(1),
     // Lit(1 + size))`, a slice the spec says does not exist.
-    let errors = chelis_ir::verify::verify(&full_axis(RtDim::Lit(1)));
+    let errors = chelis_dag_core::verify::verify(&full_axis(RtDim::Lit(1)));
     assert!(
         errors
             .iter()
@@ -1498,7 +1504,7 @@ fn to_end_shrink_end_requires_a_literal_zero_start() {
         None,
     );
     runtime_start.add_root(sliced);
-    let errors = chelis_ir::verify::verify(&runtime_start);
+    let errors = chelis_dag_core::verify::verify(&runtime_start);
     assert!(
         errors
             .iter()
@@ -1527,7 +1533,7 @@ fn to_end_shrink_end_requires_a_literal_zero_start() {
     );
     start_sentinel.add_root(sliced);
     assert!(
-        chelis_ir::verify::verify(&start_sentinel)
+        chelis_dag_core::verify::verify(&start_sentinel)
             .iter()
             .any(|error| error.contains("only valid as an end")),
         "a ToEnd start is rejected"
@@ -1559,7 +1565,7 @@ fn binding_a_to_end_bound_rejects_a_start_that_is_not_literal_zero() {
     let mut bindings = chelis_unord::UnordMap::new();
     bindings.insert("n".to_string(), 4usize);
 
-    let resolved = chelis_ir::dag::bind_symbolic_dims(
+    let resolved = chelis_dag_core::dag::bind_symbolic_dims(
         &bound(RtDim::Lit(0)),
         &bindings,
         &chelis_unord::UnordSet::new(),
@@ -1571,7 +1577,7 @@ fn binding_a_to_end_bound_rejects_a_start_that_is_not_literal_zero() {
             if bounds == &vec![(RtDim::Lit(0), RtDim::Lit(4))]
     ));
 
-    let error = chelis_ir::dag::bind_symbolic_dims(
+    let error = chelis_dag_core::dag::bind_symbolic_dims(
         &bound(RtDim::Lit(1)),
         &bindings,
         &chelis_unord::UnordSet::new(),
@@ -1813,7 +1819,7 @@ fn a_named_axis_with_no_source_resolves_to_no_origin_and_is_reported() {
 /// value resolver.
 #[test]
 fn the_op_computed_origin_walk_stops_at_same_shape_and_set_axes() {
-    use chelis_ir::axis_sources::{op_computed_axis_origin, same_shape_result_agreement};
+    use chelis_dag_core::axis_sources::{op_computed_axis_origin, same_shape_result_agreement};
 
     // `add` physically forwards one input's axis, but its result claim is
     // owned by `add` and observes both distinct positive-rank operands.
@@ -1926,7 +1932,7 @@ fn the_op_computed_origin_walk_stops_at_same_shape_and_set_axes() {
 /// then refuses to build.
 #[test]
 fn a_static_op_computed_extent_is_told_apart_from_a_runtime_one() {
-    use chelis_ir::axis_sources::static_op_computed_axis_extent;
+    use chelis_dag_core::axis_sources::static_op_computed_axis_extent;
 
     // Literal padding over a literal operand: `concat`'s lowered cascade,
     // whose extent the verifier also computes.
@@ -2012,11 +2018,16 @@ fn a_static_op_computed_extent_is_told_apart_from_a_runtime_one() {
         None,
     );
     assert_eq!(
-        chelis_ir::axis_sources::op_computed_axis_extent(&dag.get(strided).expect("stride").op, 0),
-        Some(chelis_ir::axis_sources::ComputedAxisExtent::StrideSpan {
-            step: RtDim::Lit(2),
-            operand_axis: 0,
-        })
+        chelis_dag_core::axis_sources::op_computed_axis_extent(
+            &dag.get(strided).expect("stride").op,
+            0
+        ),
+        Some(
+            chelis_dag_core::axis_sources::ComputedAxisExtent::StrideSpan {
+                step: RtDim::Lit(2),
+                operand_axis: 0,
+            }
+        )
     );
     assert_eq!(static_op_computed_axis_extent(&dag, strided, 0), Some(3));
 
@@ -2054,11 +2065,16 @@ fn a_static_op_computed_extent_is_told_apart_from_a_runtime_one() {
         None,
     );
     assert_eq!(
-        chelis_ir::axis_sources::op_computed_axis_extent(&dag.get(strided).expect("stride").op, 0),
-        Some(chelis_ir::axis_sources::ComputedAxisExtent::StrideSpan {
-            step: RtDim::Node(1),
-            operand_axis: 0,
-        })
+        chelis_dag_core::axis_sources::op_computed_axis_extent(
+            &dag.get(strided).expect("stride").op,
+            0
+        ),
+        Some(
+            chelis_dag_core::axis_sources::ComputedAxisExtent::StrideSpan {
+                step: RtDim::Node(1),
+                operand_axis: 0,
+            }
+        )
     );
     assert_eq!(static_op_computed_axis_extent(&dag, strided, 0), None);
 
@@ -2077,7 +2093,10 @@ fn a_static_op_computed_extent_is_told_apart_from_a_runtime_one() {
         None,
     );
     assert_eq!(
-        chelis_ir::axis_sources::op_computed_axis_extent(&dag.get(strided).expect("stride").op, 0),
+        chelis_dag_core::axis_sources::op_computed_axis_extent(
+            &dag.get(strided).expect("stride").op,
+            0
+        ),
         None
     );
     assert_eq!(static_op_computed_axis_extent(&dag, strided, 0), None);
@@ -2098,7 +2117,7 @@ fn a_static_op_computed_extent_is_told_apart_from_a_runtime_one() {
 /// that happens to spell a binder that way.
 #[test]
 fn synthesized_dim_names_are_told_apart_from_user_spelled_ones() {
-    use chelis_ir::axis_sources::is_synthesized_dim_name;
+    use chelis_dag_core::axis_sources::is_synthesized_dim_name;
 
     for name in [
         "",

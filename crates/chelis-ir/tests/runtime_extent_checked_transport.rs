@@ -1,7 +1,7 @@
 //! [04] section 4.7: independently observed extents precede shape refinement.
-use chelis_ir::dag::{Dag, DimInfo, NodeId, RiscOp, RtAxis, TensorType};
+use chelis_dag_core::dag::{Dag, DimInfo, NodeId, RiscOp, RtAxis, TensorType};
+use chelis_dag_core::optimize::{common_subexpr_eliminate, constant_fold, dead_code_eliminate};
 use chelis_ir::eval::{TensorValue, eval_tensor_with};
-use chelis_ir::optimize::{common_subexpr_eliminate, constant_fold, dead_code_eliminate};
 use chelis_numeric_core::dtype_semantics::scalar_from_i64;
 use chelis_numeric_core::prim::Prim;
 
@@ -11,7 +11,7 @@ fn scalar_type() -> TensorType {
         precision: Prim::Int64,
     }
 }
-fn scalar(dag: &mut Dag, decl: chelis_ir::dag::DeclId, value: i64) -> NodeId {
+fn scalar(dag: &mut Dag, decl: chelis_dag_core::dag::DeclId, value: i64) -> NodeId {
     dag.add_node(
         decl,
         RiscOp::Const {
@@ -24,7 +24,7 @@ fn scalar(dag: &mut Dag, decl: chelis_ir::dag::DeclId, value: i64) -> NodeId {
 }
 fn checked_extent(
     dag: &mut Dag,
-    decl: chelis_ir::dag::DeclId,
+    decl: chelis_dag_core::dag::DeclId,
     actual: i64,
     required: i64,
 ) -> NodeId {
@@ -41,7 +41,7 @@ fn checked_extent(
         Some("reshape-call".into()),
     )
 }
-fn unit_axis(dag: &mut Dag, decl: chelis_ir::dag::DeclId) -> (NodeId, NodeId, NodeId) {
+fn unit_axis(dag: &mut Dag, decl: chelis_dag_core::dag::DeclId) -> (NodeId, NodeId, NodeId) {
     let x = dag.add_node(
         decl,
         RiscOp::Load { name: "x".into() },
@@ -55,7 +55,7 @@ fn unit_axis(dag: &mut Dag, decl: chelis_ir::dag::DeclId) -> (NodeId, NodeId, No
     let witness = dag.add_node(
         decl,
         RiscOp::ExtentWitness {
-            site: chelis_ir::dag::ExtentWitnessSite::Caller,
+            site: chelis_dag_core::dag::ExtentWitnessSite::Caller,
             parameter: "b".into(),
             axis: RtAxis::Lit(0),
             requirements: vec![scalar_from_i64("load", Prim::Int64, 1).unwrap()],
@@ -82,11 +82,11 @@ fn unit_axis(dag: &mut Dag, decl: chelis_ir::dag::DeclId) -> (NodeId, NodeId, No
 
 fn declared_producer(
     dag: &mut Dag,
-    decl: chelis_ir::dag::DeclId,
+    decl: chelis_dag_core::dag::DeclId,
     parameter: &str,
     actual: usize,
 ) -> NodeId {
-    use chelis_ir::dag::ExtentWitnessSite;
+    use chelis_dag_core::dag::ExtentWitnessSite;
     let input = dag.add_node(
         decl,
         RiscOp::Load {
@@ -135,7 +135,7 @@ fn declared_producer(
         decl,
         RiscOp::Expand {
             axis: 0,
-            size: chelis_ir::dag::RtDim::Node(1),
+            size: chelis_dag_core::dag::RtDim::Node(1),
         },
         vec![value, actual],
         TensorType {
@@ -170,7 +170,7 @@ fn result_claim_witnesses_survive_rebuilds_without_joining_same_labels() {
             ),
             (mapped, true),
         ] {
-            let errors = chelis_ir::verify::verify(&rebuilt);
+            let errors = chelis_dag_core::verify::verify(&rebuilt);
             assert!(errors.is_empty(), "{errors:?}");
             let owned = chelis_ir::ownership::verify_ownership(
                 chelis_ir::ownership::lower_dag_ownership(rebuilt.clone()).unwrap(),
@@ -182,7 +182,7 @@ fn result_claim_witnesses_survive_rebuilds_without_joining_same_labels() {
                     if matches!(
                         rebuilt.get(*dependency).unwrap().op,
                         RiscOp::ExtentWitness {
-                            site: chelis_ir::dag::ExtentWitnessSite::ResultClaim { .. },
+                            site: chelis_dag_core::dag::ExtentWitnessSite::ResultClaim { .. },
                             ..
                         }
                     ) {
@@ -249,7 +249,7 @@ fn result_claim_witnesses_survive_rebuilds_without_joining_same_labels() {
             .unwrap()
             .shape_deps
             .insert(0, first_token);
-        assert!(chelis_ir::verify::verify(&dag).is_empty());
+        assert!(chelis_dag_core::verify::verify(&dag).is_empty());
         let result = eval_tensor_with(&dag, |name| {
             let width = if name == "left" { first } else { second };
             Some(TensorValue::from_vec(vec![width], vec![0.0; width]))
@@ -273,7 +273,7 @@ fn result_claim_witnesses_survive_rebuilds_without_joining_same_labels() {
         let decl = dag.declare("test");
         let producer = declared_producer(&mut dag, decl, "x", 2);
         dag.node_mut(producer).unwrap().output_type.dims[0] = DimInfo::Lit(literal);
-        let errors = chelis_ir::verify::verify(&dag);
+        let errors = chelis_dag_core::verify::verify(&dag);
         assert!(errors.is_empty(), "{errors:?}");
         let result = eval_tensor_with(&dag, |_| Some(TensorValue::from_vec(vec![2], vec![0.0; 2])));
         if literal == 2 {
@@ -300,14 +300,14 @@ fn result_claim_admission_requires_its_declaring_observation_and_producing_axis(
     let producer = declared_producer(&mut dag, decl, "x", 2);
     let token = dag.get(producer).unwrap().shape_deps[0];
     assert!(
-        !chelis_ir::axis_sources::witness_is_entry_obligation(&dag, token),
+        !chelis_dag_core::axis_sources::witness_is_entry_obligation(&dag, token),
         "the producer reads this witness's scalar through its explicit dependency"
     );
     assert!(
-        chelis_ir::axis_sources::witness_entry_obligations(&dag, token).is_none(),
+        chelis_dag_core::axis_sources::witness_entry_obligations(&dag, token).is_none(),
         "a local result requirement cannot be waived as an empty entry check"
     );
-    let errors = chelis_ir::verify::verify(&dag);
+    let errors = chelis_dag_core::verify::verify(&dag);
     assert!(errors.is_empty(), "{errors:?}");
     for mutation in ["declaration", "axis", "producer"] {
         let mut bad = dag.clone();
@@ -315,7 +315,7 @@ fn result_claim_admission_requires_its_declaring_observation_and_producing_axis(
             "declaration" => bad.node_mut(token).unwrap().shape_deps.clear(),
             "axis" => {
                 let RiscOp::ExtentWitness {
-                    site: chelis_ir::dag::ExtentWitnessSite::ResultClaim { axis, .. },
+                    site: chelis_dag_core::dag::ExtentWitnessSite::ResultClaim { axis, .. },
                     ..
                 } = &mut bad.node_mut(token).unwrap().op
                 else {
@@ -326,7 +326,10 @@ fn result_claim_admission_requires_its_declaring_observation_and_producing_axis(
             "producer" => bad.node_mut(producer).unwrap().op = RiscOp::Copy,
             _ => unreachable!(),
         }
-        assert!(!chelis_ir::verify::verify(&bad).is_empty(), "{mutation}");
+        assert!(
+            !chelis_dag_core::verify::verify(&bad).is_empty(),
+            "{mutation}"
+        );
     }
 }
 #[test]
@@ -336,7 +339,7 @@ fn computed_claim_checks_independent_values_before_returning_a_scalar() {
         let decl = dag.declare("test");
         let checked = checked_extent(&mut dag, decl, actual, 2);
         dag.add_root(checked);
-        assert!(chelis_ir::verify::verify(&dag).is_empty());
+        assert!(chelis_dag_core::verify::verify(&dag).is_empty());
         let result = eval_tensor_with(&dag, |_| None);
         if actual == 2 {
             let values = result.unwrap();
@@ -377,7 +380,7 @@ fn multiple_claims_keep_each_requirement_and_reject_missing_edges() {
             None,
         );
         dag.add_root(checked);
-        assert!(chelis_ir::verify::verify(&dag).is_empty());
+        assert!(chelis_dag_core::verify::verify(&dag).is_empty());
         let mut rewritten = common_subexpr_eliminate(&dag);
         constant_fold(&mut rewritten);
         let rewritten = dead_code_eliminate(&rewritten);
@@ -403,14 +406,14 @@ fn multiple_claims_keep_each_requirement_and_reject_missing_edges() {
         }
         let mut missing = dag.clone();
         missing.node_mut(checked).unwrap().inputs.pop();
-        assert!(!chelis_ir::verify::verify(&missing).is_empty());
+        assert!(!chelis_dag_core::verify::verify(&missing).is_empty());
         let mut empty = dag;
         empty.node_mut(checked).unwrap().op = RiscOp::CheckedReshapeExtent {
             claims: Vec::new(),
             axis: RtAxis::Lit(0),
         };
         empty.node_mut(checked).unwrap().inputs.truncate(1);
-        assert!(!chelis_ir::verify::verify(&empty).is_empty());
+        assert!(!chelis_dag_core::verify::verify(&empty).is_empty());
     }
 }
 
@@ -421,7 +424,7 @@ fn checked_unit_refinement_requires_the_same_observed_tensor_axis() {
         let decl = dag.declare("test");
         let (_, _, checked) = unit_axis(&mut dag, decl);
         dag.add_root(checked);
-        assert!(chelis_ir::verify::verify(&dag).is_empty());
+        assert!(chelis_dag_core::verify::verify(&dag).is_empty());
         let result = eval_tensor_with(&dag, |_| {
             Some(TensorValue::from_vec(vec![actual], vec![5.0; actual]))
         });
@@ -473,7 +476,7 @@ fn malformed_checked_carriers_cannot_assert_metadata_as_proof() {
             _ => unreachable!(),
         }
         assert!(
-            !chelis_ir::verify::verify(&dag).is_empty(),
+            !chelis_dag_core::verify::verify(&dag).is_empty(),
             "unit mutation {mutation}"
         );
     }
@@ -496,7 +499,7 @@ fn malformed_checked_carriers_cannot_assert_metadata_as_proof() {
             _ => unreachable!(),
         }
         assert!(
-            !chelis_ir::verify::verify(&dag).is_empty(),
+            !chelis_dag_core::verify::verify(&dag).is_empty(),
             "scalar mutation {mutation}"
         );
     }
@@ -527,7 +530,7 @@ fn rewriting_preserves_discarded_checks_and_separate_call_provenance() {
 }
 
 fn computed_reshape() -> (Dag, NodeId, NodeId) {
-    use chelis_ir::dag::RtDim;
+    use chelis_dag_core::dag::RtDim;
     let mut dag = Dag::new();
     let decl = dag.declare("test");
     let x = dag.add_node(
@@ -589,7 +592,7 @@ fn vectorization_transports_checked_shapes_and_shifts_observed_axes() {
         let (_, _, checked) = unit_axis(&mut dag, decl);
         dag.add_root(checked);
         let mapped = chelis_ir::vmap::vectorize_axis0(&dag, DimInfo::Lit(2)).unwrap();
-        assert!(chelis_ir::verify::verify(&mapped).is_empty());
+        assert!(chelis_dag_core::verify::verify(&mapped).is_empty());
         let result = eval_tensor_with(&mapped, |_| {
             Some(TensorValue::from_vec(
                 vec![2, actual],
@@ -608,7 +611,7 @@ fn vectorization_transports_checked_shapes_and_shifts_observed_axes() {
     for actual in [4, 6] {
         let (dag, _, _) = computed_reshape();
         let mapped = chelis_ir::vmap::vectorize_axis0(&dag, DimInfo::Lit(2)).unwrap();
-        assert!(chelis_ir::verify::verify(&mapped).is_empty());
+        assert!(chelis_dag_core::verify::verify(&mapped).is_empty());
         let result = eval_tensor_with(&mapped, |_| {
             Some(TensorValue::from_vec(
                 vec![2, actual],
@@ -638,11 +641,11 @@ fn vectorization_keeps_local_unit_failure_at_the_observed_node() {
         let decl = dag.declare("test");
         let (_, witness, checked) = unit_axis(&mut dag, decl);
         if let RiscOp::ExtentWitness { site, .. } = &mut dag.node_mut(witness).unwrap().op {
-            *site = chelis_ir::dag::ExtentWitnessSite::LocalExpand;
+            *site = chelis_dag_core::dag::ExtentWitnessSite::LocalExpand;
         }
         dag.add_root(checked);
         let mapped = chelis_ir::vmap::vectorize_axis0(&dag, DimInfo::Lit(2)).unwrap();
-        assert!(chelis_ir::verify::verify(&mapped).is_empty());
+        assert!(chelis_dag_core::verify::verify(&mapped).is_empty());
         let result = eval_tensor_with(&mapped, |_| {
             Some(TensorValue::from_vec(
                 vec![2, actual],
@@ -662,7 +665,7 @@ fn vectorization_keeps_local_unit_failure_at_the_observed_node() {
                     matches!(
                         node.op,
                         RiscOp::ExtentWitness {
-                            site: chelis_ir::dag::ExtentWitnessSite::LocalExpand,
+                            site: chelis_dag_core::dag::ExtentWitnessSite::LocalExpand,
                             ..
                         }
                     )
@@ -708,7 +711,7 @@ fn masked_gradients_keep_unit_and_computed_primal_checks() {
                     None,
                 );
             }
-            let gradient = chelis_ir::grad::grad_dag(&dag, output, &[input]).unwrap();
+            let gradient = chelis_dag_core::grad::grad_dag(&dag, output, &[input]).unwrap();
             let root = gradient.grad_nodes[&input];
             let actual = match (unit, good) {
                 (true, true) => 1,
@@ -745,16 +748,16 @@ fn remainder_rebuild_retains_exact_values_and_rejects_invalid_types() {
     let b = scalar(&mut dag, decl, 2);
     let root = dag.add_node(decl, RiscOp::Mod, vec![a, b], scalar_type(), None);
     dag.add_root(root);
-    assert!(chelis_ir::verify::verify(&dag).is_empty());
-    assert!(chelis_ir::grad::grad_dag_checked(&dag, root, &[a]).is_err());
+    assert!(chelis_dag_core::verify::verify(&dag).is_empty());
+    assert!(chelis_dag_core::grad::grad_dag_checked(&dag, root, &[a]).is_err());
     for mut rebuilt in [
         dag.clone(),
         common_subexpr_eliminate(&dag),
         dead_code_eliminate(&dag),
-        chelis_ir::fuse::fuse(&dag),
+        chelis_dag_core::fuse::fuse(&dag),
     ] {
         constant_fold(&mut rebuilt);
-        assert!(chelis_ir::verify::verify(&rebuilt).is_empty());
+        assert!(chelis_dag_core::verify::verify(&rebuilt).is_empty());
         let values = eval_tensor_with(&rebuilt, |_| None).unwrap();
         assert_eq!(
             values[&rebuilt.roots()[0]]
@@ -765,7 +768,7 @@ fn remainder_rebuild_retains_exact_values_and_rejects_invalid_types() {
         );
     }
     let mapped = chelis_ir::vmap::vectorize_axis0(&dag, DimInfo::Lit(2)).unwrap();
-    assert!(chelis_ir::verify::verify(&mapped).is_empty());
+    assert!(chelis_dag_core::verify::verify(&mapped).is_empty());
     let values = eval_tensor_with(&mapped, |_| None).unwrap();
     assert_eq!(values[&mapped.roots()[0]].shape, vec![2]);
     assert_eq!(
@@ -781,7 +784,7 @@ fn remainder_rebuild_retains_exact_values_and_rejects_invalid_types() {
             2 => node.output_type.dims.push(DimInfo::Lit(2)),
             _ => unreachable!(),
         }
-        assert!(!chelis_ir::verify::verify(&bad).is_empty());
+        assert!(!chelis_dag_core::verify::verify(&bad).is_empty());
     }
 }
 
@@ -789,8 +792,8 @@ fn remainder_rebuild_retains_exact_values_and_rejects_invalid_types() {
 /// even when that parameter occurs after the value whose extent is claimed.
 #[test]
 fn an_entry_result_claim_keeps_its_later_declaring_witness() {
-    use chelis_ir::axis_sources::{EntryExtentGuard, entry_extent_guards};
-    use chelis_ir::dag::{ExtentClaim, ExtentWitnessSite};
+    use chelis_dag_core::axis_sources::{EntryExtentGuard, entry_extent_guards};
+    use chelis_dag_core::dag::{ExtentClaim, ExtentWitnessSite};
     let mut dag = Dag::new();
     let decl = dag.declare("test");
     let mut loads = Vec::new();

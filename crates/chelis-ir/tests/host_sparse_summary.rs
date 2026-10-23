@@ -21,13 +21,13 @@
 //! here mechanically (in addition to the cli-level structural checks)
 //! to keep the per-op invariants symmetric in the IR test surface.
 
-use chelis_ir::dag::{Dag, ExtentWitnessSite, RiscOp, RtAxis};
+use chelis_dag_core::dag::{Dag, ExtentWitnessSite, RiscOp, RtAxis};
+use chelis_dag_core::{DimInfo, TensorType};
 use chelis_ir::host::{
     HostSparseOpSummary, HostTensorInput, HostTensorSpecialization, SparseOpKind,
     SparseSummaryAttempt, SummaryRejectionClass, SummaryRejectionDetail,
     summarize_sparse_helper_for_test, try_summarize_sparse_helper_for_test,
 };
-use chelis_ir::{DimInfo, TensorType};
 use chelis_numeric_core::dtype_semantics::scalar_from_i64;
 use chelis_numeric_core::prim::Prim;
 

@@ -2666,6 +2666,7 @@ packages = [
   "chelis-runtime", "chelis-shell", "chelis-std-bundle", "chelis-surf",
   "chelis-tide", "chelis-types", "chelis-unord", "chelis-validate",
   "chelis-type-core",
+  "chelis-dag-core",
   "chelis-version", "chelis-vocab", "chelisup", "tree-sitter-chelis",
 ]
 
@@ -4505,6 +4506,7 @@ packages = [
   "chelis-runtime", "chelis-runtime-bundle", "chelis-shell",
   "chelis-std-bundle", "chelis-surf", "chelis-tide", "chelis-types",
   "chelis-type-core",
+  "chelis-dag-core",
   "chelis-unord", "chelis-validate", "chelis-version", "chelis-vocab",
   "chelisup", "tree-sitter-chelis",
 ]
@@ -4523,6 +4525,7 @@ packages = [
   "chelis-runtime", "chelis-shell", "chelis-std-bundle", "chelis-surf",
   "chelis-tide", "chelis-types", "chelis-unord", "chelis-validate",
   "chelis-type-core",
+  "chelis-dag-core",
   "chelis-version", "chelis-vocab", "chelisup", "tree-sitter-chelis",
 ]
 
@@ -4771,6 +4774,24 @@ reason = "The controls reject incomplete evidence, changed numeric behavior, and
 tracking_issue = "chelis#3993"
 
 [[path_rule]]
+prefix = "scripts/dag_core_oracle.py"
+disposition = "owner"
+workflow = "heavy-e2e.yml"
+job = "integration-support"
+cadence = "daily and workflow_dispatch"
+reason = "The domain slice checks portable graph consumers, immutable parity, source owners, and transform allocation costs"
+tracking_issue = "chelis#4003"
+
+[[path_rule]]
+prefix = "scripts/test_dag_core_oracle.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "The controls reject missing graph evidence, host dependencies, feature leaks, and stale source owners"
+tracking_issue = "chelis#4003"
+
+[[path_rule]]
 prefix = "scripts/dtype_phase1_oracle.py"
 disposition = "owner"
 workflow = "heavy-e2e.yml"
@@ -4787,6 +4808,15 @@ job = "dtype-phase3-oracle"
 cadence = "daily and workflow_dispatch"
 reason = "The complete dtype oracle executes the inherited Phase 2 kernel contracts"
 tracking_issue = "chelis#3993"
+
+[[path_rule]]
+prefix = "scripts/dtype_builtin_atom_closure_oracle.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "The controls check builtin closure receipts and reject incomplete or inconsistent execution"
+tracking_issue = "chelis#4003"
 
 [[path_rule]]
 prefix = "scripts/capacity_census_wire_schema_publication.py"
@@ -4816,6 +4846,7 @@ packages = [
   "chelis-e2e",
   "chelis-numeric-core",
   "chelis-type-core",
+  "chelis-dag-core",
   "chelis-effects", "chelis-image-id", "chelis-ir", "chelis-lint",
   "chelis-lsp", "chelis-macros", "chelis-pipeline-core", "chelis-pred",
   "chelis-prove", "chelis-python", "chelis-reef", "chelis-reef-bootstrap-core", "chelis-repr-inventory",
@@ -5107,6 +5138,7 @@ packages = [
   "chelis-runtime", "chelis-shell", "chelis-std-bundle", "chelis-surf",
   "chelis-tide", "chelis-types", "chelis-unord", "chelis-validate",
   "chelis-type-core",
+  "chelis-dag-core",
   "chelis-version", "chelis-vocab", "chelisup", "tree-sitter-chelis",
 ]
 
@@ -5222,6 +5254,42 @@ job = "script-unit"
 cadence = "pull_request and push"
 reason = "Count acceptance commands and failure controls execute in the PR script-unit suite"
 tracking_issue = "chelis#1287"
+
+[[path_rule]]
+prefix = "scripts/dtype_count_device_oracle.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "The PR script suite checks device Count commands and source mutation controls"
+tracking_issue = "chelis#4003"
+
+[[path_rule]]
+prefix = "scripts/test_dtype_count_device_oracle.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "The PR script suite checks device Count mutation failures"
+tracking_issue = "chelis#4003"
+
+[[path_rule]]
+prefix = "scripts/pipeline_core_documentation_guard.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "lint-rust"
+cadence = "pull_request and push"
+reason = "The Rust policy gate rejects false compiler portability claims"
+tracking_issue = "chelis#4003"
+
+[[path_rule]]
+prefix = "scripts/test_pipeline_core_documentation_guard.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "The PR script suite checks compiler portability claim rejection"
+tracking_issue = "chelis#4003"
 
 [[path_rule]]
 prefix = "scripts/dtype_exact_reductions_oracle.py"

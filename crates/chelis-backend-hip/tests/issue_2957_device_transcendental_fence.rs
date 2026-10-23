@@ -6,7 +6,7 @@
 
 mod support;
 
-use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
+use chelis_dag_core::dag::{Dag, DimInfo, RiscOp, TensorType};
 use chelis_numeric_core::prim::Prim;
 use chelis_types::unsupported::Unsupported;
 
@@ -87,7 +87,7 @@ fn exact_operations_are_admitted() {
 
 #[test]
 fn a_transcendental_inside_a_fused_chain_is_rejected() {
-    let fused = chelis_ir::fuse::fuse(&chain_dag(RiscOp::Tanh));
+    let fused = chelis_dag_core::fuse::fuse(&chain_dag(RiscOp::Tanh));
     assert!(
         fused
             .nodes()
@@ -105,7 +105,7 @@ fn a_transcendental_inside_a_fused_chain_is_rejected() {
 
 #[test]
 fn sqrt_inside_a_fused_chain_is_rejected() {
-    let fused = chelis_ir::fuse::fuse(&chain_dag(RiscOp::Sqrt));
+    let fused = chelis_dag_core::fuse::fuse(&chain_dag(RiscOp::Sqrt));
     assert!(
         fused
             .nodes()
@@ -151,7 +151,7 @@ fn pow_is_rejected_directly_and_inside_a_fused_chain() {
         None,
     );
     dag.add_root(stored);
-    let fused = chelis_ir::fuse::fuse(&dag);
+    let fused = chelis_dag_core::fuse::fuse(&dag);
     assert!(
         fused
             .nodes()

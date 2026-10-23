@@ -43,7 +43,7 @@ fn def_name_and_body(expr: &Expr) -> Option<(String, Expr)> {
     Some((name, kids.get(1)?.clone()))
 }
 
-fn lower_out(src: &str) -> chelis_ir::dag::Dag {
+fn lower_out(src: &str) -> chelis_dag_core::dag::Dag {
     let checked = checked_surf(src);
     let mut defs = UnordMap::new();
     let mut out_expr = None;
@@ -352,7 +352,7 @@ out = grad(loss)(to_tensor([{input}]))
 "
         );
         let dag = lower_out(&source);
-        assert!(!dag.nodes().iter().any(|node| matches!(&node.op, chelis_ir::dag::RiscOp::Load { name } if ["map", "to_list", "ignored"].contains(&name.as_str()))));
+        assert!(!dag.nodes().iter().any(|node| matches!(&node.op, chelis_dag_core::dag::RiscOp::Load { name } if ["map", "to_list", "ignored"].contains(&name.as_str()))));
         let roots = dag.roots().to_vec();
         let result = eval_tensor_roots_with_strict(&dag, &roots, |_| None);
         if traps {

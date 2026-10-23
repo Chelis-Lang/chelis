@@ -6,7 +6,7 @@ use chelis_compiler_api::compiler::{
 };
 use chelis_compiler_api::emission_observer::SelectedEmission;
 use chelis_compiler_api::schema::{CompileRequest, CompileTarget, SourceKind};
-use chelis_ir::dag::RiscOp;
+use chelis_dag_core::dag::RiscOp;
 use chelis_ir::ownership::VerifiedDagAction;
 
 fn request(source: &str, target: CompileTarget, entry: Option<&str>) -> CompileRequest {

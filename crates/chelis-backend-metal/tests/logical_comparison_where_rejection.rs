@@ -2,7 +2,7 @@
 
 mod support;
 
-use chelis_ir::dag::{ComparisonKind, Dag, DimInfo, LogicalKind, RiscOp, TensorType};
+use chelis_dag_core::dag::{ComparisonKind, Dag, DimInfo, LogicalKind, RiscOp, TensorType};
 use chelis_numeric_core::prim::Prim;
 use chelis_types::unsupported::{RejectionAuthorityKind, Stage};
 use support::try_codegen_metal;
@@ -40,11 +40,11 @@ fn direct_dag(op: RiscOp, input_prims: &[Prim], output: Prim) -> Dag {
 #[test]
 fn metal_bitwise_kernels_preserve_exact_integer_width_and_shift_traps() {
     for kind in [
-        chelis_types::BitwiseKind::And,
-        chelis_types::BitwiseKind::Or,
-        chelis_types::BitwiseKind::Xor,
-        chelis_types::BitwiseKind::ShiftLeft,
-        chelis_types::BitwiseKind::ShiftRight,
+        chelis_numeric_core::bitwise::BitwiseKind::And,
+        chelis_numeric_core::bitwise::BitwiseKind::Or,
+        chelis_numeric_core::bitwise::BitwiseKind::Xor,
+        chelis_numeric_core::bitwise::BitwiseKind::ShiftLeft,
+        chelis_numeric_core::bitwise::BitwiseKind::ShiftRight,
     ] {
         for prim in [Prim::Int8, Prim::Int16, Prim::Int32, Prim::Int64] {
             let dag = direct_dag(RiscOp::Bitwise(kind), &[prim, prim], prim);
@@ -73,8 +73,8 @@ fn metal_bitwise_kernels_preserve_exact_integer_width_and_shift_traps() {
 #[test]
 fn metal_activated_shift_rejects_before_emitting_an_ungated_check() {
     for kind in [
-        chelis_types::BitwiseKind::ShiftLeft,
-        chelis_types::BitwiseKind::ShiftRight,
+        chelis_numeric_core::bitwise::BitwiseKind::ShiftLeft,
+        chelis_numeric_core::bitwise::BitwiseKind::ShiftRight,
     ] {
         let mut dag = Dag::new();
         let decl = dag.declare("activated_bitwise");
@@ -145,7 +145,7 @@ fn metal_rank_one_kernel_rejects_unrepresentable_device_indices() {
     );
     let result = dag.add_node(
         decl,
-        RiscOp::Bitwise(chelis_types::BitwiseKind::ShiftLeft),
+        RiscOp::Bitwise(chelis_numeric_core::bitwise::BitwiseKind::ShiftLeft),
         vec![lhs, rhs],
         ty,
         None,

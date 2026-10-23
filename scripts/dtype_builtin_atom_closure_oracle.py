@@ -30,10 +30,10 @@ FILTER = ('binary(builtin_atom_discovery) + binary(issue_1294_normalize) '
           '+ binary(issue_1294_generalized_conv) + binary(issue_1294_standard_lowerings) '
           '+ test(host_input_tensor_) + test(every_risc_op_has_an_exact_pre_phase4c_atom_disposition) '
           '+ test(builtin_atom_discovery_)')
-CARGO_TESTS = ["-p", "chelis-types", "-p", "chelis-ir", "-p", "chelis-cli", "--lib", "--test",
-               "builtin_atom_discovery", "--test", "issue_1294_normalize",
-               "--test", "issue_1294_generalized_conv", "--test", "issue_1294_standard_lowerings",
-               "-E", FILTER]
+CARGO_TESTS = ["-p", "chelis-types", "-p", "chelis-dag-core", "-p", "chelis-ir",
+               "-p", "chelis-cli", "--lib", "--test", "builtin_atom_discovery",
+               "--test", "issue_1294_normalize", "--test", "issue_1294_generalized_conv",
+               "--test", "issue_1294_standard_lowerings", "-E", FILTER]
 
 
 class OracleError(RuntimeError):

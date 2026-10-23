@@ -15,7 +15,7 @@
 //!    panic, not a downgrade.
 
 mod support;
-use chelis_ir::dag::{Dag, DimExpr, DimInfo, RiscOp, TensorType};
+use chelis_dag_core::dag::{Dag, DimExpr, DimInfo, RiscOp, TensorType};
 use chelis_numeric_core::prim::Prim;
 use support::emit_dag;
 
@@ -178,8 +178,8 @@ fn matmul_info_struct_carries_accumulator_field_post_ws_a1() {
     // footgun would re-emerge if any backend path could read the spec
     // without the accumulator).
     let info = MatmulInfo {
-        a: chelis_ir::dag::NodeId(0),
-        b: chelis_ir::dag::NodeId(1),
+        a: chelis_dag_core::dag::NodeId(0),
+        b: chelis_dag_core::dag::NodeId(1),
         m: 2,
         n: 4,
         k: 3,

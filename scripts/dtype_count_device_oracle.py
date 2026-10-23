@@ -163,7 +163,7 @@ def mutate_host_helper_selection(source: str) -> str:
 
     return _replace_exactly_once(
         source,
-        ".any(|node| matches!(node.op, chelis_ir::dag::RiscOp::Count { .. }))",
+        ".any(|node| matches!(node.op, chelis_dag_core::dag::RiscOp::Count { .. }))",
         ".any(|_node| false)",
         "Count host-helper selection",
     )

@@ -270,7 +270,7 @@ fn type_totality_errors(result: InferResult) -> Vec<EffectError> {
 /// emulation explicitly out of scope). The spec names three rejection
 /// surfaces: the CLI gate (`reject_unsupported_metal_ops` in
 /// `chelis-cli`), the IR validation pass
-/// (`chelis_ir::verify::validate_metal_admissible_precisions`), and
+/// (`chelis_ir::device_admission::validate_metal_admissible_precisions`), and
 /// the codegen entry (`Emitter::require_metal_admissible` in
 /// `chelis-backend-metal`). The IR pass walks the lowered DAG (which
 /// is post-typecheck and out of scope here) and the CLI invokes it

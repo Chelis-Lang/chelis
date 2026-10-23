@@ -2,7 +2,7 @@
 //! The key-level witness lives in capacity_key::tests, where construction is
 //! private. No production compatibility normalizer survives just for a test.
 
-use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
+use chelis_dag_core::dag::{Dag, DimInfo, RiscOp, TensorType};
 use chelis_ir::ownership::{lower_dag_ownership, plan_c_storage, verify_ownership};
 use chelis_numeric_core::prim::Prim;
 

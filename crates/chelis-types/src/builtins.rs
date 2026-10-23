@@ -541,7 +541,7 @@ const TO_STRING_CAPABILITY: BuiltinCapabilityDecl = BuiltinCapabilityDecl {
 /// atom does with a key-carrying value, read by the allow-list
 /// ([`crate::key_admission::case_key_operand`]). A builtin in the Numeric
 /// domain alone has no sibling case and admits a key only as a key
-/// primitive's key operand ([`crate::key_admission::KeyPrimitive`]). Every
+/// primitive's key operand ([`chelis_numeric_core::key_admission::KeyPrimitive`]). Every
 /// Container and Boundary case declares its rule in [`case_keys`], which has
 /// no wildcard arm, so a new case must decide.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
