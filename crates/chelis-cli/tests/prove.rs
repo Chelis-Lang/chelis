@@ -3408,7 +3408,8 @@ def fabs(x: f32) -> f32 = if (x >= 0.0) then x else (0.0 - x)
 //     the transcendental, says it is not supported by the SMT tier, cites the
 //     WS-7/Beacon faithful-discharge seam), NOT an internal-looking "smt
 //     lowering error" and NOT proven.
-//   * auto -> a fuzz outcome that reads `fuzz_validated`, NEVER `proven`.
+//   * auto -> successful samples read `fuzz_validated`, NEVER `proven`; a
+//     concrete counterexample reads `failed` (chelis#3705).
 // The faithful SMT discharge (Sollya envelope-plus-polynomial via Beacon) is
 // WS-7, out of scope here; this test pins the honesty, not the proof.
 #[cfg(feature = "smt")]
@@ -3434,56 +3435,14 @@ def bs_call(s: f32, k: f32, r: f32, sigma: f32, t: f32) -> f32 = {
 "#;
 
 #[cfg(feature = "smt")]
-#[test]
-fn issue_434_transcendental_smt_only_is_honest_unsupported_not_internal_error() {
-    let dir = write_prop(ISSUE_434_BLACK_SCHOLES);
-    let output = Command::cargo_bin("chelis")
-        .expect("binary")
-        .args([
-            "prove",
-            dir.path().join("prop.ch").to_str().unwrap(),
-            "--tier",
-            "smt-only",
-            "--json",
-        ])
-        .output()
-        .expect("run prove");
-    let props = property_records(&output.stdout);
-    assert_eq!(props.len(), 1, "records: {props:?}");
-    let prop = &props[0];
-    // Verdict: Unsupported, never proven, never a passed fuzz-as-proven.
-    assert_eq!(
-        prop["status"], "unsupported",
-        "transcendental BS goal must be Unsupported under smt-only: {prop}"
-    );
-    assert_eq!(
-        prop["composite_verdict"], "unsupported",
-        "must not read as proven: {prop}"
-    );
-    assert_ne!(prop["status"], "passed", "must not silently pass: {prop}");
-    // Reason: an HONEST capability boundary, not an internal-looking bug.
-    let reason = prop["reason"].as_str().unwrap_or("");
-    assert!(
-        reason.contains("does not lower to the SMT tier"),
-        "reason must frame it as a capability boundary, not an internal error: {reason}"
-    );
-    assert!(
-        reason.contains("transcendental") && reason.contains("log"),
-        "reason must name the transcendental cause: {reason}"
-    );
-    assert!(
-        reason.contains("WS-7") && reason.contains("Beacon"),
-        "reason must cite the faithful-discharge seam: {reason}"
-    );
-    assert!(
-        !reason.contains("no declared cvc5 term"),
-        "the old internal d1-leak message must be gone: {reason}"
-    );
-}
+const ISSUE_434_LOG_NONNEGATIVE: &str = r#"
+@property log_nonnegative forall(x: f32) where x >= 1.0f32, x <= 2.0f32:
+  (log(x) >= 0.0f32)
+"#;
 
 #[cfg(feature = "smt")]
 #[test]
-fn issue_434_transcendental_auto_is_fuzz_validated_never_proven() {
+fn issue_3705_black_scholes_edge_counterexample_is_failed_and_replays() {
     let dir = write_prop(ISSUE_434_BLACK_SCHOLES);
     let output = Command::cargo_bin("chelis")
         .expect("binary")
@@ -3493,10 +3452,6 @@ fn issue_434_transcendental_auto_is_fuzz_validated_never_proven() {
             "--tier",
             "auto",
             "--json",
-            // A small sample count keeps the Tier C fuzz loop over this
-            // transcendental-heavy body inside the default test budget; the
-            // assertion is on the VERDICT label (fuzz_validated, never
-            // proven), not statistical coverage.
             "--samples",
             "5",
             "--seed",
@@ -3504,6 +3459,151 @@ fn issue_434_transcendental_auto_is_fuzz_validated_never_proven() {
         ])
         .output()
         .expect("run prove");
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let props = property_records(&output.stdout);
+    assert_eq!(props.len(), 1, "records: {props:?}");
+    let prop = &props[0];
+    assert_eq!(prop["status"], "failed", "{prop}");
+    assert_eq!(prop["composite_verdict"], "failed", "{prop}");
+    assert_eq!(prop["proof_tier"], "fuzz", "{prop}");
+    assert_eq!(prop["sampling_method"], "constraint_directed", "{prop}");
+    assert_eq!(prop["seed"], 0, "{prop}");
+    assert_eq!(prop["samples"], 1, "{prop}");
+    assert_eq!(prop["accepted_samples"], 1, "{prop}");
+    assert_eq!(prop["attempted_samples"], 1, "{prop}");
+    assert_eq!(prop["rejected_samples"], 0, "{prop}");
+    let witness = prop["counterexample"]
+        .as_object()
+        .expect("counterexample map");
+    assert_eq!(witness.len(), 5, "{prop}");
+    for name in ["s", "k", "sigma", "t"] {
+        assert_eq!(
+            witness[name],
+            f64::from(f32::from_bits(1)),
+            "{name}: {prop}"
+        );
+    }
+    assert_eq!(witness["r"], 0.0, "{prop}");
+    let summary = property_summary(&output.stdout);
+    assert_eq!(summary["failed"], 1, "{summary}");
+    assert_eq!(summary["passed"], 0, "{summary}");
+    assert_eq!(summary["unsupported"], 0, "{summary}");
+    assert_eq!(summary["errors"], 0, "{summary}");
+
+    // Replay the reported inputs through the compiler's f32 evaluator, not a
+    // host-f64 approximation. [04-NUM-1/2] finalizes each operation to f32:
+    // sigma*sqrt(t) underflows to zero, the price becomes NaN, and > 0 is false.
+    let arguments = ["s", "k", "r", "sigma", "t"]
+        .map(|name| {
+            format!(
+                "{:e}f32",
+                witness[name].as_f64().expect("finite f32 witness")
+            )
+        })
+        .join(", ");
+    let replay = format!(
+        "{ISSUE_434_BLACK_SCHOLES}\n\
+         def replay(s: f32, k: f32, r: f32, sigma: f32, t: f32) -> (bool, bool, bool, bool) = {{\n\
+           price = bs_call(s, k, r, sigma, t)\n\
+           ((s > 0.0f32 && k > 0.0f32 && sigma > 0.0f32 && t > 0.0f32 && r >= 0.0f32),\n\
+            (sigma * sqrt(t) == 0.0f32), is_nan(price), (price > 0.0f32))\n\
+         }}\nreplayed = replay({arguments})\n"
+    );
+    let replay_path = dir.path().join("replay.ch");
+    std::fs::write(&replay_path, replay).expect("write witness replay");
+    let eval = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["eval", "--file", replay_path.to_str().unwrap()])
+        .output()
+        .expect("evaluate witness");
+    assert!(eval.status.success(), "{eval:?}");
+    assert_eq!(
+        String::from_utf8(eval.stdout).expect("UTF-8 output").trim(),
+        "replayed.0 = true\nreplayed.1 = true\nreplayed.2 = true\nreplayed.3 = false"
+    );
+}
+
+#[cfg(feature = "smt")]
+#[test]
+fn issue_434_transcendental_smt_only_is_honest_unsupported_not_internal_error() {
+    for source in [ISSUE_434_BLACK_SCHOLES, ISSUE_434_LOG_NONNEGATIVE] {
+        let dir = write_prop(source);
+        let output = Command::cargo_bin("chelis")
+            .expect("binary")
+            .args([
+                "prove",
+                dir.path().join("prop.ch").to_str().unwrap(),
+                "--tier",
+                "smt-only",
+                "--json",
+            ])
+            .output()
+            .expect("run prove");
+        assert_eq!(output.status.code(), Some(2), "{output:?}");
+        let props = property_records(&output.stdout);
+        assert_eq!(props.len(), 1, "records: {props:?}");
+        let prop = &props[0];
+        // Verdict: Unsupported, never proven, never a passed fuzz-as-proven.
+        assert_eq!(
+            prop["status"], "unsupported",
+            "transcendental goal must be Unsupported under smt-only: {prop}"
+        );
+        assert_eq!(
+            prop["composite_verdict"], "unsupported",
+            "must not read as proven: {prop}"
+        );
+        assert_ne!(prop["status"], "passed", "must not silently pass: {prop}");
+        // Reason: an HONEST capability boundary, not an internal-looking bug.
+        let reason = prop["reason"].as_str().unwrap_or("");
+        assert!(
+            reason.contains("does not lower to the SMT tier"),
+            "reason must frame it as a capability boundary, not an internal error: {reason}"
+        );
+        assert!(
+            reason.contains("transcendental") && reason.contains("log"),
+            "reason must name the transcendental cause: {reason}"
+        );
+        assert!(
+            reason.contains("WS-7") && reason.contains("Beacon"),
+            "reason must cite the faithful-discharge seam: {reason}"
+        );
+        assert!(
+            !reason.contains("no declared cvc5 term"),
+            "the old internal d1-leak message must be gone: {reason}"
+        );
+        assert_eq!(prop["proof_tier"], "smt", "{prop}");
+        assert!(prop.get("counterexample").is_none(), "{prop}");
+        let summary = property_summary(&output.stdout);
+        assert_eq!(summary["unsupported"], 1, "{summary}");
+        assert_eq!(summary["passed"], 0, "{summary}");
+        assert_eq!(summary["failed"], 0, "{summary}");
+        assert_eq!(summary["errors"], 0, "{summary}");
+    }
+}
+
+#[cfg(feature = "smt")]
+#[test]
+fn issue_434_transcendental_auto_is_fuzz_validated_never_proven() {
+    let dir = write_prop(ISSUE_434_LOG_NONNEGATIVE);
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "prove",
+            dir.path().join("prop.ch").to_str().unwrap(),
+            "--tier",
+            "auto",
+            "--json",
+            // This checks the empirical verdict label, not a proof of the
+            // bounded logarithm property or statistical coverage.
+            "--samples",
+            "5",
+            "--seed",
+            "0",
+        ])
+        .output()
+        .expect("run prove");
+    assert!(output.status.success(), "{output:?}");
     let props = property_records(&output.stdout);
     assert_eq!(props.len(), 1, "records: {props:?}");
     let prop = &props[0];
@@ -3522,6 +3622,18 @@ fn issue_434_transcendental_auto_is_fuzz_validated_never_proven() {
         !verdict.starts_with("proven"),
         "a transcendental fuzz pass must NEVER read as proven: {prop}"
     );
+    assert_eq!(prop["status"], "passed", "{prop}");
+    assert!(prop.get("counterexample").is_none(), "{prop}");
+    assert_eq!(prop["sampling_method"], "constraint_directed", "{prop}");
+    assert_eq!(prop["samples"], 5, "{prop}");
+    assert_eq!(prop["accepted_samples"], 5, "{prop}");
+    assert_eq!(prop["attempted_samples"], 5, "{prop}");
+    assert_eq!(prop["rejected_samples"], 0, "{prop}");
+    let summary = property_summary(&output.stdout);
+    assert_eq!(summary["passed"], 1, "{summary}");
+    assert_eq!(summary["failed"], 0, "{summary}");
+    assert_eq!(summary["unsupported"], 0, "{summary}");
+    assert_eq!(summary["errors"], 0, "{summary}");
 }
 
 #[test]
