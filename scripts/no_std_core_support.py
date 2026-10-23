@@ -24,6 +24,37 @@ class OracleFailure(RuntimeError):
     """A mandatory executable acceptance check failed."""
 
 
+def _llvm_tool_directory(environment: Mapping[str, str]) -> Path:
+    # Query the same compiler selected for the consumer, without a target flag:
+    # the LLVM executables run on the host even when they produce Thumb objects.
+    command = (environment.get("RUSTC", "rustc"), "--print", "target-libdir")
+    try:
+        result = subprocess.run(
+            command, cwd=ROOT, env=dict(environment), text=True,
+            capture_output=True, check=False,
+        )
+    except OSError as error:
+        raise OracleFailure(f"cannot locate compiler LLVM tools: {error}") from error
+    if result.returncode != 0:
+        raise OracleFailure(
+            f"cannot locate compiler LLVM tools (exit {result.returncode}): {result.stderr.strip()}"
+        )
+    paths = result.stdout.splitlines()
+    if len(paths) != 1 or not paths[0]:
+        raise OracleFailure("invalid rustc --print target-libdir result")
+    libdir = Path(paths[0])
+    if not libdir.is_absolute() or libdir.name != "lib" or not libdir.is_dir():
+        raise OracleFailure(f"invalid rustc --print target-libdir path: {libdir}")
+    directory = libdir.parent / "bin"
+    archiver = directory / ("llvm-ar.exe" if os.name == "nt" else "llvm-ar")
+    if not archiver.is_file() or not os.access(archiver, os.X_OK):
+        raise OracleFailure(
+            f"compiler llvm-tools component must provide executable llvm-ar: {archiver}; "
+            "install llvm-tools for the selected Rust toolchain"
+        )
+    return directory
+
+
 def _environment() -> dict[str, str]:
     environment = oracle_environment()
     with (ROOT / "rust-toolchain.toml").open("rb") as toolchain_file:
@@ -34,6 +65,8 @@ def _environment() -> dict[str, str]:
     )
     environment["CARGO_HUSKY_DONT_INSTALL_HOOKS"] = "1"
     environment.setdefault("PYO3_PYTHON", sys.executable)
+    tools = _llvm_tool_directory(environment)
+    environment["PATH"] = os.pathsep.join([str(tools), environment.get("PATH", "")])
     return environment
 
 

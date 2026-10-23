@@ -27,5 +27,6 @@
 channel = "1.98.0"
 # The wire publication verifier uses the matching compiler's typed MIR API.
 # rustc-dev must share this exact pin; a different compiler ABI cannot inspect it.
-components = ["rustfmt", "clippy", "rustc-dev"]
+# Portable consumers use the matching LLVM archiver for freestanding C objects.
+components = ["rustfmt", "clippy", "rustc-dev", "llvm-tools"]
 targets = ["thumbv7em-none-eabi"]

@@ -120,6 +120,22 @@ the HIP and Metal commands above as **unrun** while verifying their host staging
 Its `PASS` does not claim device execution; run the two device gates on their
 respective hardware and record those results separately.
 
+## Portable core prerequisites
+
+The portable core commands use the Rust toolchain and components declared in
+`rust-toolchain.toml`, including the Thumb target and `llvm-tools`.
+Run `rustc --version` from the checkout with no `RUSTUP_TOOLCHAIN` override to
+let rustup install that declaration. The shared consumer helper queries the
+selected compiler's host library directory and prepends its sibling tool
+directory to `PATH`; a missing or non-executable `llvm-ar` fails acceptance.
+An explicit `RUSTUP_TOOLCHAIN` or `RUSTC` override must provide the matching
+LLVM tools too. No ambient archiver substitutes for that component.
+
+Consumers whose dependency graph reaches CORE-MATH also need Clang with
+128-bit `_BitInt` support on the bare target and the repository's native C
+build prerequisites. Clang compiles the freestanding C objects with the
+CORE-MATH build's strict arithmetic flags; the selected LLVM tools archive them.
+
 ## Version core portability
 
 Run `.venv/bin/python scripts/version_core_oracle.py` from the repository root.
@@ -143,6 +159,8 @@ Owner: chelis#3977.
 
 Run `.venv/bin/python scripts/syntax_predicate_core_oracle.py` from the repository root.
 It needs the pinned Rust toolchain, `thumbv7em-none-eabi`, `cargo-nextest`, Git, and the checkout's uv-managed Python environment.
+The [shared prerequisites](#portable-core-prerequisites) include Clang and the
+matching LLVM tools for the syntax graph's CORE-MATH dependency.
 Native consumers use `chelis-syntax-host::NativeStack`.
 Embedded consumers must supply their allocator and `StackServices` implementation.
 
@@ -256,7 +274,7 @@ Run `.venv/bin/python scripts/numeric_core_oracle.py` from the repository root.
 Use the pinned Rust toolchain, `thumbv7em-none-eabi`, `cargo-nextest`, Git, Clang, and the checkout's uv-managed Python.
 The toolchain also needs `clippy` and `rustc-dev` for compiled authority checks.
 Clang must support 128-bit `_BitInt` on the bare target.
-The target build also needs `llvm-ar`.
+The [shared prerequisites](#portable-core-prerequisites) supply the matching `llvm-ar`.
 Native consumers also need the repository's normal C build prerequisites.
 
 The oracle compares against immutable commit `8ff50b201c02ec0297a89b344805ddf7aab50fef`.
