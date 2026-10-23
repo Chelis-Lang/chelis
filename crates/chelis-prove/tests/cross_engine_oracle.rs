@@ -55,8 +55,8 @@ fn real_prop(vars: &[&str], pre: Vec<SmtExpr>, post: SmtExpr) -> SmtProperty {
 enum Category {
     Proved,
     Disproved,
-    /// Timeout / Unknown / Error -- a non-verdict (not a definite Proved or
-    /// Disproved). The oracle does not require the two engines pick the SAME
+    /// Timeout / Unknown / Error / unconfirmed domain witness -- a non-verdict,
+    /// not a definite Proved or Disproved. The oracle does not require the two engines pick the SAME
     /// non-verdict (a timeout vs an unknown is engine-internal), only that
     /// neither claims a DEFINITE verdict the other contradicts.
     NonVerdict,
@@ -66,7 +66,39 @@ fn category(result: &TierBResult) -> Category {
     match result {
         TierBResult::Proved => Category::Proved,
         TierBResult::Disproved(_) => Category::Disproved,
-        TierBResult::Timeout | TierBResult::Unknown | TierBResult::Error(_) => Category::NonVerdict,
+        // A domain witness needs concrete host evaluation before it can become
+        // a property counterexample. This oracle only compares solver results.
+        TierBResult::DomainDisproved { .. }
+        | TierBResult::Timeout
+        | TierBResult::Unknown
+        | TierBResult::Error(_) => Category::NonVerdict,
+    }
+}
+
+#[test]
+fn domain_witness_is_not_a_property_verdict() {
+    let result = TierBResult::DomainDisproved {
+        reason: "sqrt domain obligation failed".to_string(),
+        witness: serde_json::json!({ "x": -1.0 }),
+    };
+    // This oracle performs no concrete host evaluation of a domain witness.
+    // TierBResult's contract therefore gives it no property-verdict authority.
+    assert_eq!(category(&result), Category::NonVerdict);
+}
+
+#[test]
+fn property_verdicts_remain_distinct_from_inconclusive_results() {
+    assert_eq!(category(&TierBResult::Proved), Category::Proved);
+    assert_eq!(
+        category(&TierBResult::Disproved(serde_json::json!({ "x": -1.0 }))),
+        Category::Disproved
+    );
+    for result in [
+        TierBResult::Timeout,
+        TierBResult::Unknown,
+        TierBResult::Error("unsupported goal".to_string()),
+    ] {
+        assert_eq!(category(&result), Category::NonVerdict);
     }
 }
 
