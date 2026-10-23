@@ -2494,6 +2494,56 @@ class PlanningTests(unittest.TestCase):
         self.assertEqual(plan["path_dispositions"][0]["kind"], "integration_target_excluded")
         self.assertEqual(plan["path_dispositions"][0]["owner"]["job"], "smt-build")
 
+    def test_cross_engine_target_declares_both_features_and_its_exact_nightly_owner(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        manifest = tomllib.loads((root / "crates/chelis-prove/Cargo.toml").read_text())
+        declarations = [row for row in manifest.get("test", [])
+                        if row["name"] == "cross_engine_oracle"]
+        self.assertEqual(len(declarations), 1)
+        features = declarations[0]["required-features"]
+        self.assertEqual(features, ["smt", "z3"])
+        repository = owned.read_config(root / ".config/ci-test-targets.toml")
+        identity = owned.Identity("chelis-prove", "cross_engine_oracle")
+        owner = repository.target_exclusions[identity]
+        command = 'cargo test -p chelis-prove --features "smt z3" --test cross_engine_oracle'
+        self.assertEqual((owner.workflow, owner.job, owner.cadence, owner.tracking_issue),
+                         ("smt-full-prove.yml", "full-smt-prove",
+                          "daily 09:00 UTC and workflow_dispatch", "chelis#3974"))
+        self.assertIn(command, owner.reason)
+        self.assertIn(command, (root / ".github/workflows" / owner.workflow).read_text())
+
+        path = "crates/chelis-prove/tests/cross_engine_oracle.rs"
+        neighbor = "crates/chelis-prove/tests/neighbor.rs"
+        standing = "crates/p/tests/smoke.rs"
+        sources = {path: (root / path).read_text(),
+                   neighbor: "#[test]\nfn neighbor() {}\n",
+                   standing: "#[test]\nfn standing() {}\n"}
+        workspace = metadata(package("p", [("smoke", standing, [])]),
+                             package("chelis-prove", [(identity.target, path, features),
+                                                      ("neighbor", neighbor, [])]))
+        config = replace(repository, standing_targets=(owned.Identity("p", "smoke"),),
+                         manual_only_targets={}, manual_gate_targets={},
+                         target_exclusions={identity: owner}, test_exclusions={},
+                         required_package_rules=(), path_rules=())
+        records = [owned.ChangeRecord("M", path), owned.ChangeRecord("M", neighbor)]
+        plan = self.plan(records, base=workspace, candidate=workspace, config=config,
+                         tracked=set(sources), sources=sources)
+        self.assertNotIn(identity.canonical, plan["change_owned"])
+        self.assertNotIn(identity.canonical, plan["package_expansion"])
+        disposition = next(row for row in plan["path_dispositions"] if row["path"] == path)
+        self.assertEqual(disposition["kind"], "integration_target_excluded")
+        self.assertEqual(disposition["owner"]["job"], "full-smt-prove")
+        # The alternative owner is exact: it cannot suppress neighboring tests.
+        self.assertIn("chelis-prove::neighbor", plan["change_owned"])
+
+        # Without the owner, the planner must select the real dual-feature
+        # target, never claim that an empty default-feature binary covered it.
+        unowned = self.plan(records, base=workspace, candidate=workspace,
+                            config=replace(config, target_exclusions={}),
+                            tracked=set(sources), sources=sources)
+        self.assertIn(identity.canonical, unowned["change_owned"])
+        self.assertEqual(unowned["target_features"][identity.canonical], ["smt", "z3"])
+
     def test_removed_shared_path_retires_without_retaining_dead_routing(self) -> None:
         path = "retired-tools/tool.py"
         sources = fixture_sources()

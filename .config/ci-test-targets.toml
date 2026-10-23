@@ -1424,6 +1424,14 @@ job = "full-smt-prove"
 cadence = "daily 09:00 UTC and workflow_dispatch"
 reason = "every test is smt-gated; `cargo test -p chelis-prove --features smt` runs it with cvc5"
 tracking_issue = "chelis#434"
+[[target_exclusion]]
+package = "chelis-prove"
+name = "cross_engine_oracle"
+workflow = "smt-full-prove.yml"
+job = "full-smt-prove"
+cadence = "daily 09:00 UTC and workflow_dispatch"
+reason = "the dual-engine oracle requires prebuilt cvc5 and Z3; `cargo test -p chelis-prove --features \"smt z3\" --test cross_engine_oracle` runs its complete target in the solver-provisioned nightly"
+tracking_issue = "chelis#3974"
 # chelis#1125: the complete Deep/numeric acceptance target is smt-gated;
 # its required feature-enabled owner runs every test on every code PR.
 [[target_exclusion]]
