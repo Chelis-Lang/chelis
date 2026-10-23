@@ -906,6 +906,9 @@ completeness-result witness. Positive controls allow unrelated body edits and
 new tests without checksum updates. The full runtime suites and shared-helper
 canaries remain necessary. Eval/C receipts establish entry and multiplicity;
 their free-form detail is not trusted as proof of behavior.
+The ordered-scan row records increasing and decreasing traversal separately
+after native comparison; both receipts are required exactly once. Its protected
+body retains native and expected-value comparisons and the one-ULP rejection.
 
 The required Docs job runs `scripts/phase3_test_change_report.py` on committed
 snapshots, computes the unique merge base, and publishes comparison commits,

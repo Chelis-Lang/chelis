@@ -38,7 +38,7 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::process::Command;
 
-use chelis_ir::dag::{Dag, DimInfo, NodeId, RiscOp, TensorType};
+use chelis_ir::dag::{Dag, DimInfo, NodeId, RiscOp, ScanDirection, TensorType};
 use chelis_ir::eval::eval_tensor;
 use chelis_numeric_core::agreement::{
     AgreementError, AgreementOp, AgreementOutcome, ArithmeticWidthStatus,
@@ -441,7 +441,6 @@ fn agreement_operation_identity_is_derived_from_ir() {
 
 #[test]
 fn agreement_cumsum_requires_exact_prefix_and_suffix_observations() {
-    use chelis_ir::dag::ScanDirection;
     for direction in [ScanDirection::Increasing, ScanDirection::Decreasing] {
         let mut dag = Dag::new();
         let owner = dag.declare("scan agreement");
@@ -464,8 +463,12 @@ fn agreement_cumsum_requires_exact_prefix_and_suffix_observations() {
             scalar_f32(),
             None,
         );
-        let actual = assert_agrees(&dag, "scan_agreement", "OP33 one-leaf scan");
-        assert_expected("OP33 first input is first prefix/suffix", &actual, "1.0");
+        let label = match direction {
+            ScanDirection::Increasing => "OP53 increasing one-leaf scan",
+            ScanDirection::Decreasing => "OP53 decreasing one-leaf scan",
+        };
+        let actual = assert_agrees(&dag, "scan_agreement", label);
+        assert_expected("OP53 first input is first prefix/suffix", &actual, "1.0");
         let wrong = format_element(
             Prim::F32,
             ElementRef::F32(f32::from_bits(1.0_f32.to_bits() + 1)),
@@ -477,7 +480,7 @@ fn agreement_cumsum_requires_exact_prefix_and_suffix_observations() {
             &actual,
             &wrong,
         )
-        .expect_err("OP33 grants no one-ULP prefix/suffix tolerance");
+        .expect_err("OP53 grants no one-ULP prefix/suffix tolerance");
         assert!(
             matches!(
                 error,

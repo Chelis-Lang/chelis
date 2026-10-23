@@ -88,6 +88,7 @@ REQUIRED_TESTS = {
         "parity_comparator_rejects_non_tensor_diff",
     },
     EVAL_AGREEMENT_SOURCE: {
+        "agreement_cumsum_requires_exact_prefix_and_suffix_observations",
         "agreement_operation_identity_is_derived_from_ir",
         "agreement_compiled_observation_reaches_comparator",
         "agreement_expected_value_reaches_comparator",
@@ -162,6 +163,8 @@ def required_body_contract() -> dict:
                     calls = [canaries[name], "record_phase3_receipt"]
                 elif name in unary_rows:
                     calls = ["assert_unary_transcendental"]
+                elif name == "agreement_cumsum_requires_exact_prefix_and_suffix_observations":
+                    calls = ["assert_agrees", "assert_expected", "compare_rendered_elements"]
                 else:
                     calls = ["assert_agrees", "assert_expected"]
             elif path == REJECTED_SOURCE:
@@ -182,12 +185,16 @@ def required_body_contract() -> dict:
             elif name == "agreement_operation_identity_is_derived_from_ir":
                 result_kind = "assert_eq"
             result = {"call": calls[0], "kind": result_kind} if result_kind else None
+            if name == "agreement_cumsum_requires_exact_prefix_and_suffix_observations":
+                result = {"call": "compare_rendered_elements", "kind": "expect_err"}
             tests.append({"name": name, "calls": calls, "run_parity": run_parity, "result": result})
         sources.append({"path": str(path), "tests": tests})
     return {"schema_version": 2, "sources": sources}
 
 
 REQUIRED_EVAL_RECEIPTS = {
+    "OP53 increasing one-leaf scan",
+    "OP53 decreasing one-leaf scan",
     "operation-identity-canary",
     "compiled-observation-canary",
     "expected-value-canary",

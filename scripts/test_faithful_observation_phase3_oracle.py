@@ -103,7 +103,7 @@ class BodyRoleTests(unittest.TestCase):
         results = {test["name"]: test["result"]
                    for source in oracle.required_body_contract()["sources"]
                    for test in source["tests"] if test["result"] is not None}
-        self.assertEqual(len(results), 12)
+        self.assertEqual(len(results), 13)
         self.assertEqual(results["parity_corpus_is_complete"],
                          {"call": "parity_corpus::validate", "kind": "success"})
         for name in ("parity_comparator_accepts_byte_identical_tensor_lines",
@@ -115,6 +115,47 @@ class BodyRoleTests(unittest.TestCase):
                          {"call": "compare_rendered_elements", "kind": "expect_err"})
         self.assertEqual(results["agreement_operation_identity_is_derived_from_ir"],
                          {"call": "agreement_op_for_risc", "kind": "assert_eq"})
+
+
+class ScanReceiptTests(unittest.TestCase):
+    cases = {"OP53 increasing one-leaf scan", "OP53 decreasing one-leaf scan"}
+
+    def complete_receipts(self):
+        return [f"{case}\tbehavior executed"
+                for case in sorted(oracle.REQUIRED_EVAL_RECEIPTS | self.cases)]
+
+    def test_both_scan_directions_are_registered_once(self):
+        self.assertLessEqual(self.cases, oracle.REQUIRED_EVAL_RECEIPTS)
+        self.assertEqual(oracle.receipt_violations("\n".join(self.complete_receipts())), [])
+
+    def test_each_missing_or_duplicate_direction_is_rejected(self):
+        receipts = self.complete_receipts()
+        for case in sorted(self.cases):
+            with self.subTest(case=case):
+                missing = [line for line in receipts if line.partition("\t")[0] != case]
+                self.assertEqual(oracle.receipt_violations("\n".join(missing)),
+                                 [f"missing Phase 3 runtime receipt: {case}"])
+                duplicate = receipts + [f"{case}\tduplicate"]
+                self.assertEqual(oracle.receipt_violations("\n".join(duplicate)),
+                                 [f"Phase 3 runtime receipt must occur exactly once: {case}"])
+
+    def test_old_generic_or_fabricated_direction_is_not_coverage(self):
+        for unknown in ("OP33 one-leaf scan", "OP53 sideways one-leaf scan"):
+            with self.subTest(unknown=unknown):
+                receipts = self.complete_receipts() + [f"{unknown}\tfabricated"]
+                self.assertEqual(oracle.receipt_violations("\n".join(receipts)),
+                                 [f"undeclared Phase 3 runtime receipt: {unknown}"])
+
+    def test_scan_body_requires_native_expected_and_one_ulp_comparisons(self):
+        source = next(row for row in oracle.required_body_contract()["sources"]
+                      if row["path"] == str(oracle.EVAL_AGREEMENT_SOURCE))
+        rows = {row["name"]: row for row in source["tests"]}
+        name = "agreement_cumsum_requires_exact_prefix_and_suffix_observations"
+        self.assertIn(name, rows)
+        self.assertEqual(rows[name]["calls"],
+                         ["assert_agrees", "assert_expected", "compare_rendered_elements"])
+        self.assertEqual(rows[name]["result"],
+                         {"call": "compare_rendered_elements", "kind": "expect_err"})
 
 
 class RunnerTests(unittest.TestCase):
