@@ -2538,7 +2538,6 @@ def validate_normative_contract(
             "Replace admits every active dtype, including bool",
             "admits exactly active signed-integer and float dtypes",
             "NaNs follow all non-NaNs",
-            "`sum_result(p, default(p))`",
             "[05-OP-30]'s canonical balanced tree",
             "`diagonal` admits every active dtype including bool",
             "rejects a NaN bound or `lower > upper`",
@@ -2552,6 +2551,9 @@ def validate_normative_contract(
             "the condition has no cotangent",
             "No operation in this family converts a stored element through `double`",
             "supplies a compatibility alias",
+        ),
+        "05-OP-53": (
+            "`sum_result(p, default(p))`",
         ),
         "05-OP-34": (
             "exported stdlib ADT identities enumerated in the normative registry",

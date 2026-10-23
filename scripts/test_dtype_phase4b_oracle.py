@@ -78,6 +78,24 @@ class ContractValidationTests(unittest.TestCase):
     def test_repository_contract_passes(self) -> None:
         oracle.validate_contract(REPO_ROOT)
 
+    def test_scan_result_contract_is_required_under_its_builtin_atom(self) -> None:
+        oracle.validate_contract(self.root)
+        path = self.root / "spec/05-risc-primitives.md"
+        original = path.read_text()
+        block = oracle.atom_blocks(original)["05-OP-53"]
+        clause = "`sum_result(p, default(p))`"
+        self.assertIn(clause, block)
+        changed = original.replace(block, block.replace(clause, "REMOVED"))
+        for spec in (
+            changed,
+            changed.replace("> **[05-OP-33]**", f"> **[05-OP-33]** {clause}"),
+        ):
+            with self.subTest(runtime_reference=spec != changed):
+                path.write_text(spec)
+                self.assert_contract_fails("05-OP-53.*missing semantic clause")
+        path.write_text(original)
+        oracle.validate_contract(self.root)
+
     def test_construct_stack_count_has_only_ordinary_dimensions(self) -> None:
         oracle.validate_contract(REPO_ROOT)
         for clause in (
