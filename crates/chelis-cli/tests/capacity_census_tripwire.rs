@@ -3785,7 +3785,7 @@ const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
             &["numeric-op"],
         ),
         atom: "[05-OP-33]",
-        authority_anchor: "`cumsum` admits signed-integer and float tensors and returns\n> `sum_result(p, default(p))` at the input shape",
+        authority_anchor: "`chelis_tensor_cumsum` follows [05-OP-53]'s increasing scan rule,\n> including its dtype, accumulator, failure, and adjoint contracts.",
     },
     FinalNumericOperationRegistration {
         surface: StaticSurfaceDescriptor::new(
@@ -6428,6 +6428,66 @@ fn capacity_census_matches_public_surface() {
     if let Err(msg) = check_against_baseline(&current, &baseline) {
         panic!("{msg}");
     }
+}
+
+#[test]
+fn tensor_cumsum_keeps_runtime_authority_for_the_builtin_scan_contract() {
+    const ID: &str = "chelis_runtime.h: chelis_tensor * chelis_tensor_cumsum ( const chelis_tensor * tensor , int32_t axis ) ;";
+    const SIGNATURE: &str =
+        "`chelis_tensor *chelis_tensor_cumsum(const chelis_tensor *tensor, int32_t axis)`";
+    const CONTRACT: &str = "`chelis_tensor_cumsum` follows [05-OP-53]'s increasing scan rule,\n> including its dtype, accumulator, failure, and adjoint contracts.";
+    let root = repo_root();
+    let current = current_inventory(&root);
+    let row = current
+        .iter()
+        .find(|row| row.kind == "header-export" && row.id == ID)
+        .expect("the published C scan retains its exact tensor and axis signature");
+    let registration = *FINAL_NUMERIC_OPERATION_ROWS
+        .iter()
+        .find(|registration| registration.surface.id == ID)
+        .expect("the C scan has an exact semantic registration");
+    assert_eq!(registration.atom, "[05-OP-33]");
+    assert_eq!(registration.surface.flags, &["numeric-op"]);
+    assert!(include_str!("../../../spec/registry/c_tensor_runtime.md").contains(SIGNATURE));
+    let spec = fs::read_to_string(root.join(CONTROLLING_SPEC_REL)).expect("read spec/05");
+    let surface = authority_surface(row);
+    assert_eq!(
+        capacity_census_authority::classify_final_authority(
+            &surface,
+            final_authority_registries(),
+            &spec,
+        ),
+        Ok(capacity_census_authority::FinalAuthority::NumericOperation { atom: "[05-OP-33]" })
+    );
+    assert!(spec.contains(CONTRACT));
+    for fragment in [
+        "`chelis_tensor_cumsum`",
+        "[05-OP-53]",
+        "increasing scan rule",
+        "dtype, accumulator, failure, and adjoint contracts",
+    ] {
+        let changed = spec.replace(CONTRACT, &CONTRACT.replace(fragment, "REMOVED"));
+        assert_ne!(changed, spec);
+        assert!(
+            capacity_census_authority::classify_final_authority(
+                &surface,
+                final_authority_registries(),
+                &changed,
+            )
+            .is_err(),
+            "the C scan must retain its exact delegated obligation: {fragment}"
+        );
+    }
+    let wrong_owner = [FinalNumericOperationRegistration {
+        atom: "[05-OP-53]",
+        ..registration
+    }];
+    let mut registries = final_authority_registries();
+    registries.numeric_operations = &wrong_owner;
+    assert!(
+        capacity_census_authority::classify_final_authority(&surface, registries, &spec).is_err(),
+        "the language/internal atom does not supply the C runtime ABI contract"
+    );
 }
 
 #[test]

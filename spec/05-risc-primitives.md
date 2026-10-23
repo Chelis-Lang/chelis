@@ -2795,19 +2795,8 @@ exact ADT identity by [05-OP-34].
 > bool storage; comparison with NaN is false and no cotangent exists. `where`
 > follows the exact language-and-C selection contract above.
 >
-> `cumsum` admits signed-integer and float tensors and returns
-> `sum_result(p, default(p))` at the input shape. In increasing axis order
-> the first input, converted exactly to §5.7.1's default sum-accumulator dtype,
-> is the first prefix, and each later input is added to the previous prefix at
-> that dtype. No base value enters the scan: the first prefix keeps the first
-> input's stored value, a `-0` included, and finalizes a NaN as a one-leaf
-> `sum` does. Every prefix is finalized to the result dtype for output without
-> narrowing the continuing accumulator. Integer overflow is checked at each
-> addition. A zero-length axis returns an empty tensor. The float adjoint is
-> the inclusive decreasing-axis scan of the cotangent at the same accumulator
-> dtype under the same rule: the last cotangent is the last suffix, no base
-> value enters, and each suffix is emitted at the operand dtype.
-> Integers are forward-only and bool is a type error.
+> `chelis_tensor_cumsum` follows [05-OP-53]'s increasing scan rule,
+> including its dtype, accumulator, failure, and adjoint contracts.
 >
 > `sort` admits signed-integer and float tensors and returns `(values,
 > indices)`, with values at the input shape/dtype and exact i64 indices at
@@ -4307,10 +4296,31 @@ path even though bare `round` under `grad` remains a structural
 > i64 sizes.
 >
 > Domain: Axis arguments are i32; sort axes obey [05-AXIS-2]. Where, diagonal, and split admit every
-> active tensor element dtype by exact selection. Cumsum, sort, trace, and
+> active tensor element dtype by exact selection. Sort, trace, and
 > clamp admit the arithmetic dtype domains and parameter shapes specified
 > for their corresponding tensor operations in [05-OP-33]. No parameter or
 > element is silently narrowed.
+>
+> `cumsum` admits signed-integer and float tensors and returns
+> `sum_result(p, default(p))` at the input shape. In increasing axis order
+> the first input, converted exactly to §5.7.1's default sum-accumulator dtype,
+> is the first prefix, and each later input is added to the previous prefix at
+> that dtype. No base value enters the scan: the first prefix keeps the first
+> input's stored value, a `-0` included, and finalizes a NaN as a one-leaf
+> `sum` does. Every prefix is finalized to the result dtype for output without
+> narrowing the continuing accumulator. Integer overflow is checked at each
+> addition. A zero-length axis returns an empty tensor. The float adjoint is
+> the inclusive decreasing-axis scan of the cotangent at the same accumulator
+> dtype under the same rule: the last cotangent is the last suffix, no base
+> value enters, and each suffix is emitted at the operand dtype.
+> Integers are forward-only and bool is a type error.
+>
+> `Cumsum` is the internal directional scan identity, with the same shape,
+> axis, accumulator, and failure rules. Increasing traversal implements `cumsum`.
+> Decreasing traversal admits only float tensors and applies the suffix rule
+> above, emitting each result at the operand dtype. Its float adjoint
+> reverses traversal direction and applies the same rule. Traversal direction
+> is an explicit closed parameter; it is not inferred from the callable name.
 >
 > Result: Where selects stored bits directly from the chosen branch without
 > converting bool to numeric. The condition's shape must equal the shape of
@@ -4337,8 +4347,9 @@ path even though bare `round` under `grad` remains a structural
 > data/control arguments follow the same atom's structural rejection/zero
 > rules.
 >
-> Accumulator: Cumsum and trace use the accumulator and operation order of
-> [05-OP-33]; selection and split have no accumulator. Cotangent collisions
+> Accumulator: Cumsum uses the ordered scan rule above; trace uses the
+> accumulator and operation order of [05-OP-33]. Selection and split have no
+> accumulator. Cotangent collisions
 > obey spec/06.
 
 #### List structure and counts

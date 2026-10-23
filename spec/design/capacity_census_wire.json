@@ -300,7 +300,7 @@
     },
     {
       "authority": "NumericOperation",
-      "contract": "[05-OP-33]",
+      "contract": "[05-OP-53]",
       "flags": [
         "numeric-field"
       ],

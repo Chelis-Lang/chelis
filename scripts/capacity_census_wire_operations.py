@@ -24,7 +24,7 @@ def operation_contracts():
         ("Argmax.axis", 15, "argmax_reduce(x, axis)", False),
         ("Argmin.axis", 16, "argmin_reduce(x, axis)", False),
         ("Count.axes", 29, "count(x, axes...)", True),
-        ("Cumsum.axis", 33, "`cumsum` admits signed-integer and float tensors", False),
+        ("Cumsum.axis", 53, "`Cumsum` is the internal directional scan identity", False),
         ("Expand.axis", 65, "axis_movement(arguments...)", False),
         ("Gather.axis", 66, "indexed_tensor(arguments...)", False),
         ("MaxReduce.axis", 12, "max_reduce(x, axes...)", False),

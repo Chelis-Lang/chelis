@@ -106,10 +106,38 @@ class SemanticAuthorityTests(unittest.TestCase):
             (root / "spec/registry/builtin_semantic_identities.md").read_text()
         )
 
+    def test_every_registered_callable_is_named_by_its_governing_atom(self):
+        # Membership of compiled discovery is independently checked by the full
+        # oracle; this control checks the real table against the real chapter.
+        table = "\n".join(f"| `{name}` | {atom} |" for name, atom in self.rows.items())
+        registry.validate(self.rows, table, self.spec, set(registry.atom_blocks(self.spec)))
+
+    def test_scan_identities_share_the_ordered_operation_contract(self):
+        for identity in ("Numeric:Cumsum:TableA", "Numeric:cumsum:TableA"):
+            with self.subTest(identity=identity):
+                self.assertEqual(self.rows[identity], "[05-OP-53]")
+                for wrong in ("[05-OP-33]", "[05-OP-30]"):
+                    with self.assertRaises(registry.RegistryError):
+                        semantics.validate_semantics({**self.rows, identity: wrong}, self.spec)
+
+    def test_internal_scan_requires_its_direction_and_domain_contract(self):
+        block = registry.atom_blocks(self.spec)["[05-OP-53]"]
+        for clause in (
+            "`Cumsum` is the internal directional scan identity",
+            "Increasing traversal implements `cumsum`",
+            "Decreasing traversal admits only float tensors",
+            "reverses traversal direction",
+        ):
+            with self.subTest(clause=clause):
+                self.assertIn(clause, semantics.normalized(block))
+                changed = self.spec.replace(block, "> " + semantics.normalized(block).replace(clause, "REMOVED") + "\n")
+                with self.assertRaises(registry.RegistryError):
+                    semantics.validate_semantics(self.rows, changed)
+
     def test_ordered_scan_contract_requires_each_decided_semantic_clause(self):
         semantics.validate_semantics(self.rows, self.spec)
-        self.assertEqual(self.rows["Numeric:Cumsum:TableA"], "[05-OP-33]")
-        block = registry.atom_blocks(self.spec)["[05-OP-33]"]
+        self.assertEqual(self.rows["Numeric:Cumsum:TableA"], "[05-OP-53]")
+        block = registry.atom_blocks(self.spec)["[05-OP-53]"]
         normalized = semantics.normalized(block)
         for clause in (
             "`cumsum` admits signed-integer and float tensors",
@@ -129,7 +157,7 @@ class SemanticAuthorityTests(unittest.TestCase):
                 self.assertIn(clause, normalized)
                 changed = self.spec.replace(block, "> " + normalized.replace(clause, "REMOVED") + "\n")
                 self.assertNotEqual(changed, self.spec)
-                with self.assertRaisesRegex(registry.RegistryError, "lost semantic obligation"):
+                with self.assertRaisesRegex(registry.RegistryError, "lost semantic obligation|does not govern the contract"):
                     semantics.validate_semantics(self.rows, changed)
 
     def test_reference_to_callable_does_not_confer_its_authority(self):

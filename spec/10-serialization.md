@@ -30,7 +30,7 @@ node is consumed. There is no versionless default, legacy migration, additive-
 variant tolerance, or best-effort compatibility path.
 
 `Cumsum` carries a normalized nonnegative axis and an explicit `increasing`
-or `decreasing` direction. It preserves input extents and uses [05-OP-33]'s
+or `decreasing` direction. It preserves input extents and uses [05-OP-53]'s
 first-leaf inclusive scan and default accumulator. Decreasing scans require
 float operands. Both directions finalize each prefix or suffix without
 narrowing the continuing accumulator.

@@ -95,7 +95,7 @@ Each row names its governing atom.
 | `Container:skip:SkipList` | [05-OP-54] |
 | `Container:take:TakeList` | [05-OP-54] |
 | `Container:zip:ZipList` | [05-OP-55] |
-| `Numeric:Cumsum:TableA` | [05-OP-33] |
+| `Numeric:Cumsum:TableA` | [05-OP-53] |
 | `Numeric:DropoutReplay:TableA` | [05-OP-37] |
 | `Numeric:ExtremaAdjoint:TableA` | [05-OP-40] |
 | `Numeric:ReduceWindowGrad:TableA` | [05-OP-39] |
