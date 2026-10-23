@@ -311,6 +311,11 @@ is the in-tree `crates/chelis-cli/tests/issue_729_payload_census.rs`, whose
 scope is `RiscOp`/`WireRiscOp` carrier fields rather than every numeric form
 in the repository.
 
+The declaration inputs are `crates/chelis-dag-core/src/dag.rs` and
+`crates/chelis-compiler-api/src/schema.rs`.
+The native declaration moves from `crates/chelis-ir/src/dag.rs` without a new
+raw-float allowance or a change to the sealed-field checks.
+
 **The Pad fill is not an exemption ([#878]).** `Pad.fill` is finalized once at
 the padded tensor's dtype during lowering and remains tagged through eval,
 wire transport, proving, and every backend emitter. Exact i64 values above

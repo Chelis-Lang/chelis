@@ -16,6 +16,9 @@ AD retains sparse adjoint storage.
 Fusion reserves lookup capacity before graph construction.
 Host comparisons use each Cargo target's declared feature requirements.
 
-Remove source-layout tests from the former graph owner.
+Remove incidental source-layout tests from the former graph owner.
+Retain the payload census and source-policy tripwire at the canonical graph owner.
+Preserve the exact moved host test source and split frozen rows without an allowance increase.
+The policy record maps each changed address to the accepted numeric base.
 The builtin closure oracle selects the portable graph library.
 This ownership change transfers no language, transform, span, serialization, or backend authority.

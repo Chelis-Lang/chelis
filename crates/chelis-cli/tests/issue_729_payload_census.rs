@@ -5,7 +5,7 @@
 //! the FIFTH storage layer of dtype_semantics.md section C3). This
 //! census makes the closure mechanical: it sweeps the two declaration
 //! surfaces that can carry numeric VALUES into execution - the IR op
-//! vocabulary (`chelis-ir/src/dag.rs`) and its wire mirror
+//! vocabulary (`chelis-dag-core/src/dag.rs`) and its wire mirror
 //! (`chelis-compiler-api/src/schema.rs`, the `WireRiscOp` block) - and
 //! pins the exact set of remaining raw `f64`/`Vec<f64>` payload fields.
 //! The wire mirror permits no raw float payload. Its exact carrier and field
@@ -78,7 +78,7 @@ fn raw_float_payload_fields(block: &str) -> Vec<String> {
 
 #[test]
 fn risc_op_has_no_unsealed_numeric_payload_beyond_the_census() {
-    let source = std::fs::read_to_string(repo_root().join("crates/chelis-ir/src/dag.rs"))
+    let source = std::fs::read_to_string(repo_root().join("crates/chelis-dag-core/src/dag.rs"))
         .expect("dag.rs readable");
     let block = enum_block(&source, "RiscOp");
 
