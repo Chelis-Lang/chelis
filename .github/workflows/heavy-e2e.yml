@@ -5,7 +5,8 @@ name: Linux Extended Validation
 # can hide a newly added target. It executes as four disjoint nextest hash
 # partitions of that one unfiltered selection, so every listed test still
 # runs exactly once and each shard reports inside the 60-minute budget.
-# The two census targets execute in dtype only.
+# Dtype owns the two census targets outside these workspace partitions.
+# Numeric-core acceptance also retains its required surface census checks.
 # Feature and phase oracles retain their own
 # acceptance commands. All ignored tests still need explicit/manual owners.
 on:
@@ -580,7 +581,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        slice: [frontend, domain]
+        slice: [frontend, domain, numeric-core]
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -612,6 +613,15 @@ jobs:
 
       - name: Gate (integration support subset)
         run: chelis-gate integration --support-only --support-slice ${{ matrix.slice }}
+
+      - name: Upload integration support receipts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: integration-support-${{ matrix.slice }}-receipts
+          path: target/gate-reports/
+          if-no-files-found: error
+          retention-days: 14
 
   backend-sanitizers-full:
     if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.validation_scope == 'all') }}
