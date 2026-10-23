@@ -95,7 +95,10 @@ The guard classifies direct lower-stage calls. It treats core transition calls a
 
 `chelis-pipeline-core` is below `chelis-compiler-api` and `chelis-reef` in the dependency graph.
 
-The core depends directly on `chelis-deep`, `chelis-types`, `chelis-effects`, and `chelis-ir`. A dependency guard checks the manifest and resolved graph.
+The core depends directly on `chelis-deep`, `chelis-types`, `chelis-effects`, `chelis-ir`, and `chelis-unord`.
+Its dependency guard checks the manifest and resolved graph.
+The approved graph includes `chelis-type-core` below the host checker and effects layer.
+Host-service exclusions remain active.
 
 The dependency guard, the documentation guard, and the pipeline-artifact compile-fail fixture run in the per-PR gate `lint-and-unit` stage, so hosted CI enforces the dependency boundary, the no_std documentation contract, and the facade artifact boundary. The manual `compiler_pipeline_oracle.py` still runs the same three controls.
 

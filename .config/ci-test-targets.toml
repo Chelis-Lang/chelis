@@ -4739,12 +4739,6 @@ prefix = "scripts/fixtures/type_unification_core/host.rs"
 disposition = "packages"
 packages = ["chelis-type-core", "chelis-types"]
 
-# The change planner also classifies the removed fixture path.
-[[path_rule]]
-prefix = "scripts/fixtures/type_unification_core_host.rs"
-disposition = "packages"
-packages = ["chelis-type-core", "chelis-types"]
-
 [[path_rule]]
 prefix = "scripts/fixtures/type_unification_core_corpus.json"
 disposition = "packages"

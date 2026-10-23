@@ -27,6 +27,8 @@ Refresh the diagnostic checkpoint and pipeline artifact fixture locks for the ex
 
 The standalone host parity fixture has an exact source inventory and a named compilation owner.
 Its oracle compiles the unchanged fixture from the isolated directory.
+Remove the obsolete route for the former fixture path.
+The pipeline dependency guard admits the portable type owner and retains host-service exclusions.
 
 The portable solver needs allocation and atomics.
 It does not support reentrant interrupts that preempt a held solver lock.

@@ -24,7 +24,8 @@ APPROVED_DIRECT_DEPENDENCIES = frozenset(
 # it before allocating, the check the C runtime makes (chelis#2491).
 # chelis-numeric-core owns the portable dtype kernels. Those kernels call
 # chelis-crmath for correctly rounded transcendentals (chelis#2957).
-# Both crates stay below host services.
+# chelis-type-core owns portable type models and unification.
+# These crates stay below host services.
 APPROVED_WORKSPACE_CLOSURE = frozenset(
     {
         CORE_PACKAGE,
@@ -33,6 +34,7 @@ APPROVED_WORKSPACE_CLOSURE = frozenset(
         "chelis-crmath",
         "chelis-numeric-core",
         "chelis-pred",
+        "chelis-type-core",
         "chelis-vocab",
         "chelis-stack-services",
     }
