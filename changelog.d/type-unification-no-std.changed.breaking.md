@@ -23,6 +23,7 @@ Distinguish active store operations from interrupted stores.
 Normal concurrent queries wait without a false interruption failure.
 Reserve identifiers once per shared allocation across the complete scheme.
 CI also lints the standalone core without default features.
+Refresh the diagnostic checkpoint fixture lock for the extracted model and solver dependencies.
 
 The portable solver needs allocation and atomics.
 It does not support reentrant interrupts that preempt a held solver lock.
