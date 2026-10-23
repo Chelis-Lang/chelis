@@ -37,6 +37,8 @@ jobs:
           echo "$(brew --prefix llvm)/bin" >> "$GITHUB_PATH"
           echo "CC=$(brew --prefix llvm)/bin/clang" >> "$GITHUB_ENV"
           echo "AR=$(brew --prefix llvm)/bin/llvm-ar" >> "$GITHUB_ENV"
+          sdkroot=$(xcrun --show-sdk-path)
+          echo "SDKROOT=$sdkroot" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.98.0
@@ -64,6 +66,9 @@ jobs:
           commands = {'rustc': ['rustc', '-vV'], 'cargo': ['cargo', '-V'], 'clippy': ['cargo', 'clippy', '--version'], 'rustfmt': ['rustfmt', '--version'], 'components': ['rustup', 'component', 'list', '--installed'], 'targets': ['rustup', 'target', 'list', '--installed'], 'cc': [os.environ.get('CC', 'cc'), '--version'], 'clang': ['clang', '--version'], 'llvm_ar': [os.environ.get('AR', 'llvm-ar'), '--version'], 'nextest': ['cargo', 'nextest', '--version'], 'uv': ['uv', '--version']}
           compiler_llvm_tools = pathlib.Path(subprocess.check_output(['rustc', '--print', 'target-libdir'], text=True).strip()).parent / 'bin'
           commands['compiler_llvm_ar'] = [str(compiler_llvm_tools / 'llvm-ar'), '--version']
+          value['compiler_environment'] = {name: os.environ.get(name) for name in ['CC', 'AR', 'SDKROOT']}
+          if platform.system() == 'Darwin':
+              commands['sdkroot'] = ['xcrun', '--show-sdk-path']
           value['compiler_identities'] = {}
           for name, command in commands.items():
               result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, check=False)
