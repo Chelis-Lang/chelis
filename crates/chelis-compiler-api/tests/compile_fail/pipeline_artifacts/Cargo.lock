@@ -153,6 +153,7 @@ dependencies = [
  "chelis-runtime",
  "chelis-surf",
  "chelis-syntax-host",
+ "chelis-type-core",
  "chelis-types",
  "chelis-unord",
  "chelis-validate",
@@ -192,6 +193,7 @@ version = "0.21.1"
 dependencies = [
  "chelis-deep",
  "chelis-numeric-core",
+ "chelis-type-core",
  "chelis-types",
  "chelis-unord",
  "chelis-vocab",
@@ -214,6 +216,7 @@ dependencies = [
  "chelis-deep",
  "chelis-effects",
  "chelis-numeric-core",
+ "chelis-type-core",
  "chelis-types",
  "chelis-unord",
  "chelis-vocab",
@@ -278,6 +281,7 @@ dependencies = [
  "chelis-shell-core",
  "chelis-surf",
  "chelis-syntax-host",
+ "chelis-type-core",
  "chelis-types",
  "chelis-unord",
  "flate2",
@@ -364,6 +368,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "chelis-type-core"
+version = "0.21.1"
+dependencies = [
+ "chelis-deep",
+ "chelis-numeric-core",
+ "chelis-unord",
+ "serde",
+ "spin",
+]
+
+[[package]]
 name = "chelis-types"
 version = "0.21.1"
 dependencies = [
@@ -371,6 +386,7 @@ dependencies = [
  "chelis-deep",
  "chelis-numeric-core",
  "chelis-pred",
+ "chelis-type-core",
  "chelis-unord",
  "chelis-vocab",
  "serde",
@@ -1518,6 +1534,12 @@ checksum = "c3e17e880bafaeb362a7b751ec46bdc5b61445a188f80e0606e68167cd540fa3"
 dependencies = [
  "smallvec",
 ]
+
+[[package]]
+name = "spin"
+version = "0.10.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "023a211cb3138dbc438680b32560ad89f699977624c9f8dbb95a47d5b4c07dd3"
 
 [[package]]
 name = "stable_deref_trait"
