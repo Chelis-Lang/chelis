@@ -664,6 +664,32 @@ STAGES: dict[str, list[list[str]]] = {
         RUNTIME_REPRESENTATION_ORACLE,
     ],
 }
+# Every integration support command has one explicit hosted budget owner.
+# Keep the unsliced stage's canonical order, including the CLI ledger last.
+INTEGRATION_SUPPORT_SLICES: dict[str, tuple[list[str], ...]] = {
+    "frontend": (
+        LOWERING_TRACE_TESTS,
+        EMISSION_OBSERVER_TESTS,
+        OWNERSHIP_LEDGER_RUNTIME_TESTS,
+        OWNERSHIP_LEDGER_API_TESTS,
+    ),
+    "domain": (
+        COMPILER_FRONT_END_PERFORMANCE_ORACLE,
+        UNREPRESENTABLE_DOMAIN_ORACLE,
+        [MANAGED_PYTHON, "scripts/dtype_builtin_atom_closure_oracle.py"],
+        EVAL_SYSTEM_ORACLE,
+        SYNTAX_CORE_ORACLE,
+        VERSION_CORE_ORACLE,
+        REEF_BOOTSTRAP_CORE_ORACLE,
+        SHELL_METADATA_CORE_ORACLE,
+        CERTIFICATE_CORE_ORACLE,
+        TYPE_UNIFICATION_CORE_ORACLE,
+        OWNERSHIP_LEDGER_CLI_TESTS,
+    ),
+    "numeric-core": (NUMERIC_CORE_ORACLE,),
+}
+
+
 STAGES["lint-and-unit-nix"] = [
     CLIPPY_SOLVER_FREE_NIX_FEATURES
     if command == CLIPPY_SOLVER_FREE_FEATURES else command
@@ -2851,8 +2877,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help="Run only the integration stage's non-nextest support oracles.",
     )
     p.add_argument(
-        "--support-slice", choices=("frontend", "domain"),
-        help="Run one integration support subset on its existing workspace worker.",
+        "--support-slice", choices=tuple(INTEGRATION_SUPPORT_SLICES),
+        help="Run one independently budgeted integration support subset.",
     )
     p.add_argument(
         "--partition",
@@ -3079,7 +3105,24 @@ def selected_stage_commands(
     else:
         selected = [list(command) for command in commands]
     if support_slice is not None:
-        selected = selected[:4] if support_slice == "frontend" else selected[4:]
+        if support_slice not in INTEGRATION_SUPPORT_SLICES:
+            raise ValueError(f"unknown integration support slice: {support_slice}")
+        owned = [
+            tuple(command)
+            for group in INTEGRATION_SUPPORT_SLICES.values()
+            for command in group
+        ]
+        canonical = [tuple(command) for command in STAGES["integration"][1:]]
+        if (
+            any(not group for group in INTEGRATION_SUPPORT_SLICES.values())
+            or len(owned) != len(set(owned))
+            or sorted(owned) != sorted(canonical)
+        ):
+            raise ValueError(
+                "integration support slices must own every canonical command exactly once"
+            )
+        members = INTEGRATION_SUPPORT_SLICES[support_slice]
+        selected = [command for command in selected if command in members]
     if partition is not None:
         selected[0].extend(["--partition", partition])
     return selected

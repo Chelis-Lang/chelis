@@ -1115,13 +1115,56 @@ class StageUnionTests(unittest.TestCase):
         slices = [gate.selected_stage_commands(
             "integration", tests_only=False, support_only=True,
             partition=None, support_slice=name,
-        ) for name in ("frontend", "domain")]
+        ) for name in ("frontend", "domain", "numeric-core")]
         self.assertTrue(all(slices))
-        commands = slices[0] + slices[1]
-        self.assertEqual(commands, gate.STAGES["integration"][1:])
+        commands = [command for selected in slices for command in selected]
+        self.assertCountEqual(commands, gate.STAGES["integration"][1:])
         self.assertEqual(
             len(commands), len({tuple(command) for command in commands})
         )
+
+    def test_numeric_core_support_slice_owns_the_complete_oracle_only(self):
+        commands = gate.selected_stage_commands(
+            "integration", tests_only=False, support_only=True,
+            partition=None, support_slice="numeric-core",
+        )
+        self.assertEqual(commands, [gate.NUMERIC_CORE_ORACLE])
+        for name in ("frontend", "domain"):
+            other = gate.selected_stage_commands(
+                "integration", tests_only=False, support_only=True,
+                partition=None, support_slice=name,
+            )
+            self.assertNotIn(gate.NUMERIC_CORE_ORACLE, other)
+        self.assertEqual(gate.parse_args([
+            "integration", "--support-only", "--support-slice", "numeric-core",
+        ]).support_slice, "numeric-core")
+
+    def test_support_slice_rejects_unknown_missing_duplicate_and_stale_ownership(self):
+        owners = gate.INTEGRATION_SUPPORT_SLICES
+        for changed in (
+            {**owners, "numeric-core": ()},
+            {**owners, "domain": (*owners["domain"], gate.NUMERIC_CORE_ORACLE)},
+            {**owners, "numeric-core": (["python", "missing_oracle.py"],)},
+        ):
+            with self.subTest(owners=changed), mock.patch.object(
+                gate, "INTEGRATION_SUPPORT_SLICES", changed,
+            ), self.assertRaises(ValueError):
+                gate.selected_stage_commands(
+                    "integration", tests_only=False, support_only=True,
+                    partition=None, support_slice="domain",
+                )
+        with self.assertRaisesRegex(ValueError, "unknown integration support slice"):
+            gate.selected_stage_commands(
+                "integration", tests_only=False, support_only=True,
+                partition=None, support_slice="typo",
+            )
+        with mock.patch.dict(gate.STAGES, {
+            "integration": [*gate.STAGES["integration"], ["new-oracle"]],
+        }), self.assertRaises(ValueError):
+            gate.selected_stage_commands(
+                "integration", tests_only=False, support_only=True,
+                partition=None, support_slice="domain",
+            )
 
     def test_emission_observer_runs_with_its_feature_locally_and_in_ci_support(self):
         command = ["cargo", "nextest", "run", "-p", "chelis-compiler-api", "--features",
@@ -2085,6 +2128,7 @@ def _ci_job_block(job: str) -> str:
         "macos-workspace-shard",
         "macos-binding-census",
         "macos-wire-census",
+        "macos-numeric-core",
         "macos-smoke",
         "smt-build-darwin-arm64",
     }:
@@ -2119,7 +2163,7 @@ def _assert_executable_run_once(job_block: str, command: str) -> None:
 def _assert_macos_aggregate_requires_censuses(aggregate_block: str) -> None:
     needs = (
         "needs: [macos-workspace-shard, macos-binding-census, "
-        "macos-wire-census, macos-ownership-ledger]"
+        "macos-wire-census, macos-ownership-ledger, macos-numeric-core]"
     )
     if needs not in aggregate_block:
         raise AssertionError("macOS aggregate omits a required producer")
@@ -2129,7 +2173,8 @@ def _assert_macos_aggregate_requires_censuses(aggregate_block: str) -> None:
         "macos-workspace-shard=${{ needs.macos-workspace-shard.result }} "
         "macos-binding-census=${{ needs.macos-binding-census.result }} "
         "macos-wire-census=${{ needs.macos-wire-census.result }} "
-        "macos-ownership-ledger=${{ needs.macos-ownership-ledger.result }}",
+        "macos-ownership-ledger=${{ needs.macos-ownership-ledger.result }} "
+        "macos-numeric-core=${{ needs.macos-numeric-core.result }}",
     )
 
 
@@ -2152,7 +2197,7 @@ def _ci_step_block(job_block: str, step_name: str) -> str:
 
 
 def _assert_support_slice_contract(block: str) -> None:
-    assert "slice: [frontend, domain]" in block
+    assert "slice: [frontend, domain, numeric-core]" in block
     command = "chelis-gate integration --support-only --support-slice ${{ matrix.slice }}"
     _assert_executable_run_once(block, command)
     assert block.count("--support-only") == 1
@@ -2699,7 +2744,7 @@ class CiParityTests(unittest.TestCase):
     def test_support_slice_contract_rejects_missing_repeated_or_skipped_work(self):
         block = _ci_job_block("integration-support")
         mutations = (
-            block.replace("slice: [frontend, domain]", "slice: [frontend, frontend]"),
+            block.replace("slice: [frontend, domain, numeric-core]", "slice: [frontend, frontend]"),
             block.replace(" --support-slice ${{ matrix.slice }}", ""),
             block.replace("    steps:", "    if: false\n    steps:"),
             block.replace(
@@ -2826,6 +2871,61 @@ class CiParityTests(unittest.TestCase):
         self.assertIn("name: macOS Smoke", aggregate_block)
         _assert_macos_aggregate_requires_censuses(aggregate_block)
 
+    def test_numeric_core_has_independent_cross_platform_owners_and_receipts(self):
+        linux = _ci_job_block("integration-support")
+        self.assertIn("slice: [frontend, domain, numeric-core]", linux)
+        self.assertIn("timeout-minutes: 70", linux)
+        self.assertIn("fail-fast: false", linux)
+        self.assertNotIn("continue-on-error", linux)
+        report = _workflow_job_block(CI_YML.with_name("heavy-e2e.yml"), "report")
+        self.assertIn("integration-support", report.split("steps:")[0])
+        self.assertIn("job.result === 'success'", report)
+        mac = _ci_job_block("macos-numeric-core")
+        self.assertIn("timeout-minutes: 120", mac)
+        self.assertNotIn("continue-on-error", mac)
+        self.assertNotIn("if:", _ci_step_block(mac, "Numeric core portability"))
+        self.assertNotIn("numeric_core_oracle.py", _ci_job_block("macos-workspace-shard"))
+        self.assertNotIn("Install portable numeric C tools", _ci_job_block("macos-workspace-shard"))
+        _assert_executable_run_once(
+            mac, ".venv/bin/python scripts/gate.py integration --support-only --support-slice numeric-core",
+        )
+        for prerequisite in (
+            "dtolnay/rust-toolchain@stable", "astral-sh/setup-uv@v8.1.0",
+            "python3 scripts/ci_setup_uv_python.py", "taiki-e/install-action@nextest",
+            "uv pip install --python .venv/bin/python -r bindings/python/pyproject.toml",
+            'subprocess.run(["brew", "install", "llvm"], check=True)',
+            'test "$(uname -m)" = "arm64"',
+        ):
+            self.assertIn(prerequisite, mac)
+        for block, artifact in (
+            (linux, "integration-support-${{ matrix.slice }}-receipts"),
+            (mac, "macos-numeric-core-receipts"),
+        ):
+            step = _ci_step_block(block, "Upload integration support receipts")
+            self.assertIn("if: always()", step)
+            self.assertIn("if-no-files-found: error", step)
+            self.assertIn(f"name: {artifact}", step)
+            self.assertIn("path: target/gate-reports/", step)
+        _assert_macos_aggregate_requires_censuses(_ci_job_block("macos-smoke"))
+
+    def test_macos_numeric_core_result_controls_the_real_aggregate_command(self):
+        block = _ci_job_block("macos-smoke")
+        command = next(line.strip()[5:] for line in block.splitlines()
+                       if line.strip().startswith("run: python3 scripts/ci_require_success.py"))
+        for result, expected in (
+            ("success", 0), ("failure", 1), ("cancelled", 1), ("skipped", 1),
+        ):
+            with self.subTest(result=result):
+                rendered = command.replace("${{ needs.macos-numeric-core.result }}", result)
+                rendered = re.sub(r"\$\{\{ needs\.[a-z-]+\.result \}\}", "success", rendered)
+                argv = shlex.split(rendered)
+                completed = subprocess.run(
+                    [sys.executable, *argv[1:]], cwd=REPO_ROOT,
+                    capture_output=True, text=True, check=False,
+                )
+                self.assertEqual(completed.returncode, expected, completed.stderr)
+                self.assertIn(f"macos-numeric-core: {result}", completed.stdout + completed.stderr)
+
     def test_macos_partition_rejects_missing_duplicate_or_wrong_denominator(self):
         shard_block = _ci_job_block("macos-workspace-shard")
         for old, new in (
@@ -2846,6 +2946,8 @@ class CiParityTests(unittest.TestCase):
             "macos-binding-census=${{ needs.macos-binding-census.result }} ",
             "macos-wire-census, ",
             "macos-wire-census=${{ needs.macos-wire-census.result }} ",
+            ", macos-numeric-core",
+            " macos-numeric-core=${{ needs.macos-numeric-core.result }}",
         ):
             with self.subTest(missing=missing):
                 with self.assertRaises(AssertionError):

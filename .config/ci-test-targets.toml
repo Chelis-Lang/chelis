@@ -4758,7 +4758,7 @@ disposition = "owner"
 workflow = "heavy-e2e.yml"
 job = "integration-support"
 cadence = "daily and workflow_dispatch"
-reason = "The domain slice checks portable numeric consumers, exact parity, allocation costs, and authority"
+reason = "The numeric-core slice checks portable numeric consumers, exact parity, allocation costs, and authority"
 tracking_issue = "chelis#3993"
 
 [[path_rule]]

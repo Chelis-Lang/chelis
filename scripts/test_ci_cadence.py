@@ -219,7 +219,7 @@ def assert_extended(test, pr, nightly):
     test.assertIn("cargo test -p chelis-cli --test chelis_std_self_test_corpus -- --ignored --nocapture", commands)
     test.assertIn("cargo test -p chelis-backend-c", [s.get("run") for s in jobs["backend-sanitizers-full"]["steps"]])
     support = jobs["integration-support"]
-    test.assertEqual(support["strategy"]["matrix"]["slice"], ["frontend", "domain"])
+    test.assertEqual(support["strategy"]["matrix"]["slice"], ["frontend", "domain", "numeric-core"])
     test.assertIn("chelis-gate integration --support-only --support-slice ${{ matrix.slice }}", [s.get("run") for s in support["steps"]])
     test.assertNotIn("--support-only", str(pr))
     test.assertNotIn("ProfilePartitionTests", str(pr))
@@ -383,8 +383,8 @@ def assert_dispatch_scopes(test, nightly):
     def legs(names):
         return sum(len(matrix_legs(jobs[name])) for name in names)
 
-    test.assertEqual(legs(full_jobs - {"report"}), 22)
-    test.assertEqual(legs(full_jobs), 23)
+    test.assertEqual(legs(full_jobs - {"report"}), 23)
+    test.assertEqual(legs(full_jobs), 24)
     for name in (
         "runtime-representation-phase0-oracle",
         "dtype-phase3-oracle",
