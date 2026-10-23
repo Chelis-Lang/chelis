@@ -262,8 +262,8 @@ mod diagnostic_checkpoint_tests {
 mod rejected_signature_resolution_tests {
     use super::*;
     use crate::deep_type::{BinderMode, DeepTypeResolver, TypeResolutionEnv, TypeUseSite};
-    use crate::types::{Type, VarGen};
     use chelis_numeric_core::prim::Prim;
+    use chelis_type_core::{Type, VarGen};
 
     fn resolve<T>(
         source: &str,
@@ -786,7 +786,7 @@ pub(crate) fn try_checked_program_with_effect_annotations(
 pub(crate) fn param_has_consuming_use(
     expr: &chelis_deep::Expr,
     param: &str,
-    available_signatures: &chelis_unord::UnordMap<String, crate::types::Type>,
+    available_signatures: &chelis_unord::UnordMap<String, chelis_type_core::Type<ErrorWitness>>,
     type_env: &std::collections::BTreeMap<String, chelis_deep::Expr>,
     type_headers: &crate::deep_type::TypeResolutionEnv,
 ) -> Result<bool, InferResult> {
@@ -859,9 +859,9 @@ mod builtin_selection_tests {
 pub(crate) fn checked_alias_argument_kinds(
     headers: &crate::deep_type::TypeResolutionEnv,
     application: &chelis_deep::Expr,
-) -> Result<Vec<crate::types::NominalParamKind>, String> {
+) -> Result<Vec<chelis_type_core::NominalParamKind>, String> {
     run_with_metadata(std::slice::from_ref(application), |sink| {
-        let mut variables = crate::types::VarGen::default();
+        let mut variables = chelis_type_core::VarGen::default();
         let mut resolver = crate::deep_type::DeepTypeResolver::new(
             crate::deep_type::TypeUseSite::CompilerMetadata,
             crate::deep_type::BinderMode::TrustedCompilerMetadata,
@@ -872,15 +872,17 @@ pub(crate) fn checked_alias_argument_kinds(
         resolver
             .resolve(application)
             .map(|resolved| match resolved.into_type() {
-                crate::types::Type::Adt(_, arguments) => {
-                    vec![crate::types::NominalParamKind::Type; arguments.len()]
+                chelis_type_core::Type::Adt(_, arguments) => {
+                    vec![chelis_type_core::NominalParamKind::Type; arguments.len()]
                 }
-                crate::types::Type::KindedAdt(_, arguments) => arguments
+                chelis_type_core::Type::KindedAdt(_, arguments) => arguments
                     .iter()
                     .map(|argument| match argument {
-                        crate::types::NominalArg::Type(_) => crate::types::NominalParamKind::Type,
-                        crate::types::NominalArg::Dimension(_) => {
-                            crate::types::NominalParamKind::Dimension
+                        chelis_type_core::NominalArg::Type(_) => {
+                            chelis_type_core::NominalParamKind::Type
+                        }
+                        chelis_type_core::NominalArg::Dimension(_) => {
+                            chelis_type_core::NominalParamKind::Dimension
                         }
                     })
                     .collect(),

@@ -346,17 +346,25 @@ drops below 1 per the existing scoring), and through `build`/`eval` as
 
 The type-state ratchet, this plan's structural core:
 
+`chelis-type-core` owns the generic model `Type<E>` without a default evidence parameter.
+The hosted checker uses `Type<ErrorWitness>` directly.
+`chelis-types::errors` retains the concrete private-field witness and its report boundary.
+
+Portable solver failures cannot create hosted evidence.
+Standalone callers can use `Type<core::convert::Infallible>`.
+This ownership change does not transfer language or diagnostic authority.
+
 ```rust
 /// Zero-sized witness that an error REACHED THE ERROR VECTOR. The only
 /// constructors live in the diagnostics module:
-///   report(sink, check_error)   -> Type   // appends, then mints
-///   propagate(&ErrorWitness)    -> Type   // copies an existing witness
+///   report(sink, check_error)   -> Type<ErrorWitness>
+///   propagate(&ErrorWitness)    -> Type<ErrorWitness>
 /// Field is private: no other module can mint one.
 pub struct ErrorWitness(());
 
-pub enum Type {
+pub enum Type<E> {
     // ... existing variants ...
-    Error(ErrorWitness),   // was: Error
+    Error(E),
 }
 ```
 

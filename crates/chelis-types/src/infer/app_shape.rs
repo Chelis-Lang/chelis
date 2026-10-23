@@ -4,6 +4,7 @@
 //! The extraction preserves control flow and diagnostic order.
 
 use super::*;
+use crate::errors::ErrorWitness;
 use chelis_deep::cons_spine::{ConsSpine, ConsSpineTail};
 
 /// chelis#339 Part 2: infer a variadic named-axis reduction
@@ -22,11 +23,11 @@ pub(super) fn infer_reduction_app(
     fname: &str,
     env: &mut Env,
     vg: &mut VarGen,
-    subst: &mut Subst,
+    subst: &mut Subst<ErrorWitness>,
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
     product: &mut InferenceProduct,
-) -> Type {
+) -> Type<ErrorWitness> {
     if fname == "argmax_reduce" || fname == "argmin_reduce" {
         let expected = "2 arguments";
         let got = format!("{} arguments", node.child_count().saturating_sub(1));
@@ -49,7 +50,7 @@ pub(super) fn infer_reduction_app(
 
     let kids = node.children_slice();
     let _func_ty = super::app::infer_callee(&kids[0], env, vg, subst, adt_reg, errors, product);
-    let arg_tys: Vec<Type> = kids[1..]
+    let arg_tys: Vec<Type<ErrorWitness>> = kids[1..]
         .iter()
         .enumerate()
         .map(|(index, arg)| {
@@ -118,11 +119,11 @@ pub(super) fn infer_expand_app(
     node: &DeepNode,
     env: &mut Env,
     vg: &mut VarGen,
-    subst: &mut Subst,
+    subst: &mut Subst<ErrorWitness>,
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
     product: &mut InferenceProduct,
-) -> Type {
+) -> Type<ErrorWitness> {
     let kids = node.children_slice();
     if kids.len() != 5 || callee == "expand" {
         let expected = if callee == "expand" {
@@ -145,7 +146,7 @@ pub(super) fn infer_expand_app(
     }
 
     let _func_ty = super::app::infer_callee(&kids[0], env, vg, subst, adt_reg, errors, product);
-    let arg_tys: Vec<Type> = kids[1..]
+    let arg_tys: Vec<Type<ErrorWitness>> = kids[1..]
         .iter()
         .enumerate()
         .map(|(index, arg)| {
@@ -232,11 +233,11 @@ pub(super) fn infer_permute_app(
     node: &DeepNode,
     env: &mut Env,
     vg: &mut VarGen,
-    subst: &mut Subst,
+    subst: &mut Subst<ErrorWitness>,
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
     product: &mut InferenceProduct,
-) -> Type {
+) -> Type<ErrorWitness> {
     let kids = node.children_slice();
     if kids.len() < 2 {
         return report_at_check_site(
@@ -257,7 +258,7 @@ pub(super) fn infer_permute_app(
 
     let _func_ty = super::app::infer_callee(&kids[0], env, vg, subst, adt_reg, errors, product);
     let input_ty = infer_expr(&kids[1], env, vg, subst, adt_reg, errors, product);
-    let axis_tys: Vec<Type> = kids[2..]
+    let axis_tys: Vec<Type<ErrorWitness>> = kids[2..]
         .iter()
         .map(|arg| infer_expr(arg, env, vg, subst, adt_reg, errors, product))
         .collect();
@@ -290,10 +291,10 @@ pub(super) fn check_permute_signature(
     site: CheckSite<'_>,
     node: &DeepNode,
     kids: &[deep::Expr],
-    arg_tys: &[Type],
-    subst: &mut Subst,
+    arg_tys: &[Type<ErrorWitness>],
+    subst: &mut Subst<ErrorWitness>,
     errors: &mut DiagnosticSink<'_>,
-) -> Type {
+) -> Type<ErrorWitness> {
     for (axis_offset, axis_ty) in arg_tys[1..].iter().enumerate() {
         let resolved = subst.apply(axis_ty);
         match resolved {
@@ -422,11 +423,11 @@ pub(super) fn infer_reshape_app(
     node: &DeepNode,
     env: &mut Env,
     vg: &mut VarGen,
-    subst: &mut Subst,
+    subst: &mut Subst<ErrorWitness>,
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
     product: &mut InferenceProduct,
-) -> Type {
+) -> Type<ErrorWitness> {
     let kids = node.children_slice();
     if kids.len() < 2 || kids.len() > 3 {
         let got = kids.len().saturating_sub(1);
@@ -538,10 +539,10 @@ pub(super) fn check_reshape_signature(
     node: &DeepNode,
     kids: &[deep::Expr],
     input_var_name: Option<&str>,
-    arg_tys: &[Type],
-    subst: &mut Subst,
+    arg_tys: &[Type<ErrorWitness>],
+    subst: &mut Subst<ErrorWitness>,
     errors: &mut DiagnosticSink<'_>,
-) -> Type {
+) -> Type<ErrorWitness> {
     let input = type_for_readonly_check(&arg_tys[0], subst);
     let precision = match &input {
         Type::Tensor(_, precision) => precision.clone(),
@@ -628,11 +629,11 @@ pub(super) fn infer_shrink_app(
     node: &DeepNode,
     env: &mut Env,
     vg: &mut VarGen,
-    subst: &mut Subst,
+    subst: &mut Subst<ErrorWitness>,
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
     product: &mut InferenceProduct,
-) -> Type {
+) -> Type<ErrorWitness> {
     let kids = node.children_slice();
     if kids.len() != 3 {
         return report_at_check_site(
@@ -682,10 +683,10 @@ pub(super) fn check_shrink_signature(
     site: CheckSite<'_>,
     node: &DeepNode,
     kids: &[deep::Expr],
-    arg_tys: &[Type],
-    subst: &mut Subst,
+    arg_tys: &[Type<ErrorWitness>],
+    subst: &mut Subst<ErrorWitness>,
     errors: &mut DiagnosticSink<'_>,
-) -> Type {
+) -> Type<ErrorWitness> {
     let input_ty = arg_tys[0].clone();
     let bounds_ty = arg_tys[1].clone();
 
@@ -904,11 +905,11 @@ pub(super) fn infer_stride_app(
     node: &DeepNode,
     env: &mut Env,
     vg: &mut VarGen,
-    subst: &mut Subst,
+    subst: &mut Subst<ErrorWitness>,
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
     product: &mut InferenceProduct,
-) -> Type {
+) -> Type<ErrorWitness> {
     let kids = node.children_slice();
     if kids.len() < 3 {
         return report_builtin_arity_range(
@@ -922,7 +923,7 @@ pub(super) fn infer_stride_app(
 
     let _func_ty = super::app::infer_callee(&kids[0], env, vg, subst, adt_reg, errors, product);
     let input_ty = infer_expr(&kids[1], env, vg, subst, adt_reg, errors, product);
-    let stride_tys: Vec<Type> = kids[2..]
+    let stride_tys: Vec<Type<ErrorWitness>> = kids[2..]
         .iter()
         .map(|arg| infer_expr(arg, env, vg, subst, adt_reg, errors, product))
         .collect();
@@ -955,10 +956,10 @@ pub(super) fn check_stride_signature(
     node: &DeepNode,
     site: CheckSite<'_>,
     kids: &[deep::Expr],
-    arg_tys: &[Type],
-    subst: &mut Subst,
+    arg_tys: &[Type<ErrorWitness>],
+    subst: &mut Subst<ErrorWitness>,
     errors: &mut DiagnosticSink<'_>,
-) -> Type {
+) -> Type<ErrorWitness> {
     let input_ty = arg_tys[0].clone();
 
     for (position, stride_ty) in arg_tys[1..].iter().enumerate() {
@@ -1109,11 +1110,11 @@ pub(super) fn infer_pad_app(
     node: &DeepNode,
     env: &mut Env,
     vg: &mut VarGen,
-    subst: &mut Subst,
+    subst: &mut Subst<ErrorWitness>,
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
     product: &mut InferenceProduct,
-) -> Type {
+) -> Type<ErrorWitness> {
     let kids = node.children_slice();
     if kids.len() != 4 {
         return report_builtin_arity(
@@ -1158,11 +1159,11 @@ pub(super) fn check_pad_signature(
     node: &DeepNode,
     site: CheckSite<'_>,
     kids: &[deep::Expr],
-    arg_tys: &[Type],
+    arg_tys: &[Type<ErrorWitness>],
     vg: &mut VarGen,
-    subst: &mut Subst,
+    subst: &mut Subst<ErrorWitness>,
     errors: &mut DiagnosticSink<'_>,
-) -> Type {
+) -> Type<ErrorWitness> {
     let input_ty = arg_tys[0].clone();
     let padding_ty = arg_tys[1].clone();
     let fill_ty = arg_tys[2].clone();
@@ -1367,11 +1368,11 @@ pub(super) fn infer_reduce_window_app(
     name: &str,
     env: &mut Env,
     vg: &mut VarGen,
-    subst: &mut Subst,
+    subst: &mut Subst<ErrorWitness>,
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
     product: &mut InferenceProduct,
-) -> Type {
+) -> Type<ErrorWitness> {
     let kids = node.children_slice();
     if kids.len() != 4 {
         return report_builtin_arity(
@@ -1441,10 +1442,10 @@ pub(super) fn check_reduce_window_signature(
     site: CheckSite<'_>,
     kids: &[deep::Expr],
     name: &str,
-    arg_tys: &[Type],
-    subst: &mut Subst,
+    arg_tys: &[Type<ErrorWitness>],
+    subst: &mut Subst<ErrorWitness>,
     errors: &mut DiagnosticSink<'_>,
-) -> Type {
+) -> Type<ErrorWitness> {
     let input_ty = arg_tys[0].clone();
     let window_ty = arg_tys[1].clone();
     let stride_ty = arg_tys[2].clone();
@@ -1868,7 +1869,7 @@ pub(super) fn reshape_output_dims(
     shape_expr: &deep::Expr,
     input_var_name: Option<&str>,
     input_dims: &[Dim],
-    subst: &Subst,
+    subst: &Subst<ErrorWitness>,
 ) -> Vec<Dim> {
     let elements = match collect_shape_list_elements(shape_expr) {
         Some(elems) => elems,
@@ -1883,7 +1884,7 @@ pub(super) fn reshape_output_dims(
         .collect()
 }
 
-fn negative_reshape_target_extent(dims: &[Dim], subst: &Subst) -> Option<i64> {
+fn negative_reshape_target_extent(dims: &[Dim], subst: &Subst<ErrorWitness>) -> Option<i64> {
     dims.iter().find_map(|dim| {
         subst
             .observe_dim(dim)
@@ -1896,7 +1897,7 @@ fn report_negative_reshape_target_extent(
     errors: &mut DiagnosticSink<'_>,
     value: i64,
     site: CheckSite<'_>,
-) -> Type {
+) -> Type<ErrorWitness> {
     report_at_check_site(
         errors,
         CheckError::with_types(
@@ -1915,7 +1916,7 @@ pub(super) fn reshape_output_dim(
     elem: &deep::Expr,
     input_var_name: Option<&str>,
     input_dims: &[Dim],
-    subst: &Subst,
+    subst: &Subst<ErrorWitness>,
 ) -> Dim {
     if let Some(n) = extract_int_for_dim(elem) {
         return Dim::Lit(n);

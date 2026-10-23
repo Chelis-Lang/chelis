@@ -7,6 +7,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+chelis-type-core = { workspace = true, default-features = false, features = ["serde"] }
 chelis-numeric-core = { workspace = true, default-features = false, features = ["alloc", "serde"] }
 chelis-reef-bootstrap-core.workspace = true
 chelis-unord.workspace = true

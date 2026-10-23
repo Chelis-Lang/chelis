@@ -56,6 +56,7 @@
 //!    the member's published signature to fit a reference.
 
 use super::*;
+use crate::errors::ErrorWitness;
 use std::sync::Arc;
 
 /// One in-group reference to a member whose header omits a type.
@@ -66,7 +67,7 @@ pub(super) struct GroupReference {
     pub(super) callee: String,
     /// The reference's instance of the callee's provisional scheme: the
     /// group's authored binders, and a fresh variable for each hole.
-    pub(super) ty: Type,
+    pub(super) ty: Type<ErrorWitness>,
     pub(super) span_id: Option<String>,
     pub(super) span_offset: Option<usize>,
 }
@@ -78,9 +79,9 @@ pub(super) struct SiblingLink {
     /// The declaration whose body holds the reference.
     pub(super) caller: Option<String>,
     pub(super) callee: String,
-    pub(super) ty: Type,
+    pub(super) ty: Type<ErrorWitness>,
     /// The member's provisional type the instance copies.
-    pub(super) own: Type,
+    pub(super) own: Type<ErrorWitness>,
     pub(super) copies: Vec<(Variable, Variable)>,
     /// Whether the member writes no signature. Its instance is then the
     /// member's own type once linked, so a rule that cannot be decided on one
@@ -90,6 +91,12 @@ pub(super) struct SiblingLink {
     pub(super) span_offset: Option<usize>,
 }
 
+pub(super) struct GroupLinks {
+    pub(super) references: Vec<GroupReference>,
+    pub(super) members: Vec<(String, Type<ErrorWitness>)>,
+    pub(super) siblings: Vec<SiblingLink>,
+}
+
 /// A sibling reference's instance of `scheme`, its callee's provisional
 /// scheme: a fresh variable for each hole the scheme quantifies, as at any
 /// reference, and a copy of every other variable of its type, which the
@@ -97,20 +104,23 @@ pub(super) struct SiblingLink {
 /// its header declares, and nothing else a body has inferred about it.
 /// Returns the instance and each copied variable paired with its copy.
 pub(super) fn sibling_instance(
-    scheme: &Scheme,
+    scheme: &Scheme<ErrorWitness>,
     env: &Env,
     vg: &mut VarGen,
-    subst: &Subst,
-) -> (crate::env::InstantiatedScheme, Vec<(Variable, Variable)>) {
-    let copied_tvars = crate::env::free_tvars(&scheme.body)
+    subst: &Subst<ErrorWitness>,
+) -> (
+    chelis_type_core::InstantiatedScheme<ErrorWitness>,
+    Vec<(Variable, Variable)>,
+) {
+    let copied_tvars = chelis_type_core::free_tvars(&scheme.body)
         .into_iter()
         .filter(|var| !scheme.tvars.contains(var))
         .collect::<Vec<_>>();
-    let copied_dvars = crate::env::free_dvars(&scheme.body)
+    let copied_dvars = chelis_type_core::free_dvars(&scheme.body)
         .into_iter()
         .filter(|var| !scheme.dvars.contains(var))
         .collect::<Vec<_>>();
-    let copied_rvars = crate::env::free_rvars(&scheme.body)
+    let copied_rvars = chelis_type_core::free_rvars(&scheme.body)
         .into_iter()
         .filter(|var| !scheme.rvars.contains(var))
         .collect::<Vec<_>>();
@@ -123,7 +133,7 @@ pub(super) fn sibling_instance(
     }
     copying.dvars.extend(copied_dvars.iter().copied());
     copying.rvars.extend(copied_rvars.iter().copied());
-    let instantiated = env.instantiate_scheme(&copying, vg, subst);
+    let instantiated = chelis_type_core::instantiate_scheme(&copying, vg, subst);
     let copies = instantiated
         .tvars
         .iter()
@@ -169,7 +179,7 @@ enum Resolved {
     Open,
 }
 
-fn resolve(variable: Variable, subst: &Subst) -> Resolved {
+fn resolve(variable: Variable, subst: &Subst<ErrorWitness>) -> Resolved {
     match variable {
         Variable::Type(var) => {
             let ty = resolved(&Type::Var(var), subst);
@@ -197,7 +207,7 @@ fn resolve(variable: Variable, subst: &Subst) -> Resolved {
 
 /// `ty` with every bound variable resolved, including dimension and rank
 /// substitutions exposed by a preceding application.
-pub(super) fn resolved(ty: &Type, subst: &Subst) -> Type {
+pub(super) fn resolved(ty: &Type<ErrorWitness>, subst: &Subst<ErrorWitness>) -> Type<ErrorWitness> {
     let mut current = subst.apply(ty);
     loop {
         let next = subst.apply(&current);
@@ -216,13 +226,13 @@ fn is_variable_dim(dim: &Dim) -> bool {
 /// one kind denote one type exactly when these are equal.
 #[derive(PartialEq)]
 enum Denotation {
-    Type(Type),
+    Type(Type<ErrorWitness>),
     Dim(Dim),
     Rank(Vec<Dim>),
 }
 
 impl Denotation {
-    fn of(variable: Variable, subst: &Subst) -> Self {
+    fn of(variable: Variable, subst: &Subst<ErrorWitness>) -> Self {
         match variable {
             Variable::Type(var) => Self::Type(resolved(&Type::Var(var), subst)),
             Variable::Dim(var) => Self::Dim(subst.constraint_dim(&Dim::Var(var))),
@@ -241,10 +251,10 @@ impl Denotation {
 
 /// [04-INF-2]'s "fully concrete type argument -- one containing no type
 /// variable". An error witness is concrete: its cause is already reported.
-fn is_concrete(ty: &Type) -> bool {
-    crate::env::free_tvars(ty).is_empty()
-        && crate::env::free_dvars(ty).is_empty()
-        && crate::env::free_rvars(ty).is_empty()
+fn is_concrete(ty: &Type<ErrorWitness>) -> bool {
+    chelis_type_core::free_tvars(ty).is_empty()
+        && chelis_type_core::free_dvars(ty).is_empty()
+        && chelis_type_core::free_rvars(ty).is_empty()
 }
 
 /// The authored binders every holed member's references share, with their
@@ -274,7 +284,7 @@ impl GroupBinders {
     }
 
     /// The variable classes the binders resolve to now.
-    fn classes(&self, subst: &Subst) -> BTreeSet<Variable> {
+    fn classes(&self, subst: &Subst<ErrorWitness>) -> BTreeSet<Variable> {
         self.names
             .iter()
             .filter_map(|(binder, _)| match resolve(*binder, subst) {
@@ -287,7 +297,7 @@ impl GroupBinders {
 
 /// Whether `variable` is free in no enclosing declaration: minted at the
 /// component's level or deeper.
-fn in_group(variable: Variable, subst: &Subst) -> bool {
+fn in_group(variable: Variable, subst: &Subst<ErrorWitness>) -> bool {
     let level = subst.current_level();
     match variable {
         Variable::Type(var) => subst.level_of_tvar(var) >= level,
@@ -297,17 +307,29 @@ fn in_group(variable: Variable, subst: &Subst) -> bool {
 }
 
 /// Every variable of the resolved type `ty`.
-fn variables(ty: &Type) -> impl Iterator<Item = Variable> {
-    crate::env::free_tvars(ty)
+fn variables(ty: &Type<ErrorWitness>) -> impl Iterator<Item = Variable> {
+    chelis_type_core::free_tvars(ty)
         .into_iter()
         .map(Variable::Type)
-        .chain(crate::env::free_dvars(ty).into_iter().map(Variable::Dim))
-        .chain(crate::env::free_rvars(ty).into_iter().map(Variable::Rank))
+        .chain(
+            chelis_type_core::free_dvars(ty)
+                .into_iter()
+                .map(Variable::Dim),
+        )
+        .chain(
+            chelis_type_core::free_rvars(ty)
+                .into_iter()
+                .map(Variable::Rank),
+        )
 }
 
 /// The group variables of the resolved type `ty`, each marked as an authored
 /// binder or not.
-fn own_variables(ty: &Type, binders: &BTreeSet<Variable>, subst: &Subst) -> Vec<(Variable, bool)> {
+fn own_variables(
+    ty: &Type<ErrorWitness>,
+    binders: &BTreeSet<Variable>,
+    subst: &Subst<ErrorWitness>,
+) -> Vec<(Variable, bool)> {
     variables(ty)
         .filter(|variable| in_group(*variable, subst))
         .map(|variable| (variable, binders.contains(&variable)))
@@ -316,7 +338,11 @@ fn own_variables(ty: &Type, binders: &BTreeSet<Variable>, subst: &Subst) -> Vec<
 
 /// The member's type parameters in its resolved type `ty`: its group
 /// variables that are not authored binders.
-fn parameters(ty: &Type, binders: &BTreeSet<Variable>, subst: &Subst) -> Vec<Variable> {
+fn parameters(
+    ty: &Type<ErrorWitness>,
+    binders: &BTreeSet<Variable>,
+    subst: &Subst<ErrorWitness>,
+) -> Vec<Variable> {
     own_variables(ty, binders, subst)
         .into_iter()
         .filter_map(|(variable, binder)| (!binder).then_some(variable))
@@ -326,14 +352,13 @@ fn parameters(ty: &Type, binders: &BTreeSet<Variable>, subst: &Subst) -> Vec<Var
 /// A fresh instance of `ty` over `parameters`: the type, and each parameter
 /// paired with its instance.
 fn instance(
-    ty: &Type,
+    ty: &Type<ErrorWitness>,
     parameters: &[Variable],
-    env: &Env,
     vg: &mut VarGen,
-    subst: &Subst,
+    subst: &Subst<ErrorWitness>,
     origin_product: Option<&InferenceProduct>,
     binders: &BTreeSet<Variable>,
-) -> (Type, Vec<(Variable, Variable)>) {
+) -> (Type<ErrorWitness>, Vec<(Variable, Variable)>) {
     let mut scheme = Scheme::mono(ty.clone());
     for parameter in parameters {
         match parameter {
@@ -347,7 +372,7 @@ fn instance(
             in_group(variable, subst) && !binders.contains(&variable)
         });
     }
-    let instantiated = env.instantiate_scheme(&scheme, vg, subst);
+    let instantiated = chelis_type_core::instantiate_scheme(&scheme, vg, subst);
     let pairs = instantiated
         .tvars
         .iter()
@@ -374,11 +399,11 @@ fn instance(
 /// Publish or instantiate the connected component of raw result equations.
 /// Its variables belong to the component before result equality is solved.
 fn origin_scheme(
-    ty: &Type,
+    ty: &Type<ErrorWitness>,
     product: &InferenceProduct,
-    subst: &Subst,
+    subst: &Subst<ErrorWitness>,
     quantify: impl Fn(Variable) -> bool,
-) -> Scheme {
+) -> Scheme<ErrorWitness> {
     let body = resolved(ty, subst);
     let equations = product.result_equations_for(&body, subst);
     let carried = Type::Tuple(
@@ -399,16 +424,16 @@ fn origin_scheme(
             Variable::Rank(var) => scheme.rvars.push(var),
         }
     }
-    let visible = crate::env::free_tvars(&carried);
+    let visible = chelis_type_core::free_tvars(&carried);
     for (_, _, constraint) in subst.pending_collection_contracts() {
         let footprint = constraint
             .carried_types()
             .into_iter()
-            .flat_map(crate::env::free_tvars)
+            .flat_map(chelis_type_core::free_tvars)
             .collect::<Vec<_>>();
         if ((!footprint.is_empty() && footprint.iter().all(|variable| visible.contains(variable)))
             || (footprint.is_empty()
-                && crate::unify::collection_contract_visible_in_type(&constraint, &carried)))
+                && chelis_type_core::collection_contract_visible_in_type(&constraint, &carried)))
             && !scheme.constraints.contains(&constraint)
         {
             scheme.constraints.push(constraint);
@@ -441,14 +466,14 @@ fn origin_scheme(
 /// whichever variables happen to represent their classes.
 #[derive(PartialEq)]
 struct Shape {
-    ty: Type,
+    ty: Type<ErrorWitness>,
     /// Kind by kind, in order of first occurrence, whether each variable is
     /// a parameter.
     parameters: [Vec<bool>; 3],
 }
 
 impl Shape {
-    fn of(ty: &Type, parameters: &[Variable]) -> Self {
+    fn of(ty: &Type<ErrorWitness>, parameters: &[Variable]) -> Self {
         let mut renaming = Renaming::default();
         let ty = renamed(ty, &mut renaming);
         let marks = |variables: &mut dyn Iterator<Item = Variable>| {
@@ -469,7 +494,7 @@ impl Shape {
 
 /// A member's type as one round of linking reads it.
 struct Snapshot {
-    ty: Type,
+    ty: Type<ErrorWitness>,
     parameters: Vec<Variable>,
     shape: Shape,
     /// Every variable of `ty`, and whether it is a parameter. While each one
@@ -479,7 +504,11 @@ struct Snapshot {
 }
 
 impl Snapshot {
-    fn new(ty: &Type, binders: &BTreeSet<Variable>, subst: &Subst) -> Self {
+    fn new(
+        ty: &Type<ErrorWitness>,
+        binders: &BTreeSet<Variable>,
+        subst: &Subst<ErrorWitness>,
+    ) -> Self {
         let ty = resolved(ty, subst);
         let parameters = parameters(&ty, binders, subst);
         let leaves = variables(&ty)
@@ -494,7 +523,7 @@ impl Snapshot {
         }
     }
 
-    fn unchanged(&self, binders: &BTreeSet<Variable>, subst: &Subst) -> bool {
+    fn unchanged(&self, binders: &BTreeSet<Variable>, subst: &Subst<ErrorWitness>) -> bool {
         self.leaves.iter().all(|(variable, parameter)| {
             resolve(*variable, subst) == Resolved::Variable(*variable)
                 && *parameter == (!binders.contains(variable) && in_group(*variable, subst))
@@ -514,14 +543,18 @@ struct Link {
 /// determines them.
 struct Local {
     /// The member's type then, for diagnostics.
-    ty: Type,
+    ty: Type<ErrorWitness>,
     /// The group variables of its parameters' types, each marked as an
     /// authored binder or not.
     arguments: Vec<(Variable, bool)>,
 }
 
 impl Local {
-    fn new(ty: &Type, binders: &BTreeSet<Variable>, subst: &Subst) -> Self {
+    fn new(
+        ty: &Type<ErrorWitness>,
+        binders: &BTreeSet<Variable>,
+        subst: &Subst<ErrorWitness>,
+    ) -> Self {
         let ty = resolved(ty, subst);
         let arguments = match &ty {
             Type::Fn(arguments, _) => {
@@ -536,7 +569,7 @@ impl Local {
 /// The references and members of one completed group.
 struct Group<'a> {
     references: &'a [GroupReference],
-    members: &'a [(String, Type)],
+    members: &'a [(String, Type<ErrorWitness>)],
     binders: GroupBinders,
     /// Each reference's callee among the members. A callee whose signature
     /// was rejected was never inferred against its provisional scheme, so it
@@ -545,7 +578,11 @@ struct Group<'a> {
 }
 
 impl<'a> Group<'a> {
-    fn new(references: &'a [GroupReference], members: &'a [(String, Type)], env: &Env) -> Self {
+    fn new(
+        references: &'a [GroupReference],
+        members: &'a [(String, Type<ErrorWitness>)],
+        env: &Env,
+    ) -> Self {
         let member_index: BTreeMap<&str, usize> = members
             .iter()
             .enumerate()
@@ -572,13 +609,17 @@ pub(super) fn link_group_references(
     product: &mut InferenceProduct,
     env: &Env,
     vg: &mut VarGen,
-    subst: &mut Subst,
+    subst: &mut Subst<ErrorWitness>,
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
 ) {
     let component_checkpoint = errors.checkpoint();
     product.import_result_constraints(subst);
-    let (references, members, siblings) = product.take_group_links();
+    let GroupLinks {
+        references,
+        members,
+        siblings,
+    } = product.take_group_links();
     let group = Group::new(&references, &members, env);
     // The component owns both views of every reference. The raw graph keeps
     // result equations suspended and gives each reference its own instance;
@@ -614,7 +655,6 @@ pub(super) fn link_group_references(
         solve(
             &raw_group,
             &mut raw_product,
-            env,
             vg,
             &mut raw_subst,
             adt_reg,
@@ -632,7 +672,7 @@ pub(super) fn link_group_references(
         .iter()
         .map(|(_, ty)| Local::new(ty, &binder_classes, subst))
         .collect::<Vec<_>>();
-    if let Some(links) = solve(&group, product, env, vg, subst, adt_reg, errors, false) {
+    if let Some(links) = solve(&group, product, vg, subst, adt_reg, errors, false) {
         decide(&group, &links, &locals, subst, errors);
     }
     if errors.iter_since(component_checkpoint).next().is_some() {
@@ -760,7 +800,11 @@ pub(super) fn link_group_references(
 /// does not share take the reported error's witness, so a check waiting on
 /// one stays silent rather than reporting the same mismatch again
 /// (chelis#731 §C3).
-fn link_copies(link: &SiblingLink, subst: &mut Subst, errors: &mut DiagnosticSink<'_>) {
+fn link_copies(
+    link: &SiblingLink,
+    subst: &mut Subst<ErrorWitness>,
+    errors: &mut DiagnosticSink<'_>,
+) {
     let Some(error) = link
         .copies
         .iter()
@@ -771,8 +815,8 @@ fn link_copies(link: &SiblingLink, subst: &mut Subst, errors: &mut DiagnosticSin
     let own = resolved(&link.own, subst);
     let used = resolved(&link.ty, subst);
     let witness = report_witness(errors, sibling_disagreement(link, &own, &used, &error));
-    let shared = crate::env::free_tvars(&own);
-    for var in crate::env::free_tvars(&used) {
+    let shared = chelis_type_core::free_tvars(&own);
+    for var in chelis_type_core::free_tvars(&used) {
         if !shared.contains(&var) {
             let _ = unify(&Type::Var(var), &propagate(&witness), subst);
         }
@@ -783,13 +827,11 @@ fn link_copies(link: &SiblingLink, subst: &mut Subst, errors: &mut DiagnosticSin
 /// nothing. Returns each reference's latest link, or `None` when a reference
 /// could not be linked: the group is then rejected at that reference, and
 /// there is no solution to make the [04-INF-2] decision on.
-#[allow(clippy::too_many_arguments)]
 fn solve(
     group: &Group<'_>,
     product: &mut InferenceProduct,
-    env: &Env,
     vg: &mut VarGen,
-    subst: &mut Subst,
+    subst: &mut Subst<ErrorWitness>,
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
     carry_origins: bool,
@@ -850,7 +892,6 @@ fn solve(
                 let (ty, instances) = instance(
                     &snapshot.ty,
                     &snapshot.parameters,
-                    env,
                     vg,
                     subst,
                     origin_templates.as_ref(),
@@ -899,7 +940,7 @@ fn decide(
     group: &Group<'_>,
     links: &[Option<Link>],
     locals: &[Local],
-    subst: &mut Subst,
+    subst: &mut Subst<ErrorWitness>,
     errors: &mut DiagnosticSink<'_>,
 ) {
     let references = group.references;
@@ -993,7 +1034,7 @@ fn decide(
 /// Whether two of `variables`, distinct where they were collected, now
 /// denote one type that is not fully concrete. Two authored binders made one
 /// are [04-INF-6]'s to report, not this rule's.
-fn merges(variables: &[(Variable, bool)], subst: &Subst) -> bool {
+fn merges(variables: &[(Variable, bool)], subst: &Subst<ErrorWitness>) -> bool {
     let denotations = variables
         .iter()
         .map(|(variable, binder)| (Denotation::of(*variable, subst), *binder))
@@ -1012,7 +1053,11 @@ fn merges(variables: &[(Variable, bool)], subst: &Subst) -> bool {
 }
 
 /// Choose `chosen` as the parameter `own`: unify the two variables.
-fn identify(own: Variable, chosen: Variable, subst: &mut Subst) -> Result<(), TypeError> {
+fn identify(
+    own: Variable,
+    chosen: Variable,
+    subst: &mut Subst<ErrorWitness>,
+) -> Result<(), TypeError> {
     match (own, chosen) {
         (Variable::Type(own), Variable::Type(chosen)) => {
             unify(&Type::Var(own), &Type::Var(chosen), subst)
@@ -1043,7 +1088,7 @@ struct Renaming {
 }
 
 impl Renaming {
-    fn for_diagnostic(binders: &GroupBinders, subst: &Subst) -> Self {
+    fn for_diagnostic(binders: &GroupBinders, subst: &Subst<ErrorWitness>) -> Self {
         Self {
             binder_names: binders
                 .names
@@ -1075,7 +1120,7 @@ impl Renaming {
     }
 }
 
-fn renamed(ty: &Type, renaming: &mut Renaming) -> Type {
+fn renamed(ty: &Type<ErrorWitness>, renaming: &mut Renaming) -> Type<ErrorWitness> {
     match ty {
         Type::Var(var) => match renaming.binder_name(Variable::Type(*var)) {
             Some(name) => Type::adt(name.to_string(), Vec::new()),
@@ -1131,17 +1176,21 @@ fn renamed_dim(dim: &Dim, renaming: &mut Renaming) -> Dim {
 
 /// `ty` rendered for a diagnostic, its variables renamed in order of first
 /// occurrence.
-fn rendered(ty: &Type, binders: &GroupBinders, subst: &Subst) -> String {
+fn rendered(
+    ty: &Type<ErrorWitness>,
+    binders: &GroupBinders,
+    subst: &Subst<ErrorWitness>,
+) -> String {
     renamed(ty, &mut Renaming::for_diagnostic(binders, subst)).to_string()
 }
 
 /// The callee's body-determined type and the reference's type, rendered with
 /// one renaming so a variable they share reads the same in both.
 fn rendered_pair(
-    own: &Type,
-    reference: &Type,
+    own: &Type<ErrorWitness>,
+    reference: &Type<ErrorWitness>,
     binders: &GroupBinders,
-    subst: &Subst,
+    subst: &Subst<ErrorWitness>,
 ) -> (String, String) {
     let mut renaming = Renaming::for_diagnostic(binders, subst);
     let own = renamed(own, &mut renaming).to_string();
@@ -1162,10 +1211,10 @@ fn at_reference(mut error: CheckError, reference: &GroupReference) -> CheckError
 /// [04-INF-5]: the reference's use disagrees with the body-determined type.
 fn disagreement(
     reference: &GroupReference,
-    own: &Type,
+    own: &Type<ErrorWitness>,
     cause: &TypeError,
     binders: &GroupBinders,
-    subst: &Subst,
+    subst: &Subst<ErrorWitness>,
 ) -> CheckError {
     let (own, used) = rendered_pair(own, &reference.ty, binders, subst);
     let mut error = CheckError::new(
@@ -1195,8 +1244,8 @@ fn disagreement(
 /// keeps the kind of the mismatch that caused it.
 fn sibling_disagreement(
     link: &SiblingLink,
-    own: &Type,
-    used: &Type,
+    own: &Type<ErrorWitness>,
+    used: &Type<ErrorWitness>,
     cause: &TypeError,
 ) -> CheckError {
     let mut renaming = Renaming::default();
@@ -1224,9 +1273,9 @@ fn sibling_disagreement(
 /// [04-INF-3]: an instance that is neither the parameter nor fully concrete.
 fn not_admitted(
     reference: &GroupReference,
-    own: &Type,
+    own: &Type<ErrorWitness>,
     binders: &GroupBinders,
-    subst: &Subst,
+    subst: &Subst<ErrorWitness>,
 ) -> CheckError {
     let (own, used) = rendered_pair(own, &reference.ty, binders, subst);
     let mut error = CheckError::new(
@@ -1254,10 +1303,10 @@ fn not_admitted(
 fn merged(
     reference: &GroupReference,
     member: &str,
-    local: &Type,
-    solved: &Type,
+    local: &Type<ErrorWitness>,
+    solved: &Type<ErrorWitness>,
     binders: &GroupBinders,
-    subst: &Subst,
+    subst: &Subst<ErrorWitness>,
 ) -> CheckError {
     let local = rendered(local, binders, subst);
     let solved = rendered(solved, binders, subst);

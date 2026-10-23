@@ -1,66 +1,7 @@
 //! Unit tests for inference.
 
 use super::*;
-
-#[test]
-fn child_stamp_roles_cover_the_canonical_deep_vocabulary() {
-    // Since chelis#731 Phase 3 the ownership table is an exhaustive
-    // match over `DeepTag`, so completeness is compile-time and an
-    // unclassified tag is unrepresentable (the old string-keyed None
-    // arm no longer exists). This smoke keeps every row executed.
-    for tag in chelis_deep::DeepTag::ALL {
-        for index in 0..3 {
-            let _ = child_stamp_role(tag, index, 3);
-        }
-    }
-}
-
-#[test]
-fn structural_child_stamp_roles_match_owner_positions() {
-    use ChildStampRole::{
-        Binder, EffectHandler, ExplicitInferenceBypass, RuntimeExpr, Selector, Syntax, Type,
-    };
-    let cases = [
-        (DeepTag::Module, 0, 2, Binder),
-        (DeepTag::Module, 1, 2, ExplicitInferenceBypass),
-        (DeepTag::Def, 0, 2, Binder),
-        (DeepTag::Def, 1, 2, RuntimeExpr),
-        (DeepTag::Defsig, 1, 2, Type),
-        (DeepTag::Defsig, 1, 3, Syntax),
-        (DeepTag::Defsig, 1, 4, Syntax),
-        (DeepTag::Deftype, 0, 3, Binder),
-        (DeepTag::Deftype, 1, 3, Syntax),
-        (DeepTag::Deftype, 2, 3, Type),
-        (DeepTag::Typealias, 1, 3, Syntax),
-        (DeepTag::Typealias, 2, 3, Type),
-        (DeepTag::Fn, 0, 2, Binder),
-        (DeepTag::Fn, 1, 2, RuntimeExpr),
-        (DeepTag::HandleEffect, 0, 2, EffectHandler),
-        (DeepTag::HandleEffect, 1, 2, RuntimeExpr),
-        (DeepTag::Bind, 0, 4, Binder),
-        (DeepTag::Bind, 1, 4, RuntimeExpr),
-        (DeepTag::Arm, 0, 3, ExplicitInferenceBypass),
-        (DeepTag::Arm, 1, 3, RuntimeExpr),
-        (DeepTag::Record, 0, 2, Type),
-        (DeepTag::Record, 1, 2, ExplicitInferenceBypass),
-        (DeepTag::Access, 1, 2, Selector),
-        (DeepTag::TupleGet, 1, 2, Selector),
-        (DeepTag::Cast, 1, 2, Type),
-        (DeepTag::Grad, 1, 2, Selector),
-        (DeepTag::Vmap, 1, 2, Selector),
-        (DeepTag::PatAs, 0, 2, Binder),
-        (DeepTag::PatAs, 1, 2, ExplicitInferenceBypass),
-        (DeepTag::TTensor, 0, 2, Type),
-    ];
-    for (tag, index, arity, expected) in cases {
-        assert_eq!(
-            child_stamp_role(tag, index, arity),
-            expected,
-            "wrong child role for `{}` child {index}",
-            tag.as_str()
-        );
-    }
-}
+use crate::errors::ErrorWitness;
 
 fn check(src: &str) -> InferResult {
     let exprs = chelis_deep::parser::parse_str(src, &chelis_syntax_host::NativeStack).unwrap();
@@ -2031,6 +1972,5 @@ mod issue_3797;
 mod issue_3819;
 mod more;
 mod post_app_ledger_key;
-mod post_app_replay_precedence;
 mod recursion_uniformity;
 mod schedule_invariants;

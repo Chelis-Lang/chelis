@@ -27,6 +27,9 @@
 //! environment no copy outlives. [`PersistentMap`] and [`PersistentSet`] keep
 //! the same ordered boundary over shared storage, so a copy that outlives its
 //! scope costs O(1) to take and O(log n) per later change.
+//!
+//! The default `serde` feature enables the existing serialization contracts.
+//! Portable consumers can disable default features to omit serde.
 
 extern crate alloc;
 
@@ -37,11 +40,15 @@ use core::borrow::Borrow;
 use core::cmp::Ordering;
 use core::fmt;
 use core::iter::FromIterator;
+#[cfg(feature = "serde")]
 use core::marker::PhantomData;
 use core::ops::Index;
 
+#[cfg(feature = "serde")]
 use serde::de::{Error as _, SeqAccess, Visitor};
+#[cfg(feature = "serde")]
 use serde::ser::SerializeSeq;
+#[cfg(feature = "serde")]
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// A map whose public API cannot expose an incidental iteration order.
@@ -1059,6 +1066,7 @@ impl<T: Ord + Clone> FromIterator<T> for PersistentSet<T> {
     }
 }
 
+#[cfg(feature = "serde")]
 impl<K, V> Serialize for UnordMap<K, V>
 where
     K: Ord + Serialize,
@@ -1073,8 +1081,10 @@ where
     }
 }
 
+#[cfg(feature = "serde")]
 struct MapVisitor<K, V>(PhantomData<fn() -> (K, V)>);
 
+#[cfg(feature = "serde")]
 impl<'de, K, V> Visitor<'de> for MapVisitor<K, V>
 where
     K: Ord + Deserialize<'de>,
@@ -1097,6 +1107,7 @@ where
     }
 }
 
+#[cfg(feature = "serde")]
 impl<'de, K, V> Deserialize<'de> for UnordMap<K, V>
 where
     K: Ord + Deserialize<'de>,
@@ -1107,6 +1118,7 @@ where
     }
 }
 
+#[cfg(feature = "serde")]
 impl<T> Serialize for UnordSet<T>
 where
     T: Ord + Serialize,
@@ -1120,8 +1132,10 @@ where
     }
 }
 
+#[cfg(feature = "serde")]
 struct SetVisitor<T>(PhantomData<fn() -> T>);
 
+#[cfg(feature = "serde")]
 impl<'de, T> Visitor<'de> for SetVisitor<T>
 where
     T: Ord + Deserialize<'de>,
@@ -1143,6 +1157,7 @@ where
     }
 }
 
+#[cfg(feature = "serde")]
 impl<'de, T> Deserialize<'de> for UnordSet<T>
 where
     T: Ord + Deserialize<'de>,
@@ -1152,6 +1167,7 @@ where
     }
 }
 
+#[cfg(feature = "serde")]
 impl<K, V> Serialize for PersistentMap<K, V>
 where
     K: Ord + Serialize,
@@ -1169,6 +1185,7 @@ where
     }
 }
 
+#[cfg(feature = "serde")]
 impl<'de, K, V> Deserialize<'de> for PersistentMap<K, V>
 where
     K: Ord + Clone + Deserialize<'de>,
@@ -1180,6 +1197,7 @@ where
     }
 }
 
+#[cfg(feature = "serde")]
 impl<T> Serialize for PersistentSet<T>
 where
     T: Ord + Serialize,
@@ -1196,6 +1214,7 @@ where
     }
 }
 
+#[cfg(feature = "serde")]
 impl<'de, T> Deserialize<'de> for PersistentSet<T>
 where
     T: Ord + Clone + Deserialize<'de>,

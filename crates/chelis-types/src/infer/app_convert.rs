@@ -5,6 +5,7 @@
 //! `List`s and tensors.
 
 use super::*;
+use crate::errors::ErrorWitness;
 
 /// List-to-tensor and tensor-to-list conversion rules after generic
 /// application unification: `to_tensor`, `to_list`, `pad_sequences` and
@@ -18,13 +19,13 @@ pub(super) fn finish_conversion_app(
     source_site: CheckSite<'_>,
     node: &DeepNode,
     kids: &[deep::Expr],
-    arg_tys: &[Type],
-    result_ty: &Type,
+    arg_tys: &[Type<ErrorWitness>],
+    result_ty: &Type<ErrorWitness>,
     site: &UnresolvedOperandSite<'_>,
-    subst: &mut Subst,
+    subst: &mut Subst<ErrorWitness>,
     errors: &mut DiagnosticSink<'_>,
     product: &mut InferenceProduct,
-) -> Option<Type> {
+) -> Option<Type<ErrorWitness>> {
     match fname {
         "to_tensor" => {
             if kids
@@ -565,13 +566,13 @@ pub(super) fn untyped_to_tensor_element_error(element: &deep::Expr) -> CheckErro
 pub(super) fn require_to_tensor_leaf(
     expr: &deep::Expr,
     dtype_child: &deep::Expr,
-    argument: &Type,
+    argument: &Type<ErrorWitness>,
     env: &Env,
     vg: &mut VarGen,
-    subst: &mut Subst,
+    subst: &mut Subst<ErrorWitness>,
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
-) -> Result<(), Type> {
+) -> Result<(), Type<ErrorWitness>> {
     let dtype = {
         let mut resolver = DeepTypeResolver::new(
             TypeUseSite::Annotation,

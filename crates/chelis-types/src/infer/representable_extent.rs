@@ -112,7 +112,7 @@ struct Unrepresentable {
 
 /// The first tensor type within `ty` whose literal extents give an element
 /// count, suffix stride, or byte size outside i64.
-fn unrepresentable_tensor(ty: &Type) -> Option<Unrepresentable> {
+fn unrepresentable_tensor(ty: &Type<ErrorWitness>) -> Option<Unrepresentable> {
     match ty {
         Type::Tensor(dims, TensorPrec::Concrete(prim)) => {
             let extents = dims

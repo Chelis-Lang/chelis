@@ -69,6 +69,7 @@
 //! and compares a stored lowering, and reruns those checkers where the
 //! payload carries none (chelis#2558).
 
+use crate::errors::ErrorWitness;
 use chelis_unord::UnordSet;
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -80,8 +81,8 @@ use sha2::{Digest, Sha256};
 use crate::adt::AdtRegistry;
 use crate::builtins;
 use crate::env::Env;
-use crate::types::VarGen;
-use crate::unify::Subst;
+use chelis_type_core::Subst;
+use chelis_type_core::VarGen;
 
 /// Opaque identity derived from an accepted checked library and its base.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -222,7 +223,7 @@ pub(crate) struct TypeEnvInner {
     /// for new-code checking start above the library's last allocation.
     pub(crate) var_gen: VarGen,
     /// Substitution carrying any library-derived constraints.
-    pub(crate) subst: Subst,
+    pub(crate) subst: Subst<ErrorWitness>,
     /// ADT registry containing library `deftype`s, type aliases, and
     /// prelude ADTs (Option, List, etc).
     pub(crate) adt_reg: AdtRegistry,
@@ -254,7 +255,11 @@ impl TypeEnv {
     /// This scope with one extra binding, for tests that check a program
     /// against an exact scheme under a name no builtin route claims.
     #[cfg(test)]
-    pub(crate) fn with_test_binding(&self, name: &str, scheme: crate::types::Scheme) -> Self {
+    pub(crate) fn with_test_binding(
+        &self,
+        name: &str,
+        scheme: chelis_type_core::Scheme<ErrorWitness>,
+    ) -> Self {
         let mut inner = (*self.inner).clone();
         inner.env.bind(name.to_string(), scheme);
         Self {
@@ -277,7 +282,7 @@ impl TypeEnv {
             inner: Arc::new(TypeEnvInner {
                 env,
                 var_gen,
-                subst: Subst::new(),
+                subst: Subst::<ErrorWitness>::new(),
                 adt_reg,
                 ir_types: BTreeMap::new(),
                 library_def_names: UnordSet::new(),
@@ -336,7 +341,7 @@ impl TypeEnv {
     /// Public package metadata uses this immutable view so quantified-domain
     /// restrictions remain attached to function values at serialization
     /// boundaries instead of being reconstructed from a printed type.
-    pub fn scheme(&self, name: &str) -> Option<&crate::types::Scheme> {
+    pub fn scheme(&self, name: &str) -> Option<&chelis_type_core::Scheme<ErrorWitness>> {
         self.inner.env.lookup(name)
     }
 
@@ -364,16 +369,16 @@ impl TypeEnv {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{Dim, Scheme, TensorPrec, Type, TypeVarRestriction};
-    use crate::unify::unify;
     use chelis_numeric_core::prim::Prim;
+    use chelis_type_core::unify;
+    use chelis_type_core::{Dim, Scheme, TensorPrec, Type, TypeVarRestriction};
 
     #[test]
     fn result_origin_is_mandatory_in_schemes_and_contexts() {
-        let scheme = Scheme::mono(Type::Prim(Prim::F32));
+        let scheme = Scheme::<ErrorWitness>::mono(Type::Prim(Prim::F32));
         let mut wire = serde_json::to_value(&scheme).unwrap();
         wire.as_object_mut().unwrap().remove("result_origin");
-        assert!(serde_json::from_value::<Scheme>(wire).is_err());
+        assert!(serde_json::from_value::<Scheme<ErrorWitness>>(wire).is_err());
         let mut wire = serde_json::to_value(TypeEnv::empty()).unwrap();
         for version in [6, 7, 8, 9, 10, 11, 12, 13] {
             wire["format_version"] = serde_json::json!(version);
@@ -405,12 +410,12 @@ mod tests {
         for label in ["fixed", "_", "", "two words"] {
             let mut inner = TypeEnv::empty().inner().clone();
             let v = if label == "fixed" {
-                crate::types::DimVar(u32::MAX)
+                chelis_type_core::DimVar(u32::MAX)
             } else {
                 inner.var_gen.fresh_dvar()
             };
             inner.subst.protect_dimensions([v]);
-            crate::unify::unify_dim(&Dim::Var(v), &Dim::Name(label.into()), &mut inner.subst)
+            chelis_type_core::unify_dim(&Dim::Var(v), &Dim::Name(label.into()), &mut inner.subst)
                 .unwrap();
             let encoded = bincode::serialize(&TypeEnv::from_inner(inner)).unwrap();
             assert!(
@@ -517,9 +522,7 @@ mod tests {
                     .any(|(_, bound)| *bound == restriction)
             );
             let Type::Fn(params, _) =
-                resumed
-                    .env
-                    .instantiate(&scheme, &mut resumed.var_gen, &resumed.subst)
+                chelis_type_core::instantiate(&scheme, &mut resumed.var_gen, &resumed.subst)
             else {
                 panic!("operation remains callable");
             };
@@ -542,7 +545,7 @@ mod tests {
             .expect_err("late dtype binding must enforce the deserialized family");
             assert!(matches!(
                 error.kind,
-                crate::unify::TypeErrorKind::DtypeFamilyMismatch
+                chelis_type_core::TypeErrorKind::DtypeFamilyMismatch
             ));
         }
     }
@@ -576,9 +579,8 @@ mod tests {
             scheme.tvar_restrictions,
             vec![(scheme.tvars[0], TypeVarRestriction::ActiveFloat)]
         );
-        let instantiated = resumed
-            .env
-            .instantiate(&scheme, &mut resumed.var_gen, &resumed.subst);
+        let instantiated =
+            chelis_type_core::instantiate(&scheme, &mut resumed.var_gen, &resumed.subst);
         let Type::Fn(params, _) = instantiated else {
             panic!("assert-close scheme must remain callable");
         };
@@ -594,7 +596,7 @@ mod tests {
         .expect_err("round-tripped restriction must reject i32");
         assert!(matches!(
             error.kind,
-            crate::unify::TypeErrorKind::DtypeFamilyMismatch
+            chelis_type_core::TypeErrorKind::DtypeFamilyMismatch
         ));
 
         let mut float_trial = resumed.subst.clone();

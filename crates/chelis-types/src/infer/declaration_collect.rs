@@ -6,6 +6,7 @@
 //! and the duplicate, orphan and builtin-shadowing reports it owns.
 
 use super::*;
+use crate::errors::ErrorWitness;
 
 // ── Declaration collection (first pass) ──────────────────────────
 
@@ -79,7 +80,7 @@ pub(super) fn collect_all_declarations(
     declaration_diagnostic_owners: &[Option<DeclarationDiagnosticOwner>],
     env: &mut Env,
     vg: &mut VarGen,
-    subst: &mut Subst,
+    subst: &mut Subst<ErrorWitness>,
     adt_reg: &mut AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
 ) {
@@ -381,7 +382,7 @@ pub(super) fn build_opacity_meta(
     let mut meta = crate::opacity::OpacityModuleMeta::default();
     // Declared signature types (from `defsig` nodes) for producer
     // display; keyed by binding name like `meta.bindings`.
-    let mut declared_sigs: UnordMap<String, Type> = UnordMap::new();
+    let mut declared_sigs: UnordMap<String, Type<ErrorWitness>> = UnordMap::new();
     // Pass 1: export sets. Lexical `(export ...)` nodes attribute to
     // their module wrapper; package-linked exports arrive as
     // top-level nodes whose names carry the reef internal-name stem
@@ -788,7 +789,7 @@ pub(super) fn collect_declarations(
     lexical_module: Option<&str>,
     env: &mut Env,
     vg: &mut VarGen,
-    subst: &mut Subst,
+    subst: &mut Subst<ErrorWitness>,
     adt_reg: &mut AdtRegistry,
     headers: &TypeResolutionEnv,
     errors: &mut DiagnosticSink<'_>,

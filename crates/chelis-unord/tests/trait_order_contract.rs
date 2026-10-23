@@ -4,6 +4,7 @@ use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 
 use chelis_unord::{UnordMap, UnordSet};
+#[cfg(feature = "serde")]
 use serde::{Serialize, Serializer};
 
 #[derive(Default)]
@@ -64,6 +65,7 @@ impl Hash for Key {
     }
 }
 
+#[cfg(feature = "serde")]
 impl Serialize for Key {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         self.trace.record(format!("key-serialize: {}", self.value));
@@ -94,6 +96,7 @@ impl PartialEq for Value {
     }
 }
 
+#[cfg(feature = "serde")]
 impl Serialize for Value {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         self.trace
@@ -182,11 +185,14 @@ fn public_trait_callbacks_run_in_canonical_key_order() {
             "the ordered exit must not run a user comparison callback"
         );
 
-        assert_eq!(
-            serde_json::to_vec(&value).unwrap(),
-            br#"[[0,0],[1,1],[2,2],[3,3],[4,4]]"#
-        );
-        assert_eq!(trace.take(), expected_pair_events("serialize"));
+        #[cfg(feature = "serde")]
+        {
+            assert_eq!(
+                serde_json::to_vec(&value).unwrap(),
+                br#"[[0,0],[1,1],[2,2],[3,3],[4,4]]"#
+            );
+            assert_eq!(trace.take(), expected_pair_events("serialize"));
+        }
     }
 }
 
@@ -239,13 +245,16 @@ fn set_trait_surfaces_share_the_structural_order_guarantee() {
             .map(|value| format!("key-eq: {value} {value}"))
             .collect::<Vec<_>>()
     );
-    assert_eq!(serde_json::to_vec(&set).unwrap(), br#"[0,1,2,3,4]"#);
-    assert_eq!(
-        trace.take(),
-        (0..5)
-            .map(|value| format!("key-serialize: {value}"))
-            .collect::<Vec<_>>()
-    );
+    #[cfg(feature = "serde")]
+    {
+        assert_eq!(serde_json::to_vec(&set).unwrap(), br#"[0,1,2,3,4]"#);
+        assert_eq!(
+            trace.take(),
+            (0..5)
+                .map(|value| format!("key-serialize: {value}"))
+                .collect::<Vec<_>>()
+        );
+    }
 }
 
 struct DropKey {

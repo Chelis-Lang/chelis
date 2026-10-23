@@ -19,20 +19,21 @@ use crate::adt::AdtRegistry;
 use crate::env::DeclarationBinderIdentities;
 use crate::errors::{CheckError, CheckErrorKind, ErrorWitness, report_witness};
 use crate::session::{DeclarationDiagnosticOwner, DeclarationTypeDiagnosticClass, DiagnosticSink};
-use crate::types::{
+use chelis_numeric_core::prim::Prim;
+use chelis_type_core::model::{
     Dim, DimVar, NominalArg, NominalParamKind, RankVar, TensorPrec, Type, TypeVar,
     TypeVarRestriction, VarGen,
 };
-use chelis_numeric_core::prim::Prim;
 
+use chelis_type_core::decisions::SourceLabel;
 /// A type that crossed the Deep syntax boundary without a silent fallback.
 /// The tuple field is private so callers cannot assert resolution without
 /// going through [`DeepTypeResolver::resolve`].
 #[derive(Debug, Clone)]
-pub(crate) struct ResolvedDeepType(Type);
+pub(crate) struct ResolvedDeepType(Type<ErrorWitness>);
 
 impl ResolvedDeepType {
-    pub(crate) fn into_type(self) -> Type {
+    pub(crate) fn into_type(self) -> Type<ErrorWitness> {
         self.0
     }
 }
@@ -112,18 +113,43 @@ impl TypeDiagnosticLocation {
         })
     }
 
-    pub(crate) fn attach(&self, mut error: CheckError) -> CheckError {
-        // A location belongs to one node: filling either missing component on
-        // an already located error would mix two different source nodes.
+    pub(crate) fn attach(&self, error: CheckError) -> CheckError {
+        Self::attach_parts(self.span_offset, &self.span_id, error)
+    }
+
+    pub(crate) fn attach_source_label(label: &SourceLabel, error: CheckError) -> CheckError {
+        Self::attach_parts(label.span_offset, &label.span_id, error)
+    }
+
+    fn attach_parts(
+        span_offset: Option<usize>,
+        span_id: &Option<String>,
+        mut error: CheckError,
+    ) -> CheckError {
+        // Both fields must belong to the same source node.
         if error.span_offset.is_none() && error.span_id.is_none() {
-            error.span_offset = self.span_offset;
-            error.span_id.clone_from(&self.span_id);
+            error.span_offset = span_offset;
+            error.span_id.clone_from(span_id);
         }
         error
     }
 
     pub(crate) fn stable_key(&self) -> (Option<usize>, Option<&str>) {
         (self.span_offset, self.span_id.as_deref())
+    }
+
+    pub(crate) fn into_source_label(self) -> SourceLabel {
+        SourceLabel {
+            span_offset: self.span_offset,
+            span_id: self.span_id,
+        }
+    }
+
+    pub(crate) fn from_source_label(label: SourceLabel) -> Self {
+        Self {
+            span_offset: label.span_offset,
+            span_id: label.span_id,
+        }
     }
 }
 
@@ -180,7 +206,7 @@ impl TypeResolutionEnv {
             name: &str,
             parameters: &[String],
             kinds: &[NominalParamKind],
-            arguments: &[NominalArg],
+            arguments: &[NominalArg<ErrorWitness>],
             type_variables: &[TypeVar],
         ) -> Result<(), String> {
             if parameters.len() != kinds.len() || parameters.len() != arguments.len() {
@@ -589,7 +615,7 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
         self.current_location = Some(TypeDiagnosticLocation::from_expr(expr).unwrap_or_default());
     }
 
-    fn resolve_type(&mut self, expr: &deep::Expr) -> Result<Type, ErrorWitness> {
+    fn resolve_type(&mut self, expr: &deep::Expr) -> Result<Type<ErrorWitness>, ErrorWitness> {
         let (form, tag, children) = self.type_form_expr(expr)?;
         self.recover_parts(form, tag, children).into_result()
     }
@@ -599,7 +625,7 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
         form_tag: Option<DeepTag>,
         tag: &str,
         children: &[deep::Expr],
-    ) -> Result<Type, ErrorWitness> {
+    ) -> Result<Type<ErrorWitness>, ErrorWitness> {
         match form_tag {
             Some(DeepTag::TPrim) => {
                 let name = self.one_symbol(tag, children)?;
@@ -1262,7 +1288,7 @@ fn render_expr(expr: &deep::Expr) -> String {
 
 #[cfg(test)]
 mod diagnostic_location_tests {
-    use super::TypeDiagnosticLocation;
+    use super::{SourceLabel, TypeDiagnosticLocation};
     use crate::errors::{CheckError, CheckErrorKind};
     use chelis_deep::Span;
 
@@ -1290,5 +1316,24 @@ mod diagnostic_location_tests {
         let result = measured.attach(complete.attach(make_error()));
         assert_eq!(result.span_offset, Some(73));
         assert_eq!(result.span_id.as_deref(), Some("surf:73..77"));
+    }
+
+    #[test]
+    fn portable_source_label_preserves_one_host_location() {
+        let label = SourceLabel {
+            span_offset: Some(31),
+            span_id: Some("producer:type".to_string()),
+        };
+        let location = TypeDiagnosticLocation::from_source_label(label.clone());
+        assert_eq!(location.into_source_label(), label);
+        let error = CheckError::new(CheckErrorKind::Other, "failure".to_string(), vec![]);
+        let attached = TypeDiagnosticLocation::attach_source_label(&label, error.clone());
+        assert_eq!(attached.span_offset, Some(31));
+        assert_eq!(attached.span_id.as_deref(), Some("producer:type"));
+        let mut located = error;
+        located.span_id = Some("other:node".to_string());
+        let attached = TypeDiagnosticLocation::attach_source_label(&label, located);
+        assert_eq!(attached.span_offset, None);
+        assert_eq!(attached.span_id.as_deref(), Some("other:node"));
     }
 }

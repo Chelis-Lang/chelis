@@ -499,7 +499,7 @@ mod artifact_outcome_tests {
             .as_ref()
             .expect("requested rows must be reported");
         assert!(
-            rows["logged"].contains(&chelis_types::types::Effect::Io),
+            rows["logged"].contains(&chelis_type_core::Effect::Io),
             "`debug` is an IO source, got {}",
             rows["logged"]
         );

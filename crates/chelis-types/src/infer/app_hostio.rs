@@ -4,8 +4,9 @@
 //! compatibility builtin is registered here.
 
 use super::*;
+use crate::errors::ErrorWitness;
 
-fn csv_table_ty() -> Type {
+fn csv_table_ty() -> Type<ErrorWitness> {
     Type::adt(
         "List".to_string(),
         vec![Type::adt(
@@ -20,8 +21,8 @@ fn reject_host_builtin_slot(
     node: &DeepNode,
     fname: &str,
     slot_description: &str,
-    got: &Type,
-) -> Type {
+    got: &Type<ErrorWitness>,
+) -> Type<ErrorWitness> {
     report(
         errors,
         CheckError::new(
@@ -39,11 +40,11 @@ fn unify_host_slot(
     errors: &mut DiagnosticSink<'_>,
     node: &DeepNode,
     fname: &str,
-    slot: &Type,
-    expected: &Type,
+    slot: &Type<ErrorWitness>,
+    expected: &Type<ErrorWitness>,
     slot_description: &str,
-    subst: &mut Subst,
-) -> Option<Type> {
+    subst: &mut Subst<ErrorWitness>,
+) -> Option<Type<ErrorWitness>> {
     // chelis#1489: decide this BEFORE unifying. `unify` binds an unbound
     // variable to `expected` and returns Ok, so a variable check placed after
     // the unification can never see one -- it would be dead code, and an
@@ -83,11 +84,11 @@ fn unify_host_slot_eager(
     errors: &mut DiagnosticSink<'_>,
     node: &DeepNode,
     fname: &str,
-    slot: &Type,
-    expected: &Type,
+    slot: &Type<ErrorWitness>,
+    expected: &Type<ErrorWitness>,
     slot_description: &str,
-    subst: &mut Subst,
-) -> Option<Type> {
+    subst: &mut Subst<ErrorWitness>,
+) -> Option<Type<ErrorWitness>> {
     if unify(slot, expected, subst).is_err() {
         return Some(reject_host_builtin_slot(
             errors,
@@ -105,10 +106,10 @@ fn loose_integer_host_slot(
     errors: &mut DiagnosticSink<'_>,
     node: &DeepNode,
     fname: &str,
-    slot: &Type,
+    slot: &Type<ErrorWitness>,
     slot_description: &str,
-    subst: &mut Subst,
-) -> Option<Type> {
+    subst: &mut Subst<ErrorWitness>,
+) -> Option<Type<ErrorWitness>> {
     let ok = match slot {
         Type::Prim(p) => p.is_integer(),
         Type::Error(_) => true,
@@ -123,10 +124,10 @@ fn loose_integer_host_slot(
 /// [05-OP-1]: `round_to` admits every active float dtype and returns it.
 pub(super) fn check_round_to_builtin_signature(
     node: &DeepNode,
-    arg_tys: &[Type],
-    subst: &mut Subst,
+    arg_tys: &[Type<ErrorWitness>],
+    subst: &mut Subst<ErrorWitness>,
     errors: &mut DiagnosticSink<'_>,
-) -> Type {
+) -> Type<ErrorWitness> {
     const FNAME: &str = "round_to";
     if arg_tys.len() != 2 {
         return report_builtin_arity(errors, node, CheckSite::Node(node), FNAME, 2, arg_tys.len());
@@ -178,10 +179,10 @@ pub(super) fn check_round_to_builtin_signature(
 pub(super) fn check_csv_builtin_signature(
     fname: &str,
     node: &DeepNode,
-    arg_tys: &[Type],
-    subst: &mut Subst,
+    arg_tys: &[Type<ErrorWitness>],
+    subst: &mut Subst<ErrorWitness>,
     errors: &mut DiagnosticSink<'_>,
-) -> Type {
+) -> Type<ErrorWitness> {
     let expected_arity = match fname {
         "parse_csv" | "to_csv" | "csv_nrows" | "csv_cols" => 1,
         "csv_f64" | "csv_int" | "csv_str" => 3,
@@ -273,11 +274,11 @@ pub(super) fn infer_mmap_tensor_app(
     node: &DeepNode,
     env: &mut Env,
     vg: &mut VarGen,
-    subst: &mut Subst,
+    subst: &mut Subst<ErrorWitness>,
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
     product: &mut InferenceProduct,
-) -> Type {
+) -> Type<ErrorWitness> {
     const FNAME: &str = "mmap_tensor";
     let kids = node.children_slice();
     let dtype_child = kids.last().filter(|child| {
@@ -304,7 +305,7 @@ pub(super) fn infer_mmap_tensor_app(
         );
     };
     let callee_ty = super::app::infer_callee(&kids[0], env, vg, subst, adt_reg, errors, product);
-    let arg_tys: Vec<Type> = kids[1..4]
+    let arg_tys: Vec<Type<ErrorWitness>> = kids[1..4]
         .iter()
         .map(|arg| infer_expr(arg, env, vg, subst, adt_reg, errors, product))
         .collect();

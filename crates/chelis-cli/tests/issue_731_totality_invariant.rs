@@ -60,7 +60,8 @@
 //! Naming the count here so the census does not understate the filed set.
 
 use chelis_deep::ast as deep;
-use chelis_types::types::Type;
+use chelis_type_core::Type;
+use chelis_types::errors::ErrorWitness;
 use chelis_types::{CheckedProgram, InferResult};
 
 const WELL_TYPED: &str = "add(cast(1.0, f32), cast(2.0, f32))";
@@ -215,7 +216,7 @@ fn collect_tree_traces(expr: &deep::Expr, path: &str, check_stamp: bool, out: &m
     }
 }
 
-fn type_contains_error(ty: &Type) -> bool {
+fn type_contains_error(ty: &Type<ErrorWitness>) -> bool {
     match ty {
         Type::Error(_) => true,
         Type::Fn(args, ret) => args.iter().any(type_contains_error) || type_contains_error(ret),

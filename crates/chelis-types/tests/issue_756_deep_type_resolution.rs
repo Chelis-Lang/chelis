@@ -12,8 +12,8 @@
 //! spec/04-type-system.md §10 [04-TOT-2];
 //! spec/design/checker_totality.md §C3.1.
 
+use chelis_type_core::Type;
 use chelis_types::errors::CheckErrorKind;
-use chelis_types::types::Type;
 use chelis_types::{build_type_env_from_library, check_ir_program, check_ir_with_context};
 
 fn parse(source: &str) -> Vec<chelis_deep::Expr> {

@@ -1,6 +1,7 @@
 //! Result equations and their origin across generalization and application.
 
 use super::*;
+use crate::errors::ErrorWitness;
 use std::sync::Arc;
 
 impl InferenceProduct {
@@ -14,9 +15,9 @@ impl InferenceProduct {
     /// type unification. Each replay reads it anew from the remaining producers.
     pub(in crate::infer) fn defer_result_type_constraint(
         &mut self,
-        actual: &Type,
-        declared: &Type,
-        subst: &mut Subst,
+        actual: &Type<ErrorWitness>,
+        declared: &Type<ErrorWitness>,
+        subst: &mut Subst<ErrorWitness>,
     ) -> bool {
         // Reject an incompatible annotation through its owning syntax boundary,
         // before a deferred replay could replace its diagnostic.
@@ -49,31 +50,32 @@ impl InferenceProduct {
     /// Its result equation must not turn those independent slots into one wait.
     fn unify_ready_result_parts(
         &self,
-        actual: &Type,
-        declared: &Type,
-        subst: &mut Subst,
+        actual: &Type<ErrorWitness>,
+        declared: &Type<ErrorWitness>,
+        subst: &mut Subst<ErrorWitness>,
     ) -> Result<bool, TypeError> {
         let actual = resolved(actual, subst);
         let declared = resolved(declared, subst);
         if actual == declared {
             return Ok(true);
         }
-        let pairs: Option<Vec<(&Type, &Type)>> = match (&actual, &declared) {
-            (Type::Fn(a, ar), Type::Fn(b, br)) if a.len() == b.len() => Some(
-                a.iter()
-                    .zip(b.iter())
-                    .chain(std::iter::once((ar.as_ref(), br.as_ref())))
-                    .collect(),
-            ),
-            (Type::Tuple(a), Type::Tuple(b)) if a.len() == b.len() => {
-                Some(a.iter().zip(b.iter()).collect())
-            }
-            (Type::Adt(a, aa), Type::Adt(b, ba)) if a == b && aa.len() == ba.len() => {
-                Some(aa.iter().zip(ba.iter()).collect())
-            }
-            (Type::Ref(a), Type::Ref(b)) => Some(vec![(a.as_ref(), b.as_ref())]),
-            _ => None,
-        };
+        let pairs: Option<Vec<(&Type<ErrorWitness>, &Type<ErrorWitness>)>> =
+            match (&actual, &declared) {
+                (Type::Fn(a, ar), Type::Fn(b, br)) if a.len() == b.len() => Some(
+                    a.iter()
+                        .zip(b.iter())
+                        .chain(std::iter::once((ar.as_ref(), br.as_ref())))
+                        .collect(),
+                ),
+                (Type::Tuple(a), Type::Tuple(b)) if a.len() == b.len() => {
+                    Some(a.iter().zip(b.iter()).collect())
+                }
+                (Type::Adt(a, aa), Type::Adt(b, ba)) if a == b && aa.len() == ba.len() => {
+                    Some(aa.iter().zip(ba.iter()).collect())
+                }
+                (Type::Ref(a), Type::Ref(b)) => Some(vec![(a.as_ref(), b.as_ref())]),
+                _ => None,
+            };
         if let Some(pairs) = pairs {
             let mut ready = true;
             for (actual, declared) in pairs {
@@ -83,7 +85,8 @@ impl InferenceProduct {
         }
         if !self.result_has_pending_producer(&actual, subst)
             && !self.result_has_pending_producer(&declared, subst)
-            && (crate::env::free_tvars(&actual).is_empty() || is_closed_first_order(&declared))
+            && (chelis_type_core::free_tvars(&actual).is_empty()
+                || is_closed_first_order(&declared))
         {
             unify(&actual, &declared, subst)?;
             Ok(true)
@@ -92,15 +95,22 @@ impl InferenceProduct {
         }
     }
 
-    fn result_has_pending_producer(&self, actual: &Type, subst: &Subst) -> bool {
+    fn result_has_pending_producer(
+        &self,
+        actual: &Type<ErrorWitness>,
+        subst: &Subst<ErrorWitness>,
+    ) -> bool {
         self.result_has_pending_producer_with(actual, subst, false)
     }
 
-    fn result_has_open_inputs(&self, ty: &Type, subst: &Subst) -> bool {
-        !crate::env::free_tvars(&resolved(ty, subst)).is_empty()
+    fn result_has_open_inputs(&self, ty: &Type<ErrorWitness>, subst: &Subst<ErrorWitness>) -> bool {
+        !chelis_type_core::free_tvars(&resolved(ty, subst)).is_empty()
     }
 
-    pub(in crate::infer) fn import_result_constraints(&mut self, subst: &Subst) -> bool {
+    pub(in crate::infer) fn import_result_constraints(
+        &mut self,
+        subst: &Subst<ErrorWitness>,
+    ) -> bool {
         let equations = subst.take_result_constraints();
         let imported = !equations.is_empty();
         for equation in equations {
@@ -126,16 +136,16 @@ impl InferenceProduct {
     /// even when no semantic producer existed when the helper was inferred.
     pub(in crate::infer) fn generalize_result_origins(
         &mut self,
-        ty: &Type,
+        ty: &Type<ErrorWitness>,
         env: &Env,
-        subst: &Subst,
+        subst: &Subst<ErrorWitness>,
         owned_contracts: Option<&[CollectionContractId]>,
         errors: &mut DiagnosticSink<'_>,
-    ) -> Scheme {
+    ) -> Scheme<ErrorWitness> {
         self.import_result_constraints(subst);
         let body = resolved(ty, subst);
         let equations = self.result_equations_for(&body, subst);
-        let generalize = |ty: &Type| {
+        let generalize = |ty: &Type<ErrorWitness>| {
             env.generalize_with_result_constraints(ty, subst, owned_contracts, &equations)
         };
         if equations.is_empty() {
@@ -188,7 +198,7 @@ impl InferenceProduct {
                 true
             }
         });
-        let free = crate::env::free_tvars(&scheme.body);
+        let free = chelis_type_core::free_tvars(&scheme.body);
         scheme.tvars = origin
             .tvars
             .iter()
@@ -204,11 +214,13 @@ impl InferenceProduct {
                     .map(|restriction| (*variable, restriction))
             })
             .collect();
-        let closed_key_variables = crate::env::closed_key_relation_variables(&scheme);
+        let closed_key_variables = chelis_type_core::closed_key_relation_variables(&scheme);
         for variable in &scheme.tvars {
             if !closed_key_variables.contains(variable) {
-                subst
-                    .forbid_key_instantiation(*variable, crate::unify::GenericParameter::default());
+                subst.forbid_key_instantiation(
+                    *variable,
+                    chelis_type_core::GenericParameter::default(),
+                );
             }
         }
         scheme.result_origin = Some(origin);
@@ -230,9 +242,9 @@ impl InferenceProduct {
     /// with an unresolved gradient's inputs.
     pub(in crate::infer) fn callable_result_alternatives(
         &self,
-        ty: &Type,
-        subst: &Subst,
-    ) -> Vec<Type> {
+        ty: &Type<ErrorWitness>,
+        subst: &Subst<ErrorWitness>,
+    ) -> Vec<Type<ErrorWitness>> {
         let equations = self.result_equations_for(&resolved(ty, subst), subst);
         let mut alternatives = vec![resolved(ty, subst)];
         loop {
@@ -266,10 +278,10 @@ impl InferenceProduct {
 
     pub(in crate::infer) fn result_equations_for(
         &self,
-        body: &Type,
-        subst: &Subst,
-    ) -> Vec<ResultConstraint> {
-        let mut available: Vec<ResultConstraint> = self
+        body: &Type<ErrorWitness>,
+        subst: &Subst<ErrorWitness>,
+    ) -> Vec<ResultConstraint<ErrorWitness>> {
+        let mut available: Vec<ResultConstraint<ErrorWitness>> = self
             .result_type_constraints
             .iter()
             .map(|constraint| {
@@ -294,7 +306,7 @@ impl InferenceProduct {
                     }
                 }),
         );
-        let mut visible = crate::env::free_tvars(body);
+        let mut visible = chelis_type_core::free_tvars(body);
         let mut equations = Vec::new();
         loop {
             let before = equations.len();
@@ -304,7 +316,7 @@ impl InferenceProduct {
                 let variables: Vec<_> = equation
                     .types()
                     .into_iter()
-                    .flat_map(crate::env::free_tvars)
+                    .flat_map(chelis_type_core::free_tvars)
                     .collect();
                 if variables.iter().any(|variable| visible.contains(variable)) {
                     visible.extend(variables);
@@ -323,11 +335,11 @@ impl InferenceProduct {
 
     fn result_has_pending_producer_with(
         &self,
-        actual: &Type,
-        subst: &Subst,
+        actual: &Type<ErrorWitness>,
+        subst: &Subst<ErrorWitness>,
         binding_only: bool,
     ) -> bool {
-        let mut variables = crate::env::free_tvars(&resolved(actual, subst));
+        let mut variables = chelis_type_core::free_tvars(&resolved(actual, subst));
         variables.sort_unstable();
         variables.dedup();
         if variables.is_empty() {
@@ -340,7 +352,7 @@ impl InferenceProduct {
         let contract_results: Vec<_> = subst
             .pending_collection_contracts()
             .iter()
-            .flat_map(|(_, _, constraint)| crate::env::free_tvars(constraint.result()))
+            .flat_map(|(_, _, constraint)| chelis_type_core::free_tvars(constraint.result()))
             .collect();
         loop {
             let before = variables.len();
@@ -353,7 +365,7 @@ impl InferenceProduct {
             for check in &self.deferred_shape_checks {
                 #[cfg(test)]
                 super::record_result_replay_work(if binding_only { 1 } else { 4 });
-                if !crate::env::free_tvars(&resolved(&check.result_ty, subst))
+                if !chelis_type_core::free_tvars(&resolved(&check.result_ty, subst))
                     .iter()
                     .any(|variable| variables.contains(variable))
                 {
@@ -386,7 +398,7 @@ impl InferenceProduct {
                             );
                         }
                     }
-                    variables.extend(corresponding.iter().flat_map(crate::env::free_tvars));
+                    variables.extend(corresponding.iter().flat_map(chelis_type_core::free_tvars));
                     variables.sort_unstable();
                     variables.dedup();
                     continue;
@@ -416,7 +428,11 @@ impl InferenceProduct {
         self.result_inputs_closed = true;
     }
 
-    fn is_group_result_variable(&self, ty: &Type, subst: &Subst) -> bool {
+    fn is_group_result_variable(
+        &self,
+        ty: &Type<ErrorWitness>,
+        subst: &Subst<ErrorWitness>,
+    ) -> bool {
         let Type::Var(variable) = resolved(ty, subst) else {
             return false;
         };
@@ -428,18 +444,18 @@ impl InferenceProduct {
             .chain(self.sibling_links.iter().map(|link| &link.ty))
             .chain(self.closing_group_types.iter())
             .any(|ty| match resolved(ty, subst) {
-                Type::Fn(_, result) => crate::env::free_tvars(&result).contains(&variable),
+                Type::Fn(_, result) => chelis_type_core::free_tvars(&result).contains(&variable),
                 _ => false,
             })
     }
 
     pub(in crate::infer) fn defer_result_join(
         &mut self,
-        left: &Type,
-        right: &Type,
+        left: &Type<ErrorWitness>,
+        right: &Type<ErrorWitness>,
         vg: &mut VarGen,
-        subst: &Subst,
-    ) -> Option<Type> {
+        subst: &Subst<ErrorWitness>,
+    ) -> Option<Type<ErrorWitness>> {
         if !self.result_has_pending_producer_with(left, subst, true)
             && !self.result_has_pending_producer_with(right, subst, true)
             && ![left, right]
@@ -467,9 +483,9 @@ impl InferenceProduct {
     /// indivisible: exposing its shape must not erase its origin for later use.
     fn settle_ready_join_parts(
         &self,
-        inputs: &[Type],
-        published: &Type,
-        subst: &mut Subst,
+        inputs: &[Type<ErrorWitness>],
+        published: &Type<ErrorWitness>,
+        subst: &mut Subst<ErrorWitness>,
         has_binding_producer: bool,
     ) -> Result<(), TypeError> {
         if inputs.iter().any(|input| {
@@ -481,7 +497,7 @@ impl InferenceProduct {
         }
         let inputs: Vec<_> = inputs.iter().map(|ty| resolved(ty, subst)).collect();
         let published = resolved(published, subst);
-        let fields = |ty: &Type| -> Option<Vec<Type>> {
+        let fields = |ty: &Type<ErrorWitness>| -> Option<Vec<Type<ErrorWitness>>> {
             match (&published, ty) {
                 (Type::Fn(args, _), Type::Fn(other, ret)) if args.len() == other.len() => Some(
                     other
@@ -528,21 +544,25 @@ impl InferenceProduct {
     pub(super) fn replay_result_joins(
         &mut self,
         vg: &mut VarGen,
-        subst: &mut Subst,
+        subst: &mut Subst<ErrorWitness>,
         errors: &mut DiagnosticSink<'_>,
     ) -> bool {
         // A join can transport a pending producer but cannot create one.
         // A derivation with a closed result has no type variable that a join
         // can reach. Test for open producers once instead of scanning the
         // growing graph for every join input (chelis#2975).
-        let has_binding_producer = subst
-            .pending_collection_contracts()
-            .iter()
-            .any(|(_, _, constraint)| !crate::env::free_tvars(constraint.result()).is_empty())
-            || self.deferred_shape_checks.iter().any(|check| {
-                matches!(check.rule, DeferredShapeRule::Derivation(_))
-                    && !crate::env::free_tvars(&resolved(&check.result_ty, subst)).is_empty()
-            });
+        let has_binding_producer =
+            subst
+                .pending_collection_contracts()
+                .iter()
+                .any(|(_, _, constraint)| {
+                    !chelis_type_core::free_tvars(constraint.result()).is_empty()
+                })
+                || self.deferred_shape_checks.iter().any(|check| {
+                    matches!(check.rule, DeferredShapeRule::Derivation(_))
+                        && !chelis_type_core::free_tvars(&resolved(&check.result_ty, subst))
+                            .is_empty()
+                });
         // Keep the complete producer graph visible while deciding readiness.
         let joins: Vec<_> = self
             .deferred_shape_checks
@@ -642,7 +662,7 @@ impl InferenceProduct {
 
     pub(super) fn replay_result_type_constraints(
         &mut self,
-        subst: &mut Subst,
+        subst: &mut Subst<ErrorWitness>,
         errors: &mut DiagnosticSink<'_>,
     ) {
         for constraint in std::mem::take(&mut self.result_type_constraints) {
@@ -661,17 +681,22 @@ impl InferenceProduct {
     }
 }
 
-fn corresponding_types(needle: &Type, from: &Type, to: &Type, found: &mut Vec<Type>) {
+fn corresponding_types(
+    needle: &Type<ErrorWitness>,
+    from: &Type<ErrorWitness>,
+    to: &Type<ErrorWitness>,
+    found: &mut Vec<Type<ErrorWitness>>,
+) {
     walk_corresponding_types(needle, from, to, found, false);
 }
 
 /// Callable alternatives require exact structural correspondence. Dependency
 /// traversal also follows a whole-value hole that owns a projected field.
 fn walk_corresponding_types(
-    needle: &Type,
-    from: &Type,
-    to: &Type,
-    found: &mut Vec<Type>,
+    needle: &Type<ErrorWitness>,
+    from: &Type<ErrorWitness>,
+    to: &Type<ErrorWitness>,
+    found: &mut Vec<Type<ErrorWitness>>,
     variable_dependencies: bool,
 ) {
     if from == needle {
@@ -681,9 +706,9 @@ fn walk_corresponding_types(
     if variable_dependencies
         && matches!(needle, Type::Var(_))
         && matches!(to, Type::Var(_))
-        && crate::env::free_tvars(needle)
+        && chelis_type_core::free_tvars(needle)
             .iter()
-            .any(|var| crate::env::free_tvars(from).contains(var))
+            .any(|var| chelis_type_core::free_tvars(from).contains(var))
     {
         found.push(to.clone());
         return;
@@ -740,7 +765,7 @@ fn walk_corresponding_types(
 
 /// A branch join exposes only constructors both branches already have.
 /// A hole on either side stays a fresh hole, even opposite a concrete type.
-fn is_closed_first_order(ty: &Type) -> bool {
+fn is_closed_first_order(ty: &Type<ErrorWitness>) -> bool {
     match ty {
         Type::Prim(_) | Type::Unit | Type::Tensor(..) => true,
         Type::Tuple(items) | Type::Adt(_, items) => items.iter().all(is_closed_first_order),
@@ -749,7 +774,11 @@ fn is_closed_first_order(ty: &Type) -> bool {
     }
 }
 
-fn common_result_structure(left: &Type, right: &Type, vg: &mut VarGen) -> Type {
+fn common_result_structure(
+    left: &Type<ErrorWitness>,
+    right: &Type<ErrorWitness>,
+    vg: &mut VarGen,
+) -> Type<ErrorWitness> {
     match (left, right) {
         (Type::Var(_), _) | (_, Type::Var(_)) => vg.fresh_type(),
         (Type::Fn(a, ar), Type::Fn(b, br)) if a.len() == b.len() => Type::Fn(
@@ -798,9 +827,13 @@ fn common_result_structure(left: &Type, right: &Type, vg: &mut VarGen) -> Type {
     }
 }
 
-fn independent_type_variables(ty: &Type, vg: &mut VarGen, subst: &Subst) -> Type {
+fn independent_type_variables(
+    ty: &Type<ErrorWitness>,
+    vg: &mut VarGen,
+    subst: &Subst<ErrorWitness>,
+) -> Type<ErrorWitness> {
     let mut scheme = Scheme::mono(ty.clone());
-    scheme.tvars = crate::env::free_tvars(ty).into_iter().collect();
+    scheme.tvars = chelis_type_core::free_tvars(ty).into_iter().collect();
     scheme.tvars.sort();
     scheme.tvar_restrictions = scheme
         .tvars
@@ -811,5 +844,5 @@ fn independent_type_variables(ty: &Type, vg: &mut VarGen, subst: &Subst) -> Type
                 .map(|restriction| (*var, restriction))
         })
         .collect();
-    Env::new().instantiate(&scheme, vg, subst)
+    chelis_type_core::instantiate(&scheme, vg, subst)
 }

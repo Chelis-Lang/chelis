@@ -8,7 +8,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use chelis_unord::{PersistentMap, PersistentSet, UnordMap, UnordSet};
+use chelis_unord::{PersistentMap, PersistentSet};
+#[cfg(feature = "serde")]
+use chelis_unord::{UnordMap, UnordSet};
 
 /// A fixed xorshift generator, so every run drives the same operations.
 struct Generator(u64);
@@ -111,6 +113,7 @@ fn a_set_tracks_an_ordered_set_across_snapshots() {
     }
 }
 
+#[cfg(feature = "serde")]
 #[test]
 fn serialization_matches_the_unordered_collections() {
     let pairs = [(3u64, "c"), (1, "a"), (2, "b")];
@@ -164,6 +167,7 @@ fn last_where_finds_the_end_of_a_true_prefix() {
     }
 }
 
+#[cfg(feature = "serde")]
 #[test]
 fn a_set_serializes_as_the_unordered_set_does() {
     // Every snapshot of a random insert and remove history writes the JSON

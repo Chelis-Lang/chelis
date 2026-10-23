@@ -3,7 +3,8 @@
 
 use super::{ProducedPosition, children, symbol_text, tag};
 use chelis_deep::{DeepTag, Expr};
-use chelis_types::types::Type;
+use chelis_type_core::Type;
+use chelis_types::errors::ErrorWitness;
 use std::collections::{BTreeMap, BTreeSet};
 
 pub(super) const DEFAULT_BUDGET: usize = 100_000;
@@ -47,7 +48,7 @@ impl Budget {
 #[derive(Clone, Copy)]
 pub(super) enum Source<'a> {
     Deep(&'a Expr),
-    Checked(&'a Type),
+    Checked(&'a Type<ErrorWitness>),
 }
 
 impl Source<'_> {
@@ -147,8 +148,8 @@ impl<'a> ProofTypes<'a> {
                     }
                     Type::KindedAdt(name, args) => {
                         let args = self.intern_all(args.iter().filter_map(|arg| match arg {
-                            chelis_types::types::NominalArg::Type(ty) => Some(Source::Checked(ty)),
-                            chelis_types::types::NominalArg::Dimension(_) => None,
+                            chelis_type_core::NominalArg::Type(ty) => Some(Source::Checked(ty)),
+                            chelis_type_core::NominalArg::Dimension(_) => None,
                         }))?;
                         self.adt(name, args)?
                     }

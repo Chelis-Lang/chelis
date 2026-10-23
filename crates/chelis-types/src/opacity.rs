@@ -22,6 +22,7 @@
 //! `infer_top_level` for stamping), every hook is a no-op, so the
 //! drivers that install it remain the single source of violations.
 
+use crate::errors::ErrorWitness;
 use chelis_unord::UnordSet;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
@@ -32,7 +33,7 @@ use serde::{Deserialize, Serialize};
 use crate::adt::AdtRegistry;
 use crate::errors::{CheckError, CheckErrorKind};
 use crate::session::DiagnosticSink;
-use crate::types::Type;
+use chelis_type_core::Type;
 
 /// Program-shape opacity metadata. Accumulated per check phase and
 /// persisted on `TypeEnvInner` so the stacked library/new-code paths
@@ -279,7 +280,7 @@ fn resolve_binding_key<'a>(name: &str, bindings: &'a BTreeMap<String, String>) -
 /// for unattributable names; see `OpacityModuleMeta::bindings`).
 pub(crate) fn check_unexported_reference(
     name: &str,
-    ty: &Type,
+    ty: &Type<ErrorWitness>,
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
 ) -> bool {
@@ -506,7 +507,7 @@ pub(crate) fn demangle_module(key: &str) -> String {
 /// De-mangle every ADT name inside a type for display (RT-1 F3), so a
 /// producer signature renders `(f32) -> Probability` rather than
 /// `(f32) -> Pkg__opq__Demo__Types__Probability`.
-pub(crate) fn demangle_type(ty: &Type) -> Type {
+pub(crate) fn demangle_type(ty: &Type<ErrorWitness>) -> Type<ErrorWitness> {
     match ty {
         Type::Adt(name, args) => Type::Adt(
             demangle_ident(name),
@@ -516,11 +517,11 @@ pub(crate) fn demangle_type(ty: &Type) -> Type {
             demangle_ident(name),
             args.iter()
                 .map(|argument| match argument {
-                    crate::types::NominalArg::Type(ty) => {
-                        crate::types::NominalArg::Type(demangle_type(ty))
+                    chelis_type_core::NominalArg::Type(ty) => {
+                        chelis_type_core::NominalArg::Type(demangle_type(ty))
                     }
-                    crate::types::NominalArg::Dimension(dim) => {
-                        crate::types::NominalArg::Dimension(dim.clone())
+                    chelis_type_core::NominalArg::Dimension(dim) => {
+                        chelis_type_core::NominalArg::Dimension(dim.clone())
                     }
                 })
                 .collect(),
@@ -541,13 +542,17 @@ pub(crate) fn demangle_type(ty: &Type) -> Type {
 /// chased through named type definitions in the registry: an
 /// unexported `helper() -> WrapRec` where the non-opaque `WrapRec`
 /// carries a `Probability` field mentions `Probability`.
-pub(crate) fn type_mentions_adt(ty: &Type, target: &str, adt_reg: &AdtRegistry) -> bool {
+pub(crate) fn type_mentions_adt(
+    ty: &Type<ErrorWitness>,
+    target: &str,
+    adt_reg: &AdtRegistry,
+) -> bool {
     let mut seen = UnordSet::new();
     mentions_inner(ty, target, adt_reg, &mut seen)
 }
 
 fn mentions_inner(
-    ty: &Type,
+    ty: &Type<ErrorWitness>,
     target: &str,
     adt_reg: &AdtRegistry,
     seen: &mut UnordSet<String>,

@@ -1,6 +1,7 @@
 //! Declared-result extent checks for the diagonal operation after application unification.
 
 use super::*;
+use crate::errors::ErrorWitness;
 
 /// The declared extent at one axis of an application's result, read from the
 /// two ingresses a declaration can reach a builtin call through.
@@ -20,12 +21,12 @@ use super::*;
 fn declared_result_literal(
     result_axis: usize,
     result_rank: usize,
-    expected_result: Option<&Type>,
+    expected_result: Option<&Type<ErrorWitness>>,
     node: &DeepNode,
     env: &Env,
     vg: &mut VarGen,
     adt_reg: &AdtRegistry,
-    subst: &Subst,
+    subst: &Subst<ErrorWitness>,
     errors: &mut DiagnosticSink<'_>,
 ) -> Option<i64> {
     // The rank-equality precondition matters as much as the literal does. A
@@ -35,7 +36,7 @@ fn declared_result_literal(
     // at most 4", which names a repair that would not fix the program, and the
     // `Type::Error` this path returns then suppresses the accurate diagnostic
     // (round 1 P2). Rank belongs to unification; the bound stands down.
-    let literal_at = |ty: &Type| -> Option<i64> {
+    let literal_at = |ty: &Type<ErrorWitness>| -> Option<i64> {
         let Type::Tensor(dims, _) = ty else {
             return None;
         };
@@ -71,7 +72,7 @@ fn declared_result_literal(
 /// application still holds its authored call site for the reporting boundary.
 pub(super) fn diagonal_result_error(
     node: &DeepNode,
-    operand: &Type,
+    operand: &Type<ErrorWitness>,
     axis1: usize,
     axis2: usize,
     message: String,
@@ -121,8 +122,8 @@ pub(super) fn diagonal_result_error(
 /// keeps the enclosing signature or ascription from reporting a second time.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn reject_unreachable_diagonal_extent(
-    operand: &Type,
-    inferred: &Type,
+    operand: &Type<ErrorWitness>,
+    inferred: &Type<ErrorWitness>,
     axis1: usize,
     axis2: usize,
     node: &DeepNode,
@@ -130,10 +131,10 @@ pub(super) fn reject_unreachable_diagonal_extent(
     env: &Env,
     vg: &mut VarGen,
     adt_reg: &AdtRegistry,
-    subst: &Subst,
+    subst: &Subst<ErrorWitness>,
     errors: &mut DiagnosticSink<'_>,
-    expected_result: Option<&Type>,
-) -> Option<Type> {
+    expected_result: Option<&Type<ErrorWitness>>,
+) -> Option<Type<ErrorWitness>> {
     let (result_axis, source_axis, bound) = diagonal_result_bound(operand, axis1, axis2, subst)?;
     let Type::Tensor(inferred_dims, _) = inferred else {
         return None;

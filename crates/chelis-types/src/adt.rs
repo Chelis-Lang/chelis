@@ -13,15 +13,15 @@ use serde::{Deserialize, Serialize};
 use crate::deep_type::{BinderMode, DeepTypeResolver, TypeResolutionEnv, TypeUseSite};
 use crate::errors::ErrorWitness;
 use crate::session::DiagnosticSink;
-use crate::types::*;
 use chelis_numeric_core::prim::Prim;
+use chelis_type_core::*;
 
 /// Information about a single variant of an ADT.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VariantInfo {
     pub name: String,
     /// (field_name, field_type) -- name is None for positional args.
-    pub fields: Vec<(Option<String>, Type)>,
+    pub fields: Vec<(Option<String>, Type<ErrorWitness>)>,
 }
 
 /// An ADT definition extracted from a `deftype` node.
@@ -44,7 +44,7 @@ pub struct AdtDef {
     /// Registration-time type/dimension variables aligned with
     /// `type_params` and `param_kinds`.
     #[serde(default)]
-    pub param_args: Vec<NominalArg>,
+    pub param_args: Vec<NominalArg<ErrorWitness>>,
     pub variants: Vec<VariantInfo>,
     /// True when the `deftype` carried `opaque: true` metadata
     /// (RFC D-CHECK): construction and inspection are checker-gated
@@ -65,8 +65,8 @@ pub struct TypeAliasDef {
     pub param_kinds: Vec<NominalParamKind>,
     pub param_vars: Vec<TypeVar>,
     #[serde(default)]
-    pub param_args: Vec<NominalArg>,
-    pub body: Type,
+    pub param_args: Vec<NominalArg<ErrorWitness>>,
+    pub body: Type<ErrorWitness>,
 }
 
 /// Shape of a constructor call site, used by
@@ -98,7 +98,7 @@ pub struct AdtRegistry {
 /// Spec/04 section 8.4.1: whether `ty` carries a key, given the data types
 /// already known to carry one. A type variable carries none here: it is a
 /// field of a generic data type, and what it is instantiated at decides.
-fn type_carries_key(ty: &Type, carriers: &UnordSet<String>) -> bool {
+fn type_carries_key(ty: &Type<ErrorWitness>, carriers: &UnordSet<String>) -> bool {
     match ty {
         Type::Prim(prim) => *prim == Prim::Key,
         Type::Tensor(_, precision) => precision.as_concrete() == Some(Prim::Key),
@@ -190,7 +190,7 @@ impl AdtRegistry {
         errors: &mut DiagnosticSink<'_>,
         opaque: bool,
         defining_module: Option<String>,
-    ) -> Result<Vec<(String, Scheme)>, ErrorWitness> {
+    ) -> Result<Vec<(String, Scheme<ErrorWitness>)>, ErrorWitness> {
         // children[0] = name (symbol)
         // children[1] = type params list like (a) or (a b) -- a bare list of symbols wrapped in parens
         // children[2..] = variant nodes
@@ -280,7 +280,7 @@ impl AdtRegistry {
             // registered; `collect_declarations` registers all `typealias` decls before
             // any `deftype` so forward references (alias declared after the deftype that
             // uses it) resolve too.
-            let mut fields: Vec<(Option<String>, Type)> = Vec::new();
+            let mut fields: Vec<(Option<String>, Type<ErrorWitness>)> = Vec::new();
             for field_expr in &vchildren[1..] {
                 match field_expr.carrier() {
                     deep::ExprCarrier::DecodedNode(DeepTag::Field, _, fchildren) => {
@@ -316,7 +316,7 @@ impl AdtRegistry {
         let all_tvars = resolver.type_vars();
         let all_dvars = resolver.dim_vars();
         let all_rvars = resolver.rank_vars();
-        let param_args: Vec<NominalArg> = type_params
+        let param_args: Vec<NominalArg<ErrorWitness>> = type_params
             .iter()
             .zip(&param_kinds)
             .map(|(param, kind)| match kind {
@@ -507,8 +507,8 @@ impl AdtRegistry {
         name: String,
         params: Vec<String>,
         param_kinds: Vec<NominalParamKind>,
-        param_args: Vec<NominalArg>,
-        body: Type,
+        param_args: Vec<NominalArg<ErrorWitness>>,
+        body: Type<ErrorWitness>,
     ) {
         let param_vars = param_args
             .iter()
@@ -693,7 +693,11 @@ impl AdtRegistry {
     }
 
     /// Instantiate a type alias with the given type arguments.
-    pub fn instantiate_alias(&self, name: &str, args: &[Type]) -> Option<Type> {
+    pub fn instantiate_alias(
+        &self,
+        name: &str,
+        args: &[Type<ErrorWitness>],
+    ) -> Option<Type<ErrorWitness>> {
         let args = args
             .iter()
             .cloned()
@@ -705,9 +709,16 @@ impl AdtRegistry {
     /// Instantiate a type alias whose parameters may be ordinary types or
     /// dimensions. The declaration-owned parameter arguments and the applied
     /// arguments must agree positionally in kind.
-    pub fn instantiate_nominal_alias(&self, name: &str, args: &[NominalArg]) -> Option<Type> {
+    pub fn instantiate_nominal_alias(
+        &self,
+        name: &str,
+        args: &[NominalArg<ErrorWitness>],
+    ) -> Option<Type<ErrorWitness>> {
         let alias = self.aliases.get(name)?;
-        let (type_subst, dim_subst) = nominal_substitutions(&alias.param_args, args)?;
+        let NominalSubstitutions {
+            types: type_subst,
+            dimensions: dim_subst,
+        } = nominal_substitutions(&alias.param_args, args)?;
         Some(substitute_nominal_type(
             &alias.body,
             &type_subst,
@@ -733,15 +744,19 @@ impl AdtRegistry {
     /// `register_deftype`'s `&mut self` borrow. The `seen` set guards against
     /// infinite recursion on a (mutually) recursive alias chain, matching the
     /// `infer.rs` guard.
-    pub fn expand_aliases(&self, ty: &Type) -> Type {
+    pub fn expand_aliases(&self, ty: &Type<ErrorWitness>) -> Type<ErrorWitness> {
         let mut seen = UnordSet::new();
         self.expand_aliases_inner(ty, &mut seen)
     }
 
-    fn expand_aliases_inner(&self, ty: &Type, seen: &mut UnordSet<String>) -> Type {
+    fn expand_aliases_inner(
+        &self,
+        ty: &Type<ErrorWitness>,
+        seen: &mut UnordSet<String>,
+    ) -> Type<ErrorWitness> {
         match ty {
             Type::Adt(name, args) => {
-                let resolved_args: Vec<Type> = args
+                let resolved_args: Vec<Type<ErrorWitness>> = args
                     .iter()
                     .map(|arg| self.expand_aliases_inner(arg, seen))
                     .collect();
@@ -810,7 +825,10 @@ fn terminal_name(name: &str) -> &str {
         .unwrap_or(name)
 }
 
-pub(crate) fn substitute_alias_type(ty: &Type, subst: &UnordMap<TypeVar, Type>) -> Type {
+pub(crate) fn substitute_alias_type(
+    ty: &Type<ErrorWitness>,
+    subst: &UnordMap<TypeVar, Type<ErrorWitness>>,
+) -> Type<ErrorWitness> {
     substitute_nominal_type(ty, subst, &UnordMap::new())
 }
 
@@ -820,7 +838,7 @@ enum NominalActual<T, D> {
 }
 
 fn nominal_argument_bindings<T: Clone, D: Clone>(
-    parameters: &[NominalArg],
+    parameters: &[NominalArg<ErrorWitness>],
     arguments: &[NominalActual<T, D>],
 ) -> Option<(UnordMap<TypeVar, T>, UnordMap<DimVar, D>)> {
     if parameters.len() != arguments.len() {
@@ -842,10 +860,15 @@ fn nominal_argument_bindings<T: Clone, D: Clone>(
     Some((types, dimensions))
 }
 
+pub(crate) struct NominalSubstitutions {
+    pub(crate) types: UnordMap<TypeVar, Type<ErrorWitness>>,
+    pub(crate) dimensions: UnordMap<DimVar, Dim>,
+}
+
 pub(crate) fn nominal_substitutions(
-    parameters: &[NominalArg],
-    arguments: &[NominalArg],
-) -> Option<(UnordMap<TypeVar, Type>, UnordMap<DimVar, Dim>)> {
+    parameters: &[NominalArg<ErrorWitness>],
+    arguments: &[NominalArg<ErrorWitness>],
+) -> Option<NominalSubstitutions> {
     let arguments = arguments
         .iter()
         .map(|argument| match argument {
@@ -854,13 +877,14 @@ pub(crate) fn nominal_substitutions(
         })
         .collect::<Vec<_>>();
     nominal_argument_bindings(parameters, &arguments)
+        .map(|(types, dimensions)| NominalSubstitutions { types, dimensions })
 }
 
 pub(crate) fn substitute_nominal_type(
-    ty: &Type,
-    type_subst: &UnordMap<TypeVar, Type>,
+    ty: &Type<ErrorWitness>,
+    type_subst: &UnordMap<TypeVar, Type<ErrorWitness>>,
     dim_subst: &UnordMap<DimVar, Dim>,
-) -> Type {
+) -> Type<ErrorWitness> {
     match ty {
         Type::Var(tv) => type_subst.get(tv).cloned().unwrap_or(Type::Var(*tv)),
         Type::Ref(inner) => Type::reference(substitute_nominal_type(inner, type_subst, dim_subst)),
@@ -1024,7 +1048,7 @@ mod alias_syntax_materialization_tests {
             Vec::new(),
             // Simulate rejected metadata at a serialized ingress; the required
             // materializer must refuse it, not recover a successful hole.
-            serde_json::from_str::<Type>(r#"{"Error":null}"#).unwrap(),
+            serde_json::from_str::<Type<ErrorWitness>>(r#"{"Error":null}"#).unwrap(),
         );
         assert!(
             registry
@@ -1315,7 +1339,7 @@ mod alias_syntax_materialization_tests {
             Vec::new(),
             Vec::new(),
             Vec::new(),
-            serde_json::from_str::<Type>(r#"{"Error":null}"#).unwrap(),
+            serde_json::from_str::<Type<ErrorWitness>>(r#"{"Error":null}"#).unwrap(),
         );
         registry
             .resolution_env

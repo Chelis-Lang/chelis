@@ -2245,12 +2245,13 @@ fn a_tensor_cast_to_a_key_is_rejected() {
         chelis_deep::CastMode::Checked,
         chelis_deep::CastMode::Named(chelis_numeric_core::named_cast::NamedCastMode::Trunc),
     ] {
-        let error = crate::infer::expr_record::cast_result_from_settled_source(
+        let error = chelis_type_core::decisions::cast::cast_result_from_settled_source(
             source.clone(),
             Prim::Key,
             mode,
-            &crate::unify::Subst::new(),
+            &chelis_type_core::Subst::<ErrorWitness>::new(),
         )
+        .map_err(|error| CheckError::from(*error))
         .expect_err("a key is never a cast target");
         assert!(matches!(
             error.kind,
@@ -2258,11 +2259,11 @@ fn a_tensor_cast_to_a_key_is_rejected() {
         ));
     }
     assert!(
-        crate::infer::expr_record::cast_result_from_settled_source(
+        chelis_type_core::decisions::cast::cast_result_from_settled_source(
             source,
             Prim::Int64,
             chelis_deep::CastMode::Checked,
-            &crate::unify::Subst::new(),
+            &chelis_type_core::Subst::<ErrorWitness>::new(),
         )
         .is_ok()
     );

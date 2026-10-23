@@ -4,10 +4,11 @@
 //! The extraction preserves control flow and diagnostic order.
 
 use super::*;
+use crate::errors::ErrorWitness;
 
 /// A shape pattern inspects the value behind a borrow, while `pat-var` and
 /// `pat-as` still bind the original scrutinee and keep its borrow provenance.
-fn pattern_shape_type(mut ty: &Type) -> &Type {
+fn pattern_shape_type(mut ty: &Type<ErrorWitness>) -> &Type<ErrorWitness> {
     while let Type::Ref(inner) = ty {
         ty = inner;
     }
@@ -19,11 +20,11 @@ pub(super) fn infer_match(
     node: &DeepNode,
     env: &mut Env,
     vg: &mut VarGen,
-    subst: &mut Subst,
+    subst: &mut Subst<ErrorWitness>,
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
     product: &mut InferenceProduct,
-) -> Type {
+) -> Type<ErrorWitness> {
     let kids = node.children_slice();
     if kids.is_empty() {
         return malformed_form(
@@ -50,7 +51,7 @@ pub(super) fn infer_match(
         );
     }
 
-    let mut result_ty: Option<Type> = None;
+    let mut result_ty: Option<Type<ErrorWitness>> = None;
     let mut covered_variants: Vec<String> = Vec::new();
     let mut has_wildcard = false;
     // chelis#2442: an arm's whole pattern sits against the scrutinee itself,
@@ -189,7 +190,7 @@ fn visit_sub_patterns_untyped(
     sub_pats: &[deep::Expr],
     env: &mut Env,
     vg: &mut VarGen,
-    subst: &mut Subst,
+    subst: &mut Subst<ErrorWitness>,
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
     product: &mut InferenceProduct,
@@ -232,10 +233,10 @@ pub(super) fn top_level_arm_is_irrefutable(pat: &deep::Expr) -> bool {
 pub(super) fn pattern_bindings(
     pat: &deep::Expr,
     site: PatternSite<'_>,
-    scrutinee_ty: &Type,
+    scrutinee_ty: &Type<ErrorWitness>,
     env: &mut Env,
     vg: &mut VarGen,
-    subst: &mut Subst,
+    subst: &mut Subst<ErrorWitness>,
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
     product: &mut InferenceProduct,
@@ -699,7 +700,7 @@ pub(super) fn pattern_bindings(
                 // types, and a mismatched kind or arity reports an error.
                 // The empty tuple pattern denotes unit, whose internal type
                 // is `Type::Unit` rather than `Type::Tuple([])`.
-                let elems: Vec<Type> = kids.iter().map(|_| vg.fresh_type()).collect();
+                let elems: Vec<Type<ErrorWitness>> = kids.iter().map(|_| vg.fresh_type()).collect();
                 let pattern_ty = if elems.is_empty() {
                     Type::Unit
                 } else {
@@ -831,9 +832,9 @@ fn check_literal_pattern(
     pat: &deep::Expr,
     atom: LiteralPatternAtom<'_>,
     site: PatternSite<'_>,
-    scrutinee_ty: &Type,
+    scrutinee_ty: &Type<ErrorWitness>,
     env: &Env,
-    subst: &Subst,
+    subst: &Subst<ErrorWitness>,
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
 ) -> bool {
@@ -954,11 +955,11 @@ fn check_literal_pattern(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn validate_deferred_literal_pattern(
     pat: &deep::Expr,
-    scrutinee_ty: &Type,
+    scrutinee_ty: &Type<ErrorWitness>,
     scrutinee_name: Option<&str>,
     declaration: Option<&str>,
     env: &Env,
-    subst: &Subst,
+    subst: &Subst<ErrorWitness>,
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
 ) {

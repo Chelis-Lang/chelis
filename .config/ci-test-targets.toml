@@ -2657,6 +2657,7 @@ packages = [
   "chelis-prove", "chelis-python", "chelis-reef", "chelis-repr-inventory",
   "chelis-runtime", "chelis-shell", "chelis-std-bundle", "chelis-surf",
   "chelis-tide", "chelis-types", "chelis-unord", "chelis-validate",
+  "chelis-type-core",
   "chelis-version", "chelis-vocab", "chelisup", "tree-sitter-chelis",
 ]
 
@@ -4495,6 +4496,7 @@ packages = [
   "chelis-prove", "chelis-python", "chelis-reef", "chelis-repr-inventory",
   "chelis-runtime", "chelis-runtime-bundle", "chelis-shell",
   "chelis-std-bundle", "chelis-surf", "chelis-tide", "chelis-types",
+  "chelis-type-core",
   "chelis-unord", "chelis-validate", "chelis-version", "chelis-vocab",
   "chelisup", "tree-sitter-chelis",
 ]
@@ -4512,6 +4514,7 @@ packages = [
   "chelis-prove", "chelis-python", "chelis-reef", "chelis-repr-inventory",
   "chelis-runtime", "chelis-shell", "chelis-std-bundle", "chelis-surf",
   "chelis-tide", "chelis-types", "chelis-unord", "chelis-validate",
+  "chelis-type-core",
   "chelis-version", "chelis-vocab", "chelisup", "tree-sitter-chelis",
 ]
 
@@ -4714,6 +4717,34 @@ reason = "The script tests reject incomplete arithmetic evidence and unauthorize
 tracking_issue = "chelis#3989"
 
 [[path_rule]]
+prefix = "scripts/type_unification_core_oracle.py"
+disposition = "owner"
+workflow = "heavy-e2e.yml"
+job = "integration-support"
+cadence = "daily and workflow_dispatch"
+reason = "The domain slice checks portable type graphs, immutable host parity, concurrency, and diagnostic authority"
+tracking_issue = "chelis#4002"
+
+[[path_rule]]
+prefix = "scripts/test_type_unification_core_oracle.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "The controls reject incomplete type evidence, changed host output, and invalid feature isolation"
+tracking_issue = "chelis#4002"
+
+[[path_rule]]
+prefix = "scripts/fixtures/type_unification_core_host.rs"
+disposition = "packages"
+packages = ["chelis-type-core", "chelis-types"]
+
+[[path_rule]]
+prefix = "scripts/fixtures/type_unification_core_corpus.json"
+disposition = "packages"
+packages = ["chelis-type-core", "chelis-types"]
+
+[[path_rule]]
 prefix = "scripts/numeric_core_oracle.py"
 disposition = "owner"
 workflow = "heavy-e2e.yml"
@@ -4776,6 +4807,7 @@ packages = [
   "chelis-certificate-core", "chelis-conformance", "chelis-cove", "chelis-crmath", "chelis-deep",
   "chelis-e2e",
   "chelis-numeric-core",
+  "chelis-type-core",
   "chelis-effects", "chelis-image-id", "chelis-ir", "chelis-lint",
   "chelis-lsp", "chelis-macros", "chelis-pipeline-core", "chelis-pred",
   "chelis-prove", "chelis-python", "chelis-reef", "chelis-reef-bootstrap-core", "chelis-repr-inventory",
@@ -5066,6 +5098,7 @@ packages = [
   "chelis-prove", "chelis-python", "chelis-reef", "chelis-repr-inventory",
   "chelis-runtime", "chelis-shell", "chelis-std-bundle", "chelis-surf",
   "chelis-tide", "chelis-types", "chelis-unord", "chelis-validate",
+  "chelis-type-core",
   "chelis-version", "chelis-vocab", "chelisup", "tree-sitter-chelis",
 ]
 

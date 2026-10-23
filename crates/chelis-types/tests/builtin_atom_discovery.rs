@@ -1,6 +1,7 @@
 //! #1294: independently defend declaration and checked-shape discovery.
 use chelis_numeric_core::prim::Prim;
-use chelis_types::types::{TensorPrec, Type};
+use chelis_type_core::{TensorPrec, Type};
+use chelis_types::errors::ErrorWitness;
 use chelis_types::{
     BUILTINS, BuiltinCapabilityDecl, BuiltinSemanticDomain as Domain, BuiltinSiblingCaseDecl,
     BuiltinSiblingCaseId as Case, builtin_decl,
@@ -102,11 +103,15 @@ fn invalid_domain_case_declarations_fail_loudly() {
 
 #[test]
 fn every_declared_identity_has_a_unique_case_selector_witness() {
-    let list = Type::adt("List".into(), vec![Type::Prim(Prim::F32)]);
-    let tensor = Type::Tensor(vec![], TensorPrec::Concrete(Prim::F32));
-    let dict = Type::adt(
+    let list =
+        Type::<ErrorWitness>::adt("List".into(), vec![Type::<ErrorWitness>::Prim(Prim::F32)]);
+    let tensor = Type::<ErrorWitness>::Tensor(vec![], TensorPrec::Concrete(Prim::F32));
+    let dict = Type::<ErrorWitness>::adt(
         "Dict".into(),
-        vec![Type::Prim(Prim::String), Type::Prim(Prim::F32)],
+        vec![
+            Type::<ErrorWitness>::Prim(Prim::String),
+            Type::<ErrorWitness>::Prim(Prim::F32),
+        ],
     );
     let mut selected = BTreeSet::new();
     for builtin in BUILTINS {
@@ -115,28 +120,34 @@ fn every_declared_identity_has_a_unique_case_selector_witness() {
             "concat" => vec![
                 vec![list.clone(), list.clone()],
                 vec![
-                    Type::adt("List".into(), vec![tensor.clone()]),
-                    Type::Prim(Prim::Int32),
+                    Type::<ErrorWitness>::adt("List".into(), vec![tensor.clone()]),
+                    Type::<ErrorWitness>::Prim(Prim::Int32),
                 ],
             ],
-            "skip" => vec![vec![list.clone(), Type::Prim(Prim::Int64)]],
+            "skip" => vec![vec![list.clone(), Type::<ErrorWitness>::Prim(Prim::Int64)]],
             "drop" => vec![vec![list.clone()]],
-            "eq" | "neq" => vec![vec![Type::Prim(Prim::F32)], vec![list.clone()]],
+            "eq" | "neq" => vec![
+                vec![Type::<ErrorWitness>::Prim(Prim::F32)],
+                vec![list.clone()],
+            ],
             "to_string" => vec![
-                Type::Prim(Prim::F32),
+                Type::<ErrorWitness>::Prim(Prim::F32),
                 tensor.clone(),
                 list.clone(),
                 dict.clone(),
-                Type::adt("Option".into(), vec![Type::Prim(Prim::F32)]),
-                Type::adt("User".into(), vec![]),
-                Type::tuple(vec![]),
-                Type::Unit,
-                Type::function(vec![], Type::Unit),
+                Type::<ErrorWitness>::adt(
+                    "Option".into(),
+                    vec![Type::<ErrorWitness>::Prim(Prim::F32)],
+                ),
+                Type::<ErrorWitness>::adt("User".into(), vec![]),
+                Type::<ErrorWitness>::tuple(vec![]),
+                Type::<ErrorWitness>::Unit,
+                Type::<ErrorWitness>::function(vec![], Type::<ErrorWitness>::Unit),
             ]
             .into_iter()
             .map(|t| vec![t])
             .collect(),
-            _ => vec![vec![Type::Unit]],
+            _ => vec![vec![Type::<ErrorWitness>::Unit]],
         };
         for args in witnesses {
             let identity = builtin.semantic_case(&args).unwrap();
@@ -160,10 +171,14 @@ fn every_declared_identity_has_a_unique_case_selector_witness() {
 
 #[test]
 fn overloaded_applications_resolve_one_exact_case() {
-    let list = Type::adt("List".into(), vec![Type::Prim(Prim::F32)]);
-    let dict = Type::adt(
+    let list =
+        Type::<ErrorWitness>::adt("List".into(), vec![Type::<ErrorWitness>::Prim(Prim::F32)]);
+    let dict = Type::<ErrorWitness>::adt(
         "Dict".into(),
-        vec![Type::Prim(Prim::String), Type::Prim(Prim::F32)],
+        vec![
+            Type::<ErrorWitness>::Prim(Prim::String),
+            Type::<ErrorWitness>::Prim(Prim::F32),
+        ],
     );
     for (name, args, expected) in [
         ("len", vec![list.clone()], "Container:len:LenList"),
@@ -175,22 +190,29 @@ fn overloaded_applications_resolve_one_exact_case() {
         ),
         (
             "concat",
-            vec![list.clone(), Type::Prim(Prim::Int32)],
+            vec![list.clone(), Type::<ErrorWitness>::Prim(Prim::Int32)],
             "Container:concat:ConcatTensors",
         ),
         ("drop", vec![list.clone()], "Container:drop:DropValue"),
         (
             "skip",
-            vec![list.clone(), Type::Prim(Prim::Int64)],
+            vec![list.clone(), Type::<ErrorWitness>::Prim(Prim::Int64)],
             "Container:skip:SkipList",
         ),
-        ("eq", vec![Type::Prim(Prim::F32)], "Numeric:eq:TableA"),
+        (
+            "eq",
+            vec![Type::<ErrorWitness>::Prim(Prim::F32)],
+            "Numeric:eq:TableA",
+        ),
         ("eq", vec![list.clone()], "Container:eq:EqRecursive"),
         ("to_string", vec![list], "Boundary:to_string:ToStringList"),
         ("to_string", vec![dict], "Boundary:to_string:ToStringDict"),
         (
             "to_string",
-            vec![Type::Tensor(vec![], TensorPrec::Concrete(Prim::F32))],
+            vec![Type::<ErrorWitness>::Tensor(
+                vec![],
+                TensorPrec::Concrete(Prim::F32),
+            )],
             "Boundary:to_string:ToStringTensor",
         ),
     ] {
@@ -202,13 +224,13 @@ fn overloaded_applications_resolve_one_exact_case() {
     assert!(
         builtin_decl("len")
             .unwrap()
-            .semantic_case(&[Type::Unit])
+            .semantic_case(&[Type::<ErrorWitness>::Unit])
             .is_err()
     );
     assert!(
         builtin_decl("concat")
             .unwrap()
-            .semantic_case(&[Type::Unit])
+            .semantic_case(&[Type::<ErrorWitness>::Unit])
             .is_err()
     );
     // The arity selector is gone with the [05-OP-54]/[05-OP-67] split:
@@ -230,14 +252,20 @@ fn overloaded_applications_resolve_one_exact_case() {
 fn observation_rejections_have_explicit_cases_not_an_accepted_wildcard() {
     let decl = builtin_decl("to_string").unwrap();
     for (ty, case) in [
-        (Type::Unit, "ToStringUnit"),
-        (Type::tuple(vec![]), "ToStringTuple"),
+        (Type::<ErrorWitness>::Unit, "ToStringUnit"),
+        (Type::<ErrorWitness>::tuple(vec![]), "ToStringTuple"),
         (
-            Type::adt("Option".into(), vec![Type::Prim(Prim::F32)]),
+            Type::<ErrorWitness>::adt("Option".into(), vec![Type::<ErrorWitness>::Prim(Prim::F32)]),
             "ToStringOption",
         ),
-        (Type::adt("UserValue".into(), vec![]), "ToStringAdt"),
-        (Type::function(vec![], Type::Unit), "ToStringFunction"),
+        (
+            Type::<ErrorWitness>::adt("UserValue".into(), vec![]),
+            "ToStringAdt",
+        ),
+        (
+            Type::<ErrorWitness>::function(vec![], Type::<ErrorWitness>::Unit),
+            "ToStringFunction",
+        ),
     ] {
         assert_eq!(
             decl.semantic_case(&[ty]).unwrap(),
@@ -325,20 +353,26 @@ fn symbolic_observation_preserves_legal_applications_and_rejects_wrong_bounds() 
 
 #[test]
 fn symbolic_selection_resolves_each_instantiation_without_a_default_case() {
+    use chelis_type_core::Subst;
+    use chelis_type_core::TypeVar;
     use chelis_types::builtin_discovery::BuiltinCaseSelection;
-    use chelis_types::types::TypeVar;
-    use chelis_types::unify::Subst;
     let variable = TypeVar(9000);
     for name in ["eq", "neq", "to_string"] {
         let decl = builtin_decl(name).unwrap();
         let selection = decl
-            .semantic_selection(&[Type::Var(variable)], &Subst::new())
+            .semantic_selection(
+                &[Type::<ErrorWitness>::Var(variable)],
+                &Subst::<ErrorWitness>::new(),
+            )
             .unwrap();
         assert!(matches!(&selection, BuiltinCaseSelection::ByOperand(_)));
-        assert!(decl.semantic_case(&[Type::Var(variable)]).is_err());
+        assert!(
+            decl.semantic_case(&[Type::<ErrorWitness>::Var(variable)])
+                .is_err()
+        );
         for (ty, expected) in [
             (
-                Type::Prim(Prim::F32),
+                Type::<ErrorWitness>::Prim(Prim::F32),
                 if name == "to_string" {
                     "Boundary:to_string:ToStringScalar".into()
                 } else {
@@ -346,7 +380,10 @@ fn symbolic_selection_resolves_each_instantiation_without_a_default_case() {
                 },
             ),
             (
-                Type::adt("List".into(), vec![Type::Prim(Prim::F32)]),
+                Type::<ErrorWitness>::adt(
+                    "List".into(),
+                    vec![Type::<ErrorWitness>::Prim(Prim::F32)],
+                ),
                 match name {
                     "eq" => "Container:eq:EqRecursive",
                     "neq" => "Container:neq:NeqRecursive",
@@ -355,7 +392,7 @@ fn symbolic_selection_resolves_each_instantiation_without_a_default_case() {
                 .into(),
             ),
         ] {
-            let mut subst = Subst::new();
+            let mut subst = Subst::<ErrorWitness>::new();
             subst.insert_type(variable, ty).unwrap();
             assert_eq!(
                 selection.resolve(&subst).unwrap(),
@@ -366,11 +403,14 @@ fn symbolic_selection_resolves_each_instantiation_without_a_default_case() {
     // A symbolic len is an obligation, not permission to skip its selector.
     let decl = builtin_decl("len").unwrap();
     let selection = decl
-        .semantic_selection(&[Type::Var(variable)], &Subst::new())
+        .semantic_selection(
+            &[Type::<ErrorWitness>::Var(variable)],
+            &Subst::<ErrorWitness>::new(),
+        )
         .unwrap();
-    let mut invalid = Subst::new();
+    let mut invalid = Subst::<ErrorWitness>::new();
     invalid
-        .insert_type(variable, Type::Prim(Prim::F32))
+        .insert_type(variable, Type::<ErrorWitness>::Prim(Prim::F32))
         .unwrap();
     assert!(selection.resolve(&invalid).is_err());
 }

@@ -18,11 +18,12 @@
 use chelis_deep::DeepTag;
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str;
+use chelis_type_core::Type;
+use chelis_types::errors::ErrorWitness;
 use chelis_types::errors::{CheckError, CheckErrorKind};
 use chelis_types::key_admission::{
     KeyAdmission, KeyPrimitive, TagKeys, builtin_key_operand, tag_keys,
 };
-use chelis_types::types::Type;
 use chelis_types::{
     BUILTINS, BuiltinSiblingCaseId, builtin_env, check_linearity, check_typed_program,
 };
@@ -316,7 +317,7 @@ fn no_builtin_accepts_a_key_at_an_operand_the_allow_list_does_not_admit() {
     let mut swept = 0;
     for decl in BUILTINS {
         let arities: Vec<usize> = match env.lookup(decl.name).map(|scheme| &scheme.body) {
-            Some(Type::Fn(params, _)) => vec![params.len()],
+            Some(Type::<ErrorWitness>::Fn(params, _)) => vec![params.len()],
             _ => (1..=4).collect(),
         };
         let cases: Vec<BuiltinSiblingCaseId> = decl

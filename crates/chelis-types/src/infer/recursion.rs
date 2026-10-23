@@ -12,15 +12,17 @@
 //! instantiation than the caller's own — polymorphic recursion — and is
 //! rejected with the atom-citing diagnostic [04-INF-3] requires.
 
+use crate::errors::ErrorWitness;
 use chelis_unord::{UnordMap, UnordSet};
 use std::cell::RefCell;
 
-use crate::env::{DeclarationBinderIdentities, Env, InstantiatedScheme};
+use crate::env::{DeclarationBinderIdentities, Env};
 use crate::errors::{CheckError, CheckErrorKind};
 use crate::session::DiagnosticSink;
-use crate::types::{NominalArg, Scheme, Type, TypeVar, TypeVarRestriction, VarGen};
-use crate::unify::Subst;
 use chelis_numeric_core::prim::Prim;
+use chelis_type_core::InstantiatedScheme;
+use chelis_type_core::Subst;
+use chelis_type_core::{NominalArg, Scheme, Type, TypeVar, TypeVarRestriction, VarGen};
 
 thread_local! {
     static GROUP_CTX: RefCell<Option<GroupCtx>> = const { RefCell::new(None) };
@@ -28,8 +30,8 @@ thread_local! {
 
 #[derive(Clone, Copy)]
 pub(super) enum RecursiveExpected<'a> {
-    Provisional(&'a Type),
-    Published(&'a Scheme),
+    Provisional(&'a Type<ErrorWitness>),
+    Published(&'a Scheme<ErrorWitness>),
 }
 
 /// Compiler-owned expected type for one recursive member inference. A
@@ -37,14 +39,14 @@ pub(super) enum RecursiveExpected<'a> {
 /// so its checked contracts receive fresh identities; a provisional first-pass
 /// type remains borrowed and carries no scheme payload.
 pub(super) struct PreparedRecursiveExpected<'a> {
-    provisional: Option<&'a Type>,
-    published: Option<InstantiatedScheme>,
+    provisional: Option<&'a Type<ErrorWitness>>,
+    published: Option<InstantiatedScheme<ErrorWitness>>,
 }
 
 pub(super) struct DeclaredMemberRequest<'a> {
     name: &'a str,
     binder_names: Option<&'a UnordSet<String>>,
-    declared_scheme: Option<&'a Scheme>,
+    declared_scheme: Option<&'a Scheme<ErrorWitness>>,
     use_published_as_declared: bool,
 }
 
@@ -52,7 +54,7 @@ impl<'a> DeclaredMemberRequest<'a> {
     pub(super) fn new(
         name: &'a str,
         binder_names: Option<&'a UnordSet<String>>,
-        declared_scheme: Option<&'a Scheme>,
+        declared_scheme: Option<&'a Scheme<ErrorWitness>>,
         use_published_as_declared: bool,
     ) -> Self {
         Self {
@@ -67,9 +69,8 @@ impl<'a> DeclaredMemberRequest<'a> {
 impl<'a> PreparedRecursiveExpected<'a> {
     pub(super) fn prepare(
         expected: Option<RecursiveExpected<'a>>,
-        env: &Env,
         var_gen: &mut VarGen,
-        subst: &mut Subst,
+        subst: &mut Subst<ErrorWitness>,
     ) -> Self {
         match expected {
             Some(RecursiveExpected::Provisional(ty)) => Self {
@@ -78,7 +79,7 @@ impl<'a> PreparedRecursiveExpected<'a> {
             },
             Some(RecursiveExpected::Published(scheme)) => Self {
                 provisional: None,
-                published: Some(env.instantiate_scheme(scheme, var_gen, subst)),
+                published: Some(chelis_type_core::instantiate_scheme(scheme, var_gen, subst)),
             },
             None => Self {
                 provisional: None,
@@ -87,7 +88,7 @@ impl<'a> PreparedRecursiveExpected<'a> {
         }
     }
 
-    pub(super) fn expected_type(&self) -> Option<&Type> {
+    pub(super) fn expected_type(&self) -> Option<&Type<ErrorWitness>> {
         self.published
             .as_ref()
             .map(|instantiated| &instantiated.ty)
@@ -120,10 +121,10 @@ impl<'a> PreparedRecursiveExpected<'a> {
         request: DeclaredMemberRequest<'_>,
         env: &Env,
         var_gen: &mut VarGen,
-        subst: &mut Subst,
+        subst: &mut Subst<ErrorWitness>,
     ) -> DeclaredMemberSetup {
         let instantiation = if let Some(scheme) = request.declared_scheme {
-            Some(env.instantiate_scheme(scheme, var_gen, subst))
+            Some(chelis_type_core::instantiate_scheme(scheme, var_gen, subst))
         } else if request.use_published_as_declared {
             self.published.clone()
         } else {
@@ -166,7 +167,7 @@ impl<'a> PreparedRecursiveExpected<'a> {
 }
 
 pub(super) struct DeclaredMemberSetup {
-    pub(super) ty: Option<Type>,
+    pub(super) ty: Option<Type<ErrorWitness>>,
     pub(super) binder_identities: DeclarationBinderIdentities,
     pub(super) caller_guard: CallerGuard,
 }
@@ -190,8 +191,8 @@ struct MemberSnapshot {
     /// identity. A member that acquired a collection obligation while its
     /// group was inferred has NOT been left unchanged, and comparing only the
     /// quantifiers and the body would report that it had.
-    constraints: Vec<crate::types::CollectionConstraint>,
-    body: Type,
+    constraints: Vec<chelis_type_core::CollectionConstraint<ErrorWitness>>,
+    body: Type<ErrorWitness>,
     /// Whether the member's `def` authored explicit type binders (`[a]`).
     /// Authored parameters take the strict caller's-own-instantiation rule;
     /// inference-introduced variables additionally admit fully concrete
@@ -222,7 +223,7 @@ struct Occurrence {
     callee: String,
     callee_authored_generic: bool,
     /// Fresh instantiation types per callee scheme tvar, in quantifier order.
-    instantiation: Vec<Type>,
+    instantiation: Vec<Type<ErrorWitness>>,
     span_id: Option<String>,
     span_offset: Option<usize>,
 }
@@ -311,7 +312,7 @@ impl Drop for CallerGuard {
 pub(super) fn begin_caller(
     name: &str,
     binder_names: Option<&UnordSet<String>>,
-    own_instantiation: &[(TypeVar, Type)],
+    own_instantiation: &[(TypeVar, Type<ErrorWitness>)],
 ) -> CallerGuard {
     let mut binders: Vec<String> = binder_names
         .map(|set| set.to_sorted().into_iter().cloned().collect())
@@ -340,7 +341,7 @@ pub(super) fn begin_caller(
 /// recorded: a group is active, a member body is being inferred, `name` is
 /// in-group, and the resolved scheme is the member's own (not a local
 /// shadow re-using the name).
-pub(super) fn should_record_occurrence(name: &str, scheme: &Scheme) -> bool {
+pub(super) fn should_record_occurrence(name: &str, scheme: &Scheme<ErrorWitness>) -> bool {
     GROUP_CTX.with(|ctx| {
         let borrow = ctx.borrow();
         let Some(c) = borrow.as_ref() else {
@@ -363,7 +364,7 @@ pub(super) fn should_record_occurrence(name: &str, scheme: &Scheme) -> bool {
 /// tvars against generalization for the rest of the group.
 pub(super) fn record_occurrence(
     callee: &str,
-    mapping: &[(TypeVar, Type)],
+    mapping: &[(TypeVar, Type<ErrorWitness>)],
     span_id: Option<String>,
     span_offset: Option<usize>,
 ) {
@@ -411,11 +412,20 @@ pub(super) fn pin(vars: impl IntoIterator<Item = TypeVar>) {
     });
 }
 
-/// Whether `v` was minted for an in-group instantiation of the active
-/// group. Consulted by `Env::generalize` so a `let`-bound alias of a group
-/// member stays monomorphic in the group's instantiation variables.
+/// Query pinned variables for the reference generalization oracle and group cleanup tests.
+#[cfg(any(test, feature = "generalize-sweep-oracle"))]
 pub(crate) fn tvar_pinned(v: TypeVar) -> bool {
     GROUP_CTX.with(|ctx| ctx.borrow().as_ref().is_some_and(|c| c.pinned.contains(&v)))
+}
+
+pub(crate) fn with_pinned_tvars<R>(consume: impl FnOnce(&UnordSet<TypeVar>) -> R) -> R {
+    GROUP_CTX.with(|ctx| {
+        let context = ctx.borrow();
+        match context.as_ref() {
+            Some(group) => consume(&group.pinned),
+            None => consume(&UnordSet::new()),
+        }
+    })
 }
 
 #[cfg(test)]
@@ -435,16 +445,17 @@ pub(super) fn group_state_counts() -> (usize, usize) {
 /// admitted — it cannot grow the instantiation set. An entry embedding a
 /// type variable inside a constructed type is polymorphic recursion
 /// ([04-INF-3]); for an authored generic, any non-variable entry is.
-pub(super) fn finish_group(subst: &Subst, errors: &mut DiagnosticSink<'_>) {
+pub(super) fn finish_group(subst: &Subst<ErrorWitness>, errors: &mut DiagnosticSink<'_>) {
     let Some(ctx) = GROUP_CTX.with(|ctx| ctx.borrow_mut().take()) else {
         return;
     };
     for occ in ctx.occurrences {
-        let resolved: Vec<Type> = occ.instantiation.iter().map(|ty| subst.apply(ty)).collect();
-        let admissible = |ty: &Type| -> bool {
+        let resolved: Vec<Type<ErrorWitness>> =
+            occ.instantiation.iter().map(|ty| subst.apply(ty)).collect();
+        let admissible = |ty: &Type<ErrorWitness>| -> bool {
             match ty {
                 Type::Var(_) | Type::Error(_) => true,
-                _ => !occ.callee_authored_generic && crate::env::free_tvars(ty).is_empty(),
+                _ => !occ.callee_authored_generic && chelis_type_core::free_tvars(ty).is_empty(),
             }
         };
         if resolved.iter().all(admissible) {
@@ -522,7 +533,10 @@ pub(super) fn finish_group(subst: &Subst, errors: &mut DiagnosticSink<'_>) {
 /// unambiguous (one declared binder, one own tvar), the resolved own tvar
 /// renders under its declared name so the diagnostic reads `Box[a]` rather
 /// than `Box[?17]`.
-fn binder_display_names(occ: &Occurrence, subst: &Subst) -> UnordMap<TypeVar, String> {
+fn binder_display_names(
+    occ: &Occurrence,
+    subst: &Subst<ErrorWitness>,
+) -> UnordMap<TypeVar, String> {
     let mut names = UnordMap::new();
     if occ.caller_binder_names.len() == 1 && occ.caller_own_tvars.len() == 1 {
         let resolved = subst.apply(&Type::Var(occ.caller_own_tvars[0]));
@@ -533,7 +547,11 @@ fn binder_display_names(occ: &Occurrence, subst: &Subst) -> UnordMap<TypeVar, St
     names
 }
 
-fn render_type(ty: &Type, names: &UnordMap<TypeVar, String>, fallback: Option<&str>) -> String {
+fn render_type(
+    ty: &Type<ErrorWitness>,
+    names: &UnordMap<TypeVar, String>,
+    fallback: Option<&str>,
+) -> String {
     match ty {
         Type::Prim(p) => prim_name(*p),
         Type::Var(v) => names.get(v).cloned().unwrap_or_else(|| {

@@ -5,10 +5,11 @@
 //! lose legal recursive aliases before a consumer computes its fixed point.
 
 use super::*;
+use crate::errors::ErrorWitness;
 
 #[derive(Debug, Clone)]
 pub struct DeclaredSignature {
-    pub ty: Type,
+    pub ty: Type<ErrorWitness>,
     pub type_names: BTreeMap<TypeVar, String>,
     pub bounds: Vec<(TypeVar, TypeVarRestriction)>,
 }
@@ -167,7 +168,7 @@ pub(crate) fn resolve_declared_surface_in_session(
     builtins::register_prelude_adts(&mut env, &mut vg, &mut registry);
     let headers = precollect_type_resolution_env(&declarations, &registry);
     registry.install_resolution_env(headers.clone());
-    let mut subst = Subst::new();
+    let mut subst = Subst::<ErrorWitness>::new();
 
     // Register fields while the alias table is empty, so register_deftype's
     // normal alias expansion preserves every edge. The same compiler helper

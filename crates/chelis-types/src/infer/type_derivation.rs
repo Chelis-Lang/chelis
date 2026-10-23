@@ -16,6 +16,7 @@
 //! the instantiations of a target that never bound rather than dropped.
 
 use super::*;
+use crate::errors::ErrorWitness;
 use std::sync::Arc;
 
 /// What a deferred derivation reads off its target.
@@ -61,7 +62,11 @@ impl TypeDerivation {
     /// (chelis#731 §C3). A deferred `grad` published a function, and what
     /// stands for the gradient is that function's result; its parameters are
     /// the operand's own.
-    fn witness_slot(&self, projected: &Type, subst: &Subst) -> Type {
+    fn witness_slot(
+        &self,
+        projected: &Type<ErrorWitness>,
+        subst: &Subst<ErrorWitness>,
+    ) -> Type<ErrorWitness> {
         match (self, subst.apply(projected)) {
             (Self::Grad { .. } | Self::Vmap { .. }, Type::Fn(_, result)) => {
                 Arc::unwrap_or_clone(result)
@@ -86,7 +91,7 @@ pub(super) enum DerivationStep {
     /// then each awaited variable.
     Awaits {
         derivation: TypeDerivation,
-        operands: Vec<Type>,
+        operands: Vec<Type<ErrorWitness>>,
     },
 }
 
@@ -116,13 +121,13 @@ pub(super) enum DerivationStep {
 #[allow(clippy::too_many_arguments)]
 pub(super) fn resolve_type_derivation(
     derivation: &TypeDerivation,
-    source: &Type,
-    projected: &Type,
-    awaits_group: &dyn Fn(&Type, &Subst) -> bool,
+    source: &Type<ErrorWitness>,
+    projected: &Type<ErrorWitness>,
+    awaits_group: &dyn Fn(&Type<ErrorWitness>, &Subst<ErrorWitness>) -> bool,
     defer_parameters: bool,
     group_open: bool,
     vg: &mut VarGen,
-    subst: &mut Subst,
+    subst: &mut Subst<ErrorWitness>,
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
 ) -> DerivationStep {
@@ -149,7 +154,7 @@ pub(super) fn resolve_type_derivation(
     // guard: `unresolved_operand_census.rs` enumerates this site by that arm's
     // pattern, and a guard naming only `Type::Var` is a spelling its
     // recognizer cannot see.
-    let resolved: Result<Type, Box<CheckError>> = match (&target, derivation) {
+    let resolved: Result<Type<ErrorWitness>, Box<CheckError>> = match (&target, derivation) {
         // Still unbound: the ledger carries the entry to the next pass, and
         // the declaration boundary decides it if nothing ever binds it.
         (Type::Var(_), _) => return DerivationStep::Pending,
@@ -252,14 +257,14 @@ pub(super) fn resolve_type_derivation(
 /// application is [04-INF-1]'s binding site for that parameter.
 #[allow(clippy::too_many_arguments)]
 fn resolve_vmap_derivation(
-    source: &Type,
-    projected: &Type,
+    source: &Type<ErrorWitness>,
+    projected: &Type<ErrorWitness>,
     axis: usize,
     batch_var: DimVar,
     group_open: bool,
     defer_parameters: bool,
     vg: &mut VarGen,
-    subst: &mut Subst,
+    subst: &mut Subst<ErrorWitness>,
     errors: &mut DiagnosticSink<'_>,
 ) -> DerivationStep {
     let source_ty = subst.apply(source);
@@ -384,7 +389,7 @@ fn resolve_vmap_derivation(
     DerivationStep::Decided
 }
 
-fn vmap_unknown_position(ty: &Type) -> bool {
+fn vmap_unknown_position(ty: &Type<ErrorWitness>) -> bool {
     match ty {
         Type::Var(_) => true,
         Type::Ref(inner) => vmap_unknown_position(inner),
@@ -397,11 +402,11 @@ fn vmap_unknown_position(ty: &Type) -> bool {
 /// still has an unknown constructor. Known tensor and key formals are checked
 /// by the forward rule when the complete row function is available.
 fn infer_vmap_row_parameter(
-    row: &Type,
-    mapped: &Type,
+    row: &Type<ErrorWitness>,
+    mapped: &Type<ErrorWitness>,
     axis: usize,
     batch_var: DimVar,
-    subst: &mut Subst,
+    subst: &mut Subst<ErrorWitness>,
 ) -> Result<bool, Box<CheckError>> {
     let row = subst.apply(row);
     let mapped = subst.apply(mapped);
@@ -429,11 +434,11 @@ fn infer_vmap_row_parameter(
 }
 
 fn unmap_vmap_parameter(
-    mapped: &Type,
+    mapped: &Type<ErrorWitness>,
     axis: usize,
     batch_var: DimVar,
-    subst: &mut Subst,
-) -> Result<Option<Type>, Box<CheckError>> {
+    subst: &mut Subst<ErrorWitness>,
+) -> Result<Option<Type<ErrorWitness>>, Box<CheckError>> {
     match mapped {
         Type::Var(_) => Ok(None),
         Type::Tensor(dims, precision) => {
@@ -482,9 +487,9 @@ fn unmap_vmap_parameter(
 }
 
 fn reject_vmap_derivation(
-    projected: &Type,
+    projected: &Type<ErrorWitness>,
     error: CheckError,
-    subst: &mut Subst,
+    subst: &mut Subst<ErrorWitness>,
     errors: &mut DiagnosticSink<'_>,
 ) -> DerivationStep {
     let witness = report(errors, error);
@@ -501,11 +506,11 @@ fn reject_vmap_derivation(
 fn record_field_type(
     adt_name: &str,
     field: &str,
-    target: &Type,
+    target: &Type<ErrorWitness>,
     vg: &mut VarGen,
-    subst: &mut Subst,
+    subst: &mut Subst<ErrorWitness>,
     adt_reg: &AdtRegistry,
-) -> Result<Type, Box<CheckError>> {
+) -> Result<Type<ErrorWitness>, Box<CheckError>> {
     let Some(variant) = single_record_variant(adt_reg, adt_name) else {
         return Err(Box::new(CheckError::new(
             CheckErrorKind::TypeMismatch,

@@ -1,3 +1,4 @@
+use chelis_types::errors::ErrorWitness;
 use std::collections::BTreeMap;
 
 use chelis_deep::DeepTag;
@@ -9,7 +10,7 @@ use chelis_ir::dag::{DimInfo, TensorType};
 use chelis_ir::eval::{TensorInputDemand, TensorValue as IrTensorValue};
 use chelis_ir::lower::SubexprLoweringContext;
 use chelis_numeric_core::prim::Prim;
-use chelis_types::types::{NominalArg, TensorPrec, Type, TypeVar};
+use chelis_type_core::{NominalArg, TensorPrec, Type, TypeVar};
 
 use super::eval::{DeclaredResultClaim, tensor_result_producer};
 use super::host_ops::terminal_name_matches;
@@ -1137,7 +1138,7 @@ fn registered_type_has_float(
 }
 
 fn stored_type_has_float(
-    ty: &Type,
+    ty: &Type<ErrorWitness>,
     registry: &chelis_types::adt::AdtRegistry,
     substitutions: &UnordMap<TypeVar, bool>,
     visiting: &mut Vec<(String, Vec<bool>)>,

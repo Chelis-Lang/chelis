@@ -22,6 +22,7 @@ pub mod known_tags;
 pub mod linearity;
 pub mod manifest;
 pub(crate) mod opacity;
+#[cfg(test)]
 mod result_scope;
 pub(crate) mod session;
 #[cfg(feature = "checkpoint-compile-probe")]
@@ -37,7 +38,6 @@ pub fn checkpoint_iter_compile_probe(
 }
 pub mod static_seed;
 pub mod types;
-pub mod unify;
 pub mod unsupported;
 
 mod rejection_registry_generated;

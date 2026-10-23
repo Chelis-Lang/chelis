@@ -4,7 +4,7 @@
 //! nearly every axis-taking primitive (reductions, `gather`, `scatter`,
 //! `cumsum`, `sort`, `split`, `diagonal`, `trace`) while `softmax`/`concat`
 //! pre-normalized inline and accepted it. Because the checker
-//! (`chelis_types::normalize_static_axis`) and the IR lowerer
+//! (`chelis_type_core::decisions::shape::normalize_static_axis`) and the IR lowerer
 //! (`chelis_ir::lower::normalize_axis`) both accept the from-the-end
 //! convention, `sum(x, -1)` passed `chelis check`/`chelis build` but failed
 //! `chelis eval` — a check↔eval soundness gap (same class as #364).

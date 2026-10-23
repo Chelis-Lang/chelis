@@ -9,8 +9,10 @@
 
 use crate::adt::{AdtDef, AdtRegistry, VariantInfo};
 use crate::env::Env;
-use crate::types::*;
+use crate::errors::ErrorWitness;
 use chelis_numeric_core::prim::Prim;
+use chelis_type_core::decisions::collection::AggregateRule;
+use chelis_type_core::*;
 use std::sync::Arc;
 
 pub const BUILTIN_NAMES: &[&str] = &[
@@ -335,18 +337,6 @@ pub(crate) enum ValueEquality {
     Aggregate(AggregateRule),
     CallbackApplication,
     NoAggregateEquality,
-}
-
-/// Aggregate equality is decided with an immutable substitution and returned
-/// as a ResultConstraint. Only the origin replay may bind its variables.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum AggregateRule {
-    Append,
-    Concat,
-    DictInsert,
-    DictMerge,
-    Fold,
-    Scan,
 }
 
 pub(crate) const fn case_value_equality(case: BuiltinSiblingCaseId) -> ValueEquality {
@@ -2643,7 +2633,7 @@ pub fn builtin_env_names() -> &'static std::collections::BTreeSet<String> {
     })
 }
 
-pub fn builtin_value_contract_carried(decl: &BuiltinDecl, scheme: &Scheme) -> bool {
+pub fn builtin_value_contract_carried(decl: &BuiltinDecl, scheme: &Scheme<ErrorWitness>) -> bool {
     let relation_carried = !scheme.constraints.is_empty()
         && scheme
             .constraints
@@ -2660,7 +2650,7 @@ pub fn builtin_value_contract_carried(decl: &BuiltinDecl, scheme: &Scheme) -> bo
 #[derive(Debug, Clone, Copy)]
 pub struct AdmittedBuiltin {
     declaration: &'static BuiltinDecl,
-    scheme: &'static Scheme,
+    scheme: &'static Scheme<ErrorWitness>,
 }
 
 impl AdmittedBuiltin {
@@ -2700,7 +2690,7 @@ impl AdmittedBuiltin {
         self.declaration
     }
 
-    pub fn scheme(&self) -> &Scheme {
+    pub fn scheme(&self) -> &Scheme<ErrorWitness> {
         self.scheme
     }
 }
@@ -2835,7 +2825,7 @@ pub fn builtin_env() -> (Env, VarGen) {
     let mut vg = VarGen::default();
 
     // --- Signature builders ---
-    fn borrowed(ty: Type) -> Type {
+    fn borrowed(ty: Type<ErrorWitness>) -> Type<ErrorWitness> {
         Type::reference(ty)
     }
 
@@ -3943,7 +3933,7 @@ pub fn builtin_env() -> (Env, VarGen) {
     // `chelis-effects` by name. `process_run` shares its host-runtime
     // implementation between evaluation and compiled C.
     let string = || Type::Prim(Prim::String);
-    let list_of = |element: Type| Type::adt("List".to_string(), vec![element]);
+    let list_of = |element: Type<ErrorWitness>| Type::adt("List".to_string(), vec![element]);
     let mapped_file = || Type::adt("MappedFile".to_string(), Vec::new());
     for (name, params, result) in [
         ("read_file", vec![string()], string()),
@@ -4511,8 +4501,8 @@ mod tests {
     fn instantiate_add_produces_fn_type() {
         let (env, mut vg) = builtin_env();
         let scheme = env.lookup("add").unwrap();
-        let subst = crate::unify::Subst::new();
-        let ty = env.instantiate(scheme, &mut vg, &subst);
+        let subst = chelis_type_core::Subst::<ErrorWitness>::new();
+        let ty = chelis_type_core::instantiate(scheme, &mut vg, &subst);
         match ty {
             Type::Fn(args, _ret) => assert_eq!(args.len(), 2),
             other => panic!("expected Fn, got {other:?}"),
@@ -4521,12 +4511,12 @@ mod tests {
 
     #[test]
     fn add_args_unify_with_same_tensor() {
-        use crate::unify::{Subst, unify};
+        use chelis_type_core::{Subst, unify};
 
         let (env, mut vg) = builtin_env();
         let add_scheme = env.lookup("add").unwrap();
-        let mut subst = Subst::new();
-        let add_ty = env.instantiate(add_scheme, &mut vg, &subst);
+        let mut subst = Subst::<ErrorWitness>::new();
+        let add_ty = chelis_type_core::instantiate(add_scheme, &mut vg, &subst);
 
         // add should accept two tensors of the same type
         let tensor_f32 = Type::Tensor(
@@ -4546,12 +4536,12 @@ mod tests {
 
     #[test]
     fn add_rejects_mixed_precision() {
-        use crate::unify::{Subst, unify};
+        use chelis_type_core::{Subst, unify};
 
         let (env, mut vg) = builtin_env();
         let add_scheme = env.lookup("add").unwrap();
-        let mut subst = Subst::new();
-        let add_ty = env.instantiate(add_scheme, &mut vg, &subst);
+        let mut subst = Subst::<ErrorWitness>::new();
+        let add_ty = chelis_type_core::instantiate(add_scheme, &mut vg, &subst);
 
         // add(tensor[batch,f32], tensor[batch,bf16]) should fail
         let t1 = Type::Tensor(
@@ -4572,12 +4562,12 @@ mod tests {
 
     #[test]
     fn add_rejects_tensor_plus_int() {
-        use crate::unify::{Subst, unify};
+        use chelis_type_core::{Subst, unify};
 
         let (env, mut vg) = builtin_env();
         let add_scheme = env.lookup("add").unwrap();
-        let mut subst = Subst::new();
-        let add_ty = env.instantiate(add_scheme, &mut vg, &subst);
+        let mut subst = Subst::<ErrorWitness>::new();
+        let add_ty = chelis_type_core::instantiate(add_scheme, &mut vg, &subst);
 
         // add(tensor[batch,f32], i32) should fail
         let t1 = Type::Tensor(

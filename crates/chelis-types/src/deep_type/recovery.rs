@@ -1,25 +1,29 @@
 //! Failed type syntax retains usable structure, but never becomes a resolved type.
 
 use super::*;
+use crate::errors::ErrorWitness;
 use crate::errors::propagate;
 
 /// An invalid signature has a real failure witness and a private body-check frame.
 /// Only the frame contains partial structure. Public name lookup retains the error.
 #[derive(Debug, Clone)]
 pub(crate) struct RejectedSignatureType {
-    pub(crate) ty: Type,
+    pub(crate) ty: Type<ErrorWitness>,
     pub(crate) witness: ErrorWitness,
 }
 
 impl RejectedSignatureType {
-    pub(crate) fn from_resolved(ty: Type, witness: ErrorWitness) -> Self {
+    pub(crate) fn from_resolved(ty: Type<ErrorWitness>, witness: ErrorWitness) -> Self {
         Self { ty, witness }
     }
 }
 
 pub(super) enum TypeResolution {
-    Resolved(Type),
-    Rejected { ty: Type, witness: ErrorWitness },
+    Resolved(Type<ErrorWitness>),
+    Rejected {
+        ty: Type<ErrorWitness>,
+        witness: ErrorWitness,
+    },
 }
 
 impl TypeResolution {
@@ -30,28 +34,31 @@ impl TypeResolution {
         }
     }
 
-    fn from_result(result: Result<Type, ErrorWitness>) -> Self {
+    fn from_result(result: Result<Type<ErrorWitness>, ErrorWitness>) -> Self {
         match result {
             Ok(ty) => Self::Resolved(ty),
             Err(witness) => Self::failed(witness),
         }
     }
 
-    pub(super) fn into_result(self) -> Result<Type, ErrorWitness> {
+    pub(super) fn into_result(self) -> Result<Type<ErrorWitness>, ErrorWitness> {
         match self {
             Self::Resolved(ty) => Ok(ty),
             Self::Rejected { witness, .. } => Err(witness),
         }
     }
 
-    fn into_parts(self) -> (Type, Option<ErrorWitness>) {
+    fn into_parts(self) -> (Type<ErrorWitness>, Option<ErrorWitness>) {
         match self {
             Self::Resolved(ty) => (ty, None),
             Self::Rejected { ty, witness } => (ty, Some(witness)),
         }
     }
 
-    fn compose(parts: Vec<Self>, constructor: impl FnOnce(Vec<Type>) -> Type) -> Self {
+    fn compose(
+        parts: Vec<Self>,
+        constructor: impl FnOnce(Vec<Type<ErrorWitness>>) -> Type<ErrorWitness>,
+    ) -> Self {
         let mut types = Vec::with_capacity(parts.len());
         let mut failure = None;
         for part in parts {

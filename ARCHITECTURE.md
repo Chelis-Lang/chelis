@@ -61,6 +61,7 @@ builds; [GPU backends](docs/gpu_backends.md) covers the HIP and Metal targets.
 |---|---|
 | Source syntax and predicates | `chelis-surf`, `chelis-deep`, `chelis-pred`, `chelis-macros` |
 | Numeric values and policy | `chelis-numeric-core`, `chelis-crmath`, `chelis-vocab` |
+| Type models and unification | `chelis-type-core` |
 | Semantic pipeline | `chelis-types`, `chelis-effects`, `chelis-pipeline-core`, `chelis-compiler-api` |
 | DAG, transforms, evaluation | `chelis-ir` |
 | Native emission and runtime | `chelis-backend-c`, `chelis-backend-hip`, `chelis-backend-metal`, `chelis-runtime` |
@@ -108,6 +109,40 @@ The [acceptance gate](docs/manual_gates.md#syntax-core-portability) lists prereq
 The command checks parser, wire, formatter, macro, predicate, and host behavior.
 Allocation checks compare four source cases with the accepted source revision.
 Target compilation proves neither device execution nor device memory capacity.
+
+## Portable type models and unification
+
+`chelis-type-core` owns `Type<E>`, `NominalArg<E>`, `Scheme<E>`, substitutions, and pure scheme and solver operations.
+It uses unconditional `no_std`, explicit `alloc`, empty defaults, and optional portable `serde`.
+Consumers must specify their evidence type.
+There is no default evidence parameter, conversion API, old model alias, or host re-export.
+
+`chelis-numeric-core` retains the sole `Prim` identity.
+The core uses current `chelis-unord` collections and private spin mutexes.
+The normal graph disables dependency defaults.
+The serde feature enables portable core model transport.
+
+Portable Deep supplies the canonical cast-mode data and retains its own serde dependency.
+Vocabulary remains unchanged below Deep.
+The core has no DAG or hosted inference dependency.
+
+The solver retains current nominal arguments, dtype restrictions, inference levels, collection contracts, and shared type children.
+Logical aliases remain separate from transient resolution caches.
+Scheme substitution stops at quantified aliases after ordinary resolution.
+Protected-operation interruption rejects later store access.
+Mutable substitution clones remain independent.
+
+`chelis-types` uses `Type<ErrorWitness>`, `Scheme<ErrorWitness>`, and `Subst<ErrorWitness>` directly.
+It retains witness construction, diagnostic reports, private sinks and checkpoints, source resolution, recursion policy, and the successful-product veto.
+Pure decisions return portable failures and optional source labels.
+The host attaches source diagnostics through its existing report boundary.
+Trusted cache decoding does not establish authority for external payloads.
+
+The solver needs an allocator and target atomics.
+A reentrant interrupt must not enter a solver whose lock it preempts.
+Run `uv run --managed-python --python 3.11 --no-project python scripts/type_unification_core_oracle.py` from the repository root.
+The [acceptance gate](docs/manual_gates.md#type-unification-core-portability) separates immutable-source parity, host concurrency, and target compilation.
+No numbered language chapter transfers authority through this extraction.
 
 ## Portable Reef bootstrap graph policy
 

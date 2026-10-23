@@ -501,6 +501,10 @@ NUMERIC_CORE_ORACLE: list[str] = [
     MANAGED_PYTHON,
     "scripts/numeric_core_oracle.py",
 ]
+TYPE_UNIFICATION_CORE_ORACLE: list[str] = [
+    MANAGED_PYTHON,
+    "scripts/type_unification_core_oracle.py",
+]
 # Generated chelis-std files stay out of the index: the bundle crate's build
 # script packs the runtime, so a tracked dist pair or a lock recording the
 # bundled runtime would go stale with the first std edit. Pure git and Python.
@@ -647,6 +651,7 @@ STAGES: dict[str, list[list[str]]] = {
         SHELL_METADATA_CORE_ORACLE,
         CERTIFICATE_CORE_ORACLE,
         NUMERIC_CORE_ORACLE,
+        TYPE_UNIFICATION_CORE_ORACLE,
         OWNERSHIP_LEDGER_CLI_TESTS,
     ],
     "runtime-representation": [
@@ -717,6 +722,7 @@ LOCAL_STATIC_COMMANDS: list[list[str]] = [
     SHELL_METADATA_CORE_ORACLE,
     CERTIFICATE_CORE_ORACLE,
     NUMERIC_CORE_ORACLE,
+    TYPE_UNIFICATION_CORE_ORACLE,
     OWNERSHIP_LEDGER_CLI_TESTS,
 ]
 

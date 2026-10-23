@@ -8,14 +8,14 @@
 //! fails the build, and a disposition that does not match the arm's actual
 //! shape fails too.
 //!
-//! WHAT IT ENUMERATES, exactly: a `match` arm, or an `if matches!(...)`
-//! guard, under `crates/chelis-types/src/infer/**`, whose pattern names
-//! `Type::Var` beside `Type::Error` (the merged spelling the issue itself
-//! identified), or, since chelis#1805, names a tensor operand at an
-//! unresolved PRECISION. That is a code-shape key, not a semantic one: an early
-//! return written in some third spelling is outside what this file can see,
-//! and the behavioural cells in `unresolved_operand_matrix.rs` are what prove
-//! the routes actually validate. The two artifacts are complements.
+//! The census enumerates `match` arms and `if matches!(...)` guards.
+//! It scans `crates/chelis-types/src/infer/**` and the core sources in
+//! `CORE_DECISION_SOURCES`.
+//!
+//! Patterns name `Type::Var` beside `Type::Error`, or a tensor operand with
+//! unresolved precision (chelis#1805). This key describes code shape, not semantics.
+//! Other spellings are outside this census. The behavioural cells in
+//! `unresolved_operand_matrix.rs` prove that routes validate.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -24,6 +24,12 @@ use syn::visit::Visit;
 
 const FIXTURE: &str = "tests/fixtures/unresolved_operand_census.json";
 const MATRIX: &str = "tests/unresolved_operand_matrix.rs";
+/// Canonical sources for decisions that moved from host inference.
+/// Keys are relative to the host crate, unlike the existing inference keys.
+const CORE_DECISION_SOURCES: &[&str] = &[
+    "../chelis-type-core/src/decisions/collection.rs",
+    "../chelis-type-core/src/decisions/cast.rs",
+];
 /// The deferred shape ledger and its route dispatch. A `deferred_by_caller`
 /// row asserts that the enclosing rule is replayed from here, so the name has
 /// to appear in one of these two files.
@@ -259,15 +265,22 @@ fn infer_sources(root: &Path) -> Vec<PathBuf> {
 
 fn collect(root: &Path) -> Vec<Site> {
     let mut sites = Vec::new();
-    for path in infer_sources(root) {
+    let sources = infer_sources(root).into_iter().map(|path| {
+        let key = path
+            .strip_prefix(root.join("src/infer"))
+            .expect("path under src/infer")
+            .to_string_lossy()
+            .into_owned();
+        (path, key)
+    });
+    let core_sources = CORE_DECISION_SOURCES
+        .iter()
+        .map(|key| (root.join(key), (*key).to_string()));
+    for (path, file) in sources.chain(core_sources) {
         let source = std::fs::read_to_string(&path).expect("readable source");
-        let parsed = syn::parse_file(&source).expect("inference source parses");
+        let parsed = syn::parse_file(&source).expect("operand census source parses");
         let mut census = Census {
-            file: path
-                .strip_prefix(root.join("src/infer"))
-                .expect("path under src/infer")
-                .to_string_lossy()
-                .into_owned(),
+            file,
             ..Census::default()
         };
         census.visit_file(&parsed);
@@ -842,9 +855,8 @@ fn a_witness_that_is_not_a_matrix_test_is_rejected() {
 }
 
 /// MUTATION CONTROL at the FILE level, the complement of the visitor-level
-/// control above. It plants a whole new inference source in a temporary tree
-/// and asserts the directory walk reaches it, so a site added in a new module
-/// cannot be invisible to the census.
+/// control above. It plants sources for both owners in a temporary tree.
+/// The inference walk and each canonical core source must reach the visitor.
 #[test]
 fn a_planted_inference_source_is_walked() {
     let root = std::env::temp_dir().join(format!(
@@ -852,7 +864,8 @@ fn a_planted_inference_source_is_walked() {
         std::process::id(),
         std::thread::current().id()
     ));
-    let infer = root.join("src/infer");
+    let host = root.join("chelis-types");
+    let infer = host.join("src/infer");
     std::fs::create_dir_all(infer.join("nested")).expect("temporary tree");
     std::fs::write(
         infer.join("nested/planted_route.rs"),
@@ -861,18 +874,43 @@ fn a_planted_inference_source_is_walked() {
          }\n",
     )
     .expect("planted source");
+    for key in CORE_DECISION_SOURCES {
+        let path = host.join(key);
+        std::fs::create_dir_all(path.parent().expect("core source directory"))
+            .expect("temporary core tree");
+        std::fs::write(
+            path,
+            "fn check_core_signature(input_ty: Type, errors: &mut DiagnosticSink<'_>) -> Type {\n\
+             match input_ty { Type::Var(_) => input_ty, other => report(errors, other) }\n\
+             }\n",
+        )
+        .expect("planted core source");
+    }
 
-    let sites = collect(&root);
+    let sites = collect(&host);
     std::fs::remove_dir_all(&root).expect("temporary tree removed");
 
     assert_eq!(
         sites.len(),
-        1,
-        "the directory walk must reach a planted inference source, found {sites:?}"
+        1 + CORE_DECISION_SOURCES.len(),
+        "the census must reach both source owners, found {sites:?}"
     );
-    assert_eq!(sites[0].file, "nested/planted_route.rs");
+    let host_site = sites
+        .iter()
+        .find(|site| site.file == "nested/planted_route.rs")
+        .expect("the inference directory walk must retain the host control");
+    for key in CORE_DECISION_SOURCES {
+        let site = sites
+            .iter()
+            .find(|site| site.file == *key)
+            .expect("the census must detect an unresolved operand in each core source");
+        assert_eq!(site.function, "check_core_signature");
+        assert_eq!(site.ordinal, 1);
+        assert_eq!(site.pattern, "Type::Var(_)");
+        assert!(site.is_route && !site.suspends && !site.gates);
+    }
     assert!(
-        sites[0].is_route,
+        host_site.is_route,
         "a function that publishes a type and holds a diagnostic sink is a route"
     );
 }

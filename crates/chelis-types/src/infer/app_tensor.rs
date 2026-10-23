@@ -4,15 +4,20 @@
 //! The extraction preserves control flow and diagnostic order.
 
 use super::*;
+use crate::errors::ErrorWitness;
+use chelis_type_core::decisions::shape::{
+    SumResultPrecision, SumResultSlot, default_sum_result_precision, normalize_static_axis,
+    publish_sum_result, sum_result_widening_note,
+};
 
 pub(super) fn check_layer_norm_signature(
     site: CheckSite<'_>,
-    arg_tys: &[Type],
-    result_ty: &Type,
+    arg_tys: &[Type<ErrorWitness>],
+    result_ty: &Type<ErrorWitness>,
     _vg: &mut VarGen,
-    subst: &mut Subst,
+    subst: &mut Subst<ErrorWitness>,
     errors: &mut DiagnosticSink<'_>,
-) -> Type {
+) -> Type<ErrorWitness> {
     if arg_tys.len() != 4 {
         return report_builtin_arity_range(
             errors,
@@ -307,7 +312,7 @@ pub(super) fn compute_concrete_conv_spatial(
     arg_exprs: &[deep::Expr],
     input_dims: &[Dim],
     kernel_dims: &[Dim],
-    subst: &Subst,
+    subst: &Subst<ErrorWitness>,
 ) -> Option<Vec<i64>> {
     let rank = input_dims.len().checked_sub(2)?;
     if rank == 0 || kernel_dims.len() != input_dims.len() {
@@ -329,12 +334,12 @@ pub(super) fn compute_concrete_conv_spatial(
 pub(super) fn check_conv_signature(
     site: CheckSite<'_>,
     arg_exprs: &[deep::Expr],
-    arg_tys: &[Type],
-    result_ty: &Type,
+    arg_tys: &[Type<ErrorWitness>],
+    result_ty: &Type<ErrorWitness>,
     vg: &mut VarGen,
-    subst: &mut Subst,
+    subst: &mut Subst<ErrorWitness>,
     errors: &mut DiagnosticSink<'_>,
-) -> Type {
+) -> Type<ErrorWitness> {
     if arg_tys.len() != 4 {
         return report_builtin_arity_range(errors, site, "conv", "4 arguments", arg_tys.len());
     }
@@ -458,11 +463,11 @@ pub(super) fn check_conv_signature(
 
 pub(super) fn check_matmul_signature(
     site: CheckSite<'_>,
-    arg_tys: &[Type],
-    result_ty: &Type,
-    subst: &mut Subst,
+    arg_tys: &[Type<ErrorWitness>],
+    result_ty: &Type<ErrorWitness>,
+    subst: &mut Subst<ErrorWitness>,
     errors: &mut DiagnosticSink<'_>,
-) -> Type {
+) -> Type<ErrorWitness> {
     if arg_tys.len() != 2 {
         return report_at_check_site(
             errors,
@@ -669,12 +674,12 @@ pub(super) fn check_reduction_signature(
     site: CheckSite<'_>,
     name: &str,
     arg_exprs: &[deep::Expr],
-    arg_tys: &[Type],
-    result_ty: &Type,
+    arg_tys: &[Type<ErrorWitness>],
+    result_ty: &Type<ErrorWitness>,
     vg: &mut VarGen,
-    subst: &mut Subst,
+    subst: &mut Subst<ErrorWitness>,
     errors: &mut DiagnosticSink<'_>,
-) -> Type {
+) -> Type<ErrorWitness> {
     if arg_tys.len() < 2 {
         return report_builtin_arity_range(
             errors,
@@ -1059,7 +1064,7 @@ pub(super) fn check_reduction_signature(
         {
             let expected = declared_prec.render();
             let got = result_prec.render();
-            let note = sum_result_widening_note(
+            let note = sum_result_widening_note::<ErrorWitness>(
                 Some("sum"),
                 &Type::Tensor(Vec::new(), prec.clone()),
                 &Type::Tensor(Vec::new(), result_prec.clone()),
@@ -1085,7 +1090,8 @@ pub(super) fn check_reduction_signature(
             out_dims,
             SumResultPrecision::Pending(variable),
             SumResultSlot::Fresh(vg),
-            site.owned_location(),
+            site.owned_location()
+                .map(TypeDiagnosticLocation::into_source_label),
             subst,
         ),
         None => Type::Tensor(out_dims, result_prec),
@@ -1115,7 +1121,7 @@ fn unit_extent_claim_error(
     builtin: &str,
     input_dims: &[Dim],
     axis: usize,
-    subst: &Subst,
+    subst: &Subst<ErrorWitness>,
 ) -> Option<CheckError> {
     match input_dims
         .get(axis)
@@ -1142,13 +1148,13 @@ pub(super) fn check_expand_signature(
     site: CheckSite<'_>,
     builtin: &'static str,
     arg_exprs: &[deep::Expr],
-    arg_tys: &[Type],
-    result_ty: &Type,
+    arg_tys: &[Type<ErrorWitness>],
+    result_ty: &Type<ErrorWitness>,
     axis_is_dim_name: bool,
     env: &Env,
-    subst: &mut Subst,
+    subst: &mut Subst<ErrorWitness>,
     errors: &mut DiagnosticSink<'_>,
-) -> Type {
+) -> Type<ErrorWitness> {
     // `insert` is this route with one result form instead of two. Everything
     // before the result typing, including what happens to a pending operand,
     // is shared byte for byte.
@@ -1547,11 +1553,11 @@ pub(super) fn check_expand_signature(
 pub(super) fn check_split_keys_signature(
     site: CheckSite<'_>,
     arg_exprs: &[deep::Expr],
-    result_ty: &Type,
+    result_ty: &Type<ErrorWitness>,
     env: &Env,
-    subst: &mut Subst,
+    subst: &mut Subst<ErrorWitness>,
     errors: &mut DiagnosticSink<'_>,
-) -> Type {
+) -> Type<ErrorWitness> {
     let rows = match arg_exprs
         .get(1)
         .and_then(|expr| fold_static_int_expr(expr, |name| env.static_size_value(name)))
@@ -1613,10 +1619,10 @@ pub(super) fn check_named_expand_signature(
     input_dims: &[Dim],
     has_spread: bool,
     input_prec: TensorPrec,
-    result_ty: &Type,
-    subst: &mut Subst,
+    result_ty: &Type<ErrorWitness>,
+    subst: &mut Subst<ErrorWitness>,
     errors: &mut DiagnosticSink<'_>,
-) -> Type {
+) -> Type<ErrorWitness> {
     // The inserted name must not collide with an existing named axis: a
     // duplicate dim name would make every later by-name lookup (reduction,
     // anchor location) ambiguous.
@@ -1796,12 +1802,12 @@ pub(super) enum ToTensorPeel<'a> {
     Poisoned,
     /// Reached a non-`List`, non-prim leaf — the innermost element is
     /// not numeric or bool, so emit a typed diagnostic.
-    BadInner(&'a Type),
+    BadInner(&'a Type<ErrorWitness>),
     /// The argument is not a `List` at all.
     NotList,
 }
 
-pub(super) fn peel_to_tensor_argument(ty: &Type) -> ToTensorPeel<'_> {
+pub(super) fn peel_to_tensor_argument(ty: &Type<ErrorWitness>) -> ToTensorPeel<'_> {
     let mut current = ty;
     let mut rank = 0;
     loop {

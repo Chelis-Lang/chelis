@@ -18,7 +18,8 @@ use chelis_deep::DeepTag;
 use chelis_deep::ast::{Atom as DeepAtom, Expr as DeepExpr, ExprCarrier as DeepExprCarrier};
 use chelis_std_bundle::EMBEDDED_RUNTIME;
 use chelis_surf::ast::Decl;
-use chelis_types::types::{Dim, Effect, EffectSet, NominalArg, TensorPrec, Type};
+use chelis_type_core::{Dim, Effect, EffectSet, NominalArg, TensorPrec, Type};
+use chelis_types::errors::ErrorWitness;
 use chelis_unord::{UnordMap, UnordSet};
 use chelis_vocab::DiagnosticKind;
 use clap::{ArgAction, ArgGroup, Parser, Subcommand};
@@ -4129,7 +4130,7 @@ fn inferred_signatures_value(
 /// [`WireInferredType`] tree emitted by `chelis check --show-inferred
 /// --json`. This is the structured counterpart to [`format_cli_type`];
 /// the two must stay in lockstep on every `Type` variant.
-fn wire_inferred_type(ty: &Type) -> Result<WireInferredType, String> {
+fn wire_inferred_type(ty: &Type<ErrorWitness>) -> Result<WireInferredType, String> {
     Ok(match ty {
         Type::Prim(prim) => WireInferredType::Prim {
             name: prim.name().to_string(),
@@ -4281,7 +4282,7 @@ fn wire_effect_row(row: Option<&EffectSet>) -> Vec<WireInferredEffect> {
 
 /// Render an effect row as the human Display spellings
 /// (`Random`/`Accum`/`IO`/`Test`/`Resource("dev")`), matching the
-/// `chelis_types::types::Effect` Display impl used in stderr
+/// `chelis_type_core::Effect` Display impl used in stderr
 /// diagnostics. Stable ordering follows `EffectSet`'s `BTreeSet`.
 fn effect_row_display(row: Option<&EffectSet>) -> Vec<String> {
     match row {
@@ -4290,7 +4291,7 @@ fn effect_row_display(row: Option<&EffectSet>) -> Vec<String> {
     }
 }
 
-fn format_cli_type(ty: &Type) -> String {
+fn format_cli_type(ty: &Type<ErrorWitness>) -> String {
     match ty {
         Type::Prim(prim) => prim.name().to_string(),
         Type::Fn(args, ret) => {

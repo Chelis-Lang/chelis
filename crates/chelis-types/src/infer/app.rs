@@ -4,6 +4,8 @@
 //! The extraction preserves control flow and diagnostic order.
 
 use super::*;
+use crate::errors::ErrorWitness;
+use chelis_type_core::decisions::shape::explicit_accumulator_result;
 
 /// The §4.5.2 join categories are semantic, not `Dim` representation tags.
 /// A private labelled Var can represent a concrete name with an optional
@@ -18,7 +20,7 @@ enum ListAxis {
 }
 
 impl ListAxis {
-    fn classify(dim: &Dim, subst: &Subst) -> Self {
+    fn classify(dim: &Dim, subst: &Subst<ErrorWitness>) -> Self {
         let observation = subst.observe_dim(dim);
         if observation.rank().is_some()
             || (observation.variable().is_some()
@@ -42,12 +44,12 @@ pub(super) fn infer_app(
     node: &DeepNode,
     env: &mut Env,
     vg: &mut VarGen,
-    subst: &mut Subst,
+    subst: &mut Subst<ErrorWitness>,
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
     product: &mut InferenceProduct,
-    expected_result: Option<&Type>,
-) -> Type {
+    expected_result: Option<&Type<ErrorWitness>>,
+) -> Type<ErrorWitness> {
     // Preserve lexical ownership before inference mutates the environment.
     // This is discovery metadata, not a backend acceptance decision.
     let kids = node.children_slice();
@@ -155,11 +157,11 @@ pub(super) fn infer_callee(
     callee: &deep::Expr,
     env: &mut Env,
     vg: &mut VarGen,
-    subst: &mut Subst,
+    subst: &mut Subst<ErrorWitness>,
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
     product: &mut InferenceProduct,
-) -> Type {
+) -> Type<ErrorWitness> {
     product.callee_reference = matches!(
         callee.carrier(),
         chelis_deep::ExprCarrier::DecodedNode(DeepTag::Var, _, _)
@@ -173,12 +175,12 @@ fn infer_app_inner(
     node: &DeepNode,
     env: &mut Env,
     vg: &mut VarGen,
-    subst: &mut Subst,
+    subst: &mut Subst<ErrorWitness>,
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
     product: &mut InferenceProduct,
-    expected_result: Option<&Type>,
-) -> Type {
+    expected_result: Option<&Type<ErrorWitness>>,
+) -> Type<ErrorWitness> {
     let all_kids = node.children_slice();
     // spec/05 [05-OP-57]: `to_tensor(xs, T)` checks as `to_tensor(xs)` whose
     // List leaf dtype is the type-node child `T` (spec/03 §6.4).
@@ -360,7 +362,7 @@ fn infer_app_inner(
         } else {
             constructor_for_shape(source_name, CallShape::Positional, env, adt_reg).map(
                 |(_, scheme, _)| {
-                    let instantiated = env.instantiate_scheme(scheme, vg, subst);
+                    let instantiated = chelis_type_core::instantiate_scheme(scheme, vg, subst);
                     // chelis#1801: a constructor head is instantiated here
                     // rather than through the Var rule, so it records its
                     // own fresh dimension variables or the bracket above
@@ -434,7 +436,7 @@ fn infer_app_inner(
     if applied_constructor_head {
         product.aggregate_arg_depth += 1;
     }
-    let arg_tys: Vec<Type> = kids[1..]
+    let arg_tys: Vec<Type<ErrorWitness>> = kids[1..]
         .iter()
         .enumerate()
         .map(|(index, arg)| {
@@ -525,7 +527,11 @@ fn infer_app_inner(
                 ));
             }
             Type::Var(tv) => {
-                subst.record_deferred_drop_operand(tv, TypeDiagnosticLocation::from_expr(expr));
+                subst.record_deferred_drop_operand(
+                    tv,
+                    TypeDiagnosticLocation::from_expr(expr)
+                        .map(TypeDiagnosticLocation::into_source_label),
+                );
             }
             _ => {}
         }
@@ -597,7 +603,7 @@ fn infer_app_inner(
     {
         let lhs = type_for_readonly_check(&arg_tys[0], subst);
         let rhs = type_for_readonly_check(&arg_tys[1], subst);
-        let scalar = |ty: &Type| {
+        let scalar = |ty: &Type<ErrorWitness>| {
             matches!(ty, Type::Prim(_))
                 || matches!(ty, Type::Var(p) if subst.tvar_restriction(*p).is_some_and(|bound| !bound.is_value_constraint()))
         };
@@ -684,7 +690,7 @@ fn infer_app_inner(
         matches!(func_name.as_deref(), Some("div" | "pow" | "trunc_div"))
             && arg_tys.len() == 2
             && {
-                let precision = |ty: &Type| match type_for_readonly_check(ty, subst) {
+                let precision = |ty: &Type<ErrorWitness>| match type_for_readonly_check(ty, subst) {
                     Type::Prim(prim) | Type::Tensor(_, TensorPrec::Concrete(prim)) => Some(prim),
                     _ => None,
                 };
@@ -1116,7 +1122,10 @@ fn infer_app_inner(
 /// `unify::tests::a_recorded_meeting_does_not_by_itself_mean_the_class_is_still_free`
 /// builds that state directly and locks which predicate answers correctly in
 /// it.
-fn absorb_runtime_extents_into_call_variables(instantiation_dvars: &[DimVar], subst: &mut Subst) {
+fn absorb_runtime_extents_into_call_variables(
+    instantiation_dvars: &[DimVar],
+    subst: &mut Subst<ErrorWitness>,
+) {
     for &dv in instantiation_dvars {
         let Dim::Var(root) = subst.constraint_dim(&Dim::Var(dv)) else {
             // Bound to a literal, a name or a rank: an argument of this
@@ -1134,7 +1143,7 @@ fn absorb_runtime_extents_into_call_variables(instantiation_dvars: &[DimVar], su
 /// [05-OP-67]: the operand of `drop` is owned, so a borrowed one is a type
 /// error rather than an implicit consume of its owner. Shared by the eager
 /// check in the `drop` route and the deferred one at declaration close.
-pub(super) fn borrowed_drop_operand_error(operand: &Type) -> CheckError {
+pub(super) fn borrowed_drop_operand_error(operand: &Type<ErrorWitness>) -> CheckError {
     CheckError::with_types(
         CheckErrorKind::TypeMismatch,
         format!(
@@ -1149,13 +1158,16 @@ pub(super) fn borrowed_drop_operand_error(operand: &Type) -> CheckError {
 
 /// chelis#3180: re-check each `drop` operand that was unresolved when its call
 /// was inferred against the declaration's final substitution.
-pub(super) fn validate_deferred_drop_operands(subst: &Subst, errors: &mut DiagnosticSink<'_>) {
+pub(super) fn validate_deferred_drop_operands(
+    subst: &Subst<ErrorWitness>,
+    errors: &mut DiagnosticSink<'_>,
+) {
     for (tv, location) in subst.take_deferred_drop_operands() {
         let operand = subst.apply(&Type::Var(tv));
         if matches!(operand, Type::Ref(_)) {
             let error = borrowed_drop_operand_error(&operand);
             errors.push(match location {
-                Some(location) => location.attach(error),
+                Some(location) => TypeDiagnosticLocation::from_source_label(location).attach(error),
                 None => error,
             });
         }
@@ -1170,11 +1182,11 @@ fn accumulated_result(
     operation: Option<&str>,
     accumulator: &deep::Expr,
     kids: &[deep::Expr],
-    result: &Type,
+    result: &Type<ErrorWitness>,
     product: &InferenceProduct,
-    subst: &Subst,
+    subst: &Subst<ErrorWitness>,
     errors: &mut DiagnosticSink<'_>,
-) -> Result<Type, String> {
+) -> Result<Type<ErrorWitness>, String> {
     let operation = match operation {
         Some(operation @ ("matmul" | "sum" | "einsum")) => operation,
         Some(operation) => {

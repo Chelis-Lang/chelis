@@ -3,16 +3,17 @@
 //! This module contains code moved from the former inference monolith.
 //! The extraction preserves control flow and diagnostic order.
 
+use crate::errors::ErrorWitness;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use super::*;
 
 pub(super) fn auto_borrow_call_arg_types(
-    func_ty: &Type,
-    arg_tys: Vec<Type>,
-    subst: &Subst,
-) -> Vec<Type> {
+    func_ty: &Type<ErrorWitness>,
+    arg_tys: Vec<Type<ErrorWitness>>,
+    subst: &Subst<ErrorWitness>,
+) -> Vec<Type<ErrorWitness>> {
     let Type::Fn(params, _) = subst.apply(func_ty) else {
         return arg_tys;
     };
@@ -74,14 +75,14 @@ fn returned_call_source(site: &deep::Expr) -> Option<(&str, usize)> {
 pub(super) fn unify_checked_call_contract(
     site: &deep::Expr,
     callee: Option<&str>,
-    func_ty: &Type,
-    arg_tys: &[Type],
+    func_ty: &Type<ErrorWitness>,
+    arg_tys: &[Type<ErrorWitness>],
     diagnostic_context: Option<(&str, &str)>,
     vg: &mut VarGen,
-    subst: &mut Subst,
+    subst: &mut Subst<ErrorWitness>,
     errors: &mut DiagnosticSink<'_>,
     product: &mut InferenceProduct,
-) -> Result<Type, Type> {
+) -> Result<Type<ErrorWitness>, Type<ErrorWitness>> {
     let ret_ty = vg.fresh_type();
     let unify_arg_tys = auto_borrow_call_arg_types(func_ty, arg_tys.to_vec(), subst);
     let expected_fn = Type::function(unify_arg_tys.clone(), ret_ty.clone());
@@ -149,9 +150,9 @@ pub(super) fn unify_checked_call_contract(
 /// does not record which side was expected, never does.
 fn bracket_literal_for_tensor_hint(
     site: &deep::Expr,
-    func_ty: &Type,
-    arguments: &[Type],
-    subst: &Subst,
+    func_ty: &Type<ErrorWitness>,
+    arguments: &[Type<ErrorWitness>],
+    subst: &Subst<ErrorWitness>,
 ) -> Option<String> {
     let Type::Fn(params, _) = subst.apply(func_ty) else {
         return None;
@@ -186,9 +187,9 @@ fn bracket_literal_for_tensor_hint(
 fn describe_failed_call_operand(
     callee: &str,
     returned: usize,
-    func_ty: &Type,
-    arguments: &[Type],
-    subst: &Subst,
+    func_ty: &Type<ErrorWitness>,
+    arguments: &[Type<ErrorWitness>],
+    subst: &Subst<ErrorWitness>,
     kind: &CheckErrorKind,
 ) -> Option<(String, Option<String>, Option<String>)> {
     // Linker names are not authored call names. Peel off the recovered
@@ -301,8 +302,8 @@ fn describe_failed_call_operand(
 /// Only concrete precision in the callee's pre-unification type supplies
 /// direction, even when nested inside a collection or tuple parameter.
 fn mismatching_declared_precision(
-    expected: &Type,
-    actual: &Type,
+    expected: &Type<ErrorWitness>,
+    actual: &Type<ErrorWitness>,
     components: &mut Vec<String>,
 ) -> Option<(String, String)> {
     match (expected, actual) {
@@ -351,9 +352,9 @@ fn mismatching_declared_precision(
 /// Compare only parallel, declared and actual constructors. The unifier's
 /// internal operand order cannot establish a user-facing expected/got pair.
 fn mismatching_tensor_dimension(
-    expected: &Type,
-    actual: &Type,
-    subst: &Subst,
+    expected: &Type<ErrorWitness>,
+    actual: &Type<ErrorWitness>,
+    subst: &Subst<ErrorWitness>,
     components: &mut Vec<String>,
 ) -> Option<(String, String, String)> {
     match (expected, actual) {
@@ -471,9 +472,9 @@ fn mismatching_tensor_dimension(
 /// `descend_to_tail_parameter`, closing `Linearity-ShapeABroadReturn-F1`.
 pub(super) fn shape_a_relaxed_return(
     body_expr: &deep::Expr,
-    body_ty: &Type,
-    decl_ty: &Type,
-) -> Option<Type> {
+    body_ty: &Type<ErrorWitness>,
+    decl_ty: &Type<ErrorWitness>,
+) -> Option<Type<ErrorWitness>> {
     // body is the def's body, which the desugarer wraps as
     // `(fn (params ...) body_inner)` whenever the def has params.  Walk
     // the inner expression's tail position to confirm it resolves to the
@@ -523,7 +524,7 @@ pub(super) fn shape_a_relaxed_return(
 /// spelling currently used to reach it.
 fn borrowed_parameter_roots(
     params_expr: &deep::Expr,
-    body_params: &[Type],
+    body_params: &[Type<ErrorWitness>],
 ) -> Option<BTreeMap<String, String>> {
     let deep::ExprCarrier::DecodedNode(DeepTag::Params, _, params) = params_expr.carrier() else {
         return None;
@@ -835,7 +836,7 @@ pub(super) fn dims_identical(d1: &Dim, d2: &Dim) -> bool {
 /// `where`/`clamp` require identical shapes, unlike permissive dimension
 /// unification or scatter containment. Names do not equal bare literals;
 /// known contradictions take precedence over a matching semantic label.
-pub(super) fn elementwise_shapes_match(a: &[Dim], b: &[Dim], subst: &Subst) -> bool {
+pub(super) fn elementwise_shapes_match(a: &[Dim], b: &[Dim], subst: &Subst<ErrorWitness>) -> bool {
     a.len() == b.len()
         && a.iter().zip(b).all(|(a, b)| {
             let a = subst.observe_dim(a);
@@ -861,7 +862,7 @@ pub(super) fn elementwise_shapes_match(a: &[Dim], b: &[Dim], subst: &Subst) -> b
 /// Tensor dims are compared with `dims_identical`: same concrete name,
 /// same literal, or the same dim variable.  Distinct dim variables do
 /// not match (`TypeCheck-FreeDimVarUnification-F1`).
-pub(super) fn types_structurally_equal(a: &Type, b: &Type) -> bool {
+pub(super) fn types_structurally_equal(a: &Type<ErrorWitness>, b: &Type<ErrorWitness>) -> bool {
     match (a, b) {
         (Type::Unit, Type::Unit) => true,
         (Type::Prim(p1), Type::Prim(p2)) => p1 == p2,
@@ -916,7 +917,10 @@ pub(super) fn types_structurally_equal(a: &Type, b: &Type) -> bool {
     }
 }
 
-pub(super) fn type_for_readonly_check(ty: &Type, subst: &Subst) -> Type {
+pub(super) fn type_for_readonly_check(
+    ty: &Type<ErrorWitness>,
+    subst: &Subst<ErrorWitness>,
+) -> Type<ErrorWitness> {
     match subst.apply(ty) {
         Type::Ref(inner) => subst.apply(&inner),
         other => other,
@@ -927,7 +931,7 @@ pub(super) fn type_for_readonly_check(ty: &Type, subst: &Subst) -> Type {
 mod dimension_observation_tests {
     use super::*;
 
-    fn labelled(subst: &mut Subst, id: u32, name: &str, extent: Option<i64>) -> Dim {
+    fn labelled(subst: &mut Subst<ErrorWitness>, id: u32, name: &str, extent: Option<i64>) -> Dim {
         let dim = Dim::Var(DimVar(id));
         subst.protect_dimensions([DimVar(id)]);
         unify_dim(&dim, &Dim::Name(name.into()), subst).unwrap();
@@ -939,7 +943,7 @@ mod dimension_observation_tests {
 
     #[test]
     fn observations_keep_constraint_label_and_identity_policies_separate() {
-        let mut subst = Subst::new();
+        let mut subst = Subst::<ErrorWitness>::new();
         let a = labelled(&mut subst, 0, "row", Some(2));
         let b = labelled(&mut subst, 1, "row", Some(3));
         let c = labelled(&mut subst, 2, "other", Some(2));
@@ -979,7 +983,7 @@ mod dimension_observation_tests {
         assert!(!dims_identical(&a, &symbolic));
         assert!(dims_identical(&a, &a));
         let serialized = bincode::serialize(&subst).unwrap();
-        let decoded: Subst = bincode::deserialize(&serialized).unwrap();
+        let decoded: Subst<ErrorWitness> = bincode::deserialize(&serialized).unwrap();
         assert_eq!(decoded.observe_dim(&a).known_extent(), Some(2));
         assert_eq!(decoded.observe_dim(&alias).name(), Some("row"));
         assert!(!decoded.observe_dim(&alias).is_protected());
@@ -1014,7 +1018,7 @@ mod dimension_observation_tests {
             }
         }
         let args = program.iter().find_map(conv_args).unwrap();
-        let mut subst = Subst::new();
+        let mut subst = Subst::<ErrorWitness>::new();
         let known = labelled(&mut subst, 0, "width", Some(5));
         let unknown = labelled(&mut subst, 1, "width", None);
         let kernel = [Dim::Lit(3), Dim::Lit(2), Dim::Lit(3)];

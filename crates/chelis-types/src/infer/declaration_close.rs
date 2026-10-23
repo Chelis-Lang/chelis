@@ -17,6 +17,7 @@
 //! here, after the last step that can narrow.
 
 use super::*;
+use crate::errors::ErrorWitness;
 
 /// The authored-binder contract of one declaration, recorded by
 /// `infer_top_level` once its body is unified with the declared signature and
@@ -37,7 +38,7 @@ pub(super) struct AuthoredBinderContract {
 }
 
 struct BinderRigidity {
-    decl_ty: Type,
+    decl_ty: Type<ErrorWitness>,
     dim_names: UnordMap<DimVar, String>,
     rank_names: UnordMap<RankVar, String>,
 }
@@ -60,7 +61,7 @@ impl AuthoredBinderContract {
     /// Add the rigidity half for a body unified with `decl_ty`.
     pub(super) fn with_rigidity(
         mut self,
-        decl_ty: Type,
+        decl_ty: Type<ErrorWitness>,
         dim_names: UnordMap<DimVar, String>,
         rank_names: UnordMap<RankVar, String>,
     ) -> Self {
@@ -80,7 +81,7 @@ impl AuthoredBinderContract {
         self
     }
 
-    fn decide(self, subst: &Subst, errors: &mut DiagnosticSink<'_>) {
+    fn decide(self, subst: &Subst<ErrorWitness>, errors: &mut DiagnosticSink<'_>) {
         let name = self.declaration.as_str();
         let checkpoint = errors.checkpoint();
         if let Some(rigidity) = &self.rigidity {
@@ -145,7 +146,7 @@ pub(super) fn close_declaration(
     scope: CloseScope,
     env: &Env,
     vg: &mut VarGen,
-    subst: &mut Subst,
+    subst: &mut Subst<ErrorWitness>,
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
 ) {
@@ -170,7 +171,7 @@ pub(super) fn close_component(
     product: &mut InferenceProduct,
     env: &mut Env,
     vg: &mut VarGen,
-    subst: &mut Subst,
+    subst: &mut Subst<ErrorWitness>,
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
 ) {
@@ -196,7 +197,7 @@ fn decide_open_obligations(
     product: &mut InferenceProduct,
     env: &Env,
     vg: &mut VarGen,
-    subst: &mut Subst,
+    subst: &mut Subst<ErrorWitness>,
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
 ) {
@@ -230,7 +231,7 @@ fn decide_open_obligations(
 /// Step 5 of [`close_declaration`].
 fn report_substitution_ledgers(
     env: &Env,
-    subst: &mut Subst,
+    subst: &mut Subst<ErrorWitness>,
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
 ) {

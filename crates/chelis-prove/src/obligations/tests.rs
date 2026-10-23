@@ -1,7 +1,8 @@
 use super::*;
 use crate::opaque::collect_opaque_invariants;
 use chelis_deep::Metadata;
-use chelis_types::types::Type;
+use chelis_type_core::Type;
+use chelis_types::errors::ErrorWitness;
 use std::collections::BTreeMap;
 
 #[test]
@@ -41,7 +42,7 @@ fn issue_872_declared_function_alias_retains_erased_opaque_return() {
                 vec![Type::Prim(chelis_numeric_core::prim::Prim::F32)],
                 Type::adt(
                     "Option".into(),
-                    vec![Type::Var(chelis_types::types::TypeVar(0))],
+                    vec![Type::Var(chelis_type_core::TypeVar(0))],
                 ),
             ),
         )]);
@@ -64,7 +65,7 @@ fn deep_of(surf: &str) -> Vec<Expr> {
 
 /// Run the checker and build the def-name -> inferred-type map the
 /// obligation collector consumes (the D-PRODUCER inferred-type path).
-fn inferred_sigs(exprs: &[Expr]) -> BTreeMap<String, Type> {
+fn inferred_sigs(exprs: &[Expr]) -> BTreeMap<String, Type<ErrorWitness>> {
     let checked = chelis_types::check_typed_program(exprs)
         .unwrap_or_else(|e| panic!("check failed: {:?}", e.errors));
     checked
@@ -219,7 +220,11 @@ fn issue_872_function_alias_cycle_converges_and_exhaustion_is_explicit() {
 fn parser_free_cycle(
     opaque: bool,
     alias: bool,
-) -> (Vec<Expr>, Vec<OpaqueInvariant>, BTreeMap<String, Type>) {
+) -> (
+    Vec<Expr>,
+    Vec<OpaqueInvariant>,
+    BTreeMap<String, Type<ErrorWitness>>,
+) {
     let payload = if opaque {
         proof_adt("T")
     } else {
@@ -303,7 +308,7 @@ fn issue_872_low_budget_is_a_collection_error_not_an_empty_success() {
 
 #[test]
 fn issue_872_kinded_type_arguments_are_edges_but_dimensions_are_not() {
-    use chelis_types::types::{Dim, NominalArg};
+    use chelis_type_core::{Dim, NominalArg};
     let records = BTreeMap::new();
     let dims = vec![NominalArg::Dimension(Dim::Lit(3))];
     assert_eq!(
@@ -435,10 +440,10 @@ def probability(x: f32) -> Probability = Probability { value: x }
 
 // --- direct decompose unit tests over Type ---
 
-fn adt(name: &str) -> Type {
+fn adt(name: &str) -> Type<ErrorWitness> {
     Type::adt(name.to_string(), vec![])
 }
-fn opt(inner: Type) -> Type {
+fn opt(inner: Type<ErrorWitness>) -> Type<ErrorWitness> {
     Type::adt("Option".to_string(), vec![inner])
 }
 
@@ -539,7 +544,7 @@ def prob_value(p: Probability) -> f32 = p.value
     );
 }
 
-fn empty_records() -> BTreeMap<String, Vec<Type>> {
+fn empty_records() -> BTreeMap<String, Vec<Type<ErrorWitness>>> {
     BTreeMap::new()
 }
 

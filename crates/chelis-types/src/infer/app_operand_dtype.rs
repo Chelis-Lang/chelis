@@ -11,6 +11,7 @@
 //! returns before the next callee's check runs.
 
 use super::*;
+use crate::errors::ErrorWitness;
 
 /// Validate `test_assert_close_tensor`'s concrete operand dtypes.
 ///
@@ -28,13 +29,13 @@ use super::*;
 #[allow(clippy::too_many_arguments)]
 pub(super) fn reject_test_assert_close_tensor_operand_dtypes(
     node: &DeepNode,
-    arg_tys: &[Type],
-    subst: &mut Subst,
+    arg_tys: &[Type<ErrorWitness>],
+    subst: &mut Subst<ErrorWitness>,
     errors: &mut DiagnosticSink<'_>,
     suspension: Option<&DtypeAdmissibilitySite<'_>>,
-    result_ty: &Type,
+    result_ty: &Type<ErrorWitness>,
     product: &mut InferenceProduct,
-) -> Option<Type> {
+) -> Option<Type<ErrorWitness>> {
     let actual = arg_tys.first().map(|ty| type_for_readonly_check(ty, subst));
     let tensor_prim = match actual {
         Some(Type::Tensor(_, TensorPrec::Concrete(prim))) if prim.is_float() => Some(prim),
@@ -144,14 +145,14 @@ pub(super) fn reject_test_assert_close_tensor_operand_dtypes(
 pub(super) fn reject_inadmissible_operand_dtypes(
     node: &DeepNode,
     func_name: Option<&str>,
-    arg_tys: &[Type],
-    subst: &mut Subst,
+    arg_tys: &[Type<ErrorWitness>],
+    subst: &mut Subst<ErrorWitness>,
     errors: &mut DiagnosticSink<'_>,
     checked_route_observed: &mut bool,
     suspension: Option<&DtypeAdmissibilitySite<'_>>,
-    result_ty: &Type,
+    result_ty: &Type<ErrorWitness>,
     product: &mut InferenceProduct,
-) -> Option<Type> {
+) -> Option<Type<ErrorWitness>> {
     if let Some(fname) = func_name
         && fname == "test_assert_close_tensor"
     {

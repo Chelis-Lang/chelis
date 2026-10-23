@@ -1,0 +1,27 @@
+[package]
+name = "chelis-type-core"
+description = "Portable type models and unification for Chelis"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = []
+serde = ["dep:serde", "chelis-unord/serde", "chelis-numeric-core/serde"]
+test-instrumentation = []
+
+[dependencies]
+chelis-numeric-core = { path = "../chelis-numeric-core", default-features = false, features = ["alloc"] }
+chelis-unord = { path = "../chelis-unord", default-features = false }
+chelis-deep = { path = "../chelis-deep", default-features = false }
+spin = { version = "0.10", default-features = false, features = ["mutex", "spin_mutex"] }
+serde = { version = "1", default-features = false, features = ["alloc", "derive", "rc"], optional = true }
+
+[dev-dependencies]
+bincode = "1"
+postcard = { version = "1", default-features = false, features = ["alloc"] }
+serde_json = "1"
+
+[lints]
+workspace = true

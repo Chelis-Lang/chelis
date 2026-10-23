@@ -4,6 +4,7 @@
 //! The extraction preserves control flow and diagnostic order.
 
 use super::*;
+use crate::errors::ErrorWitness;
 use std::sync::Arc;
 
 #[allow(clippy::too_many_arguments)]
@@ -12,11 +13,11 @@ pub(super) fn infer_grad(
     node: &DeepNode,
     env: &mut Env,
     vg: &mut VarGen,
-    subst: &mut Subst,
+    subst: &mut Subst<ErrorWitness>,
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
     product: &mut InferenceProduct,
-) -> Type {
+) -> Type<ErrorWitness> {
     let kids = node.children_slice();
     if kids.is_empty() {
         return malformed_form(node, "grad", "a function argument to differentiate", errors);
@@ -39,8 +40,9 @@ pub(super) fn infer_grad(
 
     match &resolved {
         Type::Fn(args, _) => {
-            let awaits_group =
-                |ty: &Type, subst: &Subst| product.awaits_group_completion(ty, subst);
+            let awaits_group = |ty: &Type<ErrorWitness>, subst: &Subst<ErrorWitness>| {
+                product.awaits_group_completion(ty, subst)
+            };
             match decide_grad(
                 &resolved,
                 wrt.as_deref(),
@@ -101,10 +103,13 @@ pub(super) fn infer_grad(
 /// What the `grad` rule concludes about an operand, or what it still waits on.
 pub(super) enum GradDecision {
     /// The gradient's function type, or the rule's own rejection.
-    Decided(Result<Type, Box<CheckError>>),
+    Decided(Result<Type<ErrorWitness>, Box<CheckError>>),
     /// The rule waits on the variables whose final types determine the
     /// gradient payload. Bare operands let the ledger detect readiness.
-    Awaits { operand: Type, awaited: Vec<Type> },
+    Awaits {
+        operand: Type<ErrorWitness>,
+        awaited: Vec<Type<ErrorWitness>>,
+    },
 }
 
 /// Decide the gradient using settled parameter types (spec/06 sections 2.1
@@ -116,18 +121,18 @@ pub(super) enum GradDecision {
 /// Output admission retains chelis#2626's recursive-group deferral. Generic
 /// output instantiation and its backend implementation remain chelis#2460.
 pub(super) fn decide_grad(
-    operand: &Type,
+    operand: &Type<ErrorWitness>,
     wrt: Option<&[usize]>,
-    awaits_group: &dyn Fn(&Type, &Subst) -> bool,
+    awaits_group: &dyn Fn(&Type<ErrorWitness>, &Subst<ErrorWitness>) -> bool,
     defer_parameters: bool,
     adt_reg: &AdtRegistry,
-    subst: &Subst,
+    subst: &Subst<ErrorWitness>,
 ) -> GradDecision {
     let target = resolved(operand, subst);
     let Type::Fn(args, ret) = &target else {
         return GradDecision::Decided(Err(grad_expects_a_function(&target)));
     };
-    let mut awaited: Vec<Type> = grad_output_variables(ret)
+    let mut awaited: Vec<Type<ErrorWitness>> = grad_output_variables(ret)
         .into_iter()
         .map(Type::Var)
         .filter(|variable| awaits_group(variable, subst))
@@ -173,19 +178,19 @@ fn unresolved_grad_parameter(index: usize) -> CheckError {
 /// The variables the output rule reads: the output when it is a variable, or
 /// a rank-0 tensor's precision. Every other constructor decides the rule
 /// whatever variables it holds.
-fn grad_output_variables(ret: &Type) -> Vec<TypeVar> {
+fn grad_output_variables(ret: &Type<ErrorWitness>) -> Vec<TypeVar> {
     match ret {
         Type::Tensor(dims, _) if !dims.is_empty() => Vec::new(),
         Type::Fn(..) | Type::Tuple(_) | Type::Adt(..) | Type::KindedAdt(..) | Type::Ref(_) => {
             Vec::new()
         }
-        leaf => crate::env::free_tvars(leaf),
+        leaf => chelis_type_core::free_tvars(leaf),
     }
 }
 
 /// The variables [`grad_argument_type`] reads in a parameter: every variable
 /// outside a function type, which is not differentiable whatever it holds.
-fn grad_argument_variables(arg: &Type) -> Vec<TypeVar> {
+fn grad_argument_variables(arg: &Type<ErrorWitness>) -> Vec<TypeVar> {
     match arg {
         Type::Fn(..) => Vec::new(),
         Type::Tuple(items) | Type::Adt(_, items) => {
@@ -200,7 +205,7 @@ fn grad_argument_variables(arg: &Type) -> Vec<TypeVar> {
             .flat_map(grad_argument_variables)
             .collect(),
         Type::Ref(inner) => grad_argument_variables(inner),
-        leaf => crate::env::free_tvars(leaf),
+        leaf => chelis_type_core::free_tvars(leaf),
     }
 }
 
@@ -208,18 +213,18 @@ fn grad_argument_variables(arg: &Type) -> Vec<TypeVar> {
 /// non-floating-scalar output; skip a non-differentiable parameter without
 /// `wrt`, or reject it when explicitly selected.
 fn grad_function_type(
-    args: &[Type],
-    ret: &Type,
+    args: &[Type<ErrorWitness>],
+    ret: &Type<ErrorWitness>,
     wrt: Option<&[usize]>,
     adt_reg: &AdtRegistry,
-) -> Result<Type, Box<CheckError>> {
+) -> Result<Type<ErrorWitness>, Box<CheckError>> {
     if !grad_output_supported(ret) {
         return Err(grad_output_rejection(ret));
     }
     grad_result_type(args, wrt, adt_reg).map(|grad_ret| Type::function(args.to_vec(), grad_ret))
 }
 
-fn grad_output_rejection(ret: &Type) -> Box<CheckError> {
+fn grad_output_rejection(ret: &Type<ErrorWitness>) -> Box<CheckError> {
     Box::new(CheckError::new(
         CheckErrorKind::Other,
         format!("grad requires a scalar floating output, got {ret}"),
@@ -227,7 +232,7 @@ fn grad_output_rejection(ret: &Type) -> Box<CheckError> {
     ))
 }
 
-pub(super) fn grad_expects_a_function(operand: &Type) -> Box<CheckError> {
+pub(super) fn grad_expects_a_function(operand: &Type<ErrorWitness>) -> Box<CheckError> {
     Box::new(CheckError::new(
         CheckErrorKind::TypeMismatch,
         format!("grad expects a function, got {operand}"),
@@ -235,7 +240,7 @@ pub(super) fn grad_expects_a_function(operand: &Type) -> Box<CheckError> {
     ))
 }
 
-pub(super) fn grad_output_supported(ty: &Type) -> bool {
+pub(super) fn grad_output_supported(ty: &Type<ErrorWitness>) -> bool {
     match ty {
         Type::Prim(prim) => prim.is_float(),
         Type::Tensor(dims, prim) => dims.is_empty() && prim.is_float(),
@@ -246,10 +251,10 @@ pub(super) fn grad_output_supported(ty: &Type) -> bool {
 /// The gradient's result type for a function with parameters `args`, or the
 /// rejection of a `wrt` index that is out of range or not differentiable.
 fn grad_result_type(
-    args: &[Type],
+    args: &[Type<ErrorWitness>],
     wrt: Option<&[usize]>,
     adt_reg: &AdtRegistry,
-) -> Result<Type, Box<CheckError>> {
+) -> Result<Type<ErrorWitness>, Box<CheckError>> {
     let targets = if let Some(indices) = wrt {
         let mut selected = Vec::with_capacity(indices.len());
         for &index in indices {
@@ -406,8 +411,15 @@ pub(super) fn grad_wrt_indices(
     }
 }
 
-pub(super) fn grad_argument_type(arg: &Type, adt_reg: &AdtRegistry) -> Option<Type> {
-    fn cotangent(arg: &Type, adt_reg: &AdtRegistry, visiting: &mut Vec<Type>) -> (Type, bool) {
+pub(super) fn grad_argument_type(
+    arg: &Type<ErrorWitness>,
+    adt_reg: &AdtRegistry,
+) -> Option<Type<ErrorWitness>> {
+    fn cotangent(
+        arg: &Type<ErrorWitness>,
+        adt_reg: &AdtRegistry,
+        visiting: &mut Vec<Type<ErrorWitness>>,
+    ) -> (Type<ErrorWitness>, bool) {
         match arg {
             Type::Prim(prim) if prim.is_float() => (Type::Prim(*prim), true),
             Type::Prim(_) => (Type::Unit, false),
@@ -485,8 +497,10 @@ pub(super) fn grad_argument_type(arg: &Type, adt_reg: &AdtRegistry) -> Option<Ty
                     cotangent(&expanded, adt_reg, visiting)
                 } else {
                     let has_float = adt_reg.defs.get(name).is_some_and(|def| {
-                        let Some((type_subst, dim_subst)) =
-                            crate::adt::nominal_substitutions(&def.param_args, args)
+                        let Some(crate::adt::NominalSubstitutions {
+                            types: type_subst,
+                            dimensions: dim_subst,
+                        }) = crate::adt::nominal_substitutions(&def.param_args, args)
                         else {
                             return false;
                         };
@@ -523,11 +537,11 @@ pub(super) fn infer_vmap(
     node: &DeepNode,
     env: &mut Env,
     vg: &mut VarGen,
-    subst: &mut Subst,
+    subst: &mut Subst<ErrorWitness>,
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
     product: &mut InferenceProduct,
-) -> Type {
+) -> Type<ErrorWitness> {
     let kids = node.children_slice();
     if kids.is_empty() {
         return malformed_form(node, "vmap", "a function argument to map", errors);
@@ -658,7 +672,7 @@ pub(super) fn infer_vmap(
 
 /// The caller registers this provisional type with the deferred `vmap` rule
 /// before publishing it to an application.
-fn vmap_provisional_type(source: &Type, vg: &mut VarGen) -> Type {
+fn vmap_provisional_type(source: &Type<ErrorWitness>, vg: &mut VarGen) -> Type<ErrorWitness> {
     match source {
         Type::Fn(args, _) => Type::Fn(
             args.iter()
@@ -677,7 +691,7 @@ fn vmap_provisional_type(source: &Type, vg: &mut VarGen) -> Type {
     }
 }
 
-fn vmap_needs_batched_type(ty: &Type) -> bool {
+fn vmap_needs_batched_type(ty: &Type<ErrorWitness>) -> bool {
     match ty {
         Type::Fn(args, ret) => args.iter().any(vmap_unknown_position) || vmap_unknown_position(ret),
         Type::Var(_) => true,
@@ -685,7 +699,7 @@ fn vmap_needs_batched_type(ty: &Type) -> bool {
     }
 }
 
-fn vmap_unknown_position(ty: &Type) -> bool {
+fn vmap_unknown_position(ty: &Type<ErrorWitness>) -> bool {
     match ty {
         Type::Var(_) => true,
         Type::Ref(inner) => vmap_unknown_position(inner),
@@ -697,11 +711,15 @@ fn vmap_unknown_position(ty: &Type) -> bool {
 /// A group-owned variable must wait for the member's body and the group's
 /// links before an application of the mapped function can constrain it.
 fn vmap_batches_a_group_variable<'a>(
-    f_ty: &Type,
-    subst: &Subst,
+    f_ty: &Type<ErrorWitness>,
+    subst: &Subst<ErrorWitness>,
     product: &'a InferenceProduct,
 ) -> Option<&'a str> {
-    fn owner<'a>(ty: &Type, subst: &Subst, product: &'a InferenceProduct) -> Option<&'a str> {
+    fn owner<'a>(
+        ty: &Type<ErrorWitness>,
+        subst: &Subst<ErrorWitness>,
+        product: &'a InferenceProduct,
+    ) -> Option<&'a str> {
         match subst.apply(ty) {
             Type::Ref(inner) => owner(&inner, subst, product),
             Type::Tuple(elements) => elements
@@ -724,7 +742,7 @@ fn vmap_transform_dims(
     axis: usize,
     batch_var: DimVar,
     vg: &mut VarGen,
-    subst: &Subst,
+    subst: &Subst<ErrorWitness>,
     mapped_axis_renaming: &mut UnordMap<DimVar, DimVar>,
 ) -> Result<Vec<Dim>, String> {
     let has_rank_spread = dims.iter().any(|dim| matches!(dim, Dim::Rank(_)));
@@ -767,13 +785,13 @@ fn vmap_transform_dims(
 }
 
 pub(super) fn vmap_transform_param_type(
-    ty: &Type,
+    ty: &Type<ErrorWitness>,
     axis: usize,
     batch_var: DimVar,
     vg: &mut VarGen,
-    subst: &Subst,
+    subst: &Subst<ErrorWitness>,
     mapped_axis_renaming: &mut UnordMap<DimVar, DimVar>,
-) -> Result<Type, String> {
+) -> Result<Type<ErrorWitness>, String> {
     match ty {
         Type::Ref(inner) => Ok(Type::reference(vmap_transform_param_type(
             inner,
@@ -816,13 +834,13 @@ pub(super) fn vmap_transform_param_type(
 }
 
 pub(super) fn vmap_transform_result_type(
-    ty: &Type,
+    ty: &Type<ErrorWitness>,
     axis: usize,
     batch_var: DimVar,
     vg: &mut VarGen,
-    subst: &Subst,
+    subst: &Subst<ErrorWitness>,
     mapped_axis_renaming: &mut UnordMap<DimVar, DimVar>,
-) -> Result<Type, String> {
+) -> Result<Type<ErrorWitness>, String> {
     match ty {
         Type::Ref(inner) => Ok(Type::reference(vmap_transform_result_type(
             inner,
@@ -864,11 +882,11 @@ pub(super) fn infer_def(
     node: &DeepNode,
     env: &mut Env,
     vg: &mut VarGen,
-    subst: &mut Subst,
+    subst: &mut Subst<ErrorWitness>,
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
     product: &mut InferenceProduct,
-) -> Type {
+) -> Type<ErrorWitness> {
     let kids = node.children_slice();
     if kids.len() < 2 {
         return malformed_form(node, "def", "a name and a body expression", errors);

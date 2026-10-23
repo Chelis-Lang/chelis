@@ -1,5 +1,6 @@
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str;
+use chelis_types::errors::ErrorWitness;
 use chelis_types::{
     CheckedProgram, build_compiled_library_context, check_ir_with_signature_context,
     check_typed_program,
@@ -31,7 +32,7 @@ def readonly(x, y: tensor[4, f32]) = add(x, y)
     assert!(func.params[0].inferred_read_only);
     assert!(matches!(
         func.params[0].display_type,
-        chelis_types::types::Type::Ref(_)
+        chelis_type_core::Type::<ErrorWitness>::Ref(_)
     ));
 }
 
@@ -55,7 +56,7 @@ def consume(x, y: tensor[4, f32]) = {
     assert!(!func.params[0].inferred_read_only);
     assert!(!matches!(
         func.params[0].display_type,
-        chelis_types::types::Type::Ref(_)
+        chelis_type_core::Type::<ErrorWitness>::Ref(_)
     ));
 }
 
@@ -76,7 +77,7 @@ def annotated(x: tensor[4, f32]) = relu(x)
     assert!(!func.params[0].inferred_read_only);
     assert!(!matches!(
         func.params[0].display_type,
-        chelis_types::types::Type::Ref(_)
+        chelis_type_core::Type::<ErrorWitness>::Ref(_)
     ));
 }
 

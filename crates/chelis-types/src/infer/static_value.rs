@@ -4,6 +4,8 @@
 //! The extraction preserves control flow and diagnostic order.
 
 use super::*;
+use crate::errors::ErrorWitness;
+use chelis_type_core::decisions::shape::normalize_static_axis;
 
 #[derive(Debug, Clone, PartialEq)]
 pub(super) enum StaticValue {
@@ -469,12 +471,6 @@ pub(super) fn static_einsum(
     })
 }
 
-pub(super) fn normalize_static_axis(rank: usize, axis: i64) -> Option<usize> {
-    let rank = rank as i64;
-    let axis = if axis < 0 { rank + axis } else { axis };
-    (0..rank).contains(&axis).then_some(axis as usize)
-}
-
 /// Reject an axis argument whose resolved type is not `i32`.
 ///
 /// An axis names a rank position and is i32 in every enforced surface
@@ -490,11 +486,11 @@ pub(super) fn normalize_static_axis(rank: usize, axis: i64) -> Option<usize> {
 /// plain `return` rather than minting a fresh one.
 pub(super) fn reject_non_int32_axis(
     op: &str,
-    axis_ty: &Type,
+    axis_ty: &Type<ErrorWitness>,
     node: &DeepNode,
-    subst: &mut Subst,
+    subst: &mut Subst<ErrorWitness>,
     errors: &mut DiagnosticSink<'_>,
-) -> Result<(), Type> {
+) -> Result<(), Type<ErrorWitness>> {
     reject_non_int32_axis_at(
         op,
         axis_ty,
@@ -508,14 +504,14 @@ pub(super) fn reject_non_int32_axis(
 
 fn reject_non_int32_axis_at(
     op: &str,
-    axis_ty: &Type,
+    axis_ty: &Type<ErrorWitness>,
     position: Option<usize>,
     site: CheckSite<'_>,
     node: &DeepNode,
-    subst: &mut Subst,
+    subst: &mut Subst<ErrorWitness>,
     errors: &mut DiagnosticSink<'_>,
-) -> Result<(), Type> {
-    let rejection = |other: &Type, errors: &mut DiagnosticSink<'_>| {
+) -> Result<(), Type<ErrorWitness>> {
+    let rejection = |other: &Type<ErrorWitness>, errors: &mut DiagnosticSink<'_>| {
         let slot =
             position.map_or_else(|| "axis".to_string(), |at| format!("argument {at} (axis)"));
         report_at_check_site(
@@ -548,12 +544,12 @@ fn reject_non_int32_axis_at(
 /// operation keeps its own value/rank checks.
 pub(super) fn enforce_registered_axis_dtypes(
     op: &str,
-    arg_tys: &[Type],
+    arg_tys: &[Type<ErrorWitness>],
     node: &DeepNode,
     site: CheckSite<'_>,
-    subst: &mut Subst,
+    subst: &mut Subst<ErrorWitness>,
     errors: &mut DiagnosticSink<'_>,
-) -> Result<(), Type> {
+) -> Result<(), Type<ErrorWitness>> {
     let Some(layout) = builtins::axis_argument_layout(op) else {
         return Ok(());
     };
@@ -601,13 +597,13 @@ pub(super) fn enforce_registered_axis_dtypes(
 pub(super) fn resolve_axis_pair_member(
     op: &str,
     axis_expr: Option<&deep::Expr>,
-    axis_ty: &Type,
-    tensor_ty: &Type,
+    axis_ty: &Type<ErrorWitness>,
+    tensor_ty: &Type<ErrorWitness>,
     default: usize,
     node: &DeepNode,
-    subst: &mut Subst,
+    subst: &mut Subst<ErrorWitness>,
     errors: &mut DiagnosticSink<'_>,
-) -> Result<usize, Type> {
+) -> Result<usize, Type<ErrorWitness>> {
     reject_non_int32_axis(op, axis_ty, node, subst, errors)?;
     // Issue #216: use the cast-aware extractor so `cast(N, i32)`-wrapped
     // axis literals trip the infer-time bounds check instead of slipping
@@ -663,12 +659,12 @@ pub(super) fn resolve_axis_pair_member(
 pub(super) fn resolve_builtin_axis(
     op: &str,
     axis_expr: Option<&deep::Expr>,
-    axis_ty: &Type,
-    tensor_ty: &Type,
+    axis_ty: &Type<ErrorWitness>,
+    tensor_ty: &Type<ErrorWitness>,
     node: &DeepNode,
-    subst: &mut Subst,
+    subst: &mut Subst<ErrorWitness>,
     errors: &mut DiagnosticSink<'_>,
-) -> Result<usize, Type> {
+) -> Result<usize, Type<ErrorWitness>> {
     reject_non_int32_axis(op, axis_ty, node, subst, errors)?;
     // Issue #216: cast-aware extractor; see `resolve_axis_pair_member`.
     let raw_axis = axis_expr.and_then(extract_int_for_dim);

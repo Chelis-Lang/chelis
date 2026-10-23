@@ -5,6 +5,12 @@
 
 use super::app_post_diagonal::{diagonal_result_error, reject_unreachable_diagonal_extent};
 use super::*;
+use crate::errors::ErrorWitness;
+use chelis_type_core::decisions::collection::{queried_container, tensor_concat_result_type};
+use chelis_type_core::decisions::shape::{
+    SumResultSlot, default_sum_result_precision, infer_einsum_result_type, normalize_static_axis,
+    publish_sum_result,
+};
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn finish_unified_app(
@@ -12,17 +18,17 @@ pub(super) fn finish_unified_app(
     node: &DeepNode,
     kids: &[deep::Expr],
     func_name: Option<String>,
-    arg_tys: Vec<Type>,
-    ret_tv: Type,
+    arg_tys: Vec<Type<ErrorWitness>>,
+    ret_tv: Type<ErrorWitness>,
     env: &Env,
     vg: &mut VarGen,
-    subst: &mut Subst,
+    subst: &mut Subst<ErrorWitness>,
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
     product: &mut InferenceProduct,
-    expected_result: Option<&Type>,
+    expected_result: Option<&Type<ErrorWitness>>,
     defer_result_replay: bool,
-) -> Type {
+) -> Type<ErrorWitness> {
     if let Some(message) = func_name
         .as_deref()
         .filter(|_| kids.get(1).is_some_and(is_borrow_expression))
@@ -56,7 +62,7 @@ pub(super) fn finish_unified_app(
         // Concat has a tensor overload; its selector and call-site shape
         // evidence remain below. Every other registered aggregate uses only
         // the immutable decision API before ordinary dispatch can mutate types.
-        if rule != builtins::AggregateRule::Concat {
+        if rule != chelis_type_core::decisions::collection::AggregateRule::Concat {
             return finish_registered_aggregate(
                 rule,
                 source_site,
@@ -870,7 +876,9 @@ pub(super) fn finish_unified_app(
                     &type_for_readonly_check(&arg_tys[1], subst),
                     &type_for_readonly_check(&arg_tys[2], subst),
                     SumResultSlot::Fresh(vg),
-                    source_site.owned_location(),
+                    source_site
+                        .owned_location()
+                        .map(TypeDiagnosticLocation::into_source_label),
                     subst,
                 ) {
                     Ok(result) => result,
@@ -1030,7 +1038,9 @@ pub(super) fn finish_unified_app(
                                 dims,
                                 result,
                                 SumResultSlot::Fresh(vg),
-                                source_site.owned_location(),
+                                source_site
+                                    .owned_location()
+                                    .map(TypeDiagnosticLocation::into_source_label),
                                 subst,
                             ),
                             Err(message) => report(

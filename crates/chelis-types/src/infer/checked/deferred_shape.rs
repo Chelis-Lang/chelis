@@ -7,6 +7,7 @@
 //! stay beside [`InferenceProduct`] in `checked.rs`.
 
 use super::*;
+use crate::errors::ErrorWitness;
 
 impl InferenceProduct {
     pub(in crate::infer) fn deferred_shape_checkpoint(&self) -> u64 {
@@ -20,9 +21,9 @@ impl InferenceProduct {
     /// decided at the declaration boundary if the target never binds.
     pub(in crate::infer) fn defer_tuple_projection(
         &mut self,
-        source: Type,
+        source: Type<ErrorWitness>,
         index: usize,
-        projected: Type,
+        projected: Type<ErrorWitness>,
     ) {
         self.defer_shape_check(
             DeferredShapeRule::Derivation(TypeDerivation::TupleProjection { index }),
@@ -35,9 +36,9 @@ impl InferenceProduct {
     /// [`Self::defer_tuple_projection`] for a record field.
     pub(in crate::infer) fn defer_record_field(
         &mut self,
-        source: Type,
+        source: Type<ErrorWitness>,
         field: String,
-        projected: Type,
+        projected: Type<ErrorWitness>,
     ) {
         self.defer_shape_check(
             DeferredShapeRule::Derivation(TypeDerivation::RecordField { field }),
@@ -71,25 +72,6 @@ impl InferenceProduct {
             Some((clone_addr, original_site)) if clone_addr == addr => original_site,
             _ => addr,
         }
-    }
-
-    /// The replay kind of every `PostApp` entry for this call, in ledger order.
-    ///
-    /// chelis#1512: the route and dtype registrations share one key, and which
-    /// one survives is a decision no builtin currently exercises, because no
-    /// callee reaches both a dtype validator and a `site.register` route arm.
-    /// The invariant is still real, so it is asserted here rather than left to
-    /// the first callee that does.
-    #[cfg(test)]
-    pub(in crate::infer) fn post_app_replays_for(&self, node: &DeepNode) -> Vec<PostAppReplay> {
-        let key = self.post_app_key(node);
-        self.deferred_shape_checks
-            .iter()
-            .filter_map(|check| match &check.rule {
-                DeferredShapeRule::PostApp { replay, site, .. } if *site == key => Some(*replay),
-                _ => None,
-            })
-            .collect()
     }
 
     /// Is this call already suspended, under either replay kind?
@@ -150,16 +132,19 @@ impl InferenceProduct {
     /// diagnosed as never applied. Unrelated pending parameters remain live.
     pub(in crate::infer) fn cancel_shape_checks_for_failed_family_call(
         &mut self,
-        callee: &Type,
-        subst: &Subst,
+        callee: &Type<ErrorWitness>,
+        subst: &Subst<ErrorWitness>,
         failure: ErrorWitness,
     ) {
         let Type::Fn(params, _) = subst.apply(callee) else {
             return;
         };
-        let failed_parameters: Vec<_> = params.iter().flat_map(crate::env::free_tvars).collect();
+        let failed_parameters: Vec<_> = params
+            .iter()
+            .flat_map(chelis_type_core::free_tvars)
+            .collect();
         for contract in &mut self.inferred_admission_contracts {
-            if crate::env::free_tvars(&subst.apply(&Type::Var(contract.variable)))
+            if chelis_type_core::free_tvars(&subst.apply(&Type::Var(contract.variable)))
                 .iter()
                 .any(|variable| failed_parameters.contains(variable))
             {
@@ -170,7 +155,7 @@ impl InferenceProduct {
         }
         self.deferred_shape_checks.retain(|check| {
             !check.arg_tys.iter().any(|argument| {
-                crate::env::free_tvars(&subst.apply(argument))
+                chelis_type_core::free_tvars(&subst.apply(argument))
                     .iter()
                     .any(|variable| failed_parameters.contains(variable))
             })
@@ -190,12 +175,12 @@ impl InferenceProduct {
     /// the declaration boundary cannot report it again.
     pub(in crate::infer) fn report_preceding_shape_error_for_failed_family_call(
         &mut self,
-        callee: &Type,
-        arguments: &[Type],
+        callee: &Type<ErrorWitness>,
+        arguments: &[Type<ErrorWitness>],
         vg: &VarGen,
-        subst: &Subst,
+        subst: &Subst<ErrorWitness>,
         errors: &mut DiagnosticSink<'_>,
-    ) -> Option<Type> {
+    ) -> Option<Type<ErrorWitness>> {
         let Type::Fn(parameters, _) = subst.apply(callee) else {
             return None;
         };
@@ -206,7 +191,7 @@ impl InferenceProduct {
         // Restrictions live in `subst`, not in `Type`, so a fresh
         // substitution records exactly the structural relation that the
         // failed call established without weakening the real solver.
-        let mut structural = Subst::default();
+        let mut structural = Subst::<ErrorWitness>::default();
         for (parameter, argument) in parameters.iter().zip(arguments) {
             if unify(
                 &subst.apply(parameter),
@@ -221,7 +206,7 @@ impl InferenceProduct {
 
         let failed_parameters: Vec<_> = parameters
             .iter()
-            .flat_map(crate::env::free_tvars)
+            .flat_map(chelis_type_core::free_tvars)
             .filter(|variable| subst.tvar_restriction(*variable).is_some())
             .collect();
         let candidates: Vec<_> = self
@@ -229,7 +214,7 @@ impl InferenceProduct {
             .iter()
             .filter_map(|check| {
                 let shares_failed_parameter = check.arg_tys.iter().any(|argument| {
-                    crate::env::free_tvars(&subst.apply(argument))
+                    chelis_type_core::free_tvars(&subst.apply(argument))
                         .iter()
                         .any(|variable| failed_parameters.contains(variable))
                 });
@@ -292,8 +277,8 @@ impl InferenceProduct {
         &mut self,
         rule: DeferredShapeRule,
         arg_exprs: Vec<deep::Expr>,
-        arg_tys: Vec<Type>,
-        result_ty: Type,
+        arg_tys: Vec<Type<ErrorWitness>>,
+        result_ty: Type<ErrorWitness>,
     ) {
         #[cfg(test)]
         if let DeferredShapeRule::PostApp { site, .. } = &rule {
@@ -306,8 +291,8 @@ impl InferenceProduct {
         &mut self,
         rule: DeferredShapeRule,
         arg_exprs: Vec<deep::Expr>,
-        arg_tys: Vec<Type>,
-        result_ty: Type,
+        arg_tys: Vec<Type<ErrorWitness>>,
+        result_ty: Type<ErrorWitness>,
     ) {
         let id = self.next_deferred_shape_id;
         self.next_deferred_shape_id += 1;
@@ -327,7 +312,7 @@ impl InferenceProduct {
     pub(in crate::infer) fn replay_ready_shape_checks_at_aggregate_boundary(
         &mut self,
         vg: &mut VarGen,
-        subst: &mut Subst,
+        subst: &mut Subst<ErrorWitness>,
         adt_reg: &AdtRegistry,
         errors: &mut DiagnosticSink<'_>,
     ) {
@@ -342,7 +327,7 @@ impl InferenceProduct {
     pub(in crate::infer) fn replay_ready_shape_checks(
         &mut self,
         vg: &mut VarGen,
-        subst: &mut Subst,
+        subst: &mut Subst<ErrorWitness>,
         adt_reg: &AdtRegistry,
         errors: &mut DiagnosticSink<'_>,
     ) {
@@ -375,7 +360,7 @@ impl InferenceProduct {
     fn replay_ready_shape_checks_once(
         &mut self,
         vg: &mut VarGen,
-        subst: &mut Subst,
+        subst: &mut Subst<ErrorWitness>,
         adt_reg: &AdtRegistry,
         errors: &mut DiagnosticSink<'_>,
     ) -> bool {
@@ -484,7 +469,7 @@ impl InferenceProduct {
                     kids,
                     location,
                 } => {
-                    let settled: Vec<Type> =
+                    let settled: Vec<Type<ErrorWitness>> =
                         check.arg_tys.iter().map(|ty| subst.apply(ty)).collect();
                     let produced = check_shape_route_signature(
                         CheckSite::Deferred(location.as_ref()),
@@ -549,7 +534,7 @@ impl InferenceProduct {
                     env,
                     location,
                 } => {
-                    let settled: Vec<Type> =
+                    let settled: Vec<Type<ErrorWitness>> =
                         check.arg_tys.iter().map(|ty| subst.apply(ty)).collect();
                     let call = PostAppCall {
                         replay: *replay,
@@ -595,10 +580,10 @@ impl InferenceProduct {
     pub(in crate::infer) fn replay_post_app(
         &mut self,
         call: PostAppCall<'_>,
-        settled: Vec<Type>,
-        result_ty: &Type,
+        settled: Vec<Type<ErrorWitness>>,
+        result_ty: &Type<ErrorWitness>,
         vg: &mut VarGen,
-        subst: &mut Subst,
+        subst: &mut Subst<ErrorWitness>,
         adt_reg: &AdtRegistry,
         errors: &mut DiagnosticSink<'_>,
         resuspend: bool,
@@ -653,7 +638,7 @@ impl InferenceProduct {
         &mut self,
         env: &Env,
         vg: &mut VarGen,
-        subst: &mut Subst,
+        subst: &mut Subst<ErrorWitness>,
         adt_reg: &AdtRegistry,
         errors: &mut DiagnosticSink<'_>,
     ) {
@@ -812,13 +797,16 @@ impl InferenceProduct {
 /// PRODUCED one.
 pub(super) fn reconcile_replayed_result(
     operation: &str,
-    published: &Type,
-    produced: Type,
-    subst: &mut Subst,
+    published: &Type<ErrorWitness>,
+    produced: Type<ErrorWitness>,
+    subst: &mut Subst<ErrorWitness>,
     errors: &mut DiagnosticSink<'_>,
-) -> Type {
+) -> Type<ErrorWitness> {
     if let Err(error) = unify(published, &produced, subst) {
-        if matches!(error.kind, crate::unify::TypeErrorKind::DtypeFamilyMismatch) {
+        if matches!(
+            error.kind,
+            chelis_type_core::TypeErrorKind::DtypeFamilyMismatch
+        ) {
             errors.push(error.into());
             return produced;
         }
@@ -850,7 +838,10 @@ pub(super) fn reconcile_replayed_result(
 /// route that suspends on the same condition it resumes on cannot grow that
 /// hole again for a fourth provenance, so the provenance set is gone rather
 /// than extended.
-pub(in crate::infer) fn shape_operand_awaits_binding(ty: &Type, subst: &Subst) -> bool {
+pub(in crate::infer) fn shape_operand_awaits_binding(
+    ty: &Type<ErrorWitness>,
+    subst: &Subst<ErrorWitness>,
+) -> bool {
     match subst.apply(ty) {
         Type::Var(_) => true,
         Type::Ref(inner) => shape_operand_awaits_binding(&inner, subst),

@@ -9,7 +9,7 @@ use chelis_deep::annotations::{
 };
 use chelis_deep::ast::{Atom, Expr, Metadata};
 use chelis_deep::{ExprCarrier, Span, decode_effect_kind};
-use chelis_types::types::{Effect, EffectSet};
+use chelis_type_core::{Effect, EffectSet};
 use chelis_types::{CheckedProgram, InferResult};
 use chelis_unord::ScopedMap;
 use chelis_vocab::EffectKind;

@@ -1,0 +1,62 @@
+[
+  [
+    "accepted_generic_calls",
+    true,
+    "module Parity.GenericCalls\ndef apply_twice(f: (i32) -> i32, x: i32) -> i32 = f(f(x))\ndef bump(n: i32) -> i32 = add(n, 1)\ndef run() -> i32 = apply_twice(bump, 3)\ndef identity_pair(a: i32, b: f32) -> (i32, f32) = (a, b)\ndef use_pair() -> i32 = identity_pair(1, 2.0).0\n"
+  ],
+  [
+    "accepted_shape_operations",
+    true,
+    "module Parity.ShapeOps\ndef project(x: tensor[64, 32, f32], w: tensor[32, 8, f32]) -> tensor[64, 8, f32] = matmul(x, w)\ndef broadcast_bias(b: tensor[1, f32]) -> tensor[64, f32] = expand(b, 0, 64i64)\ndef swap(x: tensor[4, 6, f32]) -> tensor[6, 4, f32] = permute(x, 1, 0)\ndef collapse(x: tensor[4, 6, f32]) -> tensor[24, f32] = reshape(x, [cast(24, i64)])\ndef reduce_rows(x: tensor[4, 6, f32]) -> tensor[4, f32] = mean(x, 1)\n"
+  ],
+  [
+    "accepted_collections",
+    true,
+    "module Parity.Collections\nvalues: List[i32] = [1, 2, 3, 4]\ndoubled = map(fn (v: i32) -> mul(v, 2), values)\nkept = filter(fn (v: i32) -> gt(v, 2), values)\ntotal = fold(fn (acc: i32, v: i32) -> add(acc, v), 0, values)\nitem_total = len(values)\nfirst_two = take(values, cast(2, i64))\npaired = zip(values, values)\n"
+  ],
+  [
+    "accepted_records",
+    true,
+    "module Parity.Records\ntype Point =\n  | Point { x: f32, y: f32 }\ndef make(a: f32, b: f32) -> Point = Point { x: a, y: b }\ndef read_x(p: Point) -> f32 = p.x\ndef shift(p: Point, dx: f32) -> Point = Point { x: add(p.x, dx), y: p.y }\n"
+  ],
+  [
+    "accepted_patterns",
+    true,
+    "module Parity.Patterns\ntype Shape =\n  | Circle(f32)  | Rect(f32, f32)\ndef area(s: Shape) -> f32 = match s with {\n  | Circle(r) => mul(3.14, mul(r, r))\n  | Rect(w, h) => mul(w, h)\n}\ndef first_or(xs: List[i32], fallback: i32) -> i32 = match xs with {\n  | Cons(head, tail) => head\n  | Nil => fallback\n}\n"
+  ],
+  [
+    "accepted_transforms",
+    true,
+    "module Parity.Transforms\ndef process(x: tensor[features, f32]) -> tensor[features, f32] = relu(x)\ndef batch_process(xs: tensor[batch, features, f32]) -> tensor[batch, features, f32] = xs |> vmap(process)\n"
+  ],
+  [
+    "rejected_numeric_restrictions",
+    false,
+    "module Parity.NumericRestrictions\ndef mixed(n: i32) -> f32 = add(1.0, n)\ndef int_div(a: i32, b: i32) -> i32 = div(a, b)\n"
+  ],
+  [
+    "rejected_invalid_shapes",
+    false,
+    "module Parity.InvalidShapes\ndef bad_matmul(x: tensor[64, 32, f32], w: tensor[16, 8, f32]) -> tensor[64, 8, f32] = matmul(x, w)\ndef bad_reshape(x: tensor[4, 6, f32]) -> tensor[25, f32] = reshape(x, [cast(25, i64)])\n"
+  ],
+  [
+    "rejected_collection_callbacks",
+    false,
+    "module Parity.CollectionCallbacks\nvalues: List[i32] = [1, 2, 3]\nwrong_element = map(fn (v: f32) -> mul(v, 2.0), values)\nwrong_predicate = filter(fn (v: i32) -> v, values)\n"
+  ],
+  [
+    "rejected_records",
+    false,
+    "module Parity.RecordsRejected\ntype Point =\n  | Point { x: f32, y: f32 }\ndef read_missing(p: Point) -> f32 = p.z\ndef build_wrong(a: i32) -> Point = Point { x: a, y: 1.0 }\n"
+  ],
+  [
+    "rejected_patterns",
+    false,
+    "module Parity.PatternsRejected\ntype Shape =\n  | Circle(f32)\n  | Rect(f32, f32)\ndef unknown_ctor(s: Shape) -> f32 = match s with {\n  | Circle(r) => r\n  | Triangle(b, h) => mul(b, h)\n  | Rect(w, h) => mul(w, h)\n}\ndef bad_result(s: Shape) -> f32 = match s with {\n  | Circle(r) => r\n  | Rect(w, h) => 1\n}\n"
+  ],
+  [
+    "rejected_transforms",
+    false,
+    "module Parity.TransformsRejected\ndef label(x: tensor[features, f32]) -> string = \"constant\"\ndef batch_label(xs: tensor[batch, features, f32]) -> tensor[batch, features, f32] = xs |> vmap(label)\n"
+  ]
+]

@@ -1,13 +1,14 @@
 //! Error types for the Chelis type checker.
 
+use chelis_type_core::decisions::{DecisionFailure, DecisionFailureKind};
 use serde::{Deserialize, Serialize};
 
 #[doc(hidden)]
 pub use crate::session::DiagnosticSink;
-use crate::types::Type;
-use crate::unify::{TypeError, TypeErrorKind};
 use crate::unsupported::Unsupported;
 use chelis_numeric_core::prim::Prim;
+use chelis_type_core::Type;
+use chelis_type_core::{TypeError, TypeErrorKind};
 
 /// Zero-sized witness that a `Type::Error` was minted HONESTLY: either a
 /// diagnostic reached the error vector (via [`report`]) or an existing
@@ -39,9 +40,10 @@ use chelis_numeric_core::prim::Prim;
 /// `Type::Error` names the tuple-variant *constructor function* and compiles
 /// happily; the oracle has to demand a `Type`.
 ///
-/// ```compile_fail
-/// use chelis_types::types::Type;
-/// let _silent: Type = Type::Error;
+/// ```rust,compile_fail
+/// use chelis_type_core::Type;
+/// use chelis_types::errors::ErrorWitness;
+/// let _silent: Type<ErrorWitness> = Type::Error;
 /// ```
 ///
 /// What this witness does NOT cover, stated here because the acceptance
@@ -67,9 +69,9 @@ use chelis_numeric_core::prim::Prim;
 ///
 /// The constructor privacy is a compile-time boundary:
 ///
-/// ```compile_fail
+/// ```rust,compile_fail
 /// use chelis_types::errors::ErrorWitness;
-/// use chelis_types::types::Type;
+/// use chelis_type_core::Type;
 /// let _silent = Type::Error(ErrorWitness(()));
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -88,7 +90,7 @@ pub struct ErrorWitness(());
 /// An arbitrary vector cannot be substituted for the session capability;
 /// this is the retained hidden-diagnostic mutation oracle:
 ///
-/// ```compile_fail
+/// ```rust,compile_fail
 /// use chelis_types::errors::{CheckError, CheckErrorKind, report};
 /// let mut hidden_errors = Vec::new();
 /// let _ = report(
@@ -99,7 +101,7 @@ pub struct ErrorWitness(());
 ///
 /// The capability cannot be directly constructed:
 ///
-/// ```compile_fail
+/// ```rust,compile_fail
 /// use chelis_types::errors::{CheckError, DiagnosticSink};
 /// let mut errors: Vec<CheckError> = Vec::new();
 /// let _ = DiagnosticSink { errors: &mut errors };
@@ -108,29 +110,29 @@ pub struct ErrorWitness(());
 /// Nor can code manufacture or duplicate one through standard conversion
 /// and ownership traits:
 ///
-/// ```compile_fail
+/// ```rust,compile_fail
 /// use chelis_types::errors::DiagnosticSink;
 /// let _ = DiagnosticSink::default();
 /// ```
 ///
-/// ```compile_fail
+/// ```rust,compile_fail
 /// use chelis_types::errors::DiagnosticSink;
 /// fn require_clone<T: Clone>() {}
 /// require_clone::<DiagnosticSink<'static>>();
 /// ```
 ///
-/// ```compile_fail
+/// ```rust,compile_fail
 /// use chelis_types::errors::{CheckError, DiagnosticSink};
 /// let _ = DiagnosticSink::from(Vec::<CheckError>::new());
 /// ```
 ///
-/// ```compile_fail
+/// ```rust,compile_fail
 /// use std::ops::DerefMut;
 /// use chelis_types::errors::{CheckError, DiagnosticSink};
 /// fn require_vec_deref_mut<T: DerefMut<Target = Vec<CheckError>>>() {}
 /// require_vec_deref_mut::<DiagnosticSink<'static>>();
 /// ```
-pub fn report(errors: &mut DiagnosticSink<'_>, error: CheckError) -> Type {
+pub fn report(errors: &mut DiagnosticSink<'_>, error: CheckError) -> Type<ErrorWitness> {
     Type::Error(report_witness(errors, error))
 }
 
@@ -140,7 +142,7 @@ pub(crate) fn report_at(
     errors: &mut DiagnosticSink<'_>,
     error: CheckError,
     span: Option<&crate::deep_type::TypeDiagnosticLocation>,
-) -> Type {
+) -> Type<ErrorWitness> {
     report(
         errors,
         match span {
@@ -166,7 +168,7 @@ pub(crate) fn report_witness(errors: &mut DiagnosticSink<'_>, error: CheckError)
 /// secondary diagnostics (spec/design/checker_totality.md §C3). Because
 /// `propagate` requires an existing witness, the cascade is provably
 /// downstream of a real reported error.
-pub fn propagate(witness: &ErrorWitness) -> Type {
+pub fn propagate(witness: &ErrorWitness) -> Type<ErrorWitness> {
     Type::Error(*witness)
 }
 
@@ -177,7 +179,7 @@ pub fn propagate(witness: &ErrorWitness) -> Type {
 /// silent `Type::Error` in the shipped checker -- the §C3 oracle is
 /// unaffected. Integration tests are separate crates and never see this.
 #[cfg(test)]
-pub(crate) fn error_sentinel_for_test() -> Type {
+pub(crate) fn error_sentinel_for_test() -> Type<ErrorWitness> {
     Type::Error(ErrorWitness(()))
 }
 
@@ -522,13 +524,9 @@ fn key_value_binding_suggestion(binding: &str) -> String {
     )
 }
 
-impl From<TypeError> for CheckError {
-    fn from(te: TypeError) -> Self {
-        let value_binding = match &te.kind {
-            TypeErrorKind::KeyInstantiation { value_binding } => value_binding.clone(),
-            _ => None,
-        };
-        let kind = match te.kind {
+impl From<TypeErrorKind> for CheckErrorKind {
+    fn from(kind: TypeErrorKind) -> Self {
+        match kind {
             TypeErrorKind::TypeMismatch => CheckErrorKind::TypeMismatch,
             TypeErrorKind::PrecisionMismatch | TypeErrorKind::DtypeFamilyMismatch => {
                 CheckErrorKind::PrecisionMismatch
@@ -538,7 +536,68 @@ impl From<TypeError> for CheckError {
             TypeErrorKind::ArityMismatch => CheckErrorKind::ArityMismatch,
             TypeErrorKind::OccursCheck => CheckErrorKind::OccursCheck,
             TypeErrorKind::NotAFunction => CheckErrorKind::NotAFunction,
+        }
+    }
+}
+
+impl From<DecisionFailureKind> for CheckErrorKind {
+    fn from(kind: DecisionFailureKind) -> Self {
+        match kind {
+            DecisionFailureKind::TypeMismatch => Self::TypeMismatch,
+            DecisionFailureKind::PrecisionMismatch => Self::PrecisionMismatch,
+            DecisionFailureKind::CastNonTensor => Self::CastNonTensor,
+            DecisionFailureKind::UnsupportedTensorPrecision => Self::UnsupportedTensorPrecision,
+            DecisionFailureKind::Unification(kind) => kind.into(),
+        }
+    }
+}
+
+impl From<DecisionFailure> for CheckError {
+    fn from(failure: DecisionFailure) -> Self {
+        let DecisionFailure {
+            kind,
+            message,
+            original_message,
+            expected,
+            got,
+            suggestions,
+            location,
+        } = failure;
+        let error = match kind {
+            DecisionFailureKind::Unification(kind) => match original_message {
+                Some(original_message) => {
+                    let mut error = Self::from(TypeError {
+                        kind,
+                        message: original_message,
+                    });
+                    error.message = message;
+                    error
+                }
+                None => Self::from(TypeError { kind, message }),
+            },
+            kind => {
+                let mut error = Self::new(kind.into(), message, suggestions);
+                error.expected = expected;
+                error.got = got;
+                error
+            }
         };
+        match location {
+            Some(location) => {
+                crate::deep_type::TypeDiagnosticLocation::from_source_label(location).attach(error)
+            }
+            None => error,
+        }
+    }
+}
+
+impl From<TypeError> for CheckError {
+    fn from(te: TypeError) -> Self {
+        let value_binding = match &te.kind {
+            TypeErrorKind::KeyInstantiation { value_binding } => value_binding.clone(),
+            _ => None,
+        };
+        let kind = te.kind.into();
         let severity = match &kind {
             CheckErrorKind::KeyReuse => 0.9,
             CheckErrorKind::PrecisionMismatch | CheckErrorKind::DimensionMismatch => 0.8,

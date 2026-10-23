@@ -964,7 +964,7 @@ fn collect_manifest_entries(
     expr: &Expr,
     type_env: &BTreeMap<String, Expr>,
     adt_registry: &chelis_types::adt::AdtRegistry,
-    effects_by_def: &BTreeMap<String, chelis_types::types::EffectSet>,
+    effects_by_def: &BTreeMap<String, chelis_type_core::EffectSet>,
     realizability: &RealizabilityResult,
     out: &mut Vec<RootEntry>,
 ) {

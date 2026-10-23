@@ -1,3 +1,5 @@
+#![cfg(feature = "serde")]
+
 use chelis_unord::{UnordMap, UnordSet};
 
 fn map_in_order(entries: &[(&str, i32)]) -> UnordMap<String, i32> {

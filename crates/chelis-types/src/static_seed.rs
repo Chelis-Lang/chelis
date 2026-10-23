@@ -191,7 +191,7 @@ fn extract_type_checked_scalar(
                         .ok()
                     }
                     chelis_deep::CastMode::Named(mode) => {
-                        if crate::infer::expr_record::named_cast_pair_error(
+                        if chelis_type_core::decisions::cast::named_cast_pair_error(
                             mode,
                             Some(inner.prim()),
                             target,

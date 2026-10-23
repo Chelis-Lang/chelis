@@ -1,7 +1,8 @@
 use super::*;
 use crate::obligations::{ObligationProperty, collect_obligations};
 use crate::opaque::collect_opaque_invariants;
-use chelis_types::types::Type;
+use chelis_type_core::Type;
+use chelis_types::errors::ErrorWitness;
 use std::collections::BTreeMap;
 
 fn deep_of(surf: &str) -> Vec<Expr> {
@@ -11,7 +12,7 @@ fn deep_of(surf: &str) -> Vec<Expr> {
         .expect("Surf fixture must desugar")
 }
 
-fn inferred_sigs(exprs: &[Expr]) -> BTreeMap<String, Type> {
+fn inferred_sigs(exprs: &[Expr]) -> BTreeMap<String, Type<ErrorWitness>> {
     let checked = chelis_types::check_typed_program(exprs)
         .unwrap_or_else(|e| panic!("check: {:?}", e.errors));
     checked

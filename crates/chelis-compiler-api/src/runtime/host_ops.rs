@@ -1317,7 +1317,7 @@ fn indices_to_linear(indices: &[usize], shape: &[usize]) -> usize {
 pub(super) fn normalize_axis(rank: usize, axis: i64, op: &str) -> Result<usize, String> {
     // chelis#522: apply the from-the-end negative-axis convention uniformly
     // (`-1` == last axis, `-rank` == axis 0), matching the type checker
-    // (`chelis_types::normalize_static_axis`), the IR lowerer
+    // (`chelis_type_core::decisions::shape::normalize_static_axis`), the IR lowerer
     // (`chelis_ir::lower::normalize_axis`), and spec/05-risc-primitives.md.
     // Before this the host evaluator rejected every negative axis with
     // "requires non-negative axis", so `sum(x, -1)` passed `chelis check` /

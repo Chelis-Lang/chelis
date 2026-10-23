@@ -282,6 +282,38 @@ Target compilation does not prove device execution, allocator capacity, or whole
 Owner: chelis#3993.
 
 
+## Type unification core portability
+
+Run `uv run --managed-python --python 3.11 --no-project python scripts/type_unification_core_oracle.py` from the repository root.
+Use the pinned Rust toolchain, `thumbv7em-none-eabi`, `cargo-nextest`, Git, and the managed Python environment.
+Native consumers also need the normal compiler build prerequisites.
+
+The oracle compares actual checked products against immutable pre-cutover commit `3ca99faa7a46158eb6a0d90c2c812a7e3a5f44c1`.
+It creates a separate baseline checkout and target directory below the assigned root.
+A shallow checkout needs repository access to fetch that commit.
+Missing source, incomplete records, failed commands, unexpected compile success, or skipped mandatory tests fail acceptance.
+
+The command checks:
+
+- Isolated normal and serde graphs, with empty defaults and no target `std`, host inference, or DAG dependency.
+- An allocator-backed target consumer and actual `Infallible` solver calls.
+- Named shapes, precision, anchored spreads, occurs failures, and long-chain cache compression.
+- Quantified boundaries, independent schemes, recursion exclusions, and current nominal and dtype forms.
+- All deferred ledgers, correlated expand and reshape choices, cache transport, and shared-context isolation.
+- Private witness fields, foreign evidence rejection, sink and checkpoint authority, and obsolete import rejection.
+- Exact checked bytes, trees, metadata, statistics, and ordered diagnostic fields against the immutable source.
+- Protected-operation interruption, callback-safe serialization, concrete `Send + Sync`, and independent mutable clones.
+- Current host suites, downstream caller compilation, and Python failure controls.
+
+Linux integration support executes this command in its domain slice.
+macOS nightly validation executes it on workspace shard one.
+Record these platform results separately.
+Default PR CI does not execute the complete command.
+
+Target compilation proves neither device execution nor device allocation capacity.
+The extraction does not make the hosted checker or compiler pipeline portable.
+The external approved `extract-type-unification-no-std-core` package remains design input, not a local planning tree.
+
 ## Compiler feature acceptance gates
 
 The incremental [eval-performance suite](eval_performance.md) runs its sparse

@@ -2326,7 +2326,7 @@ impl SubexprLoweringContext {
             let mut ty = tensor_type_from_deep(ascription.authored_type());
             ty.dims.fill(DimInfo::Named("*".into(), None));
             for claim in ascription.outstanding_claims() {
-                let chelis_types::types::Dim::Lit(required) = claim.required_extent() else {
+                let chelis_type_core::Dim::Lit(required) = claim.required_extent() else {
                     let unsupported = Unsupported::new(
                         UnsupportedKind::Construct("named host local tensor ascription".into()),
                         "host local ascription requires a declaring-witness carrier",
@@ -2385,7 +2385,7 @@ impl SubexprLoweringContext {
                     .filter(|claim| {
                         matches!(
                             claim.required_extent(),
-                            chelis_types::types::Dim::Name(_) | chelis_types::types::Dim::Var(_)
+                            chelis_type_core::Dim::Name(_) | chelis_type_core::Dim::Var(_)
                         )
                     })
                     .map(|claim| LocalAscriptionNamedSite {
@@ -13849,7 +13849,7 @@ impl<'program> LowerCtx<'program> {
     ) -> bool {
         if !matches!(
             claim.required_extent(),
-            chelis_types::types::Dim::Name(_) | chelis_types::types::Dim::Var(_)
+            chelis_type_core::Dim::Name(_) | chelis_type_core::Dim::Var(_)
         ) {
             return false;
         }
@@ -14006,7 +14006,7 @@ impl<'program> LowerCtx<'program> {
             precision: Prim::Int64,
         };
         match claim.required_extent() {
-            chelis_types::types::Dim::Lit(required) => {
+            chelis_type_core::Dim::Lit(required) => {
                 let value = chelis_numeric_core::dtype_semantics::scalar_from_i64(
                     "shape",
                     Prim::Int64,
@@ -14038,7 +14038,7 @@ impl<'program> LowerCtx<'program> {
                     self.current_span_id.clone(),
                 )
             }
-            chelis_types::types::Dim::Name(_) | chelis_types::types::Dim::Var(_) => {
+            chelis_type_core::Dim::Name(_) | chelis_type_core::Dim::Var(_) => {
                 let required = self.signature_witness(&label).unwrap_or_else(|| {
                     raise_fatal_lowering_error(
                         format!(
@@ -14076,7 +14076,7 @@ impl<'program> LowerCtx<'program> {
                 self.dag.add_shape_dep(token, required);
                 token
             }
-            chelis_types::types::Dim::Wildcard | chelis_types::types::Dim::Rank(_) => {
+            chelis_type_core::Dim::Wildcard | chelis_type_core::Dim::Rank(_) => {
                 unreachable!("checker records no wildcard/rank local claim")
             }
         }
@@ -17152,7 +17152,7 @@ impl<'program> LowerCtx<'program> {
                 }
             },
             ResolvedVmapTarget::Builtin(operation) => match &operation.scheme().body {
-                chelis_types::types::Type::Fn(parameters, _) => (0..parameters.len())
+                chelis_type_core::Type::Fn(parameters, _) => (0..parameters.len())
                     .map(|index| format!("__chelis_vmap_builtin_arg_{index}"))
                     .collect(),
                 _ => unreachable!("admission requires a function scheme"),

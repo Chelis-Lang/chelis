@@ -8,6 +8,7 @@
 //! chelis#1489 registered.
 
 use super::*;
+use crate::errors::ErrorWitness;
 
 /// chelis#1512: the call site of a checked route that is about to return
 /// early because one of its operands is still an unresolved type variable.
@@ -60,8 +61,8 @@ impl<'a> UnresolvedOperandSite<'a> {
     /// changes nothing else about the first pass.
     pub(super) fn register(
         &self,
-        arg_tys: &[Type],
-        result_ty: &Type,
+        arg_tys: &[Type<ErrorWitness>],
+        result_ty: &Type<ErrorWitness>,
         product: &mut InferenceProduct,
     ) {
         // A route that inspects several operands reaches such an arm once per
@@ -118,9 +119,9 @@ impl<'a> UnresolvedOperandSite<'a> {
     /// cancellation and its silent declaration boundary all apply unchanged.
     fn register_dtype_admissibility(
         &self,
-        arg_tys: &[Type],
-        result_ty: &Type,
-        subst: &Subst,
+        arg_tys: &[Type<ErrorWitness>],
+        result_ty: &Type<ErrorWitness>,
+        subst: &Subst<ErrorWitness>,
         product: &mut InferenceProduct,
     ) {
         // chelis#731 cascade suppression. An error witness never binds, the
@@ -155,11 +156,11 @@ impl<'a> UnresolvedOperandSite<'a> {
     /// value that arm published before this repair.
     pub(super) fn defer(
         &self,
-        arg_tys: &[Type],
-        result_ty: &Type,
+        arg_tys: &[Type<ErrorWitness>],
+        result_ty: &Type<ErrorWitness>,
         product: &mut InferenceProduct,
-        eager: Type,
-    ) -> Type {
+        eager: Type<ErrorWitness>,
+    ) -> Type<ErrorWitness> {
         self.register(arg_tys, result_ty, product);
         eager
     }
@@ -196,9 +197,9 @@ impl<'a> DtypeAdmissibilitySite<'a> {
     /// Suspend this call's dtype decision on an unresolved operand TYPE.
     pub(super) fn register(
         &self,
-        arg_tys: &[Type],
-        result_ty: &Type,
-        subst: &Subst,
+        arg_tys: &[Type<ErrorWitness>],
+        result_ty: &Type<ErrorWitness>,
+        subst: &Subst<ErrorWitness>,
         product: &mut InferenceProduct,
     ) {
         self.site
@@ -252,12 +253,12 @@ pub(super) fn defer_or_check_shape_route(
     site: CheckSite<'_>,
     node: &DeepNode,
     kids: &[deep::Expr],
-    arg_tys: Vec<Type>,
+    arg_tys: Vec<Type<ErrorWitness>>,
     vg: &mut VarGen,
-    subst: &mut Subst,
+    subst: &mut Subst<ErrorWitness>,
     errors: &mut DiagnosticSink<'_>,
     product: &mut InferenceProduct,
-) -> Type {
+) -> Type<ErrorWitness> {
     // chelis#1512: ANY unresolved operand, not just the tensor. These routes
     // check their axis, stride, bounds and window arguments too, and an arm
     // that admitted a variable there let a non-i32 `permute` axis and a
@@ -290,11 +291,11 @@ pub(super) fn check_shape_route_signature(
     route: &ShapeRouteKind,
     node: &DeepNode,
     kids: &[deep::Expr],
-    arg_tys: &[Type],
+    arg_tys: &[Type<ErrorWitness>],
     vg: &mut VarGen,
-    subst: &mut Subst,
+    subst: &mut Subst<ErrorWitness>,
     errors: &mut DiagnosticSink<'_>,
-) -> Type {
+) -> Type<ErrorWitness> {
     match route {
         ShapeRouteKind::Permute => {
             check_permute_signature(site, node, kids, arg_tys, subst, errors)
@@ -342,9 +343,9 @@ pub(super) fn replay_dtype_admissibility(
     kids: &[deep::Expr],
     func_name: &str,
     env: &Env,
-    arg_tys: &[Type],
+    arg_tys: &[Type<ErrorWitness>],
     vg: &mut VarGen,
-    subst: &mut Subst,
+    subst: &mut Subst<ErrorWitness>,
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
     product: &mut InferenceProduct,

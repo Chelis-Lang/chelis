@@ -1379,13 +1379,13 @@ impl<'de> Deserialize<'de> for OrderedInferredParameters {
 ///
 /// This is the lossless counterpart to the human-facing `display_*`
 /// strings already produced by the CLI's `format_cli_type`. A consumer
-/// (e.g. Hull) can reconstruct a `chelis_types::Type` from this tree
+/// (e.g. Hull) can reconstruct a `chelis_type_core::Type` from this tree
 /// directly instead of re-parsing a type printer. The shape mirrors
-/// `chelis_types::types::Type` one variant at a time and is internally
+/// `chelis_type_core::Type` one variant at a time and is internally
 /// tagged on `kind` so the JSON is self-describing.
 ///
 /// Stability contract: every variant name here is pinned to its
-/// `chelis_types::types::Type` source variant. Adding a new `Type`
+/// `chelis_type_core::Type` source variant. Adding a new `Type`
 /// variant is a breaking change to this wire shape and must add the
 /// matching variant here in the same change set.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -1444,7 +1444,7 @@ pub enum WireInferredDimensionArg {
     Dimension { dim: WireInferredDim },
 }
 
-/// Structured tensor dimension, mirroring `chelis_types::types::Dim`.
+/// Structured tensor dimension, mirroring `chelis_type_core::Dim`.
 /// Internally tagged on `kind`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -1466,7 +1466,7 @@ pub enum WireInferredDim {
 }
 
 /// Structured tensor precision slot, mirroring
-/// `chelis_types::types::TensorPrec`. Internally tagged on `kind`.
+/// `chelis_type_core::TensorPrec`. Internally tagged on `kind`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum WireInferredPrecision {
@@ -1478,7 +1478,7 @@ pub enum WireInferredPrecision {
     Var { id: u32 },
 }
 
-/// One inferred effect, mirroring `chelis_types::types::Effect`.
+/// One inferred effect, mirroring `chelis_type_core::Effect`.
 /// Internally tagged on `kind`. The `kind` discriminant is the
 /// lowercase spelling; `Resource` additionally carries its `device`
 /// string. Consumers that want the human Display spelling

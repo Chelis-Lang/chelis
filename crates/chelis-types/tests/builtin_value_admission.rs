@@ -16,8 +16,8 @@
 
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str;
-use chelis_types::errors::{CheckError, CheckErrorKind};
-use chelis_types::types::Type;
+use chelis_type_core::Type;
+use chelis_types::errors::{CheckError, CheckErrorKind, ErrorWitness};
 use chelis_types::{
     BUILTINS, InferenceDisposition, builtin_decl, builtin_env, builtin_env_names,
     builtin_value_contract_carried, check_ir_program,
@@ -108,8 +108,8 @@ fn value_admission_equals_carried_contract_for_every_builtin() {
 /// admit an unconstrained result as a value.
 #[test]
 fn generic_accepted_schemes_determine_their_results() {
-    fn vars(ty: &Type) -> Vec<u32> {
-        chelis_types::env::free_tvars(ty)
+    fn vars(ty: &Type<ErrorWitness>) -> Vec<u32> {
+        chelis_type_core::free_tvars(ty)
             .into_iter()
             .map(|v| v.0)
             .collect()

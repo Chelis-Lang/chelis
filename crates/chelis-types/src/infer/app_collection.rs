@@ -5,24 +5,28 @@
 //! callback diagnostics, deferred result constraints and concat shape rules.
 
 use super::*;
+use chelis_type_core::decisions::collection::{
+    AggregateRule, ConcatListInfo, TensorConcatCallEvidence, decide_collection_constraint,
+    queried_container,
+};
 
 /// Finish registered non-concat aggregates before the remaining operation
 /// families run. Concat retains its separate tensor/collection selector.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn finish_registered_aggregate(
-    rule: builtins::AggregateRule,
+    rule: AggregateRule,
     source_site: CheckSite<'_>,
     node: &DeepNode,
     kids: &[deep::Expr],
     func_name: &Option<String>,
-    arg_tys: &[Type],
-    ret_tv: &Type,
+    arg_tys: &[Type<ErrorWitness>],
+    ret_tv: &Type<ErrorWitness>,
     env: &Env,
     vg: &mut VarGen,
-    subst: &mut Subst,
+    subst: &mut Subst<ErrorWitness>,
     errors: &mut DiagnosticSink<'_>,
     product: &mut InferenceProduct,
-) -> Type {
+) -> Type<ErrorWitness> {
     let name = func_name
         .as_deref()
         .expect("registered aggregate has a name");
@@ -33,7 +37,7 @@ pub(super) fn finish_registered_aggregate(
         return subst.apply(ret_tv);
     }
     let operands = match rule {
-        builtins::AggregateRule::Fold | builtins::AggregateRule::Scan => {
+        AggregateRule::Fold | AggregateRule::Scan => {
             if arg_tys.len() != 3 {
                 return report_builtin_arity(errors, node, source_site, name, 3, arg_tys.len());
             }
@@ -62,7 +66,7 @@ pub(super) fn finish_registered_aggregate(
                 Ok(result) => result,
                 Err(rejected) => return rejected,
             };
-            if rule == builtins::AggregateRule::Scan {
+            if rule == AggregateRule::Scan {
                 vec![
                     Type::adt("List".to_string(), vec![arg_tys[1].clone()]),
                     Type::adt("List".to_string(), vec![callback_result]),
@@ -71,10 +75,10 @@ pub(super) fn finish_registered_aggregate(
                 vec![arg_tys[1].clone(), callback_result]
             }
         }
-        builtins::AggregateRule::Append
-        | builtins::AggregateRule::DictInsert
-        | builtins::AggregateRule::DictMerge
-        | builtins::AggregateRule::Concat => arg_tys.to_vec(),
+        AggregateRule::Append
+        | AggregateRule::DictInsert
+        | AggregateRule::DictMerge
+        | AggregateRule::Concat => arg_tys.to_vec(),
     };
     match rule.decide(&operands, ret_tv, subst) {
         Ok(Some(equation)) => {
@@ -94,7 +98,7 @@ pub(super) fn finish_registered_aggregate(
         }
         Err(mut error) => {
             error.message = with_node_provenance(node, error.message);
-            report(errors, *error)
+            report(errors, (*error).into())
         }
     }
 }
@@ -117,401 +121,6 @@ pub(super) fn collection_helper_type_error(
     )
 }
 
-/// The single decision boundary for operations that combine stored values.
-/// The immutable substitution is intentional: equality is checked privately,
-/// then emitted as an origin equation, never committed as operand evidence.
-/// Direct calls and transported list contracts both enter this boundary.
-impl builtins::AggregateRule {
-    pub(super) fn decide(
-        self,
-        operands: &[Type],
-        result: &Type,
-        subst: &Subst,
-    ) -> Result<Option<ResultConstraint>, Box<CheckError>> {
-        use builtins::AggregateRule;
-        let arity = match self {
-            AggregateRule::Append
-            | AggregateRule::Concat
-            | AggregateRule::DictMerge
-            | AggregateRule::Fold
-            | AggregateRule::Scan => 2,
-            AggregateRule::DictInsert => 3,
-        };
-        let name = match self {
-            AggregateRule::Append => "append",
-            AggregateRule::Concat => "concat",
-            AggregateRule::DictInsert => "dict_insert",
-            AggregateRule::DictMerge => "dict_merge",
-            AggregateRule::Fold => "fold",
-            AggregateRule::Scan => "scan",
-        };
-        if operands.len() != arity {
-            return Err(Box::new(CheckError::new(
-                CheckErrorKind::TypeMismatch,
-                format!("{name} expects {arity} arguments, got {}", operands.len()),
-                vec![],
-            )));
-        }
-        let operands = operands
-            .iter()
-            .map(|ty| subst.apply(ty))
-            .collect::<Vec<_>>();
-        if operands.iter().any(|ty| matches!(ty, Type::Error(_))) {
-            return Ok(None);
-        }
-        let inputs = match (self, operands.as_slice()) {
-            (AggregateRule::Fold | AggregateRule::Scan, [initial, callback_result]) => {
-                vec![initial.clone(), callback_result.clone()]
-            }
-            (AggregateRule::Append, [list @ Type::Adt(name, args), value])
-                if name == "List" && args.len() == 1 =>
-            {
-                vec![
-                    list.clone(),
-                    Type::adt("List".to_string(), vec![value.clone()]),
-                ]
-            }
-            (AggregateRule::Concat, [left @ Type::Adt(a, aa), right @ Type::Adt(b, ba)])
-                if a == "List" && b == "List" && aa.len() == 1 && ba.len() == 1 =>
-            {
-                vec![left.clone(), right.clone()]
-            }
-            (AggregateRule::DictInsert, [dict @ Type::Adt(name, args), key, value])
-                if name == "Dict" && args.len() == 2 =>
-            {
-                vec![
-                    dict.clone(),
-                    Type::adt("Dict".to_string(), vec![key.clone(), value.clone()]),
-                ]
-            }
-            (AggregateRule::DictMerge, [left @ Type::Adt(a, aa), right @ Type::Adt(b, ba)])
-                if a == "Dict" && b == "Dict" && aa.len() == 2 && ba.len() == 2 =>
-            {
-                vec![left.clone(), right.clone()]
-            }
-            // Unknown constructors still owe the operation's admission rule;
-            // a value hole inside a known constructor owes only the equation.
-            (_, values) if values.iter().any(|ty| matches!(ty, Type::Var(_))) => return Ok(None),
-            _ => {
-                // Both eager calls and replayed contracts retain the operation's
-                // expected operand shape, including at an authored binder.
-                let message = match (self, operands.as_slice()) {
-                    (AggregateRule::Append, [list, _]) => {
-                        format!("append expects List input, got {list}")
-                    }
-                    (AggregateRule::Concat, [left, right]) => {
-                        format!("concat expects matching List inputs, got {left} and {right}")
-                    }
-                    (AggregateRule::DictInsert, [dict, key, value]) => format!(
-                        "dict_insert expects Dict[K, V], K, and V, got {dict}, {key}, and {value}"
-                    ),
-                    (AggregateRule::DictMerge, [left, right]) => {
-                        format!("dict_merge expects matching Dict inputs, got {left} and {right}")
-                    }
-                    _ => format!(
-                        "{name} expects compatible collection operands; got {}",
-                        operands
-                            .iter()
-                            .map(ToString::to_string)
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    ),
-                };
-                return Err(Box::new(CheckError::new(
-                    CheckErrorKind::TypeMismatch,
-                    message,
-                    vec![],
-                )));
-            }
-        };
-        let mut compatibility = subst.clone();
-        for input in &inputs[1..] {
-            unify(&inputs[0], input, &mut compatibility)
-                .map_err(|error| {
-                    let message = match self {
-                    AggregateRule::Fold | AggregateRule::Scan => format!("{name} expects a callback whose accumulator/result type matches the initial accumulator; {}", error.message),
-                    AggregateRule::Append => format!("append expects a value of the list's element type; {}", error.message),
-                    AggregateRule::Concat => format!("concat expects matching List inputs; {}", error.message),
-                    AggregateRule::DictInsert | AggregateRule::DictMerge => format!("{name} requires matching stored value types; {}", error.message),
-                    };
-                    let mut diagnostic: CheckError = error.into();
-                    diagnostic.message = message;
-                    Box::new(diagnostic)
-                })?;
-        }
-        Ok(Some(ResultConstraint::Join {
-            inputs,
-            result: result.clone(),
-        }))
-    }
-}
-
-/// Stored-value equations retain their result origin. Scalar/tensor operation
-/// signatures contain no callable origin to infer backwards, and may settle
-/// directly. A computed result also retains its precise type separately from
-/// the declared signature's compatibility check.
-pub(crate) enum CollectionDecision {
-    ResultOrigin(ResultConstraint),
-    RequiredEquality {
-        actual: Type,
-        expected: Type,
-    },
-    /// A semantic rule computed this call's result. Its precise type remains
-    /// available even when the callable's declaration contains wildcards.
-    ProducedResult {
-        declared: Type,
-        produced: Type,
-    },
-}
-
-impl CollectionDecision {
-    pub(crate) fn publish(self, subst: &mut Subst) -> Result<(), TypeError> {
-        match self {
-            Self::ResultOrigin(equation) => {
-                subst.record_result_constraint(equation);
-                Ok(())
-            }
-            Self::RequiredEquality { actual, expected } => unify(&actual, &expected, subst),
-            Self::ProducedResult { declared, produced } => unify(&declared, &produced, subst),
-        }
-    }
-
-    pub(crate) fn produced_result(&self) -> Option<Type> {
-        match self {
-            Self::ProducedResult { produced, .. } => Some(produced.clone()),
-            Self::ResultOrigin(_) | Self::RequiredEquality { .. } => None,
-        }
-    }
-}
-
-/// Decide a transported checked collection contract against settled operands.
-///
-/// Scheme instantiation installs a fresh relation instance on the
-/// inference-local contract ledger. An application binds the exact instances
-/// its callee produced to that call's arguments and evidence, then decides them
-/// here after ordinary call unification has settled every available operand.
-/// An unresolved consumed instance remains owned by that declaration boundary;
-/// a merely returned or aggregated function value remains transportable.
-///
-/// The eager arms in `app_post.rs` and transported tensor-concat calls feed
-/// the same call-site evidence to [`tensor_concat_result_type`]. The checked
-/// function value carries the generic operation rule; its application
-/// contributes the axis expression and any statically visible list elements.
-///
-/// `Ok(Some(decision))` distinguishes origin equations from ordinary key
-/// signatures. Only the origin ledger propagates equality between stored
-/// elements or from a published aggregate result. `Ok(None)` means an operand is
-/// still undecided -- a variable, or an error witness whose diagnostic is
-/// already owned upstream -- and the caller suspends or suppresses. `Err` is
-/// the rule's own rejection text.
-///
-pub(crate) fn decide_collection_constraint(
-    constraint: &CollectionConstraint,
-    evidence: Option<&CollectionCallEvidence>,
-    subst: &Subst,
-) -> Result<Option<CollectionDecision>, String> {
-    let result = constraint.result().clone();
-    let joined = |inputs| {
-        Some(CollectionDecision::ResultOrigin(ResultConstraint::Join {
-            inputs,
-            result: result.clone(),
-        }))
-    };
-    let applied = constraint.map_types(|ty| subst.apply(ty));
-    if applied
-        .operands()
-        .iter()
-        .any(|ty| matches!(ty, Type::Error(_)))
-    {
-        return Ok(None);
-    }
-    match &applied {
-        CollectionConstraint::FloatClassify { kind, operand, .. } => {
-            let operand = match operand {
-                Type::Ref(inner) => inner.as_ref(),
-                other => other,
-            };
-            let expected = match operand {
-                Type::Tensor(dims, _) => {
-                    Type::Tensor(dims.clone(), TensorPrec::Concrete(Prim::Bool))
-                }
-                Type::Prim(p) if p.is_float() => Type::Prim(Prim::Bool),
-                Type::Var(v)
-                    if subst
-                        .tvar_restriction(*v)
-                        .is_some_and(|bound| !bound.is_value_constraint()) =>
-                {
-                    Type::Prim(Prim::Bool)
-                }
-                Type::Var(_) | Type::Error(_) => return Ok(None),
-                other => {
-                    return Err(format!(
-                        "{} expects a float scalar or tensor, got {other} ({})",
-                        kind.name(),
-                        kind.atom()
-                    ));
-                }
-            };
-            Ok(Some(CollectionDecision::RequiredEquality {
-                actual: result.clone(),
-                expected,
-            }))
-        }
-
-        CollectionConstraint::KeyFromSeed {
-            operand: Type::Var(_),
-            ..
-        }
-        | CollectionConstraint::SplitKey {
-            operand: Type::Var(_),
-            ..
-        }
-        | CollectionConstraint::SplitKeys {
-            operand: Type::Var(_),
-            ..
-        }
-        | CollectionConstraint::FoldIn {
-            operand: Type::Var(_),
-            ..
-        } => Ok(None),
-        CollectionConstraint::KeyFromSeed { operand, .. } => {
-            key_operation_surface(operand, Prim::Int64).map(|ty| {
-                Some(CollectionDecision::RequiredEquality {
-                    actual: result.clone(),
-                    expected: ty,
-                })
-            })
-        }
-        CollectionConstraint::SplitKey { operand, .. } => {
-            let half = key_operation_surface(operand, Prim::Key)?;
-            Ok(Some(CollectionDecision::RequiredEquality {
-                actual: result.clone(),
-                expected: Type::tuple(vec![half.clone(), half]),
-            }))
-        }
-        CollectionConstraint::SplitKeys { operand, count, .. } => {
-            let key = key_operation_surface(operand, Prim::Key)?;
-            let mut compatibility = subst.clone();
-            unify(count, &Type::Prim(Prim::Int64), &mut compatibility).map_err(|e| e.message)?;
-            let mut dims = match key {
-                Type::Tensor(dims, _) => dims,
-                _ => vec![],
-            };
-            // [05-OP-71]: a static count is the appended extent and a static
-            // negative count is refused, as the direct checker reads them.
-            dims.push(match evidence {
-                Some(CollectionCallEvidence::SplitKeysCount(Some(count))) if *count < 0 => {
-                    return Err(format!(
-                        "split_keys argument 2: expected non-negative count, got {count} \
-                         ([05-OP-71])"
-                    ));
-                }
-                Some(CollectionCallEvidence::SplitKeysCount(Some(count))) => Dim::Lit(*count),
-                _ => Dim::Wildcard,
-            });
-            Ok(Some(CollectionDecision::RequiredEquality {
-                actual: Type::tuple(vec![count.clone(), result.clone()]),
-                expected: Type::tuple(vec![
-                    Type::Prim(Prim::Int64),
-                    Type::Tensor(dims, TensorPrec::Concrete(Prim::Key)),
-                ]),
-            }))
-        }
-        CollectionConstraint::FoldIn { operand, index, .. } => {
-            let key = key_operation_surface(operand, Prim::Key)?;
-            let expected = match &key {
-                Type::Tensor(dims, _) => {
-                    Type::Tensor(dims.clone(), TensorPrec::Concrete(Prim::Int64))
-                }
-                _ => Type::Prim(Prim::Int64),
-            };
-            let mut compatibility = subst.clone();
-            unify(index, &expected, &mut compatibility).map_err(|e| format!("fold_in requires exactly equal shapes and scalar/tensor surfaces ([05-OP-72]): {}", e.message))?;
-            // Keep the input shape equality and the result relation in one
-            // equation. A private validation must not discard bindings that
-            // later applications or local result publication still require.
-            Ok(Some(CollectionDecision::RequiredEquality {
-                actual: Type::tuple(vec![index.clone(), result.clone()]),
-                expected: Type::tuple(vec![expected, key]),
-            }))
-        }
-        CollectionConstraint::Len { operand, .. } => match queried_container(operand) {
-            Type::Var(_) => Ok(None),
-            Type::Adt(name, _) if name == "List" || name == "Dict" => {
-                Ok(joined(vec![Type::Prim(Prim::Int64)]))
-            }
-            _ => Err(format!("len expects List or Dict input, got {operand}")),
-        },
-        CollectionConstraint::Index { list, index, .. } => {
-            match index {
-                Type::Var(_) => return Ok(None),
-                Type::Prim(Prim::Int64) => {}
-                other => return Err(format!("index expects i64 index, got {other}")),
-            }
-            match queried_container(list) {
-                Type::Var(_) => Ok(None),
-                Type::Adt(name, args) if name == "List" && args.len() == 1 => {
-                    Ok(joined(vec![args[0].clone()]))
-                }
-                _ => Err(format!("index expects List input, got {list}")),
-            }
-        }
-        CollectionConstraint::Append { list, value, .. } => builtins::AggregateRule::Append
-            .decide(&[list.clone(), value.clone()], &result, subst)
-            .map(|decision| decision.map(CollectionDecision::ResultOrigin))
-            .map_err(|error| error.message),
-        CollectionConstraint::Concat { lhs, rhs, .. } => match (lhs, rhs) {
-            (Type::Var(_), _) | (_, Type::Var(_)) => Ok(None),
-            (Type::Adt(lhs_name, lhs_args), Type::Adt(rhs_name, rhs_args))
-                if lhs_name == "List"
-                    && rhs_name == "List"
-                    && lhs_args.len() == 1
-                    && rhs_args.len() == 1 =>
-            {
-                builtins::AggregateRule::Concat
-                    .decide(&[lhs.clone(), rhs.clone()], &result, subst)
-                    .map(|decision| decision.map(CollectionDecision::ResultOrigin))
-                    .map_err(|error| error.message)
-            }
-            (Type::Adt(lhs_name, lhs_args), Type::Prim(Prim::Int32))
-                if lhs_name == "List" && lhs_args.len() == 1 =>
-            {
-                let (raw_axis, list_info) = match evidence {
-                    Some(CollectionCallEvidence::TensorConcat(evidence)) => {
-                        (evidence.raw_axis, evidence.list_info.clone())
-                    }
-                    _ => (None, ConcatListInfo::BindingLen(None)),
-                };
-                tensor_concat_result_type(&lhs_args[0], raw_axis, list_info, subst).map(
-                    |produced| {
-                        Some(CollectionDecision::ProducedResult {
-                            declared: result.clone(),
-                            produced,
-                        })
-                    },
-                )
-            }
-            (lhs, rhs) => Err(format!(
-                "concat expects matching List inputs, got {lhs} and {rhs}"
-            )),
-        },
-    }
-}
-
-/// The container a read-only query decides on: `len` and `index` only read
-/// their container (spec/05 section 1.3.1), so one reached through a borrow,
-/// such as a `&List[T]` or `&Dict[K, V]` parameter, is decided on its
-/// referent. The explicit `len(&xs)` / `index(&xs, i)` spelling is refused
-/// from the call's source by [`explicit_container_borrow_refusal`], never by
-/// this type, because a borrow expression and a borrowed variable have the
-/// same type.
-pub(super) fn queried_container(ty: &Type) -> &Type {
-    match ty {
-        Type::Ref(referent) => referent,
-        other => other,
-    }
-}
-
 /// spec/04 section 2.6 and spec/05 section 1.3.1: `len` and `index` take
 /// their container only by auto-borrow, so an explicit borrow expression is
 /// a type error as the container operand of a call whose callee is written
@@ -531,7 +140,10 @@ pub(super) fn queried_container(ty: &Type) -> &Type {
 /// referent that is still unresolved is not decided yet, and one that is not
 /// a container is the query's own type error, which names the real problem
 /// instead of advising a spelling that fails next.
-pub(super) fn explicit_container_borrow_refusal(query: &str, operand: &Type) -> Option<String> {
+pub(super) fn explicit_container_borrow_refusal(
+    query: &str,
+    operand: &Type<ErrorWitness>,
+) -> Option<String> {
     let (container, form, refused) = match query {
         "len" => ("List/Dict", "len(xs)", "len(&xs)"),
         "index" => ("List", "index(xs, i)", "index(&xs, i)"),
@@ -566,11 +178,11 @@ pub(super) fn is_borrow_expression(mut expr: &deep::Expr) -> bool {
 /// value equalities flow through the origin ledger; a computed scalar/tensor
 /// result retains its facts after checking the callable's declaration.
 pub(super) fn publish_collection_equation(
-    constraint: &CollectionConstraint,
+    constraint: &CollectionConstraint<ErrorWitness>,
     node: &DeepNode,
-    subst: &mut Subst,
+    subst: &mut Subst<ErrorWitness>,
     errors: &mut DiagnosticSink<'_>,
-) -> Option<Type> {
+) -> Option<Type<ErrorWitness>> {
     let produced_result;
     match decide_collection_constraint(constraint, None, subst) {
         Ok(Some(decision)) => {
@@ -594,57 +206,6 @@ pub(super) fn publish_collection_equation(
     Some(produced_result.unwrap_or_else(|| constraint.result().clone()))
 }
 
-fn key_operation_surface(operand: &Type, input: Prim) -> Result<Type, String> {
-    match operand {
-        Type::Prim(p) if *p == input => Ok(Type::Prim(Prim::Key)),
-        Type::Tensor(dims, TensorPrec::Concrete(p)) if *p == input => {
-            Ok(Type::Tensor(dims.clone(), TensorPrec::Concrete(Prim::Key)))
-        }
-        other => Err(format!(
-            "key operation expects {} or a tensor of {}, got {other}",
-            input.name(),
-            input.name()
-        )),
-    }
-}
-
-/// Static source evidence used by the tensor overload of a consumed checked
-/// `concat` value. This is application state, not part of the serialized
-/// function contract: aliases and imports carry the generic rule, and each
-/// call supplies its own axis and visible element shapes.
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) struct TensorConcatCallEvidence {
-    pub(super) raw_axis: Option<i64>,
-    pub(super) list_info: ConcatListInfo,
-}
-
-/// How the concat arm can see the list's elements (chelis#594).
-#[derive(Debug, Clone, PartialEq)]
-pub(super) enum ConcatListInfo {
-    /// A literal `Cons` chain at the call site: each element's full dim
-    /// vector, in list order (read from the current inference epoch's
-    /// already-recorded child types).
-    /// Ragged literal extents SUM.
-    Direct(Vec<Vec<Dim>>),
-    /// A variable (or anything else): only a binding-carried literal
-    /// LENGTH survives ([`Env::list_literal_len`]); the per-axis extents
-    /// come from the §4.5.2 joined element type, so the sum is
-    /// `joined extent x length` and requires uniform extents.
-    BindingLen(Option<usize>),
-}
-
-/// Static call-site evidence with which a consumed transported relation is
-/// decided: what the direct checker reads from argument expressions rather
-/// than from their types. A checked function value carries the operation
-/// rule; its application contributes this evidence.
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) enum CollectionCallEvidence {
-    TensorConcat(TensorConcatCallEvidence),
-    /// [05-OP-71]: `split_keys`'s count, when its expression folds to a
-    /// static integer.
-    SplitKeysCount(Option<i64>),
-}
-
 /// The static count of one already-inferred `split_keys`-shaped application,
 /// read exactly as `check_split_keys_signature` reads a direct call's.
 pub(super) fn split_keys_call_count(kids: &[deep::Expr], env: &Env) -> Option<i64> {
@@ -659,7 +220,7 @@ pub(super) fn split_keys_call_count(kids: &[deep::Expr], env: &Env) -> Option<i6
 pub(super) fn tensor_concat_call_evidence(
     kids: &[deep::Expr],
     env: &Env,
-    subst: &Subst,
+    subst: &Subst<ErrorWitness>,
     errors: &mut DiagnosticSink<'_>,
     product: &InferenceProduct,
 ) -> TensorConcatCallEvidence {
@@ -682,80 +243,6 @@ pub(super) fn tensor_concat_call_evidence(
         raw_axis,
         list_info,
     }
-}
-
-/// Result type of a tensor `concat(list, axis)` (spec/04-type-system.md
-/// §4.5.4, chelis#631/#594), computed from the joined element type
-/// (§4.5.2), the concat-axis value, and the statically-visible elements:
-///
-/// - literal axis + DIRECT literal list whose every element carries a
-///   literal extent on the concat axis → `Lit(sum of extents)` — ragged
-///   lists included (chelis#594). Any non-literal element extent (a
-///   name, a variable, a wildcard) makes the sum unknown → `Wildcard`.
-///   Every other axis is the joined element type's axis unchanged.
-/// - literal axis + BINDING-carried length `n >= 1` + joined element
-///   extent `Lit(k)` → `Lit(k * n)` (uniform extents only: the join has
-///   already widened ragged literals to `*`, and the head-biased
-///   `(concrete, wildcard)` join boundary is inherited on this path —
-///   the runtime dim guards keep any violation loud, never mis-sized).
-/// - literal axis, extents or count unknown → `Wildcard` on the CONCAT
-///   axis. (Pre-chelis#631 the LAST axis was wildcarded unconditionally
-///   and the concat axis kept the element's dim — a wrong concrete
-///   extent the host-program C lane baked into its tensor-helper
-///   signatures, aborting guarded forward binaries at run time.)
-/// - literal axis out of bounds after negative-axis normalization → Err.
-/// - non-literal (runtime) axis → every axis `Wildcard` at the element
-///   rank: the host runtime concatenates along a computed axis, so rank
-///   is known (§4.5.1 rank uniformity) but no per-axis extent survives.
-pub(super) fn tensor_concat_result_type(
-    element_ty: &Type,
-    raw_axis: Option<i64>,
-    list_info: ConcatListInfo,
-    subst: &Subst,
-) -> Result<Type, String> {
-    let Type::Tensor(dims, precision) = element_ty else {
-        return Err(format!(
-            "concat expects List[tensor[...]] for tensor concatenation, got {element_ty}"
-        ));
-    };
-    if dims.is_empty() {
-        return Err("concat expects tensor inputs with at least one axis".to_string());
-    }
-    let mut out_dims = dims.clone();
-    let Some(raw) = raw_axis else {
-        out_dims.fill(Dim::Wildcard);
-        return Ok(Type::Tensor(out_dims, precision.clone()));
-    };
-    let rank = out_dims.len();
-    let Some(axis) = normalize_static_axis(rank, raw) else {
-        return Err(format!("concat axis {raw} out of bounds for rank {rank}"));
-    };
-    out_dims[axis] = match list_info {
-        ConcatListInfo::Direct(elements) if !elements.is_empty() => elements
-            .iter()
-            .try_fold(0i64, |total, dims| {
-                match dims
-                    .get(axis)
-                    .and_then(|d| subst.observe_dim(d).literal_extent())
-                {
-                    Some(k) if dims.len() == rank => total.checked_add(k),
-                    _ => None,
-                }
-            })
-            .map(Dim::Lit)
-            .unwrap_or(Dim::Wildcard),
-        ConcatListInfo::BindingLen(Some(n)) if n >= 1 => {
-            match subst.observe_dim(&out_dims[axis]).literal_extent() {
-                Some(k) => match k.checked_mul(n as i64) {
-                    Some(total) => Dim::Lit(total),
-                    None => Dim::Wildcard,
-                },
-                _ => Dim::Wildcard,
-            }
-        }
-        _ => Dim::Wildcard,
-    };
-    Ok(Type::Tensor(out_dims, precision.clone()))
 }
 
 /// Statically-known element count of a list expression (chelis#631): a
@@ -784,7 +271,7 @@ pub(super) fn prepare_constructor_application(
     env: &Env,
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
-) -> Result<Option<String>, Type> {
+) -> Result<Option<String>, Type<ErrorWitness>> {
     macro_rules! reject {
         ($($arg:tt)*) => {
             return Err(report($($arg)*))
@@ -858,7 +345,7 @@ pub(super) fn prepare_constructor_application(
 
 /// [05-OP-56]'s key domain: string, bool, or an active signed-integer scalar.
 /// Float, aggregate, tensor and random-key types are not dictionary keys.
-fn is_dict_key_type(ty: &Type) -> bool {
+fn is_dict_key_type(ty: &Type<ErrorWitness>) -> bool {
     match ty {
         Type::Prim(prim) => matches!(prim, Prim::String | Prim::Bool) || prim.is_integer(),
         _ => false,
@@ -876,14 +363,14 @@ pub(super) fn finish_collection_app(
     fname: &str,
     source_site: CheckSite<'_>,
     node: &DeepNode,
-    arg_tys: &[Type],
-    result_ty: &Type,
+    arg_tys: &[Type<ErrorWitness>],
+    result_ty: &Type<ErrorWitness>,
     site: &UnresolvedOperandSite<'_>,
     vg: &mut VarGen,
-    subst: &mut Subst,
+    subst: &mut Subst<ErrorWitness>,
     errors: &mut DiagnosticSink<'_>,
     product: &mut InferenceProduct,
-) -> Option<Type> {
+) -> Option<Type<ErrorWitness>> {
     match fname {
         "map" => {
             if arg_tys.len() != 2 {
@@ -1467,7 +954,7 @@ mod aggregate_origin_tests {
 
     #[test]
     fn aggregate_admission_diagnostics_name_expected_operands() {
-        use builtins::AggregateRule;
+        use chelis_type_core::decisions::collection::AggregateRule;
         for (rule, operands, expected) in [
             (
                 AggregateRule::Append,
@@ -1495,10 +982,17 @@ mod aggregate_origin_tests {
             ),
         ] {
             let error = rule
-                .decide(&operands, &Type::Prim(Prim::Bool), &Subst::new())
+                .decide(
+                    &operands,
+                    &Type::Prim(Prim::Bool),
+                    &Subst::<ErrorWitness>::new(),
+                )
                 .expect_err("invalid collection constructors must reject");
             assert!(
-                matches!(error.kind, CheckErrorKind::TypeMismatch),
+                matches!(
+                    error.kind,
+                    chelis_type_core::decisions::DecisionFailureKind::TypeMismatch
+                ),
                 "{rule:?}"
             );
             assert_eq!(error.message, expected, "{rule:?}");
@@ -1507,7 +1001,7 @@ mod aggregate_origin_tests {
 
     #[test]
     fn every_registered_aggregate_returns_equality_without_operand_bindings() {
-        use builtins::{AggregateRule, ValueEquality};
+        use builtins::ValueEquality;
         let mut rules = Vec::new();
         for declaration in builtins::BUILTINS {
             for case in declaration.capability.sibling_cases {
@@ -1534,7 +1028,7 @@ mod aggregate_origin_tests {
                 AggregateRule::Fold => vec![unknown, known],
                 AggregateRule::Scan => vec![list(unknown), list(known)],
             };
-            let subst = Subst::new();
+            let subst = Subst::<ErrorWitness>::new();
             let equation = rule.decide(&operands, &result, &subst).unwrap().unwrap();
             assert_eq!(subst.apply(&input), input, "{rule:?} bound an input");
             assert_eq!(subst.apply(&result), result, "{rule:?} bound its result");
