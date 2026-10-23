@@ -272,3 +272,150 @@ fn structured_parameters_keep_runtime_extent_guards() {
         }
     }
 }
+
+/// §4.7: entry obligations precede the body even for unused nested fields.
+fn trap_parity(source: &str, trap: &str, context: &str) {
+    check(source, true);
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("entry.ch");
+    common::write_file(&file, source);
+    let eval = Command::cargo_bin("chelis")
+        .unwrap()
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["eval", "--file"])
+        .arg(&file)
+        .output()
+        .unwrap();
+    let out = dir.path().join("out");
+    let build = Command::cargo_bin("chelis")
+        .unwrap()
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .arg("build")
+        .arg(&file)
+        .args(["--emit-c", "--target", "c", "--output"])
+        .arg(&out)
+        .output()
+        .unwrap();
+    assert!(
+        build.status.success(),
+        "{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    assert!(common::link_generated(&out, "entry.c", "entry").success());
+    let native = std::process::Command::new(out.join("entry"))
+        .output()
+        .unwrap();
+    for (lane, output) in [("Eval", eval), ("C", native)] {
+        assert!(!output.status.success(), "{lane} accepted invalid extent");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains(&format!("numeric trap: {trap} at i64")),
+            "{lane}: {stderr}"
+        );
+        assert!(stderr.contains(context), "{lane}: {stderr}");
+    }
+}
+
+#[test]
+fn staged_entry_checks_unused_nested_parameters_in_signature_order() {
+    let dynamic =
+        "def dynamic(n: i64) -> tensor[*,f32] = insert(scalar_to_tensor(1.0f32),0i32,n)\n";
+    for (signature, argument, context) in [
+        (
+            "first[n](p: (tensor[n,f32],tensor[n,f32])) -> tensor[n,f32]",
+            "(dynamic(2i64),dynamic(SIZEi64))",
+            "p.1",
+        ),
+        (
+            "first(p: (tensor[2,f32],tensor[2,f32])) -> tensor[2,f32]",
+            "(dynamic(2i64),dynamic(SIZEi64))",
+            "p.1",
+        ),
+        (
+            "first[n](p: (tensor[n,f32],(f32,tensor[n,f32]))) -> tensor[n,f32]",
+            "(dynamic(2i64),(7.0f32,dynamic(SIZEi64)))",
+            "p.1.1",
+        ),
+        // z precedes a in the signature, contrary to lexical map order.
+        (
+            "first[n](p: (tensor[n,f32],f32), z: (f32,tensor[n,f32]), a: (tensor[n,f32],f32)) -> tensor[n,f32]",
+            "(dynamic(2i64),7.0f32),(7.0f32,dynamic(SIZEi64)),(dynamic(SIZEi64),7.0f32)",
+            "z.1",
+        ),
+    ] {
+        let source = format!("{dynamic}def {signature} = p.0\nout = first({argument})\n");
+        parity(
+            &source.replace("SIZE", "2"),
+            "out = tensor(shape=[2], data=[1.0, 1.0])\n",
+        );
+        trap_parity(&source.replace("SIZE", "3"), "domain in load", context);
+    }
+}
+
+#[test]
+fn staged_entry_guards_precede_body_traps() {
+    let source = "def dynamic(n: i64) -> tensor[*,f32] = insert(scalar_to_tensor(1.0f32),0i32,n)\ndef first[n](p: (tensor[n,f32],tensor[n,f32]), d: i64) -> tensor[*,n,f32] = insert(p.0,0i32,floor_div(1i64,d))\nout = first((dynamic(2i64),dynamic(SIZEi64)),DIVISORi64)\n";
+    parity(
+        &source.replace("SIZE", "2").replace("DIVISOR", "1"),
+        "out = tensor(shape=[1, 2], data=[1.0, 1.0])\n",
+    );
+    trap_parity(
+        &source.replace("SIZE", "3").replace("DIVISOR", "0"),
+        "domain in load",
+        "p.1",
+    );
+    trap_parity(
+        &source.replace("SIZE", "2").replace("DIVISOR", "0"),
+        "division by zero in floor_div",
+        "",
+    );
+}
+
+#[test]
+fn projected_local_ascriptions_keep_physical_carriers_and_runtime_claims() {
+    for (parameter, projection, argument) in [
+        ("(tensor[*,f32],f32)", "p.0", "(to_tensor([VALUES]),7.0f32)"),
+        (
+            "((f32,tensor[*,f32]),i64)",
+            "(p.0).1",
+            "((7.0f32,to_tensor([VALUES])),9i64)",
+        ),
+    ] {
+        // A local alias has the same physical source and its own claim owner.
+        for body in [
+            format!("x: tensor[2,f32] = {projection}\n x"),
+            format!("original = {projection}\n x: tensor[2,f32] = original\n x"),
+        ] {
+            let source = format!(
+                "def first(p: {parameter}) -> tensor[2,f32] = {{\n {body}\n}}\nout = first({argument})\n"
+            );
+            parity(
+                &source.replace("VALUES", "1.0f32,2.0f32"),
+                "out = tensor(shape=[2], data=[1.0, 2.0])\n",
+            );
+            trap_parity(
+                &source.replace("VALUES", "1.0f32,2.0f32,3.0f32"),
+                "domain in load",
+                "",
+            );
+        }
+    }
+}
+
+#[test]
+fn projected_local_ascriptions_retain_named_and_multiaxis_claims() {
+    // Wildcard results leave the local annotation as the only shape claim.
+    for (source, expected) in [
+        (
+            "def first[n](q: tensor[n,f32], p: (tensor[*,f32],f32)) -> tensor[*,f32] = {\n x: tensor[n,f32] = p.0\n x\n}\ndef dynamic(n: i64) -> tensor[*,f32] = insert(scalar_to_tensor(1.0f32),0i32,n)\nout = first(dynamic(2i64),(dynamic(SIZEi64),7.0f32))\n",
+            "out = tensor(shape=[2], data=[1.0, 1.0])\n",
+        ),
+        (
+            "def first(p: (tensor[*,*,f32],f32)) -> tensor[*,*,f32] = {\n x: tensor[2,2,f32] = p.0\n x\n}\ndef dynamic(n: i64) -> tensor[*,*,f32] = insert(insert(scalar_to_tensor(1.0f32),0i32,n),0i32,2i64)\nout = first((dynamic(SIZEi64),7.0f32))\n",
+            "out = tensor(shape=[2, 2], data=[1.0, 1.0, 1.0, 1.0])\n",
+        ),
+    ] {
+        parity(&source.replace("SIZE", "2"), expected);
+        trap_parity(&source.replace("SIZE", "3"), "domain in load", "");
+    }
+}

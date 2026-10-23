@@ -1611,7 +1611,51 @@ pub struct ClosureEntryTypes {
     nested: Vec<FormalPatternMemo>,
 }
 
+/// One actualized entry, checked in signature order before executing the body.
+/// Its plan and shapes also supply the ordinary host body's named witnesses.
+struct CheckedClosureEntry {
+    plan: chelis_ir::host::SignatureEntryPlan,
+    shapes: Vec<Vec<usize>>,
+}
+
 impl ClosureEntryTypes {
+    #[allow(clippy::too_many_arguments)]
+    fn check_entry<T: std::borrow::Borrow<Expr>>(
+        &self,
+        checked_params: Option<&[Expr]>,
+        authored_params: &[Option<T>],
+        args: &[RuntimeValue],
+        present: Option<&[bool]>,
+        patterns: EntryClaimPatterns<'_>,
+        loop_entry: Option<&mut LoopEntryReceipt>,
+    ) -> Result<CheckedClosureEntry, String> {
+        let actualized = if loop_entry_is_witnessed(loop_entry.as_deref()) {
+            Vec::new()
+        } else {
+            let (normalized, contract) = self.contract.as_ref().map_err(Clone::clone)?;
+            actualize_entry_contract(
+                normalized,
+                contract,
+                checked_params,
+                authored_params,
+                args,
+                present,
+                Some(NestedPatterns {
+                    derive: patterns,
+                    memo: Some(&self.nested),
+                }),
+                loop_entry,
+            )?
+        };
+        let (inputs, shapes): (Vec<_>, Vec<_>) = actualized
+            .into_iter()
+            .map(|(name, ty, shape)| (chelis_ir::host::HostTensorInput { name, ty }, shape))
+            .unzip();
+        let plan = chelis_ir::host::SignatureEntryPlan::new(inputs);
+        check_signature_entry_plan(&plan, &shapes.iter().map(Vec::as_slice).collect::<Vec<_>>())?;
+        Ok(CheckedClosureEntry { plan, shapes })
+    }
+
     fn build(
         param_types: &[Option<Arc<Expr>>],
         return_type: Option<&Expr>,
@@ -4560,6 +4604,36 @@ impl<'a> EvalContext<'a> {
                 if let Some(name) = def_name.as_deref()
                     && let Some(kernel) = self.def_kernel(name)?
                 {
+                    if kernel.staged.is_some() {
+                        // Staged projections observe only leaves the body uses.
+                        // Validate the whole authored entry, including unused
+                        // nested fields, before any body/capture provider runs.
+                        let checked_params = checked_signature
+                            .as_deref()
+                            .and_then(checked_function_children)
+                            .and_then(|children| children.split_last())
+                            .map(|(_, params)| params);
+                        let entry = entry_types.get_or_init(|| {
+                            ClosureEntryTypes::build(
+                                &param_types,
+                                return_type.as_deref(),
+                                checked_params,
+                                &params,
+                                self.session.as_ref(),
+                            )
+                        });
+                        entry.check_entry(
+                            checked_params,
+                            &param_types,
+                            &args,
+                            present,
+                            EntryClaimPatterns {
+                                registry: &self.adt_registry,
+                                cache: &self.claim_patterns,
+                            },
+                            loop_entry.as_deref_mut(),
+                        )?;
+                    }
                     // Arguments already ran in the caller. Kernel/staged
                     // capture providers now see only declaration scope.
                     let saved = std::mem::take(&mut self.bindings);
@@ -4620,33 +4694,27 @@ impl<'a> EvalContext<'a> {
                                 self.session.as_ref(),
                             )
                         });
-                        let actualized_entries = if loop_entry_is_witnessed(loop_entry.as_deref()) {
-                            Vec::new()
-                        } else {
-                            let (normalized, contract) =
-                                entry.contract.as_ref().map_err(Clone::clone)?;
-                            actualize_entry_contract(
-                                normalized,
-                                contract,
-                                checked_params,
-                                &param_types,
-                                &args,
-                                present,
-                                Some(NestedPatterns {
-                                    derive: EntryClaimPatterns {
-                                        registry: &self.adt_registry,
-                                        cache: &self.claim_patterns,
-                                    },
-                                    memo: Some(&entry.nested),
-                                }),
-                                loop_entry.as_deref_mut(),
-                            )?
-                        };
-                        let mut entry_inputs = Vec::with_capacity(actualized_entries.len());
-                        let mut entry_shapes: Vec<Vec<usize>> =
-                            Vec::with_capacity(actualized_entries.len());
-                        for (parameter, ty, shape) in actualized_entries {
-                            for (axis, (dim, size)) in ty.dims.iter().zip(&shape).enumerate() {
+                        let checked_entry = entry.check_entry(
+                            checked_params,
+                            &param_types,
+                            &args,
+                            present,
+                            EntryClaimPatterns {
+                                registry: &self.adt_registry,
+                                cache: &self.claim_patterns,
+                            },
+                            loop_entry.as_deref_mut(),
+                        )?;
+                        for (node, shape) in checked_entry
+                            .plan
+                            .observations()
+                            .nodes()
+                            .iter()
+                            .zip(&checked_entry.shapes)
+                        {
+                            let parameter = checked_entry.plan.label(node.id);
+                            let ty = &node.output_type;
+                            for (axis, (dim, size)) in ty.dims.iter().zip(shape).enumerate() {
                                 #[cfg(test)]
                                 ENTRY_CLAIM_WORK.with(|v| v.set(v.get() + 1));
                                 if let DimInfo::Named(name, _) = dim
@@ -4662,7 +4730,7 @@ impl<'a> EvalContext<'a> {
                                             name.clone(),
                                             NamedResultSource {
                                                 claim: chelis_ir::lower::extent_binder_label(name),
-                                                parameter: parameter.clone().into(),
+                                                parameter: parameter.to_owned().into(),
                                                 axis,
                                             },
                                             *size,
@@ -4670,17 +4738,7 @@ impl<'a> EvalContext<'a> {
                                     }
                                 }
                             }
-                            entry_inputs.push(chelis_ir::host::HostTensorInput {
-                                name: parameter,
-                                ty,
-                            });
-                            entry_shapes.push(shape);
                         }
-                        let entry_plan = chelis_ir::host::SignatureEntryPlan::new(entry_inputs);
-                        check_signature_entry_plan(
-                            &entry_plan,
-                            &entry_shapes.iter().map(Vec::as_slice).collect::<Vec<_>>(),
-                        )?;
                         if let Some(receipt) = loop_entry {
                             if let Some(delta) = &mut receipt.delta {
                                 delta.checked = Some(std::mem::take(&mut delta.pending));

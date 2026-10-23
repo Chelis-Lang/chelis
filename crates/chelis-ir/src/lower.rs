@@ -13926,11 +13926,24 @@ impl<'program> LowerCtx<'program> {
                         .get(usize::try_from(source_axis).ok()?)
                 })
                 .cloned(),
+            Some(AxisSource::ExternalAxis { load, axis }) => {
+                // A staged source owns its physical input type before any
+                // local annotation. Preserve that exact carrier; the local
+                // extent claim is owned by its separate witness token.
+                match self
+                    .host_sources
+                    .iter()
+                    .find(|source| source.value == crate::host::staged::StageValue::Tensor(load))
+                {
+                    Some(source) => crate::host::tensor_type_from_host_input(&source.ty)
+                        .and_then(|ty| ty.dims.get(axis).cloned()),
+                    None => Some(DimInfo::Named(String::new(), None)),
+                }
+            }
             Some(
                 AxisSource::ScalarInput { .. }
                 | AxisSource::OpComputed { .. }
-                | AxisSource::ClassSupplied { .. }
-                | AxisSource::ExternalAxis { .. },
+                | AxisSource::ClassSupplied { .. },
             )
             | None => Some(DimInfo::Named(String::new(), None)),
         };
