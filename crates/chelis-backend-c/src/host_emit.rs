@@ -1827,17 +1827,6 @@ fn append_scalar_conversion_helpers(out: &mut Vec<String>) {
             "    return value.bits;",
             "}",
             "",
-            "static double chelis_host_scalar_as_float(chelis_scalar value, chelis_dtype expected) {",
-            "    if (value.dtype != expected) { fprintf(stderr, \"scalar dtype mismatch\\n\"); exit(1); }",
-            "    switch (expected) {",
-            "        case CHELIS_DTYPE_F32: return (double)chelis_f32_from_bits((uint32_t)value.bits);",
-            "        case CHELIS_DTYPE_F64: return chelis_f64_from_bits(value.bits);",
-            "        case CHELIS_DTYPE_F16: return (double)chelis_f16_to_f32((uint16_t)value.bits);",
-            "        case CHELIS_DTYPE_BF16: return (double)chelis_bf16_to_f32((uint16_t)value.bits);",
-            "        default: fprintf(stderr, \"expected float scalar\\n\"); exit(1);",
-            "    }",
-            "}",
-            "",
             "static bool chelis_host_scalar_as_bool(chelis_scalar value) {",
             "    if (value.dtype != CHELIS_DTYPE_BOOL) { fprintf(stderr, \"scalar dtype mismatch\\n\"); exit(1); }",
             "    return value.bits == 1;",
@@ -11027,19 +11016,19 @@ impl<'a> HostEmitter<'a> {
                 CExpressionBuiltin::ToInt => EmittedExpr::call("chelis_to_int", [arg(0)]),
                 CExpressionBuiltin::ToFloat => EmittedExpr::call("chelis_to_float", [arg(0)]),
                 CExpressionBuiltin::TensorToScalar => match ty {
-                    HostType::Float64 => EmittedExpr::call(
-                        "chelis_host_scalar_as_float",
-                        [
-                            EmittedExpr::call("chelis_tensor_to_scalar", [arg(0)]),
-                            EmittedExpr::identifier("CHELIS_DTYPE_F64"),
-                        ],
-                    ),
-                    HostType::Float32 => EmittedExpr::call(
-                        "chelis_host_scalar_as_float",
-                        [
-                            EmittedExpr::call("chelis_tensor_to_scalar", [arg(0)]),
-                            EmittedExpr::identifier("CHELIS_DTYPE_F32"),
-                        ],
+                    HostType::Float64 | HostType::Float32 => EmittedExpr::call(
+                        if matches!(ty, HostType::Float32) {
+                            "chelis_f32_from_bits"
+                        } else {
+                            "chelis_f64_from_bits"
+                        },
+                        [EmittedExpr::call(
+                            "chelis_host_scalar_bits",
+                            [
+                                EmittedExpr::call("chelis_tensor_to_scalar", [arg(0)]),
+                                EmittedExpr::identifier(scalar_dtype_macro(ty)?),
+                            ],
+                        )],
                     ),
                     HostType::Float16 => EmittedExpr::call(
                         "chelis_host_scalar_bits",
@@ -14568,32 +14557,16 @@ impl<'a> HostEmitter<'a> {
             return Ok(());
         }
         let expr = match ty {
-            HostType::Int8 => format!(
-                "(int8_t)chelis_host_scalar_as_i64(chelis_value_unbox_scalar({value_expr}), CHELIS_DTYPE_I8)"
-            ),
-            HostType::Int16 => format!(
-                "(int16_t)chelis_host_scalar_as_i64(chelis_value_unbox_scalar({value_expr}), CHELIS_DTYPE_I16)"
-            ),
-            HostType::Int32 => format!(
-                "(int32_t)chelis_host_scalar_as_i64(chelis_value_unbox_scalar({value_expr}), CHELIS_DTYPE_I32)"
-            ),
-            HostType::Int64 => format!(
-                "chelis_host_scalar_as_i64(chelis_value_unbox_scalar({value_expr}), CHELIS_DTYPE_I64)"
-            ),
-            HostType::Float64 => format!(
-                "chelis_host_scalar_as_float(chelis_value_unbox_scalar({value_expr}), CHELIS_DTYPE_F64)"
-            ),
-            HostType::Float32 => format!(
-                "(float)chelis_host_scalar_as_float(chelis_value_unbox_scalar({value_expr}), CHELIS_DTYPE_F32)"
-            ),
-            HostType::Float16 => format!(
-                "(uint16_t)chelis_host_scalar_bits(chelis_value_unbox_scalar({value_expr}), CHELIS_DTYPE_F16)"
-            ),
-            HostType::BFloat16 => format!(
-                "(uint16_t)chelis_host_scalar_bits(chelis_value_unbox_scalar({value_expr}), CHELIS_DTYPE_BF16)"
-            ),
-            HostType::Bool => {
-                format!("chelis_host_scalar_as_bool(chelis_value_unbox_scalar({value_expr}))")
+            HostType::Int8
+            | HostType::Int16
+            | HostType::Int32
+            | HostType::Int64
+            | HostType::Float16
+            | HostType::BFloat16
+            | HostType::Float32
+            | HostType::Float64
+            | HostType::Bool => {
+                scalar_carrier_value_expr(&format!("chelis_value_unbox_scalar({value_expr})"), ty)?
             }
             HostType::String => format!("chelis_string_take_value({value_expr})"),
             HostType::Key => format!("chelis_key_take_value({value_expr})"),
@@ -15931,6 +15904,9 @@ fn validate_tensor_result<'a>(
 
 /// Project the exact tagged runtime scalar back to the resolved host scalar
 /// type. The expected dtype is always checked before reading the payload.
+/// Float storage is decoded at its own width: a floating conversion, even
+/// an exact widening followed by narrowing, can quiet a signaling NaN.
+/// Arithmetic results are finalized by their producer before this transport.
 fn scalar_carrier_value_expr(value: &str, ty: &HostType) -> Result<String, Unsupported> {
     let expr = match ty {
         HostType::Int8 => {
@@ -15952,10 +15928,12 @@ fn scalar_carrier_value_expr(value: &str, ty: &HostType) -> Result<String, Unsup
             format!("(uint16_t)chelis_host_scalar_bits({value}, CHELIS_DTYPE_BF16)")
         }
         HostType::Float32 => {
-            format!("(float)chelis_host_scalar_as_float({value}, CHELIS_DTYPE_F32)")
+            format!(
+                "chelis_f32_from_bits((uint32_t)chelis_host_scalar_bits({value}, CHELIS_DTYPE_F32))"
+            )
         }
         HostType::Float64 => {
-            format!("chelis_host_scalar_as_float({value}, CHELIS_DTYPE_F64)")
+            format!("chelis_f64_from_bits(chelis_host_scalar_bits({value}, CHELIS_DTYPE_F64))")
         }
         HostType::Bool => format!("chelis_host_scalar_as_bool({value})"),
         other => {

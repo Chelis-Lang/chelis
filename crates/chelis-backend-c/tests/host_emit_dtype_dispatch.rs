@@ -222,7 +222,7 @@ fn tensor_to_scalar_f64_keeps_the_float_extractor() {
     .expect("rank-zero f64 extraction must emit");
 
     assert!(
-        source.contains("chelis_host_scalar_as_float("),
+        source.contains("chelis_f64_from_bits(chelis_host_scalar_bits("),
         "f64 tensor_to_scalar must keep the floating reader:\n{source}"
     );
     assert!(

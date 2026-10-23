@@ -2383,10 +2383,6 @@
       "sample": "{}int64_t {} = chelis_list_len({});"
     },
     {
-      "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/host_emit.rs|owner=HostEmitter < 'a >::assign_unboxed_value",
-      "sample": "(int8_t)chelis_host_scalar_as_i64(chelis_value_unbox_scalar({value_expr}), CHELIS_DTYPE_I8)"
-    },
-    {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/host_emit.rs|owner=HostEmitter < 'a >::box_value_expr",
       "sample": "chelis_value_box_scalar(chelis_scalar_from_bits(CHELIS_DTYPE_I8, (uint64_t)(uint8_t)(int8_t){valu..."
     },
