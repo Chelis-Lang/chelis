@@ -513,6 +513,62 @@ class RuntimeExtentOracleTests(unittest.TestCase):
         ):
             ORACLE.remove_local_ascription_provenance(duplicate)
 
+    def test_checker_transport_mutation_preserves_record_type_context(self) -> None:
+        source = ORACLE._LOCAL_ASCRIPTION_CHECKER_SOURCE.read_text()
+        mutated = ORACLE.remove_local_ascription_checker_transport(source)
+        self.assertIn(
+            "validate_checked_program_totality(&checked, signature_context, errors);\n"
+            "    let mut checked = checked;\n"
+            "    checked.local_ascriptions.clear();\n"
+            "    checked\n}",
+            mutated,
+        )
+        self.assertIn("let mut records = product.local_ascriptions.clone();", mutated)
+        for invalid in (
+            source.replace(ORACLE._LOCAL_ASCRIPTION_CHECKER_TRANSPORT, "", 1),
+            source + ORACLE._LOCAL_ASCRIPTION_CHECKER_TRANSPORT,
+        ):
+            with self.assertRaisesRegex(
+                ORACLE.OracleFailure, "mutation anchor is missing or ambiguous"
+            ):
+                ORACLE.remove_local_ascription_checker_transport(invalid)
+
+    def test_controlled_mutation_checks_receipt_and_restores_source(self) -> None:
+        cases = (
+            (0, "expected assertion", "", "escaped its executable receipt"),
+            (1, "compiler stdout", "compiler stderr", "failed for an unrelated reason"),
+            (1, "expected assertion", "", None),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "source.rs"
+            for status, stdout, stderr, failure in cases:
+                with self.subTest(status=status, stdout=stdout):
+                    source.write_text("original")
+
+                    def runner(command: tuple[str, ...], **kwargs: object) -> object:
+                        self.assertEqual(source.read_text(), "mutated")
+                        return subprocess.CompletedProcess(command, status, stdout, stderr)
+
+                    def validate() -> None:
+                        ORACLE._validate_controlled_mutation(
+                            label="checker transport",
+                            source_path=source,
+                            mutate=lambda original: "mutated",
+                            command=("probe",),
+                            expected_failure="expected assertion",
+                            runner=runner,
+                        )
+
+                    if failure is None:
+                        validate()
+                    else:
+                        with self.assertRaisesRegex(ORACLE.OracleFailure, failure) as caught:
+                            validate()
+                        if status != 0:
+                            self.assertIn(stdout, str(caught.exception))
+                            self.assertIn(stderr, str(caught.exception))
+                    self.assertEqual(source.read_text(), "original")
+
     def test_local_ascription_eval_observation_mutation_matches_production_source(
         self,
     ) -> None:
