@@ -22,11 +22,11 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
-          ref: 3b7616ed150266852daba3b1800211edc41dcad8
+          ref: c54a82a84caa828ef4c1492513877dfe8f4da7e0
           fetch-depth: 0
       - name: Install Linux prerequisites
         if: runner.os == 'Linux'
-        run: python3 scripts/ci_apt_get.py gcc g++ clang llvm cmake m4 libclang-dev libopenblas-dev libgmp-dev libmpfr-dev libasan8 libubsan1
+        run: sudo python3 scripts/ci_apt_get.py --no-sudo --github-hosted-ubuntu-mirrors gcc g++ clang llvm cmake m4 libclang-dev libopenblas-dev libgmp-dev libmpfr-dev libasan8 libubsan1
       - name: Install macOS prerequisites
         if: runner.os == 'macOS'
         shell: bash
@@ -55,7 +55,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/dag-evidence"
-          test "$(git rev-parse HEAD)" = 3b7616ed150266852daba3b1800211edc41dcad8
+          test "$(git rev-parse HEAD)" = c54a82a84caa828ef4c1492513877dfe8f4da7e0
           .venv/bin/python - <<'PY'
           import hashlib, json, os, pathlib, platform, subprocess, sys
           value = {'source_sha': subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(), 'workflow_sha': os.environ['GITHUB_SHA'], 'run_id': os.environ['GITHUB_RUN_ID'], 'run_attempt': os.environ['GITHUB_RUN_ATTEMPT'], 'platform': platform.platform(), 'machine': platform.machine()}
