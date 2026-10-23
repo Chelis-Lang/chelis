@@ -25,3 +25,6 @@ The numeric oracle assigns the preserved schema case to the host schema suite.
 Keyed-randomness acceptance reads each selected target's Cargo feature requirements.
 List and run commands preserve native runtime instrumentation.
 Remove incidental command-shape assertions.
+
+Remove the obsolete Bool-extrema test.
+The verifier and its rejection tests retain the `[05-OP-40]` dtype rule.
