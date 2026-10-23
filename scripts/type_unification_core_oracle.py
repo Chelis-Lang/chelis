@@ -394,7 +394,7 @@ def checkout_baseline(directory: Path) -> Path:
 
 
 def host_snapshot(workspace: Path) -> dict:
-    source = (ROOT / "scripts/fixtures/type_unification_core_host.rs").read_text(encoding="utf-8")
+    source = (ROOT / "scripts/fixtures/type_unification_core/host.rs").read_text(encoding="utf-8")
     corpus = json.loads((ROOT / "scripts/fixtures/type_unification_core_corpus.json").read_text(encoding="utf-8"))
     if len(corpus) != len(SURF_CASES) or {row[0] for row in corpus} != SURF_CASES:
         raise OracleFailure("the complete current Surf parity corpus differs")

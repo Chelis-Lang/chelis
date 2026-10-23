@@ -25,6 +25,9 @@ Reserve identifiers once per shared allocation across the complete scheme.
 CI also lints the standalone core without default features.
 Refresh the diagnostic checkpoint and pipeline artifact fixture locks for the extracted model and solver dependencies.
 
+The standalone host parity fixture has an exact source inventory and a named compilation owner.
+Its oracle compiles the unchanged fixture from the isolated directory.
+
 The portable solver needs allocation and atomics.
 It does not support reentrant interrupts that preempt a held solver lock.
 Target compilation proves neither device execution nor allocator capacity.

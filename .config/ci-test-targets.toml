@@ -4735,6 +4735,12 @@ reason = "The controls reject incomplete type evidence, changed host output, and
 tracking_issue = "chelis#4002"
 
 [[path_rule]]
+prefix = "scripts/fixtures/type_unification_core/host.rs"
+disposition = "packages"
+packages = ["chelis-type-core", "chelis-types"]
+
+# The change planner also classifies the removed fixture path.
+[[path_rule]]
 prefix = "scripts/fixtures/type_unification_core_host.rs"
 disposition = "packages"
 packages = ["chelis-type-core", "chelis-types"]

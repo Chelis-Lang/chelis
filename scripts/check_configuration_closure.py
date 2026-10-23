@@ -336,6 +336,12 @@ UNCOMPILED_EXCEPTIONS: tuple[UncompiledException, ...] = (
         sources=tuple(case.fixture for case in CACHE_COMPILE_CASES),
     ),
     UncompiledException(
+        directory="scripts/fixtures/type_unification_core",
+        reason="standalone host parity consumer compiled by the portable type oracle",
+        owning_gate="scripts/type_unification_core_oracle.py",
+        sources=("scripts/fixtures/type_unification_core/host.rs",),
+    ),
+    UncompiledException(
         directory="scripts/fixtures/capacity_graph",
         reason="standalone rustdoc fixtures; the owning suite compiles their typed artifacts",
         owning_gate="scripts/test_capacity_census_graph.py",
