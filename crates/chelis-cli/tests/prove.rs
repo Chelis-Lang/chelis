@@ -877,9 +877,12 @@ import Std.Contracts (normal_cdf)
 
     let mut command = Command::cargo_bin("chelis").expect("binary");
     command.args(["prove", entry.to_str().unwrap(), "--json", "--tier", tier]);
-    if let Some(binary) = beacon_binary {
-        command.env("CHELIS_BEACON_BIN", binary);
-    }
+    // None selects the empirical contract fixture, regardless of the developer's
+    // provider configuration. Explicit providers still exercise Beacon failures.
+    match beacon_binary {
+        Some(binary) => command.env("CHELIS_BEACON_BIN", binary),
+        None => command.env_remove("CHELIS_BEACON_BIN"),
+    };
     let output = command.output().expect("run prove");
     let transcript = format!(
         "stdout={}\nstderr={}",
@@ -909,6 +912,26 @@ fn lu1_configured_beacon_spawn_denial_is_branded_and_nonzero() {
     let reason = property["reason"].as_str().expect("reason");
     assert!(reason.starts_with("unsupported: "), "{transcript}");
     assert!(reason.contains("chelis#730"), "{transcript}");
+}
+
+#[cfg(feature = "smt")]
+#[test]
+fn issue_4025_parity_controls_ignore_ambient_beacon_selection() {
+    let directory = tempdir().expect("tempdir");
+    let missing = directory.path().join("missing-ambient-beacon");
+    // Run the existing semantic controls with a configured provider in a child
+    // test process. Mutating this process's environment would race other tests.
+    for test in [
+        "prove_k1_parity_consumes_bundled_normal_cdf_contract",
+        "prove_parity_at_f32_does_not_inherit_a_reflection_false_at_f32",
+    ] {
+        Command::new(std::env::current_exe().expect("test executable"))
+            .env("CHELIS_BEACON_BIN", &missing)
+            .args(["--exact", test, "--nocapture"])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains(format!("test {test} ... ok")));
+    }
 }
 
 #[cfg(feature = "smt")]
