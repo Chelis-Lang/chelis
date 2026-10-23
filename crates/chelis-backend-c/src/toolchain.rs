@@ -1407,12 +1407,10 @@ mod tests {
             std::fs::write(&script, "export SDKROOT=/nix-sdk\n").unwrap();
         }
         let path = bin.join(tool);
+        #[cfg(not(unix))]
         std::fs::write(&path, "#!/bin/sh\nexit 1\n").unwrap();
         #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        write_executable(&path, "#!/bin/sh\nexit 1\n");
         path
     }
 
@@ -1987,14 +1985,13 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn verify_compiler_reports_a_rejected_profile_flag_as_the_profile() {
-        use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let reference = strict_reference_toolchain(String::new(), CodegenRequirements::default());
         let (flags, links) = (reference.compile_flags, reference.link_flags);
         let compiler = test_toolchain(CodegenRequirements::default()).compiler;
         let real = resolve_executable(&compiler).expect("a C compiler on PATH");
         let path = dir.path().join("strict-cc");
-        std::fs::write(
+        write_executable(
             &path,
             format!(
                 "#!/bin/sh\nfor arg in \"$@\"; do\n  if [ \"$arg\" = -fno-fast-math ]; then\n    \
@@ -2002,9 +1999,7 @@ mod tests {
                  done\nexec '{}' \"$@\"\n",
                 real.display()
             ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
         let result = verify_compiler(path.to_str().unwrap(), &flags, &links, &Kernel::ALL);
         assert!(
             matches!(&result, Err(CompilerCheckError::Refused(reason))
@@ -2129,19 +2124,16 @@ mod tests {
     /// canary unit `unit`, and hands every other command to the real compiler.
     #[cfg(unix)]
     fn unit_wrapper(dir: &Path, unit: usize, extra: &str) -> String {
-        use std::os::unix::fs::PermissionsExt;
         let compiler = test_toolchain(CodegenRequirements::default()).compiler;
         let real = resolve_executable(&compiler).expect("a C compiler on PATH");
         let path = dir.join(format!("unit-{unit}-cc"));
-        std::fs::write(
+        write_executable(
             &path,
             format!(
                 "#!/bin/sh\ncase \" $* \" in *chelis-compiler-canary-{unit}.c*) exec '{real}' \"$@\" {extra};; esac\nexec '{real}' \"$@\"\n",
                 real = real.display()
             ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
         path.to_string_lossy().into_owned()
     }
 
@@ -2176,7 +2168,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_process_checks_a_compiler_again_only_for_a_kernel_it_did_not_check() {
-        use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let reference = strict_reference_toolchain(String::new(), CodegenRequirements::default());
         let (flags, links) = (reference.compile_flags, reference.link_flags);
@@ -2184,16 +2175,14 @@ mod tests {
         let real = resolve_executable(&compiler).expect("a C compiler on PATH");
         let log = dir.path().join("canary-units.log");
         let counting = dir.path().join("counting-cc");
-        std::fs::write(
+        write_executable(
             &counting,
             format!(
                 "#!/bin/sh\ncase \" $* \" in *' -c '*chelis-compiler-canary-[0-9]*.c' '*) echo unit >> '{}';; esac\nexec '{}' \"$@\"\n",
                 log.display(),
                 real.display()
             ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&counting, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
         // Every count follows the first check, whose canary creates the log.
         let units = || {
             std::fs::read_to_string(&log)
@@ -2379,7 +2368,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn declared_c_directories_change_the_canary_key() {
-        use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let include = dir.path().join("include");
         let library = dir.path().join("lib");
@@ -2390,16 +2378,14 @@ mod tests {
         let real = resolve_executable(&compiler).expect("a C compiler on PATH");
         let log = dir.path().join("canary-commands.log");
         let logging = dir.path().join("logging-cc");
-        std::fs::write(
+        write_executable(
             &logging,
             format!(
                 "#!/bin/sh\ncase \" $* \" in *chelis-compiler-canary*) echo \"$*\" >> '{}';; esac\nexec '{}' \"$@\"\n",
                 log.display(),
                 real.display()
             ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&logging, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
         // Every read follows the first check, whose canary creates the log.
         let commands = || -> Vec<String> {
             std::fs::read_to_string(&log)
@@ -2506,7 +2492,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn verify_compiler_during_reuses_a_version_probe_of_the_unchanged_compiler() {
-        use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let reference = strict_reference_toolchain(String::new(), CodegenRequirements::default());
         let (flags, links) = (reference.compile_flags, reference.link_flags);
@@ -2515,16 +2500,14 @@ mod tests {
         let log = dir.path().join("versions.log");
         let counted = dir.path().join("counted-cc");
         let install = |version: &str| {
-            std::fs::write(
+            write_executable(
                 &counted,
                 format!(
                     "#!/bin/sh\ncase \" $* \" in *' --version '*) echo read >> '{}'; echo '{version}'; exit 0;; esac\nexec '{}' \"$@\"\n",
                     log.display(),
                     real.display()
                 ),
-            )
-            .unwrap();
-            std::fs::set_permissions(&counted, std::fs::Permissions::from_mode(0o755)).unwrap();
+            );
         };
         // Every count follows the first read, which creates the log.
         let reads = || {
