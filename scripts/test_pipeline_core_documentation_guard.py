@@ -156,6 +156,9 @@ Dependency features
             "It supports `no_std`.",
             "This module works without std.",
             "Unlike chelis-dag-core, the crate supports no_std.",
+            "Like chelis-dag-core, this module works without std.",
+            "chelis-dag-core is portable, and this module supports no_std.",
+            "chelis-pipeline-core and chelis-dag-core support no_std.",
         ):
             with self.subTest(claim=claim), self.assertRaisesRegex(
                 guard.DocumentationBoundaryError, "false current portability claim"

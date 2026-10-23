@@ -303,8 +303,8 @@ def main() -> None:
     selection = nextest_selection(json.loads(command([
         "cargo", "nextest", "list", "--locked", "--profile", PROFILE,
         "--ignore-default-filter", "--message-format", "json", *CARGO_TESTS])))
-    target = Path(os.environ.get("CARGO_TARGET_DIR", ROOT / "target"))
-    junit = target / "nextest" / PROFILE / "junit.xml"
+    # Nextest keeps profile reports under the checkout, not CARGO_TARGET_DIR.
+    junit = ROOT / "target" / "nextest" / PROFILE / "junit.xml"
     junit.unlink(missing_ok=True)
     command(["cargo", "nextest", "run", "--locked", "--profile", PROFILE,
              "--ignore-default-filter", "--no-fail-fast", "--retries", "0", *CARGO_TESTS])

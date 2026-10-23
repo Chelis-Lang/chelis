@@ -110,22 +110,31 @@ def false_no_std_claim(line: str) -> bool:
 
 
 def validate_document(document: InventoryDocument) -> None:
+    named_subject = re.compile(
+        r"\s*(?:[-+]\s+)?(?:(?:the|this)\s+(?:core|crate|module)\s+)?"
+        r"chelis-[a-z0-9-]+\b",
+        re.IGNORECASE,
+    )
     for line in document.lines:
         for statement in re.split(r"(?<=[.!?])\s+", line):
             explicit_crates = set(re.findall(r"\bchelis-[a-z0-9-]+\b", statement.lower()))
             pipeline_subject = (
-                not explicit_crates
+                named_subject.match(statement.replace("`", "").replace("*", "")) is None
                 or "chelis-pipeline-core" in explicit_crates
-                or re.search(
-                    r"\bthe (?:core|crate)\b(?!\s+chelis-[a-z0-9-]+\b)",
-                    statement.replace("`", ""),
-                    re.IGNORECASE,
-                )
             )
-            if pipeline_subject and false_no_std_claim(statement):
-                raise DocumentationBoundaryError(
-                    f"false current portability claim: {statement.strip()}"
+            for clause in re.split(
+                r"[,;]\s*|\s+(?:and|but|while|whereas)\s+",
+                statement,
+                flags=re.IGNORECASE,
+            ):
+                clause_is_pipeline = (
+                    pipeline_subject
+                    or named_subject.match(clause.replace("`", "").replace("*", "")) is None
                 )
+                if clause_is_pipeline and false_no_std_claim(clause):
+                    raise DocumentationBoundaryError(
+                        f"false current portability claim: {clause.strip()}"
+                    )
 
     if REQUIRED_STATEMENT not in document.text:
         raise DocumentationBoundaryError(
