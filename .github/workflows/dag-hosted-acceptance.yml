@@ -59,7 +59,7 @@ jobs:
           .venv/bin/python - <<'PY'
           import hashlib, json, os, pathlib, platform, subprocess, sys
           value = {'source_sha': subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(), 'workflow_sha': os.environ['GITHUB_SHA'], 'run_id': os.environ['GITHUB_RUN_ID'], 'run_attempt': os.environ['GITHUB_RUN_ATTEMPT'], 'platform': platform.platform(), 'machine': platform.machine()}
-          value['script_sha256'] = {name: hashlib.sha256(pathlib.Path(name).read_bytes()).hexdigest() for name in ['scripts/dag_core_oracle.py', 'scripts/dtype_builtin_atom_closure_oracle.py', 'scripts/gate.py']}
+          value['script_sha256'] = {name: hashlib.sha256(pathlib.Path(name).read_bytes()).hexdigest() for name in ['scripts/dag_core_oracle.py', 'scripts/dtype_builtin_atom_closure_oracle.py', 'scripts/runtime_representation_oracle.py', 'scripts/runtime_representation_phase1.py', 'scripts/gate.py']}
           value['initial_source_status'] = subprocess.check_output(['git', 'status', '--porcelain=v1'], text=True)
           commands = {'rustc': ['rustc', '-vV'], 'cargo': ['cargo', '-V'], 'clippy': ['cargo', 'clippy', '--version'], 'rustfmt': ['rustfmt', '--version'], 'components': ['rustup', 'component', 'list', '--installed'], 'targets': ['rustup', 'target', 'list', '--installed'], 'cc': [os.environ.get('CC', 'cc'), '--version'], 'clang': ['clang', '--version'], 'llvm_ar': [os.environ.get('AR', 'llvm-ar'), '--version'], 'nextest': ['cargo', 'nextest', '--version'], 'uv': ['uv', '--version']}
           value['compiler_identities'] = {}
@@ -89,6 +89,16 @@ jobs:
           code=${PIPESTATUS[0]}
           printf '%s\n' "$code" > "$RUNNER_TEMP/dag-evidence/closure-exit-code.txt"
           exit "$code"
+      - name: Execute complete inherited representation Phase 1
+        if: ${{ !cancelled() && runner.os == 'Linux' }}
+        shell: bash
+        run: |
+          set +e
+          set -o pipefail
+          .venv/bin/python scripts/runtime_representation_oracle.py --phase 1 2>&1 | tee "$RUNNER_TEMP/dag-evidence/phase1.log"
+          code=${PIPESTATUS[0]}
+          printf '%s\n' "$code" > "$RUNNER_TEMP/dag-evidence/phase1-exit-code.txt"
+          exit "$code"
       - name: Execute complete fast gate
         if: ${{ !cancelled() }}
         shell: bash
@@ -109,7 +119,7 @@ jobs:
           .venv/bin/python - <<'PY'
           import hashlib, json, os, pathlib, shutil
           evidence = pathlib.Path(os.environ['RUNNER_TEMP'], 'dag-evidence')
-          for name in ['gate-failures', 'gate-reports', 'builtin-atom-closure']:
+          for name in ['gate-failures', 'gate-reports', 'builtin-atom-closure', 'runtime-representation-phase1']:
               source = pathlib.Path('target', name)
               if source.exists():
                   shutil.copytree(source, evidence / name, dirs_exist_ok=True)
@@ -120,9 +130,9 @@ jobs:
                   destination.parent.mkdir(parents=True, exist_ok=True)
                   shutil.copy2(source, destination)
           results = {}
-          for name, filename in [('oracle', 'exit-code.txt'), ('closure', 'closure-exit-code.txt'), ('fast_gate', 'gate-exit-code.txt')]:
+          for name, filename in [('oracle', 'exit-code.txt'), ('closure', 'closure-exit-code.txt'), ('phase1', 'phase1-exit-code.txt'), ('fast_gate', 'gate-exit-code.txt')]:
               path = evidence / filename
-              results[name] = {'exit_code': int(path.read_text()) if path.exists() else None, 'executed': path.exists()}
+              results[name] = {'exit_code': int(path.read_text()) if path.exists() else None, 'executed': path.exists(), 'required': name != 'phase1' or os.environ['RUNNER_OS'] == 'Linux'}
           (evidence / 'command-results.json').write_text(json.dumps(results, indent=2))
           manifest = [{'path': str(path.relative_to(evidence)), 'size_bytes': path.stat().st_size, 'sha256': hashlib.sha256(path.read_bytes()).hexdigest()} for path in sorted(evidence.rglob('*')) if path.is_file()]
           (evidence / 'manifest.json').write_text(json.dumps(manifest, indent=2))
