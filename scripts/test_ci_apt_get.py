@@ -108,6 +108,45 @@ class CommandShapeTests(unittest.TestCase):
         run.assert_not_called()
 
 
+class HostedUbuntuMirrorTests(unittest.TestCase):
+    def test_hosted_mirrors_replace_azure_with_official_https_archives(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            apt_root = Path(tmp)
+            mirrors = apt_root / "apt-mirrors.txt"
+            mirrors.write_text(
+                "http://azure.archive.ubuntu.com/ubuntu/\tpriority:1\n"
+                "https://archive.ubuntu.com/ubuntu/\tpriority:2\n"
+                "https://security.ubuntu.com/ubuntu/\tpriority:3\n"
+            )
+            sources = apt_root / "sources.list.d"
+            sources.mkdir()
+            ubuntu = sources / "ubuntu.sources"
+            ubuntu.write_text("URIs: mirror+file:/etc/apt/apt-mirrors.txt\n")
+            third_party = sources / "third-party.list"
+            third_party.write_text("deb https://example.org/packages stable main\n")
+
+            cag.configure_hosted_ubuntu_mirrors(apt_root)
+
+            self.assertEqual(
+                mirrors.read_text(),
+                "https://archive.ubuntu.com/ubuntu/\tpriority:1\n"
+                "https://security.ubuntu.com/ubuntu/\tpriority:2\n",
+            )
+            self.assertEqual(ubuntu.read_text(), "URIs: mirror+file:/etc/apt/apt-mirrors.txt\n")
+            self.assertEqual(
+                third_party.read_text(), "deb https://example.org/packages stable main\n"
+            )
+            cag.configure_hosted_ubuntu_mirrors(apt_root)
+            self.assertNotIn("azure", mirrors.read_text())
+
+    def test_missing_hosted_mirror_list_fails_without_creating_one(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            apt_root = Path(tmp)
+            with self.assertRaises(FileNotFoundError):
+                cag.configure_hosted_ubuntu_mirrors(apt_root)
+            self.assertEqual(list(apt_root.iterdir()), [])
+
+
 class BullseyeSnapshotTests(unittest.TestCase):
     def test_snapshot_sources_are_immutable_and_complete(self):
         expected = (
@@ -386,6 +425,30 @@ class CliTests(unittest.TestCase):
         with mock.patch.object(cag, "apt_get", fake_apt_get):
             cag.main(["--timeout", "0", "gcc"])
         self.assertIsNone(captured["timeout"])
+
+    def test_main_configures_hosted_mirrors_before_apt(self):
+        events = []
+        with (
+            mock.patch.object(cag, "configure_hosted_ubuntu_mirrors", side_effect=lambda: events.append("mirrors")),
+            mock.patch.object(cag, "apt_get", side_effect=lambda *args, **kwargs: events.append("apt") or 0) as apt,
+        ):
+            self.assertEqual(cag.main(["--github-hosted-ubuntu-mirrors", "--no-sudo", "gcc"]), 0)
+        self.assertEqual(events, ["mirrors", "apt"])
+        self.assertEqual(apt.call_args.args, (["gcc"],))
+        self.assertFalse(apt.call_args.kwargs["sudo"])
+
+    def test_hosted_and_snapshot_sources_are_mutually_exclusive(self):
+        with (
+            mock.patch.object(cag, "configure_hosted_ubuntu_mirrors") as hosted,
+            mock.patch.object(cag, "configure_bullseye_snapshot") as snapshot,
+            mock.patch.object(cag, "apt_get") as apt,
+        ):
+            with self.assertRaises(SystemExit) as raised:
+                cag.main(["--github-hosted-ubuntu-mirrors", "--debian-bullseye-snapshot", "gcc"])
+        self.assertEqual(raised.exception.code, 2)
+        hosted.assert_not_called()
+        snapshot.assert_not_called()
+        apt.assert_not_called()
 
     def test_main_configures_snapshot_before_apt(self):
         events = []

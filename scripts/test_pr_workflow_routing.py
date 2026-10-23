@@ -1179,6 +1179,18 @@ def current_workflows() -> dict[str, dict]:
 
 
 class PullRequestWorkflowRoutingTests(unittest.TestCase):
+    def test_hosted_setup_selects_ubuntu_mirrors_before_bounded_install(self) -> None:
+        action = yaml.safe_load(SETUP_PROJECT_CI.read_text())
+        installs = [step for step in action["runs"]["steps"]
+                    if "scripts/ci_apt_get.py" in str(step.get("run", ""))]
+        self.assertEqual(len(installs), 1)
+        install = installs[0]
+        self.assertEqual(install.get("if"), "runner.environment == 'github-hosted'")
+        self.assertEqual(install.get("run"),
+                         "sudo python3 scripts/ci_apt_get.py --no-sudo "
+                         "--github-hosted-ubuntu-mirrors gcc g++ clang llvm cmake "
+                         "libclang-dev libopenblas-dev libgmp-dev libmpfr-dev libasan8 libubsan1")
+
     def test_preflight_requires_the_independent_local_command_contract(self) -> None:
         workflow = copy.deepcopy(yaml.safe_load(CI.read_text()))
         contract = next(
