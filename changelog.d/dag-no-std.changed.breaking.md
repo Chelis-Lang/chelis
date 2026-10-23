@@ -45,5 +45,8 @@ The integrated type and DAG cores remain independent.
 Shared workspace changes retain CI ownership for both portable cores.
 Both portability oracles remain in integration and nightly checks.
 The accepted [05-OP-53] contract retains explicit scan directions.
+Graph, wire, allocation, native-result, and admission comparisons retain their original immutable baseline.
+Complete generated sources and headers use the accepted pre-cutover integration base, including exact-width scalar transport.
+The registry chapter control supplies explicit public identities without a case-based rule.
 
 This ownership change transfers no language, transform, span, serialization, or backend authority.

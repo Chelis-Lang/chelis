@@ -134,7 +134,8 @@ class SemanticAuthorityTests(unittest.TestCase):
         # Membership of compiled discovery is independently checked by the full
         # oracle; this control checks the real table against the real chapter.
         table = "\n".join(f"| `{name}` | {atom} |" for name, atom in self.rows.items())
-        registry.validate(self.rows, table, self.spec, set(registry.atom_blocks(self.spec)))
+        registry.validate(self.rows, table, self.spec, set(registry.atom_blocks(self.spec)),
+                          callables=self.rows.keys() - semantics.PRIMITIVE_CLAUSES.keys())
 
     def test_scan_identities_share_the_ordered_operation_contract(self):
         for identity in ("Numeric:Cumsum:TableA", "Numeric:cumsum:TableA"):

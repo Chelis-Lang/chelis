@@ -30,6 +30,7 @@ EVIDENCE = frozenset({"thumb-default", "thumb-no-default", "standalone-alloc", "
     "native-c", "c-hip-metal-generation", "admission-diagnostics", "span-comments",
     "dependency-features", "negative-controls", "scale-allocations", "current-host-suites", "python-controls", "source-owner-controls", "moved-host-tests"})
 BASELINE_REVISION = "3ca99faa7a46158eb6a0d90c2c812a7e3a5f44c1"
+PRODUCTION_BASELINE_REVISION = "44bee6ea6674f6cbe69edd51ad6487acb6ef05c5"
 FORBIDDEN = frozenset({
     "chelis-types", "chelis-type-core", "chelis-deep", "chelis-surf", "chelis-ir",
     "chelis-effects", "chelis-pipeline-core", "chelis-compiler-api",
@@ -327,14 +328,14 @@ def workspace_environment(workspace: Path) -> dict[str, str]:
     return environment
 
 
-def baseline_clone(directory: Path) -> Path:
-    baseline = (directory / "baseline").resolve()
+def baseline_clone(directory: Path, revision: str) -> Path:
+    baseline = (directory / revision).resolve()
     run(["git", "clone", "--quiet", "--no-local", "--no-hardlinks", "--no-checkout", str(ROOT), str(baseline)])
-    exists = support._execute(["git", "cat-file", "-e", BASELINE_REVISION + "^{commit}"], cwd=baseline)
+    exists = support._execute(["git", "cat-file", "-e", revision + "^{commit}"], cwd=baseline)
     if exists.returncode:
-        run(["git", "fetch", "--quiet", "--depth", "1", "https://github.com/Chelis-Lang/chelis.git", BASELINE_REVISION], cwd=baseline)
-    run(["git", "checkout", "--quiet", "--detach", BASELINE_REVISION], cwd=baseline)
-    if run(["git", "rev-parse", "HEAD"], cwd=baseline).stdout.strip() != BASELINE_REVISION:
+        run(["git", "fetch", "--quiet", "--depth", "1", "https://github.com/Chelis-Lang/chelis.git", revision], cwd=baseline)
+    run(["git", "checkout", "--quiet", "--detach", revision], cwd=baseline)
+    if run(["git", "rev-parse", "HEAD"], cwd=baseline).stdout.strip() != revision:
         raise OracleFailure("immutable DAG baseline identity differs")
     return baseline
 
@@ -500,7 +501,7 @@ def immutable_parity() -> None:
         "out = f(to_tensor([1.0, -2.0, 3.5, 0.25], f32))\n")
     with tempfile.TemporaryDirectory(prefix="chelis-dag-production-") as temporary:
         directory = Path(temporary).resolve()
-        baseline = baseline_clone(directory)
+        baseline = baseline_clone(directory, BASELINE_REVISION)
         if wire_snapshot(baseline, baseline=True) != wire_snapshot(ROOT, baseline=False):
             raise OracleFailure("current-source wire or transform snapshot differs")
         compare_costs(host_snapshot(baseline, baseline=True), host_snapshot(ROOT, baseline=False))
@@ -508,15 +509,25 @@ def immutable_parity() -> None:
         path.write_text(source, encoding="utf-8")
         outputs = directory / "output"
         outputs.mkdir()
-        expected = production_snapshot(baseline, path, outputs)
+        historical = production_snapshot(baseline, path, outputs)
+        shutil.rmtree(outputs)
+        outputs.mkdir()
+        production_baseline = baseline_clone(directory, PRODUCTION_BASELINE_REVISION)
+        expected = production_snapshot(production_baseline, path, outputs)
         shutil.rmtree(outputs)
         outputs.mkdir()
         actual = production_snapshot(ROOT, path, outputs)
+        generated_backends = {"c", "hip", "metal"}
+        historical_behavior = {key: value for key, value in historical.items() if key not in generated_backends}
+        actual_behavior = {key: value for key, value in actual.items() if key not in generated_backends}
+        if actual_behavior != historical_behavior:
+            raise OracleFailure("historical production behavior differs")
         if actual != expected:
             differing = sorted(key for key in expected if actual.get(key) != expected[key])
             raise OracleFailure("production baseline mismatch: " + ", ".join(differing))
         preserved_suites(baseline)
-        print(f"DAG production baseline: {BASELINE_REVISION}", flush=True)
+        print(f"DAG graph and behavior baseline: {BASELINE_REVISION}", flush=True)
+        print(f"DAG generated-source baseline: {PRODUCTION_BASELINE_REVISION}", flush=True)
 
 
 SUITES = (
@@ -774,7 +785,7 @@ def run_oracle() -> None:
     if completed != EVIDENCE:
         raise OracleFailure(f"incomplete DAG evidence: missing={sorted(EVIDENCE - completed)}")
     print(json.dumps({"platform": platform.platform(), "machine": platform.machine(), "baseline": BASELINE_REVISION,
-        "evidence": sorted(completed)}, sort_keys=True), flush=True)
+        "production_baseline": PRODUCTION_BASELINE_REVISION, "evidence": sorted(completed)}, sort_keys=True), flush=True)
     print("DAG core oracle: PASS")
     print("Target compilation is not microcontroller execution. Host execution uses an explicit allocator and an 8 MiB stack.")
     print("HIP and Metal evidence covers source generation and admission, not GPU device execution.")

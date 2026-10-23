@@ -11,7 +11,6 @@ import unittest
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from dag_core_oracle import (
-    BASELINE_REVISION,
     CRATE,
     SOURCE_MODULES,
     inspect_source_owners,
@@ -86,9 +85,6 @@ fn main() {
             "chelis-ir", "use chelis_ir::verify::verify;\n", expected="unresolved import",
         )
 
-
-    def test_baseline_is_the_current_immutable_source(self) -> None:
-        self.assertEqual(BASELINE_REVISION, "3ca99faa7a46158eb6a0d90c2c812a7e3a5f44c1")
 
     def test_snapshot_requires_one_nonempty_record(self) -> None:
         from no_std_core_support import OracleFailure

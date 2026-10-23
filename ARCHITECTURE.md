@@ -252,7 +252,8 @@ Evaluation, source conversion, stack growth, host state, backend selection, and 
 
 Run `uv run --managed-python --python 3.11 --no-project python scripts/dag_core_oracle.py` for the complete acceptance command.
 The [acceptance gate](docs/manual_gates.md#dag-core-portability) states prerequisites and evidence.
-The oracle uses immutable source revision `3ca99faa7a46158eb6a0d90c2c812a7e3a5f44c1`.
+Graph, wire, transform, allocation, native-result, and admission comparisons use immutable revision `3ca99faa7a46158eb6a0d90c2c812a7e3a5f44c1`.
+Complete generated sources and headers use pre-cutover integration revision `44bee6ea6674f6cbe69edd51ad6487acb6ef05c5`, which retains exact-width scalar transport.
 Target compilation proves neither device execution nor allocator capacity.
 The numbered language, transform, span, and serialization specifications retain authority.
 
