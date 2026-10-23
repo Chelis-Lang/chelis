@@ -213,6 +213,16 @@ CLIPPY_MATRIX: tuple[ClippyRun, ...] = (
         cadence=PER_PULL_REQUEST,
     ),
     ClippyRun(
+        label="type-without-default-features",
+        command=(
+            "cargo", "clippy", "-p", "chelis-type-core",
+            "--all-targets", "--no-default-features", "--", "-D", "warnings",
+        ),
+        owner="scripts/gate.py",
+        hosts=("linux",),
+        cadence=PER_PULL_REQUEST,
+    ),
+    ClippyRun(
         label="clarabel-provider",
         command=(
             "cargo", "clippy", "--workspace", "--all-targets", "--features",

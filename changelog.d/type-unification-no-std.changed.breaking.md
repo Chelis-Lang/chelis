@@ -19,6 +19,11 @@ Host behavior and compiler checks retain coverage.
 The unresolved-operand census follows pure decisions into the core.
 It retains the existing dispositions and source mutation controls.
 
+Distinguish active store operations from interrupted stores.
+Normal concurrent queries wait without a false interruption failure.
+Reserve identifiers once per shared allocation across the complete scheme.
+CI also lints the standalone core without default features.
+
 The portable solver needs allocation and atomics.
 It does not support reentrant interrupts that preempt a held solver lock.
 Target compilation proves neither device execution nor allocator capacity.

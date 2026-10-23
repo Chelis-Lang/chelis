@@ -1,7 +1,7 @@
 use chelis_unord::{PersistentMap, UnordMap};
 use core::fmt;
 use core::ops::{Deref, DerefMut};
-use spin::Mutex;
+use spin::{Mutex, MutexGuard};
 
 /// Logical aliases and transient terminal-owner lookups have separate storage.
 #[derive(Debug)]
@@ -67,48 +67,102 @@ where
 /// A private guard never escapes a protected operation.
 pub(crate) struct Store<T> {
     state: Mutex<State<T>>,
+    #[cfg(test)]
+    contended: core::sync::atomic::AtomicBool,
 }
 
 struct State<T> {
-    incomplete: bool,
+    status: OperationState,
     value: T,
+}
+
+enum OperationState {
+    Ready,
+    // The detached operation owns the value, but not the mutex guard.
+    Active,
+    // This marker becomes visible only after a protected operation unwinds.
+    Interrupted,
+}
+
+struct DetachedOperation<'a, T> {
+    state: &'a Mutex<State<T>>,
+    completed: bool,
+}
+
+impl<T> Drop for DetachedOperation<'_, T> {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.state.lock().status = OperationState::Interrupted;
+        }
+    }
 }
 
 impl<T> Store<T> {
     pub(crate) fn new(value: T) -> Self {
         Self {
             state: Mutex::new(State {
-                incomplete: false,
+                status: OperationState::Ready,
                 value,
             }),
+            #[cfg(test)]
+            contended: core::sync::atomic::AtomicBool::new(false),
         }
+    }
+
+    fn lock_ready(&self) -> MutexGuard<'_, State<T>> {
+        loop {
+            let state = self.state.lock();
+            match state.status {
+                OperationState::Ready => return state,
+                OperationState::Interrupted => panic!("substitution store operation incomplete"),
+                OperationState::Active => {
+                    #[cfg(test)]
+                    self.contended
+                        .store(true, core::sync::atomic::Ordering::Relaxed);
+                }
+            }
+            drop(state);
+            core::hint::spin_loop();
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn was_contended(&self) -> bool {
+        self.contended.load(core::sync::atomic::Ordering::Relaxed)
     }
 
     /// An interrupted operation leaves the marker set and rejects later access.
     pub(crate) fn with<R>(&self, operation: impl FnOnce(&mut T) -> R) -> R {
-        let mut state = self.state.lock();
-        assert!(!state.incomplete, "substitution store operation incomplete");
-        state.incomplete = true;
+        let mut state = self.lock_ready();
+        // The guard hides this marker until normal return or an unwind.
+        state.status = OperationState::Interrupted;
         let result = operation(&mut state.value);
-        state.incomplete = false;
+        state.status = OperationState::Ready;
         result
     }
 
     /// Release the guard before an operation can access another store.
+    /// Other callers wait for completion and reject access after an unwind.
     pub(crate) fn with_detached<R>(&self, operation: impl FnOnce(&mut T) -> R) -> R
     where
         T: Default,
     {
         let mut value = {
-            let mut state = self.state.lock();
-            assert!(!state.incomplete, "substitution store operation incomplete");
-            state.incomplete = true;
-            core::mem::take(&mut state.value)
+            let mut state = self.lock_ready();
+            state.status = OperationState::Interrupted;
+            let value = core::mem::take(&mut state.value);
+            state.status = OperationState::Active;
+            value
+        };
+        let mut interruption = DetachedOperation {
+            state: &self.state,
+            completed: false,
         };
         let result = operation(&mut value);
         let mut state = self.state.lock();
         state.value = value;
-        state.incomplete = false;
+        state.status = OperationState::Ready;
+        interruption.completed = true;
         result
     }
 }
@@ -214,14 +268,18 @@ mod tests {
         );
         assert!(catch_unwind(AssertUnwindSafe(|| store.with(|values| values.len()))).is_err());
         assert!(catch_unwind(AssertUnwindSafe(|| store.with_detached(|_| ()))).is_err());
+        assert!(catch_unwind(AssertUnwindSafe(|| store.clone())).is_err());
     }
 
     #[test]
     fn detached_operation_releases_guard_before_callback() {
         let store = Store::new(vec![1]);
+        let other = Store::new(vec![2]);
         store.with_detached(|_| {
-            assert!(catch_unwind(AssertUnwindSafe(|| store.with(|_| ()))).is_err());
+            assert!(store.state.try_lock().is_some());
+            other.with(|values| values.push(3));
         });
+        assert_eq!(other.with(|values| values.clone()), vec![2, 3]);
         assert_eq!(store.with(|values| values.clone()), vec![1]);
     }
 

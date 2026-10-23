@@ -321,6 +321,11 @@ CLIPPY_NUMERIC_NO_DEFAULT_FEATURES: list[str] = [
     "cargo", "clippy", "-p", "chelis-numeric-core",
     "--all-targets", "--no-default-features", "--", "-D", "warnings",
 ]
+# Hosted callers enable core Serde and instrumentation through feature unification.
+CLIPPY_TYPE_NO_DEFAULT_FEATURES: list[str] = [
+    "cargo", "clippy", "-p", "chelis-type-core",
+    "--all-targets", "--no-default-features", "--", "-D", "warnings",
+]
 CLIPPY_SOLVER_FREE_FEATURES: list[str] = [
     "cargo", "clippy", "--workspace", "--all-targets", "--features",
     "chelis-cli/ownership-ledger,"
@@ -619,6 +624,7 @@ STAGES: dict[str, list[list[str]]] = {
         CLIPPY_NO_DEFAULT_FEATURES,
         CLIPPY_CORE_WITHOUT_MIGRATION,
         CLIPPY_NUMERIC_NO_DEFAULT_FEATURES,
+        CLIPPY_TYPE_NO_DEFAULT_FEATURES,
         FMT_CHECK,
         CHELIS_LINT_CHECK,
         STD_BUNDLE_REPRODUCIBILITY,

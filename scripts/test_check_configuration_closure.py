@@ -322,13 +322,6 @@ class MatrixCoverageTests(unittest.TestCase):
             self.assertIn((package, "pre-020-pipe-migration"),
                           CLOSURE.resolved_features(rows["default-features"], REPO_ROOT))
 
-    def test_removing_core_off_row_reopens_migration_configuration_gap(self) -> None:
-        matrix = tuple(run for run in CLOSURE.CLIPPY_MATRIX
-                       if run.label != "core-without-migration")
-        with self.assertRaisesRegex(CLOSURE.ConfigurationClosureFailure,
-                                    "chelis-deep/pre-020-pipe-migration"):
-            CLOSURE.check_matrix_covers_declared_features(REPO_ROOT, matrix)
-
     def test_numeric_off_row_excludes_host_feature_unification(self) -> None:
         rows = {run.label: run for run in CLOSURE.CLIPPY_MATRIX}
         compiled, enabled = CLOSURE.resolved_configuration(

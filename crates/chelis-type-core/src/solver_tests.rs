@@ -56,6 +56,166 @@ fn explicit_recursion_exclusions_remain_monomorphic() {
 use super::*;
 
 #[test]
+fn scheme_reservation_accepts_compact_shared_ground_compounds() {
+    let mut body = Type::<TestEvidence>::Unit;
+    for _ in 0..16 {
+        let tuple = Type::tuple(vec![body.clone(), body]);
+        let referent = Type::reference(tuple);
+        let nominal = Type::adt("Shared".into(), vec![referent.clone(), referent]);
+        let kinded = Type::kinded_adt(
+            "SharedDim".into(),
+            vec![
+                NominalArg::Type(nominal.clone()),
+                NominalArg::Type(nominal),
+                NominalArg::Dimension(Dim::Lit(2)),
+            ],
+        );
+        body = Type::function(vec![kinded.clone(), kinded.clone()], kinded);
+    }
+    let scheme = Scheme::mono(body);
+    let mut vg = VarGen::default();
+    let subst = Subst::new();
+    let instance = crate::scheme::instantiate(&scheme, &mut vg, &subst);
+    let (Type::Fn(original_args, original_result), Type::Fn(args, result)) =
+        (&scheme.body, &instance)
+    else {
+        panic!("the shared function must remain a function");
+    };
+    assert!(Arc::ptr_eq(original_args, args));
+    assert!(Arc::ptr_eq(original_result, result));
+    assert_eq!(vg.watermarks(), VarWatermarks::default());
+}
+
+#[test]
+fn scheme_reservation_covers_shared_child_forms_without_identifier_changes() {
+    let payload = Type::<TestEvidence>::tuple(vec![
+        Type::Var(TypeVar(40)),
+        Type::Tensor(
+            vec![Dim::Var(DimVar(50)), Dim::Rank(RankVar(60))],
+            TensorPrec::Var(TypeVar(41)),
+        ),
+    ]);
+    let shared_args: Arc<[Type<TestEvidence>]> = vec![Type::Unit].into();
+    let shared_result = Arc::new(payload.clone());
+    let bodies = [
+        Type::function(vec![payload.clone()], Type::Unit),
+        Type::tuple(vec![
+            Type::Tuple(shared_args.clone()),
+            Type::Fn(shared_args, shared_result.clone()),
+            Type::Ref(shared_result),
+        ]),
+        Type::reference(payload.clone()),
+        Type::tuple(vec![payload.clone(), payload.clone()]),
+        Type::adt("Shared".into(), vec![payload.clone(), payload.clone()]),
+        Type::kinded_adt(
+            "SharedDim".into(),
+            vec![
+                NominalArg::Type(payload),
+                NominalArg::Dimension(Dim::Var(DimVar(50))),
+                NominalArg::Dimension(Dim::Rank(RankVar(60))),
+            ],
+        ),
+        Type::kinded_adt(
+            "Dimensions".into(),
+            vec![
+                NominalArg::Type(Type::Var(TypeVar(41))),
+                NominalArg::Dimension(Dim::Var(DimVar(50))),
+                NominalArg::Dimension(Dim::Rank(RankVar(60))),
+            ],
+        ),
+    ];
+    for body in bodies {
+        let mut vg = VarGen::default();
+        let subst = Subst::new();
+        let instance = crate::scheme::instantiate(&Scheme::mono(body.clone()), &mut vg, &subst);
+        assert_eq!(instance, body);
+        assert_eq!(
+            vg.watermarks(),
+            VarWatermarks {
+                next_tvar: 42,
+                next_dvar: 51,
+                next_rvar: 61,
+            }
+        );
+    }
+}
+
+#[test]
+fn scheme_reservation_covers_carried_ids_before_quantifier_renaming() {
+    let payload = Type::<TestEvidence>::tuple(vec![
+        Type::Var(TypeVar(40)),
+        Type::Tensor(
+            vec![Dim::Var(DimVar(50)), Dim::Rank(RankVar(60))],
+            TensorPrec::Var(TypeVar(41)),
+        ),
+    ]);
+    for source in 0..5 {
+        let mut scheme = Scheme {
+            body: Type::Var(TypeVar(0)),
+            tvars: vec![TypeVar(0)],
+            tvar_restrictions: vec![],
+            dvars: vec![DimVar(0)],
+            rvars: vec![RankVar(0)],
+            constraints: vec![],
+            result_origin: None,
+        };
+        if source == 0 {
+            scheme.constraints.push(CollectionConstraint::Len {
+                operand: Type::adt("List".into(), vec![payload.clone()]),
+                result: Type::Var(TypeVar(40)),
+            });
+        } else {
+            let mut origin = ResultOrigin {
+                body: Type::Var(TypeVar(0)),
+                tvars: scheme.tvars.clone(),
+                tvar_restrictions: vec![],
+                dvars: scheme.dvars.clone(),
+                rvars: scheme.rvars.clone(),
+                equations: vec![],
+            };
+            match source {
+                1 => origin.body = Type::tuple(vec![Type::Var(TypeVar(0)), payload.clone()]),
+                2 => origin.equations.push(ResultConstraint::Annotation {
+                    actual: payload.clone(),
+                    declared: payload.clone(),
+                }),
+                3 => origin.equations.push(ResultConstraint::Join {
+                    inputs: vec![payload.clone(), payload.clone()],
+                    result: payload.clone(),
+                }),
+                4 => {
+                    scheme.tvars.push(TypeVar(40));
+                    scheme
+                        .tvar_restrictions
+                        .push((TypeVar(41), TypeVarRestriction::ActiveFloat));
+                    scheme.dvars.push(DimVar(50));
+                    scheme.rvars.push(RankVar(60));
+                    origin
+                        .tvar_restrictions
+                        .push((TypeVar(41), TypeVarRestriction::ActiveFloat));
+                }
+                _ => unreachable!(),
+            }
+            scheme.result_origin = Some(origin);
+        }
+        let mut vg = VarGen::default();
+        let subst = Subst::new();
+        let instance = crate::scheme::instantiate_scheme(&scheme, &mut vg, &subst);
+        assert_eq!(instance.tvars[0], (TypeVar(0), Type::Var(TypeVar(42))));
+        assert_eq!(instance.dvars[0], (DimVar(0), DimVar(51)));
+        assert_eq!(instance.rvars[0], (RankVar(0), RankVar(61)));
+        assert_eq!(
+            vg.watermarks(),
+            VarWatermarks {
+                next_tvar: 43 + u32::from(source == 4),
+                next_dvar: 52 + u32::from(source == 4),
+                next_rvar: 62 + u32::from(source == 4),
+            }
+        );
+    }
+}
+
+#[test]
 fn protected_label_aliases_keep_identity_after_compression_and_literal_binding() {
     let mut subst = Subst::<TestEvidence>::new();
     let root = DimVar(0);

@@ -132,6 +132,9 @@ Scheme substitution stops at quantified aliases after ordinary resolution.
 Protected-operation interruption rejects later store access.
 Mutable substitution clones remain independent.
 
+Normal concurrent queries wait for active store operations.
+Identifier reservation visits each shared allocation once across scheme bodies, collection contracts, and result equations.
+
 `chelis-types` uses `Type<ErrorWitness>`, `Scheme<ErrorWitness>`, and `Subst<ErrorWitness>` directly.
 It retains witness construction, diagnostic reports, private sinks and checkpoints, source resolution, recursion policy, and the successful-product veto.
 Pure decisions return portable failures and optional source labels.

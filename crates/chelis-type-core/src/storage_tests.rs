@@ -76,6 +76,94 @@ fn interrupted_evidence_copy_rejects_later_store_access() {
 }
 
 #[test]
+fn overlapping_pending_gate_queries_complete_normally() {
+    overlap_pending_gate_queries(false);
+}
+
+#[test]
+fn interrupted_pending_gate_query_rejects_waiters_and_later_access() {
+    overlap_pending_gate_queries(true);
+}
+
+fn overlap_pending_gate_queries(interrupt: bool) {
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Barrier};
+
+    #[derive(Debug)]
+    struct Pause {
+        armed: AtomicBool,
+        entered: Barrier,
+        release: Barrier,
+        interrupt: bool,
+    }
+
+    #[derive(Debug)]
+    struct Evidence(Arc<Pause>);
+
+    impl PartialEq for Evidence {
+        fn eq(&self, other: &Self) -> bool {
+            Arc::ptr_eq(&self.0, &other.0)
+        }
+    }
+
+    impl Clone for Evidence {
+        fn clone(&self) -> Self {
+            if self.0.armed.swap(false, Ordering::SeqCst) {
+                self.0.entered.wait();
+                self.0.release.wait();
+                assert!(!self.0.interrupt, "interrupt pending gate query");
+            }
+            Self(Arc::clone(&self.0))
+        }
+    }
+
+    let pause = Arc::new(Pause {
+        armed: AtomicBool::new(true),
+        entered: Barrier::new(2),
+        release: Barrier::new(2),
+        interrupt,
+    });
+    let subst = Subst::<Evidence>::new();
+    subst.record_deferred_tensor_operand(
+        TypeVar(0),
+        DeferredOperandGate::Copy {
+            result: Box::new(Type::Error(Evidence(Arc::clone(&pause)))),
+            location: None,
+        },
+    );
+    let (first, second) = std::thread::scope(|scope| {
+        let first = scope.spawn(|| catch_unwind(AssertUnwindSafe(|| subst.pending_gate_vars())));
+        pause.entered.wait();
+        let second = scope.spawn(|| catch_unwind(AssertUnwindSafe(|| subst.pending_gate_vars())));
+        // Release the first query only after the second observes its active store.
+        while !subst.deferred_tensor_operands.was_contended() {
+            std::thread::yield_now();
+        }
+        assert_eq!(subst.types_len(), 0);
+        pause.release.wait();
+        (first.join().unwrap(), second.join().unwrap())
+    });
+    if interrupt {
+        assert!(first.is_err());
+        assert!(second.is_err());
+        assert!(catch_unwind(AssertUnwindSafe(|| subst.pending_gate_vars())).is_err());
+        assert!(catch_unwind(AssertUnwindSafe(|| subst.take_deferred_tensor_operands())).is_err());
+        assert!(catch_unwind(AssertUnwindSafe(|| subst.clone())).is_err());
+        assert!(subst.pending_collection_contracts().is_empty());
+    } else {
+        for (tvars, dvars, rvars) in [first.unwrap(), second.unwrap(), subst.pending_gate_vars()] {
+            assert_eq!(tvars.len(), 1);
+            assert!(tvars.contains(&TypeVar(0)));
+            assert!(dvars.is_empty());
+            assert!(rvars.is_empty());
+        }
+        assert_eq!(subst.take_deferred_tensor_operands().len(), 1);
+    }
+    assert_eq!(subst.dims_len(), 0);
+}
+
+#[test]
 fn current_deferred_ledgers_clone_without_shared_mutable_state() {
     let subst = Subst::<TestEvidence>::new();
     let variable = TypeVar(10);
@@ -247,12 +335,12 @@ fn current_cache_layout_retains_logical_fields_and_omits_transient_state() {
         dims: subst.dims.with(|value| value.bindings.clone()),
         dimension_labels: subst.dimension_labels.with(|value| value.clone()),
         ranks: subst.ranks.with(|value| value.bindings.clone()),
-        current_level: subst.current_level.clone(),
+        current_level: subst.current_level,
         level_transitions: subst.level_transitions.clone(),
         lowered_tvar_levels: subst.lowered_tvar_levels.clone(),
         lowered_dvar_levels: subst.lowered_dvar_levels.clone(),
         lowered_rvar_levels: subst.lowered_rvar_levels.clone(),
-        resume_floors: subst.resume_floors.clone(),
+        resume_floors: subst.resume_floors,
     };
     let bytes = bincode::serialize(&subst).unwrap();
     assert_eq!(bytes, bincode::serialize(&logical).unwrap());

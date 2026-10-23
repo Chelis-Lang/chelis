@@ -2,7 +2,7 @@
 
 use crate::model::*;
 use crate::unify::{CollectionContractId, Subst};
-use alloc::{vec, vec::Vec};
+use alloc::{sync::Arc, vec, vec::Vec};
 use chelis_unord::UnordSet;
 
 #[derive(Clone)]
@@ -725,7 +725,10 @@ pub fn generalize_over_environment<'a, E: Clone + PartialEq + 'a>(
 }
 
 fn reserve_scheme_ids<E>(scheme: &Scheme<E>, var_gen: &mut VarGen) {
-    reserve_body_ids(&scheme.body, var_gen);
+    // The scheme retains every allocation until this operation returns.
+    // Use the same allocation addresses as the shared-child substitution caches.
+    let mut visited = UnordSet::new();
+    reserve_body_ids(&scheme.body, var_gen, &mut visited);
     for var in &scheme.tvars {
         var_gen.reserve_tvar(*var);
     }
@@ -740,11 +743,11 @@ fn reserve_scheme_ids<E>(scheme: &Scheme<E>, var_gen: &mut VarGen) {
     }
     for constraint in &scheme.constraints {
         for ty in constraint.carried_types() {
-            reserve_body_ids(ty, var_gen);
+            reserve_body_ids(ty, var_gen, &mut visited);
         }
     }
     if let Some(origin) = &scheme.result_origin {
-        reserve_body_ids(&origin.body, var_gen);
+        reserve_body_ids(&origin.body, var_gen, &mut visited);
         for var in &origin.tvars {
             var_gen.reserve_tvar(*var);
         }
@@ -759,32 +762,28 @@ fn reserve_scheme_ids<E>(scheme: &Scheme<E>, var_gen: &mut VarGen) {
         }
         for equation in &origin.equations {
             for ty in equation.types() {
-                reserve_body_ids(ty, var_gen);
+                reserve_body_ids(ty, var_gen, &mut visited);
             }
         }
     }
 }
 
-fn reserve_body_ids<E>(ty: &Type<E>, var_gen: &mut VarGen) {
+fn reserve_body_ids<E>(ty: &Type<E>, var_gen: &mut VarGen, visited: &mut UnordSet<usize>) {
     match ty {
         Type::Var(var) => var_gen.reserve_tvar(*var),
         Type::Fn(args, ret) => {
-            for arg in args.iter() {
-                reserve_body_ids(arg, var_gen);
-            }
-            reserve_body_ids(ret, var_gen);
+            reserve_list_ids(args, var_gen, visited);
+            reserve_child_ids(ret, var_gen, visited);
         }
-        Type::Ref(inner) => reserve_body_ids(inner, var_gen),
-        Type::Adt(_, args) | Type::Tuple(args) => {
-            for arg in args.iter() {
-                reserve_body_ids(arg, var_gen);
-            }
-        }
+        Type::Ref(inner) => reserve_child_ids(inner, var_gen, visited),
+        Type::Adt(_, args) | Type::Tuple(args) => reserve_list_ids(args, var_gen, visited),
         Type::KindedAdt(_, args) => {
-            for arg in args.iter() {
-                match arg {
-                    NominalArg::Type(ty) => reserve_body_ids(ty, var_gen),
-                    NominalArg::Dimension(dim) => reserve_dimension_id(dim, var_gen),
+            if visited.insert(Arc::as_ptr(args).cast::<NominalArg<E>>().addr()) {
+                for arg in args.iter() {
+                    match arg {
+                        NominalArg::Type(ty) => reserve_body_ids(ty, var_gen, visited),
+                        NominalArg::Dimension(dim) => reserve_dimension_id(dim, var_gen),
+                    }
                 }
             }
         }
@@ -797,6 +796,24 @@ fn reserve_body_ids<E>(ty: &Type<E>, var_gen: &mut VarGen) {
             }
         }
         Type::Prim(_) | Type::Unit | Type::Error(_) => {}
+    }
+}
+
+fn reserve_child_ids<E>(child: &Arc<Type<E>>, var_gen: &mut VarGen, visited: &mut UnordSet<usize>) {
+    if visited.insert(Arc::as_ptr(child).addr()) {
+        reserve_body_ids(child, var_gen, visited);
+    }
+}
+
+fn reserve_list_ids<E>(
+    items: &Arc<[Type<E>]>,
+    var_gen: &mut VarGen,
+    visited: &mut UnordSet<usize>,
+) {
+    if visited.insert(Arc::as_ptr(items).cast::<Type<E>>().addr()) {
+        for item in items.iter() {
+            reserve_body_ids(item, var_gen, visited);
+        }
     }
 }
 
