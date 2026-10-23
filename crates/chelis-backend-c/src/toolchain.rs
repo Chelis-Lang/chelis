@@ -1248,6 +1248,12 @@ fn compiler_version_text(output: &std::process::Output) -> String {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    #[path = "executable_fixture.rs"]
+    mod executable_fixture;
+    #[cfg(unix)]
+    use executable_fixture::write_executable;
+
     #[test]
     fn strict_reference_uses_portable_profile_and_required_libraries() {
         let requirements = CodegenRequirements {
@@ -1601,16 +1607,13 @@ mod tests {
 
     #[cfg(unix)]
     fn wrapper(dir: &Path, name: &str, extra: &str) -> String {
-        use std::os::unix::fs::PermissionsExt;
         let compiler = test_toolchain(CodegenRequirements::default()).compiler;
         let real = resolve_executable(&compiler).expect("a C compiler on PATH");
         let path = dir.join(name);
-        std::fs::write(
+        write_executable(
             &path,
             format!("#!/bin/sh\nexec '{}' \"$@\" {extra}\n", real.display()),
-        )
-        .unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
         path.to_string_lossy().into_owned()
     }
 
