@@ -5102,7 +5102,14 @@ fn staged_def_kernel(
         }
         host_source |= has_control(expression);
     }
-    if !reshape || !host_source {
+    // An aggregate formal cannot enter the flat tensor-input scope. Keep its
+    // checked structure in the host frame and project actual leaves through
+    // the same typed staging boundary as host-produced extents.
+    let aggregate_parameter = signature
+        .params
+        .iter()
+        .any(|param| matches!(param.ty, HostTypeTerm::Tuple(_)));
+    if !aggregate_parameter && (!reshape || !host_source) {
         return Ok(StagingAttempt::NotApplicable);
     }
     if def_effect_row_forbids_kernel(program, &signature.name)

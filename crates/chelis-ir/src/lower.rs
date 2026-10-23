@@ -12407,8 +12407,9 @@ impl<'program> LowerCtx<'program> {
         Some(self.append_host_source(expr, ty, captures))
     }
 
-    /// Publish a typed host producer once, bridging exact i64 leaves into
-    /// the tensor graph when an extent consumer needs them.
+    /// Publish a typed host producer once. Numeric scalar and tensor leaves
+    /// retain their exact graph type; aggregates remain host values until
+    /// projected, rather than acquiring a type from a later consumer.
     fn append_host_source(
         &mut self,
         expr: &Expr,
@@ -12420,19 +12421,18 @@ impl<'program> LowerCtx<'program> {
         )>,
     ) -> LoweredValue {
         use crate::host::staged::{HostSource, HostValueId, StageValue};
-        use crate::host_type_state::{HostPrecisionTerm, HostTypeTerm};
         self.host_stage_status
             .set(crate::host::staged::StagingStatus::HasSources);
         let before = self.dag.nodes().len();
         let (value, lowered) =
-            if ty == HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(Prim::Int64)) {
+            if let Some(tensor_ty) = crate::host::tensor_type_from_host_input(&ty) {
                 let id = self.dag.add_node(
                     self.owner(),
                     RiscOp::Load {
                         name: format!("__host_source_{}", self.host_sources.len()).into(),
                     },
                     Vec::new(),
-                    crate::host::staged::scalar_type(),
+                    tensor_ty,
                     expr.span_id().map(str::to_owned),
                 );
                 self.dag.node_mut(id).expect("staged scalar").shape_deps = captures

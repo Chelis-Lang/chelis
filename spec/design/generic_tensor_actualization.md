@@ -70,6 +70,18 @@ precision-changing predicates retain their own checked result relations. A
 Boolean consumer's result annotation never supplies a missing float producer
 type.
 
+Tuple parameters remain typed aggregate inputs when a declaration returns a
+tensor. The shared host staging boundary projects an already evaluated tuple
+once and bridges each numeric leaf with its actual scalar or tensor type.
+Partition validation requires exact agreement between the typed producer and
+its graph input, including dimensions and dtype. The checked load survives
+partitioning so its extent obligations execute after projection and before
+consumers. Nested aggregates keep their structure until projected; a result
+annotation never supplies their contents.
+This lets tuple-carried `i64` extents feed movement operations under
+`spec/04-type-system.md` §4.7.2 while entry and result extent claims retain
+their own witnesses and ordering.
+
 The two extrema identities use one constructor selected by `ExtremaKind`.
 It takes the lowered operands and derives the complete output `TensorType`
 from the left operand, preserving its ordered physical axes and dtype. It

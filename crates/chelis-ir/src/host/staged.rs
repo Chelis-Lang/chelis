@@ -1,4 +1,4 @@
-//! Ordered host scalar sources inside an otherwise ordinary tensor graph.
+//! Ordered typed host sources inside an otherwise ordinary tensor graph.
 //!
 //! Claim construction sees the complete graph. Only this boundary turns it
 //! into independently executable helpers; a placeholder never reaches one.
@@ -118,15 +118,13 @@ pub(crate) fn partition(
             StageValue::Tensor(id) => {
                 if source.before != id.0
                     || external_inputs.contains_key(&id)
-                    || source.ty
-                        != super::HostTypeTerm::Scalar(super::HostPrecisionTerm::Concrete(
-                            chelis_numeric_core::prim::Prim::Int64,
-                        ))
                     || logical.get(id).is_none_or(|node| {
-                        node.output_type != scalar_type() || !matches!(node.op, RiscOp::Load { .. })
+                        super::tensor_type_from_host_input(&source.ty).as_ref()
+                            != Some(&node.output_type)
+                            || !matches!(node.op, RiscOp::Load { .. })
                     })
                 {
-                    return Err("a staged reshape target must have one exact i64 producer".into());
+                    return Err("a staged graph input must have one exactly typed producer".into());
                 }
             }
             StageValue::Host(id) => {
@@ -169,8 +167,9 @@ pub(crate) fn partition(
         stages: Vec::new(),
     };
     let mut start = 0;
+    let mut next_source = 0;
     for source in sources {
-        if source.before < start || source.before > logical.nodes().len() {
+        if source.before < next_source || source.before > logical.nodes().len() {
             return Err("a staged source requires one ordered producer".into());
         }
         partition.append_kernel(start, source.before)?;
@@ -214,7 +213,12 @@ pub(crate) fn partition(
             ty: source.ty.clone(),
         });
         partition.available.insert(source.value);
-        start = source.before + usize::from(matches!(source.value, StageValue::Tensor(_)));
+        // A numeric source re-enters the next kernel through its checked
+        // load. That node may own result/local extent obligations; skipping
+        // it would drop those obligations when the source is already a
+        // tensor rather than only a scalar reshape size.
+        start = source.before;
+        next_source = source.before + usize::from(matches!(source.value, StageValue::Tensor(_)));
     }
     partition.append_kernel(start, logical.nodes().len())?;
     if !partition.available.contains(&StageValue::Tensor(*root)) {
@@ -378,10 +382,17 @@ impl Partition<'_> {
                     dependency,
                 )?;
             }
+            let op = if self.available.contains(&StageValue::Tensor(node.id)) {
+                RiscOp::Load {
+                    name: self.names[&StageValue::Tensor(node.id)].as_str().into(),
+                }
+            } else {
+                node.op.clone()
+            };
             let id = dag.add_node(
                 node.owner
                     .remap_with(|activation| remap.get(&activation).copied()),
-                node.op.clone(),
+                op,
                 node.inputs.iter().map(|i| remap[i]).collect(),
                 node.output_type.clone(),
                 node.span_id.clone(),
@@ -767,6 +778,111 @@ mod tests {
             }],
             BTreeMap::from([(x, "x".into())]),
         )
+    }
+
+    #[test]
+    fn staged_projected_inputs_preserve_exact_tensor_and_scalar_types() {
+        for precision in [
+            Prim::Int32,
+            Prim::Int64,
+            Prim::F16,
+            Prim::Bf16,
+            Prim::F32,
+            Prim::F64,
+            Prim::Bool,
+        ] {
+            for dims in [
+                vec![],
+                vec![DimInfo::Lit(2)],
+                vec![DimInfo::Lit(2), DimInfo::Lit(0)],
+            ] {
+                let tensor = TensorType { dims, precision };
+                let mut types = vec![HostTypeTerm::Tensor(tensor.clone())];
+                if tensor.dims.is_empty() {
+                    types.push(HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(precision)));
+                }
+                for ty in types {
+                    let mut dag = Dag::new();
+                    let decl = dag.declare("projection");
+                    let value = dag.add_node(
+                        decl,
+                        RiscOp::Load {
+                            name: "projected".into(),
+                        },
+                        vec![],
+                        tensor.clone(),
+                        None,
+                    );
+                    dag.add_root(value);
+                    let parameter_ty = HostTypeTerm::Tuple(vec![ty.clone()]);
+                    let parameter = HostValueId(0);
+                    let sources = vec![HostSource {
+                        before: value.0,
+                        value: StageValue::Tensor(value),
+                        ty: ty.clone(),
+                        expression: chelis_deep::parser::parse_str(
+                            "(tuple-get {} (var {} p) (lit {} 0))",
+                            &chelis_syntax_host::NativeStack,
+                        )
+                        .unwrap()
+                        .remove(0),
+                        captures: vec![(
+                            "p".into(),
+                            StageValue::Host(parameter),
+                            parameter_ty.clone(),
+                        )],
+                    }];
+                    let params = vec![HostParam {
+                        name: "p".into(),
+                        ty: parameter_ty.clone(),
+                    }];
+                    let host_parameters = BTreeMap::from([(parameter, ("p".into(), parameter_ty))]);
+                    assert!(
+                        partition(&dag, &sources, &params, &BTreeMap::new(), &host_parameters)
+                            .is_ok(),
+                        "{ty:?}"
+                    );
+                    // Re-emitting the checked load must not relax the next
+                    // source's position: it follows the load's original slot.
+                    let mut overlapping = sources.clone();
+                    let mut overlap = sources[0].clone();
+                    overlap.value = StageValue::Host(HostValueId(1));
+                    overlap.captures.clear();
+                    overlapping.push(overlap);
+                    assert!(
+                        partition(
+                            &dag,
+                            &overlapping,
+                            &params,
+                            &BTreeMap::new(),
+                            &host_parameters
+                        )
+                        .is_err()
+                    );
+                    for wrong in [
+                        TensorType {
+                            precision: if precision == Prim::F32 {
+                                Prim::F64
+                            } else {
+                                Prim::F32
+                            },
+                            ..tensor.clone()
+                        },
+                        TensorType {
+                            dims: vec![DimInfo::Lit(3)],
+                            precision,
+                        },
+                    ] {
+                        let mut sources = sources.clone();
+                        sources[0].ty = HostTypeTerm::Tensor(wrong);
+                        assert!(
+                            partition(&dag, &sources, &params, &BTreeMap::new(), &host_parameters)
+                                .is_err()
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]
