@@ -4,6 +4,7 @@
 import json
 from pathlib import Path
 import subprocess
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -48,6 +49,61 @@ class NumericCoreOracleTests(unittest.TestCase):
         for candidate in ({}, {"integer": [1, 3]}):
             with self.assertRaisesRegex(OracleFailure, "wire"):
                 oracle.compare_exact({"integer": [1, 2]}, candidate, "wire")
+
+    def test_comparison_identifies_changed_and_missing_nested_fields(self):
+        expected = {"wide-headers": {"wide.h": {"symbol": "wide"}}}
+        for actual, message in (
+            ({"wide-headers": {"wide.h": {"symbol": "other"}}},
+             "wide-headers.*wide.h.*symbol.*expected.*wide.*actual.*other"),
+            ({"wide-headers": {}}, "wide-headers.*wide.h.*missing"),
+            ({**expected, "extra": "value"}, "extra.*unexpected"),
+        ):
+            with self.subTest(actual=actual):
+                with self.assertRaisesRegex(OracleFailure, message):
+                    oracle.compare_exact(expected, actual, "generated C")
+        with self.assertRaisesRegex(OracleFailure, "empty expected"):
+            oracle.compare_exact({}, {}, "generated C")
+
+    def test_comparison_identifies_sequence_element_and_long_header_difference(self):
+        with self.assertRaisesRegex(OracleFailure, r"wire.*bytes.*\[1\].*expected 2.*actual 3"):
+            oracle.compare_exact({"bytes": [1, 2]}, {"bytes": [1, 3]}, "wire")
+        with self.assertRaisesRegex(OracleFailure, "header.*character 1000.*expected.*before.*actual.*after"):
+            oracle.compare_exact({"header": "x" * 1000 + "before"},
+                {"header": "x" * 1000 + "after"}, "generated C")
+
+    @patch.object(oracle, "workspace_environment", return_value={})
+    def test_generated_abi_requires_every_validated_fixture(self, _environment):
+        artifacts = {"wide": {"source": "source bytes", "header": "header bytes"}}
+        valid = {"wide": {"program_identity": "Numeric.Main", "declarations": {}}}
+        def validate(crate, source, **kwargs):
+            self.assertEqual(json.loads(Path(kwargs["env"]["CHELIS_NUMERIC_ARTIFACTS"]).read_text()), artifacts)
+            return subprocess.CompletedProcess([], 0, "GENERATED_ABI " + json.dumps(valid), "")
+        with patch.object(oracle, "consumer", side_effect=validate):
+            self.assertEqual(oracle.generated_abi_snapshot(artifacts), valid)
+        for result in ("", "GENERATED_ABI {}", "GENERATED_ABI {\"other\":{}}"):
+            with patch.object(oracle, "consumer", return_value=subprocess.CompletedProcess([], 0, result, "")):
+                with self.assertRaisesRegex(OracleFailure, "GENERATED_ABI"):
+                    oracle.generated_abi_snapshot(artifacts)
+        with patch.object(oracle, "consumer", side_effect=OracleFailure("wide: source digest disagrees")):
+            with self.assertRaisesRegex(OracleFailure, "source digest disagrees"):
+                oracle.generated_abi_snapshot(artifacts)
+        with self.assertRaisesRegex(OracleFailure, "empty generated"):
+            oracle.generated_abi_snapshot({})
+
+    @patch.object(oracle, "workspace_environment", return_value={})
+    def test_generated_snapshot_requires_program_and_both_runtime_headers(self, _environment):
+        for missing in ("wide.h", "chelis_runtime.h", "chelis_blas.h"):
+            with self.subTest(missing=missing), tempfile.TemporaryDirectory() as temporary:
+                def execute(command, **kwargs):
+                    if "--output" in command:
+                        output = Path(command[command.index("--output") + 1])
+                        (output / "wide.c").write_text("source")
+                        for name in {"wide.h", "chelis_runtime.h", "chelis_blas.h"} - {missing}:
+                            (output / name).write_text("header")
+                    return subprocess.CompletedProcess([], 0, "9007199254740993\nout = ()\n", "")
+                with patch.object(oracle, "toolchain", return_value={"compiler": "cc", "compile_flags": [], "link_flags": []}), patch.object(oracle, "run", side_effect=execute):
+                    with self.assertRaisesRegex(OracleFailure, "wide.*missing required.*" + missing):
+                        oracle.generated_snapshot(oracle.ROOT, Path(temporary))
 
     def test_cost_measurements_are_required(self):
         valid = costs()

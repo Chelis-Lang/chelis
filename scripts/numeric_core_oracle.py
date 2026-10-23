@@ -533,9 +533,34 @@ def record(stdout: str, prefix: str, fields: set[str]) -> dict:
     return value
 
 
+def comparison_difference(expected: object, actual: object, path: str) -> str:
+    if isinstance(expected, dict) and isinstance(actual, dict):
+        for key in sorted(expected.keys() | actual.keys()):
+            child = f"{path}[{key!r}]"
+            if key not in actual:
+                return f"{child}: missing actual fixture"
+            if key not in expected:
+                return f"{child}: unexpected actual fixture"
+            if expected[key] != actual[key]:
+                return comparison_difference(expected[key], actual[key], child)
+    if isinstance(expected, list) and isinstance(actual, list):
+        for index, (before, after) in enumerate(zip(expected, actual)):
+            if before != after:
+                return comparison_difference(before, after, f"{path}[{index}]")
+        return f"{path}: expected {len(expected)} elements; actual {len(actual)} elements"
+    if isinstance(expected, str) and isinstance(actual, str) and max(len(expected), len(actual)) > 160:
+        offset = next((index for index, (before, after) in enumerate(zip(expected, actual))
+            if before != after), min(len(expected), len(actual)))
+        window = slice(max(0, offset - 32), offset + 64)
+        return f"{path}: character {offset}; expected {expected[window]!r}; actual {actual[window]!r}"
+    return f"{path}: expected {expected!r}; actual {actual!r}"
+
+
 def compare_exact(expected: dict, actual: dict, label: str) -> None:
-    if not expected or actual != expected:
-        raise OracleFailure(f"{label} comparison differs or lacks fixtures")
+    if not expected:
+        raise OracleFailure(f"{label}: empty expected fixtures")
+    if actual != expected:
+        raise OracleFailure(comparison_difference(expected, actual, label))
 
 
 def inspect_costs(rows: list[dict]) -> None:
@@ -757,6 +782,54 @@ fn main() {
     return record(result.stdout, "TOOLCHAIN", {"compiler", "compile_flags", "link_flags"})
 
 
+GENERATED_ABI_SOURCE = r'''
+use chelis_backend_c::{GeneratedHeader, GeneratedHeaderError};
+fn validated_abi(header: &str, source: &str) -> Result<serde_json::Value, GeneratedHeaderError> {
+    let parsed = GeneratedHeader::parse(header)?;
+    parsed.validate_source(source)?;
+    let declarations: std::collections::BTreeMap<_, _> = parsed.declarations()
+        .map(|entry| (entry.source_name(), serde_json::json!({
+            "symbol": entry.symbol(), "declaration": entry.declaration(),
+        }))).collect();
+    Ok(serde_json::json!({
+        "program_identity": parsed.program_identity(), "declarations": declarations,
+    }))
+}
+fn main() {
+    let path = std::env::var("CHELIS_NUMERIC_ARTIFACTS").expect("artifact input path");
+    let artifacts: std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>> =
+        serde_json::from_slice(&std::fs::read(path).expect("artifact input")).expect("artifact records");
+    let mut results = std::collections::BTreeMap::new();
+    for (name, artifact) in artifacts {
+        let header = &artifact["header"];
+        let source = &artifact["source"];
+        let abi = validated_abi(header, source)
+            .unwrap_or_else(|error| panic!("{name}: {error}"));
+        assert!(validated_abi(header, &format!("{source}\n")).is_err(),
+            "{name}: changed-source negative control unexpectedly passed");
+        assert!(validated_abi("", source).is_err(),
+            "{name}: missing-header negative control unexpectedly passed");
+        results.insert(name, abi);
+    }
+    println!("GENERATED_ABI {}", serde_json::to_string(&results).unwrap());
+}
+'''
+
+
+def generated_abi_snapshot(artifacts: dict[str, dict[str, str]]) -> dict:
+    """Validate each exact artifact pair before projecting its comparable ABI."""
+    if not artifacts:
+        raise OracleFailure("empty generated artifact fixtures")
+    with tempfile.TemporaryDirectory(prefix="chelis-numeric-artifacts-") as temporary:
+        path = Path(temporary) / "artifacts.json"
+        path.write_text(json.dumps(artifacts), encoding="utf-8")
+        environment = workspace_environment(ROOT.resolve())
+        environment["CHELIS_NUMERIC_ARTIFACTS"] = str(path)
+        result = consumer(ROOT / "crates/chelis-backend-c", GENERATED_ABI_SOURCE,
+            default_features=True, dependencies='serde_json = "1"\n', env=environment)
+    return record(result.stdout, "GENERATED_ABI", set(artifacts))
+
+
 def generated_snapshot(workspace: Path, directory: Path) -> dict:
     native = toolchain(workspace)
     fixtures = {
@@ -775,6 +848,7 @@ def generated_snapshot(workspace: Path, directory: Path) -> dict:
         "cdf": ("standard_normal_cdf(cast(0.0, f32))", "0.5"),
     }
     outputs = {}
+    artifacts = {}
     for name, (expression, expected) in fixtures.items():
         path = directory / f"{name}.ch"
         path.write_text(f'module Numeric.Main\n\nout = print({expression})\n', encoding="utf-8")
@@ -794,9 +868,16 @@ def generated_snapshot(workspace: Path, directory: Path) -> dict:
                 raise OracleFailure(f"generated C numerical mismatch for {name}: {result.stdout!r}")
             outputs[name] = result.stdout
             headers = {p.name: p.read_bytes().hex() for p in output.glob("*.h")}
-            if not headers:
-                raise OracleFailure(f"generated C omits ABI headers for {name}")
+            required = {f"{name}.h", "chelis_runtime.h", "chelis_blas.h"}
+            if missing := required - headers.keys():
+                raise OracleFailure(f"generated C {name}: missing required headers {sorted(missing)}")
+            artifacts[name] = {
+                "source": (output / f"{name}.c").read_bytes().decode("utf-8"),
+                "header": bytes.fromhex(headers[f"{name}.h"]).decode("utf-8"),
+            }
             outputs[name + "-headers"] = headers
+    for name, abi in generated_abi_snapshot(artifacts).items():
+        outputs[name + "-headers"][f"{name}.h"] = abi
     return outputs
 
 
