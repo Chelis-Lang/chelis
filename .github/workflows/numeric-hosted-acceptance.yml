@@ -1,0 +1,119 @@
+name: Numeric rebased-source acceptance
+on:
+  push:
+    branches: [verify/numeric-rebase-acceptance-20261023]
+permissions:
+  contents: read
+jobs:
+  oracle:
+    name: Numeric oracle (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-15]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 360
+    env:
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+      CARGO_INCREMENTAL: 0
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
+      UV_MANAGED_PYTHON: 1
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: 3ca99faa7a46158eb6a0d90c2c812a7e3a5f44c1
+          fetch-depth: 0
+      - name: Install Linux prerequisites
+        if: runner.os == 'Linux'
+        run: python3 scripts/ci_apt_get.py gcc g++ clang llvm cmake m4 libclang-dev libopenblas-dev libgmp-dev libmpfr-dev libasan8 libubsan1
+      - name: Install macOS prerequisites
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = arm64
+          brew install llvm
+          echo "$(brew --prefix llvm)/bin" >> "$GITHUB_PATH"
+          echo "CC=$(brew --prefix llvm)/bin/clang" >> "$GITHUB_ENV"
+          echo "AR=$(brew --prefix llvm)/bin/llvm-ar" >> "$GITHUB_ENV"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.98.0
+          targets: thumbv7em-none-eabi
+          components: clippy, rustc-dev, rustfmt
+      - uses: astral-sh/setup-uv@v8.1.0
+      - name: Create uv-managed Python
+        run: python3 scripts/ci_setup_uv_python.py
+      - name: Install Python binding dependencies
+        run: uv pip install --python .venv/bin/python -r bindings/python/pyproject.toml
+      - name: Install shared-skill validator dependency
+        run: uv pip install --python .venv/bin/python PyYAML==6.0.3
+      - uses: taiki-e/install-action@nextest
+      - name: Record exact identities
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/numeric-evidence"
+          test "$(git rev-parse HEAD)" = 3ca99faa7a46158eb6a0d90c2c812a7e3a5f44c1
+          .venv/bin/python - <<'PY'
+          import hashlib, json, os, pathlib, platform, subprocess, sys
+          value = {'source_sha': subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(), 'workflow_sha': os.environ['GITHUB_SHA'], 'oracle_sha256': hashlib.sha256(pathlib.Path('scripts/numeric_core_oracle.py').read_bytes()).hexdigest(), 'platform': platform.platform(), 'machine': platform.machine()}
+          commands = {'rustc': ['rustc', '-vV'], 'cargo': ['cargo', '-V'], 'clippy': ['cargo', 'clippy', '--version'], 'rustfmt': ['rustfmt', '--version'], 'components': ['rustup', 'component', 'list', '--installed'], 'targets': ['rustup', 'target', 'list', '--installed'], 'cc': [os.environ.get('CC', 'cc'), '--version'], 'clang': ['clang', '--version'], 'llvm_ar': [os.environ.get('AR', 'llvm-ar'), '--version'], 'nextest': ['cargo', 'nextest', '--version']}
+          value['compiler_identities'] = {name: {'command': command, 'stdout': subprocess.check_output(command, stderr=subprocess.STDOUT, text=True)} for name, command in commands.items()}
+          value['python'] = {'executable': sys.executable, 'version': sys.version}
+          pathlib.Path(os.environ['RUNNER_TEMP'], 'numeric-evidence', 'identity.json').write_text(json.dumps(value, indent=2))
+          print(json.dumps(value))
+          PY
+      - name: Execute complete numeric oracle
+        shell: bash
+        run: |
+          set +e
+          set -o pipefail
+          .venv/bin/python scripts/numeric_core_oracle.py 2>&1 | tee "$RUNNER_TEMP/numeric-evidence/oracle.log"
+          code=${PIPESTATUS[0]}
+          printf '%s\n' "$code" > "$RUNNER_TEMP/numeric-evidence/exit-code.txt"
+          exit "$code"
+      - name: Execute current-main overlap
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set +e
+          set -o pipefail
+          cargo nextest run --locked -p chelis-ir --test issue_3997_extrema_result_types -p chelis-cli --test issue_3995_classification_producers --test issue_3997_rank_row_extrema --no-fail-fast 2>&1 | tee "$RUNNER_TEMP/numeric-evidence/main-overlap.log"
+          code=${PIPESTATUS[0]}
+          printf '%s\n' "$code" > "$RUNNER_TEMP/numeric-evidence/main-overlap-exit-code.txt"
+          if test "$code" -eq 0; then
+            echo 'Current-main overlap: PASS' | tee -a "$RUNNER_TEMP/numeric-evidence/main-overlap.log"
+          fi
+          exit "$code"
+      - name: Execute complete fast gate
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set +e
+          set -o pipefail
+          .venv/bin/python scripts/gate.py --fast 2>&1 | tee "$RUNNER_TEMP/numeric-evidence/gate.log"
+          code=${PIPESTATUS[0]}
+          printf '%s\n' "$code" > "$RUNNER_TEMP/numeric-evidence/gate-exit-code.txt"
+          exit "$code"
+      - name: Retain gate details
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/numeric-evidence"
+          git status --porcelain=v1 > "$RUNNER_TEMP/numeric-evidence/final-source-status.txt"
+          git diff --binary > "$RUNNER_TEMP/numeric-evidence/final-source.diff"
+          for path in target/gate-failures target/gate-reports; do
+            if test -e "$path"; then
+              cp -R "$path" "$RUNNER_TEMP/numeric-evidence/"
+            fi
+          done
+      - name: Upload complete evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: numeric-hosted-${{ matrix.os }}
+          path: ${{ runner.temp }}/numeric-evidence
+          if-no-files-found: error
+          retention-days: 30
