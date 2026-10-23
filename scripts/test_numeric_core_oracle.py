@@ -71,7 +71,8 @@ class NumericCoreOracleTests(unittest.TestCase):
             oracle.compare_exact({"header": "x" * 1000 + "before"},
                 {"header": "x" * 1000 + "after"}, "generated C")
 
-    def test_generated_abi_requires_every_validated_fixture(self):
+    @patch.object(oracle, "workspace_environment", return_value={})
+    def test_generated_abi_requires_every_validated_fixture(self, _environment):
         artifacts = {"wide": {"source": "source bytes", "header": "header bytes"}}
         valid = {"wide": {"program_identity": "Numeric.Main", "declarations": {}}}
         def validate(crate, source, **kwargs):
@@ -89,7 +90,8 @@ class NumericCoreOracleTests(unittest.TestCase):
         with self.assertRaisesRegex(OracleFailure, "empty generated"):
             oracle.generated_abi_snapshot({})
 
-    def test_generated_snapshot_requires_program_and_both_runtime_headers(self):
+    @patch.object(oracle, "workspace_environment", return_value={})
+    def test_generated_snapshot_requires_program_and_both_runtime_headers(self, _environment):
         for missing in ("wide.h", "chelis_runtime.h", "chelis_blas.h"):
             with self.subTest(missing=missing), tempfile.TemporaryDirectory() as temporary:
                 def execute(command, **kwargs):
