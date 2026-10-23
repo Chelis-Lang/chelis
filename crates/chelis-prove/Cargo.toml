@@ -158,6 +158,10 @@ syn.workspace = true
 name = "certificate_core_contract"
 required-features = ["clarabel"]
 
+[[test]]
+name = "cross_engine_oracle"
+required-features = ["smt", "z3"]
+
 # A compiled mock `chelis-beacon` binary for the shim integration tests: it reads
 # a request and emits a canned CheckReport JSON selected by an env var, so every
 # §5 mapping row (docs/design/beacon_subprocess_shim.md) can be exercised without

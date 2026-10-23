@@ -1,1 +1,1 @@
-Classify unconfirmed domain witnesses as non-verdicts in the dual-solver oracle, restoring compilation with both SMT engines enabled.
+Classify unconfirmed domain witnesses as non-verdicts in the dual-solver oracle, restoring compilation with both SMT engines enabled. Declare both required solver features and route the oracle to its existing full-SMT nightly owner instead of an empty default-feature CI run.
