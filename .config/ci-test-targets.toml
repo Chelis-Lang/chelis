@@ -3235,6 +3235,24 @@ reason = "script-unit enters the project CI profile before executing runtime and
 tracking_issue = "chelis#2241"
 
 [[path_rule]]
+prefix = "scripts/ci_apt_get.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit exercises hosted Ubuntu mirror selection and bounded apt installation positive and negative controls"
+tracking_issue = "chelis#4006"
+
+[[path_rule]]
+prefix = "scripts/test_ci_apt_get.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit exercises hosted Ubuntu mirror selection and bounded apt installation positive and negative controls"
+tracking_issue = "chelis#4006"
+
+[[path_rule]]
 prefix = "scripts/ci_setup_uv_python.py"
 disposition = "owner"
 workflow = "ci.yml"

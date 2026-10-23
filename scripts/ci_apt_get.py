@@ -19,9 +19,14 @@ for a required check, blocks the PR until someone manually re-runs).
 
 This helper wraps the update+install in a bounded retry loop with backoff so
 a transient reset self-heals within the step instead of failing the job. It
-also has one narrow reproducibility mode for the Debian Bullseye/glibc-2.31
-lanes: ``--debian-bullseye-snapshot`` replaces every moving apt source with
-one immutable snapshot before the first update. That prevents the mirror race
+also has an explicit GitHub-hosted Ubuntu mirror policy: select the official
+HTTPS archives before apt starts, so a live but slow Azure transfer cannot
+consume every outer timeout without selecting another mirror. The runner
+source lists, package selections and authentication remain intact.
+
+For the Debian Bullseye/glibc-2.31 lanes, ``--debian-bullseye-snapshot``
+replaces every moving apt source with one immutable snapshot before the first
+update. That prevents the mirror race
 where a freshly downloaded index names a package version that its selected
 CDN edge no longer serves (a persistent 404 which retries cannot heal).
 
@@ -184,6 +189,24 @@ def configure_bullseye_snapshot(apt_root: Path = Path("/etc/apt")) -> None:
     )
 
 
+def configure_hosted_ubuntu_mirrors(apt_root: Path = Path("/etc/apt")) -> None:
+    """Select the official HTTPS archives in the runner's existing mirror list.
+
+    Run as root, before apt update/install. GitHub's Ubuntu images refer to
+    this list from their ordinary source configuration. A missing list is a
+    runner-contract change, so fail rather than create an unused policy file.
+    """
+    mirrors = apt_root / "apt-mirrors.txt"
+    if not mirrors.is_file():
+        raise FileNotFoundError(f"GitHub-hosted Ubuntu mirror list is missing: {mirrors}")
+    mirrors.write_text(
+        "https://archive.ubuntu.com/ubuntu/\tpriority:1\n"
+        "https://security.ubuntu.com/ubuntu/\tpriority:2\n",
+        encoding="utf-8",
+    )
+    print("ci_apt_get: selected official HTTPS Ubuntu archive mirrors", flush=True)
+
+
 def _run(cmd: list[str]) -> int:
     """Run `cmd`, inheriting stdio so apt's output lands in the CI log.
     Returns the exit code (or 1 if it could not even be spawned).
@@ -306,7 +329,13 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         action="store_true",
         help="forward --no-install-recommends to apt-get install.",
     )
-    parser.add_argument(
+    sources = parser.add_mutually_exclusive_group()
+    sources.add_argument(
+        "--github-hosted-ubuntu-mirrors",
+        action="store_true",
+        help="select official HTTPS Ubuntu archives in the hosted runner mirror list (run as root).",
+    )
+    sources.add_argument(
         "--debian-bullseye-snapshot",
         action="store_true",
         help=(
@@ -340,6 +369,8 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
 
 def main(argv: list[str]) -> int:
     args = _parse_args(argv)
+    if args.github_hosted_ubuntu_mirrors:
+        configure_hosted_ubuntu_mirrors()
     if args.debian_bullseye_snapshot:
         configure_bullseye_snapshot()
     # A non-positive --timeout disables the ceiling: _timeout_wrapper returns
