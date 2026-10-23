@@ -2795,7 +2795,7 @@ exact ADT identity by [05-OP-34].
 > bool storage; comparison with NaN is false and no cotangent exists. `where`
 > follows the exact language-and-C selection contract above.
 >
-> The public C cumulative scan follows [05-OP-53]'s increasing scan rule,
+> `chelis_tensor_cumsum` follows [05-OP-53]'s increasing scan rule,
 > including its dtype, accumulator, failure, and adjoint contracts.
 >
 > `sort` admits signed-integer and float tensors and returns `(values,
