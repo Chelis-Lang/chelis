@@ -22,7 +22,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
-          ref: 705d31eb42a5ad6d0080553ec00745e47a5402d3
+          ref: 3c0a29a97f2e638b5aca8bcac32ea60257e9bbae
           fetch-depth: 0
       - name: Install Linux prerequisites
         if: runner.os == 'Linux'
@@ -55,7 +55,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/type-evidence"
-          test "$(git rev-parse HEAD)" = 705d31eb42a5ad6d0080553ec00745e47a5402d3
+          test "$(git rev-parse HEAD)" = 3c0a29a97f2e638b5aca8bcac32ea60257e9bbae
           git status --porcelain=v1 > "$RUNNER_TEMP/type-evidence/initial-source-status.txt"
           .venv/bin/python - <<'PY'
           import hashlib, json, os, pathlib, platform, subprocess, sys
@@ -106,7 +106,7 @@ jobs:
           for name, filename in [('oracle', 'exit-code.txt'), ('fast_gate', 'gate-exit-code.txt')]:
               path = root / filename
               results[name] = {'exit_code': int(path.read_text()) if path.exists() else None, 'executed': path.exists()}
-          (root / 'manifest.json').write_text(json.dumps({'source_sha': '705d31eb42a5ad6d0080553ec00745e47a5402d3', 'workflow_sha': os.environ['GITHUB_SHA'], 'results': results, 'files': files}, indent=2))
+          (root / 'manifest.json').write_text(json.dumps({'source_sha': '3c0a29a97f2e638b5aca8bcac32ea60257e9bbae', 'workflow_sha': os.environ['GITHUB_SHA'], 'results': results, 'files': files}, indent=2))
           PY
       - name: Upload complete evidence
         if: always()
