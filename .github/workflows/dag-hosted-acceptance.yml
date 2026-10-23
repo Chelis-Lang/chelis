@@ -22,7 +22,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
-          ref: 0c51efecd8f63d6148b4722b86c30949977b4938
+          ref: 91678fe73d0750f6f914344f1dfa3c740409a18c
           fetch-depth: 0
       - name: Install Linux prerequisites
         if: runner.os == 'Linux'
@@ -55,7 +55,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/dag-evidence"
-          test "$(git rev-parse HEAD)" = 0c51efecd8f63d6148b4722b86c30949977b4938
+          test "$(git rev-parse HEAD)" = 91678fe73d0750f6f914344f1dfa3c740409a18c
           .venv/bin/python - <<'PY'
           import hashlib, json, os, pathlib, platform, subprocess, sys
           value = {'source_sha': subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(), 'workflow_sha': os.environ['GITHUB_SHA'], 'run_id': os.environ['GITHUB_RUN_ID'], 'run_attempt': os.environ['GITHUB_RUN_ATTEMPT'], 'platform': platform.platform(), 'machine': platform.machine()}
@@ -106,7 +106,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/dag-evidence"
           git status --porcelain=v1 > "$RUNNER_TEMP/dag-evidence/final-source-status.txt"
           git diff --binary > "$RUNNER_TEMP/dag-evidence/final-source.diff"
-          python3 - <<'PY'
+          .venv/bin/python - <<'PY'
           import hashlib, json, os, pathlib, shutil
           evidence = pathlib.Path(os.environ['RUNNER_TEMP'], 'dag-evidence')
           for name in ['gate-failures', 'gate-reports', 'builtin-atom-closure']:
