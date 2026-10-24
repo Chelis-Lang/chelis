@@ -116,6 +116,14 @@ cancel the other phases. Run a phase through
 `.venv/bin/python scripts/gate.py integration --support-only --support-slice numeric-core --numeric-core-phase PHASE`.
 Omitting the phase selector runs the complete oracle, as on Linux.
 
+The independent `macos-dag-core` job runs the complete
+`scripts/dag_core_oracle.py` command with a 120-minute budget, including its
+isolated immutable-baseline builds, selected test inventories, execution probes,
+and complete-evidence check. It restores the workspace cache without saving over
+it. `macos-smoke` requires its success alongside the workspace shards, censuses,
+ownership ledger, and numeric-core matrix; failure, cancellation, or skipping
+fails the aggregate.
+
 Neither numeric owner spends its budget on other support or workspace commands.
 Both use the gate's exit status and upload `target/gate-reports/` with `always()`;
 macOS artifacts include the phase name, and each recorded command includes its

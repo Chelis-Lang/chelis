@@ -2153,6 +2153,7 @@ def _ci_job_block(job: str) -> str:
         "macos-binding-census",
         "macos-wire-census",
         "macos-numeric-core",
+        "macos-dag-core",
         "macos-smoke",
         "smt-build-darwin-arm64",
     }:
@@ -2187,7 +2188,7 @@ def _assert_executable_run_once(job_block: str, command: str) -> None:
 def _assert_macos_aggregate_requires_censuses(aggregate_block: str) -> None:
     needs = (
         "needs: [macos-workspace-shard, macos-binding-census, "
-        "macos-wire-census, macos-ownership-ledger, macos-numeric-core]"
+        "macos-wire-census, macos-ownership-ledger, macos-numeric-core, macos-dag-core]"
     )
     if needs not in aggregate_block:
         raise AssertionError("macOS aggregate omits a required producer")
@@ -2198,7 +2199,8 @@ def _assert_macos_aggregate_requires_censuses(aggregate_block: str) -> None:
         "macos-binding-census=${{ needs.macos-binding-census.result }} "
         "macos-wire-census=${{ needs.macos-wire-census.result }} "
         "macos-ownership-ledger=${{ needs.macos-ownership-ledger.result }} "
-        "macos-numeric-core=${{ needs.macos-numeric-core.result }}",
+        "macos-numeric-core=${{ needs.macos-numeric-core.result }} "
+        "macos-dag-core=${{ needs.macos-dag-core.result }}",
     )
 
 
@@ -2957,6 +2959,60 @@ class CiParityTests(unittest.TestCase):
                 )
                 self.assertEqual(completed.returncode, expected, completed.stderr)
                 self.assertIn(f"macos-numeric-core: {result}", completed.stdout + completed.stderr)
+
+    def test_macos_dag_core_has_an_independent_mandatory_budget(self):
+        block = _ci_job_block("macos-dag-core")
+        self.assertIn("runs-on: macos-latest", block)
+        self.assertIn("timeout-minutes: 120", block)
+        self.assertNotIn("needs:", block)
+        self.assertNotIn("strategy:", block)
+        self.assertNotIn("continue-on-error", block)
+        self.assertNotIn("if:", block.split("steps:")[0])
+        self.assertNotIn("if:", _ci_step_block(block, "DAG core portability"))
+        _assert_executable_run_once(
+            block,
+            "uv run --managed-python --python 3.11 --no-project python scripts/dag_core_oracle.py",
+        )
+        self.assertNotIn("dag_core_oracle.py", _ci_job_block("macos-workspace-shard"))
+        for prerequisite in (
+            "dtolnay/rust-toolchain@stable", "astral-sh/setup-uv@v8.1.0",
+            "python3 scripts/ci_setup_uv_python.py", "taiki-e/install-action@nextest",
+            "uv pip install --python .venv/bin/python -r bindings/python/pyproject.toml",
+            'test "$(uname -m)" = "arm64"',
+            "CARGO_PROFILE_DEV_DEBUG: 0", "CARGO_PROFILE_TEST_DEBUG: 0",
+            "shared-key: macos-workspace", "save-if: false",
+        ):
+            self.assertIn(prerequisite, block)
+        _assert_macos_aggregate_requires_censuses(_ci_job_block("macos-smoke"))
+
+    def test_macos_dag_core_result_controls_the_real_aggregate_command(self):
+        block = _ci_job_block("macos-smoke")
+        command = next(line.strip()[5:] for line in block.splitlines()
+                       if line.strip().startswith("run: python3 scripts/ci_require_success.py"))
+        for result, expected in (
+            ("success", 0), ("failure", 1), ("cancelled", 1), ("skipped", 1),
+        ):
+            with self.subTest(result=result):
+                rendered = command.replace("${{ needs.macos-dag-core.result }}", result)
+                rendered = re.sub(r"\$\{\{ needs\.[a-z-]+\.result \}\}", "success", rendered)
+                argv = shlex.split(rendered)
+                completed = subprocess.run(
+                    [sys.executable, *argv[1:]], cwd=REPO_ROOT,
+                    capture_output=True, text=True, check=False,
+                )
+                self.assertEqual(completed.returncode, expected, completed.stderr)
+                self.assertIn(f"macos-dag-core: {result}", completed.stdout + completed.stderr)
+
+    def test_macos_aggregate_rejects_a_missing_dag_dependency_or_result(self):
+        aggregate_block = _ci_job_block("macos-smoke")
+        for missing in (
+            ", macos-dag-core",
+            " macos-dag-core=${{ needs.macos-dag-core.result }}",
+        ):
+            with self.subTest(missing=missing), self.assertRaises(AssertionError):
+                _assert_macos_aggregate_requires_censuses(
+                    aggregate_block.replace(missing, "")
+                )
 
     def test_macos_partition_rejects_missing_duplicate_or_wrong_denominator(self):
         shard_block = _ci_job_block("macos-workspace-shard")
