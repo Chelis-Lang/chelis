@@ -449,12 +449,15 @@ jobs:
       - name: Ownership-ledger CLI tests
         run: python3 scripts/ownership_ledger_tests.py chelis-cli
 
-  # The complete numeric extraction oracle includes its own baseline comparison
-  # and census checks, so it has an independent budget from workspace tests.
+  # All disjoint phases are mandatory; each executes its own source checks.
   macos-numeric-core:
-    name: macOS Numeric Core
+    name: macOS Numeric Core (${{ matrix.phase }})
     runs-on: macos-latest
     timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        phase: [extraction, surface-suites, surface-controls]
     env:
       CARGO_PROFILE_DEV_DEBUG: 0
       CARGO_PROFILE_TEST_DEBUG: 0
@@ -502,13 +505,13 @@ jobs:
           PY
 
       - name: Numeric core portability
-        run: .venv/bin/python scripts/gate.py integration --support-only --support-slice numeric-core
+        run: .venv/bin/python scripts/gate.py integration --support-only --support-slice numeric-core --numeric-core-phase ${{ matrix.phase }}
 
       - name: Upload integration support receipts
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: macos-numeric-core-receipts
+          name: macos-numeric-core-${{ matrix.phase }}-receipts
           path: target/gate-reports/
           if-no-files-found: error
           retention-days: 14

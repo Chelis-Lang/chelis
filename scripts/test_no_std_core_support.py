@@ -78,6 +78,18 @@ def compiler_error(target: str, source: str) -> str:
 
 
 class ToolEnvironmentTests(unittest.TestCase):
+    def test_live_stderr_preserves_stdout_evidence_and_failing_exit(self):
+        for code in (0, 7):
+            with self.subTest(code=code), patch.object(support.subprocess, "run", return_value=
+                    subprocess.CompletedProcess([], code, "evidence\n", None)) as execute:
+                if code:
+                    with self.assertRaisesRegex(support.OracleFailure, "exit 7"):
+                        support.run(["child"], env={}, live_stderr=True)
+                else:
+                    self.assertEqual(support.run(["child"], env={}, live_stderr=True).stdout, "evidence\n")
+                self.assertEqual(execute.call_args.kwargs["stdout"], subprocess.PIPE)
+                self.assertIsNone(execute.call_args.kwargs["stderr"])
+
     def setUp(self) -> None:
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)

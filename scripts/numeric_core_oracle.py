@@ -7,6 +7,7 @@ Host consumers use an explicit allocator. Measurements do not prove allocator ca
 
 from __future__ import annotations
 
+import argparse
 import json
 from pathlib import Path
 import platform
@@ -27,9 +28,15 @@ EVIDENCE = frozenset({
     "features", "dependency-controls", "private-constructors", "removed-imports",
     "scalar", "typed-errors", "tensor", "observation", "agreement", "wire",
     "malformed-wire", "runtime", "double-round-control", "generated-c",
-    "native-abi", "surface", "baseline", "costs", "keys", "named-casts",
+    "native-abi", "surface-suites", "surface-controls", "baseline", "costs", "keys", "named-casts",
     "activation", "schema", "scalar-serde", "numeric-suites", "python-controls",
 })
+# Independent owners execute current-source checks; these labels are not reusable receipts.
+PHASE_EVIDENCE = {
+    "extraction": EVIDENCE - {"surface-suites", "surface-controls"},
+    "surface-suites": frozenset({"surface-suites"}),
+    "surface-controls": frozenset({"surface-controls"}),
+}
 FORBIDDEN = frozenset({
     "chelis-types", "chelis-type-core", "chelis-ir", "chelis-dag-core",
     "chelis-deep", "chelis-surf", "chelis-abi", "chelis-effects", "chelis-runtime",
@@ -515,9 +522,10 @@ def require_features(completed: set[tuple[str, ...]]) -> None:
         raise OracleFailure(f"incomplete feature coverage: {sorted(completed)}")
 
 
-def require_evidence(completed: set[str]) -> None:
-    if completed != EVIDENCE:
-        raise OracleFailure("missing evidence: " + ", ".join(sorted(EVIDENCE - completed)))
+def require_evidence(completed: set[str], phase: str | None = None) -> None:
+    required = EVIDENCE if phase is None else PHASE_EVIDENCE[phase]
+    if completed != required:
+        raise OracleFailure("missing evidence or unexpected evidence: " + ", ".join(sorted(required ^ completed)))
 
 
 def record(stdout: str, prefix: str, fields: set[str]) -> dict:
@@ -985,8 +993,16 @@ def run_suites(suites: list[Suite]) -> None:
         run(["cargo", "nextest", "run", *arguments], required_tests=names)
 
 
-def surface_controls(suites: list[Suite]) -> None:
+def surface_suite_checks(baseline: Path, suites: list[Suite] | None = None) -> set[str]:
+    if suites is None:
+        suites = [preserved_suite_plan(baseline, package, binary, (anchor,))
+            for package, binary, anchor in SURFACE_SUITES]
+        run(["cargo", "clean"], cwd=baseline, env=workspace_environment(baseline))
     run_suites(suites)
+    return {"surface-suites"}
+
+
+def surface_controls() -> set[str]:
     result = run([sys.executable, "scripts/capacity_census_liveness.py"])
     if (result.stdout.splitlines()[-1:] != ["CAPACITY CENSUS LIVENESS: PASS"]
         or "checked 0 active legacy rows, 0 cited issues, all OPEN" not in result.stdout.splitlines()):
@@ -996,6 +1012,7 @@ def surface_controls(suites: list[Suite]) -> None:
     if not modules:
         raise OracleFailure("surface failure controls absent")
     python_tests(modules)
+    return {"surface-controls"}
 
 
 def numeric_suite_plan(baseline: Path) -> list[Suite]:
@@ -1088,7 +1105,7 @@ def python_tests(modules: tuple[str, ...], required: tuple[str, ...] = ()) -> No
         environment.setdefault("CHELIS_NATIVE_EXECUTION_TARGET", str(NATIVE_EXECUTION_TARGET))
     result = run(
         [sys.executable, "-c", PYTHON_RUNNER, json.dumps(modules), json.dumps(required)],
-        env=environment,
+        env=environment, live_stderr=True,
     )
     value = record(result.stdout, "PYTHON", {"selected", "passed", "skipped"})
     selected, passed = value["selected"], value["passed"]
@@ -1240,12 +1257,11 @@ def scalar_serde_snapshot(workspace: Path, *, baseline: bool) -> dict:
     return value
 
 
-def run_oracle() -> None:
-    print(f"Numeric platform: {platform.platform()} {platform.machine()}", flush=True)
-    run(["rustc", "-vV"])
+def extraction_checks(baseline: Path, directory: Path) -> set[str]:
     completed = set()
     feature_builds()
     completed.add("features")
+    print("Numeric negative controls: dependency/private-import compiler rejection is expected", flush=True)
     dependency_controls()
     completed.add("dependency-controls")
     negative_compiles()
@@ -1256,57 +1272,91 @@ def run_oracle() -> None:
         or scalar != {"allocations": 0, "allocated_bytes": 0, "typed_errors": True, "cases": True}):
         raise OracleFailure("scalar allocation or typed-error evidence differs")
     completed.update({"scalar", "typed-errors"})
-    with tempfile.TemporaryDirectory(prefix="chelis-numeric-baseline-") as temporary:
-        directory = Path(temporary).resolve()
-        baseline = baseline_clone(directory)
-        compare_exact(scalar_serde_snapshot(baseline, baseline=True),
-            scalar_serde_snapshot(ROOT.resolve(), baseline=False), "scalar-only serde")
-        completed.add("scalar-serde")
-        expected = host_snapshot(baseline, baseline=True)
-        actual = host_snapshot(ROOT.resolve(), baseline=False)
-        compare_costs(expected.pop("costs"), actual.pop("costs"))
-        compare_exact(expected, actual, "current main numeric and wire fixtures")
-        completed.update({"tensor", "observation", "agreement", "wire", "malformed-wire",
-            "costs", "keys", "named-casts", "activation"})
-        compare_exact(schema_snapshot(baseline, baseline=True),
-            schema_snapshot(ROOT.resolve(), baseline=False), "host schema")
-        completed.add("schema")
-        compare_exact(runtime_snapshot(baseline, baseline=True),
-            runtime_snapshot(ROOT.resolve(), baseline=False), "runtime")
-        runtime_mutation_rejected()
-        completed.update({"runtime", "double-round-control"})
-        old_output, new_output = directory / "old-generated", directory / "new-generated"
-        old_output.mkdir()
-        new_output.mkdir()
-        compare_exact(generated_snapshot(baseline, old_output),
-            generated_snapshot(ROOT.resolve(), new_output), "generated C")
-        compare_exact(native_snapshot(baseline, old_output),
-            native_snapshot(ROOT.resolve(), new_output), "native ABI and IEEE adapters")
-        completed.update({"generated-c", "native-abi", "baseline"})
+    compare_exact(scalar_serde_snapshot(baseline, baseline=True),
+        scalar_serde_snapshot(ROOT.resolve(), baseline=False), "scalar-only serde")
+    completed.add("scalar-serde")
+    expected = host_snapshot(baseline, baseline=True)
+    actual = host_snapshot(ROOT.resolve(), baseline=False)
+    compare_costs(expected.pop("costs"), actual.pop("costs"))
+    compare_exact(expected, actual, "current main numeric and wire fixtures")
+    completed.update({"tensor", "observation", "agreement", "wire", "malformed-wire",
+        "costs", "keys", "named-casts", "activation"})
+    compare_exact(schema_snapshot(baseline, baseline=True),
+        schema_snapshot(ROOT.resolve(), baseline=False), "host schema")
+    completed.add("schema")
+    compare_exact(runtime_snapshot(baseline, baseline=True),
+        runtime_snapshot(ROOT.resolve(), baseline=False), "runtime")
+    print("Numeric double-round mutation: runtime numeric assertion rejection is expected", flush=True)
+    runtime_mutation_rejected()
+    completed.update({"runtime", "double-round-control"})
+    old_output, new_output = directory / "old-generated", directory / "new-generated"
+    old_output.mkdir()
+    new_output.mkdir()
+    compare_exact(generated_snapshot(baseline, old_output),
+        generated_snapshot(ROOT.resolve(), new_output), "generated C")
+    compare_exact(native_snapshot(baseline, old_output),
+        native_snapshot(ROOT.resolve(), new_output), "native ABI and IEEE adapters")
+    completed.update({"generated-c", "native-abi", "baseline"})
+    return completed
+
+
+def numeric_checks(baseline: Path, suites: list[Suite] | None = None) -> set[str]:
+    if suites is None:
         run(["cargo", "clean"], cwd=baseline, env=workspace_environment(baseline))
-        surface = [
-            preserved_suite_plan(baseline, package, binary, (anchor,))
-            for package, binary, anchor in SURFACE_SUITES
-        ]
-        numeric = numeric_suite_plan(baseline)
+        suites = numeric_suite_plan(baseline)
         run(["cargo", "clean"], cwd=baseline, env=workspace_environment(baseline))
-        surface_controls(surface)
-        completed.add("surface")
-        run_suites(numeric)
-        completed.add("numeric-suites")
+    run_suites(suites)
     python_tests(("test_no_std_core_support",), SHARED_CONTROLS)
     python_tests(("test_numeric_core_oracle",), NUMERIC_CONTROLS)
-    completed.add("python-controls")
-    require_evidence(completed)
+    return {"numeric-suites", "python-controls"}
+
+
+def run_oracle(phase: str | None = None) -> None:
+    if phase is not None and phase not in PHASE_EVIDENCE:
+        raise OracleFailure(f"unknown numeric phase: {phase}")
+    print(f"Numeric platform: {platform.platform()} {platform.machine()}", flush=True)
+    run(["rustc", "-vV"])
+    completed = set()
+    with tempfile.TemporaryDirectory(prefix="chelis-numeric-baseline-") as temporary:
+        directory = Path(temporary).resolve()
+        baseline = baseline_clone(directory) if phase != "surface-controls" else None
+        surface, numeric = None, None
+        if phase in (None, "extraction"):
+            print("Numeric extraction comparisons: START", flush=True)
+            completed.update(extraction_checks(baseline, directory))
+        if phase is None:
+            # Keep the full/Linux invocation's original combined baseline build
+            # and execution order. Only this live process shares these inventories.
+            run(["cargo", "clean"], cwd=baseline, env=workspace_environment(baseline))
+            surface = [preserved_suite_plan(baseline, package, binary, (anchor,))
+                for package, binary, anchor in SURFACE_SUITES]
+            numeric = numeric_suite_plan(baseline)
+            run(["cargo", "clean"], cwd=baseline, env=workspace_environment(baseline))
+        if phase in (None, "surface-suites"):
+            print("Numeric phase surface-suites: START", flush=True)
+            completed.update(surface_suite_checks(baseline, surface))
+        if phase in (None, "surface-controls"):
+            print("Numeric phase surface-controls: START", flush=True)
+            completed.update(surface_controls())
+        if phase in (None, "extraction"):
+            print("Numeric extraction suites and oracle controls: START", flush=True)
+            completed.update(numeric_checks(baseline, numeric))
+    require_evidence(completed, phase)
     print("Target builds prove compilation only. Native consumers prove host behavior with an explicit allocator.")
     print("Host results do not prove device execution, allocator capacity, or complete pipeline portability.")
     print("Timing values are measurements, not acceptance limits. Baseline allocation counts and bytes control memory regressions.")
-    print("Numeric core oracle: PASS")
+    if phase is None:
+        print("Numeric core oracle: PASS")
+    else:
+        print(f"Numeric core phase {phase}: PASS (full acceptance requires every phase)")
 
 
-def main() -> int:
+def main(argv: tuple[str, ...] | list[str] = ()) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--phase", choices=tuple(PHASE_EVIDENCE))
+    args = parser.parse_args(argv)
     try:
-        run_oracle()
+        run_oracle(args.phase)
     except (OracleFailure, OSError, ValueError, KeyError, TypeError, StopIteration) as error:
         print(f"Numeric core oracle: FAIL: {error}", file=sys.stderr)
         return 1
@@ -1314,4 +1364,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(main(sys.argv[1:]))

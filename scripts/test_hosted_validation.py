@@ -184,6 +184,30 @@ def assert_hosted_coverage(test, workflow, nightly):
     for step in ledger["steps"]:
         test.assertNotIn("if", step)
         test.assertFalse(step.get("continue-on-error", False))
+    numeric = jobs["macos-numeric-core"]
+    test.assertEqual(numeric["runs-on"], "macos-latest")
+    test.assertEqual(numeric["timeout-minutes"], 120)
+    test.assertNotIn("if", numeric)
+    test.assertFalse(numeric.get("continue-on-error", False))
+    test.assertEqual(numeric["strategy"], {
+        "fail-fast": False,
+        "matrix": {"phase": ["extraction", "surface-suites", "surface-controls"]},
+    })
+    phase_steps = [step for step in numeric["steps"]
+                   if "--support-slice" in step.get("run", "")]
+    test.assertEqual(len(phase_steps), 1)
+    test.assertEqual(phase_steps[0]["run"],
+        ".venv/bin/python scripts/gate.py integration --support-only --support-slice numeric-core"
+        " --numeric-core-phase ${{ matrix.phase }}")
+    test.assertNotIn("if", phase_steps[0])
+    test.assertFalse(phase_steps[0].get("continue-on-error", False))
+    uploads = [step for step in numeric["steps"]
+               if step.get("uses", "").startswith("actions/upload-artifact@")]
+    test.assertEqual(len(uploads), 1)
+    test.assertEqual(uploads[0].get("if"), "always()")
+    test.assertEqual(uploads[0]["with"]["name"], "macos-numeric-core-${{ matrix.phase }}-receipts")
+    test.assertEqual(uploads[0]["with"]["path"], "target/gate-reports/")
+    test.assertEqual(uploads[0]["with"]["if-no-files-found"], "error")
     aggregate = jobs["macos-smoke"]
     test.assertIn("macos-workspace-shard", aggregate["needs"])
     test.assertIn("macos-binding-census", aggregate["needs"])
@@ -213,6 +237,37 @@ class HostedCoverageTests(unittest.TestCase):
 
     def test_current_workflow_preserves_hosted_coverage(self):
         assert_hosted_coverage(self, self.workflow, self.nightly)
+
+    def test_numeric_phase_matrix_rejects_missing_duplicate_optional_or_unreceipted_work(self):
+        for change in ("missing", "duplicate", "excluded", "skip-job", "skip-phase",
+                       "optional-job", "optional-phase", "wrong-selector", "shared-artifact", "missing-receipt"):
+            with self.subTest(change=change):
+                nightly = copy.deepcopy(self.nightly)
+                numeric = nightly["jobs"]["macos-numeric-core"]
+                phase = next(step for step in numeric["steps"] if "--numeric-core-phase" in step.get("run", ""))
+                upload = next(step for step in numeric["steps"] if "upload-artifact" in step.get("uses", ""))
+                if change == "missing":
+                    numeric["strategy"]["matrix"]["phase"].pop()
+                elif change == "duplicate":
+                    numeric["strategy"]["matrix"]["phase"][0] = "surface-suites"
+                elif change == "excluded":
+                    numeric["strategy"]["matrix"]["exclude"] = [{"phase": "extraction"}]
+                elif change == "skip-job":
+                    numeric["if"] = "false"
+                elif change == "skip-phase":
+                    phase["if"] = "false"
+                elif change == "optional-job":
+                    numeric["continue-on-error"] = True
+                elif change == "optional-phase":
+                    phase["continue-on-error"] = True
+                elif change == "wrong-selector":
+                    phase["run"] = phase["run"].replace("${{ matrix.phase }}", "extraction")
+                elif change == "shared-artifact":
+                    upload["with"]["name"] = "macos-numeric-core-receipts"
+                else:
+                    upload["with"]["if-no-files-found"] = "warn"
+                with self.assertRaises(AssertionError):
+                    assert_hosted_coverage(self, self.workflow, nightly)
 
     def test_numeric_core_cannot_be_dropped_from_the_macos_aggregate(self):
         assert_hosted_coverage(self, self.workflow, self.nightly)

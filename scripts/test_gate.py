@@ -1139,6 +1139,30 @@ class StageUnionTests(unittest.TestCase):
             "integration", "--support-only", "--support-slice", "numeric-core",
         ]).support_slice, "numeric-core")
 
+    def test_numeric_core_phase_selection_is_explicit_and_receipted_in_the_command(self):
+        for phase in ("extraction", "surface-suites", "surface-controls"):
+            selected = gate.selected_stage_commands(
+                "integration", tests_only=False, support_only=True,
+                partition=None, support_slice="numeric-core", numeric_core_phase=phase,
+            )
+            self.assertEqual(selected, [gate.NUMERIC_CORE_ORACLE + ["--phase", phase]])
+            args = gate.parse_args([
+                "integration", "--support-only", "--support-slice", "numeric-core",
+                "--numeric-core-phase", phase,
+            ])
+            self.assertEqual(args.numeric_core_phase, phase)
+        for arguments in (
+            ["--numeric-core-phase", "extraction"],
+            ["integration", "--support-only", "--numeric-core-phase", "extraction"],
+            ["integration", "--support-only", "--support-slice", "domain", "--numeric-core-phase", "extraction"],
+            ["integration", "--support-only", "--support-slice", "numeric-core", "--numeric-core-phase", "missing"],
+        ):
+            with self.subTest(arguments=arguments), self.assertRaises(SystemExit):
+                gate.parse_args(arguments)
+        with self.assertRaises(ValueError):
+            gate.selected_stage_commands("integration", tests_only=False, support_only=True,
+                partition=None, support_slice="domain", numeric_core_phase="extraction")
+
     def test_support_slice_rejects_unknown_missing_duplicate_and_stale_ownership(self):
         owners = gate.INTEGRATION_SUPPORT_SLICES
         for changed in (
@@ -2894,7 +2918,7 @@ class CiParityTests(unittest.TestCase):
         self.assertNotIn("numeric_core_oracle.py", _ci_job_block("macos-workspace-shard"))
         self.assertNotIn("Install portable numeric C tools", _ci_job_block("macos-workspace-shard"))
         _assert_executable_run_once(
-            mac, ".venv/bin/python scripts/gate.py integration --support-only --support-slice numeric-core",
+            mac, ".venv/bin/python scripts/gate.py integration --support-only --support-slice numeric-core --numeric-core-phase ${{ matrix.phase }}",
         )
         for prerequisite in (
             "dtolnay/rust-toolchain@stable", "astral-sh/setup-uv@v8.1.0",
@@ -2907,7 +2931,7 @@ class CiParityTests(unittest.TestCase):
         for block, artifact in (
             (support, "integration-support-${{ matrix.slice }}-receipts"),
             (linux, "integration-support-numeric-core-receipts"),
-            (mac, "macos-numeric-core-receipts"),
+            (mac, "macos-numeric-core-${{ matrix.phase }}-receipts"),
         ):
             step = _ci_step_block(block, "Upload integration support receipts")
             self.assertIn("if: always()", step)
