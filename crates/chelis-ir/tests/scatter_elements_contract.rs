@@ -24,10 +24,10 @@
 
 use chelis_unord::UnordMap;
 
-use chelis_ir::dag::{Dag, RiscOp};
+use chelis_dag_core::dag::{Dag, RiscOp};
+use chelis_dag_core::grad::{AdError, AdRejectionReason, grad_dag_checked};
+use chelis_dag_core::{DimInfo, TensorType};
 use chelis_ir::eval::{TensorValue, eval_tensor_with};
-use chelis_ir::grad::{AdError, AdRejectionReason, grad_dag_checked};
-use chelis_ir::{DimInfo, TensorType};
 use chelis_numeric_core::prim::Prim;
 
 // chelis#729 Phase 1: f64-typed fixtures. These tests pin the ONNX
@@ -92,7 +92,7 @@ fn scatter_elements_forward_axis0_preserves_off_axis_coord() {
         None,
     );
 
-    let fwd_errs = chelis_ir::verify::verify(&dag);
+    let fwd_errs = chelis_dag_core::verify::verify(&dag);
     assert!(
         fwd_errs.is_empty(),
         "forward DAG verification errors: {fwd_errs:?}"
@@ -182,7 +182,7 @@ fn scatter_elements_forward_axis1_substitutes_column() {
         None,
     );
 
-    assert!(chelis_ir::verify::verify(&dag).is_empty());
+    assert!(chelis_dag_core::verify::verify(&dag).is_empty());
 
     let mut inputs: UnordMap<String, TensorValue> = UnordMap::new();
     inputs.insert(
@@ -420,7 +420,7 @@ fn scatter_elements_verify_rejects_mismatched_index_update_dims() {
         None,
     );
 
-    let errs = chelis_ir::verify::verify(&dag);
+    let errs = chelis_dag_core::verify::verify(&dag);
     assert!(
         errs.iter().any(|e| e.contains("scatter_elements")),
         "verifier must reject element-wise scatter with mismatched \

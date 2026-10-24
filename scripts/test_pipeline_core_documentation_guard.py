@@ -27,6 +27,7 @@ Dependency features
 `chelis-effects`
 `chelis-ir`
 `chelis-unord`
+`chelis-dag-core`
 """
         )
 
@@ -142,8 +143,46 @@ Dependency features
 `chelis-effects`
 `chelis-ir`
 `chelis-unord`
+`chelis-dag-core`
 """
         )
+
+    def test_generic_false_claims_in_a_complete_inventory_are_rejected(self) -> None:
+        inventory = "\n".join(
+            (guard.REQUIRED_STATEMENT, *guard.REQUIRED_SECTIONS, *guard.REQUIRED_CRATES)
+        )
+        for claim in (
+            "The crate is `#![no_std]`.",
+            "It supports `no_std`.",
+            "This module works without std.",
+            "Unlike chelis-dag-core, the crate supports no_std.",
+            "Like chelis-dag-core, this module works without std.",
+            "chelis-dag-core is portable, and this module supports no_std.",
+            "chelis-pipeline-core and chelis-dag-core support no_std.",
+        ):
+            with self.subTest(claim=claim), self.assertRaisesRegex(
+                guard.DocumentationBoundaryError, "false current portability claim"
+            ):
+                guard.validate_text(inventory + "\n" + claim)
+
+    def test_other_core_claims_do_not_change_the_pipeline_boundary(self) -> None:
+        inventory = "\n".join(
+            (guard.REQUIRED_STATEMENT, *guard.REQUIRED_SECTIONS, *guard.REQUIRED_CRATES)
+        )
+        for subject in ("chelis-dag-core", "chelis-numeric-core"):
+            with self.subTest(subject=subject):
+                guard.validate_text(
+                    inventory + f"\n{guard.REQUIRED_STATEMENT} `{subject}` supports `no_std`."
+                )
+                guard.validate_text(
+                    inventory + f"\nThe crate `{subject}` supports `no_std`."
+                )
+        with self.assertRaisesRegex(
+            guard.DocumentationBoundaryError, "false current portability claim"
+        ):
+            guard.validate_text(
+                inventory + "\n`chelis-pipeline-core` supports `no_std`."
+            )
 
 
 if __name__ == "__main__":

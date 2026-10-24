@@ -6,6 +6,7 @@ then run per-identity and per-atom adversarial checks through unittest. A PASS
 requires a clean, unchanged committed source and actual execution of all cases.
 """
 from __future__ import annotations
+from dataclasses import dataclass
 
 import hashlib
 import json
@@ -30,10 +31,10 @@ FILTER = ('binary(builtin_atom_discovery) + binary(issue_1294_normalize) '
           '+ binary(issue_1294_generalized_conv) + binary(issue_1294_standard_lowerings) '
           '+ test(host_input_tensor_) + test(every_risc_op_has_an_exact_pre_phase4c_atom_disposition) '
           '+ test(builtin_atom_discovery_)')
-CARGO_TESTS = ["-p", "chelis-types", "-p", "chelis-ir", "-p", "chelis-cli", "--lib", "--test",
-               "builtin_atom_discovery", "--test", "issue_1294_normalize",
-               "--test", "issue_1294_generalized_conv", "--test", "issue_1294_standard_lowerings",
-               "-E", FILTER]
+CARGO_TESTS = ["-p", "chelis-types", "-p", "chelis-dag-core", "-p", "chelis-ir",
+               "-p", "chelis-cli", "--lib", "--test", "builtin_atom_discovery",
+               "--test", "issue_1294_normalize", "--test", "issue_1294_generalized_conv",
+               "--test", "issue_1294_standard_lowerings", "-E", FILTER]
 
 
 class OracleError(RuntimeError):
@@ -77,17 +78,24 @@ def source_identity(root: Path) -> tuple[str, str]:
     return head, digest.hexdigest()
 
 
-def discover(packet: object) -> list[str]:
+@dataclass(frozen=True)
+class Discovery:
+    identities: tuple[str, ...]
+    callables: frozenset[str]
+
+
+def discover(packet: object) -> Discovery:
     if not isinstance(packet, dict) or set(packet) != {"builtins", "risc"}:
         raise OracleError("invalid compiled inventory packet")
     union = set()
     for source, rows in packet.items():
-        if not isinstance(rows, list) or not rows or any(not isinstance(x, str) for x in rows):
+        if (not isinstance(rows, list) or not rows
+                or any(not isinstance(x, str) or not registry.IDENTITY.fullmatch(x) for x in rows)):
             raise OracleError(f"empty or invalid {source} discovery")
         if len(set(rows)) != len(rows):
             raise OracleError(f"duplicate {source} discovery before union")
         union.update(rows)
-    return sorted(union)
+    return Discovery(tuple(sorted(union)), frozenset(packet["builtins"]))
 
 
 def nextest_selection(packet: dict) -> list[str]:
@@ -145,8 +153,12 @@ class Receipts(unittest.TextTestResult):
         self.executed.append({"id": test.id(), "outcome": "passed"})
 
 
-def closure_cases(identities: list[str], table: str, spec: str, generated: set[str]) -> list[Case]:
-    rows = registry.validate(identities, table, spec, generated)
+def closure_cases(discovery: Discovery, table: str, spec: str, generated: set[str]) -> list[Case]:
+    identities = list(discovery.identities)
+    callables = discovery.callables
+    if set(identities) - callables != semantics.PRIMITIVE_CLAUSES.keys():
+        raise registry.RegistryError("compiled internal primitives and semantic obligations differ")
+    rows = registry.validate(identities, table, spec, generated, callables=callables)
     semantics.validate_semantics(rows, spec)
     blocks = registry.atom_blocks(spec)
     cases = []
@@ -155,7 +167,8 @@ def closure_cases(identities: list[str], table: str, spec: str, generated: set[s
         cases.append(Case("closure:" + name, kind, action))
 
     def rejects(**changes):
-        args = dict(discovered=identities, table=table, spec=spec, generated=generated)
+        args = dict(discovered=identities, table=table, spec=spec, generated=generated,
+                    callables=callables)
         args.update(changes)
         try:
             changed_rows = registry.validate(**args)
@@ -164,7 +177,8 @@ def closure_cases(identities: list[str], table: str, spec: str, generated: set[s
             return
         raise AssertionError("mutation was accepted")
 
-    add("exact-bijection", "positive", lambda: registry.validate(identities, table, spec, generated))
+    add("exact-bijection", "positive", lambda:
+        registry.validate(identities, table, spec, generated, callables=callables))
     incorporation = re.search(
         r"\s+".join(re.escape(word) for word in registry.INCORPORATION.split()), spec
     )
@@ -175,7 +189,7 @@ def closure_cases(identities: list[str], table: str, spec: str, generated: set[s
         rejects(spec=registry.INCORPORATION + "\n" + spec))
     unlabelled = re.sub(r"\b(?:Signature|Domain|Result|Failure|Adjoint|Accumulator):", "", spec)
     def accepts_unlabelled_contracts():
-        changed_rows = registry.validate(identities, table, unlabelled, generated)
+        changed_rows = registry.validate(identities, table, unlabelled, generated, callables=callables)
         semantics.validate_semantics(changed_rows, unlabelled)
     add("contracts-without-field-labels", "positive", accepts_unlabelled_contracts)
     for identity, atom in rows.items():
@@ -184,14 +198,19 @@ def closure_cases(identities: list[str], table: str, spec: str, generated: set[s
         add(f"duplicate:{identity}", "mutation", lambda line=line: rejects(table=table + "\n" + line))
         add(f"stale:{identity}", "mutation", lambda line=line, identity=identity:
             rejects(table=table.replace(line, line.replace(identity, identity + "Stale"))))
+        block = blocks[atom]
+        operation = identity.split(":")[1]
+        changed = re.sub(r"`" + re.escape(operation) + r"(?=`|\()", "`REMOVED", block)
+        add(f"missing-operation-name:{identity}", "mutation",
+            lambda block=block, changed=changed: rejects(spec=spec.replace(block, changed)))
         # Use a real existing atom from a disjoint operation family. A syntactically
         # valid atom and generated membership alone must not confer authority.
         other = next(a for a, b in blocks.items() if a != atom and
-                     identity.split(":")[1] not in re.findall(r"`([A-Za-z][A-Za-z0-9_]*)(?:`|\()", b))
+                     identity.split(":")[1] not in registry.named_operations(b))
         add(f"wrong-authority:{identity}", "mutation", lambda line=line, atom=atom, other=other:
             rejects(table=table.replace(line, line.replace(atom, other))))
         for other, other_block in blocks.items():
-            if other == atom or identity.split(":")[1] not in registry.named_callables(other_block):
+            if other == atom or identity.split(":")[1] not in registry.named_operations(other_block):
                 continue
             add(f"incidental-authority:{identity}:{other}", "mutation",
                 lambda line=line, atom=atom, other=other:
@@ -204,8 +223,7 @@ def closure_cases(identities: list[str], table: str, spec: str, generated: set[s
         changed = f"> **{atom}** " + ", ".join(f"`{name}`" for name in names) + ".\n"
         add(f"deleted-contract:{atom}", "mutation", lambda block=block, changed=changed:
             rejects(spec=spec.replace(block, changed)))
-        clauses = {semantics.CASE_CLAUSES.get(identity,
-                   semantics.CALLABLE_CLAUSES.get(identity.split(":")[1]))
+        clauses = {semantics.contract_clause(identity)
                    for identity, owner in rows.items() if owner == atom}
         for index, clause in enumerate(sorted(clauses - {None})):
             changed = "> " + semantics.normalized(block).replace(clause, "REMOVED") + "\n"
@@ -261,13 +279,13 @@ def main() -> None:
             raise OracleError("composite source identity differs from current source")
     inventory = json.loads(command(["cargo", "run", "--quiet", "--locked", "-p", "chelis-ir",
                                     "--example", "builtin_atom_inventory"]))
-    identities = discover(inventory)
+    discovery = discover(inventory)
     command([sys.executable, "scripts/generate_rejection_registries.py", "--check"])
     spec = (ROOT / "spec/05-risc-primitives.md").read_text()
     table = (ROOT / "spec/registry/builtin_semantic_identities.md").read_text()
     generated = set(re.findall(r'"(\[05-OP-[1-9][0-9]*\])"',
         (ROOT / "crates/chelis-types/src/rejection_registry_generated.rs").read_text()))
-    cases = closure_cases(identities, table, spec, generated)
+    cases = closure_cases(discovery, table, spec, generated)
     unit_suite = unittest.defaultTestLoader.loadTestsFromNames([
         "scripts.test_builtin_atom_registry", "scripts.test_dtype_builtin_atom_closure_oracle"])
     def flatten(suite):
@@ -285,8 +303,8 @@ def main() -> None:
     selection = nextest_selection(json.loads(command([
         "cargo", "nextest", "list", "--locked", "--profile", PROFILE,
         "--ignore-default-filter", "--message-format", "json", *CARGO_TESTS])))
-    target = Path(os.environ.get("CARGO_TARGET_DIR", ROOT / "target"))
-    junit = target / "nextest" / PROFILE / "junit.xml"
+    # Nextest keeps profile reports under the checkout, not CARGO_TARGET_DIR.
+    junit = ROOT / "target" / "nextest" / PROFILE / "junit.xml"
     junit.unlink(missing_ok=True)
     command(["cargo", "nextest", "run", "--locked", "--profile", PROFILE,
              "--ignore-default-filter", "--no-fail-fast", "--retries", "0", *CARGO_TESTS])
@@ -304,7 +322,7 @@ def main() -> None:
               "hosts": {}, "devices": []}
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(packet, indent=2) + "\n")
-    print(f"{len(identities)} exact identities; {len(selected)} selected and passed tests; head {identity[0]}")
+    print(f"{len(discovery.identities)} exact identities; {len(selected)} selected and passed tests; head {identity[0]}")
     print(PASS_LINE)
 
 

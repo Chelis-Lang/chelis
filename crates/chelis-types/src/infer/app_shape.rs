@@ -1082,7 +1082,7 @@ pub(super) fn check_stride_signature(
             }
             // chelis#632: only an IDENTITY step (1) passes a symbolic dim
             // through, mirroring the identity-only rule in
-            // `chelis_ir::dag::shape_source_for_axis`. A non-identity
+            // `chelis_dag_core::dag::shape_source_for_axis`. A non-identity
             // step changes the extent to `ceil(d/step)`, so keeping the
             // input symbol was an annotation-level lie that also falsely
             // tripped §4.4.1 rigidity on sig-symbol direct returns; the

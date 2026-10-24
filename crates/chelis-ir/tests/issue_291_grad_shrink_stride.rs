@@ -42,9 +42,9 @@
 //! CLI sibling file pins the end-to-end `build`/`eval` path including
 //! the `shrink` lowering fix.
 
-use chelis_ir::dag::{Dag, DimInfo, NodeId, RiscOp, TensorType};
+use chelis_dag_core::dag::{Dag, DimInfo, NodeId, RiscOp, TensorType};
+use chelis_dag_core::grad::{AdError, grad_dag_checked};
 use chelis_ir::eval::{TensorValue, eval_tensor, eval_tensor_roots_with_strict};
-use chelis_ir::grad::{AdError, grad_dag_checked};
 use chelis_numeric_core::prim::Prim;
 use chelis_unord::UnordMap;
 
@@ -96,7 +96,7 @@ fn build_stride_sum_1d(n: usize, step: usize) -> (Dag, NodeId, NodeId) {
     let strided = dag.add_node(
         decl,
         RiscOp::Stride {
-            strides: vec![chelis_ir::dag::RtDim::Lit(step)],
+            strides: vec![chelis_dag_core::dag::RtDim::Lit(step)],
         },
         vec![x],
         strided_ty,
@@ -171,7 +171,7 @@ fn issue_291_grad_stride_routes_nonuniform_cotangent() {
     let s = dag.add_node(
         decl,
         RiscOp::Stride {
-            strides: vec![chelis_ir::dag::RtDim::Lit(2)],
+            strides: vec![chelis_dag_core::dag::RtDim::Lit(2)],
         },
         vec![x],
         strided_ty.clone(),
@@ -264,7 +264,10 @@ fn issue_291_grad_stride_two_axes() {
     let strided = dag.add_node(
         decl,
         RiscOp::Stride {
-            strides: vec![chelis_ir::dag::RtDim::Lit(2), chelis_ir::dag::RtDim::Lit(2)],
+            strides: vec![
+                chelis_dag_core::dag::RtDim::Lit(2),
+                chelis_dag_core::dag::RtDim::Lit(2),
+            ],
         },
         vec![x],
         strided_ty.clone(),
@@ -319,7 +322,10 @@ fn issue_291_grad_stride_mixed_identity_axis() {
     let strided = dag.add_node(
         decl,
         RiscOp::Stride {
-            strides: vec![chelis_ir::dag::RtDim::Lit(1), chelis_ir::dag::RtDim::Lit(2)],
+            strides: vec![
+                chelis_dag_core::dag::RtDim::Lit(1),
+                chelis_dag_core::dag::RtDim::Lit(2),
+            ],
         },
         vec![x],
         strided_ty,
@@ -371,7 +377,7 @@ fn issue_291_grad_stride_matches_finite_difference() {
     let s = dag.add_node(
         decl,
         RiscOp::Stride {
-            strides: vec![chelis_ir::dag::RtDim::Lit(2)],
+            strides: vec![chelis_dag_core::dag::RtDim::Lit(2)],
         },
         vec![x],
         strided_ty.clone(),
@@ -483,7 +489,7 @@ fn issue_291_grad_stride_supports_higher_order_ad() {
     let s = dag.add_node(
         decl,
         RiscOp::Stride {
-            strides: vec![chelis_ir::dag::RtDim::Lit(2)],
+            strides: vec![chelis_dag_core::dag::RtDim::Lit(2)],
         },
         vec![x],
         strided_ty.clone(),
@@ -552,7 +558,7 @@ fn issue_291_grad_stride_symbolic_axis_is_runtime_upsample() {
     let s = dag.add_node(
         decl,
         RiscOp::Stride {
-            strides: vec![chelis_ir::dag::RtDim::Lit(2)],
+            strides: vec![chelis_dag_core::dag::RtDim::Lit(2)],
         },
         vec![x],
         strided_ty,
@@ -601,7 +607,10 @@ fn issue_291_grad_through_shrink_is_exact_pad() {
     let shrunk = dag.add_node(
         decl,
         RiscOp::Shrink {
-            bounds: vec![(chelis_ir::dag::RtDim::Lit(0), chelis_ir::dag::RtDim::Lit(2))],
+            bounds: vec![(
+                chelis_dag_core::dag::RtDim::Lit(0),
+                chelis_dag_core::dag::RtDim::Lit(2),
+            )],
         },
         vec![x],
         vec_n_f32(2),
@@ -649,7 +658,10 @@ fn issue_291_grad_shrink_interior_nonuniform() {
     let shrunk = dag.add_node(
         decl,
         RiscOp::Shrink {
-            bounds: vec![(chelis_ir::dag::RtDim::Lit(1), chelis_ir::dag::RtDim::Lit(3))],
+            bounds: vec![(
+                chelis_dag_core::dag::RtDim::Lit(1),
+                chelis_dag_core::dag::RtDim::Lit(3),
+            )],
         },
         vec![x],
         vec_n_f32(2),

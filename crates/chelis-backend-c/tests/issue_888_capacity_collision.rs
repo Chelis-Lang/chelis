@@ -14,7 +14,7 @@
 //! `CapacityKey` plan from `chelis-ir`.
 
 use chelis_backend_c::memory::{MemoryPlan, NodeMemoryKind};
-use chelis_ir::dag::{Dag, DimExpr, DimInfo, NodeId, RiscOp, TensorType};
+use chelis_dag_core::dag::{Dag, DimExpr, DimInfo, NodeId, RiscOp, TensorType};
 use chelis_ir::ownership::plan_c_storage;
 use chelis_numeric_core::prim::Prim;
 mod support;

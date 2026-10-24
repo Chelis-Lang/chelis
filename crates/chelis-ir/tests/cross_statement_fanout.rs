@@ -7,10 +7,10 @@
 
 use chelis_unord::UnordMap;
 
-use chelis_ir::analysis::analyze_function_copy_cost;
-use chelis_ir::dag::{Dag, NodeId, RiscOp};
+use chelis_dag_core::analysis::analyze_function_copy_cost;
+use chelis_dag_core::dag::{Dag, NodeId, RiscOp};
+use chelis_dag_core::grad::grad_dag_checked;
 use chelis_ir::eval::{TensorValue, eval_tensor_with};
-use chelis_ir::grad::grad_dag_checked;
 use chelis_ir::lower::try_lower_program;
 use chelis_numeric_core::prim::Prim;
 use chelis_surf::desugar::desugar_program;
@@ -53,7 +53,7 @@ fn find_def_root_by_name(dag: &Dag, name: &str) -> NodeId {
 }
 
 /// Count `RiscOp::Copy` nodes reachable from `root` in `dag`. The cost
-/// analyzer in `chelis_ir::analysis::analyze_function_copy_cost` only
+/// analyzer in `chelis_dag_core::analysis::analyze_function_copy_cost` only
 /// considers reachable nodes, so this is the spec-aligned copy count.
 fn copy_count(dag: &Dag, root: NodeId) -> usize {
     analyze_function_copy_cost(dag, "fanout", root).copy_count
@@ -340,7 +340,7 @@ struct Scalarized {
 /// Clone `dag` and sum-reduce `root` (a `[3, f32]` tensor) down to a
 /// scalar so `grad_dag_checked` accepts it.
 fn scalarize_root(dag: &Dag, root: NodeId) -> Scalarized {
-    use chelis_ir::dag::TensorType;
+    use chelis_dag_core::dag::TensorType;
     let mut out = dag.clone();
     let out_decl = out.nodes()[0].owner.decl;
     let scalar = out.add_node(

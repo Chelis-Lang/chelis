@@ -4,9 +4,9 @@ use std::collections::BTreeMap;
 use chelis_deep::DeepTag;
 use chelis_unord::{UnordMap, UnordSet};
 
+use chelis_dag_core::dag::{DimInfo, TensorType};
 use chelis_deep::Span;
 use chelis_deep::ast::{Atom, Expr, ExprCarrier, Metadata};
-use chelis_ir::dag::{DimInfo, TensorType};
 use chelis_ir::eval::{TensorInputDemand, TensorValue as IrTensorValue};
 use chelis_ir::lower::SubexprLoweringContext;
 use chelis_numeric_core::prim::Prim;
@@ -370,8 +370,8 @@ impl<'a> EvalContext<'a> {
     /// that repacking below consumes, before executing any graph producer.
     fn transform_result_claims(
         &self,
-        dag: &chelis_ir::dag::Dag,
-        roots: &[chelis_ir::dag::NodeId],
+        dag: &chelis_dag_core::dag::Dag,
+        roots: &[chelis_dag_core::dag::NodeId],
         repacks: &[ArgRepack],
         gradient: bool,
         claims: &[DeclaredResultClaim],
@@ -725,7 +725,7 @@ impl<'a> EvalContext<'a> {
         // tensor_bindings as a fallback for any external tensor refs
         // captured by the inner fn body).
         let tensor_bindings = self.tensor_bindings;
-        let roots: Vec<chelis_ir::dag::NodeId> = dag.roots().to_vec();
+        let roots: Vec<chelis_dag_core::dag::NodeId> = dag.roots().to_vec();
         let value_roots = lowered.value_roots().to_vec();
         let root_producers: Vec<Option<ResultProducer>> = value_roots
             .iter()
@@ -821,7 +821,8 @@ impl<'a> EvalContext<'a> {
         }
         let mut provider_failed = false;
         let prepare_input = |name: &str, demand: TensorInputDemand| {
-            let top_level_source = chelis_ir::LoadStoreName::top_level_source_for_label(name)?;
+            let top_level_source =
+                chelis_dag_core::LoadStoreName::top_level_source_for_label(name)?;
             // eval_compiled supplies manifested Tensor-lane root values in
             // tensor_bindings, not raw caller parameters. Actual arguments
             // were evaluated separately and own the placeholders first.
@@ -886,7 +887,7 @@ impl<'a> EvalContext<'a> {
         // load contract itself. Keep this guard as a defensive invariant check
         // before an inconsistent DAG can reach elementwise evaluation.
         for node in dag.nodes() {
-            let chelis_ir::dag::RiscOp::Load { name } = &node.op else {
+            let chelis_dag_core::dag::RiscOp::Load { name } = &node.op else {
                 continue;
             };
             if let Some(value) = captured_tensors.get(name.as_str())

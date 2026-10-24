@@ -1,6 +1,6 @@
 //! C emission adapter for the shared `chelis-ir` storage plan.
 
-use chelis_ir::dag::{DimExpr, NodeId};
+use chelis_dag_core::dag::{DimExpr, NodeId};
 use chelis_ir::ownership::{
     CStorageLane, StoragePlacement, StorageSlotPlan, VerifiedDagView, VerifiedStorageLayout,
     VerifiedStoragePlan,
@@ -129,7 +129,7 @@ impl MemoryPlan {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
+    use chelis_dag_core::dag::{Dag, DimInfo, RiscOp, TensorType};
     use chelis_ir::ownership::{lower_dag_ownership, plan_c_storage, verify_ownership};
 
     fn vec_f32(elements: usize) -> TensorType {

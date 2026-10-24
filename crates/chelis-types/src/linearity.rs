@@ -16,7 +16,8 @@ use crate::builtins::{BUILTIN_NAMES, BuiltinSiblingCaseId, COMPARISON_OPS, built
 use crate::cancel::CancelToken;
 use crate::errors::{CheckError, CheckErrorKind};
 use crate::infer::SignatureInferenceMetadata;
-use crate::key_admission::{KeyAdmission, KeyRefusal, TagKeys, builtin_key_operand, tag_keys};
+use crate::key_admission::{KeyRefusal, TagKeys, builtin_key_operand, tag_keys};
+use chelis_numeric_core::key_admission::KeyAdmission;
 use chelis_type_core::{NominalParamKind, Type, TypeVar};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

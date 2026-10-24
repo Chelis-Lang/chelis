@@ -17,8 +17,8 @@
 //! is at least as wide as the operand precision and is not narrower
 //! than the documented default."
 
-use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
-use chelis_ir::verify;
+use chelis_dag_core::dag::{Dag, DimInfo, RiscOp, TensorType};
+use chelis_dag_core::verify;
 use chelis_numeric_core::prim::Prim;
 
 fn vec_t(n: usize, p: Prim) -> TensorType {

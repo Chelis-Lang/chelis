@@ -29,9 +29,9 @@
 
 use chelis_unord::UnordMap;
 
-use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
+use chelis_dag_core::dag::{Dag, DimInfo, RiscOp, TensorType};
+use chelis_dag_core::grad::grad_dag_checked;
 use chelis_ir::eval::{TensorValue, eval_tensor_with};
-use chelis_ir::grad::grad_dag_checked;
 use chelis_numeric_core::prim::Prim;
 
 fn t(dims: Vec<usize>) -> TensorType {
@@ -79,8 +79,14 @@ fn gather_via_section_3_5_lowering_accumulates_duplicate_indices() {
         RiscOp::zero_pad(
             Prim::F32,
             vec![
-                (chelis_ir::dag::RtDim::Lit(0), chelis_ir::dag::RtDim::Lit(0)),
-                (chelis_ir::dag::RtDim::Lit(0), chelis_ir::dag::RtDim::Lit(1)),
+                (
+                    chelis_dag_core::dag::RtDim::Lit(0),
+                    chelis_dag_core::dag::RtDim::Lit(0),
+                ),
+                (
+                    chelis_dag_core::dag::RtDim::Lit(0),
+                    chelis_dag_core::dag::RtDim::Lit(1),
+                ),
             ],
         ),
         vec![oh_col],
@@ -93,7 +99,7 @@ fn gather_via_section_3_5_lowering_accumulates_duplicate_indices() {
         decl,
         RiscOp::Expand {
             axis: 2,
-            size: chelis_ir::dag::RtDim::Lit(2),
+            size: chelis_dag_core::dag::RtDim::Lit(2),
         },
         vec![one_hot],
         t(vec![3, 2, 2]),
@@ -105,7 +111,7 @@ fn gather_via_section_3_5_lowering_accumulates_duplicate_indices() {
         decl,
         RiscOp::Expand {
             axis: 0,
-            size: chelis_ir::dag::RtDim::Lit(3),
+            size: chelis_dag_core::dag::RtDim::Lit(3),
         },
         vec![table],
         t(vec![3, 2, 2]),
@@ -154,7 +160,7 @@ fn gather_via_section_3_5_lowering_accumulates_duplicate_indices() {
     );
 
     // Sanity: forward dag should be structurally valid.
-    let fwd_errs = chelis_ir::verify::verify(&dag);
+    let fwd_errs = chelis_dag_core::verify::verify(&dag);
     assert!(
         fwd_errs.is_empty(),
         "forward dag verification errors: {fwd_errs:?}"
@@ -248,7 +254,7 @@ fn first_class_gather_adjoint_scatter_add_accumulates_duplicate_indices() {
         None,
     );
 
-    let fwd_errs = chelis_ir::verify::verify(&dag);
+    let fwd_errs = chelis_dag_core::verify::verify(&dag);
     assert!(
         fwd_errs.is_empty(),
         "first-class gather verification errors: {fwd_errs:?}"
@@ -326,7 +332,7 @@ fn first_class_gather_axis1_adjoint_scatter_add_accumulates_duplicate_indices() 
         None,
     );
 
-    let fwd_errs = chelis_ir::verify::verify(&dag);
+    let fwd_errs = chelis_dag_core::verify::verify(&dag);
     assert!(
         fwd_errs.is_empty(),
         "axis-1 gather verification errors: {fwd_errs:?}"

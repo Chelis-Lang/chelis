@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use chelis_ir::dag::{
+use chelis_dag_core::dag::{
     ComparisonKind, Dag, DagNode, DimExpr, DimInfo, ExtremaKind, ExtremaOperand, FusedInput,
     FusedStep, FusedStepOp, LogicalKind, NodeId, ReduceWindowKind, RiscOp, RtAxis, RtDim,
     TensorType,
@@ -73,15 +73,15 @@ pub struct CEmitter {
     /// Exact immutable input comparisons proven by the enclosing host entry.
     /// Only the private helper emitter accepts this projection; public DAG
     /// entry always supplies an empty set and retains every check.
-    host_entry_coverage: Vec<chelis_ir::axis_sources::EntryExtentGuard>,
+    host_entry_coverage: Vec<chelis_dag_core::axis_sources::EntryExtentGuard>,
     use_blas: bool,
     /// FusedElem nodes inlined into a trailing reduction (no standalone emission).
     reduction_inlined: chelis_unord::UnordSet<usize>,
     /// Products a sum computes leaf by leaf, by the id of the node that runs
     /// the kernel: the sum, or its narrowing
-    /// ([`chelis_ir::fuse::InlinedProduct`]). Their `Mul` and widenings emit
+    /// ([`chelis_dag_core::fuse::InlinedProduct`]). Their `Mul` and widenings emit
     /// nothing and their expansions emit only their checked plans.
-    inlined_products: BTreeMap<usize, chelis_ir::fuse::InlinedProduct>,
+    inlined_products: BTreeMap<usize, chelis_dag_core::fuse::InlinedProduct>,
     /// For each inlined sum or narrowing a later node stores in its place, the
     /// first expansion and the summed axis: its extents are that expansion's
     /// without the axis.
@@ -110,38 +110,38 @@ pub struct CEmitter {
     /// Local claims in derivation/declaration order at each operation. Grouping
     /// by axis would reorder simultaneous failures when axes are permuted.
     local_dim_guard_sites:
-        chelis_unord::UnordMap<usize, Vec<(usize, chelis_ir::ownership::LocalGuardClaim)>>,
+        chelis_unord::UnordMap<usize, Vec<(usize, chelis_dag_core::axis_sources::LocalGuardClaim)>>,
     /// Local obligations already emitted at an earlier ready point. A later
     /// realized-extent fallback may observe the same semantic claim through a
     /// different C expression, but one comparison has already discharged it.
-    emitted_local_dim_guards: Vec<(usize, usize, chelis_ir::ownership::LocalGuardClaim)>,
+    emitted_local_dim_guards: Vec<(usize, usize, chelis_dag_core::axis_sources::LocalGuardClaim)>,
     /// Per node id, whether it checks nothing where its activation is false
-    /// ([`chelis_ir::dag::TrapSeeds::is_activation_gated`]), from one seed
+    /// ([`chelis_dag_core::dag::TrapSeeds::is_activation_gated`]), from one seed
     /// query over the graph.
     activation_gated: Vec<bool>,
     /// Per node id, whether its declared extent rests on a claim checked
-    /// under its activation ([`chelis_ir::dag::TrapSeeds::is_claim_sized`]):
+    /// under its activation ([`chelis_dag_core::dag::TrapSeeds::is_claim_sized`]):
     /// where no row of its activation holds it is zero-filled rather than
     /// computed. A movement is not, since its own gate already zero-fills
     /// ([`CEmitter::emit_movement_copy`]).
     zero_filled_when_inactive: Vec<bool>,
     /// Per claim-sized node, the extent each claim states for one of its axes
-    /// ([`chelis_ir::axis_sources::GuardActivation::sized_axis`]): what that
+    /// ([`chelis_dag_core::axis_sources::GuardActivation::sized_axis`]): what that
     /// axis declares where the claim is not checked.
-    claimed_extents: BTreeMap<usize, Vec<(usize, chelis_ir::axis_sources::CanonicalExtent)>>,
+    claimed_extents: BTreeMap<usize, Vec<(usize, chelis_dag_core::axis_sources::CanonicalExtent)>>,
     /// The claim-sized node whose operation is being emitted inside its
     /// activation's branch ([`CEmitter::open_inactive_zeros`]).
     inactive_zeros: Option<InactiveZeros>,
     /// The literal result claims each witness checks
-    /// ([`chelis_ir::dag::TrapSeeds::literal_result_witness_requirements`]),
+    /// ([`chelis_dag_core::dag::TrapSeeds::literal_result_witness_requirements`]),
     /// derived once for the graph.
     literal_result_witness_requirements:
         BTreeMap<NodeId, Vec<chelis_numeric_core::dtype_semantics::ScalarValue>>,
     /// Claim names this function actually declares as C variables. Resolved
     /// claims compare against their numeric canonical value instead.
     declared_dim_names: chelis_unord::UnordSet<String>,
-    inherited_result_sites: Vec<chelis_ir::axis_sources::ResultExtentSite>,
-    inherited_result_roots: Vec<(usize, Vec<chelis_ir::axis_sources::ResultExtentSite>)>,
+    inherited_result_sites: Vec<chelis_dag_core::axis_sources::ResultExtentSite>,
+    inherited_result_roots: Vec<(usize, Vec<chelis_dag_core::axis_sources::ResultExtentSite>)>,
     /// Node descriptors whose exclusive runtime write lease remains live
     /// while the generated kernel fills and consumes its private storage.
     /// All leases are ended before any descriptor is returned or released.
@@ -149,7 +149,7 @@ pub struct CEmitter {
     /// The activation gate of the checking node being emitted, if it has an
     /// activation (spec/10 section 3.2): where it is false the node checks
     /// nothing, so each operand element it reads takes a value its checks
-    /// accept ([`chelis_ir::dag::DagNode::inactive_operand`]).
+    /// accept ([`chelis_dag_core::dag::DagNode::inactive_operand`]).
     gate: Option<ActivationGate>,
     /// Per reduction or window node, the group and leaf ranks of the plan
     /// projection whose terms [`CEmitter::emit_projection_terms`] declared.
@@ -324,7 +324,7 @@ struct CFusedReuse {
 /// Public tensor entries construct this without discharged host obligations.
 struct InvocationEmission<'a> {
     private_invocation_context: bool,
-    entry_coverage: &'a [chelis_ir::axis_sources::EntryExtentGuard],
+    entry_coverage: &'a [chelis_dag_core::axis_sources::EntryExtentGuard],
 }
 
 impl CEmitter {
@@ -497,7 +497,7 @@ impl CEmitter {
     fn emit_runtime_recurrence_forward(
         &mut self,
         node: &DagNode,
-        recurrence: &chelis_ir::dag::RuntimeRecurrence,
+        recurrence: &chelis_dag_core::dag::RuntimeRecurrence,
     ) -> Result<(), Unsupported> {
         let id = node.id.0;
         let callback = &recurrence.callback;
@@ -515,7 +515,7 @@ impl CEmitter {
             })
             .collect::<Result<Vec<_>, _>>()?;
         let mut inputs = Vec::new();
-        for name in chelis_ir::axis_sources::ordered_interface_loads(callback.nodes())
+        for name in chelis_dag_core::axis_sources::ordered_interface_loads(callback.nodes())
             .into_iter()
             .filter_map(|load| match &load.op {
                 RiscOp::Load { name } => Some(name.as_str()),
@@ -544,12 +544,12 @@ impl CEmitter {
         let source = node.inputs[0].0;
         let seed = node.inputs[1].0;
         match &recurrence.source {
-            chelis_ir::dag::RuntimeRecurrenceSource::Tensor { .. } => {
+            chelis_dag_core::dag::RuntimeRecurrenceSource::Tensor { .. } => {
                 self.line(&format!(
                     "int64_t t{id}_rec_count = chelis_tensor_shape(t{source}, 0);"
                 ));
             }
-            chelis_ir::dag::RuntimeRecurrenceSource::Columns { items } => {
+            chelis_dag_core::dag::RuntimeRecurrenceSource::Columns { items } => {
                 self.line(&format!(
                     "int64_t t{id}_rec_count = (int64_t)chelis_tensor_to_scalar(t{source}).bits;"
                 ));
@@ -658,8 +658,8 @@ impl CEmitter {
     fn emit_runtime_recurrence_adjoint(
         &mut self,
         node: &DagNode,
-        recurrence: &chelis_ir::dag::RuntimeRecurrence,
-        backward: &chelis_ir::dag::RuntimeRecurrenceBackward,
+        recurrence: &chelis_dag_core::dag::RuntimeRecurrence,
+        backward: &chelis_dag_core::dag::RuntimeRecurrenceBackward,
         target: usize,
     ) -> Result<(), Unsupported> {
         let id = node.id.0;
@@ -690,7 +690,7 @@ impl CEmitter {
             .position(|slot| *slot == target)
             .ok_or_else(|| unsupported_recurrence_graph("missing requested cotangent target"))?;
         let mut inputs = Vec::new();
-        for load in chelis_ir::axis_sources::ordered_interface_loads(backward.dag.nodes()) {
+        for load in chelis_dag_core::axis_sources::ordered_interface_loads(backward.dag.nodes()) {
             let RiscOp::Load { name } = &load.op else {
                 unreachable!()
             };
@@ -862,7 +862,7 @@ impl CEmitter {
         dag: VerifiedDagView<'_>,
         func_name: &str,
         options: crate::CodegenOptions,
-        entry_coverage: &[chelis_ir::axis_sources::EntryExtentGuard],
+        entry_coverage: &[chelis_dag_core::axis_sources::EntryExtentGuard],
     ) -> Result<String, Unsupported> {
         let mut plan = plan_c_storage_layout(dag).map_err(unsupported_storage_plan)?;
         let memory_plan = MemoryPlan::from_layout(&plan);
@@ -1002,11 +1002,11 @@ impl CEmitter {
         // which is exactly the set one comparison discharges.
         let mut local_dim_guard_sites: chelis_unord::UnordMap<
             usize,
-            Vec<(usize, chelis_ir::ownership::LocalGuardClaim)>,
+            Vec<(usize, chelis_dag_core::axis_sources::LocalGuardClaim)>,
         > = chelis_unord::UnordMap::new();
         let mut claimed_extents: BTreeMap<
             usize,
-            Vec<(usize, chelis_ir::axis_sources::CanonicalExtent)>,
+            Vec<(usize, chelis_dag_core::axis_sources::CanonicalExtent)>,
         > = BTreeMap::new();
         for ((node, axis), claim) in dag.local_dim_guard_sites().map_err(|reason| {
             Unsupported::new(
@@ -1133,7 +1133,8 @@ impl CEmitter {
                 .map(|node| {
                     node.owner.activation.is_some()
                         && seeds.is_claim_sized(node)
-                        && node.runtime_check() != chelis_ir::dag::RuntimeCheck::MovementBounds
+                        && node.runtime_check()
+                            != chelis_dag_core::dag::RuntimeCheck::MovementBounds
                 })
                 .collect(),
             claimed_extents,
@@ -1379,11 +1380,12 @@ impl CEmitter {
                 e.nan_finalization = crate::fp_env::risc_nan_finalization(&node.op);
                 if node.id == inlined.product {
                     let [lhs, rhs] = inlined.views.map(|view| view.0);
-                    let context = if chelis_ir::tier2::is_matmul_product(node, |id| dag.get(id)) {
-                        "CHELIS_PRODUCT_MATMUL"
-                    } else {
-                        "CHELIS_PRODUCT_MUL"
-                    };
+                    let context =
+                        if chelis_dag_core::tier2::is_matmul_product(node, |id| dag.get(id)) {
+                            "CHELIS_PRODUCT_MATMUL"
+                        } else {
+                            "CHELIS_PRODUCT_MUL"
+                        };
                     e.line(&format!(
                         "chelis_movement_check_product(t{lhs}_movement, t{rhs}_movement, {context});"
                     ));
@@ -1420,11 +1422,11 @@ impl CEmitter {
                     site.producer() == node.id
                         && matches!(
                             site.observation(),
-                            chelis_ir::axis_sources::LocalGuardObservation::RealizedExtent
+                            chelis_dag_core::axis_sources::LocalGuardObservation::RealizedExtent
                         )
                 })
                 .map(|site| {
-                    let chelis_ir::dag::RtAxis::Lit(axis) = site.producer_axis();
+                    let chelis_dag_core::dag::RtAxis::Lit(axis) = site.producer_axis();
                     (axis as usize, e.tensor_extent(node.id, axis as usize))
                 })
                 .collect::<Vec<_>>();
@@ -1432,7 +1434,7 @@ impl CEmitter {
                 for (axis, claim) in sites {
                     if matches!(
                         claim.observed,
-                        chelis_ir::axis_sources::LocalGuardObservation::RealizedExtent
+                        chelis_dag_core::axis_sources::LocalGuardObservation::RealizedExtent
                     ) && !realized.iter().any(|(existing, _)| existing == axis)
                     {
                         realized.push((*axis, e.tensor_extent(node.id, *axis)));
@@ -1726,7 +1728,7 @@ impl CEmitter {
             renamed
         }
 
-        let scopes = chelis_ir::node_scopes(&dag);
+        let scopes = chelis_dag_core::axis_sources::node_scopes(&dag);
         // Which scopes declare each name through a `Load` axis, in the order
         // the scopes are numbered.
         let mut declared: Vec<(String, Vec<usize>)> = Vec::new();
@@ -1764,7 +1766,7 @@ impl CEmitter {
         // op-internal payloads alike, so the suffix is bumped until it answers
         // no. Names minted here are reserved as they are chosen, because two
         // scopes of two different binders can otherwise pick the same one.
-        let mut taken = chelis_ir::dag::dimension_identity_names(&dag);
+        let mut taken = chelis_dag_core::dag::dimension_identity_names(&dag);
         let mut renames: Vec<(usize, String, String)> = Vec::new();
         for (name, mut list) in declared {
             if list.len() < 2 {
@@ -1816,7 +1818,7 @@ impl CEmitter {
                     op = next;
                     changed = true;
                 }
-                if chelis_ir::dag::op_references_symbol(&op, from) {
+                if chelis_dag_core::dag::op_references_symbol(&op, from) {
                     // A payload this pass does not rewrite still names the old
                     // identity. Abandon rather than emit a half-renamed graph.
                     return dag;
@@ -1851,7 +1853,9 @@ impl CEmitter {
                 .enumerate()
                 .map(|(axis, name)| match *name {
                     AnonymousAxisName::Own => node.output_type.dims[axis].clone(),
-                    AnonymousAxisName::Literal(extent) => chelis_ir::dag::DimInfo::Lit(extent),
+                    AnonymousAxisName::Literal(extent) => {
+                        chelis_dag_core::dag::DimInfo::Lit(extent)
+                    }
                     AnonymousAxisName::Of {
                         node: source,
                         axis: read,
@@ -1922,13 +1926,13 @@ impl CEmitter {
         // trap in the operation, rendered by the runtime as every evaluator
         // renders it.
         // Matmul's decomposed product reports matmul's own trap, with the
-        // operands as written ([`chelis_ir::tier2::is_matmul_product`]).
-        let (trap, op) = if chelis_ir::tier2::is_matmul_product(node, |id| dag.get(id)) {
+        // operands as written ([`chelis_dag_core::tier2::is_matmul_product`]).
+        let (trap, op) = if chelis_dag_core::tier2::is_matmul_product(node, |id| dag.get(id)) {
             ("chelis_matmul_product_trap(", String::new())
         } else {
             (
                 "chelis_elementwise_shape_trap(",
-                format!("\"{}\", ", chelis_ir::grad::risc_op_name(&node.op)),
+                format!("\"{}\", ", chelis_dag_core::grad::risc_op_name(&node.op)),
             )
         };
         for (left_index, left) in agreement.members().iter().enumerate() {
@@ -1948,7 +1952,7 @@ impl CEmitter {
     }
 
     /// Hoist the activation of a node that checks nothing where it is false
-    /// ([`chelis_ir::dag::TrapSeeds::is_activation_gated`], spec/10 section 3.2) before its
+    /// ([`chelis_dag_core::dag::TrapSeeds::is_activation_gated`], spec/10 section 3.2) before its
     /// loops and record how its loops read it. A rank-0 activation is read
     /// once. A per-row activation (a `vmap`ped `if`), shaped like the node's
     /// leading axes, is read once per row by each element loop
@@ -2153,12 +2157,12 @@ impl CEmitter {
             RiscOp::ConstTensor { data } => self.emit_const_tensor(id, data, &node.output_type)?,
             RiscOp::Shape { axis } => self.emit_shape(id, *axis, &node.inputs, &node.output_type),
             RiscOp::ExtentWitness {
-                site: chelis_ir::dag::ExtentWitnessSite::LiteralResultClaim,
+                site: chelis_dag_core::dag::ExtentWitnessSite::LiteralResultClaim,
                 requirements,
                 ..
             } => self.emit_const(id, &requirements[0], &node.output_type)?,
             RiscOp::ExtentWitness {
-                site: chelis_ir::dag::ExtentWitnessSite::LocalAscriptionClaim { .. },
+                site: chelis_dag_core::dag::ExtentWitnessSite::LocalAscriptionClaim { .. },
                 requirements,
                 ..
             } if !requirements.is_empty() => {
@@ -2172,25 +2176,27 @@ impl CEmitter {
                 claims,
             } => {
                 let operation = match site {
-                    chelis_ir::dag::ExtentWitnessSite::Caller => "load",
-                    chelis_ir::dag::ExtentWitnessSite::LocalExpand => "expand",
-                    chelis_ir::dag::ExtentWitnessSite::ResultClaim { .. } => "shape",
-                    chelis_ir::dag::ExtentWitnessSite::LocalAscriptionClaim { .. } => "shape",
-                    chelis_ir::dag::ExtentWitnessSite::LiteralResultClaim => {
+                    chelis_dag_core::dag::ExtentWitnessSite::Caller => "load",
+                    chelis_dag_core::dag::ExtentWitnessSite::LocalExpand => "expand",
+                    chelis_dag_core::dag::ExtentWitnessSite::ResultClaim { .. } => "shape",
+                    chelis_dag_core::dag::ExtentWitnessSite::LocalAscriptionClaim { .. } => "shape",
+                    chelis_dag_core::dag::ExtentWitnessSite::LiteralResultClaim => {
                         unreachable!("literal role handled above")
                     }
                 };
                 let input = node.inputs[0].0;
                 let parameter = match site {
-                    chelis_ir::dag::ExtentWitnessSite::Caller => {
+                    chelis_dag_core::dag::ExtentWitnessSite::Caller => {
                         chelis_ir::span_sanitize::sanitize_for_format_string(parameter).to_string()
                     }
-                    chelis_ir::dag::ExtentWitnessSite::LocalExpand => format!("node {input}"),
-                    chelis_ir::dag::ExtentWitnessSite::ResultClaim { .. } => parameter.clone(),
-                    chelis_ir::dag::ExtentWitnessSite::LocalAscriptionClaim { .. } => {
+                    chelis_dag_core::dag::ExtentWitnessSite::LocalExpand => format!("node {input}"),
+                    chelis_dag_core::dag::ExtentWitnessSite::ResultClaim { .. } => {
                         parameter.clone()
                     }
-                    chelis_ir::dag::ExtentWitnessSite::LiteralResultClaim => {
+                    chelis_dag_core::dag::ExtentWitnessSite::LocalAscriptionClaim { .. } => {
+                        parameter.clone()
+                    }
+                    chelis_dag_core::dag::ExtentWitnessSite::LiteralResultClaim => {
                         unreachable!("literal role handled above")
                     }
                 };
@@ -2310,11 +2316,11 @@ impl CEmitter {
             RiscOp::Bitwise(kind) => self.emit_binary(
                 id,
                 match kind {
-                    chelis_types::BitwiseKind::And => "&",
-                    chelis_types::BitwiseKind::Or => "|",
-                    chelis_types::BitwiseKind::Xor => "^",
-                    chelis_types::BitwiseKind::ShiftLeft => "shl",
-                    chelis_types::BitwiseKind::ShiftRight => "shr",
+                    chelis_numeric_core::bitwise::BitwiseKind::And => "&",
+                    chelis_numeric_core::bitwise::BitwiseKind::Or => "|",
+                    chelis_numeric_core::bitwise::BitwiseKind::Xor => "^",
+                    chelis_numeric_core::bitwise::BitwiseKind::ShiftLeft => "shl",
+                    chelis_numeric_core::bitwise::BitwiseKind::ShiftRight => "shr",
                 },
                 &node.inputs,
                 &node.output_type,
@@ -2434,7 +2440,7 @@ impl CEmitter {
             }
             // WS-A1 + WS-A4: `Sum` carries an `accumulator: Prim` field
             // that governs both the running-sum precision and the output
-            // precision (verified by `chelis_ir::verify::C3a` to equal
+            // precision (verified by `chelis_dag_core::verify::C3a` to equal
             // `output_type.precision` per spec §5.7.1). Per the
             // destructure-`..` memory rule, bind `accumulator` here
             // rather than `..`-skipping it so the dtype-aware reduce
@@ -2741,14 +2747,14 @@ impl CEmitter {
              finalizes canonically ([04-NUM-2]), but its emitter wrote it through \
              none of `{}`, the finalizations its dtype computes through",
             node.id.0,
-            chelis_ir::grad::risc_op_name(&node.op),
+            chelis_dag_core::grad::risc_op_name(&node.op),
             node.output_type.precision.name(),
             helpers.join("`, `"),
         );
     }
 
     /// The condition under which a claim-sized node computes
-    /// ([`chelis_ir::dag::TrapSeeds::is_claim_sized`]): some row of its
+    /// ([`chelis_dag_core::dag::TrapSeeds::is_claim_sized`]): some row of its
     /// activation holds. `None` for every other node.
     fn claim_sized_activity(&self, id: usize) -> Option<String> {
         if !self.zero_filled_when_inactive[id] {
@@ -2818,7 +2824,7 @@ impl CEmitter {
         self.indent -= 1;
         if !zeros.allocated || self.declared_dim_names.len() != zeros.declared_names {
             return Err(Unsupported::new(
-                UnsupportedKind::Op(chelis_ir::grad::risc_op_name(&node.op).to_string()),
+                UnsupportedKind::Op(chelis_dag_core::grad::risc_op_name(&node.op).to_string()),
                 format!(
                     "a claim-sized operation under an activation at C DAG node {} that {}",
                     node.id.0,
@@ -2912,7 +2918,7 @@ impl CEmitter {
     ///   * then `merged_spans` lex-sorted (deduped against `span_id`).
     ///
     /// `merged_spans` are already kept lex-sorted/deduped by the
-    /// `chelis_ir::span_merge` helpers, so we sort defensively here.
+    /// `chelis_dag_core::span_merge` helpers, so we sort defensively here.
     /// No-op when both fields are empty (the common case for hand-written
     /// Chelis or for span-free Deep input).
     fn emit_span_comments(&mut self, node: &DagNode) {
@@ -2987,7 +2993,7 @@ impl CEmitter {
     }
 
     pub(crate) fn input_labels(dag: VerifiedDagView<'_>) -> Vec<String> {
-        chelis_ir::axis_sources::ordered_interface_loads(dag.nodes())
+        chelis_dag_core::axis_sources::ordered_interface_loads(dag.nodes())
             .into_iter()
             .map(|node| match &node.op {
                 RiscOp::Load { name } => name.as_str().to_string(),
@@ -3310,7 +3316,7 @@ impl CEmitter {
         // duplicate literal comparisons. A second label/guard traversal
         // would give Eval and C different first failures (#2531).
         for step in dag.entry_validation_plan() {
-            use chelis_ir::axis_sources::{EntryExtentGuard, EntryValidationStep};
+            use chelis_dag_core::axis_sources::{EntryExtentGuard, EntryValidationStep};
             let input = |load: NodeId| {
                 let node = dag.get(load).expect("entry input");
                 let RiscOp::Load { name } = &node.op else {
@@ -3436,7 +3442,8 @@ impl CEmitter {
         // occurrence walk did with a panic. Residual under chelis#1372.
         let mut entry_dim_declarations: Vec<((usize, usize), String)> = Vec::new();
         for (name, origin) in dag.dim_extent_origins() {
-            let chelis_ir::axis_sources::ExtentOrigin::ExternalAxis { load, axis } = origin else {
+            let chelis_dag_core::axis_sources::ExtentOrigin::ExternalAxis { load, axis } = origin
+            else {
                 continue;
             };
             let Some(RiscOp::Load { name: label }) = dag.get(load).map(|node| &node.op) else {
@@ -3877,7 +3884,7 @@ impl CEmitter {
         let id = node.id.0;
         self.nan_finalization = crate::fp_env::risc_nan_finalization(&node.op);
         let [lhs, rhs] = [node.inputs[0].0, node.inputs[1].0];
-        let context = if chelis_ir::tier2::is_matmul_product(node, |id| dag.get(id)) {
+        let context = if chelis_dag_core::tier2::is_matmul_product(node, |id| dag.get(id)) {
             "CHELIS_PRODUCT_MATMUL"
         } else {
             "CHELIS_PRODUCT_MUL"
@@ -5820,7 +5827,7 @@ impl CEmitter {
         }
     }
 
-    /// A random node's own activation ([`chelis_ir::dag::Owner::activation`])
+    /// A random node's own activation ([`chelis_dag_core::dag::Owner::activation`])
     /// when rank 0, read as its stored Bool byte. No activation is active.
     fn rank0_bool_expr(input: Option<&NodeId>) -> String {
         match input {
@@ -5854,7 +5861,7 @@ impl CEmitter {
     fn emit_uniform_bound_adjoint(
         &mut self,
         node: &DagNode,
-        bound: chelis_ir::dag::UniformBound,
+        bound: chelis_dag_core::dag::UniformBound,
         dag: VerifiedDagView<'_>,
     ) {
         self.emit_draw_extent_guards(node, dag);
@@ -6260,7 +6267,7 @@ impl CEmitter {
     fn emit_explicitly_keyed_bound_adjoint(
         &mut self,
         node: &DagNode,
-        bound: chelis_ir::dag::UniformBound,
+        bound: chelis_dag_core::dag::UniformBound,
         dag: VerifiedDagView<'_>,
     ) {
         let id = node.id.0;
@@ -6293,8 +6300,8 @@ impl CEmitter {
             ),
         };
         let weight = match bound {
-            chelis_ir::dag::UniformBound::Low => format!("(({arithmetic})1 - u)"),
-            chelis_ir::dag::UniformBound::High => "u".to_string(),
+            chelis_dag_core::dag::UniformBound::Low => format!("(({arithmetic})1 - u)"),
+            chelis_dag_core::dag::UniformBound::High => "u".to_string(),
         };
         let nan_finalization = self.nan_finalization;
         let store = |value: &str| match prim {
@@ -6430,7 +6437,7 @@ impl CEmitter {
     fn emit_split_key(
         &mut self,
         node: &DagNode,
-        branch: chelis_ir::dag::KeyBranch,
+        branch: chelis_dag_core::dag::KeyBranch,
         dag: VerifiedDagView<'_>,
     ) {
         let id = node.id.0;
@@ -6438,8 +6445,8 @@ impl CEmitter {
         let word = Self::prim_elem_type(Prim::Key);
         let index = Self::prim_elem_type(Prim::Int64);
         let derive_index = match branch {
-            chelis_ir::dag::KeyBranch::Left => 0,
-            chelis_ir::dag::KeyBranch::Right => 1,
+            chelis_dag_core::dag::KeyBranch::Left => 0,
+            chelis_dag_core::dag::KeyBranch::Right => 1,
         };
         self.emit_key_operation_extent_guards("split_key", node, dag);
         self.emit_slot_wrapper(id, &node.output_type);
@@ -7540,7 +7547,7 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         ty: &TensorType,
         dag: VerifiedDagView<'_>,
     ) {
-        // C3a invariant from `chelis_ir::verify`: `Sum.output_type.precision == accumulator`.
+        // C3a invariant from `chelis_dag_core::verify`: `Sum.output_type.precision == accumulator`.
         // Pin it locally so a future emit refactor that decouples the two
         // gets a loud assertion instead of silent miscompilation.
         debug_assert_eq!(
@@ -7960,13 +7967,13 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         id: usize,
         input: usize,
         axis: usize,
-        direction: chelis_ir::dag::ScanDirection,
+        direction: chelis_dag_core::dag::ScanDirection,
         ty: &TensorType,
     ) {
         self.emit_slot_wrapper(id, ty);
         let index = Self::index_c_type();
         let axis_type = Self::prim_elem_type(Prim::Int32);
-        let reverse = direction == chelis_ir::dag::ScanDirection::Decreasing;
+        let reverse = direction == chelis_dag_core::dag::ScanDirection::Decreasing;
         let rank = Self::ndim(ty);
         self.line(&format!("{index} t{id}_scan_shape[{rank}];"));
         self.line(&format!("for ({axis_type} d = 0; d < {rank}; ++d) t{id}_scan_shape[d] = chelis_tensor_shape(t{input}, d);"));
@@ -8390,7 +8397,7 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         &mut self,
         id: usize,
         axis: usize,
-        inlined: chelis_ir::fuse::InlinedProduct,
+        inlined: chelis_dag_core::fuse::InlinedProduct,
         ty: &TensorType,
         dag: VerifiedDagView<'_>,
     ) {
@@ -9839,7 +9846,7 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
             .filter(|(_, dim)| matches!(dim, RtDim::Node(_) | RtDim::InputAxis { .. }))
             .map(|(axis, dim)| (axis, self.checked_bound_c_expr(dim, inputs, a, axis)))
             .collect();
-        let restored_shape_source = chelis_ir::axis_sources::reshape_restored_shape_source(
+        let restored_shape_source = chelis_dag_core::axis_sources::reshape_restored_shape_source(
             dag.nodes(),
             dag.get(NodeId(id)).expect("verified reshape"),
         );
@@ -10027,8 +10034,8 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
             });
         }
         let operation = match kind {
-            chelis_ir::axis_sources::ExpansionKind::Expand => "CHELIS_MOVEMENT_EXPAND",
-            chelis_ir::axis_sources::ExpansionKind::Insert => "CHELIS_MOVEMENT_INSERT",
+            chelis_dag_core::axis_sources::ExpansionKind::Expand => "CHELIS_MOVEMENT_EXPAND",
+            chelis_dag_core::axis_sources::ExpansionKind::Insert => "CHELIS_MOVEMENT_INSERT",
         };
         let elem_type = Self::elem_type(ty);
         let logical = self.deferred_views.is_deferred(NodeId(id))
@@ -10237,12 +10244,14 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
     }
 
     fn is_same_shape_observation(
-        observation: &chelis_ir::axis_sources::LocalGuardObservation,
+        observation: &chelis_dag_core::axis_sources::LocalGuardObservation,
     ) -> bool {
         matches!(
             observation,
-            chelis_ir::axis_sources::LocalGuardObservation::SameShapeAgreement(_)
-                | chelis_ir::axis_sources::LocalGuardObservation::MalformedSameShapeAgreement(_)
+            chelis_dag_core::axis_sources::LocalGuardObservation::SameShapeAgreement(_)
+                | chelis_dag_core::axis_sources::LocalGuardObservation::MalformedSameShapeAgreement(
+                    _
+                )
         )
     }
 
@@ -10347,7 +10356,7 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
     /// Emit producer-owned result claims after the same-shape relation has
     /// agreed and before the producer allocates or reads an element.
     fn emit_same_shape_result_guards(&mut self, node: &DagNode) {
-        use chelis_ir::axis_sources::LocalGuardObservation;
+        use chelis_dag_core::axis_sources::LocalGuardObservation;
         let mut extents = Vec::new();
         let add_extent =
             |axis: usize, observation: &LocalGuardObservation, extents: &mut Vec<_>| {
@@ -10389,7 +10398,7 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
 
     /// Input-axis observations, shared by ordinary and movement producers.
     fn input_axis_result_extents(&self, id: usize, inputs: &[NodeId]) -> Vec<(usize, String)> {
-        use chelis_ir::axis_sources::LocalGuardObservation;
+        use chelis_dag_core::axis_sources::LocalGuardObservation;
         let mut carriers = Vec::new();
         if let Some(sites) = self.local_dim_guard_sites.get(&id) {
             for (axis, claim) in sites {
@@ -10473,8 +10482,8 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
             let observations = sites
                 .iter()
                 .filter_map(|site| {
-                    let chelis_ir::dag::RtAxis::Lit(producer_axis) = site.producer_axis();
-                    let chelis_ir::dag::RtAxis::Lit(output_axis) = site.output_axis();
+                    let chelis_dag_core::dag::RtAxis::Lit(producer_axis) = site.producer_axis();
+                    let chelis_dag_core::dag::RtAxis::Lit(output_axis) = site.output_axis();
                     extents
                         .iter()
                         .find(|(axis, _)| *axis == producer_axis as usize)
@@ -10587,7 +10596,7 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
     /// The inlined product whose kernel computes `node` without storing it
     /// and without emitting it elsewhere: its product, an expansion's
     /// widening, or a sum whose narrowing runs the kernel.
-    fn inlined_component(&self, node: NodeId) -> Option<chelis_ir::fuse::InlinedProduct> {
+    fn inlined_component(&self, node: NodeId) -> Option<chelis_dag_core::fuse::InlinedProduct> {
         self.inlined_products
             .values()
             .find(|inlined| {
@@ -10779,7 +10788,7 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
                 .iter()
                 .find(|(claimed_axis, _)| *claimed_axis == axis)
                 .and_then(|(_, canonical)| match canonical {
-                    chelis_ir::axis_sources::CanonicalExtent::Binder(name)
+                    chelis_dag_core::axis_sources::CanonicalExtent::Binder(name)
                         if !self.declared_dim_names.contains(name) =>
                     {
                         None
@@ -10794,19 +10803,19 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
     /// the declared binder, the declaring witness's scalar, or the resolved
     /// size.
     fn canonical_extent_operand(
-        canonical: &chelis_ir::axis_sources::CanonicalExtent,
+        canonical: &chelis_dag_core::axis_sources::CanonicalExtent,
         _axis: usize,
     ) -> String {
         match canonical {
-            chelis_ir::axis_sources::CanonicalExtent::Binder(name) => extent_read(name),
-            chelis_ir::axis_sources::CanonicalExtent::Witness(witness) => {
+            chelis_dag_core::axis_sources::CanonicalExtent::Binder(name) => extent_read(name),
+            chelis_dag_core::axis_sources::CanonicalExtent::Witness(witness) => {
                 format!(
                     "(({}*)t{}_data)[0]",
                     Self::prim_elem_type(Prim::Int64),
                     witness.0
                 )
             }
-            chelis_ir::axis_sources::CanonicalExtent::Resolved(extent) => extent.to_string(),
+            chelis_dag_core::axis_sources::CanonicalExtent::Resolved(extent) => extent.to_string(),
         }
     }
 
@@ -11272,7 +11281,7 @@ fn settle_extent_marks(
 mod tests {
     use super::*;
 
-    use chelis_ir::dag::{ComparisonKind, Dag, DimInfo, RiscOp, RtDim, TensorType};
+    use chelis_dag_core::dag::{ComparisonKind, Dag, DimInfo, RiscOp, RtDim, TensorType};
     use chelis_numeric_core::prim::Prim;
 
     /// Every name is an extent, for the order tests below.
@@ -11413,14 +11422,14 @@ mod tests {
         // inactive claim-sized axis declares.
         assert_eq!(
             CEmitter::canonical_extent_operand(
-                &chelis_ir::axis_sources::CanonicalExtent::Binder("n".into()),
+                &chelis_dag_core::axis_sources::CanonicalExtent::Binder("n".into()),
                 0
             ),
             extent_read("n")
         );
         assert_eq!(
             CEmitter::canonical_extent_operand(
-                &chelis_ir::axis_sources::CanonicalExtent::Resolved(3),
+                &chelis_dag_core::axis_sources::CanonicalExtent::Resolved(3),
                 0
             ),
             "3"
@@ -11460,7 +11469,7 @@ mod tests {
     /// program emits.
     #[test]
     fn inlined_product_storage_decisions_are_exclusive_and_emit() {
-        use chelis_ir::dag::{NodeId, Owner};
+        use chelis_dag_core::dag::{NodeId, Owner};
         use chelis_ir::ownership::StoragePlacement;
         let lit = |dims: &[usize]| dims.iter().map(|&n| DimInfo::Lit(n)).collect::<Vec<_>>();
         let runtime = |name: &str| DimInfo::Named(name.into(), None);
@@ -11488,7 +11497,7 @@ mod tests {
                         dims: dims.to_vec(),
                         precision: p,
                     };
-                    let contraction = chelis_ir::tier2_ordered::einsum_contraction(
+                    let contraction = chelis_ir::ordered_layout::einsum_contraction(
                         equation,
                         &ty(&a),
                         &ty(&b),
@@ -11511,7 +11520,7 @@ mod tests {
                         ty(&b),
                         None,
                     );
-                    let out = chelis_ir::tier2_ordered::lower_einsum_contraction(
+                    let out = chelis_dag_core::tier2_ordered::lower_einsum_contraction(
                         owner,
                         &mut dag,
                         &contraction,
@@ -11670,9 +11679,9 @@ mod tests {
                              a: (NodeId, &TensorType),
                              b: (NodeId, &TensorType)| {
                     let contraction =
-                        chelis_ir::tier2_ordered::einsum_contraction(equation, a.1, b.1, None)
+                        chelis_ir::ordered_layout::einsum_contraction(equation, a.1, b.1, None)
                             .unwrap_or_else(|| panic!("`{equation}` contraction form"));
-                    chelis_ir::tier2_ordered::lower_einsum_contraction(
+                    chelis_dag_core::tier2_ordered::lower_einsum_contraction(
                         owner,
                         dag,
                         &contraction,
@@ -12599,7 +12608,7 @@ mod tests {
             decl,
             RiscOp::Expand {
                 axis: 0,
-                size: chelis_ir::dag::RtDim::Lit(4),
+                size: chelis_dag_core::dag::RtDim::Lit(4),
             },
             vec![a],
             vec_f32(4),
@@ -12638,8 +12647,8 @@ mod tests {
     #[test]
     fn bitwise_shift_loops_preserve_first_negative_count() {
         for kind in [
-            chelis_types::BitwiseKind::ShiftLeft,
-            chelis_types::BitwiseKind::ShiftRight,
+            chelis_numeric_core::bitwise::BitwiseKind::ShiftLeft,
+            chelis_numeric_core::bitwise::BitwiseKind::ShiftRight,
         ] {
             let mut dag = Dag::new();
             let decl = dag.declare("test");
@@ -13297,7 +13306,7 @@ mod tests {
             None,
         );
         let draw = dag.add_node(
-            chelis_ir::dag::Owner::new(decl, Some(activation)),
+            chelis_dag_core::dag::Owner::new(decl, Some(activation)),
             RiscOp::UniformLike,
             vec![template, low, high, key],
             vec_f32(2),
@@ -13550,7 +13559,7 @@ mod tests {
             decl,
             RiscOp::Expand {
                 axis: 2,
-                size: chelis_ir::dag::RtDim::Lit(4),
+                size: chelis_dag_core::dag::RtDim::Lit(4),
             },
             vec![a],
             TensorType {
@@ -13563,7 +13572,7 @@ mod tests {
             decl,
             RiscOp::Expand {
                 axis: 0,
-                size: chelis_ir::dag::RtDim::Lit(2),
+                size: chelis_dag_core::dag::RtDim::Lit(2),
             },
             vec![b],
             TensorType {
@@ -13625,7 +13634,7 @@ mod tests {
             decl,
             RiscOp::Expand {
                 axis: 2,
-                size: chelis_ir::dag::RtDim::Lit(4),
+                size: chelis_dag_core::dag::RtDim::Lit(4),
             },
             vec![a],
             TensorType {
@@ -13638,7 +13647,7 @@ mod tests {
             decl,
             RiscOp::Expand {
                 axis: 0,
-                size: chelis_ir::dag::RtDim::Lit(2),
+                size: chelis_dag_core::dag::RtDim::Lit(2),
             },
             vec![b],
             TensorType {
@@ -13761,7 +13770,7 @@ mod tests {
             decl,
             RiscOp::Expand {
                 axis: 0,
-                size: chelis_ir::dag::RtDim::Lit(4),
+                size: chelis_dag_core::dag::RtDim::Lit(4),
             },
             vec![a],
             vec_f32(4),
@@ -13816,7 +13825,7 @@ mod tests {
     /// Fused elementwise fast path must emit restrict pointers and #pragma omp parallel for simd.
     #[test]
     fn fused_elem_fast_path_emits_restrict_and_simd() {
-        use chelis_ir::dag::{FusedInput, FusedStep, FusedStepOp};
+        use chelis_dag_core::dag::{FusedInput, FusedStep, FusedStepOp};
         let mut dag = Dag::new();
         let decl = dag.declare("test");
         let a = dag.add_node(
@@ -13867,7 +13876,7 @@ mod tests {
 
     #[test]
     fn fused_elem_without_reusable_input_keeps_non_in_place_restrict_shape() {
-        use chelis_ir::dag::{FusedInput, FusedStep, FusedStepOp};
+        use chelis_dag_core::dag::{FusedInput, FusedStep, FusedStepOp};
         let mut dag = Dag::new();
         let decl = dag.declare("test");
         let x = dag.add_node(
@@ -14209,7 +14218,7 @@ mod tests {
     fn target_fused_in_place_consumes_the_verified_reuse_proof() {
         // The shared planner turns the DAG's liveness hint into the sealed
         // provenance/capacity proof consumed by C emission.
-        use chelis_ir::dag::{FusedInput, FusedStep, FusedStepOp};
+        use chelis_dag_core::dag::{FusedInput, FusedStep, FusedStepOp};
         let mut dag = Dag::new();
         let decl = dag.declare("test");
         let x = dag.add_node(
@@ -14265,7 +14274,7 @@ mod tests {
         // to the caller (`cpu_input_tensor` in `chelis-python` passes a
         // pointer straight into the caller's NumPy buffer), so writing
         // the result there overwrites an argument.
-        use chelis_ir::dag::{FusedInput, FusedStep, FusedStepOp};
+        use chelis_dag_core::dag::{FusedInput, FusedStep, FusedStepOp};
         let mut dag = Dag::new();
         let decl = dag.declare("test");
         let x = dag.add_node(
@@ -14319,7 +14328,7 @@ mod tests {
         // constructor. `reshape` materializes program-owned canonical
         // storage, so the shared proof may later reuse that intermediate,
         // but it must never transfer the caller's descriptor or bytes.
-        use chelis_ir::dag::{FusedInput, FusedStep, FusedStepOp};
+        use chelis_dag_core::dag::{FusedInput, FusedStep, FusedStepOp};
         let mut dag = Dag::new();
         let decl = dag.declare("test");
         let x = dag.add_node(
@@ -14373,7 +14382,7 @@ mod tests {
 
     #[test]
     fn fused_reusable_input_with_multiple_consumers_does_not_alias() {
-        use chelis_ir::dag::{FusedInput, FusedStep, FusedStepOp};
+        use chelis_dag_core::dag::{FusedInput, FusedStep, FusedStepOp};
         let mut dag = Dag::new();
         let decl = dag.declare("test");
         let x = dag.add_node(
@@ -14605,7 +14614,7 @@ mod tests {
     /// the first scope's `seq` are unchanged.
     #[test]
     fn scope_rename_mints_a_fresh_identity_past_one_the_graph_declares() {
-        use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
+        use chelis_dag_core::dag::{Dag, DimInfo, RiscOp, TensorType};
         let ty = |dims: Vec<DimInfo>| TensorType {
             dims,
             precision: chelis_numeric_core::prim::Prim::F32,
@@ -14681,7 +14690,7 @@ mod tests {
     /// satisfy the row above.
     #[test]
     fn scope_rename_leaves_a_binder_no_second_scope_declares_alone() {
-        use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
+        use chelis_dag_core::dag::{Dag, DimInfo, RiscOp, TensorType};
         let ty = |dims: Vec<DimInfo>| TensorType {
             dims,
             precision: chelis_numeric_core::prim::Prim::F32,

@@ -14,7 +14,7 @@
 //! the assertion.
 
 mod support;
-use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
+use chelis_dag_core::dag::{Dag, DimInfo, RiscOp, TensorType};
 use chelis_numeric_core::prim::Prim;
 use support::{codegen_metal, try_codegen_metal};
 
@@ -199,7 +199,7 @@ fn wsm1_matmul_at_tile_boundary_routes_to_mps() {
         decl,
         RiscOp::Expand {
             axis: 2,
-            size: chelis_ir::dag::RtDim::Lit(16),
+            size: chelis_dag_core::dag::RtDim::Lit(16),
         },
         vec![a],
         tensor3_f32(16, 16, 16),
@@ -209,7 +209,7 @@ fn wsm1_matmul_at_tile_boundary_routes_to_mps() {
         decl,
         RiscOp::Expand {
             axis: 0,
-            size: chelis_ir::dag::RtDim::Lit(16),
+            size: chelis_dag_core::dag::RtDim::Lit(16),
         },
         vec![b],
         tensor3_f32(16, 16, 16),

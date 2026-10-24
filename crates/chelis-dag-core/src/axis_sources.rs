@@ -39,9 +39,53 @@
 //! classes, the guard placement, and the deletion of the provenance walk are
 //! the second half of Slice B.
 
+#[cfg(test)]
+use alloc::boxed::Box;
+use alloc::{
+    format,
+    string::{String, ToString},
+    vec,
+    vec::Vec,
+};
 use chelis_numeric_core::prim::Prim;
-use chelis_types::unimplemented_rejection;
-use chelis_types::unsupported::{Stage, Unsupported, UnsupportedKind};
+
+/// A graph extent failure, without a host diagnostic stage.
+///
+/// Display uses the structural verifier's lowering-stage text.
+/// Host adapters retain these facts and supply their own diagnostic stage.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AxisSourceError {
+    pub what: String,
+    pub context: String,
+    pub sourceless: bool,
+}
+
+impl AxisSourceError {
+    pub const SOURCELESS_HINT: &'static str = "give the axis a real extent source: size the consuming operation's output from the operand that declares the extent, or declare the extent on the producing node";
+    pub const MAPPING_HINT: &'static str = "derive one checked source per output axis from the operation's own shape rule; see runtime_extents.md C4";
+
+    pub const fn hint(&self) -> &'static str {
+        if self.sourceless {
+            Self::SOURCELESS_HINT
+        } else {
+            Self::MAPPING_HINT
+        }
+    }
+}
+
+impl core::fmt::Display for AxisSourceError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "unsupported: {} on {} (lowering); unimplemented chelis#1277: {}",
+            self.what,
+            self.context,
+            self.hint()
+        )
+    }
+}
+
+impl core::error::Error for AxisSourceError {}
 
 use crate::dag::{Dag, DagNode, DimInfo, NodeId, RiscOp, RtAxis, RtDim};
 
@@ -507,7 +551,7 @@ pub fn output_axis_sources(dag: &Dag, node: NodeId) -> Vec<AxisSource> {
     let rank = node.output_type.dims.len();
     match &node.op {
         RiscOp::RuntimeRecurrence(recurrence) if recurrence.scan => or_op_computed(
-            std::iter::once(pass_through(id, 0, 0))
+            core::iter::once(pass_through(id, 0, 0))
                 .chain(
                     node.output_type
                         .dims
@@ -624,7 +668,7 @@ pub fn output_axis_sources(dag: &Dag, node: NodeId) -> Vec<AxisSource> {
         RiscOp::SplitN { count } => match input_rank(dag, node, 0) {
             Some(key_rank) if key_rank + 1 == rank => (0..key_rank)
                 .map(|axis| pass_through(id, 0, axis))
-                .chain(std::iter::once(rt_dim_source(id, key_rank, count)))
+                .chain(core::iter::once(rt_dim_source(id, key_rank, count)))
                 .collect(),
             _ => op_computed(id, rank),
         },
@@ -768,7 +812,7 @@ pub fn output_axis_sources(dag: &Dag, node: NodeId) -> Vec<AxisSource> {
             Some(operand_rank) => or_op_computed(
                 (0..operand_rank)
                     .map(|axis| pass_through(id, 0, axis))
-                    .chain(std::iter::once(literal(*vocab)))
+                    .chain(core::iter::once(literal(*vocab)))
                     .collect(),
                 id,
                 rank,
@@ -904,12 +948,11 @@ pub fn output_axis_sources(dag: &Dag, node: NodeId) -> Vec<AxisSource> {
 /// chelis#730 typed receipt (C4.3), never the occurrence pass's panic and
 /// never an input extent substituted for the missing one.
 ///
-/// `stage` names the refusing lane so the rendered receipt says which
-/// production path stopped, per the section C2 diagnostic shape.
-pub fn check_axis_sources(dag: &Dag, stage: Stage) -> Result<(), Unsupported> {
+/// Host adapters supply the diagnostic stage for each production path.
+pub fn check_axis_sources(dag: &Dag) -> Result<(), AxisSourceError> {
     for node in dag.nodes() {
         let sources = output_axis_sources(dag, node.id);
-        check_node_axis_sources(dag, node, &sources, stage)?;
+        check_node_axis_sources(dag, node, &sources)?;
     }
     Ok(())
 }
@@ -948,7 +991,7 @@ pub fn check_axis_sources(dag: &Dag, stage: Stage) -> Result<(), Unsupported> {
 /// the carrier the scan found, never a positional fallback: a name reaches
 /// [`unresolved_dim_names`] only by way of a node that carries it, so there
 /// is nothing to fall back to and an empty graph reports nothing.
-pub fn check_rendered_dim_origins(dag: &Dag, stage: Stage) -> Result<(), Unsupported> {
+pub fn check_rendered_dim_origins(dag: &Dag) -> Result<(), AxisSourceError> {
     let unresolved = unresolved_dim_names(dag);
     if unresolved.is_empty() {
         return Ok(());
@@ -968,7 +1011,6 @@ pub fn check_rendered_dim_origins(dag: &Dag, stage: Stage) -> Result<(), Unsuppo
             return Err(receipt(
                 format!("extent `{name}` resolves to no source"),
                 node,
-                stage,
                 true,
             ));
         }
@@ -976,40 +1018,27 @@ pub fn check_rendered_dim_origins(dag: &Dag, stage: Stage) -> Result<(), Unsuppo
     Ok(())
 }
 
-fn receipt(what: String, node: &DagNode, stage: Stage, sourceless: bool) -> Unsupported {
-    let authority = if sourceless {
-        unimplemented_rejection!(
-            1277,
-            "give the axis a real extent source: size the consuming operation's output from the operand that declares the extent, or declare the extent on the producing node"
-        )
-    } else {
-        unimplemented_rejection!(
-            1277,
-            "derive one checked source per output axis from the operation's own shape rule; see runtime_extents.md C4"
-        )
-    };
-    Unsupported::new(
-        UnsupportedKind::Construct(what),
-        format!(
+fn receipt(what: String, node: &DagNode, sourceless: bool) -> AxisSourceError {
+    AxisSourceError {
+        what,
+        context: format!(
             "node {} output-axis extent sources (op {})",
             node.id.0,
             crate::grad::risc_op_name(&node.op)
         ),
-        stage,
-        authority,
-    )
+        sourceless,
+    }
 }
 
-/// The per-node half of [`check_axis_sources`]. Crate-private, and taking
-/// the source vector by reference rather than deriving it, so this module's
-/// own unit tests can present a duplicated or misdirected vector that a
-/// correct exhaustive match would never produce.
-pub(crate) fn check_node_axis_sources(
+/// Check one node against a caller-supplied vector of physical axis sources.
+///
+/// Lowering uses this boundary before gradient publication. A duplicated or
+/// misdirected vector receives the same diagnostics as whole-graph verification.
+pub fn check_node_axis_sources(
     dag: &Dag,
     node: &DagNode,
     sources: &[AxisSource],
-    stage: Stage,
-) -> Result<(), Unsupported> {
+) -> Result<(), AxisSourceError> {
     let rank = node.output_type.dims.len();
     if sources.len() != rank {
         let sourceless = sources.len() < rank
@@ -1020,7 +1049,6 @@ pub(crate) fn check_node_axis_sources(
                 sources.len()
             ),
             node,
-            stage,
             sourceless,
         ));
     }
@@ -1031,7 +1059,6 @@ pub(crate) fn check_node_axis_sources(
                     return Err(receipt(
                         format!("negative literal extent {value} on output axis {axis}"),
                         node,
-                        stage,
                         false,
                     ));
                 }
@@ -1047,7 +1074,6 @@ pub(crate) fn check_node_axis_sources(
                             load.0
                         ),
                         node,
-                        stage,
                         false,
                     ));
                 };
@@ -1058,7 +1084,6 @@ pub(crate) fn check_node_axis_sources(
                             declaring.output_type.dims.len()
                         ),
                         node,
-                        stage,
                         false,
                     ));
                 }
@@ -1074,7 +1099,6 @@ pub(crate) fn check_node_axis_sources(
                             node.inputs.len()
                         ),
                         node,
-                        stage,
                         false,
                     ));
                 };
@@ -1082,7 +1106,6 @@ pub(crate) fn check_node_axis_sources(
                     return Err(receipt(
                         format!("output axis {axis} reads a non-normalized axis {read}"),
                         node,
-                        stage,
                         false,
                     ));
                 };
@@ -1093,7 +1116,6 @@ pub(crate) fn check_node_axis_sources(
                             source_node.output_type.dims.len()
                         ),
                         node,
-                        stage,
                         false,
                     ));
                 }
@@ -1105,7 +1127,6 @@ pub(crate) fn check_node_axis_sources(
                             "output axis {axis} reads input slot 0, which is the tensor operand"
                         ),
                         node,
-                        stage,
                         false,
                     ));
                 }
@@ -1116,7 +1137,6 @@ pub(crate) fn check_node_axis_sources(
                             node.inputs.len()
                         ),
                         node,
-                        stage,
                         false,
                     ));
                 };
@@ -1127,7 +1147,6 @@ pub(crate) fn check_node_axis_sources(
                             source_node.output_type.dims.len()
                         ),
                         node,
-                        stage,
                         false,
                     ));
                 }
@@ -1138,7 +1157,6 @@ pub(crate) fn check_node_axis_sources(
                             source_node.output_type.precision.name()
                         ),
                         node,
-                        stage,
                         false,
                     ));
                 }
@@ -1156,7 +1174,6 @@ pub(crate) fn check_node_axis_sources(
                             op.0
                         ),
                         node,
-                        stage,
                         false,
                     ));
                 }
@@ -1572,7 +1589,7 @@ fn member_is_interface(dag: &Dag, member: &ClassMember) -> bool {
 }
 
 #[cfg(test)]
-thread_local! {
+std::thread_local! {
     /// DAG nodes that interface-input scans visit (chelis#3726).
     static INTERFACE_SCAN_WORK: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
@@ -1596,7 +1613,7 @@ thread_local! {
 pub fn ordered_interface_loads(nodes: &[DagNode]) -> Vec<&DagNode> {
     #[cfg(test)]
     INTERFACE_SCAN_WORK.with(|work| work.set(work.get() + nodes.len()));
-    let mut seen = chelis_unord::UnordSet::new();
+    let mut seen = crate::collections::HashSet::new();
     nodes
         .iter()
         .filter(|node| matches!(&node.op, RiscOp::Load { name } if seen.insert(name.as_str())))
@@ -1612,7 +1629,7 @@ pub fn ordered_interface_loads(nodes: &[DagNode]) -> Vec<&DagNode> {
 struct InterfaceSlots<'a> {
     dag: &'a Dag,
     loads: Vec<&'a DagNode>,
-    by_name: chelis_unord::UnordMap<&'a str, usize>,
+    by_name: crate::collections::HashMap<&'a str, usize>,
 }
 
 impl<'a> InterfaceSlots<'a> {
@@ -1712,18 +1729,18 @@ fn guarded_restamp_axes(dag: &Dag) -> Vec<(NodeId, usize)> {
 ///
 /// Only a node with an activation is gated, so a graph with none has no
 /// member worth deriving.
-pub fn claim_sized_nodes(dag: &Dag) -> Result<std::collections::BTreeSet<NodeId>, String> {
+pub fn claim_sized_nodes(dag: &Dag) -> Result<alloc::collections::BTreeSet<NodeId>, String> {
     if dag
         .nodes()
         .iter()
         .all(|node| node.owner.activation.is_none())
     {
-        return Ok(std::collections::BTreeSet::new());
+        return Ok(alloc::collections::BTreeSet::new());
     }
     let mut nodes = local_dim_guard_sites(dag)?
         .into_iter()
         .map(|(_, claim)| claim.activation.claimed())
-        .collect::<std::collections::BTreeSet<_>>();
+        .collect::<alloc::collections::BTreeSet<_>>();
     nodes.extend(
         dag.nodes()
             .iter()
@@ -2143,7 +2160,7 @@ fn split_by_scope(
                     if *bucket_mask & merged_mask != 0 {
                         merged_mask |= *bucket_mask;
                         if merged.is_empty() {
-                            merged = std::mem::take(bucket);
+                            merged = core::mem::take(bucket);
                         } else {
                             merged.append(bucket);
                         }
@@ -3027,12 +3044,12 @@ pub enum CanonicalExtent {
     Witness(NodeId),
 }
 
-impl std::fmt::Display for CanonicalExtent {
+impl core::fmt::Display for CanonicalExtent {
     /// The canonical value as a lane reads it: the claim's binder name, or the
     /// resolved size. Both consumers render it through this one impl, so a
     /// guard's comparison and a diagnostic naming that comparison cannot
     /// describe the value two different ways.
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             CanonicalExtent::Binder(binder) => f.write_str(binder),
             CanonicalExtent::Resolved(value) => write!(f, "{value}"),
@@ -3673,14 +3690,14 @@ fn checked_result_extent_site(
 /// Every rewrite that can replace, merge, fold, fuse, specialize, or eliminate
 /// a producer consumes this one classification. Keeping the token forms behind
 /// this API prevents a new rewrite from accidentally protecting only one.
-pub(crate) fn claimed_producers(dag: &Dag) -> Vec<bool> {
+pub fn claimed_producers(dag: &Dag) -> Vec<bool> {
     claim_producers_matching(dag, directly_owns_producer_claim)
 }
 
 /// Literal-only ownership carriers are a lowering representation detail, not
 /// the semantic rewrite barrier. Sparse helper recognition uses this narrower
 /// query only to peel those exact administrative carriers.
-pub(crate) fn literal_result_claim_producers(dag: &Dag) -> Vec<bool> {
+pub fn literal_result_claim_producers(dag: &Dag) -> Vec<bool> {
     claim_producers_matching(dag, directly_owns_literal_result_claim)
 }
 
@@ -3716,7 +3733,7 @@ fn claim_producers_matching(dag: &Dag, directly_owns: impl Fn(&Dag, NodeId) -> b
     protected
 }
 
-pub(crate) fn directly_owns_producer_claim(dag: &Dag, owner: NodeId) -> bool {
+pub fn directly_owns_producer_claim(dag: &Dag, owner: NodeId) -> bool {
     dag.get(owner).is_some_and(|node| {
         node.shape_deps
             .iter()
@@ -3774,11 +3791,11 @@ fn caller_witness_for_axis(
 /// [`caller_witness_for_axis`] query by binary search: a whole-graph scan per
 /// query made the literal-result derivations quadratic in graph size, which
 /// a long unrolled chain (a `cumsum` adjoint) turns into minutes.
-pub(crate) struct CallerWitnesses(std::collections::BTreeMap<(NodeId, usize), Vec<NodeId>>);
+pub(crate) struct CallerWitnesses(alloc::collections::BTreeMap<(NodeId, usize), Vec<NodeId>>);
 
 impl CallerWitnesses {
     pub(crate) fn new(dag: &Dag) -> Self {
-        let mut index = std::collections::BTreeMap::<_, Vec<NodeId>>::new();
+        let mut index = alloc::collections::BTreeMap::<_, Vec<NodeId>>::new();
         for node in dag.nodes() {
             if let RiscOp::ExtentWitness {
                 site: crate::dag::ExtentWitnessSite::Caller,
@@ -3801,7 +3818,7 @@ impl CallerWitnesses {
 /// that input (spec/04-type-system.md section 4.7), and no other owner exists
 /// to carry it. An input axis that declares a claim already has its entry
 /// check; the checker has made the result literal agree with it.
-pub(crate) fn result_axis_is_unwitnessed_input_axis(dag: &Dag, owner: NodeId, axis: usize) -> bool {
+pub fn result_axis_is_unwitnessed_input_axis(dag: &Dag, owner: NodeId, axis: usize) -> bool {
     let Some(LiteralResultInterfaceObservation::InputAxis {
         load,
         axis: input_axis,
@@ -4029,9 +4046,9 @@ fn literal_result_interface_claims(
 /// witness, which made every seed query quadratic in the graph.
 pub fn literal_result_witness_requirements(
     dag: &Dag,
-) -> std::collections::BTreeMap<NodeId, Vec<chelis_numeric_core::dtype_semantics::ScalarValue>> {
+) -> alloc::collections::BTreeMap<NodeId, Vec<chelis_numeric_core::dtype_semantics::ScalarValue>> {
     let slots = InterfaceSlots::of(dag);
-    let mut requirements = std::collections::BTreeMap::<NodeId, Vec<_>>::new();
+    let mut requirements = alloc::collections::BTreeMap::<NodeId, Vec<_>>::new();
     for (_, observed, required) in literal_result_interface_claims(dag) {
         if let LiteralResultInterfaceObservation::Witness(witness) = observed
             && observed.entry_axis(dag, &slots).is_none()
@@ -4830,7 +4847,7 @@ mod tests {
                 },
             ],
         );
-        assert!(check_axis_sources(&dag, Stage::Lowering).is_ok());
+        assert!(check_axis_sources(&dag).is_ok());
     }
 
     #[test]
@@ -4893,7 +4910,7 @@ mod tests {
             ],
             "the batch axis is the operand's axis; only m and n are contracted"
         );
-        assert!(check_axis_sources(&dag, Stage::Lowering).is_ok());
+        assert!(check_axis_sources(&dag).is_ok());
 
         // Negative parity: an unbatched matmul has no pass-through axis.
         let mut flat = Dag::new();
@@ -5000,12 +5017,11 @@ mod tests {
         };
 
         assert!(
-            check_node_axis_sources(&dag, node, std::slice::from_ref(&one), Stage::Lowering)
-                .is_ok(),
+            check_node_axis_sources(&dag, node, core::slice::from_ref(&one)).is_ok(),
             "exactly one source per output axis is the accepted cardinality"
         );
 
-        let duplicated = check_node_axis_sources(&dag, node, &[one.clone(), one], Stage::Lowering)
+        let duplicated = check_node_axis_sources(&dag, node, &[one.clone(), one])
             .expect_err("two sources for a rank 1 output must fail");
         assert!(duplicated.to_string().starts_with("unsupported: "));
         assert!(duplicated.to_string().contains("chelis#1277"));
@@ -5019,7 +5035,6 @@ mod tests {
                 op: operand,
                 axis: 0,
             }],
-            Stage::Lowering,
         )
         .expect_err("OpComputed must name the node whose axis it is");
         assert!(misdirected.to_string().contains("rather than by itself"));
@@ -5053,7 +5068,6 @@ mod tests {
                     load: source,
                     axis: 0
                 }],
-                Stage::Lowering,
             )
             .is_ok()
         );
@@ -5065,7 +5079,6 @@ mod tests {
                 load: negated,
                 axis: 0,
             }],
-            Stage::Lowering,
         )
         .expect_err("a non-Load declaring node must fail");
         assert!(not_a_load.to_string().contains("which is not a Load"));
@@ -5077,7 +5090,6 @@ mod tests {
                 load: source,
                 axis: 4,
             }],
-            Stage::Lowering,
         )
         .expect_err("an axis past the Load's rank must fail");
         assert!(out_of_range.to_string().contains("rank 1 Load"));
@@ -5126,7 +5138,7 @@ mod tests {
                 "of a rank 1 tensor",
             ),
         ] {
-            let error = check_node_axis_sources(&dag, node, &[source_vector], Stage::Lowering)
+            let error = check_node_axis_sources(&dag, node, &[source_vector])
                 .expect_err("an invalid InputAxis must fail");
             assert!(error.to_string().contains(needle), "{error}");
         }
@@ -5176,13 +5188,7 @@ mod tests {
         let node = dag.get(expanded).expect("node");
 
         assert!(
-            check_node_axis_sources(
-                &dag,
-                node,
-                &[AxisSource::ScalarInput { input: 1 }],
-                Stage::Lowering,
-            )
-            .is_ok()
+            check_node_axis_sources(&dag, node, &[AxisSource::ScalarInput { input: 1 }],).is_ok()
         );
 
         for (slot, needle) in [
@@ -5190,13 +5196,9 @@ mod tests {
             (2, "must be rank 0"),
             (9, "the node has 3 input(s)"),
         ] {
-            let error = check_node_axis_sources(
-                &dag,
-                node,
-                &[AxisSource::ScalarInput { input: slot }],
-                Stage::Lowering,
-            )
-            .expect_err("an invalid ScalarInput must fail");
+            let error =
+                check_node_axis_sources(&dag, node, &[AxisSource::ScalarInput { input: slot }])
+                    .expect_err("an invalid ScalarInput must fail");
             assert!(error.to_string().contains(needle), "{error}");
         }
     }
@@ -5213,13 +5215,8 @@ mod tests {
             None,
         );
         let node = dag.get(source).expect("node");
-        let error = check_node_axis_sources(
-            &dag,
-            node,
-            &[AxisSource::Literal { value: -1 }],
-            Stage::Lowering,
-        )
-        .expect_err("a negative extent is a static type error, never a source");
+        let error = check_node_axis_sources(&dag, node, &[AxisSource::Literal { value: -1 }])
+            .expect_err("a negative extent is a static type error, never a source");
         assert!(error.to_string().contains("negative literal extent"));
     }
 
@@ -5268,7 +5265,7 @@ mod tests {
             ],
             "the leading axis passes through; the windowed extent is the op's own"
         );
-        assert!(check_axis_sources(&dag, Stage::Lowering).is_ok());
+        assert!(check_axis_sources(&dag).is_ok());
     }
 
     #[test]
@@ -5314,7 +5311,7 @@ mod tests {
             ],
             "the adjoint's output is the forward INPUT's shape, never the cotangent's"
         );
-        assert!(check_axis_sources(&dag, Stage::Lowering).is_ok());
+        assert!(check_axis_sources(&dag).is_ok());
     }
 
     #[test]
@@ -5345,7 +5342,7 @@ mod tests {
                 AxisSource::Literal { value: 5 },
             ],
         );
-        assert!(check_axis_sources(&dag, Stage::Lowering).is_ok());
+        assert!(check_axis_sources(&dag).is_ok());
     }
 
     #[test]
@@ -5418,29 +5415,56 @@ mod tests {
                 ],
                 "every scatter writes into a copy of its target, so the shape is the target's: {op:?}"
             );
-            assert!(check_axis_sources(&dag, Stage::Lowering).is_ok());
+            assert!(check_axis_sources(&dag).is_ok());
         }
     }
 
-    /// The library of chelis#3726's probe: `f` reads `inputs` parameters that
-    /// all claim the runtime extent `n`, and adds them in a chain.
-    fn shared_extent_library(inputs: usize) -> crate::lower::LoweredLibrary {
-        let params = (1..=inputs)
-            .map(|i| format!("x{i}: tensor[n, f32]"))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let body = (2..=inputs).fold("x1".to_string(), |body, i| format!("add({body}, x{i})"));
-        let source = format!("def f[n]({params}) -> tensor[n, f32] = {body}\n");
-        let declarations =
-            chelis_surf::parser::parse_str(&source, &chelis_syntax_host::NativeStack).unwrap();
-        let checked = chelis_types::check_typed_program(
-            &chelis_surf::desugar::desugar_program(&declarations, &chelis_syntax_host::NativeStack)
-                .unwrap(),
-        )
-        .unwrap();
-        let checked = chelis_effects::check_program(&checked).unwrap();
-        let checked = chelis_types::check_linearity(&checked).unwrap();
-        crate::lower::try_lower_program_to_library(&checked).unwrap()
+    /// A shared-extent input graph for the portable scan-count test.
+    fn shared_extent_graph(inputs: usize) -> Dag {
+        let mut dag = Dag::new();
+        let decl = dag.declare("f");
+        let tensor = ty(vec![DimInfo::Named("n".into(), None)], Prim::F32);
+        let mut result = None;
+        for input in 1..=inputs {
+            let name = format!("x{input}");
+            let load = dag.add_node(
+                decl,
+                RiscOp::Load {
+                    name: name.clone().into(),
+                },
+                vec![],
+                tensor.clone(),
+                None,
+            );
+            let witness = dag.add_node(
+                decl,
+                RiscOp::ExtentWitness {
+                    site: crate::dag::ExtentWitnessSite::Caller,
+                    parameter: name,
+                    axis: RtAxis::Lit(0),
+                    requirements: vec![],
+                    claims: vec![],
+                },
+                vec![load],
+                ty(vec![], Prim::Int64),
+                None,
+            );
+            result = Some(match result {
+                None => load,
+                Some(previous) => dag.add_node(
+                    decl,
+                    RiscOp::Add,
+                    vec![previous, load],
+                    tensor.clone(),
+                    None,
+                ),
+            });
+            if input > 1 {
+                dag.add_shape_dep(result.expect("input supplies a result"), witness);
+            }
+        }
+        dag.add_root(result.expect("the fixture has inputs"));
+        dag
     }
 
     /// chelis#3726: one derivation of entry guards, runtime-extent classes, or
@@ -5450,8 +5474,8 @@ mod tests {
     #[test]
     fn entry_derivations_scan_the_interface_a_fixed_number_of_times() {
         for inputs in [4, 8, 16, 32] {
-            let library = shared_extent_library(inputs);
-            let dag = library.dag();
+            let graph = shared_extent_graph(inputs);
+            let dag = &graph;
             let nodes = dag.nodes().len();
             let witness = dag
                 .nodes()
@@ -5481,7 +5505,7 @@ mod tests {
                 INTERFACE_SCAN_WORK.with(|work| work.set(0));
                 derive();
                 let visits = INTERFACE_SCAN_WORK.with(std::cell::Cell::get);
-                eprintln!(
+                std::eprintln!(
                     "interface scans, {inputs} inputs: {name} visited {visits} of {nodes} nodes"
                 );
                 assert!(

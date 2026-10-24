@@ -1,0 +1,23 @@
+[package]
+name = "chelis-dag-core"
+description = "Portable DAG models and graph transforms for Chelis"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+chelis-numeric-core = { workspace = true, default-features = false, features = ["alloc", "serde"] }
+chelis-unord = { path = "../chelis-unord" }
+serde = { version = "1", default-features = false, features = ["alloc", "derive"] }
+hashbrown = { version = "0.16", default-features = false }
+rustc-hash = { version = "2.1", default-features = false }
+
+[dev-dependencies]
+bincode = "1.3.3"
+serde_json = { version = "1", features = ["float_roundtrip"] }
+syn.workspace = true
+
+[lints]
+workspace = true

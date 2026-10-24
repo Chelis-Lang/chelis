@@ -52,7 +52,7 @@ impl IrHandle {
 ```
 
 **① RESOLVED.** Beacon's sign-off corrected the default assumption: Beacon does
-not consume a `node: u64` index, nor a borrow of an in-memory `chelis_ir::Dag`.
+not consume a `node: u64` index, nor a borrow of an in-memory `chelis_dag_core::Dag`.
 It consumes the SERIALIZED exact-version `WireDag` JSON bytes out of process:
 it parses the slice, requires the current `WIRE_DAG_SCHEMA_VERSION` (version 9), validates the complete
 cross-node wire contract, computes a sha256 over those bytes, and
@@ -66,7 +66,7 @@ are rejected before any `WireRiscOp` is decoded; there is no compatibility
 reader. `IrHandle`'s hash-plus-index shape remains independent of the schema
 payload it addresses.
 
-`IrHandle` still holds only a hash + index: it does NOT carry a `chelis_ir::Dag`
+`IrHandle` still holds only a hash + index: it does NOT carry a `chelis_dag_core::Dag`
 or a `WireDag` value, so populating it pulls no live IR dependency into
 `chelis-prove`'s public API. The WI-3 producer (which DOES have the IR in scope)
 serializes the exact-version `WireDag` v9, validates its version and complete

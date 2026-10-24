@@ -1,6 +1,6 @@
 {
   "schema_version": 8,
-  "freeze_sha256": "18641a6b120ec86ea788314f9261c73fdea401165049343961ca64f1e1a12670",
+  "freeze_sha256": "5cffc9354ead58a3d2b79e7e6435123c971a712168b5ec9c813cd715ed40f5ea",
   "source_inventory": {
     "mutations": [
       {
@@ -139,7 +139,7 @@
       {
         "witness_id": "phase0.mutate_normalized_key_arithmetic",
         "expected_kind": "normalized-key-arithmetic",
-        "path": "crates/chelis-ir/src/dag.rs",
+        "path": "crates/chelis-dag-core/src/dag.rs",
         "implementation_sha256": "2fe7caf5f79f8c5f18515a211073875bb84938c86347e4c263f43004ea69d1c4",
         "expected_failure": {
           "code": "inventory.unclassified",
@@ -152,7 +152,7 @@
       {
         "witness_id": "phase0.mutate_retired_capacity_normalizer",
         "expected_kind": "normalized-key-arithmetic",
-        "path": "crates/chelis-ir/src/dag.rs",
+        "path": "crates/chelis-dag-core/src/dag.rs",
         "implementation_sha256": "955e70aa636012fdeb8ea2a7d990f971e47cfebfae031325b6f98f59700859f9",
         "expected_failure": {
           "code": "inventory.unclassified",
@@ -571,7 +571,7 @@
       {
         "witness_id": "phase0.mutate_rust_path_module",
         "expected_kind": "rust-path-module",
-        "path": "crates/chelis-ir/src/dag.rs",
+        "path": "crates/chelis-dag-core/src/dag.rs",
         "implementation_sha256": "459c3cde96dae99f997843567dcb6924bc2674e18b7065d664ecf710eb3a3183",
         "expected_failure": {
           "code": "source.rejected",
@@ -653,6 +653,18 @@
         "pattern": "crates/chelis-ir/build.rs",
         "directories": [
           "crates/chelis-ir"
+        ]
+      },
+      {
+        "pattern": "crates/chelis-dag-core/src/**/*.rs",
+        "directories": [
+          "crates/chelis-dag-core/src"
+        ]
+      },
+      {
+        "pattern": "crates/chelis-dag-core/build.rs",
+        "directories": [
+          "crates/chelis-dag-core"
         ]
       },
       {
@@ -1781,35 +1793,35 @@
       "deletion_phase": 2
     },
     {
-      "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/analysis.rs|owner=analyze_copy_costs_for_roots",
+      "identity": "kind=normalized-key-arithmetic|path=crates/chelis-dag-core/src/analysis.rs|owner=analyze_copy_costs_for_roots",
       "deletion_phase": 1
     },
     {
-      "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/analysis.rs|owner=analyze_function_copy_cost_for_roots",
+      "identity": "kind=normalized-key-arithmetic|path=crates/chelis-dag-core/src/analysis.rs|owner=analyze_function_copy_cost_for_roots",
       "deletion_phase": 1
     },
     {
-      "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/analysis.rs|owner=tensor_bytes",
+      "identity": "kind=normalized-key-arithmetic|path=crates/chelis-dag-core/src/analysis.rs|owner=tensor_bytes",
       "deletion_phase": 1
     },
     {
-      "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/dag.rs|owner=DimExpr::as_concrete",
+      "identity": "kind=normalized-key-arithmetic|path=crates/chelis-dag-core/src/dag.rs|owner=DimExpr::as_concrete",
       "deletion_phase": 1
     },
     {
-      "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/dag.rs|owner=DimExpr::evaluate",
+      "identity": "kind=normalized-key-arithmetic|path=crates/chelis-dag-core/src/dag.rs|owner=DimExpr::evaluate",
       "deletion_phase": 1
     },
     {
-      "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/dag.rs|owner=DimExpr::normalized_key",
+      "identity": "kind=normalized-key-arithmetic|path=crates/chelis-dag-core/src/dag.rs|owner=DimExpr::normalized_key",
       "deletion_phase": 1
     },
     {
-      "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/dag.rs|owner=normalize_dim_product::take_factor",
+      "identity": "kind=normalized-key-arithmetic|path=crates/chelis-dag-core/src/dag.rs|owner=normalize_dim_product::take_factor",
       "deletion_phase": 1
     },
     {
-      "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/dag.rs|owner=push_product_atoms",
+      "identity": "kind=normalized-key-arithmetic|path=crates/chelis-dag-core/src/dag.rs|owner=push_product_atoms",
       "deletion_phase": 1
     },
     {
@@ -1877,19 +1889,19 @@
       "deletion_phase": 1
     },
     {
-      "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/tier2.rs|owner=align_matmul_operand",
+      "identity": "kind=normalized-key-arithmetic|path=crates/chelis-dag-core/src/tier2.rs|owner=align_matmul_operand",
       "deletion_phase": 1
     },
     {
-      "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/tier2.rs|owner=lower_conv2d",
+      "identity": "kind=normalized-key-arithmetic|path=crates/chelis-dag-core/src/tier2.rs|owner=lower_conv2d",
       "deletion_phase": 1
     },
     {
-      "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/tier2.rs|owner=lower_layer_norm",
+      "identity": "kind=normalized-key-arithmetic|path=crates/chelis-dag-core/src/tier2.rs|owner=lower_layer_norm",
       "deletion_phase": 1
     },
     {
-      "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/verify.rs|owner=verify_with_dangling_policy",
+      "identity": "kind=normalized-key-arithmetic|path=crates/chelis-dag-core/src/verify.rs|owner=verify_with_dangling_policy",
       "deletion_phase": 1
     },
     {
@@ -2803,23 +2815,23 @@
       "sample": "ndim: i32"
     },
     {
-      "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/analysis.rs|owner=analyze_copy_costs_for_roots",
+      "identity": "kind=normalized-key-arithmetic|path=crates/chelis-dag-core/src/analysis.rs|owner=analyze_copy_costs_for_roots",
       "sample": "acc . saturating_add (bytes)"
     },
     {
-      "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/analysis.rs|owner=analyze_function_copy_cost_for_roots",
+      "identity": "kind=normalized-key-arithmetic|path=crates/chelis-dag-core/src/analysis.rs|owner=analyze_function_copy_cost_for_roots",
       "sample": "concrete_total . saturating_add (bytes)"
     },
     {
-      "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/analysis.rs|owner=tensor_bytes",
+      "identity": "kind=normalized-key-arithmetic|path=crates/chelis-dag-core/src/analysis.rs|owner=tensor_bytes",
       "sample": "concrete_elements . saturating_mul (* size)"
     },
     {
-      "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/dag.rs|owner=DimExpr::as_concrete",
+      "identity": "kind=normalized-key-arithmetic|path=crates/chelis-dag-core/src/dag.rs|owner=DimExpr::as_concrete",
       "sample": "lhs . as_concrete () ? . checked_mul (rhs . as_concrete () ?)"
     },
     {
-      "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/dag.rs|owner=DimExpr::evaluate",
+      "identity": "kind=normalized-key-arithmetic|path=crates/chelis-dag-core/src/dag.rs|owner=DimExpr::evaluate",
       "sample": "lhs . evaluate (bindings) ? . checked_mul (rhs . evaluate (bindings) ?)"
     },
     {
@@ -2871,15 +2883,15 @@
       "sample": "rank . saturating_sub (matrix_rank)"
     },
     {
-      "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/tier2.rs|owner=align_matmul_operand",
+      "identity": "kind=normalized-key-arithmetic|path=crates/chelis-dag-core/src/tier2.rs|owner=align_matmul_operand",
       "sample": "lead_dims . len () . saturating_sub (source_lead . len ())"
     },
     {
-      "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/tier2.rs|owner=lower_layer_norm",
+      "identity": "kind=normalized-key-arithmetic|path=crates/chelis-dag-core/src/tier2.rs|owner=lower_layer_norm",
       "sample": "x_ty . dims . len () . saturating_sub (1)"
     },
     {
-      "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/verify.rs|owner=verify_with_dangling_policy",
+      "identity": "kind=normalized-key-arithmetic|path=crates/chelis-dag-core/src/verify.rs|owner=verify_with_dangling_policy",
       "sample": "count . checked_mul (extent)"
     },
     {

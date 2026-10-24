@@ -18,7 +18,7 @@ use std::fmt;
 use chelis_deep::ast::{Atom, Expr};
 use chelis_numeric_core::prim::Prim;
 
-use crate::dag::{DimInfo, TensorType};
+use chelis_dag_core::dag::{DimInfo, TensorType};
 
 /// A checked, unspecialized builtin operation carried as a host value. The
 /// operation identity belongs to the value's type until a checked call or a

@@ -51,14 +51,14 @@ def source_contracts() -> tuple[SourceContract, ...]:
     return (
         SourceContract(
             "direct Sub lowering",
-            "crates/chelis-ir/src/tier2.rs",
+            "crates/chelis-dag-core/src/tier2.rs",
             (
                 "add_synth(owner, dag, RiscOp::Sub, vec![a, b], ty.clone(), parent_span)",
             ),
         ),
         SourceContract(
             "direct paired extrema lowering",
-            "crates/chelis-ir/src/tier2.rs",
+            "crates/chelis-dag-core/src/tier2.rs",
             (
                 'let ty = dag\n'
                 '        .get(a)\n'
@@ -336,7 +336,7 @@ def source_contracts() -> tuple[SourceContract, ...]:
         ),
         SourceContract(
             "current Tier-2 helper module boundary",
-            "crates/chelis-ir/src/tier2.rs",
+            "crates/chelis-dag-core/src/tier2.rs",
             (
                 "Most functions in this module decompose Tier 2 derived operations",
                 "`lower_sub` and `lower_extrema` emit direct Tier-1 identities",
@@ -345,7 +345,7 @@ def source_contracts() -> tuple[SourceContract, ...]:
         ),
         SourceContract(
             "current gradient direct subtraction narrative",
-            "crates/chelis-ir/src/grad.rs",
+            "crates/chelis-dag-core/src/grad.rs",
             ("sign = pos - neg_cast (direct Tier-1 Sub)",),
             ("sign = pos - neg_cast  (tier2 sub)",),
         ),
@@ -456,7 +456,7 @@ def oracle_legs(python: str) -> tuple[OracleLeg, ...]:
                 "nextest",
                 "run",
                 "-p",
-                "chelis-ir",
+                "chelis-dag-core",
                 "-E",
                 "test(/constant_fold_direct_/)",
             ),

@@ -1,9 +1,9 @@
 use chelis_unord::UnordMap;
 
-use chelis_ir::dag::{ComparisonKind, Dag, ExtremaKind, ExtremaOperand, RiscOp, TensorType};
+use chelis_dag_core::dag::{ComparisonKind, Dag, ExtremaKind, ExtremaOperand, RiscOp, TensorType};
+use chelis_dag_core::grad::{AdError, AdRejectionReason, grad_dag_checked};
+use chelis_dag_core::{tier2, verify};
 use chelis_ir::eval::{TensorValue, eval_tensor};
-use chelis_ir::grad::{AdError, AdRejectionReason, grad_dag_checked};
-use chelis_ir::{tier2, verify};
 use chelis_numeric_core::dtype_semantics::{RawTensor, finalize_tensor};
 use chelis_numeric_core::prim::Prim;
 
@@ -250,7 +250,7 @@ fn integer_extrema_used_only_as_discrete_indices_do_not_poison_float_ad() {
         let mut dag = Dag::new();
         let decl = dag.declare("test");
         let values_ty = TensorType {
-            dims: vec![chelis_ir::dag::DimInfo::Lit(3)],
+            dims: vec![chelis_dag_core::dag::DimInfo::Lit(3)],
             precision: Prim::F32,
         };
         let index_ty = scalar_at(Prim::Int64);
@@ -441,7 +441,7 @@ fn signed_integer_extrema_chains_stay_materialized_for_typed_backends() {
         let minimum = dag.add_node(decl, RiscOp::MinElem, vec![maximum, cap], ty, None);
         dag.add_root(minimum);
 
-        let fused = chelis_ir::fuse::fuse(&dag);
+        let fused = chelis_dag_core::fuse::fuse(&dag);
         assert!(
             fused
                 .nodes()

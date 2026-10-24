@@ -100,9 +100,9 @@ class SourceUniverseTests(unittest.TestCase):
                 with self.assertRaisesRegex(
                     oracle.OracleFailure,
                     "only a departed referenced file can be retired: "
-                    "crates/chelis-ir/src/dag.rs",
+                    "crates/chelis-dag-core/src/dag.rs",
                 ):
-                    oracle.regenerate(retired_files=("crates/chelis-ir/src/dag.rs",))
+                    oracle.regenerate(retired_files=("crates/chelis-dag-core/src/dag.rs",))
 
     def test_a_crate_leaving_a_glob_root_fails_as_departed(self) -> None:
         baseline = oracle.load_baseline()
@@ -430,7 +430,7 @@ class SourceUniverseTests(unittest.TestCase):
                 oracle.validate_baseline(baseline, oracle.inventory_rows(REPO_ROOT))
 
     def test_a_missing_mutation_target_fails_rather_than_being_planted(self) -> None:
-        target = "crates/chelis-ir/src/dag.rs"
+        target = "crates/chelis-dag-core/src/dag.rs"
         probes = [
             probe for probe in oracle.phase0_mutation_probes()
             if probe.path.as_posix() == target
@@ -505,6 +505,13 @@ class SourceUniverseTests(unittest.TestCase):
             self.assertTrue(
                 (REPO_ROOT / relative).is_file(), f"scanned source missing: {relative}"
             )
+        for module in (
+            "dag", "load_store_name", "analysis", "axis_sources", "verify",
+            "tier2", "tier2_ordered", "grad", "fuse", "optimize", "span_merge",
+        ):
+            with self.subTest(module=module):
+                self.assertIn(f"crates/chelis-dag-core/src/{module}.rs", sources)
+                self.assertFalse((REPO_ROOT / f"crates/chelis-ir/src/{module}.rs").exists())
 
     def test_a_new_file_under_a_root_is_scanned_without_registration(self) -> None:
         relative = "crates/chelis-ir/src/runtime_representation_new_source_probe.rs"
@@ -636,12 +643,13 @@ class SourceUniverseTests(unittest.TestCase):
     def test_candidates_come_from_disk_not_the_git_index(self) -> None:
         # cargo compiles what is on disk, so an unstaged file is production
         # source, and a tracked file deleted from disk is not.
-        unstaged = "crates/chelis-ir/src/runtime_representation_unstaged_probe.rs"
-        deleted = "crates/chelis-ir/src/span_merge.rs"
-        with oracle.temporary_mutation(
-            REPO_ROOT / unstaged, lambda _: "pub fn unstaged() {}\n", creates_file=True
-        ):
-            self.assertIn(unstaged, oracle._inventory_candidates(REPO_ROOT))
+        for package in ("chelis-ir", "chelis-dag-core"):
+            unstaged = f"crates/{package}/src/runtime_representation_unstaged_probe.rs"
+            with oracle.temporary_mutation(
+                REPO_ROOT / unstaged, lambda _: "pub fn unstaged() {}\n", creates_file=True
+            ):
+                self.assertIn(unstaged, oracle._inventory_candidates(REPO_ROOT))
+        deleted = "crates/chelis-dag-core/src/span_merge.rs"
         with moved(REPO_ROOT / deleted, REPO_ROOT / "crates/chelis-departed-probe/span_merge.rs"):
             self.assertNotIn(deleted, oracle._inventory_candidates(REPO_ROOT))
 
@@ -660,6 +668,75 @@ class SourceUniverseTests(unittest.TestCase):
             "crates/chelis-runtime/include/chelis_runtime_views.h",
         ):
             self.assertIn(source, sources)
+
+
+class DagSourceRelocationTests(unittest.TestCase):
+    def test_canonical_sources_and_parsed_owners_pass(self) -> None:
+        oracle.validate_dag_source_relocations(REPO_ROOT)
+
+    def test_each_missing_empty_or_duplicate_destination_fails(self) -> None:
+        for old, canonical in oracle.DAG_SOURCE_RELOCATIONS:
+            with self.subTest(source=canonical, failure="missing"):
+                with moved(
+                    REPO_ROOT / canonical,
+                    REPO_ROOT / "crates/chelis-departed-probe" / Path(canonical).name,
+                ):
+                    with self.assertRaises(oracle.OracleFailure) as caught:
+                        oracle.validate_dag_source_relocations(REPO_ROOT)
+                    self.assertEqual(
+                        caught.exception.code, "source_relocation.missing_destination"
+                    )
+                    self.assertIn(canonical, caught.exception.details)
+            with self.subTest(source=canonical, failure="empty"):
+                with oracle.temporary_mutation(REPO_ROOT / canonical, lambda _: ""):
+                    with self.assertRaises(oracle.OracleFailure) as caught:
+                        oracle.validate_dag_source_relocations(REPO_ROOT)
+                    self.assertEqual(
+                        caught.exception.code, "source_relocation.empty_destination"
+                    )
+                    self.assertIn(canonical, caught.exception.details)
+            with self.subTest(source=canonical, failure="duplicate"):
+                source = (REPO_ROOT / canonical).read_text(encoding="utf-8")
+                with oracle.temporary_mutation(
+                    REPO_ROOT / old, lambda _: source, creates_file=True
+                ):
+                    with self.assertRaises(oracle.OracleFailure) as caught:
+                        oracle.validate_dag_source_relocations(REPO_ROOT)
+                    self.assertEqual(
+                        caught.exception.code, "source_relocation.duplicate_owner"
+                    )
+                    self.assertEqual(set(caught.exception.details), {old, canonical})
+
+    def test_nonempty_sources_without_their_parsed_owners_fail(self) -> None:
+        for canonical in (
+            "crates/chelis-dag-core/src/analysis.rs",
+            "crates/chelis-dag-core/src/dag.rs",
+            "crates/chelis-dag-core/src/tier2.rs",
+            "crates/chelis-dag-core/src/verify.rs",
+        ):
+            with self.subTest(source=canonical), oracle.temporary_mutation(
+                REPO_ROOT / canonical, lambda _: "pub struct RelocationOwnerProbe;\n"
+            ):
+                with self.assertRaises(oracle.OracleFailure) as caught:
+                    oracle.validate_dag_source_relocations(REPO_ROOT)
+                self.assertEqual(caught.exception.code, "source_relocation.missing_owner")
+                self.assertTrue(caught.exception.details)
+                for identity in caught.exception.details:
+                    self.assertEqual(identity.split("|", 2)[1], f"path={canonical}")
+
+    def test_a_real_retired_owner_restoration_fails(self) -> None:
+        with oracle.temporary_mutation(
+            REPO_ROOT / "crates/chelis-dag-core/src/dag.rs",
+            oracle.mutate_retired_capacity_normalizer,
+        ):
+            with self.assertRaises(oracle.OracleFailure) as caught:
+                oracle.validate_dag_source_relocations(REPO_ROOT)
+            self.assertEqual(caught.exception.code, "source_relocation.retired_owner")
+            self.assertIn(
+                "kind=normalized-key-arithmetic|path=crates/chelis-dag-core/src/dag.rs"
+                "|owner=DimExpr::normalized_key",
+                caught.exception.details,
+            )
 
 
 class BaselineTests(unittest.TestCase):
@@ -1159,7 +1236,7 @@ class BaselineTests(unittest.TestCase):
     def test_an_unclassified_hit_names_its_exact_identities(self) -> None:
         extra = oracle.InventoryRow(
             kind="direct-data-access",
-            path="crates/chelis-ir/src/dag.rs",
+            path="crates/chelis-dag-core/src/dag.rs",
             owner="runtime_representation_phase0_unit_probe",
             deletion_phase=3,
         )
@@ -1169,24 +1246,31 @@ class BaselineTests(unittest.TestCase):
         self.assertIn(extra.identity, caught.exception.details)
 
     def test_a_retired_foundation_identity_cannot_be_restored(self) -> None:
-        restored = oracle.InventoryRow(
-            kind="normalized-key-arithmetic",
-            path="crates/chelis-ir/src/dag.rs",
-            owner="DimExpr::normalized_key",
-            deletion_phase=1,
-        )
-        self.assertIn(
-            restored.identity,
-            {row["identity"] for row in self.baseline["foundation_rows"]},
-        )
-        self.assertNotIn(
-            restored.identity,
-            {row["identity"] for row in self.baseline["active_debt"]},
-        )
-        with self.assertRaises(oracle.OracleFailure) as caught:
-            oracle.validate_baseline(self.baseline, (*self.rows, restored))
-        self.assertEqual(caught.exception.code, oracle.UNCLASSIFIED_FAILURE.code)
-        self.assertIn(restored.identity, caught.exception.details)
+        for module, owner in (
+            ("dag", "DimExpr::normalized_key"),
+            ("dag", "normalize_dim_product::take_factor"),
+            ("dag", "push_product_atoms"),
+            ("tier2", "lower_conv2d"),
+        ):
+            with self.subTest(module=module, owner=owner):
+                restored = oracle.InventoryRow(
+                    kind="normalized-key-arithmetic",
+                    path=f"crates/chelis-dag-core/src/{module}.rs",
+                    owner=owner,
+                    deletion_phase=1,
+                )
+                self.assertIn(
+                    restored.identity,
+                    {row["identity"] for row in self.baseline["foundation_rows"]},
+                )
+                self.assertNotIn(
+                    restored.identity,
+                    {row["identity"] for row in self.baseline["active_debt"]},
+                )
+                with self.assertRaises(oracle.OracleFailure) as caught:
+                    oracle.validate_baseline(self.baseline, (*self.rows, restored))
+                self.assertEqual(caught.exception.code, oracle.UNCLASSIFIED_FAILURE.code)
+                self.assertIn(restored.identity, caught.exception.details)
 
     def test_only_explicit_exact_arithmetic_is_final_inside_the_capacity_owner(self) -> None:
         exact = oracle.InventoryRow(
@@ -1215,7 +1299,7 @@ class BaselineTests(unittest.TestCase):
         )
         sibling = oracle.InventoryRow(
             kind="normalized-key-arithmetic",
-            path="crates/chelis-ir/src/dag.rs",
+            path="crates/chelis-dag-core/src/dag.rs",
             owner="normalized_key",
             deletion_phase=1,
         )

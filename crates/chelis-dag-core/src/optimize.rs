@@ -1,10 +1,26 @@
 //! Basic DAG optimization passes.
 
+use alloc::format;
+use alloc::string::String;
+use alloc::vec;
+use alloc::vec::Vec;
+
+use crate::collections::HashMap;
+use chelis_numeric_core::dtype_semantics::{
+    WideBinaryFold, WideUnaryFold, fold_wide_binary, fold_wide_unary,
+};
 use chelis_unord::UnordMap;
 
 use crate::dag::{ComparisonKind, Dag, LogicalKind, NodeId, Owner, RiscOp};
 
-type CseKey = (Owner, String, Vec<NodeId>, Vec<NodeId>, Vec<NodeId>);
+type CseKey = (
+    Owner,
+    String,
+    Vec<NodeId>,
+    Vec<NodeId>,
+    Vec<NodeId>,
+    Option<NodeId>,
+);
 
 /// Constant folding: if a binary op has two Const inputs, evaluate it.
 ///
@@ -40,14 +56,6 @@ pub fn constant_fold(dag: &mut Dag) {
     // chelis#856), and a result that does not finalize at the node's dtype
     // declines (never bake a trap away nor in - the runtime evaluates the
     // unfolded graph and traps with its full diagnostic).
-    let wide_image = |value: &chelis_numeric_core::dtype_semantics::ScalarValue| -> Option<f64> {
-        if let Some(i) = value.as_i64_exact()
-            && (i as f64) as i128 != i as i128
-        {
-            return None;
-        }
-        Some(value.as_f64_lossy())
-    };
 
     for node in dag.nodes() {
         if claimed_producers[node.id.0] {
@@ -179,21 +187,14 @@ pub fn constant_fold(dag: &mut Dag) {
                     continue;
                 }
 
-                let (Some(lv), Some(rv)) = (wide_image(lval), wide_image(rval)) else {
-                    continue;
-                };
-                let result = match &node.op {
-                    RiscOp::Add => Some(lv + rv),
-                    RiscOp::Mul => Some(lv * rv),
+                let operation = match &node.op {
+                    RiscOp::Add => Some(WideBinaryFold::Add),
+                    RiscOp::Mul => Some(WideBinaryFold::Mul),
                     _ => None,
                 };
-                if let Some(val) = result
-                    && let Ok(sealed) = chelis_numeric_core::dtype_semantics::scalar_from_f64(
-                        "const",
-                        node.output_type.precision,
-                        val,
-                    )
-                {
+                if let Some(sealed) = operation.and_then(|operation| {
+                    fold_wide_binary(operation, *lval, *rval, node.output_type.precision)
+                }) {
                     let merge_spans = collect_operand_spans(node, &[l, r]);
                     replacements.push((node.id, sealed, merge_spans));
                 }
@@ -229,27 +230,31 @@ pub fn constant_fold(dag: &mut Dag) {
                 }
             } else if let Some(inp) = input
                 && let RiscOp::Const { value: inner } = &inp.op
-                && let Some(v) = wide_image(inner)
             {
-                let result = match &node.op {
-                    RiscOp::Logical(LogicalKind::Not) => {
-                        inner.as_bool_exact().map(|value| i64::from(!value) as f64)
-                    }
-                    RiscOp::Neg => Some(-v),
-                    RiscOp::Sqrt => Some(v.sqrt()),
-                    RiscOp::Abs => Some(v.abs()),
-                    RiscOp::Floor => Some(v.floor()),
-                    RiscOp::Ceil => Some(v.ceil()),
-                    RiscOp::Round => Some(v.round_ties_even()),
+                let operation = match &node.op {
+                    RiscOp::Neg => Some(WideUnaryFold::Neg),
+                    RiscOp::Sqrt => Some(WideUnaryFold::Sqrt),
+                    RiscOp::Abs => Some(WideUnaryFold::Abs),
+                    RiscOp::Floor => Some(WideUnaryFold::Floor),
+                    RiscOp::Ceil => Some(WideUnaryFold::Ceil),
+                    RiscOp::Round => Some(WideUnaryFold::Round),
                     _ => None,
                 };
-                if let Some(val) = result
-                    && let Ok(sealed) = chelis_numeric_core::dtype_semantics::scalar_from_f64(
-                        "const",
-                        node.output_type.precision,
-                        val,
-                    )
-                {
+                let folded = if matches!(node.op, RiscOp::Logical(LogicalKind::Not)) {
+                    inner.as_bool_exact().and_then(|value| {
+                        chelis_numeric_core::dtype_semantics::scalar_from_i64(
+                            "const",
+                            node.output_type.precision,
+                            i64::from(!value),
+                        )
+                        .ok()
+                    })
+                } else {
+                    operation.and_then(|operation| {
+                        fold_wide_unary(operation, *inner, node.output_type.precision)
+                    })
+                };
+                if let Some(sealed) = folded {
                     let merge_spans = collect_operand_spans(node, &[inp]);
                     replacements.push((node.id, sealed, merge_spans));
                 }
@@ -338,7 +343,7 @@ pub fn dead_code_eliminate_with_remap(dag: &Dag) -> (Dag, UnordMap<NodeId, NodeI
 
 /// Extra execution roots belong to an evaluator plan, not to the public
 /// value-root interface. Keep their dependencies without publishing outputs.
-pub(crate) fn dead_code_eliminate_with_retained(
+pub fn dead_code_eliminate_with_retained(
     dag: &Dag,
     retained: &[NodeId],
 ) -> (Dag, UnordMap<NodeId, NodeId>) {
@@ -491,8 +496,9 @@ fn dead_code_eliminate_impl(
                 node.output_type.clone(),
                 node.span_id.clone(),
             );
-            if let Some(reusable_input) = node.reusable_input
-                && let Some(&mapped_input) = id_map.get(&reusable_input.0)
+            if let Some(mapped_input) = node
+                .reusable_input
+                .and_then(|old| id_map.get(&old.0).copied())
             {
                 new_dag.set_reusable_input(new_id, mapped_input);
             }
@@ -564,7 +570,7 @@ pub fn common_subexpr_eliminate(dag: &Dag) -> Dag {
     let mut new_dag = Dag::new();
     new_dag.inherit_declarations(dag);
     let mut id_map: UnordMap<usize, NodeId> = UnordMap::new();
-    let mut seen: UnordMap<CseKey, NodeId> = UnordMap::new();
+    let mut seen: HashMap<CseKey, NodeId> = HashMap::new();
     let claimed_producers = crate::axis_sources::claimed_producers(dag);
 
     for node in dag.nodes() {
@@ -592,6 +598,9 @@ pub fn common_subexpr_eliminate(dag: &Dag) -> Dag {
             })
             .collect();
 
+        let reusable_input = node
+            .reusable_input
+            .and_then(|old| id_map.get(&old.0).copied());
         let op_key = format!("{:?}", node.op);
         // Nodes of two owners never merge: a parameter is its declaration and
         // its name, a node's declaration decides which selection runs it, and
@@ -604,6 +613,7 @@ pub fn common_subexpr_eliminate(dag: &Dag) -> Dag {
             remapped_inputs.clone(),
             remapped_shape_deps.clone(),
             remapped_result_claims.clone(),
+            reusable_input,
         );
 
         if !claimed_producers[node.id.0]
@@ -1006,28 +1016,28 @@ mod tests {
             // rather than the dtype, so both sides are integer.
             (
                 "shift_left",
-                RiscOp::Bitwise(chelis_types::bitwise::BitwiseKind::ShiftLeft),
+                RiscOp::Bitwise(chelis_numeric_core::bitwise::BitwiseKind::ShiftLeft),
                 2,
                 Prim::Int32,
                 true,
             ),
             (
                 "shift_right",
-                RiscOp::Bitwise(chelis_types::bitwise::BitwiseKind::ShiftRight),
+                RiscOp::Bitwise(chelis_numeric_core::bitwise::BitwiseKind::ShiftRight),
                 2,
                 Prim::Int32,
                 true,
             ),
             (
                 "bitand is not a shift",
-                RiscOp::Bitwise(chelis_types::bitwise::BitwiseKind::And),
+                RiscOp::Bitwise(chelis_numeric_core::bitwise::BitwiseKind::And),
                 2,
                 Prim::Int32,
                 false,
             ),
             (
                 "bitxor is not a shift",
-                RiscOp::Bitwise(chelis_types::bitwise::BitwiseKind::Xor),
+                RiscOp::Bitwise(chelis_numeric_core::bitwise::BitwiseKind::Xor),
                 2,
                 Prim::Int32,
                 false,
@@ -2009,85 +2019,6 @@ mod tests {
         let new_dag = dead_code_eliminate(&dag);
         // Store + its input const + second const + neg = 4 nodes all live.
         assert_eq!(new_dag.len(), 4);
-    }
-
-    #[test]
-    fn cse_keeps_each_key_operation_and_its_draw() {
-        // Two `key_from_seed` nodes over one seed produce equal bits, but
-        // merging them would hand one key to two draws, which the key rules
-        // reject (spec/10 section 3.2, V2): CSE keeps both key operations and
-        // both draws, and the two draws, as pure functions of equal keys,
-        // produce equal values.
-        use chelis_numeric_core::prim::Prim;
-        let mut dag = Dag::new();
-        let decl = dag.declare("test");
-        let template = dag.add_node(
-            decl,
-            RiscOp::synth_const(Prim::F32, 0.0),
-            vec![],
-            scalar_f32(),
-            None,
-        );
-        let seed = dag.add_node(
-            decl,
-            RiscOp::synth_const(Prim::Int64, 42.0),
-            vec![],
-            TensorType {
-                dims: vec![],
-                precision: Prim::Int64,
-            },
-            None,
-        );
-        let low = dag.add_node(
-            decl,
-            RiscOp::synth_const(Prim::F32, 2.0),
-            vec![],
-            scalar_f32(),
-            None,
-        );
-        let high = dag.add_node(
-            decl,
-            RiscOp::synth_const(Prim::F32, 5.0),
-            vec![],
-            scalar_f32(),
-            None,
-        );
-        for _ in 0..2 {
-            let key = dag.add_node(
-                decl,
-                RiscOp::KeyFromSeed,
-                vec![seed],
-                TensorType {
-                    dims: vec![],
-                    precision: Prim::Key,
-                },
-                None,
-            );
-            let draw = dag.add_node(
-                decl,
-                RiscOp::UniformLike,
-                vec![template, low, high, key],
-                scalar_f32(),
-                None,
-            );
-            dag.add_root(draw);
-        }
-        let optimized = common_subexpr_eliminate(&dag);
-        assert_eq!(crate::verify::verify(&optimized), Vec::<String>::new());
-        assert_eq!(
-            optimized
-                .nodes()
-                .iter()
-                .filter(|node| matches!(node.op, RiscOp::KeyFromSeed))
-                .count(),
-            2,
-            "equal key operations must not merge"
-        );
-        assert_eq!(optimized.roots().len(), 2);
-        assert_ne!(optimized.roots()[0], optimized.roots()[1]);
-        let values =
-            crate::eval::eval_tensor_roots_exact(&optimized, optimized.roots(), |_| None).unwrap();
-        assert_eq!(values[&optimized.roots()[0]], values[&optimized.roots()[1]]);
     }
 
     #[test]

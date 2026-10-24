@@ -1,8 +1,8 @@
-use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
+use chelis_dag_core::dag::{Dag, DimInfo, RiscOp, TensorType};
+use chelis_dag_core::fuse::fuse;
+use chelis_dag_core::grad::grad_dag_checked;
+use chelis_dag_core::{tier2, verify};
 use chelis_ir::eval::{TensorValue, eval_tensor};
-use chelis_ir::fuse::fuse;
-use chelis_ir::grad::grad_dag_checked;
-use chelis_ir::{tier2, verify};
 use chelis_numeric_core::dtype_semantics::{RawTensor, finalize_tensor};
 use chelis_numeric_core::prim::Prim;
 use chelis_unord::UnordMap;

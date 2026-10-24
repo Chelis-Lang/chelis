@@ -1411,13 +1411,16 @@ fn owner_byte_cost(unit: &Unit, owner: OwnerId) -> Result<super::LiveByteBound, 
     let mut elements = 1u64;
     for dim in &tensor.dims {
         let value = match dim {
-            crate::dag::DimInfo::Lit(value) | crate::dag::DimInfo::Named(_, Some(value)) => {
+            chelis_dag_core::dag::DimInfo::Lit(value)
+            | chelis_dag_core::dag::DimInfo::Named(_, Some(value)) => {
                 let Ok(value) = u64::try_from(*value) else {
                     return Ok(super::LiveByteBound::Unbounded);
                 };
                 value
             }
-            crate::dag::DimInfo::Named(_, None) => return Ok(super::LiveByteBound::Unknown),
+            chelis_dag_core::dag::DimInfo::Named(_, None) => {
+                return Ok(super::LiveByteBound::Unknown);
+            }
         };
         let Some(product) = elements.checked_mul(value) else {
             return Ok(super::LiveByteBound::Unbounded);

@@ -10379,7 +10379,7 @@ fn build_c_linreg_insert_singleton_bias_keeps_rank2_shape() {
 /// the generated C failed to compile with `error: 'd36' undeclared`.
 ///
 /// Since chelis#665 the C emitter declares every such name from its
-/// resolved extent ORIGIN (`chelis_ir::axis_sources::dim_extent_origins`)
+/// resolved extent ORIGIN (`chelis_dag_core::axis_sources::dim_extent_origins`)
 /// rather than from a search for a `Load` carrying a matching string, and a
 /// name that resolves to no origin is a typed receipt. The earlier repair,
 /// a sibling sweep in the occurrence walk that panicked on an unrecoverable

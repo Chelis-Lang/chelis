@@ -1,5 +1,5 @@
 //! Post-AD decomposition of retained activation identities.
-use crate::dag::{Dag, NodeId, RiscOp};
+use chelis_dag_core::dag::{Dag, NodeId, RiscOp};
 use chelis_unord::UnordMap;
 
 /// Recreate [05-OP-48]'s stable forward graph only after AD selected its rule.
@@ -19,7 +19,7 @@ pub fn decompose(dag: &Dag) -> Dag {
         let inputs = node.inputs.iter().map(|id| map[id]).collect::<Vec<_>>();
         let owner = node.owner.remap(&map);
         let result = if let RiscOp::Softmax { axis } = node.op {
-            crate::tier2::decompose_softmax(
+            chelis_dag_core::tier2::decompose_softmax(
                 owner,
                 &mut out,
                 inputs[0],

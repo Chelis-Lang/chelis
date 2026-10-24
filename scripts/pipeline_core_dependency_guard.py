@@ -17,7 +17,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 CORE_PACKAGE = "chelis-pipeline-core"
 CORE_MANIFEST = REPO_ROOT / "crates" / CORE_PACKAGE / "Cargo.toml"
 APPROVED_DIRECT_DEPENDENCIES = frozenset(
-    {"chelis-deep", "chelis-types", "chelis-effects", "chelis-ir", "chelis-unord"}
+    {"chelis-deep", "chelis-types", "chelis-effects", "chelis-ir", "chelis-unord", "chelis-dag-core"}
 )
 # chelis-abi is the leaf checked-metadata authority (it depends only on
 # chelis-vocab). chelis-ir's DAG evaluator admits each result's extents through

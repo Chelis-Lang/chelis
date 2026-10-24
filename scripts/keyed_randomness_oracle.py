@@ -295,7 +295,7 @@ def validate_junit(path: Path, expected: set[str]) -> set[str]:
 
 def check_retirement(root: Path) -> None:
     pattern = re.compile(r"\b(?:" + "|".join(RETIRED) + r")\b")
-    for package in ("chelis-ir", "chelis-compiler-api"):
+    for package in ("chelis-ir", "chelis-dag-core", "chelis-compiler-api"):
         paths = sorted((root / "crates" / package / "src").rglob("*.rs"))
         if not paths:
             raise OracleFailure(f"missing production sources: {package}")

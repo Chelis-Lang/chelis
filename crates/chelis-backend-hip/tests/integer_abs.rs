@@ -1,6 +1,6 @@
 //! Exact integer unary/Grad device emission and compiled kernel execution.
 mod support;
-use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
+use chelis_dag_core::dag::{Dag, DimInfo, RiscOp, TensorType};
 use chelis_numeric_core::prim::Prim;
 
 fn gradient_dag() -> Dag {
@@ -16,15 +16,15 @@ fn gradient_dag() -> Dag {
     let checked = chelis_types::check_linearity(&checked).expect("linearity");
     let mut dag =
         chelis_ir::host::lower_named_tensor_entry_dag(&checked, "main").expect("tensor entry");
-    chelis_ir::optimize::constant_fold(&mut dag);
-    chelis_ir::optimize::dead_code_eliminate(&dag)
+    chelis_dag_core::optimize::constant_fold(&mut dag);
+    chelis_dag_core::optimize::dead_code_eliminate(&dag)
 }
 
 #[test]
 fn lowered_integer_abs_gradient_emits_checked_hip_kernel_and_typed_cast() {
     let dag = gradient_dag();
-    let dag = chelis_ir::fuse::fuse(&chelis_ir::specialize::specialize_for_blas(&dag));
-    assert!(!dag.nodes().iter().any(|node| matches!(&node.op, RiscOp::FusedElem { ops } if ops.iter().any(|step| step.op == chelis_ir::dag::FusedStepOp::Abs))));
+    let dag = chelis_dag_core::fuse::fuse(&chelis_ir::specialize::specialize_for_blas(&dag));
+    assert!(!dag.nodes().iter().any(|node| matches!(&node.op, RiscOp::FusedElem { ops } if ops.iter().any(|step| step.op == chelis_dag_core::dag::FusedStepOp::Abs))));
     let result = support::codegen_hip(&dag, "integer_gradient").expect("typed gradient emission");
     assert!(
         result

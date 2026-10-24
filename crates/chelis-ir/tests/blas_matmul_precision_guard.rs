@@ -9,8 +9,8 @@
 //! dispatch lands) breaks the test loudly rather than silently
 //! reverting the guard.
 
-use chelis_ir::dag::{Dag, DimExpr, DimInfo, RiscOp, TensorType};
-use chelis_ir::verify;
+use chelis_dag_core::dag::{Dag, DimExpr, DimInfo, RiscOp, TensorType};
+use chelis_dag_core::verify;
 use chelis_numeric_core::prim::Prim;
 
 fn matrix(rows: usize, cols: usize, prec: Prim) -> TensorType {

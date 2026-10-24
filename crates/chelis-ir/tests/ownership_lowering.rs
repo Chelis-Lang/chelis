@@ -7,7 +7,9 @@
 
 use std::collections::BTreeSet;
 
+use chelis_dag_core::{Dag, DimInfo, RiscOp, TensorType};
 use chelis_effects::realizability::{compute_root_manifest, infer_realizability};
+use chelis_ir::ConcreteHostType;
 use chelis_ir::host::{
     ConcreteHostProgram, HostExpr, HostExprKind, HostFunctionOrigin,
     try_lower_compiled_program_with_manifest,
@@ -17,7 +19,6 @@ use chelis_ir::ownership::{
     VerifiedHostOperation, VerifiedHostProgram, VerifiedHostTerminator, VerifiedOwnershipUse,
     lower_dag_ownership, lower_host_ownership, verify_ownership,
 };
-use chelis_ir::{ConcreteHostType, Dag, DimInfo, RiscOp, TensorType};
 use chelis_numeric_core::prim::Prim;
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str as surf_parse;

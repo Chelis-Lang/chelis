@@ -27,7 +27,7 @@
 //! See `docs/archive/investigations/implicit_copy_fanout_v3_diagnosis.md` for
 //! the diagnosis and chosen fix sites.
 
-use chelis_ir::dag::Dag;
+use chelis_dag_core::dag::Dag;
 use chelis_ir::lower::try_lower_program;
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str as surf_parse;

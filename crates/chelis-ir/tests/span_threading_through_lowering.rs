@@ -19,8 +19,8 @@
 
 use std::collections::BTreeSet;
 
+use chelis_dag_core::dag::Dag;
 use chelis_deep::Expr;
-use chelis_ir::dag::Dag;
 use chelis_ir::lower_program;
 use chelis_types::{check_ir_program, check_linearity};
 
@@ -326,7 +326,7 @@ fn atom_const_inherits_parent_span() {
     for node in dag.nodes() {
         if matches!(
             node.op,
-            chelis_ir::dag::RiscOp::Const { .. } | chelis_ir::dag::RiscOp::Store { .. }
+            chelis_dag_core::dag::RiscOp::Const { .. } | chelis_dag_core::dag::RiscOp::Store { .. }
         ) && node.span_id.as_deref() == Some("atom_lit")
         {
             found_atom_span = true;
@@ -408,7 +408,7 @@ fn var_ref_to_let_bound_name_records_span_on_cached_node() {
     // collapsed onto the same node).
     let mut found_collapsed_node = false;
     for node in dag.nodes() {
-        if matches!(node.op, chelis_ir::dag::RiscOp::Const { .. })
+        if matches!(node.op, chelis_dag_core::dag::RiscOp::Const { .. })
             && node.span_id.as_deref() == Some("lit_a")
             && node.merged_spans.iter().any(|s| s == "var_a_use")
         {
@@ -452,7 +452,7 @@ fn var_ref_without_span_does_not_fabricate_one() {
 
     let mut saw_lit_a_node = false;
     for node in dag.nodes() {
-        if matches!(node.op, chelis_ir::dag::RiscOp::Const { .. })
+        if matches!(node.op, chelis_dag_core::dag::RiscOp::Const { .. })
             && node.span_id.as_deref() == Some("lit_a")
         {
             saw_lit_a_node = true;

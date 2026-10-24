@@ -886,6 +886,36 @@ machine-checked: every `test <name>` / `canary <name>` token in a
 status cell must name an existing test function and every row must
 carry an issue link, or the binding test is red.
 
+### Portable graph source ownership
+
+The source-policy migration uses accepted base
+`32c28feed569ec0cde8463fe7cd1095f78bb1a68` for each original address.
+The table records exact relocations, not site fixes or new allowances.
+All addresses below are relative to the repository root.
+
+| Pattern | Accepted source and count | Current source and count |
+|---|---|---|
+| `unwrap-or-default` | `crates/chelis-ir/src/lower.rs`: 5 | `crates/chelis-ir/src/lower.rs`: 4, `crates/chelis-dag-core/src/ownership.rs`: 1 |
+| `unwrap-or-numeric-literal` | `crates/chelis-ir/src/dag.rs`: 0 | `crates/chelis-dag-core/src/dag.rs`: 0 |
+| `rust-format-narrowing` | `crates/chelis-ir/src/grad.rs`: 2 | `crates/chelis-ir/tests/dag_grad_host.rs`: 2 |
+
+The first row retains all five matches from the accepted source.
+The match at old line 1328 moves to `ownership.rs` line 47.
+The other four matches remain in `lower.rs`.
+Old lines 10765, 25441, 32880, and 32936 map to lines 10574, 25268, 32709, and 32765.
+The graph row retains the zero allowance and its chelis#665 debt history.
+The two format matches share old line 8238 and new host line 3513.
+
+The tripwire scans every Rust source under `crates/chelis-dag-core/src/`.
+The three scoped `UnwrapOr*` classes include that complete production tree.
+The exact moved host file retains all seven applicable classes from its former source.
+No other integration-test source enters this frontier.
+The formatter oracle uses the same exact host address.
+
+These moves retain the census row 8 history, frozen allowances, diagnostics, and mutation controls.
+They change no primitive rule, runtime-representation foundation row, active debt, or digest.
+
+
 ## C6. Phase 2 ownership and consumer contract
 
 This inventory is normative. A consumer may be removed only when the

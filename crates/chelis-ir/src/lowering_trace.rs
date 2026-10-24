@@ -9,9 +9,9 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
-use crate::dag::{Dag, NodeId, TensorType};
-use crate::grad::GradResult;
 use crate::lower::{LowerDiagnostic, LoweredLibrary};
+use chelis_dag_core::dag::{Dag, NodeId, TensorType};
+use chelis_dag_core::grad::GradResult;
 use chelis_types::CheckedProgram;
 use chelis_unord::UnordMap;
 
@@ -319,7 +319,7 @@ impl Collector {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dag::{DimInfo, RiscOp, TensorType};
+    use chelis_dag_core::dag::{DimInfo, RiscOp, TensorType};
     use chelis_numeric_core::prim::Prim;
 
     #[test]
@@ -359,7 +359,7 @@ mod tests {
         dag.add_shape_dep(output, input);
         dag.node_mut(output).unwrap().merged_spans = vec!["merged-span".into()];
         dag.add_root(output);
-        let result = crate::grad::grad_dag_checked(&dag, output, &[input]).unwrap();
+        let result = chelis_dag_core::grad::grad_dag_checked(&dag, output, &[input]).unwrap();
         let collector = Collector::new();
         collector.gradient(&dag, output, &[input], &result);
         let captured = &collector.state.borrow().gradients[0];

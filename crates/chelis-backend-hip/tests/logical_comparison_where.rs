@@ -2,14 +2,15 @@
 
 mod support;
 
-use chelis_ir::dag::{ComparisonKind, Dag, DimInfo, LogicalKind, RiscOp, RtDim, TensorType};
+use chelis_dag_core::dag::{ComparisonKind, Dag, DimInfo, LogicalKind, RiscOp, RtDim, TensorType};
 use chelis_numeric_core::prim::Prim;
 use support::codegen_hip;
 
 #[test]
 fn generated_hip_bitwise_math_matches_exact_width_reference_on_cpu() {
+    use chelis_numeric_core::bitwise::BitwiseKind;
     use chelis_numeric_core::dtype_semantics::scalar_from_i64;
-    use chelis_types::{BitwiseKind, bitwise_scalar};
+    use chelis_types::bitwise_scalar;
     use std::process::Command;
 
     for (prim, signed, width, minimum, min_literal) in [
@@ -136,11 +137,11 @@ fn vector(precision: Prim) -> TensorType {
 #[test]
 fn hip_bitwise_kernels_preserve_exact_integer_width_and_shift_traps() {
     for kind in [
-        chelis_types::BitwiseKind::And,
-        chelis_types::BitwiseKind::Or,
-        chelis_types::BitwiseKind::Xor,
-        chelis_types::BitwiseKind::ShiftLeft,
-        chelis_types::BitwiseKind::ShiftRight,
+        chelis_numeric_core::bitwise::BitwiseKind::And,
+        chelis_numeric_core::bitwise::BitwiseKind::Or,
+        chelis_numeric_core::bitwise::BitwiseKind::Xor,
+        chelis_numeric_core::bitwise::BitwiseKind::ShiftLeft,
+        chelis_numeric_core::bitwise::BitwiseKind::ShiftRight,
     ] {
         for prim in [Prim::Int8, Prim::Int16, Prim::Int32, Prim::Int64] {
             let mut dag = Dag::new();

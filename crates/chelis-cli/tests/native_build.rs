@@ -1405,16 +1405,16 @@ enum NanAtomCoverage {
 /// disposition is checked against the atom, and its NaN finalization is read
 /// from `fp_env::risc_nan_finalization`, never restated.
 fn nan_atom_coverage(
-    atom: chelis_ir::dag::RiscAtomIdentity,
-) -> (chelis_ir::dag::RiscOp, NanAtomCoverage) {
+    atom: chelis_dag_core::dag::RiscAtomIdentity,
+) -> (chelis_dag_core::dag::RiscOp, NanAtomCoverage) {
     use NanAtomCoverage::{BuiltinInventory, CastRows, ChildGraph, NoFloatValue, Rows};
-    use chelis_ir::dag::{
+    use chelis_dag_core::dag::{
         ComparisonKind, Dag, DimExpr, ExtremaKind, ExtremaOperand, KeyBranch, LogicalKind, NodeId,
         ReduceWindowKind, RiscAtomIdentity as Id, RiscOp, RtDim, RuntimeRecurrence,
         RuntimeRecurrenceBackward, RuntimeRecurrenceSource, UniformBound,
     };
+    use chelis_numeric_core::bitwise::BitwiseKind;
     use chelis_numeric_core::prim::Prim;
-    use chelis_types::BitwiseKind;
     let window = |reducer| RiscOp::ReduceWindow {
         reducer,
         window_shape: vec![2],
@@ -1451,7 +1451,7 @@ fn nan_atom_coverage(
         Id::Cumsum => (
             RiscOp::Cumsum {
                 axis: 0,
-                direction: chelis_ir::dag::ScanDirection::Increasing,
+                direction: chelis_dag_core::dag::ScanDirection::Increasing,
             },
             Rows,
         ),
@@ -1671,10 +1671,10 @@ fn nan_atom_coverage(
 /// that no addition touches. Widths an atom does not build at in
 /// `chelis build` are skipped with the reason beside them.
 fn nan_atom_rows(
-    atom: chelis_ir::dag::RiscAtomIdentity,
+    atom: chelis_dag_core::dag::RiscAtomIdentity,
     w: &'static NanWidth,
 ) -> Vec<NanKernelRow> {
-    use chelis_ir::dag::RiscAtomIdentity as Id;
+    use chelis_dag_core::dag::RiscAtomIdentity as Id;
     let name = w.name;
     let neg_inf = w.inf | w.sign();
     let (p, n, s) = (w.payload, w.negative, w.signaling);
@@ -1983,7 +1983,7 @@ fn nan_atom_rows(
 /// their rows are listed by name.
 #[test]
 fn every_reduction_and_vendor_kernel_finalizes_nan_like_eval_through_the_static_library_abi() {
-    use chelis_ir::dag::{RiscAtomDisposition, RiscAtomIdentity};
+    use chelis_dag_core::dag::{RiscAtomDisposition, RiscAtomIdentity};
     let inventory = chelis_backend_c::host_builtin_nan_inventory();
     let mut rows = Vec::new();
     for &atom in RiscAtomIdentity::ALL {

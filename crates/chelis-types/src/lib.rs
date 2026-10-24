@@ -51,7 +51,7 @@ mod builtins;
 #[cfg(test)]
 mod source_arch;
 
-pub use bitwise::{BitwiseError, BitwiseKind, bitwise_scalar, bitwise_tensor};
+pub use bitwise::{BitwiseError, bitwise_scalar, bitwise_tensor};
 pub use builtins::{
     AdmittedBuiltin, AxisArgumentLayout, BUILTIN_NAMES, BUILTINS, BuiltinCapabilityDecl,
     BuiltinDecl, BuiltinInferenceRule, BuiltinSemanticDomain, BuiltinSiblingCaseDecl,

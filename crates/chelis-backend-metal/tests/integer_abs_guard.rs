@@ -1,5 +1,5 @@
 mod support;
-use chelis_ir::dag::{Dag, DimInfo, FusedInput, FusedStep, FusedStepOp, RiscOp, TensorType};
+use chelis_dag_core::dag::{Dag, DimInfo, FusedInput, FusedStep, FusedStepOp, RiscOp, TensorType};
 use chelis_numeric_core::prim::Prim;
 use support::try_codegen_metal;
 
@@ -136,8 +136,8 @@ fn lower_gradient_source(source: &str) -> Dag {
     let checked = chelis_types::check_linearity(&checked).expect("linearity");
     let mut dag =
         chelis_ir::host::lower_named_tensor_entry_dag(&checked, "main").expect("tensor entry");
-    chelis_ir::optimize::constant_fold(&mut dag);
-    chelis_ir::optimize::dead_code_eliminate(&dag)
+    chelis_dag_core::optimize::constant_fold(&mut dag);
+    chelis_dag_core::optimize::dead_code_eliminate(&dag)
 }
 
 #[cfg(target_os = "macos")]
@@ -522,7 +522,7 @@ fn constant_operation(shape: &[usize], value: i64, op: RiscOp) -> Dag {
         RiscOp::Cast { new_precision } => output_type.precision = *new_precision,
         RiscOp::Expand {
             axis,
-            size: chelis_ir::dag::RtDim::Lit(size),
+            size: chelis_dag_core::dag::RtDim::Lit(size),
         } => {
             output_type.dims.insert(*axis, DimInfo::Lit(*size));
         }
@@ -543,7 +543,7 @@ fn empty_pointwise_dispatches_are_omitted_without_omitting_output_allocations() 
         },
         RiscOp::Expand {
             axis: 0,
-            size: chelis_ir::dag::RtDim::Lit(2),
+            size: chelis_dag_core::dag::RtDim::Lit(2),
         },
     ] {
         let empty =
@@ -636,7 +636,7 @@ fn metal_empty_integer_float_cast_preserves_shape_and_nonempty_conversion_execut
 fn metal_empty_expand_preserves_inserted_axis_and_nonempty_replication_executes() {
     let op = RiscOp::Expand {
         axis: 0,
-        size: chelis_ir::dag::RtDim::Lit(2),
+        size: chelis_dag_core::dag::RtDim::Lit(2),
     };
     assert_metal_bytes(&constant_operation(&[0], 1, op.clone()), &[]);
     // A zero inserted axis also produces empty work from a nonempty source.
@@ -646,7 +646,7 @@ fn metal_empty_expand_preserves_inserted_axis_and_nonempty_replication_executes(
             1,
             RiscOp::Expand {
                 axis: 1,
-                size: chelis_ir::dag::RtDim::Lit(0),
+                size: chelis_dag_core::dag::RtDim::Lit(0),
             },
         ),
         &[],

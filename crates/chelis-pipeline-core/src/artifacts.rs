@@ -2,9 +2,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::sync::OnceLock;
 
+use chelis_dag_core::Dag;
+use chelis_dag_core::dag::NodeId;
 use chelis_deep::Expr as DeepExpr;
-use chelis_ir::Dag;
-use chelis_ir::dag::NodeId;
 use chelis_ir::lower::LowerDiagnostic;
 use chelis_types::{CheckedProgram, FitnessReport, InferResult, TypeEnv};
 
@@ -350,7 +350,7 @@ impl ForwardNodeIndex {
     pub(crate) fn from_named_roots(named_roots: &NamedRoots, dag: &Dag) -> Self {
         let mut nodes = named_roots.0.clone();
         for node in dag.nodes() {
-            if let chelis_ir::dag::RiscOp::Load { name } = &node.op {
+            if let chelis_dag_core::dag::RiscOp::Load { name } = &node.op {
                 nodes.entry(IrName::new(name.as_str())).or_insert(node.id);
             }
         }

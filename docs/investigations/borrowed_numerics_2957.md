@@ -51,7 +51,7 @@ independently per op.
 - Eval: Rust `f32::exp` and friends in `crates/chelis-types/src/dtype_semantics.rs`;
   f64-then-narrow in the host softmax
   (`crates/chelis-compiler-api/src/runtime/host_ops.rs`). The f64 constant folder in
-  `crates/chelis-ir/src/optimize.rs` has no production caller, only tests.
+  `crates/chelis-dag-core/src/optimize.rs` has no production caller, only tests.
 - C: libm names in `crates/chelis-backend-c/src/host_emit.rs` and `emit.rs`; vForce
   (`vforce_func`) and Sleef (`sleef_macro`, `simd_step_expr`) routes selected by
   `MathLib::detect()` in `crates/chelis-backend-c/src/lib.rs`.
@@ -59,7 +59,7 @@ independently per op.
   with its own copy of the Abramowitz-Stegun `erf`.
 - Metal and HIP: device built-ins (MSL fast by default; ROCm ocml).
 
-The RISC DAG expands compounds once (`crates/chelis-ir/src/tier2.rs`), so the C tensor
+The RISC DAG expands compounds once (`crates/chelis-dag-core/src/tier2.rs`), so the C tensor
 path, the IR evaluator and the GPU backends share one composition and differ only in the
 leaves. The host-scalar path re-implements the activations by hand in
 `dtype_semantics.rs` and `host_emit.rs`. The only definition consumed identically by both

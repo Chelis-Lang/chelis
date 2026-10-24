@@ -67,7 +67,7 @@ BASELINE_PATH = REPO_ROOT / "spec/design/runtime_representation_phase0_inventory
 # design amendment when the finished foundation or a mutation binding changes.
 # Release reproducers, hardware probes, counts, and ordinary configuration are
 # deliberately outside this digest.
-FREEZE_SHA256 = "18641a6b120ec86ea788314f9261c73fdea401165049343961ca64f1e1a12670"
+FREEZE_SHA256 = "5cffc9354ead58a3d2b79e7e6435123c971a712168b5ec9c813cd715ed40f5ea"
 PHASE0_COMMAND = (
     "uv run --managed-python --python 3.11 --no-project python "
     "scripts/runtime_representation_oracle.py --phase 0"
@@ -84,6 +84,8 @@ INVENTORY_ROOTS = (
     "crates/chelis-vocab/build.rs",
     "crates/chelis-ir/src/**/*.rs",
     "crates/chelis-ir/build.rs",
+    "crates/chelis-dag-core/src/**/*.rs",
+    "crates/chelis-dag-core/build.rs",
     "crates/chelis-python/src/**/*.rs",
     "crates/chelis-python/build.rs",
     "crates/chelis-backend-*/src/**/*.rs",
@@ -92,6 +94,21 @@ INVENTORY_ROOTS = (
     # A build script is compiled by cargo like any other source and can carry
     # a seam; a root that cannot see it is a closure hole.
     "crates/chelis-backend-*/build.rs",
+)
+
+# These exact source moves grant no representation exception.
+DAG_SOURCE_RELOCATIONS = (
+    ("crates/chelis-ir/src/dag.rs", "crates/chelis-dag-core/src/dag.rs"),
+    ("crates/chelis-ir/src/load_store_name.rs", "crates/chelis-dag-core/src/load_store_name.rs"),
+    ("crates/chelis-ir/src/analysis.rs", "crates/chelis-dag-core/src/analysis.rs"),
+    ("crates/chelis-ir/src/axis_sources.rs", "crates/chelis-dag-core/src/axis_sources.rs"),
+    ("crates/chelis-ir/src/verify.rs", "crates/chelis-dag-core/src/verify.rs"),
+    ("crates/chelis-ir/src/tier2.rs", "crates/chelis-dag-core/src/tier2.rs"),
+    ("crates/chelis-ir/src/tier2_ordered.rs", "crates/chelis-dag-core/src/tier2_ordered.rs"),
+    ("crates/chelis-ir/src/grad.rs", "crates/chelis-dag-core/src/grad.rs"),
+    ("crates/chelis-ir/src/fuse.rs", "crates/chelis-dag-core/src/fuse.rs"),
+    ("crates/chelis-ir/src/optimize.rs", "crates/chelis-dag-core/src/optimize.rs"),
+    ("crates/chelis-ir/src/span_merge.rs", "crates/chelis-dag-core/src/span_merge.rs"),
 )
 
 # Which phase deletes each seam class, from the design's Part III phase map.
@@ -1191,6 +1208,10 @@ def _coverage_manifest_from_configuration(
                     "until it is retired"
                 ),
             },
+            "source_relocations": [
+                {"old_path": old, "canonical_path": canonical}
+                for old, canonical in DAG_SOURCE_RELOCATIONS
+            ],
             "identity": "kind|path|owner, where owner is the seam's enclosing declaration",
             "expected_success": "every hit is exact active debt from the frozen foundation",
             "owner_module_final_forms": _owner_module_final_forms_manifest(),
@@ -1628,8 +1649,58 @@ def validate_baseline(
             )
 
 
+def validate_dag_source_relocations(root: Path) -> tuple[InventoryRow, ...]:
+    """Check exact source moves and their real parsed representation owners."""
+
+    for old, canonical in DAG_SOURCE_RELOCATIONS:
+        if not (root / canonical).is_file():
+            raise OracleFailure(
+                f"missing canonical DAG source: {canonical}",
+                code="source_relocation.missing_destination",
+                details=(canonical,),
+            )
+        if (root / old).exists():
+            raise OracleFailure(
+                f"obsolete DAG source duplicates its canonical owner: {old}, {canonical}",
+                code="source_relocation.duplicate_owner",
+                details=(old, canonical),
+            )
+        if not (root / canonical).read_text(encoding="utf-8").strip():
+            raise OracleFailure(
+                f"empty canonical DAG source: {canonical}",
+                code="source_relocation.empty_destination",
+                details=(canonical,),
+            )
+
+    baseline = load_baseline()
+    destination_fields = {f"path={canonical}" for _, canonical in DAG_SOURCE_RELOCATIONS}
+    expected = {
+        str(row["identity"])
+        for row in baseline["foundation_rows"]
+        if str(row["identity"]).split("|", 2)[1] in destination_fields
+    }
+    active = {str(row["identity"]) for row in baseline["active_debt"]} & expected
+    rows = inventory_rows(root)
+    observed = {row.identity for row in rows}
+    missing = sorted(active - observed)
+    if missing:
+        raise OracleFailure(
+            "missing canonical DAG representation owner: " + ", ".join(missing),
+            code="source_relocation.missing_owner",
+            details=tuple(missing),
+        )
+    restored = sorted((expected - active) & observed)
+    if restored:
+        raise OracleFailure(
+            "retired DAG representation owner returned: " + ", ".join(restored),
+            code="source_relocation.retired_owner",
+            details=tuple(restored),
+        )
+    return rows
+
+
 def validate_phase0_inventory() -> None:
-    validate_baseline(load_baseline(), inventory_rows(REPO_ROOT))
+    validate_baseline(load_baseline(), validate_dag_source_relocations(REPO_ROOT))
 
 
 # ---------------------------------------------------------------------------
@@ -2274,8 +2345,8 @@ def phase0_mutation_probes() -> tuple[MutationProbe, ...]:
         _probe("fixed-rank-metadata", "crates/chelis-python/src/lib.rs", mutate_fixed_rank_metadata),
         _probe("load-store-template", "crates/chelis-backend-c/src/host_emit.rs", mutate_load_store_template),
         _probe("narrow-metadata", "crates/chelis-python/src/lib.rs", mutate_narrow_metadata),
-        _probe("normalized-key-arithmetic", "crates/chelis-ir/src/dag.rs", mutate_normalized_key_arithmetic),
-        _probe("normalized-key-arithmetic", "crates/chelis-ir/src/dag.rs", mutate_retired_capacity_normalizer,
+        _probe("normalized-key-arithmetic", "crates/chelis-dag-core/src/dag.rs", mutate_normalized_key_arithmetic),
+        _probe("normalized-key-arithmetic", "crates/chelis-dag-core/src/dag.rs", mutate_retired_capacity_normalizer,
                expected_owners=("DimExpr::normalized_key",)),
         _probe(
             "saturating-capacity-fold",
@@ -2434,7 +2505,7 @@ def phase0_mutation_probes() -> tuple[MutationProbe, ...]:
         ),
         _probe(
             "rust-path-module",
-            "crates/chelis-ir/src/dag.rs",
+            "crates/chelis-dag-core/src/dag.rs",
             mutate_rust_path_module,
             SOURCE_REJECTED_FAILURE,
         ),

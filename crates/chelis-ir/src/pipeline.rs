@@ -5,9 +5,9 @@
 //! packages that ordering so callers do not accidentally differentiate a fused
 //! DAG, which `grad_dag` intentionally rejects.
 
-use crate::dag::{Dag, NodeId};
-use crate::fuse::fuse_with_remap;
-use crate::grad::{AdError, GradResult, grad_dag, grad_dag_checked};
+use chelis_dag_core::dag::{Dag, NodeId};
+use chelis_dag_core::fuse::fuse_with_remap;
+use chelis_dag_core::grad::{AdError, GradResult, grad_dag, grad_dag_checked};
 
 /// Differentiate the unfused DAG, then fuse the combined forward+backward DAG.
 ///
@@ -77,8 +77,8 @@ fn fuse_grad_result(grad_result: GradResult) -> GradResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dag::{DimInfo, RiscOp, TensorType};
     use crate::eval::{TensorValue, eval_tensor_roots_with_strict};
+    use chelis_dag_core::dag::{DimInfo, RiscOp, TensorType};
     use chelis_numeric_core::prim::Prim;
     use chelis_unord::UnordMap;
 
@@ -203,7 +203,7 @@ mod tests {
         );
         dag.add_root(sum);
 
-        let fused_forward = crate::fuse::fuse(&dag);
+        let fused_forward = chelis_dag_core::fuse::fuse(&dag);
         let fused_output = *fused_forward
             .roots()
             .first()

@@ -23,8 +23,8 @@ use std::fs;
 use std::process::Command;
 
 use chelis_backend_c::toolchain::{CodegenRequirements, strict_reference_toolchain};
-use chelis_ir::dag::{Dag, DimInfo, NodeId, RiscOp, RtDim, TensorType};
-use chelis_ir::fuse::fuse;
+use chelis_dag_core::dag::{Dag, DimInfo, NodeId, RiscOp, RtDim, TensorType};
+use chelis_dag_core::fuse::fuse;
 use chelis_numeric_core::prim::Prim;
 
 /// The #2957 witnesses that are leaves of a C emission route: inputs where a

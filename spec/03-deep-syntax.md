@@ -287,7 +287,7 @@ that reach the IR through programmatic DAG construction without going
 through the parser:
 
 - `RiscOp::Load { name }` and `RiscOp::Store { name }` use the
-  validating newtype `chelis_ir::LoadStoreName`. Its constructor enforces
+  validating newtype `chelis_dag_core::LoadStoreName`. Its constructor enforces
   the Deep parser's identifier grammar (`is_ident_start` /
   `is_ident_continue` from `crates/chelis-deep/src/lexer.rs`) extended
   with `.` to admit the synthesized tuple-flatten names (`foo.0`,

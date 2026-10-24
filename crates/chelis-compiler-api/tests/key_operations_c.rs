@@ -5,7 +5,9 @@
 //! §1.1.3's HIP `key` cell against the HIP build.
 mod ownership_support;
 
-use chelis_ir::dag::{Dag, DimInfo, KeyBranch, NodeId, RiscOp, RtDim, TensorType, UniformBound};
+use chelis_dag_core::dag::{
+    Dag, DimInfo, KeyBranch, NodeId, RiscOp, RtDim, TensorType, UniformBound,
+};
 use chelis_ir::eval::{TensorValue, eval_tensor_roots_exact};
 use chelis_numeric_core::dtype_semantics::{RandomKey, scalar_from_i64};
 use chelis_numeric_core::dtype_semantics::{
@@ -98,7 +100,7 @@ fn ty(dims: &[usize], prim: Prim) -> TensorType {
 /// Some(active))` for a node under the activation `active`.
 fn node(
     dag: &mut Dag,
-    owner: impl Into<chelis_ir::dag::Owner>,
+    owner: impl Into<chelis_dag_core::dag::Owner>,
     op: RiscOp,
     inputs: Vec<NodeId>,
     dims: &[usize],
@@ -107,7 +109,7 @@ fn node(
     dag.add_node(owner, op, inputs, ty(dims, prim), None)
 }
 
-fn i64_const(dag: &mut Dag, decl: chelis_ir::dag::DeclId, value: i64) -> NodeId {
+fn i64_const(dag: &mut Dag, decl: chelis_dag_core::dag::DeclId, value: i64) -> NodeId {
     node(
         dag,
         decl,
@@ -120,7 +122,12 @@ fn i64_const(dag: &mut Dag, decl: chelis_ir::dag::DeclId, value: i64) -> NodeId 
     )
 }
 
-fn float_const(dag: &mut Dag, decl: chelis_ir::dag::DeclId, prim: Prim, value: f64) -> NodeId {
+fn float_const(
+    dag: &mut Dag,
+    decl: chelis_dag_core::dag::DeclId,
+    prim: Prim,
+    value: f64,
+) -> NodeId {
     node(
         dag,
         decl,
@@ -133,7 +140,7 @@ fn float_const(dag: &mut Dag, decl: chelis_ir::dag::DeclId, prim: Prim, value: f
 
 fn load(
     dag: &mut Dag,
-    decl: chelis_ir::dag::DeclId,
+    decl: chelis_dag_core::dag::DeclId,
     name: &str,
     dims: &[usize],
     prim: Prim,
@@ -153,7 +160,7 @@ struct Chain {
     g: NodeId,
 }
 
-fn build_chain(dag: &mut Dag, decl: chelis_ir::dag::DeclId) -> Chain {
+fn build_chain(dag: &mut Dag, decl: chelis_dag_core::dag::DeclId) -> Chain {
     let seed = i64_const(dag, decl, -3);
     let root = node(dag, decl, RiscOp::KeyFromSeed, vec![seed], &[], Prim::Key);
     let left = node(
@@ -378,7 +385,7 @@ fn run_c_failure(dag: Dag, inputs: &[(&str, Input)]) -> String {
 }
 
 fn run_eval(dag: &Dag, inputs: &[(&str, Input)]) -> Result<Vec<Vec<u64>>, String> {
-    assert_eq!(chelis_ir::verify::verify(dag), Vec::<String>::new());
+    assert_eq!(chelis_dag_core::verify::verify(dag), Vec::<String>::new());
     let values = inputs
         .iter()
         .map(|(name, input)| {
@@ -440,12 +447,12 @@ fn a_draw_and_a_fold_run_under_their_owners_activation_in_c_and_eval() {
     let not_c = node(
         &mut dag,
         decl,
-        RiscOp::Logical(chelis_ir::dag::LogicalKind::Not),
+        RiscOp::Logical(chelis_dag_core::dag::LogicalKind::Not),
         vec![c],
         &[],
         Prim::Bool,
     );
-    let under = |active| chelis_ir::dag::Owner::new(decl, Some(active));
+    let under = |active| chelis_dag_core::dag::Owner::new(decl, Some(active));
     let three = i64_const(&mut dag, decl, 3);
     let folded = node(
         &mut dag,
@@ -600,7 +607,7 @@ fn per_row_controls_activations_and_bound_adjoints_agree_in_c_and_eval() {
         let active = load(&mut dag, decl, "active", &[3], Prim::Bool);
         let dropped = node(
             &mut dag,
-            chelis_ir::dag::Owner::new(decl, Some(active)),
+            chelis_dag_core::dag::Owner::new(decl, Some(active)),
             RiscOp::Dropout,
             vec![x, rates, chain.rows],
             &[3, 5],
@@ -609,7 +616,7 @@ fn per_row_controls_activations_and_bound_adjoints_agree_in_c_and_eval() {
         let g = load(&mut dag, decl, "g", &[3, 5], prim);
         let replay = node(
             &mut dag,
-            chelis_ir::dag::Owner::new(decl, Some(active)),
+            chelis_dag_core::dag::Owner::new(decl, Some(active)),
             RiscOp::DropoutReplay,
             vec![g, rates, chain.rows],
             &[3, 5],
@@ -653,7 +660,7 @@ fn per_row_controls_activations_and_bound_adjoints_agree_in_c_and_eval() {
             };
             let forward = node(
                 &mut dag,
-                chelis_ir::dag::Owner::new(decl, Some(active)),
+                chelis_dag_core::dag::Owner::new(decl, Some(active)),
                 RiscOp::UniformLike,
                 vec![template, low, high, chain.rows],
                 &[3, 5],
@@ -662,7 +669,7 @@ fn per_row_controls_activations_and_bound_adjoints_agree_in_c_and_eval() {
             let out_dims: &[usize] = if per_row { &[3] } else { &[] };
             let low_adjoint = node(
                 &mut dag,
-                chelis_ir::dag::Owner::new(decl, Some(active)),
+                chelis_dag_core::dag::Owner::new(decl, Some(active)),
                 RiscOp::UniformBoundAdjoint {
                     bound: UniformBound::Low,
                 },
@@ -672,7 +679,7 @@ fn per_row_controls_activations_and_bound_adjoints_agree_in_c_and_eval() {
             );
             let high_adjoint = node(
                 &mut dag,
-                chelis_ir::dag::Owner::new(decl, Some(active)),
+                chelis_dag_core::dag::Owner::new(decl, Some(active)),
                 RiscOp::UniformBoundAdjoint {
                     bound: UniformBound::High,
                 },
@@ -703,7 +710,7 @@ fn per_row_controls_activations_and_bound_adjoints_agree_in_c_and_eval() {
 /// `split_keys(split_keys(key(seed), 2)[i], 3)`: the `tensor[2, 3, key]`
 /// whose element `(i, j)` is key_ref.py's
 /// `split_n(split_n(key(seed), 2)[i], 3)[j]`.
-fn rank_two_keys(dag: &mut Dag, decl: chelis_ir::dag::DeclId, seed: i64) -> NodeId {
+fn rank_two_keys(dag: &mut Dag, decl: chelis_dag_core::dag::DeclId, seed: i64) -> NodeId {
     let seed = i64_const(dag, decl, seed);
     let root = node(dag, decl, RiscOp::KeyFromSeed, vec![seed], &[], Prim::Key);
     let rows = node(
@@ -782,7 +789,7 @@ fn a_rank_two_key_batch_agrees_in_c_and_eval() {
     let active = load(&mut dag, decl, "active", &[2], Prim::Bool);
     let dropped = node(
         &mut dag,
-        chelis_ir::dag::Owner::new(decl, Some(active)),
+        chelis_dag_core::dag::Owner::new(decl, Some(active)),
         RiscOp::Dropout,
         vec![x, rates, dropout_keys],
         &[2, 3, 4],
@@ -981,7 +988,7 @@ fn gated_split(batch: &[usize], declared: DimInfo) -> Dag {
         .collect::<Vec<_>>();
     dims.push(declared.clone());
     let rows = dag.add_node(
-        chelis_ir::dag::Owner::new(decl, Some(active)),
+        chelis_dag_core::dag::Owner::new(decl, Some(active)),
         RiscOp::SplitN {
             count: RtDim::Node(1),
         },
@@ -1236,7 +1243,7 @@ enum Operand {
 /// A load whose leading axis is the key batch's `n`, followed by `trailing`.
 fn load_n(
     dag: &mut Dag,
-    decl: chelis_ir::dag::DeclId,
+    decl: chelis_dag_core::dag::DeclId,
     name: &str,
     trailing: &[usize],
     prim: Prim,
@@ -1257,7 +1264,7 @@ fn load_n(
 
 fn batched_operand(
     dag: &mut Dag,
-    decl: chelis_ir::dag::DeclId,
+    decl: chelis_dag_core::dag::DeclId,
     name: &str,
     prim: Prim,
     shape: Operand,
@@ -1301,7 +1308,7 @@ fn a_batched_draw_validates_each_active_rows_controls_in_c_and_eval() {
                             RiscOp::Dropout
                         };
                         let drawn = dag.add_node(
-                            chelis_ir::dag::Owner::new(decl, on),
+                            chelis_dag_core::dag::Owner::new(decl, on),
                             op,
                             inputs,
                             TensorType {
@@ -1468,7 +1475,7 @@ fn named_dims(name: &str, trailing: &[usize]) -> Vec<DimInfo> {
 /// a draw with operands whose extents disagree.
 fn rows_of_p(
     dag: &mut Dag,
-    decl: chelis_ir::dag::DeclId,
+    decl: chelis_dag_core::dag::DeclId,
     name: &str,
     trailing: &[usize],
     prim: Prim,
@@ -1484,7 +1491,7 @@ fn rows_of_p(
         None,
     );
     let op = if prim == Prim::Bool {
-        RiscOp::Logical(chelis_ir::dag::LogicalKind::Not)
+        RiscOp::Logical(chelis_dag_core::dag::LogicalKind::Not)
     } else {
         RiscOp::Neg
     };
@@ -1502,7 +1509,7 @@ fn rows_of_p(
 
 fn load_m(
     dag: &mut Dag,
-    decl: chelis_ir::dag::DeclId,
+    decl: chelis_dag_core::dag::DeclId,
     name: &str,
     trailing: &[usize],
     prim: Prim,
@@ -1578,7 +1585,7 @@ fn short_operand_draw(short: Short) -> Dag {
             // The activation is the draw's own, its owner's.
             let on = second.unwrap();
             let id = dag.add_node(
-                chelis_ir::dag::Owner::new(decl, Some(on)),
+                chelis_dag_core::dag::Owner::new(decl, Some(on)),
                 RiscOp::Dropout,
                 vec![data, first, keys],
                 drawn_ty,
@@ -1851,7 +1858,7 @@ impl KeyOperation {
 
 /// A value declared `[m]` whose extent is that of the load `name`, declared
 /// `[p]`: `neg` of that load, as in [`rows_of_p`].
-fn neg_of_p(dag: &mut Dag, decl: chelis_ir::dag::DeclId, name: &str, prim: Prim) -> NodeId {
+fn neg_of_p(dag: &mut Dag, decl: chelis_dag_core::dag::DeclId, name: &str, prim: Prim) -> NodeId {
     rows_of_p(dag, decl, name, &[], prim)
 }
 
@@ -2089,7 +2096,7 @@ fn a_float_parameter_given_a_key_tensor_names_the_key_in_c() {
 /// and the data it batches binds, followed by `trailing` literal axes.
 fn over_n(
     dag: &mut Dag,
-    decl: chelis_ir::dag::DeclId,
+    decl: chelis_dag_core::dag::DeclId,
     op: RiscOp,
     inputs: Vec<NodeId>,
     trailing: &[usize],
@@ -2110,7 +2117,7 @@ fn over_n(
 /// `split_keys(key(seed), count)` with its count axis declared `n`.
 fn runtime_split_over_n(
     dag: &mut Dag,
-    decl: chelis_ir::dag::DeclId,
+    decl: chelis_dag_core::dag::DeclId,
     seed: i64,
     count: NodeId,
 ) -> NodeId {
@@ -2129,7 +2136,12 @@ fn runtime_split_over_n(
 }
 
 /// `sum(value)` over `[n, 4]`, one axis at a time.
-fn total_over_n(dag: &mut Dag, decl: chelis_ir::dag::DeclId, value: NodeId, prim: Prim) -> NodeId {
+fn total_over_n(
+    dag: &mut Dag,
+    decl: chelis_dag_core::dag::DeclId,
+    value: NodeId,
+    prim: Prim,
+) -> NodeId {
     let rows = over_n(
         dag,
         decl,
@@ -2151,11 +2163,11 @@ fn total_over_n(dag: &mut Dag, decl: chelis_ir::dag::DeclId, value: NodeId, prim
 /// The pruned gradient graph of `forward`'s `output` with respect to `wrt`,
 /// rooted at the gradients in `wrt`'s order.
 fn gradient_graph(forward: &Dag, output: NodeId, wrt: &[NodeId]) -> Dag {
-    let result = chelis_ir::grad::grad_dag_checked(forward, output, wrt)
+    let result = chelis_dag_core::grad::grad_dag_checked(forward, output, wrt)
         .unwrap_or_else(|error| panic!("grad: {error:?}"));
     let mut dag = result.dag.clone();
     dag.set_roots(wrt.iter().map(|id| result.grad_nodes[id]).collect());
-    chelis_ir::optimize::dead_code_eliminate(&dag)
+    chelis_dag_core::optimize::dead_code_eliminate(&dag)
 }
 
 /// Both lanes stop at the split with the same extent line and trap.
@@ -2223,7 +2235,7 @@ fn grad_of_a_dropout_keyed_by_a_runtime_count_split_agrees_in_c_and_eval() {
             let backward = gradient_graph(&forward, total, &[x]);
             let mut mask = forward.clone();
             mask.set_roots(vec![drawn]);
-            let mask = chelis_ir::optimize::dead_code_eliminate(&mask);
+            let mask = chelis_dag_core::optimize::dead_code_eliminate(&mask);
 
             let inputs = |count: i64, rows: usize, fill: fn(usize) -> f64| {
                 [
@@ -2361,11 +2373,12 @@ fn grad_of_per_row_uniform_bounds_over_a_runtime_count_split_agrees_in_c_and_eva
 /// gate `reject_unsupported_hip_ops`, then fusion, ownership and emission.
 /// The error names the stage that refused.
 fn hip_build(dag: &Dag) -> Result<(), String> {
-    let dag = chelis_ir::optimize::dead_code_eliminate(dag);
+    let dag = chelis_dag_core::optimize::dead_code_eliminate(dag);
     let specialized = chelis_ir::specialize::specialize_for_blas(&dag);
     chelis_compiler_api::compiler::reject_unsupported_hip_ops(&specialized)
         .map_err(|error| format!("gate: {error:?}"))?;
-    let selected = chelis_backend_hip::prepare_dag_for_codegen(chelis_ir::fuse::fuse(&specialized));
+    let selected =
+        chelis_backend_hip::prepare_dag_for_codegen(chelis_dag_core::fuse::fuse(&specialized));
     let verified = chelis_ir::ownership::lower_dag_ownership(selected)
         .and_then(chelis_ir::ownership::verify_ownership)
         .map_err(|error| format!("ownership: {error}"))?;
@@ -2480,7 +2493,7 @@ fn hip_key_graph(how: HipKey, prim: Prim) -> Dag {
         HipKey::Result => unreachable!("built above"),
     };
     let inputs = vec![like, low, high, key];
-    let owner = chelis_ir::dag::Owner::new(decl, active);
+    let owner = chelis_dag_core::dag::Owner::new(decl, active);
     let drawn = node(&mut dag, owner, RiscOp::UniformLike, inputs, &rows, prim);
     dag.add_root(drawn);
     dag
@@ -2506,7 +2519,7 @@ fn the_hip_build_admits_no_key() {
         for (how, refusal) in cases {
             let dag = hip_key_graph(how, prim);
             assert_eq!(
-                chelis_ir::verify::verify(&dag),
+                chelis_dag_core::verify::verify(&dag),
                 Vec::<String>::new(),
                 "{how:?} {prim:?}"
             );

@@ -3,8 +3,16 @@
 //! The DAG is a flat vector of nodes, each referencing earlier nodes by [`NodeId`].
 //! Nodes are always in topological order (an invariant maintained by append-only construction).
 
+use alloc::{
+    borrow::ToOwned,
+    boxed::Box,
+    format,
+    string::{String, ToString},
+    vec,
+    vec::Vec,
+};
 use chelis_unord::{UnordMap, UnordSet};
-use std::fmt;
+use core::fmt;
 
 use chelis_numeric_core::named_cast::NamedCastMode;
 use chelis_numeric_core::prim::Prim;
@@ -515,115 +523,6 @@ pub enum FusedStepOp {
     Round,
 }
 
-/// Identity-preserving numeric comparison operation.
-///
-/// `CmpLt` and `Lt` intentionally remain distinct source identities even
-/// though both use the same ordered comparison kernel.
-impl FusedStepOp {
-    /// [05-OP-46]'s transcendental operations and [05-OP-79]'s `pow`, which no
-    /// device lane may compute until it has correctly rounded kernels of its own.
-    pub const fn transcendental_name(self) -> Option<&'static str> {
-        match self {
-            Self::Pow => Some("pow"),
-            Self::Exp => Some("exp"),
-            Self::Log => Some("log"),
-            Self::Sin => Some("sin"),
-            Self::Cos => Some("cos"),
-            Self::Tan => Some("tan"),
-            Self::Atan => Some("atan"),
-            Self::Tanh => Some("tanh"),
-            Self::Erf => Some("erf"),
-            Self::Erfc => Some("erfc"),
-            Self::Add
-            | Self::Sub
-            | Self::Mul
-            | Self::Div
-            | Self::FloorDiv
-            | Self::TruncDiv
-            | Self::MaxElem
-            | Self::MinElem
-            | Self::Neg
-            | Self::Recip
-            | Self::Sqrt
-            | Self::Abs
-            | Self::Floor
-            | Self::Ceil
-            | Self::Round => None,
-        }
-    }
-
-    /// The [05-OP-46] operations a device lane may not compute: the
-    /// transcendentals, and `sqrt`, whose correct rounding neither device
-    /// lane establishes (Metal compiles with fast math, and the HIP runtime
-    /// compile does not pin a correctly rounded square root).
-    pub const fn device_fenced_name(self) -> Option<&'static str> {
-        match self {
-            Self::Sqrt => Some("sqrt"),
-            _ => self.transcendental_name(),
-        }
-    }
-}
-
-/// chelis#2957 GPU fence (`spec/design/correctly_rounded_math.md` §4.3): a
-/// device lane has no correctly rounded kernels for [05-OP-46]'s
-/// transcendentals, `sqrt`, or [05-OP-79]'s `pow`, so a DAG that computes one, directly or inside
-/// a fused chain, is rejected through [05-UNS-1] rather than computed with a
-/// vendor library.
-pub fn reject_device_correctly_rounded_ops(
-    nodes: &[DagNode],
-    target: &'static str,
-) -> Result<(), chelis_types::unsupported::Unsupported> {
-    for node in nodes {
-        let name = match &node.op {
-            RiscOp::Exp => Some("exp"),
-            RiscOp::Log => Some("log"),
-            RiscOp::Sin => Some("sin"),
-            RiscOp::Cos => Some("cos"),
-            RiscOp::Tan => Some("tan"),
-            RiscOp::Atan => Some("atan"),
-            RiscOp::Tanh => Some("tanh"),
-            RiscOp::Erf => Some("erf"),
-            RiscOp::Erfc => Some("erfc"),
-            RiscOp::Pow => Some("pow"),
-            RiscOp::Sqrt => Some("sqrt"),
-            RiscOp::FusedElem { ops } => ops.iter().find_map(|step| step.op.device_fenced_name()),
-            _ => None,
-        };
-        if let Some(name) = name {
-            return Err(device_correctly_rounded_rejection(name, target));
-        }
-    }
-    Ok(())
-}
-
-/// The [05-UNS-1] rejection of a correctly rounded operation `name` on the
-/// device lane `target`: one of [05-OP-46]'s transcendentals, `sqrt`, or
-/// [05-OP-79]'s `pow`.
-pub fn device_correctly_rounded_rejection(
-    name: &str,
-    target: &'static str,
-) -> chelis_types::unsupported::Unsupported {
-    let authority = if name == "pow" {
-        chelis_types::deliberate_rejection!(
-            "[05-OP-79]",
-            "device pow is fenced until the device lane has a correctly rounded kernel"
-        )
-    } else {
-        chelis_types::deliberate_rejection!(
-            "[05-OP-46]",
-            "device transcendentals and sqrt are fenced until the device lane has correctly rounded kernels"
-        )
-    };
-    chelis_types::unsupported::Unsupported::new(
-        chelis_types::unsupported::UnsupportedKind::Op(name.to_string()),
-        format!(
-            "`{name}` must be correctly rounded and the {target} device lane has no correctly rounded kernel for it; build for `--target c`"
-        ),
-        chelis_types::unsupported::Stage::Codegen(target),
-        authority,
-    )
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ComparisonKind {
@@ -861,7 +760,7 @@ pub enum RuntimeRecurrenceSource {
 impl RuntimeRecurrence {
     pub fn item_loads(&self) -> &[NodeId] {
         match &self.source {
-            RuntimeRecurrenceSource::Tensor { item } => std::slice::from_ref(item),
+            RuntimeRecurrenceSource::Tensor { item } => core::slice::from_ref(item),
             RuntimeRecurrenceSource::Columns { items } => items,
         }
     }
@@ -992,7 +891,7 @@ pub enum RiscOp {
     /// and dividend-sign semantics under [05-OP-64].
     Mod,
     /// Exact signed-width [05-OP-47] operation.
-    Bitwise(chelis_types::BitwiseKind),
+    Bitwise(chelis_numeric_core::bitwise::BitwiseKind),
     /// [05-OP-20..22]: stored-width IEEE predicate.
     FloatClassify(chelis_numeric_core::dtype_semantics::FloatClassify),
     /// Identity-preserving comparison with Bool output ([05-OP-36]).
@@ -1200,7 +1099,7 @@ pub enum RiscOp {
     /// AD policy: the reverse-mode adjoint lowers to a single
     /// [`RiscOp::ReduceWindowGrad`] node carrying the same
     /// `{reducer, window_shape, strides}` triple (see
-    /// `chelis_ir::grad`). Adjoints follow `spec/05-risc-primitives.md`
+    /// `chelis_dag_core::grad`). Adjoints follow `spec/05-risc-primitives.md`
     /// §2.3.1: `Sum`/`Mean` scatter (overlap-add) the upstream gradient
     /// back over each window, and `Max`/`Min` route it to the window
     /// extreme (distributing to all tied positions, matching the
@@ -1867,11 +1766,11 @@ impl RiscOp {
                 chelis_numeric_core::dtype_semantics::FloatClassify::Infinite => Id::IsInfinite,
             }),
             Self::Bitwise(kind) => Semantic(match kind {
-                chelis_types::BitwiseKind::And => Id::BitAnd,
-                chelis_types::BitwiseKind::Or => Id::BitOr,
-                chelis_types::BitwiseKind::Xor => Id::BitXor,
-                chelis_types::BitwiseKind::ShiftLeft => Id::ShiftLeft,
-                chelis_types::BitwiseKind::ShiftRight => Id::ShiftRight,
+                chelis_numeric_core::bitwise::BitwiseKind::And => Id::BitAnd,
+                chelis_numeric_core::bitwise::BitwiseKind::Or => Id::BitOr,
+                chelis_numeric_core::bitwise::BitwiseKind::Xor => Id::BitXor,
+                chelis_numeric_core::bitwise::BitwiseKind::ShiftLeft => Id::ShiftLeft,
+                chelis_numeric_core::bitwise::BitwiseKind::ShiftRight => Id::ShiftRight,
             }),
             Self::Compare(kind) => Semantic(match kind {
                 ComparisonKind::CmpLt => Id::CmpLt,
@@ -2505,6 +2404,27 @@ pub struct DagNode {
 }
 
 impl DagNode {
+    /// Whether input `slot` supplies payload rather than only shape metadata.
+    pub fn reads_input_payload(&self, slot: usize) -> bool {
+        if matches!(self.op, RiscOp::Shape { .. } | RiscOp::Drop) {
+            return false;
+        }
+        if slot == 0 {
+            return true;
+        }
+        let bounds: &[RtDim] = match &self.op {
+            RiscOp::Expand { size, .. } => core::slice::from_ref(size),
+            RiscOp::Reshape { new_shape } => new_shape,
+            _ => return true,
+        };
+        !bounds
+            .iter()
+            .any(|bound| matches!(bound, RtDim::InputAxis { tensor, .. } if *tensor == slot))
+            || bounds
+                .iter()
+                .any(|bound| matches!(bound, RtDim::Node(input) if *input == slot))
+    }
+
     /// Every node this node reads, in every dependency lane: its value
     /// inputs, its shape-only and result-claim dependencies, and its
     /// activation ([`Owner::activation`]). A liveness walk or a partition
@@ -2792,10 +2712,13 @@ pub enum RuntimeCheck {
 /// verifier.
 pub struct TrapSeeds<'dag> {
     dag: &'dag Dag,
-    literal_result_witness_requirements: std::cell::OnceCell<
-        std::collections::BTreeMap<NodeId, Vec<chelis_numeric_core::dtype_semantics::ScalarValue>>,
+    literal_result_witness_requirements: core::cell::OnceCell<
+        alloc::collections::BTreeMap<
+            NodeId,
+            Vec<chelis_numeric_core::dtype_semantics::ScalarValue>,
+        >,
     >,
-    claim_sized_nodes: std::cell::OnceCell<Result<std::collections::BTreeSet<NodeId>, String>>,
+    claim_sized_nodes: core::cell::OnceCell<Result<alloc::collections::BTreeSet<NodeId>, String>>,
 }
 
 impl TrapSeeds<'_> {
@@ -3328,8 +3251,8 @@ impl Dag {
     pub fn trap_seeds(&self) -> TrapSeeds<'_> {
         TrapSeeds {
             dag: self,
-            literal_result_witness_requirements: std::cell::OnceCell::new(),
-            claim_sized_nodes: std::cell::OnceCell::new(),
+            literal_result_witness_requirements: core::cell::OnceCell::new(),
+            claim_sized_nodes: core::cell::OnceCell::new(),
         }
     }
 
@@ -3477,7 +3400,7 @@ impl Dag {
                 .per_row
                 .iter()
                 .map(|slot| dims_of(*slot))
-                .chain(std::iter::once(activation))
+                .chain(core::iter::once(activation))
                 .all(|dims| match dims {
                     Some(dims) => dims.len() <= key.len() && literal_prefix(dims, dims.len()),
                     None => true,
@@ -3718,7 +3641,7 @@ fn op_declared_output_axes(dag: &Dag, node: &DagNode) -> Vec<(String, usize)> {
 /// the root op will declare that symbol's value; anywhere else the symbol
 /// reaches an emission boundary with no extent source, which
 /// `axis_sources::check_rendered_dim_origins` refuses.
-pub(crate) fn op_declarable_axes(dag: &Dag, node: &DagNode) -> Vec<usize> {
+pub fn op_declarable_axes(dag: &Dag, node: &DagNode) -> Vec<usize> {
     match &node.op {
         RiscOp::Iota | RiscOp::ListMapCapture { .. } => vec![0],
         RiscOp::Shrink { .. } | RiscOp::Stride { .. } | RiscOp::Pad { .. } => {
@@ -3765,7 +3688,7 @@ pub fn op_declared_dim_names(dag: &Dag) -> UnordSet<String> {
 /// [`op_declared_output_axes`]), for the evaluator's mid-evaluation binding:
 /// when the declaring node's value is computed, each `(symbol, axis)` binds
 /// the symbol to the value's actual extent on that axis.
-pub(crate) fn op_declared_axes_by_node(dag: &Dag) -> UnordMap<NodeId, Vec<(String, usize)>> {
+pub fn op_declared_axes_by_node(dag: &Dag) -> UnordMap<NodeId, Vec<(String, usize)>> {
     let mut out = UnordMap::new();
     for node in dag.nodes() {
         let axes = op_declared_output_axes(dag, node);
@@ -3793,7 +3716,7 @@ pub(crate) fn op_declared_axes_by_node(dag: &Dag) -> UnordMap<NodeId, Vec<(Strin
 /// every later user of that extent keep an adjoint the gradient never reads
 /// alive, such as a `Where` condition's Bool cotangent chain (chelis#3389).
 pub fn record_runtime_dim_shape_deps(dag: &mut Dag) {
-    let mut declarers: UnordMap<String, NodeId> = UnordMap::new();
+    let mut declarers = crate::collections::HashMap::<String, NodeId>::new();
     for node in dag.nodes() {
         if node.span_id.as_deref() == Some(crate::grad::GRAD_SYNTH_MARKER) {
             continue;
@@ -4135,7 +4058,7 @@ pub fn symbolic_params(dag: &Dag) -> Vec<String> {
     // One binder spelled once in a signature is one parameter however many
     // scopes the derivation finds it in; without this a merged kernel
     // published `["batch", "batch"]`.
-    let mut seen = std::collections::BTreeSet::new();
+    let mut seen = alloc::collections::BTreeSet::new();
     symbolic_bindings_interface(dag)
         .into_iter()
         .filter(|binding| matches!(binding.canonical.source, SymbolicDimSource::Load { .. }))
@@ -4352,7 +4275,7 @@ fn map_node_symbolic_bindings<E>(
 /// Whole-DAG prebinding obligations for names no witness class answered.
 /// A dynamic-unbound exemption cannot be guessed here: only inference knows
 /// whether supplied values disagree, and such names are already class-claimed.
-pub(crate) fn required_prebinding_symbols(dag: &Dag) -> UnordSet<String> {
+pub fn required_prebinding_symbols(dag: &Dag) -> UnordSet<String> {
     let op_declared = op_declared_dim_names(dag);
     let unbound = UnordSet::new();
     let mut required = UnordSet::new();
@@ -4363,7 +4286,7 @@ pub(crate) fn required_prebinding_symbols(dag: &Dag) -> UnordSet<String> {
                 if !usage.allows_unbound(name, &op_declared, &unbound) {
                     required.insert(name.to_owned());
                 }
-                Ok::<_, std::convert::Infallible>(None)
+                Ok::<_, core::convert::Infallible>(None)
             },
             &mut |_| Ok(()),
         );
@@ -5209,7 +5132,7 @@ mod tests {
             RiscOp::FloatClassify(chelis_numeric_core::dtype_semantics::FloatClassify::Nan),
             RiscOp::FloatClassify(chelis_numeric_core::dtype_semantics::FloatClassify::Finite),
             RiscOp::FloatClassify(chelis_numeric_core::dtype_semantics::FloatClassify::Infinite),
-            RiscOp::Bitwise(chelis_types::BitwiseKind::And),
+            RiscOp::Bitwise(chelis_numeric_core::bitwise::BitwiseKind::And),
             RiscOp::Compare(ComparisonKind::Eq),
             RiscOp::Logical(LogicalKind::And),
             RiscOp::Where,
@@ -5344,7 +5267,7 @@ mod tests {
     }
 
     /// chelis#2413: the verifier's key rule V4 reads the key allow-list
-    /// (`chelis_types::key_admission`). Every graph operation admits a key at
+    /// (`chelis_numeric_core::key_admission`). Every graph operation admits a key at
     /// exactly the input slots of its role's admission, and the admissions
     /// graph operations reach are exactly the list's graph admissions, the
     /// same list the linearity checker reads.
@@ -5358,8 +5281,8 @@ mod tests {
     #[test]
     fn every_risc_op_admits_a_key_exactly_where_the_allow_list_does() {
         use crate::verify::{KeyGraph, verify_key_rules};
-        use chelis_types::key_admission::KeyAdmission;
-        use std::collections::BTreeSet;
+        use alloc::collections::BTreeSet;
+        use chelis_numeric_core::key_admission::KeyAdmission;
         let ty = |precision| TensorType {
             dims: vec![DimInfo::Lit(2)],
             precision,
@@ -5455,7 +5378,7 @@ mod tests {
     #[test]
     fn every_extent_slot_observes_a_key_without_using_it() {
         use crate::verify::{ExtentSlot, SlotRead, slot_read, verify_key_rules};
-        use std::collections::BTreeSet;
+        use alloc::collections::BTreeSet;
         let ty = |precision| TensorType {
             dims: vec![DimInfo::Lit(2)],
             precision,
@@ -5635,7 +5558,7 @@ mod tests {
 
     #[test]
     fn every_risc_op_has_an_exact_pre_phase4c_atom_disposition() {
-        use std::collections::BTreeSet;
+        use alloc::collections::BTreeSet;
 
         let all = one_of_every_risc_op();
         let mut discovery_cases = all.clone();
@@ -5665,10 +5588,10 @@ mod tests {
             RiscOp::Compare(ComparisonKind::Lte),
             RiscOp::Logical(LogicalKind::Or),
             RiscOp::Logical(LogicalKind::Not),
-            RiscOp::Bitwise(chelis_types::BitwiseKind::Or),
-            RiscOp::Bitwise(chelis_types::BitwiseKind::Xor),
-            RiscOp::Bitwise(chelis_types::BitwiseKind::ShiftLeft),
-            RiscOp::Bitwise(chelis_types::BitwiseKind::ShiftRight),
+            RiscOp::Bitwise(chelis_numeric_core::bitwise::BitwiseKind::Or),
+            RiscOp::Bitwise(chelis_numeric_core::bitwise::BitwiseKind::Xor),
+            RiscOp::Bitwise(chelis_numeric_core::bitwise::BitwiseKind::ShiftLeft),
+            RiscOp::Bitwise(chelis_numeric_core::bitwise::BitwiseKind::ShiftRight),
         ]);
         discovery_cases.extend(NamedCastMode::ALL.iter().map(|&mode| RiscOp::NamedCast {
             mode,

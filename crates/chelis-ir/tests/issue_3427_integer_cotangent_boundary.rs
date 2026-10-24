@@ -5,8 +5,8 @@
 //! is itself differentiated, because it computes from an integer parameter
 //! selected for differentiation, keeps its atom's structural rejection
 //! ([05-OP-64]), whichever integer operation it is.
-use chelis_ir::dag::{Dag, NodeId, RiscOp, TensorType};
-use chelis_ir::grad::{AdError, AdRejectionReason, grad_dag_checked};
+use chelis_dag_core::dag::{Dag, NodeId, RiscOp, TensorType};
+use chelis_dag_core::grad::{AdError, AdRejectionReason, grad_dag_checked};
 use chelis_numeric_core::prim::Prim;
 
 fn scalar_at(precision: Prim) -> TensorType {

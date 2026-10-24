@@ -5,6 +5,7 @@ version.workspace = true
 license.workspace = true
 
 [dependencies]
+chelis-dag-core.workspace = true
 chelis-numeric-core = { workspace = true, default-features = false, features = ["alloc", "serde"] }
 chelis-unord.workspace = true
 chelis-backend-c = { path = "../chelis-backend-c" }

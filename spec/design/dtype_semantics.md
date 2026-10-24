@@ -247,6 +247,17 @@ pub fn scalar_from_f64(prim: Prim, v: f64) -> Result<ScalarValue, NumericTrap>;
 pub enum RawScalar { Int(i64), Float(f64) }   // what kernels produce
 ```
 
+The DAG extraction places the existing f64-image folds in `chelis_numeric_core::dtype_semantics`.
+`fold_wide_unary(WideUnaryFold, ScalarValue, Prim)` accepts only Neg, Sqrt, Abs, Floor, Ceil, and Round.
+`fold_wide_binary(WideBinaryFold, ScalarValue, ScalarValue, Prim)` accepts only Add and Mul.
+Both APIs reject inexact integer images and decline results that fail `scalar_from_f64` finalization.
+
+These folds retain their existing stored-image behavior without changing ordinary typed-kernel NaN canonicalization.
+Floor, Ceil, and Round quiet signaling NaNs while preserving sign and payload.
+Neg and Abs retain their native signaling behavior.
+All other inputs use the existing numeric evaluators and private math provider.
+This transfers implementation ownership without expanding fold eligibility or changing numeric authority.
+
 **Tensors.** The element buffer becomes private and per-dtype:
 
 ```rust
@@ -299,6 +310,11 @@ no-sixth-layer census over every remaining f64/Vec<f64> payload field
 is the in-tree `crates/chelis-cli/tests/issue_729_payload_census.rs`, whose
 scope is `RiscOp`/`WireRiscOp` carrier fields rather than every numeric form
 in the repository.
+
+The declaration inputs are `crates/chelis-dag-core/src/dag.rs` and
+`crates/chelis-compiler-api/src/schema.rs`.
+The native declaration moves from `crates/chelis-ir/src/dag.rs` without a new
+raw-float allowance or a change to the sealed-field checks.
 
 **The Pad fill is not an exemption ([#878]).** `Pad.fill` is finalized once at
 the padded tensor's dtype during lowering and remains tagged through eval,

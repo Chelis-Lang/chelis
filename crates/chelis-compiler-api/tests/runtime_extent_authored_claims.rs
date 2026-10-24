@@ -18,7 +18,7 @@ use chelis_compiler_api::pipeline::{
     LoweringMode, PipelineGoal, PipelineOutcome, PipelineRequest, run_source,
 };
 use chelis_compiler_api::schema::SourceKind;
-use chelis_ir::dag::{Dag, RiscOp};
+use chelis_dag_core::dag::{Dag, RiscOp};
 
 fn request(source: &str) -> PipelineRequest<'_> {
     PipelineRequest {

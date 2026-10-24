@@ -14,7 +14,7 @@
 //! (W2-A); both are intentionally out of scope here.
 
 mod support;
-use chelis_ir::dag::{
+use chelis_dag_core::dag::{
     Dag, DimInfo, FusedInput, FusedStep, FusedStepOp, NodeId, RiscOp, TensorType,
 };
 use chelis_numeric_core::prim::Prim;

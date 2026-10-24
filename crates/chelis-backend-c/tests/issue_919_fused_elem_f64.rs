@@ -23,8 +23,8 @@
 //!     rather than panics
 
 mod support;
-use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
-use chelis_ir::fuse::fuse;
+use chelis_dag_core::dag::{Dag, DimInfo, RiscOp, TensorType};
+use chelis_dag_core::fuse::fuse;
 use chelis_numeric_core::prim::Prim;
 use support::codegen;
 

@@ -38,7 +38,7 @@
 //!   * `perf_f1_broadcasted_leading_axis_realizes_then_dispatches_strided`
 
 mod support;
-use chelis_ir::dag::{Dag, DimExpr, DimInfo, RiscOp, TensorType};
+use chelis_dag_core::dag::{Dag, DimExpr, DimInfo, RiscOp, TensorType};
 use chelis_numeric_core::prim::Prim;
 use support::codegen_hip;
 
@@ -80,9 +80,9 @@ fn assert_no_substring(source: &str, forbidden: &str) {
 
 #[derive(Debug)]
 struct PreparedMatmul {
-    lhs: chelis_ir::dag::NodeId,
-    rhs: chelis_ir::dag::NodeId,
-    output: chelis_ir::dag::NodeId,
+    lhs: chelis_dag_core::dag::NodeId,
+    rhs: chelis_dag_core::dag::NodeId,
+    output: chelis_dag_core::dag::NodeId,
     lhs_source_op: RiscOp,
     rhs_source_op: RiscOp,
     matrix_axis: usize,
@@ -502,7 +502,7 @@ fn broadcasted_rhs_leading_axis_realizes_then_dispatches_strided() {
         decl,
         RiscOp::Expand {
             axis: 0,
-            size: chelis_ir::dag::RtDim::Lit(3),
+            size: chelis_dag_core::dag::RtDim::Lit(3),
         },
         vec![base_b],
         t(Prim::F32, vec![3, 5, 6]),
@@ -552,7 +552,7 @@ fn both_sides_broadcasted_leading_axes_realize_then_dispatch_strided() {
         decl,
         RiscOp::Expand {
             axis: 0,
-            size: chelis_ir::dag::RtDim::Lit(3),
+            size: chelis_dag_core::dag::RtDim::Lit(3),
         },
         vec![base_a],
         t(Prim::F32, vec![3, 4, 5]),
@@ -571,7 +571,7 @@ fn both_sides_broadcasted_leading_axes_realize_then_dispatch_strided() {
         decl,
         RiscOp::Expand {
             axis: 0,
-            size: chelis_ir::dag::RtDim::Lit(3),
+            size: chelis_dag_core::dag::RtDim::Lit(3),
         },
         vec![base_b],
         t(Prim::F32, vec![3, 5, 6]),
@@ -703,7 +703,7 @@ fn perf_f1_broadcasted_leading_axis_realizes_then_dispatches_strided() {
         decl,
         RiscOp::Expand {
             axis: 0,
-            size: chelis_ir::dag::RtDim::Lit(3),
+            size: chelis_dag_core::dag::RtDim::Lit(3),
         },
         vec![base_a],
         t(Prim::F32, vec![3, 4, 5]),

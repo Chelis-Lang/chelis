@@ -7,7 +7,7 @@ use chelis_compiler_api::pipeline::{
     LoweringMode, PipelineGoal, PipelineOutcome, PipelineRequest, run_source,
 };
 use chelis_compiler_api::schema::{EvalRequest, SourceKind};
-use chelis_ir::dag::RiscOp;
+use chelis_dag_core::dag::RiscOp;
 use std::collections::BTreeMap;
 
 fn eval_main(source: &str) -> Result<Vec<String>, String> {

@@ -1,9 +1,9 @@
 //! Adversarial fusion tests — red team Phase 1b.
 //! These are NOT committed to the repo; they exist to probe for bugs.
 
-use chelis_ir::dag::{ComparisonKind, Dag, DimInfo, NodeId, RiscOp, TensorType};
+use chelis_dag_core::dag::{ComparisonKind, Dag, DimInfo, NodeId, RiscOp, TensorType};
+use chelis_dag_core::fuse::fuse;
 use chelis_ir::eval::{TensorValue, eval_tensor_roots_with_strict};
-use chelis_ir::fuse::fuse;
 use chelis_numeric_core::observation::ElementRef;
 use chelis_numeric_core::prim::Prim;
 use chelis_unord::UnordMap;
@@ -15,7 +15,7 @@ fn vec_f32(n: usize) -> TensorType {
     }
 }
 
-fn load(dag: &mut Dag, decl: chelis_ir::dag::DeclId, name: &str, ty: TensorType) -> NodeId {
+fn load(dag: &mut Dag, decl: chelis_dag_core::dag::DeclId, name: &str, ty: TensorType) -> NodeId {
     dag.add_node(decl, RiscOp::Load { name: name.into() }, vec![], ty, None)
 }
 

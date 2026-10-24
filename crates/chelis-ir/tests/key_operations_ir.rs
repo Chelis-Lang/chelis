@@ -9,14 +9,14 @@
 //! float dtype, row-batched draws, the counter-stream bridge, the verifier's
 //! key rules V1 to V5, `grad`, the optimizer, and `vmap`.
 
-use chelis_ir::dag::{
+use chelis_dag_core::dag::{
     Dag, DimInfo, KeyBranch, LogicalKind, NodeId, Owner, RiscOp, RtDim, TensorType, UniformBound,
     record_runtime_dim_shape_deps,
 };
+use chelis_dag_core::grad::grad_dag_checked;
+use chelis_dag_core::optimize::{common_subexpr_eliminate, constant_fold, dead_code_eliminate};
+use chelis_dag_core::verify::verify;
 use chelis_ir::eval::{TensorValue, eval_tensor_roots_exact};
-use chelis_ir::grad::grad_dag_checked;
-use chelis_ir::optimize::{common_subexpr_eliminate, constant_fold, dead_code_eliminate};
-use chelis_ir::verify::verify;
 use chelis_ir::vmap::vectorize_axis0;
 use chelis_numeric_core::dtype_semantics::{RandomKey, ScalarValue, scalar_from_i64};
 use chelis_numeric_core::dtype_semantics::{
@@ -107,7 +107,7 @@ fn ty(dims: &[usize], prim: Prim) -> TensorType {
 
 fn node(
     dag: &mut Dag,
-    decl: chelis_ir::dag::DeclId,
+    decl: chelis_dag_core::dag::DeclId,
     op: RiscOp,
     inputs: Vec<NodeId>,
     dims: &[usize],
@@ -116,7 +116,7 @@ fn node(
     dag.add_node(decl, op, inputs, ty(dims, prim), None)
 }
 
-fn i64_const(dag: &mut Dag, decl: chelis_ir::dag::DeclId, value: i64) -> NodeId {
+fn i64_const(dag: &mut Dag, decl: chelis_dag_core::dag::DeclId, value: i64) -> NodeId {
     node(
         dag,
         decl,
@@ -129,7 +129,12 @@ fn i64_const(dag: &mut Dag, decl: chelis_ir::dag::DeclId, value: i64) -> NodeId 
     )
 }
 
-fn float_const(dag: &mut Dag, decl: chelis_ir::dag::DeclId, prim: Prim, value: f64) -> NodeId {
+fn float_const(
+    dag: &mut Dag,
+    decl: chelis_dag_core::dag::DeclId,
+    prim: Prim,
+    value: f64,
+) -> NodeId {
     node(
         dag,
         decl,
@@ -142,7 +147,7 @@ fn float_const(dag: &mut Dag, decl: chelis_ir::dag::DeclId, prim: Prim, value: f
 
 fn load(
     dag: &mut Dag,
-    decl: chelis_ir::dag::DeclId,
+    decl: chelis_dag_core::dag::DeclId,
     name: &str,
     dims: &[usize],
     prim: Prim,
@@ -164,7 +169,7 @@ struct Chain {
     g: NodeId,
 }
 
-fn build_chain(dag: &mut Dag, decl: chelis_ir::dag::DeclId) -> Chain {
+fn build_chain(dag: &mut Dag, decl: chelis_dag_core::dag::DeclId) -> Chain {
     let seed = i64_const(dag, decl, -3);
     let root = node(dag, decl, RiscOp::KeyFromSeed, vec![seed], &[], Prim::Key);
     let left = node(
@@ -1030,14 +1035,14 @@ fn assert_rejected(dag: &Dag, needle: &str) {
     );
 }
 
-fn root_key(dag: &mut Dag, decl: chelis_ir::dag::DeclId) -> NodeId {
+fn root_key(dag: &mut Dag, decl: chelis_dag_core::dag::DeclId) -> NodeId {
     let seed = i64_const(dag, decl, 7);
     node(dag, decl, RiscOp::KeyFromSeed, vec![seed], &[], Prim::Key)
 }
 
 fn draw(
     dag: &mut Dag,
-    decl: chelis_ir::dag::DeclId,
+    decl: chelis_dag_core::dag::DeclId,
     key: NodeId,
     active: Option<NodeId>,
 ) -> NodeId {
@@ -1052,7 +1057,12 @@ fn draw(
     )
 }
 
-fn split(dag: &mut Dag, decl: chelis_ir::dag::DeclId, key: NodeId, branch: KeyBranch) -> NodeId {
+fn split(
+    dag: &mut Dag,
+    decl: chelis_dag_core::dag::DeclId,
+    key: NodeId,
+    branch: KeyBranch,
+) -> NodeId {
     node(
         dag,
         decl,
@@ -1367,7 +1377,7 @@ fn a_replay_must_read_its_own_forward_draws_key() {
 /// `lower_if`'s arm activations over the enclosing path `parent`.
 fn arms(
     dag: &mut Dag,
-    decl: chelis_ir::dag::DeclId,
+    decl: chelis_dag_core::dag::DeclId,
     parent: Option<NodeId>,
 ) -> (NodeId, NodeId, NodeId) {
     let condition = load(dag, decl, "c", &[], Prim::Bool);
@@ -1478,7 +1488,7 @@ fn rule_v3_admits_exclusive_arms_and_rejects_overlapping_ones() {
     assert_rejected(&dag, "is consumed twice");
 }
 
-fn bool_const(dag: &mut Dag, decl: chelis_ir::dag::DeclId, value: bool) -> NodeId {
+fn bool_const(dag: &mut Dag, decl: chelis_dag_core::dag::DeclId, value: bool) -> NodeId {
     node(
         dag,
         decl,
@@ -1982,7 +1992,7 @@ fn a_declared_result_or_cotangent_unlike_its_operand_is_rejected() {
 /// `[05-OP-71]` twice: `split_keys(split_keys(key(seed), 2)[i], 3)`, the
 /// `tensor[2, 3, key]` whose element `(i, j)` is key_ref.py's
 /// `split_n(split_n(key(seed), 2)[i], 3)[j]`.
-fn rank_two_keys(dag: &mut Dag, decl: chelis_ir::dag::DeclId, seed: i64) -> NodeId {
+fn rank_two_keys(dag: &mut Dag, decl: chelis_dag_core::dag::DeclId, seed: i64) -> NodeId {
     let seed = i64_const(dag, decl, seed);
     let root = node(dag, decl, RiscOp::KeyFromSeed, vec![seed], &[], Prim::Key);
     let rows = node(

@@ -17,7 +17,7 @@
 //! Acceptance oracle: `cargo test -p chelis-backend-c --test dtype_matrix_bf16_f16`.
 
 mod support;
-use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
+use chelis_dag_core::dag::{Dag, DimInfo, RiscOp, TensorType};
 use chelis_ir::eval::eval_tensor;
 use chelis_numeric_core::prim::Prim;
 use chelis_unord::UnordMap;
@@ -279,7 +279,7 @@ int main(void) {{
 fn eval_scalar(dag: &Dag) -> f64 {
     let inputs = UnordMap::new();
     let vals = eval_tensor(dag, &inputs).unwrap();
-    let last_id = chelis_ir::dag::NodeId(dag.len() - 1);
+    let last_id = chelis_dag_core::dag::NodeId(dag.len() - 1);
     vals[&last_id].element_f64_lossy(0)
 }
 
@@ -694,9 +694,9 @@ fn build_bf16_matmul_dag() -> Dag {
     );
     let mm = RiscOp::matmul_default(
         vec![],
-        chelis_ir::dag::DimExpr::Concrete(2),
-        chelis_ir::dag::DimExpr::Concrete(4),
-        chelis_ir::dag::DimExpr::Concrete(3),
+        chelis_dag_core::dag::DimExpr::Concrete(2),
+        chelis_dag_core::dag::DimExpr::Concrete(4),
+        chelis_dag_core::dag::DimExpr::Concrete(3),
         Prim::Bf16,
     )
     .expect("bf16 matmul constructs");
@@ -723,9 +723,9 @@ fn build_f16_matmul_dag() -> Dag {
     );
     let mm = RiscOp::matmul_default(
         vec![],
-        chelis_ir::dag::DimExpr::Concrete(2),
-        chelis_ir::dag::DimExpr::Concrete(4),
-        chelis_ir::dag::DimExpr::Concrete(3),
+        chelis_dag_core::dag::DimExpr::Concrete(2),
+        chelis_dag_core::dag::DimExpr::Concrete(4),
+        chelis_dag_core::dag::DimExpr::Concrete(3),
         Prim::F16,
     )
     .expect("f16 matmul constructs");

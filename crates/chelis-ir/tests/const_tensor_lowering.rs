@@ -1,10 +1,10 @@
 //! Verify that `to_tensor([1.0, 2.0, 3.0], f32)` with non-uniform data
 //! lowers to a single `ConstTensor` node instead of a Const+Pad+Add tree.
 
-use chelis_ir::dag::{Dag, NodeId, RiscOp};
+use chelis_dag_core::dag::{Dag, NodeId, RiscOp};
+use chelis_dag_core::verify;
 use chelis_ir::eval::{TensorValue, eval_tensor_roots_with};
 use chelis_ir::lower::try_lower_program;
-use chelis_ir::verify;
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str as surf_parse;
 use chelis_types::{check_linearity, check_typed_program};

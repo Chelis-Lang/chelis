@@ -3,7 +3,7 @@
 //! Claim construction sees the complete graph. Only this boundary turns it
 //! into independently executable helpers; a placeholder never reaches one.
 use super::{HostParam, HostTypeTerm};
-use crate::dag::{Dag, NodeId, RiscOp, TensorType};
+use chelis_dag_core::dag::{Dag, NodeId, RiscOp, TensorType};
 use chelis_deep::Expr;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -291,7 +291,7 @@ impl Partition<'_> {
                     })
                     .transpose()?;
                 let id = dag.add_node(
-                    crate::dag::Owner::new(source.owner.decl, activation),
+                    chelis_dag_core::dag::Owner::new(source.owner.decl, activation),
                     source.op.clone(),
                     inputs,
                     source.output_type.clone(),
@@ -316,7 +316,7 @@ impl Partition<'_> {
                 // A value computed in an earlier segment arrives as a
                 // parameter, which checks nothing.
                 dag.add_node(
-                    crate::dag::Owner::unconditional(source.owner.decl),
+                    chelis_dag_core::dag::Owner::unconditional(source.owner.decl),
                     RiscOp::Load {
                         name: names[&StageValue::Tensor(dependency)].as_str().into(),
                     },
@@ -360,9 +360,9 @@ impl Partition<'_> {
             if matches!(
                 node.op,
                 RiscOp::ExtentWitness {
-                    site: crate::dag::ExtentWitnessSite::ResultClaim { .. }
-                        | crate::dag::ExtentWitnessSite::LiteralResultClaim
-                        | crate::dag::ExtentWitnessSite::LocalAscriptionClaim { .. },
+                    site: chelis_dag_core::dag::ExtentWitnessSite::ResultClaim { .. }
+                        | chelis_dag_core::dag::ExtentWitnessSite::LiteralResultClaim
+                        | chelis_dag_core::dag::ExtentWitnessSite::LocalAscriptionClaim { .. },
                     ..
                 }
             ) {
@@ -425,11 +425,11 @@ impl Partition<'_> {
                     && !matches!(
                         node.op,
                         RiscOp::ExtentWitness {
-                            site: crate::dag::ExtentWitnessSite::ResultClaim { .. }
-                                | crate::dag::ExtentWitnessSite::LiteralResultClaim,
+                            site: chelis_dag_core::dag::ExtentWitnessSite::ResultClaim { .. }
+                                | chelis_dag_core::dag::ExtentWitnessSite::LiteralResultClaim,
                             ..
                         } | RiscOp::ExtentWitness {
-                            site: crate::dag::ExtentWitnessSite::LocalAscriptionClaim { .. },
+                            site: chelis_dag_core::dag::ExtentWitnessSite::LocalAscriptionClaim { .. },
                             ..
                         }
                     )
@@ -668,8 +668,8 @@ pub(super) fn resolve_callable_aliases(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dag::{DimInfo, RtAxis, RtDim};
     use crate::host_type_state::HostPrecisionTerm;
+    use chelis_dag_core::dag::{DimInfo, RtAxis, RtDim};
     use chelis_numeric_core::dtype_semantics::scalar_from_i64;
     use chelis_numeric_core::prim::Prim;
 
@@ -726,7 +726,7 @@ mod tests {
             dag.add_node(
                 decl,
                 RiscOp::ExtentWitness {
-                    site: crate::dag::ExtentWitnessSite::LiteralResultClaim,
+                    site: chelis_dag_core::dag::ExtentWitnessSite::LiteralResultClaim,
                     parameter: String::new(),
                     axis: RtAxis::Lit(1),
                     requirements: vec![scalar_from_i64("reshape", Prim::Int64, 2).unwrap()],
@@ -904,7 +904,7 @@ mod tests {
                     assert!(available.insert(output.clone()));
                 }
                 HostStage::Kernel { dag, outputs } => {
-                    assert!(crate::verify::verify(dag).is_empty());
+                    assert!(chelis_dag_core::verify::verify(dag).is_empty());
                     for node in dag.nodes() {
                         if let RiscOp::Load { name } = &node.op {
                             assert!(available.contains(name.as_str()));
@@ -934,7 +934,11 @@ mod tests {
         let plan = partition(&dag, &sources, &params, &inputs, &BTreeMap::new()).unwrap();
         for stage in plan.stages() {
             if let HostStage::Kernel { dag, .. } = stage {
-                assert_eq!(crate::verify::verify(dag), Vec::<String>::new(), "{dag:?}");
+                assert_eq!(
+                    chelis_dag_core::verify::verify(dag),
+                    Vec::<String>::new(),
+                    "{dag:?}"
+                );
             }
         }
     }
@@ -957,7 +961,7 @@ mod tests {
         let declaring = dag.add_node(
             decl,
             RiscOp::ExtentWitness {
-                site: crate::dag::ExtentWitnessSite::Caller,
+                site: chelis_dag_core::dag::ExtentWitnessSite::Caller,
                 parameter: "x".into(),
                 axis: RtAxis::Lit(0),
                 requirements: Vec::new(),
@@ -970,7 +974,7 @@ mod tests {
         let claim = dag.add_node(
             decl,
             RiscOp::ExtentWitness {
-                site: crate::dag::ExtentWitnessSite::ResultClaim {
+                site: chelis_dag_core::dag::ExtentWitnessSite::ResultClaim {
                     claim: "n".into(),
                     axis: RtAxis::Lit(0),
                 },
@@ -1026,7 +1030,11 @@ mod tests {
         let mut retained_owner = false;
         for stage in plan.stages() {
             if let HostStage::Kernel { dag, .. } = stage {
-                assert_eq!(crate::verify::verify(dag), Vec::<String>::new(), "{dag:?}");
+                assert_eq!(
+                    chelis_dag_core::verify::verify(dag),
+                    Vec::<String>::new(),
+                    "{dag:?}"
+                );
                 let claims = dag
                     .nodes()
                     .iter()
@@ -1034,7 +1042,7 @@ mod tests {
                         matches!(
                             node.op,
                             RiscOp::ExtentWitness {
-                                site: crate::dag::ExtentWitnessSite::ResultClaim { .. },
+                                site: chelis_dag_core::dag::ExtentWitnessSite::ResultClaim { .. },
                                 ..
                             }
                         )
@@ -1052,7 +1060,7 @@ mod tests {
                                 !matches!(
                                     dag.get(*dependency).map(|dependency| &dependency.op),
                                     Some(RiscOp::ExtentWitness {
-                                        site: crate::dag::ExtentWitnessSite::ResultClaim { .. },
+                                        site: chelis_dag_core::dag::ExtentWitnessSite::ResultClaim { .. },
                                         ..
                                     })
                                 )
@@ -1090,7 +1098,7 @@ mod tests {
         let claim = dag.add_node(
             decl,
             RiscOp::ExtentWitness {
-                site: crate::dag::ExtentWitnessSite::LiteralResultClaim,
+                site: chelis_dag_core::dag::ExtentWitnessSite::LiteralResultClaim,
                 parameter: String::new(),
                 axis: RtAxis::Lit(0),
                 requirements: vec![scalar_from_i64("reshape", Prim::Int64, 2).unwrap()],
@@ -1190,7 +1198,7 @@ mod tests {
                 assert!(node.shape_deps.iter().any(|dependency| matches!(
                     dag.get(*dependency).map(|node| &node.op),
                     Some(RiscOp::ExtentWitness {
-                        site: crate::dag::ExtentWitnessSite::LiteralResultClaim,
+                        site: chelis_dag_core::dag::ExtentWitnessSite::LiteralResultClaim,
                         ..
                     })
                 )));
@@ -1217,7 +1225,7 @@ mod tests {
         let claim = dag.add_node(
             decl,
             RiscOp::ExtentWitness {
-                site: crate::dag::ExtentWitnessSite::LocalAscriptionClaim {
+                site: chelis_dag_core::dag::ExtentWitnessSite::LocalAscriptionClaim {
                     ascription_id: 4,
                     binding: "y".into(),
                     claim: "2".into(),
@@ -1310,7 +1318,11 @@ mod tests {
             let HostStage::Kernel { dag, outputs } = stage else {
                 continue;
             };
-            assert_eq!(crate::verify::verify(dag), Vec::<String>::new(), "{dag:?}");
+            assert_eq!(
+                chelis_dag_core::verify::verify(dag),
+                Vec::<String>::new(),
+                "{dag:?}"
+            );
             assert!(!outputs.contains(&exported_claim));
             assert!(
                 !dag.nodes().iter().any(
@@ -1326,7 +1338,7 @@ mod tests {
                 assert!(node.shape_deps.iter().any(|dependency| matches!(
                     dag.get(*dependency).map(|node| &node.op),
                     Some(RiscOp::ExtentWitness {
-                        site: crate::dag::ExtentWitnessSite::LocalAscriptionClaim { .. },
+                        site: chelis_dag_core::dag::ExtentWitnessSite::LocalAscriptionClaim { .. },
                         ..
                     })
                 )));

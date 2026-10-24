@@ -5,7 +5,7 @@
 //! schedule, removing only comparisons entailed by its dominating entry plan.
 
 use super::*;
-use chelis_ir::axis_sources::EntryExtentGuard;
+use chelis_dag_core::axis_sources::EntryExtentGuard;
 use chelis_ir::host::SignatureEntryPlan;
 use chelis_ir::ownership::VerifiedHostTensorHelperView;
 use std::collections::BTreeMap;
@@ -21,7 +21,7 @@ enum Fact {
 
 fn fact(
     guard: &EntryExtentGuard,
-    source: impl Fn(chelis_ir::NodeId, usize) -> Option<Read>,
+    source: impl Fn(chelis_dag_core::NodeId, usize) -> Option<Read>,
 ) -> Option<Fact> {
     match guard {
         EntryExtentGuard::Named {
@@ -348,7 +348,7 @@ impl<'a> Walker<'a> {
                         .position(|input| input.name == name.as_str())?;
                     var_read(args.get(index)?, axis, env)
                 };
-                let mut guards = chelis_ir::axis_sources::entry_extent_guards(&source.dag);
+                let mut guards = chelis_dag_core::axis_sources::entry_extent_guards(&source.dag);
                 // Literal ABI comparisons precede the DAG's dynamic guards.
                 // Retain them unless entry checked that same input axis/value.
                 for node in source.dag.nodes() {
@@ -466,8 +466,8 @@ impl<'a> Walker<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chelis_dag_core::{Dag, TensorType};
     use chelis_ir::host::{HostFunctionOrigin, HostParam};
-    use chelis_ir::{Dag, TensorType};
     use chelis_numeric_core::prim::Prim;
 
     fn verified_host_from_source(source: &str) -> chelis_ir::ownership::VerifiedHostProgram {
@@ -581,7 +581,7 @@ mod tests {
     fn dominating_signature_discharges_the_exact_helper_comparison() {
         let function = function();
         let required =
-            chelis_ir::axis_sources::entry_extent_guards(&function.tensor_helpers[0].dag);
+            chelis_dag_core::axis_sources::entry_extent_guards(&function.tensor_helpers[0].dag);
         assert_eq!(required.len(), 1);
         assert!(delegated_function_guards(&function, &[]).is_empty());
         assert_eq!(helper_coverage(&function).variants, vec![vec![required]]);

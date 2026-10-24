@@ -94,7 +94,7 @@ struct UnrepresentableDag;
 ///
 /// `fatal` distinguishes a hard user-facing rejection (e.g. the AD
 /// pass refused to differentiate a non-differentiable op via
-/// [`crate::grad::grad_dag_checked`]) from a "merely unrepresentable
+/// [`chelis_dag_core::grad::grad_dag_checked`]) from a "merely unrepresentable
 /// in the IR DAG" condition (which `try_lower_compiled_program`
 /// silently absorbs and recovers from by falling through to the host
 /// lowering path). A fatal diagnostic must NOT be silently swallowed
@@ -589,11 +589,11 @@ pub(crate) fn raise_fatal_lowering_error(
 /// The extent `dag` fixes for `axis` of `id`, or `None` when only run time
 /// has it ([`LowerCtx::graph_fixed_axis_extent`] documents the two origins).
 fn graph_fixed_axis_extent(dag: &Dag, id: NodeId, axis: usize) -> Option<usize> {
-    use crate::axis_sources::ExtentOrigin;
-    match crate::axis_sources::resolve_axis_extent(dag, id, axis)? {
+    use chelis_dag_core::axis_sources::ExtentOrigin;
+    match chelis_dag_core::axis_sources::resolve_axis_extent(dag, id, axis)? {
         ExtentOrigin::Literal(extent) => usize::try_from(extent).ok(),
         ExtentOrigin::OpComputed { op, axis } => {
-            crate::axis_sources::static_op_computed_axis_extent(dag, op, axis)
+            chelis_dag_core::axis_sources::static_op_computed_axis_extent(dag, op, axis)
         }
         ExtentOrigin::ExternalAxis { .. } | ExtentOrigin::ScalarInput { .. } => None,
     }
@@ -613,7 +613,8 @@ fn reject_literal_operand_disagreement(dag: &Dag) {
     for node in dag.nodes() {
         // A malformed relation is the IR verifier's to report; only a
         // well-formed one can prove a disagreement.
-        let Ok(Some(agreement)) = crate::axis_sources::same_shape_result_agreement(dag, node.id)
+        let Ok(Some(agreement)) =
+            chelis_dag_core::axis_sources::same_shape_result_agreement(dag, node.id)
         else {
             continue;
         };
@@ -638,7 +639,7 @@ fn reject_literal_operand_disagreement(dag: &Dag) {
                             format!(
                                 "`{}` argument {argument}, axis {axis}: expected {required}, \
                                  got {extent} (extents fixed by literals after inlining)",
-                                crate::grad::risc_op_name(&node.op)
+                                chelis_dag_core::grad::risc_op_name(&node.op)
                             ),
                             node.span_id.clone(),
                         ));
@@ -921,15 +922,15 @@ use chelis_types::unsupported::{Stage, Unsupported, UnsupportedKind};
 use chelis_types::{BUILTIN_NAMES, CheckedProgram, LibraryProofId, LinearityInfo};
 use chelis_vocab::EffectKind;
 
-use crate::dag::{
+use crate::vmap;
+use chelis_dag_core::dag::{
     ComparisonKind, Dag, DeclId, DimExpr, DimInfo, LogicalKind, NodeId, Owner, RiscOp, RtAxis,
     RtDim, TensorType,
 };
-use crate::grad::grad_dag_checked;
-use crate::load_store_name::LoadStoreName;
-use crate::tier2;
-use crate::tier2_ordered;
-use crate::vmap;
+use chelis_dag_core::grad::grad_dag_checked;
+use chelis_dag_core::load_store_name::LoadStoreName;
+use chelis_dag_core::tier2;
+use chelis_dag_core::tier2_ordered;
 
 /// Lower a checked Deep program into a RISC DAG.
 pub fn lower_program(program: &CheckedProgram) -> Dag {
@@ -1254,13 +1255,14 @@ fn lower_program_to_library_inner(
     }
     log_sub("flatten_bindings", &mut sub_t);
 
-    let (dce_dag, remap) = crate::optimize::dead_code_eliminate_with_remap(&ctx.dag);
+    let (dce_dag, remap) = chelis_dag_core::optimize::dead_code_eliminate_with_remap(&ctx.dag);
     log_sub("dce", &mut sub_t);
-    let (copy_dag, linear_remap) = insert_copy_nodes_for_consuming_fanout(&dce_dag);
+    let (copy_dag, linear_remap) =
+        chelis_dag_core::ownership::insert_copy_nodes_for_consuming_fanout(&dce_dag);
     log_sub("implicit_copy_nodes", &mut sub_t);
     #[cfg(feature = "lowering-trace")]
     let copy_snapshot = ctx.trace.as_ref().map(|_| copy_dag.clone());
-    let linear_dag = insert_drop_nodes_for_unconsumed_values(copy_dag);
+    let linear_dag = chelis_dag_core::ownership::insert_drop_nodes_for_unconsumed_values(copy_dag);
     log_sub("implicit_drop_nodes", &mut sub_t);
     #[cfg(feature = "lowering-trace")]
     if let (Some(trace), Some(copy_snapshot)) = (&ctx.trace, copy_snapshot) {
@@ -1301,202 +1303,6 @@ fn lower_program_to_library_inner(
         rootless_defs: ctx.rootless_defs,
         library_proof_id: program.library_proof_id(),
     }
-}
-
-fn insert_copy_nodes_for_consuming_fanout(dag: &Dag) -> (Dag, UnordMap<NodeId, NodeId>) {
-    let mut consuming_uses = UnordMap::<NodeId, usize>::new();
-    for node in dag.nodes() {
-        if !op_consumes_inputs(&node.op) {
-            continue;
-        }
-        for input in &node.inputs {
-            *consuming_uses.entry(*input).or_default() += 1;
-        }
-    }
-
-    let mut seen_consuming_uses = UnordMap::<NodeId, usize>::new();
-    let mut out = Dag::new();
-    out.inherit_declarations(dag);
-    let mut id_map = UnordMap::<NodeId, NodeId>::new();
-
-    for node in dag.nodes() {
-        let mut inputs = Vec::with_capacity(node.inputs.len());
-        for input in &node.inputs {
-            let mapped = *id_map
-                .get(input)
-                .expect("input must have been remapped before consumer");
-            let total = consuming_uses.get(input).copied().unwrap_or_default();
-            if op_consumes_inputs(&node.op) && total > 1 {
-                let seen = seen_consuming_uses.entry(*input).or_default();
-                *seen += 1;
-                if *seen < total {
-                    let input_ty = out
-                        .get(mapped)
-                        .map(|n| n.output_type.clone())
-                        .unwrap_or_else(LowerCtx::default_type);
-                    let copy = out.add_node(
-                        node.owner.remap(&id_map),
-                        RiscOp::Copy,
-                        vec![mapped],
-                        input_ty,
-                        node.span_id.clone(),
-                    );
-                    inputs.push(copy);
-                    continue;
-                }
-            }
-            inputs.push(mapped);
-        }
-
-        let new_id = out.add_node(
-            node.owner.remap(&id_map),
-            node.op.clone(),
-            inputs,
-            node.output_type.clone(),
-            node.span_id.clone(),
-        );
-        if let Some(new_node) = out.node_mut(new_id) {
-            new_node.reusable_input = node
-                .reusable_input
-                .and_then(|old| id_map.get(&old).copied());
-            new_node.merged_spans = node.merged_spans.clone();
-            // chelis#384/#397: preserve (remapped) shape-only deps so an
-            // `expand` shape-derived extent source survives this rebuild. Deps are
-            // earlier in topo order, so already remapped in `id_map`.
-            new_node.shape_deps = node
-                .shape_deps
-                .iter()
-                .filter_map(|old| id_map.get(old).copied())
-                .collect();
-            new_node.result_claim_deps = node
-                .result_claim_deps
-                .iter()
-                .map(|old| {
-                    *id_map
-                        .get(old)
-                        .unwrap_or_else(|| panic!("unmapped result claim dependency {old:?}"))
-                })
-                .collect();
-        }
-        id_map.insert(node.id, new_id);
-    }
-
-    for root in dag.roots() {
-        if let Some(new_root) = id_map.get(root) {
-            out.add_root(*new_root);
-        }
-    }
-
-    (out, id_map)
-}
-
-fn op_consumes_inputs(op: &RiscOp) -> bool {
-    matches!(op, RiscOp::Realize | RiscOp::Drop | RiscOp::Store { .. })
-}
-
-fn insert_drop_nodes_for_unconsumed_values(mut dag: Dag) -> Dag {
-    let mut consumed = UnordSet::<NodeId>::new();
-    for node in dag.nodes() {
-        if !op_consumes_inputs(&node.op) {
-            continue;
-        }
-        consumed.extend(node.inputs.iter().copied());
-    }
-    let roots = dag.roots().iter().copied().collect::<UnordSet<_>>();
-    let values_to_drop = dag
-        .nodes()
-        .iter()
-        .filter(|node| !roots.contains(&node.id))
-        .filter(|node| !consumed.contains(&node.id))
-        .filter(|node| {
-            !matches!(
-                node.op,
-                RiscOp::Load { .. } | RiscOp::Drop | RiscOp::Store { .. }
-            )
-        })
-        // A key, at any rank, is never dropped. Its one use is a draw, a key
-        // operation or a root (spec/10 §3.2), and a `Drop` would be a second
-        // reader and a key reaching an operation that does not consume keys.
-        // Its storage is still released exactly once: an owned value with no
-        // terminal of its own gets the ownership plan's scope-end release.
-        .filter(|node| node.output_type.precision != Prim::Key)
-        .map(|node| {
-            (
-                node.id,
-                node.output_type.clone(),
-                node.span_id.clone(),
-                node.merged_spans.clone(),
-                node.owner,
-            )
-        })
-        .collect::<Vec<_>>();
-
-    // A discarded value's terminal belongs to the owner of the value it
-    // drops (chelis#2476: an unrooted `Drop` owned by no root).
-    for (id, ty, span_id, merged_spans, owner) in values_to_drop {
-        let drop = dag.add_node(owner, RiscOp::Drop, vec![id], ty, span_id);
-        if let Some(node) = dag.node_mut(drop) {
-            node.merged_spans = merged_spans;
-        }
-    }
-
-    dag
-}
-
-fn strip_drop_nodes(dag: &Dag) -> (Dag, UnordMap<NodeId, NodeId>) {
-    let mut out = Dag::new();
-    out.inherit_declarations(dag);
-    let mut id_map = UnordMap::<NodeId, NodeId>::new();
-
-    for node in dag.nodes() {
-        if matches!(node.op, RiscOp::Drop) {
-            continue;
-        }
-        let inputs = node
-            .inputs
-            .iter()
-            .filter_map(|input| id_map.get(input).copied())
-            .collect::<Vec<_>>();
-        let new_id = out.add_node(
-            node.owner.remap(&id_map),
-            node.op.clone(),
-            inputs,
-            node.output_type.clone(),
-            node.span_id.clone(),
-        );
-        if let Some(new_node) = out.node_mut(new_id) {
-            new_node.reusable_input = node
-                .reusable_input
-                .and_then(|old| id_map.get(&old).copied());
-            new_node.merged_spans = node.merged_spans.clone();
-            // chelis#384/#397: preserve (remapped) shape-only deps so an
-            // `expand` shape-derived extent source survives this rebuild. Deps are
-            // earlier in topo order, so already remapped in `id_map`.
-            new_node.shape_deps = node
-                .shape_deps
-                .iter()
-                .filter_map(|old| id_map.get(old).copied())
-                .collect();
-            new_node.result_claim_deps = node
-                .result_claim_deps
-                .iter()
-                .map(|old| {
-                    *id_map
-                        .get(old)
-                        .unwrap_or_else(|| panic!("unmapped result claim dependency {old:?}"))
-                })
-                .collect();
-        }
-        id_map.insert(node.id, new_id);
-    }
-
-    for root in dag.roots() {
-        if let Some(new_root) = id_map.get(root) {
-            out.add_root(*new_root);
-        }
-    }
-
-    (out, id_map)
 }
 
 /// Compose a library's lowered DAG with a new-code [`CheckedProgram`].
@@ -1638,7 +1444,10 @@ fn lower_program_with_context_inner(
     // standalone library snapshot; composition can make formerly terminal
     // values live again, so we strip them and re-normalize Copy/Drop across
     // the combined DAG below.
-    let (library_dag, library_remap) = strip_drop_nodes(&library.dag);
+    let chelis_dag_core::ownership::OwnershipResult {
+        dag: library_dag,
+        old_to_new: library_remap,
+    } = chelis_dag_core::ownership::strip_drop_nodes(&library.dag);
     ctx.dag = library_dag;
     for (name, node_id) in library.symbol_table.to_sorted() {
         if let Some(mapped) = library_remap.get(node_id).copied() {
@@ -1722,8 +1531,7 @@ fn lower_program_with_context_inner(
     // run the linearity normalization passes so consuming fan-out across the
     // library/new-code boundary gets the same Copy nodes as monolithic
     // lowering, and every surviving linear value receives a terminal Drop.
-    let (copy_dag, _) = insert_copy_nodes_for_consuming_fanout(&ctx.dag);
-    let dag = insert_drop_nodes_for_unconsumed_values(copy_dag);
+    let dag = chelis_dag_core::ownership::normalize_ownership(&ctx.dag).dag;
     ComposedLowering {
         dag,
         rootless_defs: ctx.rootless_defs,
@@ -3340,14 +3148,15 @@ fn lower_subexpr_program_inner_impl(
     }
     #[cfg(feature = "lowering-trace")]
     let before_dce = trace.as_ref().map(|_| ctx.dag.clone());
-    let (dce_dag, dce_remap) = crate::optimize::dead_code_eliminate_with_remap(&ctx.dag);
+    let (dce_dag, dce_remap) = chelis_dag_core::optimize::dead_code_eliminate_with_remap(&ctx.dag);
     reject_literal_operand_disagreement(&dce_dag);
-    let (copy_dag, copy_remap) = insert_copy_nodes_for_consuming_fanout(&dce_dag);
+    let (copy_dag, copy_remap) =
+        chelis_dag_core::ownership::insert_copy_nodes_for_consuming_fanout(&dce_dag);
     #[cfg(not(feature = "lowering-trace"))]
     let _ = (&dce_remap, &copy_remap);
     #[cfg(feature = "lowering-trace")]
     let after_copies = trace.as_ref().map(|_| copy_dag.clone());
-    let after_drops = insert_drop_nodes_for_unconsumed_values(copy_dag);
+    let after_drops = chelis_dag_core::ownership::insert_drop_nodes_for_unconsumed_values(copy_dag);
     #[cfg(feature = "lowering-trace")]
     if let Some(trace) = &trace {
         trace.normalization(
@@ -9333,7 +9142,7 @@ struct TopLevelValue {
     /// here ([`names_top_level_value`]).
     bound: Option<LoweredValue>,
     /// The initializer, when its lowered form holds a potentially trapping
-    /// node ([`crate::dag::TrapSeeds::is_observable_root`]). `None` for a total one, whose one
+    /// node ([`chelis_dag_core::dag::TrapSeeds::is_observable_root`]). `None` for a total one, whose one
     /// node set every reference shares.
     trapping: Option<Arc<TrappingInitializer>>,
 }
@@ -10054,7 +9863,7 @@ fn same_physical_tensor_type(actual: &TensorType, view: &TensorType) -> bool {
 struct MappedArgumentLayout {
     physical: NodeId,
     canonical: NodeId,
-    steps: Vec<crate::dag::DagNode>,
+    steps: Vec<chelis_dag_core::dag::DagNode>,
 }
 
 impl MappedArgumentLayout {
@@ -10904,16 +10713,19 @@ impl<'program> LowerCtx<'program> {
     fn lower_split_key(&mut self, key_expr: &Expr) -> LoweredValue {
         let key = self.lower_expr_node(key_expr, "split_key key");
         let key_ty = self.key_operand_type(key);
-        let halves = [crate::dag::KeyBranch::Left, crate::dag::KeyBranch::Right]
-            .into_iter()
-            .map(|branch| {
-                LoweredValue::Node(self.lower_key_operation(
-                    RiscOp::Split { branch },
-                    vec![key],
-                    key_ty.clone(),
-                ))
-            })
-            .collect();
+        let halves = [
+            chelis_dag_core::dag::KeyBranch::Left,
+            chelis_dag_core::dag::KeyBranch::Right,
+        ]
+        .into_iter()
+        .map(|branch| {
+            LoweredValue::Node(self.lower_key_operation(
+                RiscOp::Split { branch },
+                vec![key],
+                key_ty.clone(),
+            ))
+        })
+        .collect();
         LoweredValue::Tuple(halves)
     }
 
@@ -12745,7 +12557,7 @@ impl<'program> LowerCtx<'program> {
                             && (self.same_shape_result_owner_is_admitted(id, axis)
                                 || self.runtime_carrier_result_owner_is_admitted(id, axis)
                                 || (declaration_root
-                                    && crate::axis_sources::result_axis_is_unwitnessed_input_axis(
+                                    && chelis_dag_core::axis_sources::result_axis_is_unwitnessed_input_axis(
                                         &self.dag, id, axis,
                                     )))))
                     && self.literal_result_token_owner_is_admitted(id, axis)
@@ -12765,7 +12577,7 @@ impl<'program> LowerCtx<'program> {
                         self.dag.add_node(
                             self.owner(),
                             RiscOp::ExtentWitness {
-                                site: crate::dag::ExtentWitnessSite::LiteralResultClaim,
+                                site: chelis_dag_core::dag::ExtentWitnessSite::LiteralResultClaim,
                                 parameter: String::new(),
                                 axis: RtAxis::Lit(i32::try_from(axis).expect("rank fits i32")),
                                 requirements: vec![value],
@@ -12781,7 +12593,7 @@ impl<'program> LowerCtx<'program> {
                     } else {
                         self.dag.node_mut(required).expect("literal requirement").op =
                             RiscOp::ExtentWitness {
-                                site: crate::dag::ExtentWitnessSite::LiteralResultClaim,
+                                site: chelis_dag_core::dag::ExtentWitnessSite::LiteralResultClaim,
                                 parameter: String::new(),
                                 axis: RtAxis::Lit(i32::try_from(axis).expect("rank fits i32")),
                                 requirements: vec![value],
@@ -12898,10 +12710,11 @@ impl<'program> LowerCtx<'program> {
         if self.same_shape_result_owner_is_admitted(id, axis) {
             return true;
         }
-        match crate::axis_sources::output_axis_sources(&self.dag, id).get(axis) {
-            Some(crate::axis_sources::AxisSource::OpComputed { axis, .. }) => {
+        match chelis_dag_core::axis_sources::output_axis_sources(&self.dag, id).get(axis) {
+            Some(chelis_dag_core::axis_sources::AxisSource::OpComputed { axis, .. }) => {
                 self.dag.get(id).is_some_and(|node| {
-                    crate::axis_sources::op_computed_axis_extent(&node.op, *axis).is_some()
+                    chelis_dag_core::axis_sources::op_computed_axis_extent(&node.op, *axis)
+                        .is_some()
                 })
             }
             Some(_) => true,
@@ -12914,7 +12727,7 @@ impl<'program> LowerCtx<'program> {
     /// a carrier; the shared site derivation preserves that distinction.
     /// Op-computed observations keep their existing admission.
     fn runtime_carrier_result_owner_is_admitted(&self, id: NodeId, axis: usize) -> bool {
-        crate::axis_sources::result_extent_sites(&self.dag, id)
+        chelis_dag_core::axis_sources::result_extent_sites(&self.dag, id)
             .iter()
             .any(|site| {
                 let RtAxis::Lit(output_axis) = site.output_axis();
@@ -12927,7 +12740,7 @@ impl<'program> LowerCtx<'program> {
         self.dag.get(id).is_some_and(|node| {
             axis < node.output_type.dims.len()
                 && matches!(
-                    crate::axis_sources::same_shape_result_agreement(&self.dag, id),
+                    chelis_dag_core::axis_sources::same_shape_result_agreement(&self.dag, id),
                     Ok(Some(_))
                 )
         })
@@ -12951,7 +12764,7 @@ impl<'program> LowerCtx<'program> {
         requirement: NodeId,
     ) -> bool {
         let Ok(Some(agreement)) =
-            crate::axis_sources::same_shape_result_agreement(&self.dag, producer)
+            chelis_dag_core::axis_sources::same_shape_result_agreement(&self.dag, producer)
         else {
             return false;
         };
@@ -12974,7 +12787,8 @@ impl<'program> LowerCtx<'program> {
         axis: usize,
         required: usize,
     ) -> bool {
-        let Ok(Some(agreement)) = crate::axis_sources::same_shape_result_agreement(&self.dag, id)
+        let Ok(Some(agreement)) =
+            chelis_dag_core::axis_sources::same_shape_result_agreement(&self.dag, id)
         else {
             return false;
         };
@@ -13003,7 +12817,7 @@ impl<'program> LowerCtx<'program> {
                     matches!(
                         self.dag.get(*dependency).map(|node| &node.op),
                         Some(RiscOp::ExtentWitness {
-                            site: crate::dag::ExtentWitnessSite::LiteralResultClaim,
+                            site: chelis_dag_core::dag::ExtentWitnessSite::LiteralResultClaim,
                             axis: RtAxis::Lit(claimed_axis),
                             ..
                         }) if usize::try_from(*claimed_axis).ok() == Some(axis)
@@ -13134,11 +12948,15 @@ impl<'program> LowerCtx<'program> {
     /// is a previously-bound `LoweredValue` — append the parent's span to
     /// the existing node so the audit invariant ("every input span appears
     /// as `span_id` or `merged_spans` on at least one node") is preserved.
-    /// Thin wrapper over `crate::span_merge::append_span_to_node`; the
+    /// Thin wrapper over `chelis_dag_core::span_merge::append_span_to_node`. the
     /// shared helper owns the None-no-op / canonical-no-op / dedup / sort
     /// logic.
     fn append_current_span_to_existing_node(&mut self, id: NodeId) {
-        crate::span_merge::append_span_to_node(&mut self.dag, id, self.current_span_id.as_deref());
+        chelis_dag_core::span_merge::append_span_to_node(
+            &mut self.dag,
+            id,
+            self.current_span_id.as_deref(),
+        );
     }
 
     /// Walk a `LoweredValue` and apply
@@ -13858,7 +13676,7 @@ impl<'program> LowerCtx<'program> {
                 let witness = self.dag.add_node(
                     self.owner(),
                     RiscOp::ExtentWitness {
-                        site: crate::dag::ExtentWitnessSite::LocalExpand,
+                        site: chelis_dag_core::dag::ExtentWitnessSite::LocalExpand,
                         parameter: binding.to_string(),
                         axis: RtAxis::Lit(
                             i32::try_from(realized_axis).expect("checked tensor rank fits int32"),
@@ -14000,8 +13818,8 @@ impl<'program> LowerCtx<'program> {
     /// untaken runtime branch. Recover the producer's structural source
     /// instead and leave the exact claim on its dedicated witness token.
     fn restore_local_ascription_owner_axis(&mut self, owner: NodeId, axis: usize) {
-        use crate::axis_sources::AxisSource;
-        let replacement = match crate::axis_sources::output_axis_sources(&self.dag, owner)
+        use chelis_dag_core::axis_sources::AxisSource;
+        let replacement = match chelis_dag_core::axis_sources::output_axis_sources(&self.dag, owner)
             .get(axis)
             .cloned()
         {
@@ -14101,7 +13919,7 @@ impl<'program> LowerCtx<'program> {
     ) -> NodeId {
         let label = Self::local_ascription_claim_label(ascription, claim.axis(), claim);
         let realized_axis = self.realized_local_ascription_axis(ascription, claim.axis());
-        let site = crate::dag::ExtentWitnessSite::LocalAscriptionClaim {
+        let site = chelis_dag_core::dag::ExtentWitnessSite::LocalAscriptionClaim {
             ascription_id: ascription.id().get(),
             binding: ascription.binding_name().to_string(),
             claim: label.clone(),
@@ -16004,8 +15822,8 @@ impl<'program> LowerCtx<'program> {
                 self.current_span_id.clone(),
             )
         });
-        let sources = crate::axis_sources::output_axis_sources(&self.dag, id);
-        crate::axis_sources::check_node_axis_sources(
+        let sources = chelis_dag_core::axis_sources::output_axis_sources(&self.dag, id);
+        crate::axis_admission::check_node_axis_sources(
             &self.dag,
             node,
             &sources,
@@ -16675,7 +16493,7 @@ impl<'program> LowerCtx<'program> {
                 let fresh = DimInfo::Named(
                     format!(
                         "{}{serial}_{variable}",
-                        crate::axis_sources::ACTIVATION_DIM_PREFIX
+                        chelis_dag_core::axis_sources::ACTIVATION_DIM_PREFIX
                     ),
                     None,
                 );
@@ -17129,7 +16947,7 @@ impl<'program> LowerCtx<'program> {
             .collect::<UnordMap<_, _>>();
         for source_node in source.nodes() {
             let RiscOp::ExtentWitness {
-                site: crate::dag::ExtentWitnessSite::Caller,
+                site: chelis_dag_core::dag::ExtentWitnessSite::Caller,
                 parameter,
                 axis: RtAxis::Lit(canonical_axis),
                 ..
@@ -17154,7 +16972,7 @@ impl<'program> LowerCtx<'program> {
                 continue;
             };
             let RiscOp::ExtentWitness {
-                site: crate::dag::ExtentWitnessSite::Caller,
+                site: chelis_dag_core::dag::ExtentWitnessSite::Caller,
                 axis,
                 ..
             } = &mut node.op
@@ -17481,12 +17299,12 @@ impl<'program> LowerCtx<'program> {
         // iterations only if no invocation can produce an observable check.
         // Scalar outputs also exclude iteration-dependent allocation extents.
         if ordered_scalar_map
-            && crate::optimize::dead_code_eliminate(&subctx.dag)
+            && chelis_dag_core::optimize::dead_code_eliminate(&subctx.dag)
                 .nodes()
                 .iter()
                 .any(|node| {
                     !node.output_type.dims.is_empty()
-                        || node.runtime_check() != crate::dag::RuntimeCheck::Nothing
+                        || node.runtime_check() != chelis_dag_core::dag::RuntimeCheck::Nothing
                         || node.output_type.precision == Prim::Key
                 })
         {
@@ -17958,18 +17776,20 @@ impl<'program> LowerCtx<'program> {
         for cotangent in flattened.iter().filter(|id| **id != forward_activation) {
             self.dag.add_shape_dep(*cotangent, forward_activation);
         }
-        crate::verify::verify_mapped_gradient_closure(crate::verify::MappedGradientClosure {
-            source: &grad_result.dag,
-            mapped: &vmapped,
-            node_map: &batched_ids,
-            root_map: &root_map,
-            spliced: &self.dag,
-            splice_map: &remap,
-            forward_source: grad_result.output_node,
-            forward_activation,
-            cotangents: &flattened,
-            expected_cotangents: selected.len(),
-        })
+        chelis_dag_core::verify::verify_mapped_gradient_closure(
+            chelis_dag_core::verify::MappedGradientClosure {
+                source: &grad_result.dag,
+                mapped: &vmapped,
+                node_map: &batched_ids,
+                root_map: &root_map,
+                spliced: &self.dag,
+                splice_map: &remap,
+                forward_source: grad_result.output_node,
+                forward_activation,
+                cotangents: &flattened,
+                expected_cotangents: selected.len(),
+            },
+        )
         .unwrap_or_else(|message| {
             invalid_mapping(format!(
                 "post-splice closure verification failed: {message}"
@@ -18250,7 +18070,7 @@ impl<'program> LowerCtx<'program> {
                     let mut refined_layout = None;
                     match &mut op {
                         RiscOp::ExtentWitness {
-                            site: crate::dag::ExtentWitnessSite::Caller,
+                            site: chelis_dag_core::dag::ExtentWitnessSite::Caller,
                             parameter,
                             axis: RtAxis::Lit(axis),
                             ..
@@ -18509,9 +18329,9 @@ impl<'program> LowerCtx<'program> {
                 let a = self.lower_expr_node(&args[0], "extrema lhs");
                 let b = self.lower_expr_node(&args[1], "extrema rhs");
                 let kind = if func_name == "max_elem" {
-                    crate::dag::ExtremaKind::Max
+                    chelis_dag_core::dag::ExtremaKind::Max
                 } else {
-                    crate::dag::ExtremaKind::Min
+                    chelis_dag_core::dag::ExtremaKind::Min
                 };
                 let node = tier2::lower_extrema(
                     self.owner(),
@@ -18979,9 +18799,11 @@ impl<'program> LowerCtx<'program> {
                 );
                 self.attach_reuse_hint(node, app_span, &[a, b])
             }
-            name if args.len() == 2 && chelis_types::BitwiseKind::from_name(name).is_some() => {
-                let kind =
-                    chelis_types::BitwiseKind::from_name(name).expect("matched bitwise identity");
+            name if args.len() == 2
+                && chelis_numeric_core::bitwise::BitwiseKind::from_name(name).is_some() =>
+            {
+                let kind = chelis_numeric_core::bitwise::BitwiseKind::from_name(name)
+                    .expect("matched bitwise identity");
                 let a = self.lower_expr_node(&args[0], "bitwise lhs");
                 let b = self.lower_expr_node(&args[1], "bitwise rhs");
                 let out_ty = Self::elementwise_out_ty(&self.dag, a, ty, None);
@@ -19739,10 +19561,10 @@ impl<'program> LowerCtx<'program> {
                 let window_shape = extract_literal_axis_list(&args[1], "window");
                 let strides = extract_literal_axis_list(&args[2], "stride");
                 let reducer = match name {
-                    "reduce_window_max" => crate::dag::ReduceWindowKind::Max,
-                    "reduce_window_min" => crate::dag::ReduceWindowKind::Min,
-                    "reduce_window_sum" => crate::dag::ReduceWindowKind::Sum,
-                    "reduce_window_mean" => crate::dag::ReduceWindowKind::Mean,
+                    "reduce_window_max" => chelis_dag_core::dag::ReduceWindowKind::Max,
+                    "reduce_window_min" => chelis_dag_core::dag::ReduceWindowKind::Min,
+                    "reduce_window_sum" => chelis_dag_core::dag::ReduceWindowKind::Sum,
+                    "reduce_window_mean" => chelis_dag_core::dag::ReduceWindowKind::Mean,
                     _ => unreachable!(),
                 };
                 // Compute output dims directly from the input + window
@@ -20768,7 +20590,7 @@ impl<'program> LowerCtx<'program> {
                 let a_ty = self.lowered_type_or(a, ty);
                 let b_ty = self.lowered_type_or(b, ty);
                 let plan = contraction.as_deref().and_then(|equation| {
-                    tier2_ordered::einsum_contraction(equation, &a_ty, &b_ty, accumulator)
+                    crate::ordered_layout::einsum_contraction(equation, &a_ty, &b_ty, accumulator)
                 });
                 let span = self.current_span_id.clone();
                 match plan.map(|plan| {
@@ -21671,7 +21493,7 @@ impl<'program> LowerCtx<'program> {
             let nonnegative = tier2::lower_extrema(
                 self.owner(),
                 &mut self.dag,
-                crate::dag::ExtremaKind::Max,
+                chelis_dag_core::dag::ExtremaKind::Max,
                 count,
                 zero,
                 self.current_span_id.as_deref(),
@@ -21679,7 +21501,7 @@ impl<'program> LowerCtx<'program> {
             let effective = tier2::lower_extrema(
                 self.owner(),
                 &mut self.dag,
-                crate::dag::ExtremaKind::Min,
+                chelis_dag_core::dag::ExtremaKind::Min,
                 nonnegative,
                 len,
                 self.current_span_id.as_deref(),
@@ -21761,7 +21583,7 @@ impl<'program> LowerCtx<'program> {
             let nonnegative_count = tier2::lower_extrema(
                 self.owner(),
                 &mut self.dag,
-                crate::dag::ExtremaKind::Max,
+                chelis_dag_core::dag::ExtremaKind::Max,
                 count,
                 zero,
                 self.current_span_id.as_deref(),
@@ -21769,7 +21591,7 @@ impl<'program> LowerCtx<'program> {
             let within_view = tier2::lower_extrema(
                 self.owner(),
                 &mut self.dag,
-                crate::dag::ExtremaKind::Min,
+                chelis_dag_core::dag::ExtremaKind::Min,
                 nonnegative_count,
                 len,
                 self.current_span_id.as_deref(),
@@ -21785,7 +21607,7 @@ impl<'program> LowerCtx<'program> {
             let effective = tier2::lower_extrema(
                 self.owner(),
                 &mut self.dag,
-                crate::dag::ExtremaKind::Min,
+                chelis_dag_core::dag::ExtremaKind::Min,
                 raw_effective,
                 last,
                 self.current_span_id.as_deref(),
@@ -21808,7 +21630,7 @@ impl<'program> LowerCtx<'program> {
             let nonnegative = tier2::lower_extrema(
                 self.owner(),
                 &mut self.dag,
-                crate::dag::ExtremaKind::Max,
+                chelis_dag_core::dag::ExtremaKind::Max,
                 count,
                 zero,
                 self.current_span_id.as_deref(),
@@ -21816,7 +21638,7 @@ impl<'program> LowerCtx<'program> {
             tier2::lower_extrema(
                 self.owner(),
                 &mut self.dag,
-                crate::dag::ExtremaKind::Min,
+                chelis_dag_core::dag::ExtremaKind::Min,
                 nonnegative,
                 len,
                 self.current_span_id.as_deref(),
@@ -22173,7 +21995,7 @@ impl<'program> LowerCtx<'program> {
         {
             subctx.dag.add_root(load);
         }
-        let callback_dag = crate::optimize::dead_code_eliminate(&subctx.dag);
+        let callback_dag = chelis_dag_core::optimize::dead_code_eliminate(&subctx.dag);
         let result = callback_dag.roots()[0];
         let param_ids = params
             .iter()
@@ -22217,10 +22039,10 @@ impl<'program> LowerCtx<'program> {
         } else {
             state_result_ty
         };
-        let recurrence = crate::dag::RuntimeRecurrence {
+        let recurrence = chelis_dag_core::dag::RuntimeRecurrence {
             callback: Box::new(callback_dag),
             state: param_ids[0],
-            source: crate::dag::RuntimeRecurrenceSource::Tensor { item: param_ids[1] },
+            source: chelis_dag_core::dag::RuntimeRecurrenceSource::Tensor { item: param_ids[1] },
             captures,
             result,
             scan,
@@ -22383,7 +22205,7 @@ impl<'program> LowerCtx<'program> {
         {
             subctx.dag.add_root(load);
         }
-        let callback_dag = crate::optimize::dead_code_eliminate(&subctx.dag);
+        let callback_dag = chelis_dag_core::optimize::dead_code_eliminate(&subctx.dag);
         let result = callback_dag.roots()[0];
         let find_load = |wanted: &str| {
             callback_dag.nodes().iter().find_map(|node| {
@@ -22452,13 +22274,13 @@ impl<'program> LowerCtx<'program> {
             state_result_ty
         };
         let recurrence_source = if packed {
-            crate::dag::RuntimeRecurrenceSource::Tensor {
+            chelis_dag_core::dag::RuntimeRecurrenceSource::Tensor {
                 item: find_load(&index_name)?,
             }
         } else {
-            crate::dag::RuntimeRecurrenceSource::Columns { items: item_loads }
+            chelis_dag_core::dag::RuntimeRecurrenceSource::Columns { items: item_loads }
         };
-        let recurrence = crate::dag::RuntimeRecurrence {
+        let recurrence = chelis_dag_core::dag::RuntimeRecurrence {
             callback: Box::new(callback_dag),
             state: state_load,
             source: recurrence_source,
@@ -22483,7 +22305,7 @@ impl<'program> LowerCtx<'program> {
     /// a nonempty fold can change shape).
     fn add_runtime_recurrence(
         &mut self,
-        recurrence: crate::dag::RuntimeRecurrence,
+        recurrence: chelis_dag_core::dag::RuntimeRecurrence,
         inputs: Vec<NodeId>,
         mut output_ty: TensorType,
     ) -> NodeId {
@@ -23513,8 +23335,8 @@ impl<'program> LowerCtx<'program> {
     /// or a prior checked scalar's literal refinement. Result metadata alone
     /// is no proof; every checked producer remains a dependency of the fold.
     fn independently_known_axis_extent(&self, id: NodeId, axis: usize) -> Option<i64> {
-        use crate::axis_sources::AxisSource;
-        match crate::axis_sources::output_axis_sources(&self.dag, id).get(axis)? {
+        use chelis_dag_core::axis_sources::AxisSource;
+        match chelis_dag_core::axis_sources::output_axis_sources(&self.dag, id).get(axis)? {
             AxisSource::Literal { value } => Some(*value),
             AxisSource::ExternalAxis { load, axis } => {
                 match self.dag.get(*load)?.output_type.dims.get(*axis)? {
@@ -23689,7 +23511,7 @@ impl<'program> LowerCtx<'program> {
                     return false;
                 };
                 let operands = &kids[1..];
-                if chelis_types::BitwiseKind::from_name(&op).is_some() {
+                if chelis_numeric_core::bitwise::BitwiseKind::from_name(&op).is_some() {
                     return operands.len() == 2;
                 }
                 let arity_ok = match op.as_str() {
@@ -23949,7 +23771,7 @@ impl<'program> LowerCtx<'program> {
                 let witness = self.dag.add_node(
                     self.owner(),
                     RiscOp::ExtentWitness {
-                        site: crate::dag::ExtentWitnessSite::Caller,
+                        site: chelis_dag_core::dag::ExtentWitnessSite::Caller,
                         parameter: name.to_owned(),
                         axis: RtAxis::Lit(i32::try_from(axis).expect("parameter rank fits i32")),
                         requirements,
@@ -24077,9 +23899,9 @@ impl<'program> LowerCtx<'program> {
                     }) => (site.clone(), parameter.clone()),
                     _ => (
                         if local {
-                            crate::dag::ExtentWitnessSite::LocalExpand
+                            chelis_dag_core::dag::ExtentWitnessSite::LocalExpand
                         } else {
-                            crate::dag::ExtentWitnessSite::Caller
+                            chelis_dag_core::dag::ExtentWitnessSite::Caller
                         },
                         match &self.dag.get(input).expect("expand input").op {
                             RiscOp::Load { name } => name.as_str().to_owned(),
@@ -24168,7 +23990,7 @@ impl<'program> LowerCtx<'program> {
             .zip(node.inputs.iter().skip(1))
             .any(|(recorded, edge)| recorded.claim == claim && *edge == requirement);
         if !already {
-            claims.push(crate::dag::ExtentClaim {
+            claims.push(chelis_dag_core::dag::ExtentClaim {
                 claim,
                 requirement_declares,
             });
@@ -24227,7 +24049,7 @@ impl<'program> LowerCtx<'program> {
             unreachable!("named result claims resolve to signature witnesses")
         };
         let op = RiscOp::ExtentWitness {
-            site: crate::dag::ExtentWitnessSite::ResultClaim {
+            site: chelis_dag_core::dag::ExtentWitnessSite::ResultClaim {
                 claim,
                 axis: RtAxis::Lit(i32::try_from(axis).expect("result rank fits i32")),
             },
@@ -24251,7 +24073,7 @@ impl<'program> LowerCtx<'program> {
     fn attach_result_claim(&mut self, producer: NodeId, axis: usize, required: NodeId) {
         let Some(RiscOp::ExtentWitness {
             site:
-                crate::dag::ExtentWitnessSite::ResultClaim {
+                chelis_dag_core::dag::ExtentWitnessSite::ResultClaim {
                     axis: claimed_axis, ..
                 },
             ..
@@ -24265,7 +24087,7 @@ impl<'program> LowerCtx<'program> {
         if *claimed_axis != RtAxis::Lit(i32::try_from(axis).expect("producer rank fits i32")) {
             let RiscOp::ExtentWitness {
                 site:
-                    crate::dag::ExtentWitnessSite::ResultClaim {
+                    chelis_dag_core::dag::ExtentWitnessSite::ResultClaim {
                         axis: claimed_axis, ..
                     },
                 ..
@@ -24286,7 +24108,7 @@ impl<'program> LowerCtx<'program> {
     fn attach_same_shape_result_claim(&mut self, producer: NodeId, axis: usize, required: NodeId) {
         let Some(RiscOp::ExtentWitness {
             site:
-                crate::dag::ExtentWitnessSite::ResultClaim {
+                chelis_dag_core::dag::ExtentWitnessSite::ResultClaim {
                     axis: claimed_axis, ..
                 },
             ..
@@ -24297,7 +24119,7 @@ impl<'program> LowerCtx<'program> {
         if *claimed_axis != RtAxis::Lit(i32::try_from(axis).expect("producer rank fits i32")) {
             let RiscOp::ExtentWitness {
                 site:
-                    crate::dag::ExtentWitnessSite::ResultClaim {
+                    chelis_dag_core::dag::ExtentWitnessSite::ResultClaim {
                         axis: claimed_axis, ..
                     },
                 ..
@@ -24325,12 +24147,12 @@ impl<'program> LowerCtx<'program> {
         required: NodeId,
         authored_result_claim: bool,
     ) {
-        use crate::axis_sources::AxisSource;
+        use chelis_dag_core::axis_sources::AxisSource;
         let captured_declaration = self.dag.get(required).and_then(|token| {
             matches!(
                 token.op,
                 RiscOp::ExtentWitness {
-                    site: crate::dag::ExtentWitnessSite::ResultClaim { .. },
+                    site: chelis_dag_core::dag::ExtentWitnessSite::ResultClaim { .. },
                     ..
                 }
             )
@@ -24344,7 +24166,7 @@ impl<'program> LowerCtx<'program> {
             return;
         }
         if authored_result_claim {
-            match crate::axis_sources::same_shape_result_agreement(&self.dag, id) {
+            match chelis_dag_core::axis_sources::same_shape_result_agreement(&self.dag, id) {
                 Ok(Some(_)) => {
                     self.attach_same_shape_result_claim(id, axis, required);
                     return;
@@ -24359,7 +24181,7 @@ impl<'program> LowerCtx<'program> {
                 Ok(None) => {}
             }
         }
-        let Some(source) = crate::axis_sources::output_axis_sources(&self.dag, id)
+        let Some(source) = chelis_dag_core::axis_sources::output_axis_sources(&self.dag, id)
             .get(axis)
             .cloned()
         else {
@@ -24424,7 +24246,7 @@ impl<'program> LowerCtx<'program> {
                 }
             }
             AxisSource::OpComputed { axis: computed, .. }
-                if crate::axis_sources::op_computed_axis_extent(
+                if chelis_dag_core::axis_sources::op_computed_axis_extent(
                     &self.dag.get(id).expect("producer").op,
                     computed,
                 )
@@ -24445,9 +24267,9 @@ impl<'program> LowerCtx<'program> {
     }
 
     fn axis_literal_witness(&self, id: NodeId, axis: usize) -> Option<NodeId> {
-        use crate::axis_sources::AxisSource;
+        use chelis_dag_core::axis_sources::AxisSource;
         let node = self.dag.get(id)?;
-        match crate::axis_sources::output_axis_sources(&self.dag, id).get(axis)? {
+        match chelis_dag_core::axis_sources::output_axis_sources(&self.dag, id).get(axis)? {
             AxisSource::ScalarInput { input } => {
                 let source = *node.inputs.get(*input)?;
                 matches!(self.dag.get(source)?.op, RiscOp::ExtentWitness { .. }).then_some(source)
@@ -24614,8 +24436,8 @@ impl<'program> LowerCtx<'program> {
     /// `ExtentOrigin::OpComputed` is fixed exactly when every quantity the
     /// operation's own output-shape rule reads is a compile-time constant,
     /// which is the question
-    /// [`crate::axis_sources::static_op_computed_axis_extent`] answers and the
-    /// same arithmetic [`crate::verify`]'s per-owner size check performs.
+    /// [`chelis_dag_core::axis_sources::static_op_computed_axis_extent`] answers and the
+    /// same arithmetic [`chelis_dag_core::verify`]'s per-owner size check does.
     ///
     /// `ExternalAxis` and `ScalarInput` are the guard's own cases and are
     /// absent on purpose: an input tensor's axis and a rank-0 runtime extent
@@ -24674,12 +24496,13 @@ impl<'program> LowerCtx<'program> {
         // #1948), so the walk stops there rather than passing to an operand.
         let (mut origin, mut origin_axis) = (id, axis);
         while !matches!(
-            crate::axis_sources::same_shape_result_agreement(&self.dag, origin),
+            chelis_dag_core::axis_sources::same_shape_result_agreement(&self.dag, origin),
             Ok(Some(_))
-        ) && let Some(crate::axis_sources::AxisSource::InputAxis {
+        ) && let Some(chelis_dag_core::axis_sources::AxisSource::InputAxis {
             input,
             axis: RtAxis::Lit(source_axis),
-        }) = crate::axis_sources::output_axis_sources(&self.dag, origin).get(origin_axis)
+        }) =
+            chelis_dag_core::axis_sources::output_axis_sources(&self.dag, origin).get(origin_axis)
         {
             origin = self.dag.get(origin).expect("axis source").inputs[*input];
             origin_axis = usize::try_from(*source_axis).expect("verified source axis");
@@ -24703,7 +24526,7 @@ impl<'program> LowerCtx<'program> {
         for dependency in dependencies {
             if let RiscOp::ExtentWitness {
                 site:
-                    crate::dag::ExtentWitnessSite::ResultClaim {
+                    chelis_dag_core::dag::ExtentWitnessSite::ResultClaim {
                         claim,
                         axis: RtAxis::Lit(claimed_axis),
                     },
@@ -24740,7 +24563,7 @@ impl<'program> LowerCtx<'program> {
         // while its operand remains `Lit(2)`). Retain the exact producer and
         // put the diagnostic-only refinement on an administrative carrier
         // instead.
-        if crate::axis_sources::result_type_is_operand_bound(&self.dag, id) {
+        if chelis_dag_core::axis_sources::result_type_is_operand_bound(&self.dag, id) {
             let source = self.dag.get(id).expect("result");
             let mut output_type = source.output_type.clone();
             output_type.dims[axis] = refined;
@@ -24765,9 +24588,10 @@ impl<'program> LowerCtx<'program> {
         axis: usize,
         required: usize,
     ) -> Option<DimInfo> {
-        let (origin, computed) = crate::axis_sources::op_computed_axis_origin(&self.dag, id, axis)?;
+        let (origin, computed) =
+            chelis_dag_core::axis_sources::op_computed_axis_origin(&self.dag, id, axis)?;
         let node = self.dag.get(origin)?;
-        crate::axis_sources::op_computed_axis_extent(&node.op, computed)?;
+        chelis_dag_core::axis_sources::op_computed_axis_extent(&node.op, computed)?;
         let declared = DimInfo::Lit(required);
         if origin != id && !self.stamp_op_computed_origin(origin, computed, &declared) {
             return None;
@@ -24795,7 +24619,8 @@ impl<'program> LowerCtx<'program> {
         }
         match existing {
             DimInfo::Lit(_) => {}
-            DimInfo::Named(name, _) if crate::axis_sources::is_synthesized_dim_name(name) => {}
+            DimInfo::Named(name, _)
+                if chelis_dag_core::axis_sources::is_synthesized_dim_name(name) => {}
             DimInfo::Named(_, _) => return false,
         }
         self.dag
@@ -24896,7 +24721,7 @@ impl<'program> LowerCtx<'program> {
     /// their literal guard where `g(a, b)` kept it, so the rule the design doc
     /// states was not the rule the build had.
     ///
-    /// [`crate::axis_sources::resolve_axis_extent`] is the existing answer and
+    /// [`chelis_dag_core::axis_sources::resolve_axis_extent`] is the existing answer and
     /// is total over the four origins, so "not fixed" is a decision rather
     /// than a fallthrough. `Literal` is an extent the graph itself states;
     /// `ExternalAxis` is an ABI promise, recognised through any number of
@@ -24905,7 +24730,7 @@ impl<'program> LowerCtx<'program> {
     /// `entry_covered_witness_claims` resolves for its own question, so the
     /// two readers cannot disagree about where an extent comes from.
     fn graph_fixed_witness_extent(&self, witness: NodeId) -> Option<usize> {
-        use crate::axis_sources::ExtentOrigin;
+        use chelis_dag_core::axis_sources::ExtentOrigin;
         let node = self.dag.get(witness)?;
         let RiscOp::ExtentWitness {
             axis: RtAxis::Lit(axis),
@@ -24916,7 +24741,7 @@ impl<'program> LowerCtx<'program> {
         };
         let observed = node.inputs.first().copied()?;
         let axis = usize::try_from(*axis).ok()?;
-        match crate::axis_sources::resolve_axis_extent(&self.dag, observed, axis)? {
+        match chelis_dag_core::axis_sources::resolve_axis_extent(&self.dag, observed, axis)? {
             ExtentOrigin::Literal(extent) => usize::try_from(extent).ok(),
             ExtentOrigin::ExternalAxis { .. }
             | ExtentOrigin::ScalarInput { .. }
@@ -24975,7 +24800,7 @@ impl<'program> LowerCtx<'program> {
     /// scalar node. Both spellings observe the same quantity and owe the same
     /// check, so both resolve to the witness that reads that `Load` axis.
     fn axis_interface_witness(&self, id: NodeId, axis: usize) -> Option<NodeId> {
-        use crate::axis_sources::AxisSource;
+        use chelis_dag_core::axis_sources::AxisSource;
         if let Some(witness) = self.caller_witness_for(id, axis) {
             return Some(witness);
         }
@@ -24983,7 +24808,7 @@ impl<'program> LowerCtx<'program> {
             return Some(witness);
         }
         let node = self.dag.get(id)?;
-        match crate::axis_sources::output_axis_sources(&self.dag, id).get(axis)? {
+        match chelis_dag_core::axis_sources::output_axis_sources(&self.dag, id).get(axis)? {
             AxisSource::ExternalAxis { load, axis } => self.caller_witness_for(*load, *axis),
             AxisSource::InputAxis {
                 input,
@@ -25001,7 +24826,7 @@ impl<'program> LowerCtx<'program> {
     fn caller_witness_for(&self, tensor: NodeId, axis: usize) -> Option<NodeId> {
         self.dag.nodes().iter().find_map(|node| {
             let RiscOp::ExtentWitness {
-                site: crate::dag::ExtentWitnessSite::Caller,
+                site: chelis_dag_core::dag::ExtentWitnessSite::Caller,
                 axis: RtAxis::Lit(observed),
                 ..
             } = &node.op
@@ -25029,7 +24854,9 @@ impl<'program> LowerCtx<'program> {
                 ) || matches!(&self.dag.get(*witness).expect("witness").op,
                 RiscOp::ExtentWitness { requirements, claims, .. }
                     if !requirements.is_empty() || !claims.is_empty())
-                    || crate::axis_sources::directly_owns_producer_claim(&self.dag, *witness)
+                    || chelis_dag_core::axis_sources::directly_owns_producer_claim(
+                        &self.dag, *witness,
+                    )
             })
             .collect::<Vec<_>>();
         // A key result keeps its own node: a carrier `Copy` of it would be the
@@ -27587,7 +27414,7 @@ impl<'program> LowerCtx<'program> {
         }
     }
 
-    fn is_runtime_if_bottom_placeholder(node: &crate::dag::DagNode) -> bool {
+    fn is_runtime_if_bottom_placeholder(node: &chelis_dag_core::dag::DagNode) -> bool {
         matches!(node.op, RiscOp::Const { .. })
             && node.inputs.is_empty()
             && node.shape_deps.is_empty()
@@ -27772,7 +27599,7 @@ impl<'program> LowerCtx<'program> {
     /// reads the axis where that identity is decided, when it runs whenever
     /// the join does, so it carries the arms' identity in C too. An axis
     /// whose extents are one otherwise (the operand agreement `where`
-    /// verifies, [`crate::verify::axis_extents_semantically_equivalent`]:
+    /// verifies, [`chelis_dag_core::verify::axis_extents_semantically_equivalent`]:
     /// one bound name, a checked named claim, one static extent; or one
     /// identity decided where the join does not run) keeps the `else` arm's
     /// extent. Where none of these proves the arms' extents equal, the join
@@ -27807,20 +27634,22 @@ impl<'program> LowerCtx<'program> {
             if !matches!(dim, DimInfo::Named(_, None)) {
                 continue;
             }
-            match crate::verify::shared_axis_origin(&self.dag, then_node, else_node, axis, &arms) {
+            match chelis_dag_core::verify::shared_axis_origin(
+                &self.dag, then_node, else_node, axis, &arms,
+            ) {
                 Some(
-                    crate::axis_sources::ExtentOrigin::ExternalAxis {
+                    chelis_dag_core::axis_sources::ExtentOrigin::ExternalAxis {
                         load: node,
                         axis: read,
                     }
-                    | crate::axis_sources::ExtentOrigin::OpComputed {
+                    | chelis_dag_core::axis_sources::ExtentOrigin::OpComputed {
                         op: node,
                         axis: read,
                     },
                 ) if runs_with_join(&self.dag, node) => {
                     sources.insert(axis, JoinExtent { node, axis: read });
                 }
-                _ if crate::verify::axis_extents_semantically_equivalent(
+                _ if chelis_dag_core::verify::axis_extents_semantically_equivalent(
                     &self.dag, then_node, else_node, axis, &arms,
                 ) => {}
                 _ => {
@@ -27915,7 +27744,7 @@ mod declaration_attribution_tests {
     /// whose own body discards a draw. Every draw here can trap.
     const PROGRAM: &str = "x: tensor[4, f32] = x\nsampled = dropout(key_from_seed(7i64), copy(x), 1.0f32)\ndef h(v: tensor[4, f32]) -> tensor[4, f32] = {\n dead = dropout(key_from_seed(9i64), copy(v), 1.0f32)\n v\n}\nselected = {\n dead = sampled\n a = h(copy(x))\n copy(x)\n}\n";
 
-    fn declaration_name(dag: &Dag, node: &crate::dag::DagNode) -> String {
+    fn declaration_name(dag: &Dag, node: &chelis_dag_core::dag::DagNode) -> String {
         dag.declaration(node.owner.decl).name.clone()
     }
 
@@ -27999,7 +27828,7 @@ mod declaration_attribution_tests {
 
         let mut sliced = dag.clone();
         sliced.set_roots(vec![root("selected")]);
-        let sliced = crate::optimize::dead_code_eliminate(&sliced);
+        let sliced = chelis_dag_core::optimize::dead_code_eliminate(&sliced);
         assert_eq!(draws(&sliced), ["selected", "selected"]);
         assert!(!sliced.nodes().iter().any(|node| matches!(
             &node.op,
@@ -28029,7 +27858,7 @@ mod declaration_attribution_tests {
             let library = lowered(source);
             let dag = library.dag();
             assert_eq!(
-                crate::verify::verify(dag)
+                chelis_dag_core::verify::verify(dag)
                     .into_iter()
                     .filter(|error| error.contains("has a node that can trap"))
                     .collect::<Vec<_>>(),
@@ -28166,7 +27995,7 @@ mod declaration_attribution_tests {
                         .iter()
                         .filter(|node| {
                             matches!(&node.op, RiscOp::Load { name }
-                                if name.binding() == crate::load_store_name::LoadBinding::TopLevel("h0"))
+                                if name.binding() == chelis_dag_core::load_store_name::LoadBinding::TopLevel("h0"))
                         })
                         .count();
                     assert_eq!(h0, 4, "scalar chain of depth {depth}");
@@ -28220,10 +28049,10 @@ mod declaration_attribution_tests {
                 .iter()
                 .filter_map(|node| match &node.op {
                     RiscOp::Load { name } => Some(match name.binding() {
-                        crate::load_store_name::LoadBinding::TopLevel(source) => {
+                        chelis_dag_core::load_store_name::LoadBinding::TopLevel(source) => {
                             ("top-level", source.to_owned())
                         }
-                        crate::load_store_name::LoadBinding::GraphInput => {
+                        chelis_dag_core::load_store_name::LoadBinding::GraphInput => {
                             ("graph-input", name.as_str().to_owned())
                         }
                     }),
@@ -28348,7 +28177,7 @@ mod fused_zero_tests {
                 decl,
                 RiscOp::Expand {
                     axis: 0,
-                    size: crate::dag::RtDim::Node(1),
+                    size: chelis_dag_core::dag::RtDim::Node(1),
                 },
                 vec![input, integer],
                 tensor_type(&[n as usize], Prim::F32),
@@ -28444,7 +28273,7 @@ mod fused_zero_tests {
                 ctx.owner(),
                 RiscOp::Cumsum {
                     axis: 0,
-                    direction: crate::dag::ScanDirection::Increasing,
+                    direction: chelis_dag_core::dag::ScanDirection::Increasing,
                 },
                 vec![param],
                 view_ty.clone(),
@@ -28460,7 +28289,7 @@ mod fused_zero_tests {
                 assert_eq!(view.inputs, vec![actual]);
                 assert_eq!(view.output_type, view_ty);
                 ctx.dag.add_root(mapped[&scan]);
-                assert!(crate::verify::verify(&ctx.dag).is_empty());
+                assert!(chelis_dag_core::verify::verify(&ctx.dag).is_empty());
                 let values = eval_tensor_roots_with_strict(&ctx.dag, &[mapped[&scan]], |_| {
                     Some(value(&[3], Prim::F32, &[1.0, 2.0, 3.0]))
                 })
@@ -28736,7 +28565,7 @@ mod fused_zero_tests {
                 decl,
                 RiscOp::CheckedReshapeExtent {
                     claims: vec!["rows".into()],
-                    axis: crate::dag::RtAxis::Lit(0),
+                    axis: chelis_dag_core::dag::RtAxis::Lit(0),
                 },
                 vec![actual, required],
                 int.clone(),
@@ -28770,7 +28599,7 @@ mod fused_zero_tests {
                 decl,
                 RiscOp::Expand {
                     axis: 0,
-                    size: crate::dag::RtDim::Node(1),
+                    size: chelis_dag_core::dag::RtDim::Node(1),
                 },
                 vec![operand, forward],
                 tensor_type(&[7], Prim::F32),
@@ -28798,7 +28627,7 @@ mod fused_zero_tests {
             let zero = ctx.zero_tensor_node(&tensor_type(&[2], Prim::F32), None);
             ctx.dag.add_shape_dep(zero, forward);
             ctx.dag.set_roots(vec![zero]);
-            let pruned = crate::optimize::dead_code_eliminate(&ctx.dag);
+            let pruned = chelis_dag_core::optimize::dead_code_eliminate(&ctx.dag);
             assert_eq!(
                 pruned
                     .nodes()
@@ -28823,7 +28652,7 @@ mod fused_zero_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::verify;
+    use chelis_dag_core::verify;
 
     #[test]
     fn builtin_value_result_claim_retains_physical_producer_and_independent_guard() {
@@ -28896,7 +28725,7 @@ mod tests {
                 matches!(
                     context.dag.get(*dependency).map(|node| &node.op),
                     Some(RiscOp::ExtentWitness {
-                        site: crate::dag::ExtentWitnessSite::LiteralResultClaim,
+                        site: chelis_dag_core::dag::ExtentWitnessSite::LiteralResultClaim,
                         ..
                     })
                 )
@@ -28905,7 +28734,7 @@ mod tests {
             context.dag.nodes()
         );
         context.dag.add_root(result.expect_node("result"));
-        let dag = crate::optimize::dead_code_eliminate(&context.dag);
+        let dag = chelis_dag_core::optimize::dead_code_eliminate(&context.dag);
         let errors = verify::verify(&dag);
         assert!(errors.is_empty(), "{errors:?}; graph={:?}", dag.nodes());
     }
@@ -30673,7 +30502,7 @@ mod tests {
             .count()
     }
 
-    fn root_node(dag: &Dag) -> &crate::dag::DagNode {
+    fn root_node(dag: &Dag) -> &chelis_dag_core::dag::DagNode {
         dag.roots()
             .last()
             .and_then(|id| dag.get(*id))
@@ -32522,7 +32351,7 @@ mod tests {
     #[test]
     fn issue_320_grad_eval_windowed_max_reduce_end_to_end() {
         use crate::eval::{TensorValue, eval_tensor};
-        use crate::grad::grad_dag_checked;
+        use chelis_dag_core::grad::grad_dag_checked;
 
         // `w = reshape(x, [2,2])` with NO type on the reshape app -> rank-0
         // operand node, but a real producer (Reshape over the `x` Load).
@@ -32585,7 +32414,7 @@ mod tests {
     #[test]
     fn issue_369_grad_eval_let_bound_fulllike_end_to_end() {
         use crate::eval::{TensorValue, eval_tensor};
-        use crate::grad::grad_dag_checked;
+        use chelis_dag_core::grad::grad_dag_checked;
 
         // `def loss(x: tensor[3, f32]) = {
         //    len  = shape(x, 0)
@@ -32702,7 +32531,7 @@ mod tests {
     #[test]
     fn issue_320_grad_eval_windowed_gather_end_to_end() {
         use crate::eval::{TensorValue, eval_tensor};
-        use crate::grad::grad_dag_checked;
+        use chelis_dag_core::grad::grad_dag_checked;
 
         let src = r#"
             (def {} x (var {type: (t-tensor {} (d-lit {} 4) (t-prim {} f32))} x))
@@ -33302,7 +33131,7 @@ mod tests {
         invalid.node_mut(relu).expect("relu").output_type.dims[0] =
             DimInfo::Named("caller".into(), Some(2));
         assert!(
-            crate::verify::verify(&invalid)
+            chelis_dag_core::verify::verify(&invalid)
                 .iter()
                 .any(|error| error.contains("relu op")),
             "directly stamping the primitive demonstrates the invalid representation"
@@ -33324,9 +33153,9 @@ mod tests {
             vec![DimInfo::Named("caller".into(), Some(2))]
         );
         assert!(
-            crate::verify::verify(&ctx.dag).is_empty(),
+            chelis_dag_core::verify::verify(&ctx.dag).is_empty(),
             "{:?}",
-            crate::verify::verify(&ctx.dag)
+            chelis_dag_core::verify::verify(&ctx.dag)
         );
     }
 
@@ -33900,8 +33729,8 @@ mod tests {
 #[cfg(test)]
 mod regression_tests {
     use super::*;
-    use crate::dag::{DimInfo, NodeId, RiscOp};
-    use crate::verify;
+    use chelis_dag_core::dag::{DimInfo, NodeId, RiscOp};
+    use chelis_dag_core::verify;
     use chelis_numeric_core::prim::Prim;
 
     /// E2 (WS-A0 RT-1 fixup): `ty_expr_to_deep` must panic on
@@ -33910,7 +33739,7 @@ mod regression_tests {
     #[test]
     #[should_panic(expected = "f8e4m3 is deferred per spec/04-type-system.md §1.1.1")]
     fn ty_expr_to_deep_panics_on_f8e4m3_per_spec_1_1_1() {
-        let ty = crate::dag::TensorType {
+        let ty = chelis_dag_core::dag::TensorType {
             dims: vec![DimInfo::Lit(4)],
             precision: Prim::F8e4m3,
         };
@@ -33931,14 +33760,14 @@ mod regression_tests {
     fn ty_expr_to_deep_carries_no_raw_vocabulary_tag_strings() {
         for (ty, expected) in [
             (
-                crate::dag::TensorType {
+                chelis_dag_core::dag::TensorType {
                     dims: vec![],
                     precision: Prim::F32,
                 },
                 DeepTag::TPrim,
             ),
             (
-                crate::dag::TensorType {
+                chelis_dag_core::dag::TensorType {
                     dims: vec![DimInfo::Lit(4)],
                     precision: Prim::Int64,
                 },
@@ -35566,8 +35395,8 @@ mod regression_tests {
             .expect("app expr");
         let mut program_defs = UnordMap::new();
         program_defs.insert("loss".to_string(), fn_expr);
-        let input_ty = crate::dag::TensorType {
-            dims: vec![crate::dag::DimInfo::Lit(1)],
+        let input_ty = chelis_dag_core::dag::TensorType {
+            dims: vec![chelis_dag_core::dag::DimInfo::Lit(1)],
             precision: chelis_numeric_core::prim::Prim::F32,
         };
         let scoped_types = UnordMap::from([("input".to_string(), input_ty)]);
@@ -35621,8 +35450,8 @@ mod regression_tests {
             .expect("app expr");
         let mut program_defs = UnordMap::new();
         program_defs.insert("loss".to_string(), fn_expr);
-        let input_ty = crate::dag::TensorType {
-            dims: vec![crate::dag::DimInfo::Lit(1)],
+        let input_ty = chelis_dag_core::dag::TensorType {
+            dims: vec![chelis_dag_core::dag::DimInfo::Lit(1)],
             precision: chelis_numeric_core::prim::Prim::F32,
         };
         let scoped_types = UnordMap::from([("input".to_string(), input_ty)]);
@@ -35632,7 +35461,7 @@ mod regression_tests {
             "input".to_string(),
             crate::eval::TensorValue::from_vec(vec![1], vec![3.0]),
         )]);
-        let roots: Vec<crate::dag::NodeId> = dag.roots().to_vec();
+        let roots: Vec<chelis_dag_core::dag::NodeId> = dag.roots().to_vec();
         assert!(!roots.is_empty(), "grad DAG must have at least one root");
         let result = crate::eval::eval_tensor_roots_with_strict(&dag, &roots, |name| {
             inputs.get(name).cloned()
@@ -35685,8 +35514,8 @@ mod regression_tests {
             .expect("app expr");
         let mut program_defs = UnordMap::new();
         program_defs.insert("loss".to_string(), fn_expr);
-        let input_ty = crate::dag::TensorType {
-            dims: vec![crate::dag::DimInfo::Lit(1)],
+        let input_ty = chelis_dag_core::dag::TensorType {
+            dims: vec![chelis_dag_core::dag::DimInfo::Lit(1)],
             precision: chelis_numeric_core::prim::Prim::F32,
         };
         let scoped_types = UnordMap::from([("input".to_string(), input_ty.clone())]);
@@ -35699,7 +35528,7 @@ mod regression_tests {
             "input".to_string(),
             crate::eval::TensorValue::from_vec(vec![1], vec![3.0]),
         )]);
-        let roots: Vec<crate::dag::NodeId> = dag.roots().to_vec();
+        let roots: Vec<chelis_dag_core::dag::NodeId> = dag.roots().to_vec();
         assert!(!roots.is_empty(), "DAG must have roots");
         let result = crate::eval::eval_tensor_roots_with_strict(&dag, &roots, |name| {
             inputs.get(name).cloned()

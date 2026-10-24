@@ -32,13 +32,13 @@
 //! `contains()` on the rendered `Display` string is explicitly
 //! rejected, per the W5 red-team thoroughness contract.
 
-use chelis_ir::dag::{Dag, RiscOp};
+use chelis_dag_core::dag::{Dag, RiscOp};
+use chelis_dag_core::{DimInfo, TensorType};
 use chelis_ir::host::{
     HelperSummaryRejection, HostTensorInput, PayloadRole, SparseOpKind, SparseSummaryAttempt,
     SummaryRejectionClass, SummaryRejectionDetail, WildcardLocation,
     try_summarize_sparse_helper_for_test,
 };
-use chelis_ir::{DimInfo, TensorType};
 use chelis_numeric_core::prim::Prim;
 
 fn t_f32(dims: Vec<usize>) -> TensorType {

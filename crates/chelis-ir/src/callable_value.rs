@@ -469,7 +469,7 @@ mod tests {
             assert_eq!(values[name].symbol(), "is_finite");
             assert_eq!(values[name].contracts().len(), 1);
             assert_eq!(values[name].contracts()[0].signature(), &inner);
-            let label = crate::LoadStoreName::top_level(name);
+            let label = chelis_dag_core::LoadStoreName::top_level(name);
             assert_eq!(values[label.as_str()].contracts()[0].signature(), &inner);
         }
         assert_eq!(values["wide"].contracts().len(), 2);

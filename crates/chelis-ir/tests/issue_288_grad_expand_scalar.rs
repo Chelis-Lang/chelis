@@ -43,9 +43,9 @@
 //! (numeric correctness), independent of the front-end parser and the
 //! `chelis` binary; the CLI sibling file pins the end-to-end build.
 
-use chelis_ir::dag::{Dag, DimInfo, NodeId, RiscOp, TensorType};
+use chelis_dag_core::dag::{Dag, DimInfo, NodeId, RiscOp, TensorType};
+use chelis_dag_core::grad::{AdError, grad_dag_checked};
 use chelis_ir::eval::{TensorValue, eval_tensor};
-use chelis_ir::grad::{AdError, grad_dag_checked};
 use chelis_numeric_core::prim::Prim;
 use chelis_unord::UnordMap;
 
@@ -121,7 +121,7 @@ fn build_expand_scalar_forward(
         decl,
         RiscOp::Expand {
             axis: 0,
-            size: chelis_ir::dag::RtDim::Lit(n),
+            size: chelis_dag_core::dag::RtDim::Lit(n),
         },
         vec![c],
         vec_ty.clone(),
@@ -389,7 +389,7 @@ fn issue_288_grad_wrt_rank0_expand_source() {
         decl,
         RiscOp::Expand {
             axis: 0,
-            size: chelis_ir::dag::RtDim::Lit(2),
+            size: chelis_dag_core::dag::RtDim::Lit(2),
         },
         vec![s],
         vec_ty.clone(),
@@ -455,7 +455,7 @@ fn issue_288_grad_wrt_size1_expand_source() {
         decl,
         RiscOp::Expand {
             axis: 0,
-            size: chelis_ir::dag::RtDim::Lit(2),
+            size: chelis_dag_core::dag::RtDim::Lit(2),
         },
         vec![s],
         vec_ty.clone(),
@@ -538,7 +538,7 @@ fn issue_288_grad_wrt_size1_expand_source_nonzero_axis() {
         decl,
         RiscOp::Expand {
             axis: 1,
-            size: chelis_ir::dag::RtDim::Lit(2),
+            size: chelis_dag_core::dag::RtDim::Lit(2),
         },
         vec![s],
         mat_ty.clone(),

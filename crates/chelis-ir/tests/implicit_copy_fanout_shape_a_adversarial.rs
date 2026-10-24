@@ -1,7 +1,7 @@
 //! Implicit-copy fan-out fixtures for borrowed values returned as
 //! owned values. Each case must type-check and lower cleanly.
 
-use chelis_ir::dag::Dag;
+use chelis_dag_core::dag::Dag;
 use chelis_ir::lower::try_lower_program;
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str as surf_parse;

@@ -1,10 +1,10 @@
 //! Execute [05-OP-33] AD contraction recipes and count generated tensor payloads.
 mod common;
 mod support;
-use chelis_ir::dag::{Dag, DimInfo, NodeId, RiscOp, TensorType};
+use chelis_dag_core::dag::{Dag, DimInfo, NodeId, RiscOp, TensorType};
+use chelis_dag_core::grad::grad_dag_checked;
+use chelis_dag_core::{tier2, tier2_ordered};
 use chelis_ir::eval::{TensorValue, eval_tensor};
-use chelis_ir::grad::grad_dag_checked;
-use chelis_ir::{tier2, tier2_ordered};
 use chelis_numeric_core::dtype_semantics::{RawTensor, finalize_tensor};
 use chelis_numeric_core::dtype_semantics::{StorageView, TensorStorage};
 use chelis_numeric_core::prim::Prim;
@@ -765,7 +765,7 @@ fn shared_numeric_diamonds_cache_before_movement_readers() {
         value = dag.add_node(
             owner,
             RiscOp::Reshape {
-                new_shape: vec![chelis_ir::dag::RtDim::Lit(17)],
+                new_shape: vec![chelis_dag_core::dag::RtDim::Lit(17)],
             },
             vec![value],
             vector.clone(),
@@ -966,7 +966,7 @@ fn deep_movement_child() {
                     RiscOp::Permute { axes: vec![0] }
                 } else {
                     RiscOp::Reshape {
-                        new_shape: vec![chelis_ir::dag::RtDim::Lit(count)],
+                        new_shape: vec![chelis_dag_core::dag::RtDim::Lit(count)],
                     }
                 };
                 let inputs = if numeric {

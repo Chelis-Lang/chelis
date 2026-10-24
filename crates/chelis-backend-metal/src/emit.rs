@@ -5,7 +5,7 @@
 //! programs. Reductions land in M4, matmul in M5, and broadcasting/strided
 //! layouts will be added incrementally.
 
-use chelis_ir::dag::{DagNode, DimInfo, NodeId, RiscOp, RtDim, TensorType};
+use chelis_dag_core::dag::{DagNode, DimInfo, NodeId, RiscOp, RtDim, TensorType};
 use chelis_ir::ownership::{VerifiedDagAction, VerifiedDagView};
 use chelis_numeric_core::dtype_semantics::{NumericTrap, ScalarValue};
 
@@ -16,7 +16,7 @@ use chelis_numeric_core::dtype_semantics::{NumericTrap, ScalarValue};
 fn metal_bound_to_usize(b: &RtDim) -> Result<usize, String> {
     match b {
         RtDim::Lit(n) => Ok(*n),
-        RtDim::ToEnd => Ok(chelis_ir::dag::SHRINK_TO_END),
+        RtDim::ToEnd => Ok(chelis_dag_core::dag::SHRINK_TO_END),
         RtDim::Node(_) => Err(
             "Metal backend reached a node-valued (runtime) movement bound; runtime-symbolic \
              movement bounds are not supported on the Metal lane (chelis#616)"
@@ -37,7 +37,7 @@ fn metal_bound_to_usize(b: &RtDim) -> Result<usize, String> {
 #[cfg(test)]
 mod rejection_authority_tests {
     use super::{Emitter, emit_verified_dag};
-    use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
+    use chelis_dag_core::dag::{Dag, DimInfo, RiscOp, TensorType};
     use chelis_numeric_core::prim::Prim;
 
     #[test]
@@ -1087,9 +1087,9 @@ impl<'plan> Emitter<'plan> {
                 if ops.iter().any(|step| {
                     matches!(
                         step.op,
-                        chelis_ir::dag::FusedStepOp::Sub
-                            | chelis_ir::dag::FusedStepOp::MaxElem
-                            | chelis_ir::dag::FusedStepOp::MinElem
+                        chelis_dag_core::dag::FusedStepOp::Sub
+                            | chelis_dag_core::dag::FusedStepOp::MaxElem
+                            | chelis_dag_core::dag::FusedStepOp::MinElem
                     )
                 }) =>
             {
@@ -1717,7 +1717,7 @@ impl<'plan> Emitter<'plan> {
     fn emit_bitwise(
         &mut self,
         node: &DagNode,
-        kind: chelis_types::BitwiseKind,
+        kind: chelis_numeric_core::bitwise::BitwiseKind,
     ) -> Result<(), String> {
         if node.inputs.len() != 2 {
             return Err(format!("Metal bitwise node {} needs two inputs", node.id.0));
@@ -1843,7 +1843,7 @@ impl<'plan> Emitter<'plan> {
         dag: VerifiedDagView<'_>,
         node: &DagNode,
         axis: usize,
-        direction: chelis_ir::dag::ScanDirection,
+        direction: chelis_dag_core::dag::ScanDirection,
     ) -> Result<(), String> {
         let input = self
             .plan_of(node.inputs[0])
@@ -1872,7 +1872,7 @@ impl<'plan> Emitter<'plan> {
         let source = kernels::ordered_scan(
             &kernel,
             input.prec,
-            direction == chelis_ir::dag::ScanDirection::Decreasing,
+            direction == chelis_dag_core::dag::ScanDirection::Decreasing,
         );
         self.kernels.push((
             pso.clone(),

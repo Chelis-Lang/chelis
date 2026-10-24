@@ -1,38 +1,13 @@
-//! Every producer-supplied string flowing into a C-backend `printf`-
-//! style format string is routed through
-//! `chelis_ir::span_sanitize::sanitize_for_format_string`.
+//! Verify format-string escapes for entry names and symbolic dimension names.
 //!
-//! ## What this covers
-//!
-//! The C backend interpolates three kinds of producer-supplied strings
-//! into `fprintf(stderr, "...{x}...", ...)` runtime-error reports:
-//!
-//! - `func_name` — typically the source filename's stem (CLI-derived).
-//! - Load names — `LoadStoreName::as_str()` of `RiscOp::Load { name }`.
-//! - `SymbolicDimBinding.name` and `SymbolicDimOccurrence.input_label`
-//!   — the symbolic-dim mismatch path.
-//!
-//! All three contexts can carry forbidden bytes (`%` confuses
-//! positional-printf consumers; `\\`/`"`/control bytes break the C
-//! string literal). The format-string sanitizer normalises all of them.
-//!
-//! Today's grammar-validated `LoadStoreName` rejects `%`/`\\`/`"`/control
-//! bytes at construction; the bypass for these tests is
-//! `serde_json::from_str` (transparent deserialize, no re-validation).
-//! For `SymbolicDimBinding.name`, the field is plain `String` with no
-//! constructor-side validation today — see the audit notes in
-//! `producer-string-sanitization.md` and CLAUDE.md's "no silent
-//! deferrals" rule. The emit-side sanitizer is the second layer of
-//! defense in depth and is what these tests verify.
+//! Checked construction and deserialization reject invalid graph labels.
+//! These cases retain the source-emission controls for other producer fields.
 
 use chelis_backend_c::CodegenOptions;
 mod support;
-use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
-use chelis_ir::load_store_name::LoadStoreName;
+use chelis_dag_core::dag::{Dag, DimInfo, RiscOp, TensorType};
 use chelis_numeric_core::prim::Prim;
 use support::{codegen, codegen_with_options};
-
-mod common;
 
 fn vec_f32(n: usize) -> TensorType {
     TensorType {
@@ -46,12 +21,6 @@ fn vec_f32_named(name: &str) -> TensorType {
         dims: vec![DimInfo::Named(name.to_string(), None)],
         precision: Prim::F32,
     }
-}
-
-fn dirty_name(s: &str) -> LoadStoreName {
-    let json = serde_json::to_string(s).expect("string serializes");
-    serde_json::from_str(&json)
-        .expect("LoadStoreName deserialize is transparent (no re-validation)")
 }
 
 fn codegen_with_invalid_test_entry(dag: &Dag, name: &str) -> chelis_backend_c::CodegenResult {
@@ -101,33 +70,6 @@ fn c_fprintf_format_string_escapes_percent_in_func_name() {
     assert!(
         !src.contains("\"f%spct:"),
         "raw `%s` in func_name leaked into fprintf format; source:\n{src}"
-    );
-}
-
-#[test]
-fn c_fprintf_format_string_escapes_percent_in_load_name() {
-    // `Load { name }`'s emitted `// ...` comment is comment-context
-    // (handled in metal); for C the `name` flows into the
-    // input-shape-preamble fprintf — that's the format-string context.
-    let mut dag = Dag::new();
-    let decl = dag.declare("test");
-    let bad = dirty_name("inp%s");
-    let a = dag.add_node(decl, RiscOp::Load { name: bad }, vec![], vec_f32(4), None);
-    let n = dag.add_node(decl, RiscOp::Neg, vec![a], vec_f32(4), None);
-    dag.add_root(n);
-
-    let result = codegen(&dag, "test_load_pct").unwrap();
-    let src = &result.c_source;
-
-    // The fprintf reporting "input `inp%s` at slot N is NULL" needs the
-    // escaped form so printf doesn't consume a phantom argument.
-    assert!(
-        src.contains("input `inp%%s`"),
-        "expected `%%`-escaped Load label in fprintf format; source:\n{src}"
-    );
-    assert!(
-        !src.contains("input `inp%s`"),
-        "raw `%s` in Load name leaked into fprintf format; source:\n{src}"
     );
 }
 
@@ -276,75 +218,6 @@ fn c_fprintf_format_string_escapes_percent_in_symbolic_dim_name() {
         src.contains("numeric trap: domain in load at i64"),
         "and the trap line is [04-NUM-9]'s exact rendering; source:\n{src}"
     );
-}
-
-#[test]
-fn c_sanitized_format_strings_still_compile_cleanly() {
-    // Audit invariant: sanitization preserves valid C. Push a dirty
-    // Load name (carrying every byte class the sanitizer escapes —
-    // `%`, `\\`, `"`, `\n`) through codegen with a CLEAN func_name (so
-    // the C identifier-context emission is valid). Ask gcc for
-    // `-fsyntax-only`. If the sanitizer produced an invalid C string
-    // literal (raw `"` terminating early, raw `\n` splitting the source
-    // line, raw `\\` mis-escaping the next char), gcc rejects it.
-    let mut dag = Dag::new();
-    let decl = dag.declare("test");
-    // Every adversarial byte in one identifier — the sanitizer must
-    // escape ALL of them so the surrounding `"..."` C string literal
-    // stays well-formed.
-    let bad = dirty_name("inp%s\\back\"q\n");
-    let a = dag.add_node(decl, RiscOp::Load { name: bad }, vec![], vec_f32(4), None);
-    let n = dag.add_node(decl, RiscOp::Neg, vec![a], vec_f32(4), None);
-    dag.add_root(n);
-
-    // Clean func_name so the declarator (`void {func_name}(...)`) is
-    // valid C. This isolates the test to the format-string-context
-    // sanitizer.
-    let result = codegen(&dag, "test_sanitize").unwrap();
-
-    let probe = common::probe_dir("producer_sanitize_c_compile");
-    let dir = probe.path().to_path_buf();
-    let src_path = dir.join("sanitized.c");
-    std::fs::write(&src_path, &result.c_source).unwrap();
-
-    let include_dir =
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../chelis-runtime/include");
-    for header in &[
-        "chelis_runtime.h",
-        "chelis_runtime_views.h",
-        "chelis_runtime_dtype.h",
-        "chelis_blas.h",
-        "chelis_simd.h",
-        "chelis_math.h",
-    ] {
-        let raw = std::fs::read_to_string(include_dir.join(header)).unwrap();
-        std::fs::write(dir.join(header), &raw).unwrap();
-    }
-
-    let output = std::process::Command::new(chelis_backend_c::toolchain::c_compiler())
-        .args([
-            "-fsyntax-only",
-            "-I",
-            dir.to_str().unwrap(),
-            src_path.to_str().unwrap(),
-        ])
-        .output();
-
-    match output {
-        Ok(o) if o.status.success() => {
-            // Sanitized format strings parse as valid C string literals.
-        }
-        Ok(o) => {
-            let stderr = String::from_utf8_lossy(&o.stderr);
-            panic!(
-                "Sanitized fprintf format strings do NOT parse as valid C:\n{stderr}\n\nsource:\n{}",
-                result.c_source
-            );
-        }
-        Err(e) => {
-            eprintln!("C compiler not available ({e}); skipping syntax check");
-        }
-    }
 }
 
 #[test]

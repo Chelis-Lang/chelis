@@ -1,7 +1,7 @@
 //! [04-SHAPE-1]: finite extent projection fails instead of wrapping.
 //! Capacity equality itself belongs to the opaque CapacityKey contract.
 
-use chelis_ir::dag::DimExpr;
+use chelis_dag_core::dag::DimExpr;
 use chelis_unord::UnordMap;
 
 fn mul(lhs: DimExpr, rhs: DimExpr) -> DimExpr {

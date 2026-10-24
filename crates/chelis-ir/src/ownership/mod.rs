@@ -44,9 +44,8 @@
 //! ```
 //!
 //! ```compile_fail
-//! # use chelis_ir::dag::Dag;
 //! use chelis_ir::ownership::DagEmissionPayload;
-//! fn forge(dag: Dag) -> DagEmissionPayload { DagEmissionPayload { dag } }
+//! fn forge(dag: chelis_dag_core::dag::Dag) -> DagEmissionPayload { DagEmissionPayload { dag } }
 //! ```
 //!
 //! A lowering call consumes the host program, so no mutable raw sibling can
@@ -103,12 +102,12 @@ use std::collections::BTreeMap;
 
 use chelis_types::manifest::{ManifestedProgram, RootManifest};
 
-use crate::dag::{Dag, DagNode, NodeId, RiscOp, SymbolicDimBinding};
 use crate::host::{
     ConcreteHostBinding, ConcreteHostExpr, ConcreteHostFunction, ConcreteHostParam,
     ConcreteHostProgram, HostFunctionOrigin, HostFunctionSpecialization, HostTensorHelper,
     HostTensorInput, HostTensorSpecialization, SummaryRejection,
 };
+use chelis_dag_core::dag::{Dag, DagNode, NodeId, RiscOp, SymbolicDimBinding};
 
 #[expect(
     dead_code,
@@ -124,7 +123,7 @@ mod render;
 mod storage;
 mod verify;
 
-pub use crate::axis_sources::{CanonicalExtent, LocalGuardClaim, LocalGuardSite};
+use chelis_dag_core::axis_sources::{LocalGuardClaim, LocalGuardSite};
 pub use error::OwnershipError;
 pub use ir::{HostSiteId, HostSiteKind};
 pub use locations::counting_site_lookup_entries;
@@ -145,7 +144,10 @@ pub struct VerifiedDagView<'a> {
 
 impl<'a> VerifiedDagView<'a> {
     /// The declaration `decl` names in the verified graph.
-    pub fn declaration(self, decl: crate::dag::DeclId) -> &'a crate::dag::Declaration {
+    pub fn declaration(
+        self,
+        decl: chelis_dag_core::dag::DeclId,
+    ) -> &'a chelis_dag_core::dag::Declaration {
         self.dag.declaration(decl)
     }
 
@@ -174,10 +176,10 @@ impl<'a> VerifiedDagView<'a> {
     }
 
     /// The trap seed and activation-gate queries over this graph
-    /// ([`crate::dag::TrapSeeds`]: whether a node checks nothing where its
+    /// ([`chelis_dag_core::dag::TrapSeeds`]: whether a node checks nothing where its
     /// activation is false, the one gate declaration, and the literal result
     /// claims a witness checks). An emitter takes one per graph.
-    pub fn trap_seeds(self) -> crate::dag::TrapSeeds<'a> {
+    pub fn trap_seeds(self) -> chelis_dag_core::dag::TrapSeeds<'a> {
         self.dag.trap_seeds()
     }
 
@@ -189,28 +191,28 @@ impl<'a> VerifiedDagView<'a> {
     /// origin that produces its value (chelis#665, C4.4). A declaration
     /// consumer reads this instead of searching for a `Load` whose type
     /// carries a matching string.
-    pub fn dim_extent_origins(self) -> Vec<(String, crate::axis_sources::ExtentOrigin)> {
-        crate::axis_sources::dim_extent_origins(self.dag)
+    pub fn dim_extent_origins(self) -> Vec<(String, chelis_dag_core::axis_sources::ExtentOrigin)> {
+        chelis_dag_core::axis_sources::dim_extent_origins(self.dag)
     }
 
     /// The names this graph renders that resolve to no origin. A lane turns
     /// each into a typed receipt; the legacy walk panicked instead.
     pub fn unresolved_dim_names(self) -> Vec<String> {
-        crate::axis_sources::unresolved_dim_names(self.dag)
+        chelis_dag_core::axis_sources::unresolved_dim_names(self.dag)
     }
 
     /// Every name this graph can render as an identifier, whether or not the
     /// entry supplies its extent. An emitter checks its own declarations
     /// against this set.
     pub fn rendered_dim_names(self) -> Vec<String> {
-        crate::axis_sources::rendered_dim_names(self.dag)
+        chelis_dag_core::axis_sources::rendered_dim_names(self.dag)
     }
 
     /// The INTERFACE bindings: the declaration and entry-guard set, derived
     /// from the class witnesses rather than recovered by walking for a `Load`
     /// that carries a matching string (chelis#1277).
     pub fn symbolic_bindings_interface(self) -> Vec<SymbolicDimBinding> {
-        crate::dag::symbolic_bindings_interface(self.dag)
+        chelis_dag_core::dag::symbolic_bindings_interface(self.dag)
     }
 
     /// The runtime-dimension equality classes whose guards `spec/04` section
@@ -238,36 +240,39 @@ impl<'a> VerifiedDagView<'a> {
     /// The view is where the C and HIP lanes ask every class question under
     /// chelis#1538's discipline, so this one is asked here too rather than by
     /// reaching around the facade for a raw `Dag`; see
-    /// [`crate::axis_sources::member_load_axis`] for what it answers and why
+    /// [`chelis_dag_core::axis_sources::member_load_axis`] for what it answers and why
     /// three consumers share it.
     pub fn member_load_axis(
         self,
-        member: &crate::axis_sources::ClassMember,
+        member: &chelis_dag_core::axis_sources::ClassMember,
     ) -> Option<(NodeId, usize)> {
-        crate::axis_sources::member_load_axis(self.dag, member)
+        chelis_dag_core::axis_sources::member_load_axis(self.dag, member)
     }
 
     /// Closed primitive form from the verified IR rank relation. Backends and
     /// local extent diagnostics consume the same derivation.
-    pub fn expansion_kind(self, id: NodeId) -> crate::axis_sources::ExpansionKind {
-        crate::axis_sources::expansion_kind(self.dag, id)
+    pub fn expansion_kind(self, id: NodeId) -> chelis_dag_core::axis_sources::ExpansionKind {
+        chelis_dag_core::axis_sources::expansion_kind(self.dag, id)
             .expect("verified expansion node has a rank-preserving or inserting form")
     }
 
     /// C1.3's local guard sites for this verified payload.
     ///
-    /// The derivation is [`crate::axis_sources::local_dim_guard_sites`], which
+    /// The derivation is [`chelis_dag_core::axis_sources::local_dim_guard_sites`], which
     /// the DAG evaluator also reads, so the two lanes cannot place a local
     /// guard at two different sites or compare it against two different
     /// values. The view asks it here rather than handing a backend a raw
     /// [`Dag`], under the same chelis#1538 discipline as
     /// [`Self::member_load_axis`].
     pub fn local_dim_guard_sites(self) -> Result<Vec<(LocalGuardSite, LocalGuardClaim)>, String> {
-        crate::axis_sources::local_dim_guard_sites(self.dag)
+        chelis_dag_core::axis_sources::local_dim_guard_sites(self.dag)
     }
 
-    pub fn result_extent_sites(self, root: NodeId) -> Vec<crate::axis_sources::ResultExtentSite> {
-        crate::axis_sources::result_extent_sites(self.dag, root)
+    pub fn result_extent_sites(
+        self,
+        root: NodeId,
+    ) -> Vec<chelis_dag_core::axis_sources::ResultExtentSite> {
+        chelis_dag_core::axis_sources::result_extent_sites(self.dag, root)
     }
 
     /// The complete positive-rank operand relation for a verified same-shape
@@ -276,26 +281,28 @@ impl<'a> VerifiedDagView<'a> {
     pub fn same_shape_result_agreement(
         self,
         node: NodeId,
-    ) -> Option<crate::axis_sources::SameShapeAgreement> {
-        crate::axis_sources::same_shape_result_agreement(self.dag, node)
+    ) -> Option<chelis_dag_core::axis_sources::SameShapeAgreement> {
+        chelis_dag_core::axis_sources::same_shape_result_agreement(self.dag, node)
             .expect("verified same-shape result agreement")
     }
 
-    pub fn entry_dim_classes(self) -> Vec<crate::axis_sources::RuntimeDimClass> {
-        crate::axis_sources::derive_runtime_dim_classes(self.dag)
+    pub fn entry_dim_classes(self) -> Vec<chelis_dag_core::axis_sources::RuntimeDimClass> {
+        chelis_dag_core::axis_sources::derive_runtime_dim_classes(self.dag)
             .into_iter()
-            .filter(|class| class.placement(self.dag) == crate::axis_sources::GuardPlacement::Entry)
+            .filter(|class| {
+                class.placement(self.dag) == chelis_dag_core::axis_sources::GuardPlacement::Entry
+            })
             .collect()
     }
 
     /// Individual interface checks, shared with Eval and already scheduled.
-    pub fn entry_extent_guards(self) -> Vec<crate::axis_sources::EntryExtentGuard> {
-        crate::axis_sources::entry_extent_guards(self.dag)
+    pub fn entry_extent_guards(self) -> Vec<chelis_dag_core::axis_sources::EntryExtentGuard> {
+        chelis_dag_core::axis_sources::entry_extent_guards(self.dag)
     }
 
     /// The same ordered input admission plan consumed by DAG evaluation.
-    pub fn entry_validation_plan(self) -> Vec<crate::axis_sources::EntryValidationStep> {
-        crate::axis_sources::entry_validation_plan(self.dag)
+    pub fn entry_validation_plan(self) -> Vec<chelis_dag_core::axis_sources::EntryValidationStep> {
+        chelis_dag_core::axis_sources::entry_validation_plan(self.dag)
     }
 
     /// The named witness claims the entry schedule above already compares, so
@@ -303,7 +310,7 @@ impl<'a> VerifiedDagView<'a> {
     /// The view answers this for the same reason it answers placement: the
     /// question needs the class derivation, not the graph.
     pub fn entry_covered_witness_claims(self) -> Vec<(NodeId, usize)> {
-        crate::axis_sources::entry_covered_witness_claims(self.dag)
+        chelis_dag_core::axis_sources::entry_covered_witness_claims(self.dag)
     }
 
     /// Is this witness retained purely as a section 4.7 entry obligation, with
@@ -313,7 +320,7 @@ impl<'a> VerifiedDagView<'a> {
     /// tell an obligation it can discharge in its host prologue from a read it
     /// must refuse.
     pub fn witness_is_entry_obligation(self, id: NodeId) -> bool {
-        crate::axis_sources::witness_is_entry_obligation(self.dag, id)
+        chelis_dag_core::axis_sources::witness_is_entry_obligation(self.dag, id)
     }
 
     /// The obligations that witness owes, reduced to input reads, or `None`
@@ -321,18 +328,20 @@ impl<'a> VerifiedDagView<'a> {
     pub fn witness_entry_obligations(
         self,
         id: NodeId,
-    ) -> Option<Vec<crate::axis_sources::WitnessEntryObligation>> {
-        crate::axis_sources::witness_entry_obligations(self.dag, id)
+    ) -> Option<Vec<chelis_dag_core::axis_sources::WitnessEntryObligation>> {
+        chelis_dag_core::axis_sources::witness_entry_obligations(self.dag, id)
     }
 
     /// The unit-extent claims whose guard section 4.7 places at entry.
     ///
     /// The sibling of [`Self::entry_dim_classes`], filtered by the same
     /// placement rule through the same shared predicate.
-    pub fn entry_unit_extent_claims(self) -> Vec<crate::axis_sources::UnitExtentClaim> {
-        crate::axis_sources::derive_unit_extent_claims(self.dag)
+    pub fn entry_unit_extent_claims(self) -> Vec<chelis_dag_core::axis_sources::UnitExtentClaim> {
+        chelis_dag_core::axis_sources::derive_unit_extent_claims(self.dag)
             .into_iter()
-            .filter(|claim| claim.placement(self.dag) == crate::axis_sources::GuardPlacement::Entry)
+            .filter(|claim| {
+                claim.placement(self.dag) == chelis_dag_core::axis_sources::GuardPlacement::Entry
+            })
             .collect()
     }
 
@@ -349,20 +358,22 @@ impl<'a> VerifiedDagView<'a> {
     pub fn entry_unit_extent_reads(self) -> Vec<(NodeId, usize)> {
         self.entry_unit_extent_claims()
             .iter()
-            .filter_map(|claim| crate::axis_sources::member_load_axis(self.dag, &claim.member()))
+            .filter_map(|claim| {
+                chelis_dag_core::axis_sources::member_load_axis(self.dag, &claim.member())
+            })
             .collect()
     }
 
     pub fn symbolic_params(self) -> Vec<String> {
-        crate::dag::symbolic_params(self.dag)
+        chelis_dag_core::dag::symbolic_params(self.dag)
     }
 
     pub fn reduction_inlined_fused_elems(self) -> chelis_unord::UnordSet<NodeId> {
-        crate::fuse::reduction_inlined_fused_elems(self.dag)
+        chelis_dag_core::fuse::reduction_inlined_fused_elems(self.dag)
     }
 
-    pub fn reduction_inlined_products(self) -> Vec<crate::fuse::InlinedProduct> {
-        crate::fuse::reduction_inlined_products(self.dag)
+    pub fn reduction_inlined_products(self) -> Vec<chelis_dag_core::fuse::InlinedProduct> {
+        chelis_dag_core::fuse::reduction_inlined_products(self.dag)
     }
 
     /// Additional checked recipes, leaving the existing specialized product
@@ -371,7 +382,7 @@ impl<'a> VerifiedDagView<'a> {
         let products = self.reduction_inlined_products();
         let specialized = products
             .iter()
-            .flat_map(crate::fuse::InlinedProduct::skipped)
+            .flat_map(chelis_dag_core::fuse::InlinedProduct::skipped)
             .collect::<Vec<_>>();
         crate::contraction_views::contraction_views_with_products(
             self.dag,
@@ -382,18 +393,18 @@ impl<'a> VerifiedDagView<'a> {
     }
 
     pub fn first_integer_abs_node(self) -> Option<NodeId> {
-        crate::analysis::first_integer_abs_node(self.dag)
+        chelis_dag_core::analysis::first_integer_abs_node(self.dag)
     }
 
     pub fn first_fused_integer_abs_node(self) -> Option<NodeId> {
-        crate::analysis::first_fused_integer_abs_node(self.dag)
+        chelis_dag_core::analysis::first_fused_integer_abs_node(self.dag)
     }
 
     pub fn check_axis_sources(
         self,
         stage: chelis_types::unsupported::Stage,
     ) -> Result<(), chelis_types::unsupported::Unsupported> {
-        crate::axis_sources::check_axis_sources(self.dag, stage)
+        crate::axis_admission::check_axis_sources(self.dag, stage)
     }
 
     /// Every name a lane renders as an identifier resolves to one origin
@@ -403,7 +414,7 @@ impl<'a> VerifiedDagView<'a> {
         self,
         stage: chelis_types::unsupported::Stage,
     ) -> Result<(), chelis_types::unsupported::Unsupported> {
-        crate::axis_sources::check_rendered_dim_origins(self.dag, stage)
+        crate::axis_admission::check_rendered_dim_origins(self.dag, stage)
     }
 
     /// The checked extent source for each output axis of `node`.
@@ -411,8 +422,11 @@ impl<'a> VerifiedDagView<'a> {
     /// Kept crate-private so the exact-capacity owner can consume typed
     /// provenance without exposing the raw DAG or a backend normalization
     /// seam.
-    pub(crate) fn output_axis_sources(self, node: NodeId) -> Vec<crate::AxisSource> {
-        crate::axis_sources::output_axis_sources(self.dag, node)
+    pub(crate) fn output_axis_sources(
+        self,
+        node: NodeId,
+    ) -> Vec<chelis_dag_core::axis_sources::AxisSource> {
+        chelis_dag_core::axis_sources::output_axis_sources(self.dag, node)
     }
 
     /// The opaque program scope that makes DAG-local extent sources globally
@@ -1098,7 +1112,7 @@ impl<'a> VerifiedHostTensorHelperView<'a> {
         &self.helper.inputs
     }
 
-    pub fn output(self) -> &'a crate::dag::TensorType {
+    pub fn output(self) -> &'a chelis_dag_core::dag::TensorType {
         &self.helper.output
     }
 
@@ -1137,7 +1151,7 @@ impl<'a> VerifiedHostFunctionView<'a> {
         &self.function().name
     }
 
-    pub fn helper_result_claim_axes(self) -> &'a [crate::dag::RtAxis] {
+    pub fn helper_result_claim_axes(self) -> &'a [chelis_dag_core::dag::RtAxis] {
         &self.function().helper_result_claim_axes
     }
 
@@ -1205,7 +1219,7 @@ impl<'a> VerifiedHostFunctionView<'a> {
                         .captured_globals
                         .get(&param.owner)
                         .expect("verified environment parameter records its captured global");
-                    let source = crate::LoadStoreName::top_level_source_for_label(name)
+                    let source = chelis_dag_core::LoadStoreName::top_level_source_for_label(name)
                         .ok()
                         .flatten()
                         .unwrap_or_else(|| name.clone());
@@ -1918,7 +1932,7 @@ struct DagOwnershipPlan {
 
 impl DagOwnershipPlan {
     fn lower(dag: &Dag) -> Result<Self, OwnershipError> {
-        let structural_errors = crate::verify::verify_ownership_input(dag);
+        let structural_errors = chelis_dag_core::verify::verify_ownership_input(dag);
         if !structural_errors.is_empty() {
             return Err(OwnershipError::LoweringInvariant {
                 unit: "dag".to_string(),
@@ -2094,7 +2108,7 @@ impl DagOwnershipPlan {
     }
 
     fn verify(&self, dag: &Dag) -> Result<(), OwnershipError> {
-        let structural_errors = crate::verify::verify_ownership_input(dag);
+        let structural_errors = chelis_dag_core::verify::verify_ownership_input(dag);
         if !structural_errors.is_empty() {
             return Err(OwnershipError::LoweringInvariant {
                 unit: "dag".to_string(),
@@ -2412,7 +2426,10 @@ fn require_dag_arity(
     }
 }
 
-fn validate_dag_dependencies(dag: &Dag, node: &crate::dag::DagNode) -> Result<(), OwnershipError> {
+fn validate_dag_dependencies(
+    dag: &Dag,
+    node: &chelis_dag_core::dag::DagNode,
+) -> Result<(), OwnershipError> {
     for input in node.dependencies() {
         if input.0 >= node.id.0 || dag.get(input).is_none() {
             return Err(OwnershipError::DagInput {

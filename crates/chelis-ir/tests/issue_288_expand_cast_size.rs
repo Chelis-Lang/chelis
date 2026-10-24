@@ -19,12 +19,12 @@
 //! `expand` node carries the requested size and that the full
 //! constant-broadcast idiom lowers to a verify-clean DAG.
 
-use chelis_ir::dag::{DimInfo, RiscOp};
+use chelis_dag_core::dag::{DimInfo, RiscOp};
+use chelis_dag_core::verify;
 use chelis_ir::lower::lower_program;
-use chelis_ir::verify;
 use chelis_types::check_ir_program;
 
-fn lower_surf(src: &str) -> Result<chelis_ir::dag::Dag, String> {
+fn lower_surf(src: &str) -> Result<chelis_dag_core::dag::Dag, String> {
     let decls = chelis_surf::parser::parse_str(src, &chelis_syntax_host::NativeStack)
         .map_err(|e| format!("parse: {e:?}"))?;
     let exprs = chelis_macros::expand_program(
@@ -74,7 +74,7 @@ def run(x) = mul(x, insert(scalar_to_tensor(cast(2.5, f32)), cast(0, i32), cast(
     assert_eq!(expand.0, 0, "expand axis must be the cast-wrapped 0");
     assert_eq!(
         expand.1,
-        chelis_ir::dag::RtDim::Lit(2),
+        chelis_dag_core::dag::RtDim::Lit(2),
         "expand size must be the cast-wrapped 2, not the default 1",
     );
     assert_eq!(
@@ -104,7 +104,7 @@ def run(x) = mul(x, insert(scalar_to_tensor(cast(2.5, f32)), 0, 2i64))
     });
     assert_eq!(
         size,
-        Some(chelis_ir::dag::RtDim::Lit(2)),
+        Some(chelis_dag_core::dag::RtDim::Lit(2)),
         "plain size 2 must still extract"
     );
 }
@@ -165,7 +165,7 @@ fn assert_no_default_extent(src: &str, label: &str, reaches_the_dag: bool) {
     assert!(
         sizes
             .iter()
-            .all(|size| matches!(size, chelis_ir::dag::RtDim::Node(_))),
+            .all(|size| matches!(size, chelis_dag_core::dag::RtDim::Node(_))),
         "{label}: the size is a runtime extent node, never the extent-1 default; got {sizes:?}"
     );
     assert!(

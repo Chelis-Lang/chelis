@@ -1,6 +1,6 @@
 use chelis_unord::{UnordMap, UnordSet};
 
-use crate::dag::{
+use chelis_dag_core::dag::{
     Dag, DimExpr, DimInfo, ExtentWitnessSite, NodeId, RiscOp, RtAxis, RtDim, TensorType,
 };
 
@@ -205,19 +205,19 @@ fn vectorize_axis0_impl(
                 claims,
             } => RiscOp::ExtentWitness {
                 site: match site {
-                    crate::dag::ExtentWitnessSite::ResultClaim {
+                    chelis_dag_core::dag::ExtentWitnessSite::ResultClaim {
                         claim,
                         axis: RtAxis::Lit(axis),
-                    } => crate::dag::ExtentWitnessSite::ResultClaim {
+                    } => chelis_dag_core::dag::ExtentWitnessSite::ResultClaim {
                         claim: claim.clone(),
                         axis: RtAxis::Lit(axis.checked_add(1).expect("vmap result axis fits i32")),
                     },
-                    crate::dag::ExtentWitnessSite::LocalAscriptionClaim {
+                    chelis_dag_core::dag::ExtentWitnessSite::LocalAscriptionClaim {
                         ascription_id,
                         binding,
                         claim,
                         axis: RtAxis::Lit(axis),
-                    } => crate::dag::ExtentWitnessSite::LocalAscriptionClaim {
+                    } => chelis_dag_core::dag::ExtentWitnessSite::LocalAscriptionClaim {
                         ascription_id: *ascription_id,
                         binding: binding.clone(),
                         claim: claim.clone(),
@@ -504,7 +504,7 @@ fn vectorize_axis0_impl(
                 || (matches!(node.op, RiscOp::Const { .. }) && node.output_type.dims.is_empty()))
         {
             let raw_owner = if matches!(node.op, RiscOp::Const { .. }) {
-                crate::dag::Owner::new(owner.decl, None)
+                chelis_dag_core::dag::Owner::new(owner.decl, None)
             } else {
                 owner
             };
@@ -871,8 +871,8 @@ fn prepend_batch_dims(dims: &[DimInfo], batch_dim: &DimInfo) -> Vec<DimInfo> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dag::{NodeId, RiscOp, TensorType};
     use crate::eval::{TensorValue, eval_tensor_roots_with_strict};
+    use chelis_dag_core::dag::{NodeId, RiscOp, TensorType};
     use chelis_numeric_core::prim::Prim;
     use chelis_unord::UnordMap;
 

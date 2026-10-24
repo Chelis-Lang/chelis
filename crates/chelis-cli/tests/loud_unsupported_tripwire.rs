@@ -81,6 +81,9 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+// This exact host file contains tests from the former graph source owner.
+const MOVED_GRAD_HOST_SOURCE: &str = "crates/chelis-ir/tests/dag_grad_host.rs";
+
 /// Declare the pattern enum AND its scan list from ONE variant list, so a
 /// variant cannot exist without being ENUMERATED for scanning. The
 /// previous shape - a hand list plus a hand index map plus a hand count -
@@ -185,12 +188,16 @@ impl Pat {
         const ALL_CRATE_SRC: &[&str] = &["crates/"];
         const LOWERING_AND_EMISSION: &[&str] = &[
             "crates/chelis-ir/src/",
+            "crates/chelis-dag-core/src/",
+            MOVED_GRAD_HOST_SOURCE,
             "crates/chelis-backend-c/src/",
             "crates/chelis-backend-hip/src/",
             "crates/chelis-backend-metal/src/",
         ];
         const LOWERING_EMISSION_AND_RUNTIME_PACKING: &[&str] = &[
             "crates/chelis-ir/src/",
+            "crates/chelis-dag-core/src/",
+            MOVED_GRAD_HOST_SOURCE,
             "crates/chelis-backend-c/src/",
             "crates/chelis-backend-hip/src/",
             "crates/chelis-backend-metal/src/",
@@ -374,10 +381,20 @@ const BASELINE: &[Entry] = &[
     // converted at Phase 1 (both print arms and the to_string catch-all
     // are Err(Unsupported)) ---------------------------------------------
     // -- unwrap-or-default --------------------------------------------------
+    // The accepted lower.rs cohort splits into four host sites and one
+    // portable ownership site. The total allowance remains five.
     (
         Pat::UnwrapOrDefault,
         "crates/chelis-ir/src/lower.rs",
-        5,
+        4,
+        "census row 8's two reduce_window extraction uses converted at \
+         Phase 1 (chelis#725); the remaining 5 pre-existing non-censused \
+         uses stay frozen at the P0 baseline for the Phase 2 lint audit",
+    ),
+    (
+        Pat::UnwrapOrDefault,
+        "crates/chelis-dag-core/src/ownership.rs",
+        1,
         "census row 8's two reduce_window extraction uses converted at \
          Phase 1 (chelis#725); the remaining 5 pre-existing non-censused \
          uses stay frozen at the P0 baseline for the Phase 2 lint audit",
@@ -460,7 +477,7 @@ const BASELINE: &[Entry] = &[
     ),
     (
         Pat::UnwrapOrNumericLiteral,
-        "crates/chelis-ir/src/dag.rs",
+        "crates/chelis-dag-core/src/dag.rs",
         0,
         "chelis#665 removed the one site (1 -> 0, per \
          spec/design/loud_unsupported.md B1: removals only with the site's \
@@ -587,9 +604,9 @@ const BASELINE: &[Entry] = &[
     ),
     (
         Pat::RustFormatNarrowing,
-        "crates/chelis-ir/src/grad.rs",
+        "crates/chelis-ir/tests/dag_grad_host.rs",
         2,
-        "cfg(test) tolerance-assert message ({expected:.6}/{a:.6}) - not \
+        "former cfg(test) tolerance-assert message ({expected:.6}/{a:.6}) - not \
          an exit",
     ),
     (
@@ -993,8 +1010,8 @@ fn collect_rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// All `.rs` files under `crates/<crate>/src/`, as repo-relative
-/// `/`-separated paths paired with contents.
+/// All `.rs` files under `crates/<crate>/src/`, plus the exact moved host
+/// source, as repo-relative `/`-separated paths paired with contents.
 fn crate_sources(root: &Path) -> Vec<(String, String)> {
     let crates_dir = root.join("crates");
     let mut files = Vec::new();
@@ -1019,6 +1036,12 @@ fn crate_sources(root: &Path) -> Vec<(String, String)> {
             let content = fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {rel}: {e}"));
             files.push((rel, content));
         }
+    }
+    let host_path = root.join(MOVED_GRAD_HOST_SOURCE);
+    if host_path.is_file() {
+        let content = fs::read_to_string(&host_path)
+            .unwrap_or_else(|e| panic!("read {MOVED_GRAD_HOST_SOURCE}: {e}"));
+        files.push((MOVED_GRAD_HOST_SOURCE.to_string(), content));
     }
     files
 }
@@ -1272,6 +1295,45 @@ fn pattern_ids_are_unique() {
             pat.id()
         );
     }
+}
+
+/// Each migrated source retains all seven applicable token classes.
+#[test]
+fn tripwire_covers_portable_graph_and_exact_moved_host_sources() {
+    for rel in [
+        "crates/chelis-dag-core/src/planted.rs",
+        MOVED_GRAD_HOST_SOURCE,
+    ] {
+        for pat in [
+            Pat::StubZero,
+            Pat::ValuePlaceholder,
+            Pat::UnwrapOrDefault,
+            Pat::UnwrapOrPrim,
+            Pat::UnwrapOrNumericLiteral,
+            Pat::CFormatNarrowing,
+            Pat::RustFormatNarrowing,
+        ] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let path = dir.path().join(rel);
+            fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
+            fs::write(&path, pat.sample().1).expect("write sample");
+            let got = violations(dir.path(), &[]);
+            assert!(
+                got.iter().any(|v| v.contains(pat.id()) && v.contains(rel)),
+                "pattern `{}` must cover migrated source {rel}; got: {got:?}",
+                pat.id()
+            );
+        }
+    }
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("crates/chelis-ir/tests/unrelated.rs");
+    fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
+    fs::write(&path, Pat::RustFormatNarrowing.sample().1).expect("write sample");
+    assert!(
+        violations(dir.path(), &[]).is_empty(),
+        "the exact moved host source must not extend the scan to unrelated tests"
+    );
 }
 
 /// PR #962 round-2 F3: a format spec split across physical lines by a

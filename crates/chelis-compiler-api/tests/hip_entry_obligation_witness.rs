@@ -11,7 +11,7 @@
 //! boundary is measured rather than asserted.
 
 use chelis_compiler_api::compiler::reject_unsupported_hip_ops;
-use chelis_ir::dag::{
+use chelis_dag_core::dag::{
     Dag, DimInfo, ExtentClaim, ExtentWitnessSite, NodeId, RiscOp, RtAxis, TensorType,
 };
 use chelis_numeric_core::prim::Prim;
@@ -20,7 +20,7 @@ fn tensor(dims: Vec<DimInfo>, precision: Prim) -> TensorType {
     TensorType { dims, precision }
 }
 
-fn load(dag: &mut Dag, decl: chelis_ir::dag::DeclId, name: &str) -> NodeId {
+fn load(dag: &mut Dag, decl: chelis_dag_core::dag::DeclId, name: &str) -> NodeId {
     dag.add_node(
         decl,
         RiscOp::Load { name: name.into() },
@@ -32,7 +32,7 @@ fn load(dag: &mut Dag, decl: chelis_ir::dag::DeclId, name: &str) -> NodeId {
 
 fn witness(
     dag: &mut Dag,
-    decl: chelis_ir::dag::DeclId,
+    decl: chelis_dag_core::dag::DeclId,
     parameter: &str,
     input: NodeId,
     claims: Vec<ExtentClaim>,

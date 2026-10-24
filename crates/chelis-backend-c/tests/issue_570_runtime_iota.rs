@@ -1,7 +1,7 @@
 //! [05-OP-54] Native C range source: exact endpoints, dynamic counts and overflow.
 mod common;
 mod support;
-use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
+use chelis_dag_core::dag::{Dag, DimInfo, RiscOp, TensorType};
 use chelis_numeric_core::prim::Prim;
 use std::fs;
 use std::process::{Command, Output};
@@ -76,7 +76,7 @@ fn program_with_activation(active: Option<bool>) -> Dag {
         )
     });
     let output = dag.add_node(
-        chelis_ir::dag::Owner::new(owner, activation),
+        chelis_dag_core::dag::Owner::new(owner, activation),
         RiscOp::Iota,
         vec![start, end],
         TensorType {

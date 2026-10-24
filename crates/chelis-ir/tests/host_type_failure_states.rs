@@ -152,7 +152,7 @@ fn raw_decoder_preserves_exact_primitives_and_polymorphic_names() {
             precision: HostPrecisionTerm::Variable("p".into()),
             shape: HostShapeTerm::Polymorphic(vec![
                 HostShapeSlot::RankVariable("pre".into()),
-                HostShapeSlot::Dim(chelis_ir::DimInfo::Named("seq".into(), None)),
+                HostShapeSlot::Dim(chelis_dag_core::DimInfo::Named("seq".into(), None)),
                 HostShapeSlot::RankVariable("post".into()),
             ]),
         }))
@@ -358,19 +358,19 @@ fn nominal_dimension_arguments_retain_exact_kind_and_identity() {
     for (syntax, slot) in [
         (
             "(d-lit {} 3)",
-            HostShapeSlot::Dim(chelis_ir::DimInfo::Lit(3)),
+            HostShapeSlot::Dim(chelis_dag_core::DimInfo::Lit(3)),
         ),
         (
             "(d-name {} channels)",
-            HostShapeSlot::Dim(chelis_ir::DimInfo::Named("channels".into(), None)),
+            HostShapeSlot::Dim(chelis_dag_core::DimInfo::Named("channels".into(), None)),
         ),
         (
             "(d-var {} d7)",
-            HostShapeSlot::Dim(chelis_ir::DimInfo::Named("d7".into(), None)),
+            HostShapeSlot::Dim(chelis_dag_core::DimInfo::Named("d7".into(), None)),
         ),
         (
             "(d-name {} *)",
-            HostShapeSlot::Dim(chelis_ir::DimInfo::Named("*".into(), None)),
+            HostShapeSlot::Dim(chelis_dag_core::DimInfo::Named("*".into(), None)),
         ),
     ] {
         let decoded = decode_host_type(&parse_one(&format!("(t-adt {{}} Leaf {syntax})"))).unwrap();

@@ -1,4 +1,5 @@
-use chelis_ir::{Dag, DimInfo, RiscOp, TensorType, compositions, tier2, verify, vmap};
+use chelis_dag_core::{Dag, DimInfo, RiscOp, TensorType, tier2, verify};
+use chelis_ir::{compositions, vmap};
 use chelis_numeric_core::prim::Prim;
 
 fn graph(precision: Prim, axis: usize) -> Dag {
@@ -68,7 +69,7 @@ fn malformed_softmax_identities_reject_before_execution() {
 
 #[test]
 fn decomposition_preserves_activation_provenance_and_nonvalue_edges() {
-    use chelis_ir::dag::Owner;
+    use chelis_dag_core::dag::Owner;
     let dag = graph(Prim::F32, 1);
     // Rebuild with metadata dependencies preceding the softmax.
     let mut source = Dag::new();
@@ -106,9 +107,9 @@ fn decomposition_preserves_activation_provenance_and_nonvalue_edges() {
     let claim = source.add_node(
         owner,
         RiscOp::ExtentWitness {
-            site: chelis_ir::dag::ExtentWitnessSite::LiteralResultClaim,
+            site: chelis_dag_core::dag::ExtentWitnessSite::LiteralResultClaim,
             parameter: String::new(),
-            axis: chelis_ir::dag::RtAxis::Lit(0),
+            axis: chelis_dag_core::dag::RtAxis::Lit(0),
             requirements: vec![
                 chelis_numeric_core::dtype_semantics::scalar_from_i64("test", Prim::Int64, 2)
                     .unwrap(),
@@ -159,16 +160,14 @@ fn decomposition_preserves_activation_provenance_and_nonvalue_edges() {
 fn decomposition_refuses_an_unmapped_metadata_dependency() {
     let mut dag = graph(Prim::F32, 1);
     let root = dag.roots()[0];
-    dag.add_shape_dep(root, chelis_ir::NodeId(999));
+    dag.add_shape_dep(root, chelis_dag_core::NodeId(999));
     assert!(std::panic::catch_unwind(|| compositions::decompose(&dag)).is_err());
 }
 
 #[test]
 fn empty_axis_traps_only_when_the_retained_softmax_is_active() {
-    use chelis_ir::{
-        dag::Owner,
-        eval::{self, TensorValue},
-    };
+    use chelis_dag_core::dag::Owner;
+    use chelis_ir::eval::{self, TensorValue};
     use chelis_numeric_core::dtype_semantics::{RawTensor, finalize_tensor};
     let mut dag = Dag::new();
     let owner = dag.declare("empty");
@@ -226,6 +225,6 @@ fn empty_axis_traps_only_when_the_retained_softmax_is_active() {
 fn decomposition_refuses_an_unmapped_result_claim_dependency() {
     let mut dag = graph(Prim::F32, 1);
     let root = dag.roots()[0];
-    dag.add_result_claim_dep(root, chelis_ir::NodeId(999));
+    dag.add_result_claim_dep(root, chelis_dag_core::NodeId(999));
     assert!(std::panic::catch_unwind(|| compositions::decompose(&dag)).is_err());
 }

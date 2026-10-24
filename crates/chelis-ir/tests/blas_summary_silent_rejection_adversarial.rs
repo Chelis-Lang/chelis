@@ -3,7 +3,7 @@
 //! non-sparse shapes. Structured BLAS rejection coverage lives in
 //! `host_blas_summary_diagnostics.rs`.
 
-use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
+use chelis_dag_core::dag::{Dag, DimInfo, RiscOp, TensorType};
 use chelis_ir::host::{
     HostTensorInput, SparseSummaryAttempt, try_summarize_sparse_helper_for_test,
 };
@@ -47,7 +47,7 @@ fn build_matmul_helper(prim: Prim) -> (Dag, Vec<HostTensorInput>, TensorType) {
         decl,
         RiscOp::Expand {
             axis: 2,
-            size: chelis_ir::dag::RtDim::Lit(4),
+            size: chelis_dag_core::dag::RtDim::Lit(4),
         },
         vec![a],
         t3(prim, 8, 16, 4),
@@ -57,7 +57,7 @@ fn build_matmul_helper(prim: Prim) -> (Dag, Vec<HostTensorInput>, TensorType) {
         decl,
         RiscOp::Expand {
             axis: 0,
-            size: chelis_ir::dag::RtDim::Lit(8),
+            size: chelis_dag_core::dag::RtDim::Lit(8),
         },
         vec![b],
         t3(prim, 8, 16, 4),
@@ -221,7 +221,7 @@ fn const_operand_helper_silently_misses_blas_summary() {
         decl,
         RiscOp::Expand {
             axis: 2,
-            size: chelis_ir::dag::RtDim::Lit(4),
+            size: chelis_dag_core::dag::RtDim::Lit(4),
         },
         vec![a],
         t3(Prim::F32, 8, 16, 4),
@@ -231,7 +231,7 @@ fn const_operand_helper_silently_misses_blas_summary() {
         decl,
         RiscOp::Expand {
             axis: 0,
-            size: chelis_ir::dag::RtDim::Lit(8),
+            size: chelis_dag_core::dag::RtDim::Lit(8),
         },
         vec![b],
         t3(Prim::F32, 8, 16, 4),

@@ -30,9 +30,9 @@
 
 use chelis_unord::UnordMap;
 
-use chelis_ir::dag::{DimInfo, TensorType};
+use chelis_dag_core::dag::{DimInfo, TensorType};
+use chelis_dag_core::verify;
 use chelis_ir::lower::{lower_program, try_lower_subexpr_program};
-use chelis_ir::verify;
 use chelis_numeric_core::prim::Prim;
 use chelis_types::check_ir_program;
 use chelis_types::errors::{CheckError, CheckErrorKind};
@@ -40,7 +40,7 @@ use chelis_types::errors::{CheckError, CheckErrorKind};
 /// Surf source -> desugar -> macro-expand -> typecheck -> effects ->
 /// linearity -> lower. Returns the lowered DAG, or a stage-tagged error
 /// string. Mirrors the `lower_surf` helper in `reduce_sum_lowering_adversarial`.
-fn lower_surf(src: &str) -> Result<chelis_ir::dag::Dag, String> {
+fn lower_surf(src: &str) -> Result<chelis_dag_core::dag::Dag, String> {
     let decls = chelis_surf::parser::parse_str(src, &chelis_syntax_host::NativeStack)
         .map_err(|e| format!("parse: {e:?}"))?;
     let exprs = chelis_macros::expand_program(

@@ -48,7 +48,7 @@ use chelis_numeric_core::prim::Prim;
 /// In Phase 1 this is always unpopulated for the cvc5 path. The
 /// graph-extraction seam (WI-3) populates it via [`from_wire_dag`](Self::from_wire_dag)
 /// once it has serialized and hashed the artifact. The handle stays a plain
-/// hash + index: it does NOT hold a `chelis_ir::Dag` or a `WireDag` value, so
+/// hash + index: it does NOT hold a `chelis_dag_core::Dag` or a `WireDag` value, so
 /// populating it pulls no live IR dependency into this crate; the producer
 /// computes the hash and hands it here.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]

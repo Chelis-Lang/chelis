@@ -21,7 +21,7 @@ use crate::host::{
     HostExprKind, HostFunctionOrigin,
 };
 use crate::host_type_state::ConcreteHostType;
-use crate::{Dag, DimInfo, RiscOp, TensorType};
+use chelis_dag_core::{Dag, DimInfo, RiscOp, TensorType};
 
 fn ty(prim: Prim) -> ConcreteHostType {
     ConcreteHostType::Scalar(prim)

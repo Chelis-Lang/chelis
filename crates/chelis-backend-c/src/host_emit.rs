@@ -335,7 +335,7 @@ use crate::host_abi::{
     HostAbiMatchArm as HostMatchArm, HostAbiParam as HostParam, HostAbiProgram as HostProgram,
     HostAbiType, HostAbiType as HostType, ProjectedHostProgram, ProjectedHostSite,
 };
-use chelis_ir::dag::{ComparisonKind, DimInfo, RiscOp, TensorType};
+use chelis_dag_core::dag::{ComparisonKind, DimInfo, RiscOp, TensorType};
 use chelis_ir::ownership::{
     HostSiteId, VerifiedApplyKind, VerifiedBlockId, VerifiedEdgeView, VerifiedHostAction,
     VerifiedHostOperation, VerifiedHostTensorHelperView, VerifiedHostTerminator,
@@ -568,7 +568,7 @@ pub(crate) fn emit_host_abi_program(
     if !captured_globals.is_empty() {
         body.push("// Top-level bindings captured by compiled functions (issue #352):".to_string());
         for name in &captured_globals {
-            let source = chelis_ir::LoadStoreName::top_level_source_for_label(name)
+            let source = chelis_dag_core::LoadStoreName::top_level_source_for_label(name)
                 .map_err(|reason| invalid_abi_shape(reason, "captured global identity"))?
                 .unwrap_or_else(|| name.clone());
             let binding = program
@@ -939,7 +939,7 @@ pub(crate) fn tensor_helper_names(
 pub(crate) fn concrete_tensor_helper_codegen(
     program: &chelis_ir::host::ConcreteHostProgram,
     program_name: &str,
-) -> Result<Vec<(String, chelis_ir::dag::Dag)>, Unsupported> {
+) -> Result<Vec<(String, chelis_dag_core::dag::Dag)>, Unsupported> {
     let symbols = tensor_helper_symbols(
         program_name,
         program.global_tensor_helpers.len(),
@@ -1449,7 +1449,7 @@ fn append_json_canonical_object_helpers(out: &mut Vec<String>) {
 
 /// Instantiate the scalar host-expression path at each concrete float ABI.
 ///
-/// Tensor activations lower through `chelis_ir::tier2`; scalar calls in a
+/// Tensor activations lower through `chelis_dag_core::tier2`. Scalar calls in a
 /// Surf `def` reach this emitter after host-ABI projection instead. Both
 /// lanes take one definition: each composite helper body is emitted from the
 /// very graph `tier2` builds for spec/05 §3.3, one finalized C statement per
@@ -1497,13 +1497,13 @@ fn append_activation_helpers(
     }
 
     let lowerings: [(&str, ActivationLowering); 5] = [
-        ("sigmoid", chelis_ir::tier2::lower_sigmoid),
-        ("silu", chelis_ir::tier2::lower_silu),
-        ("gelu", chelis_ir::tier2::lower_gelu),
-        ("gelu_tanh", chelis_ir::tier2::lower_gelu_tanh),
+        ("sigmoid", chelis_dag_core::tier2::lower_sigmoid),
+        ("silu", chelis_dag_core::tier2::lower_silu),
+        ("gelu", chelis_dag_core::tier2::lower_gelu),
+        ("gelu_tanh", chelis_dag_core::tier2::lower_gelu_tanh),
         (
             "standard_normal_cdf",
-            chelis_ir::tier2::lower_standard_normal_cdf,
+            chelis_dag_core::tier2::lower_standard_normal_cdf,
         ),
     ];
     for (name, lower) in lowerings {
@@ -1519,12 +1519,12 @@ fn append_activation_helpers(
 }
 
 type ActivationLowering = fn(
-    chelis_ir::dag::Owner,
-    &mut chelis_ir::dag::Dag,
-    chelis_ir::dag::NodeId,
+    chelis_dag_core::dag::Owner,
+    &mut chelis_dag_core::dag::Dag,
+    chelis_dag_core::dag::NodeId,
     &TensorType,
     Option<&str>,
-) -> chelis_ir::dag::NodeId;
+) -> chelis_dag_core::dag::NodeId;
 
 /// The C statements of one activation helper: the `tier2` lowering of a
 /// rank-0 `x` at `prim`, one finalized statement per primitive, in the
@@ -1532,9 +1532,9 @@ type ActivationLowering = fn(
 /// is spelled at its own dtype: `Phi` at f16 and bf16 runs at f32 between
 /// two casts, and its `cmplt` predicates are C `int`s.
 fn activation_body(prim: Prim, lower: ActivationLowering) -> Vec<String> {
-    let ty = chelis_ir::tier2::scalar_type(prim);
-    let mut dag = chelis_ir::dag::Dag::new();
-    let owner = chelis_ir::dag::Owner::from(dag.declare("activation"));
+    let ty = chelis_dag_core::tier2::scalar_type(prim);
+    let mut dag = chelis_dag_core::dag::Dag::new();
+    let owner = chelis_dag_core::dag::Owner::from(dag.declare("activation"));
     let x = dag.add_node(
         owner,
         RiscOp::Load { name: "x".into() },
@@ -1543,7 +1543,7 @@ fn activation_body(prim: Prim, lower: ActivationLowering) -> Vec<String> {
         None,
     );
     let root = lower(owner, &mut dag, x, &ty, None);
-    let name = |id: chelis_ir::dag::NodeId| {
+    let name = |id: chelis_dag_core::dag::NodeId| {
         if id == x {
             "x".to_string()
         } else {
@@ -1552,7 +1552,7 @@ fn activation_body(prim: Prim, lower: ActivationLowering) -> Vec<String> {
     };
     let mut lines = Vec::new();
     for (index, node) in dag.nodes().iter().enumerate() {
-        let id = chelis_ir::dag::NodeId(index);
+        let id = chelis_dag_core::dag::NodeId(index);
         if id == x {
             continue;
         }
@@ -2631,7 +2631,7 @@ fn append_helper(
     out: &mut Vec<String>,
     verified: VerifiedHostTensorHelperView<'_>,
     helper_name: &str,
-    entry_coverage: &[chelis_ir::axis_sources::EntryExtentGuard],
+    entry_coverage: &[chelis_dag_core::axis_sources::EntryExtentGuard],
 ) -> Result<HelperRequirements, Unsupported> {
     let helper_name = private_helper_name(helper_name);
     if verified.identity_input().is_some() {
@@ -2966,7 +2966,7 @@ impl HostResultClaim {
             .filter(|(axis, _)| {
                 !function
                     .helper_result_claim_axes
-                    .contains(&chelis_ir::dag::RtAxis::Lit(
+                    .contains(&chelis_dag_core::dag::RtAxis::Lit(
                         i32::try_from(*axis).expect("rank fits i32"),
                     ))
             })
@@ -4801,11 +4801,11 @@ fn signature_entry_lines(
     plan: &chelis_ir::host::SignatureEntryPlan,
     args: &[String],
     indent: &str,
-    delegated: &[chelis_ir::axis_sources::EntryExtentGuard],
+    delegated: &[chelis_dag_core::axis_sources::EntryExtentGuard],
     work: Option<&entry_walk::FunctionEntryWork>,
     declare_named_states: bool,
 ) -> Result<Vec<String>, Unsupported> {
-    use chelis_ir::axis_sources::EntryExtentGuard;
+    use chelis_dag_core::axis_sources::EntryExtentGuard;
     if args.len() != plan.observations().nodes().len()
         || work.is_some_and(|work| {
             work.owners.len() != args.len()
@@ -4843,7 +4843,7 @@ fn signature_entry_lines(
             ));
         }
     }
-    let label_of = |node: &chelis_ir::dag::DagNode| {
+    let label_of = |node: &chelis_dag_core::dag::DagNode| {
         let RiscOp::Load { name } = &node.op else {
             unreachable!("signature observation")
         };
@@ -4878,7 +4878,7 @@ fn signature_entry_lines(
             lines.extend(work.metadata.iter().cloned());
         }
     }
-    let read = |(load, axis): (chelis_ir::NodeId, usize)| {
+    let read = |(load, axis): (chelis_dag_core::NodeId, usize)| {
         let node = plan.observations().get(load).expect("signature witness");
         let RiscOp::Load { name } = &node.op else {
             unreachable!("signature observation")
@@ -5531,7 +5531,7 @@ fn emit_main(
         // A top-level read and a same-spelled lexical binder have distinct
         // identities. The alias is a second C name for this binding's value;
         // only the authored binding owns storage and participates in roots.
-        let global_label = chelis_ir::LoadStoreName::top_level(&binding.name);
+        let global_label = chelis_dag_core::LoadStoreName::top_level(&binding.name);
         if hoisted.contains(global_label.as_str()) {
             emitter.lines.push(format!(
                 "    {} = {};",
@@ -13051,7 +13051,7 @@ impl<'a> HostEmitter<'a> {
                 &format!("chelis_tensor_numel({target})"),
                 &format!("chelis_host_tensor_data({updates})"),
                 summary.output.precision,
-                crate::fp_env::risc_nan_finalization(&chelis_ir::dag::RiscOp::ScatterAdd {
+                crate::fp_env::risc_nan_finalization(&chelis_dag_core::dag::RiscOp::ScatterAdd {
                     axis: summary.axis,
                     batch_rank: 0,
                 }),
@@ -15379,7 +15379,7 @@ fn result_origin_name(value: &str) -> String {
 fn c_ident(name: &str) -> std::borrow::Cow<'_, str> {
     // The `@` label cannot be authored in Surf. In emitted C it occupies a
     // namespace from which authored lookalikes are escaped below.
-    if let Some(source) = chelis_ir::LoadStoreName::top_level_source_for_label(name)
+    if let Some(source) = chelis_dag_core::LoadStoreName::top_level_source_for_label(name)
         .expect("compiler-created global labels are canonical")
     {
         return std::borrow::Cow::Owned(format!(
@@ -16520,7 +16520,7 @@ mod expression_dispatch_tests {
 
     #[test]
     fn resolved_global_c_symbol_cannot_alias_authored_lookalikes() {
-        let global = chelis_ir::LoadStoreName::top_level("x");
+        let global = chelis_dag_core::LoadStoreName::top_level("x");
         let alias = c_ident(global.as_str());
         assert_eq!(alias, "__chelis_global_78");
         assert_ne!(alias, c_ident("__chelis_global_78"));
@@ -16535,15 +16535,15 @@ mod expression_dispatch_tests {
     // each carry the C port of the Random stream. They must be one port.
     #[test]
     fn host_random_stream_helpers_are_the_standalone_kernel_prelude() {
-        let mut dag = chelis_ir::dag::Dag::new();
+        let mut dag = chelis_dag_core::dag::Dag::new();
         let decl = dag.declare("test");
         let ty = TensorType {
-            dims: vec![chelis_ir::dag::DimInfo::Lit(2)],
+            dims: vec![chelis_dag_core::dag::DimInfo::Lit(2)],
             precision: Prim::F32,
         };
         let template = dag.add_node(
             decl,
-            chelis_ir::dag::RiscOp::Load {
+            chelis_dag_core::dag::RiscOp::Load {
                 name: "template".into(),
             },
             vec![],
@@ -16554,10 +16554,10 @@ mod expression_dispatch_tests {
             dims: vec![],
             precision,
         };
-        let bound = |dag: &mut chelis_ir::dag::Dag, value| {
+        let bound = |dag: &mut chelis_dag_core::dag::Dag, value| {
             dag.add_node(
                 decl,
-                chelis_ir::dag::RiscOp::synth_const(Prim::F32, value),
+                chelis_dag_core::dag::RiscOp::synth_const(Prim::F32, value),
                 vec![],
                 rank0(Prim::F32),
                 None,
@@ -16567,21 +16567,21 @@ mod expression_dispatch_tests {
         let high = bound(&mut dag, 1.0);
         let seed = dag.add_node(
             decl,
-            chelis_ir::dag::RiscOp::synth_const(Prim::Int64, 7.0),
+            chelis_dag_core::dag::RiscOp::synth_const(Prim::Int64, 7.0),
             vec![],
             rank0(Prim::Int64),
             None,
         );
         let key = dag.add_node(
             decl,
-            chelis_ir::dag::RiscOp::KeyFromSeed,
+            chelis_dag_core::dag::RiscOp::KeyFromSeed,
             vec![seed],
             rank0(Prim::Key),
             None,
         );
         let draw = dag.add_node(
             decl,
-            chelis_ir::dag::RiscOp::UniformLike,
+            chelis_dag_core::dag::RiscOp::UniformLike,
             vec![template, low, high, key],
             ty,
             None,

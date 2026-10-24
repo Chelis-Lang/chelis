@@ -1,5 +1,5 @@
 //! Read the compiled declarations, independently of normative registrations.
-use chelis_ir::dag::RiscAtomIdentity;
+use chelis_dag_core::dag::RiscAtomIdentity;
 
 fn main() {
     let builtins = chelis_types::builtin_discovery::builtin_semantic_identities()

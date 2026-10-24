@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
 use chelis_backend_c::{CodegenOptions, CodegenResult};
-use chelis_ir::dag::Dag;
+use chelis_dag_core::dag::Dag;
 use chelis_ir::host::ConcreteHostProgram;
 use chelis_types::unsupported::Unsupported;
 

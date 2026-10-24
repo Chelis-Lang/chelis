@@ -7,11 +7,11 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use chelis_backend_c::CodegenResult;
 use chelis_backend_hip::HipCodegenResult;
-use chelis_deep::Expr as DeepExpr;
-use chelis_ir::dag::{
+use chelis_dag_core::dag::{
     ComparisonKind, Dag, DimInfo, ExtremaKind, ExtremaOperand, FusedInput, FusedStepOp,
     LogicalKind, NodeId, ReduceWindowKind, RiscOp, RtDim, TensorType,
 };
+use chelis_deep::Expr as DeepExpr;
 use chelis_ir::eval;
 use chelis_numeric_core::named_cast::NamedCastMode;
 use chelis_surf::ast::{
@@ -1574,7 +1574,7 @@ fn entry_lane_decision<'a>(
             entry: entry.to_string(),
         }));
     };
-    let dag = chelis_ir::optimize::dead_code_eliminate(&dag);
+    let dag = chelis_dag_core::optimize::dead_code_eliminate(&dag);
     if dag.roots().is_empty() {
         return Ok(Decline(EntryLaneDecline::EmptyAfterDce {
             entry: entry.to_string(),
@@ -1852,7 +1852,7 @@ fn resolve_in_context_entry<'a>(
     })?;
     let mut scoped = compiled.dag.clone();
     scoped.set_roots(vec![root]);
-    let scoped = chelis_ir::optimize::dead_code_eliminate(&scoped);
+    let scoped = chelis_dag_core::optimize::dead_code_eliminate(&scoped);
     Ok(Some((selected.as_str(), scoped)))
 }
 
@@ -2095,7 +2095,7 @@ fn execution_artifact_from_compiled_observed(
                 // transformed entries with runtime pad/shrink intermediates.
                 let specialized =
                     chelis_ir::specialize::specialize_for_exact_arithmetic(&entry_dag);
-                let fused = chelis_ir::fuse::fuse(&specialized);
+                let fused = chelis_dag_core::fuse::fuse(&specialized);
                 let options = chelis_backend_c::CodegenOptions {
                     use_blas: true,
                     ..chelis_backend_c::CodegenOptions::default()
@@ -2302,7 +2302,7 @@ fn execution_artifact_from_compiled_observed(
             reject_unsupported_reduce_window_precision(&compiled.dag, BuildTarget::C)?;
             reject_unsized_named_dims(&compiled.dag, "c")?;
             let specialized = chelis_ir::specialize::specialize_for_exact_arithmetic(&compiled.dag);
-            let fused = chelis_ir::fuse::fuse(&specialized);
+            let fused = chelis_dag_core::fuse::fuse(&specialized);
             let options = chelis_backend_c::CodegenOptions {
                 use_blas: true,
                 ..chelis_backend_c::CodegenOptions::default()
@@ -2449,12 +2449,12 @@ fn execution_artifact_from_compiled_observed(
             } else {
                 compiled.dag.clone()
             };
-            hip_dag = chelis_ir::optimize::dead_code_eliminate(&hip_dag);
+            hip_dag = chelis_dag_core::optimize::dead_code_eliminate(&hip_dag);
             reject_unsupported_effect_ops(&hip_dag, BuildTarget::Hip)?;
             reject_unsized_named_dims(&hip_dag, "hip")?;
             let specialized = chelis_ir::specialize::specialize_for_blas(&hip_dag);
             reject_unsupported_hip_ops(&specialized)?;
-            let fused = chelis_ir::fuse::fuse(&specialized);
+            let fused = chelis_dag_core::fuse::fuse(&specialized);
             let selected = chelis_backend_hip::prepare_dag_for_codegen(fused);
             let verified = chelis_ir::ownership::verify_ownership(
                 chelis_ir::ownership::lower_dag_ownership(selected).map_err(|error| {
@@ -3759,7 +3759,7 @@ pub fn grad(request: GradRequest) -> Result<GradResult> {
     let grad_result = if request.fuse {
         chelis_ir::grad_then_fuse_checked(&compiled.dag, output, &wrt_nodes)
     } else {
-        chelis_ir::grad::grad_dag_checked(&compiled.dag, output, &wrt_nodes)
+        chelis_dag_core::grad::grad_dag_checked(&compiled.dag, output, &wrt_nodes)
     }
     .map_err(|ad_err| stage_error("grad", ad_err.to_string(), GeneralKind::GradError))?;
 
@@ -4049,12 +4049,12 @@ impl CompiledSource {
                 crate::target_capability::tensor_capable_prims(self.program.target()),
             );
             let mut key_rule_errors = Vec::new();
-            chelis_ir::verify::verify_random_operands(&self.dag, &mut key_rule_errors);
+            chelis_dag_core::verify::verify_random_operands(&self.dag, &mut key_rule_errors);
             if key_rule_errors.is_empty() {
-                chelis_ir::verify::verify_key_rules(&self.dag, &mut key_rule_errors);
+                chelis_dag_core::verify::verify_key_rules(&self.dag, &mut key_rule_errors);
             }
             let mut sharing_errors = Vec::new();
-            chelis_ir::verify::verify_declaration_sharing(&self.dag, &mut sharing_errors);
+            chelis_dag_core::verify::verify_declaration_sharing(&self.dag, &mut sharing_errors);
             EvalProgramFacts {
                 base_manifest: std::sync::Arc::new(base_manifest),
                 base_def_names,
@@ -5350,7 +5350,7 @@ fn reduction_sum_source(dag: &Dag, result: NodeId) -> Option<(usize, NodeId)> {
 /// runtime extent represented by a sum of a shape-dependent ones tensor.
 /// Requiring those shape-dependency edges keeps this check from capturing an
 /// authored `div(sum(x), y)` expression.
-fn is_lowered_mean_result(dag: &Dag, node: &chelis_ir::dag::DagNode) -> bool {
+fn is_lowered_mean_result(dag: &Dag, node: &chelis_dag_core::dag::DagNode) -> bool {
     if !matches!(node.op, RiscOp::Div) || node.inputs.len() != 2 {
         return false;
     }
@@ -5378,7 +5378,7 @@ fn is_lowered_mean_result(dag: &Dag, node: &chelis_ir::dag::DagNode) -> bool {
 
 fn inexact_device_reduction(
     dag: &Dag,
-    node: &chelis_ir::dag::DagNode,
+    node: &chelis_dag_core::dag::DagNode,
 ) -> Option<(&'static str, Prim)> {
     let operand_precision = || {
         node.inputs
@@ -5741,7 +5741,7 @@ pub fn reject_unsupported_metal_ops(dag: &Dag) -> std::result::Result<(), Compil
 #[cfg(test)]
 mod metal_runtime_dim_reject_tests {
     use super::reject_unsupported_metal_ops;
-    use chelis_ir::dag::{
+    use chelis_dag_core::dag::{
         Dag, DimInfo, ExtremaKind, ExtremaOperand, FusedInput, FusedStep, FusedStepOp, NodeId,
         RiscOp, RtAxis, RtDim, TensorType,
     };
@@ -6118,8 +6118,8 @@ pub fn reject_unsupported_hip_ops(dag: &Dag) -> std::result::Result<(), Compiler
             // refuses every witness a device node reads, and refuses this one
             // too when an obligation does not reduce to input reads.
             RiscOp::ExtentWitness { .. }
-                if chelis_ir::axis_sources::witness_is_entry_obligation(dag, node.id)
-                    && chelis_ir::axis_sources::witness_entry_obligations(dag, node.id)
+                if chelis_dag_core::axis_sources::witness_is_entry_obligation(dag, node.id)
+                    && chelis_dag_core::axis_sources::witness_entry_obligations(dag, node.id)
                         .is_some() => {}
             RiscOp::Shape { .. }
             | RiscOp::ExtentWitness { .. }
@@ -7273,7 +7273,10 @@ fn wire_dag(dag: &Dag) -> WireResult<WireDag> {
 
 /// `node` on the wire, whose declaration is row `declaration` of the
 /// graph's declaration table.
-fn wire_dag_node(node: &chelis_ir::dag::DagNode, declaration: u64) -> WireResult<WireDagNode> {
+fn wire_dag_node(
+    node: &chelis_dag_core::dag::DagNode,
+    declaration: u64,
+) -> WireResult<WireDagNode> {
     Ok(WireDagNode {
         declaration,
         activation: node
@@ -7318,8 +7321,8 @@ fn wire_dim(dim: &DimInfo) -> WireResult<WireDimInfo> {
     })
 }
 
-fn wire_dim_expr(expr: &chelis_ir::dag::DimExpr) -> WireResult<WireDimExpr> {
-    use chelis_ir::dag::DimExpr;
+fn wire_dim_expr(expr: &chelis_dag_core::dag::DimExpr) -> WireResult<WireDimExpr> {
+    use chelis_dag_core::dag::DimExpr;
     Ok(match expr {
         DimExpr::Concrete(value) => WireDimExpr::Concrete {
             value: wire_extent(*value)?,
@@ -7349,7 +7352,7 @@ fn wire_bound(b: &RtDim) -> WireResult<WireRtDim> {
         RtDim::Sym(name) => WireRtDim::Sym { name: name.clone() },
         RtDim::InputAxis {
             tensor,
-            axis: chelis_ir::dag::RtAxis::Lit(axis),
+            axis: chelis_dag_core::dag::RtAxis::Lit(axis),
         } => WireRtDim::InputAxis {
             tensor: crate::schema::host_index(*tensor),
             axis: WireRtAxis::Lit { value: *axis },
@@ -7365,10 +7368,10 @@ fn wire_op(op: &RiscOp) -> WireResult<WireRiscOp> {
         RiscOp::Cumsum { axis, direction } => WireRiscOp::Cumsum {
             axis: wire_axis(*axis)?,
             direction: match direction {
-                chelis_ir::dag::ScanDirection::Increasing => {
+                chelis_dag_core::dag::ScanDirection::Increasing => {
                     crate::schema::WireScanDirection::Increasing
                 }
-                chelis_ir::dag::ScanDirection::Decreasing => {
+                chelis_dag_core::dag::ScanDirection::Decreasing => {
                     crate::schema::WireScanDirection::Decreasing
                 }
             },
@@ -7449,15 +7452,15 @@ fn wire_op(op: &RiscOp) -> WireResult<WireRiscOp> {
         RiscOp::DropoutReplay => WireRiscOp::DropoutReplay {},
         RiscOp::UniformBoundAdjoint { bound } => WireRiscOp::UniformBoundAdjoint {
             bound: match bound {
-                chelis_ir::dag::UniformBound::Low => crate::schema::WireUniformBound::Low,
-                chelis_ir::dag::UniformBound::High => crate::schema::WireUniformBound::High,
+                chelis_dag_core::dag::UniformBound::Low => crate::schema::WireUniformBound::Low,
+                chelis_dag_core::dag::UniformBound::High => crate::schema::WireUniformBound::High,
             },
         },
         RiscOp::KeyFromSeed => WireRiscOp::KeyFromSeed {},
         RiscOp::Split { branch } => WireRiscOp::Split {
             branch: match branch {
-                chelis_ir::dag::KeyBranch::Left => crate::schema::WireKeyBranch::Left,
-                chelis_ir::dag::KeyBranch::Right => crate::schema::WireKeyBranch::Right,
+                chelis_dag_core::dag::KeyBranch::Left => crate::schema::WireKeyBranch::Left,
+                chelis_dag_core::dag::KeyBranch::Right => crate::schema::WireKeyBranch::Right,
             },
         },
         RiscOp::Iota => WireRiscOp::Iota,
@@ -7500,10 +7503,10 @@ fn wire_op(op: &RiscOp) -> WireResult<WireRiscOp> {
             strides,
         } => WireRiscOp::ReduceWindow {
             reducer: match reducer {
-                chelis_ir::dag::ReduceWindowKind::Max => "max".to_string(),
-                chelis_ir::dag::ReduceWindowKind::Min => "min".to_string(),
-                chelis_ir::dag::ReduceWindowKind::Sum => "sum".to_string(),
-                chelis_ir::dag::ReduceWindowKind::Mean => "mean".to_string(),
+                chelis_dag_core::dag::ReduceWindowKind::Max => "max".to_string(),
+                chelis_dag_core::dag::ReduceWindowKind::Min => "min".to_string(),
+                chelis_dag_core::dag::ReduceWindowKind::Sum => "sum".to_string(),
+                chelis_dag_core::dag::ReduceWindowKind::Mean => "mean".to_string(),
             },
             window_shape: window_shape
                 .iter()
@@ -7522,10 +7525,10 @@ fn wire_op(op: &RiscOp) -> WireResult<WireRiscOp> {
             strides,
         } => WireRiscOp::ReduceWindowGrad {
             reducer: match reducer {
-                chelis_ir::dag::ReduceWindowKind::Max => "max".to_string(),
-                chelis_ir::dag::ReduceWindowKind::Min => "min".to_string(),
-                chelis_ir::dag::ReduceWindowKind::Sum => "sum".to_string(),
-                chelis_ir::dag::ReduceWindowKind::Mean => "mean".to_string(),
+                chelis_dag_core::dag::ReduceWindowKind::Max => "max".to_string(),
+                chelis_dag_core::dag::ReduceWindowKind::Min => "min".to_string(),
+                chelis_dag_core::dag::ReduceWindowKind::Sum => "sum".to_string(),
+                chelis_dag_core::dag::ReduceWindowKind::Mean => "mean".to_string(),
             },
             window_shape: window_shape
                 .iter()
@@ -7588,30 +7591,30 @@ fn wire_op(op: &RiscOp) -> WireResult<WireRiscOp> {
         RiscOp::ExtentWitness {
             site,
             parameter,
-            axis: chelis_ir::dag::RtAxis::Lit(axis),
+            axis: chelis_dag_core::dag::RtAxis::Lit(axis),
             requirements,
             claims,
         } => WireRiscOp::ExtentWitness {
             site: match site {
-                chelis_ir::dag::ExtentWitnessSite::LiteralResultClaim => {
+                chelis_dag_core::dag::ExtentWitnessSite::LiteralResultClaim => {
                     WireExtentWitnessSite::LiteralResultClaim
                 }
-                chelis_ir::dag::ExtentWitnessSite::Caller => WireExtentWitnessSite::Caller,
-                chelis_ir::dag::ExtentWitnessSite::LocalExpand => {
+                chelis_dag_core::dag::ExtentWitnessSite::Caller => WireExtentWitnessSite::Caller,
+                chelis_dag_core::dag::ExtentWitnessSite::LocalExpand => {
                     WireExtentWitnessSite::LocalExpand
                 }
-                chelis_ir::dag::ExtentWitnessSite::ResultClaim {
+                chelis_dag_core::dag::ExtentWitnessSite::ResultClaim {
                     claim,
-                    axis: chelis_ir::dag::RtAxis::Lit(axis),
+                    axis: chelis_dag_core::dag::RtAxis::Lit(axis),
                 } => WireExtentWitnessSite::ResultClaim {
                     claim: claim.clone(),
                     axis: WireRtAxis::Lit { value: *axis },
                 },
-                chelis_ir::dag::ExtentWitnessSite::LocalAscriptionClaim {
+                chelis_dag_core::dag::ExtentWitnessSite::LocalAscriptionClaim {
                     ascription_id,
                     binding,
                     claim,
-                    axis: chelis_ir::dag::RtAxis::Lit(axis),
+                    axis: chelis_dag_core::dag::RtAxis::Lit(axis),
                 } => WireExtentWitnessSite::LocalAscriptionClaim {
                     ascription_id: *ascription_id,
                     binding: binding.clone(),
@@ -7636,13 +7639,13 @@ fn wire_op(op: &RiscOp) -> WireResult<WireRiscOp> {
         },
         RiscOp::CheckedReshapeExtent {
             claims,
-            axis: chelis_ir::dag::RtAxis::Lit(axis),
+            axis: chelis_dag_core::dag::RtAxis::Lit(axis),
         } => WireRiscOp::CheckedReshapeExtent {
             claims: claims.clone(),
             axis: WireRtAxis::Lit { value: *axis },
         },
         RiscOp::CheckedUnitAxis {
-            axis: chelis_ir::dag::RtAxis::Lit(axis),
+            axis: chelis_dag_core::dag::RtAxis::Lit(axis),
         } => WireRiscOp::CheckedUnitAxis {
             axis: WireRtAxis::Lit { value: *axis },
         },
@@ -7770,7 +7773,7 @@ mod tests {
     fn wire_producer_preserves_resolved_global_load_origin_at_v22() {
         let mut dag = Dag::new();
         let declaration = dag.declare("entry");
-        let global = chelis_ir::LoadStoreName::top_level("Lib.weights");
+        let global = chelis_dag_core::LoadStoreName::top_level("Lib.weights");
         let root = dag.add_node(
             declaration,
             RiscOp::Load {
@@ -7807,8 +7810,8 @@ mod tests {
     /// Evidentiary status: LOCK. Both tables are new in this change.
     #[test]
     fn the_wire_and_the_ir_declare_the_same_extent_slots() {
-        use chelis_ir::dag::{ExtentWitnessSite, RtAxis};
-        use chelis_ir::verify::{ExtentSlot, SlotRead, slot_read};
+        use chelis_dag_core::dag::{ExtentWitnessSite, RtAxis};
+        use chelis_dag_core::verify::{ExtentSlot, SlotRead, slot_read};
         let axis = |tensor| RtDim::InputAxis {
             tensor,
             axis: RtAxis::Lit(0),
@@ -7986,7 +7989,7 @@ mod tests {
     }
 
     fn native_wire_witness_fixture() -> Dag {
-        use chelis_ir::dag::RtAxis;
+        use chelis_dag_core::dag::RtAxis;
         let mut dag = Dag::new();
         let decl = dag.declare("test");
         let input = dag.add_node(
@@ -8009,7 +8012,7 @@ mod tests {
         let witness = dag.add_node(
             decl,
             RiscOp::ExtentWitness {
-                site: chelis_ir::dag::ExtentWitnessSite::Caller,
+                site: chelis_dag_core::dag::ExtentWitnessSite::Caller,
                 parameter: "x".into(),
                 axis: RtAxis::Lit(0),
                 requirements,
@@ -8049,10 +8052,10 @@ mod tests {
     /// schema-18 variant, and the projection decodes back to itself.
     #[test]
     fn explicit_key_operations_project_onto_wire_v18_and_round_trip() {
-        let ty = |dims: &[usize], precision| chelis_ir::dag::TensorType {
+        let ty = |dims: &[usize], precision| chelis_dag_core::dag::TensorType {
             dims: dims
                 .iter()
-                .map(|extent| chelis_ir::dag::DimInfo::Lit(*extent))
+                .map(|extent| chelis_dag_core::dag::DimInfo::Lit(*extent))
                 .collect(),
             precision,
         };
@@ -8082,7 +8085,7 @@ mod tests {
         let left = dag.add_node(
             decl,
             RiscOp::Split {
-                branch: chelis_ir::dag::KeyBranch::Left,
+                branch: chelis_dag_core::dag::KeyBranch::Left,
             },
             vec![root],
             ty(&[], chelis_numeric_core::prim::Prim::Key),
@@ -8091,7 +8094,7 @@ mod tests {
         let right = dag.add_node(
             decl,
             RiscOp::Split {
-                branch: chelis_ir::dag::KeyBranch::Right,
+                branch: chelis_dag_core::dag::KeyBranch::Right,
             },
             vec![root],
             ty(&[], chelis_numeric_core::prim::Prim::Key),
@@ -8107,7 +8110,7 @@ mod tests {
         let rows = dag.add_node(
             decl,
             RiscOp::SplitN {
-                count: chelis_ir::dag::RtDim::Lit(3),
+                count: chelis_dag_core::dag::RtDim::Lit(3),
             },
             vec![folded],
             ty(&[3], chelis_numeric_core::prim::Prim::Key),
@@ -8426,7 +8429,7 @@ mod tests {
         );
         dag.add_root(selected);
         assert_eq!(dag.get(zero).unwrap().shape_deps, vec![values]);
-        assert!(chelis_ir::verify::verify(&dag).is_empty());
+        assert!(chelis_dag_core::verify::verify(&dag).is_empty());
 
         let projected = wire_dag(&dag)
             .expect("WireDag v15 must preserve producer-aware anonymous where shape semantics");
@@ -8522,7 +8525,7 @@ mod tests {
 
     #[test]
     fn native_wire_witness_projection_rejects_invalid_requirements_and_edges() {
-        use chelis_ir::dag::{NodeId, RtAxis};
+        use chelis_dag_core::dag::{NodeId, RtAxis};
         for (invalid, expected) in [
             (
                 chelis_numeric_core::dtype_semantics::scalar_from_i64("load", Prim::Int64, -1)
@@ -8937,7 +8940,7 @@ mod tests {
         }
 
         let fused_sub = RiscOp::FusedElem {
-            ops: vec![chelis_ir::dag::FusedStep {
+            ops: vec![chelis_dag_core::dag::FusedStep {
                 op: FusedStepOp::Sub,
                 input_indices: vec![FusedInput::External(0), FusedInput::External(1)],
             }],
@@ -9055,7 +9058,7 @@ mod tests {
                 axis: 0,
                 size: RtDim::InputAxis {
                     tensor: 1,
-                    axis: chelis_ir::dag::RtAxis::Lit(0),
+                    axis: chelis_dag_core::dag::RtAxis::Lit(0),
                 },
             },
             vec![value, witness],
@@ -9296,7 +9299,7 @@ mod tests {
     // out-of-bounds window read). See spec/05-risc-primitives.md §2.3.1.
 
     fn reduce_window_node_dag(out_dims: Vec<DimInfo>, window: Vec<usize>) -> Dag {
-        use chelis_ir::dag::ReduceWindowKind;
+        use chelis_dag_core::dag::ReduceWindowKind;
         let mut dag = Dag::new();
         let decl = dag.declare("test");
         let input = dag.add_node(
@@ -9407,7 +9410,7 @@ windowed = reduce_window_max(padded, [2i64], [1i64])
     }
 
     fn reduce_window_dag_with_precision(prec: chelis_numeric_core::prim::Prim) -> Dag {
-        use chelis_ir::dag::ReduceWindowKind;
+        use chelis_dag_core::dag::ReduceWindowKind;
         let mut dag = Dag::new();
         let decl = dag.declare("test");
         let input = dag.add_node(
@@ -9486,7 +9489,7 @@ windowed = reduce_window_max(padded, [2i64], [1i64])
 
     #[test]
     fn hip_rejects_reduce_window_extrema_grad_with_issue_2339_authority() {
-        use chelis_ir::dag::ReduceWindowKind;
+        use chelis_dag_core::dag::ReduceWindowKind;
 
         let mut dag = Dag::new();
         let decl = dag.declare("test");
@@ -9813,7 +9816,7 @@ def out(x: tensor[2, f32]) -> tensor[2, f32] = add(consume(x), consume(x))
             .named_roots
             .get(&crate::pipeline::IrName::new("out"))
             .expect("out root");
-        let monolithic_summary = chelis_ir::analysis::analyze_function_copy_cost(
+        let monolithic_summary = chelis_dag_core::analysis::analyze_function_copy_cost(
             &monolithic.dag,
             "out",
             monolithic_root,
@@ -9837,15 +9840,18 @@ def out(x: tensor[2, f32]) -> tensor[2, f32] = add(consume(x), consume(x))
             .named_roots
             .get(&crate::pipeline::IrName::new("out"))
             .expect("out root");
-        let context_summary =
-            chelis_ir::analysis::analyze_function_copy_cost(&compiled.dag, "out", context_root);
+        let context_summary = chelis_dag_core::analysis::analyze_function_copy_cost(
+            &compiled.dag,
+            "out",
+            context_root,
+        );
 
         assert_eq!(monolithic_summary.copy_count, 1);
         assert_eq!(context_summary.copy_count, monolithic_summary.copy_count);
         assert!(compiled.dag.roots().iter().all(|root| {
             !matches!(
                 compiled.dag.get(*root).map(|node| &node.op),
-                Some(chelis_ir::dag::RiscOp::Drop)
+                Some(chelis_dag_core::dag::RiscOp::Drop)
             )
         }));
     }
@@ -11133,8 +11139,14 @@ bad = shape(scalar_to_tensor(cast(3, i64)), axis)
     #[test]
     fn ordered_scan_directions_cross_the_explicit_wire_boundary() {
         for (direction, spelling) in [
-            (chelis_ir::dag::ScanDirection::Increasing, "increasing"),
-            (chelis_ir::dag::ScanDirection::Decreasing, "decreasing"),
+            (
+                chelis_dag_core::dag::ScanDirection::Increasing,
+                "increasing",
+            ),
+            (
+                chelis_dag_core::dag::ScanDirection::Decreasing,
+                "decreasing",
+            ),
         ] {
             let wire = wire_op(&RiscOp::Cumsum { axis: 2, direction }).unwrap();
             assert_eq!(

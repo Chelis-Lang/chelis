@@ -77,7 +77,7 @@ class MutationTests(unittest.TestCase):
             (
                 oracle.HIP_LIB_SOURCE,
                 oracle.mutate_host_helper_selection,
-                ".any(|node| matches!(node.op, chelis_ir::dag::RiscOp::Count { .. }))",
+                ".any(|node| matches!(node.op, chelis_dag_core::dag::RiscOp::Count { .. }))",
             ),
         )
         for relative, mutate, anchor in cases:

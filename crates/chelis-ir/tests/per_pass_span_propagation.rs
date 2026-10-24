@@ -18,8 +18,9 @@
 
 use std::collections::BTreeSet;
 
-use chelis_ir::dag::{Dag, DimInfo, NodeId, RiscOp, TensorType};
-use chelis_ir::{fuse, grad, optimize, tier2, vmap};
+use chelis_dag_core::dag::{Dag, DimInfo, NodeId, RiscOp, TensorType};
+use chelis_dag_core::{fuse, grad, optimize, tier2};
+use chelis_ir::vmap;
 use chelis_numeric_core::prim::Prim;
 
 fn scalar_f32() -> TensorType {
@@ -254,7 +255,7 @@ fn verify_does_not_mutate_spans() {
         .map(|n| (n.span_id.clone(), n.merged_spans.clone()))
         .collect();
 
-    let errors = chelis_ir::verify::verify(&dag);
+    let errors = chelis_dag_core::verify::verify(&dag);
     assert!(errors.is_empty(), "verify reported errors: {errors:?}");
 
     let post_spans: Vec<(Option<String>, Vec<String>)> = dag

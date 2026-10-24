@@ -89,6 +89,12 @@ its rejected domain/case identities. An identity is the exact triple of
 domain, canonical operation, and builtin-owned case; the rows have no
 semantic ordinals.
 
+Compiled builtin declarations define public callable identities.
+`RiscAtomIdentity` defines graph primitive identities.
+An identity absent from builtin declarations names an internal primitive, not a public callable.
+Each governing atom must name the exact callable or internal primitive and state its semantic contract.
+Letter case does not determine the identity kind.
+
 Each atom supplies its signatures, admitted and rejected domains, results,
 failures, differentiation rules, and any accumulator or traversal order.
 The registry supplies identity membership only: it adds no behavior,
@@ -691,7 +697,7 @@ the way the global `sum` reduction does; the output element type matches
 the operand type (which is also why the adjoint needs no `Cast` — see
 **AD policy**).
 
-**AD policy.** `reduce_window_*` is differentiable. `chelis_ir::grad`
+**AD policy.** `reduce_window_*` is differentiable. `chelis_dag_core::grad`
 lowers the reverse-mode adjoint to a single `RiscOp::ReduceWindowGrad`
 node carrying the same `{reducer, window_shape, strides}` triple, taking
 `(x, g)` (the forward input and the upstream cotangent) and returning the
@@ -1551,7 +1557,7 @@ rejected. The forward result depends on iteration order at
 duplicate indices, so distributing a single output gradient across
 the colliding updates would require an arbitrary policy that does
 not derive from the forward semantics. The rejection is returned
-through the new structured error type `chelis_ir::grad::AdError`:
+through the new structured error type `chelis_dag_core::grad::AdError`:
 
 ```rust
 AdError::NotSupported {

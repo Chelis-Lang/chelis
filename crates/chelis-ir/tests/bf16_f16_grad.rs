@@ -9,8 +9,8 @@
 //! exercises the full host→device→host execution; this test exercises
 //! the AD construction without requiring a HIP-capable GPU.
 
-use chelis_ir::dag::{Dag, DimInfo, NodeId, RiscOp, TensorType};
-use chelis_ir::grad::grad_dag;
+use chelis_dag_core::dag::{Dag, DimInfo, NodeId, RiscOp, TensorType};
+use chelis_dag_core::grad::grad_dag;
 use chelis_numeric_core::prim::Prim;
 
 fn vec_at(precision: Prim, len: usize) -> TensorType {

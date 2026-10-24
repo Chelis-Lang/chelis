@@ -17,7 +17,7 @@
 //! fixtures are written before the fix lands to lock the contract.
 
 mod support;
-use chelis_ir::dag::{Dag, RiscOp, TensorType};
+use chelis_dag_core::dag::{Dag, RiscOp, TensorType};
 use chelis_numeric_core::prim::Prim;
 use support::emit_dag;
 
@@ -249,7 +249,7 @@ fn issue_189_f32_const_byte_identical_to_eval_under_gcc() {
         decl,
         RiscOp::synth_const(
             TensorType {
-                dims: vec![chelis_ir::dag::DimInfo::Lit(1)],
+                dims: vec![chelis_dag_core::dag::DimInfo::Lit(1)],
                 precision: Prim::F32,
             }
             .precision,
@@ -257,7 +257,7 @@ fn issue_189_f32_const_byte_identical_to_eval_under_gcc() {
         ),
         vec![],
         TensorType {
-            dims: vec![chelis_ir::dag::DimInfo::Lit(1)],
+            dims: vec![chelis_dag_core::dag::DimInfo::Lit(1)],
             precision: Prim::F32,
         },
         None,
@@ -311,7 +311,7 @@ fn issue_189_f64_const_byte_identical_to_eval_under_gcc() {
         decl,
         RiscOp::synth_const(
             TensorType {
-                dims: vec![chelis_ir::dag::DimInfo::Lit(1)],
+                dims: vec![chelis_dag_core::dag::DimInfo::Lit(1)],
                 precision: Prim::F64,
             }
             .precision,
@@ -319,7 +319,7 @@ fn issue_189_f64_const_byte_identical_to_eval_under_gcc() {
         ),
         vec![],
         TensorType {
-            dims: vec![chelis_ir::dag::DimInfo::Lit(1)],
+            dims: vec![chelis_dag_core::dag::DimInfo::Lit(1)],
             precision: Prim::F64,
         },
         None,

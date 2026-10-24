@@ -764,7 +764,7 @@ impl DeclaredNames {
         }
         if matches!(kind, "TypedefDecl" | "TypeAliasDecl") && !name.is_empty() {
             if kind == "TypedefDecl" {
-                for owned in owned_tag_ids(node) {
+                for owned in typedef_record_ids(node) {
                     self.typedef_of_record
                         .entry(owned)
                         .or_insert_with(|| name.to_string());
@@ -788,14 +788,24 @@ impl DeclaredNames {
     }
 }
 
-/// The ids of the anonymous tag declarations a typedef's type owns, found
-/// through the `ElaboratedType.ownedTagDecl` link the dumper emits for
-/// `typedef struct { ... } name;`.
-fn owned_tag_ids(node: &Value) -> Vec<String> {
+/// Record identities that a typedef's type references. Clang can emit
+/// `ElaboratedType.ownedTagDecl`, `RecordType.decl`, or both links.
+/// Only declaration ids associate an aggregate with its typedef.
+fn typedef_record_ids(node: &Value) -> Vec<String> {
     let mut ids = Vec::new();
     fn walk(node: &Value, ids: &mut Vec<String>) {
-        if let Some(owned) = node.get("ownedTagDecl")
-            && let Some(id) = owned.get("id").and_then(Value::as_str)
+        let declaration = match field_str(node, "kind") {
+            Some("ElaboratedType") => node.get("ownedTagDecl"),
+            Some("RecordType") => node.get("decl"),
+            _ => None,
+        };
+        if let Some(declaration) = declaration
+            && matches!(
+                field_str(declaration, "kind"),
+                Some("RecordDecl" | "CXXRecordDecl")
+            )
+            && let Some(id) = field_str(declaration, "id")
+            && !ids.iter().any(|known| known.as_str() == id)
         {
             ids.push(id.to_string());
         }
@@ -1734,4 +1744,74 @@ fn bracket_groups(spelling: &str) -> Vec<&str> {
         rest = &rest[open + close + 1..];
     }
     groups
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DeclaredNames;
+    use serde_json::json;
+
+    #[test]
+    fn record_type_decl_link_names_the_exact_aggregate() {
+        for record_kind in ["RecordDecl", "CXXRecordDecl"] {
+            let tree = json!({
+                "kind": "TranslationUnitDecl",
+                "inner": [
+                    {"id": "record", "kind": record_kind, "completeDefinition": true},
+                    {"id": "unnamed", "kind": record_kind, "completeDefinition": true},
+                    {
+                        "kind": "TypedefDecl",
+                        "name": "probe_record",
+                        "inner": [{
+                            "kind": "RecordType",
+                            "decl": {"id": "record", "kind": record_kind, "name": ""}
+                        }]
+                    }
+                ]
+            });
+            let mut names = DeclaredNames::default();
+            names.collect(&tree);
+            assert_eq!(
+                names.typedef_of_record,
+                [("record".to_string(), "probe_record".to_string())].into()
+            );
+        }
+    }
+
+    #[test]
+    fn elaborated_and_record_type_links_keep_the_same_typedef_owner() {
+        let tree = json!({
+            "kind": "TypedefDecl",
+            "name": "probe_record",
+            "inner": [{
+                "kind": "ElaboratedType",
+                "ownedTagDecl": {"id": "record", "kind": "CXXRecordDecl", "name": ""},
+                "inner": [{
+                    "kind": "RecordType",
+                    "decl": {"id": "record", "kind": "CXXRecordDecl", "name": ""}
+                }]
+            }]
+        });
+        let mut names = DeclaredNames::default();
+        names.collect(&tree);
+        assert_eq!(
+            names.typedef_of_record,
+            [("record".to_string(), "probe_record".to_string())].into()
+        );
+    }
+
+    #[test]
+    fn a_record_type_without_a_declaration_link_cannot_name_an_aggregate() {
+        let tree = json!({
+            "kind": "TypedefDecl",
+            "name": "probe_record",
+            "inner": [{
+                "kind": "RecordType",
+                "type": {"qualType": "probe_record"}
+            }]
+        });
+        let mut names = DeclaredNames::default();
+        names.collect(&tree);
+        assert!(names.typedef_of_record.is_empty());
+    }
 }

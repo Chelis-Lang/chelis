@@ -4,7 +4,7 @@
 //! An observation can precede a later compilation error; callers must also check
 //! the enclosing compilation result. The callback cannot mutate selected payloads.
 
-use chelis_ir::dag::Dag;
+use chelis_dag_core::dag::Dag;
 use chelis_ir::host::ConcreteHostProgram;
 use chelis_ir::ownership::{VerifiedDagView, VerifiedHostEmission};
 use chelis_types::manifest::ManifestedProgram;

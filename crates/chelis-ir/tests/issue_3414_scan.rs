@@ -1,5 +1,5 @@
 //! [05-OP-33] ordered scans retain first-leaf and accumulator semantics.
-use chelis_ir::dag::{Dag, DimInfo, RiscOp, ScanDirection, TensorType};
+use chelis_dag_core::dag::{Dag, DimInfo, RiscOp, ScanDirection, TensorType};
 use chelis_ir::eval::{TensorValue, eval_tensor};
 use chelis_numeric_core::dtype_semantics::cumsum_tensor_lanes;
 use chelis_numeric_core::dtype_semantics::{RawTensor, finalize_tensor};
@@ -11,7 +11,7 @@ fn graph(
     axis: usize,
     direction: ScanDirection,
     runtime: bool,
-) -> (Dag, chelis_ir::dag::NodeId) {
+) -> (Dag, chelis_dag_core::dag::NodeId) {
     let mut dag = Dag::new();
     let owner = dag.declare("scan");
     let dims = shape
@@ -181,7 +181,7 @@ fn reduced_float_scan_keeps_wide_running_state() {
 
 #[test]
 fn scan_adjoint_reverses_direction_without_zero_seed_at_all_float_widths() {
-    use chelis_ir::grad::grad_dag_checked;
+    use chelis_dag_core::grad::grad_dag_checked;
     for p in [Prim::F16, Prim::Bf16, Prim::F32, Prim::F64] {
         for n in [0, 1, 5] {
             for direction in [ScanDirection::Increasing, ScanDirection::Decreasing] {

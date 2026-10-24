@@ -379,7 +379,7 @@ fn fixed_control_gradients_keep_the_same_authored_activation_claim() {
 
 #[test]
 fn subexpression_context_does_not_replace_an_authored_binder_with_inferred_spelling() {
-    use chelis_ir::dag::{DimInfo, TensorType};
+    use chelis_dag_core::dag::{DimInfo, TensorType};
     use chelis_ir::eval::{TensorValue, eval_tensor_roots_with_strict};
     use chelis_ir::lower::SubexprLoweringContext;
     use chelis_numeric_core::prim::Prim;

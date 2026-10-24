@@ -95,7 +95,7 @@ The guard classifies direct lower-stage calls. It treats core transition calls a
 
 `chelis-pipeline-core` is below `chelis-compiler-api` and `chelis-reef` in the dependency graph.
 
-The core depends directly on `chelis-deep`, `chelis-types`, `chelis-effects`, `chelis-ir`, and `chelis-unord`.
+The core depends directly on `chelis-deep`, `chelis-types`, `chelis-effects`, `chelis-ir`, `chelis-dag-core`, and `chelis-unord`.
 Its dependency guard checks the manifest and resolved graph.
 The approved graph includes `chelis-type-core` below the host checker and effects layer.
 Host-service exclusions remain active.

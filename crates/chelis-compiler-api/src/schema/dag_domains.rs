@@ -4,8 +4,8 @@ use super::{
     WireExtentWitnessSite, WireFusedInput, WireKeyBranch, WireLogicalKind, WireRiscOp, WireRtAxis,
     WireRtDim, host_index, wire_dim_info_equal,
 };
-use chelis_ir::dag::{DimInfo, KeyBranch};
-use chelis_ir::verify::{
+use chelis_dag_core::dag::{DimInfo, KeyBranch};
+use chelis_dag_core::verify::{
     BoundInput, ExtentSlot, KeyGraph, KeyRole, SlotRead, SplitCount, bound_slot_read,
     is_const_false, is_const_true, operand_extent_read, verify_key_rules, verify_random_operands,
 };
@@ -250,7 +250,7 @@ impl KeyGraph for DecodedKeys<'_> {
     }
 }
 
-/// `chelis_ir::verify::slot_read` of the operation `op` encodes: the same
+/// `chelis_dag_core::verify::slot_read` of the operation `op` encodes: the same
 /// rows, exhaustive with no wildcard arm, each bound read by the shared
 /// `bound_slot_read`.
 pub(crate) fn wire_slot_read(op: &WireRiscOp, slot: usize) -> SlotRead {
@@ -381,7 +381,7 @@ fn rt_dim_supplies_extent(dim: &WireRtDim) -> bool {
 
 fn is_same_shape_result_op(op: &WireRiscOp) -> bool {
     // Exhaustive with no wildcard arm, like its IR twin
-    // `chelis_ir::axis_sources::is_same_shape_result_op`: a new wire
+    // `chelis_dag_core::axis_sources::is_same_shape_result_op`: a new wire
     // operation does not compile until it states its membership.
     match op {
         WireRiscOp::Add

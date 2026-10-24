@@ -10,8 +10,7 @@
 //! must apply the format-string sanitizer.
 
 mod support;
-use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
-use chelis_ir::load_store_name::LoadStoreName;
+use chelis_dag_core::dag::{Dag, DimInfo, RiscOp, TensorType};
 use chelis_numeric_core::prim::Prim;
 use support::codegen_hip;
 
@@ -20,12 +19,6 @@ fn vec_f32(n: usize) -> TensorType {
         dims: vec![DimInfo::Lit(n)],
         precision: Prim::F32,
     }
-}
-
-fn dirty_name(s: &str) -> LoadStoreName {
-    let json = serde_json::to_string(s).expect("string serializes");
-    serde_json::from_str(&json)
-        .expect("LoadStoreName deserialize is transparent (no re-validation)")
 }
 
 #[test]
@@ -62,29 +55,6 @@ fn hip_fprintf_format_string_escapes_percent_in_func_name() {
     assert!(
         !src.contains("\"f%spct"),
         "raw `%s` leaked into HIP fprintf format; source:\n{src}"
-    );
-}
-
-#[test]
-fn hip_fprintf_format_string_escapes_percent_in_load_name() {
-    let mut dag = Dag::new();
-    let decl = dag.declare("test");
-    let bad = dirty_name("inp%s");
-    let a = dag.add_node(decl, RiscOp::Load { name: bad }, vec![], vec_f32(4), None);
-    let n = dag.add_node(decl, RiscOp::Neg, vec![a], vec_f32(4), None);
-    dag.add_root(n);
-
-    let result = codegen_hip(&dag, "test_load_pct").unwrap();
-    let src = &result.c_source;
-
-    // Both host and device input-shape preambles emit "input `<label>`".
-    assert!(
-        src.contains("input `inp%%s`"),
-        "expected `%%`-escaped Load label in HIP fprintf format; source:\n{src}"
-    );
-    assert!(
-        !src.contains("input `inp%s`"),
-        "raw `%s` in Load name leaked into HIP fprintf format; source:\n{src}"
     );
 }
 

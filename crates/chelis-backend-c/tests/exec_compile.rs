@@ -9,14 +9,14 @@
 use chelis_backend_c::CodegenOptions;
 
 mod support;
-use chelis_ir::ConcreteHostType as HostType;
-use chelis_ir::dag::{
+use chelis_dag_core::dag::{
     ComparisonKind, Dag, DimInfo, ExtentClaim, ExtentWitnessSite, ExtremaKind, ExtremaOperand,
     LogicalKind, Owner, ReduceWindowKind, RiscOp, RtAxis, TensorType,
 };
+use chelis_dag_core::fuse::fuse;
+use chelis_dag_core::grad::grad_dag_checked;
+use chelis_ir::ConcreteHostType as HostType;
 use chelis_ir::eval::{TensorValue, eval_tensor};
-use chelis_ir::fuse::fuse;
-use chelis_ir::grad::grad_dag_checked;
 use chelis_ir::host::{
     ConcreteHostExpr as HostExpr, ConcreteHostExprKind as HostExprKind,
     ConcreteHostFunction as HostFunction, ConcreteHostParam as HostParam,
@@ -454,7 +454,7 @@ int main(void) {{
 }
 
 fn checked_blas_dag(operand: Prim, output: Prim) -> Dag {
-    use chelis_ir::dag::DimExpr;
+    use chelis_dag_core::dag::DimExpr;
     let ty = |names: &[&str], precision| TensorType {
         dims: names
             .iter()
@@ -619,7 +619,7 @@ fn checked_blas_batches_scratch_and_empty_domains_execute_under_sanitizers() {
         assert_eq!(default_options.c_source, source);
         let mut sources = vec![source];
         if operand == Prim::F32 && output == Prim::F32 {
-            use chelis_ir::dag::DimExpr;
+            use chelis_dag_core::dag::DimExpr;
             use chelis_ir::host::{
                 HostBlasMatmulSummary, HostTensorHelper, HostTensorInput, HostTensorSpecialization,
             };
@@ -1009,7 +1009,7 @@ fn checked_c_nested_sparse_batches_use_each_index_row_under_sanitizers() {
         };
         let output = dag.add_node(decl, op, inputs, ty(output_shape, Prim::F32), None);
         dag.add_root(output);
-        assert!(chelis_ir::verify::verify(&dag).is_empty());
+        assert!(chelis_dag_core::verify::verify(&dag).is_empty());
         let function = format!("nested_sparse_{case_index}");
         let generated = codegen(&dag, &function).unwrap();
         let selected = if invalid {
@@ -1466,7 +1466,7 @@ int main(void) {{
 
 #[test]
 fn checked_c_movement_permute_and_expand_preserve_bits_under_sanitizers() {
-    use chelis_ir::dag::RtDim;
+    use chelis_dag_core::dag::RtDim;
     // Each expected map is explicit, independent of the production coordinate helpers.
     let cases = [
         // A three-cycle distinguishes a permutation from its inverse.
@@ -1747,7 +1747,7 @@ void {function_name}(chelis_tensor **, int, chelis_tensor **, int);
 
 #[test]
 fn checked_c_movement_affine_maps_preserve_bits_under_sanitizers() {
-    use chelis_ir::dag::RtDim;
+    use chelis_dag_core::dag::RtDim;
     for (prim, dtype, seed, fill_bits) in [
         (
             Prim::F32,
@@ -1940,7 +1940,7 @@ int case_{case_index}(void) {{
 
 #[test]
 fn checked_c_movement_runtime_affine_bounds_reject_before_allocation() {
-    use chelis_ir::dag::RtDim;
+    use chelis_dag_core::dag::RtDim;
     for (name, op, cases) in [
         (
             "pad",
@@ -2068,7 +2068,7 @@ int main(void) {{
 
 #[test]
 fn checked_c_indexing_dag_scalar_fused_reuse_and_empty_execute_under_sanitizers() {
-    use chelis_ir::dag::{FusedInput, FusedStep, FusedStepOp};
+    use chelis_dag_core::dag::{FusedInput, FusedStep, FusedStepOp};
     for prim in [Prim::F32, Prim::F64] {
         for shape in [vec![], vec![4], vec![0], vec![1; 9]] {
             for fused in [false, true] {
@@ -4012,7 +4012,7 @@ int main() { return 0; }
 // for the fixed-point reduce_sum / matmul cases is the closed-form
 // value).
 
-use chelis_ir::dag::DimExpr;
+use chelis_dag_core::dag::DimExpr;
 
 fn vec_f64(n: usize) -> TensorType {
     TensorType {
@@ -4699,7 +4699,7 @@ fn ws_a1_negative_integer_matmul_rejected_with_spec_citation() {
 // REPLACED, not silently deleted.
 #[test]
 fn ws_a3_bf16_f16_matmul_admitted_at_ir_validation() {
-    use chelis_ir::verify;
+    use chelis_dag_core::verify;
     for prim in [Prim::Bf16, Prim::F16] {
         let mut dag = Dag::new();
         let decl = dag.declare("test");
@@ -5051,8 +5051,8 @@ fn exec_i8_reduce_sum_promotes_to_i32() {
     // Use the spec-default constructor so the IR carries the §5.7.1
     // i32 accumulator, not an inline `Prim::Int8` that would fail the
     // verifier's narrowness check.
-    let sum_op =
-        chelis_ir::dag::RiscOp::sum_default(0, Prim::Int8).expect("i8 sum_default must succeed");
+    let sum_op = chelis_dag_core::dag::RiscOp::sum_default(0, Prim::Int8)
+        .expect("i8 sum_default must succeed");
     dag.add_node(decl, sum_op, vec![a], scalar_i32(), None);
     let dag = fuse(&dag);
 
@@ -5115,8 +5115,8 @@ fn exec_i16_reduce_sum_promotes_to_i32() {
         vec_i16(200),
         None,
     );
-    let sum_op =
-        chelis_ir::dag::RiscOp::sum_default(0, Prim::Int16).expect("i16 sum_default must succeed");
+    let sum_op = chelis_dag_core::dag::RiscOp::sum_default(0, Prim::Int16)
+        .expect("i16 sum_default must succeed");
     dag.add_node(decl, sum_op, vec![a], scalar_i32(), None);
     let dag = fuse(&dag);
 
@@ -5165,7 +5165,7 @@ int main() {{
 /// the codegen path never sees the malformed IR.
 #[test]
 fn ws_a4_i8_sum_with_narrower_accumulator_is_ir_error() {
-    let err = chelis_ir::dag::RiscOp::sum_with_accumulator(0, Prim::Int8, Prim::Int8)
+    let err = chelis_dag_core::dag::RiscOp::sum_with_accumulator(0, Prim::Int8, Prim::Int8)
         .expect_err("i8 reduce_sum with i8 accumulator must be rejected by sum_with_accumulator");
     assert!(
         err.contains("narrower than"),
@@ -5903,7 +5903,7 @@ int main(void) {{
 
 #[test]
 fn typed_nonnumeric_c_permuted_stepped_views_match_evaluator_and_preserve_bits() {
-    use chelis_ir::dag::RtDim;
+    use chelis_dag_core::dag::RtDim;
     use chelis_numeric_core::dtype_semantics::StorageView;
     use chelis_unord::UnordMap;
 
@@ -7548,7 +7548,7 @@ fn direct_fused_reduction_runtime_shape_guard_case(reduce_kind: &str) {
         "the scalar must be first so the guard proves all-pairs tensor comparison"
     );
     assert!(
-        chelis_ir::fuse::reduction_inlined_fused_elems(&fused).contains(&fused_node.id),
+        chelis_dag_core::fuse::reduction_inlined_fused_elems(&fused).contains(&fused_node.id),
         "the regression must exercise the reduction-inlined FusedElem path"
     );
 
@@ -7717,7 +7717,7 @@ fn fused_max_reduce_runtime_axis_source(input_dims: Vec<DimInfo>, axis: usize) -
         .find(|node| matches!(node.op, RiscOp::FusedElem { .. }))
         .expect("the elementwise chain must fuse");
     assert!(
-        chelis_ir::fuse::reduction_inlined_fused_elems(&fused).contains(&fused_node.id),
+        chelis_dag_core::fuse::reduction_inlined_fused_elems(&fused).contains(&fused_node.id),
         "the test must exercise the inlined reduction path"
     );
     codegen(&fused, "fused_max_empty_axis")
@@ -8692,8 +8692,8 @@ fn a_selected_runtime_branch_emits_its_local_ascription_guard_on_c() {
     assert!(!text.contains("RAN "), "{text}");
 }
 
-fn two_witness_dag() -> chelis_ir::dag::Dag {
-    use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
+fn two_witness_dag() -> chelis_dag_core::dag::Dag {
+    use chelis_dag_core::dag::{Dag, DimInfo, RiscOp, TensorType};
     let named = || TensorType {
         dims: vec![DimInfo::Named("n".into(), None)],
         precision: Prim::F32,
@@ -8835,8 +8835,11 @@ int main() {{
 /// broadcast sets. The operand is the ONLY input, so its axis is an interface
 /// value and section 4.7 places the guard at function entry, in declared
 /// signature order, before any other operation of the function runs.
-fn same_rank_expand_over_symbolic_operand_dag(x_dim: DimInfo, size: usize) -> chelis_ir::dag::Dag {
-    use chelis_ir::dag::{Dag, RiscOp, RtDim, TensorType};
+fn same_rank_expand_over_symbolic_operand_dag(
+    x_dim: DimInfo,
+    size: usize,
+) -> chelis_dag_core::dag::Dag {
+    use chelis_dag_core::dag::{Dag, RiscOp, RtDim, TensorType};
     let mut dag = Dag::new();
     let decl = dag.declare("test");
     let x = dag.add_node(
@@ -8948,8 +8951,8 @@ int main() {{
     );
 }
 
-fn expand_reading_own_axis_dag(x_dim: DimInfo, out_dim: DimInfo) -> chelis_ir::dag::Dag {
-    use chelis_ir::dag::{Dag, RiscOp, RtAxis, RtDim, TensorType};
+fn expand_reading_own_axis_dag(x_dim: DimInfo, out_dim: DimInfo) -> chelis_dag_core::dag::Dag {
+    use chelis_dag_core::dag::{Dag, RiscOp, RtAxis, RtDim, TensorType};
     let mut dag = Dag::new();
     let decl = dag.declare("test");
     let scalar = TensorType {
@@ -9057,7 +9060,7 @@ fn a_literal_class_guard_replaces_the_abi_static_dim_check_on_that_axis() {
 /// revert.
 #[test]
 fn the_abi_static_dim_check_survives_where_no_literal_class_guards_the_axis() {
-    use chelis_ir::dag::{Dag, RiscOp, TensorType};
+    use chelis_dag_core::dag::{Dag, RiscOp, TensorType};
     let mut dag = Dag::new();
     let decl = dag.declare("test");
     let ty = TensorType {
@@ -9103,7 +9106,7 @@ fn the_abi_static_dim_check_survives_where_no_literal_class_guards_the_axis() {
 /// the dedupe.
 #[test]
 fn one_axis_reached_by_two_member_spellings_is_guarded_once() {
-    use chelis_ir::dag::{Dag, RiscOp, RtAxis, RtDim, TensorType};
+    use chelis_dag_core::dag::{Dag, RiscOp, RtAxis, RtDim, TensorType};
     let named = || TensorType {
         dims: vec![DimInfo::Named("n".into(), None)],
         precision: Prim::F32,
@@ -9184,7 +9187,7 @@ fn one_axis_reached_by_two_member_spellings_is_guarded_once() {
 /// EVIDENTIARY STATUS: regression test. On `main` neither class exists.
 #[test]
 fn entry_guards_run_in_assigned_slot_order_not_claim_name_order() {
-    use chelis_ir::dag::{Dag, RiscOp, TensorType};
+    use chelis_dag_core::dag::{Dag, RiscOp, TensorType};
     let dim = |name: &str| TensorType {
         dims: vec![DimInfo::Named(name.into(), None)],
         precision: Prim::F32,
@@ -9242,9 +9245,9 @@ fn entry_guards_run_in_assigned_slot_order_not_claim_name_order() {
         decl,
         RiscOp::Expand {
             axis: 0,
-            size: chelis_ir::dag::RtDim::InputAxis {
+            size: chelis_dag_core::dag::RtDim::InputAxis {
                 tensor: 1,
-                axis: chelis_ir::dag::RtAxis::Lit(0),
+                axis: chelis_dag_core::dag::RtAxis::Lit(0),
             },
         },
         vec![folded, zsum],
@@ -9393,8 +9396,8 @@ int main() {{
 /// at this site, which [04-NUM-9] does not permit - and a disposition lock
 /// for the position, which `main` already gets right through chelis#616's
 /// `runtime_dim_sites`.
-fn local_class_dag() -> chelis_ir::dag::Dag {
-    use chelis_ir::dag::{Dag, RiscOp, RtAxis, RtDim, TensorType};
+fn local_class_dag() -> chelis_dag_core::dag::Dag {
+    use chelis_dag_core::dag::{Dag, RiscOp, RtAxis, RtDim, TensorType};
     let named = |name: &str| TensorType {
         dims: vec![DimInfo::Named(name.into(), None)],
         precision: Prim::F32,
@@ -9524,7 +9527,7 @@ int main() {{
 /// computed scalar sizes and reads of computed tensors, on both host lanes.
 #[test]
 fn numeric_local_extent_claims_execute_exactly() {
-    use chelis_ir::dag::{RtAxis, RtDim};
+    use chelis_dag_core::dag::{RtAxis, RtDim};
     use chelis_ir::eval::{TensorValue, eval_tensor_with};
     let mut failures = Vec::new();
     let mut executions = 0;
@@ -9748,7 +9751,7 @@ int main(void) {{
 /// has local carrier members.
 #[test]
 fn an_interface_member_of_a_mixed_class_is_still_checked() {
-    use chelis_ir::dag::{Dag, RiscOp, RtAxis, RtDim, TensorType};
+    use chelis_dag_core::dag::{Dag, RiscOp, RtAxis, RtDim, TensorType};
     let resolved = || TensorType {
         dims: vec![DimInfo::Named("n".into(), Some(4))],
         precision: Prim::F32,
@@ -9867,8 +9870,8 @@ int main() {{
 /// A literal claim reading a symbolic input, in a class placed Local by a
 /// computed co-member. No static ABI check covers the input; the local
 /// carrier consumer must check its independently supplied extent.
-fn symbolic_input_mixed_class_dag() -> chelis_ir::dag::Dag {
-    use chelis_ir::dag::{Dag, RiscOp, RtAxis, RtDim, TensorType};
+fn symbolic_input_mixed_class_dag() -> chelis_dag_core::dag::Dag {
+    use chelis_dag_core::dag::{Dag, RiscOp, RtAxis, RtDim, TensorType};
     let four = || TensorType {
         dims: vec![DimInfo::Lit(4)],
         precision: Prim::F32,
@@ -9993,7 +9996,7 @@ int main() {{
 /// the resolved result metadata must not exempt its interface member either.
 #[test]
 fn an_interface_member_with_a_resolved_dim_keeps_its_site_in_a_local_class() {
-    use chelis_ir::dag::{Dag, RiscOp, RtAxis, RtDim, TensorType};
+    use chelis_dag_core::dag::{Dag, RiscOp, RtAxis, RtDim, TensorType};
     let open = |name: &str| TensorType {
         dims: vec![DimInfo::Named(name.into(), None)],
         precision: Prim::F32,
@@ -10101,7 +10104,7 @@ fn an_interface_member_with_a_resolved_dim_keeps_its_site_in_a_local_class() {
 /// failure independently; the matching control must preserve shape and values.
 #[test]
 fn local_reshape_guards_follow_declaration_order() {
-    use chelis_ir::dag::RtDim;
+    use chelis_dag_core::dag::RtDim;
     use chelis_ir::eval::{TensorValue, eval_tensor_with};
     let mut dag = Dag::new();
     let decl = dag.declare("test");
@@ -10619,7 +10622,7 @@ int main(void) {
 /// sibling row above covers the rename itself.
 #[test]
 fn issue_1788_a_scope_rename_does_not_collide_with_a_name_the_graph_declares() {
-    use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
+    use chelis_dag_core::dag::{Dag, DimInfo, RiscOp, TensorType};
     let ty = |dims: Vec<DimInfo>| TensorType {
         dims,
         precision: Prim::F32,
@@ -10744,7 +10747,7 @@ int main() {{
 /// kernel now RUNS and produces both outputs.
 #[test]
 fn issue_1788_two_scopes_in_one_function_share_one_declaration() {
-    use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
+    use chelis_dag_core::dag::{Dag, DimInfo, RiscOp, TensorType};
     let ty = |dims: Vec<DimInfo>| TensorType {
         dims,
         precision: Prim::F32,
@@ -10919,7 +10922,7 @@ fn assert_zero_geometry_both_lanes(
         }
     }
     // Restrict the native entry to the same roots the evaluator executed.
-    dag = chelis_ir::optimize::dead_code_eliminate(&dag);
+    dag = chelis_dag_core::optimize::dead_code_eliminate(&dag);
     let generated = codegen_with_options(
         &dag,
         "gradient_geometry",
@@ -11141,23 +11144,23 @@ fn gated_check_graph(kind: &str, bound: i64) -> (Dag, Vec<GatedInput>) {
             &mut dag,
             RiscOp::Shrink {
                 bounds: vec![(
-                    chelis_ir::dag::RtDim::Lit(0),
-                    chelis_ir::dag::RtDim::Node(1),
+                    chelis_dag_core::dag::RtDim::Lit(0),
+                    chelis_dag_core::dag::RtDim::Node(1),
                 )],
             },
         ),
         "stride" => movement(
             &mut dag,
             RiscOp::Stride {
-                strides: vec![chelis_ir::dag::RtDim::Node(1)],
+                strides: vec![chelis_dag_core::dag::RtDim::Node(1)],
             },
         ),
         "pad" => movement(
             &mut dag,
             RiscOp::Pad {
                 padding: vec![(
-                    chelis_ir::dag::RtDim::Node(1),
-                    chelis_ir::dag::RtDim::Lit(0),
+                    chelis_dag_core::dag::RtDim::Node(1),
+                    chelis_dag_core::dag::RtDim::Lit(0),
                 )],
                 fill: chelis_numeric_core::dtype_semantics::scalar_from_i64("pad", Prim::Int64, 1)
                     .unwrap(),
@@ -12068,7 +12071,10 @@ fn restamp_scalar(precision: Prim) -> TensorType {
 /// value is the second root, so its untaken-arm value is observed directly.
 fn restamp_under_activation_dag(
     output: Prim,
-    restamp: impl FnOnce(&mut Dag, Owner) -> (chelis_ir::dag::NodeId, chelis_ir::dag::NodeId),
+    restamp: impl FnOnce(
+        &mut Dag,
+        Owner,
+    ) -> (chelis_dag_core::dag::NodeId, chelis_dag_core::dag::NodeId),
 ) -> Dag {
     let mut dag = Dag::new();
     let decl = dag.declare("test");
@@ -12297,7 +12303,7 @@ fn issue_2512_a_restamp_is_checked_under_its_own_activation_and_untaken_yields_z
     let mut failures = Vec::new();
     for case in restamps_under_activation() {
         let dag = restamped_extent_under_activation_dag(&case);
-        assert_eq!(chelis_ir::verify::verify(&dag), Vec::<String>::new());
+        assert_eq!(chelis_dag_core::verify::verify(&dag), Vec::<String>::new());
         let generated = codegen(&dag, "restamp_gate").expect("restamp codegen");
         let bytes =
             |values: &[i32]| restamp_storage_bytes(&restamp_input_storage(case.output, values));
@@ -12412,7 +12418,7 @@ fn issue_2512_an_untaken_restamping_expand_declares_its_inserted_extent_and_yiel
             under_a,
             RiscOp::Expand {
                 axis: 1,
-                size: chelis_ir::dag::RtDim::Node(1),
+                size: chelis_dag_core::dag::RtDim::Node(1),
             },
             vec![x, s],
             TensorType {
@@ -12436,7 +12442,7 @@ fn issue_2512_an_untaken_restamping_expand_declares_its_inserted_extent_and_yiel
         );
         (expanded, reduced)
     });
-    assert_eq!(chelis_ir::verify::verify(&dag), Vec::<String>::new());
+    assert_eq!(chelis_dag_core::verify::verify(&dag), Vec::<String>::new());
     let generated = codegen(&dag, "restamp_gate").expect("restamp codegen");
     let f32_bytes =
         |values: &[i32]| restamp_storage_bytes(&restamp_input_storage(Prim::F32, values));
@@ -12831,7 +12837,7 @@ fn inlined_matmul_products_match_evaluator_bits_under_sanitizers() {
             let product = ty(&dims(&[m, k, n]));
             let expand = |axis, size| RiscOp::Expand {
                 axis,
-                size: chelis_ir::dag::RtDim::Lit(size),
+                size: chelis_dag_core::dag::RtDim::Lit(size),
             };
             let ea = dag.add_node(decl, expand(b0 + 2, n), vec![a], product.clone(), None);
             let eb = dag.add_node(decl, expand(b0, m), vec![b], product.clone(), None);
@@ -13083,7 +13089,7 @@ int main(void) {{
 /// the trap; the agreeing extent computes the evaluator's bits.
 #[test]
 fn inlined_matmul_expansion_traps_precede_allocation_and_match_the_evaluator() {
-    use chelis_ir::dag::RtDim;
+    use chelis_dag_core::dag::RtDim;
     let ty = |dims: &[usize], precision| TensorType {
         dims: dims.iter().copied().map(DimInfo::Lit).collect(),
         precision,
@@ -13258,7 +13264,7 @@ int main(void) {{
 
 #[test]
 fn ordered_scan_c_exec_bits_at_all_float_widths_runtime_axes_and_empty() {
-    use chelis_ir::dag::ScanDirection;
+    use chelis_dag_core::dag::ScanDirection;
     use chelis_numeric_core::dtype_semantics::{StorageView, TensorStorage};
     fn bytes(storage: &TensorStorage) -> Vec<u8> {
         match storage.view() {
@@ -13348,7 +13354,7 @@ int main() {{
 
 #[test]
 fn ordered_scan_c_exec_integer_forward_and_intermediate_overflow() {
-    use chelis_ir::dag::ScanDirection;
+    use chelis_dag_core::dag::ScanDirection;
     for precision in [Prim::Int8, Prim::Int16, Prim::Int32, Prim::Int64] {
         let mut dag = Dag::new();
         let owner = dag.declare("scan integer");
@@ -13430,7 +13436,7 @@ int main() {{
 
 #[test]
 fn ordered_scan_activation_suppresses_only_inactive_overflow() {
-    use chelis_ir::dag::ScanDirection;
+    use chelis_dag_core::dag::ScanDirection;
     let mut dag = Dag::new();
     let declaration = dag.declare("gated scan");
     let active = dag.add_node(
@@ -13567,7 +13573,7 @@ fn restored_shape_keeps_the_forward_extent_and_independent_mismatch_guard() {
         let restored = dag.add_node(
             decl,
             RiscOp::Reshape {
-                new_shape: vec![chelis_ir::dag::RtDim::Node(1)],
+                new_shape: vec![chelis_dag_core::dag::RtDim::Node(1)],
             },
             vec![restamp, copied],
             named("n"),

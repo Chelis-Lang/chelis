@@ -1,14 +1,14 @@
 //! [05-OP-33]: bounded scan emission and first-leaf prefix/suffix semantics.
 mod support;
-use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
+use chelis_dag_core::dag::{Dag, DimInfo, RiscOp, TensorType};
+use chelis_dag_core::grad::grad_dag_checked;
+use chelis_dag_core::tier2_ordered::lower_cumsum;
 use chelis_ir::eval::{TensorValue, eval_tensor};
-use chelis_ir::grad::grad_dag_checked;
-use chelis_ir::tier2_ordered::lower_cumsum;
 use chelis_numeric_core::prim::Prim;
 use chelis_unord::UnordMap;
 use std::time::Instant;
 
-fn gradient(n: usize) -> (Dag, chelis_ir::dag::NodeId) {
+fn gradient(n: usize) -> (Dag, chelis_dag_core::dag::NodeId) {
     let mut dag = Dag::new();
     let owner = dag.declare("ordered scan");
     let ty = TensorType {

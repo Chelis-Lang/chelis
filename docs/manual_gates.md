@@ -65,6 +65,7 @@ assertion failures unless an explicit different success condition is given.
 | `mnist_real_over_90_percent` | `chelis-e2e` | `cargo test -p chelis-e2e --test mnist mnist_real_over_90_percent -- --ignored` | MNIST data on disk; default `data/mnist/` or set `MNIST_DIR`; expected `final_acc > 0.90` on full data | 0h |
 | `mnist_surf_pipeline_builds_trainable_program` | `chelis-e2e` | `cargo test -p chelis-e2e --test mnist mnist_surf_pipeline_builds_trainable_program -- --ignored --exact --nocapture` | None beyond default toolchain. Expected: the MNIST Surf training fixture parses, checks, and lowers to a trainable workload. Runtime is over the default inner-loop budget. | 0h |
 | `mnist_synthetic_loss_decreases` | `chelis-e2e` | `cargo test -p chelis-e2e --test mnist mnist_synthetic_loss_decreases -- --ignored --exact --nocapture` | None beyond default toolchain. Expected: the synthetic MNIST workload reports decreasing loss. Runtime is over the default inner-loop budget. | 0h |
+| `mnist regression suite` | `chelis-e2e` | `cargo test -p chelis-e2e --test mnist -- --ignored --test-threads=1` | MNIST data in `MNIST_DIR` or `data/mnist/`. All four ignored cases must pass. Default PR CI only lists this suite. | chelis#4003 |
 | `pipeline_transformer_model_lowers` | `chelis-e2e` | `cargo test -p chelis-e2e --test pipeline pipeline_transformer_model_lowers -- --ignored` | None beyond default toolchain (gated as long-running transformer compile) | 1f / 2d |
 | `phase3b_python_manual_acceptance_oracle` | `chelis-python` | `cargo test -p chelis-python --test manual_phase3b -- --ignored` | `py/.venv` populated with PyTorch; `bindings/python` installed via `uv pip install` (the test installs it) | 3b |
 | `phase3bii_python_manual_acceptance_oracle` | `chelis-python` | `cargo test -p chelis-python --test manual_phase3bii -- --ignored` | `py/.venv` with torch/numpy; `bindings/python` installed via `uv pip install` (the test installs it) | 3b-ii |
@@ -420,3 +421,37 @@ active Devenv shell unless the command itself tests shell entry.
 - [`spec/design/phase1a_kernel_codegen.md`](../spec/design/phase1a_kernel_codegen.md) — owning HIP gate spec
 - [`spec/design/chelis_phase2_plan.md`](../spec/design/chelis_phase2_plan.md) — Phase 2 manual gate descriptions
 - [`spec/design/chelis_phase3_plan.md`](../spec/design/chelis_phase3_plan.md) — Phase 3 manual gate descriptions
+
+## DAG-core portability
+
+Command:
+
+```sh
+uv run --managed-python --python 3.11 --no-project python scripts/dag_core_oracle.py
+```
+
+The DAG extraction owns this gate.
+Run the same command on hosted Linux and macOS after the edit phase.
+Success means that every acceptance lane exits zero.
+Missing prerequisites or missing evidence fail the command.
+
+Prerequisites include managed Python 3.11, the repository Rust toolchain, `thumbv7em-none-eabi`, native C tools, and the numeric-core target toolchain.
+The immutable source base is `3ca99faa7a46158eb6a0d90c2c812a7e3a5f44c1`.
+Use isolated target directories under this worktree.
+The oracle creates separate baseline and standalone consumer graphs.
+
+Evidence includes default and no-default Thumb builds, standalone `alloc`, an explicit allocator, dependency features, and negative dependency controls.
+Real host graphs test AD against `2*x`, fusion, ownership, symbolic shape edges, declaration owners, roots, remaps, spans, reuse, copies, and drops.
+Malformed graph and checked-name fixtures test rejection before execution.
+JSON, bincode, numeric payloads, diagnostics, transform outputs, graph scale, and per-pass allocation costs retain fixed-base comparison.
+Public binding maps retain `chelis_unord`.
+Hash-based graph lookups use fixed hashes.
+
+The production lanes compare native C execution and C/HIP/Metal source, headers, span comments, and admission diagnostics.
+Build lanes use `--emit-c` and compare native compiler flags.
+Raw logs retain build paths and archive hashes.
+Host suite commands use the Cargo feature requirements from each source manifest.
+HIP and Metal source evidence does not establish GPU device execution.
+Thumb compilation does not establish microcontroller execution, stack capacity, or allocator capacity.
+Source lowering, evaluation, host diagnostics, ABI layout admission, and production stage order remain host responsibilities.
+

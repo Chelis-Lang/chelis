@@ -63,6 +63,7 @@ arb = ["dep:arb-sys"]
 
 [dependencies]
 chelis-type-core = { workspace = true, default-features = false, features = ["serde"] }
+chelis-dag-core.workspace = true
 chelis-numeric-core = { workspace = true, default-features = false, features = ["alloc", "serde"] }
 chelis-syntax-host.workspace = true
 chelis-certificate-core = { workspace = true, optional = true }

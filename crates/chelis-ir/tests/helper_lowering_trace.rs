@@ -5,8 +5,8 @@
 //! second library lowering or an independently pairable graph.
 #![cfg(feature = "lowering-trace")]
 
+use chelis_dag_core::dag::RiscOp;
 use chelis_effects::realizability::{compute_root_manifest, infer_realizability};
-use chelis_ir::dag::RiscOp;
 use chelis_ir::host::{
     try_lower_manifested_execution_program, try_lower_manifested_execution_program_with_trace,
 };
@@ -40,7 +40,7 @@ fn manifested(source: &str) -> ManifestedProgram {
     ManifestedProgram::new(checked, manifest, Target::C)
 }
 
-fn same_dag(left: &chelis_ir::Dag, right: &chelis_ir::Dag) {
+fn same_dag(left: &chelis_dag_core::Dag, right: &chelis_dag_core::Dag) {
     assert_eq!(
         bincode::serialize(left).unwrap(),
         bincode::serialize(right).unwrap()
@@ -178,7 +178,7 @@ def derivative(x: tensor[3, f32], y: tensor[3, f32])
             .unwrap()
             .output_type
             .dims,
-        vec![chelis_ir::DimInfo::Lit(3)]
+        vec![chelis_dag_core::DimInfo::Lit(3)]
     );
     assert_eq!(helper.dag.roots().len(), 2);
     assert_ne!(helper.dag.roots()[0], helper.dag.roots()[1]);
@@ -251,7 +251,7 @@ def derivative(x: tensor[32, f32]) -> tensor[32, f32] = grad(loss)(x)
         .expect("drawing helper trace");
     assert_eq!(trace.lowering.gradients.len(), 1);
     let gradient = &trace.lowering.gradients[0];
-    let count = |dag: &chelis_ir::Dag, op: fn(&RiscOp) -> bool| {
+    let count = |dag: &chelis_dag_core::Dag, op: fn(&RiscOp) -> bool| {
         dag.nodes().iter().filter(|node| op(&node.op)).count()
     };
     let draw_key = |op: &RiscOp| matches!(op, RiscOp::KeyFromSeed);

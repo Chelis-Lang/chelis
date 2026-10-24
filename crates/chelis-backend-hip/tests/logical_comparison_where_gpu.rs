@@ -6,7 +6,7 @@
 mod support;
 
 use chelis_backend_hip::HipCodegenResult;
-use chelis_ir::dag::{ComparisonKind, Dag, DimInfo, LogicalKind, RiscOp, RtDim, TensorType};
+use chelis_dag_core::dag::{ComparisonKind, Dag, DimInfo, LogicalKind, RiscOp, RtDim, TensorType};
 use chelis_numeric_core::prim::Prim;
 use std::collections::BTreeMap;
 use std::fs;
@@ -362,7 +362,7 @@ fn encode_signed(values: &[i64], precision: Prim) -> Vec<u64> {
         .collect()
 }
 
-fn direct_bitwise_dag(precision: Prim, kinds: &[chelis_types::BitwiseKind]) -> Dag {
+fn direct_bitwise_dag(precision: Prim, kinds: &[chelis_numeric_core::bitwise::BitwiseKind]) -> Dag {
     let mut dag = Dag::new();
     let decl = dag.declare("bitwise");
     let lhs = dag.add_node(
@@ -395,8 +395,9 @@ fn direct_bitwise_dag(precision: Prim, kinds: &[chelis_types::BitwiseKind]) -> D
 #[test]
 #[ignore = "requires a real HIP GPU; run through scripts/hip_test.py"]
 fn real_hip_bitwise_signed_width_matrix_is_bit_exact() {
+    use chelis_numeric_core::bitwise::BitwiseKind;
     use chelis_numeric_core::dtype_semantics::scalar_from_i64;
-    use chelis_types::{BitwiseKind, bitwise_scalar};
+    use chelis_types::bitwise_scalar;
     let kinds = [
         BitwiseKind::And,
         BitwiseKind::Or,
@@ -458,7 +459,7 @@ fn real_hip_bitwise_signed_width_matrix_is_bit_exact() {
 #[test]
 #[ignore = "requires a real HIP GPU; run through scripts/hip_test.py"]
 fn real_hip_bitwise_first_negative_shift_has_exact_diagnostic() {
-    use chelis_types::BitwiseKind;
+    use chelis_numeric_core::bitwise::BitwiseKind;
     for precision in [Prim::Int8, Prim::Int16, Prim::Int32, Prim::Int64] {
         for kind in [BitwiseKind::ShiftLeft, BitwiseKind::ShiftRight] {
             let dag = direct_bitwise_dag(precision, &[kind]);

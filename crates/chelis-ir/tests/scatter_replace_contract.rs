@@ -31,10 +31,10 @@
 
 use chelis_unord::UnordMap;
 
-use chelis_ir::dag::{Dag, RiscOp};
+use chelis_dag_core::dag::{Dag, RiscOp};
+use chelis_dag_core::grad::{AdError, AdRejectionReason, grad_dag, grad_dag_checked};
+use chelis_dag_core::{DimInfo, TensorType};
 use chelis_ir::eval::{TensorValue, eval_tensor_with};
-use chelis_ir::grad::{AdError, AdRejectionReason, grad_dag, grad_dag_checked};
-use chelis_ir::{DimInfo, TensorType};
 use chelis_numeric_core::prim::Prim;
 
 fn t(dims: Vec<usize>) -> TensorType {
@@ -103,7 +103,7 @@ fn scatter_replace_forward_last_write_wins_with_deterministic_order() {
         None,
     );
 
-    let fwd_errs = chelis_ir::verify::verify(&dag);
+    let fwd_errs = chelis_dag_core::verify::verify(&dag);
     assert!(
         fwd_errs.is_empty(),
         "forward DAG verification errors: {fwd_errs:?}"
@@ -561,7 +561,7 @@ fn scatter_replace_verifier_rejects_out_of_bounds_axis() {
         None,
     );
 
-    let errs = chelis_ir::verify::verify(&dag);
+    let errs = chelis_dag_core::verify::verify(&dag);
     assert!(
         errs.iter()
             .any(|e| e.contains("scatter_replace") && e.contains("out of bounds")),

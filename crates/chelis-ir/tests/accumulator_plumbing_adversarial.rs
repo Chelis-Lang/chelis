@@ -15,8 +15,8 @@
 //!     (§5.7.2) and f8e4m3 matmul (§1.1.1) should remain rejected;
 //!     all four float dtypes must be admitted at the verify layer.
 
-use chelis_ir::dag::{Dag, DimExpr, DimInfo, RiscOp, TensorType};
-use chelis_ir::verify;
+use chelis_dag_core::dag::{Dag, DimExpr, DimInfo, RiscOp, TensorType};
+use chelis_dag_core::verify;
 use chelis_numeric_core::prim::Prim;
 
 fn tensor(prec: Prim, dims: Vec<usize>) -> TensorType {

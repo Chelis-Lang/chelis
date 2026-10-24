@@ -476,6 +476,13 @@ For every dtype and every storable value:
    Rust lane was added by the 2026-07-30 detector-scope review, after
    the rule's only instrument - C tokens - let PR #891's Rust-side
    `format_f64_json` reach review with no mechanical signal.
+
+   The two tolerance-message matches from `chelis-ir/src/grad.rs` now reside in
+   `crates/chelis-ir/tests/dag_grad_host.rs`.
+   The tripwire and this plan's Phase 2 oracle retain that exact source address
+   and its allowance of two.
+   The source collection includes this moved file, not the integration-test tree.
+   `loud_unsupported.md` §C5 records the accepted-base relocation.
 5. **Discoveries fork** (shared rule): new unfaithful exits found
    mid-phase are filed, added to the census in the tracking issue, and
    scheduled - not silently absorbed.

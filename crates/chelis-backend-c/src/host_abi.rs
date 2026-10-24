@@ -69,16 +69,16 @@ pub(crate) enum HostAbiType {
     List(Box<HostAbiType>),
     Dict(Box<HostAbiType>, Box<HostAbiType>),
     Tuple(Vec<HostAbiType>),
-    Tensor(chelis_ir::TensorType),
+    Tensor(chelis_dag_core::TensorType),
     Option(Box<HostAbiType>),
     MappedFile,
     Unit,
 }
 
 impl chelis_ir::host::FixedEntryType for HostAbiType {
-    type Tensor = chelis_ir::TensorType;
+    type Tensor = chelis_dag_core::TensorType;
 
-    fn entry_tensor(&self) -> Option<&chelis_ir::TensorType> {
+    fn entry_tensor(&self) -> Option<&chelis_dag_core::TensorType> {
         match self {
             Self::Tensor(ty) => Some(ty),
             _ => None,
@@ -568,12 +568,12 @@ fn project_site<'a>(site: chelis_ir::ownership::VerifiedHostSiteView<'a>) -> Pro
 }
 
 fn helper_metadata(helper: VerifiedHostTensorHelperView<'_>) -> HostTensorHelper {
-    let mut dag = chelis_ir::dag::Dag::new();
+    let mut dag = chelis_dag_core::dag::Dag::new();
     let verified = helper.dag();
     if verified.roots().len() == 1
         && helper.inputs().len() == 1
         && let Some(node) = verified.get(verified.roots()[0])
-        && let chelis_ir::dag::RiscOp::Load { name } = &node.op
+        && let chelis_dag_core::dag::RiscOp::Load { name } = &node.op
         && node.output_type == *helper.output()
         && helper.inputs().iter().any(|input| input.name == *name)
     {
@@ -582,7 +582,7 @@ fn helper_metadata(helper: VerifiedHostTensorHelperView<'_>) -> HostTensorHelper
         let decl = dag.declare(verified.declaration(node.owner.decl).name.clone());
         let root = dag.add_node(
             decl,
-            chelis_ir::dag::RiscOp::Load { name: name.clone() },
+            chelis_dag_core::dag::RiscOp::Load { name: name.clone() },
             Vec::new(),
             node.output_type.clone(),
             node.span_id.clone(),

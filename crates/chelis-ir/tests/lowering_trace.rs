@@ -1,7 +1,7 @@
 //! Spec-derived acceptance tests for the opt-in trace, not an AD certificate.
 
 #[cfg(feature = "lowering-trace")]
-use chelis_ir::dag::{Dag, RiscOp};
+use chelis_dag_core::dag::{Dag, RiscOp};
 #[cfg(feature = "lowering-trace")]
 use chelis_ir::lower::try_lower_program_to_library;
 #[cfg(feature = "lowering-trace")]
@@ -344,7 +344,7 @@ def derivative(x: tensor[3, f32]) -> tensor[3, f32] = grad(constant)(x)
     assert!(grad.backward.is_root(raw_zero));
     assert_eq!(
         grad.backward.get(raw_zero).unwrap().output_type.dims,
-        vec![chelis_ir::dag::DimInfo::Lit(3)]
+        vec![chelis_dag_core::dag::DimInfo::Lit(3)]
     );
     let values = chelis_ir::eval::eval_tensor_roots_exact(&grad.backward, &[raw_zero], |name| {
         (name == "x").then(|| chelis_ir::eval::TensorValue::from_vec(vec![3], vec![1.0, -2.0, 3.0]))
@@ -369,7 +369,7 @@ def derivative(x: tensor[3, f32]) -> tensor[3, f32] = grad(constant)(x)
     );
     assert_eq!(
         library.dag().get(root).unwrap().output_type.dims,
-        vec![chelis_ir::dag::DimInfo::Lit(3)]
+        vec![chelis_dag_core::dag::DimInfo::Lit(3)]
     );
     same_dag(&trace.normalization.after_drops, library.dag());
     let application = grad.application.as_ref().unwrap();
@@ -479,7 +479,7 @@ def derivative(y: tensor[3, f32]) -> tensor[3, f32] = grad(loss)(y)
     );
     assert_eq!(
         application.actual_types[0].dims,
-        vec![chelis_ir::dag::DimInfo::Lit(3)]
+        vec![chelis_dag_core::dag::DimInfo::Lit(3)]
     );
     assert!(
         application

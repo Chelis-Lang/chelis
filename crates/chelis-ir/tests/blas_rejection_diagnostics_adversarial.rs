@@ -31,13 +31,13 @@
 //! `HelperSummaryRejection::rejection_class`, and the structured
 //! `SummaryRejectionDetail` variant.
 
-use chelis_ir::dag::{Dag, DimExpr, RiscOp};
+use chelis_dag_core::dag::{Dag, DimExpr, RiscOp};
+use chelis_dag_core::{DimInfo, TensorType};
 use chelis_ir::host::{
     BlasDimRole, BlasSummaryAttempt, HelperSummaryRejection, HostBlasMatmulSummary,
     HostTensorInput, SummaryRejectionClass, SummaryRejectionDetail,
     try_summarize_blas_helper_for_test,
 };
-use chelis_ir::{DimInfo, TensorType};
 use chelis_numeric_core::prim::Prim;
 
 fn mat(prim: Prim, r: usize, c: usize) -> TensorType {
@@ -113,7 +113,7 @@ fn blas_multiple_roots_one_matmul_near_one_elementwise_emits_structured_rejectio
         decl,
         RiscOp::Expand {
             axis: 2,
-            size: chelis_ir::dag::RtDim::Lit(4),
+            size: chelis_dag_core::dag::RtDim::Lit(4),
         },
         vec![a],
         t3(Prim::F32, 8, 16, 4),
@@ -123,7 +123,7 @@ fn blas_multiple_roots_one_matmul_near_one_elementwise_emits_structured_rejectio
         decl,
         RiscOp::Expand {
             axis: 0,
-            size: chelis_ir::dag::RtDim::Lit(8),
+            size: chelis_dag_core::dag::RtDim::Lit(8),
         },
         vec![b],
         t3(Prim::F32, 8, 16, 4),
@@ -273,7 +273,7 @@ fn root_reshape_wrapping_matmul_returns_not_eligible() {
         decl,
         RiscOp::Expand {
             axis: 2,
-            size: chelis_ir::dag::RtDim::Lit(4),
+            size: chelis_dag_core::dag::RtDim::Lit(4),
         },
         vec![a],
         t3(Prim::F32, 8, 16, 4),
@@ -283,7 +283,7 @@ fn root_reshape_wrapping_matmul_returns_not_eligible() {
         decl,
         RiscOp::Expand {
             axis: 0,
-            size: chelis_ir::dag::RtDim::Lit(8),
+            size: chelis_dag_core::dag::RtDim::Lit(8),
         },
         vec![b],
         t3(Prim::F32, 8, 16, 4),
@@ -310,7 +310,7 @@ fn root_reshape_wrapping_matmul_returns_not_eligible() {
     let reshape = dag.add_node(
         decl,
         RiscOp::Reshape {
-            new_shape: vec![chelis_ir::dag::RtDim::Lit(32)],
+            new_shape: vec![chelis_dag_core::dag::RtDim::Lit(32)],
         },
         vec![sum],
         TensorType {
@@ -593,7 +593,7 @@ fn blas_not_matmul_pattern_wrong_sum_axis_emits_structured_rejection_tail_op_sum
         decl,
         RiscOp::Expand {
             axis: 2,
-            size: chelis_ir::dag::RtDim::Lit(4),
+            size: chelis_dag_core::dag::RtDim::Lit(4),
         },
         vec![a],
         t3(Prim::F32, 8, 16, 4),
@@ -603,7 +603,7 @@ fn blas_not_matmul_pattern_wrong_sum_axis_emits_structured_rejection_tail_op_sum
         decl,
         RiscOp::Expand {
             axis: 0,
-            size: chelis_ir::dag::RtDim::Lit(8),
+            size: chelis_dag_core::dag::RtDim::Lit(8),
         },
         vec![b],
         t3(Prim::F32, 8, 16, 4),
@@ -737,7 +737,7 @@ fn near_miss_sum_of_mul_of_expand_and_load_returns_not_eligible() {
         decl,
         RiscOp::Expand {
             axis: 2,
-            size: chelis_ir::dag::RtDim::Lit(4),
+            size: chelis_dag_core::dag::RtDim::Lit(4),
         },
         vec![a],
         t3(Prim::F32, 8, 16, 4),
@@ -794,7 +794,7 @@ fn near_miss_sum_of_add_of_expands_returns_not_eligible() {
         decl,
         RiscOp::Expand {
             axis: 2,
-            size: chelis_ir::dag::RtDim::Lit(4),
+            size: chelis_dag_core::dag::RtDim::Lit(4),
         },
         vec![a],
         t3(Prim::F32, 8, 16, 4),
@@ -804,7 +804,7 @@ fn near_miss_sum_of_add_of_expands_returns_not_eligible() {
         decl,
         RiscOp::Expand {
             axis: 0,
-            size: chelis_ir::dag::RtDim::Lit(8),
+            size: chelis_dag_core::dag::RtDim::Lit(8),
         },
         vec![b],
         t3(Prim::F32, 8, 16, 4),
@@ -881,7 +881,7 @@ fn near_match_sum_of_mul_of_expand_of_expand_is_blas_near() {
         decl,
         RiscOp::Expand {
             axis: 2,
-            size: chelis_ir::dag::RtDim::Lit(4),
+            size: chelis_dag_core::dag::RtDim::Lit(4),
         },
         vec![a],
         t3(Prim::F64, 8, 16, 4),
@@ -891,7 +891,7 @@ fn near_match_sum_of_mul_of_expand_of_expand_is_blas_near() {
         decl,
         RiscOp::Expand {
             axis: 0,
-            size: chelis_ir::dag::RtDim::Lit(8),
+            size: chelis_dag_core::dag::RtDim::Lit(8),
         },
         vec![b],
         t3(Prim::F64, 8, 16, 4),

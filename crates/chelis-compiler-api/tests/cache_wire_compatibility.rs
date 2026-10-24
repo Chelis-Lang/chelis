@@ -193,7 +193,7 @@ const NUMERIC_SOURCE: &str = "def fixture_wide() -> int64 = 9007199254740993i64\
 const WITNESS_SOURCE: &str = "def fixture_literal(b: tensor[f32], x: tensor[rows, f32]) -> tensor[4, f32] = insert(b, 0i32, shape(x, 0i32))\nfixture_claim = fixture_literal(scalar_to_tensor(7.0f32), to_tensor([1.0f32, 1.0f32, 1.0f32, 1.0f32]))\n";
 
 fn numeric_payloads(library: &chelis_ir::lower::LoweredLibrary) -> Vec<serde_json::Value> {
-    use chelis_ir::RiscOp;
+    use chelis_dag_core::RiscOp;
     use chelis_numeric_core::dtype_semantics::StorageView;
     use chelis_numeric_core::prim::Prim;
     let mut rows = Vec::new();

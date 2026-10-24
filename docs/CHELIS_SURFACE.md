@@ -20,7 +20,7 @@ If this guide disagrees with an owning source, correct the guide:
 | Language operations and adjoints | [`spec/05-risc-primitives.md`](../spec/05-risc-primitives.md), [`spec/06-transformations.md`](../spec/06-transformations.md) |
 | Syntax, types, dtypes and effects | [`spec/02-surf-syntax.md`](../spec/02-surf-syntax.md), [`spec/04-type-system.md`](../spec/04-type-system.md) |
 | Builtin registration | `BUILTIN_NAMES` and `builtin_env`, `crates/chelis-types/src/builtins.rs` |
-| IR and target implementation | `RiscOp`, `crates/chelis-ir/src/dag.rs`; `crates/chelis-compiler-api/src/compiler.rs`; `crates/chelis-backend-{c,hip,metal}` |
+| IR and target implementation | `RiscOp`, `crates/chelis-dag-core/src/dag.rs`, `crates/chelis-compiler-api/src/compiler.rs`, `crates/chelis-backend-{c,hip,metal}` |
 | Target contract | [`spec/08-backends.md`](../spec/08-backends.md) and the dtype matrix in `spec/04` §1.1.3 |
 | Command surface | `crates/chelis-cli/src/main.rs` and its CLI integration tests |
 | Scope taxonomy (core vs std vs shell) | [`spec/design/chelis_canonical_reference.md`](../spec/design/chelis_canonical_reference.md) §8.5 |
@@ -35,9 +35,9 @@ collections, I/O, and other host work in a host execution program. One source
 program can contain both. The host interpreter and generated host code call
 tensor helpers admitted by the selected target (§6).
 
-- **DAG:** `crates/chelis-ir/src/dag.rs`, `lower.rs`, and `tier2.rs` contain
-  tensor nodes and derived-op lowerings. Eval and the C, HIP, and Metal emitters
-  check capability separately by dtype, shape, and target.
+- **DAG:** `chelis-dag-core` owns tensor nodes, structural checks, graph transforms, and derived-op decomposition.
+  `crates/chelis-ir/src/lower.rs` retains source conversion.
+  Eval and the C, HIP, and Metal emitters check capability separately by dtype, shape, and target.
 - **Host execution:** `crates/chelis-ir/src/host.rs` represents calls, control,
   scalar and collection values, and tensor helpers. Eval uses
   `chelis-compiler-api/src/runtime/host_ops.rs`; compiled host programs use
@@ -229,7 +229,7 @@ The five-argument, string-mode `scatter` is a separate host-runtime form (§3).
 
 `spec/05` §3–4 gives these names typed identities and lowering rules. Most
 are implemented by compositions of primitive nodes in
-`crates/chelis-ir/src/tier2.rs`. `relu` has a dedicated DAG node and
+`crates/chelis-dag-core/src/tier2.rs`. `relu` has a dedicated DAG node and
 its own zero rule.
 
 | Name | Lowering | AD |

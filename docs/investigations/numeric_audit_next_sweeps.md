@@ -212,7 +212,7 @@ zero placeholder and silently produce a zero gradient? A zero gradient is
 question for `floor`/`ceil`/`round`/`cos`/`tan`/`atan`, and for the scalar
 activations in #704.
 
-`crates/chelis-ir/src/grad.rs:1897-1908` (`int_scalar_binary`) is the one place
+`crates/chelis-dag-core/src/grad.rs:1897-1908` (`int_scalar_binary`) is the one place
 `chelis-ir` explicitly reasons about integer precision, and it still bottoms out
 in the f64 `RiscOp::Add`/`Mul`. Start there.
 

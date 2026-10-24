@@ -1,11 +1,11 @@
 //! Spec/04 §4.7: declarations own distinct ordered obligations at their producer.
-use chelis_ir::dag::{Dag, DimInfo, ExtentWitnessSite, NodeId, RiscOp, RtAxis, TensorType};
+use chelis_dag_core::dag::{Dag, DimInfo, ExtentWitnessSite, NodeId, RiscOp, RtAxis, TensorType};
+use chelis_dag_core::optimize::{common_subexpr_eliminate, dead_code_eliminate};
 use chelis_ir::eval::{TensorValue, eval_tensor_with};
-use chelis_ir::optimize::{common_subexpr_eliminate, dead_code_eliminate};
 use chelis_numeric_core::dtype_semantics::scalar_from_i64;
 use chelis_numeric_core::prim::Prim;
 
-fn token(dag: &mut Dag, decl: chelis_ir::dag::DeclId, required: i64) -> NodeId {
+fn token(dag: &mut Dag, decl: chelis_dag_core::dag::DeclId, required: i64) -> NodeId {
     dag.add_node(
         decl,
         RiscOp::ExtentWitness {
@@ -73,7 +73,7 @@ fn distinct_literal_tokens_keep_declaration_order_and_primitive_through_rebuilds
                 dead_code_eliminate(&dag),
                 chelis_ir::specialize::specialize_for_exact_arithmetic(&dag),
             ] {
-                assert!(chelis_ir::verify::verify(&rebuilt).is_empty());
+                assert!(chelis_dag_core::verify::verify(&rebuilt).is_empty());
                 assert_eq!(
                     rebuilt
                         .nodes()
@@ -160,7 +160,7 @@ fn literal_role_rejects_observations_entry_claims_and_malformed_requirements() {
                     }
                     "axis" => *axis = RtAxis::Lit(1),
                     "parameter" => *parameter = "x".into(),
-                    "entry-claim" => claims.push(chelis_ir::dag::ExtentClaim {
+                    "entry-claim" => claims.push(chelis_dag_core::dag::ExtentClaim {
                         claim: "n".into(),
                         requirement_declares: true,
                     }),
@@ -168,7 +168,10 @@ fn literal_role_rejects_observations_entry_claims_and_malformed_requirements() {
                 }
             }
         }
-        assert!(!chelis_ir::verify::verify(&dag).is_empty(), "{mutation}");
+        assert!(
+            !chelis_dag_core::verify::verify(&dag).is_empty(),
+            "{mutation}"
+        );
     }
 }
 
@@ -205,23 +208,23 @@ fn administrative_copies_preserve_literal_producer_through_fusion() {
             unclaimed.node_mut(owner).unwrap().shape_deps.clear();
             let unclaimed = dead_code_eliminate(&unclaimed);
             assert!(
-                chelis_ir::fuse::fuse(&unclaimed)
+                chelis_dag_core::fuse::fuse(&unclaimed)
                     .nodes()
                     .iter()
                     .any(|node| matches!(node.op, RiscOp::FusedElem { .. })),
                 "the control must exercise fusion"
             );
             let mut folded = dag.clone();
-            chelis_ir::optimize::constant_fold(&mut folded);
+            chelis_dag_core::optimize::constant_fold(&mut folded);
             for rebuilt in [
                 dag.clone(),
-                chelis_ir::fuse::fuse(&dag),
+                chelis_dag_core::fuse::fuse(&dag),
                 common_subexpr_eliminate(&dag),
                 dead_code_eliminate(&dag),
                 chelis_ir::specialize::specialize_for_exact_arithmetic(&dag),
                 folded,
             ] {
-                assert!(chelis_ir::verify::verify(&rebuilt).is_empty());
+                assert!(chelis_dag_core::verify::verify(&rebuilt).is_empty());
                 let result = eval_tensor_with(&rebuilt, |_| {
                     Some(TensorValue::from_vec(vec![2], vec![1.0, 2.0]))
                 });

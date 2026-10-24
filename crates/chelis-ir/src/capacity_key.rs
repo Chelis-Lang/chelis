@@ -7,9 +7,9 @@ use chelis_unord::UnordSet;
 use chelis_vocab::Repr;
 use num_bigint::BigUint;
 
-use crate::axis_sources::AxisSource;
-use crate::dag::{DimInfo, NodeId, RtAxis};
 use crate::ownership::VerifiedDagView;
+use chelis_dag_core::axis_sources::AxisSource;
+use chelis_dag_core::dag::{DimInfo, NodeId, RtAxis};
 
 /// Opaque proof carrier for one tensor storage capacity.
 ///
@@ -55,18 +55,19 @@ use crate::ownership::VerifiedDagView;
 /// The retired lossy key and its normalizer are not alternative APIs:
 ///
 /// ```compile_fail
-/// use chelis_ir::dag::DimExprKey;
+/// use chelis_dag_core::dag::DimExprKey;
 /// ```
 ///
 /// ```compile_fail
-/// use chelis_ir::dag::DimExpr;
+/// use chelis_dag_core::dag::DimExpr;
 /// let _ = DimExpr::Concrete(1).normalized_key();
 /// ```
 ///
 /// Finite expression evaluation and the proof API remain available:
 ///
 /// ```
-/// use chelis_ir::{capacity_key::CapacityKey, dag::DimExpr};
+/// use chelis_ir::capacity_key::CapacityKey;
+/// use chelis_dag_core::dag::DimExpr;
 /// fn compare(a: &CapacityKey, b: &CapacityKey) -> bool {
 ///     a.prove_equal(b).is_ok()
 /// }
@@ -444,7 +445,7 @@ fn push_product_factor(
 ///
 /// This remains crate-private so the shared ownership planner is the only
 /// production consumer. Backend crates cannot recover equality from names or
-/// from [`crate::dag::DimExpr`].
+/// from [`chelis_dag_core::dag::DimExpr`].
 pub(crate) fn capacity_key_for_node(
     dag: VerifiedDagView<'_>,
     node: NodeId,
@@ -591,8 +592,8 @@ mod tests {
     use num_bigint::BigUint;
 
     use super::*;
-    use crate::dag::{Dag, DimInfo, RiscOp, TensorType};
     use crate::ownership::{lower_dag_ownership, verify_ownership};
+    use chelis_dag_core::dag::{Dag, DimInfo, RiscOp, TensorType};
     use chelis_numeric_core::prim::Prim;
 
     fn literal(value: u128) -> CapacityExpr {
@@ -602,7 +603,7 @@ mod tests {
     fn source(node: usize, axis: usize) -> CapacityExpr {
         CapacityExpr::Source(CapacitySource::OpComputed {
             scope: CapacityScope(0),
-            op: crate::dag::NodeId(node),
+            op: chelis_dag_core::dag::NodeId(node),
             axis,
         })
     }

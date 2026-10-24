@@ -4,7 +4,7 @@
 //! read checked metadata at the original node and ordered scalar leaves at
 //! reductions. Exposed values and unsupported payload readers stay dense.
 
-use crate::dag::{Dag, DagNode, NodeId, RiscOp, RtDim};
+use chelis_dag_core::dag::{Dag, DagNode, NodeId, RiscOp};
 
 /// A lane-independent storage decision. Indices are original DAG node IDs.
 #[derive(Debug, Clone)]
@@ -39,28 +39,6 @@ fn recipe(node: &DagNode) -> bool {
         )
 }
 
-/// `InputAxis` auxiliary slots supply extents, never tensor elements. A
-/// scalar bound is a payload read even when another bound names its shape.
-pub(crate) fn payload_slot(node: &DagNode, slot: usize) -> bool {
-    if matches!(node.op, RiscOp::Shape { .. } | RiscOp::Drop) {
-        return false;
-    }
-    if slot == 0 {
-        return true;
-    }
-    let bounds: &[RtDim] = match &node.op {
-        RiscOp::Expand { size, .. } => std::slice::from_ref(size),
-        RiscOp::Reshape { new_shape } => new_shape,
-        _ => return true,
-    };
-    !bounds
-        .iter()
-        .any(|bound| matches!(bound, RtDim::InputAxis { tensor, .. } if *tensor == slot))
-        || bounds
-            .iter()
-            .any(|bound| matches!(bound, RtDim::Node(input) if *input == slot))
-}
-
 /// Plan deferred recipes without changing the graph. A lane must retain
 /// original admission/agreement/claim checks, implement every admitted
 /// recipe and keep each dense base immutable through `base_last_read`.
@@ -89,7 +67,7 @@ pub(crate) fn contraction_views_with_products(
     dag: &Dag,
     exposed: &[NodeId],
     opaque_consumers: &[NodeId],
-    products: &[crate::fuse::InlinedProduct],
+    products: &[chelis_dag_core::fuse::InlinedProduct],
 ) -> ContractionViews {
     let mut opaque = vec![false; dag.len()];
     // A node an inlined product stores its total in has dense storage, never
@@ -123,7 +101,7 @@ pub(crate) fn contraction_views_with_products(
     for node in dag.nodes() {
         for (slot, input) in node.inputs.iter().enumerate() {
             last_read[input.0] = last_read[input.0].max(node.id.0);
-            if payload_slot(node, slot) {
+            if node.reads_input_payload(slot) {
                 supported[input.0] &= candidate[node.id.0]
                     || (matches!(node.op, RiscOp::Sum { .. }) && node.owner.activation.is_none());
             }
@@ -143,7 +121,7 @@ pub(crate) fn contraction_views_with_products(
     for node in dag.nodes().iter().rev() {
         if reaches_sum[node.id.0] && candidate[node.id.0] {
             for (slot, input) in node.inputs.iter().enumerate() {
-                if payload_slot(node, slot) {
+                if node.reads_input_payload(slot) {
                     reaches_sum[input.0] = true;
                 }
             }
@@ -188,7 +166,7 @@ pub(crate) fn contraction_views_with_products(
             continue;
         }
         for (slot, input) in node.inputs.iter().enumerate() {
-            if payload_slot(node, slot) {
+            if node.reads_input_payload(slot) {
                 demand[input.0] = (demand[input.0] + 1).min(2);
             }
         }

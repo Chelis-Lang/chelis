@@ -12,8 +12,8 @@
 //! (`lower.rs`, `join_condition_extents`) so the lanes agree on which arms
 //! share an extent.
 
-use crate::axis_sources::{AxisSource, output_axis_sources};
-use crate::dag::{Dag, DimInfo, NodeId, RiscOp, RtAxis, RtDim};
+use chelis_dag_core::axis_sources::{AxisSource, output_axis_sources};
+use chelis_dag_core::dag::{Dag, DimInfo, NodeId, RiscOp, RtAxis, RtDim};
 
 /// How one output axis of a node with an anonymous extent is named.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -51,7 +51,7 @@ pub fn fresh_anonymous_dim(node: NodeId, axis: usize, dim: &DimInfo) -> DimInfo 
 /// share one C variable), so it does not apply, and each anonymous axis gets
 /// a fresh `_anon_dim_{id}_{axis}` that `emit_shrink`/`emit_stride`/`emit_pad`
 /// size from its own bounds. Mirrors the identity-only pass-through rule in
-/// `chelis_ir::dag::shape_source_for_axis`.
+/// `chelis_dag_core::dag::shape_source_for_axis`.
 fn movement_alters_extents(op: &RiscOp) -> bool {
     match op {
         RiscOp::Shrink { bounds } => bounds
@@ -267,12 +267,12 @@ pub(crate) fn anonymous_axis_identity(
 #[cfg(test)]
 mod tests {
     use super::{AnonymousAxisName, anonymous_axis_names};
-    use crate::dag::{Dag, DimInfo, RiscOp, RuntimeRecurrence, RuntimeRecurrenceSource};
+    use chelis_dag_core::dag::{Dag, DimInfo, RiscOp, RuntimeRecurrence, RuntimeRecurrenceSource};
     use chelis_numeric_core::prim::Prim;
 
     #[test]
     fn runtime_fold_names_its_computed_extent_independently_of_source_length() {
-        let ty = |dims| crate::dag::TensorType {
+        let ty = |dims| chelis_dag_core::dag::TensorType {
             dims,
             precision: Prim::F32,
         };
@@ -294,7 +294,7 @@ mod tests {
                 name: "item".into(),
             },
             vec![],
-            crate::dag::TensorType {
+            chelis_dag_core::dag::TensorType {
                 dims: vec![],
                 precision: Prim::Int64,
             },
@@ -311,7 +311,7 @@ mod tests {
                 name: "source".into(),
             },
             vec![],
-            crate::dag::TensorType {
+            chelis_dag_core::dag::TensorType {
                 dims: vec![wildcard.clone()],
                 precision: Prim::Int64,
             },

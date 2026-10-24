@@ -3353,7 +3353,7 @@ def validate_receipt_coverage(rows: Sequence[CorpusRow], targets: Sequence[TestT
         raise OracleFailure(f"corpus rows have no executable receipt: {missing}")
 
 
-_CLAIM_BARRIER_SOURCE = REPO_ROOT / "crates/chelis-ir/src/axis_sources.rs"
+_CLAIM_BARRIER_SOURCE = REPO_ROOT / "crates/chelis-dag-core/src/axis_sources.rs"
 _CLAIM_BARRIER_ALL_PRODUCER_CLAIMS = """\
                         site: crate::dag::ExtentWitnessSite::ResultClaim { .. }
                             | crate::dag::ExtentWitnessSite::LiteralResultClaim
@@ -3469,11 +3469,11 @@ _LOCAL_ASCRIPTION_C_OBSERVATION_REMOVED = """\
 """
 _LOCAL_ASCRIPTION_ARTIFACT_SOURCE = REPO_ROOT / "crates/chelis-compiler-api/src/compiler.rs"
 _LOCAL_ASCRIPTION_ARTIFACT_CONVERSION = """\
-                chelis_ir::dag::ExtentWitnessSite::LocalAscriptionClaim {
+                chelis_dag_core::dag::ExtentWitnessSite::LocalAscriptionClaim {
                     ascription_id,
                     binding,
                     claim,
-                    axis: chelis_ir::dag::RtAxis::Lit(axis),
+                    axis: chelis_dag_core::dag::RtAxis::Lit(axis),
                 } => WireExtentWitnessSite::LocalAscriptionClaim {
                     ascription_id: *ascription_id,
                     binding: binding.clone(),
@@ -3482,7 +3482,7 @@ _LOCAL_ASCRIPTION_ARTIFACT_CONVERSION = """\
                 },
 """
 _LOCAL_ASCRIPTION_ARTIFACT_CONVERSION_REMOVED = """\
-                chelis_ir::dag::ExtentWitnessSite::LocalAscriptionClaim { .. } => {
+                chelis_dag_core::dag::ExtentWitnessSite::LocalAscriptionClaim { .. } => {
                     WireExtentWitnessSite::LiteralResultClaim
                 }
 """

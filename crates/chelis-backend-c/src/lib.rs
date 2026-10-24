@@ -85,7 +85,7 @@ impl CodegenResult {
 #[derive(Debug, Clone)]
 pub struct HostTensorHelperCodegen {
     pub name: String,
-    pub dag: chelis_ir::dag::Dag,
+    pub dag: chelis_dag_core::dag::Dag,
 }
 
 /// Optional backend features for C code generation.
@@ -116,8 +116,7 @@ pub struct CodegenOptions {
 /// remaining DAG roots are appended afterward as `root{index}`.
 ///
 /// ```compile_fail
-/// # use chelis_ir::dag::Dag;
-/// fn bypass(raw: &Dag) {
+/// fn bypass(raw: &chelis_dag_core::dag::Dag) {
 ///     let _ = chelis_backend_c::codegen(raw, "unchecked");
 /// }
 /// ```
@@ -254,7 +253,7 @@ pub fn codegen_with_options(
             emission
                 .nodes()
                 .iter()
-                .any(|node| matches!(node.op, chelis_ir::dag::RiscOp::BlasMatmul { .. })),
+                .any(|node| matches!(node.op, chelis_dag_core::dag::RiscOp::BlasMatmul { .. })),
             emit::CEmitter::input_labels(emission),
             emit::CEmitter::output_labels(emission),
             emission.symbolic_params(),
@@ -310,9 +309,9 @@ fn generated_artifact_error(
 
 /// Apply the C backend's payload-selection rewrites before ownership lowering.
 pub fn prepare_dag_for_codegen(
-    dag: chelis_ir::dag::Dag,
+    dag: chelis_dag_core::dag::Dag,
     options: CodegenOptions,
-) -> chelis_ir::dag::Dag {
+) -> chelis_dag_core::dag::Dag {
     let dag = chelis_ir::compositions::decompose(&dag);
     let dag = if options.use_blas {
         chelis_ir::specialize::specialize_for_exact_arithmetic(&dag)
@@ -340,11 +339,14 @@ pub fn prepare_host_execution_plan_for_codegen(
     plan: chelis_ir::host::HostExecutionPlan,
 ) -> Result<chelis_ir::host::HostExecutionPlan, chelis_types::unsupported::Unsupported> {
     for helper in &plan.program().global_tensor_helpers {
-        chelis_ir::check_axis_sources(&helper.dag, chelis_types::unsupported::Stage::Codegen("c"))?;
+        chelis_ir::axis_admission::check_axis_sources(
+            &helper.dag,
+            chelis_types::unsupported::Stage::Codegen("c"),
+        )?;
     }
     for function in &plan.program().functions {
         for helper in &function.tensor_helpers {
-            chelis_ir::check_axis_sources(
+            chelis_ir::axis_admission::check_axis_sources(
                 &helper.dag,
                 chelis_types::unsupported::Stage::Codegen("c"),
             )?;
@@ -375,7 +377,7 @@ fn prepare_concrete_host_program_for_codegen(
         } else {
             decomposed
         };
-        chelis_ir::check_axis_sources(
+        chelis_ir::axis_admission::check_axis_sources(
             &specialized,
             chelis_types::unsupported::Stage::Codegen("c"),
         )?;
@@ -406,7 +408,7 @@ pub(crate) mod testing {
     use chelis_ir::ownership::{OwnershipError, VerifiedDagProgram};
 
     pub(crate) fn verified_dag(
-        dag: &chelis_ir::dag::Dag,
+        dag: &chelis_dag_core::dag::Dag,
         options: crate::CodegenOptions,
     ) -> Result<VerifiedDagProgram, OwnershipError> {
         let selected = crate::prepare_dag_for_codegen(dag.clone(), options);
@@ -417,8 +419,8 @@ pub(crate) mod testing {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chelis_ir::dag::{ComparisonKind, Dag, DimInfo, RiscOp, RtDim, TensorType};
-    use chelis_ir::tier2;
+    use chelis_dag_core::dag::{ComparisonKind, Dag, DimInfo, RiscOp, RtDim, TensorType};
+    use chelis_dag_core::tier2;
     use chelis_numeric_core::prim::Prim;
     use std::io::Write;
     use std::path::PathBuf;
@@ -846,9 +848,9 @@ mod tests {
             helper_dag_decl,
             RiscOp::BlasMatmul {
                 batch_dims: vec![],
-                m: chelis_ir::dag::DimExpr::Concrete(2),
-                n: chelis_ir::dag::DimExpr::Concrete(4),
-                k: chelis_ir::dag::DimExpr::Concrete(3),
+                m: chelis_dag_core::dag::DimExpr::Concrete(2),
+                n: chelis_dag_core::dag::DimExpr::Concrete(4),
+                k: chelis_dag_core::dag::DimExpr::Concrete(3),
                 accumulator: chelis_numeric_core::prim::Prim::F32,
             },
             vec![a, b],
@@ -984,7 +986,7 @@ mod tests {
             decl,
             RiscOp::Expand {
                 axis: 2,
-                size: chelis_ir::dag::RtDim::Lit(4),
+                size: chelis_dag_core::dag::RtDim::Lit(4),
             },
             vec![a],
             TensorType {
@@ -997,7 +999,7 @@ mod tests {
             decl,
             RiscOp::Expand {
                 axis: 0,
-                size: chelis_ir::dag::RtDim::Lit(2),
+                size: chelis_dag_core::dag::RtDim::Lit(2),
             },
             vec![b],
             TensorType {
@@ -1053,7 +1055,7 @@ mod tests {
             decl,
             RiscOp::Expand {
                 axis: 2,
-                size: chelis_ir::dag::RtDim::Lit(4),
+                size: chelis_dag_core::dag::RtDim::Lit(4),
             },
             vec![a],
             TensorType {
@@ -1066,7 +1068,7 @@ mod tests {
             decl,
             RiscOp::Expand {
                 axis: 0,
-                size: chelis_ir::dag::RtDim::Lit(2),
+                size: chelis_dag_core::dag::RtDim::Lit(2),
             },
             vec![b],
             TensorType {
@@ -2357,7 +2359,7 @@ int main(int argc, char **argv) {{
             decl,
             RiscOp::Expand {
                 axis: 0,
-                size: chelis_ir::dag::RtDim::Lit(3),
+                size: chelis_dag_core::dag::RtDim::Lit(3),
             },
             vec![a],
             vec_f32(3),
@@ -3553,7 +3555,7 @@ int main(void) {
             decl,
             RiscOp::Expand {
                 axis: 2,
-                size: chelis_ir::dag::RtDim::Lit(4),
+                size: chelis_dag_core::dag::RtDim::Lit(4),
             },
             vec![a],
             TensorType {
@@ -3566,7 +3568,7 @@ int main(void) {
             decl,
             RiscOp::Expand {
                 axis: 0,
-                size: chelis_ir::dag::RtDim::Lit(2),
+                size: chelis_dag_core::dag::RtDim::Lit(2),
             },
             vec![b],
             TensorType {
@@ -3666,7 +3668,7 @@ int main(void) {
             decl,
             RiscOp::Expand {
                 axis: 2,
-                size: chelis_ir::dag::RtDim::Lit(4),
+                size: chelis_dag_core::dag::RtDim::Lit(4),
             },
             vec![a],
             TensorType {
@@ -3679,7 +3681,7 @@ int main(void) {
             decl,
             RiscOp::Expand {
                 axis: 0,
-                size: chelis_ir::dag::RtDim::Lit(2),
+                size: chelis_dag_core::dag::RtDim::Lit(2),
             },
             vec![b],
             TensorType {
@@ -3739,7 +3741,7 @@ int main(void) {
             decl,
             RiscOp::Expand {
                 axis: 2,
-                size: chelis_ir::dag::RtDim::Lit(4),
+                size: chelis_dag_core::dag::RtDim::Lit(4),
             },
             vec![a],
             TensorType {
@@ -3752,7 +3754,7 @@ int main(void) {
             decl,
             RiscOp::Expand {
                 axis: 0,
-                size: chelis_ir::dag::RtDim::Lit(2),
+                size: chelis_dag_core::dag::RtDim::Lit(2),
             },
             vec![b],
             TensorType {
@@ -3797,7 +3799,7 @@ int main(void) {
 
     /// Build a fused exp(add(a, b)) DAG and return the fused version.
     fn build_fused_exp_add_dag(n: usize) -> Dag {
-        use chelis_ir::fuse::fuse;
+        use chelis_dag_core::fuse::fuse;
         let mut dag = Dag::new();
         let decl = dag.declare("test");
         let a = dag.add_node(

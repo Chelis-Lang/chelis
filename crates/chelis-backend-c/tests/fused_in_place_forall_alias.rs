@@ -1,7 +1,7 @@
 //! C in-place fused-elementwise reuse consumes the shared planner's exact
 //! shape, dtype, capacity, operation, and lifetime proof.
 
-use chelis_ir::dag::{Dag, DimInfo, FusedInput, FusedStep, FusedStepOp, RiscOp, TensorType};
+use chelis_dag_core::dag::{Dag, DimInfo, FusedInput, FusedStep, FusedStepOp, RiscOp, TensorType};
 use chelis_numeric_core::prim::Prim;
 
 mod support;
@@ -48,7 +48,11 @@ fn fan_in_dag(
     b_ty: TensorType,
     c_ty: TensorType,
     out_ty: TensorType,
-) -> (Dag, chelis_ir::dag::NodeId, chelis_ir::dag::NodeId) {
+) -> (
+    Dag,
+    chelis_dag_core::dag::NodeId,
+    chelis_dag_core::dag::NodeId,
+) {
     let mut dag = Dag::new();
     let decl = dag.declare("test");
     // Sources: Load + Copy stages so each fan-in input is SlotBacked
@@ -98,7 +102,11 @@ fn fan_in_dag(
     (dag, fused, a)
 }
 
-fn assert_reuse_proven(c: &str, fused: chelis_ir::dag::NodeId, reusable: chelis_ir::dag::NodeId) {
+fn assert_reuse_proven(
+    c: &str,
+    fused: chelis_dag_core::dag::NodeId,
+    reusable: chelis_dag_core::dag::NodeId,
+) {
     let fused_id = fused.0;
     let reusable_id = reusable.0;
     assert!(
@@ -123,7 +131,11 @@ fn assert_reuse_proven(c: &str, fused: chelis_ir::dag::NodeId, reusable: chelis_
     );
 }
 
-fn assert_reuse_rejected(c: &str, fused: chelis_ir::dag::NodeId, reusable: chelis_ir::dag::NodeId) {
+fn assert_reuse_rejected(
+    c: &str,
+    fused: chelis_dag_core::dag::NodeId,
+    reusable: chelis_dag_core::dag::NodeId,
+) {
     assert!(
         !c.contains(&format!("chelis_tensor *t{} = t{};", fused.0, reusable.0)),
         "unproved reuse must not transfer the source descriptor; got:\n{c}"
