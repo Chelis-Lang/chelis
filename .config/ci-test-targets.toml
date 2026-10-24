@@ -1309,6 +1309,19 @@ reason = "the two ignored matmul checks require an AMD HIP GPU, hipcc, and hipBL
 tracking_issue = "chelis#1354"
 
 [[manual_gate_target]]
+package = "chelis-e2e"
+name = "mnist"
+manual_gates = [
+  "mnist_subset_full_pipeline",
+  "mnist_real_over_90_percent",
+  "mnist_surf_pipeline_builds_trainable_program",
+  "mnist_synthetic_loss_decreases",
+  "mnist regression suite",
+]
+reason = "the documented MNIST suite needs data and remains outside the default loop limit"
+tracking_issue = "chelis#4003"
+
+[[manual_gate_target]]
 package = "chelis-python"
 name = "manual_reef_context"
 manual_gates = ["reef_context_manual_acceptance_oracle"]

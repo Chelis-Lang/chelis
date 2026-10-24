@@ -54,5 +54,9 @@ The actual-main integration retains fixed tuple observations and their extent wi
 C entry contracts and graph witnesses use the same portable tensor type.
 The support-lane union retains both portable oracles and the separate numeric owner.
 
+Remove backend fixtures that depend on unchecked graph-name decoding.
+Retain constructor and codec rejection tests plus valid producer-field sanitizer controls.
+Register all four ignored MNIST cases under the exact documented manual gate.
+PR CI lists the complete suite and reports that it does not execute the manual gate.
 
 This ownership change transfers no language, transform, span, serialization, or backend authority.
