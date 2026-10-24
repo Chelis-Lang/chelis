@@ -2888,6 +2888,10 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help="Run one independently budgeted integration support subset.",
     )
     p.add_argument(
+        "--numeric-core-phase", choices=("extraction", "surface-suites", "surface-controls"),
+        help="Run one required numeric acceptance phase instead of the complete oracle.",
+    )
+    p.add_argument(
         "--partition",
         metavar="HASH:N/M",
         help=(
@@ -3027,6 +3031,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         p.error("--lease-timeout must be a positive number of seconds")
     if args.support_slice is not None and not args.support_only:
         p.error("--support-slice requires integration --support-only")
+    if args.numeric_core_phase is not None and args.support_slice != "numeric-core":
+        p.error("--numeric-core-phase requires integration --support-only --support-slice numeric-core")
     if args.tests_only and args.support_only:
         p.error("--tests-only and --support-only are mutually exclusive")
     if (args.tests_only or args.support_only) and args.stage != "integration":
@@ -3055,6 +3061,7 @@ def selected_stage_commands(
     support_only: bool,
     partition: str | None,
     support_slice: str | None = None,
+    numeric_core_phase: str | None = None,
     environ: dict[str, str] | None = None,
 ) -> list[list[str]]:
     """Return one CI stage slice without duplicating canonical commands."""
@@ -3130,6 +3137,12 @@ def selected_stage_commands(
             )
         members = INTEGRATION_SUPPORT_SLICES[support_slice]
         selected = [command for command in selected if command in members]
+    if numeric_core_phase is not None:
+        if (numeric_core_phase not in ("extraction", "surface-suites", "surface-controls")
+            or selected != [NUMERIC_CORE_ORACLE] or stage != "integration"
+            or not support_only or support_slice != "numeric-core"):
+            raise ValueError("numeric phase requires the exclusive numeric-core support slice")
+        selected[0].extend(["--phase", numeric_core_phase])
     if partition is not None:
         selected[0].extend(["--partition", partition])
     return selected
@@ -3493,6 +3506,7 @@ def main(
                 support_only=args.support_only,
                 partition=args.partition,
                 support_slice=args.support_slice,
+                numeric_core_phase=args.numeric_core_phase,
                 environ=environment_in,
             )
             exit_code = run_commands(

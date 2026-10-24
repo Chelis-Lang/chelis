@@ -19,6 +19,71 @@ def costs():
 
 
 class NumericCoreOracleTests(unittest.TestCase):
+    def test_phase_evidence_is_an_exact_disjoint_partition(self):
+        groups = list(oracle.PHASE_EVIDENCE.values())
+        self.assertEqual(set(oracle.PHASE_EVIDENCE), {"extraction", "surface-suites", "surface-controls"})
+        self.assertEqual(set().union(*groups), oracle.EVIDENCE)
+        self.assertEqual(sum(map(len, groups)), len(oracle.EVIDENCE))
+        for phase, required in oracle.PHASE_EVIDENCE.items():
+            oracle.require_evidence(set(required), phase)
+            for missing in required:
+                with self.subTest(phase=phase, missing=missing):
+                    with self.assertRaisesRegex(OracleFailure, "missing evidence"):
+                        oracle.require_evidence(set(required) - {missing}, phase)
+            with self.assertRaises(OracleFailure):
+                oracle.require_evidence(set(oracle.EVIDENCE), phase)
+
+    def test_default_preserves_combined_inventory_setup_and_order_while_phases_are_disjoint(self):
+        surface = [(('surface',), {'surface-case'})] * len(oracle.SURFACE_SUITES)
+        numeric = [(('numeric',), {'numeric-case'})]
+        for selected in (None, *oracle.PHASE_EVIDENCE):
+            calls = []
+            def record(name, value):
+                def execute(*args, **kwargs):
+                    calls.append(name)
+                    return value
+                return execute
+            partial = set(oracle.PHASE_EVIDENCE['extraction']) - {'numeric-suites', 'python-controls'}
+            with self.subTest(selected=selected), \
+                 patch.object(oracle, 'run', side_effect=record('command', None)), \
+                 patch.object(oracle, 'workspace_environment', return_value={}), \
+                 patch.object(oracle, 'baseline_clone', side_effect=record('baseline', Path('baseline'))), \
+                 patch.object(oracle, 'extraction_checks', side_effect=record('comparisons', partial)), \
+                 patch.object(oracle, 'preserved_suite_plan', side_effect=record('surface-inventory', surface[0])), \
+                 patch.object(oracle, 'numeric_suite_plan', side_effect=record('numeric-inventory', numeric)), \
+                 patch.object(oracle, 'run_suites', side_effect=lambda suites: calls.append('surface-run' if suites == surface else 'numeric-run')), \
+                 patch.object(oracle, 'surface_controls', side_effect=record('surface-controls', {'surface-controls'})), \
+                 patch.object(oracle, 'python_tests', side_effect=record('python-controls', None)), \
+                 patch('builtins.print'):
+                oracle.run_oracle(selected)
+                expected = {
+                    None: ['command', 'baseline', 'comparisons', 'command',
+                        *(['surface-inventory'] * len(oracle.SURFACE_SUITES)),
+                        'numeric-inventory', 'command', 'surface-run', 'surface-controls',
+                        'numeric-run', 'python-controls', 'python-controls'],
+                    'extraction': ['command', 'baseline', 'comparisons', 'command',
+                        'numeric-inventory', 'command', 'numeric-run', 'python-controls', 'python-controls'],
+                    'surface-suites': ['command', 'baseline',
+                        *(['surface-inventory'] * len(oracle.SURFACE_SUITES)), 'command', 'surface-run'],
+                    'surface-controls': ['command', 'surface-controls'],
+                }
+                self.assertEqual(calls, expected[selected])
+
+    def test_failed_or_incomplete_phase_cannot_report_success(self):
+        for result in (set(), OracleFailure("failed control")):
+            with self.subTest(result=result), patch.object(oracle, "run"), \
+                 patch.object(oracle, "surface_controls", side_effect=result if isinstance(result, Exception) else None,
+                              return_value=result), patch("builtins.print") as output:
+                with self.assertRaises(OracleFailure):
+                    oracle.run_oracle("surface-controls")
+                self.assertFalse(any("PASS" in str(call) for call in output.call_args_list))
+
+    def test_unknown_phase_is_rejected_before_execution(self):
+        with patch.object(oracle, "run") as run:
+            with self.assertRaisesRegex(OracleFailure, "unknown"):
+                oracle.run_oracle("missing")
+            run.assert_not_called()
+
     def test_complete_feature_coverage(self):
         oracle.require_features(set(oracle.FEATURES))
         for feature in oracle.FEATURES:
@@ -200,7 +265,7 @@ class NumericCoreOracleTests(unittest.TestCase):
         result = subprocess.CompletedProcess([], 0, "", "")
         with patch.object(oracle, "run", return_value=result):
             with self.assertRaisesRegex(OracleFailure, "surface"):
-                oracle.surface_controls([])
+                oracle.surface_controls()
 
     def test_python_evidence_needs_every_named_case(self):
         required = ("module.Tests.mandatory",)

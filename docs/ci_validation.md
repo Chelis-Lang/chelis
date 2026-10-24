@@ -100,15 +100,30 @@ of cold setup headroom, also used by dtype and runtime extent. Its baseline
 builds, generated-code comparisons and nested surface censuses exceed the short
 support execution allowance; [#4031](https://github.com/Chelis-Lang/chelis/issues/4031)
 records the measured isolated timeout. The `integration-support` matrix runs
-only `frontend` and `domain`, each with its 70-minute total limit. On macOS
-`macos-numeric-core` has a 120-minute job and is required by `macos-smoke`.
+only `frontend` and `domain`, each with its 70-minute total limit.
+
+On macOS `macos-numeric-core` runs three required matrix phases, each with a
+120-minute job budget: `extraction` runs portable consumers, immutable-baseline
+comparisons, numeric suites, and oracle failure controls; `surface-suites` runs
+all three Rust censuses against their immutable-baseline inventories;
+`surface-controls` runs liveness, registry agreement, and every Python
+capacity-census module. The evidence groups form a disjoint partition of the
+complete oracle. Each phase executes its checks from source, with Python test
+progress streamed while stdout remains available for evidence validation. No
+phase receipt substitutes for another phase's execution. `macos-smoke` requires
+the complete matrix to succeed, with fail-fast disabled so one failure does not
+cancel the other phases. Run a phase through
+`.venv/bin/python scripts/gate.py integration --support-only --support-slice numeric-core --numeric-core-phase PHASE`.
+Omitting the phase selector runs the complete oracle, as on Linux.
+
 Neither numeric owner spends its budget on other support or workspace commands.
 Both use the gate's exit status and upload `target/gate-reports/` with `always()`;
-selected test inventories and exact per-test result checks remain inside the
-intact oracle. These gate receipts describe command completion, not a replacement
-test inventory. The Linux nightly report requires both the support matrix and
-numeric-core phase job to succeed. Both platforms reject failed, cancelled, or
-skipped numeric execution; a hard timeout that prevents the gate receipt is
+macOS artifacts include the phase name, and each recorded command includes its
+phase selector. Selected test inventories and exact per-test result checks remain
+inside the oracle. These gate receipts describe command completion, not a
+replacement test inventory. The Linux nightly report requires both the support
+matrix and numeric-core job to succeed. Both platforms reject failed, cancelled,
+or skipped numeric execution; a hard timeout that prevents the gate receipt is
 incomplete coverage. Job limits include setup and uploads, and are scheduling
 allowances rather than an oracle runtime guarantee.
 

@@ -75,6 +75,7 @@ def _execute(
     *,
     cwd: Path = ROOT,
     env: Mapping[str, str] | None = None,
+    live_stderr: bool = False,
 ) -> subprocess.CompletedProcess[str]:
     print("+ " + " ".join(map(str, command)), flush=True)
     try:
@@ -83,7 +84,8 @@ def _execute(
             cwd=cwd,
             env=_environment() if env is None else dict(env),
             text=True,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=None if live_stderr else subprocess.PIPE,
             check=False,
         )
     except OSError as error:
@@ -101,6 +103,7 @@ def run(
     cwd: Path = ROOT,
     env: Mapping[str, str] | None = None,
     required_tests: Iterable[str] = (),
+    live_stderr: bool = False,
 ) -> subprocess.CompletedProcess[str]:
     arguments = tuple(map(str, command))
     test_arguments = None
@@ -129,7 +132,7 @@ def run(
         arguments = ("cargo", "nextest", "run", *test_arguments,
                      "--message-format", "libtest-json-plus")
         env = environment
-    result = _execute(arguments, cwd=cwd, env=env)
+    result = _execute(arguments, cwd=cwd, env=env, live_stderr=live_stderr)
     if result.returncode != 0:
         raise OracleFailure(f"command failed with exit {result.returncode}: {' '.join(arguments)}")
     if selected is not None:
