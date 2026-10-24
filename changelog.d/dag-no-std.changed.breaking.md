@@ -59,4 +59,6 @@ Retain constructor and codec rejection tests plus valid producer-field sanitizer
 Register all four ignored MNIST cases under the exact documented manual gate.
 PR CI lists the complete suite and reports that it does not execute the manual gate.
 
+Preserve host-gradient timing values under their actual test binary identities.
+
 This ownership change transfers no language, transform, span, serialization, or backend authority.
