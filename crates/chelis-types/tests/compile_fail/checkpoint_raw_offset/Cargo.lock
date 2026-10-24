@@ -45,14 +45,14 @@ dependencies = [
 
 [[package]]
 name = "chelis-abi"
-version = "0.21.1"
+version = "0.22.0"
 dependencies = [
  "chelis-vocab",
 ]
 
 [[package]]
 name = "chelis-crmath"
-version = "0.21.1"
+version = "0.22.0"
 dependencies = [
  "cc",
  "half",
@@ -61,7 +61,7 @@ dependencies = [
 
 [[package]]
 name = "chelis-deep"
-version = "0.21.1"
+version = "0.22.0"
 dependencies = [
  "chelis-numeric-core",
  "chelis-stack-services",
@@ -72,7 +72,7 @@ dependencies = [
 
 [[package]]
 name = "chelis-numeric-core"
-version = "0.21.1"
+version = "0.22.0"
 dependencies = [
  "chelis-crmath",
  "chelis-vocab",
@@ -83,7 +83,7 @@ dependencies = [
 
 [[package]]
 name = "chelis-pred"
-version = "0.21.1"
+version = "0.22.0"
 dependencies = [
  "chelis-deep",
  "thiserror",
@@ -91,11 +91,11 @@ dependencies = [
 
 [[package]]
 name = "chelis-stack-services"
-version = "0.21.1"
+version = "0.22.0"
 
 [[package]]
 name = "chelis-type-core"
-version = "0.21.1"
+version = "0.22.0"
 dependencies = [
  "chelis-deep",
  "chelis-numeric-core",
@@ -106,7 +106,7 @@ dependencies = [
 
 [[package]]
 name = "chelis-types"
-version = "0.21.1"
+version = "0.22.0"
 dependencies = [
  "chelis-abi",
  "chelis-deep",
@@ -123,14 +123,14 @@ dependencies = [
 
 [[package]]
 name = "chelis-unord"
-version = "0.21.1"
+version = "0.22.0"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "chelis-vocab"
-version = "0.21.1"
+version = "0.22.0"
 
 [[package]]
 name = "cpufeatures"
