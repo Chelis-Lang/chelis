@@ -13,6 +13,8 @@ import unittest
 
 import yaml
 
+from scripts import gate
+
 ROOT = Path(__file__).resolve().parents[1]
 NEXTEST_CONFIG = ROOT / ".config/nextest.toml"
 # A `cargo nextest` command naming its profile literally, anywhere a hosted job
@@ -23,6 +25,7 @@ PROFILE_CALL = re.compile(r"--profile[\"',\s=]+([a-z][a-z0-9-]*)")
 # means a job that starts using it cannot arrive without one.
 ALWAYS_UNATTENDED = {"nightly"}
 MOVED = {
+    "numeric-core-oracle": "chelis-gate integration --support-only --support-slice numeric-core",
     "dtype-phase3-oracle": "python scripts/dtype_phase3_oracle.py",
     "faithful-observation-phase2-oracle": "python scripts/faithful_observation_phase2_oracle.py",
     "compiled-value-ownership-phase0-oracle": "python scripts/compiled_value_ownership_oracle.py --phase 2",
@@ -88,6 +91,55 @@ def assert_complete_hash_partition(test, job, command):
     )
 
 
+def assert_numeric_phase_ownership(test, nightly):
+    jobs = nightly["jobs"]
+    test.assertIn("numeric-core-oracle", jobs)
+    numeric = jobs["numeric-core-oracle"]
+    support = jobs["integration-support"]
+    test.assertNotIn("strategy", numeric)
+    test.assertEqual(numeric["runs-on"], "ubuntu-latest")
+    test.assertEqual(numeric["timeout-minutes"], 115)
+    test.assertEqual(support["timeout-minutes"], 70)
+    test.assertEqual(support["strategy"]["matrix"]["slice"], ["frontend", "domain"])
+    test.assertEqual(numeric["defaults"], support["defaults"])
+    test.assertEqual(numeric["env"], support["env"])
+    # Preserve checkout, disk setup, project dependencies, cache and products
+    # verbatim; only the budget owner and literal slice differ.
+    test.assertEqual(numeric["steps"][:5], support["steps"][:5])
+    test.assertEqual(numeric["steps"][5], {
+        "name": "Gate (numeric-core phase)",
+        "run": MOVED["numeric-core-oracle"],
+    })
+    test.assertEqual(len(numeric["steps"]), 7)
+    test.assertEqual(numeric["steps"][6], {
+        "name": "Upload integration support receipts",
+        "if": "always()",
+        "uses": "actions/upload-artifact@v7",
+        "with": {
+            "name": "integration-support-numeric-core-receipts",
+            "path": "target/gate-reports/",
+            "if-no-files-found": "error",
+            "retention-days": 14,
+        },
+    })
+    commands = []
+    for job in jobs.values():
+        for leg in matrix_legs(job):
+            for step in job.get("steps", []):
+                command = step.get("run", "")
+                if not command.startswith("chelis-gate integration --support-only"):
+                    continue
+                if "slice" in leg:
+                    command = command.replace("${{ matrix.slice }}", leg["slice"])
+                arguments = gate.parse_args(shlex.split(command)[1:])
+                commands.extend(gate.selected_stage_commands(
+                    arguments.stage, tests_only=arguments.tests_only,
+                    support_only=arguments.support_only, partition=arguments.partition,
+                    support_slice=arguments.support_slice,
+                ))
+    test.assertCountEqual(commands, gate.STAGES["integration"][1:])
+
+
 def assert_extended(test, pr, nightly):
     test.assertEqual(
         nightly[True],
@@ -127,7 +179,7 @@ def assert_extended(test, pr, nightly):
             120
             if name == "runtime-representation-phase0-oracle"
             else 90
-            if name == "dtype-phase3-oracle"
+            if name in {"dtype-phase3-oracle", "numeric-core-oracle"}
             else 60
             if name.startswith("generalize")
             else 45
@@ -219,8 +271,9 @@ def assert_extended(test, pr, nightly):
     test.assertIn("cargo test -p chelis-cli --test chelis_std_self_test_corpus -- --ignored --nocapture", commands)
     test.assertIn("cargo test -p chelis-backend-c", [s.get("run") for s in jobs["backend-sanitizers-full"]["steps"]])
     support = jobs["integration-support"]
-    test.assertEqual(support["strategy"]["matrix"]["slice"], ["frontend", "domain", "numeric-core"])
+    test.assertEqual(support["strategy"]["matrix"]["slice"], ["frontend", "domain"])
     test.assertIn("chelis-gate integration --support-only --support-slice ${{ matrix.slice }}", [s.get("run") for s in support["steps"]])
+    assert_numeric_phase_ownership(test, nightly)
     test.assertNotIn("--support-only", str(pr))
     test.assertNotIn("ProfilePartitionTests", str(pr))
     test.assertIn("ProfilePartitionTests", str(full))
@@ -327,6 +380,7 @@ def assert_dispatch_scopes(test, nightly):
         "generalize-sweep-oracle-shard",
         "generalize-sweep-oracle",
         "integration-support",
+        "numeric-core-oracle",
         "backend-sanitizers-full",
         "test-telemetry",
         "report",
@@ -489,6 +543,51 @@ class ExtendedCadenceTests(unittest.TestCase):
                     with self.assertRaises(AssertionError):
                         assert_dispatch_scopes(self, nightly)
 
+    def test_numeric_phase_retains_exact_selection_budget_prerequisites_and_receipts(self):
+        assert_numeric_phase_ownership(self, self.nightly)
+        with (ROOT / ".config/ci-test-targets.toml").open("rb") as handle:
+            rules = tomllib.load(handle)["path_rule"]
+        owners = [row for row in rules if row["prefix"] == "scripts/numeric_core_oracle.py"]
+        self.assertEqual(len(owners), 1)
+        self.assertEqual(owners[0]["workflow"], "heavy-e2e.yml")
+        self.assertEqual(owners[0]["job"], "numeric-core-oracle")
+
+    def test_numeric_phase_cannot_lose_or_repeat_work_or_borrow_the_short_budget(self):
+        assert_numeric_phase_ownership(self, self.nightly)
+        for mutation in (
+            "short-budget", "widen-support", "repeat-in-support", "wrong-slice",
+            "omit-setup", "omit-products", "write-cache", "skip-command",
+            "ignore-command", "missing-receipt", "optional-receipt",
+        ):
+            with self.subTest(mutation=mutation):
+                nightly = copy.deepcopy(self.nightly)
+                numeric = nightly["jobs"]["numeric-core-oracle"]
+                support = nightly["jobs"]["integration-support"]
+                if mutation == "short-budget":
+                    numeric["timeout-minutes"] = 70
+                elif mutation == "widen-support":
+                    support["timeout-minutes"] = 115
+                elif mutation == "repeat-in-support":
+                    support["strategy"]["matrix"]["slice"].append("numeric-core")
+                elif mutation == "wrong-slice":
+                    numeric["steps"][5]["run"] = numeric["steps"][5]["run"].replace("numeric-core", "domain")
+                elif mutation == "omit-setup":
+                    del numeric["steps"][2]
+                elif mutation == "omit-products":
+                    del numeric["steps"][4]
+                elif mutation == "write-cache":
+                    numeric["steps"][3]["with"]["save-if"] = True
+                elif mutation == "skip-command":
+                    numeric["steps"][5]["if"] = "false"
+                elif mutation == "ignore-command":
+                    numeric["steps"][5]["continue-on-error"] = True
+                elif mutation == "missing-receipt":
+                    del numeric["steps"][6]
+                else:
+                    numeric["steps"][6]["with"]["if-no-files-found"] = "warn"
+                with self.assertRaises(AssertionError):
+                    assert_numeric_phase_ownership(self, nightly)
+
     def test_dispatch_receipt_step_records_the_exact_scope_run_and_head(self):
         step = self.nightly["jobs"]["dispatch-scope"]["steps"][2]
         self.assertTrue(step["run"].startswith(".venv/bin/python - <<'PY'\n"))
@@ -542,7 +641,7 @@ class ExtendedCadenceTests(unittest.TestCase):
 
     def test_missing_skipped_or_nonblocking_oracle_is_rejected(self):
         for name in MOVED:
-            for mutation in ("remove", "skip", "ignore", "command", "timeout"):
+            for mutation in ("remove", "skip", "ignore", "command", "timeout", "needs"):
                 with self.subTest(job=name, mutation=mutation):
                     nightly = copy.deepcopy(self.nightly)
                     if mutation == "remove":
@@ -553,6 +652,8 @@ class ExtendedCadenceTests(unittest.TestCase):
                         nightly["jobs"][name]["continue-on-error"] = True
                     elif mutation == "command":
                         nightly["jobs"][name]["steps"] = []
+                    elif mutation == "needs":
+                        nightly["jobs"]["report"]["needs"].remove(name)
                     else:
                         nightly["jobs"][name]["timeout-minutes"] = 1
                     with self.assertRaises((AssertionError, KeyError)):

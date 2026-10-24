@@ -2133,7 +2133,7 @@ def _ci_job_block(job: str) -> str:
         "smt-build-darwin-arm64",
     }:
         return _workflow_job_block(CI_YML.with_name("macos-nightly.yml"), job)
-    if job in {'backend-sanitizers-full', 'dtype-phase3-oracle', 'compiled-value-ownership-phase0-oracle', 'faithful-observation-phase2-oracle', 'generalize-sweep-oracle-shard', 'full-workspace', 'runtime-representation-phase0-oracle', 'integration-support', 'generalize-sweep-oracle', 'module-oracles'}:
+    if job in {'backend-sanitizers-full', 'dtype-phase3-oracle', 'compiled-value-ownership-phase0-oracle', 'faithful-observation-phase2-oracle', 'generalize-sweep-oracle-shard', 'full-workspace', 'runtime-representation-phase0-oracle', 'integration-support', 'numeric-core-oracle', 'generalize-sweep-oracle', 'module-oracles'}:
         return _workflow_job_block(CI_YML.with_name("heavy-e2e.yml"), job)
     return _workflow_job_block(CI_YML, job)
 
@@ -2197,7 +2197,7 @@ def _ci_step_block(job_block: str, step_name: str) -> str:
 
 
 def _assert_support_slice_contract(block: str) -> None:
-    assert "slice: [frontend, domain, numeric-core]" in block
+    assert "slice: [frontend, domain]" in block
     command = "chelis-gate integration --support-only --support-slice ${{ matrix.slice }}"
     _assert_executable_run_once(block, command)
     assert block.count("--support-only") == 1
@@ -2744,7 +2744,7 @@ class CiParityTests(unittest.TestCase):
     def test_support_slice_contract_rejects_missing_repeated_or_skipped_work(self):
         block = _ci_job_block("integration-support")
         mutations = (
-            block.replace("slice: [frontend, domain, numeric-core]", "slice: [frontend, frontend]"),
+            block.replace("slice: [frontend, domain]", "slice: [frontend, frontend]"),
             block.replace(" --support-slice ${{ matrix.slice }}", ""),
             block.replace("    steps:", "    if: false\n    steps:"),
             block.replace(
@@ -2872,13 +2872,20 @@ class CiParityTests(unittest.TestCase):
         _assert_macos_aggregate_requires_censuses(aggregate_block)
 
     def test_numeric_core_has_independent_cross_platform_owners_and_receipts(self):
-        linux = _ci_job_block("integration-support")
-        self.assertIn("slice: [frontend, domain, numeric-core]", linux)
-        self.assertIn("timeout-minutes: 70", linux)
-        self.assertIn("fail-fast: false", linux)
+        support = _ci_job_block("integration-support")
+        self.assertIn("slice: [frontend, domain]", support)
+        self.assertIn("timeout-minutes: 70", support)
+        self.assertIn("fail-fast: false", support)
+        linux = _ci_job_block("numeric-core-oracle")
+        self.assertIn("timeout-minutes: 115", linux)
+        self.assertNotIn("strategy:", linux)
         self.assertNotIn("continue-on-error", linux)
+        _assert_executable_run_once(
+            linux, "chelis-gate integration --support-only --support-slice numeric-core",
+        )
         report = _workflow_job_block(CI_YML.with_name("heavy-e2e.yml"), "report")
         self.assertIn("integration-support", report.split("steps:")[0])
+        self.assertIn("numeric-core-oracle", report.split("steps:")[0])
         self.assertIn("job.result === 'success'", report)
         mac = _ci_job_block("macos-numeric-core")
         self.assertIn("timeout-minutes: 120", mac)
@@ -2898,7 +2905,8 @@ class CiParityTests(unittest.TestCase):
         ):
             self.assertIn(prerequisite, mac)
         for block, artifact in (
-            (linux, "integration-support-${{ matrix.slice }}-receipts"),
+            (support, "integration-support-${{ matrix.slice }}-receipts"),
+            (linux, "integration-support-numeric-core-receipts"),
             (mac, "macos-numeric-core-receipts"),
         ):
             step = _ci_step_block(block, "Upload integration support receipts")
