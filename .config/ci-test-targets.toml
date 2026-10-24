@@ -4756,9 +4756,9 @@ packages = ["chelis-type-core", "chelis-types"]
 prefix = "scripts/numeric_core_oracle.py"
 disposition = "owner"
 workflow = "heavy-e2e.yml"
-job = "integration-support"
+job = "numeric-core-oracle"
 cadence = "daily and workflow_dispatch"
-reason = "The numeric-core slice checks portable numeric consumers, exact parity, allocation costs, and authority"
+reason = "The dedicated numeric-core phase checks portable numeric consumers, exact parity, allocation costs, and authority"
 tracking_issue = "chelis#3993"
 
 [[path_rule]]
