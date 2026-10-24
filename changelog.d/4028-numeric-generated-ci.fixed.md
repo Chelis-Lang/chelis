@@ -1,1 +1,0 @@
-The numeric-core acceptance oracle validates generated source/header seals before comparing ABI declarations across compiler revisions. It retains exact numerical output and runtime-header checks, requires each program and runtime header, and identifies the differing fixture and field on failure.

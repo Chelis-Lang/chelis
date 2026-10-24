@@ -4,6 +4,254 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.22.0] - 2026-10-24
+
+### Added
+
+- Add dependency-free `chelis-reef-bootstrap-core` with `no_std` and `alloc` for checked bootstrap graph order. Reef retains typed version requirements, canonical release checks, diagnostics, and original release selection. Manifest access, default discovery, artifact verification, and installation remain host operations. The acceptance command checks isolated target consumers, exact graph behavior, and real host bootstrap fixtures. Target compilation does not prove device execution or allocator capacity. See [#3984](https://github.com/Chelis-Lang/chelis/issues/3984).
+
+  The standalone pipeline rejection fixture retains a locked graph that includes the new core.
+  Its compiler checks retain all original diagnostics.
+
+- Use `chelis-version` without the standard library, allocation, or package dependencies. Both public predicates retain their installer and conformance behavior. The acceptance command checks embedded compilation, zero allocations, and host decisions.
+
+  The acceptance command rejects filtered mandatory cases and an unusable shim interpreter.
+
+### Changed
+
+- **BREAKING:** Move exact certificate arithmetic to `chelis-certificate-core` with unconditional `no_std` and `alloc`. Consumers import `poly`, `exact`, and `linalg` from that crate without compatibility re-exports. Clarabel, native BLAS, goal extraction, solver layouts, and proof admission remain in `chelis-prove`. Host admission rejects noncanonical block counts, matrix dimensions, and interval multipliers. The acceptance command checks target consumers, exact fixed-revision parity, native production certificates, and mandatory failure controls. See [#3989](https://github.com/Chelis-Lang/chelis/issues/3989).
+
+  Standalone acceptance executes both Python failure-control suites before its PASS marker.
+
+  The core inherits workspace lint rules. Runtime solver-isolation checks replace source-text setup checks.
+
+- **BREAKING:** Move graph models and graph-only passes to the allocation-backed `no_std` crate `chelis-dag-core`.
+  Consumers now import `dag`, checked names, structural verification, axis sources, Tier-2 decomposition, AD, fusion, pure optimization, spans, and copy analysis directly.
+  The old `chelis_ir` graph modules and root exports no longer exist.
+
+  Graph-only ownership normalization and drop removal also use the portable owner.
+  Declaration owners, shape dependencies, roots, remaps, reuse hints, spans, valid wire data, and numeric delegation retain their contracts.
+  `chelis-numeric-core::bitwise::BitwiseKind` and `chelis-numeric-core::key_admission::{KeyPrimitive, KeyAdmission}` provide the sole shared pure identities.
+  The existing eight f64-image folds now use closed numeric-core APIs with sealed inputs and an explicit destination dtype.
+  Their exact-integer guard, refusal behavior, and specified final stored bits retain their contracts.
+  Ordinary typed numeric kernels retain their canonical NaN behavior.
+
+  The fold oracle checks signaling-NaN quiet bits from the numeric contract, independent of native rounding behavior.
+
+  Source lowering, evaluation, source linearity conversion, host diagnostics, ABI layout admission, target fences, and production orchestration stay in host crates.
+  The embedding supplies an allocator and stack policy.
+  The DAG oracle covers isolated target features, fixed-base behavior, rejection controls, native output, generated sources, graph scale, and transform allocation costs.
+  AD retains sparse adjoint storage.
+  Fusion reserves lookup capacity before graph construction.
+  Host comparisons use each Cargo target's declared feature requirements.
+
+  Move the closed-enum and exhaustive semantic-match guards to the canonical graph owner.
+  Remove incidental source-layout and class-dispatch assertions.
+  Register both standalone fixtures with exact source compilation ownership.
+  Retain the payload census and source-policy tripwire at the canonical graph owner.
+  Preserve the exact moved host test source and split frozen rows without an allowance increase.
+
+  The builtin registry uses compiled declarations to distinguish public callables from internal primitive identities.
+  The semantic obligations cover every compiled internal primitive, including casts and guarded failure.
+  The native execution oracle reads the runtime owner's staging receipt and verifies the archive and public header digests.
+  Compile-fail ownership examples use valid fully qualified graph types.
+  The portability guard limits the sibling rule to direct named subjects.
+  It rejects generic false pipeline claims, also when a comparison names a sibling.
+
+  Known empty shapes remain valid after large prefix extents.
+  Known nonzero counts must fit the graph index domain.
+  Cardinality uses bounded u128 intermediates without allocation.
+  Runtime metadata retains extent and suffix-stride checks.
+  The C inventory associates typedef owners through compiler declaration identities.
+  Refresh the independent pipeline artifact fixture lock for the portable graph dependencies.
+
+  The builtin closure reads Nextest reports from the checkout target directory.
+  The Cargo artifact directory can differ.
+
+  The integrated type and DAG cores remain independent.
+  Shared workspace changes retain CI ownership for both portable cores.
+  Both portability oracles remain in integration and nightly checks.
+  The accepted [05-OP-53] contract retains explicit scan directions.
+
+  Graph, wire, allocation, native-result, and admission comparisons retain their original immutable baseline.
+  Complete generated sources and headers use the accepted pre-cutover integration base, including exact-width scalar transport.
+  The registry chapter control supplies explicit public identities without a case-based rule.
+
+  The actual-main integration retains fixed tuple observations and their extent witness ownership.
+  C entry contracts and graph witnesses use the same portable tensor type.
+  The support-lane union retains both portable oracles and the separate numeric owner.
+
+  Remove backend fixtures that depend on unchecked graph-name decoding.
+  Retain constructor and codec rejection tests plus valid producer-field sanitizer controls.
+  Register all four ignored MNIST cases under the exact documented manual gate.
+  PR CI lists the complete suite and reports that it does not execute the manual gate.
+
+  Preserve host-gradient timing values under their actual test binary identities.
+
+  This ownership change transfers no language, transform, span, serialization, or backend authority.
+
+- **BREAKING:** Move primitive identities, sealed numeric values, operations, activation graphs, observation, and agreement into `chelis-numeric-core` with unconditional `no_std`. Callers use canonical modules without compatibility exports. Default `alloc` adds tensors and owned text. Optional `serde` preserves stored-value transport. Host crates retain schemas, I/O, native allocation, and the runtime C ABI.
+
+  The shared CORE-MATH provider supports bare targets without a C library. Acceptance compares immutable-main behavior, wire bytes, schemas, generated C, traps, and allocation costs. See [#3993](https://github.com/Chelis-Lang/chelis/issues/3993).
+  Schema metadata ownership uses verified codec definitions. Payload publication still needs an admitted declaration.
+
+  Compile probes retain the vocabulary failure module.
+  Source spelling checks read the canonical primitive owner.
+  Host tests compile the bare-target math helpers.
+  Schema entry points retain floating-point guards.
+  Generated-C checks link each program with its exact staged runtime archive.
+  Baseline cleanup removes the complete isolated cache.
+
+  Runtime source records include numeric code and CORE-MATH C inputs. Development consumers reject stale Rust and C sources. Rebuilt consumers retain the existing staging contract.
+  The CORE-MATH build script watches its complete C source directory.
+
+  Pipeline dependency checks accept the numeric core and still reject host services. Numeric integration targets declare their Cargo feature prerequisites.
+  Closed-vocabulary checks use the numeric core as the primitive adapter owner.
+
+  Remove the format-dependent duplicate builtin dispatch test. AST-based positive and negative controls retain dispatch coverage.
+
+  Count and exact-reduction acceptance use the numeric core and retain checker coverage.
+  Current policy documents name the canonical owners.
+  The numeric oracle assigns the preserved schema case to the host schema suite.
+
+  Keyed-randomness acceptance reads each selected target's Cargo feature requirements.
+  List and run commands preserve native runtime instrumentation.
+  Remove incidental command-shape assertions.
+
+  Remove the obsolete Bool-extrema test.
+  The verifier and its rejection tests retain the `[05-OP-40]` dtype rule.
+
+- **BREAKING:** Use `chelis-shell-core` for CHB 8 metadata and complete validation with unconditional `no_std` and `alloc`. Metadata imports move directly from `chelis_shell` to `chelis_shell_core`. Validation now returns typed errors and needs explicit `StackServices`. `chelis-shell` retains codecs and filesystem adapters. Reef retains archive and requested-package identity checks.
+
+  CHB fields, bytes, diagnostics, first-error order, and embedded bundle digests remain unchanged. The acceptance command checks isolated target consumers, immutable-baseline parity, and real host artifact rejection. Linux integration support and macOS nightly validation execute the complete command. Target compilation does not prove device execution or allocator capacity. See [#3986](https://github.com/Chelis-Lang/chelis/issues/3986).
+
+  Matching incomplete metadata snapshots fail acceptance.
+
+- **BREAKING:** `chelis-deep`, `chelis-pred`, `chelis-surf`, and `chelis-macros` use `no_std` with `alloc`. Parser, formatter, desugarer, and decompiler callers pass explicit `StackServices`. Native callers use `chelis-syntax-host::NativeStack`. Module identity checks move from `chelis-surf` to `chelis-syntax-host`. `chelis-unord` uses portable storage. Syntax and wire contracts remain unchanged.
+
+  The syntax acceptance command checks isolated embedded builds, native parity, allocation costs, and failure controls. Linux integration support and macOS nightly validation execute the complete command. See [#3979](https://github.com/Chelis-Lang/chelis/issues/3979).
+
+  The acceptance command fetches the pinned baseline for shallow checkouts.
+  It rejects matching snapshots with missing nested evidence.
+
+  Standalone rejection fixtures retain locked dependencies on the resource crates.
+  Historical cache producer bytes and artifact hashes remain unchanged.
+  Current cache tests use separate live helpers.
+  Acceptance tests share one support module.
+
+- **BREAKING:** Move type models, substitutions, unification, and pure scheme operations into allocation-based `chelis-type-core`.
+  The crate uses unconditional `no_std`, empty default features, and optional portable `serde`.
+
+  Rust consumers now import the canonical core owner and specify evidence through `Type<E>`, `NominalArg<E>`, `Scheme<E>`, and `Subst<E>`.
+  Old hosted model and solver paths do not exist.
+  `Prim` remains in `chelis-numeric-core`, and `chelis-vocab` remains unchanged.
+  The type core has no DAG dependency.
+
+  The hosted checker directly uses its sealed `ErrorWitness` type.
+  It retains diagnostic reports, private sinks and checkpoints, source inference, recursion policy, trusted cache boundaries, and the successful-product veto.
+  The extraction preserves current nominal arguments, dtype restrictions, levels, collection contracts, shared type children, and deferred shape relations.
+
+  The sole type acceptance command is `uv run --managed-python --python 3.11 --no-project python scripts/type_unification_core_oracle.py`.
+  It compares actual host output against immutable pre-cutover source and separates host execution from target compilation.
+  Accepted programs can have an empty exported type map.
+  Remove API-shape tests and unreachable ledger implementation tests.
+  Host behavior and compiler checks retain coverage.
+
+  The unresolved-operand census follows pure decisions into the core.
+  It retains the existing dispositions and source mutation controls.
+
+  Distinguish active store operations from interrupted stores.
+  Normal concurrent queries wait without a false interruption failure.
+  Reserve identifiers once per shared allocation across the complete scheme.
+  CI also lints the standalone core without default features.
+  Refresh the diagnostic checkpoint and pipeline artifact fixture locks for the extracted model and solver dependencies.
+
+  The standalone host parity fixture has an exact source inventory and a named compilation owner.
+  Its oracle compiles the unchanged fixture from the isolated directory.
+  Remove the obsolete route for the former fixture path.
+  The pipeline dependency guard admits the portable type owner and retains host-service exclusions.
+
+  The portable solver needs allocation and atomics.
+  It does not support reentrant interrupts that preempt a held solver lock.
+  Target compilation proves neither device execution nor allocator capacity.
+  No language or diagnostic authority transfers through this extraction.
+
+- Refresh public architecture, property-verification, cache, and example guidance;
+  move dated issue inventories and audit notes into the documentation archive.
+
+### Fixed
+
+- Preserve tuple parameters in functions with declared tensor results, including nested tensor projections, tuple-carried runtime extents, whole-parameter entry guards and local shape claims, across evaluation and native C lowering. Named extents declared by tuple fields remain available to independent local and result claims on fixed tensor projections and selected host results, including unused declaring fields and repeated calls. Record-bearing tuple operands retain their existing host accessor route.
+
+- Compiler-wrapper tests write executable fixtures in a dedicated child process,
+  preventing concurrent process spawns from retaining writable handles that make
+  Linux execution fail with `ETXTBSY`.
+
+- `chelis prove` no longer reports an SMT disproof as a property failure when the
+  witness it rests on is not a machine value. A Tier B disproof is decided over
+  the real numbers, so its counterexample is an exact real point: no binary64
+  value equals an irrational, and an exact rational need not be representable
+  either. `1.0f64 / ((x * x) - 2.0f64)` is disproved finite over the reals at
+  `x = sqrt(2)` and is finite at every double in `[1, 2]`, yet a property
+  asserting that was reported failed under `--tier auto` and `--tier smt-only`
+  alike.
+
+  A readable witness is now rounded to each binder's declared width and evaluated
+  concretely, the same route a square-root domain witness takes; an irrational one
+  is classified from the model term itself, since no machine value equals it.
+  Either way the outcome is reported in the additive `machine_arithmetic` field:
+
+  - `confirmed` — the preconditions admit the rounded witness and the body is
+    false there. The result is a definite `failed` carrying that machine value as
+    the counterexample, rather than the reals-hedged
+    `disproved_modulo_real_arithmetic` with the solver's model term.
+  - `unconfirmed` — the witness is not a machine counterexample. The result is
+    `unsupported` (exit `2`): there is no basis for a failure, because the only
+    point the solver exhibited is not one, and none for a pass either, because the
+    property was decided false over the reals and the check establishes nothing
+    about any other input. `--tier auto` samples first, so a sampled
+    counterexample is still a definite failure; only a clean run is `unsupported`.
+  - `unchecked` — the witness could not be read or evaluated. The disproof is
+    unchanged: an evaluation limit is not evidence about the property.
+
+  `unconfirmed` does not mean the property holds. `(x * x) != 11.0f64` on `[3, 4]`
+  is `unconfirmed`, because `sqrt(11)` is irrational, and is nevertheless false at
+  `3.3166247903554`, whose square is exactly `11.0`.
+
+  See [#3971](https://github.com/Chelis-Lang/chelis/issues/3971).
+
+- Lower boolean negation in semantic Surf goals and inlined helper conditions to SMT, preserving proof-tier selection for negated properties under `smt-only` and `auto`.
+
+- Classify unconfirmed domain witnesses as non-verdicts in the dual-solver oracle, restoring compilation with both SMT engines enabled. Declare both required solver features and record the oracle's existing full-SMT nightly test and Clippy owners instead of an empty default-feature CI run or an unowned source.
+
+- Preserve scalar precision and tensor rank rows through type-preserving builtin producers before float classification in compiled C programs.
+
+- Elementwise minimum and maximum preserve their operands' ordered shape and
+  exact numeric dtype through rank-polymorphic helpers. Minimum results and
+  floating classification of those results agree between Eval and native C,
+  including empty tensors. Extrema DAG verification rejects inconsistent result
+  shapes and dtypes. See [#3997](https://github.com/Chelis-Lang/chelis/issues/3997)
+  and [#3998](https://github.com/Chelis-Lang/chelis/issues/3998).
+
+- The C host backend preserves signaling NaN bits when f32 values cross
+  scalar/tensor boundaries or are unboxed from structured values. Exact-width
+  decoding avoids the floating widening and narrowing that could quiet NaNs
+  depending on the C compiler's optimization decisions. Arithmetic NaN
+  canonicalization is unchanged. Fixes
+  [#4001](https://github.com/Chelis-Lang/chelis/issues/4001).
+
+- Measure substitution allocation scaling on the production checker path even in generalization-oracle builds, while retaining level/sweep parity checks over the same programs.
+
+- Keep the runtime-extent oracle's checker-transport mutation compilable and include captured command output when a controlled mutation fails for an unrelated reason.
+
+- The numeric-core acceptance oracle validates generated source/header seals before comparing ABI declarations across compiler revisions. It retains exact numerical output and runtime-header checks, requires each program and runtime header, and identifies the differing fixture and field on failure.
+
+- Run complete numeric-core acceptance in dedicated Linux and macOS nightly workers, with a long-phase Linux budget that preserves the shorter frontend/domain support limits. Preserve the full oracle and require its completion in nightly status.
+
+- Bind the internal directional scan and language `cumsum` to their shared ordered-scan operation contract so builtin semantic closure validates both identities.
+
+- Hosted Ubuntu CI setup selects the official HTTPS package archives so slow Azure mirror transfers do not exhaust every bounded installation attempt.
+
 ## [0.21.1] - 2026-10-19
 
 ### Added
