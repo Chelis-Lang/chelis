@@ -2674,6 +2674,26 @@ pub fn prepare_program_for_eval_file(
     context_dir: &Path,
     runtime: &'static EmbeddedRuntime,
 ) -> Result<Option<PreparedProgram>, String> {
+    prepare_program_for_eval_file_with_package(
+        file,
+        context_dir,
+        runtime,
+        prepare_program_for_eval_source,
+    )
+}
+
+// Keep package preparation as an operation-scoped dependency so the single-file
+// boundary can be tested without global state, network access, or a clock.
+fn prepare_program_for_eval_file_with_package(
+    file: &Path,
+    context_dir: &Path,
+    runtime: &'static EmbeddedRuntime,
+    prepare_package: impl FnOnce(
+        &Path,
+        &[Decl],
+        &'static EmbeddedRuntime,
+    ) -> Result<Option<PreparedProgram>, String>,
+) -> Result<Option<PreparedProgram>, String> {
     let source =
         fs::read_to_string(file).map_err(|e| format!("failed to read {}: {e}", file.display()))?;
     let decls = chelis_surf::parser::parse_str(&source, &chelis_syntax_host::NativeStack)
@@ -2684,7 +2704,7 @@ pub fn prepare_program_for_eval_file(
     if find_package_root_for_dir(context_dir)?.is_none() {
         return prepare_single_file_program(&file.display().to_string(), &decls, runtime);
     }
-    prepare_program_for_eval_source(context_dir, &decls, runtime)
+    prepare_package(context_dir, &decls, runtime)
 }
 
 /// The graph name of a single-file program's implicit root package
@@ -3902,6 +3922,18 @@ fn load_package_graph_with_lock_preference(
     options: LoadOptions,
     publication: remote_discovery::LockPublication,
 ) -> Result<(PackageGraph, bool), String> {
+    load_package_graph_with_lock_preference_using(root, options, || {
+        resolve_package_graph_for_load(root, options, publication)
+    })
+}
+
+// Both resolver versions stay behind this fallback boundary. Lock assessment
+// and reconstruction run normally even when a test rejects fallback work.
+fn load_package_graph_with_lock_preference_using(
+    root: &Path,
+    options: LoadOptions,
+    resolve: impl FnOnce() -> Result<(PackageGraph, bool), String>,
+) -> Result<(PackageGraph, bool), String> {
     let lock_path = root.join("reef.lock");
     if lock_path.exists() {
         let manifest = read_manifest(&root.join("reef.toml"))?;
@@ -3937,6 +3969,14 @@ fn load_package_graph_with_lock_preference(
             }
         }
     }
+    resolve()
+}
+
+fn resolve_package_graph_for_load(
+    root: &Path,
+    options: LoadOptions,
+    publication: remote_discovery::LockPublication,
+) -> Result<(PackageGraph, bool), String> {
     let manifest = read_manifest(&root.join("reef.toml"))?;
     if manifest.typed.resolver == package_versioning::ResolverVersion::Two {
         let lock = remote_discovery::resolve_project(
@@ -13890,8 +13930,8 @@ module_prefix = "Demo"
         assert_eq!(found, project.canonicalize().expect("canonicalize project"));
     }
 
-    /// Positive: when `reef.lock` exists and all deps are path-based, the fast
-    /// path resolves correctly and returns within 1 second.
+    /// A current path-dependency lock reconstructs the graph without fallback
+    /// resolution, and the public eval entry point links its definitions.
     #[test]
     fn eval_file_uses_lockfile_fast_path_for_path_dep() {
         let dir = tempdir().expect("tempdir");
@@ -13937,26 +13977,13 @@ mylib = {{ path = "./mylib" }}
             "module Myapp.Main\n\nimport Mylib.Math (add)\ndef double(x: i32) -> i32 = add(x, x)\n",
         );
 
-        // Write a reef.lock that records the path dependency (the fast path reads
-        // this instead of calling resolve_package_graph).
-        write(
+        // Produce a current lock with the same writer used by package builds.
+        let graph = resolve_package_graph(&root, runtime_load_options()).expect("resolve fixture");
+        write_lockfile(
             &root.join("reef.lock"),
-            r#"[package]
-name = "myapp"
-version = "0.1.0"
-
-[[dependencies]]
-name = "mylib"
-version = "0.1.0"
-compiler = "=0.1.0"
-archive_sha256 = ""
-shell_sha256 = ""
-
-[dependencies.source]
-kind = "path"
-path = "./mylib"
-"#,
-        );
+            &build_lockfile(&graph, test_runtime()).expect("build fixture lock"),
+        )
+        .expect("write fixture lock");
 
         // The eval file imports `add` from Mylib.Math.
         let eval_file = dir.path().join("probe.ch");
@@ -13965,15 +13992,14 @@ path = "./mylib"
             "import Mylib.Math (add)\ndef result() -> i32 = add(1, 2)\n",
         );
 
-        let start = std::time::Instant::now();
-        let result = prepare_program_for_eval_file(&eval_file, &root, test_runtime());
-        let elapsed = start.elapsed();
-
-        assert!(
-            elapsed < Duration::from_secs(1),
-            "fast path took {elapsed:?}. Expected < 1s"
-        );
-        let program = result
+        let (_, reused_lock) = load_package_graph_with_lock_preference_using(
+            &root,
+            runtime_load_options(),
+            reject_fallback_resolution,
+        )
+        .expect("the path lock must reconstruct without fallback resolution");
+        assert!(reused_lock);
+        let program = prepare_program_for_eval_file(&eval_file, &root, test_runtime())
             .expect("prepare_program_for_eval_file should succeed")
             .expect("should find a reef package");
         // The returned decls must include the rewritten definition from Mylib.Math.
@@ -14107,8 +14133,8 @@ some-registry-lib = {{ version = "0.1.0" }}
     /// outside chelis-std and has NO reef.toml anywhere in the ancestor chain
     /// (no package root at all). A single-file program links against the
     /// bundled runtime alone (chelis#2881), so the import is rejected, naming
-    /// the module and the missing manifest, immediately: no package resolver
-    /// runs.
+    /// the module and the missing manifest, without entering package preparation.
+    /// This is an operation boundary, not a wall-clock latency guarantee.
     #[test]
     fn adv_eval_file_no_package_root_rejects_a_non_std_import() {
         let dir = tempdir().expect("tempdir");
@@ -14119,19 +14145,132 @@ some-registry-lib = {{ version = "0.1.0" }}
             "import NonExistent.Module (something)\ndef result() -> i32 = 42\n",
         );
 
-        let start = std::time::Instant::now();
-        let result = prepare_program_for_eval_file(&eval_file, dir.path(), test_runtime());
-        let elapsed = start.elapsed();
-
-        // Must return immediately (< 500ms), not hang.
-        assert!(
-            elapsed < Duration::from_millis(500),
-            "no-package-root eval took {elapsed:?}. Should return immediately"
+        let result = prepare_program_for_eval_file_with_package(
+            &eval_file,
+            dir.path(),
+            test_runtime(),
+            reject_package_preparation,
         );
         let error = result.expect_err("a non-Std import without a manifest must be rejected");
         assert!(
             error.contains("unresolved import `NonExistent.Module`") && error.contains("reef.toml"),
             "{error}"
+        );
+        assert_eq!(
+            prepare_program_for_eval_file(&eval_file, dir.path(), test_runtime()).unwrap_err(),
+            error
+        );
+    }
+
+    fn reject_package_preparation(
+        _: &Path,
+        _: &[Decl],
+        _: &'static EmbeddedRuntime,
+    ) -> Result<Option<PreparedProgram>, String> {
+        panic!("unexpected package preparation");
+    }
+
+    fn reject_fallback_resolution() -> Result<(PackageGraph, bool), String> {
+        panic!("unexpected fallback resolution");
+    }
+
+    #[test]
+    fn eval_file_no_package_root_links_std_without_package_preparation() {
+        let dir = tempdir().expect("tempdir");
+        let file = dir.path().join("probe.ch");
+        write(
+            &file,
+            "import Std.Scalar (max)\ndef result() -> i64 = max(1i64, 2i64)\n",
+        );
+        let program = prepare_program_for_eval_file_with_package(
+            &file,
+            dir.path(),
+            test_runtime(),
+            reject_package_preparation,
+        )
+        .expect("bundled Std import resolves without package preparation")
+        .expect("Std import links a program");
+        assert!(program.package_root.is_none());
+        assert!(program.decls.iter().any(
+            |decl| matches!(decl, Decl::FunDef { name, .. } if name == &internal_name(CHELIS_STD_PACKAGE_NAME, "Std.Scalar", "max"))
+        ));
+        let deep = expanded_desugared_program(&program.decls).expect("desugar linked program");
+        checked_program_with_effects(&deep).expect("the imported name binds and typechecks");
+        let public_program = prepare_program_for_eval_file(&file, dir.path(), test_runtime())
+            .expect("public entry point")
+            .expect("linked program");
+        assert_eq!(public_program.decls, program.decls);
+    }
+
+    #[test]
+    fn eval_file_no_package_root_rejects_invalid_std_without_package_preparation() {
+        let dir = tempdir().expect("tempdir");
+        let file = dir.path().join("probe.ch");
+        for (source, subject) in [
+            (
+                "import Std.Nonexistent (nothing)\ndef result() -> i32 = 42\n",
+                "Std.Nonexistent",
+            ),
+            (
+                "import Std.Scalar (nothing)\ndef result() -> i32 = 42\n",
+                "nothing",
+            ),
+        ] {
+            write(&file, source);
+            let error = prepare_program_for_eval_file_with_package(
+                &file,
+                dir.path(),
+                test_runtime(),
+                reject_package_preparation,
+            )
+            .expect_err("an invalid Std import must be rejected");
+            assert!(error.contains(subject), "{error}");
+            assert_eq!(
+                prepare_program_for_eval_file(&file, dir.path(), test_runtime()).unwrap_err(),
+                error
+            );
+        }
+    }
+
+    /// The same rejecting dependency must fire on a real package input.
+    #[test]
+    #[should_panic(expected = "unexpected package preparation")]
+    fn eval_file_package_preparation_guard_detects_package_context() {
+        let (dir, root) = lockless_package("");
+        let file = dir.path().join("probe.ch");
+        write(&file, "def result() -> i32 = 42\n");
+        let _ = prepare_program_for_eval_file_with_package(
+            &file,
+            &root,
+            test_runtime(),
+            reject_package_preparation,
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "unexpected fallback resolution")]
+    fn lock_preference_guard_detects_missing_lock() {
+        let (_dir, root) = lockless_package("");
+        let _ = load_package_graph_with_lock_preference_using(
+            &root,
+            runtime_load_options(),
+            reject_fallback_resolution,
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "unexpected fallback resolution")]
+    fn lock_preference_guard_detects_stale_lock() {
+        let (_dir, root) = implicit_runtime_package();
+        let mut lock = read_lockfile(&root.join("reef.lock"))
+            .expect("read current lock")
+            .raw;
+        lock.package.version = "99.0.0".to_string();
+        write_lockfile(&root.join("reef.lock"), &lock).expect("write stale root version");
+        let _ = load_package_graph_with_lock_preference_using(
+            &root,
+            runtime_load_options(),
+            reject_fallback_resolution,
         );
     }
 
@@ -14291,19 +14430,10 @@ path = "./nonexistent_dep"
 "#,
         );
 
-        let start = std::time::Instant::now();
-        let entry_decls = chelis_surf::parser::parse_str(
-            "def result() -> i32 = 42",
-            &chelis_syntax_host::NativeStack,
-        )
-        .expect("parse");
-        let result = prepare_program_for_eval_source(&root, &entry_decls, test_runtime());
-        let elapsed = start.elapsed();
-
-        // Must fail fast with a clean error — not hang.
-        assert!(
-            elapsed < Duration::from_secs(2),
-            "missing-path-dep fast path took {elapsed:?}. Should fail quickly"
+        let result = load_package_graph_with_lock_preference_using(
+            &root,
+            runtime_load_options(),
+            reject_fallback_resolution,
         );
         assert!(
             result.is_err(),
@@ -14315,6 +14445,14 @@ path = "./nonexistent_dep"
             err.contains("missing") || err.contains("nonexistent") || err.contains("canonicalize"),
             "error should identify the missing dep; got: {err}"
         );
+        let entry_decls = chelis_surf::parser::parse_str(
+            "def result() -> i32 = 42",
+            &chelis_syntax_host::NativeStack,
+        )
+        .expect("parse");
+        let public_error = prepare_program_for_eval_source(&root, &entry_decls, test_runtime())
+            .expect_err("the eval entry point must propagate the missing path error");
+        assert_eq!(public_error, err);
     }
 
     // ---- Shared-graph split: prepare_reef_graph + compile_with_reef_graph ----
