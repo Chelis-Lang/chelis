@@ -30,7 +30,7 @@ EVIDENCE = frozenset({"thumb-default", "thumb-no-default", "standalone-alloc", "
     "native-c", "c-hip-metal-generation", "admission-diagnostics", "span-comments",
     "dependency-features", "negative-controls", "scale-allocations", "current-host-suites", "python-controls", "source-owner-controls", "moved-host-tests"})
 BASELINE_REVISION = "3ca99faa7a46158eb6a0d90c2c812a7e3a5f44c1"
-PRODUCTION_BASELINE_REVISION = "44bee6ea6674f6cbe69edd51ad6487acb6ef05c5"
+PRODUCTION_BASELINE_REVISION = "137ba12e2cf9bcdcac4b4d3ed3662832a93e44a4"
 FORBIDDEN = frozenset({
     "chelis-types", "chelis-type-core", "chelis-deep", "chelis-surf", "chelis-ir",
     "chelis-effects", "chelis-pipeline-core", "chelis-compiler-api",

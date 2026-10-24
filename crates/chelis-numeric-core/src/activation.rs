@@ -4,7 +4,7 @@
 //! `spec/05-risc-primitives.md` section 3.3 pins each derived activation as a
 //! graph of Tier 1 primitives, and [05-OP-48] makes every lane compute exactly
 //! that graph at the operand dtype, rounding each primitive once. The IR
-//! lowering (`chelis_ir::tier2`) and the evaluator's scalar and tensor
+//! lowering (`chelis_dag_core::tier2`) and the evaluator's scalar and tensor
 //! activation kernels each implement [`ActivationGraph`] and call
 //! [`lower_activation`], so the graph has one definition and no lane can drift
 //! from it. `tanh`, `erf`, and `erfc` are not here: they are Tier 1

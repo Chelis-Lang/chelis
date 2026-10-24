@@ -689,6 +689,7 @@ INTEGRATION_SUPPORT_SLICES: dict[str, tuple[list[str], ...]] = {
         SHELL_METADATA_CORE_ORACLE,
         CERTIFICATE_CORE_ORACLE,
         TYPE_UNIFICATION_CORE_ORACLE,
+        DAG_CORE_ORACLE,
         OWNERSHIP_LEDGER_CLI_TESTS,
     ),
     "numeric-core": (NUMERIC_CORE_ORACLE,),

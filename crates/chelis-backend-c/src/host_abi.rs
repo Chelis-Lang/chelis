@@ -76,9 +76,9 @@ pub(crate) enum HostAbiType {
 }
 
 impl chelis_ir::host::FixedEntryType for HostAbiType {
-    type Tensor = chelis_ir::TensorType;
+    type Tensor = chelis_dag_core::TensorType;
 
-    fn entry_tensor(&self) -> Option<&chelis_ir::TensorType> {
+    fn entry_tensor(&self) -> Option<&chelis_dag_core::TensorType> {
         match self {
             Self::Tensor(ty) => Some(ty),
             _ => None,

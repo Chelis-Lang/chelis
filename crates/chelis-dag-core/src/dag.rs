@@ -1099,7 +1099,7 @@ pub enum RiscOp {
     /// AD policy: the reverse-mode adjoint lowers to a single
     /// [`RiscOp::ReduceWindowGrad`] node carrying the same
     /// `{reducer, window_shape, strides}` triple (see
-    /// `chelis_ir::grad`). Adjoints follow `spec/05-risc-primitives.md`
+    /// `chelis_dag_core::grad`). Adjoints follow `spec/05-risc-primitives.md`
     /// §2.3.1: `Sum`/`Mean` scatter (overlap-add) the upstream gradient
     /// back over each window, and `Max`/`Min` route it to the window
     /// extreme (distributing to all tied positions, matching the

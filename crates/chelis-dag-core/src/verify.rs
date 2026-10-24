@@ -2847,7 +2847,7 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                 // *different* shapes (forward input vs forward output), so
                 // this is not an elementwise binary op. Check arity only;
                 // the output shape equals `x`'s shape and is set at
-                // construction by `chelis_ir::grad`.
+                // construction by `chelis_dag_core::grad`.
                 if arity != 2 {
                     errors.push(format!(
                         "reduce_window_grad at node {} has {} inputs (expected 2)",
