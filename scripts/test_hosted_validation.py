@@ -214,6 +214,7 @@ def assert_hosted_coverage(test, workflow, nightly):
     test.assertIn("macos-wire-census", aggregate["needs"])
     test.assertIn("macos-ownership-ledger", aggregate["needs"])
     test.assertIn("macos-numeric-core", aggregate["needs"])
+    test.assertIn("macos-dag-core", aggregate["needs"])
     test.assertEqual(aggregate.get("if"), "always()")
     test.assertFalse(aggregate.get("continue-on-error", False))
     command = (
@@ -223,6 +224,7 @@ def assert_hosted_coverage(test, workflow, nightly):
         " macos-wire-census=${{ needs.macos-wire-census.result }}"
         " macos-ownership-ledger=${{ needs.macos-ownership-ledger.result }}"
         " macos-numeric-core=${{ needs.macos-numeric-core.result }}"
+        " macos-dag-core=${{ needs.macos-dag-core.result }}"
     )
     steps = [step for step in aggregate["steps"] if step.get("run") == command]
     test.assertEqual(len(steps), 1)
