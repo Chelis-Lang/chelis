@@ -234,7 +234,7 @@ pub enum PipelineRejection {
         fitness: FitnessReport,
     },
     Effects {
-        errors: Vec<chelis_effects::EffectError>,
+        errors: Vec<chelis_effects_core::EffectError>,
     },
     Linearity {
         errors: Vec<chelis_types::errors::CheckError>,

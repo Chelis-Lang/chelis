@@ -33,6 +33,7 @@ chelis-surf = { workspace = true, features = ["pre-020-pipe-migration"] }
 chelis-syntax-host.workspace = true
 chelis-types = { path = "../chelis-types" }
 chelis-effects.workspace = true
+chelis-effects-core.workspace = true
 chelis-ir = { path = "../chelis-ir" }
 chelis-runtime.workspace = true
 chelis-runtime-bundle.workspace = true

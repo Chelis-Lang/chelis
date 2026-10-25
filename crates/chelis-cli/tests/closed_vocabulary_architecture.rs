@@ -140,8 +140,14 @@ const EFFECT_KIND_CRATES: &[CrateEvidence] = &[
     },
     CrateEvidence {
         crate_name: "chelis-effects",
-        role: "effect inference and handler/target validation",
+        role: "host target effect validation",
         roots: &["crates/chelis-effects/src"],
+        required: &["use chelis_vocab::EffectKind", "decode_effect_kind("],
+    },
+    CrateEvidence {
+        crate_name: "chelis-effects-core",
+        role: "portable effect inference and handler validation",
+        roots: &["crates/chelis-effects-core/src"],
         required: &["use chelis_vocab::EffectKind", "decode_effect_kind("],
     },
     CrateEvidence {
@@ -257,7 +263,10 @@ const EFFECT_KIND_FORBIDDEN_RULES: &[ForbiddenRule] = &[
     },
     ForbiddenRule {
         role: "effect inference and handler/target validation",
-        roots: &["crates/chelis-effects/src"],
+        roots: &[
+            "crates/chelis-effects/src",
+            "crates/chelis-effects-core/src",
+        ],
         forbidden: &[
             "match effect_name(list)",
             "effect_name(list) == Some(\"resource\")",

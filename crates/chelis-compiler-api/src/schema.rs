@@ -376,7 +376,10 @@ impl Diagnostic {
     /// repair hints at six sites, and the template this replaces had no slot
     /// for them, so dropping them here would keep the very stage-dependence
     /// the atom forbids.
-    pub fn from_effect_error(error: &chelis_effects::EffectError, severity: UnitInterval) -> Self {
+    pub fn from_effect_error(
+        error: &chelis_effects_core::EffectError,
+        severity: UnitInterval,
+    ) -> Self {
         let _fp_env = chelis_runtime::FpEnvGuard::enter();
         Self {
             kind: effect_error_kind(&error.kind).as_str().to_owned(),
@@ -465,8 +468,8 @@ fn check_error_kind(kind: &chelis_types::errors::CheckErrorKind) -> DiagnosticKi
 }
 
 /// Total map from the effect checker's kind to its governed identity.
-fn effect_error_kind(kind: &chelis_effects::EffectErrorKind) -> DiagnosticKind {
-    use chelis_effects::EffectErrorKind as K;
+fn effect_error_kind(kind: &chelis_effects_core::EffectErrorKind) -> DiagnosticKind {
+    use chelis_effects_core::EffectErrorKind as K;
     match kind {
         K::UnhandledEffect => DiagnosticKind::UnhandledEffect,
         K::InvalidHandler => DiagnosticKind::InvalidHandler,
@@ -9966,7 +9969,7 @@ mod tests {
 #[cfg(test)]
 mod diagnostic_projection_contract {
     use super::{Diagnostic, DiagnosticSpan, check_error_kind, effect_error_kind};
-    use chelis_effects::EffectErrorKind as E;
+    use chelis_effects_core::EffectErrorKind as E;
     use chelis_types::errors::{CheckError, CheckErrorKind as K};
     use chelis_types::unsupported::{Stage, Unsupported, UnsupportedKind};
 

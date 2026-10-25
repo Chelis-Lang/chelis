@@ -147,6 +147,7 @@ dependencies = [
  "chelis-dag-core",
  "chelis-deep",
  "chelis-effects",
+ "chelis-effects-core",
  "chelis-image-id",
  "chelis-ir",
  "chelis-macros",
@@ -206,9 +207,20 @@ name = "chelis-effects"
 version = "0.22.1"
 dependencies = [
  "chelis-deep",
+ "chelis-effects-core",
  "chelis-numeric-core",
  "chelis-type-core",
  "chelis-types",
+ "chelis-unord",
+ "chelis-vocab",
+]
+
+[[package]]
+name = "chelis-effects-core"
+version = "0.22.1"
+dependencies = [
+ "chelis-deep",
+ "chelis-type-core",
  "chelis-unord",
  "chelis-vocab",
 ]
@@ -268,6 +280,7 @@ dependencies = [
  "chelis-dag-core",
  "chelis-deep",
  "chelis-effects",
+ "chelis-effects-core",
  "chelis-ir",
  "chelis-types",
  "chelis-unord",

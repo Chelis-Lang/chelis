@@ -10,7 +10,8 @@
 //!    subsequent call against the same `library_program`.
 
 use chelis_deep::ast::Expr;
-use chelis_effects::{EffectError, EffectErrorKind, check_effects_with_context, check_program};
+use chelis_effects::{check_effects_with_context, check_program};
+use chelis_effects_core::{EffectError, EffectErrorKind};
 use chelis_surf::{desugar::desugar_program, parser::parse_str as parse_surf};
 use chelis_type_core::Effect;
 use chelis_types::{
@@ -535,13 +536,13 @@ def pure_local(x: i64) -> i64 = add(x, 1i64)
 def pure_via_import(x: i64) -> i64 = lib_pure(x)
 "#;
 
-fn imported_io_rows() -> chelis_effects::DefEffectRows {
+fn imported_io_rows() -> chelis_effects_core::DefEffectRows {
     let (typeenv, lib_checked) = build_library_pair(IMPORTED_IO_LIBRARY);
     let new_checked = build_new_code_checked(&typeenv, IMPORTED_IO_EXTENSION);
     chelis_effects::def_effect_rows_in_context(Some(&lib_checked), &new_checked)
 }
 
-fn row_names(rows: &chelis_effects::DefEffectRows, name: &str) -> Vec<String> {
+fn row_names(rows: &chelis_effects_core::DefEffectRows, name: &str) -> Vec<String> {
     rows.get(name)
         .unwrap_or_else(|| panic!("`{name}` must have an effect row"))
         .iter()

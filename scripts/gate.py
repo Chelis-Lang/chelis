@@ -326,6 +326,20 @@ CLIPPY_TYPE_NO_DEFAULT_FEATURES: list[str] = [
     "cargo", "clippy", "-p", "chelis-type-core",
     "--all-targets", "--no-default-features", "--", "-D", "warnings",
 ]
+# Compile each portable effect feature state without hosted feature unification.
+CLIPPY_EFFECT_DEFAULT_FEATURES: list[str] = [
+    "cargo", "clippy", "-p", "chelis-effects-core",
+    "--all-targets", "--", "-D", "warnings",
+]
+CLIPPY_EFFECT_NO_DEFAULT_FEATURES: list[str] = [
+    "cargo", "clippy", "-p", "chelis-effects-core",
+    "--all-targets", "--no-default-features", "--", "-D", "warnings",
+]
+CLIPPY_EFFECT_SERDE: list[str] = [
+    "cargo", "clippy", "-p", "chelis-effects-core",
+    "--all-targets", "--no-default-features", "--features", "serde",
+    "--", "-D", "warnings",
+]
 CLIPPY_SOLVER_FREE_FEATURES: list[str] = [
     "cargo", "clippy", "--workspace", "--all-targets", "--features",
     "chelis-cli/ownership-ledger,"
@@ -514,6 +528,10 @@ DAG_CORE_ORACLE: list[str] = [
     "uv", "run", "--managed-python", "--python", "3.11", "--no-project", "python",
     "scripts/dag_core_oracle.py",
 ]
+EFFECT_ANALYSIS_CORE_ORACLE: list[str] = [
+    "uv", "run", "--managed-python", "--python", "3.11", "--no-project", "python",
+    "scripts/effect_analysis_core_oracle.py",
+]
 # Generated chelis-std files stay out of the index: the bundle crate's build
 # script packs the runtime, so a tracked dist pair or a lock recording the
 # bundled runtime would go stale with the first std edit. Pure git and Python.
@@ -629,6 +647,9 @@ STAGES: dict[str, list[list[str]]] = {
         CLIPPY_CORE_WITHOUT_MIGRATION,
         CLIPPY_NUMERIC_NO_DEFAULT_FEATURES,
         CLIPPY_TYPE_NO_DEFAULT_FEATURES,
+        CLIPPY_EFFECT_DEFAULT_FEATURES,
+        CLIPPY_EFFECT_NO_DEFAULT_FEATURES,
+        CLIPPY_EFFECT_SERDE,
         FMT_CHECK,
         CHELIS_LINT_CHECK,
         STD_BUNDLE_REPRODUCIBILITY,
@@ -663,6 +684,7 @@ STAGES: dict[str, list[list[str]]] = {
         NUMERIC_CORE_ORACLE,
         TYPE_UNIFICATION_CORE_ORACLE,
         DAG_CORE_ORACLE,
+        EFFECT_ANALYSIS_CORE_ORACLE,
         OWNERSHIP_LEDGER_CLI_TESTS,
     ],
     "runtime-representation": [
@@ -690,6 +712,7 @@ INTEGRATION_SUPPORT_SLICES: dict[str, tuple[list[str], ...]] = {
         CERTIFICATE_CORE_ORACLE,
         TYPE_UNIFICATION_CORE_ORACLE,
         DAG_CORE_ORACLE,
+        EFFECT_ANALYSIS_CORE_ORACLE,
         OWNERSHIP_LEDGER_CLI_TESTS,
     ),
     "numeric-core": (NUMERIC_CORE_ORACLE,),
@@ -734,6 +757,9 @@ HASH_PARTITION_RE = re.compile(
 LOCAL_STATIC_COMMANDS: list[list[str]] = [
     CLIPPY_WORKSPACE,
     CLIPPY_SOLVER_FREE_FEATURES,
+    CLIPPY_EFFECT_DEFAULT_FEATURES,
+    CLIPPY_EFFECT_NO_DEFAULT_FEATURES,
+    CLIPPY_EFFECT_SERDE,
     FMT_CHECK,
     CHELIS_LINT_CHECK,
     STD_BUNDLE_REPRODUCIBILITY,
@@ -762,6 +788,7 @@ LOCAL_STATIC_COMMANDS: list[list[str]] = [
     NUMERIC_CORE_ORACLE,
     TYPE_UNIFICATION_CORE_ORACLE,
     DAG_CORE_ORACLE,
+    EFFECT_ANALYSIS_CORE_ORACLE,
     OWNERSHIP_LEDGER_CLI_TESTS,
 ]
 

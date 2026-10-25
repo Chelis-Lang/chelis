@@ -193,6 +193,16 @@ rec {
       # File a bug if you depend on any for non-debug work!
       debug = internal.debugCrate { inherit packageId; };
     };
+    "chelis-effects-core" = rec {
+      packageId = "chelis-effects-core";
+      build = internal.buildRustCrateWithFeatures {
+        packageId = "chelis-effects-core";
+      };
+
+      # Debug support which might change between releases.
+      # File a bug if you depend on any for non-debug work!
+      debug = internal.debugCrate { inherit packageId; };
+    };
     "chelis-image-id" = rec {
       packageId = "chelis-image-id";
       build = internal.buildRustCrateWithFeatures {
@@ -2112,6 +2122,11 @@ rec {
             packageId = "chelis-effects";
           }
           {
+            name = "chelis-effects-core";
+            packageId = "chelis-effects-core";
+            usesDefaultFeatures = false;
+          }
+          {
             name = "chelis-ir";
             packageId = "chelis-ir";
           }
@@ -2372,6 +2387,11 @@ rec {
           {
             name = "chelis-effects";
             packageId = "chelis-effects";
+          }
+          {
+            name = "chelis-effects-core";
+            packageId = "chelis-effects-core";
+            usesDefaultFeatures = false;
           }
           {
             name = "chelis-image-id";
@@ -2898,6 +2918,11 @@ rec {
             packageId = "chelis-deep";
           }
           {
+            name = "chelis-effects-core";
+            packageId = "chelis-effects-core";
+            usesDefaultFeatures = false;
+          }
+          {
             name = "chelis-numeric-core";
             packageId = "chelis-numeric-core";
             usesDefaultFeatures = false;
@@ -2925,6 +2950,12 @@ rec {
         ];
         devDependencies = [
           {
+            name = "chelis-effects-core";
+            packageId = "chelis-effects-core";
+            usesDefaultFeatures = false;
+            features = [ "test-instrumentation" ];
+          }
+          {
             name = "chelis-macros";
             packageId = "chelis-macros";
           }
@@ -2938,6 +2969,45 @@ rec {
           }
         ];
 
+      };
+      "chelis-effects-core" = rec {
+        crateName = "chelis-effects-core";
+        version = "0.22.1";
+        edition = "2024";
+        src = lib.cleanSourceWith { filter = sourceFilter;  src = ./crates/chelis-effects-core; };
+        libName = "chelis_effects_core";
+        dependencies = [
+          {
+            name = "chelis-deep";
+            packageId = "chelis-deep";
+            usesDefaultFeatures = false;
+          }
+          {
+            name = "chelis-type-core";
+            packageId = "chelis-type-core";
+            usesDefaultFeatures = false;
+          }
+          {
+            name = "chelis-unord";
+            packageId = "chelis-unord";
+            usesDefaultFeatures = false;
+          }
+          {
+            name = "chelis-vocab";
+            packageId = "chelis-vocab";
+            usesDefaultFeatures = false;
+          }
+        ];
+        devDependencies = [
+          {
+            name = "chelis-syntax-host";
+            packageId = "chelis-syntax-host";
+          }
+        ];
+        features = {
+          "serde" = [ "chelis-type-core/serde" "chelis-unord/serde" ];
+        };
+        resolvedDefaultFeatures = [ "test-instrumentation" ];
       };
       "chelis-image-id" = rec {
         crateName = "chelis-image-id";
@@ -3302,6 +3372,11 @@ rec {
           {
             name = "chelis-effects";
             packageId = "chelis-effects";
+          }
+          {
+            name = "chelis-effects-core";
+            packageId = "chelis-effects-core";
+            usesDefaultFeatures = false;
           }
           {
             name = "chelis-ir";

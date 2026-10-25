@@ -1,0 +1,20 @@
+{
+  "old_package": "chelis-effects",
+  "old_binary": "chelis_effects",
+  "new_package": "chelis-effects-core",
+  "new_binary": "chelis_effects_core",
+  "same_test_names": [
+    "tests::effects_reader_classes_read_a_recursive_stamped_program",
+    "tests::guarded_var_and_literal_readers_read_decoded_nodes",
+    "tests::let_effect_reader_traverses_every_non_bind_slot_carrier",
+    "tests::declared_effect_reader_reads_a_decoded_defsig",
+    "tests::declared_effect_reader_declines_nondecoded_carriers",
+    "tests::keyed_dropout_introduces_no_effect",
+    "decode_once_producer_tests::synthesized_effects_preserve_typed_members_and_decoded_wire_tags",
+    "decode_once_producer_tests::effect_names_are_payload_not_vocabulary_tags",
+    "decode_once_producer_tests::effect_annotation_reaches_registered_expressions_and_preserves_data"
+  ],
+  "retired_tests": {
+    "chelis-effects::chelis_effects$tests::declared_effect_reader_has_no_local_optional_carrier_adapter": "Main explicitly retires this source-wording test. All consumer-visible carrier behavior tests remain mandatory."
+  }
+}

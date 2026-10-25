@@ -1,46 +1,32 @@
 use chelis_deep::DeepTag;
-use std::collections::{BTreeMap, BTreeSet};
 
 #[cfg(test)]
 use std::cell::RefCell;
 
-use chelis_deep::annotations::{
-    EffectMember, EffectSet as AstEffectSet, MetadataValue, ResourceEffect, Spanned,
-};
-use chelis_deep::ast::{Atom, Expr, Metadata};
-use chelis_deep::{ExprCarrier, Span, decode_effect_kind};
+#[cfg(test)]
+use chelis_deep::Span;
+#[cfg(test)]
+use chelis_deep::annotations::MetadataValue;
+use chelis_deep::ast::Expr;
+#[cfg(test)]
+use chelis_deep::ast::Metadata;
+use chelis_deep::{ExprCarrier, decode_effect_kind, string_literal};
+#[cfg(test)]
+use chelis_effects_core::EffectWorkProfile;
+use chelis_effects_core::{DefEffectRows, EffectError, EffectErrorKind, infer_effect_rows};
+#[cfg(test)]
 use chelis_type_core::{Effect, EffectSet};
 use chelis_types::{CheckedProgram, InferResult};
-use chelis_unord::ScopedMap;
 use chelis_vocab::EffectKind;
 use chelis_vocab::EffectKindDecodeError;
 
 pub mod realizability;
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-struct EffectWorkProfile {
-    infer_expr_visits: usize,
-    annotation_expr_visits: usize,
-    node_bridge_clone_nodes: usize,
-    list_rewrite_clone_nodes: usize,
-    top_level_body_clone_nodes: usize,
-    metadata_rewrites: usize,
-}
 
 #[cfg(test)]
 thread_local! {
     static EFFECT_WORK_PROFILE: RefCell<EffectWorkProfile> =
         RefCell::new(EffectWorkProfile::default());
 }
-
-#[cfg(test)]
-fn record_effect_work(update: impl FnOnce(&mut EffectWorkProfile)) {
-    EFFECT_WORK_PROFILE.with(|profile| update(&mut profile.borrow_mut()));
-}
-
-#[cfg(not(test))]
-#[inline(always)]
-fn record_effect_work(_update: impl FnOnce(&mut EffectWorkProfile)) {}
 
 #[cfg(test)]
 fn reset_effect_work_profile() {
@@ -52,57 +38,30 @@ fn take_effect_work_profile() -> EffectWorkProfile {
     EFFECT_WORK_PROFILE.with(|profile| std::mem::take(&mut *profile.borrow_mut()))
 }
 
-/// An effect diagnostic's kind.
-///
-/// Its published spelling is the governed `chelis_vocab::DiagnosticKind`
-/// identity that `Diagnostic::from_effect_error` maps it to (chelis#886).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum EffectErrorKind {
-    UnhandledEffect,
-    InvalidHandler,
-    BuildTargetMismatch,
-    TypeTotality,
+fn analyze_effect_annotations(
+    expressions: &[Expr],
+    library: Option<&[Expr]>,
+) -> Result<Vec<Expr>, Vec<EffectError>> {
+    #[cfg(test)]
+    {
+        let (result, profile) =
+            chelis_effects_core::analyze_effects_with_profile(expressions, library);
+        EFFECT_WORK_PROFILE.with(|current| *current.borrow_mut() = profile);
+        result
+    }
+    #[cfg(not(test))]
+    {
+        chelis_effects_core::analyze_effects(expressions, library)
+    }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EffectError {
-    pub kind: EffectErrorKind,
-    pub message: String,
-    pub suggestions: Vec<String>,
-}
-
-/// The inferred effect row of every top-level `def`, keyed by def name.
-pub type DefEffectRows = BTreeMap<String, EffectSet>;
-
-/// The one inferred-effect result for `program`, optionally extended with
-/// an outer library scope.
-///
-/// Enforcement ([`check_program`], [`check_effects_with_context`]) and
-/// reporting ([`def_effect_rows`], [`def_effect_rows_in_context`]) both
-/// route through here, so a reported row is the row the discharge check
-/// used. They differ only in what they do afterwards: enforcement
-/// validates and annotates, reporting returns the rows.
-///
-/// `library` is the already-checked outer program a caller's imports
-/// resolve against. Passing `None` infers over `program` alone, which is
-/// correct only when `program` is the whole program: a def whose callee
-/// lives in an omitted library would otherwise be inferred pure
-/// (chelis#606).
-fn infer_def_effects(
-    library: Option<&CheckedProgram>,
+fn reconstruct_effect_annotations(
     program: &CheckedProgram,
-) -> (DefEffectRows, BTreeSet<String>) {
-    let Some(library) = library else {
-        return infer_program_effects(program.annotated_exprs());
-    };
-    // The library was already validated by its own check; re-inferring
-    // here only surfaces the rows new code inherits when it calls in.
-    let (library_effects, library_callables) = infer_program_effects(library.annotated_exprs());
-    infer_program_effects_with_context(
-        program.annotated_exprs(),
-        &library_effects,
-        &library_callables,
-    )
+    annotated_exprs: Vec<Expr>,
+) -> Result<CheckedProgram, Vec<EffectError>> {
+    program
+        .try_with_effect_annotations(annotated_exprs)
+        .map_err(type_totality_errors)
 }
 
 /// Compute the inferred effect row for every top-level `def` in a
@@ -139,38 +98,15 @@ pub fn def_effect_rows_in_context(
     library: Option<&CheckedProgram>,
     program: &CheckedProgram,
 ) -> DefEffectRows {
-    let mut rows = infer_def_effects(library, program).0;
-    let owned_definitions = top_level_def_bodies(program.annotated_exprs());
-    rows.retain(|name, _| owned_definitions.contains_key(name));
-    rows
+    infer_effect_rows(
+        program.annotated_exprs(),
+        library.map(CheckedProgram::annotated_exprs),
+    )
 }
 
 pub fn check_program(program: &CheckedProgram) -> Result<CheckedProgram, Vec<EffectError>> {
-    let (effects_by_def, top_level_callables) = infer_def_effects(None, program);
-    let annotated_exprs: Vec<Expr> = program
-        .annotated_exprs()
-        .iter()
-        .map(|expr| {
-            annotate_effects(
-                expr,
-                &effects_by_def,
-                &top_level_callables,
-                &mut Locals::new(),
-            )
-        })
-        .collect();
-
-    let mut errors = Vec::new();
-    validate_handlers(&annotated_exprs, &mut errors);
-    validate_declared_vs_inferred(&annotated_exprs, &effects_by_def, &mut errors);
-
-    if errors.is_empty() {
-        program
-            .try_with_effect_annotations(annotated_exprs)
-            .map_err(type_totality_errors)
-    } else {
-        Err(errors)
-    }
+    let annotated_exprs = analyze_effect_annotations(program.annotated_exprs(), None)?;
+    reconstruct_effect_annotations(program, annotated_exprs)
 }
 
 /// Check effects on `new_program` against an outer-scope library context.
@@ -201,41 +137,11 @@ pub fn check_effects_with_context(
     library_program: &CheckedProgram,
     new_program: &CheckedProgram,
 ) -> Result<CheckedProgram, Vec<EffectError>> {
-    // Iterative fixed-point inference for new-code defs, seeded with the
-    // library's effect rows. Library callables stay reachable as call
-    // targets; new-code defs of the same name shadow on the inner pass.
-    // This is the same `infer_def_effects` result
-    // `def_effect_rows_in_context` reports, so enforcement and reporting
-    // cannot disagree (chelis#606).
-    let (effects_by_def, top_level_callables) =
-        infer_def_effects(Some(library_program), new_program);
-
-    // Annotate ONLY new-code exprs, but with effect/callable maps that
-    // include library entries so cross-context calls resolve.
-    let annotated_exprs: Vec<Expr> = new_program
-        .annotated_exprs()
-        .iter()
-        .map(|expr| {
-            annotate_effects(
-                expr,
-                &effects_by_def,
-                &top_level_callables,
-                &mut Locals::new(),
-            )
-        })
-        .collect();
-
-    let mut errors = Vec::new();
-    validate_handlers(&annotated_exprs, &mut errors);
-    validate_declared_vs_inferred(&annotated_exprs, &effects_by_def, &mut errors);
-
-    if errors.is_empty() {
-        new_program
-            .try_with_effect_annotations(annotated_exprs)
-            .map_err(type_totality_errors)
-    } else {
-        Err(errors)
-    }
+    let annotated_exprs = analyze_effect_annotations(
+        new_program.annotated_exprs(),
+        Some(library_program.annotated_exprs()),
+    )?;
+    reconstruct_effect_annotations(new_program, annotated_exprs)
 }
 
 fn type_totality_errors(result: InferResult) -> Vec<EffectError> {
@@ -303,723 +209,6 @@ pub fn validate_build_target_expressions(
         Ok(())
     } else {
         Err(errors)
-    }
-}
-
-fn infer_program_effects(exprs: &[Expr]) -> (BTreeMap<String, EffectSet>, BTreeSet<String>) {
-    infer_program_effects_with_context(exprs, &BTreeMap::new(), &BTreeSet::new())
-}
-
-/// Iterative-fixed-point effect inference that lets new-code defs see an
-/// outer library scope. The library's `effects_by_def` and callable-name
-/// set are merged into the seed maps so `(var libname)` references in new
-/// code resolve to the library's effect row.
-///
-/// New-code defs shadow library defs of the same name on the inner pass.
-/// The function does NOT mutate the library inputs; merging is local.
-fn infer_program_effects_with_context(
-    new_exprs: &[Expr],
-    library_effects: &BTreeMap<String, EffectSet>,
-    library_callables: &BTreeSet<String>,
-) -> (BTreeMap<String, EffectSet>, BTreeSet<String>) {
-    let bodies = top_level_def_bodies(new_exprs);
-    let new_callables = top_level_callable_names(&bodies);
-
-    // Union of library + new callables. New-code names are present
-    // because they are added below; both must be visible during inference.
-    let mut top_level_callables: BTreeSet<String> = library_callables.clone();
-    top_level_callables.extend(new_callables.iter().cloned());
-
-    // Seed the effects map with the library's already-validated effect
-    // rows. New-code defs are *not* in this map yet — the loop below will
-    // populate them, shadowing library entries for any name the new code
-    // re-defines.
-    let mut effects: BTreeMap<String, EffectSet> = library_effects.clone();
-
-    // Track which names are owned by the new code so we don't accidentally
-    // overwrite a library entry that has the same name as a new-code def
-    // until the new-code's own inference has produced a value. Library
-    // shadow happens naturally: as soon as the new-code def's first pass
-    // produces an EffectSet, the .insert() below overwrites the library
-    // entry for that name.
-    for _ in 0..=bodies.len() {
-        let mut changed = false;
-        for (name, body) in &bodies {
-            let inferred =
-                infer_expr_effects(body, &effects, &top_level_callables, &mut Locals::new());
-            if effects.get(name) != Some(&inferred) {
-                effects.insert(name.clone(), inferred);
-                changed = true;
-            }
-        }
-        if !changed {
-            break;
-        }
-    }
-
-    (effects, top_level_callables)
-}
-
-/// Yield each top-level declaration, descending through any `(module {} name
-/// ...)` wrapper. Deep sources produced by Surf `module X` desugaring nest
-/// every def/defsig inside this wrapper; the whole-program effect validators
-/// below compare declared-vs-inferred over a flat decl list, so without descent a module-wrapped `.dp` would hide every
-/// nested def from them. This mirrors `top_level_decl_items` in chelis-types,
-/// so the effect pass sees the same flattened decl set the type pass does and
-/// the module-wrapped `chelis check` path agrees with the flattened
-/// build/eval path. Descends nested wrappers to any depth.
-fn flattened_top_level(exprs: &[Expr]) -> Vec<&Expr> {
-    fn push<'a>(expr: &'a Expr, out: &mut Vec<&'a Expr>) {
-        match expr.carrier() {
-            ExprCarrier::DecodedNode(DeepTag::Module, _, children) => {
-                // Module semantic children are `[name, declarations...]`.
-                for child in children.iter().skip(1) {
-                    push(child, out);
-                }
-            }
-            ExprCarrier::DecodedNode(_, _, _)
-            | ExprCarrier::StructuralList(_)
-            | ExprCarrier::UndecodableHead(_, _, _)
-            | ExprCarrier::Atom(_)
-            | ExprCarrier::MetadataMap(_)
-            | ExprCarrier::MetadataExpression(_) => out.push(expr),
-        }
-    }
-    let mut out = Vec::new();
-    for expr in exprs {
-        push(expr, &mut out);
-    }
-    out
-}
-
-fn top_level_def_bodies(exprs: &[Expr]) -> BTreeMap<String, &Expr> {
-    let mut defs = BTreeMap::new();
-    for expr in flattened_top_level(exprs) {
-        match expr.carrier() {
-            ExprCarrier::DecodedNode(DeepTag::Def, _, children) if children.len() >= 2 => {
-                if let Some(name) = symbol_name(&children[0]) {
-                    defs.insert(name.to_string(), &children[1]);
-                }
-            }
-            ExprCarrier::DecodedNode(_, _, _)
-            | ExprCarrier::StructuralList(_)
-            | ExprCarrier::UndecodableHead(_, _, _)
-            | ExprCarrier::Atom(_)
-            | ExprCarrier::MetadataMap(_)
-            | ExprCarrier::MetadataExpression(_) => {}
-        }
-    }
-    defs
-}
-
-/// A top-level function, or an alias whose body names another value: an
-/// alias carries the latent effects of what it names, a builtin included
-/// ([04-INF-9]), and an alias of plain data names nothing latent.
-fn top_level_callable_names(bodies: &BTreeMap<String, &Expr>) -> BTreeSet<String> {
-    bodies
-        .iter()
-        .filter(|(_, body)| matches!(body.tag(), Some(DeepTag::Fn | DeepTag::Var)))
-        .map(|(name, _)| name.clone())
-        .collect()
-}
-
-fn infer_expr_effects(
-    expr: &Expr,
-    top_level_effects: &BTreeMap<String, EffectSet>,
-    top_level_callables: &BTreeSet<String>,
-    locals: &mut Locals,
-) -> EffectSet {
-    record_effect_work(|profile| profile.infer_expr_visits += 1);
-    match expr.carrier() {
-        ExprCarrier::Atom(_) | ExprCarrier::MetadataMap(_) => EffectSet::new(),
-        ExprCarrier::MetadataExpression(meta) => {
-            infer_expr_effects(&meta.expr, top_level_effects, top_level_callables, locals)
-        }
-        ExprCarrier::DecodedNode(tag, metadata, children) => {
-            let handled_effect = (tag == DeepTag::HandleEffect)
-                .then(|| decode_effect_kind(metadata).ok())
-                .flatten();
-            infer_tagged_effects(
-                tag,
-                children,
-                handled_effect,
-                top_level_effects,
-                top_level_callables,
-                locals,
-            )
-        }
-        ExprCarrier::StructuralList(children) | ExprCarrier::UndecodableHead(_, _, children) => {
-            infer_children_effects(children, top_level_effects, top_level_callables, locals)
-        }
-    }
-}
-
-fn infer_children_effects(
-    children: &[Expr],
-    top_level_effects: &BTreeMap<String, EffectSet>,
-    top_level_callables: &BTreeSet<String>,
-    locals: &mut Locals,
-) -> EffectSet {
-    children
-        .iter()
-        .map(|child| infer_expr_effects(child, top_level_effects, top_level_callables, locals))
-        .fold(EffectSet::new(), |mut accumulated, effects| {
-            accumulated.extend(&effects);
-            accumulated
-        })
-}
-
-fn infer_tagged_effects(
-    tag: DeepTag,
-    kids: &[Expr],
-    handled_effect: Option<EffectKind>,
-    top_level_effects: &BTreeMap<String, EffectSet>,
-    top_level_callables: &BTreeSet<String>,
-    locals: &mut Locals,
-) -> EffectSet {
-    match tag {
-        DeepTag::Var => kids
-            .first()
-            .and_then(symbol_name)
-            .and_then(|name| {
-                locals.get(name).cloned().or_else(|| {
-                    top_level_callables
-                        .contains(name)
-                        .then(|| top_level_effects.get(name).cloned())
-                        .flatten()
-                        // [04-INF-9]: a builtin named as a value performs
-                        // its call's effect, as a lambda calling it would.
-                        .or_else(|| {
-                            chelis_types::builtin_call_effect(name).map(|effect| {
-                                let mut effects = EffectSet::new();
-                                effects.insert(effect);
-                                effects
-                            })
-                        })
-                })
-            })
-            .unwrap_or_default(),
-        DeepTag::App => infer_app_effects(kids, top_level_effects, top_level_callables, locals),
-        DeepTag::Fn => locals.scope(|scope| {
-            bind_lexical_names(tag, kids, scope);
-            kids.get(1)
-                .map(|body| infer_expr_effects(body, top_level_effects, top_level_callables, scope))
-                .unwrap_or_default()
-        }),
-        DeepTag::Arm => locals.scope(|scope| {
-            bind_lexical_names(tag, kids, scope);
-            infer_children_effects(kids, top_level_effects, top_level_callables, scope)
-        }),
-        DeepTag::Let => infer_let_effects(kids, top_level_effects, top_level_callables, locals),
-        DeepTag::Grad | DeepTag::Vmap => kids
-            .first()
-            .map(|child| infer_expr_effects(child, top_level_effects, top_level_callables, locals))
-            .unwrap_or_default(),
-        DeepTag::HandleEffect => infer_handle_effects(
-            kids,
-            handled_effect,
-            top_level_effects,
-            top_level_callables,
-            locals,
-        ),
-        _ => infer_children_effects(kids, top_level_effects, top_level_callables, locals),
-    }
-}
-
-/// The local names in scope where the walk is, each with the latent effects
-/// of the value it binds. A binder's names last for one
-/// [`ScopedMap::scope`], so entering a binder copies nothing, and a chain of
-/// `k` nested `let`s costs `k` rather than `k` squared (chelis#3740).
-type Locals = ScopedMap<String, EffectSet>;
-
-/// Bind, in the scope `locals` has open, the names this node binds for its
-/// children: a function's parameters and a match arm's pattern variables.
-/// The names come from the type checker's own binder reading, so a lexical
-/// binder that reuses a builtin's name is the binder here exactly as it is
-/// there, and the builtin's call effect does not apply to it ([04-INF-9]).
-fn bind_lexical_names(tag: DeepTag, kids: &[Expr], locals: &mut Locals) {
-    let names = match (tag, kids.first()) {
-        (DeepTag::Fn, Some(params)) => chelis_types::lexical_param_names(params),
-        (DeepTag::Arm, Some(pattern)) => chelis_types::lexical_pattern_names(pattern),
-        _ => Vec::new(),
-    };
-    for name in names {
-        locals.insert(name, EffectSet::new());
-    }
-}
-
-/// The names a `let` binding target binds: a plain name, or a destructuring
-/// pattern's variables.
-fn bind_target_names(target: &Expr) -> Vec<String> {
-    match symbol_name(target) {
-        Some(name) => vec![name.to_string()],
-        None => chelis_types::lexical_pattern_names(target),
-    }
-}
-
-fn infer_app_effects(
-    kids: &[Expr],
-    top_level_effects: &BTreeMap<String, EffectSet>,
-    top_level_callables: &BTreeSet<String>,
-    locals: &mut Locals,
-) -> EffectSet {
-    let mut effects = EffectSet::new();
-    for kid in kids {
-        effects.extend(&infer_expr_effects(
-            kid,
-            top_level_effects,
-            top_level_callables,
-            locals,
-        ));
-    }
-
-    effects
-}
-
-fn infer_let_effects(
-    kids: &[Expr],
-    top_level_effects: &BTreeMap<String, EffectSet>,
-    top_level_callables: &BTreeSet<String>,
-    locals: &mut Locals,
-) -> EffectSet {
-    if kids.len() < 2 {
-        return EffectSet::new();
-    }
-
-    locals.scope(|local_scope| {
-        let mut effects = EffectSet::new();
-
-        match kids[0].carrier() {
-            ExprCarrier::DecodedNode(DeepTag::Bind, _, bind_kids) => {
-                let mut i = 0;
-                while i + 1 < bind_kids.len() {
-                    let value = &bind_kids[i + 1];
-                    let value_effects = infer_expr_effects(
-                        value,
-                        top_level_effects,
-                        top_level_callables,
-                        local_scope,
-                    );
-                    effects.extend(&value_effects);
-                    let binding_effects = if value.tag() == Some(DeepTag::Fn) {
-                        value_effects
-                    } else {
-                        EffectSet::new()
-                    };
-                    for name in bind_target_names(&bind_kids[i]) {
-                        local_scope.insert(name, binding_effects.clone());
-                    }
-                    i += 2;
-                }
-            }
-            ExprCarrier::DecodedNode(_, _, _)
-            | ExprCarrier::StructuralList(_)
-            | ExprCarrier::UndecodableHead(_, _, _)
-            | ExprCarrier::Atom(_)
-            | ExprCarrier::MetadataMap(_)
-            | ExprCarrier::MetadataExpression(_) => {
-                effects.extend(&infer_expr_effects(
-                    &kids[0],
-                    top_level_effects,
-                    top_level_callables,
-                    local_scope,
-                ));
-            }
-        }
-
-        effects.extend(&infer_expr_effects(
-            &kids[1],
-            top_level_effects,
-            top_level_callables,
-            local_scope,
-        ));
-        effects
-    })
-}
-
-fn infer_handle_effects(
-    kids: &[Expr],
-    handled_effect: Option<EffectKind>,
-    top_level_effects: &BTreeMap<String, EffectSet>,
-    top_level_callables: &BTreeSet<String>,
-    locals: &mut Locals,
-) -> EffectSet {
-    if kids.len() != 2 {
-        return infer_children_effects(kids, top_level_effects, top_level_callables, locals);
-    }
-    let mut effects = infer_expr_effects(&kids[0], top_level_effects, top_level_callables, locals);
-    let body_effects = infer_expr_effects(&kids[1], top_level_effects, top_level_callables, locals);
-    match handled_effect {
-        // A `resource` region places its body; it handles no inferred effect.
-        Some(EffectKind::Resource) => {}
-        // Validation reports the structural decode error. Inference leaves the
-        // body's effects unhandled instead of substituting a known kind.
-        None => {}
-    }
-    effects.extend(&body_effects);
-    effects
-}
-
-fn annotate_effects(
-    expr: &Expr,
-    top_level_effects: &BTreeMap<String, EffectSet>,
-    top_level_callables: &BTreeSet<String>,
-    locals: &mut Locals,
-) -> Expr {
-    record_effect_work(|profile| profile.annotation_expr_visits += 1);
-    match expr {
-        Expr::Atom(_, _) => expr.clone(),
-        Expr::Map(map, span) => Expr::Map(
-            map.map_expressions(&mut |value, _| {
-                annotate_effects(value, top_level_effects, top_level_callables, locals)
-            })
-            .expect("effect annotation preserves metadata payloads"),
-            *span,
-        ),
-        Expr::MetaExpr(meta, span) => Expr::MetaExpr(
-            chelis_deep::MetaExpr {
-                expr: Box::new(annotate_effects(
-                    &meta.expr,
-                    top_level_effects,
-                    top_level_callables,
-                    locals,
-                )),
-                metadata: meta
-                    .metadata
-                    .map_expressions(&mut |value, _| {
-                        annotate_effects(value, top_level_effects, top_level_callables, locals)
-                    })
-                    .expect("effect annotation preserves metadata payloads"),
-            },
-            *span,
-        ),
-        Expr::Node(node, span) => {
-            let annotated_children = locals.scope(|scope| {
-                if node.tag() == DeepTag::Let && node.children_slice().len() >= 2 {
-                    annotate_let_children(
-                        node.children_slice(),
-                        top_level_effects,
-                        top_level_callables,
-                        scope,
-                    )
-                } else {
-                    bind_lexical_names(node.tag(), node.children_slice(), scope);
-                    node.children_slice()
-                        .iter()
-                        .map(|child| {
-                            annotate_effects(child, top_level_effects, top_level_callables, scope)
-                        })
-                        .collect()
-                }
-            });
-            let mut meta = node
-                .meta()
-                .map_expressions(&mut |value, _| {
-                    annotate_effects(value, top_level_effects, top_level_callables, locals)
-                })
-                .expect("effect annotation preserves metadata payloads");
-            if node.tag() == DeepTag::Fn {
-                let effects =
-                    infer_expr_effects(expr, top_level_effects, top_level_callables, locals);
-                if !effects.is_empty() {
-                    record_effect_work(|profile| profile.metadata_rewrites += 1);
-                    meta.replace(MetadataValue::Effects(effect_set_metadata(&effects)));
-                }
-            }
-            Expr::node(node.tag(), meta, annotated_children, *span)
-        }
-        Expr::BareList(elements, span) => Expr::BareList(
-            elements
-                .iter()
-                .map(|child| {
-                    annotate_effects(child, top_level_effects, top_level_callables, locals)
-                })
-                .collect(),
-            *span,
-        ),
-        Expr::UnknownForm(data) => Expr::UnknownForm(Box::new(chelis_deep::UnknownFormData {
-            head: data.head.clone(),
-            meta: data
-                .meta
-                .map_expressions(&mut |value, _| {
-                    annotate_effects(value, top_level_effects, top_level_callables, locals)
-                })
-                .expect("effect annotation preserves metadata payloads"),
-            children: data
-                .children
-                .iter()
-                .map(|child| {
-                    annotate_effects(child, top_level_effects, top_level_callables, locals)
-                })
-                .collect(),
-            span: data.span,
-        })),
-    }
-}
-
-fn annotate_let_children(
-    kids: &[Expr],
-    top_level_effects: &BTreeMap<String, EffectSet>,
-    top_level_callables: &BTreeSet<String>,
-    local_scope: &mut Locals,
-) -> Vec<Expr> {
-    let bind_kids = match kids[0].carrier() {
-        ExprCarrier::DecodedNode(DeepTag::Bind, _, children) => children,
-        ExprCarrier::DecodedNode(_, _, _)
-        | ExprCarrier::StructuralList(_)
-        | ExprCarrier::UndecodableHead(_, _, _)
-        | ExprCarrier::Atom(_)
-        | ExprCarrier::MetadataMap(_)
-        | ExprCarrier::MetadataExpression(_) => {
-            return vec![
-                annotate_effects(
-                    &kids[0],
-                    top_level_effects,
-                    top_level_callables,
-                    local_scope,
-                ),
-                annotate_effects(
-                    &kids[1],
-                    top_level_effects,
-                    top_level_callables,
-                    local_scope,
-                ),
-            ];
-        }
-    };
-
-    let mut annotated_bind_kids = Vec::with_capacity(bind_kids.len());
-    let mut index = 0;
-    while index + 1 < bind_kids.len() {
-        annotated_bind_kids.push(bind_kids[index].clone());
-        let value = &bind_kids[index + 1];
-        annotated_bind_kids.push(annotate_effects(
-            value,
-            top_level_effects,
-            top_level_callables,
-            local_scope,
-        ));
-        let value_effects =
-            infer_expr_effects(value, top_level_effects, top_level_callables, local_scope);
-        let binding_effects = if value.tag() == Some(DeepTag::Fn) {
-            value_effects
-        } else {
-            EffectSet::new()
-        };
-        for name in bind_target_names(&bind_kids[index]) {
-            local_scope.insert(name, binding_effects.clone());
-        }
-        index += 2;
-    }
-    annotated_bind_kids.extend(bind_kids[index..].iter().cloned());
-
-    let annotated_bind = match &kids[0] {
-        Expr::Node(bind_node, span) => Expr::node(
-            bind_node.tag(),
-            bind_node.meta().clone(),
-            annotated_bind_kids,
-            *span,
-        ),
-        _ => unreachable!("a decoded Bind carrier is an Expr::Node"),
-    };
-
-    vec![
-        annotated_bind,
-        annotate_effects(
-            &kids[1],
-            top_level_effects,
-            top_level_callables,
-            local_scope,
-        ),
-    ]
-}
-
-fn validate_handlers(exprs: &[Expr], errors: &mut Vec<EffectError>) {
-    for expr in exprs {
-        validate_handler_expr(expr, errors);
-    }
-}
-
-fn validate_handler_expr(expr: &Expr, errors: &mut Vec<EffectError>) {
-    match expr.carrier() {
-        ExprCarrier::DecodedNode(tag, metadata, children) => {
-            if tag == DeepTag::HandleEffect {
-                validate_handler_kind(decode_effect_kind(metadata), children, errors);
-            }
-            metadata.visit_expressions(&mut |value, _| validate_handler_expr(value, errors));
-            for kid in children {
-                validate_handler_expr(kid, errors);
-            }
-        }
-        ExprCarrier::MetadataMap(map) => {
-            map.visit_expressions(&mut |value, _| validate_handler_expr(value, errors));
-        }
-        ExprCarrier::MetadataExpression(meta) => {
-            validate_handler_expr(&meta.expr, errors);
-            meta.metadata
-                .visit_expressions(&mut |value, _| validate_handler_expr(value, errors));
-        }
-        ExprCarrier::Atom(_) => {}
-        ExprCarrier::StructuralList(children) => {
-            for child in children {
-                validate_handler_expr(child, errors);
-            }
-        }
-        ExprCarrier::UndecodableHead(_, _, children) => {
-            for child in children {
-                validate_handler_expr(child, errors);
-            }
-        }
-    }
-}
-
-fn validate_handler_kind(
-    effect_kind: Result<EffectKind, EffectKindDecodeError<'_>>,
-    kids: &[Expr],
-    errors: &mut Vec<EffectError>,
-) {
-    if kids.len() != 2 {
-        errors.push(EffectError {
-            kind: EffectErrorKind::InvalidHandler,
-            message: format!(
-                "`handle-effect` requires exactly two children (handler payload and body), got {}",
-                kids.len()
-            ),
-            suggestions: vec!["Use `(handle-effect {effect: ...} <handler> <body>)`".to_string()],
-        });
-        return;
-    }
-
-    match effect_kind {
-        Ok(EffectKind::Resource) if kids.first().and_then(string_literal).is_none() => {
-            errors.push(EffectError {
-                kind: EffectErrorKind::InvalidHandler,
-                message: "with device(...) currently requires a string literal device".to_string(),
-                suggestions: vec![
-                    "Use `with device(\"gpu:0\") { ... }` with an explicit device literal"
-                        .to_string(),
-                ],
-            });
-        }
-        Ok(EffectKind::Resource) => {}
-        Err(error) => errors.push(EffectError {
-            kind: EffectErrorKind::InvalidHandler,
-            message: format!("{error} in `handle-effect`"),
-            suggestions: vec![
-                "Use the closed effect kind `resource`; randomness has no handler, \
-                 a random primitive takes an explicit key"
-                    .to_string(),
-            ],
-        }),
-    }
-}
-
-/// Extract the effect set declared on a
-/// `(defsig name [(binders...)] t-fn-with-eff-meta)` expression.
-/// Returns `None` when there is no explicit effect annotation (i.e., inference-only mode).
-fn declared_effects_from_defsig(expr: &Expr) -> Option<EffectSet> {
-    // The type is last in both canonical defsig forms.
-    let kids = match expr.carrier() {
-        ExprCarrier::DecodedNode(DeepTag::Defsig, _, children) => children,
-        ExprCarrier::DecodedNode(_, _, _)
-        | ExprCarrier::StructuralList(_)
-        | ExprCarrier::UndecodableHead(_, _, _)
-        | ExprCarrier::Atom(_)
-        | ExprCarrier::MetadataMap(_)
-        | ExprCarrier::MetadataExpression(_) => return None,
-    };
-    let t_fn = kids.last()?;
-    let meta = match t_fn.carrier() {
-        ExprCarrier::DecodedNode(DeepTag::TFn, metadata, _) => metadata,
-        ExprCarrier::DecodedNode(_, _, _)
-        | ExprCarrier::StructuralList(_)
-        | ExprCarrier::UndecodableHead(_, _, _)
-        | ExprCarrier::Atom(_)
-        | ExprCarrier::MetadataMap(_)
-        | ExprCarrier::MetadataExpression(_) => return None,
-    };
-    let effects = meta.eff()?;
-    let mut declared = EffectSet::new();
-    for member in effects.values() {
-        match member {
-            EffectMember::Name(name) => match name.value().as_str() {
-                "accum" => declared.insert(Effect::Accum),
-                "io" => declared.insert(Effect::Io),
-                "test" => declared.insert(Effect::Test),
-                // Diff is tracked separately from the inferred effect row.
-                _ => {}
-            },
-            EffectMember::Resource(resource) => {
-                declared.insert(Effect::Resource(resource.name().value().clone()))
-            }
-        }
-    }
-    Some(declared)
-}
-
-/// Reject `def f` whose inferred effects exceed the effects declared on its `defsig`.
-///
-/// This enforces the contract that effect annotations are upper bounds: a function
-/// signed `! {}` (or `! { IO }`) cannot silently acquire additional effects such as
-/// `Test` via a call to `test_assert_*`.
-fn validate_declared_vs_inferred(
-    exprs: &[Expr],
-    effects_by_def: &BTreeMap<String, EffectSet>,
-    errors: &mut Vec<EffectError>,
-) {
-    let mut declared_by_name: BTreeMap<String, EffectSet> = BTreeMap::new();
-    for expr in flattened_top_level(exprs) {
-        match expr.carrier() {
-            ExprCarrier::DecodedNode(DeepTag::Defsig, _, children) => {
-                let Some(name) = children.first().and_then(symbol_name) else {
-                    continue;
-                };
-                if let Some(declared) = declared_effects_from_defsig(expr) {
-                    declared_by_name.insert(name.to_string(), declared);
-                }
-            }
-            ExprCarrier::DecodedNode(_, _, _)
-            | ExprCarrier::StructuralList(_)
-            | ExprCarrier::UndecodableHead(_, _, _)
-            | ExprCarrier::Atom(_)
-            | ExprCarrier::MetadataMap(_)
-            | ExprCarrier::MetadataExpression(_) => {}
-        }
-    }
-
-    for (name, declared) in &declared_by_name {
-        let inferred = match effects_by_def.get(name) {
-            Some(inferred) => inferred,
-            None => continue,
-        };
-        // Find effects inferred but not declared.
-        let missing: Vec<Effect> = inferred
-            .iter()
-            .filter(|effect| !declared.contains(effect))
-            .cloned()
-            .collect();
-        if missing.is_empty() {
-            continue;
-        }
-        let declared_str = if declared.is_empty() {
-            "{}".to_string()
-        } else {
-            declared.to_string()
-        };
-        let missing_str = missing
-            .iter()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>()
-            .join(", ");
-        errors.push(EffectError {
-            kind: EffectErrorKind::UnhandledEffect,
-            message: format!(
-                "Function `{name}` is declared with effects `{declared_str}` but its body performs effects `{{{missing_str}}}` that were not declared"
-            ),
-            suggestions: vec![format!(
-                "Either add the missing effect(s) to the signature of `{name}` (e.g. `! {{ {missing_str} }}`) or refactor the body so it does not perform them."
-            )],
-        });
     }
 }
 
@@ -1124,76 +313,6 @@ fn validate_build_target_handler(
 /// because it lacks a known prefix.
 fn is_c_host_device_designator(device: &str) -> bool {
     device == "cpu"
-}
-
-/// Convert semantic effects to their dedicated AST annotation payload.
-fn effect_set_metadata(effects: &EffectSet) -> AstEffectSet {
-    let values = effects
-        .iter()
-        .map(|effect| match effect {
-            Effect::Accum => EffectMember::Name(Spanned::new("accum".into(), zero_span())),
-            Effect::Io => EffectMember::Name(Spanned::new("io".into(), zero_span())),
-            Effect::Test => EffectMember::Name(Spanned::new("test".into(), zero_span())),
-            Effect::Resource(device) => EffectMember::Resource(
-                ResourceEffect::new(
-                    Spanned::new(device.clone(), zero_span()),
-                    Metadata::default(),
-                    zero_span(),
-                )
-                .expect("resource effect annotations"),
-            ),
-        })
-        .collect();
-    AstEffectSet::new(Metadata::default(), values, zero_span())
-}
-
-#[cfg(test)]
-fn var_name(expr: &Expr) -> Option<&str> {
-    match expr.carrier() {
-        ExprCarrier::DecodedNode(DeepTag::Var, _, children) => {
-            children.first().and_then(symbol_name)
-        }
-        ExprCarrier::DecodedNode(_, _, _)
-        | ExprCarrier::StructuralList(_)
-        | ExprCarrier::UndecodableHead(_, _, _)
-        | ExprCarrier::Atom(_)
-        | ExprCarrier::MetadataMap(_)
-        | ExprCarrier::MetadataExpression(_) => None,
-    }
-}
-
-fn symbol_name(expr: &Expr) -> Option<&str> {
-    match expr {
-        Expr::Atom(Atom::Name(name), _) => Some(name.as_str()),
-        _ => None,
-    }
-}
-
-fn string_literal(expr: &Expr) -> Option<&str> {
-    match expr.carrier() {
-        ExprCarrier::Atom(Atom::Str(value)) => Some(value.as_str()),
-        ExprCarrier::DecodedNode(DeepTag::Lit, _, children) => {
-            children.first().and_then(|child| match child.carrier() {
-                ExprCarrier::Atom(Atom::Str(value)) => Some(value.as_str()),
-                ExprCarrier::DecodedNode(_, _, _)
-                | ExprCarrier::StructuralList(_)
-                | ExprCarrier::UndecodableHead(_, _, _)
-                | ExprCarrier::Atom(_)
-                | ExprCarrier::MetadataMap(_)
-                | ExprCarrier::MetadataExpression(_) => None,
-            })
-        }
-        ExprCarrier::DecodedNode(_, _, _)
-        | ExprCarrier::StructuralList(_)
-        | ExprCarrier::UndecodableHead(_, _, _)
-        | ExprCarrier::Atom(_)
-        | ExprCarrier::MetadataMap(_)
-        | ExprCarrier::MetadataExpression(_) => None,
-    }
-}
-
-fn zero_span() -> Span {
-    Span::new(0, 0)
 }
 
 #[cfg(test)]
@@ -1327,6 +446,45 @@ mod tests {
     }
 
     #[test]
+    fn core_success_cannot_hide_checked_reconstruction_failure() {
+        let original = checked("(def {} answer (lit {type: (t-prim {} i32)} 1))");
+        let other = checked("(def {} answer (lit {type: (t-prim {} i32)} 2))");
+        let annotations = chelis_effects_core::analyze_effects(other.annotated_exprs(), None)
+            .expect("portable analysis accepts the other program");
+        let errors = reconstruct_effect_annotations(&original, annotations)
+            .expect_err("portable success cannot authorize another program");
+        assert!(!errors.is_empty());
+        assert!(
+            errors
+                .iter()
+                .all(|error| error.kind == EffectErrorKind::TypeTotality)
+        );
+    }
+
+    #[test]
+    fn effect_annotation_reconstruction_preserves_checked_local_owners() {
+        let source = "def run(flag: bool, x: tensor[*, f64]) -> tensor[*, bool] = {\n f = if flag then is_nan else is_finite\n g: &tensor[2, f64] -> tensor[*, bool] = copy(f)\n g(x)\n}\n";
+        let decls =
+            parse_surf(source, &chelis_syntax_host::NativeStack).expect("Surf fixture parses");
+        let deep = desugar_program(&decls, &chelis_syntax_host::NativeStack)
+            .expect("Surf fixture desugars");
+        let typed = chelis_types::check_ir_program(&deep).expect("fixture type checks");
+        assert_eq!(
+            typed.local_ascriptions().len(),
+            1,
+            "fixture requires a real checked owner"
+        );
+        let reconstructed =
+            check_program(&typed).expect("effect annotations preserve owner authority");
+        assert_eq!(reconstructed.local_ascriptions(), typed.local_ascriptions());
+        assert_eq!(reconstructed.type_env(), typed.type_env());
+        assert_eq!(
+            reconstructed.signature_inference(),
+            typed.signature_inference()
+        );
+    }
+
+    #[test]
     fn stamped_effect_annotation_preserves_the_checked_node_carrier() {
         let deep = chelis_deep::parse_and_stamp(
             "(def {} answer (fn {} (params {}) (lit {} 1)))",
@@ -1372,102 +530,6 @@ mod tests {
         );
     }
 
-    fn effect_error_messages(errors: Vec<EffectError>) -> Vec<String> {
-        errors
-            .into_iter()
-            .map(|error| format!("{:?}: {}", error.kind, error.message))
-            .collect()
-    }
-
-    #[test]
-    fn effects_reader_classes_read_a_recursive_stamped_program() {
-        let successor = chelis_deep::parse_and_stamp_file(
-            r#"(module {} Test
-             (defsig {} entry
-               (t-fn {eff: (effects {})} (t-prim {} unit)))
-             (def {} entry
-               (fn {}
-                 (params {})
-                 (let {}
-                   (bind {} local
-                     (fn {}
-                       (params {})
-                       (app {} (var {} debug) (lit {} 1))))
-                   (app {} (var {} local))))))"#,
-            &chelis_syntax_host::NativeStack,
-        )
-        .expect("recursive effects fixture stamps");
-
-        let successor_bodies = top_level_def_bodies(&successor);
-        assert_eq!(successor_bodies.keys().collect::<Vec<_>>(), ["entry"]);
-
-        let (successor_effects, successor_callables) = infer_program_effects(&successor);
-        assert!(
-            successor_effects
-                .get("entry")
-                .is_some_and(|effects| effects.contains(&Effect::Io))
-        );
-
-        let mut successor_errors = Vec::new();
-        validate_declared_vs_inferred(&successor, &successor_effects, &mut successor_errors);
-        assert!(
-            effect_error_messages(successor_errors)
-                .iter()
-                .any(|message| message.contains("`entry`")),
-            "the declared-pure `entry` must be rejected for its local closure's IO"
-        );
-
-        let successor_annotated = successor
-            .iter()
-            .map(|expr| {
-                annotate_effects(
-                    expr,
-                    &successor_effects,
-                    &successor_callables,
-                    &mut Locals::new(),
-                )
-            })
-            .collect::<Vec<_>>();
-        assert!(
-            chelis_deep::printer::print_canonical(&successor_annotated).contains("eff"),
-            "the annotated closure carries its inferred effect row"
-        );
-    }
-
-    #[test]
-    fn guarded_var_and_literal_readers_read_decoded_nodes() {
-        let span = Span::new(0, 0);
-        let successor_var = Expr::node(
-            DeepTag::Var,
-            Metadata::default(),
-            vec![Expr::Atom(Atom::Name("value".into()), span)],
-            span,
-        );
-        let successor_lit = Expr::node(
-            DeepTag::Lit,
-            Metadata::default(),
-            vec![Expr::Atom(Atom::Str("gpu:0".into()), span)],
-            span,
-        );
-        assert_eq!(var_name(&successor_var), Some("value"));
-        assert_eq!(string_literal(&successor_lit), Some("gpu:0"));
-
-        let wrong_tag = Expr::node(
-            DeepTag::Var,
-            Metadata::default(),
-            vec![Expr::Atom(Atom::Str("gpu:0".into()), span)],
-            span,
-        );
-        assert_eq!(string_literal(&wrong_tag), None);
-        assert_eq!(
-            var_name(&Expr::BareList(
-                vec![Expr::Atom(Atom::Name("value".into()), span)],
-                span,
-            )),
-            None
-        );
-    }
-
     #[test]
     fn undecodable_head_metadata_is_not_traversed_by_handler_validation() {
         fn stamped_def_body(source: &str) -> Expr {
@@ -1503,8 +565,10 @@ mod tests {
                  (lit {} 1)))",
         );
         let invalid_metadata = expression_metadata(invalid_resource);
-        let mut unknown_errors = Vec::new();
-        validate_handler_expr(&unknown_form(invalid_metadata, span), &mut unknown_errors);
+        let unknown_errors =
+            chelis_effects_core::analyze_effects(&[unknown_form(invalid_metadata, span)], None)
+                .err()
+                .unwrap_or_default();
         assert!(
             unknown_errors.is_empty(),
             "UnknownForm metadata was not traversed before the carrier migration: {unknown_errors:?}"
@@ -1527,161 +591,6 @@ mod tests {
             unknown_target_errors.is_empty(),
             "UnknownForm metadata was not traversed by target validation before migration: \
              {unknown_target_errors:?}"
-        );
-    }
-
-    #[test]
-    fn let_effect_reader_traverses_every_non_bind_slot_carrier() {
-        let span = Span::new(0, 0);
-        let name = |value: &str| Expr::Atom(Atom::Name(value.into()), span);
-        let io_expr = || {
-            Expr::node(
-                DeepTag::App,
-                Metadata::default(),
-                vec![
-                    Expr::node(DeepTag::Var, Metadata::default(), vec![name("debug")], span),
-                    Expr::node(
-                        DeepTag::Lit,
-                        Metadata::default(),
-                        vec![Expr::Atom(Atom::Int(1), span)],
-                        span,
-                    ),
-                ],
-                span,
-            )
-        };
-        let pure_expr = || {
-            Expr::node(
-                DeepTag::Lit,
-                Metadata::default(),
-                vec![Expr::Atom(Atom::Int(0), span)],
-                span,
-            )
-        };
-
-        let carrier_cases = |child: Expr| {
-            [
-                ("structural-list", Expr::BareList(vec![child.clone()], span)),
-                (
-                    "undecodable-head",
-                    Expr::UnknownForm(Box::new(chelis_deep::UnknownFormData {
-                        head: "future-bind".into(),
-                        meta: Metadata::default(),
-                        children: vec![child.clone()],
-                        span,
-                    })),
-                ),
-                (
-                    "metadata-expression",
-                    Expr::MetaExpr(
-                        chelis_deep::MetaExpr {
-                            metadata: Metadata::default(),
-                            expr: Box::new(child.clone()),
-                        },
-                        span,
-                    ),
-                ),
-                (
-                    "decoded-non-bind",
-                    Expr::node(DeepTag::Tuple, Metadata::default(), vec![child], span),
-                ),
-            ]
-        };
-        let effectful_cases = carrier_cases(io_expr());
-        assert!(matches!(
-            effectful_cases[0].1.carrier(),
-            ExprCarrier::StructuralList(_)
-        ));
-        assert!(matches!(
-            effectful_cases[1].1.carrier(),
-            ExprCarrier::UndecodableHead(..)
-        ));
-        assert!(matches!(
-            effectful_cases[2].1.carrier(),
-            ExprCarrier::MetadataExpression(_)
-        ));
-        assert!(matches!(
-            effectful_cases[3].1.carrier(),
-            ExprCarrier::DecodedNode(DeepTag::Tuple, ..)
-        ));
-
-        let hidden = effectful_cases
-            .iter()
-            .filter_map(|(label, bind_slot)| {
-                let effects = infer_let_effects(
-                    &[bind_slot.clone(), pure_expr()],
-                    &BTreeMap::new(),
-                    &BTreeSet::new(),
-                    &mut Locals::new(),
-                );
-                (!effects.contains(&Effect::Io)).then_some(*label)
-            })
-            .collect::<Vec<_>>();
-        assert!(
-            hidden.is_empty(),
-            "bind-slot carriers hide effectful content: {hidden:?}"
-        );
-
-        let pure_cases = carrier_cases(pure_expr());
-        let invented = pure_cases
-            .iter()
-            .filter_map(|(label, bind_slot)| {
-                let effects = infer_let_effects(
-                    &[bind_slot.clone(), pure_expr()],
-                    &BTreeMap::new(),
-                    &BTreeSet::new(),
-                    &mut Locals::new(),
-                );
-                effects.contains(&Effect::Io).then_some(*label)
-            })
-            .collect::<Vec<_>>();
-        assert!(
-            invented.is_empty(),
-            "bind-slot carrier traversal invents effects: {invented:?}"
-        );
-    }
-
-    #[test]
-    fn declared_effect_reader_reads_a_decoded_defsig() {
-        let mut parsed = chelis_deep::parse_and_stamp(
-            "(defsig {} entry \
-           (t-fn {eff: (effects {} accum io)} \
-             (t-prim {} i32) \
-             (t-prim {} i32)))",
-            &chelis_syntax_host::NativeStack,
-        )
-        .expect("canonical defsig fixture stamps");
-        let successor = parsed.remove(0);
-
-        let successor_effects =
-            declared_effects_from_defsig(&successor).expect("successor declaration");
-        assert!(successor_effects.contains(&Effect::Accum));
-        assert!(successor_effects.contains(&Effect::Io));
-    }
-
-    #[test]
-    fn declared_effect_reader_declines_nondecoded_carriers() {
-        let span = Span::new(0, 0);
-        for expr in [
-            Expr::BareList(vec![], span),
-            Expr::UnknownForm(Box::new(chelis_deep::UnknownFormData {
-                head: "future-defsig".into(),
-                meta: Metadata::default(),
-                children: vec![],
-                span,
-            })),
-        ] {
-            assert_eq!(declared_effects_from_defsig(&expr), None);
-        }
-    }
-
-    #[test]
-    fn declared_effect_reader_has_no_local_optional_carrier_adapter() {
-        let source = include_str!("lib.rs");
-        let definition = ["fn stamped_", "parts"].concat();
-        assert!(
-            !source.contains(&definition),
-            "E5b requires declared-effect reads to disposition ExprCarrier directly"
         );
     }
 
@@ -1748,27 +657,6 @@ mod tests {
                 .message
                 .contains("requires a string literal device"),
             "{errors:?}"
-        );
-    }
-
-    #[test]
-    fn keyed_dropout_introduces_no_effect() {
-        // [05-RNG-1]: a draw is a pure function of its key, so a keyed
-        // `dropout` carries an empty effect row (the `Random` effect was
-        // retired with the counter stream, #2413).
-        let exprs = parse_str(
-            "(def {} x (lit {type: (t-tensor {} (d-lit {} 8) (t-prim {} f32))} 0))
-         (def {} y (app {} (var {} dropout)
-           (app {} (var {} key_from_seed) (lit {type: (t-prim {} i64)} 7))
-           (var {} x) (lit {type: (t-prim {} f32)} 0.5)))",
-            &chelis_syntax_host::NativeStack,
-        )
-        .unwrap();
-        let (inferred, _) = infer_program_effects(&exprs);
-        assert!(
-            inferred.get("y").is_some_and(|effects| effects.is_empty()),
-            "keyed dropout must infer an empty effect row, got {:?}",
-            inferred.get("y")
         );
     }
 
@@ -1945,7 +833,7 @@ xs: List[i64] = [cast(1, i64), cast(2, i64)]
 ys = map(emit, xs)
 "#,
         );
-        let (inferred, _) = infer_program_effects(program.annotated_exprs());
+        let inferred = infer_effect_rows(program.annotated_exprs(), None);
         assert!(
             inferred
                 .get("ys")
@@ -1963,7 +851,7 @@ xs: List[i64] = [cast(1, i64), cast(2, i64)]
 total = fold(fn (acc: i64, x: i64) -> debug(add(acc, x)), cast(0, i64), xs)
 "#,
         );
-        let (inferred, _) = infer_program_effects(program.annotated_exprs());
+        let inferred = infer_effect_rows(program.annotated_exprs(), None);
         assert!(
             inferred
                 .get("total")
@@ -1981,7 +869,7 @@ xs: List[i64] = [cast(1, i64), cast(2, i64)]
 totals = scan(fn (acc: i64, x: i64) -> debug(add(acc, x)), cast(0, i64), xs)
 "#,
         );
-        let (inferred, _) = infer_program_effects(program.annotated_exprs());
+        let inferred = infer_effect_rows(program.annotated_exprs(), None);
         assert!(
             inferred
                 .get("totals")
@@ -2000,7 +888,7 @@ xs: List[i64] = [cast(1, i64), cast(2, i64)]
 buckets = partition(keep, xs)
 "#,
         );
-        let (inferred, _) = infer_program_effects(program.annotated_exprs());
+        let inferred = infer_effect_rows(program.annotated_exprs(), None);
         assert!(
             inferred
                 .get("buckets")
@@ -2018,7 +906,7 @@ xs: List[i64] = [cast(1, i64), cast(2, i64)]
 ys = flat_map(fn (x: i64) -> debug([x, add(x, cast(10, i64))]), xs)
 "#,
         );
-        let (inferred, _) = infer_program_effects(program.annotated_exprs());
+        let inferred = infer_effect_rows(program.annotated_exprs(), None);
         assert!(
             inferred
                 .get("ys")
@@ -2048,7 +936,7 @@ def via_lambda(path: string) -> string = {
 }
 "#,
         );
-        let (inferred, _) = infer_program_effects(program.annotated_exprs());
+        let inferred = infer_effect_rows(program.annotated_exprs(), None);
         for (name, effect) in [
             ("reader", Effect::Io),
             ("caller", Effect::Io),
@@ -2083,9 +971,9 @@ def via_lambda(path: string) -> string = {
                 continue;
             }
             let program = surf_checked(&format!("alias = {}\n", decl.name));
-            let (inferred, _) = infer_program_effects(program.annotated_exprs());
+            let inferred = infer_effect_rows(program.annotated_exprs(), None);
             let mut expected = EffectSet::new();
-            if let Some(effect) = chelis_types::builtin_call_effect(decl.name) {
+            if let Some(effect) = chelis_effects_core::builtin_call_effect(decl.name) {
                 expected.insert(effect);
             }
             assert_eq!(
@@ -2134,7 +1022,7 @@ def outside(p: string) -> string = {
 }
 "#,
         );
-        let (inferred, _) = infer_program_effects(program.annotated_exprs());
+        let inferred = infer_effect_rows(program.annotated_exprs(), None);
         for name in [
             "param",
             "param_call",
@@ -2171,7 +1059,7 @@ digest = mmap_sha256(mapped, cast(0, i64), cast(4, i64))
 contents = read_file("dataset.txt")
 "#,
         );
-        let (inferred, _) = infer_program_effects(program.annotated_exprs());
+        let inferred = infer_effect_rows(program.annotated_exprs(), None);
         // [05-OP-80] and [05-OP-81]: the reads of an open mapping are pure.
         for root in ["weights", "text", "digest"] {
             assert!(
@@ -2221,7 +1109,7 @@ result = process_run("echo", ["hi"])
 pure_value = add(cast(1, i64), cast(2, i64))
 "#,
         );
-        let (inferred, _) = infer_program_effects(program.annotated_exprs());
+        let inferred = infer_effect_rows(program.annotated_exprs(), None);
         assert!(
             inferred
                 .get("result")
@@ -2249,7 +1137,7 @@ mono = clock_monotonic_read()
 pure_value = add(1i64, 2i64)
 "#,
         );
-        let (inferred, _) = infer_program_effects(program.annotated_exprs());
+        let inferred = infer_effect_rows(program.annotated_exprs(), None);
         for root in ["wall", "mono"] {
             assert!(
                 inferred
@@ -2317,7 +1205,7 @@ pure_value = add(1i64, 2i64)
 def my_check() -> unit = test_assert(true, "ok")
 "#,
         );
-        let (inferred, _) = infer_program_effects(program.annotated_exprs());
+        let inferred = infer_effect_rows(program.annotated_exprs(), None);
         assert!(
             inferred
                 .get("my_check")
@@ -2340,7 +1228,7 @@ def close() -> unit =
   )
 "#,
         );
-        let (inferred, _) = infer_program_effects(program.annotated_exprs());
+        let inferred = infer_effect_rows(program.annotated_exprs(), None);
         assert!(
             inferred
                 .get("close")
@@ -2358,7 +1246,7 @@ def inner() -> unit = test_assert(true, "inner")
 def outer() -> unit = inner()
 "#,
         );
-        let (inferred, _) = infer_program_effects(program.annotated_exprs());
+        let inferred = infer_effect_rows(program.annotated_exprs(), None);
         assert!(
             inferred
                 .get("outer")
@@ -2378,7 +1266,7 @@ def sealed() -> unit =
   with device("cpu") { test_assert(true, "inside-handler") }
 "#,
         );
-        let (inferred, _) = infer_program_effects(program.annotated_exprs());
+        let inferred = infer_effect_rows(program.annotated_exprs(), None);
         assert!(
             inferred
                 .get("sealed")
@@ -2545,90 +1433,5 @@ def entry(path: string) -> string ! { IO } = read_file(path)
 "#,
         );
         check_program(&checked).expect("honest IO module-wrapped program must check clean");
-    }
-}
-
-#[cfg(test)]
-mod decode_once_producer_tests {
-    use super::*;
-
-    #[test]
-    fn synthesized_effects_preserve_typed_members_and_decoded_wire_tags() {
-        let mut effects = EffectSet::new();
-        effects.insert(Effect::Accum);
-        effects.insert(Effect::Io);
-        effects.insert(Effect::Resource("gpu0".into()));
-        let metadata = Metadata::from(MetadataValue::Effects(effect_set_metadata(&effects)));
-        let mut payload = None;
-        metadata.visit_syntax(&mut |_, value| payload = Some(value.clone()));
-        let expr = payload.unwrap();
-        assert_eq!(
-            chelis_deep::validate::find_raw_vocabulary_tag(std::slice::from_ref(&expr)),
-            None
-        );
-        assert_eq!(expr.tag(), Some(DeepTag::Effects));
-        let Expr::Node(node, _) = &expr else {
-            panic!("structural effects node")
-        };
-        let resource = node
-            .children_slice()
-            .iter()
-            .find(|child| child.tag() == Some(DeepTag::Resource))
-            .unwrap();
-        assert_eq!(resource.tag(), Some(DeepTag::Resource));
-    }
-
-    #[test]
-    fn effect_names_are_payload_not_vocabulary_tags() {
-        let mut effects = EffectSet::new();
-        effects.insert(Effect::Accum);
-        let payload = effect_set_metadata(&effects);
-        assert!(matches!(payload.values(), [EffectMember::Name(name)] if name.value() == "accum"));
-    }
-
-    #[test]
-    fn effect_annotation_reaches_registered_expressions_and_preserves_data() {
-        let source = "(def {property_seed: (fn {} (params {}) (app {} (var {} debug) (lit {} 1))), custom: (fn {} (params {}) (app {} (var {} debug) (lit {} 1))), source: (original (fn {} (params {}) (app {} (var {} debug) (lit {} 1))))} f (lit {} 1))";
-        let parsed =
-            chelis_deep::parser::parse_str(source, &chelis_syntax_host::NativeStack).unwrap();
-        let Expr::Node(node, _) = &parsed[0] else {
-            panic!("stamped declaration")
-        };
-        let unknown = Expr::UnknownForm(Box::new(chelis_deep::UnknownFormData {
-            head: "custom".into(),
-            meta: node.meta().clone(),
-            children: vec![],
-            span: parsed[0].span(),
-        }));
-        for original in [parsed[0].clone(), unknown] {
-            let rewritten = annotate_effects(
-                &original,
-                &BTreeMap::new(),
-                &BTreeSet::new(),
-                &mut Locals::new(),
-            );
-            let metadata = match &rewritten {
-                Expr::Node(node, _) => node.meta(),
-                Expr::UnknownForm(data) => &data.meta,
-                _ => unreachable!(),
-            };
-            assert_eq!(metadata.extensions(), node.meta().extensions());
-            let closure = metadata.property_seed().unwrap().expression();
-            let Expr::Node(closure, _) = closure else {
-                panic!("closure")
-            };
-            assert!(
-                closure
-                    .meta()
-                    .values()
-                    .any(|v| matches!(v, MetadataValue::Effects(_))),
-                "registered expression closure needs inferred effects"
-            );
-            assert_eq!(
-                metadata.source(),
-                node.meta().source(),
-                "preserved source is data"
-            );
-        }
     }
 }

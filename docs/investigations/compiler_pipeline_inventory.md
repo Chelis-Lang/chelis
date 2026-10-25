@@ -52,6 +52,10 @@ The CLI check paths ran inference twice. They called `check_ir_fitness` and `che
 `chelis_compiler_api::pipeline` owns source preparation, dynamic goal selection, cancellation, host policy, and backend policy.
 
 Adapters retain presentation and policy. The CLI retains style checks, Reef preparation, JSON, exit codes, target selection, and backend emission.
+`chelis-effects-core` owns pure effect inference, annotation, handler validation, and declared-row checks over borrowed Deep expressions.
+`chelis-effects` retains checked reconstruction, occurrence identity, type-totality rejection, target admission, realizability, and root policy.
+The compiler API, CLI, and pipeline import shared effect errors and rows directly from the portable core.
+
 
 Shared Deep verification consumers retain typed parser ingress. One complete transitional bridge supplies their list-based dispatch.
 
@@ -95,7 +99,7 @@ The guard classifies direct lower-stage calls. It treats core transition calls a
 
 `chelis-pipeline-core` is below `chelis-compiler-api` and `chelis-reef` in the dependency graph.
 
-The core depends directly on `chelis-deep`, `chelis-types`, `chelis-effects`, `chelis-ir`, `chelis-dag-core`, and `chelis-unord`.
+The core depends directly on `chelis-deep`, `chelis-types`, `chelis-effects`, `chelis-effects-core`, `chelis-ir`, `chelis-dag-core`, and `chelis-unord`.
 Its dependency guard checks the manifest and resolved graph.
 The approved graph includes `chelis-type-core` below the host checker and effects layer.
 Host-service exclusions remain active.

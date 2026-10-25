@@ -6,6 +6,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+chelis-effects-core.workspace = true
 chelis-type-core = { workspace = true, default-features = false, features = ["serde"] }
 chelis-numeric-core = { workspace = true, default-features = false, features = ["alloc", "serde"] }
 chelis-unord.workspace = true
@@ -14,6 +15,7 @@ chelis-types.workspace = true
 chelis-vocab.workspace = true
 
 [dev-dependencies]
+chelis-effects-core = { workspace = true, features = ["test-instrumentation"] }
 chelis-syntax-host.workspace = true
 chelis-macros.workspace = true
 chelis-surf.workspace = true

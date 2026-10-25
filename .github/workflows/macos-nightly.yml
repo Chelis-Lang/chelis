@@ -158,6 +158,10 @@ jobs:
       - name: Create uv-managed venv + wire libpython rpath
         run: python3 scripts/ci_setup_uv_python.py
 
+      - name: Install effect oracle policy dependency
+        if: matrix.shard == 1
+        run: uv pip install --python "$PYO3_PYTHON" PyYAML==6.0.3
+
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2
         with:
@@ -202,9 +206,9 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-      # These two configurations previously depended on a mandatory local
-      # gate. Linux Clippy cannot lint target_os=macos code. Run each once
-      # on shard 1; the existing macOS Smoke aggregate requires its success.
+      # Linux Clippy cannot lint target_os=macos code. Run the workspace and
+      # isolated effect configurations once on shard 1.
+      # The macOS Smoke aggregate needs their success.
       - name: Clippy macOS default features
         if: matrix.shard == 1
         run: cargo clippy --workspace --all-targets -- -D warnings
@@ -212,6 +216,18 @@ jobs:
       - name: Clippy macOS solver-free features
         if: matrix.shard == 1
         run: cargo clippy --workspace --all-targets --features chelis-cli/ownership-ledger,chelis-compiler-api/compilation-trace,chelis-compiler-api/ownership-ledger,chelis-e2e/hip-local-gpu,chelis-ir/lowering-trace,chelis-numeric-core/alloc,chelis-numeric-core/serde,chelis-prove/clarabel,chelis-python/extension-module,chelis-runtime/ownership-ledger,chelis-types/checkpoint-compile-probe,chelis-types/generalize-sweep-oracle -- -D warnings
+
+      - name: Clippy effect core default features
+        if: matrix.shard == 1
+        run: cargo clippy -p chelis-effects-core --all-targets -- -D warnings
+
+      - name: Clippy effect core without default features
+        if: matrix.shard == 1
+        run: cargo clippy -p chelis-effects-core --all-targets --no-default-features -- -D warnings
+
+      - name: Clippy effect core Serde
+        if: matrix.shard == 1
+        run: cargo clippy -p chelis-effects-core --all-targets --no-default-features --features serde -- -D warnings
 
       - name: Version core portability
         if: matrix.shard == 1
@@ -236,6 +252,19 @@ jobs:
       - name: Type unification core portability
         if: matrix.shard == 1
         run: .venv/bin/python scripts/type_unification_core_oracle.py
+
+      - name: Effect analysis core portability
+        if: matrix.shard == 1
+        run: uv run --managed-python --python 3.11 --no-project python scripts/effect_analysis_core_oracle.py
+
+      - name: Upload effect analysis core evidence
+        if: always() && matrix.shard == 1
+        uses: actions/upload-artifact@v7
+        with:
+          name: effect-analysis-core-darwin
+          path: target/agents/effect-analysis-core/
+          if-no-files-found: error
+          retention-days: 14
 
       - name: Verify packaged binary architecture
         if: matrix.shard == 2

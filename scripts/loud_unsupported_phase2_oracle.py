@@ -1,19 +1,15 @@
 #!/usr/bin/env python3
-"""Authoritative Phase 2 oracle for the loud-unsupported contract.
+"""Check the Phase 2 loud-unsupported contract.
 
-This is intentionally one runner rather than a prose conjunction. It executes
-the focused vocabulary/runtime/host-state/ABI/emission/public-API surfaces,
-the two privacy compile-fail doctests, a structural endpoint scan, and a
-controlled vocabulary mutation that adds one fully-decodable variant to BOTH
-closed vocabularies (``EffectKind`` and ``RuntimeDType``) in a single
-workspace check, requiring non-exhaustive compile errors at each vocabulary's
-independent consumers, plus a controlled ``HostAbiType`` mutation (the
-backend's crate-private typed ABI vocabulary, section C6.3) that must go red
-at the ABI owner's and the emitter's exhaustive matches. The endpoint scan rejects the former Unit and
-raw-generic-field escape hatches in addition to the legacy host-type and
-expression-emission endpoints. The mutation touches only the vocabulary
-owner, refuses to run over a dirty owner file, and restores the original bytes
-in a ``finally`` block.
+The runner checks vocabulary, runtime, host states, ABI, emission, and public APIs.
+Compiler checks supply the controlled mutation evidence.
+The vocabulary probe first requires numeric dtype admission to reject the added variant.
+A temporary numeric arm then exposes independent effect and runtime consumers.
+Both source owners restore their original bytes.
+
+The separate ABI probe requires exhaustive owner and emitter matches.
+The endpoint scan rejects legacy host-type, expression-emission, Unit, and raw-field paths.
+The oracle refuses mutations when either source owner is dirty.
 """
 
 from __future__ import annotations
@@ -30,6 +26,7 @@ from contextlib import contextmanager
 REPO_ROOT = Path(__file__).resolve().parents[1]
 VOCAB_SOURCE = Path("crates/chelis-vocab/src/lib.rs")
 HOST_ABI_SOURCE = Path("crates/chelis-backend-c/src/host_abi.rs")
+NUMERIC_PRIM_SOURCE = Path("crates/chelis-numeric-core/src/prim.rs")
 
 FOCUSED_COMMANDS: tuple[tuple[str, ...], ...] = (
     ("cargo", "nextest", "run", "-p", "chelis-vocab"),
@@ -238,6 +235,23 @@ def temporary_vocab_mutation(path: Path) -> Iterator[None]:
             raise OracleFailure(f"failed to restore controlled mutation: {path}")
 
 
+@contextmanager
+def temporary_numeric_dtype_admission(path: Path) -> Iterator[None]:
+    original = path.read_bytes()
+    anchor = "            RuntimeDType::Key => Prim::Key,\n"
+    admitted = anchor + "            RuntimeDType::Phase2OracleDType => Prim::F32,\n"
+    mutated = apply_anchored_replacements(
+        original.decode("utf-8"), ((anchor, admitted),), "numeric dtype admission"
+    )
+    try:
+        path.write_bytes(mutated.encode("utf-8"))
+        yield
+    finally:
+        path.write_bytes(original)
+        if path.read_bytes() != original:
+            raise OracleFailure(f"failed to restore controlled mutation: {path}")
+
+
 def mutate_host_abi_type(source: str) -> str:
     """Add one ABI variant so every exhaustive HostAbiType consumer goes red.
 
@@ -273,9 +287,9 @@ def temporary_host_abi_mutation(path: Path) -> Iterator[None]:
             raise OracleFailure(f"failed to restore controlled mutation: {path}")
 
 
-def assert_vocab_source_clean(env: dict[str, str]) -> None:
+def assert_vocab_sources_clean(env: dict[str, str]) -> None:
     completed = subprocess.run(
-        ("git", "status", "--porcelain", "--", str(VOCAB_SOURCE)),
+        ("git", "status", "--porcelain", "--", str(VOCAB_SOURCE), str(NUMERIC_PRIM_SOURCE)),
         cwd=REPO_ROOT,
         env=env,
         check=False,
@@ -287,49 +301,61 @@ def assert_vocab_source_clean(env: dict[str, str]) -> None:
         raise OracleFailure(f"could not inspect vocabulary source: {completed.stderr}")
     if completed.stdout.strip():
         raise OracleFailure(
-            "controlled mutation requires a clean vocabulary owner; commit or "
-            f"stash changes to {VOCAB_SOURCE}"
+            "controlled mutation requires clean vocabulary and numeric owners. "
+            f"Commit or stash changes to {VOCAB_SOURCE} and {NUMERIC_PRIM_SOURCE}"
+        )
+
+
+def validate_vocab_mutation_output(returncode: int, output: str) -> None:
+    if returncode == 0:
+        raise OracleFailure("added closed-vocabulary variants compiled successfully")
+    required_evidence = (
+        "non-exhaustive patterns",
+        # EffectKind consumers compile independently below host adapters.
+        "crates/chelis-surf/src/resugar.rs",
+        "crates/chelis-types/src/infer/expr.rs",
+        "crates/chelis-effects-core/src/lib.rs",
+        # Runtime FFI dtype dispatch must also reject an unknown variant.
+        "crates/chelis-runtime/src/lib.rs",
+    )
+    missing = [needle for needle in required_evidence if needle not in output]
+    if missing:
+        tail = "\n".join(output.splitlines()[-80:])
+        raise OracleFailure(
+            "vocabulary mutation failed without the required exhaustive "
+            f"consumer evidence {missing}:\n{tail}"
         )
 
 
 def run_vocab_mutation(env: dict[str, str]) -> None:
-    assert_vocab_source_clean(env)
+    assert_vocab_sources_clean(env)
     source_path = REPO_ROOT / VOCAB_SOURCE
+    numeric_path = REPO_ROOT / NUMERIC_PRIM_SOURCE
+    numeric_command = ("cargo", "check", "-p", "chelis-numeric-core", "--lib")
     command = ("cargo", "check", "--workspace", "--all-targets", "--keep-going")
     print(
         f"+ controlled EffectKind + RuntimeDType mutation: {command_text(command)}",
         flush=True,
     )
     with temporary_vocab_mutation(source_path):
+        print(f"+ numeric dtype admission mutation: {command_text(numeric_command)}", flush=True)
         completed = subprocess.run(
-            command,
-            cwd=REPO_ROOT,
-            env=env,
-            check=False,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
+            numeric_command, cwd=REPO_ROOT, env=env, check=False,
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         )
-        output = completed.stdout
-        if completed.returncode == 0:
-            raise OracleFailure("added closed-vocabulary variants compiled successfully")
-        required_evidence = (
-            "non-exhaustive patterns",
-            # EffectKind: the two independently-checkable consumer roots.
-            "crates/chelis-surf/src/resugar.rs",
-            "crates/chelis-types/src/infer/expr.rs",
-            # RuntimeDType: every runtime FFI dtype boundary matches
-            # exhaustively; an added dtype must go red there before any
-            # sizing, allocation, or element-access decision exists for it.
-            "crates/chelis-runtime/src/lib.rs",
-        )
-        missing = [needle for needle in required_evidence if needle not in output]
-        if missing:
-            tail = "\n".join(output.splitlines()[-80:])
-            raise OracleFailure(
-                "vocabulary mutation failed without the required exhaustive "
-                f"consumer evidence {missing}:\n{tail}"
+        print(f"  numeric dtype admission exit: {completed.returncode}", flush=True)
+        print(completed.stdout, end="", flush=True)
+        required = ("E0004", str(NUMERIC_PRIM_SOURCE), "RuntimeDType::Phase2OracleDType")
+        if completed.returncode == 0 or any(needle not in completed.stdout for needle in required):
+            raise OracleFailure("numeric dtype admission did not reject the added variant")
+        with temporary_numeric_dtype_admission(numeric_path):
+            completed = subprocess.run(
+                command, cwd=REPO_ROOT, env=env, check=False,
+                text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             )
+            print(f"  dependent vocabulary consumer exit: {completed.returncode}", flush=True)
+            print(completed.stdout, end="", flush=True)
+            validate_vocab_mutation_output(completed.returncode, completed.stdout)
     print("  mutation produced the expected downstream compile failures", flush=True)
 
 
@@ -378,6 +404,8 @@ def run_host_abi_mutation(env: dict[str, str]) -> None:
             stderr=subprocess.STDOUT,
         )
         output = completed.stdout
+        print(f"  ABI consumer mutation exit: {completed.returncode}", flush=True)
+        print(output, end="", flush=True)
         if completed.returncode == 0:
             raise OracleFailure("an added HostAbiType variant compiled successfully")
         required_evidence = (

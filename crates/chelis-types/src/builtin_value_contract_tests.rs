@@ -9,10 +9,9 @@
 //! after the call and the call is repeated, so consumption and borrowing are
 //! compared; each scalar operand is also spelled as a literal, a negative
 //! literal and a `let`-bound literal, so a rule that reads a static operand's
-//! value is compared, and the verdict is the type checker's and the linearity pass's
-//! together. Effects are charged from one table for both routes
-//! (`builtin_call_effect`; chelis-effects locks that per builtin). Two
-//! properties follow:
+//! value is compared. Type and linearity checks determine the result.
+//! Effects use the `chelis-effects-core` builtin table for both routes.
+//! The host effect tests verify each builtin. Two properties follow:
 //!
 //! - an admitted builtin agrees with its direct call on every witness, so a
 //!   value never checks a program its direct call refuses, or the reverse;

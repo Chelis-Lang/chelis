@@ -1675,6 +1675,64 @@ class SchemaTests(unittest.TestCase):
             ],
         )
 
+    def test_effect_oracle_sources_route_to_exact_automated_owners(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        config = owned.read_config(root / ".config/ci-test-targets.toml")
+        fixtures = sorted(
+            path.relative_to(root).as_posix()
+            for path in (root / "scripts/fixtures/effect_analysis_core").rglob("*")
+            if path.is_file()
+        )
+        self.assertTrue(fixtures)
+        for path in (
+            "scripts/effect_analysis_core_oracle.py",
+            "scripts/test_effect_analysis_core_oracle.py",
+            *fixtures,
+        ):
+            with self.subTest(path=path):
+                classification, packages, rules = owned.static_path_classification(
+                    path, (), config,
+                )
+                self.assertEqual(classification, "rule")
+                self.assertEqual(packages, [])
+                self.assertEqual(len(rules), 1)
+                rule = rules[0]
+                self.assertEqual(rule.prefix, path)
+                self.assertEqual(rule.disposition, "owner")
+                self.assertIsNotNone(rule.owner)
+                expected = (
+                    ("ci.yml", "script-unit")
+                    if path == "scripts/test_effect_analysis_core_oracle.py"
+                    else ("heavy-e2e.yml", "integration-support")
+                )
+                self.assertEqual((rule.owner.workflow, rule.owner.job), expected)
+        neighbors = [
+            "scripts/effect_analysis_core_oracle_extra.py",
+            "scripts/test_effect_analysis_core_oracle_extra.py",
+            "scripts/fixtures/effect_analysis_core/unowned.rs",
+            "scripts/fixtures/effect_analysis_core/nested/unowned.json",
+        ]
+        self.assertEqual(
+            owned.classify_changed_paths(neighbors, config=config, packages=()),
+            [(path, "unclassified") for path in sorted(neighbors)],
+        )
+
+    def test_effect_core_receives_shared_configuration_changes(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        config = owned.read_config(root / ".config/ci-test-targets.toml")
+        for path in (
+            ".cargo/config.toml", "Cargo.toml", "Cargo.lock",
+            "rust-toolchain.toml", ".config/nextest.toml",
+        ):
+            with self.subTest(path=path):
+                classification, _, rules = owned.static_path_classification(
+                    path, (), config,
+                )
+                self.assertEqual(classification, "rule")
+                self.assertEqual(len(rules), 1)
+                self.assertEqual(rules[0].disposition, "packages")
+                self.assertIn("chelis-effects-core", rules[0].packages)
+
     def test_configuration_closure_scripts_have_exact_script_unit_owners(self) -> None:
         root = Path(__file__).resolve().parents[1]
         config = owned.read_config(root / ".config/ci-test-targets.toml")

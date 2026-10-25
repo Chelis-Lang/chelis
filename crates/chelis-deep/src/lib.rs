@@ -30,6 +30,7 @@ pub mod effect_kind;
 mod extension_data;
 pub use extension_data::ExtensionData;
 pub mod lexer;
+mod lexical;
 pub mod literal_source;
 pub mod metadata;
 pub mod migration;
@@ -56,6 +57,9 @@ pub use dtype_bounds::{
 };
 pub use effect_kind::decode_effect_kind;
 pub use lexer::LiteralSuffix;
+pub use lexical::{
+    lexical_param_name_and_type, lexical_param_names, lexical_pattern_names, string_literal,
+};
 pub use literal_source::{
     BinderLiteralUse, LiteralFamilyFit, LiteralSource, classify_literal_source,
     exact_type_variable_name, visit_binder_literal_uses,

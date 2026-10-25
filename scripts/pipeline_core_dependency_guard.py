@@ -17,7 +17,10 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 CORE_PACKAGE = "chelis-pipeline-core"
 CORE_MANIFEST = REPO_ROOT / "crates" / CORE_PACKAGE / "Cargo.toml"
 APPROVED_DIRECT_DEPENDENCIES = frozenset(
-    {"chelis-deep", "chelis-types", "chelis-effects", "chelis-ir", "chelis-unord", "chelis-dag-core"}
+    {
+        "chelis-deep", "chelis-types", "chelis-effects", "chelis-effects-core",
+        "chelis-ir", "chelis-unord", "chelis-dag-core",
+    }
 )
 # chelis-abi is the leaf checked-metadata authority (it depends only on
 # chelis-vocab). chelis-ir's DAG evaluator admits each result's extents through
@@ -25,6 +28,7 @@ APPROVED_DIRECT_DEPENDENCIES = frozenset(
 # chelis-numeric-core owns the portable dtype kernels. Those kernels call
 # chelis-crmath for correctly rounded transcendentals (chelis#2957).
 # chelis-type-core owns portable type models and unification.
+# chelis-effects-core owns portable effect data and analysis.
 # These crates stay below host services.
 APPROVED_WORKSPACE_CLOSURE = frozenset(
     {

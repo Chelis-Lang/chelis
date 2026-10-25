@@ -593,6 +593,7 @@ dependencies = [
  "chelis-dag-core",
  "chelis-deep",
  "chelis-effects",
+ "chelis-effects-core",
  "chelis-ir",
  "chelis-lint",
  "chelis-lsp",
@@ -648,6 +649,7 @@ dependencies = [
  "chelis-dag-core",
  "chelis-deep",
  "chelis-effects",
+ "chelis-effects-core",
  "chelis-image-id",
  "chelis-ir",
  "chelis-macros",
@@ -776,12 +778,24 @@ name = "chelis-effects"
 version = "0.22.1"
 dependencies = [
  "chelis-deep",
+ "chelis-effects-core",
  "chelis-macros",
  "chelis-numeric-core",
  "chelis-surf",
  "chelis-syntax-host",
  "chelis-type-core",
  "chelis-types",
+ "chelis-unord",
+ "chelis-vocab",
+]
+
+[[package]]
+name = "chelis-effects-core"
+version = "0.22.1"
+dependencies = [
+ "chelis-deep",
+ "chelis-syntax-host",
+ "chelis-type-core",
  "chelis-unord",
  "chelis-vocab",
 ]
@@ -889,6 +903,7 @@ dependencies = [
  "chelis-dag-core",
  "chelis-deep",
  "chelis-effects",
+ "chelis-effects-core",
  "chelis-ir",
  "chelis-numeric-core",
  "chelis-syntax-host",

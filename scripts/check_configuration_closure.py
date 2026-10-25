@@ -59,10 +59,9 @@ class ClippyRun:
     label: str
     command: tuple[str, ...]
     owner: str
-    #: Hosts covered at the registered cadence. The gate owns the canonical
-    #: per-pull-request commands; CI's `lint-and-unit` job runs all four on
-    #: Linux, and `macos-workspace-shard` runs default and solver-free Clippy
-    #: on macOS nightly. `no-default-features` has Linux coverage only.
+    #: The gate owns the canonical Linux per-pull-request commands.
+    #: macOS nightly runs default, solver-free, and isolated effect Clippy.
+    #: The workspace no-default-features command has Linux coverage only.
     #: `scripts/test_check_configuration_closure.py` checks the macOS command
     #: pairing; `scripts/test_hosted_validation.py` guards its nightly
     #: routing. Optional `--validation` execution is supporting evidence.
@@ -223,6 +222,37 @@ CLIPPY_MATRIX: tuple[ClippyRun, ...] = (
         cadence=PER_PULL_REQUEST,
     ),
     ClippyRun(
+        label="effect-default-features",
+        command=(
+            "cargo", "clippy", "-p", "chelis-effects-core",
+            "--all-targets", "--", "-D", "warnings",
+        ),
+        owner="scripts/gate.py",
+        hosts=("linux",),
+        cadence=PER_PULL_REQUEST,
+    ),
+    ClippyRun(
+        label="effect-without-default-features",
+        command=(
+            "cargo", "clippy", "-p", "chelis-effects-core",
+            "--all-targets", "--no-default-features", "--", "-D", "warnings",
+        ),
+        owner="scripts/gate.py",
+        hosts=("linux",),
+        cadence=PER_PULL_REQUEST,
+    ),
+    ClippyRun(
+        label="effect-serde",
+        command=(
+            "cargo", "clippy", "-p", "chelis-effects-core",
+            "--all-targets", "--no-default-features", "--features", "serde",
+            "--", "-D", "warnings",
+        ),
+        owner="scripts/gate.py",
+        hosts=("linux",),
+        cadence=PER_PULL_REQUEST,
+    ),
+    ClippyRun(
         label="clarabel-provider",
         command=(
             "cargo", "clippy", "--workspace", "--all-targets", "--features",
@@ -249,8 +279,8 @@ CLIPPY_MATRIX: tuple[ClippyRun, ...] = (
         cadence=NIGHTLY,
     ),
 )
-# The same configurations cover target_os=macos at a daily cadence. Separate
-# rows prevent Linux PR execution from being reported as Mac PR coverage.
+# macOS nightly also runs default, solver-free, and isolated effect states.
+# Separate rows retain the exact platform and cadence of each command.
 CLIPPY_MATRIX += tuple(
     replace(
         run,
@@ -266,7 +296,10 @@ CLIPPY_MATRIX += tuple(
         cadence=NIGHTLY,
     )
     for run in CLIPPY_MATRIX
-    if run.label in {"default-features", "solver-free-features"}
+    if run.label in {
+        "default-features", "solver-free-features",
+        "effect-default-features", "effect-without-default-features", "effect-serde",
+    }
 )
 
 
@@ -344,6 +377,17 @@ UNCOMPILED_EXCEPTIONS: tuple[UncompiledException, ...] = (
         reason="standalone host parity consumer compiled by the portable type oracle",
         owning_gate="scripts/type_unification_core_oracle.py",
         sources=("scripts/fixtures/type_unification_core/host.rs",),
+    ),
+    UncompiledException(
+        directory="scripts/fixtures/effect_analysis_core",
+        reason="standalone effect consumers compiled by the complete effect oracle",
+        owning_gate="scripts/effect_analysis_core_oracle.py",
+        sources=(
+            "scripts/fixtures/effect_analysis_core/core.rs",
+            "scripts/fixtures/effect_analysis_core/diagnostics.rs",
+            "scripts/fixtures/effect_analysis_core/host.rs",
+            "scripts/fixtures/effect_analysis_core/target.rs",
+        ),
     ),
     UncompiledException(
         directory="scripts/fixtures/capacity_graph",

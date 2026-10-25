@@ -2582,32 +2582,6 @@ pub fn builtin_decl(name: &str) -> Option<&'static BuiltinDecl> {
     BUILTINS.iter().find(|b| b.name == name)
 }
 
-/// The effect a call to this builtin performs, if any. The effect checker
-/// charges it at every call and wherever the builtin is named as a value, as
-/// it charges an anonymous function that calls it, so an alias cannot shed
-/// it. A random draw is a pure function of its key ([05-RNG-1]): `dropout`
-/// and `uniform_like` perform none.
-pub fn builtin_call_effect(name: &str) -> Option<Effect> {
-    match name {
-        "print"
-        | "debug"
-        | "read_file"
-        | "write_file"
-        | "read_lines"
-        | "read_bytes"
-        | "file_exists"
-        | "list_dir"
-        | "mmap_file"
-        | "process_run"
-        | "clock_wall_read"
-        | "clock_monotonic_read" => Some(Effect::Io),
-        "test_assert" | "test_assert_eq" | "test_assert_close_tensor" | "test_assert_eq_tensor" => {
-            Some(Effect::Test)
-        }
-        _ => None,
-    }
-}
-
 /// [04-INF-9]: a builtin is a function value exactly when its whole
 /// operation contract travels with the value. Either the reviewed
 /// declaration says the scheme states that contract completely

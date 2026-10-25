@@ -62,6 +62,7 @@ builds; [GPU backends](docs/gpu_backends.md) covers the HIP and Metal targets.
 | Source syntax and predicates | `chelis-surf`, `chelis-deep`, `chelis-pred`, `chelis-macros` |
 | Numeric values and policy | `chelis-numeric-core`, `chelis-crmath`, `chelis-vocab` |
 | Type models and unification | `chelis-type-core` |
+| Effect data and analysis | `chelis-effects-core` |
 | Semantic pipeline | `chelis-types`, `chelis-effects`, `chelis-pipeline-core`, `chelis-compiler-api` |
 | DAG models and graph transforms | `chelis-dag-core` |
 | Source lowering and evaluation | `chelis-ir` |
@@ -147,6 +148,28 @@ A reentrant interrupt must not enter a solver whose lock it preempts.
 Run `uv run --managed-python --python 3.11 --no-project python scripts/type_unification_core_oracle.py` from the repository root.
 The [acceptance gate](docs/manual_gates.md#type-unification-core-portability) separates immutable-source parity, host concurrency, and target compilation.
 No numbered language chapter transfers authority through this extraction.
+
+## Portable effect analysis
+
+`chelis-effects-core` uses unconditional `no_std`, explicit `alloc`, empty default features, and optional portable model serde.
+Its normal dependencies are portable syntax, type, collection, and vocabulary owners.
+It has no hosted checker, native stack, or DAG dependency.
+
+`infer_effect_rows` and `analyze_effects` borrow Deep expression slices and an optional library slice.
+Reporting returns rows only for definitions in the new input.
+Library inputs remain unchanged, and new definitions shadow library definitions.
+Analysis returns annotations or shared effect errors, not checked-program authority.
+
+`chelis-effects` retains checked occurrence identity, `try_with_effect_annotations`, type-totality rejection, target admission, realizability, and root policy.
+The compiler API, CLI, and pipeline import effect error and row data directly from the portable core.
+Deep owns the shared parameter, pattern, and string readers.
+The effect core owns the single builtin effect table.
+
+The caller supplies allocation and stack resources.
+Run `uv run --managed-python --python 3.11 --no-project python scripts/effect_analysis_core_oracle.py` from the repository root.
+The [acceptance gate](docs/manual_gates.md#effect-analysis-core-portability) separates immutable-source parity, host authority, full-host costs, and target compilation.
+The numbered specifications retain effect semantics, and the host compiler pipeline remains `std`-bound.
+
 
 ## Portable Reef bootstrap graph policy
 

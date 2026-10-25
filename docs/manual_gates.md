@@ -335,6 +335,46 @@ Target compilation proves neither device execution nor device allocation capacit
 The extraction does not make the hosted checker or compiler pipeline portable.
 The external approved `extract-type-unification-no-std-core` package remains design input, not a local planning tree.
 
+## Effect analysis core portability
+
+Run `uv run --managed-python --python 3.11 --no-project python scripts/effect_analysis_core_oracle.py` from the repository root.
+Use managed Python 3.11, `PyYAML==6.0.3`, the repository Rust toolchain, `thumbv7em-none-eabi`, `cargo-nextest`, `llvm-tools`, and the native compiler prerequisites.
+Run from a clean source commit.
+Linux and macOS must execute the same complete command at that exact head.
+
+The oracle compares actual host results against immutable source `949d8606bca101b825ea49b0df4719da99458e09`.
+The baseline retains rows, annotations, checked bytes, owners, contexts, ordered diagnostics, supplied severities, and compiler outcomes.
+Missing source, missing evidence, failed commands, unexpected compile success, and skipped mandatory tests fail acceptance.
+A shallow checkout needs access to the source repository for the immutable baseline.
+
+The command checks:
+
+- Isolated default, no-default, and serde Thumb graphs without target `std`, hosted inference, native stack, or DAG dependencies.
+- Independent analysis consumers and an explicit allocator-backed target consumer.
+- Imported and recursive calls, builtin values, aliases, callbacks, shadowed definitions, handlers, declared bounds, and malformed metadata.
+- Checked occurrence identity, checked reconstruction, type-totality rejection, target rejection before artifact production, prepared reuse, and optional row reporting.
+- Full-host memory at 256 and 512 bindings, a 2.5 growth limit, and the retained environment-copy negative control.
+- Nested and flat clone work at 20, 40, 80, and 160 operations, a 2.2 growth limit, and zero descendant clone work.
+- Moved test identities, unchanged timing values, dependency controls, source ownership, and policy failure controls.
+
+Evidence resides under `target/agents/effect-analysis-core/{linux,darwin}/run-*/`.
+It includes inventories, unique execution identities, raw logs, command exits, consumer locks, artifact sizes, and SHA-256 hashes.
+The source-wording carrier assertion retires explicitly, while all behavior and cost tests remain mandatory.
+
+The vocabulary control first checks numeric dtype admission for rejection of its added variant.
+A temporary control arm then exposes independent effect and runtime matches.
+The control restores both source owners and retains the compiler output.
+
+Linux integration support owns the command in its domain slice.
+macOS nightly validation owns it on workspace shard one.
+Default PR CI does not execute the complete command.
+
+The embedding supplies allocation and stack policy.
+Target compilation proves neither device execution nor stack or allocator capacity.
+The extraction does not make host inference, target policy, or the complete compiler pipeline portable.
+Existing metadata-admission and diagnostic-report limits remain unchanged.
+
+
 ## Compiler feature acceptance gates
 
 The incremental [eval-performance suite](eval_performance.md) runs its sparse
