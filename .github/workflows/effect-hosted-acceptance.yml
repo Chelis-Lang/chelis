@@ -1,0 +1,159 @@
+name: Effect exact-source acceptance
+on:
+  push:
+    branches: [verify/effect-core-acceptance-20261025]
+permissions:
+  contents: read
+jobs:
+  oracle:
+    name: Effect oracle (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-15]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 360
+    env:
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+      CARGO_INCREMENTAL: 0
+      CARGO_BUILD_JOBS: 1
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
+      UV_MANAGED_PYTHON: 1
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ba10f0b47b1a168cfc1a1deec13eea108f06a9da
+          fetch-depth: 0
+      - name: Install Linux prerequisites
+        if: runner.os == 'Linux'
+        run: sudo python3 scripts/ci_apt_get.py --no-sudo --github-hosted-ubuntu-mirrors gcc g++ clang llvm cmake m4 libclang-dev libopenblas-dev libgmp-dev libmpfr-dev libasan8 libubsan1
+      - name: Install macOS prerequisites
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = arm64
+          brew install llvm
+          echo "$(brew --prefix llvm)/bin" >> "$GITHUB_PATH"
+          echo "CC=$(brew --prefix llvm)/bin/clang" >> "$GITHUB_ENV"
+          echo "AR=$(brew --prefix llvm)/bin/llvm-ar" >> "$GITHUB_ENV"
+          echo "SDKROOT=$(xcrun --show-sdk-path)" >> "$GITHUB_ENV"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.98.0
+          targets: thumbv7em-none-eabi
+          components: clippy, rustc-dev, rustfmt, llvm-tools
+      - uses: astral-sh/setup-uv@v8.1.0
+      - name: Create uv-managed Python
+        run: python3 scripts/ci_setup_uv_python.py
+      - name: Install Python binding dependencies
+        run: uv pip install --python .venv/bin/python -r bindings/python/pyproject.toml
+      - name: Install oracle policy dependency
+        run: uv pip install --python .venv/bin/python PyYAML==6.0.3
+      - uses: taiki-e/install-action@nextest
+      - name: Record exact identities
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/effect-evidence"
+          test "$(git rev-parse HEAD)" = ba10f0b47b1a168cfc1a1deec13eea108f06a9da
+          .venv/bin/python - <<'PY'
+          import hashlib, json, os, pathlib, platform, subprocess, sys
+          value = {'source_sha': subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(), 'workflow_sha': os.environ['GITHUB_SHA'], 'run_id': os.environ['GITHUB_RUN_ID'], 'run_attempt': os.environ['GITHUB_RUN_ATTEMPT'], 'platform': platform.platform(), 'machine': platform.machine()}
+          value['script_sha256'] = {name: hashlib.sha256(pathlib.Path(name).read_bytes()).hexdigest() for name in ['scripts/effect_analysis_core_oracle.py', 'scripts/no_std_core_support.py', 'scripts/gate.py']}
+          value['initial_source_status'] = subprocess.check_output(['git', 'status', '--porcelain=v1'], text=True)
+          value['compiler_environment'] = {name: os.environ.get(name) for name in ['CC', 'AR', 'SDKROOT', 'CARGO_TARGET_DIR', 'CARGO_BUILD_JOBS']}
+          commands = {'rustc': ['rustc', '-vV'], 'cargo': ['cargo', '-V'], 'clippy': ['cargo', 'clippy', '--version'], 'rustfmt': ['rustfmt', '--version'], 'components': ['rustup', 'component', 'list', '--installed'], 'targets': ['rustup', 'target', 'list', '--installed'], 'cc': [os.environ.get('CC', 'cc'), '--version'], 'clang': ['clang', '--version'], 'llvm_ar': [os.environ.get('AR', 'llvm-ar'), '--version'], 'nextest': ['cargo', 'nextest', '--version'], 'uv': ['uv', '--version']}
+          llvm_tools = pathlib.Path(subprocess.check_output(['rustc', '--print', 'target-libdir'], text=True).strip()).parent / 'bin'
+          commands['compiler_llvm_ar'] = [str(llvm_tools / 'llvm-ar'), '--version']
+          if platform.system() == 'Darwin':
+              commands['sdkroot'] = ['xcrun', '--show-sdk-path']
+          value['compiler_identities'] = {}
+          for name, command in commands.items():
+              result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, check=False)
+              value['compiler_identities'][name] = {'command': command, 'exit_code': result.returncode, 'stdout': result.stdout}
+          value['python'] = {'executable': sys.executable, 'version': sys.version}
+          pathlib.Path(os.environ['RUNNER_TEMP'], 'effect-evidence', 'identity.json').write_text(json.dumps(value, indent=2))
+          print(json.dumps(value))
+          PY
+      - name: Execute the complete effect oracle
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set +e
+          set -o pipefail
+          uv run --managed-python --python 3.11 --no-project python scripts/effect_analysis_core_oracle.py 2>&1 | tee "$RUNNER_TEMP/effect-evidence/oracle.log"
+          code=${PIPESTATUS[0]}
+          printf '%s\n' "$code" > "$RUNNER_TEMP/effect-evidence/oracle-exit-code.txt"
+          exit "$code"
+      - name: Preserve complete effect artifacts
+        if: always()
+        shell: bash
+        run: |
+          .venv/bin/python - <<'PY'
+          import hashlib, json, os, pathlib, shutil
+          evidence = pathlib.Path(os.environ['RUNNER_TEMP'], 'effect-evidence')
+          evidence.mkdir(parents=True, exist_ok=True)
+          target = pathlib.Path('target').resolve()
+          source = target / 'agents/effect-analysis-core'
+          if source.exists():
+              shutil.copytree(source, evidence / 'effect-analysis-core', dirs_exist_ok=True)
+              for manifest in source.rglob('compiled-artifacts.json'):
+                  for name, expected in json.loads(manifest.read_text()).items():
+                      artifact = pathlib.Path(name).resolve()
+                      if not artifact.is_relative_to(target):
+                          raise SystemExit('compiled artifact is outside the target')
+                      data = artifact.read_bytes()
+                      if len(data) != expected['bytes'] or hashlib.sha256(data).hexdigest() != expected['sha256']:
+                          raise SystemExit('compiled artifact identity differs')
+                      destination = evidence / 'compiled-artifacts' / artifact.relative_to(target)
+                      destination.parent.mkdir(parents=True, exist_ok=True)
+                      shutil.copy2(artifact, destination)
+          PY
+      - name: Execute the complete fast gate
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set +e
+          set -o pipefail
+          .venv/bin/python scripts/gate.py --fast 2>&1 | tee "$RUNNER_TEMP/effect-evidence/gate.log"
+          code=${PIPESTATUS[0]}
+          printf '%s\n' "$code" > "$RUNNER_TEMP/effect-evidence/gate-exit-code.txt"
+          exit "$code"
+      - name: Retain complete evidence
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/effect-evidence"
+          git status --porcelain=v1 > "$RUNNER_TEMP/effect-evidence/final-source-status.txt"
+          git diff --binary > "$RUNNER_TEMP/effect-evidence/final-source.diff"
+          .venv/bin/python - <<'PY'
+          import hashlib, json, os, pathlib, shutil
+          evidence = pathlib.Path(os.environ['RUNNER_TEMP'], 'effect-evidence')
+          for name in ['gate-failures', 'gate-reports']:
+              source = pathlib.Path('target', name)
+              if source.exists():
+                  shutil.copytree(source, evidence / name, dirs_exist_ok=True)
+          target = pathlib.Path('target')
+          for source in target.glob('**/junit.xml'):
+              destination = evidence / 'receipts' / source.relative_to(target)
+              destination.parent.mkdir(parents=True, exist_ok=True)
+              shutil.copy2(source, destination)
+          results = {}
+          for name, filename in [('oracle', 'oracle-exit-code.txt'), ('fast_gate', 'gate-exit-code.txt')]:
+              path = evidence / filename
+              results[name] = {'exit_code': int(path.read_text()) if path.exists() else None, 'executed': path.exists(), 'required': True}
+          (evidence / 'command-results.json').write_text(json.dumps(results, indent=2))
+          manifest = [{'path': str(path.relative_to(evidence)), 'size_bytes': path.stat().st_size, 'sha256': hashlib.sha256(path.read_bytes()).hexdigest()} for path in sorted(evidence.rglob('*')) if path.is_file()]
+          (evidence / 'manifest.json').write_text(json.dumps(manifest, indent=2))
+          print(json.dumps(results))
+          PY
+      - name: Upload complete evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: effect-hosted-${{ matrix.os }}
+          path: ${{ runner.temp }}/effect-evidence
+          if-no-files-found: error
+          retention-days: 30
