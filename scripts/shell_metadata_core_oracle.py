@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+import hashlib
 import json
 from pathlib import Path
 import sys
@@ -353,8 +355,8 @@ fn main() {
     let mut variable = SHELL_MAGIC.to_vec(); variable.extend(8u32.to_le_bytes());
     variable.extend(bincode::DefaultOptions::new().with_varint_encoding().serialize(&fixture()).unwrap());
     wire.insert("varint".into(), json!(decode_shell(&variable).unwrap_err().to_string()));
-    let runtime = chelis_std_bundle::CHELIS_STD_SHELL;
-    let archive = chelis_std_bundle::CHELIS_STD_ARCHIVE;
+    let runtime: &[u8] = include_bytes!(__SHELL_INPUT__);
+    let archive: &[u8] = include_bytes!(__ARCHIVE_INPUT__);
     use sha2::{Digest, Sha256};
     let embedded = decode_shell(runtime).unwrap();
     assert_eq!(embedded.archive_sha256, format!("{:x}", Sha256::digest(archive)));
@@ -362,6 +364,36 @@ fn main() {
     println!("SHELL_SNAPSHOT {}", json!({"cases": cases, "wire": wire, "bundle": {"shell_sha256": format!("{:x}", Sha256::digest(runtime)), "archive_sha256": format!("{:x}", Sha256::digest(archive)), "shell": embedded}}));
 }
 '''
+
+BUNDLE_SOURCE = r'''
+use chelis_shell::{decode_shell, encode_shell};
+use sha2::{Digest, Sha256};
+use serde_json::json;
+fn main() {
+    let runtime = chelis_std_bundle::CHELIS_STD_SHELL;
+    let archive = chelis_std_bundle::CHELIS_STD_ARCHIVE;
+    let embedded = decode_shell(runtime).unwrap();
+    assert_eq!(embedded.package.name, __PACKAGE_NAME__);
+    assert_eq!(embedded.package.version, __PACKAGE_VERSION__);
+    assert_eq!(chelis_std_bundle::BUNDLED_CHELIS_STD_VERSION, __PACKAGE_VERSION__);
+    assert_eq!(embedded.compiler, __COMPILER__);
+    assert_eq!(embedded.archive_sha256, format!("{:x}", Sha256::digest(archive)));
+    assert_eq!(encode_shell(&embedded).unwrap(), runtime);
+    let directory = std::path::Path::new(__DIRECTORY__);
+    std::fs::write(directory.join("runtime.chb"), runtime).unwrap();
+    std::fs::write(directory.join("runtime.tar.zst"), archive).unwrap();
+    println!("SHELL_BUNDLE {}", json!({"shell_sha256": format!("{:x}", Sha256::digest(runtime)),
+        "archive_sha256": format!("{:x}", Sha256::digest(archive)), "shell": embedded}));
+}
+'''
+
+
+@dataclass(frozen=True)
+class FrozenBundle:
+    directory: Path
+    evidence: dict
+    package: dict[str, str]
+    compiler: str
 
 
 def case_inventory() -> set[str]:
@@ -514,7 +546,10 @@ def validate_snapshot(record: dict) -> None:
     expected_wire |= {f"length/{field}/{length}" for field in ("package-name", "modules") for length in (0, 1024, 18446744073709551615)}
     if not isinstance(wire, dict) or set(wire) != expected_wire or any(not isinstance(v, str) or not v for v in wire.values()):
         raise OracleFailure("incomplete malformed-wire evidence")
-    bundle = record["bundle"]
+    validate_bundle_evidence(record["bundle"])
+
+
+def validate_bundle_evidence(bundle: object) -> None:
     if not isinstance(bundle, dict) or set(bundle) != {"shell_sha256", "archive_sha256", "shell"}:
         raise OracleFailure("incomplete embedded bundle evidence")
     for field in ("shell_sha256", "archive_sha256"):
@@ -524,6 +559,17 @@ def validate_snapshot(record: dict) -> None:
     validate_metadata_evidence(bundle["shell"])
     if not isinstance(bundle["shell"], dict) or bundle["shell"].get("archive_sha256") != bundle["archive_sha256"]:
         raise OracleFailure("embedded archive identity differs")
+
+
+def validate_frozen_bundle(bundle: FrozenBundle) -> None:
+    validate_bundle_evidence(bundle.evidence)
+    embedded = bundle.evidence["shell"]
+    if embedded["package"] != bundle.package or embedded["compiler"] != bundle.compiler:
+        raise OracleFailure("frozen bundle differs from its declared package/compiler identity")
+    for filename, field in (("runtime.chb", "shell_sha256"), ("runtime.tar.zst", "archive_sha256")):
+        actual = hashlib.sha256((bundle.directory / filename).read_bytes()).hexdigest()
+        if actual != bundle.evidence[field]:
+            raise OracleFailure(f"frozen input digest differs: {filename}")
 
 
 def compare_snapshots(baseline: dict, candidate: dict) -> None:
@@ -552,22 +598,62 @@ def checkout_baseline(directory: Path) -> Path:
     return directory
 
 
-def snapshot(workspace: Path, *, candidate: bool) -> dict:
-    environment = None
-    if not candidate:
-        environment = {
-            **support._environment(),
-            "CARGO_TARGET_DIR": str(workspace.resolve() / "target"),
-        }
+def snapshot_environment(workspace: Path, *, candidate: bool) -> dict[str, str] | None:
+    if candidate:
+        return None
+    return {**support._environment(), "CARGO_TARGET_DIR": str(workspace.resolve() / "target")}
+
+
+def freeze_bundle(workspace: Path, directory: Path, *, candidate: bool) -> FrozenBundle:
+    directory = directory.resolve()
+    directory.mkdir()
+    with (workspace / "packages/chelis-std/reef.toml").open("rb") as manifest:
+        declared = tomllib.load(manifest)["package"]
+    package = {key: declared[key] for key in ("name", "version")}
+    compiler = declared["compiler"]
+    source = BUNDLE_SOURCE
+    for key, value in (("PACKAGE_NAME", package["name"]), ("PACKAGE_VERSION", package["version"]),
+                       ("COMPILER", compiler), ("DIRECTORY", str(directory))):
+        source = source.replace(f"__{key}__", json.dumps(value))
+    result = consumer(workspace / "crates/chelis-shell", source,
+                      dependencies=dependencies(workspace, "chelis-std-bundle") + 'serde_json = "1"\nsha2 = "0.10"\n',
+                      env=snapshot_environment(workspace, candidate=candidate))
+    bundle = FrozenBundle(directory, parse_record(result.stdout, "SHELL_BUNDLE "), package, compiler)
+    validate_frozen_bundle(bundle)
+    return bundle
+
+
+def snapshot(workspace: Path, *, candidate: bool, bundle: FrozenBundle) -> dict:
+    validate_frozen_bundle(bundle)
     source = SNAPSHOT_SOURCE.replace("__MODELS__", "chelis_shell_core" if candidate else "chelis_shell")
     source = source.replace("__STACK__", ", &NativeStack" if candidate else "")
-    extra = dependencies(workspace, "chelis-syntax-host", "chelis-std-bundle")
+    source = source.replace("__SHELL_INPUT__", json.dumps(str(bundle.directory / "runtime.chb")))
+    source = source.replace("__ARCHIVE_INPUT__", json.dumps(str(bundle.directory / "runtime.tar.zst")))
+    extra = dependencies(workspace, "chelis-syntax-host")
     if candidate:
         extra += dependencies(workspace, "chelis-shell-core")
     result = consumer(workspace / "crates/chelis-shell", source,
                       dependencies=extra + 'serde_json = "1"\nsha2 = "0.10"\nbincode = "1"\n',
-                      env=environment)
-    return parse_record(result.stdout, "SHELL_SNAPSHOT ")
+                      env=snapshot_environment(workspace, candidate=candidate))
+    record = parse_record(result.stdout, "SHELL_SNAPSHOT ")
+    if record.get("bundle") != bundle.evidence:
+        raise OracleFailure("snapshot bundle differs from the frozen input")
+    return record
+
+
+def compare_bundle_inputs(baseline: Path, directory: Path) -> None:
+    bundles = (
+        ("baseline", freeze_bundle(baseline, directory / "baseline-input", candidate=False)),
+        ("candidate", freeze_bundle(ROOT, directory / "candidate-input", candidate=True)),
+    )
+    for origin, bundle in bundles:
+        previous = snapshot(baseline, candidate=False, bundle=bundle)
+        current = snapshot(ROOT, candidate=True, bundle=bundle)
+        compare_snapshots(previous, current)
+        print("SHELL_COMPARISON " + json.dumps({"baseline": BASELINE, "input_source": origin,
+            "metadata_cases": len(case_inventory()), "wire_cases": len(current["wire"]),
+            "bundle": current["bundle"]["shell_sha256"], "compiler": bundle.compiler,
+            "archive": current["bundle"]["archive_sha256"]}, sort_keys=True), flush=True)
 
 
 def target_graphs() -> None:
@@ -778,10 +864,7 @@ def main() -> int:
     negative_controls()
     with tempfile.TemporaryDirectory(prefix="chelis-shell-baseline-") as temporary:
         baseline = checkout_baseline(Path(temporary) / "baseline")
-        previous = snapshot(baseline, candidate=False)
-        current = snapshot(ROOT, candidate=True)
-        compare_snapshots(previous, current)
-        print("SHELL_COMPARISON " + json.dumps({"baseline": BASELINE, "metadata_cases": len(case_inventory()), "wire_cases": len(current["wire"]), "bundle": current["bundle"]["shell_sha256"]}, sort_keys=True), flush=True)
+        compare_bundle_inputs(baseline, Path(temporary))
     native_suites()
     host_trust()
     from test_shell_metadata_core_oracle import MANDATORY_TESTS

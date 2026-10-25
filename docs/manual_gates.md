@@ -222,6 +222,7 @@ The command checks:
 - Real host consumers with an explicit allocator, `NativeStack`, and typed validation failures.
 - All current metadata fields, type-variable restrictions, collection contracts, canonical identities, and first-error order.
 - Fixed-revision CHB 8 bytes, decoded values, malformed-byte diagnostics, and embedded bundle digests.
+- Both revisions' actual embedded shell/archive pairs, frozen with their declared package and compiler identities and independently checked digests; both implementations read each identical pair and their complete snapshots must match without version or hash normalization.
 - Host codec and filesystem behavior, real Reef and CLI artifact rejection, and unchanged registry state after rejection.
 - Mandatory test execution, obsolete public API rejection, host dependency rejection, and acceptance failure controls.
 - Matching snapshots with missing metadata fields or invalid collection and scalar evidence fail acceptance.

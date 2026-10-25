@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import contextlib
 from copy import deepcopy
+import hashlib
 import io
 import json
 from pathlib import Path
@@ -159,6 +160,99 @@ class BaselineTests(unittest.TestCase):
                     oracle.checkout_baseline(directory / "baseline")
 
 
+class FrozenBundleTests(unittest.TestCase):
+    def bundle(self, directory: Path, *, compiler: str = "=0.21.1"):
+        directory.mkdir()
+        shell = ("shell " + compiler).encode()
+        archive = ("archive " + compiler).encode()
+        (directory / "runtime.chb").write_bytes(shell)
+        (directory / "runtime.tar.zst").write_bytes(archive)
+        metadata = EvidenceTests().metadata()
+        metadata["compiler"] = compiler
+        metadata["archive_sha256"] = hashlib.sha256(archive).hexdigest()
+        evidence = {
+            "shell_sha256": hashlib.sha256(shell).hexdigest(),
+            "archive_sha256": hashlib.sha256(archive).hexdigest(),
+            "shell": metadata,
+        }
+        return oracle.FrozenBundle(directory, evidence, metadata["package"].copy(), compiler)
+
+    def test_release_versions_retain_distinct_exact_input_bytes_and_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            old = self.bundle(root / "old")
+            new = self.bundle(root / "new", compiler="=0.22.0")
+            oracle.validate_frozen_bundle(old)
+            oracle.validate_frozen_bundle(new)
+            self.assertNotEqual(old.evidence, new.evidence)
+            self.assertEqual(old.evidence["shell"]["compiler"], "=0.21.1")
+            self.assertEqual(new.evidence["shell"]["compiler"], "=0.22.0")
+
+    def test_frozen_inputs_reject_byte_digest_and_declared_identity_tampering(self) -> None:
+        for changed in ("runtime.chb", "runtime.tar.zst", "shell_sha256", "archive_sha256", "compiler", "name", "version"):
+            with self.subTest(changed=changed), tempfile.TemporaryDirectory() as temporary:
+                bundle = self.bundle(Path(temporary) / "input")
+                if changed.startswith("runtime."):
+                    with (bundle.directory / changed).open("ab") as output:
+                        output.write(b"tampered")
+                elif changed in ("shell_sha256", "archive_sha256"):
+                    bundle.evidence[changed] = "0" * 64
+                elif changed == "compiler":
+                    bundle.evidence["shell"][changed] = "=0.22.0"
+                else:
+                    bundle.evidence["shell"]["package"][changed] = "wrong"
+                with self.assertRaises(OracleFailure):
+                    oracle.validate_frozen_bundle(bundle)
+
+    def test_both_implementations_receive_each_identical_frozen_pair(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            baseline = directory / "baseline"
+            old = self.bundle(directory / "old")
+            new = self.bundle(directory / "new", compiler="=0.22.0")
+            records = [{"bundle": bundle.evidence, "wire": {}} for bundle in (old, old, new, new)]
+            with patch.object(oracle, "freeze_bundle", side_effect=(old, new)) as freeze, \
+                 patch.object(oracle, "snapshot", side_effect=records) as snapshot, \
+                 patch.object(oracle, "compare_snapshots") as compare, \
+                 contextlib.redirect_stdout(io.StringIO()):
+                oracle.compare_bundle_inputs(baseline, directory)
+            self.assertEqual(freeze.call_args_list, [
+                unittest.mock.call(baseline, directory / "baseline-input", candidate=False),
+                unittest.mock.call(oracle.ROOT, directory / "candidate-input", candidate=True),
+            ])
+            self.assertEqual(snapshot.call_args_list, [
+                unittest.mock.call(baseline, candidate=False, bundle=old),
+                unittest.mock.call(oracle.ROOT, candidate=True, bundle=old),
+                unittest.mock.call(baseline, candidate=False, bundle=new),
+                unittest.mock.call(oracle.ROOT, candidate=True, bundle=new),
+            ])
+            self.assertEqual(compare.call_args_list, [
+                unittest.mock.call(records[0], records[1]),
+                unittest.mock.call(records[2], records[3]),
+            ])
+
+    def test_snapshot_rejects_output_not_bound_to_the_frozen_input(self) -> None:
+        for path, value in (
+            (("shell_sha256",), "0" * 64),
+            (("archive_sha256",), "0" * 64),
+            (("shell", "archive_sha256"), "0" * 64),
+            (("shell", "compiler"), "=0.22.0"),
+            (("shell", "modules", 0, "exports", 0, "name"), "wrong"),
+        ):
+            with self.subTest(path=path), tempfile.TemporaryDirectory() as temporary:
+                bundle = self.bundle(Path(temporary) / "input")
+                changed = deepcopy(bundle.evidence)
+                target = changed
+                for key in path[:-1]:
+                    target = target[key]
+                target[path[-1]] = value
+                output = "SHELL_SNAPSHOT " + json.dumps({"bundle": changed})
+                result = subprocess.CompletedProcess([], 0, output, "")
+                with patch.object(oracle, "consumer", return_value=result), \
+                     self.assertRaisesRegex(OracleFailure, "frozen input"):
+                    oracle.snapshot(oracle.ROOT, candidate=True, bundle=bundle)
+
+
 MANDATORY_TESTS = (
     "EvidenceTests.test_snapshot_requires_one_complete_structured_record",
     "EvidenceTests.test_unrelated_command_output_is_not_evidence",
@@ -169,6 +263,10 @@ MANDATORY_TESTS = (
     "BaselineTests.test_baseline_uses_committed_source_not_candidate_changes",
     "BaselineTests.test_missing_baseline_in_complete_clone_fails",
     "BaselineTests.test_missing_original_source_fails_without_candidate_fallback",
+    "FrozenBundleTests.test_release_versions_retain_distinct_exact_input_bytes_and_identity",
+    "FrozenBundleTests.test_frozen_inputs_reject_byte_digest_and_declared_identity_tampering",
+    "FrozenBundleTests.test_both_implementations_receive_each_identical_frozen_pair",
+    "FrozenBundleTests.test_snapshot_rejects_output_not_bound_to_the_frozen_input",
 )
 
 
