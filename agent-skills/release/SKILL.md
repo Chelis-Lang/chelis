@@ -40,20 +40,32 @@ Work in a fresh worktree on `origin/main`, with its own `uv venv --python 3.11`.
    `gh workflow run loud-unsupported-nightly.yml`, which the PR-author guide asks to be
    run by hand before a release, and record its result. Red results do not block on
    their own; the user decides, so list them.
-2. Bump and assemble:
+2. Select the matching standalone Clarabel package release version. Its published
+   assets are immutable, and the compiler admits the exact carried package version
+   and solver source. Use a package version newer than the one carried by the
+   previous compiler release. Retain an already allocated newer version rather
+   than incrementing it again. Fetch the previous compiler's tag before running
+   the bump; the script reads that local tag and does not select versions over
+   the network. Then bump and assemble:
 
    ```sh
-   .venv/bin/python scripts/bump_compiler_pins.py X.Y.Z
+   .venv/bin/python scripts/bump_compiler_pins.py X.Y.Z --clarabel-version A.B.C
    .venv/bin/python scripts/changelog.py check
    .venv/bin/python scripts/changelog.py build --version X.Y.Z --date YYYY-MM-DD
    .venv/bin/python scripts/changelog.py build --version X.Y.Z --date YYYY-MM-DD --write
    .venv/bin/python scripts/changelog.py extract --version vX.Y.Z --output <scratch>/notes.md
    ```
 
-   The bump rewrites the workspace version, every hand-pinned `package.compiler`, the
+   The bump rewrites the workspace version, the carried Clarabel package version,
+   every hand-pinned `package.compiler`, the
    pipeline-parity captures, the Hull corpus pin, and the root and fixture `Cargo.lock`
    files. It regenerates `Cargo.nix` through Nix (run it in Devenv) and the conformance
    assets. Read the preview before `--write`, and give the release day as the date.
+   It does not edit the standalone Clarabel checkout. Prepare its selected package
+   version, matching compiler pin and identical solver source in a separate PR.
+   Publish the compiler first, then qualify the standalone package against that
+   published compiler and publish its immutable artifact pair. Carried-source
+   release checks do not establish standalone publication or installation.
 3. Check the diff touches only `Cargo.toml`, `Cargo.lock` files, `Cargo.nix`, `reef.toml`
    and pinned fixture JSON files, `tests/conformance/hull/manifest.json`, `CHANGELOG.md`,
    and deleted `changelog.d/` fragments. Lock and `Cargo.nix` diffs change only local

@@ -102,6 +102,169 @@ def _graph_workspace_crates(graph: str) -> dict:
     return crates
 
 
+class ClarabelReleasePairTests(unittest.TestCase):
+    """A compiler release must select a fresh immutable provider package identity."""
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        self.cargo = self.root / "Cargo.toml"
+        self.manifest = self.root / "packages/chelis-clarabel/reef.toml"
+        self.manifest.parent.mkdir(parents=True)
+        self.example = self.root / "example.toml"
+        self.hull = self.root / "hull.json"
+        self.write_pair()
+        self.example.write_text('[package]\ncompiler = "=0.22.0"\n')
+        self.hull.write_text('{\n  "chelis_version_pinned": "0.22.0"\n}\n')
+        self.baseline = mock.Mock(return_value="0.1.1")
+        patcher = mock.patch.multiple(
+            bump_mod,
+            REPO_ROOT=self.root,
+            WORKSPACE_CARGO_TOML=self.cargo,
+            CLARABEL_MANIFEST=self.manifest,
+            PINNED_REAL_TOML_FILES=[self.manifest, self.example],
+            PINNED_FIXTURE_TOML_FILES=[],
+            PINNED_FIXTURE_JSON_FILES=[],
+            HULL_MANIFEST=self.hull,
+            released_clarabel_version=self.baseline,
+            regenerate_workspace_lock=mock.Mock(),
+            regenerate_cargo_nix=mock.Mock(),
+            regenerate_compile_fail_fixture_locks=mock.Mock(),
+            regenerate_conformance_assets=mock.Mock(),
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def write_pair(self, compiler="0.22.0", package="0.1.1", pin=None):
+        self.cargo.write_text(f'[workspace.package]\nversion = "{compiler}"\n')
+        self.manifest.write_text(
+            f'[package]\nname = "chelis-clarabel"\nversion = "{package}"\n'
+            f'compiler = "={pin or compiler}"\nmodule_prefix = "Clarabel"\n'
+            '[dependencies]\nother = { version = "0.1.1" }\n'
+        )
+
+    def snapshot(self):
+        return {p: p.read_bytes() for p in self.root.rglob("*") if p.is_file()}
+
+    def run_bump(self, compiler="0.22.1", package="0.1.2", *extra):
+        with contextlib.redirect_stdout(io.StringIO()):
+            return bump_mod.main([compiler, "--clarabel-version", package, *extra])
+
+    def test_missing_package_target_rejects_before_writes(self):
+        before = self.snapshot()
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            bump_mod.main(["0.22.1"])
+        self.assertEqual(self.snapshot(), before)
+
+    def test_paired_bump_changes_package_and_all_compiler_pins(self):
+        self.assertEqual(self.run_bump(), 0)
+        package = tomllib.loads(self.manifest.read_text())["package"]
+        self.assertEqual((package["version"], package["compiler"]), ("0.1.2", "=0.22.1"))
+        self.assertEqual(tomllib.loads(self.cargo.read_text())["workspace"]["package"]["version"], "0.22.1")
+        self.assertIn('compiler = "=0.22.1"', self.example.read_text())
+        self.assertIn('other = { version = "0.1.1" }', self.manifest.read_text())
+        self.baseline.assert_called_once_with("0.22.0")
+
+    def test_already_allocated_package_is_not_incremented_again(self):
+        self.write_pair(package="0.1.2")
+        self.run_bump()
+        self.assertEqual(tomllib.loads(self.manifest.read_text())["package"]["version"], "0.1.2")
+
+    def test_published_or_older_package_target_rejects_before_writes(self):
+        for version in ("0.1.1", "0.1.0", "0.1.1+repacked"):
+            with self.subTest(version=version):
+                before = self.snapshot()
+                with self.assertRaisesRegex(SystemExit, "(?:newer than|older than).*0.1.1"):
+                    self.run_bump(package=version)
+                self.assertEqual(self.snapshot(), before)
+
+    def test_invalid_package_target_rejects_before_writes(self):
+        for version in ("", "v0.1.2", "0.1", "0.1.2\n", "0.1.2-01"):
+            with self.subTest(version=version):
+                before = self.snapshot()
+                with self.assertRaises(SystemExit):
+                    self.run_bump(package=version)
+                self.assertEqual(self.snapshot(), before)
+
+    def test_explicit_target_cannot_downgrade_an_allocated_package(self):
+        self.write_pair(package="0.1.3")
+        before = self.snapshot()
+        with self.assertRaisesRegex(SystemExit, "older than.*0.1.3"):
+            self.run_bump()
+        self.assertEqual(self.snapshot(), before)
+
+    def test_dry_run_preserves_every_input_byte(self):
+        before = self.snapshot()
+        self.run_bump("0.22.1", "0.1.2", "--dry-run")
+        self.assertEqual(self.snapshot(), before)
+
+    def test_retry_is_idempotent_and_does_not_read_a_new_tag(self):
+        self.run_bump()
+        before = self.snapshot()
+        self.baseline.reset_mock()
+        self.run_bump()
+        self.assertEqual(self.snapshot(), before)
+        self.baseline.assert_not_called()
+
+    def test_retry_after_workspace_write_recovers_the_old_manifest_pin(self):
+        self.write_pair(compiler="0.22.1", pin="0.22.0")
+        self.run_bump()
+        self.baseline.assert_called_once_with("0.22.0")
+        self.assertIn('compiler = "=0.22.1"', self.manifest.read_text())
+
+    def test_same_compiler_cannot_change_its_provider_identity(self):
+        before = self.snapshot()
+        with self.assertRaisesRegex(SystemExit, "new compiler version"):
+            self.run_bump(compiler="0.22.0")
+        self.assertEqual(self.snapshot(), before)
+
+    def test_absent_release_baseline_rejects_before_writes(self):
+        self.baseline.side_effect = SystemExit("missing release tag")
+        before = self.snapshot()
+        with self.assertRaisesRegex(SystemExit, "missing release tag"):
+            self.run_bump()
+        self.assertEqual(self.snapshot(), before)
+
+    def test_invalid_carried_manifest_rejects_before_writes(self):
+        self.manifest.write_text('[package]\nname = "lookalike"\n')
+        before = self.snapshot()
+        with self.assertRaisesRegex(SystemExit, "invalid compiler/Clarabel release manifests"):
+            self.run_bump()
+        self.assertEqual(self.snapshot(), before)
+
+    def test_compiler_downgrade_rejects_before_writes(self):
+        before = self.snapshot()
+        with self.assertRaisesRegex(SystemExit, "compiler target.*older than"):
+            self.run_bump(compiler="0.21.0")
+        self.assertEqual(self.snapshot(), before)
+
+
+class ReleasedClarabelIdentityTests(unittest.TestCase):
+    def test_reads_exact_tag_manifest_without_network_selection(self):
+        text = '[package]\nname = "chelis-clarabel"\nversion = "0.1.2"\ncompiler = "=0.22.1"\n'
+        with mock.patch.object(bump_mod.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, text, "")) as run:
+            self.assertEqual(bump_mod.released_clarabel_version("0.22.1"), "0.1.2")
+        self.assertEqual(run.call_args.args[0], ["git", "show", "v0.22.1:packages/chelis-clarabel/reef.toml"])
+        self.assertEqual(run.call_args.kwargs["cwd"], bump_mod.REPO_ROOT)
+
+    def test_missing_tag_and_mismatched_identity_are_rejected(self):
+        for result in (
+            subprocess.CompletedProcess([], 128, "", "missing"),
+            subprocess.CompletedProcess([], 0, '[package]\nname = "other"\n', ""),
+            subprocess.CompletedProcess([], 0, '[package]\nname = "chelis-clarabel"\nversion = "0.1.2"\ncompiler = "=0.21.0"\n', ""),
+        ):
+            with self.subTest(result=result), mock.patch.object(bump_mod.subprocess, "run", return_value=result):
+                with self.assertRaises(SystemExit):
+                    bump_mod.released_clarabel_version("0.22.1")
+
+    def test_semver_prerelease_order_and_build_identity(self):
+        versions = ["0.1.2-alpha", "0.1.2-alpha.2", "0.1.2-alpha.10", "0.1.2-beta", "0.1.2-rc.1", "0.1.2", "0.1.3"]
+        keys = list(map(bump_mod.release_version_key, versions))
+        self.assertEqual(keys, sorted(keys))
+        self.assertEqual(bump_mod.release_version_key("0.1.2+one"), bump_mod.release_version_key("0.1.2+two"))
+
+
 class BumpWorkspaceVersionTests(unittest.TestCase):
     """Regression: `bump_workspace_cargo_toml` used to drop the trailing
     newline because the regex `.*` does not match `\\n`. Bumping then
@@ -571,6 +734,8 @@ class ConformanceAssetRegenerationTests(unittest.TestCase):
     def _run_main(self, *extra):
         """Run `main` with every other step stubbed; return the stubbed runner."""
         stubs = {
+            "validate_clarabel_release_pair": None,
+            "bump_clarabel_package_version": None,
             "bump_workspace_cargo_toml": None,
             "bump_compiler_pin": None,
             "bump_json_compiler_pin": None,
@@ -595,7 +760,7 @@ class ConformanceAssetRegenerationTests(unittest.TestCase):
             side_effect=lambda argv, **_: order.append(argv)
             or subprocess.CompletedProcess(argv, 0),
         ) as runner:
-            bump_mod.main(["0.18.12", *extra])
+            bump_mod.main(["0.18.12", "--clarabel-version", "0.1.2", *extra])
         return runner, order
 
     def test_main_regenerates_the_conformance_assets_last(self):
@@ -611,7 +776,7 @@ class ConformanceAssetRegenerationTests(unittest.TestCase):
     def test_the_retired_dist_rebuild_flag_is_rejected(self):
         with contextlib.redirect_stderr(io.StringIO()):
             with self.assertRaises(SystemExit):
-                bump_mod.parse_args(["0.18.12", "--no-rebuild-dist"])
+                bump_mod.parse_args(["0.18.12", "--clarabel-version", "0.1.2", "--no-rebuild-dist"])
 
     def test_dry_run_prints_the_step_without_running_it(self):
         with mock.patch.object(bump_mod.subprocess, "run") as runner, mock.patch(

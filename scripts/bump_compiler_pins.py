@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Bump the workspace version and every coupled compiler pin in lockstep.
+"""Bump the compiler and its explicitly selected Clarabel package identity.
 
 Background: when `workspace.package.version` in the root `Cargo.toml`
-changes, six categories of files must change with it:
+changes, its coupled release inputs must change with it:
 
 1. Test fixtures with hardcoded `compiler = "=X.Y.Z"` strings. These are
    already auto-synced via `chelis_compiler_api::COMPILER_VERSION`
@@ -84,6 +84,15 @@ changes, six categories of files must change with it:
    header records, through the Nixpkgs that `flake.lock` pins, after the
    root `Cargo.lock` moves. It therefore needs Nix on `PATH`.
 
+8. The carried Clarabel package version. Its native provider admits that exact
+   identity, while the standalone package's compiler pin is exact and published
+   package assets are immutable. Select the matching standalone release version
+   explicitly with --clarabel-version. Before any write, compare it with the
+   carried identity in the local previous compiler tag; a new compiler needs a
+   newer package identity. An already allocated newer identity is retained, and
+   an exact retry regenerates derived artifacts without incrementing it again.
+   This script never edits or publishes the standalone repository.
+
 This script is the single, scriptable entry point for the release bump.
 These tripwires fail loudly when the categories drift, pointing future
 operators at this script:
@@ -102,7 +111,7 @@ operators at this script:
     job reports its byte difference.
 
 Usage:
-    python3 scripts/bump_compiler_pins.py 0.3.2
+    .venv/bin/python scripts/bump_compiler_pins.py 0.3.2 --clarabel-version 0.1.2
 
 The script is safe to run from any cwd: paths are resolved relative to
 the script's own location.
@@ -114,6 +123,7 @@ import re
 import shlex
 import subprocess
 import sys
+import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -133,6 +143,7 @@ PINNED_REAL_TOML_FILES: list[Path] = [
 ]
 
 WORKSPACE_CARGO_TOML = REPO_ROOT / "Cargo.toml"
+CLARABEL_MANIFEST = REPO_ROOT / "packages/chelis-clarabel/reef.toml"
 
 # Category 6: the conformance assets the binary embeds for `conform sync`.
 REGEN_CONFORMANCE_ASSETS_SCRIPT = REPO_ROOT / "scripts/regenerate_conformance_assets.py"
@@ -209,6 +220,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help="New workspace version, e.g. 0.3.2 (semver)",
     )
     p.add_argument(
+        "--clarabel-version",
+        required=True,
+        help="Exact Clarabel package version the new compiler must admit; select a fresh release identity.",
+    )
+    p.add_argument(
         "--dry-run",
         action="store_true",
         help="Print what would change without writing files.",
@@ -219,6 +235,106 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 def validate_version(version: str) -> None:
     if not SEMVER_RE.match(version):
         sys.exit(f"error: {version!r} is not a valid semver string")
+
+
+def release_version_key(version: str) -> tuple:
+    """SemVer precedence, excluding build metadata from release ordering."""
+    number = r"(?:0|[1-9][0-9]*)"
+    match = re.fullmatch(
+        rf"({number})\.({number})\.({number})(?:-([0-9A-Za-z.-]+))?(?:\+([0-9A-Za-z.-]+))?",
+        version,
+    )
+    if match is None:
+        sys.exit(f"error: {version!r} is not a valid release version")
+    pre, build = match.group(4), match.group(5)
+    for value in (pre, build):
+        if value is not None and any(not part for part in value.split(".")):
+            sys.exit(f"error: {version!r} is not a valid release version")
+    identifiers = []
+    for part in pre.split(".") if pre else []:
+        if part.isdigit():
+            if len(part) > 1 and part.startswith("0"):
+                sys.exit(f"error: {version!r} has a leading-zero prerelease identifier")
+            identifiers.append((0, int(part)))
+        else:
+            identifiers.append((1, part))
+    return (*map(int, match.group(1, 2, 3)), pre is None, tuple(identifiers))
+
+
+def released_clarabel_version(compiler: str) -> str:
+    """Read the immutable local compiler tag; never select versions over the network."""
+    revision = f"v{compiler}:packages/chelis-clarabel/reef.toml"
+    result = subprocess.run(
+        ["git", "show", revision], cwd=REPO_ROOT, capture_output=True, text=True
+    )
+    if result.returncode:
+        sys.exit(f"error: cannot read release tag v{compiler}; fetch that tag before bumping")
+    try:
+        package = tomllib.loads(result.stdout)["package"]
+        if package["name"] != "chelis-clarabel" or package["compiler"] != f"={compiler}":
+            raise ValueError("package name or compiler pin does not match the release tag")
+        version = package["version"]
+        release_version_key(version)
+    except (KeyError, TypeError, ValueError) as error:
+        sys.exit(f"error: invalid Clarabel release identity in {revision}: {error}")
+    return version
+
+
+def validate_clarabel_release_pair(compiler: str, target: str) -> None:
+    """Reject omitted, reused or regressing identities before the first write."""
+    desired_key = release_version_key(compiler)
+    target_key = release_version_key(target)
+    try:
+        workspace = tomllib.loads(WORKSPACE_CARGO_TOML.read_text())["workspace"]["package"]["version"]
+        package = tomllib.loads(CLARABEL_MANIFEST.read_text())["package"]
+        if package["name"] != "chelis-clarabel":
+            raise ValueError("expected the carried chelis-clarabel package")
+        current = package["version"]
+        pin = package["compiler"]
+        if not isinstance(pin, str) or not pin.startswith("="):
+            raise ValueError("expected an exact compiler pin")
+        previous_compiler = pin[1:]
+    except (OSError, KeyError, TypeError, ValueError) as error:
+        sys.exit(f"error: invalid compiler/Clarabel release manifests: {error}")
+    if desired_key < release_version_key(workspace):
+        sys.exit(f"error: compiler target {compiler} is older than {workspace}")
+    if target_key < release_version_key(current):
+        sys.exit(f"error: Clarabel target {target} is older than allocated package {current}")
+    if workspace == compiler and previous_compiler == compiler:
+        if target != current:
+            sys.exit("error: changing the Clarabel provider identity requires a new compiler version")
+        return  # Exact retry, including regeneration after a derived-artifact failure.
+    # The workspace may already have moved when an earlier invocation failed.
+    baseline_compiler = previous_compiler if workspace == compiler else workspace
+    release_version_key(baseline_compiler)
+    if desired_key <= release_version_key(baseline_compiler):
+        sys.exit("error: the Clarabel compiler pin must advance to a new compiler version")
+    baseline = released_clarabel_version(baseline_compiler)
+    if target_key <= release_version_key(baseline):
+        sys.exit(f"error: Clarabel target {target} must be newer than released package {baseline}")
+
+
+def bump_clarabel_package_version(version: str, dry_run: bool) -> FileChange | None:
+    """Change only the carried manifest's package.version, never dependency versions."""
+    text = CLARABEL_MANIFEST.read_text()
+    before = tomllib.loads(text)["package"]["version"]
+    if before == version:
+        return None
+    in_package = False
+    lines = []
+    replacements = 0
+    for line in text.splitlines(keepends=True):
+        if line.lstrip().startswith("["):
+            in_package = line.split("#", 1)[0].strip() == "[package]"
+        if in_package and re.match(r"\s*version\s*=", line):
+            line, count = re.subn(r'^(\s*version\s*=\s*")[^"]+(".*)', lambda m: f'{m[1]}{version}{m[2]}', line)
+            replacements += count
+        lines.append(line)
+    if replacements != 1:
+        sys.exit("error: expected exactly one carried Clarabel package.version assignment")
+    if not dry_run:
+        CLARABEL_MANIFEST.write_text("".join(lines))
+    return FileChange(CLARABEL_MANIFEST, before, version)
 
 
 def bump_workspace_cargo_toml(version: str, dry_run: bool) -> FileChange | None:
@@ -468,8 +584,13 @@ def regenerate_conformance_assets(dry_run: bool) -> None:
 def main(argv: list[str]) -> int:
     args = parse_args(argv)
     validate_version(args.version)
+    validate_clarabel_release_pair(args.version, args.clarabel_version)
 
     changes: list[FileChange] = []
+
+    clarabel_change = bump_clarabel_package_version(args.clarabel_version, args.dry_run)
+    if clarabel_change is not None:
+        changes.append(clarabel_change)
 
     cargo_change = bump_workspace_cargo_toml(args.version, args.dry_run)
     if cargo_change is not None:
