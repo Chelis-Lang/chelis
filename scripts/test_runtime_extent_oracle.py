@@ -569,6 +569,51 @@ class RuntimeExtentOracleTests(unittest.TestCase):
                             self.assertIn(stderr, str(caught.exception))
                     self.assertEqual(source.read_text(), "original")
 
+    def test_local_ascription_barrier_mutation_requires_primitive_attribution_receipt(
+        self,
+    ) -> None:
+        original = ORACLE._CLAIM_BARRIER_SOURCE.read_text()
+        validate_mutation = ORACLE._validate_controlled_mutation
+        cases = (
+            (101, "the claimed initializer must retain its primitive attribution", None),
+            (101, "error: could not compile chelis-ir", "failed for an unrelated reason"),
+            (0, "the claimed initializer must retain its primitive attribution", "escaped"),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "axis_sources.rs"
+            for status, stderr, failure in cases:
+                with self.subTest(status=status, stderr=stderr):
+                    source.write_text(original)
+                    observed = []
+
+                    def runner(command, **kwargs):
+                        observed.append(tuple(command))
+                        self.assertEqual(
+                            source.read_text(),
+                            ORACLE.remove_local_claim_from_producer_barrier(original),
+                        )
+                        return subprocess.CompletedProcess(command, status, "", stderr)
+
+                    def validate_selected(**kwargs):
+                        if kwargs["mutate"] is ORACLE.remove_local_claim_from_producer_barrier:
+                            kwargs["source_path"] = source
+                            validate_mutation(**kwargs)
+
+                    with patch.object(
+                        ORACLE, "_validate_controlled_mutation", side_effect=validate_selected
+                    ):
+                        if failure is None:
+                            ORACLE.validate_local_ascription_layer_mutations(runner)
+                        else:
+                            with self.assertRaisesRegex(ORACLE.OracleFailure, failure):
+                                ORACLE.validate_local_ascription_layer_mutations(runner)
+                    self.assertEqual(len(observed), 1)
+                    self.assertIn(
+                        "fusion_preserves_the_exact_local_site_on_the_rebuilt_initializer",
+                        observed[0],
+                    )
+                    self.assertEqual(source.read_text(), original)
+
     def test_local_ascription_eval_observation_mutation_matches_production_source(
         self,
     ) -> None:
