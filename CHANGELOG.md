@@ -4,6 +4,26 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.22.1] - 2026-10-25
+
+### Fixed
+
+- Split macOS numeric-core acceptance into three required phases with independent
+  job budgets and phase-specific receipts, preserving the complete oracle's checks
+  and exposing Python failure-control progress during execution.
+
+- macOS validation runs complete DAG portability acceptance in an independent
+  required job, preserving its baseline comparisons and test selection while
+  giving it a full job budget. See
+  [#4040](https://github.com/Chelis-Lang/chelis/issues/4040).
+
+- Shell metadata acceptance compares both implementations on the same frozen
+  bundle inputs across compiler releases, retaining exact compiler pins, artifact
+  digests, metadata bytes, and diagnostics. See
+  [#4043](https://github.com/Chelis-Lang/chelis/issues/4043).
+
+- Bind the native Clarabel provider to the 0.1.2 library release so compatible packages retain evaluator and compiled C solver access.
+
 ## [0.22.0] - 2026-10-24
 
 ### Added
