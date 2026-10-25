@@ -263,12 +263,20 @@ def release_version_key(version: str) -> tuple:
 
 def released_clarabel_version(compiler: str) -> str:
     """Read the immutable local compiler tag; never select versions over the network."""
-    revision = f"v{compiler}:packages/chelis-clarabel/reef.toml"
+    reference = f"refs/tags/v{compiler}"
+    resolved = subprocess.run(
+        ["git", "show-ref", "--verify", "--hash", reference],
+        cwd=REPO_ROOT, capture_output=True, text=True,
+    )
+    object_id = resolved.stdout.strip()
+    if resolved.returncode or re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", object_id) is None:
+        sys.exit(f"error: cannot read release tag v{compiler}; fetch that tag before bumping")
+    revision = f"{object_id}:packages/chelis-clarabel/reef.toml"
     result = subprocess.run(
         ["git", "show", revision], cwd=REPO_ROOT, capture_output=True, text=True
     )
     if result.returncode:
-        sys.exit(f"error: cannot read release tag v{compiler}; fetch that tag before bumping")
+        sys.exit(f"error: cannot read Clarabel manifest from release tag v{compiler}")
     try:
         package = tomllib.loads(result.stdout)["package"]
         if package["name"] != "chelis-clarabel" or package["compiler"] != f"={compiler}":

@@ -241,20 +241,57 @@ class ClarabelReleasePairTests(unittest.TestCase):
 
 
 class ReleasedClarabelIdentityTests(unittest.TestCase):
+    def test_branch_named_like_release_cannot_replace_the_actual_tag(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            manifest = root / "packages/chelis-clarabel/reef.toml"
+            manifest.parent.mkdir(parents=True)
+            manifest.write_text('[package]\nname = "chelis-clarabel"\nversion = "0.1.2"\ncompiler = "=0.22.1"\n')
+
+            def git(*args):
+                return subprocess.run(
+                    ["git", "-c", "user.name=Release fixture", "-c", "user.email=fixture@example.invalid", *args],
+                    cwd=root, capture_output=True, text=True, check=True,
+                )
+
+            git("init", "--quiet", "-b", "fixture")
+            git("add", ".")
+            git("commit", "--quiet", "-m", "test: release fixture")
+            git("branch", "v0.22.1")
+            with mock.patch.object(bump_mod, "REPO_ROOT", root):
+                with self.assertRaisesRegex(SystemExit, "cannot read release tag"):
+                    bump_mod.released_clarabel_version("0.22.1")
+                git("branch", "refs/tags/v0.22.1")
+                with self.assertRaisesRegex(SystemExit, "cannot read release tag"):
+                    bump_mod.released_clarabel_version("0.22.1")
+                git("tag", "v0.22.1")
+                manifest.write_text(manifest.read_text().replace('"0.1.2"', '"0.1.1"'))
+                git("commit", "--quiet", "-am", "test: move mutable branch")
+                git("branch", "-f", "v0.22.1")
+                self.assertEqual(bump_mod.released_clarabel_version("0.22.1"), "0.1.2")
+
     def test_reads_exact_tag_manifest_without_network_selection(self):
         text = '[package]\nname = "chelis-clarabel"\nversion = "0.1.2"\ncompiler = "=0.22.1"\n'
-        with mock.patch.object(bump_mod.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, text, "")) as run:
+        object_id = "1" * 40
+        results = [subprocess.CompletedProcess([], 0, object_id + "\n", ""), subprocess.CompletedProcess([], 0, text, "")]
+        with mock.patch.object(bump_mod.subprocess, "run", side_effect=results) as run:
             self.assertEqual(bump_mod.released_clarabel_version("0.22.1"), "0.1.2")
-        self.assertEqual(run.call_args.args[0], ["git", "show", "v0.22.1:packages/chelis-clarabel/reef.toml"])
+        self.assertEqual([call.args[0] for call in run.call_args_list], [
+            ["git", "show-ref", "--verify", "--hash", "refs/tags/v0.22.1"],
+            ["git", "show", object_id + ":packages/chelis-clarabel/reef.toml"],
+        ])
         self.assertEqual(run.call_args.kwargs["cwd"], bump_mod.REPO_ROOT)
 
     def test_missing_tag_and_mismatched_identity_are_rejected(self):
-        for result in (
-            subprocess.CompletedProcess([], 128, "", "missing"),
-            subprocess.CompletedProcess([], 0, '[package]\nname = "other"\n', ""),
-            subprocess.CompletedProcess([], 0, '[package]\nname = "chelis-clarabel"\nversion = "0.1.2"\ncompiler = "=0.21.0"\n', ""),
+        tag = subprocess.CompletedProcess([], 0, "1" * 40, "")
+        for results in (
+            [subprocess.CompletedProcess([], 128, "", "missing")],
+            [subprocess.CompletedProcess([], 0, "", "")],
+            [tag, subprocess.CompletedProcess([], 128, "", "missing manifest")],
+            [tag, subprocess.CompletedProcess([], 0, '[package]\nname = "other"\n', "")],
+            [tag, subprocess.CompletedProcess([], 0, '[package]\nname = "chelis-clarabel"\nversion = "0.1.2"\ncompiler = "=0.21.0"\n', "")],
         ):
-            with self.subTest(result=result), mock.patch.object(bump_mod.subprocess, "run", return_value=result):
+            with self.subTest(results=results), mock.patch.object(bump_mod.subprocess, "run", side_effect=results):
                 with self.assertRaises(SystemExit):
                     bump_mod.released_clarabel_version("0.22.1")
 
