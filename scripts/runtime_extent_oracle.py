@@ -3845,7 +3845,7 @@ def validate_local_ascription_layer_mutations(
                 "--exact",
                 "--nocapture",
             ),
-            "fusion must retain one exact site",
+            "the claimed initializer must retain its primitive attribution",
         ),
         (
             "local-ascription Eval observation",
