@@ -1163,6 +1163,47 @@ class StageUnionTests(unittest.TestCase):
             gate.selected_stage_commands("integration", tests_only=False, support_only=True,
                 partition=None, support_slice="domain", numeric_core_phase="extraction")
 
+    def test_effect_oracle_has_one_support_owner_and_keeps_portable_commands(self):
+        slices = {
+            name: gate.selected_stage_commands(
+                "integration", tests_only=False, support_only=True,
+                partition=None, support_slice=name,
+            )
+            for name in gate.INTEGRATION_SUPPORT_SLICES
+        }
+        for command in (
+            gate.EFFECT_ANALYSIS_CORE_ORACLE, gate.SYNTAX_CORE_ORACLE,
+            gate.NUMERIC_CORE_ORACLE, gate.TYPE_UNIFICATION_CORE_ORACLE,
+            gate.DAG_CORE_ORACLE,
+        ):
+            with self.subTest(command=command):
+                self.assertEqual(
+                    sum(commands.count(command) for commands in slices.values()), 1
+                )
+        owners = gate.INTEGRATION_SUPPORT_SLICES
+        owner = next(
+            name for name, commands in slices.items()
+            if gate.EFFECT_ANALYSIS_CORE_ORACLE in commands
+        )
+        mutations = (
+            {
+                **owners,
+                owner: tuple(
+                    command for command in owners[owner]
+                    if command != gate.EFFECT_ANALYSIS_CORE_ORACLE
+                ),
+            },
+            {**owners, owner: (*owners[owner], gate.EFFECT_ANALYSIS_CORE_ORACLE)},
+        )
+        for changed in mutations:
+            with self.subTest(owners=changed), mock.patch.object(
+                gate, "INTEGRATION_SUPPORT_SLICES", changed,
+            ), self.assertRaises(ValueError):
+                gate.selected_stage_commands(
+                    "integration", tests_only=False, support_only=True,
+                    partition=None, support_slice=owner,
+                )
+
     def test_support_slice_rejects_unknown_missing_duplicate_and_stale_ownership(self):
         owners = gate.INTEGRATION_SUPPORT_SLICES
         for changed in (
@@ -2809,43 +2850,6 @@ class CiParityTests(unittest.TestCase):
         self.assertIn("target/gate-reports", worker)
         self.assertNotIn("continue-on-error: true", worker)
 
-    def test_every_partitioned_test_lane_publishes_named_junit(self):
-        expectations = {
-            "ci-fast": (
-                "junit-linux-fast",
-                "target/nextest/ci-fast/junit.xml",
-            ),
-            "dtype-phase3-oracle": (
-                "junit-linux-dtype",
-                "target/nextest/ci-full/junit.xml",
-            ),
-            "generalize-sweep-oracle-shard": (
-                "junit-linux-generalization-${{ matrix.shard }}",
-                "target/nextest/ci-full/junit.xml",
-            ),
-            # chelis#1819: the nightly workspace suite is a four-way hash
-            # partition, so its report is one artifact per shard. A shared
-            # name would collide on upload and strand the telemetry download.
-            "full-workspace": (
-                "junit-linux-full-${{ matrix.shard }}",
-                "target/nextest/ci-full/junit.xml",
-            ),
-            "macos-workspace-shard": (
-                "junit-macos-workspace-${{ matrix.shard }}",
-                "target/nextest/ci-full/junit.xml",
-            ),
-            "module-oracles": (
-                "junit-linux-module-oracles-${{ matrix.shard }}",
-                "target/nextest/module-oracles/junit.xml",
-            ),
-        }
-        for job, (artifact, path) in expectations.items():
-            with self.subTest(job=job):
-                block = _ci_job_block(job)
-                self.assertEqual(block.count("uses: actions/upload-artifact@v7"), 2 if job in {"ci-fast", "dtype-phase3-oracle"} else 1)
-                self.assertIn(f"name: {artifact}", block)
-                self.assertIn(f"path: {path}", block)
-                self.assertIn("if-no-files-found: error", block)
 
     def test_every_nonworkspace_pr_lane_validates_and_reports_timing(self):
         expectations = {

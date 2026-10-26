@@ -34,7 +34,7 @@
 //!   workload; the error path stays correct by deferring to the
 //!   existing checker.
 
-use chelis_effects::{DefEffectRows, EffectError};
+use chelis_effects_core::{DefEffectRows, EffectError};
 use chelis_types::errors::CheckError;
 use chelis_types::{CheckedProgram, FitnessReport, InferStats, StructuralStats};
 

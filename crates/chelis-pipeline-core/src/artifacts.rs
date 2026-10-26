@@ -64,7 +64,7 @@ pub enum SemanticContext {
 #[derive(Debug)]
 pub enum SemanticRejection {
     Effects {
-        errors: Vec<chelis_effects::EffectError>,
+        errors: Vec<chelis_effects_core::EffectError>,
     },
     Linearity {
         errors: Vec<chelis_types::errors::CheckError>,
@@ -94,7 +94,7 @@ pub enum LibraryRejection {
     },
     ContextMismatch,
     Effects {
-        errors: Vec<chelis_effects::EffectError>,
+        errors: Vec<chelis_effects_core::EffectError>,
     },
     Linearity {
         errors: Vec<chelis_types::errors::CheckError>,

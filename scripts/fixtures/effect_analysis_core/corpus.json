@@ -1,0 +1,42 @@
+{
+  "revision": "949d8606bca101b825ea49b0df4719da99458e09",
+  "cases": [
+    ["pure", "surf", true, "def identity(x: i64) -> i64 = x\n"],
+    ["direct_io", "surf", true, "def logged(x: i64) -> i64 = debug(x)\n"],
+    ["transitive_io", "surf", true, "def emit(x: i64) -> i64 = debug(x)\ndef wrapper(x: i64) -> i64 = emit(x)\n"],
+    ["recursive_io", "surf", true, "def recur(x: i64) -> i64 = if eq(x, 0i64) then debug(x) else recur(sub(x, 1i64))\n"],
+    ["declared_upper_bound", "surf", true, "def logged(x: i64) -> i64 ! {IO, Test} = debug(x)\n"],
+    ["declared_empty", "surf", false, "def logged(x: i64) -> i64 ! {} = debug(x)\n"],
+    ["declared_transitive_empty", "surf", false, "def emit(x: i64) -> i64 = debug(x)\ndef wrapper(x: i64) -> i64 ! {} = emit(x)\n"],
+    ["test_effect", "surf", true, "def verify() -> unit = test_assert(true, \"oracle\")\n"],
+    ["builtin_value", "surf", true, "def alias() = file_exists\n"],
+    ["builtin_debug_value_rejected", "surf", false, "def alias() = debug\n"],
+    ["local_alias", "surf", true, "def exists(path: string) -> bool = {\n f = file_exists\n f(path)\n}\n"],
+    ["local_debug_alias_rejected", "surf", false, "def logged(x: i64) -> i64 = {\n f = debug\n f(x)\n}\n"],
+    ["local_closure_empty", "surf", false, "def logged(x: i64) -> i64 ! {} = {\n f = fn (y: i64) -> debug(y)\n f(x)\n}\n"],
+    ["shadow_parameter", "surf", true, "def emit(x: i64) -> i64 = debug(x)\ndef pure(emit: i64) -> i64 ! {} = emit\n"],
+    ["callback", "surf", true, "def emit(x: i64) -> i64 = debug(x)\nxs: List[i64] = [cast(1, i64), cast(2, i64)]\nys = map(emit, xs)\n"],
+    ["callback_empty", "surf", false, "def logged(xs: List[i64]) -> List[i64] ! {} = map(fn (x: i64) -> debug(x), xs)\n"],
+    ["module", "surf", true, "module Oracle.Effect\ndef logged(x: i64) -> i64 = debug(x)\n"],
+    ["keyed_random", "surf", true, "def draw(k: key, x: tensor[4,f32]) -> tensor[4,f32] ! {} = dropout(k, x, 0.5f32)\n"],
+    ["cpu", "surf", true, "def main() -> i32 = with device(\"cpu\") { 1 }\n"],
+    ["gpu", "surf", true, "def main() -> i32 = with device(\"gpu:0\") { 1 }\n"],
+    ["cpu_label", "surf", true, "def main() -> i32 = with device(\"cpu:label\") { 1 }\n"],
+    ["nested_resource", "surf", true, "def main() -> i32 = with device(\"cpu\") { with device(\"gpu:0\") { 1 } }\n"],
+    ["deep_cpu", "deep", true, "(def {} value (handle-effect {effect: resource} (lit {type: (t-prim {} string)} \"cpu\") (lit {type: (t-prim {} i32)} 1)))"],
+    ["invalid_resource", "deep", false, "(def {} value (handle-effect {effect: resource} (var {} computed_handler) (lit {type: (t-prim {} i32)} 1)))"],
+    ["metadata_duplicate", "deep", false, "(def {} f (fn {effects: (effects {} io), effects: (effects {})} (params {}) (lit {} 1)))"],
+    ["metadata_malformed", "deep", false, "(def {} f (fn {effects: 42} (params {}) (lit {} 1)))"],
+    ["metadata_misplaced", "deep", false, "(def {eff: (effects {} io)} value (lit {} 1))"],
+    ["random_handler", "deep", false, "(def {} value (handle-effect {effect: random} (lit {} 7) (lit {} 1)))"]
+  ],
+  "library": "def emit(x: i64) -> i64 = debug(x)\ndef verify() -> unit = test_assert(true, \"library\")\ndef identity(x: i64) -> i64 = x\n",
+  "extensions": [
+    ["import_io", true, "def wrapper(x: i64) -> i64 = emit(x)\ndef transitive(x: i64) -> i64 = wrapper(x)\n"],
+    ["import_pure", true, "def pure(x: i64) -> i64 = identity(x)\n"],
+    ["import_empty", false, "def wrapper(x: i64) -> i64 ! {} = emit(x)\n"],
+    ["import_test", false, "def wrapper() -> unit ! {} = verify()\n"],
+    ["shadow_pure", true, "def emit(x: i64) -> i64 = x\ndef caller(x: i64) -> i64 ! {} = emit(x)\n"],
+    ["shadow_effect", true, "def identity(x: i64) -> i64 = debug(x)\ndef caller(x: i64) -> i64 = identity(x)\n"]
+  ]
+}

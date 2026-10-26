@@ -12,6 +12,7 @@ APPROVED_DEPENDENCIES = (
     "chelis-deep",
     "chelis-types",
     "chelis-effects",
+    "chelis-effects-core",
     "chelis-ir",
     "chelis-unord",
     "chelis-dag-core",
@@ -36,7 +37,8 @@ def approved_graph() -> dict[str, list[str]]:
         "chelis-pipeline-core": list(APPROVED_DEPENDENCIES),
         "chelis-deep": [],
         "chelis-types": ["chelis-deep", "chelis-type-core"],
-        "chelis-effects": ["chelis-deep", "chelis-types"],
+        "chelis-effects": ["chelis-deep", "chelis-types", "chelis-effects-core"],
+        "chelis-effects-core": ["chelis-deep", "chelis-type-core", "chelis-unord"],
         "chelis-ir": ["chelis-deep", "chelis-types"],
         "chelis-type-core": ["chelis-numeric-core"],
         "chelis-numeric-core": [],
@@ -93,13 +95,15 @@ class PipelineCoreDependencyGuardTests(unittest.TestCase):
             guard.validate_fixture(manifest_with(*APPROVED_DEPENDENCIES), graph)
 
     def test_portable_cores_preserve_denied_and_unapproved_host_paths(self) -> None:
-        for core in ("chelis-numeric-core", "chelis-type-core"):
+        for core in ("chelis-numeric-core", "chelis-type-core", "chelis-effects-core"):
             for dependency, classification in (
                 ("chelis-compiler-api", "forbidden"),
                 ("chelis-conformance", "unapproved workspace"),
             ):
                 with self.subTest(core=core, dependency=dependency):
                     graph = approved_graph()
+                    if core in graph["chelis-pipeline-core"]:
+                        graph["chelis-pipeline-core"].remove(core)
                     graph["chelis-deep"].append(core)
                     graph[core] = [dependency]
                     graph[dependency] = []
@@ -111,6 +115,23 @@ class PipelineCoreDependencyGuardTests(unittest.TestCase):
                         guard.validate_fixture(
                             manifest_with(*APPROVED_DEPENDENCIES), graph
                         )
+
+    def test_effect_core_keeps_forbidden_host_descendants_rejected(self) -> None:
+        for dependency in (
+            "chelis-compiler-api", "chelis-surf", "chelis-backend-c",
+        ):
+            with self.subTest(dependency=dependency):
+                graph = approved_graph()
+                graph["chelis-effects-core"].append(dependency)
+                graph[dependency] = []
+                with self.assertRaisesRegex(
+                    guard.DependencyBoundaryError,
+                    "forbidden dependency path: chelis-pipeline-core"
+                    f" -> chelis-effects-core -> {dependency}",
+                ):
+                    guard.validate_fixture(
+                        manifest_with(*APPROVED_DEPENDENCIES), graph
+                    )
 
     def test_metadata_excludes_dev_only_edges(self) -> None:
         raw = {

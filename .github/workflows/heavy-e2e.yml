@@ -646,6 +646,10 @@ jobs:
       - name: Set up project CI
         uses: ./.github/actions/setup-project-ci
 
+      - name: Install effect oracle policy dependency
+        if: matrix.slice == 'domain'
+        run: uv pip install --python "$PYO3_PYTHON" PyYAML==6.0.3
+
       - name: Cache cargo registry and build
         if: runner.environment == 'github-hosted'
         uses: Swatinem/rust-cache@v2
@@ -666,6 +670,15 @@ jobs:
         with:
           name: integration-support-${{ matrix.slice }}-receipts
           path: target/gate-reports/
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload effect analysis core evidence
+        if: always() && matrix.slice == 'domain'
+        uses: actions/upload-artifact@v7
+        with:
+          name: effect-analysis-core-linux
+          path: target/agents/effect-analysis-core/
           if-no-files-found: error
           retention-days: 14
 

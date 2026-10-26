@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "baseline": "949d8606bca101b825ea49b0df4719da99458e09",
+  "comparison": "Exact JSON equality. No semantic fields are removed or normalized.",
+  "snapshot_fields": ["cases", "extensions", "library", "context"],
+  "checked_fields": ["bytes", "payload", "tree", "type_env", "signatures", "linearity", "typed_nodes", "total_nodes"],
+  "effect_error_fields": ["kind", "message", "suggestions"],
+  "type_error_fields": ["kind", "identifier", "message", "suggestions", "severity_bits", "expected", "got", "span_offset", "span_id"],
+  "stack_bytes": 67108864,
+  "memory_bindings": [256, 512],
+  "memory_growth": 2.5,
+  "clone_operations": [20, 40, 80, 160],
+  "clone_shapes": ["nested", "flat"],
+  "clone_growth": 2.2,
+  "descendant_clone_work": 0
+}

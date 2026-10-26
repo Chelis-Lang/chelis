@@ -2294,7 +2294,7 @@ impl Checker {
     /// whose parameter annotation was a synthesized inference hole:
     /// `DeepTag::Var` is in `should_attach_type_metadata`'s deny list so
     /// a `(var ..)` node never carries `:type`, and the scope entry that
-    /// `param_name_and_type` builds is empty because the parameter was
+    /// `lexical_param_name_and_type` builds is empty because the parameter was
     /// emitted as a bare name. `expr_is_owned_or_borrow_linear` is an
     /// `is_some_and`, so absent information became a rejection: a
     /// fail-closed, not a classification.
@@ -2435,7 +2435,7 @@ impl Checker {
 
         let declaration = std::mem::take(&mut self.declaration_free_reads);
         let repairable = !declaration;
-        let params = param_names(&children[0]);
+        let params = chelis_deep::lexical_param_names(&children[0]);
         let captured = free_vars(&children[1], &params);
         let mut inner_scope = outer_scope.clone();
         let body = &children[1];
@@ -2604,7 +2604,7 @@ impl Checker {
         let checked_fn_type = type_metadata(expr);
         if let Some(params) = tagged_children(&children[0], DeepTag::Params) {
             for (index, param) in params.iter().enumerate() {
-                if let Some((name, ty)) = param_name_and_type(param) {
+                if let Some((name, ty)) = chelis_deep::lexical_param_name_and_type(param) {
                     let checked = checked_fn_type.and_then(|fn_ty| type_expr_fn_arg(fn_ty, index));
                     // The checked type, not the annotation: a `sig` declares
                     // the parameter's type away from the parameter, and an
@@ -4183,58 +4183,7 @@ fn callee_is_observational_higher_order(expr: &Expr) -> bool {
     matches!(get_tag_expr(expr), Some(DeepTag::Grad | DeepTag::Vmap))
 }
 
-/// The names a function's `(params ...)` binds, as the checker reads them.
-/// The effect checker resolves names through this same reading.
-pub fn param_names(expr: &Expr) -> Vec<String> {
-    let Some(params) = tagged_children(expr, DeepTag::Params) else {
-        return Vec::new();
-    };
-    params
-        .iter()
-        .filter_map(|param| param_name_and_type(param).map(|(name, _)| name.to_string()))
-        .collect()
-}
-
-/// The names a pattern binds, as the checker reads them. The effect checker
-/// resolves names through this same reading.
-pub fn pattern_names(expr: &Expr) -> Vec<String> {
-    let mut names = Vec::new();
-    collect_pattern_names(expr, &mut names);
-    names
-}
-
-fn collect_pattern_names(expr: &Expr, names: &mut Vec<String>) {
-    let (tag, children) = match expr.carrier() {
-        ExprCarrier::DecodedNode(tag, _, children) => (tag, children),
-        ExprCarrier::StructuralList(_)
-        | ExprCarrier::UndecodableHead(_, _, _)
-        | ExprCarrier::Atom(_)
-        | ExprCarrier::MetadataMap(_)
-        | ExprCarrier::MetadataExpression(_) => return,
-    };
-    match tag {
-        DeepTag::PatVar => {
-            if let Some(name) = children.first().and_then(symbol_name) {
-                names.push(name.to_string());
-            }
-        }
-        DeepTag::PatAs => {
-            if let Some(name) = children.first().and_then(symbol_name) {
-                names.push(name.to_string());
-            }
-            if let Some(inner) = children.get(1) {
-                collect_pattern_names(inner, names);
-            }
-        }
-        _ => {
-            for child in children {
-                collect_pattern_names(child, names);
-            }
-        }
-    }
-}
-
-/// Like [`pattern_names`], but also returns each binding's resolved
+/// Like [`chelis_deep::lexical_pattern_names`], but also returns each binding's resolved
 /// type expression when the inferencer stamped one onto the pattern
 /// node's metadata. `check_match` populates arm `LinearScope` entries
 /// with these types — required for destructured fields whose type comes
@@ -4579,9 +4528,10 @@ fn rename_free_vars(
                     }
                 }
                 DeepTag::Fn if kids.len() >= 2 => {
-                    let body = within_binder(bound, param_names(&kids[0]), |bound| {
-                        rename_free_vars(&kids[1], renames, bound)
-                    });
+                    let body =
+                        within_binder(bound, chelis_deep::lexical_param_names(&kids[0]), |bound| {
+                            rename_free_vars(&kids[1], renames, bound)
+                        });
                     rebuilt(with_renamed_child(kids, 1, body))
                 }
                 DeepTag::Let if kids.len() >= 2 => {
@@ -4623,13 +4573,16 @@ fn rename_free_vars(
                             renamed.push(rename_free_vars(arm, renames, bound));
                             continue;
                         };
-                        let (guard, body) =
-                            within_binder(bound, pattern_names(&arm_kids[0]), |bound| {
+                        let (guard, body) = within_binder(
+                            bound,
+                            chelis_deep::lexical_pattern_names(&arm_kids[0]),
+                            |bound| {
                                 (
                                     rename_free_vars(&arm_kids[1], renames, bound),
                                     rename_free_vars(&arm_kids[2], renames, bound),
                                 )
-                            });
+                            },
+                        );
                         let mut arm_renamed = vec![unrenamed(&arm_kids[0]), guard, body];
                         arm_renamed.extend(arm_kids[3..].iter().map(unrenamed));
                         renamed.push(Expr::node(
@@ -4666,9 +4619,13 @@ fn collect_free_vars(expr: &Expr, bound: &mut BoundNames, free: &mut UnordSet<St
                 }
                 DeepTag::Fn => {
                     if children.len() >= 2 {
-                        within_binder(bound, param_names(&children[0]), |bound| {
-                            collect_free_vars(&children[1], bound, free);
-                        });
+                        within_binder(
+                            bound,
+                            chelis_deep::lexical_param_names(&children[0]),
+                            |bound| {
+                                collect_free_vars(&children[1], bound, free);
+                            },
+                        );
                     }
                 }
                 DeepTag::Let => {
@@ -4700,10 +4657,14 @@ fn collect_free_vars(expr: &Expr, bound: &mut BoundNames, free: &mut UnordSet<St
                             collect_untrusted_free_vars(arm, bound, free);
                             continue;
                         };
-                        within_binder(bound, pattern_names(&arm_kids[0]), |bound| {
-                            collect_free_vars(&arm_kids[1], bound, free);
-                            collect_free_vars(&arm_kids[2], bound, free);
-                        });
+                        within_binder(
+                            bound,
+                            chelis_deep::lexical_pattern_names(&arm_kids[0]),
+                            |bound| {
+                                collect_free_vars(&arm_kids[1], bound, free);
+                                collect_free_vars(&arm_kids[2], bound, free);
+                            },
+                        );
                     }
                 }
                 _ => {
@@ -4951,45 +4912,6 @@ fn span_metadata_id(expr: &Expr) -> Option<&str> {
         | ExprCarrier::Atom(_)
         | ExprCarrier::MetadataMap(_)
         | ExprCarrier::MetadataExpression(_) => None,
-    }
-}
-
-fn param_name_and_type(param: &Expr) -> Option<(&str, Option<&Expr>)> {
-    match param.carrier() {
-        ExprCarrier::Atom(Atom::Name(name)) => Some((name.as_str(), None)),
-        ExprCarrier::StructuralList(elements) => {
-            let name = elements.first().and_then(symbol_name)?;
-            let ty = elements.get(1).and_then(|meta| {
-                let Expr::Map(meta, _) = meta else {
-                    return None;
-                };
-                meta.ty().map(|v| v.expression())
-            });
-            Some((name, ty))
-        }
-        ExprCarrier::UndecodableHead(name, metadata, []) => {
-            Some((name, metadata.ty().map(|value| value.expression())))
-        }
-        // chelis#343: a typed param whose name collides with a Deep tag
-        // (`params`, `fn`, `let`, ...) cannot use the `(name {type: T})`
-        // list form — `(params {type: T})` is indistinguishable from a
-        // `params` tag list — so the desugarer emits the caret-metadata
-        // wrapper `^{:type T} name` (a `MetaExpr`) instead
-        // (`typed_param_needs_meta_wrapper`). `extract_params` in infer.rs
-        // already reads this form; linearity must too, or the param is
-        // declared with NO type and a borrow of it (`&params`) trips a
-        // spurious "borrowed arguments must be tensor or tensor-carrying
-        // values". Mirrors infer.rs `extract_params`'s MetaExpr arm.
-        ExprCarrier::MetadataExpression(meta) => {
-            let Expr::Atom(Atom::Name(name), _) = meta.expr.as_ref() else {
-                return None;
-            };
-            Some((name.as_str(), meta.metadata.ty().map(|v| v.expression())))
-        }
-        ExprCarrier::DecodedNode(_, _, _)
-        | ExprCarrier::UndecodableHead(_, _, _)
-        | ExprCarrier::Atom(_)
-        | ExprCarrier::MetadataMap(_) => None,
     }
 }
 

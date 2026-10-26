@@ -1,0 +1,24 @@
+[package]
+name = "chelis-effects-core"
+description = "Portable effect analysis for Chelis Deep expressions"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = []
+serde = ["chelis-type-core/serde", "chelis-unord/serde"]
+test-instrumentation = []
+
+[dependencies]
+chelis-deep = { path = "../chelis-deep", default-features = false }
+chelis-type-core = { path = "../chelis-type-core", default-features = false }
+chelis-unord = { path = "../chelis-unord", default-features = false }
+chelis-vocab = { path = "../chelis-vocab", default-features = false }
+
+[dev-dependencies]
+chelis-syntax-host.workspace = true
+
+[lints]
+workspace = true

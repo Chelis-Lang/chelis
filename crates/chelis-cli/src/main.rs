@@ -3628,7 +3628,7 @@ fn check_prepared_file(
 
 type PreparedCliReport = (
     chelis_types::FitnessReport,
-    Vec<chelis_effects::EffectError>,
+    Vec<chelis_effects_core::EffectError>,
     Vec<chelis_types::errors::CheckError>,
     Option<Vec<chelis_compiler_api::schema::WireInferredSignature>>,
 );
@@ -3688,7 +3688,7 @@ fn check_prepared_for_cli(
 /// The caller maps a non-empty `errors` list to [`CHECK_ERRORS_EXIT_CODE`].
 fn assemble_check_report(
     report: chelis_types::FitnessReport,
-    effect_errors: &[chelis_effects::EffectError],
+    effect_errors: &[chelis_effects_core::EffectError],
     linearity_errors: &[chelis_types::errors::CheckError],
     inferred_signatures: Option<Vec<chelis_compiler_api::schema::WireInferredSignature>>,
 ) -> CheckResult {
@@ -3721,7 +3721,7 @@ fn assemble_check_report(
 /// because the only consumer turns it into a diagnostic.
 fn assemble_validated_check_report(
     mut report: chelis_types::FitnessReport,
-    effect_errors: &[chelis_effects::EffectError],
+    effect_errors: &[chelis_effects_core::EffectError],
     linearity_errors: &[chelis_types::errors::CheckError],
     inferred_signatures: Option<Vec<chelis_compiler_api::schema::WireInferredSignature>>,
 ) -> Result<CheckResult, String> {
@@ -3866,7 +3866,7 @@ mod check_path_totality_tests {
     /// readable.
     type AssembleCheckReport = fn(
         chelis_types::FitnessReport,
-        &[chelis_effects::EffectError],
+        &[chelis_effects_core::EffectError],
         &[chelis_types::errors::CheckError],
         Option<Vec<chelis_compiler_api::schema::WireInferredSignature>>,
     ) -> CheckResult;
@@ -3885,7 +3885,7 @@ mod check_path_totality_tests {
         bool,
     ) -> (
         chelis_types::FitnessReport,
-        Vec<chelis_effects::EffectError>,
+        Vec<chelis_effects_core::EffectError>,
         Vec<chelis_types::errors::CheckError>,
         Option<Vec<chelis_compiler_api::schema::WireInferredSignature>>,
     );
@@ -4019,7 +4019,7 @@ mod advisory_lint_scope_tests {
 /// rows.
 fn layered_inferred_signatures(
     checked: &chelis_types::CheckedProgram,
-    effect_rows: Option<chelis_effects::DefEffectRows>,
+    effect_rows: Option<chelis_effects_core::DefEffectRows>,
     fitness: &mut chelis_types::FitnessReport,
 ) -> Option<Vec<chelis_compiler_api::schema::WireInferredSignature>> {
     let Some(effect_rows) = effect_rows else {
@@ -4046,7 +4046,7 @@ fn layered_inferred_signatures(
 /// (chelis#606).
 fn inferred_signatures_or_diagnostic(
     checked: &chelis_types::CheckedProgram,
-    effect_rows: &chelis_effects::DefEffectRows,
+    effect_rows: &chelis_effects_core::DefEffectRows,
     fitness: &mut chelis_types::FitnessReport,
 ) -> Option<Vec<chelis_compiler_api::schema::WireInferredSignature>> {
     match inferred_signatures_value(checked, effect_rows) {
@@ -4083,7 +4083,7 @@ fn report_inferred_signature_failure(
 
 fn inferred_signatures_value(
     checked: &chelis_types::CheckedProgram,
-    effect_rows: &chelis_effects::DefEffectRows,
+    effect_rows: &chelis_effects_core::DefEffectRows,
 ) -> Result<Vec<chelis_compiler_api::schema::WireInferredSignature>, Box<dyn std::error::Error>> {
     use chelis_compiler_api::schema::{WireInferredParameter, WireInferredSignature};
     let entries = checked
@@ -12513,7 +12513,7 @@ fn boxed_string_error(message: String) -> Box<dyn std::error::Error> {
     message.into()
 }
 
-fn format_effect_errors(errors: &[chelis_effects::EffectError]) -> String {
+fn format_effect_errors(errors: &[chelis_effects_core::EffectError]) -> String {
     errors
         .iter()
         .map(|error| error.message.clone())

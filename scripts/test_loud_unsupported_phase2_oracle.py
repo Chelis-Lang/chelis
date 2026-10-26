@@ -60,6 +60,26 @@ class LoudUnsupportedPhase2OracleTests(unittest.TestCase):
         ):
             self.assertIn(required, joined)
 
+    def test_vocab_mutation_needs_all_independent_consumer_failures(self) -> None:
+        evidence = (
+            "non-exhaustive patterns",
+            "crates/chelis-surf/src/resugar.rs",
+            "crates/chelis-types/src/infer/expr.rs",
+            "crates/chelis-effects-core/src/lib.rs",
+            "crates/chelis-runtime/src/lib.rs",
+        )
+        output = "\n".join(evidence)
+        oracle.validate_vocab_mutation_output(101, output)
+        for missing in evidence:
+            with self.subTest(missing=missing), self.assertRaisesRegex(
+                oracle.OracleFailure, "required exhaustive consumer evidence",
+            ):
+                oracle.validate_vocab_mutation_output(
+                    101, "\n".join(line for line in evidence if line != missing)
+                )
+        with self.assertRaisesRegex(oracle.OracleFailure, "compiled successfully"):
+            oracle.validate_vocab_mutation_output(0, output)
+
     def test_effect_mutation_updates_owner_without_a_default_arm(self) -> None:
         source = (oracle.REPO_ROOT / oracle.VOCAB_SOURCE).read_text(encoding="utf-8")
         mutated = oracle.mutate_effect_kind(source)
@@ -138,6 +158,26 @@ class LoudUnsupportedPhase2OracleTests(unittest.TestCase):
                     self.assertIn("Phase2OracleDType", mutated)
                     raise RuntimeError("probe failed")
             self.assertEqual(path.read_bytes(), source)
+
+    def test_numeric_dtype_admission_restores_original_bytes_on_failure(self) -> None:
+        original = (oracle.REPO_ROOT / oracle.NUMERIC_PRIM_SOURCE).read_bytes()
+        with tempfile.TemporaryDirectory() as raw_dir:
+            path = Path(raw_dir) / "prim.rs"
+            path.write_bytes(original)
+            with self.assertRaisesRegex(RuntimeError, "probe failed"):
+                with oracle.temporary_numeric_dtype_admission(path):
+                    raise RuntimeError("probe failed")
+            self.assertEqual(path.read_bytes(), original)
+
+    def test_numeric_dtype_admission_refuses_drift_without_source_loss(self) -> None:
+        original = b"pub enum Unrelated {}\n"
+        with tempfile.TemporaryDirectory() as raw_dir:
+            path = Path(raw_dir) / "prim.rs"
+            path.write_bytes(original)
+            with self.assertRaisesRegex(oracle.OracleFailure, "numeric dtype admission"):
+                with oracle.temporary_numeric_dtype_admission(path):
+                    self.fail("the probe accepted a different owner")
+            self.assertEqual(path.read_bytes(), original)
 
     def test_endpoint_scan_is_green_on_the_repository(self) -> None:
         self.assertEqual(oracle.endpoint_violations(oracle.REPO_ROOT), [])

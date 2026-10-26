@@ -81,7 +81,7 @@ class CompileBackedControlTests(unittest.TestCase):
                 },
             )
             completed = subprocess.run(
-                ("cargo", "check", "--quiet"),
+                ("cargo", "check", "--quiet", "--target-dir", str(root / "target")),
                 cwd=root,
                 capture_output=True,
                 text=True,
@@ -114,7 +114,7 @@ class CompileBackedControlTests(unittest.TestCase):
                 },
             )
             completed = subprocess.run(
-                ("cargo", "check", "--quiet"),
+                ("cargo", "check", "--quiet", "--target-dir", str(root / "target")),
                 cwd=root,
                 capture_output=True,
                 text=True,
@@ -142,7 +142,7 @@ class CompileBackedControlTests(unittest.TestCase):
                 },
             )
             completed = subprocess.run(
-                ("cargo", "check", "--quiet"),
+                ("cargo", "check", "--quiet", "--target-dir", str(root / "target")),
                 cwd=root,
                 capture_output=True,
                 text=True,
@@ -339,6 +339,23 @@ class MatrixCoverageTests(unittest.TestCase):
         with self.assertRaisesRegex(CLOSURE.ConfigurationClosureFailure,
                                     "chelis-numeric-core/serde"):
             CLOSURE.check_matrix_covers_declared_features(REPO_ROOT, matrix)
+
+    def test_effect_rows_resolve_all_three_isolated_feature_states(self) -> None:
+        rows = {
+            run.label: run for run in CLOSURE.CLIPPY_MATRIX
+            if run.owner == "scripts/gate.py" and run.label.startswith("effect-")
+        }
+        self.assertEqual(len(rows), 3)
+        states = set()
+        for run in rows.values():
+            compiled, enabled = CLOSURE.resolved_configuration(run, REPO_ROOT)
+            self.assertIn("chelis-effects-core", compiled)
+            # Clippy includes dev dependencies. Independent target consumers check the normal graph.
+            states.add((
+                "--no-default-features" in run.cargo_feature_flags(),
+                ("chelis-effects-core", "serde") in enabled,
+            ))
+        self.assertEqual(states, {(False, False), (True, False), (True, True)})
 
     def test_uncompiled_package_cannot_count_as_feature_off_coverage(self) -> None:
         matrix = tuple(run for run in CLOSURE.CLIPPY_MATRIX
@@ -538,6 +555,59 @@ class SourceReconciliationTests(unittest.TestCase):
             (root / selected[0].sources[0]).unlink()
             with self.assertRaisesRegex(CLOSURE.ConfigurationClosureFailure, "fixture inventory"):
                 CLOSURE.check_every_source_is_compiled(*args, exceptions=selected, nightly_only=())
+
+    def test_effect_fixture_owner_rejects_missing_extra_and_unowned_sources(self):
+        selected = tuple(
+            entry for entry in CLOSURE.UNCOMPILED_EXCEPTIONS
+            if entry.owning_gate == "scripts/effect_analysis_core_oracle.py"
+        )
+        self.assertEqual(len(selected), 1)
+        entry = selected[0]
+        self.assertIsNotNone(entry.sources)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            subprocess.run(("git", "init", "--quiet"), cwd=root, check=True)
+            for source in (*entry.sources, entry.owning_gate, "src/compiled.rs"):
+                path = root / source
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("", encoding="utf-8")
+            deps = root / "target/debug/deps"
+            deps.mkdir(parents=True)
+            (deps / "unit.d").write_text(
+                "target/debug/deps/x.rmeta: src/compiled.rs\n", encoding="utf-8"
+            )
+
+            def reconcile(owners=selected):
+                CLOSURE.check_every_source_is_compiled(
+                    (root / "target/debug",), root,
+                    exceptions=owners, nightly_only=(), require_complete=True,
+                )
+
+            reconcile()
+            with self.assertRaisesRegex(
+                CLOSURE.ConfigurationClosureFailure, "compiled by no registered Clippy",
+            ):
+                reconcile(())
+            owner = root / entry.owning_gate
+            owner.unlink()
+            with self.assertRaisesRegex(
+                CLOSURE.ConfigurationClosureFailure, "missing owning gate",
+            ):
+                reconcile()
+            owner.write_text("", encoding="utf-8")
+            extra = root / entry.directory / "nested/undriven.rs"
+            extra.parent.mkdir()
+            extra.write_text("", encoding="utf-8")
+            with self.assertRaisesRegex(
+                CLOSURE.ConfigurationClosureFailure, "exact fixture inventory",
+            ):
+                reconcile()
+            extra.unlink()
+            (root / entry.sources[0]).unlink()
+            with self.assertRaisesRegex(
+                CLOSURE.ConfigurationClosureFailure, "exact fixture inventory",
+            ):
+                reconcile()
 
     def test_historical_producer_requires_real_dep_info_without_an_exception(self):
         source = "crates/chelis-compiler-api/tests/fixtures/cache_wire_v3/producer.rs"

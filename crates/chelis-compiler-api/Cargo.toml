@@ -30,6 +30,7 @@ chelis-backend-hip.workspace = true
 chelis-deep.workspace = true
 chelis-image-id.workspace = true
 chelis-effects.workspace = true
+chelis-effects-core.workspace = true
 chelis-ir.workspace = true
 chelis-macros.workspace = true
 chelis-pipeline-core.workspace = true

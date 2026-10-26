@@ -2,7 +2,7 @@
 
 `chelis-pipeline-core` requires `std`.
 
-This inventory records direct core use and transitive blockers in its six direct dependencies.
+This inventory records direct core use and transitive blockers in its seven direct dependencies.
 It does not claim current `#![no_std]` support for `chelis-pipeline-core`.
 
 ## Direct Core Use
@@ -14,7 +14,7 @@ It does not claim current `#![no_std]` support for `chelis-pipeline-core`.
 | Stack support | The core calls lower crates that use stack growth. |
 | Panic behavior | Core errors implement `std::error::Error`. Core tests use `panic!` for failed fixtures. |
 | Operating-system use | Core production code does not use files, processes, sockets, or environment variables. |
-| Dependency features | All six lower crates retain their declared default features. Portable owners disable dependency `std` defaults. |
+| Dependency features | Existing owners retain their declared features. Portable owners disable dependency `std` defaults. |
 
 ## Transitive Lower-Crate Blockers
 
@@ -35,7 +35,16 @@ The checker also retains panic paths for internal invariant failures. Its defaul
 
 ### `chelis-effects`
 
-`chelis-effects` uses standard map and set collections. It also depends on `chelis-types`, so it inherits the type-checker blockers.
+`chelis-effects` retains checked reconstruction, target admission, realizability, and root policy.
+Its `chelis-types` dependency retains the host checker blockers.
+Portable effect inference and annotation reside in `chelis-effects-core`.
+
+### `chelis-effects-core`
+
+`chelis-effects-core` uses unconditional `no_std` with explicit `alloc`.
+It owns effect inference, annotation, handler validation, declared-row checks, and shared effect error data.
+The caller supplies allocation and stack resources.
+This portable dependency does not make the pipeline core portable.
 
 ### `chelis-ir`
 
