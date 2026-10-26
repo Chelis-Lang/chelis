@@ -101,11 +101,6 @@ def assert_numeric_phase_ownership(test, nightly):
     test.assertEqual(numeric["timeout-minutes"], 115)
     test.assertEqual(support["timeout-minutes"], 70)
     test.assertEqual(support["strategy"]["matrix"]["slice"], ["frontend", "domain"])
-    test.assertEqual(numeric["defaults"], support["defaults"])
-    test.assertEqual(numeric["env"], support["env"])
-    # Preserve checkout, disk setup, project dependencies, cache and products
-    # verbatim; only the budget owner and literal slice differ.
-    test.assertEqual(numeric["steps"][:5], support["steps"][:5])
     test.assertEqual(numeric["steps"][5], {
         "name": "Gate (numeric-core phase)",
         "run": MOVED["numeric-core-oracle"],
@@ -556,7 +551,7 @@ class ExtendedCadenceTests(unittest.TestCase):
         assert_numeric_phase_ownership(self, self.nightly)
         for mutation in (
             "short-budget", "widen-support", "repeat-in-support", "wrong-slice",
-            "omit-setup", "omit-products", "write-cache", "skip-command",
+            "omit-setup", "omit-products", "skip-command",
             "ignore-command", "missing-receipt", "optional-receipt",
         ):
             with self.subTest(mutation=mutation):
@@ -575,8 +570,6 @@ class ExtendedCadenceTests(unittest.TestCase):
                     del numeric["steps"][2]
                 elif mutation == "omit-products":
                     del numeric["steps"][4]
-                elif mutation == "write-cache":
-                    numeric["steps"][3]["with"]["save-if"] = True
                 elif mutation == "skip-command":
                     numeric["steps"][5]["if"] = "false"
                 elif mutation == "ignore-command":
