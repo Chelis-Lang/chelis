@@ -4780,8 +4780,93 @@ mod tests {
     struct OracleOutcome {
         result: Result<BTreeMap<String, String>, String>,
         candidates: BTreeSet<(String, String)>,
+        known: BTreeMap<String, Vec<PackageRequirement>>,
         archives: usize,
         listings: usize,
+    }
+
+    fn registry_requests(requester: &PackageName, typed: &TypedManifest) -> Vec<RequestedPackage> {
+        typed
+            .dependencies
+            .iter()
+            .filter_map(|(name, dependency)| match dependency {
+                TypedDependency::Registry { requirement } => Some(RequestedPackage::new(
+                    requester.clone(),
+                    name.clone(),
+                    requirement.as_package_requirement(),
+                )),
+                TypedDependency::Path { .. } => None,
+            })
+            .collect()
+    }
+
+    /// The spec's statement of the selection, computed directly: the
+    /// window for the final known requirements, every candidate in it with
+    /// its real manifest, and one resolver-2 search. It shares no window
+    /// or deferral code with discovery.
+    fn resolve_over_final_window(
+        root: &str,
+        packages: &BTreeMap<String, Vec<(String, String)>>,
+        known: &BTreeMap<String, Vec<PackageRequirement>>,
+    ) -> Result<BTreeMap<String, String>, String> {
+        let directory = tempfile::tempdir().unwrap();
+        let read = |name: &str, version: &str, dependencies: &str| {
+            let path = directory.path().join(format!("{name}-{version}.toml"));
+            fs::write(&path, fixture_manifest(name, version, dependencies)).unwrap();
+            crate::read_manifest(&path).unwrap().typed
+        };
+        let app = PackageName::from_str("app").unwrap();
+        let root_requests = registry_requests(&app, &read("app", "0.1.0", root));
+        let mut candidates = BTreeMap::new();
+        for (name, releases) in packages {
+            let package = PackageName::from_str(name).unwrap();
+            let mut window = BTreeSet::new();
+            for requirement in known.get(name).into_iter().flatten() {
+                window.extend(
+                    releases
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, (version, _))| {
+                            requirement.matches(&PackageVersion::from_str(version).unwrap())
+                        })
+                        .take(MAX_CANDIDATES_PER_REQUIREMENT)
+                        .map(|(position, _)| position),
+                );
+            }
+            let entries = window
+                .into_iter()
+                .map(|position| {
+                    let (version, dependencies) = &releases[position];
+                    let typed = read(name, version, dependencies);
+                    package_versioning::LocalCandidate {
+                        id: typed.package.clone(),
+                        source: CandidateSource::Remote {
+                            source_identity: format!("github://chelis-lang/{name}@v{version}"),
+                        },
+                        content_identity: format!("{name}@{version}"),
+                        dependencies: registry_requests(&package, &typed),
+                    }
+                })
+                .collect::<Vec<_>>();
+            if !entries.is_empty() {
+                candidates.insert(package, entries);
+            }
+        }
+        let mut states = 0;
+        package_versioning::resolve_local_with_state_counter(
+            &root_requests,
+            &candidates,
+            package_versioning::ResolverLimits::default(),
+            &mut states,
+        )
+        .map(|resolution| {
+            resolution
+                .selected
+                .iter()
+                .map(|(name, candidate)| (name.to_string(), candidate.id.version.to_string()))
+                .collect()
+        })
+        .map_err(|error| error.to_string())
     }
 
     fn run_generated(
@@ -4840,9 +4925,15 @@ mod tests {
             })
             .collect();
         let requests = log.lock().unwrap().clone();
+        let known = session
+            .listings
+            .keys()
+            .map(|name| (name.to_string(), session.known_requirements(name)))
+            .collect();
         OracleOutcome {
             result,
             candidates,
+            known,
             archives: requests
                 .iter()
                 .filter(|path| path.contains("/releases/assets/"))
@@ -4854,8 +4945,11 @@ mod tests {
         }
     }
 
-    /// Differential oracle: deferred discovery against the eager reference
-    /// on generated graphs. A case passes when the reference fails, when
+    /// Differential oracle on generated graphs, with two checks. First,
+    /// deferred discovery must select exactly what one resolver-2 search
+    /// selects over the window for its final known requirements with every
+    /// candidate's manifest read, or both must fail. Second, against the
+    /// eager reference, a case passes when the reference fails, when
     /// both select the same graph, or when deferred discovery selects, for
     /// some package, a release the reference never had as a candidate for
     /// that package: its window dropped the release, so it reached a later
@@ -4874,6 +4968,7 @@ mod tests {
             .build()
             .unwrap();
         let mut tally = BTreeMap::<&str, u64>::new();
+        let mut spec_tally = BTreeMap::<&str, u64>::new();
         let (mut deferred_archives, mut eager_archives) = (0, 0);
         let (mut deferred_time, mut eager_time) = (Duration::ZERO, Duration::ZERO);
         let mut failures = Vec::new();
@@ -4889,7 +4984,7 @@ mod tests {
             runtime.block_on(
                 wiremock::Mock::given(wiremock::matchers::method("GET"))
                     .respond_with(GeneratedRegistry {
-                        packages,
+                        packages: packages.clone(),
                         log: log.clone(),
                         archives: std::sync::Mutex::new(BTreeMap::new()),
                     })
@@ -4903,6 +4998,24 @@ mod tests {
             eager_time += started.elapsed();
             deferred_archives += deferred.archives;
             eager_archives += eager.archives;
+            // Spec check: the selection over the final window with every
+            // candidate's manifest read. This needs no reference
+            // implementation, so it cannot share a reference's defect.
+            let direct = resolve_over_final_window(&root, &packages, &deferred.known);
+            let agrees = match (&direct, &deferred.result) {
+                (Ok(left), Ok(right)) => left == right,
+                (Err(_), Err(_)) => true,
+                _ => false,
+            };
+            *spec_tally
+                .entry(if agrees { "agrees" } else { "FAIL" })
+                .or_default() += 1;
+            if !agrees {
+                failures.push(format!(
+                    "case {case} seed {seed:#x} packages [{shape}] root {root:?}: final-window search {direct:?}; deferred {:?} ({} archives)",
+                    deferred.result, deferred.archives
+                ));
+            }
             let class = match (&eager.result, &deferred.result) {
                 (Err(_), Err(_)) => "both fail",
                 (Err(_), Ok(_)) => "eager fails, deferred resolves",
@@ -4936,7 +5049,7 @@ mod tests {
             }
         }
         eprintln!(
-            "oracle seed {ORACLE_SEED:#x}, {ORACLE_CASES} cases: {tally:?}; archives deferred {deferred_archives}, eager {eager_archives}; time deferred {deferred_time:?}, eager {eager_time:?}"
+            "oracle seed {ORACLE_SEED:#x}, {ORACLE_CASES} cases: final window {spec_tally:?}; against eager {tally:?}; archives deferred {deferred_archives}, eager {eager_archives}; time deferred {deferred_time:?}, eager {eager_time:?}"
         );
         assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
