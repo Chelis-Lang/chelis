@@ -349,3 +349,67 @@ def observations_b() -> tensor[3, f32] =
             .is_some_and(|reason| reason.contains("same compiler-bound dataset"))
     );
 }
+
+const EXAMPLE_PROOFS: &str =
+    include_str!("../../../examples/nautilus_quantile_contract/src/proofs.ch");
+
+/// chelis#4065: the example's own property under the default `auto` tier.
+/// The machine-arithmetic search evaluates the bound implementation at
+/// sampled levels, so a trap at a fractional index reports `unchecked` and
+/// this test fails; only a search that ran every sample corroborates.
+#[test]
+fn example_property_corroborates_machine_arithmetic_under_auto() {
+    let dir = tempdir().expect("tempdir");
+    let root = dir.path().join("quantile-contract");
+    write(
+        &root.join("reef.toml"),
+        &format!(
+            r#"[package]
+name = "quantile-contract"
+version = "0.1.0"
+compiler = "={}"
+module_prefix = "QuantileContract"
+
+[dependencies]
+nautilus = {{ path = "../nautilus" }}
+"#,
+            env!("CARGO_PKG_VERSION")
+        ),
+    );
+    write(&dir.path().join("nautilus/reef.toml"), NAUTILUS_REEF);
+    write(&dir.path().join("nautilus/src/stats.ch"), NAUTILUS_STATS);
+    write(&root.join("src/proofs.ch"), EXAMPLE_PROOFS);
+    let output = Command::cargo_bin("chelis")
+        .expect("chelis binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .env_remove("CHELIS_BEACON_BIN")
+        .args([
+            "prove",
+            root.join("src/proofs.ch").to_str().expect("utf8 path"),
+            "--json",
+        ])
+        .output()
+        .expect("run prove");
+    let transcript = format!(
+        "stdout={}\nstderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.status.success(), "{transcript}");
+    let records = property_records(&output.stdout);
+    assert_eq!(records.len(), 1, "{transcript}");
+    assert_eq!(records[0]["status"], "passed", "{transcript}");
+    assert_eq!(
+        records[0]["composite_verdict"], "proven_modulo_fuzz_validated_contract",
+        "{transcript}"
+    );
+    let machine = &records[0]["machine_arithmetic"];
+    assert_eq!(machine["status"], "corroborated", "{transcript}");
+    assert!(
+        machine["samples"]
+            .as_u64()
+            .is_some_and(|samples| samples > 0),
+        "{transcript}"
+    );
+    assert!(machine.get("reason").is_none(), "{transcript}");
+}

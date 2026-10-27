@@ -9,7 +9,9 @@ assumption.
 
 The Nautilus dependency is a path dependency on `fixtures/nautilus`, an in-tree
 copy of the functions this example uses from Nautilus 0.7.36, so the package
-needs no download beyond the toolchain.
+needs no download beyond the toolchain. Its `quantile_vec` takes the lower
+order-statistic index with the truncating `cast_trunc`, as later Nautilus
+releases do; the checked `cast` traps whenever that index is fractional.
 
 ## Run it
 
