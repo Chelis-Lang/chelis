@@ -6,37 +6,49 @@ project's `reef.toml`.
 
 ## Start a project with a library
 
-Create a project with `reef init`, then add the library you need under
-`[dependencies]` in its `reef.toml`:
+Create a project with `reef init`:
 
 ```sh
 chelis reef init demo --module-prefix Demo --output demo
 cd demo
 ```
 
-```toml
-[dependencies]
-nautilus = { version = "0.7.50" }
+Chelis libraries distributed through Reef are called shells; Nautilus
+(numerical methods) is one. Install the release you need into your local Reef
+registry. The release is public, so no token is needed:
+
+```sh
+chelis reef install --from-github Chelis-Lang/nautilus@v0.7.58
 ```
 
-Chelis libraries distributed through Reef are called shells; Nautilus
-(numerical methods) is one. Each shell release pins an exact Chelis compiler version. The compiler pin in your
-project must match the version required by the shell release; Reef rejects a
-mismatch. For example, Nautilus 0.7.50 uses Chelis 0.19.1. Set the generated
-`compiler` field in `reef.toml` to `"=0.19.1"`, then prepare and build the
-project:
+Then add it under `[dependencies]` in the project's `reef.toml`:
+
+```toml
+[dependencies]
+nautilus = { version = "0.7.58" }
+```
+
+Each shell release pins an exact Chelis compiler version. The compiler pin in
+your project must match the version required by the shell release; Reef
+rejects a mismatch. For example, Nautilus 0.7.58 uses Chelis 0.22.1. Set the
+generated `compiler` field in `reef.toml` to `"=0.22.1"`, then prepare and
+build the project:
 
 ```sh
 chelis reef setup
 chelis reef build
 ```
 
-Reef installs the pinned compiler, downloads the declared library from its
-release, and resolves its dependencies. It records the selected versions in
-`reef.lock`. You do not need to check out the source repository of Nautilus or
-its dependencies to use them. Add other published libraries your project
-imports to the same `[dependencies]` table, using versions compatible with the
-project's compiler pin.
+`reef setup` installs the pinned compiler if it is missing. `reef build`
+resolves the declared libraries from your local registry, records the selected
+versions in `reef.lock`, and prints `Built demo 0.1.0`. You do not need to
+check out the source repository of Nautilus to use it. Install every other
+published library your project imports the same way, including the libraries
+it depends on, and add it to the same `[dependencies]` table at a version
+built for the project's compiler pin. If a declared
+library is not in the local registry, `reef build` can discover its public
+GitHub release after you set `GITHUB_TOKEN` or authenticate with
+`gh auth login`.
 
 ## Set up an existing project
 
@@ -65,24 +77,24 @@ makes no network request:
 chelis reef fetch-plan --package-root .
 ```
 
-For a project that locks Coral 0.7.45, the output starts like this:
+For the hello-chelis 0.1.17 lockfile, the output starts like this:
 
 ```json
 {
   "format_version": 1,
   "package": {
     "name": "hello-chelis",
-    "version": "0.1.12"
+    "version": "0.1.17"
   },
   "artifacts": [
     {
-      "name": "coral",
-      "version": "0.7.45",
+      "name": "chelis-clarabel",
+      "version": "0.1.2",
       "kind": "archive",
-      "file": "coral-0.7.45.tar.zst",
-      "url": "https://github.com/Chelis-Lang/coral/releases/download/v0.7.45/coral-0.7.45.tar.zst",
-      "sha256": "87e82d63e01ce2ddc931dc19306680d4f18ad24fada1ffb883e026c6719d9538",
-      "remote_origin": "github://Chelis-Lang/coral@v0.7.45"
+      "file": "chelis-clarabel-0.1.2.tar.zst",
+      "url": "https://github.com/chelis-lang/chelis-clarabel/releases/download/v0.1.2/chelis-clarabel-0.1.2.tar.zst",
+      "sha256": "8291e653d051b2c53d8918419a10d38f072b2b7db5003d0b485eff2115e275e8",
+      "remote_origin": "github://chelis-lang/chelis-clarabel@v0.1.2"
     },
 ```
 

@@ -128,8 +128,8 @@ not shown. No binary64 value equals an irrational, and an exact rational need
 not be representable either.
 
 For example, `1.0f64 / ((x * x) - 2.0f64)` is infinite over the reals at
-`x = sqrt(2)`, so a property that asserts it is finite on `[1, 2]` is disproved
-there. No binary64 value squares to exactly 2. The two doubles nearest
+`x = sqrt(2)`, so a property that bounds it by the largest finite `f64` in both
+directions on `[1, 2]` is disproved there. No binary64 value squares to exactly 2. The two doubles nearest
 `sqrt(2)` give `x * x` of 2.0000000000000004 and 1.9999999999999996, so the
 quotient is finite at every double in that range.
 
@@ -192,15 +192,16 @@ each with `"status":"proved"`, and names the induction variable
 ## Prove a property about a Clarabel QP
 
 The optional `chelis-clarabel` package exposes `Clarabel.Qp.solve` to ordinary
-Chelis code. Build `chelis` with `clarabel-provider,smt` and declare the package
-as a Reef dependency. Match the result of `solve` or a typed helper that returns
+Chelis code. Declare the package as a Reef dependency. Match the result of `solve` or a typed helper that returns
 one direct `solve` call.
 
 A property may attach `with contract = "clarabel.qp.ideal_optimality"`.
 This uses the `Solved` primal as an ideal exact-real optimizer for that call's
 `P`, `q`, `A`, `b`, and cones. The non-`Solved` arm must establish its claim
-without that assumption. See the executable files in `examples/clarabel_qp/tests/`
-and the commands in `packages/chelis-clarabel/README.md`.
+without that assumption. The
+[executable examples](https://github.com/Chelis-Lang/chelis/tree/v0.22.1/examples/clarabel_qp/tests)
+run from their package directory, for example
+`chelis prove tests/ideal_stationary.ch --tier smt-only --json`.
 
 The SMT lowering accepts fixed-size `f64` QP data with symbolic entries.
 It also accepts pure helpers with named bindings and conditionals, and fixed
@@ -210,7 +211,9 @@ zero and nonnegative cone blocks. It proves the PSD premise for exact literal
 For another symbolic `P`, add
 `with contract = "clarabel.qp.assume_psd"` to the same property. That explicit
 premise applies to the resolved call's `P` and is listed as a separate axiom.
-For example, `tests/ideal_symbolic_constrained_quality.ch` compares a feasible
+For example,
+[`ideal_symbolic_constrained_quality.ch`](https://github.com/Chelis-Lang/chelis/blob/v0.22.1/examples/clarabel_qp/tests/ideal_symbolic_constrained_quality.ch)
+compares a feasible
 baseline with the optimizer after the algorithm applies its step. It proves
 that the baseline cannot score better, for every input that satisfies the
 property's `where` condition.
@@ -298,7 +301,7 @@ because a concrete evaluation decided it.
 
 If the witness violates a precondition that the domain proof did not use, or
 the body holds there, the result stays `unsupported`.
-[The executable record example](https://github.com/Chelis-Lang/chelis/blob/v0.21.0/examples/record_sqrt_property.ch)
+[The executable record example](https://github.com/Chelis-Lang/chelis/blob/v0.22.1/examples/record_sqrt_property.ch)
 shows this route.
 
 The command exits `0` when all reported checks pass, `1` when a property or obligation fails,
