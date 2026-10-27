@@ -82,6 +82,10 @@ Remote discovery uses one private provider interface. `GitHubReleaseProvider` is
 
 The production budget limits pages, requests, tags, manifests, request time, and downloaded bytes. Local resolver limits remain authoritative for graph search.
 
+Resolution and refresh download a listed release's archive only when the search selects it. The listing supplies every version the resolver orders by, so until then the release stands in as a candidate without dependencies. That stand-in is at least as satisfiable as the release, so a search that rejects it also rejects the release; a search that selects it downloads it and searches again. Over the same candidate window, the search selects what it would select with every candidate downloaded, except where a rejected release would have raised a search-limit or source-conflict error. An exact requirement downloads one archive, and a range downloads the newest matching release unless the search walks back past it. A release whose version a registry candidate already has is downloaded when it is listed, so the source-conflict check still compares bytes. Inspection downloads the whole window, because it reports versions the selection does not use.
+
+A discovery request refused by GitHub's rate limit says whether the exhausted limit was anonymous or the configured token's, and names `chelis reef install --from-github <org>/<repo>@<tag>` as a path that needs no discovery.
+
 Candidate archives stay in command-owned temporary storage. Reef scans one root `reef.toml` without complete archive extraction.
 
 A project refresh stages and verifies each selected pair. Then it gets the project lock before the registry lock.

@@ -12783,7 +12783,7 @@ mod tests {
     /// Acquire `CHELIS_REEF_HOME_LOCK`, recovering from poison. Bind
     /// the returned guard to a named local that lives for the whole
     /// test body.
-    fn lock_reef_home_env() -> std::sync::MutexGuard<'static, ()> {
+    pub(crate) fn lock_reef_home_env() -> std::sync::MutexGuard<'static, ()> {
         CHELIS_REEF_HOME_LOCK
             .lock()
             .unwrap_or_else(|p| p.into_inner())
