@@ -4707,7 +4707,11 @@ mod tests {
     }
 
     const ORACLE_SEED: u64 = 0x4063_0000_D15C_0FE7;
+    /// Cases compared with the eager reference, which downloads every
+    /// window release and so dominates the test's time.
     const ORACLE_CASES: u64 = 64;
+    /// Cases given only the final-window check.
+    const FINAL_WINDOW_CASES: u64 = 512;
     const RELEASE_COUNTS: [usize; 18] = [
         1, 2, 3, 10, 40, 63, 64, 65, 99, 100, 101, 120, 200, 255, 256, 257, 300, 400,
     ];
@@ -4781,8 +4785,38 @@ mod tests {
         result: Result<BTreeMap<String, String>, String>,
         candidates: BTreeSet<(String, String)>,
         known: BTreeMap<String, Vec<PackageRequirement>>,
+        downloaded: Vec<(String, u64)>,
         archives: usize,
         listings: usize,
+    }
+
+    /// The requirements in the root and in every archive a run downloaded,
+    /// per required package, recomputed from the generated manifests.
+    fn requirements_read(
+        root: &str,
+        packages: &BTreeMap<String, Vec<(String, String)>>,
+        downloaded: &[(String, u64)],
+    ) -> BTreeMap<String, BTreeSet<String>> {
+        let directory = tempfile::tempdir().unwrap();
+        let mut manifests = vec![("app".to_string(), "0.1.0".to_string(), root.to_string())];
+        for (name, asset) in downloaded {
+            let position = packages.keys().position(|key| key == name).unwrap() as u64;
+            let index = ((asset - (position + 1) * 1_000_000) / 2) as usize;
+            let (version, dependencies) = &packages[name][index];
+            manifests.push((name.clone(), version.clone(), dependencies.clone()));
+        }
+        let mut read = BTreeMap::<String, BTreeSet<String>>::new();
+        for (name, version, dependencies) in manifests {
+            let path = directory.path().join(format!("{name}-{version}.toml"));
+            fs::write(&path, fixture_manifest(&name, &version, &dependencies)).unwrap();
+            let typed = crate::read_manifest(&path).unwrap().typed;
+            for request in registry_requests(&PackageName::from_str(&name).unwrap(), &typed) {
+                read.entry(request.package.to_string())
+                    .or_default()
+                    .insert(request.requirement.as_str().to_string());
+            }
+        }
+        read
     }
 
     fn registry_requests(requester: &PackageName, typed: &TypedManifest) -> Vec<RequestedPackage> {
@@ -4925,6 +4959,16 @@ mod tests {
             })
             .collect();
         let requests = log.lock().unwrap().clone();
+        let downloaded = requests
+            .iter()
+            .filter_map(|path| {
+                let (prefix, asset) = path.rsplit_once("/releases/assets/")?;
+                Some((
+                    prefix.rsplit('/').next()?.to_string(),
+                    asset.parse::<u64>().ok()?,
+                ))
+            })
+            .collect();
         let known = session
             .listings
             .keys()
@@ -4934,6 +4978,7 @@ mod tests {
             result,
             candidates,
             known,
+            downloaded,
             archives: requests
                 .iter()
                 .filter(|path| path.contains("/releases/assets/"))
@@ -4948,7 +4993,10 @@ mod tests {
     /// Differential oracle on generated graphs, with two checks. First,
     /// deferred discovery must select exactly what one resolver-2 search
     /// selects over the window for its final known requirements with every
-    /// candidate's manifest read, or both must fail. Second, against the
+    /// candidate's manifest read, or both must fail. Those requirements are
+    /// the deferred run's, as the window rule defines them over the
+    /// manifests a run reads, and must equal the requirements recomputed
+    /// from the root and the archives the run downloaded. Second, against the
     /// eager reference, a case passes when the reference fails, when
     /// both select the same graph, or when deferred discovery selects, for
     /// some package, a release the reference never had as a candidate for
@@ -4972,7 +5020,7 @@ mod tests {
         let (mut deferred_archives, mut eager_archives) = (0, 0);
         let (mut deferred_time, mut eager_time) = (Duration::ZERO, Duration::ZERO);
         let mut failures = Vec::new();
-        for case in 0..ORACLE_CASES {
+        for case in 0..FINAL_WINDOW_CASES {
             let seed = ORACLE_SEED.wrapping_add(case);
             let (root, packages) = generated_case(seed);
             let shape = packages
@@ -4993,29 +5041,43 @@ mod tests {
             let started = Instant::now();
             let deferred = run_generated(&client, &server, &log, &root, false);
             deferred_time += started.elapsed();
-            let started = Instant::now();
-            let eager = run_generated(&client, &server, &log, &root, true);
-            eager_time += started.elapsed();
             deferred_archives += deferred.archives;
-            eager_archives += eager.archives;
-            // Spec check: the selection over the final window with every
+            // Check 1: the selection over the final window with every
             // candidate's manifest read. This needs no reference
-            // implementation, so it cannot share a reference's defect.
+            // implementation, so it cannot share a reference's defect. The
+            // known requirements are the deferred run's, and are checked
+            // against the root and the archives that run downloaded.
+            let read = requirements_read(&root, &packages, &deferred.downloaded);
+            let known_matches = deferred.known.iter().all(|(name, requirements)| {
+                requirements
+                    .iter()
+                    .map(|requirement| requirement.as_str().to_string())
+                    .collect::<BTreeSet<_>>()
+                    == read.get(name).cloned().unwrap_or_default()
+            });
             let direct = resolve_over_final_window(&root, &packages, &deferred.known);
-            let agrees = match (&direct, &deferred.result) {
-                (Ok(left), Ok(right)) => left == right,
-                (Err(_), Err(_)) => true,
-                _ => false,
-            };
+            let agrees = known_matches
+                && match (&direct, &deferred.result) {
+                    (Ok(left), Ok(right)) => left == right,
+                    (Err(_), Err(_)) => true,
+                    _ => false,
+                };
             *spec_tally
                 .entry(if agrees { "agrees" } else { "FAIL" })
                 .or_default() += 1;
             if !agrees {
                 failures.push(format!(
-                    "case {case} seed {seed:#x} packages [{shape}] root {root:?}: final-window search {direct:?}; deferred {:?} ({} archives)",
+                    "case {case} seed {seed:#x} packages [{shape}] root {root:?}: final-window search {direct:?}; deferred {:?} ({} archives); known requirements match the manifests read: {known_matches}",
                     deferred.result, deferred.archives
                 ));
             }
+            if case >= ORACLE_CASES {
+                continue;
+            }
+            let started = Instant::now();
+            let eager = run_generated(&client, &server, &log, &root, true);
+            eager_time += started.elapsed();
+            eager_archives += eager.archives;
             let class = match (&eager.result, &deferred.result) {
                 (Err(_), Err(_)) => "both fail",
                 (Err(_), Ok(_)) => "eager fails, deferred resolves",
@@ -5049,7 +5111,7 @@ mod tests {
             }
         }
         eprintln!(
-            "oracle seed {ORACLE_SEED:#x}, {ORACLE_CASES} cases: final window {spec_tally:?}; against eager {tally:?}; archives deferred {deferred_archives}, eager {eager_archives}; time deferred {deferred_time:?}, eager {eager_time:?}"
+            "oracle seed {ORACLE_SEED:#x}: final window over {FINAL_WINDOW_CASES} cases {spec_tally:?}; against eager over {ORACLE_CASES} cases {tally:?}; archives deferred {deferred_archives}, eager {eager_archives}; time deferred {deferred_time:?}, eager {eager_time:?}"
         );
         assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
