@@ -4856,11 +4856,12 @@ mod tests {
 
     /// Differential oracle: deferred discovery against the eager reference
     /// on generated graphs. A case passes when the reference fails, when
-    /// both select the same graph, or when deferred discovery selects a
-    /// release the reference never had as a candidate (its window held
-    /// fewer releases, so the reference reached a later resolver-2
-    /// solution). Deferred discovery failing where the reference succeeds,
-    /// or selecting differently from the same candidates, fails.
+    /// both select the same graph, or when deferred discovery selects, for
+    /// some package, a release the reference never had as a candidate for
+    /// that package: its window dropped the release, so it reached a later
+    /// resolver-2 solution. Deferred discovery failing where the reference
+    /// succeeds, or selecting differently while the reference had every
+    /// selected release, fails.
     #[test]
     fn deferred_discovery_agrees_with_eager_discovery_on_generated_graphs() {
         let _guard = crate::tests::lock_reef_home_env();
