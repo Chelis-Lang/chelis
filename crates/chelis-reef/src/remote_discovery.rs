@@ -767,8 +767,6 @@ trait CandidateProvider {
         &self,
         locator: &SourceLocator,
         package: &PackageName,
-        requirements: &[PackageRequirement],
-        stop_after_matches: Option<u64>,
         budget: &mut ResolutionBudget,
     ) -> Result<ProviderListing, DiscoveryError>;
 
@@ -787,6 +785,34 @@ trait CandidateProvider {
         temp_root: &Path,
         budget: &mut ResolutionBudget,
     ) -> Result<PathBuf, DiscoveryError>;
+}
+
+/// Render Unix seconds as `YYYY-MM-DD HH:MM:SS UTC` (proleptic Gregorian).
+fn utc_timestamp(seconds: u64) -> String {
+    let days = (seconds / 86_400) as i64;
+    let second_of_day = seconds % 86_400;
+    // Civil date from days since 1970-01-01, after Howard Hinnant's
+    // `civil_from_days`.
+    let shifted = days + 719_468;
+    let era = shifted.div_euclid(146_097);
+    let day_of_era = shifted.rem_euclid(146_097);
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let shifted_month = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * shifted_month + 2) / 5 + 1;
+    let month = if shifted_month < 10 {
+        shifted_month + 3
+    } else {
+        shifted_month - 9
+    };
+    let year = year_of_era + era * 400 + i64::from(month <= 2);
+    format!(
+        "{year:04}-{month:02}-{day:02} {:02}:{:02}:{:02} UTC",
+        second_of_day / 3_600,
+        second_of_day % 3_600 / 60,
+        second_of_day % 60
+    )
 }
 
 struct GitHubReleaseProvider {
@@ -885,7 +911,8 @@ impl GitHubReleaseProvider {
     }
 
     /// GitHub reports an exhausted primary limit as HTTP 403 or 429 with
-    /// `x-ratelimit-remaining: 0`, and a secondary limit as HTTP 429.
+    /// `x-ratelimit-remaining: 0`. A secondary limit is HTTP 429, or HTTP
+    /// 403 with `retry-after`, while primary quota remains.
     fn rate_limit_reason(
         &self,
         response: &reqwest::blocking::Response,
@@ -899,26 +926,35 @@ impl GitHubReleaseProvider {
                 .and_then(|value| value.to_str().ok())
                 .map(str::to_string)
         };
-        let exhausted = header("x-ratelimit-remaining").as_deref() == Some("0");
-        if !(status == 429 || (status == 403 && exhausted)) {
-            return None;
-        }
-        let reset = header("x-ratelimit-reset")
-            .map(|reset| format!(" until Unix time {reset}"))
-            .unwrap_or_default();
         let (org, repo) = locator.github_parts();
         let install = format!(
             "install a release without discovery with `chelis reef install --from-github {org}/{repo}@<tag>`"
         );
-        Some(if self.token.is_some() {
-            format!(
-                "GitHub's API rate limit for the configured token is exhausted{reset}; wait for the reset, or {install}"
-            )
-        } else {
-            format!(
-                "GitHub's API rate limit for anonymous requests is exhausted{reset}; set GITHUB_TOKEN or sign in with gh auth login to use the authenticated limit, or {install}"
-            )
-        })
+        if matches!(status, 403 | 429) && header("x-ratelimit-remaining").as_deref() == Some("0") {
+            let reset = header("x-ratelimit-reset")
+                .and_then(|reset| reset.parse::<u64>().ok())
+                .map(|reset| format!(" until {}", utc_timestamp(reset)))
+                .unwrap_or_default();
+            return Some(if self.token.is_some() {
+                format!(
+                    "GitHub's API rate limit for the configured token is exhausted{reset}; wait for the reset, or {install}"
+                )
+            } else {
+                format!(
+                    "GitHub's API rate limit for anonymous requests is exhausted{reset}; set GITHUB_TOKEN or sign in with gh auth login to use the authenticated limit, or {install}"
+                )
+            });
+        }
+        let retry_after = header("retry-after");
+        if status == 429 || (status == 403 && retry_after.is_some()) {
+            let wait = retry_after
+                .map(|seconds| format!("retry after {seconds} seconds"))
+                .unwrap_or_else(|| "retry later".to_string());
+            return Some(format!(
+                "GitHub's secondary rate limit refused the request; {wait}, or {install}"
+            ));
+        }
+        None
     }
 
     fn asset_url(&self, locator: &SourceLocator, asset: u64) -> String {
@@ -1009,8 +1045,6 @@ impl CandidateProvider for GitHubReleaseProvider {
         &self,
         locator: &SourceLocator,
         package: &PackageName,
-        requirements: &[PackageRequirement],
-        stop_after_matches: Option<u64>,
         budget: &mut ResolutionBudget,
     ) -> Result<ProviderListing, DiscoveryError> {
         let (org, repo) = locator.github_parts();
@@ -1145,19 +1179,9 @@ impl CandidateProvider for GitHubReleaseProvider {
                     shell_asset,
                 });
             }
-            let enough_matches = stop_after_matches.is_some_and(|required| {
-                releases
-                    .iter()
-                    .filter(|release| {
-                        requirements.is_empty()
-                            || requirements
-                                .iter()
-                                .any(|requirement| requirement.matches(&release.version))
-                    })
-                    .count() as u64
-                    >= required
-            });
-            if enough_matches || !has_next || page_len < 100 {
+            // The whole listing is read: a requirement learned later must
+            // see the same releases as one known now.
+            if !has_next || page_len < 100 {
                 break;
             }
         }
@@ -1346,6 +1370,12 @@ struct DiscoverySession {
     loaded_local: BTreeMap<PackageName, Vec<PackageRequirement>>,
     queried_remote: BTreeSet<PackageName>,
     deferred: BTreeMap<PackageName, Vec<DeferredRelease>>,
+    /// Each queried package's accepted releases, newest first.
+    listings: BTreeMap<PackageName, (SourceLocator, Vec<ProviderRelease>)>,
+    /// The known requirements each package's window was last derived for.
+    windowed: BTreeMap<PackageName, Vec<PackageRequirement>>,
+    /// Listed versions already fetched or deferred.
+    placed: BTreeMap<PackageName, BTreeSet<PackageVersion>>,
     /// Packages a targeted refresh queries with their remote dependencies.
     refresh_closure: BTreeSet<PackageName>,
     refresh_dependencies: BTreeSet<PackageName>,
@@ -1477,6 +1507,9 @@ impl DiscoverySession {
             loaded_local: BTreeMap::new(),
             queried_remote: BTreeSet::new(),
             deferred: BTreeMap::new(),
+            listings: BTreeMap::new(),
+            windowed: BTreeMap::new(),
+            placed: BTreeMap::new(),
             refresh_closure: BTreeSet::new(),
             refresh_dependencies: BTreeSet::new(),
             exclusions: BTreeMap::new(),
@@ -1695,7 +1728,64 @@ impl DiscoverySession {
         Ok(())
     }
 
+    /// Load local candidates and derive remote windows until both are
+    /// current for every known requirement.
     fn load_local_closure(&mut self) -> Result<(), DiscoveryError> {
+        loop {
+            self.load_local_candidates()?;
+            let Some(package) = self
+                .listings
+                .keys()
+                .find(|package| {
+                    self.windowed.get(*package) != Some(&self.known_requirements(package))
+                })
+                .cloned()
+            else {
+                return Ok(());
+            };
+            self.derive_window(&package)?;
+        }
+    }
+
+    /// A queried package's window is every listed release that satisfies at
+    /// least one known requirement on it. Each enters once: as a deferred
+    /// stand-in, or fetched now when a registry candidate already has its
+    /// version.
+    fn derive_window(&mut self, package: &PackageName) -> Result<(), DiscoveryError> {
+        let requirements = self.known_requirements(package);
+        self.windowed.insert(package.clone(), requirements.clone());
+        let Some((locator, releases)) = self.listings.get(package).cloned() else {
+            return Ok(());
+        };
+        for release in releases {
+            if !requirements
+                .iter()
+                .any(|requirement| requirement.matches(&release.version))
+                || !self
+                    .placed
+                    .entry(package.clone())
+                    .or_default()
+                    .insert(release.version.clone())
+            {
+                continue;
+            }
+            let deferred = DeferredRelease {
+                locator: locator.clone(),
+                release,
+            };
+            if self.has_registry_material(package, &deferred.release.version) {
+                self.fetch_listed(package, &deferred)?;
+            } else {
+                self.deferred
+                    .entry(package.clone())
+                    .or_default()
+                    .push(deferred);
+            }
+        }
+        Ok(())
+    }
+
+    fn load_local_candidates(&mut self) -> Result<(), DiscoveryError> {
         while let Some(package) = self
             .pending_local
             .iter()
@@ -1997,40 +2087,14 @@ impl DiscoverySession {
                     })
                 })
                 .transpose()?;
-            let stop_after_matches = (self.mode == DiscoveryMode::Resolve && missing_pin.is_none())
-                .then(|| {
-                    if !known_requirements.is_empty()
-                        && known_requirements
-                            .iter()
-                            .all(|requirement| requirement.as_str().starts_with('='))
-                    {
-                        1
-                    } else {
-                        self.budget.limit(BudgetDimension::CandidateManifests)
-                    }
-                });
-            let mut listing = provider.list_releases(
-                &locator,
-                package,
-                &known_requirements,
-                stop_after_matches,
-                &mut self.budget,
-            )?;
-            listing.releases.sort_by(|left, right| {
-                let left_matches = known_requirements
-                    .iter()
-                    .any(|requirement| requirement.matches(&left.version));
-                let right_matches = known_requirements
-                    .iter()
-                    .any(|requirement| requirement.matches(&right.version));
-                right_matches
-                    .cmp(&left_matches)
-                    .then_with(|| right.version.cmp(&left.version))
-                    .then_with(|| left.tag.cmp(&right.tag))
-            });
+            let listing = provider.list_releases(&locator, package, &mut self.budget)?;
+            self.exclusions
+                .entry(package.clone())
+                .or_default()
+                .extend(listing.exclusions);
+            let mut releases = listing.releases;
             let pinned_release = if let Some(version) = &missing_pin {
-                let position = listing
-                    .releases
+                let position = releases
                     .iter()
                     .position(|release| &release.version == version)
                     .ok_or_else(|| DiscoveryError::RemoteUnavailable {
@@ -2039,25 +2103,29 @@ impl DiscoverySession {
                             "locked release `{version}` is unavailable within the bounded GitHub release listing"
                         ),
                     })?;
-                Some(listing.releases.remove(position))
+                Some(releases.remove(position))
             } else {
                 None
             };
-            self.exclusions
-                .entry(package.clone())
-                .or_default()
-                .extend(listing.exclusions);
-            for release in pinned_release
-                .into_iter()
-                .chain(listing.releases)
-                .take(self.budget.limit(BudgetDimension::CandidateManifests) as usize)
-            {
-                // Resolution downloads a release only when the search
-                // selects it. A lock pin is verified now, and inspection
-                // reports every candidate in the window.
-                if self.mode == DiscoveryMode::Inspect
-                    || missing_pin.as_ref() == Some(&release.version)
-                    || self.has_registry_material(package, &release.version)
+            if self.mode == DiscoveryMode::Inspect {
+                // Inspection reports versions the selection does not use,
+                // so it downloads its whole window now.
+                releases.sort_by(|left, right| {
+                    let left_matches = known_requirements
+                        .iter()
+                        .any(|requirement| requirement.matches(&left.version));
+                    let right_matches = known_requirements
+                        .iter()
+                        .any(|requirement| requirement.matches(&right.version));
+                    right_matches
+                        .cmp(&left_matches)
+                        .then_with(|| right.version.cmp(&left.version))
+                        .then_with(|| left.tag.cmp(&right.tag))
+                });
+                for release in pinned_release
+                    .into_iter()
+                    .chain(releases)
+                    .take(self.budget.limit(BudgetDimension::CandidateManifests) as usize)
                 {
                     self.fetch_release(
                         &provider,
@@ -2067,15 +2135,27 @@ impl DiscoverySession {
                         &temp_root,
                         missing_pin.as_ref(),
                     )?;
-                } else {
-                    self.deferred
+                }
+            } else {
+                if let Some(release) = &pinned_release {
+                    self.placed
                         .entry(package.clone())
                         .or_default()
-                        .push(DeferredRelease {
-                            locator: locator.clone(),
-                            release,
-                        });
+                        .insert(release.version.clone());
+                    self.fetch_release(
+                        &provider,
+                        &locator,
+                        package,
+                        release,
+                        &temp_root,
+                        missing_pin.as_ref(),
+                    )?;
                 }
+                // The window is derived from this listing in
+                // `load_local_closure`, and again whenever the package's
+                // known requirements change.
+                self.listings
+                    .insert(package.clone(), (locator.clone(), releases));
             }
             if let Some(version) = &missing_pin
                 && !self
@@ -2262,6 +2342,14 @@ impl DiscoverySession {
         if releases.is_empty() {
             self.deferred.remove(package);
         }
+        self.fetch_listed(package, &deferred)
+    }
+
+    fn fetch_listed(
+        &mut self,
+        package: &PackageName,
+        deferred: &DeferredRelease,
+    ) -> Result<(), DiscoveryError> {
         let provider = match self.provider.take() {
             Some(provider) => provider,
             None => GitHubReleaseProvider::new()?,
@@ -2371,6 +2459,10 @@ impl DiscoverySession {
         &mut self,
     ) -> Result<package_versioning::LocalResolution, package_versioning::VersioningError> {
         let candidates = self.resolver_candidates();
+        // Each search has the whole state limit. Fetching a selected
+        // stand-in reruns the search, so a session-wide count would make
+        // the limit depend on how many releases were deferred.
+        self.explored_states = 0;
         package_versioning::resolve_local_with_state_counter(
             &self.root_requests,
             &candidates,
@@ -3497,7 +3589,7 @@ mod tests {
             let mut tags =
                 ResolutionBudget::with_test_limits(&[(BudgetDimension::AcceptedTags, 1)]);
             let error = tokio::task::block_in_place(|| {
-                provider.list_releases(&locator, &package, &[], None, &mut tags)
+                provider.list_releases(&locator, &package, &mut tags)
             })
             .unwrap_err();
             assert!(matches!(
@@ -3509,13 +3601,7 @@ mod tests {
             ));
 
             let first_order = tokio::task::block_in_place(|| {
-                provider.list_releases(
-                    &locator,
-                    &package,
-                    &[],
-                    None,
-                    &mut ResolutionBudget::production(),
-                )
+                provider.list_releases(&locator, &package, &mut ResolutionBudget::production())
             })
             .unwrap()
             .releases;
@@ -3549,8 +3635,6 @@ mod tests {
                 reversed_provider.list_releases(
                     &locator,
                     &package,
-                    &[],
-                    None,
                     &mut ResolutionBudget::production(),
                 )
             })
@@ -4076,7 +4160,7 @@ mod tests {
             .unwrap_err()
             .to_string();
         for expected in [
-            "GitHub's API rate limit for anonymous requests is exhausted until Unix time 1798761600",
+            "GitHub's API rate limit for anonymous requests is exhausted until 2027-01-01 00:00:00 UTC",
             "set GITHUB_TOKEN or sign in with gh auth login",
             "`chelis reef install --from-github chelis-lang/demo@<tag>`",
         ] {
@@ -4089,15 +4173,226 @@ mod tests {
     }
 
     #[test]
-    fn secondary_rate_limit_is_reported_as_a_rate_limit() {
-        let fixture = FixtureProvider::new();
-        fixture.refuse_listing("demo", 429, &[]);
-        let rendered = resolve_fixture_project(&fixture, DiscoveryMode::Resolve, "demo = \"^1\"\n")
-            .unwrap_err()
-            .to_string();
+    fn secondary_rate_limits_are_not_reported_as_exhausted_quota() {
+        for (status, headers, wait) in [
+            (429, &[][..], "retry later"),
+            (
+                403,
+                &[("retry-after", "30"), ("x-ratelimit-remaining", "41")][..],
+                "retry after 30 seconds",
+            ),
+        ] {
+            let fixture = FixtureProvider::new();
+            fixture.refuse_listing("demo", status, headers);
+            let rendered =
+                resolve_fixture_project(&fixture, DiscoveryMode::Resolve, "demo = \"^1\"\n")
+                    .unwrap_err()
+                    .to_string();
+            let expected = format!(
+                "GitHub's secondary rate limit refused the request; {wait}, or install a release without discovery with `chelis reef install --from-github chelis-lang/demo@<tag>`"
+            );
+            assert!(rendered.contains(&expected), "{rendered}");
+            for absent in [
+                "anonymous",
+                "GITHUB_TOKEN",
+                "exhausted",
+                "restricted repository",
+            ] {
+                assert!(!rendered.contains(absent), "`{absent}` in: {rendered}");
+            }
+        }
+    }
+
+    #[test]
+    fn rate_limit_reset_times_render_as_utc_dates() {
+        assert_eq!(utc_timestamp(0), "1970-01-01 00:00:00 UTC");
+        assert_eq!(utc_timestamp(951_782_400), "2000-02-29 00:00:00 UTC");
+        assert_eq!(
+            utc_timestamp(1_798_761_600 + 3_661),
+            "2027-01-01 01:01:01 UTC"
+        );
+        assert_eq!(utc_timestamp(4_107_542_399), "2100-02-28 23:59:59 UTC");
+    }
+
+    /// Resolve like [`resolve_fixture_project`] and also return the states
+    /// the final search explored.
+    fn resolve_fixture_with_states(
+        fixture: &FixtureProvider,
+        dependencies: &str,
+    ) -> (Result<BTreeMap<String, String>, String>, u64) {
+        let _guard = crate::tests::lock_reef_home_env();
+        let directory = tempfile::tempdir().unwrap();
+        let previous_home = std::env::var_os("CHELIS_REEF_HOME");
+        unsafe {
+            std::env::set_var("CHELIS_REEF_HOME", directory.path().join("reef-home"));
+        }
+        let root = directory.path().join("app");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join("reef.toml"),
+            fixture_manifest("app", "0.1.0", dependencies),
+        )
+        .unwrap();
+        let mut session = DiscoverySession::new(
+            &root,
+            DiscoveryMode::Resolve,
+            None,
+            true,
+            crate::tests::test_runtime(),
+        )
+        .unwrap();
+        session.provider = Some(fixture.provider());
+        let result = session
+            .resolve()
+            .map(|resolution| {
+                resolution
+                    .selected
+                    .iter()
+                    .map(|(name, candidate)| (name.to_string(), candidate.id.version.to_string()))
+                    .collect()
+            })
+            .map_err(|error| error.to_string());
+        let states = session.explored_states;
+        unsafe {
+            match previous_home {
+                Some(value) => std::env::set_var("CHELIS_REEF_HOME", value),
+                None => std::env::remove_var("CHELIS_REEF_HOME"),
+            }
+        }
+        (result, states)
+    }
+
+    fn leaked_versions(count: usize, format: impl Fn(usize) -> String) -> Vec<&'static str> {
+        (0..count)
+            .map(|index| -> &'static str { Box::leak(format(index).into_boxed_str()) })
+            .collect()
+    }
+
+    #[test]
+    fn a_requirement_learned_after_a_query_widens_that_package_window() {
+        // beta has 70 releases. Only the older alpha, fetched after beta is
+        // queried, needs beta 1.0.0, which the newest 64 releases omit.
+        let mut fixture = FixtureProvider::new();
+        fixture.publish(
+            "alpha",
+            &[
+                release_with_dependencies("1.1.0", "beta = \"=5.0.0\"\n"),
+                release_with_dependencies("1.0.0", "beta = \"=1.0.0\"\n"),
+            ],
+            100,
+        );
+        let mut versions = leaked_versions(69, |minor| format!("2.{minor}.0"));
+        versions.push("1.0.0");
+        fixture.publish("beta", &many_releases(&versions), 100);
+        let (result, _) = resolve_fixture_with_states(&fixture, "alpha = \"^1\"\n");
+        assert_eq!(
+            result,
+            Ok(selection(&[("alpha", "1.0.0"), ("beta", "1.0.0")]))
+        );
+        assert_eq!(fixture.listing_requests("beta"), 1);
+        let mut fetched = fixture.fetched_archives();
+        fetched.sort();
+        assert_eq!(fetched, ["alpha@1.0.0", "alpha@1.1.0", "beta@1.0.0"]);
+    }
+
+    #[test]
+    fn a_learned_range_requirement_widens_the_window_to_its_newest_match() {
+        let mut fixture = FixtureProvider::new();
+        fixture.publish(
+            "alpha",
+            &[
+                release_with_dependencies("1.1.0", "beta = \"^3\"\n"),
+                release_with_dependencies("1.0.0", "beta = \"^1\"\n"),
+            ],
+            100,
+        );
+        let mut versions = leaked_versions(66, |minor| format!("2.{minor}.0"));
+        versions.extend(["1.2.0", "1.1.0", "1.0.0"]);
+        fixture.publish("beta", &many_releases(&versions), 100);
+        let (result, _) = resolve_fixture_with_states(&fixture, "alpha = \"^1\"\n");
+        assert_eq!(
+            result,
+            Ok(selection(&[("alpha", "1.0.0"), ("beta", "1.2.0")]))
+        );
+        let mut fetched = fixture.fetched_archives();
+        fetched.sort();
+        assert_eq!(fetched, ["alpha@1.0.0", "alpha@1.1.0", "beta@1.2.0"]);
+    }
+
+    #[test]
+    fn a_learned_requirement_outside_every_listed_release_still_fails() {
+        let mut fixture = FixtureProvider::new();
+        fixture.publish(
+            "alpha",
+            &[
+                release_with_dependencies("1.1.0", "beta = \"=5.0.0\"\n"),
+                release_with_dependencies("1.0.0", "beta = \"=0.9.0\"\n"),
+            ],
+            100,
+        );
+        let mut versions = leaked_versions(69, |minor| format!("2.{minor}.0"));
+        versions.push("1.0.0");
+        fixture.publish("beta", &many_releases(&versions), 100);
+        let (result, _) = resolve_fixture_with_states(&fixture, "alpha = \"^1\"\n");
+        assert!(result.is_err(), "{result:?}");
         assert!(
-            rendered.contains("GitHub's API rate limit for anonymous requests is exhausted;"),
-            "{rendered}"
+            !fixture
+                .fetched_archives()
+                .iter()
+                .any(|archive| archive.starts_with("beta@"))
+        );
+    }
+
+    #[test]
+    fn a_requirement_learned_after_a_query_sees_every_listing_page() {
+        // beta's first page holds 100 2.x releases and 1.0.0 is on the
+        // second. When beta is queried only alpha 1.1.0's exact `=2.5.0` is
+        // known; alpha 1.1.0 then fails on delta, and alpha 1.0.0 needs
+        // beta 1.0.0.
+        let mut fixture = FixtureProvider::new();
+        fixture.publish(
+            "alpha",
+            &[
+                release_with_dependencies("1.1.0", "beta = \"=2.5.0\"\ndelta = \"=9.0.0\"\n"),
+                release_with_dependencies("1.0.0", "beta = \"=1.0.0\"\n"),
+            ],
+            100,
+        );
+        let mut versions = leaked_versions(100, |minor| format!("2.{minor}.0"));
+        versions.extend(leaked_versions(30, |minor| format!("1.{minor}.0")));
+        fixture.publish("beta", &many_releases(&versions), 100);
+        fixture.publish("delta", &many_releases(&["1.0.0"]), 100);
+        let (result, _) = resolve_fixture_with_states(&fixture, "alpha = \"^1\"\n");
+        assert_eq!(
+            result,
+            Ok(selection(&[("alpha", "1.0.0"), ("beta", "1.0.0")]))
+        );
+        assert_eq!(fixture.listing_requests("beta"), 2);
+    }
+
+    #[test]
+    fn each_search_after_a_deferred_fetch_has_the_whole_state_limit() {
+        // Walking back through 64 alpha releases reruns the search once per
+        // fetched release. The count is per search, so the final search is
+        // the size of one search over the 64 releases.
+        let mut fixture = FixtureProvider::new();
+        let mut releases = Vec::new();
+        for minor in (0..64).rev() {
+            let version: &'static str = Box::leak(format!("1.{minor}.0").into_boxed_str());
+            releases.push(if minor == 0 {
+                release(version)
+            } else {
+                release_with_dependencies(version, "beta = \"^2\"\n")
+            });
+        }
+        fixture.publish("alpha", &releases, 100);
+        fixture.publish("beta", &many_releases(&["1.0.0"]), 100);
+        let (result, states) = resolve_fixture_with_states(&fixture, "alpha = \"^1\"\n");
+        assert_eq!(result, Ok(selection(&[("alpha", "1.0.0")])));
+        assert_eq!(fixture.fetched_archives().len(), 64);
+        assert!(
+            states <= 2 * 64 + 2,
+            "final search explored {states} states"
         );
     }
 
