@@ -25,7 +25,14 @@ use tar::Archive;
 pub const MAX_GITHUB_RELEASE_PAGES_PER_PACKAGE: u64 = 10;
 pub const MAX_HTTP_REQUESTS_PER_COMMAND: u64 = 2_048;
 pub const MAX_ACCEPTED_RELEASE_TAGS_PER_PACKAGE: u64 = 256;
-pub const MAX_CANDIDATE_MANIFESTS_PER_PACKAGE: u64 = 64;
+/// Every candidate of a package can be downloaded once, so the download
+/// budget equals the resolver's candidates-per-name limit.
+pub const MAX_CANDIDATE_MANIFESTS_PER_PACKAGE: u64 = package_versioning::MAX_CANDIDATES_PER_PACKAGE;
+/// Resolution and refresh take this many of the highest listed versions
+/// satisfying each known requirement.
+pub const MAX_CANDIDATES_PER_REQUIREMENT: usize = 64;
+/// Inspection downloads this many listed releases, matching ones first.
+pub const MAX_INSPECTED_CANDIDATES_PER_PACKAGE: usize = 64;
 pub const MAX_COMPRESSED_CANDIDATE_BYTES: u64 = 64 * 1024 * 1024;
 pub const MAX_SCANNED_CANDIDATE_BYTES: u64 = 256 * 1024 * 1024;
 pub const MAX_MANIFEST_BYTES: u64 = 1024 * 1024;
@@ -1166,12 +1173,6 @@ impl CandidateProvider for GitHubReleaseProvider {
                     exclusions.push(format!("{}: missing shell asset", release.tag_name));
                     continue;
                 };
-                budget.charge(
-                    BudgetDimension::AcceptedTags,
-                    1,
-                    package.as_str(),
-                    "accept GitHub release tag",
-                )?;
                 releases.push(ProviderRelease {
                     version,
                     tag: release.tag_name,
@@ -1386,6 +1387,10 @@ struct DiscoverySession {
     temp: tempfile::TempDir,
     provider: Option<GitHubReleaseProvider>,
     runtime: &'static EmbeddedRuntime,
+    /// Test oracle: query and search as eager discovery did, for the
+    /// differential test against deferred discovery.
+    #[cfg(test)]
+    eager_reference: bool,
 }
 
 impl DiscoverySession {
@@ -1519,6 +1524,8 @@ impl DiscoverySession {
             temp,
             provider: None,
             runtime,
+            #[cfg(test)]
+            eager_reference: false,
         })
     }
 
@@ -1747,28 +1754,39 @@ impl DiscoverySession {
         }
     }
 
-    /// A queried package's window is every listed release that satisfies at
-    /// least one known requirement on it. Each enters once: as a deferred
-    /// stand-in, or fetched now when a registry candidate already has its
-    /// version.
+    /// A queried package's window is, for each known requirement on it, the
+    /// highest listed versions satisfying that requirement. It depends only
+    /// on the listing and the known requirements, and only grows as they
+    /// do. Each release enters once: as a deferred stand-in, or fetched now
+    /// when a registry candidate already has its version.
     fn derive_window(&mut self, package: &PackageName) -> Result<(), DiscoveryError> {
         let requirements = self.known_requirements(package);
         self.windowed.insert(package.clone(), requirements.clone());
         let Some((locator, releases)) = self.listings.get(package).cloned() else {
             return Ok(());
         };
-        for release in releases {
-            if !requirements
-                .iter()
-                .any(|requirement| requirement.matches(&release.version))
-                || !self
-                    .placed
-                    .entry(package.clone())
-                    .or_default()
-                    .insert(release.version.clone())
+        let mut window = BTreeSet::new();
+        for requirement in &requirements {
+            window.extend(
+                releases
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, release)| requirement.matches(&release.version))
+                    .take(MAX_CANDIDATES_PER_REQUIREMENT)
+                    .map(|(position, _)| position),
+            );
+        }
+        for position in window {
+            let release = releases[position].clone();
+            if !self
+                .placed
+                .entry(package.clone())
+                .or_default()
+                .insert(release.version.clone())
             {
                 continue;
             }
+            self.accept_tag(package, &release)?;
             let deferred = DeferredRelease {
                 locator: locator.clone(),
                 release,
@@ -1782,6 +1800,20 @@ impl DiscoverySession {
                     .push(deferred);
             }
         }
+        Ok(())
+    }
+
+    fn accept_tag(
+        &mut self,
+        package: &PackageName,
+        release: &ProviderRelease,
+    ) -> Result<(), DiscoveryError> {
+        self.budget.charge(
+            BudgetDimension::AcceptedTags,
+            1,
+            package.as_str(),
+            &format!("accept GitHub release tag {}", release.tag),
+        )?;
         Ok(())
     }
 
@@ -2043,6 +2075,10 @@ impl DiscoverySession {
         if self.queried_remote.contains(package) {
             return Ok(());
         }
+        #[cfg(test)]
+        if self.eager_reference {
+            return self.query_remote_eagerly(package);
+        }
         if !self.network_enabled {
             return Err(DiscoveryError::RemoteUnavailable {
                 package: package.to_string(),
@@ -2052,10 +2088,10 @@ impl DiscoverySession {
         let locator = self.source_locator(package)?;
         let known_requirements = self.known_requirements(package);
         let temp_root = self.temp.path().to_path_buf();
-        let provider = self
-            .provider
-            .take()
-            .unwrap_or(GitHubReleaseProvider::new()?);
+        let provider = match self.provider.take() {
+            Some(provider) => provider,
+            None => GitHubReleaseProvider::new()?,
+        };
         let result: Result<(), DiscoveryError> = (|| {
             // An uncached registry pin must be verified before a refresh or
             // inspection can replace or report it. Reserve a manifest slot
@@ -2125,8 +2161,9 @@ impl DiscoverySession {
                 for release in pinned_release
                     .into_iter()
                     .chain(releases)
-                    .take(self.budget.limit(BudgetDimension::CandidateManifests) as usize)
+                    .take(MAX_INSPECTED_CANDIDATES_PER_PACKAGE)
                 {
+                    self.accept_tag(package, &release)?;
                     self.fetch_release(
                         &provider,
                         &locator,
@@ -2142,6 +2179,7 @@ impl DiscoverySession {
                         .entry(package.clone())
                         .or_default()
                         .insert(release.version.clone());
+                    self.accept_tag(package, release)?;
                     self.fetch_release(
                         &provider,
                         &locator,
@@ -2171,6 +2209,88 @@ impl DiscoverySession {
                     package: package.to_string(),
                     reason: format!("locked release `{version}` could not be verified"),
                 });
+            }
+            Ok(())
+        })();
+        self.provider = Some(provider);
+        result?;
+        self.queried_remote.insert(package.clone());
+        self.load_local_closure()
+    }
+
+    /// The eager query step that deferred discovery replaced, kept as the
+    /// differential oracle's reference. Listing stopped at the first page
+    /// on which enough releases matched the requirements known at query
+    /// time, charging every tag read; the window was those releases ranked
+    /// matching first, then newest first, and its first 64 were all
+    /// downloaded. The oracle publishes releases newest first, so the
+    /// pages read are a prefix of the sorted listing. Lock pins are not
+    /// modelled.
+    #[cfg(test)]
+    fn query_remote_eagerly(&mut self, package: &PackageName) -> Result<(), DiscoveryError> {
+        const EAGER_WINDOW: usize = 64;
+        let locator = self.source_locator(package)?;
+        let known_requirements = self.known_requirements(package);
+        let temp_root = self.temp.path().to_path_buf();
+        let provider = match self.provider.take() {
+            Some(provider) => provider,
+            None => GitHubReleaseProvider::new()?,
+        };
+        let result: Result<(), DiscoveryError> = (|| {
+            let required = if !known_requirements.is_empty()
+                && known_requirements
+                    .iter()
+                    .all(|requirement| requirement.as_str().starts_with('='))
+            {
+                1
+            } else {
+                EAGER_WINDOW
+            };
+            // The full listing is read under a scratch budget; only the
+            // pages eager discovery read are charged below.
+            let mut scratch =
+                ResolutionBudget::with_test_limits(&[(BudgetDimension::AcceptedTags, u64::MAX)]);
+            let listing = provider.list_releases(&locator, package, &mut scratch)?;
+            self.exclusions
+                .entry(package.clone())
+                .or_default()
+                .extend(listing.exclusions);
+            let mut releases = listing.releases;
+            let mut read = releases.len();
+            let mut matched = 0;
+            for (position, release) in releases.iter().enumerate() {
+                if known_requirements
+                    .iter()
+                    .any(|requirement| requirement.matches(&release.version))
+                {
+                    matched += 1;
+                    if matched >= required {
+                        read = read.min((position / 100 + 1) * 100);
+                        break;
+                    }
+                }
+            }
+            releases.truncate(read);
+            self.budget.charge(
+                BudgetDimension::AcceptedTags,
+                releases.len() as u64,
+                package.as_str(),
+                "accept GitHub release tags",
+            )?;
+            releases.sort_by(|left, right| {
+                let left_matches = known_requirements
+                    .iter()
+                    .any(|requirement| requirement.matches(&left.version));
+                let right_matches = known_requirements
+                    .iter()
+                    .any(|requirement| requirement.matches(&right.version));
+                right_matches
+                    .cmp(&left_matches)
+                    .then_with(|| right.version.cmp(&left.version))
+                    .then_with(|| left.tag.cmp(&right.tag))
+            });
+            for release in releases.into_iter().take(EAGER_WINDOW) {
+                self.fetch_release(&provider, &locator, package, &release, &temp_root, None)?;
             }
             Ok(())
         })();
@@ -2462,7 +2582,13 @@ impl DiscoverySession {
         // Each search has the whole state limit. Fetching a selected
         // stand-in reruns the search, so a session-wide count would make
         // the limit depend on how many releases were deferred.
-        self.explored_states = 0;
+        #[cfg(test)]
+        let cumulative = self.eager_reference;
+        #[cfg(not(test))]
+        let cumulative = false;
+        if !cumulative {
+            self.explored_states = 0;
+        }
         package_versioning::resolve_local_with_state_counter(
             &self.root_requests,
             &candidates,
@@ -3586,19 +3712,15 @@ mod tests {
                 })
             ));
 
+            // Listing accepts tags without charging them; a tag is charged
+            // when its release enters a candidate window.
             let mut tags =
-                ResolutionBudget::with_test_limits(&[(BudgetDimension::AcceptedTags, 1)]);
-            let error = tokio::task::block_in_place(|| {
+                ResolutionBudget::with_test_limits(&[(BudgetDimension::AcceptedTags, 0)]);
+            let listed = tokio::task::block_in_place(|| {
                 provider.list_releases(&locator, &package, &mut tags)
             })
-            .unwrap_err();
-            assert!(matches!(
-                error,
-                DiscoveryError::Budget(BudgetError {
-                    dimension: BudgetDimension::AcceptedTags,
-                    ..
-                })
-            ));
+            .unwrap();
+            assert_eq!(listed.releases.len(), 2);
 
             let first_order = tokio::task::block_in_place(|| {
                 provider.list_releases(&locator, &package, &mut ResolutionBudget::production())
@@ -4427,5 +4549,394 @@ mod tests {
             "{rendered}"
         );
         assert!(!rendered.contains("rate limit"), "{rendered}");
+    }
+
+    #[test]
+    fn a_range_over_hundreds_of_releases_resolves_to_its_newest_match() {
+        let mut fixture = FixtureProvider::new();
+        let mut versions = leaked_versions(300, |minor| format!("1.{minor}.0"));
+        versions.reverse();
+        fixture.publish("beta", &many_releases(&versions), 100);
+        let (result, _) = resolve_fixture_with_states(&fixture, "beta = \"^1\"\n");
+        assert_eq!(result, Ok(selection(&[("beta", "1.299.0")])));
+        assert_eq!(fixture.listing_requests("beta"), 3);
+        assert_eq!(fixture.fetched_archives(), ["beta@1.299.0"]);
+    }
+
+    #[test]
+    fn a_window_over_the_candidate_limit_fails_with_the_accepted_tag_budget() {
+        // Five compatible requirements on beta whose newest 64 matches are
+        // disjoint, so the window would hold 5 x 64 = 320 candidates, more
+        // than the 256 limit.
+        let mut fixture = FixtureProvider::new();
+        let mut versions = Vec::new();
+        for major in (1..=5).rev() {
+            versions.extend(leaked_versions(66, |minor| {
+                format!("{major}.{}.0", 65 - minor)
+            }));
+        }
+        fixture.publish("beta", &many_releases(&versions), 100);
+        let mut root = String::from("beta = \"<2.0.0\"\n");
+        for (name, requirement) in [
+            ("alpha", "<3.0.0"),
+            ("gamma", "<4.0.0"),
+            ("delta", "<5.0.0"),
+            ("omega", ">=1.0.0"),
+        ] {
+            let dependency: &'static str =
+                Box::leak(format!("beta = \"{requirement}\"\n").into_boxed_str());
+            fixture.publish(name, &[release_with_dependencies("1.0.0", dependency)], 100);
+            root.push_str(&format!("{name} = \"=1.0.0\"\n"));
+        }
+        let (result, _) = resolve_fixture_with_states(&fixture, &root);
+        let error = result.unwrap_err();
+        assert!(
+            error.contains(
+                "accepted release tags per package limit 256 reached at 257 for package `beta`"
+            ),
+            "{error}"
+        );
+    }
+
+    /// A generated registry served by one wiremock responder: each
+    /// package's releases newest first, 100 per listing page, and archives
+    /// built on request. Every request path is logged.
+    struct GeneratedRegistry {
+        packages: BTreeMap<String, Vec<(String, String)>>,
+        log: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        archives: std::sync::Mutex<BTreeMap<u64, Vec<u8>>>,
+    }
+
+    impl GeneratedRegistry {
+        fn asset_id(&self, name: &str, index: usize) -> u64 {
+            let package = self
+                .packages
+                .keys()
+                .position(|candidate| candidate == name)
+                .unwrap() as u64;
+            (package + 1) * 1_000_000 + index as u64 * 2
+        }
+    }
+
+    impl wiremock::Respond for GeneratedRegistry {
+        fn respond(&self, request: &wiremock::Request) -> wiremock::ResponseTemplate {
+            let path = request.url.path().to_string();
+            self.log.lock().unwrap().push(path.clone());
+            let parts = path.trim_start_matches('/').split('/').collect::<Vec<_>>();
+            let Some(releases) = parts.get(2).and_then(|name| self.packages.get(*name)) else {
+                return wiremock::ResponseTemplate::new(404);
+            };
+            let name = parts[2];
+            match parts.as_slice() {
+                ["repos", _, _, "releases"] => {
+                    let page = request
+                        .url
+                        .query_pairs()
+                        .find(|(key, _)| key == "page")
+                        .and_then(|(_, value)| value.parse::<usize>().ok())
+                        .unwrap_or(1);
+                    let start = (page - 1) * 100;
+                    let entries = releases
+                        .iter()
+                        .enumerate()
+                        .skip(start)
+                        .take(100)
+                        .map(|(index, (version, _))| {
+                            let archive = self.asset_id(name, index);
+                            serde_json::json!({
+                                "tag_name": format!("v{version}"),
+                                "assets": [
+                                    {"id": archive, "name": format!("{name}-{version}.tar.zst")},
+                                    {"id": archive + 1, "name": format!("{name}-{version}.chb")}
+                                ]
+                            })
+                        })
+                        .collect::<Vec<_>>();
+                    let mut response = wiremock::ResponseTemplate::new(200)
+                        .set_body_json(serde_json::Value::Array(entries));
+                    if start + 100 < releases.len() {
+                        response = response.insert_header("link", "<next>; rel=\"next\"");
+                    }
+                    response
+                }
+                ["repos", _, _, "releases", "assets", asset] => {
+                    let asset = asset.parse::<u64>().unwrap_or(0);
+                    let Some(index) =
+                        (0..releases.len()).find(|index| self.asset_id(name, *index) == asset)
+                    else {
+                        return wiremock::ResponseTemplate::new(404);
+                    };
+                    let (version, dependencies) = &releases[index];
+                    let body = self
+                        .archives
+                        .lock()
+                        .unwrap()
+                        .entry(asset)
+                        .or_insert_with(|| {
+                            compressed_manifest(
+                                fixture_manifest(name, version, dependencies).as_bytes(),
+                            )
+                        })
+                        .clone();
+                    wiremock::ResponseTemplate::new(200).set_body_bytes(body)
+                }
+                _ => wiremock::ResponseTemplate::new(404),
+            }
+        }
+    }
+
+    /// SplitMix64, so each case is a fixed function of its seed.
+    struct CaseRng(u64);
+
+    impl CaseRng {
+        fn next(&mut self) -> u64 {
+            self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut value = self.0;
+            value = (value ^ (value >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            value = (value ^ (value >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            value ^ (value >> 31)
+        }
+
+        fn below(&mut self, bound: usize) -> usize {
+            (self.next() % bound as u64) as usize
+        }
+
+        fn chance(&mut self, percent: usize) -> bool {
+            self.below(100) < percent
+        }
+    }
+
+    const ORACLE_SEED: u64 = 0x4063_0000_D15C_0FE7;
+    const ORACLE_CASES: u64 = 64;
+    const RELEASE_COUNTS: [usize; 18] = [
+        1, 2, 3, 10, 40, 63, 64, 65, 99, 100, 101, 120, 200, 255, 256, 257, 300, 400,
+    ];
+
+    /// Release `index` (0 is newest) of a package with `count` releases.
+    /// Majors 1 to 3 split the listing into thirds, so ranges cover part of
+    /// it.
+    fn generated_version(count: usize, index: usize) -> String {
+        let ascending = count - 1 - index;
+        format!("{}.{ascending}.0", ascending * 3 / count + 1)
+    }
+
+    fn generated_requirement(rng: &mut CaseRng, count: usize) -> String {
+        match rng.below(6) {
+            0 | 1 => format!("={}", generated_version(count, rng.below(count))),
+            2 => "=9.9.9".to_string(),
+            3 => format!("^{}", rng.below(4) + 1),
+            4 => {
+                let low = generated_version(count, rng.below(count));
+                format!(">={low}, <{}.0.0", rng.below(3) + 2)
+            }
+            _ => format!("^{}", rng.below(3) + 1),
+        }
+    }
+
+    /// One generated case: the root's `[dependencies]` body and each
+    /// package's releases, newest first, with their dependency bodies.
+    fn generated_case(seed: u64) -> (String, BTreeMap<String, Vec<(String, String)>>) {
+        let mut rng = CaseRng(seed);
+        let names = ["pa", "pb", "pc", "pd"];
+        let package_count = rng.below(4) + 1;
+        let counts = (0..package_count)
+            .map(|_| RELEASE_COUNTS[rng.below(RELEASE_COUNTS.len())])
+            .collect::<Vec<_>>();
+        let mut packages = BTreeMap::new();
+        for (package, &count) in counts.iter().enumerate() {
+            let mut releases = Vec::new();
+            for index in 0..count {
+                let mut dependencies = String::new();
+                for later in package + 1..package_count {
+                    if rng.chance(50) {
+                        let requirement = if index < 3 && rng.chance(30) {
+                            "=9.9.9".to_string()
+                        } else {
+                            generated_requirement(&mut rng, counts[later])
+                        };
+                        dependencies.push_str(&format!("{} = \"{requirement}\"\n", names[later]));
+                    }
+                }
+                releases.push((generated_version(count, index), dependencies));
+            }
+            packages.insert(names[package].to_string(), releases);
+        }
+        let mut root = format!(
+            "pa = \"{}\"\n",
+            match rng.below(3) {
+                0 => format!("={}", generated_version(counts[0], rng.below(counts[0]))),
+                _ => format!("^{}", rng.below(3) + 1),
+            }
+        );
+        if package_count > 1 && rng.chance(40) {
+            root.push_str(&format!(
+                "pb = \"{}\"\n",
+                generated_requirement(&mut rng, counts[1])
+            ));
+        }
+        (root, packages)
+    }
+
+    struct OracleOutcome {
+        result: Result<BTreeMap<String, String>, String>,
+        candidates: BTreeSet<(String, String)>,
+        archives: usize,
+        listings: usize,
+    }
+
+    fn run_generated(
+        client: &reqwest::blocking::Client,
+        server: &wiremock::MockServer,
+        log: &std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        root: &str,
+        eager_reference: bool,
+    ) -> OracleOutcome {
+        let directory = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("CHELIS_REEF_HOME", directory.path().join("reef-home"));
+        }
+        let project = directory.path().join("app");
+        fs::create_dir_all(&project).unwrap();
+        fs::write(
+            project.join("reef.toml"),
+            fixture_manifest("app", "0.1.0", root),
+        )
+        .unwrap();
+        log.lock().unwrap().clear();
+        let mut session = DiscoverySession::new(
+            &project,
+            DiscoveryMode::Resolve,
+            None,
+            true,
+            crate::tests::test_runtime(),
+        )
+        .unwrap();
+        session.eager_reference = eager_reference;
+        session.provider = Some(GitHubReleaseProvider {
+            client: client.clone(),
+            api_base: server.uri(),
+            token: None,
+        });
+        let result = session
+            .resolve()
+            .map(|resolution| {
+                resolution
+                    .selected
+                    .iter()
+                    .map(|(name, candidate)| (name.to_string(), candidate.id.version.to_string()))
+                    .collect()
+            })
+            .map_err(|error| error.to_string());
+        let candidates = session
+            .candidates
+            .iter()
+            .flat_map(|(name, materials)| {
+                materials.iter().map(move |material| {
+                    (
+                        name.to_string(),
+                        material.typed().package.version.to_string(),
+                    )
+                })
+            })
+            .collect();
+        let requests = log.lock().unwrap().clone();
+        OracleOutcome {
+            result,
+            candidates,
+            archives: requests
+                .iter()
+                .filter(|path| path.contains("/releases/assets/"))
+                .count(),
+            listings: requests
+                .iter()
+                .filter(|path| path.ends_with("/releases"))
+                .count(),
+        }
+    }
+
+    /// Differential oracle: deferred discovery against the eager reference
+    /// on generated graphs. A case passes when the reference fails, when
+    /// both select the same graph, or when deferred discovery selects a
+    /// release the reference never had as a candidate (its window held
+    /// fewer releases, so the reference reached a later resolver-2
+    /// solution). Deferred discovery failing where the reference succeeds,
+    /// or selecting differently from the same candidates, fails.
+    #[test]
+    fn deferred_discovery_agrees_with_eager_discovery_on_generated_graphs() {
+        let _guard = crate::tests::lock_reef_home_env();
+        let previous_home = std::env::var_os("CHELIS_REEF_HOME");
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let server = runtime.block_on(wiremock::MockServer::start());
+        let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let client = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(30))
+            .build()
+            .unwrap();
+        let mut tally = BTreeMap::<&str, u64>::new();
+        let (mut deferred_archives, mut eager_archives) = (0, 0);
+        let (mut deferred_time, mut eager_time) = (Duration::ZERO, Duration::ZERO);
+        let mut failures = Vec::new();
+        for case in 0..ORACLE_CASES {
+            let seed = ORACLE_SEED.wrapping_add(case);
+            let (root, packages) = generated_case(seed);
+            let shape = packages
+                .iter()
+                .map(|(name, releases)| format!("{name}:{}", releases.len()))
+                .collect::<Vec<_>>()
+                .join(",");
+            runtime.block_on(server.reset());
+            runtime.block_on(
+                wiremock::Mock::given(wiremock::matchers::method("GET"))
+                    .respond_with(GeneratedRegistry {
+                        packages,
+                        log: log.clone(),
+                        archives: std::sync::Mutex::new(BTreeMap::new()),
+                    })
+                    .mount(&server),
+            );
+            let started = Instant::now();
+            let deferred = run_generated(&client, &server, &log, &root, false);
+            deferred_time += started.elapsed();
+            let started = Instant::now();
+            let eager = run_generated(&client, &server, &log, &root, true);
+            eager_time += started.elapsed();
+            deferred_archives += deferred.archives;
+            eager_archives += eager.archives;
+            let class = match (&eager.result, &deferred.result) {
+                (Err(_), Err(_)) => "both fail",
+                (Err(_), Ok(_)) => "eager fails, deferred resolves",
+                (Ok(left), Ok(right)) if left == right => "same selection",
+                (Ok(_), Ok(right))
+                    if right.iter().any(|(name, version)| {
+                        !eager.candidates.contains(&(name.clone(), version.clone()))
+                    }) =>
+                {
+                    "deferred selects a release outside the eager window"
+                }
+                _ => {
+                    failures.push(format!(
+                        "case {case} seed {seed:#x} packages [{shape}] root {root:?}: eager {:?} ({} archives, {} listings); deferred {:?} ({} archives, {} listings)",
+                        eager.result,
+                        eager.archives,
+                        eager.listings,
+                        deferred.result,
+                        deferred.archives,
+                        deferred.listings
+                    ));
+                    "FAIL"
+                }
+            };
+            *tally.entry(class).or_default() += 1;
+        }
+        unsafe {
+            match previous_home {
+                Some(value) => std::env::set_var("CHELIS_REEF_HOME", value),
+                None => std::env::remove_var("CHELIS_REEF_HOME"),
+            }
+        }
+        eprintln!(
+            "oracle seed {ORACLE_SEED:#x}, {ORACLE_CASES} cases: {tally:?}; archives deferred {deferred_archives}, eager {eager_archives}; time deferred {deferred_time:?}, eager {eager_time:?}"
+        );
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 }

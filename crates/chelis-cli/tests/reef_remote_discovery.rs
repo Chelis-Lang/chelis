@@ -311,7 +311,7 @@ fn every_production_budget_dimension_accepts_its_limit_and_rejects_the_next_unit
         (BudgetDimension::ReleasePages, 10),
         (BudgetDimension::HttpRequests, 2_048),
         (BudgetDimension::AcceptedTags, 256),
-        (BudgetDimension::CandidateManifests, 64),
+        (BudgetDimension::CandidateManifests, 256),
         (BudgetDimension::CompressedCandidateBytes, 64 * 1024 * 1024),
         (BudgetDimension::ScannedCandidateBytes, 256 * 1024 * 1024),
         (BudgetDimension::ManifestBytes, 1024 * 1024),
