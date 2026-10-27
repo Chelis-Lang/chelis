@@ -4996,8 +4996,10 @@ mod tests {
     /// candidate's manifest read, or both must fail. Those requirements are
     /// the deferred run's, as the window rule defines them over the
     /// manifests a run reads, and must equal the requirements recomputed
-    /// from the root and the archives the run downloaded. Second, against the
-    /// eager reference, a case passes when the reference fails, when
+    /// from the root and the archives the run downloaded. Second, as
+    /// regression and download-count evidence against the eager reference,
+    /// rather than a proof of equivalence, a case passes when the reference
+    /// fails, when
     /// both select the same graph, or when deferred discovery selects, for
     /// some package, a release the reference never had as a candidate for
     /// that package: its window dropped the release, so it reached a later
