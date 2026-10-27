@@ -25,6 +25,7 @@ const NAUTILUS_REEF: &str =
     include_str!("../../../examples/nautilus_quantile_contract/fixtures/nautilus/reef.toml");
 const NAUTILUS_STATS: &str =
     include_str!("../../../examples/nautilus_quantile_contract/fixtures/nautilus/src/stats.ch");
+#[cfg(feature = "chelis-prove")]
 const EXAMPLE_PROOFS: &str =
     include_str!("../../../examples/nautilus_quantile_contract/src/proofs.ch");
 
