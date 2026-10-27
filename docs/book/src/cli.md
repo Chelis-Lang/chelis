@@ -45,7 +45,7 @@ chelis eval --file app.ch
 ```
 
 `check` writes a JSON report to stdout even when checking fails, and nothing
-else: style-gate errors and lint warnings go to stderr. For one file, an empty
+else: style-check errors and lint warnings go to stderr. For one file, an empty
 `errors` array means exit `0`; a nonempty one means exit `2`. Here a function
 of one argument is called with two:
 
@@ -81,7 +81,7 @@ file, here the call `f(1.0f32, 2.0f32)`. An error without a location, such as
 a formatting failure, has neither field. `--show-inferred` adds the inferred
 signature of each callable to the report.
 
-The style gate runs first. An unformatted file fails before type checking,
+The style check runs first. An unformatted file fails before type checking,
 with `score` 0 and one error whose message says to run
 `chelis fmt --inplace FILE`.
 
