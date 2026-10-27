@@ -298,7 +298,7 @@ because a concrete evaluation decided it.
 
 If the witness violates a precondition that the domain proof did not use, or
 the body holds there, the result stays `unsupported`.
-[The executable record example](https://github.com/Chelis-Lang/chelis/blob/v0.21.0/examples/record_sqrt_property.ch)
+[The executable record example](https://github.com/Chelis-Lang/chelis/blob/v0.22.1/examples/record_sqrt_property.ch)
 shows this route.
 
 The command exits `0` when all reported checks pass, `1` when a property or obligation fails,

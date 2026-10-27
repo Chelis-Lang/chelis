@@ -16,14 +16,14 @@ cd demo
 
 ```toml
 [dependencies]
-nautilus = { version = "0.7.50" }
+nautilus = { version = "0.7.58" }
 ```
 
 Chelis libraries distributed through Reef are called shells; Nautilus
 (numerical methods) is one. Each shell release pins an exact Chelis compiler version. The compiler pin in your
 project must match the version required by the shell release; Reef rejects a
-mismatch. For example, Nautilus 0.7.50 uses Chelis 0.19.1. Set the generated
-`compiler` field in `reef.toml` to `"=0.19.1"`, then prepare and build the
+mismatch. For example, Nautilus 0.7.58 uses Chelis 0.22.1. Set the generated
+`compiler` field in `reef.toml` to `"=0.22.1"`, then prepare and build the
 project:
 
 ```sh
@@ -65,24 +65,24 @@ makes no network request:
 chelis reef fetch-plan --package-root .
 ```
 
-For a project that locks Coral 0.7.45, the output starts like this:
+For the hello-chelis 0.1.17 lockfile, the output starts like this:
 
 ```json
 {
   "format_version": 1,
   "package": {
     "name": "hello-chelis",
-    "version": "0.1.12"
+    "version": "0.1.17"
   },
   "artifacts": [
     {
-      "name": "coral",
-      "version": "0.7.45",
+      "name": "chelis-clarabel",
+      "version": "0.1.2",
       "kind": "archive",
-      "file": "coral-0.7.45.tar.zst",
-      "url": "https://github.com/Chelis-Lang/coral/releases/download/v0.7.45/coral-0.7.45.tar.zst",
-      "sha256": "87e82d63e01ce2ddc931dc19306680d4f18ad24fada1ffb883e026c6719d9538",
-      "remote_origin": "github://Chelis-Lang/coral@v0.7.45"
+      "file": "chelis-clarabel-0.1.2.tar.zst",
+      "url": "https://github.com/chelis-lang/chelis-clarabel/releases/download/v0.1.2/chelis-clarabel-0.1.2.tar.zst",
+      "sha256": "8291e653d051b2c53d8918419a10d38f072b2b7db5003d0b485eff2115e275e8",
+      "remote_origin": "github://chelis-lang/chelis-clarabel@v0.1.2"
     },
 ```
 

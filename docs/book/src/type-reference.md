@@ -94,7 +94,7 @@ The helper keeps its dtype bounds, effects, and ownership requirements.
 A matching function signature alone supplies no body evidence. Local or
 computed callable values cannot borrow evidence from a declaration with the
 same spelling. See the
-[helper composition example](https://github.com/Chelis-Lang/chelis/blob/v0.21.0/examples/rank_helper_composition.ch).
+[helper composition example](https://github.com/Chelis-Lang/chelis/blob/v0.22.1/examples/rank_helper_composition.ch).
 
 ### Dtype bounds
 
