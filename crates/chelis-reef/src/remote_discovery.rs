@@ -1391,6 +1391,9 @@ struct DiscoverySession {
     /// differential test against deferred discovery.
     #[cfg(test)]
     eager_reference: bool,
+    /// Test oracle: every release some search selected, stand-ins included.
+    #[cfg(test)]
+    selected_in_a_search: BTreeSet<(String, String)>,
 }
 
 impl DiscoverySession {
@@ -1526,6 +1529,8 @@ impl DiscoverySession {
             runtime,
             #[cfg(test)]
             eager_reference: false,
+            #[cfg(test)]
+            selected_in_a_search: BTreeSet::new(),
         })
     }
 
@@ -2654,6 +2659,14 @@ impl DiscoverySession {
         loop {
             match self.resolve_once() {
                 Ok(resolution) => {
+                    #[cfg(test)]
+                    self.selected_in_a_search
+                        .extend(resolution.selected.values().map(|candidate| {
+                            (
+                                candidate.id.name.to_string(),
+                                candidate.id.version.to_string(),
+                            )
+                        }));
                     // Fetch the first deferred release in the selection, then
                     // query remote dependencies as eager fetching would have.
                     let Some(candidate) = resolution
@@ -4936,8 +4949,16 @@ mod tests {
         candidates: BTreeSet<(String, String)>,
         known: BTreeMap<String, Vec<PackageRequirement>>,
         downloaded: Vec<(String, u64)>,
+        selected_in_a_search: BTreeSet<(String, String)>,
         archives: usize,
         listings: usize,
+    }
+
+    /// The release a generated archive asset id publishes.
+    fn downloaded_release(case: &GeneratedCase, name: &str, asset: u64) -> (String, String) {
+        let position = case.packages.keys().position(|key| key == name).unwrap() as u64;
+        let index = ((asset - (position + 1) * 1_000_000) / 2) as usize;
+        (name.to_string(), case.packages[name][index].0.clone())
     }
 
     /// The requirements in the root and in every archive a run downloaded,
@@ -4953,10 +4974,13 @@ mod tests {
             manifests.push(("local".to_string(), "0.1.0".to_string(), local.clone()));
         }
         for (name, asset) in downloaded {
-            let position = packages.keys().position(|key| key == name).unwrap() as u64;
-            let index = ((asset - (position + 1) * 1_000_000) / 2) as usize;
-            let (version, dependencies) = &packages[name][index];
-            manifests.push((name.clone(), version.clone(), dependencies.clone()));
+            let (_, version) = downloaded_release(case, name, *asset);
+            let dependencies = &packages[name]
+                .iter()
+                .find(|(listed, _)| listed == &version)
+                .unwrap()
+                .1;
+            manifests.push((name.clone(), version, dependencies.clone()));
         }
         let mut read = BTreeMap::<String, BTreeSet<String>>::new();
         for (name, version, dependencies) in manifests {
@@ -5168,6 +5192,7 @@ mod tests {
             candidates,
             known,
             downloaded,
+            selected_in_a_search: session.selected_in_a_search.clone(),
             archives: requests
                 .iter()
                 .filter(|path| path.contains("/releases/assets/"))
@@ -5186,7 +5211,8 @@ mod tests {
     /// the deferred run's, as the window rule defines them over the
     /// manifests a run reads, and must equal the requirements recomputed
     /// from the root, the path package, and the archives the run
-    /// downloaded. Second, as regression and download-count evidence
+    /// downloaded; and every archive the deferred run downloaded must be of
+    /// a release some search selected. Second, as regression evidence
     /// against the eager reference rather than a proof of equivalence, a
     /// case passes when the reference fails, when both select the same
     /// graph, when deferred discovery selects a release the reference never
@@ -5207,6 +5233,7 @@ mod tests {
             .unwrap();
         let mut tally = BTreeMap::<&str, u64>::new();
         let mut spec_tally = BTreeMap::<&str, u64>::new();
+        let mut download_tally = BTreeMap::<&str, u64>::new();
         let (mut deferred_archives, mut eager_archives) = (0, 0);
         let (mut deferred_time, mut eager_time) = (Duration::ZERO, Duration::ZERO);
         let mut failures = Vec::new();
@@ -5262,6 +5289,26 @@ mod tests {
                     deferred.result, deferred.archives
                 ));
             }
+            // Every download is of a release some search selected: a
+            // stand-in is fetched only once a search chooses it.
+            let unselected = deferred
+                .downloaded
+                .iter()
+                .map(|(name, asset)| downloaded_release(&case_input, name, *asset))
+                .filter(|release| !deferred.selected_in_a_search.contains(release))
+                .collect::<Vec<_>>();
+            *download_tally
+                .entry(if unselected.is_empty() {
+                    "selected"
+                } else {
+                    "FAIL"
+                })
+                .or_default() += 1;
+            if !unselected.is_empty() {
+                failures.push(format!(
+                    "case {case} seed {seed:#x} packages [{shape}] root {root:?}: downloaded releases no search selected: {unselected:?}"
+                ));
+            }
             if case >= ORACLE_CASES {
                 continue;
             }
@@ -5309,7 +5356,7 @@ mod tests {
             }
         }
         eprintln!(
-            "oracle seed {ORACLE_SEED:#x}: final window over {FINAL_WINDOW_CASES} cases {spec_tally:?}; against eager over {ORACLE_CASES} cases {tally:?}; archives deferred {deferred_archives}, eager {eager_archives}; time deferred {deferred_time:?}, eager {eager_time:?}"
+            "oracle seed {ORACLE_SEED:#x}: final window over {FINAL_WINDOW_CASES} cases {spec_tally:?}, downloads {download_tally:?}; against eager over {ORACLE_CASES} cases {tally:?}; archives deferred {deferred_archives}, eager {eager_archives}; time deferred {deferred_time:?}, eager {eager_time:?}"
         );
         assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
