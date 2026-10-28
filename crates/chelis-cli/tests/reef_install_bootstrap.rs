@@ -1228,10 +1228,45 @@ fn bootstrap_defaults_existing_identity_conflicts_preserve_registry_metadata() {
 }
 
 #[test]
-fn bootstrap_defaults_keep_the_shared_release_tag_budget() {
+fn bootstrap_defaults_keep_the_shared_release_page_budget() {
     use wiremock::matchers::query_param;
     let _g = file_lock();
     let harness = fixture_for_shells(&default_cohort());
+    // Discovery reads a complete listing up to the shared ten-page budget,
+    // so an eleventh full page fails default bootstrap before installation.
+    for page in 1..=11 {
+        let count = 100;
+        let rows = (0..count).map(|offset| { let version = format!("1.0.{}", (page - 1) * 100 + offset); serde_json::json!({"tag_name":format!("v{version}"),"draft":false,"prerelease":false,"assets":[{"id":10,"name":format!("nautilus-{version}.tar.zst")},{"id":11,"name":format!("nautilus-{version}.chb")}]}) }).collect::<Vec<_>>();
+        harness.mount_all(vec![
+            Mock::given(method("GET"))
+                .and(wm_path("/repos/chelis-lang/nautilus/releases"))
+                .and(query_param("page", page.to_string()))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_json(rows)
+                        .insert_header("link", "<http://localhost/next>; rel=\"next\""),
+                )
+                .with_priority(1),
+        ]);
+    }
+    let directory = tempdir().expect("tempdir");
+    let registry = directory.path().join("registry");
+    default_command(&harness, &registry, directory.path(), true)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "GitHub release pages per package limit 10 reached at 11 for package `nautilus`",
+        ));
+    assert!(!registry.join("index.json").exists());
+}
+
+#[test]
+fn bootstrap_defaults_charge_tags_only_for_window_releases() {
+    use wiremock::matchers::query_param;
+    let _g = file_lock();
+    let harness = fixture_for_shells(&default_cohort());
+    // 257 listed tags fit the 256 accepted-tag budget, because a tag is
+    // charged only when its release enters a 64-release window.
     for page in 1..=3 {
         let count = if page == 3 { 57 } else { 100 };
         let rows = (0..count).map(|offset| { let version = format!("1.0.{}", (page - 1) * 100 + offset); serde_json::json!({"tag_name":format!("v{version}"),"draft":false,"prerelease":false,"assets":[{"id":10,"name":format!("nautilus-{version}.tar.zst")},{"id":11,"name":format!("nautilus-{version}.chb")}]}) }).collect::<Vec<_>>();
@@ -1252,7 +1287,11 @@ fn bootstrap_defaults_keep_the_shared_release_tag_budget() {
     default_command(&harness, &registry, directory.path(), true)
         .assert()
         .failure()
-        .stderr(predicate::str::contains("accepted release tags"));
+        .stderr(
+            predicate::str::contains("accepted release tags")
+                .not()
+                .and(predicate::str::contains("no local version of `nautilus`")),
+        );
     assert!(!registry.join("index.json").exists());
 }
 
