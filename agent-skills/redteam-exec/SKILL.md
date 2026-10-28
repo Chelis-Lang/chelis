@@ -27,9 +27,9 @@ validation pass, or verification of a fix that a red team reported.
    and a second needs the same approval. Rounds run from any platform count, and the
    pull request's round record is the counter. Verification does not count against the
    cap; the end-of-pull-request round does.
-4. Context budgets and time limits are optional, with no default. When set, include
-   them in the brief. The reviewer reports what it has when an explicit limit is
-   reached; an unfinished check is "unvalidated", not a finding.
+4. Time limits are optional, with no default. When set, include them in the brief.
+   The reviewer reports what it has when an explicit limit is reached; an unfinished
+   check is "unvalidated", not a finding.
 5. The initial head is pushed before the round starts, so CI runs while the first review
    runs. Repair commits remain local until the standing reviewer is satisfied. Push the
    exact verified repair head once after the round closes; CI then validates that head.
@@ -106,7 +106,7 @@ validation pass, or verification of a fix that a red team reported.
 ## Round Brief Template
 
 Send this as the subagent's prompt, with every placeholder filled.
-Add a context budget or deadline only when one is set for the round.
+Add a deadline only when one is set for the round.
 
 ```text
 Red-team round <N> of <cap> for <PR number or branch>: <one-line subject>.
