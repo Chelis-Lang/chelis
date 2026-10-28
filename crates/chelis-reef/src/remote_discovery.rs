@@ -4598,6 +4598,116 @@ mod tests {
         );
     }
 
+    fn resolve_fixture_against_reference(
+        fixture: &FixtureProvider,
+        dependencies: &str,
+        eager_reference: bool,
+    ) -> Result<BTreeMap<String, String>, String> {
+        let _guard = crate::tests::lock_reef_home_env();
+        let directory = tempfile::tempdir().unwrap();
+        let previous_home = std::env::var_os("CHELIS_REEF_HOME");
+        unsafe {
+            std::env::set_var("CHELIS_REEF_HOME", directory.path().join("reef-home"));
+        }
+        let root = directory.path().join("app");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join("reef.toml"),
+            fixture_manifest("app", "0.1.0", dependencies),
+        )
+        .unwrap();
+        let mut session = DiscoverySession::new(
+            &root,
+            DiscoveryMode::Resolve,
+            None,
+            true,
+            crate::tests::test_runtime(),
+        )
+        .unwrap();
+        session.eager_reference = eager_reference;
+        session.provider = Some(fixture.provider());
+        let result = session
+            .resolve()
+            .map(|resolution| {
+                resolution
+                    .selected
+                    .iter()
+                    .map(|(name, candidate)| (name.to_string(), candidate.id.version.to_string()))
+                    .collect()
+            })
+            .map_err(|error| error.to_string());
+        unsafe {
+            match previous_home {
+                Some(value) => std::env::set_var("CHELIS_REEF_HOME", value),
+                None => std::env::remove_var("CHELIS_REEF_HOME"),
+            }
+        }
+        result
+    }
+
+    /// aa 1.1.0 is never selected but pins bb 0.1.0, the only bb that cc
+    /// 1.1.0 can use; bb's 70 newer releases need a missing dd. Eager
+    /// discovery read aa 1.1.0's manifest and so learned `=0.1.0`; deferred
+    /// discovery never reads it, so bb 0.1.0 stays outside the window.
+    fn unselected_requirer_fixture() -> FixtureProvider {
+        let mut fixture = FixtureProvider::new();
+        fixture.publish(
+            "aa",
+            &[
+                release("1.2.0"),
+                release_with_dependencies("1.1.0", "bb = \"=0.1.0\"\n"),
+            ],
+            100,
+        );
+        let mut bb = leaked_versions(70, |minor| format!("1.{}.0", 69 - minor))
+            .into_iter()
+            .map(|version| release_with_dependencies(version, "dd = \"=9.9.9\"\n"))
+            .collect::<Vec<_>>();
+        bb.push(release("0.1.0"));
+        fixture.publish("bb", &bb, 100);
+        fixture.publish(
+            "cc",
+            &[
+                release_with_dependencies("1.1.0", "bb = \">=0.1.0\"\n"),
+                release("1.0.0"),
+            ],
+            100,
+        );
+        fixture.publish("dd", &many_releases(&["1.0.0"]), 100);
+        fixture
+    }
+
+    #[test]
+    fn a_requirement_only_an_unselected_release_declares_is_not_learned() {
+        let dependencies = "aa = \"^1\"\ncc = \"^1\"\n";
+        let deferred =
+            resolve_fixture_against_reference(&unselected_requirer_fixture(), dependencies, false);
+        let eager =
+            resolve_fixture_against_reference(&unselected_requirer_fixture(), dependencies, true);
+        assert_eq!(deferred, Ok(selection(&[("aa", "1.2.0"), ("cc", "1.0.0")])));
+        assert_eq!(
+            eager,
+            Ok(selection(&[
+                ("aa", "1.2.0"),
+                ("bb", "0.1.0"),
+                ("cc", "1.1.0")
+            ]))
+        );
+        let pinned = "aa = \"^1\"\ncc = \"=1.1.0\"\n";
+        assert!(
+            resolve_fixture_against_reference(&unselected_requirer_fixture(), pinned, false)
+                .is_err()
+        );
+        assert_eq!(
+            resolve_fixture_against_reference(&unselected_requirer_fixture(), pinned, true),
+            Ok(selection(&[
+                ("aa", "1.2.0"),
+                ("bb", "0.1.0"),
+                ("cc", "1.1.0")
+            ]))
+        );
+    }
+
     /// A generated registry served by one wiremock responder: each
     /// package's releases newest first, 100 per listing page, and archives
     /// built on request. Every request path is logged.
@@ -4737,21 +4847,36 @@ mod tests {
         }
     }
 
-    /// One generated case: the root's `[dependencies]` body and each
-    /// package's releases, newest first, with their dependency bodies.
-    fn generated_case(seed: u64) -> (String, BTreeMap<String, Vec<(String, String)>>) {
+    /// One generated case: the root's `[dependencies]` body, each
+    /// package's releases newest first with their dependency bodies, and
+    /// the dependency body of an optional path package `local`.
+    struct GeneratedCase {
+        root: String,
+        packages: BTreeMap<String, Vec<(String, String)>>,
+        local: Option<String>,
+    }
+
+    /// Dependencies follow a random order of the packages, so an edge often
+    /// points to a bytewise-earlier name, as eager discovery's bytewise
+    /// query order does not anticipate.
+    fn generated_case(seed: u64) -> GeneratedCase {
         let mut rng = CaseRng(seed);
         let names = ["pa", "pb", "pc", "pd"];
         let package_count = rng.below(4) + 1;
         let counts = (0..package_count)
             .map(|_| RELEASE_COUNTS[rng.below(RELEASE_COUNTS.len())])
             .collect::<Vec<_>>();
+        let mut order = (0..package_count).collect::<Vec<_>>();
+        for index in (1..package_count).rev() {
+            order.swap(index, rng.below(index + 1));
+        }
         let mut packages = BTreeMap::new();
-        for (package, &count) in counts.iter().enumerate() {
+        for (rank, &package) in order.iter().enumerate() {
+            let count = counts[package];
             let mut releases = Vec::new();
             for index in 0..count {
                 let mut dependencies = String::new();
-                for later in package + 1..package_count {
+                for &later in &order[rank + 1..] {
                     if rng.chance(50) {
                         let requirement = if index < 3 && rng.chance(30) {
                             "=9.9.9".to_string()
@@ -4765,20 +4890,45 @@ mod tests {
             }
             packages.insert(names[package].to_string(), releases);
         }
+        let first = order[0];
         let mut root = format!(
-            "pa = \"{}\"\n",
+            "{} = \"{}\"\n",
+            names[first],
             match rng.below(3) {
-                0 => format!("={}", generated_version(counts[0], rng.below(counts[0]))),
+                0 => format!(
+                    "={}",
+                    generated_version(counts[first], rng.below(counts[first]))
+                ),
                 _ => format!("^{}", rng.below(3) + 1),
             }
         );
         if package_count > 1 && rng.chance(40) {
+            let second = order[1];
             root.push_str(&format!(
-                "pb = \"{}\"\n",
-                generated_requirement(&mut rng, counts[1])
+                "{} = \"{}\"\n",
+                names[second],
+                generated_requirement(&mut rng, counts[second])
             ));
         }
-        (root, packages)
+        let local = rng.chance(30).then(|| {
+            let mut dependencies = String::new();
+            for package in 0..package_count {
+                if rng.chance(40) {
+                    dependencies.push_str(&format!(
+                        "{} = \"{}\"\n",
+                        names[package],
+                        generated_requirement(&mut rng, counts[package])
+                    ));
+                }
+            }
+            root.push_str("local = { path = \"local\" }\n");
+            dependencies
+        });
+        GeneratedCase {
+            root,
+            packages,
+            local,
+        }
     }
 
     struct OracleOutcome {
@@ -4793,12 +4943,15 @@ mod tests {
     /// The requirements in the root and in every archive a run downloaded,
     /// per required package, recomputed from the generated manifests.
     fn requirements_read(
-        root: &str,
-        packages: &BTreeMap<String, Vec<(String, String)>>,
+        case: &GeneratedCase,
         downloaded: &[(String, u64)],
     ) -> BTreeMap<String, BTreeSet<String>> {
+        let packages = &case.packages;
         let directory = tempfile::tempdir().unwrap();
-        let mut manifests = vec![("app".to_string(), "0.1.0".to_string(), root.to_string())];
+        let mut manifests = vec![("app".to_string(), "0.1.0".to_string(), case.root.clone())];
+        if let Some(local) = &case.local {
+            manifests.push(("local".to_string(), "0.1.0".to_string(), local.clone()));
+        }
         for (name, asset) in downloaded {
             let position = packages.keys().position(|key| key == name).unwrap() as u64;
             let index = ((asset - (position + 1) * 1_000_000) / 2) as usize;
@@ -4834,15 +4987,17 @@ mod tests {
             .collect()
     }
 
+    type SelectionResult = Result<BTreeMap<String, String>, String>;
+
     /// The spec's statement of the selection, computed directly: the
     /// window for the final known requirements, every candidate in it with
     /// its real manifest, and one resolver-2 search. It shares no window
     /// or deferral code with discovery.
     fn resolve_over_final_window(
-        root: &str,
-        packages: &BTreeMap<String, Vec<(String, String)>>,
+        case: &GeneratedCase,
         known: &BTreeMap<String, Vec<PackageRequirement>>,
-    ) -> Result<BTreeMap<String, String>, String> {
+    ) -> (SelectionResult, BTreeSet<(String, String)>) {
+        let (root, packages) = (&case.root, &case.packages);
         let directory = tempfile::tempdir().unwrap();
         let read = |name: &str, version: &str, dependencies: &str| {
             let path = directory.path().join(format!("{name}-{version}.toml"));
@@ -4850,8 +5005,32 @@ mod tests {
             crate::read_manifest(&path).unwrap().typed
         };
         let app = PackageName::from_str("app").unwrap();
-        let root_requests = registry_requests(&app, &read("app", "0.1.0", root));
+        let mut root_requests = registry_requests(&app, &read("app", "0.1.0", root));
         let mut candidates = BTreeMap::new();
+        if let Some(local) = &case.local {
+            let name = PackageName::from_str("local").unwrap();
+            let typed = read("local", "0.1.0", local);
+            root_requests.push(RequestedPackage::new(
+                app.clone(),
+                name.clone(),
+                package_versioning::DependencyRequirement::Compatible(PackageRequirement::exact(
+                    &typed.package.version,
+                ))
+                .as_package_requirement(),
+            ));
+            candidates.insert(
+                name.clone(),
+                vec![package_versioning::LocalCandidate {
+                    id: typed.package.clone(),
+                    source: CandidateSource::Path {
+                        canonical_path: "local".to_string(),
+                    },
+                    content_identity: "editable:local".to_string(),
+                    dependencies: registry_requests(&name, &typed),
+                }],
+            );
+        }
+        let mut members = BTreeSet::new();
         for (name, releases) in packages {
             let package = PackageName::from_str(name).unwrap();
             let mut window = BTreeSet::new();
@@ -4871,6 +5050,7 @@ mod tests {
                 .into_iter()
                 .map(|position| {
                     let (version, dependencies) = &releases[position];
+                    members.insert((name.clone(), version.clone()));
                     let typed = read(name, version, dependencies);
                     package_versioning::LocalCandidate {
                         id: typed.package.clone(),
@@ -4887,7 +5067,7 @@ mod tests {
             }
         }
         let mut states = 0;
-        package_versioning::resolve_local_with_state_counter(
+        let result = package_versioning::resolve_local_with_state_counter(
             &root_requests,
             &candidates,
             package_versioning::ResolverLimits::default(),
@@ -4900,14 +5080,15 @@ mod tests {
                 .map(|(name, candidate)| (name.to_string(), candidate.id.version.to_string()))
                 .collect()
         })
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string());
+        (result, members)
     }
 
     fn run_generated(
         client: &reqwest::blocking::Client,
         server: &wiremock::MockServer,
         log: &std::sync::Arc<std::sync::Mutex<Vec<String>>>,
-        root: &str,
+        case: &GeneratedCase,
         eager_reference: bool,
     ) -> OracleOutcome {
         let directory = tempfile::tempdir().unwrap();
@@ -4918,9 +5099,17 @@ mod tests {
         fs::create_dir_all(&project).unwrap();
         fs::write(
             project.join("reef.toml"),
-            fixture_manifest("app", "0.1.0", root),
+            fixture_manifest("app", "0.1.0", &case.root),
         )
         .unwrap();
+        if let Some(local) = &case.local {
+            fs::create_dir_all(project.join("local")).unwrap();
+            fs::write(
+                project.join("local/reef.toml"),
+                fixture_manifest("local", "0.1.0", local),
+            )
+            .unwrap();
+        }
         log.lock().unwrap().clear();
         let mut session = DiscoverySession::new(
             &project,
@@ -4996,16 +5185,15 @@ mod tests {
     /// candidate's manifest read, or both must fail. Those requirements are
     /// the deferred run's, as the window rule defines them over the
     /// manifests a run reads, and must equal the requirements recomputed
-    /// from the root and the archives the run downloaded. Second, as
-    /// regression and download-count evidence against the eager reference,
-    /// rather than a proof of equivalence, a case passes when the reference
-    /// fails, when
-    /// both select the same graph, or when deferred discovery selects, for
-    /// some package, a release the reference never had as a candidate for
-    /// that package: its window dropped the release, so it reached a later
-    /// resolver-2 solution. Deferred discovery failing where the reference
-    /// succeeds, or selecting differently while the reference had every
-    /// selected release, fails.
+    /// from the root, the path package, and the archives the run
+    /// downloaded. Second, as regression and download-count evidence
+    /// against the eager reference rather than a proof of equivalence, a
+    /// case passes when the reference fails, when both select the same
+    /// graph, when deferred discovery selects a release the reference never
+    /// had as a candidate for that package, or when the reference selects
+    /// a release outside the final window, which it reached through a
+    /// requirement learned from a manifest deferred discovery never read.
+    /// Any other difference fails.
     #[test]
     fn deferred_discovery_agrees_with_eager_discovery_on_generated_graphs() {
         let _guard = crate::tests::lock_reef_home_env();
@@ -5024,7 +5212,8 @@ mod tests {
         let mut failures = Vec::new();
         for case in 0..FINAL_WINDOW_CASES {
             let seed = ORACLE_SEED.wrapping_add(case);
-            let (root, packages) = generated_case(seed);
+            let case_input = generated_case(seed);
+            let (root, packages) = (&case_input.root, &case_input.packages);
             let shape = packages
                 .iter()
                 .map(|(name, releases)| format!("{name}:{}", releases.len()))
@@ -5041,7 +5230,7 @@ mod tests {
                     .mount(&server),
             );
             let started = Instant::now();
-            let deferred = run_generated(&client, &server, &log, &root, false);
+            let deferred = run_generated(&client, &server, &log, &case_input, false);
             deferred_time += started.elapsed();
             deferred_archives += deferred.archives;
             // Check 1: the selection over the final window with every
@@ -5049,7 +5238,7 @@ mod tests {
             // implementation, so it cannot share a reference's defect. The
             // known requirements are the deferred run's, and are checked
             // against the root and the archives that run downloaded.
-            let read = requirements_read(&root, &packages, &deferred.downloaded);
+            let read = requirements_read(&case_input, &deferred.downloaded);
             let known_matches = deferred.known.iter().all(|(name, requirements)| {
                 requirements
                     .iter()
@@ -5057,7 +5246,7 @@ mod tests {
                     .collect::<BTreeSet<_>>()
                     == read.get(name).cloned().unwrap_or_default()
             });
-            let direct = resolve_over_final_window(&root, &packages, &deferred.known);
+            let (direct, final_window) = resolve_over_final_window(&case_input, &deferred.known);
             let agrees = known_matches
                 && match (&direct, &deferred.result) {
                     (Ok(left), Ok(right)) => left == right,
@@ -5077,7 +5266,7 @@ mod tests {
                 continue;
             }
             let started = Instant::now();
-            let eager = run_generated(&client, &server, &log, &root, true);
+            let eager = run_generated(&client, &server, &log, &case_input, true);
             eager_time += started.elapsed();
             eager_archives += eager.archives;
             let class = match (&eager.result, &deferred.result) {
@@ -5090,6 +5279,13 @@ mod tests {
                     }) =>
                 {
                     "deferred selects a release outside the eager window"
+                }
+                (Ok(left), _)
+                    if left.iter().any(|(name, version)| {
+                        name != "local" && !final_window.contains(&(name.clone(), version.clone()))
+                    }) =>
+                {
+                    "eager selects a release outside the final window"
                 }
                 _ => {
                     failures.push(format!(
