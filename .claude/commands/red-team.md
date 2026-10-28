@@ -18,8 +18,8 @@ round.
 4. Fill the round brief template from the skill: head SHA, files, in-scope claims,
    worktree, the target with the output of
    `.venv/bin/python scripts/worktree_status.py --path <target>` pasted verbatim and the
-   time you took it, the report-length budget, and delivery channel. Context budgets
-   and time limits are optional, with no default; include them only when set. Give a
+   time you took it, the report-length budget, and delivery channel. Time limits
+   are optional, with no default; include them only when set. Give a
    reviewer whose probes will mutate tracked source its own worktree.
    Do not tell the reviewer to read `AGENTS.md`.
 5. Spawn a **new local subagent with fresh context** with the brief as its prompt. In

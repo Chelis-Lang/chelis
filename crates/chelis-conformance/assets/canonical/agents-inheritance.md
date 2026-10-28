@@ -503,11 +503,8 @@ holds the measurements behind these rules.
   here, not a certified safe width, and it is a separate budget from the CPU one above.
 - Every spawn names its model tier and says in one clause why that tier fits: the
   expensive tier for judgement whose errors are costly to detect, the cheap tier for
-  mechanical work such as waiting on CI, polling, or transcribing a result. The
-  orchestrator states its own context size in the message that announces a spawn.
-- Every brief states a numeric report-length budget, and a numeric context budget except
-  for red-team rounds. An agent that will exceed its context budget says so and returns
-  what it has.
+  mechanical work such as waiting on CI, polling, or transcribing a result.
+- Every brief states a numeric report-length budget.
 - A brief says which facts the orchestrator has already verified, against what head, and
   that the agent must not re-derive them, and it names what the agent still has to
   establish itself.
