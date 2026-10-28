@@ -25,7 +25,14 @@ use tar::Archive;
 pub const MAX_GITHUB_RELEASE_PAGES_PER_PACKAGE: u64 = 10;
 pub const MAX_HTTP_REQUESTS_PER_COMMAND: u64 = 2_048;
 pub const MAX_ACCEPTED_RELEASE_TAGS_PER_PACKAGE: u64 = 256;
-pub const MAX_CANDIDATE_MANIFESTS_PER_PACKAGE: u64 = 64;
+/// Every candidate of a package can be downloaded once, so the download
+/// budget equals the resolver's candidates-per-name limit.
+pub const MAX_CANDIDATE_MANIFESTS_PER_PACKAGE: u64 = package_versioning::MAX_CANDIDATES_PER_PACKAGE;
+/// Resolution and refresh take this many of the highest listed versions
+/// satisfying each known requirement.
+pub const MAX_CANDIDATES_PER_REQUIREMENT: usize = 64;
+/// Inspection downloads this many listed releases, matching ones first.
+pub const MAX_INSPECTED_CANDIDATES_PER_PACKAGE: usize = 64;
 pub const MAX_COMPRESSED_CANDIDATE_BYTES: u64 = 64 * 1024 * 1024;
 pub const MAX_SCANNED_CANDIDATE_BYTES: u64 = 256 * 1024 * 1024;
 pub const MAX_MANIFEST_BYTES: u64 = 1024 * 1024;
@@ -643,6 +650,28 @@ struct ProviderRelease {
     shell_asset: u64,
 }
 
+/// A listed release whose archive discovery has not downloaded. Resolver 2
+/// orders candidates by lock preference and version, both known from the
+/// listing, so a release waits until the search selects it; see
+/// [`DiscoverySession::resolve`].
+#[derive(Debug, Clone)]
+struct DeferredRelease {
+    locator: SourceLocator,
+    release: ProviderRelease,
+}
+
+impl DeferredRelease {
+    fn source_identity(&self) -> String {
+        format!("{}@{}", self.locator, self.release.tag)
+    }
+
+    /// Never equal to an archive hash, so a deferred stand-in cannot be
+    /// mistaken for fetched material.
+    fn content_identity(&self) -> String {
+        format!("deferred:{}", self.source_identity())
+    }
+}
+
 #[derive(Debug)]
 struct ProviderListing {
     releases: Vec<ProviderRelease>,
@@ -745,8 +774,6 @@ trait CandidateProvider {
         &self,
         locator: &SourceLocator,
         package: &PackageName,
-        requirements: &[PackageRequirement],
-        stop_after_matches: Option<u64>,
         budget: &mut ResolutionBudget,
     ) -> Result<ProviderListing, DiscoveryError>;
 
@@ -765,6 +792,34 @@ trait CandidateProvider {
         temp_root: &Path,
         budget: &mut ResolutionBudget,
     ) -> Result<PathBuf, DiscoveryError>;
+}
+
+/// Render Unix seconds as `YYYY-MM-DD HH:MM:SS UTC` (proleptic Gregorian).
+fn utc_timestamp(seconds: u64) -> String {
+    let days = (seconds / 86_400) as i64;
+    let second_of_day = seconds % 86_400;
+    // Civil date from days since 1970-01-01, after Howard Hinnant's
+    // `civil_from_days`.
+    let shifted = days + 719_468;
+    let era = shifted.div_euclid(146_097);
+    let day_of_era = shifted.rem_euclid(146_097);
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let shifted_month = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * shifted_month + 2) / 5 + 1;
+    let month = if shifted_month < 10 {
+        shifted_month + 3
+    } else {
+        shifted_month - 9
+    };
+    let year = year_of_era + era * 400 + i64::from(month <= 2);
+    format!(
+        "{year:04}-{month:02}-{day:02} {:02}:{:02}:{:02} UTC",
+        second_of_day / 3_600,
+        second_of_day % 3_600 / 60,
+        second_of_day % 60
+    )
 }
 
 struct GitHubReleaseProvider {
@@ -805,6 +860,7 @@ impl GitHubReleaseProvider {
         &self,
         url: &str,
         accept: &str,
+        locator: &SourceLocator,
         package: &PackageName,
         operation: &str,
         budget: &mut ResolutionBudget,
@@ -835,6 +891,15 @@ impl GitHubReleaseProvider {
             }
         };
         budget.check_request_elapsed(started.elapsed(), package.as_str(), operation)?;
+        if let Some(reason) = self.rate_limit_reason(&response, locator) {
+            return Err(DiscoveryError::RemoteUnavailable {
+                package: package.to_string(),
+                reason: format!(
+                    "{operation} at {url} returned HTTP {}: {reason}",
+                    response.status()
+                ),
+            });
+        }
         if !response.status().is_success() {
             return Err(DiscoveryError::RemoteUnavailable {
                 package: package.to_string(),
@@ -850,6 +915,53 @@ impl GitHubReleaseProvider {
             });
         }
         Ok((response, started))
+    }
+
+    /// GitHub reports an exhausted primary limit as HTTP 403 or 429 with
+    /// `x-ratelimit-remaining: 0`. A secondary limit is HTTP 429, or HTTP
+    /// 403 with `retry-after`, while primary quota remains.
+    fn rate_limit_reason(
+        &self,
+        response: &reqwest::blocking::Response,
+        locator: &SourceLocator,
+    ) -> Option<String> {
+        let status = response.status().as_u16();
+        let header = |name: &str| {
+            response
+                .headers()
+                .get(name)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_string)
+        };
+        let (org, repo) = locator.github_parts();
+        let install = format!(
+            "install a release without discovery with `chelis reef install --from-github {org}/{repo}@<tag>`"
+        );
+        if matches!(status, 403 | 429) && header("x-ratelimit-remaining").as_deref() == Some("0") {
+            let reset = header("x-ratelimit-reset")
+                .and_then(|reset| reset.parse::<u64>().ok())
+                .map(|reset| format!(" until {}", utc_timestamp(reset)))
+                .unwrap_or_default();
+            return Some(if self.token.is_some() {
+                format!(
+                    "GitHub's API rate limit for the configured token is exhausted{reset}; wait for the reset, or {install}"
+                )
+            } else {
+                format!(
+                    "GitHub's API rate limit for anonymous requests is exhausted{reset}; set GITHUB_TOKEN or sign in with gh auth login to use the authenticated limit, or {install}"
+                )
+            });
+        }
+        let retry_after = header("retry-after");
+        if status == 429 || (status == 403 && retry_after.is_some()) {
+            let wait = retry_after
+                .map(|seconds| format!("retry after {seconds} seconds"))
+                .unwrap_or_else(|| "retry later".to_string());
+            return Some(format!(
+                "GitHub's secondary rate limit refused the request; {wait}, or {install}"
+            ));
+        }
+        None
     }
 
     fn asset_url(&self, locator: &SourceLocator, asset: u64) -> String {
@@ -874,8 +986,14 @@ impl GitHubReleaseProvider {
             compressed_candidate,
         } = download;
         let url = self.asset_url(locator, asset);
-        let (mut response, started) =
-            self.get(&url, "application/octet-stream", package, operation, budget)?;
+        let (mut response, started) = self.get(
+            &url,
+            "application/octet-stream",
+            locator,
+            package,
+            operation,
+            budget,
+        )?;
         let mut output = fs::File::create(destination).map_err(|error| DiscoveryError::Io {
             operation: format!("create {}", destination.display()),
             message: error.to_string(),
@@ -934,8 +1052,6 @@ impl CandidateProvider for GitHubReleaseProvider {
         &self,
         locator: &SourceLocator,
         package: &PackageName,
-        requirements: &[PackageRequirement],
-        stop_after_matches: Option<u64>,
         budget: &mut ResolutionBudget,
     ) -> Result<ProviderListing, DiscoveryError> {
         let (org, repo) = locator.github_parts();
@@ -961,6 +1077,7 @@ impl CandidateProvider for GitHubReleaseProvider {
             let (mut response, started) = self.get(
                 &url,
                 "application/vnd.github+json",
+                locator,
                 package,
                 "list GitHub releases",
                 budget,
@@ -1056,12 +1173,6 @@ impl CandidateProvider for GitHubReleaseProvider {
                     exclusions.push(format!("{}: missing shell asset", release.tag_name));
                     continue;
                 };
-                budget.charge(
-                    BudgetDimension::AcceptedTags,
-                    1,
-                    package.as_str(),
-                    "accept GitHub release tag",
-                )?;
                 releases.push(ProviderRelease {
                     version,
                     tag: release.tag_name,
@@ -1069,19 +1180,9 @@ impl CandidateProvider for GitHubReleaseProvider {
                     shell_asset,
                 });
             }
-            let enough_matches = stop_after_matches.is_some_and(|required| {
-                releases
-                    .iter()
-                    .filter(|release| {
-                        requirements.is_empty()
-                            || requirements
-                                .iter()
-                                .any(|requirement| requirement.matches(&release.version))
-                    })
-                    .count() as u64
-                    >= required
-            });
-            if enough_matches || !has_next || page_len < 100 {
+            // The whole listing is read: a requirement learned later must
+            // see the same releases as one known now.
+            if !has_next || page_len < 100 {
                 break;
             }
         }
@@ -1269,6 +1370,15 @@ struct DiscoverySession {
     pending_local: BTreeSet<PackageName>,
     loaded_local: BTreeMap<PackageName, Vec<PackageRequirement>>,
     queried_remote: BTreeSet<PackageName>,
+    deferred: BTreeMap<PackageName, Vec<DeferredRelease>>,
+    /// Each queried package's accepted releases, newest first.
+    listings: BTreeMap<PackageName, (SourceLocator, Vec<ProviderRelease>)>,
+    /// The known requirements each package's window was last derived for.
+    windowed: BTreeMap<PackageName, Vec<PackageRequirement>>,
+    /// Listed versions already fetched or deferred.
+    placed: BTreeMap<PackageName, BTreeSet<PackageVersion>>,
+    /// Packages a targeted refresh queries with their remote dependencies.
+    refresh_closure: BTreeSet<PackageName>,
     refresh_dependencies: BTreeSet<PackageName>,
     exclusions: BTreeMap<PackageName, Vec<String>>,
     locked: BTreeMap<PackageName, LockedDependency>,
@@ -1277,6 +1387,13 @@ struct DiscoverySession {
     temp: tempfile::TempDir,
     provider: Option<GitHubReleaseProvider>,
     runtime: &'static EmbeddedRuntime,
+    /// Test oracle: query and search as eager discovery did, for the
+    /// differential test against deferred discovery.
+    #[cfg(test)]
+    eager_reference: bool,
+    /// Test oracle: every release some search selected, stand-ins included.
+    #[cfg(test)]
+    selected_in_a_search: BTreeSet<(String, String)>,
 }
 
 impl DiscoverySession {
@@ -1397,6 +1514,11 @@ impl DiscoverySession {
             pending_local: BTreeSet::new(),
             loaded_local: BTreeMap::new(),
             queried_remote: BTreeSet::new(),
+            deferred: BTreeMap::new(),
+            listings: BTreeMap::new(),
+            windowed: BTreeMap::new(),
+            placed: BTreeMap::new(),
+            refresh_closure: BTreeSet::new(),
             refresh_dependencies: BTreeSet::new(),
             exclusions: BTreeMap::new(),
             locked,
@@ -1405,6 +1527,10 @@ impl DiscoverySession {
             temp,
             provider: None,
             runtime,
+            #[cfg(test)]
+            eager_reference: false,
+            #[cfg(test)]
+            selected_in_a_search: BTreeSet::new(),
         })
     }
 
@@ -1614,7 +1740,89 @@ impl DiscoverySession {
         Ok(())
     }
 
+    /// Load local candidates and derive remote windows until both are
+    /// current for every known requirement.
     fn load_local_closure(&mut self) -> Result<(), DiscoveryError> {
+        loop {
+            self.load_local_candidates()?;
+            let Some(package) = self
+                .listings
+                .keys()
+                .find(|package| {
+                    self.windowed.get(*package) != Some(&self.known_requirements(package))
+                })
+                .cloned()
+            else {
+                return Ok(());
+            };
+            self.derive_window(&package)?;
+        }
+    }
+
+    /// A queried package's window is, for each known requirement on it, the
+    /// highest listed versions satisfying that requirement. It depends only
+    /// on the listing and the known requirements, and only grows as they
+    /// do. Each release enters once: as a deferred stand-in, or fetched now
+    /// when a registry candidate already has its version.
+    fn derive_window(&mut self, package: &PackageName) -> Result<(), DiscoveryError> {
+        let requirements = self.known_requirements(package);
+        self.windowed.insert(package.clone(), requirements.clone());
+        let Some((locator, releases)) = self.listings.get(package).cloned() else {
+            return Ok(());
+        };
+        let mut window = BTreeSet::new();
+        for requirement in &requirements {
+            window.extend(
+                releases
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, release)| requirement.matches(&release.version))
+                    .take(MAX_CANDIDATES_PER_REQUIREMENT)
+                    .map(|(position, _)| position),
+            );
+        }
+        for position in window {
+            let release = releases[position].clone();
+            if !self
+                .placed
+                .entry(package.clone())
+                .or_default()
+                .insert(release.version.clone())
+            {
+                continue;
+            }
+            self.accept_tag(package, &release)?;
+            let deferred = DeferredRelease {
+                locator: locator.clone(),
+                release,
+            };
+            if self.has_registry_material(package, &deferred.release.version) {
+                self.fetch_listed(package, &deferred)?;
+            } else {
+                self.deferred
+                    .entry(package.clone())
+                    .or_default()
+                    .push(deferred);
+            }
+        }
+        Ok(())
+    }
+
+    fn accept_tag(
+        &mut self,
+        package: &PackageName,
+        release: &ProviderRelease,
+    ) -> Result<(), DiscoveryError> {
+        self.budget.charge(
+            BudgetDimension::AcceptedTags,
+            1,
+            package.as_str(),
+            &format!("accept GitHub release tag {}", release.tag),
+        )?;
+        Ok(())
+    }
+
+    fn load_local_candidates(&mut self) -> Result<(), DiscoveryError> {
         while let Some(package) = self
             .pending_local
             .iter()
@@ -1777,6 +1985,9 @@ impl DiscoverySession {
                             .to_string(),
                     });
                 }
+                // A fetched release of this version must precede the
+                // registry copy, as it would have without deferral.
+                self.fetch_deferred(&package, &version)?;
                 let dependencies =
                     self.requests_for_manifest(&package, Some(&installed.root), &parsed.typed)?;
                 self.insert_material(
@@ -1869,6 +2080,10 @@ impl DiscoverySession {
         if self.queried_remote.contains(package) {
             return Ok(());
         }
+        #[cfg(test)]
+        if self.eager_reference {
+            return self.query_remote_eagerly(package);
+        }
         if !self.network_enabled {
             return Err(DiscoveryError::RemoteUnavailable {
                 package: package.to_string(),
@@ -1878,10 +2093,10 @@ impl DiscoverySession {
         let locator = self.source_locator(package)?;
         let known_requirements = self.known_requirements(package);
         let temp_root = self.temp.path().to_path_buf();
-        let provider = self
-            .provider
-            .take()
-            .unwrap_or(GitHubReleaseProvider::new()?);
+        let provider = match self.provider.take() {
+            Some(provider) => provider,
+            None => GitHubReleaseProvider::new()?,
+        };
         let result: Result<(), DiscoveryError> = (|| {
             // An uncached registry pin must be verified before a refresh or
             // inspection can replace or report it. Reserve a manifest slot
@@ -1913,40 +2128,14 @@ impl DiscoverySession {
                     })
                 })
                 .transpose()?;
-            let stop_after_matches = (self.mode == DiscoveryMode::Resolve && missing_pin.is_none())
-                .then(|| {
-                    if !known_requirements.is_empty()
-                        && known_requirements
-                            .iter()
-                            .all(|requirement| requirement.as_str().starts_with('='))
-                    {
-                        1
-                    } else {
-                        self.budget.limit(BudgetDimension::CandidateManifests)
-                    }
-                });
-            let mut listing = provider.list_releases(
-                &locator,
-                package,
-                &known_requirements,
-                stop_after_matches,
-                &mut self.budget,
-            )?;
-            listing.releases.sort_by(|left, right| {
-                let left_matches = known_requirements
-                    .iter()
-                    .any(|requirement| requirement.matches(&left.version));
-                let right_matches = known_requirements
-                    .iter()
-                    .any(|requirement| requirement.matches(&right.version));
-                right_matches
-                    .cmp(&left_matches)
-                    .then_with(|| right.version.cmp(&left.version))
-                    .then_with(|| left.tag.cmp(&right.tag))
-            });
+            let listing = provider.list_releases(&locator, package, &mut self.budget)?;
+            self.exclusions
+                .entry(package.clone())
+                .or_default()
+                .extend(listing.exclusions);
+            let mut releases = listing.releases;
             let pinned_release = if let Some(version) = &missing_pin {
-                let position = listing
-                    .releases
+                let position = releases
                     .iter()
                     .position(|release| &release.version == version)
                     .ok_or_else(|| DiscoveryError::RemoteUnavailable {
@@ -1955,127 +2144,61 @@ impl DiscoverySession {
                             "locked release `{version}` is unavailable within the bounded GitHub release listing"
                         ),
                     })?;
-                Some(listing.releases.remove(position))
+                Some(releases.remove(position))
             } else {
                 None
             };
-            self.exclusions
-                .entry(package.clone())
-                .or_default()
-                .extend(listing.exclusions);
-            for release in pinned_release
-                .into_iter()
-                .chain(listing.releases)
-                .take(self.budget.limit(BudgetDimension::CandidateManifests) as usize)
-            {
-                let mut material = match provider.fetch_manifest(
-                    &locator,
-                    package,
-                    &release,
-                    &temp_root,
-                    &mut self.budget,
-                ) {
-                    Ok(material) => material,
-                    Err(error @ DiscoveryError::CandidateArchive { .. })
-                    | Err(error @ DiscoveryError::CandidateManifest { .. }) => {
-                        if self.locked.get(package).is_some_and(|locked| {
-                            locked.version == release.version.to_string()
-                                && matches!(&locked.source, LockSource::LocalRegistry { .. })
-                        }) {
-                            return Err(error);
-                        }
-                        self.exclusions
-                            .entry(package.clone())
-                            .or_default()
-                            .push(format!("{}: {error}", release.tag));
-                        continue;
-                    }
-                    Err(error) => return Err(error),
-                };
-                if let Some(locked) = self.locked.get(package)
-                    && locked.version == release.version.to_string()
-                    && matches!(&locked.source, LockSource::LocalRegistry { .. })
-                {
-                    crate::verify_locked_hashes(locked, Some(&material.archive_sha256), None)
-                        .map_err(|message| DiscoveryError::CandidateManifest {
-                            package: package.to_string(),
-                            message,
-                        })?;
-                    // A verified installed pin already supplies its shell.
-                    // An uncached pin must verify both downloaded assets.
-                    if missing_pin.as_ref() == Some(&release.version) {
-                        let shell_path = provider.fetch_selected_shell(
-                            &material,
-                            &temp_root,
-                            &mut self.budget,
-                        )?;
-                        let verified = verify_artifact_pair(&material.archive_path, &shell_path)
-                            .map_err(|message| DiscoveryError::CandidateManifest {
-                                package: package.to_string(),
-                                message,
-                            })?;
-                        crate::verify_locked_hashes(
-                            locked,
-                            Some(&verified.archive_sha256),
-                            Some(&verified.shell_sha256),
-                        )
-                        .map_err(|message| {
-                            DiscoveryError::CandidateManifest {
-                                package: package.to_string(),
-                                message,
-                            }
-                        })?;
-                        if verified.package.name != package.as_str()
-                            || verified.package.version != release.version.to_string()
-                            || verified.compiler != material.typed.compiler.to_string()
-                        {
-                            return Err(DiscoveryError::CandidateManifest {
-                                package: package.to_string(),
-                                message:
-                                    "locked remote archive, shell, and manifest identities disagree"
-                                        .to_string(),
-                            });
-                        }
-                        material.verified_shell_path = Some(shell_path);
-                    }
-                }
-                let typed = material.typed.clone();
-                if self.seed.canonical_remote_only() && typed.compiler != *self.seed.compiler() {
-                    self.exclusions
-                        .entry(package.clone())
-                        .or_default()
-                        .push(format!(
-                            "{}: compiler pin `{}` does not match `{}`",
-                            release.tag,
-                            typed.compiler,
-                            self.seed.compiler()
-                        ));
-                    continue;
-                }
-                if let Some((dependency, path)) = typed.dependencies.iter().find_map(
-                    |(dependency, declaration)| match declaration {
-                        TypedDependency::Path { path, .. } => Some((dependency, path)),
-                        TypedDependency::Registry { .. } => None,
-                    },
-                ) {
-                    self.exclusions
-                        .entry(package.clone())
-                        .or_default()
-                        .push(format!(
-                            "{}: remote candidate `{}` contains path dependency `{dependency}` at `{path}`",
-                            release.tag, typed.package
-                        ));
-                    continue;
-                }
-                material.dependencies =
-                    self.requests_for_manifest(package, Some(&temp_root), &typed)?;
-                self.refresh_dependencies.extend(
-                    material
-                        .dependencies
+            if self.mode == DiscoveryMode::Inspect {
+                // Inspection reports versions the selection does not use,
+                // so it downloads its whole window now.
+                releases.sort_by(|left, right| {
+                    let left_matches = known_requirements
                         .iter()
-                        .map(|request| request.package.clone()),
-                );
-                self.insert_material(package.clone(), CandidateMaterial::Remote(material))?;
+                        .any(|requirement| requirement.matches(&left.version));
+                    let right_matches = known_requirements
+                        .iter()
+                        .any(|requirement| requirement.matches(&right.version));
+                    right_matches
+                        .cmp(&left_matches)
+                        .then_with(|| right.version.cmp(&left.version))
+                        .then_with(|| left.tag.cmp(&right.tag))
+                });
+                for release in pinned_release
+                    .into_iter()
+                    .chain(releases)
+                    .take(MAX_INSPECTED_CANDIDATES_PER_PACKAGE)
+                {
+                    self.accept_tag(package, &release)?;
+                    self.fetch_release(
+                        &provider,
+                        &locator,
+                        package,
+                        &release,
+                        &temp_root,
+                        missing_pin.as_ref(),
+                    )?;
+                }
+            } else {
+                if let Some(release) = &pinned_release {
+                    self.placed
+                        .entry(package.clone())
+                        .or_default()
+                        .insert(release.version.clone());
+                    self.accept_tag(package, release)?;
+                    self.fetch_release(
+                        &provider,
+                        &locator,
+                        package,
+                        release,
+                        &temp_root,
+                        missing_pin.as_ref(),
+                    )?;
+                }
+                // The window is derived from this listing in
+                // `load_local_closure`, and again whenever the package's
+                // known requirements change.
+                self.listings
+                    .insert(package.clone(), (locator.clone(), releases));
             }
             if let Some(version) = &missing_pin
                 && !self
@@ -2100,6 +2223,275 @@ impl DiscoverySession {
         self.load_local_closure()
     }
 
+    /// The eager query step that deferred discovery replaced, kept as the
+    /// differential oracle's reference. Listing stopped at the first page
+    /// on which enough releases matched the requirements known at query
+    /// time, charging every tag read; the window was those releases ranked
+    /// matching first, then newest first, and its first 64 were all
+    /// downloaded. The oracle publishes releases newest first, so the
+    /// pages read are a prefix of the sorted listing. Lock pins are not
+    /// modelled.
+    #[cfg(test)]
+    fn query_remote_eagerly(&mut self, package: &PackageName) -> Result<(), DiscoveryError> {
+        const EAGER_WINDOW: usize = 64;
+        let locator = self.source_locator(package)?;
+        let known_requirements = self.known_requirements(package);
+        let temp_root = self.temp.path().to_path_buf();
+        let provider = match self.provider.take() {
+            Some(provider) => provider,
+            None => GitHubReleaseProvider::new()?,
+        };
+        let result: Result<(), DiscoveryError> = (|| {
+            let required = if !known_requirements.is_empty()
+                && known_requirements
+                    .iter()
+                    .all(|requirement| requirement.as_str().starts_with('='))
+            {
+                1
+            } else {
+                EAGER_WINDOW
+            };
+            // The full listing is read under a scratch budget; only the
+            // pages eager discovery read are charged below.
+            let mut scratch =
+                ResolutionBudget::with_test_limits(&[(BudgetDimension::AcceptedTags, u64::MAX)]);
+            let listing = provider.list_releases(&locator, package, &mut scratch)?;
+            self.exclusions
+                .entry(package.clone())
+                .or_default()
+                .extend(listing.exclusions);
+            let mut releases = listing.releases;
+            let mut read = releases.len();
+            let mut matched = 0;
+            for (position, release) in releases.iter().enumerate() {
+                if known_requirements
+                    .iter()
+                    .any(|requirement| requirement.matches(&release.version))
+                {
+                    matched += 1;
+                    if matched >= required {
+                        read = read.min((position / 100 + 1) * 100);
+                        break;
+                    }
+                }
+            }
+            releases.truncate(read);
+            self.budget.charge(
+                BudgetDimension::AcceptedTags,
+                releases.len() as u64,
+                package.as_str(),
+                "accept GitHub release tags",
+            )?;
+            releases.sort_by(|left, right| {
+                let left_matches = known_requirements
+                    .iter()
+                    .any(|requirement| requirement.matches(&left.version));
+                let right_matches = known_requirements
+                    .iter()
+                    .any(|requirement| requirement.matches(&right.version));
+                right_matches
+                    .cmp(&left_matches)
+                    .then_with(|| right.version.cmp(&left.version))
+                    .then_with(|| left.tag.cmp(&right.tag))
+            });
+            for release in releases.into_iter().take(EAGER_WINDOW) {
+                self.fetch_release(&provider, &locator, package, &release, &temp_root, None)?;
+            }
+            Ok(())
+        })();
+        self.provider = Some(provider);
+        result?;
+        self.queried_remote.insert(package.clone());
+        self.load_local_closure()
+    }
+
+    /// Download one release's archive, verify it against its tag and any
+    /// lock pin, and add it as a candidate or record why it is excluded.
+    fn fetch_release(
+        &mut self,
+        provider: &GitHubReleaseProvider,
+        locator: &SourceLocator,
+        package: &PackageName,
+        release: &ProviderRelease,
+        temp_root: &Path,
+        missing_pin: Option<&PackageVersion>,
+    ) -> Result<(), DiscoveryError> {
+        let mut material =
+            match provider.fetch_manifest(locator, package, release, temp_root, &mut self.budget) {
+                Ok(material) => material,
+                Err(error @ DiscoveryError::CandidateArchive { .. })
+                | Err(error @ DiscoveryError::CandidateManifest { .. }) => {
+                    if self.locked.get(package).is_some_and(|locked| {
+                        locked.version == release.version.to_string()
+                            && matches!(&locked.source, LockSource::LocalRegistry { .. })
+                    }) {
+                        return Err(error);
+                    }
+                    self.exclusions
+                        .entry(package.clone())
+                        .or_default()
+                        .push(format!("{}: {error}", release.tag));
+                    return Ok(());
+                }
+                Err(error) => return Err(error),
+            };
+        if let Some(locked) = self.locked.get(package)
+            && locked.version == release.version.to_string()
+            && matches!(&locked.source, LockSource::LocalRegistry { .. })
+        {
+            crate::verify_locked_hashes(locked, Some(&material.archive_sha256), None).map_err(
+                |message| DiscoveryError::CandidateManifest {
+                    package: package.to_string(),
+                    message,
+                },
+            )?;
+            // A verified installed pin already supplies its shell.
+            // An uncached pin must verify both downloaded assets.
+            if missing_pin == Some(&release.version) {
+                let shell_path =
+                    provider.fetch_selected_shell(&material, temp_root, &mut self.budget)?;
+                let verified = verify_artifact_pair(&material.archive_path, &shell_path).map_err(
+                    |message| DiscoveryError::CandidateManifest {
+                        package: package.to_string(),
+                        message,
+                    },
+                )?;
+                crate::verify_locked_hashes(
+                    locked,
+                    Some(&verified.archive_sha256),
+                    Some(&verified.shell_sha256),
+                )
+                .map_err(|message| DiscoveryError::CandidateManifest {
+                    package: package.to_string(),
+                    message,
+                })?;
+                if verified.package.name != package.as_str()
+                    || verified.package.version != release.version.to_string()
+                    || verified.compiler != material.typed.compiler.to_string()
+                {
+                    return Err(DiscoveryError::CandidateManifest {
+                        package: package.to_string(),
+                        message: "locked remote archive, shell, and manifest identities disagree"
+                            .to_string(),
+                    });
+                }
+                material.verified_shell_path = Some(shell_path);
+            }
+        }
+        let typed = material.typed.clone();
+        if self.seed.canonical_remote_only() && typed.compiler != *self.seed.compiler() {
+            self.exclusions
+                .entry(package.clone())
+                .or_default()
+                .push(format!(
+                    "{}: compiler pin `{}` does not match `{}`",
+                    release.tag,
+                    typed.compiler,
+                    self.seed.compiler()
+                ));
+            return Ok(());
+        }
+        if let Some((dependency, path)) =
+            typed
+                .dependencies
+                .iter()
+                .find_map(|(dependency, declaration)| match declaration {
+                    TypedDependency::Path { path, .. } => Some((dependency, path)),
+                    TypedDependency::Registry { .. } => None,
+                })
+        {
+            self.exclusions
+                .entry(package.clone())
+                .or_default()
+                .push(format!(
+                    "{}: remote candidate `{}` contains path dependency `{dependency}` at `{path}`",
+                    release.tag, typed.package
+                ));
+            return Ok(());
+        }
+        material.dependencies = self.requests_for_manifest(package, Some(temp_root), &typed)?;
+        if self.refresh_closure.contains(package) {
+            self.refresh_dependencies.extend(
+                material
+                    .dependencies
+                    .iter()
+                    .map(|request| request.package.clone()),
+            );
+        }
+        self.insert_material(package.clone(), CandidateMaterial::Remote(material))?;
+        Ok(())
+    }
+
+    /// Whether a fetched or registry candidate already has `version`, so a
+    /// release of that version must be fetched for the source-conflict
+    /// check. A path source overrides every registry candidate.
+    fn has_registry_material(&self, package: &PackageName, version: &PackageVersion) -> bool {
+        self.candidates
+            .get(package)
+            .into_iter()
+            .flatten()
+            .any(|material| {
+                !matches!(material, CandidateMaterial::Path { .. })
+                    && &material.typed().package.version == version
+            })
+    }
+
+    fn is_deferred(&self, candidate: &LocalCandidate) -> bool {
+        self.deferred
+            .get(&candidate.id.name)
+            .into_iter()
+            .flatten()
+            .any(|deferred| {
+                deferred.release.version == candidate.id.version
+                    && deferred.content_identity() == candidate.content_identity
+            })
+    }
+
+    /// Download a deferred release of `package` at `version`, if one is
+    /// waiting.
+    fn fetch_deferred(
+        &mut self,
+        package: &PackageName,
+        version: &PackageVersion,
+    ) -> Result<(), DiscoveryError> {
+        let Some(releases) = self.deferred.get_mut(package) else {
+            return Ok(());
+        };
+        let Some(position) = releases
+            .iter()
+            .position(|deferred| &deferred.release.version == version)
+        else {
+            return Ok(());
+        };
+        let deferred = releases.remove(position);
+        if releases.is_empty() {
+            self.deferred.remove(package);
+        }
+        self.fetch_listed(package, &deferred)
+    }
+
+    fn fetch_listed(
+        &mut self,
+        package: &PackageName,
+        deferred: &DeferredRelease,
+    ) -> Result<(), DiscoveryError> {
+        let provider = match self.provider.take() {
+            Some(provider) => provider,
+            None => GitHubReleaseProvider::new()?,
+        };
+        let temp_root = self.temp.path().to_path_buf();
+        let result = self.fetch_release(
+            &provider,
+            &deferred.locator,
+            package,
+            &deferred.release,
+            &temp_root,
+            None,
+        );
+        self.provider = Some(provider);
+        result
+    }
+
     fn lock_preferred(&self, package: &PackageName, version: &PackageVersion) -> bool {
         let permitted = match self.mode {
             DiscoveryMode::Resolve => true,
@@ -2114,6 +2506,34 @@ impl DiscoverySession {
     }
 
     fn resolver_candidates(&self) -> BTreeMap<PackageName, Vec<LocalCandidate>> {
+        let mut candidates = self.material_candidates();
+        // A deferred release stands in with no dependencies. Its subtree is
+        // then at least as satisfiable as the real one, so a search that
+        // rejects it rejects the release, and a search that selects it
+        // fetches it and searches again.
+        for (package, releases) in &self.deferred {
+            let entries = candidates.entry(package.clone()).or_default();
+            for deferred in releases {
+                let source_identity = deferred.source_identity();
+                entries.push(LocalCandidate {
+                    id: package_versioning::ResolvedPackageId {
+                        name: package.clone(),
+                        version: deferred.release.version.clone(),
+                    },
+                    source: if self.lock_preferred(package, &deferred.release.version) {
+                        CandidateSource::Locked { source_identity }
+                    } else {
+                        CandidateSource::Remote { source_identity }
+                    },
+                    content_identity: deferred.content_identity(),
+                    dependencies: Vec::new(),
+                });
+            }
+        }
+        candidates
+    }
+
+    fn material_candidates(&self) -> BTreeMap<PackageName, Vec<LocalCandidate>> {
         self.candidates
             .iter()
             .map(|(package, materials)| {
@@ -2164,6 +2584,16 @@ impl DiscoverySession {
         &mut self,
     ) -> Result<package_versioning::LocalResolution, package_versioning::VersioningError> {
         let candidates = self.resolver_candidates();
+        // Each search has the whole state limit. Fetching a selected
+        // stand-in reruns the search, so a session-wide count would make
+        // the limit depend on how many releases were deferred.
+        #[cfg(test)]
+        let cumulative = self.eager_reference;
+        #[cfg(not(test))]
+        let cumulative = false;
+        if !cumulative {
+            self.explored_states = 0;
+        }
         package_versioning::resolve_local_with_state_counter(
             &self.root_requests,
             &candidates,
@@ -2190,6 +2620,24 @@ impl DiscoverySession {
         }
     }
 
+    /// Query the remote dependencies of a targeted refresh's remote
+    /// candidates, transitively.
+    fn query_refresh_closure(&mut self) -> Result<(), DiscoveryError> {
+        while let Some(dependency) = self
+            .refresh_dependencies
+            .iter()
+            .find(|package| {
+                package.as_str() != crate::CHELIS_STD_PACKAGE_NAME
+                    && !self.queried_remote.contains(*package)
+            })
+            .cloned()
+        {
+            self.refresh_closure.insert(dependency.clone());
+            self.query_remote(&dependency)?;
+        }
+        Ok(())
+    }
+
     fn resolve(&mut self) -> Result<package_versioning::LocalResolution, DiscoveryError> {
         self.load_local_closure()?;
         match self.mode {
@@ -2201,25 +2649,48 @@ impl DiscoverySession {
             DiscoveryMode::Refresh | DiscoveryMode::Inspect => {
                 let target = self.target.clone().expect("target exists");
                 if self.network_enabled && target.as_str() != crate::CHELIS_STD_PACKAGE_NAME {
+                    self.refresh_closure.insert(target.clone());
                     self.query_remote(&target)?;
-                    while let Some(dependency) = self
-                        .refresh_dependencies
-                        .iter()
-                        .find(|package| {
-                            package.as_str() != crate::CHELIS_STD_PACKAGE_NAME
-                                && !self.queried_remote.contains(*package)
-                        })
-                        .cloned()
-                    {
-                        self.query_remote(&dependency)?;
-                    }
+                    self.query_refresh_closure()?;
                 }
             }
             DiscoveryMode::Resolve | DiscoveryMode::Locked => {}
         }
         loop {
             match self.resolve_once() {
-                Ok(resolution) => return Ok(resolution),
+                Ok(resolution) => {
+                    #[cfg(test)]
+                    self.selected_in_a_search
+                        .extend(resolution.selected.values().map(|candidate| {
+                            (
+                                candidate.id.name.to_string(),
+                                candidate.id.version.to_string(),
+                            )
+                        }));
+                    // Fetch the first deferred release in the selection, then
+                    // query remote dependencies as eager fetching would have.
+                    let Some(candidate) = resolution
+                        .selected
+                        .values()
+                        .find(|candidate| self.is_deferred(candidate))
+                        .cloned()
+                    else {
+                        return Ok(resolution);
+                    };
+                    self.fetch_deferred(&candidate.id.name, &candidate.id.version)?;
+                    self.load_local_closure()?;
+                    match self.mode {
+                        DiscoveryMode::Refresh | DiscoveryMode::Inspect
+                            if self.target.is_some() =>
+                        {
+                            self.query_refresh_closure()?;
+                        }
+                        DiscoveryMode::Locked => {}
+                        DiscoveryMode::Resolve
+                        | DiscoveryMode::Refresh
+                        | DiscoveryMode::Inspect => self.refresh_all_known()?,
+                    }
+                }
                 Err(package_versioning::VersioningError::IncompatibleRequirements { .. })
                     if self.network_enabled
                         && self.mode == DiscoveryMode::Resolve
@@ -3254,28 +3725,18 @@ mod tests {
                 })
             ));
 
+            // Listing accepts tags without charging them; a tag is charged
+            // when its release enters a candidate window.
             let mut tags =
-                ResolutionBudget::with_test_limits(&[(BudgetDimension::AcceptedTags, 1)]);
-            let error = tokio::task::block_in_place(|| {
-                provider.list_releases(&locator, &package, &[], None, &mut tags)
+                ResolutionBudget::with_test_limits(&[(BudgetDimension::AcceptedTags, 0)]);
+            let listed = tokio::task::block_in_place(|| {
+                provider.list_releases(&locator, &package, &mut tags)
             })
-            .unwrap_err();
-            assert!(matches!(
-                error,
-                DiscoveryError::Budget(BudgetError {
-                    dimension: BudgetDimension::AcceptedTags,
-                    ..
-                })
-            ));
+            .unwrap();
+            assert_eq!(listed.releases.len(), 2);
 
             let first_order = tokio::task::block_in_place(|| {
-                provider.list_releases(
-                    &locator,
-                    &package,
-                    &[],
-                    None,
-                    &mut ResolutionBudget::production(),
-                )
+                provider.list_releases(&locator, &package, &mut ResolutionBudget::production())
             })
             .unwrap()
             .releases;
@@ -3309,8 +3770,6 @@ mod tests {
                 reversed_provider.list_releases(
                     &locator,
                     &package,
-                    &[],
-                    None,
                     &mut ResolutionBudget::production(),
                 )
             })
@@ -3347,5 +3806,1558 @@ mod tests {
             std::mem::forget(server);
             std::mem::forget(reversed_server);
         });
+    }
+
+    /// One published release of a fixture package: its tag version, the
+    /// version its archive's manifest names, and that manifest's
+    /// `[dependencies]` body.
+    struct FixtureRelease {
+        tag_version: &'static str,
+        manifest_version: &'static str,
+        dependencies: &'static str,
+    }
+
+    fn release(version: &'static str) -> FixtureRelease {
+        FixtureRelease {
+            tag_version: version,
+            manifest_version: version,
+            dependencies: "",
+        }
+    }
+
+    fn release_with_dependencies(
+        version: &'static str,
+        dependencies: &'static str,
+    ) -> FixtureRelease {
+        FixtureRelease {
+            tag_version: version,
+            manifest_version: version,
+            dependencies,
+        }
+    }
+
+    fn fixture_manifest(name: &str, version: &str, dependencies: &str) -> String {
+        format!(
+            "schema = \"2\"\n[package]\nname = \"{name}\"\nversion = \"{version}\"\ncompiler = \"={}\"\nmodule_prefix = \"Fixture\"\nresolver = \"2\"\n\n[dependencies]\n{dependencies}",
+            env!("CARGO_PKG_VERSION")
+        )
+    }
+
+    /// A mock GitHub API with fixture packages. Each archive asset id maps
+    /// back to the tag version it publishes, so a test can name exactly
+    /// which candidate archives discovery downloaded.
+    struct FixtureProvider {
+        runtime: tokio::runtime::Runtime,
+        server: wiremock::MockServer,
+        archives: BTreeMap<u64, (String, String)>,
+        next_asset: u64,
+        token: Option<String>,
+    }
+
+    impl FixtureProvider {
+        fn new() -> Self {
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            let server = runtime.block_on(wiremock::MockServer::start());
+            Self {
+                runtime,
+                server,
+                archives: BTreeMap::new(),
+                next_asset: 1,
+                token: None,
+            }
+        }
+
+        /// Publish `releases` for `name`, listed in the given order and
+        /// paginated `page_size` releases per page with GitHub's `link`
+        /// header.
+        fn publish(&mut self, name: &str, releases: &[FixtureRelease], page_size: usize) {
+            use wiremock::matchers::{method, path, query_param};
+            use wiremock::{Mock, ResponseTemplate};
+
+            let mut listed = Vec::new();
+            for release in releases {
+                let archive = self.next_asset;
+                let shell = archive + 1;
+                self.next_asset += 2;
+                self.archives
+                    .insert(archive, (name.to_string(), release.tag_version.to_string()));
+                let body = compressed_manifest(
+                    fixture_manifest(name, release.manifest_version, release.dependencies)
+                        .as_bytes(),
+                );
+                self.runtime.block_on(
+                    Mock::given(method("GET"))
+                        .and(path(format!(
+                            "/repos/chelis-lang/{name}/releases/assets/{archive}"
+                        )))
+                        .respond_with(ResponseTemplate::new(200).set_body_bytes(body))
+                        .mount(&self.server),
+                );
+                listed.push(serde_json::json!({
+                    "tag_name": format!("v{}", release.tag_version),
+                    "assets": [
+                        {"id": archive, "name": format!("{name}-{}.tar.zst", release.tag_version)},
+                        {"id": shell, "name": format!("{name}-{}.chb", release.tag_version)}
+                    ]
+                }));
+            }
+            let pages = listed.chunks(page_size.max(1)).collect::<Vec<_>>();
+            let page_count = pages.len().max(1);
+            for page in 1..=page_count {
+                let entries = pages.get(page - 1).map(|entries| entries.to_vec());
+                let mut response = ResponseTemplate::new(200)
+                    .set_body_json(serde_json::Value::Array(entries.unwrap_or_default()));
+                if page < page_count {
+                    response = response.insert_header(
+                        "link",
+                        format!(
+                            "<{}/repos/chelis-lang/{name}/releases?per_page=100&page={}>; rel=\"next\"",
+                            self.server.uri(),
+                            page + 1
+                        ),
+                    );
+                }
+                self.runtime.block_on(
+                    Mock::given(method("GET"))
+                        .and(path(format!("/repos/chelis-lang/{name}/releases")))
+                        .and(query_param("page", page.to_string()))
+                        .respond_with(response)
+                        .mount(&self.server),
+                );
+            }
+        }
+
+        fn provider(&self) -> GitHubReleaseProvider {
+            GitHubReleaseProvider {
+                client: reqwest::blocking::Client::builder()
+                    .timeout(Duration::from_secs(10))
+                    .build()
+                    .unwrap(),
+                api_base: self.server.uri(),
+                token: self.token.clone(),
+            }
+        }
+
+        /// Answer every listing of `name` with `status` and `headers`.
+        fn refuse_listing(&self, name: &str, status: u16, headers: &[(&str, &str)]) {
+            use wiremock::matchers::{method, path};
+            use wiremock::{Mock, ResponseTemplate};
+
+            let mut response = ResponseTemplate::new(status);
+            for (header, value) in headers {
+                response = response.insert_header(*header, *value);
+            }
+            self.runtime.block_on(
+                Mock::given(method("GET"))
+                    .and(path(format!("/repos/chelis-lang/{name}/releases")))
+                    .respond_with(response)
+                    .mount(&self.server),
+            );
+        }
+
+        fn request_paths(&self) -> Vec<String> {
+            self.runtime
+                .block_on(self.server.received_requests())
+                .unwrap()
+                .into_iter()
+                .map(|request| request.url.path().to_string())
+                .collect()
+        }
+
+        /// The candidate archives downloaded, as `name@version`, in request
+        /// order.
+        fn fetched_archives(&self) -> Vec<String> {
+            self.request_paths()
+                .into_iter()
+                .filter_map(|path| {
+                    let asset = path
+                        .rsplit_once("/releases/assets/")?
+                        .1
+                        .parse::<u64>()
+                        .ok()?;
+                    let (name, version) = self.archives.get(&asset)?;
+                    Some(format!("{name}@{version}"))
+                })
+                .collect()
+        }
+
+        fn listing_requests(&self, name: &str) -> usize {
+            let listing = format!("/repos/chelis-lang/{name}/releases");
+            self.request_paths()
+                .into_iter()
+                .filter(|path| path == &listing)
+                .count()
+        }
+    }
+
+    /// Resolve a fresh project whose `[dependencies]` body is
+    /// `dependencies` against `fixture`, with an empty Reef home.
+    fn resolve_fixture_project(
+        fixture: &FixtureProvider,
+        mode: DiscoveryMode,
+        dependencies: &str,
+    ) -> Result<BTreeMap<String, String>, DiscoveryError> {
+        let _guard = crate::tests::lock_reef_home_env();
+        let directory = tempfile::tempdir().unwrap();
+        let previous_home = std::env::var_os("CHELIS_REEF_HOME");
+        unsafe {
+            std::env::set_var("CHELIS_REEF_HOME", directory.path().join("reef-home"));
+        }
+        let root = directory.path().join("app");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join("reef.toml"),
+            fixture_manifest("app", "0.1.0", dependencies),
+        )
+        .unwrap();
+        let result = (|| {
+            let mut session =
+                DiscoverySession::new(&root, mode, None, true, crate::tests::test_runtime())?;
+            session.provider = Some(fixture.provider());
+            let resolution = session.resolve()?;
+            Ok(resolution
+                .selected
+                .iter()
+                .map(|(name, candidate)| (name.to_string(), candidate.id.version.to_string()))
+                .collect())
+        })();
+        unsafe {
+            match previous_home {
+                Some(value) => std::env::set_var("CHELIS_REEF_HOME", value),
+                None => std::env::remove_var("CHELIS_REEF_HOME"),
+            }
+        }
+        result
+    }
+
+    fn selection(entries: &[(&str, &str)]) -> BTreeMap<String, String> {
+        entries
+            .iter()
+            .map(|(name, version)| (name.to_string(), version.to_string()))
+            .collect()
+    }
+
+    fn many_releases(versions: &[&'static str]) -> Vec<FixtureRelease> {
+        versions.iter().map(|version| release(version)).collect()
+    }
+
+    const DEMO_VERSIONS: [&str; 10] = [
+        "1.5.0", "1.4.0", "1.3.0", "1.2.0", "1.1.0", "1.0.0", "0.3.2", "0.3.1", "0.2.0", "0.1.0",
+    ];
+
+    #[test]
+    fn exact_pin_downloads_only_the_pinned_release_archive() {
+        let mut fixture = FixtureProvider::new();
+        fixture.publish("demo", &many_releases(&DEMO_VERSIONS), 100);
+        let selected =
+            resolve_fixture_project(&fixture, DiscoveryMode::Resolve, "demo = \"=1.2.0\"\n")
+                .unwrap();
+        assert_eq!(selected, selection(&[("demo", "1.2.0")]));
+        assert_eq!(fixture.fetched_archives(), ["demo@1.2.0"]);
+    }
+
+    #[test]
+    fn exact_pin_without_a_matching_tag_downloads_no_archive() {
+        let mut fixture = FixtureProvider::new();
+        fixture.publish("demo", &many_releases(&DEMO_VERSIONS), 100);
+        let error =
+            resolve_fixture_project(&fixture, DiscoveryMode::Resolve, "demo = \"=2.0.0\"\n")
+                .unwrap_err();
+        assert!(
+            matches!(error, DiscoveryError::Resolution { .. }),
+            "unexpected error: {error}"
+        );
+        assert_eq!(fixture.fetched_archives(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn range_downloads_only_the_newest_matching_release_archive() {
+        let mut fixture = FixtureProvider::new();
+        fixture.publish("demo", &many_releases(&DEMO_VERSIONS), 100);
+        let selected =
+            resolve_fixture_project(&fixture, DiscoveryMode::Resolve, "demo = \"^0.3\"\n").unwrap();
+        assert_eq!(selected, selection(&[("demo", "0.3.2")]));
+        assert_eq!(fixture.fetched_archives(), ["demo@0.3.2"]);
+    }
+
+    #[test]
+    fn range_without_a_matching_tag_downloads_no_archive() {
+        let mut fixture = FixtureProvider::new();
+        fixture.publish("demo", &many_releases(&DEMO_VERSIONS), 100);
+        let error = resolve_fixture_project(&fixture, DiscoveryMode::Resolve, "demo = \"^0.4\"\n")
+            .unwrap_err();
+        assert!(
+            matches!(error, DiscoveryError::Resolution { .. }),
+            "unexpected error: {error}"
+        );
+        assert_eq!(fixture.fetched_archives(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn update_refresh_downloads_only_the_newest_matching_release_archive() {
+        let mut fixture = FixtureProvider::new();
+        fixture.publish("demo", &many_releases(&DEMO_VERSIONS), 100);
+        let selected =
+            resolve_fixture_project(&fixture, DiscoveryMode::Refresh, "demo = \"^1\"\n").unwrap();
+        assert_eq!(selected, selection(&[("demo", "1.5.0")]));
+        assert_eq!(fixture.fetched_archives(), ["demo@1.5.0"]);
+    }
+
+    #[test]
+    fn newest_first_walks_back_past_an_unsatisfiable_release_and_stops() {
+        // demo 1.5.0 needs helper ^2, which no helper tag satisfies, so the
+        // resolver walks back to demo 1.4.0. Only the newest helper that
+        // satisfies ^1 is downloaded, and nothing older than demo 1.4.0.
+        let mut fixture = FixtureProvider::new();
+        let mut releases = many_releases(&DEMO_VERSIONS);
+        releases[0] = release_with_dependencies("1.5.0", "helper = \"^2\"\n");
+        releases[1] = release_with_dependencies("1.4.0", "helper = \"^1\"\n");
+        fixture.publish("demo", &releases, 100);
+        fixture.publish("helper", &many_releases(&["1.1.0", "1.0.0", "0.9.0"]), 100);
+        let selected =
+            resolve_fixture_project(&fixture, DiscoveryMode::Resolve, "demo = \"^1\"\n").unwrap();
+        assert_eq!(
+            selected,
+            selection(&[("demo", "1.4.0"), ("helper", "1.1.0")])
+        );
+        let mut fetched = fixture.fetched_archives();
+        fetched.sort();
+        assert_eq!(fetched, ["demo@1.4.0", "demo@1.5.0", "helper@1.1.0"]);
+    }
+
+    #[test]
+    fn walking_back_fails_closed_when_no_release_is_compatible() {
+        let mut fixture = FixtureProvider::new();
+        fixture.publish(
+            "demo",
+            &[
+                release_with_dependencies("1.1.0", "helper = \"^2\"\n"),
+                release_with_dependencies("1.0.0", "helper = \"^3\"\n"),
+                release("0.9.0"),
+            ],
+            100,
+        );
+        fixture.publish("helper", &many_releases(&["1.0.0"]), 100);
+        let error = resolve_fixture_project(&fixture, DiscoveryMode::Resolve, "demo = \"^1\"\n")
+            .unwrap_err();
+        assert!(
+            matches!(error, DiscoveryError::Resolution { .. }),
+            "unexpected error: {error}"
+        );
+        let mut fetched = fixture.fetched_archives();
+        fetched.sort();
+        assert_eq!(fetched, ["demo@1.0.0", "demo@1.1.0"]);
+    }
+
+    #[test]
+    fn deferred_downloads_keep_the_backtracking_resolver_selection() {
+        // The newest demo pins an older helper. Resolver 2 orders packages
+        // bytewise and versions descending, so the complete-candidate
+        // answer is demo 1.1.0 with helper 1.0.0, not the per-package
+        // newest pair demo 1.0.0 with helper 1.5.0.
+        let mut fixture = FixtureProvider::new();
+        fixture.publish(
+            "demo",
+            &[
+                release_with_dependencies("1.1.0", "helper = \"=1.0.0\"\n"),
+                release_with_dependencies("1.0.0", "helper = \"^1\"\n"),
+            ],
+            100,
+        );
+        fixture.publish(
+            "helper",
+            &many_releases(&["1.5.0", "1.4.0", "1.0.0", "0.1.0"]),
+            100,
+        );
+        let selected = resolve_fixture_project(
+            &fixture,
+            DiscoveryMode::Resolve,
+            "demo = \"^1\"\nhelper = \"^1\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            selected,
+            selection(&[("demo", "1.1.0"), ("helper", "1.0.0")])
+        );
+        let mut fetched = fixture.fetched_archives();
+        fetched.sort();
+        assert_eq!(fetched, ["demo@1.1.0", "helper@1.0.0"]);
+    }
+
+    #[test]
+    fn shuffled_release_listings_give_the_same_selection_and_downloads() {
+        let order = [
+            "0.3.1", "1.2.0", "0.1.0", "1.5.0", "1.0.0", "0.3.2", "1.4.0", "0.2.0", "1.1.0",
+            "1.3.0",
+        ];
+        let mut outcomes = Vec::new();
+        for versions in [&DEMO_VERSIONS[..], &order[..]] {
+            let mut fixture = FixtureProvider::new();
+            let mut releases = many_releases(versions);
+            for release in &mut releases {
+                if release.tag_version == "1.5.0" {
+                    release.dependencies = "helper = \"^2\"\n";
+                }
+            }
+            fixture.publish("demo", &releases, 100);
+            fixture.publish("helper", &many_releases(&["1.0.0"]), 100);
+            let selected =
+                resolve_fixture_project(&fixture, DiscoveryMode::Resolve, "demo = \"^1\"\n")
+                    .unwrap();
+            let mut fetched = fixture.fetched_archives();
+            fetched.sort();
+            outcomes.push((selected, fetched));
+        }
+        assert_eq!(outcomes[0], outcomes[1]);
+        assert_eq!(outcomes[0].0, selection(&[("demo", "1.4.0")]));
+        assert_eq!(outcomes[0].1, ["demo@1.4.0", "demo@1.5.0"]);
+    }
+
+    #[test]
+    fn tag_and_manifest_version_mismatch_is_rejected_loudly() {
+        // The newest tag publishes a manifest naming another version. The
+        // mismatch is excluded with its reason, discovery walks back, and
+        // the mismatched bytes are never selected.
+        let mut fixture = FixtureProvider::new();
+        let mut releases = many_releases(&DEMO_VERSIONS);
+        releases[0].manifest_version = "1.4.9";
+        fixture.publish("demo", &releases, 100);
+        let selected =
+            resolve_fixture_project(&fixture, DiscoveryMode::Resolve, "demo = \"^1\"\n").unwrap();
+        assert_eq!(selected, selection(&[("demo", "1.4.0")]));
+        let mut fetched = fixture.fetched_archives();
+        fetched.sort();
+        assert_eq!(fetched, ["demo@1.4.0", "demo@1.5.0"]);
+    }
+
+    #[test]
+    fn an_exact_pin_whose_manifest_disagrees_with_its_tag_fails() {
+        let mut fixture = FixtureProvider::new();
+        let mut releases = many_releases(&DEMO_VERSIONS);
+        releases[3].manifest_version = "1.2.1";
+        fixture.publish("demo", &releases, 100);
+        let error =
+            resolve_fixture_project(&fixture, DiscoveryMode::Resolve, "demo = \"=1.2.0\"\n")
+                .unwrap_err();
+        let rendered = error.to_string();
+        assert!(
+            rendered.contains("release `v1.2.0` advertises `1.2.0` but its manifest names"),
+            "unexpected error: {rendered}"
+        );
+        assert_eq!(fixture.fetched_archives(), ["demo@1.2.0"]);
+    }
+
+    #[test]
+    fn paginated_listings_download_only_the_selected_release_archive() {
+        // 120 non-matching releases precede the matching ones across three
+        // pages of 100 entries each in GitHub order.
+        let mut fixture = FixtureProvider::new();
+        let old = (0..120)
+            .map(|patch| -> &'static str { Box::leak(format!("0.1.{patch}").into_boxed_str()) })
+            .collect::<Vec<_>>();
+        let mut versions = old;
+        versions.extend(["1.0.0", "1.1.0", "1.2.0"]);
+        fixture.publish("demo", &many_releases(&versions), 100);
+        let selected =
+            resolve_fixture_project(&fixture, DiscoveryMode::Resolve, "demo = \"^1\"\n").unwrap();
+        assert_eq!(selected, selection(&[("demo", "1.2.0")]));
+        assert_eq!(fixture.listing_requests("demo"), 2);
+        assert_eq!(fixture.fetched_archives(), ["demo@1.2.0"]);
+    }
+
+    #[test]
+    fn paginated_listing_without_a_match_downloads_no_archive() {
+        let mut fixture = FixtureProvider::new();
+        let versions = (0..150)
+            .map(|patch| -> &'static str { Box::leak(format!("0.1.{patch}").into_boxed_str()) })
+            .collect::<Vec<_>>();
+        fixture.publish("demo", &many_releases(&versions), 100);
+        let error = resolve_fixture_project(&fixture, DiscoveryMode::Resolve, "demo = \"^1\"\n")
+            .unwrap_err();
+        assert!(
+            matches!(error, DiscoveryError::Resolution { .. }),
+            "unexpected error: {error}"
+        );
+        assert_eq!(fixture.listing_requests("demo"), 2);
+        assert_eq!(fixture.fetched_archives(), Vec::<String>::new());
+    }
+
+    const EXHAUSTED: [(&str, &str); 2] = [
+        ("x-ratelimit-remaining", "0"),
+        ("x-ratelimit-reset", "1798761600"),
+    ];
+
+    #[test]
+    fn anonymous_rate_limit_names_the_token_and_explicit_install_remedies() {
+        let fixture = FixtureProvider::new();
+        fixture.refuse_listing("demo", 403, &EXHAUSTED);
+        let rendered = resolve_fixture_project(&fixture, DiscoveryMode::Resolve, "demo = \"^1\"\n")
+            .unwrap_err()
+            .to_string();
+        for expected in [
+            "GitHub's API rate limit for anonymous requests is exhausted until 2027-01-01 00:00:00 UTC",
+            "set GITHUB_TOKEN or sign in with gh auth login",
+            "`chelis reef install --from-github chelis-lang/demo@<tag>`",
+        ] {
+            assert!(
+                rendered.contains(expected),
+                "missing `{expected}` in: {rendered}"
+            );
+        }
+        assert!(!rendered.contains("restricted repository"), "{rendered}");
+    }
+
+    #[test]
+    fn secondary_rate_limits_are_not_reported_as_exhausted_quota() {
+        for (status, headers, wait) in [
+            (429, &[][..], "retry later"),
+            (
+                403,
+                &[("retry-after", "30"), ("x-ratelimit-remaining", "41")][..],
+                "retry after 30 seconds",
+            ),
+        ] {
+            let fixture = FixtureProvider::new();
+            fixture.refuse_listing("demo", status, headers);
+            let rendered =
+                resolve_fixture_project(&fixture, DiscoveryMode::Resolve, "demo = \"^1\"\n")
+                    .unwrap_err()
+                    .to_string();
+            let expected = format!(
+                "GitHub's secondary rate limit refused the request; {wait}, or install a release without discovery with `chelis reef install --from-github chelis-lang/demo@<tag>`"
+            );
+            assert!(rendered.contains(&expected), "{rendered}");
+            for absent in [
+                "anonymous",
+                "GITHUB_TOKEN",
+                "exhausted",
+                "restricted repository",
+            ] {
+                assert!(!rendered.contains(absent), "`{absent}` in: {rendered}");
+            }
+        }
+    }
+
+    #[test]
+    fn rate_limit_reset_times_render_as_utc_dates() {
+        assert_eq!(utc_timestamp(0), "1970-01-01 00:00:00 UTC");
+        assert_eq!(utc_timestamp(951_782_400), "2000-02-29 00:00:00 UTC");
+        assert_eq!(
+            utc_timestamp(1_798_761_600 + 3_661),
+            "2027-01-01 01:01:01 UTC"
+        );
+        assert_eq!(utc_timestamp(4_107_542_399), "2100-02-28 23:59:59 UTC");
+    }
+
+    /// Resolve like [`resolve_fixture_project`] and also return the states
+    /// the final search explored.
+    fn resolve_fixture_with_states(
+        fixture: &FixtureProvider,
+        dependencies: &str,
+    ) -> (Result<BTreeMap<String, String>, String>, u64) {
+        let _guard = crate::tests::lock_reef_home_env();
+        let directory = tempfile::tempdir().unwrap();
+        let previous_home = std::env::var_os("CHELIS_REEF_HOME");
+        unsafe {
+            std::env::set_var("CHELIS_REEF_HOME", directory.path().join("reef-home"));
+        }
+        let root = directory.path().join("app");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join("reef.toml"),
+            fixture_manifest("app", "0.1.0", dependencies),
+        )
+        .unwrap();
+        let mut session = DiscoverySession::new(
+            &root,
+            DiscoveryMode::Resolve,
+            None,
+            true,
+            crate::tests::test_runtime(),
+        )
+        .unwrap();
+        session.provider = Some(fixture.provider());
+        let result = session
+            .resolve()
+            .map(|resolution| {
+                resolution
+                    .selected
+                    .iter()
+                    .map(|(name, candidate)| (name.to_string(), candidate.id.version.to_string()))
+                    .collect()
+            })
+            .map_err(|error| error.to_string());
+        let states = session.explored_states;
+        unsafe {
+            match previous_home {
+                Some(value) => std::env::set_var("CHELIS_REEF_HOME", value),
+                None => std::env::remove_var("CHELIS_REEF_HOME"),
+            }
+        }
+        (result, states)
+    }
+
+    fn leaked_versions(count: usize, format: impl Fn(usize) -> String) -> Vec<&'static str> {
+        (0..count)
+            .map(|index| -> &'static str { Box::leak(format(index).into_boxed_str()) })
+            .collect()
+    }
+
+    #[test]
+    fn a_requirement_learned_after_a_query_widens_that_package_window() {
+        // beta has 70 releases. Only the older alpha, fetched after beta is
+        // queried, needs beta 1.0.0, which the newest 64 releases omit.
+        let mut fixture = FixtureProvider::new();
+        fixture.publish(
+            "alpha",
+            &[
+                release_with_dependencies("1.1.0", "beta = \"=5.0.0\"\n"),
+                release_with_dependencies("1.0.0", "beta = \"=1.0.0\"\n"),
+            ],
+            100,
+        );
+        let mut versions = leaked_versions(69, |minor| format!("2.{minor}.0"));
+        versions.push("1.0.0");
+        fixture.publish("beta", &many_releases(&versions), 100);
+        let (result, _) = resolve_fixture_with_states(&fixture, "alpha = \"^1\"\n");
+        assert_eq!(
+            result,
+            Ok(selection(&[("alpha", "1.0.0"), ("beta", "1.0.0")]))
+        );
+        assert_eq!(fixture.listing_requests("beta"), 1);
+        let mut fetched = fixture.fetched_archives();
+        fetched.sort();
+        assert_eq!(fetched, ["alpha@1.0.0", "alpha@1.1.0", "beta@1.0.0"]);
+    }
+
+    #[test]
+    fn a_learned_range_requirement_widens_the_window_to_its_newest_match() {
+        let mut fixture = FixtureProvider::new();
+        fixture.publish(
+            "alpha",
+            &[
+                release_with_dependencies("1.1.0", "beta = \"^3\"\n"),
+                release_with_dependencies("1.0.0", "beta = \"^1\"\n"),
+            ],
+            100,
+        );
+        let mut versions = leaked_versions(66, |minor| format!("2.{minor}.0"));
+        versions.extend(["1.2.0", "1.1.0", "1.0.0"]);
+        fixture.publish("beta", &many_releases(&versions), 100);
+        let (result, _) = resolve_fixture_with_states(&fixture, "alpha = \"^1\"\n");
+        assert_eq!(
+            result,
+            Ok(selection(&[("alpha", "1.0.0"), ("beta", "1.2.0")]))
+        );
+        let mut fetched = fixture.fetched_archives();
+        fetched.sort();
+        assert_eq!(fetched, ["alpha@1.0.0", "alpha@1.1.0", "beta@1.2.0"]);
+    }
+
+    #[test]
+    fn a_learned_requirement_outside_every_listed_release_still_fails() {
+        let mut fixture = FixtureProvider::new();
+        fixture.publish(
+            "alpha",
+            &[
+                release_with_dependencies("1.1.0", "beta = \"=5.0.0\"\n"),
+                release_with_dependencies("1.0.0", "beta = \"=0.9.0\"\n"),
+            ],
+            100,
+        );
+        let mut versions = leaked_versions(69, |minor| format!("2.{minor}.0"));
+        versions.push("1.0.0");
+        fixture.publish("beta", &many_releases(&versions), 100);
+        let (result, _) = resolve_fixture_with_states(&fixture, "alpha = \"^1\"\n");
+        assert!(result.is_err(), "{result:?}");
+        assert!(
+            !fixture
+                .fetched_archives()
+                .iter()
+                .any(|archive| archive.starts_with("beta@"))
+        );
+    }
+
+    #[test]
+    fn a_requirement_learned_after_a_query_sees_every_listing_page() {
+        // beta's first page holds 100 2.x releases and 1.0.0 is on the
+        // second. When beta is queried only alpha 1.1.0's exact `=2.5.0` is
+        // known; alpha 1.1.0 then fails on delta, and alpha 1.0.0 needs
+        // beta 1.0.0.
+        let mut fixture = FixtureProvider::new();
+        fixture.publish(
+            "alpha",
+            &[
+                release_with_dependencies("1.1.0", "beta = \"=2.5.0\"\ndelta = \"=9.0.0\"\n"),
+                release_with_dependencies("1.0.0", "beta = \"=1.0.0\"\n"),
+            ],
+            100,
+        );
+        let mut versions = leaked_versions(100, |minor| format!("2.{minor}.0"));
+        versions.extend(leaked_versions(30, |minor| format!("1.{minor}.0")));
+        fixture.publish("beta", &many_releases(&versions), 100);
+        fixture.publish("delta", &many_releases(&["1.0.0"]), 100);
+        let (result, _) = resolve_fixture_with_states(&fixture, "alpha = \"^1\"\n");
+        assert_eq!(
+            result,
+            Ok(selection(&[("alpha", "1.0.0"), ("beta", "1.0.0")]))
+        );
+        assert_eq!(fixture.listing_requests("beta"), 2);
+    }
+
+    #[test]
+    fn each_search_after_a_deferred_fetch_has_the_whole_state_limit() {
+        // Walking back through 64 alpha releases reruns the search once per
+        // fetched release. The count is per search, so the final search is
+        // the size of one search over the 64 releases.
+        let mut fixture = FixtureProvider::new();
+        let mut releases = Vec::new();
+        for minor in (0..64).rev() {
+            let version: &'static str = Box::leak(format!("1.{minor}.0").into_boxed_str());
+            releases.push(if minor == 0 {
+                release(version)
+            } else {
+                release_with_dependencies(version, "beta = \"^2\"\n")
+            });
+        }
+        fixture.publish("alpha", &releases, 100);
+        fixture.publish("beta", &many_releases(&["1.0.0"]), 100);
+        let (result, states) = resolve_fixture_with_states(&fixture, "alpha = \"^1\"\n");
+        assert_eq!(result, Ok(selection(&[("alpha", "1.0.0")])));
+        assert_eq!(fixture.fetched_archives().len(), 64);
+        assert!(
+            states <= 2 * 64 + 2,
+            "final search explored {states} states"
+        );
+    }
+
+    #[test]
+    fn authenticated_rate_limit_does_not_claim_the_request_was_anonymous() {
+        let mut fixture = FixtureProvider::new();
+        fixture.token = Some("test-token".to_string());
+        fixture.refuse_listing("demo", 403, &EXHAUSTED);
+        let rendered = resolve_fixture_project(&fixture, DiscoveryMode::Resolve, "demo = \"^1\"\n")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            rendered.contains("GitHub's API rate limit for the configured token is exhausted"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("`chelis reef install --from-github chelis-lang/demo@<tag>`"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("anonymous"), "{rendered}");
+    }
+
+    #[test]
+    fn a_forbidden_response_with_remaining_quota_is_not_a_rate_limit() {
+        let fixture = FixtureProvider::new();
+        fixture.refuse_listing("demo", 403, &[("x-ratelimit-remaining", "41")]);
+        let rendered = resolve_fixture_project(&fixture, DiscoveryMode::Resolve, "demo = \"^1\"\n")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            rendered.contains("for a restricted repository"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("rate limit"), "{rendered}");
+    }
+
+    #[test]
+    fn a_range_over_hundreds_of_releases_resolves_to_its_newest_match() {
+        let mut fixture = FixtureProvider::new();
+        let mut versions = leaked_versions(300, |minor| format!("1.{minor}.0"));
+        versions.reverse();
+        fixture.publish("beta", &many_releases(&versions), 100);
+        let (result, _) = resolve_fixture_with_states(&fixture, "beta = \"^1\"\n");
+        assert_eq!(result, Ok(selection(&[("beta", "1.299.0")])));
+        assert_eq!(fixture.listing_requests("beta"), 3);
+        assert_eq!(fixture.fetched_archives(), ["beta@1.299.0"]);
+    }
+
+    #[test]
+    fn a_window_over_the_candidate_limit_fails_with_the_accepted_tag_budget() {
+        // Five compatible requirements on beta whose newest 64 matches are
+        // disjoint, so the window would hold 5 x 64 = 320 candidates, more
+        // than the 256 limit.
+        let mut fixture = FixtureProvider::new();
+        let mut versions = Vec::new();
+        for major in (1..=5).rev() {
+            versions.extend(leaked_versions(66, |minor| {
+                format!("{major}.{}.0", 65 - minor)
+            }));
+        }
+        fixture.publish("beta", &many_releases(&versions), 100);
+        let mut root = String::from("beta = \"<2.0.0\"\n");
+        for (name, requirement) in [
+            ("alpha", "<3.0.0"),
+            ("gamma", "<4.0.0"),
+            ("delta", "<5.0.0"),
+            ("omega", ">=1.0.0"),
+        ] {
+            let dependency: &'static str =
+                Box::leak(format!("beta = \"{requirement}\"\n").into_boxed_str());
+            fixture.publish(name, &[release_with_dependencies("1.0.0", dependency)], 100);
+            root.push_str(&format!("{name} = \"=1.0.0\"\n"));
+        }
+        let (result, _) = resolve_fixture_with_states(&fixture, &root);
+        let error = result.unwrap_err();
+        assert!(
+            error.contains(
+                "accepted release tags per package limit 256 reached at 257 for package `beta`"
+            ),
+            "{error}"
+        );
+    }
+
+    fn resolve_fixture_against_reference(
+        fixture: &FixtureProvider,
+        dependencies: &str,
+        eager_reference: bool,
+    ) -> Result<BTreeMap<String, String>, String> {
+        let _guard = crate::tests::lock_reef_home_env();
+        let directory = tempfile::tempdir().unwrap();
+        let previous_home = std::env::var_os("CHELIS_REEF_HOME");
+        unsafe {
+            std::env::set_var("CHELIS_REEF_HOME", directory.path().join("reef-home"));
+        }
+        let root = directory.path().join("app");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join("reef.toml"),
+            fixture_manifest("app", "0.1.0", dependencies),
+        )
+        .unwrap();
+        let mut session = DiscoverySession::new(
+            &root,
+            DiscoveryMode::Resolve,
+            None,
+            true,
+            crate::tests::test_runtime(),
+        )
+        .unwrap();
+        session.eager_reference = eager_reference;
+        session.provider = Some(fixture.provider());
+        let result = session
+            .resolve()
+            .map(|resolution| {
+                resolution
+                    .selected
+                    .iter()
+                    .map(|(name, candidate)| (name.to_string(), candidate.id.version.to_string()))
+                    .collect()
+            })
+            .map_err(|error| error.to_string());
+        unsafe {
+            match previous_home {
+                Some(value) => std::env::set_var("CHELIS_REEF_HOME", value),
+                None => std::env::remove_var("CHELIS_REEF_HOME"),
+            }
+        }
+        result
+    }
+
+    /// aa 1.1.0 is never selected but pins bb 0.1.0, the only bb that cc
+    /// 1.1.0 can use; bb's 70 newer releases need a missing dd. Eager
+    /// discovery read aa 1.1.0's manifest and so learned `=0.1.0`; deferred
+    /// discovery never reads it, so bb 0.1.0 stays outside the window.
+    fn unselected_requirer_fixture() -> FixtureProvider {
+        let mut fixture = FixtureProvider::new();
+        fixture.publish(
+            "aa",
+            &[
+                release("1.2.0"),
+                release_with_dependencies("1.1.0", "bb = \"=0.1.0\"\n"),
+            ],
+            100,
+        );
+        let mut bb = leaked_versions(70, |minor| format!("1.{}.0", 69 - minor))
+            .into_iter()
+            .map(|version| release_with_dependencies(version, "dd = \"=9.9.9\"\n"))
+            .collect::<Vec<_>>();
+        bb.push(release("0.1.0"));
+        fixture.publish("bb", &bb, 100);
+        fixture.publish(
+            "cc",
+            &[
+                release_with_dependencies("1.1.0", "bb = \">=0.1.0\"\n"),
+                release("1.0.0"),
+            ],
+            100,
+        );
+        fixture.publish("dd", &many_releases(&["1.0.0"]), 100);
+        fixture
+    }
+
+    #[test]
+    fn a_requirement_only_an_unselected_release_declares_is_not_learned() {
+        let dependencies = "aa = \"^1\"\ncc = \"^1\"\n";
+        let deferred =
+            resolve_fixture_against_reference(&unselected_requirer_fixture(), dependencies, false);
+        let eager =
+            resolve_fixture_against_reference(&unselected_requirer_fixture(), dependencies, true);
+        assert_eq!(deferred, Ok(selection(&[("aa", "1.2.0"), ("cc", "1.0.0")])));
+        assert_eq!(
+            eager,
+            Ok(selection(&[
+                ("aa", "1.2.0"),
+                ("bb", "0.1.0"),
+                ("cc", "1.1.0")
+            ]))
+        );
+        let pinned = "aa = \"^1\"\ncc = \"=1.1.0\"\n";
+        assert!(
+            resolve_fixture_against_reference(&unselected_requirer_fixture(), pinned, false)
+                .is_err()
+        );
+        assert_eq!(
+            resolve_fixture_against_reference(&unselected_requirer_fixture(), pinned, true),
+            Ok(selection(&[
+                ("aa", "1.2.0"),
+                ("bb", "0.1.0"),
+                ("cc", "1.1.0")
+            ]))
+        );
+    }
+
+    /// A generated registry served by one wiremock responder: each
+    /// package's releases newest first, 100 per listing page, and archives
+    /// built on request. Every request path is logged.
+    struct GeneratedRegistry {
+        packages: BTreeMap<String, Vec<(String, String)>>,
+        log: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        archives: std::sync::Mutex<BTreeMap<u64, Vec<u8>>>,
+    }
+
+    impl GeneratedRegistry {
+        fn asset_id(&self, name: &str, index: usize) -> u64 {
+            let package = self
+                .packages
+                .keys()
+                .position(|candidate| candidate == name)
+                .unwrap() as u64;
+            (package + 1) * 1_000_000 + index as u64 * 2
+        }
+    }
+
+    impl wiremock::Respond for GeneratedRegistry {
+        fn respond(&self, request: &wiremock::Request) -> wiremock::ResponseTemplate {
+            let path = request.url.path().to_string();
+            self.log.lock().unwrap().push(path.clone());
+            let parts = path.trim_start_matches('/').split('/').collect::<Vec<_>>();
+            let Some(releases) = parts.get(2).and_then(|name| self.packages.get(*name)) else {
+                return wiremock::ResponseTemplate::new(404);
+            };
+            let name = parts[2];
+            match parts.as_slice() {
+                ["repos", _, _, "releases"] => {
+                    let page = request
+                        .url
+                        .query_pairs()
+                        .find(|(key, _)| key == "page")
+                        .and_then(|(_, value)| value.parse::<usize>().ok())
+                        .unwrap_or(1);
+                    let start = (page - 1) * 100;
+                    let entries = releases
+                        .iter()
+                        .enumerate()
+                        .skip(start)
+                        .take(100)
+                        .map(|(index, (version, _))| {
+                            let archive = self.asset_id(name, index);
+                            serde_json::json!({
+                                "tag_name": format!("v{version}"),
+                                "assets": [
+                                    {"id": archive, "name": format!("{name}-{version}.tar.zst")},
+                                    {"id": archive + 1, "name": format!("{name}-{version}.chb")}
+                                ]
+                            })
+                        })
+                        .collect::<Vec<_>>();
+                    let mut response = wiremock::ResponseTemplate::new(200)
+                        .set_body_json(serde_json::Value::Array(entries));
+                    if start + 100 < releases.len() {
+                        response = response.insert_header("link", "<next>; rel=\"next\"");
+                    }
+                    response
+                }
+                ["repos", _, _, "releases", "assets", asset] => {
+                    let asset = asset.parse::<u64>().unwrap_or(0);
+                    let Some(index) =
+                        (0..releases.len()).find(|index| self.asset_id(name, *index) == asset)
+                    else {
+                        return wiremock::ResponseTemplate::new(404);
+                    };
+                    let (version, dependencies) = &releases[index];
+                    let body = self
+                        .archives
+                        .lock()
+                        .unwrap()
+                        .entry(asset)
+                        .or_insert_with(|| {
+                            compressed_manifest(
+                                fixture_manifest(name, version, dependencies).as_bytes(),
+                            )
+                        })
+                        .clone();
+                    wiremock::ResponseTemplate::new(200).set_body_bytes(body)
+                }
+                _ => wiremock::ResponseTemplate::new(404),
+            }
+        }
+    }
+
+    /// SplitMix64, so each case is a fixed function of its seed.
+    struct CaseRng(u64);
+
+    impl CaseRng {
+        fn next(&mut self) -> u64 {
+            self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut value = self.0;
+            value = (value ^ (value >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            value = (value ^ (value >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            value ^ (value >> 31)
+        }
+
+        fn below(&mut self, bound: usize) -> usize {
+            (self.next() % bound as u64) as usize
+        }
+
+        fn chance(&mut self, percent: usize) -> bool {
+            self.below(100) < percent
+        }
+    }
+
+    const ORACLE_SEED: u64 = 0x4063_0000_D15C_0FE7;
+    /// Cases compared with the eager reference, which downloads every
+    /// window release and so dominates the test's time.
+    const ORACLE_CASES: u64 = 64;
+    /// Cases given only the final-window check.
+    const FINAL_WINDOW_CASES: u64 = 512;
+    const RELEASE_COUNTS: [usize; 18] = [
+        1, 2, 3, 10, 40, 63, 64, 65, 99, 100, 101, 120, 200, 255, 256, 257, 300, 400,
+    ];
+
+    /// Release `index` (0 is newest) of a package with `count` releases.
+    /// Majors 1 to 3 split the listing into thirds, so ranges cover part of
+    /// it.
+    fn generated_version(count: usize, index: usize) -> String {
+        let ascending = count - 1 - index;
+        format!("{}.{ascending}.0", ascending * 3 / count + 1)
+    }
+
+    fn generated_requirement(rng: &mut CaseRng, count: usize) -> String {
+        match rng.below(6) {
+            0 | 1 => format!("={}", generated_version(count, rng.below(count))),
+            2 => "=9.9.9".to_string(),
+            3 => format!("^{}", rng.below(4) + 1),
+            4 => {
+                let low = generated_version(count, rng.below(count));
+                format!(">={low}, <{}.0.0", rng.below(3) + 2)
+            }
+            _ => format!("^{}", rng.below(3) + 1),
+        }
+    }
+
+    /// One generated case: the root's `[dependencies]` body, each
+    /// package's releases newest first with their dependency bodies, and
+    /// the dependency body of an optional path package `local`.
+    struct GeneratedCase {
+        root: String,
+        packages: BTreeMap<String, Vec<(String, String)>>,
+        local: Option<String>,
+    }
+
+    /// Dependencies follow a random order of the packages, so an edge often
+    /// points to a bytewise-earlier name, as eager discovery's bytewise
+    /// query order does not anticipate.
+    fn generated_case(seed: u64) -> GeneratedCase {
+        let mut rng = CaseRng(seed);
+        let names = ["pa", "pb", "pc", "pd"];
+        let package_count = rng.below(4) + 1;
+        let counts = (0..package_count)
+            .map(|_| RELEASE_COUNTS[rng.below(RELEASE_COUNTS.len())])
+            .collect::<Vec<_>>();
+        let mut order = (0..package_count).collect::<Vec<_>>();
+        for index in (1..package_count).rev() {
+            order.swap(index, rng.below(index + 1));
+        }
+        let mut packages = BTreeMap::new();
+        for (rank, &package) in order.iter().enumerate() {
+            let count = counts[package];
+            let mut releases = Vec::new();
+            for index in 0..count {
+                let mut dependencies = String::new();
+                for &later in &order[rank + 1..] {
+                    if rng.chance(50) {
+                        let requirement = if index < 3 && rng.chance(30) {
+                            "=9.9.9".to_string()
+                        } else {
+                            generated_requirement(&mut rng, counts[later])
+                        };
+                        dependencies.push_str(&format!("{} = \"{requirement}\"\n", names[later]));
+                    }
+                }
+                releases.push((generated_version(count, index), dependencies));
+            }
+            packages.insert(names[package].to_string(), releases);
+        }
+        let first = order[0];
+        let mut root = format!(
+            "{} = \"{}\"\n",
+            names[first],
+            match rng.below(3) {
+                0 => format!(
+                    "={}",
+                    generated_version(counts[first], rng.below(counts[first]))
+                ),
+                _ => format!("^{}", rng.below(3) + 1),
+            }
+        );
+        if package_count > 1 && rng.chance(40) {
+            let second = order[1];
+            root.push_str(&format!(
+                "{} = \"{}\"\n",
+                names[second],
+                generated_requirement(&mut rng, counts[second])
+            ));
+        }
+        let local = rng.chance(30).then(|| {
+            let mut dependencies = String::new();
+            for package in 0..package_count {
+                if rng.chance(40) {
+                    dependencies.push_str(&format!(
+                        "{} = \"{}\"\n",
+                        names[package],
+                        generated_requirement(&mut rng, counts[package])
+                    ));
+                }
+            }
+            root.push_str("local = { path = \"local\" }\n");
+            dependencies
+        });
+        GeneratedCase {
+            root,
+            packages,
+            local,
+        }
+    }
+
+    struct OracleOutcome {
+        result: Result<BTreeMap<String, String>, String>,
+        candidates: BTreeSet<(String, String)>,
+        known: BTreeMap<String, Vec<PackageRequirement>>,
+        downloaded: Vec<(String, u64)>,
+        selected_in_a_search: BTreeSet<(String, String)>,
+        archives: usize,
+        listings: usize,
+    }
+
+    /// The release a generated archive asset id publishes.
+    fn downloaded_release(case: &GeneratedCase, name: &str, asset: u64) -> (String, String) {
+        let position = case.packages.keys().position(|key| key == name).unwrap() as u64;
+        let index = ((asset - (position + 1) * 1_000_000) / 2) as usize;
+        (name.to_string(), case.packages[name][index].0.clone())
+    }
+
+    /// The requirements in the root and in every archive a run downloaded,
+    /// per required package, recomputed from the generated manifests.
+    fn requirements_read(
+        case: &GeneratedCase,
+        downloaded: &[(String, u64)],
+    ) -> BTreeMap<String, BTreeSet<String>> {
+        let packages = &case.packages;
+        let directory = tempfile::tempdir().unwrap();
+        let mut manifests = vec![("app".to_string(), "0.1.0".to_string(), case.root.clone())];
+        if let Some(local) = &case.local {
+            manifests.push(("local".to_string(), "0.1.0".to_string(), local.clone()));
+        }
+        for (name, asset) in downloaded {
+            let (_, version) = downloaded_release(case, name, *asset);
+            let dependencies = &packages[name]
+                .iter()
+                .find(|(listed, _)| listed == &version)
+                .unwrap()
+                .1;
+            manifests.push((name.clone(), version, dependencies.clone()));
+        }
+        let mut read = BTreeMap::<String, BTreeSet<String>>::new();
+        for (name, version, dependencies) in manifests {
+            let path = directory.path().join(format!("{name}-{version}.toml"));
+            fs::write(&path, fixture_manifest(&name, &version, &dependencies)).unwrap();
+            let typed = crate::read_manifest(&path).unwrap().typed;
+            for request in registry_requests(&PackageName::from_str(&name).unwrap(), &typed) {
+                read.entry(request.package.to_string())
+                    .or_default()
+                    .insert(request.requirement.as_str().to_string());
+            }
+        }
+        read
+    }
+
+    fn registry_requests(requester: &PackageName, typed: &TypedManifest) -> Vec<RequestedPackage> {
+        typed
+            .dependencies
+            .iter()
+            .filter_map(|(name, dependency)| match dependency {
+                TypedDependency::Registry { requirement } => Some(RequestedPackage::new(
+                    requester.clone(),
+                    name.clone(),
+                    requirement.as_package_requirement(),
+                )),
+                TypedDependency::Path { .. } => None,
+            })
+            .collect()
+    }
+
+    type SelectionResult = Result<BTreeMap<String, String>, String>;
+
+    /// The spec's statement of the selection, computed directly: the
+    /// window for the final known requirements, every candidate in it with
+    /// its real manifest, and one resolver-2 search. It shares no window
+    /// or deferral code with discovery.
+    fn resolve_over_final_window(
+        case: &GeneratedCase,
+        known: &BTreeMap<String, Vec<PackageRequirement>>,
+    ) -> (SelectionResult, BTreeSet<(String, String)>) {
+        let (root, packages) = (&case.root, &case.packages);
+        let directory = tempfile::tempdir().unwrap();
+        let read = |name: &str, version: &str, dependencies: &str| {
+            let path = directory.path().join(format!("{name}-{version}.toml"));
+            fs::write(&path, fixture_manifest(name, version, dependencies)).unwrap();
+            crate::read_manifest(&path).unwrap().typed
+        };
+        let app = PackageName::from_str("app").unwrap();
+        let mut root_requests = registry_requests(&app, &read("app", "0.1.0", root));
+        let mut candidates = BTreeMap::new();
+        if let Some(local) = &case.local {
+            let name = PackageName::from_str("local").unwrap();
+            let typed = read("local", "0.1.0", local);
+            root_requests.push(RequestedPackage::new(
+                app.clone(),
+                name.clone(),
+                package_versioning::DependencyRequirement::Compatible(PackageRequirement::exact(
+                    &typed.package.version,
+                ))
+                .as_package_requirement(),
+            ));
+            candidates.insert(
+                name.clone(),
+                vec![package_versioning::LocalCandidate {
+                    id: typed.package.clone(),
+                    source: CandidateSource::Path {
+                        canonical_path: "local".to_string(),
+                    },
+                    content_identity: "editable:local".to_string(),
+                    dependencies: registry_requests(&name, &typed),
+                }],
+            );
+        }
+        let mut members = BTreeSet::new();
+        for (name, releases) in packages {
+            let package = PackageName::from_str(name).unwrap();
+            let mut window = BTreeSet::new();
+            for requirement in known.get(name).into_iter().flatten() {
+                window.extend(
+                    releases
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, (version, _))| {
+                            requirement.matches(&PackageVersion::from_str(version).unwrap())
+                        })
+                        .take(MAX_CANDIDATES_PER_REQUIREMENT)
+                        .map(|(position, _)| position),
+                );
+            }
+            let entries = window
+                .into_iter()
+                .map(|position| {
+                    let (version, dependencies) = &releases[position];
+                    members.insert((name.clone(), version.clone()));
+                    let typed = read(name, version, dependencies);
+                    package_versioning::LocalCandidate {
+                        id: typed.package.clone(),
+                        source: CandidateSource::Remote {
+                            source_identity: format!("github://chelis-lang/{name}@v{version}"),
+                        },
+                        content_identity: format!("{name}@{version}"),
+                        dependencies: registry_requests(&package, &typed),
+                    }
+                })
+                .collect::<Vec<_>>();
+            if !entries.is_empty() {
+                candidates.insert(package, entries);
+            }
+        }
+        let mut states = 0;
+        let result = package_versioning::resolve_local_with_state_counter(
+            &root_requests,
+            &candidates,
+            package_versioning::ResolverLimits::default(),
+            &mut states,
+        )
+        .map(|resolution| {
+            resolution
+                .selected
+                .iter()
+                .map(|(name, candidate)| (name.to_string(), candidate.id.version.to_string()))
+                .collect()
+        })
+        .map_err(|error| error.to_string());
+        (result, members)
+    }
+
+    fn run_generated(
+        client: &reqwest::blocking::Client,
+        server: &wiremock::MockServer,
+        log: &std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        case: &GeneratedCase,
+        eager_reference: bool,
+    ) -> OracleOutcome {
+        let directory = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("CHELIS_REEF_HOME", directory.path().join("reef-home"));
+        }
+        let project = directory.path().join("app");
+        fs::create_dir_all(&project).unwrap();
+        fs::write(
+            project.join("reef.toml"),
+            fixture_manifest("app", "0.1.0", &case.root),
+        )
+        .unwrap();
+        if let Some(local) = &case.local {
+            fs::create_dir_all(project.join("local")).unwrap();
+            fs::write(
+                project.join("local/reef.toml"),
+                fixture_manifest("local", "0.1.0", local),
+            )
+            .unwrap();
+        }
+        log.lock().unwrap().clear();
+        let mut session = DiscoverySession::new(
+            &project,
+            DiscoveryMode::Resolve,
+            None,
+            true,
+            crate::tests::test_runtime(),
+        )
+        .unwrap();
+        session.eager_reference = eager_reference;
+        session.provider = Some(GitHubReleaseProvider {
+            client: client.clone(),
+            api_base: server.uri(),
+            token: None,
+        });
+        let result = session
+            .resolve()
+            .map(|resolution| {
+                resolution
+                    .selected
+                    .iter()
+                    .map(|(name, candidate)| (name.to_string(), candidate.id.version.to_string()))
+                    .collect()
+            })
+            .map_err(|error| error.to_string());
+        let candidates = session
+            .candidates
+            .iter()
+            .flat_map(|(name, materials)| {
+                materials.iter().map(move |material| {
+                    (
+                        name.to_string(),
+                        material.typed().package.version.to_string(),
+                    )
+                })
+            })
+            .collect();
+        let requests = log.lock().unwrap().clone();
+        let downloaded = requests
+            .iter()
+            .filter_map(|path| {
+                let (prefix, asset) = path.rsplit_once("/releases/assets/")?;
+                Some((
+                    prefix.rsplit('/').next()?.to_string(),
+                    asset.parse::<u64>().ok()?,
+                ))
+            })
+            .collect();
+        let known = session
+            .listings
+            .keys()
+            .map(|name| (name.to_string(), session.known_requirements(name)))
+            .collect();
+        OracleOutcome {
+            result,
+            candidates,
+            known,
+            downloaded,
+            selected_in_a_search: session.selected_in_a_search.clone(),
+            archives: requests
+                .iter()
+                .filter(|path| path.contains("/releases/assets/"))
+                .count(),
+            listings: requests
+                .iter()
+                .filter(|path| path.ends_with("/releases"))
+                .count(),
+        }
+    }
+
+    /// Differential oracle on generated graphs, with two checks. First,
+    /// deferred discovery must select exactly what one resolver-2 search
+    /// selects over the window for its final known requirements with every
+    /// candidate's manifest read, or both must fail. Those requirements are
+    /// the deferred run's, as the window rule defines them over the
+    /// manifests a run reads, and must equal the requirements recomputed
+    /// from the root, the path package, and the archives the run
+    /// downloaded; and every archive the deferred run downloaded must be of
+    /// a release some search selected. Second, as regression evidence
+    /// against the eager reference rather than a proof of equivalence, a
+    /// case passes when the reference fails, when both select the same
+    /// graph, when deferred discovery selects a release the reference never
+    /// had as a candidate for that package, or when the reference selects
+    /// a release outside the final window, which it reached through a
+    /// requirement learned from a manifest deferred discovery never read.
+    /// Any other difference fails.
+    #[test]
+    fn deferred_discovery_agrees_with_eager_discovery_on_generated_graphs() {
+        let _guard = crate::tests::lock_reef_home_env();
+        let previous_home = std::env::var_os("CHELIS_REEF_HOME");
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let server = runtime.block_on(wiremock::MockServer::start());
+        let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let client = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(30))
+            .build()
+            .unwrap();
+        let mut tally = BTreeMap::<&str, u64>::new();
+        let mut spec_tally = BTreeMap::<&str, u64>::new();
+        let mut download_tally = BTreeMap::<&str, u64>::new();
+        let (mut deferred_archives, mut eager_archives) = (0, 0);
+        let (mut deferred_time, mut eager_time) = (Duration::ZERO, Duration::ZERO);
+        let mut failures = Vec::new();
+        for case in 0..FINAL_WINDOW_CASES {
+            let seed = ORACLE_SEED.wrapping_add(case);
+            let case_input = generated_case(seed);
+            let (root, packages) = (&case_input.root, &case_input.packages);
+            let shape = packages
+                .iter()
+                .map(|(name, releases)| format!("{name}:{}", releases.len()))
+                .collect::<Vec<_>>()
+                .join(",");
+            runtime.block_on(server.reset());
+            runtime.block_on(
+                wiremock::Mock::given(wiremock::matchers::method("GET"))
+                    .respond_with(GeneratedRegistry {
+                        packages: packages.clone(),
+                        log: log.clone(),
+                        archives: std::sync::Mutex::new(BTreeMap::new()),
+                    })
+                    .mount(&server),
+            );
+            let started = Instant::now();
+            let deferred = run_generated(&client, &server, &log, &case_input, false);
+            deferred_time += started.elapsed();
+            deferred_archives += deferred.archives;
+            // Check 1: the selection over the final window with every
+            // candidate's manifest read. This needs no reference
+            // implementation, so it cannot share a reference's defect. The
+            // known requirements are the deferred run's, and are checked
+            // against the root and the archives that run downloaded.
+            let read = requirements_read(&case_input, &deferred.downloaded);
+            let known_matches = deferred.known.iter().all(|(name, requirements)| {
+                requirements
+                    .iter()
+                    .map(|requirement| requirement.as_str().to_string())
+                    .collect::<BTreeSet<_>>()
+                    == read.get(name).cloned().unwrap_or_default()
+            });
+            let (direct, final_window) = resolve_over_final_window(&case_input, &deferred.known);
+            let agrees = known_matches
+                && match (&direct, &deferred.result) {
+                    (Ok(left), Ok(right)) => left == right,
+                    (Err(_), Err(_)) => true,
+                    _ => false,
+                };
+            *spec_tally
+                .entry(if agrees { "agrees" } else { "FAIL" })
+                .or_default() += 1;
+            if !agrees {
+                failures.push(format!(
+                    "case {case} seed {seed:#x} packages [{shape}] root {root:?}: final-window search {direct:?}; deferred {:?} ({} archives); known requirements match the manifests read: {known_matches}",
+                    deferred.result, deferred.archives
+                ));
+            }
+            // Every download is of a release some search selected: a
+            // stand-in is fetched only once a search chooses it.
+            let unselected = deferred
+                .downloaded
+                .iter()
+                .map(|(name, asset)| downloaded_release(&case_input, name, *asset))
+                .filter(|release| !deferred.selected_in_a_search.contains(release))
+                .collect::<Vec<_>>();
+            *download_tally
+                .entry(if unselected.is_empty() {
+                    "selected"
+                } else {
+                    "FAIL"
+                })
+                .or_default() += 1;
+            if !unselected.is_empty() {
+                failures.push(format!(
+                    "case {case} seed {seed:#x} packages [{shape}] root {root:?}: downloaded releases no search selected: {unselected:?}"
+                ));
+            }
+            if case >= ORACLE_CASES {
+                continue;
+            }
+            let started = Instant::now();
+            let eager = run_generated(&client, &server, &log, &case_input, true);
+            eager_time += started.elapsed();
+            eager_archives += eager.archives;
+            let class = match (&eager.result, &deferred.result) {
+                (Err(_), Err(_)) => "both fail",
+                (Err(_), Ok(_)) => "eager fails, deferred resolves",
+                (Ok(left), Ok(right)) if left == right => "same selection",
+                (Ok(_), Ok(right))
+                    if right.iter().any(|(name, version)| {
+                        !eager.candidates.contains(&(name.clone(), version.clone()))
+                    }) =>
+                {
+                    "deferred selects a release outside the eager window"
+                }
+                (Ok(left), _)
+                    if left.iter().any(|(name, version)| {
+                        name != "local" && !final_window.contains(&(name.clone(), version.clone()))
+                    }) =>
+                {
+                    "eager selects a release outside the final window"
+                }
+                _ => {
+                    failures.push(format!(
+                        "case {case} seed {seed:#x} packages [{shape}] root {root:?}: eager {:?} ({} archives, {} listings); deferred {:?} ({} archives, {} listings)",
+                        eager.result,
+                        eager.archives,
+                        eager.listings,
+                        deferred.result,
+                        deferred.archives,
+                        deferred.listings
+                    ));
+                    "FAIL"
+                }
+            };
+            *tally.entry(class).or_default() += 1;
+        }
+        unsafe {
+            match previous_home {
+                Some(value) => std::env::set_var("CHELIS_REEF_HOME", value),
+                None => std::env::remove_var("CHELIS_REEF_HOME"),
+            }
+        }
+        eprintln!(
+            "oracle seed {ORACLE_SEED:#x}: final window over {FINAL_WINDOW_CASES} cases {spec_tally:?}, downloads {download_tally:?}; against eager over {ORACLE_CASES} cases {tally:?}; archives deferred {deferred_archives}, eager {eager_archives}; time deferred {deferred_time:?}, eager {eager_time:?}"
+        );
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 }
