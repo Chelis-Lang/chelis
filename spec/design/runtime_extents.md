@@ -1132,6 +1132,10 @@ DAG. Lowering attaches result claims through that complete graph before splittin
 it into executable helpers; a helper's result metadata cannot reconstruct the
 lost provenance after a split. Existing native arithmetic lowering remains in
 place where it already carries the source correctly.
+When an authored reshape target cannot be represented in that graph, shared
+kernel lowering reports a host-control boundary and retains the complete
+runtime shape List in host execution. Result dimensions remain claim
+requirements; they never substitute for the target's producing values.
 
 The host/C bitwise family uses that same scalar extent contract after its
 Tier-2 lowering: every [05-OP-47] operation over a `shape()`-derived `i64`
@@ -2164,9 +2168,11 @@ exist; the existing rules decide where each one executes.
   result binder whose only witnesses lie under variants absent at run time is
   the same unbound-binder case as the only-empty-List witness, and follows
   the decision #2805 owns.
-  C tensor-result and nested-result frames resolve binders through the exact
-  ordered witness-state roster of this entry work, including nominal-field
-  observations; they do not reconstruct a List-only subset from ABI types.
+  A retained result binder whose first formal witness is nested resolves
+  through this entry work's exact ordered witness-state roster, including
+  nominal-field observations. C tensor-result and nested-result frames use
+  the same roster rather than reconstructing a List-only subset from ABI
+  types; an earlier direct witness keeps its existing ownership route.
 - *Results and local ascriptions.* When the nested tensor's producer is in
   the activation, the obligation is producer-owned. The #1771 origin
   transport carries it through construction, aliases, selected branches and

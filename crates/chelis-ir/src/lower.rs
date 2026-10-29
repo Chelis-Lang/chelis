@@ -19626,7 +19626,8 @@ impl<'program> LowerCtx<'program> {
             // H3: Movement ops -- extract parameters from Deep AST args where possible.
             "reshape" if !args.is_empty() => {
                 let x = self.lower_expr_node(&args[0], "reshape input");
-                // Try to extract new_shape from the second arg; fall back to output type dims.
+                // The authored target produces the shape. Result type dims
+                // are claims, so they cannot replace an unrepresented target.
                 // chelis#513 gap 1: a `shape(operand, axis)`-derived reshape
                 // target dim (e.g. `reshape(&x, [shape(x, 0), 1])` or the
                 // let-bound `k = shape(x, 0); reshape(&x, [k, 1])` idiom) must
@@ -19657,7 +19658,16 @@ impl<'program> LowerCtx<'program> {
                                 vec![source],
                             ))
                         })
-                        .unwrap_or_else(fallback)
+                        .unwrap_or_else(|| {
+                            raise_lowering_diagnostic(
+                                LowerDiagnostic::new(
+                                    "reshape's authored runtime target requires host execution; result dimensions cannot substitute for its values",
+                                    Some(args[1].span()),
+                                    args[1].span_id().map(ToOwned::to_owned),
+                                )
+                                .host_control(),
+                            )
+                        })
                 } else {
                     fallback()
                 };

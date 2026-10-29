@@ -255,3 +255,124 @@ fn named_root_claim_executes_between_the_producers_surrounding_effects() {
         }
     }
 }
+
+fn runtime_target_source(target: i64, nested: bool, wildcard: bool, effects: bool) -> String {
+    let tensor = if wildcard {
+        "tensor[*, *, f32]"
+    } else {
+        "tensor[rows, cols, f32]"
+    };
+    let result = if nested {
+        format!("({tensor}, i64)")
+    } else {
+        tensor.into()
+    };
+    let effect = if effects { " ! { IO }" } else { "" };
+    let before = if effects {
+        "_ = print(\"before-target\")"
+    } else {
+        ""
+    };
+    let after_reshape = if effects {
+        "_ = print(\"after-reshape\")"
+    } else {
+        ""
+    };
+    let after_where = if effects {
+        "_ = print(\"after-where\")"
+    } else {
+        ""
+    };
+    let returned = if nested { "(chosen, 9i64)" } else { "chosen" };
+    let projection = if nested { ".0" } else { "" };
+    format!(
+        "module RuntimeTarget\nexport (forward)\ntype Inputs[rows, cols] =\n  | Inputs {{ x: tensor[rows, cols, f32], target: i64 }}\ndef forward[rows, cols](inputs: Inputs[rows, cols], direct: tensor[cols, f32], samples: List[tensor[cols, f32]]) -> {result}{effect} = {{\n  {before}\n  part = reshape(inputs.x, [shape(inputs.x, 0i32), inputs.target])\n  {after_reshape}\n  chosen = where(cmplt(part, part), part, part)\n  {after_where}\n  {returned}\n}}\nx = reshape(to_tensor([], f32), [0i64, 5i64])\nrecord = Inputs {{ x, target: {target}i64 }}\nout = shape(forward(record, to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32, 5.0f32]), [to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32, 5.0f32])]){projection}, 1i32)\n"
+    )
+}
+
+#[test]
+fn opaque_runtime_reshape_targets_reach_named_result_guards() {
+    let dir = tempfile::tempdir().unwrap();
+    // Aggregate-result effect timing is a separate #1277 obligation.
+    for (nested, effects) in [(false, false), (true, false), (false, true)] {
+        for target in [3, 5] {
+            let source = runtime_target_source(target, nested, false, effects);
+            let (eval, native) = execute(
+                &dir,
+                &format!("opaque_claim_{nested}_{effects}_{target}"),
+                &source,
+            );
+            for (lane, output) in [("eval", &eval), ("native", &native)] {
+                if target == 5 {
+                    assert_success(output);
+                } else {
+                    assert_eq!(output.status.code(), Some(1), "{}", text(output));
+                    assert!(
+                        text(output)
+                            .contains("extent `cols`: inputs.x axis 1 = 5, where axis 1 = 3"),
+                        "{lane}, nested={nested}, effects={effects}: {}",
+                        text(output)
+                    );
+                    assert!(
+                        text(output).contains("numeric trap: domain in where at i64"),
+                        "{}",
+                        text(output)
+                    );
+                    assert!(
+                        !String::from_utf8_lossy(&output.stdout)
+                            .lines()
+                            .any(|line| line.starts_with("out = ")),
+                        "{}",
+                        text(output)
+                    );
+                }
+                if effects {
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    assert_eq!(stdout.matches("before-target").count(), 1, "{stdout}");
+                    assert_eq!(stdout.matches("after-reshape").count(), 1, "{stdout}");
+                    assert_eq!(
+                        stdout.matches("after-where").count(),
+                        usize::from(target == 5),
+                        "{lane}, nested={nested}, effects={effects}, target={target}: {stdout}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn opaque_runtime_reshape_targets_preserve_values_and_validation_without_result_claims() {
+    let dir = tempfile::tempdir().unwrap();
+    for target in [-1, 3, 5] {
+        let source = runtime_target_source(target, false, true, true);
+        let (eval, native) = execute(&dir, &format!("opaque_value_{target}"), &source);
+        for output in [&eval, &native] {
+            if target < 0 {
+                assert_eq!(output.status.code(), Some(1), "{}", text(output));
+                assert!(text(output).contains("reshape"), "{}", text(output));
+            } else {
+                assert!(output.status.success(), "{}", text(output));
+                assert!(
+                    String::from_utf8_lossy(&output.stdout)
+                        .lines()
+                        .any(|line| line == format!("out = {target}")),
+                    "{}",
+                    text(output)
+                );
+            }
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert_eq!(stdout.matches("before-target").count(), 1, "{stdout}");
+            assert_eq!(
+                stdout.matches("after-reshape").count(),
+                usize::from(target >= 0),
+                "{stdout}"
+            );
+            assert_eq!(
+                stdout.matches("after-where").count(),
+                usize::from(target >= 0),
+                "{stdout}"
+            );
+        }
+    }
+}
