@@ -2278,7 +2278,7 @@ fn float_vec_unop_f32<T: Copy>(
         FloatUnOp::Exp => map!(chelis_crmath::exp_f32),
         FloatUnOp::Log => map!(chelis_crmath::log_f32),
         FloatUnOp::Sin => map!(chelis_crmath::sin_f32),
-        FloatUnOp::Sqrt => map!(f32::sqrt),
+        FloatUnOp::Sqrt => map!(FloatMath::sqrt),
         FloatUnOp::Cos => map!(chelis_crmath::cos_f32),
         FloatUnOp::Tan => map!(chelis_crmath::tan_f32),
         FloatUnOp::Atan => map!(chelis_crmath::atan_f32),
@@ -2286,9 +2286,9 @@ fn float_vec_unop_f32<T: Copy>(
         FloatUnOp::Erf => map!(chelis_crmath::erf_f32),
         FloatUnOp::Erfc => map!(chelis_crmath::erfc_f32),
         FloatUnOp::Abs => map!(f32::abs),
-        FloatUnOp::Floor => map!(f32::floor),
-        FloatUnOp::Ceil => map!(f32::ceil),
-        FloatUnOp::Round => map!(f32::round_ties_even),
+        FloatUnOp::Floor => map!(FloatMath::floor),
+        FloatUnOp::Ceil => map!(FloatMath::ceil),
+        FloatUnOp::Round => map!(FloatMath::round_ties_even),
         FloatUnOp::Relu
         | FloatUnOp::Sigmoid
         | FloatUnOp::Silu
@@ -2316,7 +2316,7 @@ fn float_vec_unop_f64(op: FloatUnOp, values: &[f64]) -> Vec<f64> {
         FloatUnOp::Exp => map!(chelis_crmath::exp_f64),
         FloatUnOp::Log => map!(chelis_crmath::log_f64),
         FloatUnOp::Sin => map!(chelis_crmath::sin_f64),
-        FloatUnOp::Sqrt => map!(f64::sqrt),
+        FloatUnOp::Sqrt => map!(FloatMath::sqrt),
         FloatUnOp::Cos => map!(chelis_crmath::cos_f64),
         FloatUnOp::Tan => map!(chelis_crmath::tan_f64),
         FloatUnOp::Atan => map!(chelis_crmath::atan_f64),
@@ -2324,9 +2324,9 @@ fn float_vec_unop_f64(op: FloatUnOp, values: &[f64]) -> Vec<f64> {
         FloatUnOp::Erf => map!(chelis_crmath::erf_f64),
         FloatUnOp::Erfc => map!(chelis_crmath::erfc_f64),
         FloatUnOp::Abs => map!(f64::abs),
-        FloatUnOp::Floor => map!(f64::floor),
-        FloatUnOp::Ceil => map!(f64::ceil),
-        FloatUnOp::Round => map!(f64::round_ties_even),
+        FloatUnOp::Floor => map!(FloatMath::floor),
+        FloatUnOp::Ceil => map!(FloatMath::ceil),
+        FloatUnOp::Round => map!(FloatMath::round_ties_even),
         FloatUnOp::Relu
         | FloatUnOp::Sigmoid
         | FloatUnOp::Silu

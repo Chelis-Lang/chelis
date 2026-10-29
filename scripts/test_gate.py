@@ -929,6 +929,42 @@ class StageUnionTests(unittest.TestCase):
         self.assertNotIn(gate.BUILD_WORKSPACE, gate.STAGES["lint-and-unit"])
         self.assertIn(gate.CLIPPY_WORKSPACE, gate.STAGES["lint-and-unit"])
 
+    def test_optimized_float_finalization_has_full_and_targeted_policy_owners(self):
+        expected = [
+            "cargo", "nextest", "run", "--release", "-p", "chelis-numeric-core",
+            "--features", "serde,serde/std,half/std,chelis-crmath/std",
+            "--test", "issue_3982_sqrt_nan_finalization",
+        ]
+        for stage in ("lint-and-unit", "lint-and-unit-nix"):
+            self.assertIn(expected, gate.STAGES[stage])
+        arguments = dict(tests_only=False, support_only=False, partition=None)
+        selected = gate.selected_stage_commands(
+            "targeted-units", **arguments,
+            environ={gate.TARGETED_PACKAGES_ENV: "chelis-numeric-core,chelis-cli"},
+        )
+        self.assertIn(expected, selected)
+        unrelated = gate.selected_stage_commands(
+            "targeted-units", **arguments,
+            environ={gate.TARGETED_PACKAGES_ENV: "chelis-types"},
+        )
+        self.assertNotIn(expected, unrelated)
+
+    def test_release_cli_qualifies_json_and_native_element_bits(self):
+        command = (
+            "cargo test --release -p chelis-cli --features smt "
+            "--test issue_3505_3982_exact_bits -- --test-threads=1"
+        )
+        for workflow, job in (
+            (CI_YML, "smt-build-glibc231"),
+            (WORKFLOWS_DIR / "macos-nightly.yml", "smt-build-darwin-arm64"),
+        ):
+            block = _workflow_job_block(workflow, job)
+            _assert_executable_run_once(block, command)
+            self.assertLess(
+                block.index("run: cargo build --release -p chelis-cli --features smt"),
+                block.index("run: " + command),
+            )
+
     def test_core_off_configuration_is_linted_before_closure_is_checked(self):
         for stage in ("lint-and-unit", "lint-and-unit-nix"):
             commands = gate.STAGES[stage]

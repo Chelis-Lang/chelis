@@ -1155,6 +1155,9 @@ jobs:
       - name: Build chelis-cli (release, smt)
         run: cargo build --release -p chelis-cli --features smt
 
+      - name: Verify release JSON and native element bits
+        run: cargo test --release -p chelis-cli --features smt --test issue_3505_3982_exact_bits -- --test-threads=1
+
       - name: Harvest cvc5 build for cache
         id: cvc5harvest
         run: python3 scripts/ci_cvc5_cache.py harvest --dir "${{ steps.cvc5key.outputs.dir }}"

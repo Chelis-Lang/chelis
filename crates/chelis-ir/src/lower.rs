@@ -20785,7 +20785,7 @@ impl<'program> LowerCtx<'program> {
     }
 
     /// The node-level tail of [`Self::lower_tensor_concat`]: type-check the
-    /// already-lowered elements and emit the Pad+Add cascade. Split out
+    /// already-lowered elements and select their disjoint padded slices. Split out
     /// (chelis#620) so a list that is only statically known as a lowered
     /// VALUE (an [`adt_cons_chain_values`] spine from an unrolled recursive
     /// builder) shares the exact same construction as the expr-level path.
@@ -20859,7 +20859,7 @@ impl<'program> LowerCtx<'program> {
             precision,
         };
 
-        // Pad each element to the full shape and sum. `offset` tracks the
+        // Pad each element to the full shape and select its slice. `offset` tracks the
         // start of the current element's slice along the concat axis.
         let mut accumulator: Option<NodeId> = None;
         let mut offset = 0usize;
@@ -20871,28 +20871,13 @@ impl<'program> LowerCtx<'program> {
             // non-concat dims need no concrete extent.
             let mut padding = vec![(RtDim::Lit(0), RtDim::Lit(0)); rank];
             padding[axis] = (RtDim::Lit(before), RtDim::Lit(after));
-            let padded = self.dag.add_node(
-                self.owner(),
-                RiscOp::zero_pad(out_ty.precision, padding),
-                vec![*node],
-                out_ty.clone(),
-                self.current_span_id.clone(),
-            );
-            accumulator = Some(match accumulator {
-                None => padded,
-                Some(prev) => self.dag.add_node(
-                    self.owner(),
-                    RiscOp::Add,
-                    vec![prev, padded],
-                    out_ty.clone(),
-                    self.current_span_id.clone(),
-                ),
-            });
+            accumulator =
+                Some(self.append_concat_slice(*node, accumulator, axis, padding, &[], &out_ty));
         }
         accumulator
     }
 
-    /// chelis#3390: the Pad+Add cascade of [`Self::tensor_concat_from_nodes`]
+    /// chelis#3390: the padded selection of [`Self::tensor_concat_from_nodes`]
     /// inside a `grad` or `vmap` body when some element's concat-axis extent
     /// is known only at run time (a signature name or a wildcard). spec/04 section 4.5.4 rule 3 types the
     /// concat axis `*`; every other axis is the elements' shared axis.
@@ -20959,25 +20944,122 @@ impl<'program> LowerCtx<'program> {
             let after = sum_extents(self, &extents[index + 1..]);
             let mut padding = vec![(RtDim::Lit(0), RtDim::Lit(0)); rank];
             padding[axis] = (RtDim::Node(1), RtDim::Node(2));
-            let padded = self.dag.add_node(
-                self.owner(),
-                RiscOp::zero_pad(precision, padding),
-                vec![*node, before, after],
-                out_ty.clone(),
-                self.current_span_id.clone(),
-            );
-            accumulator = Some(match accumulator {
-                None => padded,
-                Some(prev) => self.dag.add_node(
-                    self.owner(),
-                    RiscOp::Add,
-                    vec![prev, padded],
-                    out_ty.clone(),
-                    self.current_span_id.clone(),
-                ),
-            });
+            accumulator = Some(self.append_concat_slice(
+                *node,
+                accumulator,
+                axis,
+                padding,
+                &[before, after],
+                &out_ty,
+            ));
         }
         accumulator.expect("a concat has at least one element")
+    }
+
+    /// Append one disjoint source slice without performing arithmetic on its
+    /// elements ([05-OP-62]). The mask reads this source's concatenated extent
+    /// and the established result's non-concatenated extents, so every part
+    /// is checked against the first part's shape, including empty tensors.
+    fn append_concat_slice(
+        &mut self,
+        source: NodeId,
+        previous: Option<NodeId>,
+        concat_axis: usize,
+        padding: Vec<(RtDim, RtDim)>,
+        extent_inputs: &[NodeId],
+        output_type: &TensorType,
+    ) -> NodeId {
+        let source_type = self
+            .dag
+            .get(source)
+            .expect("lowered concat source")
+            .output_type
+            .clone();
+        let mut inputs = vec![source];
+        inputs.extend_from_slice(extent_inputs);
+        let padded = self.dag.add_node(
+            self.owner(),
+            RiscOp::zero_pad(output_type.precision, padding.clone()),
+            inputs,
+            output_type.clone(),
+            self.current_span_id.clone(),
+        );
+        let Some(previous) = previous else {
+            return padded;
+        };
+        let mut mask_dimensions = output_type.dims.clone();
+        mask_dimensions[concat_axis] = source_type.dims[concat_axis].clone();
+        let mut mask = self.dag.add_node(
+            self.owner(),
+            RiscOp::synth_const(Prim::Bool, 1.0),
+            vec![],
+            TensorType {
+                dims: vec![],
+                precision: Prim::Bool,
+            },
+            self.current_span_id.clone(),
+        );
+        for (axis, dimension) in mask_dimensions.iter().enumerate() {
+            let (size, inputs) = if let Some(extent) = concrete_dim_len(dimension) {
+                (RtDim::Lit(extent), vec![mask])
+            } else {
+                let extent = self.dag.add_node(
+                    self.owner(),
+                    RiscOp::Shape { axis },
+                    vec![if axis == concat_axis {
+                        source
+                    } else {
+                        previous
+                    }],
+                    TensorType {
+                        dims: vec![],
+                        precision: Prim::Int64,
+                    },
+                    self.current_span_id.clone(),
+                );
+                (RtDim::Node(1), vec![mask, extent])
+            };
+            mask = self.dag.add_node(
+                self.owner(),
+                RiscOp::Expand { axis, size },
+                inputs,
+                TensorType {
+                    dims: mask_dimensions[..=axis].to_vec(),
+                    precision: Prim::Bool,
+                },
+                self.current_span_id.clone(),
+            );
+        }
+        let mut mask_inputs = vec![mask];
+        mask_inputs.extend_from_slice(extent_inputs);
+        let mask = self.dag.add_node(
+            self.owner(),
+            RiscOp::zero_pad(Prim::Bool, padding),
+            mask_inputs,
+            TensorType {
+                dims: output_type.dims.clone(),
+                precision: Prim::Bool,
+            },
+            self.current_span_id.clone(),
+        );
+        // Keep the established prefix first for operand-shape attribution.
+        let outside_slice = self.dag.add_node(
+            self.owner(),
+            RiscOp::Logical(chelis_dag_core::dag::LogicalKind::Not),
+            vec![mask],
+            TensorType {
+                dims: output_type.dims.clone(),
+                precision: Prim::Bool,
+            },
+            self.current_span_id.clone(),
+        );
+        self.dag.add_node(
+            self.owner(),
+            RiscOp::Where,
+            vec![outside_slice, previous, padded],
+            output_type.clone(),
+            self.current_span_id.clone(),
+        )
     }
 
     /// chelis#620: `concat` over list VALUES that are only statically known
@@ -20987,7 +21069,7 @@ impl<'program> LowerCtx<'program> {
     ///     concat; when the list expr is NOT expr-enumerable (so the
     ///     builtin arm's `lower_tensor_concat` would fall to the host
     ///     placeholder) but lowers to a static spine of single tensor
-    ///     nodes, emit the same Pad+Add cascade via
+    ///     nodes, select their disjoint padded slices via
     ///     [`Self::tensor_concat_from_nodes`].
     ///   * `concat(list, list)` — static list append; rebuild the appended
     ///     spine as a `LoweredValue::Adt`.

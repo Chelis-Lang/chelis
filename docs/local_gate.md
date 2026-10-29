@@ -40,6 +40,18 @@ nextest row). Two trailing `#` notes describe the dynamic stages: what
 `--fast` runs, and the per-crate nextest `--validation` appends. The gate's own
 output is the only authoritative list; no document transcribes it.
 
+Required Rust policy runs the optimized float-finalization integration target
+with the compiler's std-enabled dependency features:
+`cargo nextest run --release -p chelis-numeric-core --features serde,serde/std,half/std,chelis-crmath/std --test issue_3982_sqrt_nan_finalization`.
+The same command runs for a targeted rebase whose package frontier includes
+`chelis-numeric-core`; ordinary debug/default-feature execution remains.
+This command is CI-owned and also runs in the full gate.
+
+The Linux glibc-2.31 PR build and macOS nightly release build also run
+`cargo test --release -p chelis-cli --features smt --test issue_3505_3982_exact_bits -- --test-threads=1`
+against the release CLI. That target checks runtime ingress, JSON element bits,
+and executed C output for arithmetic NaNs and bit-preserving selection/concat.
+
 Before `--fast`, `--validation`, or another long local validation, fetch
 `origin/main` so the changed-crate selection and inherited-failure comparison
 use current evidence. If the branch is materially behind, reconcile it
