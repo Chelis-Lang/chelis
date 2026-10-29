@@ -1731,6 +1731,61 @@ pub(super) fn map_binding_owner_tokens(
     rewrite_binding_owner_expr(expr, &std::cell::RefCell::new(rewrite))
 }
 
+/// Inspect expression owners without rebuilding their descendant-bearing bodies.
+/// Structural metadata still uses the common mapper so detached binders and
+/// annotation containers retain exactly the same owner coverage as rewrites.
+fn visit_binding_owner_tokens(
+    expr: &deep::Expr,
+    visit: &mut impl FnMut(Option<&str>) -> Result<(), BindingOwnerRewriteError>,
+) -> Result<(), BindingOwnerRewriteError> {
+    stack_guard!(
+        "visit_binding_owner_tokens",
+        expr,
+        Err(BindingOwnerRewriteError(
+            "binding owner inspection exhausted stack budget".into()
+        ))
+    );
+    fn metadata(
+        metadata: &deep::Metadata,
+        visit: &mut impl FnMut(Option<&str>) -> Result<(), BindingOwnerRewriteError>,
+    ) -> Result<(), BindingOwnerRewriteError> {
+        rewrite_binding_owner_metadata(
+            metadata,
+            &std::cell::RefCell::new(&mut |token| {
+                visit(token)?;
+                Ok(token.map(str::to_owned))
+            }),
+        )?;
+        Ok(())
+    }
+    match expr {
+        deep::Expr::Atom(..) => {}
+        deep::Expr::Map(value, _) => metadata(value, visit)?,
+        deep::Expr::MetaExpr(value, _) => {
+            metadata(&value.metadata, visit)?;
+            visit_binding_owner_tokens(&value.expr, visit)?;
+        }
+        deep::Expr::Node(node, _) => {
+            metadata(node.meta(), visit)?;
+            for child in node.children_slice() {
+                visit_binding_owner_tokens(child, visit)?;
+            }
+        }
+        deep::Expr::BareList(children, _) => {
+            for child in children {
+                visit_binding_owner_tokens(child, visit)?;
+            }
+        }
+        deep::Expr::UnknownForm(value) => {
+            metadata(&value.meta, visit)?;
+            for child in &value.children {
+                visit_binding_owner_tokens(child, visit)?;
+            }
+        }
+    }
+    Ok(())
+}
+
 fn rewrite_binding_owner_metadata(
     meta: &deep::Metadata,
     rewrite: &std::cell::RefCell<&mut BindingOwnerRewrite<'_>>,
@@ -2254,14 +2309,14 @@ fn binding_owner_invariant_traces(checked: &CheckedProgram) -> Vec<String> {
     let mut traces = Vec::new();
     let mut attachments = BTreeMap::<LocalAscriptionId, usize>::new();
     for expr in checked.annotated_exprs() {
-        if let Err(error) = map_binding_owner_tokens(expr, &mut |token| {
+        if let Err(error) = visit_binding_owner_tokens(expr, &mut |token| {
             if let Some(token) = token {
                 let id = LocalAscriptionId::from_checked_owner_token(token).ok_or_else(|| {
                     BindingOwnerRewriteError("malformed checked binding occurrence".into())
                 })?;
                 *attachments.entry(id).or_default() += 1;
             }
-            Ok(token.map(str::to_owned))
+            Ok(())
         }) {
             traces.push(error.0);
         }
@@ -2518,20 +2573,7 @@ pub(super) fn effects_only_rewrite_matches(
     original: &[deep::Expr],
     candidate: &[deep::Expr],
 ) -> bool {
-    fn owners(expressions: &[deep::Expr]) -> Option<Vec<Option<String>>> {
-        let mut owners = Vec::new();
-        for expr in expressions {
-            let normalized = expression_without_derived_effects(expr).ok()?;
-            map_binding_owner_tokens(&normalized, &mut |token| {
-                owners.push(token.map(str::to_owned));
-                Ok(token.map(str::to_owned))
-            })
-            .ok()?;
-        }
-        Some(owners)
-    }
     original.len() == candidate.len()
-        && owners(original).is_some_and(|before| owners(candidate).as_ref() == Some(&before))
         && original
             .iter()
             .zip(candidate)
@@ -2613,11 +2655,26 @@ fn metadata_matches_except_effects(
     after: &deep::Metadata,
     ignore_effects: bool,
 ) -> bool {
+    fn owners(metadata: &deep::Metadata) -> Option<Vec<Option<String>>> {
+        let mut owners = Vec::new();
+        rewrite_binding_owner_metadata(
+            metadata,
+            &std::cell::RefCell::new(&mut |token| {
+                owners.push(token.map(str::to_owned));
+                Ok(token.map(str::to_owned))
+            }),
+        )
+        .ok()?;
+        Some(owners)
+    }
     match (
         metadata_without_derived_effects(before, ignore_effects),
         metadata_without_derived_effects(after, ignore_effects),
     ) {
-        (Ok(before), Ok(after)) => before == after,
+        (Ok(before), Ok(after)) => {
+            before == after
+                && owners(&before).is_some_and(|before| owners(&after).as_ref() == Some(&before))
+        }
         _ => false,
     }
 }
