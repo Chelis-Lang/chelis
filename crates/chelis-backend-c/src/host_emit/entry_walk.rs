@@ -510,18 +510,13 @@ impl<'a> EntryWalkers<'a> {
     /// The entry work of one function's body and of its exported entry.
     pub fn entry_work(&mut self, function: &HostFunction) -> Result<EntryWork, Unsupported> {
         validate_entry_contract(function)?;
-        let mut named_list_binders = function.entry_contract.named_list_binders().to_vec();
-        // A binder a formal nests below a tuple or nominal type may first be
-        // witnessed there, so it shares the List witness state: every
-        // observation in signature order defines it or is compared with it
-        // (runtime_extents.md C6.5). Appending keeps every List state index.
-        for pattern in function.entry_claims.iter().flatten() {
-            for binder in pattern.binders() {
-                if !named_list_binders.contains(&binder) {
-                    named_list_binders.push(binder);
-                }
-            }
-        }
+        let named_list_binders = function.entry_contract.named_witness_binders(
+            function
+                .entry_claims
+                .iter()
+                .flatten()
+                .map(|pattern| pattern.as_ref()),
+        );
         let claimed_lists = function
             .entry_contract
             .formals()

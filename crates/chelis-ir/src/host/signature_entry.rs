@@ -202,6 +202,25 @@ impl<T> Default for EntryContract<T> {
 }
 
 impl<T> EntryContract<T> {
+    /// The exact state roster shared by entry observation and result claims.
+    /// Nested authored patterns append binders after the established List
+    /// states, preserving every existing state index. The entry walk determines
+    /// first-observation order independently of those indices.
+    pub fn named_witness_binders<'a>(
+        &self,
+        nested: impl IntoIterator<Item = &'a crate::claim_pattern::ClaimPattern>,
+    ) -> Vec<String> {
+        let mut binders = self.named_list_binders().to_vec();
+        for pattern in nested {
+            for binder in pattern.binders() {
+                if !binders.contains(&binder) {
+                    binders.push(binder);
+                }
+            }
+        }
+        binders
+    }
+
     pub fn formals(&self) -> &[EntryFormal<T>] {
         &self.formals
     }
@@ -601,6 +620,47 @@ mod tests {
             contract.formals()[1].pattern(),
             EntryPattern::Tensor(_)
         ));
+    }
+
+    #[test]
+    fn named_witness_roster_preserves_list_slots_and_deduplicates_nested_binders() {
+        let tensor = |names: &[&str]| {
+            HostTypeTerm::Tensor(TensorType {
+                dims: names
+                    .iter()
+                    .map(|name| DimInfo::Named((*name).into(), None))
+                    .collect(),
+                precision: Prim::F32,
+            })
+        };
+        let contract = EntryContract::from_params(&[HostParam {
+            name: "values".into(),
+            ty: HostTypeTerm::List(Box::new(tensor(&["seq"]))),
+        }]);
+        let span = chelis_deep::Span::new(0, 0);
+        let registry = chelis_types::adt::AdtRegistry::default();
+        let first = super::super::host_type_syntax(
+            &HostTypeTerm::Tuple(vec![tensor(&["rows", "seq"])]),
+            span,
+        )
+        .unwrap();
+        let first = crate::claim_pattern::ClaimPattern::derive(&first, &registry).unwrap();
+        let second = super::super::host_type_syntax(
+            &HostTypeTerm::Tuple(vec![tensor(&["cols", "rows"])]),
+            span,
+        )
+        .unwrap();
+        let second = crate::claim_pattern::ClaimPattern::derive(&second, &registry).unwrap();
+        assert_eq!(contract.named_witness_binders([]), ["seq"]);
+        assert_eq!(
+            contract.named_witness_binders([&first, &second, &first]),
+            ["seq", "rows", "cols"]
+        );
+        assert_eq!(
+            contract.named_list_binders(),
+            ["seq"],
+            "the source contract stays immutable"
+        );
     }
 
     #[test]

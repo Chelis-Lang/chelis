@@ -2898,9 +2898,10 @@ enum HostResultRequirement {
         steps: Vec<usize>,
         axis: usize,
     },
-    /// The first available witness may be a List element or a later direct
-    /// parameter. An empty List does not bind the result axis.
-    NamedList {
+    /// The signature-entry walk records the first available witness, including
+    /// List elements and tensors in parameterized ADTs. Absent variants and
+    /// empty Lists contribute no witness.
+    NamedEntry {
         state: usize,
     },
 }
@@ -2931,7 +2932,7 @@ impl HostResultClaim {
                             axis: *axis,
                         },
                         HostResultRequirementPlan::NamedList { state } => {
-                            HostResultRequirement::NamedList { state: *state }
+                            HostResultRequirement::NamedEntry { state: *state }
                         }
                     };
                     (*axis, requirement)
@@ -2940,14 +2941,14 @@ impl HostResultClaim {
         }
     }
 
-    /// A named axis resolves to the binder's first fixed tensor observation,
-    /// in signature and tuple order: the canonical side of entry comparisons.
-    /// A binder outside the fixed roster retains its separate owner.
-    fn of(function: &HostFunction) -> Option<Self> {
+    /// Resolve named axes through the exact entry work that creates their
+    /// witness states, including nominal-field observations. Fixed tensor
+    /// observations retain the same signature/tuple order as entry comparisons.
+    fn of(function: &HostFunction, entry: &entry_walk::FunctionEntryWork) -> Option<Self> {
         let HostAbiType::Tensor(ty) = &function.ret_ty else {
             return None;
         };
-        let named_lists = function.entry_contract.named_list_binders().to_vec();
+        let named_states = &entry.named_list_binders;
         let observations = entry_walk::entry_observations(function);
         let witness = |binder: &str| {
             observations.iter().find_map(|observation| {
@@ -2973,8 +2974,8 @@ impl HostResultClaim {
             .filter_map(|(axis, dim)| match dim {
                 DimInfo::Lit(required) => Some((axis, HostResultRequirement::Literal(*required))),
                 DimInfo::Named(binder, _) if binder != "*" => {
-                    if let Some(state) = named_lists.iter().position(|name| name == binder) {
-                        return Some((axis, HostResultRequirement::NamedList { state }));
+                    if let Some(state) = named_states.iter().position(|name| name == binder) {
+                        return Some((axis, HostResultRequirement::NamedEntry { state }));
                     }
                     let (observation, source_axis) = witness(binder)?;
                     Some((
@@ -3051,7 +3052,7 @@ impl HostResultClaim {
         if self
             .axes
             .iter()
-            .any(|(_, requirement)| matches!(requirement, HostResultRequirement::NamedList { .. }))
+            .any(|(_, requirement)| matches!(requirement, HostResultRequirement::NamedEntry { .. }))
         {
             let count = format!("{axes_name}_count");
             lines.extend([
@@ -3077,7 +3078,7 @@ impl HostResultClaim {
                         c_string_literal(claim),
                         c_string_literal(parameter),
                     )),
-                    HostResultRequirement::NamedList { state } => {
+                    HostResultRequirement::NamedEntry { state } => {
                         let source = format!("__chelis_entry_named_states[{state}]");
                         lines.push(format!("{indent}if ({source}.seen) {{"));
                         lines.push(format!(
@@ -3118,7 +3119,7 @@ impl HostResultClaim {
                     c_string_literal(claim),
                     c_string_literal(parameter),
                 ),
-                HostResultRequirement::NamedList { .. } => {
+                HostResultRequirement::NamedEntry { .. } => {
                     unreachable!("dynamic frame handled above")
                 }
             });
@@ -3353,17 +3354,18 @@ fn nested_claim_frame_lines(
 /// parameter axis that declares it, as the tensor result frame does.
 fn nested_result_frame_lines(
     function: &HostFunction,
+    entry: &entry_walk::FunctionEntryWork,
     pattern: &chelis_ir::claim_pattern::ClaimPattern,
     frame: &str,
     parent: &str,
     indent: &str,
 ) -> Vec<String> {
-    let named_lists = function.entry_contract.named_list_binders().to_vec();
+    let named_states = &entry.named_list_binders;
     let binders = pattern
         .binders()
         .iter()
         .map(|binder| {
-            if let Some(state) = named_lists.iter().position(|name| name == binder) {
+            if let Some(state) = named_states.iter().position(|name| name == binder) {
                 return named_list_binder_slot(state);
             }
             // The authored entry contract names the binders; a specialized
@@ -5266,6 +5268,7 @@ fn emit_function(
     if let Some(pattern) = &function.result_claim {
         claim_lines.extend(nested_result_frame_lines(
             function,
+            &entry_work.body,
             pattern,
             "__chelis_declared_nested_result",
             &claims_parent,
@@ -5273,7 +5276,7 @@ fn emit_function(
         ));
         claims_parent = "__chelis_declared_nested_result_joined".to_string();
     }
-    match HostResultClaim::of(function) {
+    match HostResultClaim::of(function, &entry_work.body) {
         Some(claim) => claim_lines.extend(claim.frame_lines(
             &indent,
             "__chelis_result_axes",
@@ -8120,14 +8123,8 @@ impl<'a> HostEmitter<'a> {
         let checked = self.next_temp("stationary_entry_checked");
         self.lines
             .push(format!("{}bool {checked} = false;", self.indent));
-        let mut binders = contract.named_list_binders().to_vec();
-        for pattern in lists.iter().filter_map(|entry| entry.claim.as_ref()) {
-            for binder in pattern.binders() {
-                if !binders.contains(&binder) {
-                    binders.push(binder);
-                }
-            }
-        }
+        let mut binders =
+            contract.named_witness_binders(lists.iter().filter_map(|entry| entry.claim.as_deref()));
         if let Some(proof) = &delta {
             for binder in proof.pattern().binders() {
                 if !binders.contains(&binder) {
@@ -8695,11 +8692,8 @@ impl<'a> HostEmitter<'a> {
                         contract, lists, ..
                     } = &binding.value.kind
                     {
-                        for binder in contract.named_list_binders().iter().cloned().chain(
-                            lists
-                                .iter()
-                                .filter_map(|entry| entry.claim.as_ref())
-                                .flat_map(|pattern| pattern.binders()),
+                        for binder in contract.named_witness_binders(
+                            lists.iter().filter_map(|entry| entry.claim.as_deref()),
                         ) {
                             if !list_states.contains(&binder) {
                                 list_states.push(binder);
@@ -8897,14 +8891,9 @@ impl<'a> HostEmitter<'a> {
                     );
                 } else {
                     let count = contract.formals().len();
-                    let mut named_list_binders = contract.named_list_binders().to_vec();
-                    for pattern in lists.iter().filter_map(|entry| entry.claim.as_ref()) {
-                        for binder in pattern.binders() {
-                            if !named_list_binders.contains(&binder) {
-                                named_list_binders.push(binder);
-                            }
-                        }
-                    }
+                    let mut named_list_binders = contract.named_witness_binders(
+                        lists.iter().filter_map(|entry| entry.claim.as_deref()),
+                    );
                     let delta_guard = self
                         .stationary_entry
                         .iter()
