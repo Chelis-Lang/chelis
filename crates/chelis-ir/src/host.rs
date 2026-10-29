@@ -20847,12 +20847,29 @@ fn hoist_host_lane_tensor_bindings_with_names<'expr, 'scope>(
     // arguments, so this two-tensor boundary is specific to matmul.
     let callee = direct_var_name(&kids[0]);
     let hoist_matmul_operands = kids.len() == 3 && callee == Some("matmul");
-    // Preserve checked compile-time integer selectors, including cast-wrapped
-    // literals. Their evaluation has no observable work; a fresh runtime
-    // binding would instead erase the selector's compile-time evidence.
-    let does_work = |_index: usize, arg: &Expr| {
-        crate::lower::extract_int_axis(arg).is_none() && operand_does_work(arg)
+    // The resolved operation's registration owns selector positions. A
+    // syntactic integer reader is not proof that evaluating a cast is safe:
+    // numeric operands, including shape-list leaves, retain all their work.
+    let axis_arguments = resolve_host_builtin_value(&kids[0], program, scope, tensor_helpers)?
+        .map(|value| value.declaration().axis_arguments)
+        // Direct-only builtins such as insert have no first-class value.
+        // Their unshadowed source declaration still owns argument roles.
+        .or_else(|| {
+            let name = callee?;
+            (!host_lexically_binds(scope, name) && program.def_named(name).is_none())
+                .then(|| chelis_types::builtin_decl(name).map(|decl| decl.axis_arguments))
+                .flatten()
+        })
+        .unwrap_or(chelis_types::AxisArgumentLayout::NoAxes);
+    let static_selector = |index: usize, arg: &Expr| {
+        let axis = match axis_arguments {
+            chelis_types::AxisArgumentLayout::NoAxes => false,
+            chelis_types::AxisArgumentLayout::Fixed(slots) => slots.contains(&(index - 1)),
+            chelis_types::AxisArgumentLayout::VariadicFrom(first) => index > first,
+        };
+        axis && crate::lower::extract_int_axis(arg).is_some()
     };
+    let does_work = |_index: usize, arg: &Expr| operand_does_work(arg);
     let params = scope
         .to_sorted()
         .into_iter()
@@ -20866,7 +20883,6 @@ fn hoist_host_lane_tensor_bindings_with_names<'expr, 'scope>(
         .enumerate()
         .map(|(index, arg)| {
             index != 0
-                && crate::lower::extract_int_axis(arg).is_none()
                 && (should_keep_tensor_expr_in_host_lane(arg)
                     || operand_reads_host_record(arg, program, scope)
                     // Names already denote values or checked static selectors
@@ -20964,12 +20980,20 @@ fn hoist_host_lane_tensor_bindings_with_names<'expr, 'scope>(
                 value,
             });
             scoped.insert(name.clone(), ty);
-            new_children.push(Expr::node(
-                DeepTag::Var,
-                chelis_deep::Metadata::default(),
-                vec![Expr::Atom(Atom::Name(name), *span)],
-                *span,
-            ));
+            if static_selector(index, arg) {
+                // The host binding executes the numeric work (and can trap)
+                // before later operands. The helper consumes the checked
+                // selector syntax, not a runtime scalar name; its axis reader
+                // does not evaluate that syntax a second time.
+                new_children.push(arg.clone());
+            } else {
+                new_children.push(Expr::node(
+                    DeepTag::Var,
+                    chelis_deep::Metadata::default(),
+                    vec![Expr::Atom(Atom::Name(name), *span)],
+                    *span,
+                ));
+            }
         } else {
             new_children.push(arg.clone());
         }

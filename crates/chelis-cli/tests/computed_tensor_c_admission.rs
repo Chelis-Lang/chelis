@@ -286,6 +286,122 @@ fn build_and_execute(source: &str, name: &str) -> Output {
     StdCommand::new(out.join(name)).output().unwrap()
 }
 
+// [04-NUM-14] checked integer casts remain computations in a shape list.
+// spec/02 argument order and spec/04 §4.7.3 put their failure before a later
+// effect, even when a syntactic integer reader can see an underlying literal.
+#[test]
+fn checked_shape_casts_precede_later_effects() {
+    for (dtype, value, overflows) in [
+        ("i8", "128", true),
+        ("i8", "-129", true),
+        ("i16", "32768", true),
+        ("i32", "2147483648", true),
+        ("i8", "2", false),
+        ("i16", "2", false),
+        ("i32", "2", false),
+    ] {
+        let cast = format!("cast(cast({value}i64, {dtype}), i64)");
+        // Keep the requested shape non-negative so this below-range cast
+        // reaches runtime rather than the checker's negative-extent error.
+        let target = if value.starts_with('-') {
+            format!("neg({cast})")
+        } else {
+            cast
+        };
+        let source = format!(
+            "def later(marker: i64) -> i64 ! {{ IO }} = {{\n _ = print(\"later\")\n 3i64\n}}\ndef run[n](x: tensor[n, f32], marker: i64) -> f32 ! {{ IO }} = tensor_to_scalar(sum(sum(reshape(x, [{target}, later(marker)]), 1i32), 0i32))\nout = run(to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32, 5.0f32, 6.0f32]), 0i64)\n"
+        );
+        let name = format!(
+            "shape_cast_{dtype}_{overflows}_{}",
+            value.replace('-', "negative")
+        );
+        let checked = cli(&source, &name, &["check"]);
+        assert!(checked.status.success(), "{checked:?}");
+        let check: Value = serde_json::from_slice(&checked.stdout).unwrap();
+        assert_eq!(check["score"], 1);
+        assert_eq!(check["errors"], serde_json::json!([]));
+        let evaluated = cli(&source, &name, &["eval", "--file"]);
+        let native = build_and_execute(&source, &name);
+        if overflows {
+            for output in [evaluated, native] {
+                assert!(!output.status.success(), "{output:?}");
+                assert!(output.stdout.is_empty(), "{output:?}");
+                assert!(
+                    String::from_utf8_lossy(&output.stderr)
+                        .contains(&format!("numeric trap: overflow in cast at {dtype}")),
+                    "{output:?}"
+                );
+            }
+        } else {
+            assert!(evaluated.status.success(), "{evaluated:?}");
+            assert!(native.status.success(), "{native:?}");
+            assert_eq!(native.stdout, evaluated.stdout);
+            assert_eq!(
+                String::from_utf8(native.stdout).unwrap(),
+                "later\nout = 21.0\n"
+            );
+        }
+    }
+}
+
+#[test]
+fn an_earlier_shape_effect_precedes_a_checked_cast_and_suppresses_the_tail() {
+    for (value, overflows) in [("128", true), ("2", false)] {
+        let source = format!(
+            "def earlier(marker: i64) -> i64 ! {{ IO }} = {{\n _ = print(\"earlier\")\n 1i64\n}}\ndef later(marker: i64) -> i64 ! {{ IO }} = {{\n _ = print(\"later\")\n 3i64\n}}\ndef run[n](x: tensor[n, f32], marker: i64) -> f32 ! {{ IO }} = tensor_to_scalar(sum(sum(sum(reshape(x, [earlier(marker), cast(cast({value}i64, i8), i64), later(marker)]), 2i32), 1i32), 0i32))\nout = run(to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32, 5.0f32, 6.0f32]), 0i64)\n"
+        );
+        let name = format!("ordered_shape_cast_{overflows}");
+        let evaluated = cli(&source, &name, &["eval", "--file"]);
+        let native = build_and_execute(&source, &name);
+        assert_eq!(native.stdout, evaluated.stdout, "{native:?}");
+        if overflows {
+            for output in [evaluated, native] {
+                assert!(!output.status.success(), "{output:?}");
+                assert_eq!(output.stdout, b"earlier\n");
+                assert!(
+                    String::from_utf8_lossy(&output.stderr)
+                        .contains("numeric trap: overflow in cast at i8"),
+                    "{output:?}"
+                );
+            }
+        } else {
+            assert!(evaluated.status.success(), "{evaluated:?}");
+            assert!(native.status.success(), "{native:?}");
+            assert_eq!(
+                String::from_utf8(native.stdout).unwrap(),
+                "earlier\nlater\nout = 21.0\n"
+            );
+        }
+    }
+}
+
+#[test]
+fn registered_static_axes_keep_their_form_when_numeric_work_moves() {
+    for (name, axis) in [
+        ("direct", "cast(0i64, i32)"),
+        ("nested", "cast(cast(0i64, i8), i32)"),
+    ] {
+        let source = format!(
+            "def rows(xs: List[i64], x: tensor[2, i64]) -> tensor[*, 2, i64] = insert(x, {axis}, index(xs, 0i64))\nout = rows([3i64], to_tensor([1i64, 2i64]))\n"
+        );
+        let name = format!("registered_axis_{name}");
+        checked_eval(&source, &name);
+        assert!(
+            assert_native_matches_eval(&source, &name)
+                .contains("shape=[3, 2], data=[1, 2, 1, 2, 1, 2]")
+        );
+    }
+    for invalid in [
+        "def rows(xs: List[i64], x: tensor[2, i64], axis: i32) -> tensor[*, 2, i64] = insert(x, axis, index(xs, 0i64))\n",
+        "def rows(xs: List[i64], x: tensor[2, i64]) -> tensor[*, 2, i64] = {\n repeated = insert\n repeated(x, cast(0i64, i32), index(xs, 0i64))\n}\n",
+    ] {
+        let checked = cli(invalid, "invalid_axis_contract", &["check"]);
+        assert!(!checked.status.success(), "{checked:?}");
+        let report: Value = serde_json::from_slice(&checked.stdout).unwrap();
+        assert!(!report["errors"].as_array().unwrap().is_empty());
+    }
+}
+
 #[test]
 fn a_computed_reshape_keeps_its_product_guard_before_mean() {
     let source = "def average[n](x: tensor[n, f32], extra: i64) -> f32 = tensor_to_scalar(mean(reshape(x, [add(numel(x), extra)]), 0i32))\nout = average(to_tensor([1.0f32, 0.0f32, 0.0f32]), 1i64)\n";

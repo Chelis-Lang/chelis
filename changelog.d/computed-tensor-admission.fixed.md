@@ -1,1 +1,1 @@
-Keep host-owned producer operands and computed reshape targets as typed inputs to C tensor helpers, preserving inline range/reshape/expand and symbolic reshape/mean admission, dtypes and runtime guards.
+Keep host-owned producer operands and computed reshape targets as typed inputs to C tensor helpers, preserving inline range/reshape/expand and symbolic reshape/mean admission, dtypes and runtime guards. Retain checked casts and source-order effects while preparing shape values and registered axis selectors.

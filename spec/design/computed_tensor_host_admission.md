@@ -70,6 +70,14 @@ source evaluation order; integer constants and named axes retain static
 selector evidence. Names already in scope do not acquire a runtime computation
 merely because they are operation arguments.
 
+Numeric work classification includes checked casts. A syntactic integer
+reader supplies selector syntax, not evidence that evaluation cannot trap.
+Axis positions come from the resolved builtin's registered argument layout;
+direct-only builtins use their unshadowed declaration. When operand preparation
+moves a selector's numeric work before a later host operand, that work executes
+in the host prelude and the helper retains the checked selector form. Shape-list
+leaves transport their evaluated values, including every checked cast.
+
 A tensor helper captures scalar and tensor values. Lexical ADTs, containers,
 strings and mapped files retain typed opaque bindings during numeric lowering.
 These bindings represent caller values that have already been evaluated; they
