@@ -727,6 +727,13 @@ type-specific behavior that wouldn't be captured by HM inference, or
 when the function name benefits from being explicit about the type
 it operates on.
 
+A tensor parameter's element type is its precision component, including
+when the function returns a different element type:
+
+```chelis
+def integer_codes_f32[n](values: tensor[n, f32]) -> tensor[n, i64] = cast(values, i64)
+```
+
 ```chelis
 def parse_int(s: string) -> Option[i64] = ...
 def parse_string(s: string) -> string = ...

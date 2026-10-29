@@ -8,43 +8,12 @@
 //! on functions whose name uses the suffix to mean "different container
 //! form" (the Coral `*_int` family violation).
 //!
-//! Heuristic: a function whose name ends in an element-type suffix where
-//! NEITHER the first argument's type string NOR the return type string
-//! contains the corresponding type token is a violation. The Coral
-//! `is_nan_int(f: Frame, name: string) -> tensor[n, bool]` triggers because
-//! neither `Frame, string` nor `tensor[n, bool]` mentions `int` — the
-//! suffix means dispatch form, not element type.
+//! Read signatures from the Surf syntax tree: commas in tensor, tuple, and
+//! generic types belong to those types, not to the enclosing parameter list.
+//! Match type names and tensor precision tokens, excluding comments and bodies.
 
 use crate::{Context, Rule, Surface, Violation};
-use regex::Regex;
-use std::sync::OnceLock;
-
-static DEF_RE: OnceLock<Regex> = OnceLock::new();
-
-fn def_re() -> &'static Regex {
-    // Match `def funcname(arg: TypeExpr, ...)` or
-    // `def funcname[generic_params](arg: TypeExpr, ...)`. Captures:
-    //   1: function name
-    //   2: first argument type expression (greedy across nested [..])
-    //
-    // The TypeExpr for the first arg is greedy across nested
-    // brackets [..] but stops at the next top-level comma or close-paren.
-    DEF_RE.get_or_init(|| {
-        Regex::new(
-            r"(?m)^[ \t]*def[ \t]+([a-z_][a-z0-9_]*)(?:\[[^\]]*\])?[ \t]*\([ \t]*[a-z_][a-z0-9_]*[ \t]*:[ \t]*([^,\)]+(?:\[[^\]]*\][^,\)]*)*)",
-        )
-        .unwrap()
-    })
-}
-
-static RETURN_RE: OnceLock<Regex> = OnceLock::new();
-
-fn return_re() -> &'static Regex {
-    // After the close-paren of the parameter list, look for `-> RetType =`
-    // or `-> RetType\n`. We invoke this on the slice after the function
-    // signature starts, so anchoring isn't needed.
-    RETURN_RE.get_or_init(|| Regex::new(r"\)[ \t]*->[ \t]*([^=\n]+)").unwrap())
-}
+use chelis_surf::ast::{Decl, TypeExpr};
 
 pub struct TypeSuffixPolicy;
 
@@ -59,7 +28,7 @@ struct Suffix {
 const SUFFIXES: &[Suffix] = &[
     Suffix {
         name: "_int",
-        matches: &["int", "i32", "i64", "i32", "i64"],
+        matches: &["int", "i32", "i64"],
     },
     Suffix {
         name: "_f32",
@@ -100,88 +69,85 @@ impl Rule for TypeSuffixPolicy {
         let Some(source) = ctx.source else {
             return Vec::new();
         };
-        let mut out = Vec::new();
-        for caps in def_re().captures_iter(source) {
-            let func_name = caps.get(1).unwrap().as_str();
-            let first_arg_type = caps.get(2).unwrap().as_str();
-            // Find the return type, if any. Search starting at the end of
-            // the signature match.
-            let sig_end = caps.get(0).unwrap().end();
-            let after = &source[sig_end..];
-            // Stop at the first newline that isn't escaped — keep the search
-            // on the same line as the def.
-            let line_after = after.split('\n').next().unwrap_or("");
-            let return_type = return_re()
-                .captures(line_after)
-                .map(|c| c.get(1).unwrap().as_str().trim().to_string());
-            for suffix in SUFFIXES {
-                if func_name.ends_with(suffix.name) {
-                    // §7.2 "Parser/converter idiom" carve-out: when the
-                    // function name starts with a recognized parser-verb
-                    // prefix (parse_, unwrap_, is_some_, try_, as_,
-                    // from_, to_), the type-suffix names the type the
-                    // function tests-for or produces, not the principal
-                    // argument's element type. Skip the rule for these.
-                    if has_parser_verb_prefix(func_name) {
-                        continue;
-                    }
-                    // Two violation modes per §7.2:
-                    //
-                    // (1) The suffix doesn't match anywhere in the
-                    //     signature — neither first arg nor return type
-                    //     mentions the suffix's element type.
-                    //
-                    // (2) The first argument is a container type (Frame,
-                    //     Series, etc.) — the suffix is being used for
-                    //     dispatch form rather than element type. This is
-                    //     the Coral *_int family pattern: five Frame-taking
-                    //     functions where _int means "Frame variant", not
-                    //     "operates on int data".
-                    let matched_in_arg = type_contains_any(first_arg_type, suffix.matches);
-                    let matched_in_ret = return_type
-                        .as_deref()
-                        .is_some_and(|r| type_contains_any(r, suffix.matches));
-                    let first_arg_is_container = type_is_container(first_arg_type);
-                    let no_match = !matched_in_arg && !matched_in_ret;
-                    if no_match || first_arg_is_container {
-                        let match_start = caps.get(0).unwrap().start();
-                        let line = source[..match_start]
-                            .bytes()
-                            .filter(|&b| b == b'\n')
-                            .count()
-                            + 1;
-                        let reason = if first_arg_is_container {
-                            format!(
-                                "first argument type (`{}`) is a container. The `{}` suffix is being used for dispatch form, which §7.2 prohibits (use `_col` for column-form variants or move to a container-specific module)",
-                                first_arg_type.trim(),
-                                suffix.name
-                            )
-                        } else {
-                            format!(
-                                "neither first argument type (`{}`) nor return type ({}) mentions the matching element type: `{}` suffix doesn't describe the signature",
-                                first_arg_type.trim(),
-                                return_type
-                                    .as_deref()
-                                    .map_or("not declared".to_string(), |r| format!("`{r}`")),
-                                suffix.name
-                            )
-                        };
-                        out.push(Violation {
-                            rule_id: self.id().to_string(),
-                            spec_ref: self.spec_ref().to_string(),
-                            path: ctx.path.to_path_buf(),
-                            line: Some(line),
-                            col: None,
-                            message: format!(
-                                "function `{func_name}` has element-type suffix `{}` but {reason}",
-                                suffix.name
-                            ),
-                        });
-                        break; // only fire once per function
-                    }
-                }
-            }
+        // Most files have no element-type suffix at all. Avoid another full
+        // Surf parse when no declaration could possibly use one. This is only
+        // a prefilter; the syntax tree decides every violation.
+        if !SUFFIXES.iter().any(|suffix| source.contains(suffix.name)) {
+            return Vec::new();
         }
+        let Ok(decls) = chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+        else {
+            // `surf-parses` owns malformed-source diagnostics (§12.5).
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        let mut pending: Vec<_> = decls.iter().collect();
+        while let Some(decl) = pending.pop() {
+            if let Decl::Module { decls, .. } = decl {
+                pending.extend(decls.iter());
+            }
+            let Decl::FunDef {
+                name,
+                params,
+                ret_ty,
+                span,
+                ..
+            } = decl
+            else {
+                continue;
+            };
+            let Some(first_arg_type) = params.first().and_then(|param| param.ty.as_ref()) else {
+                // This rule compares declared first-argument and return types;
+                // inference, unannotated parameters and nullary defs stay outside it.
+                continue;
+            };
+            let Some(suffix) = SUFFIXES.iter().find(|suffix| name.ends_with(suffix.name)) else {
+                continue;
+            };
+            if has_parser_verb_prefix(name) {
+                continue;
+            }
+            let matched_in_arg = type_contains_any(first_arg_type, suffix.matches);
+            let matched_in_ret = ret_ty
+                .as_ref()
+                .is_some_and(|ty| type_contains_any(ty, suffix.matches));
+            let first_arg_is_container = type_contains_any(first_arg_type, CONTAINER_TYPES);
+            if (matched_in_arg || matched_in_ret) && !first_arg_is_container {
+                continue;
+            }
+            let first_arg_text = type_source(first_arg_type, source);
+            let reason = if first_arg_is_container {
+                format!(
+                    "first argument type (`{first_arg_text}`) is a container. The `{}` suffix is being used for dispatch form, which §7.2 prohibits (use `_col` for column-form variants or move to a container-specific module)",
+                    suffix.name
+                )
+            } else {
+                format!(
+                    "neither first argument type (`{first_arg_text}`) nor return type ({}) mentions the matching element type: `{}` suffix doesn't describe the signature",
+                    ret_ty.as_ref().map_or("not declared".to_string(), |ty| {
+                        format!("`{}`", type_source(ty, source))
+                    }),
+                    suffix.name
+                )
+            };
+            let line = source[..span.offset]
+                .bytes()
+                .filter(|&byte| byte == b'\n')
+                .count()
+                + 1;
+            out.push(Violation {
+                rule_id: self.id().to_string(),
+                spec_ref: self.spec_ref().to_string(),
+                path: ctx.path.to_path_buf(),
+                line: Some(line),
+                col: None,
+                message: format!(
+                    "function `{name}` has element-type suffix `{}` but {reason}",
+                    suffix.name
+                ),
+            });
+        }
+        out.sort_by_key(|violation| violation.line);
         out
     }
 }
@@ -200,16 +166,63 @@ fn has_parser_verb_prefix(func_name: &str) -> bool {
         .any(|p| func_name.starts_with(p))
 }
 
-/// Word-boundary check: does `haystack` contain any of `needles` as a
-/// distinct token (not as a substring of a longer identifier)? This
-/// distinguishes `int` in `i64` (matches) from `int` in `print` (no match).
-fn type_contains_any(haystack: &str, needles: &[&str]) -> bool {
-    for needle in needles {
-        if has_word(haystack, needle) {
-            return true;
+/// Inspect type syntax only, with exact type-name and precision matches.
+/// An explicit worklist also handles deeply nested applications and references.
+fn type_contains_any(ty: &TypeExpr, names: &[&str]) -> bool {
+    let mut pending = vec![ty];
+    while let Some(ty) = pending.pop() {
+        match ty {
+            TypeExpr::Named(name, _) | TypeExpr::RankSpread(name, _) => {
+                if matches_name(name, names) {
+                    return true;
+                }
+            }
+            TypeExpr::Tensor(dims, precision, _) => {
+                if names.iter().any(|name| precision == *name) {
+                    return true;
+                }
+                pending.extend(dims);
+            }
+            TypeExpr::App(name, args, _) => {
+                if matches_name(name, names) {
+                    return true;
+                }
+                pending.extend(args);
+            }
+            TypeExpr::Arrow(args, ret, _) => {
+                pending.extend(args);
+                pending.push(ret);
+            }
+            TypeExpr::Ref(inner, _) => pending.push(inner),
+            TypeExpr::Tuple(items, _) => pending.extend(items),
+            TypeExpr::DimensionLiteral(_, _) | TypeExpr::Infer(_) => {}
         }
     }
     false
+}
+
+fn matches_name(name: &str, names: &[&str]) -> bool {
+    names.contains(
+        &name
+            .rsplit('.')
+            .next()
+            .expect("a type name has a final component"),
+    )
+}
+
+fn type_source<'a>(ty: &TypeExpr, source: &'a str) -> &'a str {
+    let span = match ty {
+        TypeExpr::Named(_, span)
+        | TypeExpr::DimensionLiteral(_, span)
+        | TypeExpr::Tensor(_, _, span)
+        | TypeExpr::Arrow(_, _, span)
+        | TypeExpr::Ref(_, span)
+        | TypeExpr::App(_, _, span)
+        | TypeExpr::Tuple(_, span)
+        | TypeExpr::Infer(span)
+        | TypeExpr::RankSpread(_, span) => span,
+    };
+    &source[span.offset..span.end()]
 }
 
 /// Container types whose presence as the first-argument type indicates
@@ -218,39 +231,6 @@ fn type_contains_any(haystack: &str, needles: &[&str]) -> bool {
 /// `Frame` (Coral dataframe), `Series` (column-shaped). Add more here
 /// as new container types appear in the ecosystem.
 const CONTAINER_TYPES: &[&str] = &["Frame", "Series"];
-
-fn type_is_container(type_expr: &str) -> bool {
-    for c in CONTAINER_TYPES {
-        if has_word(type_expr, c) {
-            return true;
-        }
-    }
-    false
-}
-
-fn has_word(haystack: &str, needle: &str) -> bool {
-    let bytes = haystack.as_bytes();
-    let n = needle.as_bytes();
-    if n.is_empty() {
-        return false;
-    }
-    let mut i = 0;
-    while i + n.len() <= bytes.len() {
-        if &bytes[i..i + n.len()] == n {
-            let before_ok = i == 0 || !is_ident_byte(bytes[i - 1]);
-            let after_ok = i + n.len() == bytes.len() || !is_ident_byte(bytes[i + n.len()]);
-            if before_ok && after_ok {
-                return true;
-            }
-        }
-        i += 1;
-    }
-    false
-}
-
-fn is_ident_byte(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || b == b'_'
-}
 
 #[cfg(test)]
 mod tests {
@@ -265,7 +245,106 @@ mod tests {
             source: Some(src),
             surface: Surface::SurfSource,
         };
+        chelis_surf::parser::parse_str(src, &chelis_syntax_host::NativeStack)
+            .expect("rule fixture must parse");
         TypeSuffixPolicy.check(&ctx)
+    }
+
+    #[test]
+    fn accepts_tensor_input_suffix_when_cast_changes_output_dtype() {
+        let src = "module Probe.Suffix\nexport (g_f32)\ndef g_f32[d0](a: tensor[d0, f32]) -> tensor[d0, i64] = cast(a, i64)\n";
+        assert!(run(src).is_empty(), "the suffix describes the tensor input");
+    }
+
+    #[test]
+    fn rejects_tensor_input_suffix_with_no_matching_dtype() {
+        let src = "def g_f32[d0](a: tensor[d0, f64]) -> tensor[d0, i64] = cast(a, i64)\n";
+        let violations = run(src);
+        assert_eq!(violations.len(), 1);
+        assert!(violations[0].message.contains("`tensor[d0, f64]`"));
+    }
+
+    #[test]
+    fn accepts_dtype_in_nested_first_parameter_types() {
+        for ty in [
+            "Option[tensor[d0, f32]]",
+            "(i64, tensor[d0, f32])",
+            "&tensor[d0, f32]",
+            "(i64 -> tensor[d0, f32])",
+        ] {
+            let src = format!("def g_f32[d0](a: {ty}, b: i64) -> i64 = b\n");
+            assert!(run(&src).is_empty(), "complete first type {ty}");
+        }
+    }
+
+    #[test]
+    fn rejects_mismatched_dtype_in_nested_first_parameter_types() {
+        for ty in [
+            "Option[tensor[d0, f64]]",
+            "(i64, tensor[d0, f64])",
+            "&tensor[d0, f64]",
+            "(i64 -> tensor[d0, f64])",
+        ] {
+            let src = format!("def g_f32[d0](a: {ty}, b: i64) -> i64 = b\n");
+            assert_eq!(run(&src).len(), 1, "mismatched first type {ty}");
+        }
+    }
+
+    #[test]
+    fn rejects_qualified_and_nested_container_dispatch() {
+        for ty in ["Coral.Frame[n]", "&Series[n, f32]", "Option[Frame[n]]"] {
+            let src = format!("def mean_f32[n](a: {ty}) -> f32 = 1.0f32\n");
+            let violations = run(&src);
+            assert_eq!(violations.len(), 1);
+            assert!(violations[0].message.contains("dispatch form"));
+        }
+    }
+
+    #[test]
+    fn rejects_matching_dtype_only_in_later_parameters() {
+        let src = "def g_f32[d0](a: tensor[d0, f64], b: tensor[d0, f32]) -> i64 = 1i64\n";
+        assert_eq!(run(src).len(), 1, "the first argument is principal");
+    }
+
+    #[test]
+    fn accepts_nested_return_type_after_function_parameter() {
+        let src = "def g_f32(a: (i64 -> i64), b: i64) -> Option[tensor[2, f32]] = todo\n";
+        assert!(
+            run(src).is_empty(),
+            "read the declared return, not an inner arrow"
+        );
+    }
+
+    #[test]
+    fn accepts_multiline_tensor_signature() {
+        let src = "def g_f32[d0](\n  a: tensor[d0, f32],\n  b: i64\n) -> tensor[d0, i64] = cast(a, i64)\n";
+        assert!(run(src).is_empty());
+    }
+
+    #[test]
+    fn rejects_multiline_mismatched_signature_at_definition_line() {
+        let src = "-- leading comment\ndef g_f32[d0](\n  a: tensor[d0, f64]\n) -> tensor[d0, i64] = cast(a, i64)\n";
+        let violations = run(src);
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].line, Some(2));
+    }
+
+    #[test]
+    fn ignores_signature_text_in_comments_and_strings() {
+        let src = "{-\ndef g_f32(a: i64) -> i64 = 1i64\n-}\ndef text() -> string = \"def h_f32(a: i64) -> i64 = 1i64\"\n";
+        assert!(run(src).is_empty());
+    }
+
+    #[test]
+    fn rejects_dtype_mentioned_only_in_type_comment() {
+        let src = "def g_f32[d0](a: tensor[d0, {- f32 -} f64]) -> i64 = 1i64\n";
+        assert_eq!(run(src).len(), 1);
+    }
+
+    #[test]
+    fn rejects_dtype_identifier_substrings() {
+        let src = "def g_f32(a: Wrapped_f32) -> i64 = 1i64\n";
+        assert_eq!(run(src).len(), 1);
     }
 
     #[test]
@@ -430,17 +509,13 @@ mod tests {
 
     #[test]
     fn word_boundary_int_in_int64() {
-        // `int` appears as a sub-substring of `i64`; the word-boundary
-        // check should still match because `i64` is the surrounding token.
-        assert!(has_word("Option[i64]", "i64"));
-        assert!(!has_word("Option[print]", "int"));
+        assert!(matches_name("i64", &["i64"]));
+        assert!(!matches_name("print", &["int"]));
     }
 
     #[test]
     fn word_boundary_int_word() {
-        // Bare `int` token matches.
-        assert!(has_word("int", "int"));
-        // `int` inside `tint` doesn't match (word boundary fails).
-        assert!(!has_word("tint", "int"));
+        assert!(matches_name("int", &["int"]));
+        assert!(!matches_name("tint", &["int"]));
     }
 }

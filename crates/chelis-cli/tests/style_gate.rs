@@ -46,6 +46,74 @@ fn check_fails_on_lint_violation() {
         .stderr(predicates::str::contains("surf-value-snake-case"));
 }
 
+/// The input dtype remains a valid suffix when a tensor cast changes the output dtype.
+#[test]
+fn check_accepts_tensor_input_dtype_suffix() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("suffix.ch");
+    for source in [
+        "module Probe.Suffix\nexport (g_f32)\ndef g_f32[d0](a: tensor[d0, f32]) -> tensor[d0, i64] = cast(a, i64)\n",
+        "module Probe.Suffix\nexport (g_f64)\ndef g_f64[d0, d1](a: tensor[d0, d1, f64]) -> tensor[d0, d1, i64] = cast(a, i64)\n",
+        "module Probe.Suffix\nexport (g_f32)\ndef g_f32(a: f32) -> i64 = cast(a, i64)\n",
+    ] {
+        let decls = chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+            .expect("suffix fixture parses");
+        fs::write(&path, chelis_surf::format::format_program(&decls)).unwrap();
+        Command::cargo_bin("chelis")
+            .expect("binary")
+            .args(["fmt", "--check", path.to_str().unwrap()])
+            .assert()
+            .success();
+        Command::cargo_bin("chelis")
+            .expect("binary")
+            .args(["lint", "--check", path.to_str().unwrap()])
+            .assert()
+            .success();
+        let output = Command::cargo_bin("chelis")
+            .expect("binary")
+            .args(["check", path.to_str().unwrap()])
+            .assert()
+            .success()
+            .get_output()
+            .clone();
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout).expect("check JSON");
+        assert_eq!(report["score"].as_f64(), Some(1.0));
+        assert_eq!(report["errors"], serde_json::json!([]));
+    }
+}
+
+/// Parsing the full tensor type does not admit a suffix matching only a later argument.
+#[test]
+fn check_rejects_tensor_suffix_that_misses_principal_argument() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("suffix.ch");
+    for source in [
+        "def g_f32[d0](a: tensor[d0, f64]) -> tensor[d0, i64] = cast(a, i64)\n",
+        "def g_f32[d0](a: tensor[d0, f64], b: tensor[d0, f32]) -> tensor[d0, i64] = cast(a, i64)\n",
+    ] {
+        let decls = chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+            .expect("suffix fixture parses");
+        fs::write(&path, chelis_surf::format::format_program(&decls)).unwrap();
+        Command::cargo_bin("chelis")
+            .expect("binary")
+            .args(["lint", "--check", path.to_str().unwrap()])
+            .assert()
+            .failure()
+            .stdout(predicates::str::contains("type-suffix-policy"));
+        let output = Command::cargo_bin("chelis")
+            .expect("binary")
+            .args(["check", path.to_str().unwrap()])
+            .assert()
+            .failure()
+            .stderr(predicates::str::contains("type-suffix-policy"))
+            .get_output()
+            .clone();
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout).expect("check JSON");
+        assert!(!report["errors"].as_array().unwrap().is_empty());
+        assert!(report["score"].as_f64().unwrap() < 1.0);
+    }
+}
+
 /// Package-level lint walks all Surf files, builds the opaque-type catalog,
 /// and rejects direct construction from another module.
 #[test]
