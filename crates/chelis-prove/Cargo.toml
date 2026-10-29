@@ -112,6 +112,7 @@ num-traits = { version = "0.2", default-features = false, optional = true }
 chelis-surf = { path = "../chelis-surf" }
 chelis-deep = { path = "../chelis-deep" }
 chelis-pred = { path = "../chelis-pred" }
+chelis-checker-core.workspace = true
 chelis-types = { path = "../chelis-types" }
 chelis-compiler-api = { path = "../chelis-compiler-api" }
 chelis-ir.workspace = true

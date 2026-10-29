@@ -18,15 +18,18 @@
 //! A row whose scheme yields no generatable call fails, rather than being
 //! skipped.
 
-use chelis_types::errors::ErrorWitness;
+use chelis_checker_core::errors::ErrorWitness;
 use std::collections::BTreeSet;
 
+use chelis_checker_core::BUILTINS;
+use chelis_checker_core::ShapeClass;
+use chelis_checker_core::builtin_env;
 use chelis_deep::Expr;
 use chelis_numeric_core::prim::Prim;
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str as parse_surf;
 use chelis_type_core::{TensorPrec, Type, TypeVar};
-use chelis_types::{BUILTINS, ShapeClass, builtin_env, check_ir_program};
+use chelis_types::check_ir_program;
 
 const DTYPES: [&str; 3] = ["f32", "i32", "bool"];
 

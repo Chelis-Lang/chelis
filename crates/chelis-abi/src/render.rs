@@ -1,5 +1,8 @@
 //! C projections of the same schema that expands the owning Rust structures.
 
+use alloc::format;
+use alloc::string::String;
+
 #[doc(hidden)]
 #[derive(Clone, Copy)]
 pub enum FieldKind {

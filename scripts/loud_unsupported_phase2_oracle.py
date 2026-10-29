@@ -313,7 +313,7 @@ def validate_vocab_mutation_output(returncode: int, output: str) -> None:
         "non-exhaustive patterns",
         # EffectKind consumers compile independently below host adapters.
         "crates/chelis-surf/src/resugar.rs",
-        "crates/chelis-types/src/infer/expr.rs",
+        "crates/chelis-checker-core/src/infer/expr.rs",
         "crates/chelis-effects-core/src/lib.rs",
         # Runtime FFI dtype dispatch must also reject an unknown variant.
         "crates/chelis-runtime/src/lib.rs",

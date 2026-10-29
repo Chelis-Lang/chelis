@@ -144,7 +144,7 @@ impl LowerDiagnostic {
         span_id: Option<String>,
     ) -> Self {
         if unsupported.span.is_none() && (span.is_some() || span_id.is_some()) {
-            unsupported = unsupported.with_span(chelis_types::unsupported::SpanRef {
+            unsupported = unsupported.with_span(chelis_checker_core::unsupported::SpanRef {
                 offset: span.map(|value| value.offset),
                 len: span.map(|value| value.len),
                 span_id: span_id.clone(),
@@ -908,6 +908,8 @@ pub fn install_chelis_panic_hook() {
     });
 }
 
+use chelis_checker_core::unsupported::{Stage, Unsupported, UnsupportedKind};
+use chelis_checker_core::{BUILTIN_NAMES, LinearityInfo};
 use chelis_deep::ast::{Atom, Expr, ExprCarrier, Metadata};
 use chelis_deep::cons_spine::{ConsSpine, ConsSpineNode};
 use chelis_deep::{
@@ -918,8 +920,7 @@ use chelis_numeric_core::dtype_semantics::{
     float_binop, float_unop, int_binop, int_unop, scalar_from_i64,
 };
 use chelis_numeric_core::prim::Prim;
-use chelis_types::unsupported::{Stage, Unsupported, UnsupportedKind};
-use chelis_types::{BUILTIN_NAMES, CheckedProgram, LibraryProofId, LinearityInfo};
+use chelis_types::{CheckedProgram, LibraryProofId};
 use chelis_vocab::EffectKind;
 
 use crate::vmap;
@@ -975,7 +976,7 @@ pub struct LoweredLibrary {
     /// This field intentionally has no serde default: a cache written before
     /// the obligation carrier existed cannot prove that an absent list means
     /// there were no authored claims.
-    local_ascriptions: Vec<chelis_types::CheckedLocalAscription>,
+    local_ascriptions: Vec<chelis_checker_core::CheckedLocalAscription>,
     /// Library linearity metadata. Forwarded so cross-DAG reuse hints can
     /// be re-applied if needed.
     linearity: LinearityInfo,
@@ -1025,7 +1026,7 @@ impl LoweredLibrary {
 
     /// Return the checked local tensor-ascription obligations owned by the
     /// retained library definitions.
-    pub fn local_ascriptions(&self) -> &[chelis_types::CheckedLocalAscription] {
+    pub fn local_ascriptions(&self) -> &[chelis_checker_core::CheckedLocalAscription] {
         &self.local_ascriptions
     }
 
@@ -1382,7 +1383,7 @@ fn lower_program_with_context_inner(
     // new-code wins, mirroring monolithic lowering of `library + new`.
     let new_definitions = collect_top_level_defs(new_program.exprs());
     let replaced_definitions = new_definitions.keys().cloned().collect::<BTreeSet<_>>();
-    let composition = chelis_types::compose_local_ascriptions(
+    let composition = chelis_checker_core::compose_local_ascriptions(
         &library.local_ascriptions,
         new_program.local_ascriptions(),
         &replaced_definitions,
@@ -1732,7 +1733,7 @@ pub struct SubexprLoweringContext {
     program_types: Arc<BTreeMap<String, TensorType>>,
     program_defs: Arc<BTreeMap<String, Expr>>,
     program_signatures: Arc<BTreeMap<String, Expr>>,
-    local_ascriptions: Arc<Vec<chelis_types::CheckedLocalAscription>>,
+    local_ascriptions: Arc<Vec<chelis_checker_core::CheckedLocalAscription>>,
     /// See [`LowerCtx::declaration_bodies`].
     declaration_bodies: DeclarationBodyIndex,
     /// See [`LowerCtx::constructor_layouts`].
@@ -1849,7 +1850,7 @@ impl SubexprLoweringContext {
         Ok(None)
     }
 
-    pub fn local_ascriptions(&self) -> &[chelis_types::CheckedLocalAscription] {
+    pub fn local_ascriptions(&self) -> &[chelis_checker_core::CheckedLocalAscription] {
         &self.local_ascriptions
     }
 
@@ -1866,7 +1867,7 @@ impl SubexprLoweringContext {
     /// record construction stores its fields in declared order and
     /// positional patterns over records resolve (chelis#3230). A context
     /// built from a [`CheckedProgram`] already carries its registry's.
-    pub fn with_adt_registry(&self, registry: &chelis_types::adt::AdtRegistry) -> Self {
+    pub fn with_adt_registry(&self, registry: &chelis_checker_core::adt::AdtRegistry) -> Self {
         Self {
             constructor_layouts: Arc::new(ConstructorLayouts::from_registry(registry)),
             resolved_builtin_values: Arc::new(OnceLock::new()),
@@ -1997,7 +1998,7 @@ impl SubexprLoweringContext {
     pub fn callable_binding_ascription(
         &self,
         initializer: &Expr,
-    ) -> Result<Option<&chelis_types::CheckedLocalAscription>, LowerDiagnostic> {
+    ) -> Result<Option<&chelis_checker_core::CheckedLocalAscription>, LowerDiagnostic> {
         checked_callable_binding_ascription(&self.local_ascriptions, initializer)
     }
 
@@ -2148,7 +2149,7 @@ impl SubexprLoweringContext {
                         UnsupportedKind::Construct("named host local tensor ascription".into()),
                         "host local ascription requires a declaring-witness carrier",
                         Stage::Lowering,
-                        chelis_types::unimplemented_rejection!(
+                        chelis_checker_core::unimplemented_rejection!(
                             2374,
                             "named local host tensor witnesses are not implemented"
                         ),
@@ -2262,16 +2263,16 @@ impl SubexprLoweringContext {
 /// Only the checker's occurrence token and ledger classify source authority;
 /// optional Surf provenance and inferred ABI metadata are not consumer inputs.
 fn checked_callable_binding_ascription<'a>(
-    ledger: &'a [chelis_types::CheckedLocalAscription],
+    ledger: &'a [chelis_checker_core::CheckedLocalAscription],
     initializer: &Expr,
-) -> Result<Option<&'a chelis_types::CheckedLocalAscription>, LowerDiagnostic> {
+) -> Result<Option<&'a chelis_checker_core::CheckedLocalAscription>, LowerDiagnostic> {
     let Some((_, metadata, _)) = stamped_parts(initializer) else {
         return Ok(None);
     };
     let Some(token) = metadata.checked_binding_owner() else {
         return Ok(None);
     };
-    let id = chelis_types::LocalAscriptionId::from_checked_owner_token(token);
+    let id = chelis_checker_core::LocalAscriptionId::from_checked_owner_token(token);
     let mut matching = ledger.iter().filter(|record| Some(record.id()) == id);
     let record = matching.next();
     if record.is_none() || matching.next().is_some() {
@@ -5651,7 +5652,7 @@ impl DimBinderRoles {
     /// signature in `signatures`; empty when it has none.
     pub fn of_ascription(
         signatures: &BTreeMap<String, Expr>,
-        ascription: &chelis_types::CheckedLocalAscription,
+        ascription: &chelis_checker_core::CheckedLocalAscription,
     ) -> Self {
         match ascription.declaration_name() {
             Some(name) => Self::of_declaration(signatures, name),
@@ -5878,7 +5879,7 @@ fn resolve_builtin_producer_reference(
     expr: &Expr,
     declarations: &BTreeMap<String, Expr>,
     signatures: &BTreeMap<String, Expr>,
-    registry: &chelis_types::adt::AdtRegistry,
+    registry: &chelis_checker_core::adt::AdtRegistry,
     values: &mut BTreeMap<String, Option<ResolvedBuiltinValue>>,
     visiting: &mut UnordSet<String>,
 ) -> Result<Option<ResolvedBuiltinValue>, String> {
@@ -5934,7 +5935,7 @@ fn resolve_builtin_producer_reference(
 pub(crate) fn resolved_builtin_producer_bindings(
     declarations: &BTreeMap<String, Expr>,
     signatures: &BTreeMap<String, Expr>,
-    registry: &chelis_types::adt::AdtRegistry,
+    registry: &chelis_checker_core::adt::AdtRegistry,
 ) -> Result<BTreeMap<String, ResolvedBuiltinValue>, String> {
     let mut values = BTreeMap::new();
     for (name, body) in declarations {
@@ -5974,12 +5975,12 @@ pub(crate) fn resolved_builtin_producer_bindings(
 pub(crate) fn admitted_builtin_callable(
     expr: &Expr,
     declarations: &BTreeMap<String, Expr>,
-) -> Option<chelis_types::AdmittedBuiltin> {
+) -> Option<chelis_checker_core::AdmittedBuiltin> {
     resolve_builtin_producer_reference(
         expr,
         declarations,
         &BTreeMap::new(),
-        &chelis_types::adt::AdtRegistry::default(),
+        &chelis_checker_core::adt::AdtRegistry::default(),
         &mut BTreeMap::new(),
         &mut UnordSet::new(),
     )
@@ -7326,7 +7327,7 @@ fn require_rectangular_runtime_scan_state(
                 UnsupportedKind::Construct("`scan` with runtime-varying state extents".into()),
                 "the runtime recurrence scan List carrier",
                 Stage::Lowering,
-                chelis_types::unimplemented_rejection!(
+                chelis_checker_core::unimplemented_rejection!(
                     3366,
                     "scan states require a per-step List carrier when their extents are not fixed; \
                      the rectangular runtime scan carrier cannot preserve each state shape"
@@ -9075,7 +9076,7 @@ impl AdtLayout {
 /// and host lowering orders record fields by (chelis#3230).
 #[derive(Clone, Debug, Default)]
 pub(crate) struct ConstructorLayouts {
-    type_registry: Arc<chelis_types::adt::AdtRegistry>,
+    type_registry: Arc<chelis_checker_core::adt::AdtRegistry>,
     constructors: BTreeMap<String, Vec<DeclaredConstructor>>,
 }
 
@@ -9086,7 +9087,7 @@ struct DeclaredConstructor {
 }
 
 impl ConstructorLayouts {
-    pub(crate) fn from_registry(registry: &chelis_types::adt::AdtRegistry) -> Self {
+    pub(crate) fn from_registry(registry: &chelis_checker_core::adt::AdtRegistry) -> Self {
         let mut constructors = BTreeMap::<String, Vec<DeclaredConstructor>>::new();
         for definition in registry.defs.values() {
             for variant in &definition.variants {
@@ -10141,7 +10142,7 @@ struct LowerCtx<'program> {
     literal_result_claim_ownership: LiteralResultClaimOwnership,
     /// Checker-owned authored local tensor ascriptions. This is intentionally
     /// separate from ordinary inferred expression `type` metadata.
-    local_ascriptions: Arc<Vec<chelis_types::CheckedLocalAscription>>,
+    local_ascriptions: Arc<Vec<chelis_checker_core::CheckedLocalAscription>>,
     /// Which binders the host lane executing this graph's ascription regions
     /// records when an activation starts, and so claims a site naming one
     /// against. `chelis eval` records every parameter-carried binder, List
@@ -13792,9 +13793,9 @@ impl<'program> LowerCtx<'program> {
 
     fn body_contains_local_ascription(
         body: &Expr,
-        ascription: &chelis_types::CheckedLocalAscription,
+        ascription: &chelis_checker_core::CheckedLocalAscription,
     ) -> bool {
-        fn contains(expr: &Expr, ascription: &chelis_types::CheckedLocalAscription) -> bool {
+        fn contains(expr: &Expr, ascription: &chelis_checker_core::CheckedLocalAscription) -> bool {
             match expr.carrier() {
                 ExprCarrier::DecodedNode(DeepTag::Fn, _, _) => false,
                 ExprCarrier::DecodedNode(tag, _, children) => {
@@ -13837,7 +13838,7 @@ impl<'program> LowerCtx<'program> {
     /// first axis and claimed by the rest.
     fn resolve_local_ascription_claims(
         &mut self,
-        ascription: &chelis_types::CheckedLocalAscription,
+        ascription: &chelis_checker_core::CheckedLocalAscription,
         pending: LocalAscriptionClaimTokens,
         owner: NodeId,
         binding: &str,
@@ -13922,7 +13923,7 @@ impl<'program> LowerCtx<'program> {
     /// remain stable across calls with different ranks.
     fn realized_local_ascription_axis(
         &self,
-        ascription: &chelis_types::CheckedLocalAscription,
+        ascription: &chelis_checker_core::CheckedLocalAscription,
         axis: usize,
     ) -> usize {
         let slots = tensor_formal_dim_slots(ascription.authored_type())
@@ -13959,8 +13960,8 @@ impl<'program> LowerCtx<'program> {
     /// where its initializer lowers.
     fn local_claim_awaits_first_site(
         &mut self,
-        ascription: &chelis_types::CheckedLocalAscription,
-        claim: &chelis_types::LocalAscriptionAxisClaim,
+        ascription: &chelis_checker_core::CheckedLocalAscription,
+        claim: &chelis_checker_core::LocalAscriptionAxisClaim,
     ) -> bool {
         if !matches!(
             claim.required_extent(),
@@ -14000,14 +14001,14 @@ impl<'program> LowerCtx<'program> {
     }
 
     fn local_ascription_matches_binding(
-        ascription: &chelis_types::CheckedLocalAscription,
+        ascription: &chelis_checker_core::CheckedLocalAscription,
         _binding_name: &str,
         _binding: &Expr,
         initializer: &Expr,
     ) -> bool {
         stamped_parts(initializer)
             .and_then(|(_, metadata, _)| metadata.checked_binding_owner())
-            .and_then(chelis_types::LocalAscriptionId::from_checked_owner_token)
+            .and_then(chelis_checker_core::LocalAscriptionId::from_checked_owner_token)
             == Some(ascription.id())
     }
 
@@ -14073,9 +14074,9 @@ impl<'program> LowerCtx<'program> {
     }
 
     fn local_ascription_claim_label(
-        ascription: &chelis_types::CheckedLocalAscription,
+        ascription: &chelis_checker_core::CheckedLocalAscription,
         axis: usize,
-        claim: &chelis_types::LocalAscriptionAxisClaim,
+        claim: &chelis_checker_core::LocalAscriptionAxisClaim,
     ) -> String {
         let authored = ascription.authored_type();
         let dim_parts = match authored.carrier() {
@@ -14116,8 +14117,8 @@ impl<'program> LowerCtx<'program> {
 
     fn local_ascription_claim_token(
         &mut self,
-        ascription: &chelis_types::CheckedLocalAscription,
-        claim: &chelis_types::LocalAscriptionAxisClaim,
+        ascription: &chelis_checker_core::CheckedLocalAscription,
+        claim: &chelis_checker_core::LocalAscriptionAxisClaim,
     ) -> NodeId {
         let label = Self::local_ascription_claim_label(ascription, claim.axis(), claim);
         let realized_axis = self.realized_local_ascription_axis(ascription, claim.axis());
@@ -16029,7 +16030,7 @@ impl<'program> LowerCtx<'program> {
             &self.dag,
             node,
             &sources,
-            chelis_types::unsupported::Stage::Lowering,
+            chelis_checker_core::unsupported::Stage::Lowering,
         )
         .unwrap_or_else(|error| {
             raise_fatal_lowering_error(
@@ -17247,11 +17248,11 @@ impl<'program> LowerCtx<'program> {
         }
         if let ResolvedVmapTarget::Builtin(operation) = target {
             let declaration = operation.declaration();
-            if declaration.realizability == chelis_types::Realizability::HostOnly
+            if declaration.realizability == chelis_checker_core::Realizability::HostOnly
                 || !declaration
                     .capability
                     .domains
-                    .contains(&chelis_types::BuiltinSemanticDomain::Numeric)
+                    .contains(&chelis_checker_core::BuiltinSemanticDomain::Numeric)
             {
                 return self.lower_unrepresentable(
                     &format!(
@@ -18457,7 +18458,7 @@ impl<'program> LowerCtx<'program> {
                     UnsupportedKind::Op(func_name.to_string()),
                     "numeric IR lowering of a host string operation",
                     Stage::Lowering,
-                    chelis_types::deliberate_rejection!(
+                    chelis_checker_core::deliberate_rejection!(
                         "[05-OP-58]",
                         "this string operation structurally rejects differentiation; \
                          no numeric cotangent is fabricated"
@@ -19744,7 +19745,7 @@ impl<'program> LowerCtx<'program> {
                                 )),
                                 "the compiled-backend lowering of `reduce_window_*`",
                                 Stage::Lowering,
-                                chelis_types::unimplemented_rejection!(
+                                chelis_checker_core::unimplemented_rejection!(
                                     1058,
                                     "window and stride lists must be integer literals for the \
                                      compiled lane today; a runtime-parameterized window \
@@ -20033,7 +20034,7 @@ impl<'program> LowerCtx<'program> {
                             )),
                             "the compiled-backend lowering of `expand`/`insert`",
                             Stage::Lowering,
-                            chelis_types::deliberate_rejection!(
+                            chelis_checker_core::deliberate_rejection!(
                                 "[05-AXIS-1]",
                                 "the expand/insert axis must be an integer literal or a named \
                                  dimension; a computed axis previously fell back to axis 0 \
@@ -20752,7 +20753,7 @@ impl<'program> LowerCtx<'program> {
                     Ok(node) => return node,
                     Err(tier2_ordered::OrderedGap::IntegerForm(detail)) => (
                         detail,
-                        chelis_types::unimplemented_rejection!(
+                        chelis_checker_core::unimplemented_rejection!(
                             3377,
                             "an integer form inside a differentiated or batched body keeps its \
                              checked host kernel, which a transform cannot consume"
@@ -20760,7 +20761,7 @@ impl<'program> LowerCtx<'program> {
                     ),
                     Err(tier2_ordered::OrderedGap::RuntimeExtent(detail)) => (
                         detail,
-                        chelis_types::unimplemented_rejection!(
+                        chelis_checker_core::unimplemented_rejection!(
                             3378,
                             "the transform graph for this operation requires static extents"
                         ),
@@ -22268,7 +22269,7 @@ impl<'program> LowerCtx<'program> {
                 )),
                 "the List staging of a `grad` or `vmap` body",
                 Stage::Lowering,
-                chelis_types::unimplemented_rejection!(
+                chelis_checker_core::unimplemented_rejection!(
                     3366,
                     "the staged recurrence unrolls only a List staged as known items; \
                      a `range` source or a List whose length is runtime data needs a \
@@ -25414,7 +25415,7 @@ impl<'program> LowerCtx<'program> {
                 UnsupportedKind::EffectKind(what),
                 "a `handle-effect` form in IR lowering",
                 Stage::Lowering,
-                chelis_types::deliberate_rejection!(
+                chelis_checker_core::deliberate_rejection!(
                     "[04-EFF-1]",
                     "the known effect kind is `resource` \
                      (spec/03-deep-syntax.md); an unknown kind previously dropped its \
@@ -25959,7 +25960,7 @@ impl<'program> LowerCtx<'program> {
                 UnsupportedKind::Op(format!("{op:?}")),
                 format!("`{}` tensors in IR lowering", input_prec.name()),
                 Stage::Lowering,
-                chelis_types::unimplemented_rejection!(
+                chelis_checker_core::unimplemented_rejection!(
                     729,
                     "this op family is float-only in the executable IR today; cast the \
                      operand to a float dtype first. Integer support for the well-defined \
@@ -26043,23 +26044,23 @@ impl<'program> LowerCtx<'program> {
         // numeric-unary cell is unbuilt. Exhaustive so a new `Prim`
         // forces a decision here.
         let authority = match input_prec {
-            Prim::Bool => chelis_types::deliberate_rejection!(
+            Prim::Bool => chelis_checker_core::deliberate_rejection!(
                 "[04-NUM-4]",
                 "bool has no arithmetic width; numeric unary ops on bool tensors are \
                  rejected"
             ),
-            Prim::F8e4m3 => chelis_types::deliberate_rejection!(
+            Prim::F8e4m3 => chelis_checker_core::deliberate_rejection!(
                 "[04-DTYPE-1]",
                 "f8e4m3 is reserved but inactive and must not reach IR lowering \
                  (spec/04-type-system.md section 1.1.1)"
             ),
-            Prim::String => chelis_types::unimplemented_rejection!(
+            Prim::String => chelis_checker_core::unimplemented_rejection!(
                 729,
                 "this numeric unary family accepts active float and signed-integer \
                  dtypes only in the executable IR today; the string cell is owned by \
                  the target capability table"
             ),
-            Prim::Key => chelis_types::deliberate_rejection!(
+            Prim::Key => chelis_checker_core::deliberate_rejection!(
                 "[05-RNG-1]",
                 "a random key has no arithmetic; numeric unary ops on keys are rejected"
             ),
@@ -26320,7 +26321,7 @@ impl<'program> LowerCtx<'program> {
                 UnsupportedKind::Dtype(found.to_string()),
                 "a `cast` target in IR lowering",
                 Stage::Lowering,
-                chelis_types::deliberate_rejection!(
+                chelis_checker_core::deliberate_rejection!(
                     "[04-DTYPE-1]",
                     "the cast target must name an active primitive type \
                      (spec/04-type-system.md section 1.1); a bogus target previously \
@@ -27567,7 +27568,7 @@ impl<'program> LowerCtx<'program> {
             self.reject_static_match(
                 span,
                 "`match` on a runtime scrutinee".to_string(),
-                chelis_types::unimplemented_rejection!(
+                chelis_checker_core::unimplemented_rejection!(
                     618,
                     "`match` on a runtime scrutinee is not supported by IR lowering: \
                      only a match whose scrutinee is a compile-time-known constructor \
@@ -27591,7 +27592,7 @@ impl<'program> LowerCtx<'program> {
                     self.reject_static_match(
                         span,
                         reason,
-                        chelis_types::unimplemented_rejection!(
+                        chelis_checker_core::unimplemented_rejection!(
                             618,
                             "static arm selection lowers a `match` only when its patterns \
                              read compile-time-known structure; selecting an arm by, or \
@@ -27603,7 +27604,7 @@ impl<'program> LowerCtx<'program> {
                     self.reject_static_match(
                         span,
                         reason,
-                        chelis_types::deliberate_rejection!(
+                        chelis_checker_core::deliberate_rejection!(
                             "[04-PAT-3]",
                             "a lane that cannot establish a scrutinee's declared field \
                              order rejects the pattern rather than match by another order"
@@ -27625,7 +27626,7 @@ impl<'program> LowerCtx<'program> {
                         self.reject_static_match(
                             span,
                             "a `match` arm guard".to_string(),
-                            chelis_types::unimplemented_rejection!(
+                            chelis_checker_core::unimplemented_rejection!(
                                 618,
                                 "`match` arm guards are not supported by static arm \
                                  selection: a guard needs runtime evaluation, so the taken \
@@ -27719,7 +27720,7 @@ impl<'program> LowerCtx<'program> {
         &self,
         span: Span,
         what: String,
-        authority: chelis_types::unsupported::RejectionAuthority,
+        authority: chelis_checker_core::unsupported::RejectionAuthority,
     ) -> ! {
         if unrepresentable_panic_suppressed() {
             std::panic::panic_any(UnrepresentableDag);
@@ -28125,7 +28126,7 @@ impl<'program> LowerCtx<'program> {
             )),
             "the `if` join in IR lowering",
             Stage::Lowering,
-            chelis_types::unimplemented_rejection!(
+            chelis_checker_core::unimplemented_rejection!(
                 2583,
                 "an `if` whose arms' extents are not proven equal cannot be joined as a \
                  selection yet: an untaken arm may be sized by its unchecked claim"
@@ -29122,7 +29123,7 @@ mod tests {
             .unwrap()
             .with_outer_contract(
                 NormalizedCallableContract::from_authored(
-                    &chelis_types::adt::AdtRegistry::default(),
+                    &chelis_checker_core::adt::AdtRegistry::default(),
                     &contract,
                 )
                 .unwrap()
@@ -30104,7 +30105,7 @@ mod tests {
         );
     }
 
-    fn local_ascription_fixture() -> (chelis_types::CheckedLocalAscription, Expr) {
+    fn local_ascription_fixture() -> (chelis_checker_core::CheckedLocalAscription, Expr) {
         let declarations = chelis_surf::parser::parse_str(
             "def f(x: tensor[*, f32]) -> tensor[*, f32] = {\n  \
              y: tensor[2, f32] = pad(x, [[0i64, 0i64]], 0.0f32)\n  \
@@ -35530,7 +35531,7 @@ mod regression_tests {
 
     /// The checker's ADT registry for `types`, the declaration source
     /// record construction orders its slots by (chelis#3230).
-    fn checked_registry(types: &str) -> chelis_types::adt::AdtRegistry {
+    fn checked_registry(types: &str) -> chelis_checker_core::adt::AdtRegistry {
         let declarations = chelis_surf::parser::parse_str(types, &chelis_syntax_host::NativeStack)
             .expect("Surf fixture parses");
         chelis_types::check_typed_program(
@@ -35546,7 +35547,7 @@ mod regression_tests {
     /// (none when `None`) and name the free input its result is the `Load`
     /// of, or return the lowering diagnostic.
     fn lowered_input(
-        registry: Option<&chelis_types::adt::AdtRegistry>,
+        registry: Option<&chelis_checker_core::adt::AdtRegistry>,
         deep: &str,
     ) -> Result<String, String> {
         let exprs = chelis_deep::parser::parse_str(deep, &chelis_syntax_host::NativeStack)

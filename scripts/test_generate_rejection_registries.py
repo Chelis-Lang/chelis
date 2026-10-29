@@ -394,7 +394,7 @@ class ProductionSources(unittest.TestCase):
                 {
                     "crates/example/src/lib.rs",
                     "tests/support/compiler_reached.rs",
-                    "crates/chelis-types/src/unsupported.rs",
+                    "crates/chelis-checker-core/src/unsupported.rs",
                 },
             ),
             ["tests/support/compiler_reached.rs"],

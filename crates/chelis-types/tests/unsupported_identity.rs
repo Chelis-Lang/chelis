@@ -1,13 +1,15 @@
-use chelis_types::unsupported::{
-    RejectionAuthorityKind, SpanRef, Stage, Unsupported, UnsupportedKind,
-};
+use chelis_checker_core::unsupported::RejectionAuthorityKind;
+use chelis_checker_core::unsupported::SpanRef;
+use chelis_checker_core::unsupported::Stage;
+use chelis_checker_core::unsupported::Unsupported;
+use chelis_checker_core::unsupported::UnsupportedKind;
 
 fn complete_trial_error() -> Unsupported {
     Unsupported::new(
         UnsupportedKind::Construct("a non-literal window list".into()),
         "compiled-backend lowering",
         Stage::Lowering,
-        chelis_types::unimplemented_rejection!(1058, "current wording"),
+        chelis_checker_core::unimplemented_rejection!(1058, "current wording"),
     )
     .with_span(SpanRef {
         offset: Some(17),
@@ -63,7 +65,7 @@ fn identity_mutations_fail_but_hint_wording_is_derived() {
         base.what.clone(),
         base.context.clone(),
         base.stage,
-        chelis_types::unimplemented_rejection!(1058, "rewritten prose only"),
+        chelis_checker_core::unimplemented_rejection!(1058, "rewritten prose only"),
     )
     .with_span((**base.span.as_ref().expect("test span")).clone())
     .with_supported_alternative("use integer literal window and stride lists");
@@ -126,7 +128,7 @@ fn identity_mutations_fail_but_hint_wording_is_derived() {
             base.what.clone(),
             base.context.clone(),
             base.stage,
-            chelis_types::deliberate_rejection!("[04-TOT-2]", "different authority wording"),
+            chelis_checker_core::deliberate_rejection!("[04-TOT-2]", "different authority wording"),
         )
         .with_span((**base.span.as_ref().expect("test span")).clone())
         .with_supported_alternative("use integer literal window and stride lists")
@@ -156,11 +158,11 @@ fn identity_mutations_fail_but_hint_wording_is_derived() {
         .identity()
     };
     assert_ne!(
-        deliberate(chelis_types::deliberate_rejection!(
+        deliberate(chelis_checker_core::deliberate_rejection!(
             "[04-TOT-2]",
             "first wording"
         )),
-        deliberate(chelis_types::deliberate_rejection!(
+        deliberate(chelis_checker_core::deliberate_rejection!(
             "[04-TOT-3]",
             "second wording"
         )),
@@ -177,11 +179,11 @@ fn identity_mutations_fail_but_hint_wording_is_derived() {
         .identity()
     };
     assert_ne!(
-        tracked(chelis_types::unimplemented_rejection!(
+        tracked(chelis_checker_core::unimplemented_rejection!(
             1058,
             "first wording"
         )),
-        tracked(chelis_types::unimplemented_rejection!(
+        tracked(chelis_checker_core::unimplemented_rejection!(
             729,
             "second wording"
         )),

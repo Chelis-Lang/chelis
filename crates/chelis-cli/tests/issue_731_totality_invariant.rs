@@ -59,10 +59,11 @@
 //! over-application guard in `structural_symbol_positions_still_score_one`).
 //! Naming the count here so the census does not understate the filed set.
 
+use chelis_checker_core::InferResult;
+use chelis_checker_core::errors::ErrorWitness;
 use chelis_deep::ast as deep;
 use chelis_type_core::Type;
-use chelis_types::errors::ErrorWitness;
-use chelis_types::{CheckedProgram, InferResult};
+use chelis_types::CheckedProgram;
 
 const WELL_TYPED: &str = "add(cast(1.0, f32), cast(2.0, f32))";
 /// Same ill-typed expression the chelis#709 canary uses.

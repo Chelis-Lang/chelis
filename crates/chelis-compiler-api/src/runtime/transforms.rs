@@ -1,4 +1,4 @@
-use chelis_types::errors::ErrorWitness;
+use chelis_checker_core::errors::ErrorWitness;
 use std::collections::BTreeMap;
 
 use chelis_deep::DeepTag;
@@ -1086,7 +1086,7 @@ fn lookup_registered_type<'a, T>(
 fn registered_type_has_float(
     name: &str,
     argument_flags: Vec<bool>,
-    registry: &chelis_types::adt::AdtRegistry,
+    registry: &chelis_checker_core::adt::AdtRegistry,
     visiting: &mut Vec<(String, Vec<bool>)>,
 ) -> bool {
     if terminal_name_matches(name, "List") {
@@ -1140,7 +1140,7 @@ fn registered_type_has_float(
 
 fn stored_type_has_float(
     ty: &Type<ErrorWitness>,
-    registry: &chelis_types::adt::AdtRegistry,
+    registry: &chelis_checker_core::adt::AdtRegistry,
     substitutions: &UnordMap<TypeVar, bool>,
     visiting: &mut Vec<(String, Vec<bool>)>,
 ) -> bool {
@@ -1183,7 +1183,7 @@ fn stored_type_has_float(
 
 fn grad_type_expr_has_float(
     expr: &Expr,
-    registry: &chelis_types::adt::AdtRegistry,
+    registry: &chelis_checker_core::adt::AdtRegistry,
     visiting: &mut Vec<(String, Vec<bool>)>,
 ) -> bool {
     let (node_tag, kids) = match expr.carrier() {

@@ -14,10 +14,10 @@
 //! Both polarities throughout: every accepted `i64` form has the
 //! rejected `i32` counterpart beside it.
 
+use chelis_checker_core::errors::CheckError;
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str as parse_surf;
 use chelis_types::check_typed_program;
-use chelis_types::errors::CheckError;
 
 fn typecheck_surf(source: &str) -> Vec<CheckError> {
     let decls =

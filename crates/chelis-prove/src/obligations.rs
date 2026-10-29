@@ -17,8 +17,8 @@
 //! parameter), is an ERROR naming the producer and channel — never a
 //! silent skip, since one uncovered producer collapses D-SOUND.
 
+use chelis_checker_core::errors::ErrorWitness;
 use chelis_deep::{DeepTag, ExprCarrier};
-use chelis_types::errors::ErrorWitness;
 use std::collections::{BTreeMap, BTreeSet};
 
 use chelis_deep::ast::{Atom, Expr};

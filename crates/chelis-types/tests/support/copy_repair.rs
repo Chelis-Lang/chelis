@@ -9,9 +9,12 @@
 //! `UseAfterConsume` error. A use that does not consume records no repair, so
 //! the repair list is the observable that tells the two apart.
 
+use chelis_checker_core::CopyRepair;
+use chelis_checker_core::CopyRepairUseKind;
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str;
-use chelis_types::{CopyRepair, CopyRepairUseKind, check_typed_program, copy_repairs};
+use chelis_types::check_typed_program;
+use chelis_types::copy_repairs;
 
 /// The copy repairs of a Surf program that must pass linearity.
 pub fn copy_repairs_of(source: &str) -> Vec<CopyRepair> {

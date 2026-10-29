@@ -406,7 +406,7 @@ fn predicate_binder(fn_node: &Expr) -> Option<String> {
 /// `string`/`f8e4m3`, multi-variant or generic ADTs). `deftypes` resolves a
 /// nested-record `t-adt` reference to its record; `visiting` breaks recursive
 /// type cycles (a recursive ADT is not value-class). The scalar-prim class is
-/// the SAME `chelis_types::invariants::invariant_value_class_prim` the D-WF
+/// the SAME `chelis_checker_core::invariants::invariant_value_class_prim` the D-WF
 /// checker uses, so the checker and the prover agree on the value class.
 fn field_type_from_deep(
     ty: &Expr,
@@ -416,7 +416,7 @@ fn field_type_from_deep(
     match tag(ty)? {
         DeepTag::TPrim => {
             let name = symbol_text(children(ty).first()?)?;
-            chelis_types::invariants::invariant_value_class_prim(name)
+            chelis_checker_core::invariants::invariant_value_class_prim(name)
                 .then(|| FieldType::Scalar(name.to_string()))
         }
         DeepTag::TTensor => {

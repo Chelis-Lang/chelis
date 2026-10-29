@@ -16,12 +16,12 @@
 //! it is the typed refusal [`ClaimPatternError::NonRegularRecursion`], never
 //! a skipped claim.
 
+use chelis_checker_core::adt::AdtRegistry;
+use chelis_checker_core::errors::ErrorWitness;
+use chelis_checker_core::infer::type_to_deep_expr;
 use chelis_deep::ast::{Atom, Expr, Metadata};
 use chelis_deep::{DeepTag, ExprCarrier};
 use chelis_type_core::{Dim, NominalArg, TensorPrec, Type};
-use chelis_types::adt::AdtRegistry;
-use chelis_types::errors::ErrorWitness;
-use chelis_types::infer::type_to_deep_expr;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
@@ -328,7 +328,7 @@ impl Builder<'_> {
     fn unfold_alias(
         &self,
         name: &str,
-        alias: &chelis_types::adt::TypeAliasDef,
+        alias: &chelis_checker_core::adt::TypeAliasDef,
         args: &[Expr],
     ) -> Result<Expr, ClaimPatternError> {
         let substitution = parameter_substitution(name, &alias.param_args, args)?;

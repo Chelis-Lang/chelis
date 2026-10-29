@@ -1,11 +1,12 @@
 //! [04-PAT-1] remains an obligation when a pattern first sees a flexible
 //! scrutinee. [04-INF-1] keeps the enclosing lambda monomorphic until use.
 
+use chelis_checker_core::errors::CheckError;
+use chelis_checker_core::errors::CheckErrorKind;
 use chelis_deep::Expr;
 use chelis_macros::{ExpansionOptions, expand_program};
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str;
-use chelis_types::errors::{CheckError, CheckErrorKind};
 use chelis_types::{check_ir_program, check_typed_program};
 
 fn desugared(source: &str) -> Vec<Expr> {

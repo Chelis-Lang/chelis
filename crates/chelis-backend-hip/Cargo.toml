@@ -10,6 +10,7 @@ chelis-numeric-core = { workspace = true, default-features = false, features = [
 chelis-unord.workspace = true
 chelis-backend-c = { path = "../chelis-backend-c" }
 chelis-ir = { path = "../chelis-ir" }
+chelis-checker-core.workspace = true
 chelis-types = { path = "../chelis-types" }
 chelis-vocab.workspace = true
 

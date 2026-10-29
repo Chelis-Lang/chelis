@@ -1,11 +1,12 @@
 //! chelis#1654: collection admission is explicit at authored boundaries and
 //! durable on already-checked function values.
 
+use chelis_checker_core::errors::CheckError;
+use chelis_checker_core::errors::CheckErrorKind;
 use chelis_deep::Expr;
 use chelis_macros::{ExpansionOptions, expand_program};
 use chelis_surf::ast::Decl;
 use chelis_surf::{desugar::desugar_program, parser::parse_str};
-use chelis_types::errors::{CheckError, CheckErrorKind};
 use chelis_types::{
     TypeEnv, build_type_env_from_library, check_ir_program, check_ir_with_context,
     check_typed_program,

@@ -14,14 +14,19 @@
 //! builtin added later with a rule its scheme does not carry is rejected in
 //! value position without anyone remembering to add it here.
 
+use chelis_checker_core::BUILTINS;
+use chelis_checker_core::InferenceDisposition;
+use chelis_checker_core::builtin_decl;
+use chelis_checker_core::builtin_env;
+use chelis_checker_core::builtin_env_names;
+use chelis_checker_core::builtin_value_contract_carried;
+use chelis_checker_core::errors::CheckError;
+use chelis_checker_core::errors::CheckErrorKind;
+use chelis_checker_core::errors::ErrorWitness;
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str;
 use chelis_type_core::Type;
-use chelis_types::errors::{CheckError, CheckErrorKind, ErrorWitness};
-use chelis_types::{
-    BUILTINS, InferenceDisposition, builtin_decl, builtin_env, builtin_env_names,
-    builtin_value_contract_carried, check_ir_program,
-};
+use chelis_types::check_ir_program;
 
 const MARKER: &str = "is applicable only by name";
 

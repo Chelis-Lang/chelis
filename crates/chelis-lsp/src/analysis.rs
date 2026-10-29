@@ -3,11 +3,11 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use chelis_checker_core::BUILTIN_NAMES;
 use chelis_deep::Span as DeepSpan;
 use chelis_surf::ast::{Decl, Expr, ImportKind, LetPattern, MatchArm, Param, Pattern, TypeExpr};
 use chelis_tide::compiler;
 use chelis_tide::schema::{CheckRequest, Diagnostic as ApiDiagnostic, SourceKind};
-use chelis_types::BUILTIN_NAMES;
 use tower_lsp::lsp_types::{
     CompletionItem, CompletionItemKind, Diagnostic, DiagnosticSeverity, Location, MarkedString,
     Position, Range, Url,

@@ -1,0 +1,2978 @@
+//! Additional unit tests for inference.
+
+use super::*;
+use alloc::sync::Arc;
+
+#[test]
+fn builtin_relu() {
+    crate::test_support::run(|operation| {
+        check_ok(
+            "(def {} x (lit {type: (t-tensor {} (d-name {} hidden) (t-prim {} f32))} 0))
+         (def {} y (app {} (var {} relu) (var {} x)))",
+            operation,
+        );
+    })
+}
+
+// ── Tensor type tests ────────────────────────────────────────
+
+#[test]
+fn tensor_2d() {
+    crate::test_support::run(|operation| {
+        check_ok(
+            "(def {} x (lit {type: (t-tensor {} (d-name {} batch) (d-name {} hidden) (t-prim {} f32))} 0))",
+            operation,
+        );
+    })
+}
+
+#[test]
+fn tensor_literal_dim() {
+    crate::test_support::run(|operation| {
+        check_ok(
+            "(def {} x (lit {type: (t-tensor {} (d-lit {} 512) (t-prim {} f32))} 0))",
+            operation,
+        );
+    })
+}
+
+// ── Edge cases ───────────────────────────────────────────────
+
+#[test]
+fn empty_program() {
+    crate::test_support::run(|operation| {
+        let result = check("", operation);
+        assert!(result.errors.is_empty());
+        assert_eq!(result.typed_nodes, 0);
+        assert_eq!(result.total_nodes, 0);
+    })
+}
+
+#[test]
+fn def_with_fn_body() {
+    crate::test_support::run(|operation| {
+        check_ok(
+            "(def {} double (fn {} (params {} (x {type: (t-prim {} i32)})) (app {} (var {} add) (var {} x) (var {} x))))",
+            operation,
+        );
+        check_err(
+            "(def {} double (fn {} (params {} x) (app {} (var {} add) (var {} x) (var {} x))))",
+            CheckErrorKind::PrecisionMismatch,
+            operation,
+        );
+    })
+}
+
+#[test]
+fn nested_let() {
+    crate::test_support::run(|operation| {
+        check_ok(
+            "(def {} result
+           (let {} (bind {} x (lit {type: (t-prim {} i32)} 1))
+             (let {} (bind {} y (var {} x))
+               (var {} y))))",
+            operation,
+        );
+    })
+}
+
+#[test]
+fn if_with_tensor_branches() {
+    crate::test_support::run(|operation| {
+        check_ok(
+            "(def {} cond (lit {type: (t-prim {} bool)} true))
+         (def {} a (lit {type: (t-tensor {} (d-name {} batch) (t-prim {} f32))} 0))
+         (def {} b (lit {type: (t-tensor {} (d-name {} batch) (t-prim {} f32))} 0))
+         (def {} c (if {} (var {} cond) (var {} a) (var {} b)))",
+            operation,
+        );
+    })
+}
+
+#[test]
+fn fn_applied_to_args() {
+    crate::test_support::run(|operation| {
+        check_ok(
+            "(def {} f (fn {} (params {} x) (var {} x)))
+         (def {} result (app {} (var {} f) (lit {type: (t-prim {} i32)} 42)))",
+            operation,
+        );
+    })
+}
+
+#[test]
+fn adt_with_fields() {
+    crate::test_support::run(|operation| {
+        check_ok(
+            "(deftype {} Pair ()
+           (variant {} MkPair
+             (field {} fst (t-prim {} i32))
+             (field {} snd (t-prim {} f32))))
+         (def {} p
+           (record {}
+             MkPair
+             (kv {} fst (lit {type: (t-prim {} i32)} 1))
+             (kv {} snd (lit {type: (t-prim {} f32)} 2.0))))",
+            operation,
+        );
+    })
+}
+
+#[test]
+fn pipe_with_lambda() {
+    crate::test_support::run(|operation| {
+        check_ok(
+            "(def {}\n  result\n  (app {} (fn {} (params {} x) (var {} x)) (lit {type: (t-prim {} f32)} 1.0)))\n",
+            operation,
+        );
+    })
+}
+
+#[test]
+fn total_nodes_counted() {
+    crate::test_support::run(|operation| {
+        let result = check("(def {} x (lit {type: (t-prim {} i32)} 42))", operation);
+        assert!(result.total_nodes > 0, "expected some total nodes");
+    })
+}
+
+#[test]
+fn tuple_three_elems() {
+    crate::test_support::run(|operation| {
+        check_ok(
+            "(def {} t (tuple {}
+           (lit {type: (t-prim {} i32)} 1)
+           (lit {type: (t-prim {} f32)} 2.0)
+           (lit {type: (t-prim {} bool)} true)))",
+            operation,
+        );
+    })
+}
+
+// ── Regression tests for bug fixes ──────────────────────────────
+
+// Fix 1: scalar arithmetic accepts matching numeric scalars but still rejects bad mixes
+#[test]
+fn fix1_tensor_op_rejects_non_tensor_args() {
+    crate::test_support::run(|operation| {
+        check_err(
+            "(def {} r (app {} (var {} add) (lit {type: (t-prim {} i32)} 1) (lit {type: (t-prim {} bool)} true)))",
+            CheckErrorKind::PrecisionMismatch,
+            operation,
+        );
+    })
+}
+
+// Fix 2: unsound generalization — fn x -> { y = x; (y 1, y true) } should fail
+#[test]
+fn fix2_unsound_generalization_rejected() {
+    crate::test_support::run(|operation| {
+        // x is a monomorphic param, y = x so y is also monomorphic.
+        // Applying y to both i32 and bool should fail.
+        check_err(
+            "(def {} test \
+           (fn {} (params {} x) \
+             (let {} (bind {} y (var {} x)) \
+               (tuple {} \
+                 (app {} (var {} y) (lit {type: (t-prim {} i32)} 1)) \
+                 (app {} (var {} y) (lit {type: (t-prim {} bool)} true))))))",
+            CheckErrorKind::PrecisionMismatch,
+            operation,
+        );
+    })
+}
+
+#[test]
+fn level_generalization_quantifies_only_the_ignored_inner_argument() {
+    crate::test_support::run(|operation| {
+        // [04-INF-1] positive twin for `fix2_unsound_generalization_rejected`:
+        // `x` belongs to the enclosing lambda and must remain monomorphic, while
+        // the ignored `z` is created by the let RHS and may be generalized.
+        check_ok(
+            "(def {} test \
+           (fn {} (params {} x) \
+             (let {} (bind {} y (fn {} (params {} z) (var {} x))) \
+               (tuple {} \
+                 (app {} (var {} y) (lit {type: (t-prim {} i32)} 1)) \
+                 (app {} (var {} y) (lit {type: (t-prim {} bool)} true))))))",
+            operation,
+        );
+    })
+}
+
+#[cfg(feature = "generalize-sweep-oracle")]
+#[test]
+fn independent_binding_generalization_visits_zero_environment_bindings() {
+    crate::test_support::run(|operation| {
+        let mut source = String::new();
+        for index in 0..128 {
+            source.push_str(&format!(
+                "(def {{}} independent_{index} \
+               (fn {{}} (params {{}} value_{index}) (var {{}} value_{index})))\n"
+            ));
+        }
+
+        crate::env::reset_generalize_sweep_env_visits(operation);
+        let result =
+            crate::env::without_generalize_sweep_oracle(|| check(&source, operation), operation);
+        assert!(
+            result.errors.is_empty(),
+            "generated independent-binding fixture must check: {:?}",
+            result.errors
+        );
+        assert_eq!(
+            crate::env::generalize_sweep_env_visits(operation),
+            0,
+            "the production level path must not enumerate environment bindings"
+        );
+    })
+}
+
+/// The shape of `Std.Datetime.Zone.date_rule_at`, without the stdlib: the
+/// scrutinee instantiates `day`'s deferred branch joins in the declaration
+/// scope, and the destructure's `let` carries those intermediates beside the
+/// pattern variable. Under `generalize-sweep-oracle` both generalizers must
+/// keep them shared; in every build the components stay tied to `found`.
+#[test]
+fn destructured_match_payload_keeps_scrutinee_join_intermediates_shared() {
+    crate::test_support::run(|operation| {
+        let source = |use_of_a: &str| {
+            format!(
+                "def pick(c: bool, d: bool) -> i64 = {{\n\
+               day = if c then Some((1i64, 2i64)) else if d then Some((3i64, 4i64)) else None\n\
+               match day with {{\n\
+                 | Some(found) => {{\n\
+                   (a, b) = found\n\
+                   {use_of_a}\n\
+                 }}\n\
+                 | None => 0i64\n\
+               }}\n\
+             }}\n"
+            )
+        };
+        assert_surf_ok(&source("add(a, b)"), operation);
+        let errors = surf_check_errors(
+            &source("add(string_len(string_concat(a, \"!\")), b)"),
+            operation,
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|error| matches!(error.kind, CheckErrorKind::TypeMismatch)),
+            "a destructured i64 component must not be usable as a string: {errors:?}"
+        );
+    })
+}
+
+// Fix 3: defsig not enforced — body must match declared signature
+#[test]
+fn fix3_defsig_enforced() {
+    crate::test_support::run(|operation| {
+        check_err(
+            "(defsig {} f (t-fn {} (t-prim {} i32) (t-prim {} i32))) \
+         (def {} f (lit {type: (t-prim {} bool)} true))",
+            CheckErrorKind::TypeMismatch,
+            operation,
+        );
+    })
+}
+
+// Fix 4: d-var names shared within a type — same d-var name maps to same DimVar
+#[test]
+fn fix4_dvar_names_shared() {
+    crate::test_support::run(|operation| {
+        // Declare a function requiring same dim 'a' in both args.
+        // Call with tensor[batch,f32] and tensor[seq,f32] — should fail.
+        check_err(
+            "(defsig {} myfn (a) \
+           (t-fn {} \
+             (t-tensor {} (d-var {} a) (t-prim {} f32)) \
+             (t-tensor {} (d-var {} a) (t-prim {} f32)) \
+             (t-tensor {} (d-var {} a) (t-prim {} f32)))) \
+         (def {} myfn (fn {} (params {} x y) (var {} x))) \
+         (def {} result (app {} (var {} myfn) \
+           (lit {type: (t-tensor {} (d-name {} batch) (t-prim {} f32))} 0) \
+           (lit {type: (t-tensor {} (d-name {} seq) (t-prim {} f32))} 0)))",
+            CheckErrorKind::DimensionMismatch,
+            operation,
+        );
+    })
+}
+
+// Fix 5: if condition must be bool
+#[test]
+fn fix5_if_condition_must_be_bool() {
+    crate::test_support::run(|operation| {
+        check_err(
+            "(if {} (lit {type: (t-prim {} i32)} 0) \
+                (lit {type: (t-prim {} i32)} 1) \
+                (lit {type: (t-prim {} i32)} 2))",
+            CheckErrorKind::TypeMismatch,
+            operation,
+        );
+    })
+}
+
+// Fix 6a: wildcard satisfies exhaustiveness
+#[test]
+fn fix6a_wildcard_exhaustive() {
+    crate::test_support::run(|operation| {
+        check_ok(
+            "(deftype {} MyOpt (a) (variant {} MySome (t-var {} a)) (variant {} MyNone)) \
+         (def {} x (app {} (var {} MySome) (lit {type: (t-prim {} i32)} 42))) \
+         (def {} result \
+           (match {} (var {} x) \
+             (arm {} (pat-wild {}) () (lit {type: (t-prim {} i32)} 0))))",
+            operation,
+        );
+    })
+}
+
+// Fix 6b: pat-as binds name
+#[test]
+fn fix6b_pat_as_binds_name() {
+    crate::test_support::run(|operation| {
+        check_ok(
+            "(deftype {} MyOpt (a) (variant {} MySome (t-var {} a)) (variant {} MyNone)) \
+         (def {} x (app {} (var {} MySome) (lit {type: (t-prim {} i32)} 42))) \
+         (def {} result \
+           (match {} (var {} x) \
+             (arm {} (pat-as {} whole (pat-wild {})) () (var {} whole))))",
+            operation,
+        );
+    })
+}
+
+// Fix 7b: suggestions populated for UnboundVariable
+#[test]
+fn fix7b_suggestions_for_unbound() {
+    crate::test_support::run(|operation| {
+        let result = check("(def {} x (var {} typo))", operation);
+        let unbound_err = result
+            .errors
+            .iter()
+            .find(|e| matches!(e.kind, CheckErrorKind::UnboundVariable { .. }))
+            .expect("expected UnboundVariable error");
+        assert!(
+            !unbound_err.suggestions.is_empty(),
+            "expected suggestions for unbound variable"
+        );
+    })
+}
+
+#[test]
+fn ir_literal_dimension_mismatch_surfaces_error() {
+    crate::test_support::run(|operation| {
+        let decls = chelis_surf::parser::parse_str(
+            "def want_2x2(a: tensor[2, 2, f32]) -> tensor[f32] = trace(a, 0, 1)\n\
+     def main(a: tensor[3, 3, f32]) -> tensor[f32] = want_2x2(a)\n",
+            &chelis_syntax_host::NativeStack,
+        )
+        .expect("surf parse");
+        let exprs = chelis_surf::desugar::desugar_program(&decls, &chelis_syntax_host::NativeStack)
+            .expect("Surf fixture must desugar");
+
+        let result = crate::test_support::infer_ir_program(&exprs, operation);
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|error| matches!(error.kind, CheckErrorKind::DimensionMismatch)),
+            "expected ir inference to preserve literal dimension mismatches, got {:?}",
+            result.errors
+        );
+        assert!(
+            !result
+                .errors
+                .iter()
+                .any(|error| matches!(error.kind, CheckErrorKind::TypeMismatch)),
+            "dimension mismatch fixture must not include an unrelated trace return TypeMismatch: {:?}",
+            result.errors
+        );
+    })
+}
+
+#[test]
+fn ir_rejects_polymorphic_dims_pinned_by_body() {
+    crate::test_support::run(|operation| {
+        let decls = chelis_surf::parser::parse_str(
+            "def want_2x2(a: tensor[2, 2, f32]) -> tensor[f32] = trace(a, 0, 1)\n\
+     def bad_consumer[m, n](a: tensor[m, n, f32]) -> tensor[f32] = want_2x2(a)\n\
+     def main() -> f32 = cast(0.0, f32)\n",
+            &chelis_syntax_host::NativeStack,
+        )
+        .expect("surf parse");
+        let exprs = chelis_surf::desugar::desugar_program(&decls, &chelis_syntax_host::NativeStack)
+            .expect("Surf fixture must desugar");
+
+        let result = crate::test_support::infer_ir_program(&exprs, operation);
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|error| matches!(error.kind, CheckErrorKind::DimensionMismatch)),
+            "expected ir inference to reject polymorphic dims forced to literals by the body, got {:?}",
+            result.errors
+        );
+        assert!(
+            !result
+                .errors
+                .iter()
+                .any(|error| matches!(error.kind, CheckErrorKind::TypeMismatch)),
+            "polymorphic dimension fixture must not include an unrelated trace return TypeMismatch: {:?}",
+            result.errors
+        );
+    })
+}
+
+// chelis#317: an in-scope constructor resolves through its *exact*
+// (consistently mangled) name. Before #317 this test fed a half-mangled
+// program — a bare `deftype KVCache` plus a `Pkg__..__KVCache` reference —
+// and relied on the registry's fuzzy terminal-segment fallback to bind the
+// two. That fuzzy bind is exactly the cross-module mis-resolution #317
+// removes, so the program the real reef pipeline produces (deftype AND
+// reference carry the same mangled name) is the one that must resolve. Both
+// the construction site (`None => KVCache([])`) and the type annotations
+// resolve against the same key without any terminal-match fuzziness.
+#[test]
+fn ir_resolves_consistently_mangled_constructor_names() {
+    crate::test_support::run(|operation| {
+        let decls = chelis_surf::parser::parse_str(
+            "type Pkg__chelis__std__Std__Nn__Generate__KVCache[a] = \
+        | Pkg__chelis__std__Std__Nn__Generate__KVCache(List[a])\n\
+     def keep_cache[p](cache: \
+         Option[Pkg__chelis__std__Std__Nn__Generate__KVCache[p]]) -> \
+         Pkg__chelis__std__Std__Nn__Generate__KVCache[p] =\n\
+       match cache with {\n\
+         | Some(value) => value\n\
+         | None => Pkg__chelis__std__Std__Nn__Generate__KVCache([])\n\
+       }\n",
+            &chelis_syntax_host::NativeStack,
+        )
+        .expect("surf parse");
+        let exprs = chelis_surf::desugar::desugar_program(&decls, &chelis_syntax_host::NativeStack)
+            .expect("Surf fixture must desugar");
+
+        let result = crate::test_support::infer_ir_program(&exprs, operation);
+        assert!(
+            !result.errors.iter().any(|error| matches!(
+                error.kind,
+                CheckErrorKind::UnboundVariable { .. } | CheckErrorKind::UnknownConstructor { .. }
+            )),
+            "expected the consistently mangled constructor to resolve clean, got {:?}",
+            result.errors
+        );
+    })
+}
+
+// Fix 8: typed params in Deep
+#[test]
+fn fix8_typed_params() {
+    crate::test_support::run(|operation| {
+        // fn with typed param x: f32 — using x should give f32
+        check_ok(
+            "(def {} f (fn {} (params {} (x {type: (t-prim {} f32)})) (var {} x)))",
+            operation,
+        );
+    })
+}
+
+// Fix 8b: typed param enforces type
+#[test]
+fn fix8b_typed_param_enforced() {
+    crate::test_support::run(|operation| {
+        // Param x is f32, so mixing it with a bool in arithmetic must fail.
+        check_err(
+            "(def {} f (fn {} (params {} (x {type: (t-prim {} f32)})) \
+           (app {} (var {} add) (var {} x) (lit {type: (t-prim {} bool)} true))))",
+            CheckErrorKind::PrecisionMismatch,
+            operation,
+        );
+    })
+}
+
+// ── Round 3 regression tests ──────────────────────────────────
+
+#[test]
+fn fix9_logical_ops_reject_non_bool_tensors() {
+    crate::test_support::run(|operation| {
+        // and(tensor[batch, f32], tensor[batch, f32]) should fail — requires bool
+        check_err(
+            "(def {} a (lit {type: (t-tensor {} (d-name {} batch) (t-prim {} f32))} 0)) \
+         (def {} b (lit {type: (t-tensor {} (d-name {} batch) (t-prim {} f32))} 0)) \
+         (def {} r (app {} (var {} and) (var {} a) (var {} b)))",
+            CheckErrorKind::TypeMismatch,
+            operation,
+        );
+    })
+}
+
+#[test]
+fn fix9b_logical_ops_reject_non_tensor() {
+    crate::test_support::run(|operation| {
+        // and(i32, i32) should fail — requires tensor
+        check_err(
+            "(def {} r (app {} (var {} and) (lit {type: (t-prim {} i32)} 1) (lit {type: (t-prim {} i32)} 2)))",
+            CheckErrorKind::TypeMismatch,
+            operation,
+        );
+    })
+}
+
+#[test]
+fn fix9c_not_rejects_non_bool_tensor() {
+    crate::test_support::run(|operation| {
+        // not(tensor[batch, f32]) should fail — requires bool
+        check_err(
+            "(def {} a (lit {type: (t-tensor {} (d-name {} batch) (t-prim {} f32))} 0)) \
+         (def {} r (app {} (var {} not) (var {} a)))",
+            CheckErrorKind::TypeMismatch,
+            operation,
+        );
+    })
+}
+
+#[test]
+fn fix9d_logical_ops_accept_bool_tensors() {
+    crate::test_support::run(|operation| {
+        // and(tensor[batch, bool], tensor[batch, bool]) should pass
+        check_ok(
+            "(def {} a (lit {type: (t-tensor {} (d-name {} batch) (t-prim {} bool))} 0)) \
+         (def {} b (lit {type: (t-tensor {} (d-name {} batch) (t-prim {} bool))} 0)) \
+         (def {} r (app {} (var {} and) (var {} a) (var {} b)))",
+            operation,
+        );
+    })
+}
+
+// ── Round 4 regression tests ──────────────────────────────────
+
+#[test]
+fn fix11_pat_record_rejects_unknown_field() {
+    crate::test_support::run(|operation| {
+        // Define Adam with field lr, then match on nonexistent field 'nope'
+        check_err(
+            "(deftype {} Optimizer () \
+           (variant {} Adam (field {} lr (t-prim {} f32)))) \
+         (def {} x (lit {type: (t-adt {} Optimizer)} 0)) \
+         (def {} r \
+           (match {} (var {} x) \
+             (arm {} (pat-record {} Adam (kv {} nope (pat-var {} v))) () (var {} v))))",
+            CheckErrorKind::TypeMismatch,
+            operation,
+        );
+    })
+}
+
+#[test]
+fn fix11b_pat_record_accepts_valid_field() {
+    crate::test_support::run(|operation| {
+        // Match on actual field lr — should pass
+        check_ok(
+            "(deftype {} Optimizer () \
+           (variant {} Adam (field {} lr (t-prim {} f32)))) \
+         (def {} x (lit {type: (t-adt {} Optimizer)} 0)) \
+         (def {} r \
+           (match {} (var {} x) \
+             (arm {} (pat-record {} Adam (kv {} lr (pat-var {} v))) () (var {} v))))",
+            operation,
+        );
+    })
+}
+
+#[test]
+fn checked_program_annotates_fn_bodies() {
+    crate::test_support::run(|operation| {
+        let exprs = chelis_deep::parser::parse_str(
+            "(def {} f (fn {} (params {} (x {type: (t-prim {} f32)})) (var {} x)))",
+            &chelis_syntax_host::NativeStack,
+        )
+        .unwrap();
+        let checked =
+            crate::test_support::check_ir_program(&exprs, operation).expect("checked program");
+        let text = chelis_deep::printer::print_canonical(checked.annotated_exprs());
+        assert!(
+            text.contains("(fn {type: (t-fn {} (t-prim {} f32) (t-prim {} f32))}"),
+            "expected typed fn metadata, got:\n{text}"
+        );
+    })
+}
+
+#[test]
+fn checked_program_annotates_apps_and_updates_type_env() {
+    crate::test_support::run(|operation| {
+        let exprs = chelis_deep::parser::parse_str(
+            "(def {} a (lit {type: (t-tensor {} (d-name {} batch) (t-prim {} f32))} 0))
+     (def {} b (lit {type: (t-tensor {} (d-name {} batch) (t-prim {} f32))} 0))
+     (def {} c (app {} (var {} add) (var {} a) (var {} b)))",
+            &chelis_syntax_host::NativeStack,
+        )
+        .unwrap();
+        let checked =
+            crate::test_support::check_ir_program(&exprs, operation).expect("checked program");
+        let text = chelis_deep::printer::print_canonical(checked.annotated_exprs());
+        assert!(
+            text.contains("(app {type: (t-tensor {} (d-name {} batch) (t-prim {} f32))}"),
+            "expected typed app metadata, got:\n{text}"
+        );
+        assert!(checked.type_env().contains_key("c"));
+    })
+}
+
+#[test]
+fn ir_accepts_symbolic_normalized_axis_for_layer_norm() {
+    crate::test_support::run(|operation| {
+        let exprs = chelis_deep::parser::parse_str("(def {} x (lit {type: (t-tensor {} (d-name {} batch) (d-name {} hidden) (t-prim {} f32))} 0))
+     (def {} gamma (lit {type: (t-tensor {} (d-name {} hidden) (t-prim {} f32))} 0))
+     (def {} beta (lit {type: (t-tensor {} (d-name {} hidden) (t-prim {} f32))} 0))
+     (def {} y (app {} (var {} layer_norm) (var {} x) (var {} gamma) (var {} beta) (lit {type: (t-prim {} f32)} 0.00001)))", &chelis_syntax_host::NativeStack)
+    .unwrap();
+        crate::test_support::check_ir_program(&exprs, operation)
+            .expect("symbolic normalized-axis metadata is legal at the language checker");
+    })
+}
+
+#[test]
+fn checked_program_annotates_symbolic_expand_apps_from_surf() {
+    crate::test_support::run(|operation| {
+        let checked = checked_surf(
+            r#"
+def predict(
+  x: tensor[batch, 64, f32],
+  w: tensor[64, 1, f32],
+  b: tensor[1, f32]
+) -> tensor[batch, 1, f32] =
+  add(matmul(x, w), insert(b, 0, batch))
+"#,
+            operation,
+        );
+        let missing = checked
+            .annotated_exprs()
+            .iter()
+            .find_map(missing_shape_sensitive_app);
+        assert!(
+            missing.is_none(),
+            "expected all shape-sensitive apps to be annotated, missing: {:?}",
+            missing
+        );
+    })
+}
+
+#[test]
+fn surf_permute_with_axis_arguments_type_checks() {
+    crate::test_support::run(|operation| {
+        let checked = checked_surf(
+            r#"
+def transpose(x: tensor[seq, hidden, f32]) -> tensor[hidden, seq, f32] =
+  permute(x, 1, 0)
+"#,
+            operation,
+        );
+        let missing = checked
+            .annotated_exprs()
+            .iter()
+            .find_map(missing_shape_sensitive_app);
+        assert!(
+            missing.is_none(),
+            "expected typed shape-sensitive apps after permute, missing: {:?}",
+            missing
+        );
+    })
+}
+
+#[test]
+fn surf_list_builtins_type_check() {
+    crate::test_support::run(|operation| {
+        let checked = checked_surf(
+            r#"
+xs: List[f32] = [1.0, 2.0]
+ys = append(xs, 3.0)
+total = tensor_to_scalar(sum(to_tensor(ys), 0))
+roundtrip = to_list(to_tensor(ys))
+"#,
+            operation,
+        );
+        assert!(checked.annotated_exprs().len() >= 4);
+    })
+}
+
+#[test]
+fn surf_pad_sequences_type_checks() {
+    crate::test_support::run(|operation| {
+        let checked = checked_surf(
+            r#"
+tokens: List[List[i64]] = [[cast(1, i64), cast(2, i64)], [cast(3, i64)]]
+padded = pad_sequences(tokens, cast(0, i64))
+"#,
+            operation,
+        );
+        assert!(checked.annotated_exprs().len() >= 2);
+    })
+}
+
+#[test]
+fn surf_3g_io_and_exact_padding_builtins_type_check() {
+    crate::test_support::run(|operation| {
+        let checked = checked_surf(
+            r#"
+contents = read_file("dataset.txt")
+lines = read_lines("dataset.txt")
+bytes = read_bytes("dataset.txt")
+exists = file_exists("dataset.txt")
+names = list_dir(".")
+mapped = mmap_file("dataset.txt")
+mapped_len = mmap_len(mapped)
+prefix = mmap_read(mapped, cast(0, i64), cast(4, i64))
+padded = pad_sequences_to([[cast(1, i64)], [cast(2, i64), cast(3, i64)]], cast(4, i64), cast(0, i64))
+"#,
+            operation,
+        );
+        assert!(checked.annotated_exprs().len() >= 9);
+    })
+}
+
+// #143: `pad_sequences_to`'s padded (axis-1) dimension equals its
+// literal `width` argument. The result type carries `Dim::Lit(width)`
+// for that axis (not `Dim::Wildcard`), so a declared return type with
+// the matching concrete width type-checks and a mismatched one is
+// rejected. The width arrives as `cast(N, i64)` in every caller.
+
+#[test]
+fn pad_sequences_to_literal_width_matches_declared_shape() {
+    crate::test_support::run(|operation| {
+        let decls = chelis_surf::parser::parse_str(
+            "def f() -> tensor[1, 4, f32] = \
+     pad_sequences_to([[cast(10.0, f32)]], cast(4, i64), cast(0.0, f32))\n",
+            &chelis_syntax_host::NativeStack,
+        )
+        .expect("surf parse");
+        let exprs = chelis_surf::desugar::desugar_program(&decls, &chelis_syntax_host::NativeStack)
+            .expect("Surf fixture must desugar");
+        let result = crate::test_support::infer_ir_program(&exprs, operation);
+        assert!(
+            result.errors.is_empty(),
+            "literal pad width 4 should match declared tensor[1, 4, f32], got {:?}",
+            result.errors
+        );
+    })
+}
+
+#[test]
+fn pad_sequences_to_wrong_literal_width_is_rejected() {
+    crate::test_support::run(|operation| {
+        let decls = chelis_surf::parser::parse_str(
+            "def f() -> tensor[1, 5, f32] = \
+     pad_sequences_to([[cast(10.0, f32)]], cast(4, i64), cast(0.0, f32))\n",
+            &chelis_syntax_host::NativeStack,
+        )
+        .expect("surf parse");
+        let exprs = chelis_surf::desugar::desugar_program(&decls, &chelis_syntax_host::NativeStack)
+            .expect("Surf fixture must desugar");
+        let result = crate::test_support::infer_ir_program(&exprs, operation);
+        assert!(
+            !result.errors.is_empty(),
+            "pad width 4 declared as tensor[1, 5, f32] should be a type error"
+        );
+    })
+}
+
+#[test]
+fn pad_sequences_to_mismatched_width_through_shared_sig_dim_is_rejected() {
+    crate::test_support::run(|operation| {
+        // The two `pad_sequences_to` results flow into a function whose
+        // sig declares the same dim variable `d` on both parameters.
+        // Different literal widths (8 vs 5) must collide on `d`.
+        let decls = chelis_surf::parser::parse_str(
+            "sig demo_unify[s, d, p]: &tensor[s, d, p] -> &tensor[s, d, p] -> tensor[s, d, p]\n\
+     def demo_unify(a, b) = a\n\
+     def test_mismatch[s, d]() -> tensor[s, d, f32] = {\n\
+       q = pad_sequences_to([[cast(0.0, f32)]], cast(8, i64), cast(0.0, f32))\n\
+       k = pad_sequences_to([[cast(0.0, f32)]], cast(5, i64), cast(0.0, f32))\n\
+       demo_unify(q, k)\n\
+     }\n",
+            &chelis_syntax_host::NativeStack,
+        )
+        .expect("surf parse");
+        let exprs = chelis_surf::desugar::desugar_program(&decls, &chelis_syntax_host::NativeStack)
+            .expect("Surf fixture must desugar");
+        let result = crate::test_support::infer_ir_program(&exprs, operation);
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|error| matches!(error.kind, CheckErrorKind::DimensionMismatch)),
+            "widths 8 and 5 sharing sig dim `d` should surface a DimensionMismatch, got {:?}",
+            result.errors
+        );
+    })
+}
+
+#[test]
+fn surf_dict_and_iteration_builtins_type_check() {
+    crate::test_support::run(|operation| {
+        let checked = checked_surf(
+            r#"
+keys: List[string] = ["alpha", "beta"]
+ids: List[i64] = [cast(1, i64), cast(2, i64)]
+pairs = zip(keys, ids)
+indexed = enumerate(keys)
+vocab: Dict[string, i64] = dict_of(pairs)
+found = dict_contains(vocab, "alpha")
+id = dict_get(vocab, "beta")
+only_keys = dict_keys(vocab)
+only_values = dict_values(vocab)
+roundtrip = dict_entries(vocab)
+"#,
+            operation,
+        );
+        assert!(checked.annotated_exprs().len() >= 9);
+    })
+}
+
+#[test]
+fn surf_3h_tensor_numeric_builtins_type_check() {
+    crate::test_support::run(|operation| {
+        let checked = checked_surf(
+            r#"
+def projection(
+  x: tensor[batch, seq, hidden, f32],
+  w: tensor[hidden, out_dim, f32],
+  token_ids: tensor[batch, seq, i64],
+  mask: tensor[batch, seq, out_dim, bool],
+  table: tensor[vocab, out_dim, f32]
+) -> tensor[batch, seq, out_dim, f32] = {
+  logits = einsum("bsh,ho->bso", x, w)
+  embed = gather(table, token_ids, 0)
+  clipped = clamp(add(logits, embed), scalar_to_tensor(0.0), scalar_to_tensor(6.0))
+  running = cumsum(clipped, 1)
+  where(mask, running, clipped)
+}
+"#,
+            operation,
+        );
+        assert!(!checked.annotated_exprs().is_empty());
+    })
+}
+
+#[test]
+fn surf_3h_structural_tensor_builtins_type_check() {
+    crate::test_support::run(|operation| {
+        let checked = checked_surf(
+            r#"
+def pack_heads(
+  q: tensor[batch, seq, 2, f32],
+  k: tensor[batch, seq, 2, f32]
+) -> tensor[batch, seq, *, f32] = {
+  packed = concat([q, k], 2)
+  pieces = split(packed, 2, [2, 2])
+  concat(pieces, 2)
+}
+"#,
+            operation,
+        );
+        assert!(!checked.annotated_exprs().is_empty());
+    })
+}
+
+// ── chelis#631: concat result typing (spec/04-type-system.md §4.5.4) ──
+
+/// Axis-0 concat of two `[1, 2]` rows types `[2, 2]`: the concat axis
+/// is the element extent times the statically-counted element count,
+/// every other axis unchanged. Pre-chelis#631 the result kept the
+/// element's `1` on axis 0 and wildcarded the LAST axis, so this
+/// concrete return annotation was rejected.
+#[test]
+fn issue631_concat_axis0_literal_list_counts_elements() {
+    crate::test_support::run(|operation| {
+        let result = infer_surf(
+            r#"
+module Repro.ConcatCount
+def stack_rows(a: tensor[1, 2, f32], b: tensor[1, 2, f32]) -> tensor[2, 2, f32] =
+  concat([a, b], 0)
+"#,
+            operation,
+        );
+        assert!(
+            result.errors.is_empty(),
+            "axis-0 concat of two [1, 2] rows must type [2, 2], got: {:?}",
+            result.errors
+        );
+    })
+}
+
+/// The chelis#631 reproducer shape: the list is LET-BOUND, so the
+/// concat site sees a variable. The binding carries its literal
+/// length to the concat (Env::list_literal_len).
+#[test]
+fn issue631_concat_axis0_let_bound_list_counts_elements() {
+    crate::test_support::run(|operation| {
+        let result = infer_surf(
+            r#"
+module Repro.ConcatCountLet
+def stack_rows(a: tensor[1, 2, f32], b: tensor[1, 2, f32]) -> tensor[2, 2, f32] = {
+  rows = [a, b]
+  concat(rows, 0)
+}
+"#,
+            operation,
+        );
+        assert!(
+            result.errors.is_empty(),
+            "let-bound list concat must count elements through the binding, got: {:?}",
+            result.errors
+        );
+    })
+}
+
+/// Negative parity: a wrong concat-axis sum is rejected — the
+/// computed `Lit(2)` is a real claim, not a permissive wildcard.
+#[test]
+fn issue631_concat_wrong_sum_annotation_rejected() {
+    crate::test_support::run(|operation| {
+        let result = infer_surf(
+            r#"
+module Repro.ConcatWrongSum
+def stack_rows(a: tensor[1, 2, f32], b: tensor[1, 2, f32]) -> tensor[3, 2, f32] =
+  concat([a, b], 0)
+"#,
+            operation,
+        );
+        assert!(
+            !result.errors.is_empty(),
+            "an axis-0 concat of two [1, 2] rows must not satisfy [3, 2]"
+        );
+    })
+}
+
+/// A non-last-axis concat sizes the CONCAT axis and preserves the
+/// trailing axes. Pre-chelis#631 the last axis was wildcarded
+/// unconditionally (the chelis#594 symptom).
+#[test]
+fn issue631_concat_mid_axis_preserves_last_axis() {
+    crate::test_support::run(|operation| {
+        let accepted = infer_surf(
+            r#"
+module Repro.ConcatMidAxis
+def stack_mid(a: tensor[2, 1, 5, f32], b: tensor[2, 1, 5, f32]) -> tensor[2, 2, 5, f32] =
+  concat([a, b], 1)
+"#,
+            operation,
+        );
+        assert!(
+            accepted.errors.is_empty(),
+            "axis-1 concat must type [2, 2, 5], got: {:?}",
+            accepted.errors
+        );
+        // The last axis is the element's `5`, not a wildcard: a wrong
+        // trailing extent no longer slips through.
+        let rejected = infer_surf(
+            r#"
+module Repro.ConcatMidAxisBad
+def stack_mid(a: tensor[2, 1, 5, f32], b: tensor[2, 1, 5, f32]) -> tensor[2, 2, 6, f32] =
+  concat([a, b], 1)
+"#,
+            operation,
+        );
+        assert!(
+            !rejected.errors.is_empty(),
+            "the non-concat trailing axis must stay 5; [2, 2, 6] must be rejected"
+        );
+    })
+}
+
+/// A non-enumerable list (a `List` parameter) wildcards the CONCAT
+/// axis — and ONLY the concat axis: the trailing axis keeps the
+/// element extent (pre-chelis#631 it was the wildcarded one).
+#[test]
+fn issue631_concat_param_list_wildcards_concat_axis_only() {
+    crate::test_support::run(|operation| {
+        let accepted = infer_surf(
+            r#"
+module Repro.ConcatParamList
+def cat_all(xs: List[tensor[2, 3, f32]]) -> tensor[*, 3, f32] =
+  concat(xs, 0)
+"#,
+            operation,
+        );
+        assert!(
+            accepted.errors.is_empty(),
+            "param-list concat must type [*, 3], got: {:?}",
+            accepted.errors
+        );
+        let rejected = infer_surf(
+            r#"
+module Repro.ConcatParamListBad
+def cat_all(xs: List[tensor[2, 3, f32]]) -> tensor[*, 4, f32] =
+  concat(xs, 0)
+"#,
+            operation,
+        );
+        assert!(
+            !rejected.errors.is_empty(),
+            "the non-concat trailing axis must stay 3; [*, 4] must be rejected"
+        );
+    })
+}
+
+/// A runtime (non-literal) concat axis wildcards EVERY axis at the
+/// element rank: any axis may be the one that grows. An
+/// axis-0-concat-shaped annotation must typecheck even though axis 0
+/// carried a literal in the element type (pre-chelis#631 the element's
+/// `2` was pinned and `[4, 3]` was rejected).
+#[test]
+fn issue631_concat_dynamic_axis_wildcards_all_axes() {
+    crate::test_support::run(|operation| {
+        let result = infer_surf(
+            r#"
+module Repro.ConcatDynAxis
+def cat_dyn(a: tensor[2, 3, f32], b: tensor[2, 3, f32], ax: i32) -> tensor[4, 3, f32] =
+  concat([a, b], ax)
+"#,
+            operation,
+        );
+        assert!(
+            result.errors.is_empty(),
+            "runtime-axis concat must not pin any per-axis extent, got: {:?}",
+            result.errors
+        );
+    })
+}
+
+/// An out-of-bounds literal concat axis is a check-time error.
+#[test]
+fn issue631_concat_axis_out_of_bounds_rejected() {
+    crate::test_support::run(|operation| {
+        let result = infer_surf(
+            r#"
+module Repro.ConcatOob
+def cat_oob(a: tensor[2, f32], b: tensor[2, f32]) -> tensor[*, f32] =
+  concat([a, b], 5)
+"#,
+            operation,
+        );
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.message.contains("concat axis 5 out of bounds for rank 1")),
+            "a literal axis past the element rank must error, got: {:?}",
+            result.errors
+        );
+    })
+}
+
+/// A negative literal axis indexes from the end (`-1` = last axis),
+/// matching every other axis-taking builtin.
+#[test]
+fn issue631_concat_negative_axis_indexes_from_end() {
+    crate::test_support::run(|operation| {
+        let accepted = infer_surf(
+            r#"
+module Repro.ConcatNegAxis
+def cat_neg(a: tensor[1, 2, f32], b: tensor[1, 2, f32]) -> tensor[1, 4, f32] =
+  concat([a, b], -1)
+"#,
+            operation,
+        );
+        assert!(
+            accepted.errors.is_empty(),
+            "axis -1 concat of two [1, 2] rows must type [1, 4], got: {:?}",
+            accepted.errors
+        );
+        let rejected = infer_surf(
+            r#"
+module Repro.ConcatNegAxisBad
+def cat_neg(a: tensor[1, 2, f32], b: tensor[1, 2, f32]) -> tensor[1, 5, f32] =
+  concat([a, b], -1)
+"#,
+            operation,
+        );
+        assert!(
+            !rejected.errors.is_empty(),
+            "axis -1 concat sum is 4; [1, 5] must be rejected"
+        );
+    })
+}
+
+/// chelis#594 CONSCIOUS FLIP of the original chelis#631 head-bias
+/// boundary pin: a DIRECT literal list now sums PER-ELEMENT extents,
+/// so `[tensor[2], tensor[*]]` no longer inherits the §4.5.2
+/// head-biased join times the count (`Lit(4)`) — the wildcard
+/// element makes the sum honestly unknown and the concat axis
+/// wildcards (both `[4]` and `[5]` typecheck). The head bias remains
+/// observable on the BINDING path, where only the joined element
+/// type and the literal length survive.
+#[test]
+fn issue594_mixed_wildcard_element_wildcards_direct_concat_axis() {
+    crate::test_support::run(|operation| {
+        for claim in ["4", "5"] {
+            let result = infer_surf(
+                &format!(
+                    r#"
+module Repro.ConcatHeadBias
+def cat_bias(a: tensor[2, f32], b: tensor[*, f32]) -> tensor[{claim}, f32] =
+  concat([a, b], 0)
+"#
+                ),
+                operation,
+            );
+            assert!(
+                result.errors.is_empty(),
+                "a wildcard element makes the direct sum unknown; [{claim}] must typecheck, got: {:?}",
+                result.errors
+            );
+        }
+        // Binding path: the join is head-biased to the element `[2]` and
+        // the length is 2, so the concat axis is `Lit(4)` — `[5]` rejects.
+        let rejected = infer_surf(
+            r#"
+module Repro.ConcatHeadBiasBinding
+def cat_bias(a: tensor[2, f32], b: tensor[*, f32]) -> tensor[5, f32] = {
+  rows = [a, b]
+  concat(rows, 0)
+}
+"#,
+            operation,
+        );
+        assert!(
+            !rejected.errors.is_empty(),
+            "the binding path keeps the head-biased join times count (Lit(4)); [5] must be rejected"
+        );
+    })
+}
+
+// ── chelis#594: ragged direct-literal concat sums per-element extents ──
+
+/// A DIRECT literal list with ragged extents sums them: `[2] + [3]`
+/// on axis 0 types `[5]`. Pre-chelis#594 the §4.5.2 join widened the
+/// mismatched literals to `*` before the concat rule saw them, so
+/// the sum was unrecoverable and the axis stayed a wildcard.
+#[test]
+fn issue594_ragged_direct_literal_concat_sums_extents() {
+    crate::test_support::run(|operation| {
+        let accepted = infer_surf(
+            r#"
+module Repro.RaggedConcat
+def cat(a: tensor[2, f32], b: tensor[3, f32]) -> tensor[5, f32] =
+  concat([a, b], 0)
+"#,
+            operation,
+        );
+        assert!(
+            accepted.errors.is_empty(),
+            "ragged [2] + [3] must type [5], got: {:?}",
+            accepted.errors
+        );
+        let rejected = infer_surf(
+            r#"
+module Repro.RaggedConcatBad
+def cat(a: tensor[2, f32], b: tensor[3, f32]) -> tensor[6, f32] =
+  concat([a, b], 0)
+"#,
+            operation,
+        );
+        assert!(
+            !rejected.errors.is_empty(),
+            "ragged sum is 5; [6] must be rejected"
+        );
+    })
+}
+
+/// Three ragged elements and a non-zero concat axis: concatenating
+/// `[4, 1]`, `[4, 2]`, and `[4, 3]` on axis 1 types `[4, 6]`, with
+/// the non-concat axis preserved.
+#[test]
+fn issue594_ragged_three_element_mid_axis_concat_sums_extents() {
+    crate::test_support::run(|operation| {
+        let accepted = infer_surf(
+            r#"
+module Repro.RaggedConcat3
+def cat(a: tensor[4, 1, f32], b: tensor[4, 2, f32], c: tensor[4, 3, f32]) -> tensor[4, 6, f32] =
+  concat([a, b, c], 1)
+"#,
+            operation,
+        );
+        assert!(
+            accepted.errors.is_empty(),
+            "ragged axis-1 sum must type [4, 6], got: {:?}",
+            accepted.errors
+        );
+        let rejected = infer_surf(
+            r#"
+module Repro.RaggedConcat3Bad
+def cat(a: tensor[4, 1, f32], b: tensor[4, 2, f32], c: tensor[4, 3, f32]) -> tensor[4, 7, f32] =
+  concat([a, b, c], 1)
+"#,
+            operation,
+        );
+        assert!(
+            !rejected.errors.is_empty(),
+            "ragged axis-1 sum is 6; [4, 7] must be rejected"
+        );
+    })
+}
+
+/// Ragged extents are NOT recoverable through a binding — only the
+/// literal length survives (`Env::list_literal_len`), and the
+/// §4.5.2 join has already widened the mismatched extents to `*`. A
+/// let-bound ragged list therefore keeps the honest wildcard: a
+/// claim the direct form would reject is accepted permissively.
+/// Deliberate boundary, pinned so a future extension is conscious.
+#[test]
+fn issue594_ragged_let_bound_list_stays_wildcard() {
+    crate::test_support::run(|operation| {
+        let result = infer_surf(
+            r#"
+module Repro.RaggedConcatLet
+def cat(a: tensor[2, f32], b: tensor[3, f32]) -> tensor[9, f32] = {
+  rows = [a, b]
+  concat(rows, 0)
+}
+"#,
+            operation,
+        );
+        assert!(
+            result.errors.is_empty(),
+            "a let-bound ragged list wildcards the concat axis (permissive), got: {:?}",
+            result.errors
+        );
+    })
+}
+
+/// Add-symmetric staleness pin (mirrors the size-provenance BLOCKER-B
+/// discipline): a name re-bound from a list literal to a non-literal
+/// list must NOT keep the stale literal length. With the stale length
+/// the concat would type `Lit(2)` and reject `[7, 2]`; the cleared
+/// binding honestly wildcards the concat axis.
+#[test]
+fn issue631_concat_rebound_list_clears_stale_length() {
+    crate::test_support::run(|operation| {
+        let result = infer_surf(
+            r#"
+module Repro.ConcatRebind
+def cat_rebind(a: tensor[1, 2, f32], b: tensor[1, 2, f32], xs: List[tensor[1, 2, f32]]) -> tensor[7, 2, f32] = {
+  rows = [a, b]
+  rows = xs
+  concat(rows, 0)
+}
+"#,
+            operation,
+        );
+        assert!(
+            result.errors.is_empty(),
+            "a re-bound list name must clear its stale literal length, got: {:?}",
+            result.errors
+        );
+    })
+}
+
+/// Shadow pin (mirrors size-provenance BLOCKER C): a `List` value
+/// parameter that shadows an outer list-literal binding must not
+/// inherit the outer literal length through the env clone.
+#[test]
+fn issue631_concat_param_shadow_clears_outer_length() {
+    crate::test_support::run(|operation| {
+        let result = infer_surf(
+            r#"
+module Repro.ConcatShadow
+rows = [to_tensor([cast(1.0, f32), cast(2.0, f32)])]
+def cat_shadow(rows: List[tensor[2, f32]]) -> tensor[9, f32] =
+  concat(rows, 0)
+"#,
+            operation,
+        );
+        assert!(
+            result.errors.is_empty(),
+            "a shadowing List param must clear the outer literal length, got: {:?}",
+            result.errors
+        );
+    })
+}
+
+#[test]
+fn surf_3h_sort_and_trace_type_check() {
+    crate::test_support::run(|operation| {
+        let checked = checked_surf(
+            r#"
+def summarize(x: tensor[batch, hidden, hidden, f32]) -> (tensor[batch, hidden, f32], tensor[batch, hidden, i64], tensor[batch, f32]) = {
+  diag = diagonal(x, 1, 2)
+  sorted = sort(diag, 1)
+  values = sorted.0
+  indices = sorted.1
+  total = trace(x, 1, 2)
+  (values, indices, total)
+}
+"#,
+            operation,
+        );
+        assert!(!checked.annotated_exprs().is_empty());
+    })
+}
+
+#[test]
+fn surf_einsum_rejects_ellipsis_in_3h() {
+    crate::test_support::run(|operation| {
+        let result = crate::test_support::check_ir_program(
+            &chelis_surf::desugar::desugar_program(
+                &chelis_surf::parser::parse_str(
+                    r#"
+                def bad(
+                  x: tensor[batch, seq, hidden, f32],
+                  w: tensor[hidden, out_dim, f32]
+                ) -> tensor[batch, seq, out_dim, f32] =
+                  einsum("...h,ho->...o", x, w)
+                "#,
+                    &chelis_syntax_host::NativeStack,
+                )
+                .expect("surf parse"),
+                &chelis_syntax_host::NativeStack,
+            )
+            .expect("Surf fixture must desugar"),
+            operation,
+        );
+        let err = result.expect_err("ellipsis should be rejected in 3h einsum");
+        assert!(
+            err.errors.iter().any(|error| {
+                error.message.contains("einsum")
+                    && (error.message.contains("ellipsis") || error.message.contains("..."))
+            }),
+            "expected einsum ellipsis rejection, got {:?}",
+            err.errors
+        );
+    })
+}
+
+#[test]
+fn surf_where_rejects_non_bool_condition_tensor() {
+    crate::test_support::run(|operation| {
+        let result = crate::test_support::check_ir_program(
+            &chelis_surf::desugar::desugar_program(
+                &chelis_surf::parser::parse_str(
+                    r#"
+                def bad(
+                  cond: tensor[batch, hidden, f32],
+                  x: tensor[batch, hidden, f32],
+                  y: tensor[batch, hidden, f32]
+                ) -> tensor[batch, hidden, f32] =
+                  where(cond, x, y)
+                "#,
+                    &chelis_syntax_host::NativeStack,
+                )
+                .expect("surf parse"),
+                &chelis_syntax_host::NativeStack,
+            )
+            .expect("Surf fixture must desugar"),
+            operation,
+        );
+        let err = result.expect_err("where should reject non-bool condition tensors");
+        assert!(
+            err.errors
+                .iter()
+                .any(|error| { error.message.contains("where") && error.message.contains("bool") }),
+            "expected where bool mismatch, got {:?}",
+            err.errors
+        );
+    })
+}
+
+#[test]
+fn surf_scatter_replace_rejects_unknown_mode() {
+    crate::test_support::run(|operation| {
+        let result = crate::test_support::check_ir_program(
+            &chelis_surf::desugar::desugar_program(
+                &chelis_surf::parser::parse_str(
+                    r#"
+                def bad(
+                  base: tensor[seq, hidden, f32],
+                  ids: tensor[seq, i64],
+                  updates: tensor[seq, hidden, f32]
+                ) -> tensor[seq, hidden, f32] =
+                  scatter(base, ids, updates, 0, "last")
+                "#,
+                    &chelis_syntax_host::NativeStack,
+                )
+                .expect("surf parse"),
+                &chelis_syntax_host::NativeStack,
+            )
+            .expect("Surf fixture must desugar"),
+            operation,
+        );
+        let err = result.expect_err("scatter should reject unsupported mode");
+        assert!(
+            err.errors.iter().any(|error| {
+                error.message.contains("scatter")
+                    && error.message.contains("replace")
+                    && error.message.contains("add")
+            }),
+            "expected scatter mode rejection, got {:?}",
+            err.errors
+        );
+    })
+}
+
+#[test]
+fn surf_einsum_rejects_static_extent_mismatch() {
+    crate::test_support::run(|operation| {
+        let result = crate::test_support::check_ir_program(
+            &chelis_surf::desugar::desugar_program(
+                &chelis_surf::parser::parse_str(
+                    r#"
+                a = pad_sequences([[1.0, 2.0], [3.0, 4.0]], 0.0)
+                b = pad_sequences([[5.0, 6.0], [7.0, 8.0], [9.0, 10.0]], 0.0)
+                out = einsum("ij,jk->ik", a, b)
+                "#,
+                    &chelis_syntax_host::NativeStack,
+                )
+                .expect("surf parse"),
+                &chelis_syntax_host::NativeStack,
+            )
+            .expect("Surf fixture must desugar"),
+            operation,
+        );
+        let err = result.expect_err("static einsum extent mismatch should be rejected");
+        assert!(
+            err.errors.iter().any(|error| {
+                error.message.contains("einsum") && error.message.contains("inconsistent extents")
+            }),
+            "expected einsum extent mismatch, got {:?}",
+            err.errors
+        );
+    })
+}
+
+#[test]
+fn surf_scatter_replace_accepts_static_duplicate_indices() {
+    crate::test_support::run(|operation| {
+        let result = crate::test_support::check_ir_program(
+            &chelis_surf::desugar::desugar_program(
+                &chelis_surf::parser::parse_str(
+                    r#"
+                base = pad_sequences([[0.0, 0.0], [0.0, 0.0], [0.0, 0.0]], 0.0)
+                ids: List[i64] = [cast(1, i64), cast(1, i64)]
+                idx = to_tensor(ids)
+                updates = pad_sequences([[5.0, 5.0], [6.0, 6.0]], 0.0)
+                out = scatter(base, idx, updates, 0, "replace")
+                "#,
+                    &chelis_syntax_host::NativeStack,
+                )
+                .expect("surf parse"),
+                &chelis_syntax_host::NativeStack,
+            )
+            .expect("Surf fixture must desugar"),
+            operation,
+        );
+        result.expect("static scatter duplicate indices follow deterministic last-write-wins");
+    })
+}
+
+#[test]
+fn surf_map_filter_fold_type_check() {
+    crate::test_support::run(|operation| {
+        let checked = checked_surf(
+            r#"
+def inc(x: i64) -> i64 = add(x, cast(1, i64))
+xs: List[i64] = [cast(1, i64), cast(2, i64), cast(3, i64)]
+mapped = map(inc, xs)
+filtered = filter(fn (x: i64) -> eq(mod(x, cast(2, i64)), cast(0, i64)), mapped)
+total = fold(fn (acc: i64, x: i64) -> add(acc, x), cast(0, i64), filtered)
+"#,
+            operation,
+        );
+        assert!(checked.annotated_exprs().len() >= 5);
+    })
+}
+
+#[test]
+fn surf_append_rejects_wrong_element_type() {
+    crate::test_support::run(|operation| {
+        let result = crate::test_support::check_ir_program(
+            &chelis_surf::desugar::desugar_program(
+                &chelis_surf::parser::parse_str(
+                    r#"
+                xs: List[i64] = [cast(1, i64)]
+                bad = append(xs, "oops")
+                "#,
+                    &chelis_syntax_host::NativeStack,
+                )
+                .expect("surf parse"),
+                &chelis_syntax_host::NativeStack,
+            )
+            .expect("Surf fixture must desugar"),
+            operation,
+        );
+        let err = result.expect_err("append should reject mismatched element type");
+        assert!(
+            err.errors
+                .iter()
+                .any(|error| error.message.contains("List") || error.message.contains("string")),
+            "expected list element mismatch, got {:?}",
+            err.errors
+        );
+    })
+}
+
+#[test]
+fn surf_filter_rejects_non_bool_callback() {
+    crate::test_support::run(|operation| {
+        let result = crate::test_support::check_ir_program(
+            &chelis_surf::desugar::desugar_program(
+                &chelis_surf::parser::parse_str(
+                    r#"
+                xs: List[i64] = [cast(1, i64)]
+                bad = filter(fn (x: i64) -> add(x, cast(1, i64)), xs)
+                "#,
+                    &chelis_syntax_host::NativeStack,
+                )
+                .expect("surf parse"),
+                &chelis_syntax_host::NativeStack,
+            )
+            .expect("Surf fixture must desugar"),
+            operation,
+        );
+        let err = result.expect_err("filter should reject non-bool callback");
+        assert!(
+            err.errors
+                .iter()
+                .any(|error| error.message.contains("filter")
+                    && error.message.contains("bool")
+                    && error.message.contains("callback")),
+            "expected bool callback mismatch, got {:?}",
+            err.errors
+        );
+    })
+}
+
+#[test]
+fn surf_dict_entries_rejects_non_dict_input() {
+    crate::test_support::run(|operation| {
+        let result = crate::test_support::check_ir_program(
+            &chelis_surf::desugar::desugar_program(
+                &chelis_surf::parser::parse_str(
+                    r#"
+                xs: List[i64] = [cast(1, i64)]
+                bad = dict_entries(xs)
+                "#,
+                    &chelis_syntax_host::NativeStack,
+                )
+                .expect("surf parse"),
+                &chelis_syntax_host::NativeStack,
+            )
+            .expect("Surf fixture must desugar"),
+            operation,
+        );
+        let err = result.expect_err("dict_entries should reject non-dict input");
+        assert!(
+            err.errors
+                .iter()
+                .any(|error| error.message.contains("dict_entries")
+                    || error.message.contains("Dict")),
+            "expected dict input mismatch, got {:?}",
+            err.errors
+        );
+    })
+}
+
+#[test]
+fn surf_to_list_rejects_rank2_tensor() {
+    crate::test_support::run(|operation| {
+        let result = crate::test_support::check_ir_program(
+            &chelis_surf::desugar::desugar_program(
+                &chelis_surf::parser::parse_str(
+                    r#"
+                def bad(x: tensor[2, 2, f32]) -> List[f32] = to_list(x)
+                "#,
+                    &chelis_syntax_host::NativeStack,
+                )
+                .expect("surf parse"),
+                &chelis_syntax_host::NativeStack,
+            )
+            .expect("Surf fixture must desugar"),
+            operation,
+        );
+        let err = result.expect_err("to_list should reject rank-2 tensor input");
+        assert!(
+            err.errors.iter().any(|error| {
+                error.message.contains("rank-1 tensor") || error.message.contains("to_list")
+            }),
+            "expected rank mismatch, got {:?}",
+            err.errors
+        );
+    })
+}
+
+#[test]
+fn surf_fold_rejects_accumulator_mismatch() {
+    crate::test_support::run(|operation| {
+        let result = crate::test_support::check_ir_program(
+        &chelis_surf::desugar::desugar_program(&chelis_surf::parser::parse_str(r#"
+                xs: List[i64] = [cast(1, i64)]
+                bad = fold(fn (acc: string, x: i64) -> string_concat(acc, to_string(x)), cast(0, i64), xs)
+                "#, &chelis_syntax_host::NativeStack)
+        .expect("surf parse"), &chelis_syntax_host::NativeStack)
+        .expect("Surf fixture must desugar"),
+     operation);
+        let err = result.expect_err("fold should reject mismatched accumulator type");
+        assert!(
+            err.errors.iter().any(|error| error.message.contains("fold")
+                && error.message.contains("accumulator")
+                && error.message.contains("string")
+                && error.message.contains("i64")),
+            "expected accumulator mismatch, got {:?}",
+            err.errors
+        );
+    })
+}
+
+fn surf_tuple_fold_tensor_slot_program() -> Vec<deep::Expr> {
+    chelis_surf::desugar::desugar_program(
+        &chelis_surf::parser::parse_str(
+            r#"
+        def f[n](xs: tensor[n, f32]) -> (tensor[n, f32], i64) = {
+          idxs = range(cast(0, i64), numel(copy(xs)))
+          state0 = (to_tensor(map(fn (x: f32) -> cast(0.0, f32), to_list(copy(xs)))), cast(0, i64))
+          step = fn (state, i) -> {
+        acc = state.0
+        total = state.1
+        (acc, add(total, i))
+          }
+          fold(step, state0, idxs)
+        }
+        
+        out = f(to_tensor([1.0, 2.0, 3.0], f32))
+        "#,
+            &chelis_syntax_host::NativeStack,
+        )
+        .expect("surf parse"),
+        &chelis_syntax_host::NativeStack,
+    )
+    .expect("Surf fixture must desugar")
+}
+
+#[test]
+fn surf_polymorphic_tuple_fold_with_tensor_slot_infers_ir() {
+    crate::test_support::run(|operation| {
+        let result = crate::test_support::infer_ir_program(
+            &surf_tuple_fold_tensor_slot_program(),
+            operation,
+        );
+        assert!(
+            result.errors.is_empty(),
+            "ir inference should succeed without overflowing: {:?}",
+            result.errors
+        );
+    })
+}
+
+#[test]
+fn surf_polymorphic_tuple_fold_with_tensor_slot_annotates_ir() {
+    crate::test_support::run(|operation| {
+        let program = surf_tuple_fold_tensor_slot_program();
+        crate::test_support::check_typed_program(&program, operation)
+            .expect("annotation should succeed without overflowing");
+    })
+}
+
+#[test]
+fn surf_polymorphic_tuple_fold_with_tensor_slot_type_checks() {
+    crate::test_support::run(|operation| {
+        let result = crate::test_support::check_ir_program(
+            &surf_tuple_fold_tensor_slot_program(),
+            operation,
+        );
+        result.expect("polymorphic tuple fold should type check without overflowing");
+    })
+}
+
+#[test]
+fn surf_collection_helper_builtins_type_check() {
+    crate::test_support::run(|operation| {
+        let result = crate::test_support::check_ir_program(
+        &chelis_surf::desugar::desugar_program(&chelis_surf::parser::parse_str(r#"
+                xs: List[i64] = [cast(1, i64), cast(2, i64), cast(3, i64)]
+                prefix = take(xs, cast(2, i64))
+                suffix = skip(xs, cast(1, i64))
+                groups = chunk(xs, cast(2, i64))
+                scanned = scan(fn (acc: i64, x: i64) -> add(acc, x), cast(0, i64), xs)
+                buckets = partition(fn (x: i64) -> gt(x, cast(1, i64)), xs)
+                exploded = flat_map(fn (x: i64) -> [x, add(x, cast(10, i64))], xs)
+                flattened = flatten([[cast(1, i64)], [cast(2, i64), cast(3, i64)]])
+                base: Dict[string, i64] = dict_of([("alpha", cast(1, i64))])
+                extended = dict_insert(base, "beta", cast(2, i64))
+                merged = dict_merge(extended, dict_of([("beta", cast(20, i64)), ("gamma", cast(3, i64))]))
+                trimmed = dict_remove(merged, "gamma")
+                "#, &chelis_syntax_host::NativeStack)
+        .expect("surf parse"), &chelis_syntax_host::NativeStack)
+        .expect("Surf fixture must desugar"),
+     operation);
+        result.expect("collection helper builtins should type check");
+    })
+}
+
+#[test]
+fn surf_take_rejects_non_integer_count() {
+    crate::test_support::run(|operation| {
+        let result = crate::test_support::check_ir_program(
+            &chelis_surf::desugar::desugar_program(
+                &chelis_surf::parser::parse_str(
+                    r#"
+                xs: List[i64] = [cast(1, i64), cast(2, i64)]
+                bad = take(xs, "two")
+                "#,
+                    &chelis_syntax_host::NativeStack,
+                )
+                .expect("surf parse"),
+                &chelis_syntax_host::NativeStack,
+            )
+            .expect("Surf fixture must desugar"),
+            operation,
+        );
+        let err = result.expect_err("take should reject non-integer count");
+        assert!(
+            err.errors
+                .iter()
+                .any(|error| error.message.contains("take") || error.message.contains("integer")),
+            "expected integer count mismatch, got {:?}",
+            err.errors
+        );
+    })
+}
+
+#[test]
+fn surf_dict_insert_rejects_value_type_mismatch() {
+    crate::test_support::run(|operation| {
+        let result = crate::test_support::check_ir_program(
+            &chelis_surf::desugar::desugar_program(
+                &chelis_surf::parser::parse_str(
+                    r#"
+                base: Dict[string, i64] = dict_of([("alpha", cast(1, i64))])
+                bad = dict_insert(base, "beta", "two")
+                "#,
+                    &chelis_syntax_host::NativeStack,
+                )
+                .expect("surf parse"),
+                &chelis_syntax_host::NativeStack,
+            )
+            .expect("Surf fixture must desugar"),
+            operation,
+        );
+        let err = result.expect_err("dict_insert should reject mismatched value type");
+        assert!(
+            err.errors
+                .iter()
+                .any(|error| error.message.contains("dict_insert")
+                    || error.message.contains("i64")
+                    || error.message.contains("string")),
+            "expected dict value mismatch, got {:?}",
+            err.errors
+        );
+    })
+}
+
+#[test]
+fn surf_dict_merge_rejects_mismatched_dict_value_types() {
+    crate::test_support::run(|operation| {
+        let result = crate::test_support::check_ir_program(
+            &chelis_surf::desugar::desugar_program(
+                &chelis_surf::parser::parse_str(
+                    r#"
+                lhs: Dict[string, i64] = dict_of([("alpha", cast(1, i64))])
+                rhs: Dict[string, string] = dict_of([("beta", "two")])
+                bad = dict_merge(lhs, rhs)
+                "#,
+                    &chelis_syntax_host::NativeStack,
+                )
+                .expect("surf parse"),
+                &chelis_syntax_host::NativeStack,
+            )
+            .expect("Surf fixture must desugar"),
+            operation,
+        );
+        let err = result.expect_err("dict_merge should reject mismatched dict value types");
+        assert!(
+            err.errors
+                .iter()
+                .any(|error| error.message.contains("dict_merge")
+                    || error.message.contains("Dict")
+                    || error.message.contains("i64")
+                    || error.message.contains("string")),
+            "expected dict merge mismatch, got {:?}",
+            err.errors
+        );
+    })
+}
+
+#[test]
+fn surf_scan_rejects_accumulator_mismatch() {
+    crate::test_support::run(|operation| {
+        let result = crate::test_support::check_ir_program(
+        &chelis_surf::desugar::desugar_program(&chelis_surf::parser::parse_str(r#"
+                xs: List[i64] = [cast(1, i64)]
+                bad = scan(fn (acc: string, x: i64) -> string_concat(acc, to_string(x)), cast(0, i64), xs)
+                "#, &chelis_syntax_host::NativeStack)
+        .expect("surf parse"), &chelis_syntax_host::NativeStack)
+        .expect("Surf fixture must desugar"),
+     operation);
+        let err = result.expect_err("scan should reject mismatched accumulator type");
+        assert!(
+            err.errors.iter().any(|error| error.message.contains("scan")
+                && error.message.contains("accumulator")
+                && error.message.contains("string")
+                && error.message.contains("i64")),
+            "expected scan accumulator mismatch, got {:?}",
+            err.errors
+        );
+    })
+}
+
+#[test]
+fn surf_partition_rejects_non_bool_callback() {
+    crate::test_support::run(|operation| {
+        let result = crate::test_support::check_ir_program(
+            &chelis_surf::desugar::desugar_program(
+                &chelis_surf::parser::parse_str(
+                    r#"
+                xs: List[i64] = [cast(1, i64)]
+                bad = partition(fn (x: i64) -> add(x, cast(1, i64)), xs)
+                "#,
+                    &chelis_syntax_host::NativeStack,
+                )
+                .expect("surf parse"),
+                &chelis_syntax_host::NativeStack,
+            )
+            .expect("Surf fixture must desugar"),
+            operation,
+        );
+        let err = result.expect_err("partition should reject non-bool callback");
+        assert!(
+            err.errors
+                .iter()
+                .any(|error| error.message.contains("partition")
+                    && error.message.contains("bool")
+                    && error.message.contains("callback")),
+            "expected partition callback mismatch, got {:?}",
+            err.errors
+        );
+    })
+}
+
+#[test]
+fn surf_flat_map_rejects_non_list_callback() {
+    crate::test_support::run(|operation| {
+        let result = crate::test_support::check_ir_program(
+            &chelis_surf::desugar::desugar_program(
+                &chelis_surf::parser::parse_str(
+                    r#"
+                xs: List[i64] = [cast(1, i64)]
+                bad = flat_map(fn (x: i64) -> add(x, cast(1, i64)), xs)
+                "#,
+                    &chelis_syntax_host::NativeStack,
+                )
+                .expect("surf parse"),
+                &chelis_syntax_host::NativeStack,
+            )
+            .expect("Surf fixture must desugar"),
+            operation,
+        );
+        let err = result.expect_err("flat_map should reject non-list callback");
+        assert!(
+            err.errors
+                .iter()
+                .any(|error| error.message.contains("List") || error.message.contains("flat_map")),
+            "expected flat_map callback mismatch, got {:?}",
+            err.errors
+        );
+    })
+}
+
+#[test]
+fn surf_flatten_rejects_non_nested_list_input() {
+    crate::test_support::run(|operation| {
+        let result = crate::test_support::check_ir_program(
+            &chelis_surf::desugar::desugar_program(
+                &chelis_surf::parser::parse_str(
+                    r#"
+                xs: List[i64] = [cast(1, i64)]
+                bad = flatten(xs)
+                "#,
+                    &chelis_syntax_host::NativeStack,
+                )
+                .expect("surf parse"),
+                &chelis_syntax_host::NativeStack,
+            )
+            .expect("Surf fixture must desugar"),
+            operation,
+        );
+        let err = result.expect_err("flatten should reject non-nested list input");
+        assert!(
+            err.errors
+                .iter()
+                .any(|error| error.message.contains("flatten") || error.message.contains("List")),
+            "expected flatten input mismatch, got {:?}",
+            err.errors
+        );
+    })
+}
+
+#[test]
+fn surf_dict_remove_rejects_mismatched_key_type() {
+    crate::test_support::run(|operation| {
+        let result = crate::test_support::check_ir_program(
+            &chelis_surf::desugar::desugar_program(
+                &chelis_surf::parser::parse_str(
+                    r#"
+                base: Dict[string, i64] = dict_of([("alpha", cast(1, i64))])
+                bad = dict_remove(base, cast(7, i64))
+                "#,
+                    &chelis_syntax_host::NativeStack,
+                )
+                .expect("surf parse"),
+                &chelis_syntax_host::NativeStack,
+            )
+            .expect("Surf fixture must desugar"),
+            operation,
+        );
+        let err = result.expect_err("dict_remove should reject mismatched key type");
+        assert!(
+            err.errors.iter().any(|error| {
+                error.message.contains("dict_remove")
+                    || (error.message.contains("string") && error.message.contains("i64"))
+            }),
+            "expected dict_remove key mismatch, got {:?}",
+            err.errors
+        );
+    })
+}
+
+#[test]
+fn surf_chunk_rejects_non_integer_size() {
+    crate::test_support::run(|operation| {
+        let result = crate::test_support::check_ir_program(
+            &chelis_surf::desugar::desugar_program(
+                &chelis_surf::parser::parse_str(
+                    r#"
+                xs: List[i64] = [cast(1, i64)]
+                bad = chunk(xs, "two")
+                "#,
+                    &chelis_syntax_host::NativeStack,
+                )
+                .expect("surf parse"),
+                &chelis_syntax_host::NativeStack,
+            )
+            .expect("Surf fixture must desugar"),
+            operation,
+        );
+        let err = result.expect_err("chunk should reject non-integer size");
+        assert!(
+            err.errors
+                .iter()
+                .any(|error| error.message.contains("chunk") || error.message.contains("integer")),
+            "expected chunk size mismatch, got {:?}",
+            err.errors
+        );
+    })
+}
+
+// ------------------------------------------------------------------
+// Top-level binding cycle detection
+// ------------------------------------------------------------------
+
+fn ir_errors_from_surf(src: &str, operation: &crate::resources::Operation<'_>) -> Vec<CheckError> {
+    let decls =
+        chelis_surf::parser::parse_str(src, &chelis_syntax_host::NativeStack).expect("surf parse");
+    let exprs = chelis_surf::desugar::desugar_program(&decls, &chelis_syntax_host::NativeStack)
+        .expect("Surf fixture must desugar");
+    crate::test_support::infer_ir_program(&exprs, operation).errors
+}
+
+#[test]
+fn nautilus_self_reference_is_allowed() {
+    crate::test_support::run(|operation| {
+        // The single-hop identity `x = (x : tensor[...])` is a pinned Nautilus
+        // external-input pattern and must NOT be flagged as a binding cycle.
+        let errors = ir_errors_from_surf("x = (x : tensor[4, f32])\n", operation);
+        assert!(
+            !errors
+                .iter()
+                .any(|e| matches!(e.kind, CheckErrorKind::CycleDetected)),
+            "Nautilus self-reference should not be flagged; got {errors:?}"
+        );
+    })
+}
+
+#[test]
+fn two_hop_binding_cycle_is_detected() {
+    crate::test_support::run(|operation| {
+        let errors = ir_errors_from_surf(
+            "a = (b : tensor[4, f32])\n\
+         b = (a : tensor[4, f32])\n",
+            operation,
+        );
+        let cycle_err = errors
+            .iter()
+            .find(|e| matches!(e.kind, CheckErrorKind::CycleDetected))
+            .unwrap_or_else(|| {
+                panic!("expected a CycleDetected error for a two-hop cycle; got {errors:?}")
+            });
+        assert!(
+            cycle_err.message.contains("binding cycle"),
+            "message should mention 'binding cycle'; got {:?}",
+            cycle_err.message
+        );
+        assert!(
+            cycle_err.message.contains("a -> b -> a"),
+            "expected 'a -> b -> a' in message; got {:?}",
+            cycle_err.message
+        );
+    })
+}
+
+#[test]
+fn three_hop_binding_cycle_is_detected() {
+    crate::test_support::run(|operation| {
+        let errors = ir_errors_from_surf(
+            "a = (b : tensor[4, f32])\n\
+         b = (c : tensor[4, f32])\n\
+         c = (a : tensor[4, f32])\n",
+            operation,
+        );
+        let cycle_err = errors
+            .iter()
+            .find(|e| matches!(e.kind, CheckErrorKind::CycleDetected))
+            .unwrap_or_else(|| {
+                panic!("expected a CycleDetected error for a three-hop cycle; got {errors:?}")
+            });
+        assert!(
+            cycle_err.message.contains("a -> b -> c -> a"),
+            "expected 'a -> b -> c -> a' in message; got {:?}",
+            cycle_err.message
+        );
+    })
+}
+
+#[test]
+fn unrelated_defs_do_not_trigger_cycle_false_positive() {
+    crate::test_support::run(|operation| {
+        // Sanity: multiple Nautilus self-references together should still pass.
+        let errors = ir_errors_from_surf(
+            "x = (x : tensor[4, f32])\n\
+         y = (y : tensor[4, f32])\n",
+            operation,
+        );
+        assert!(
+            !errors
+                .iter()
+                .any(|e| matches!(e.kind, CheckErrorKind::CycleDetected)),
+            "multiple independent Nautilus inputs must not trigger a cycle error; got {errors:?}"
+        );
+    })
+}
+
+// ── chelis#293: general type var through a function-typed parameter ──
+//
+// A def generic over a general type variable `P` declared in its
+// explicit `[..]` quantifier list, where `P` is threaded through a
+// function-typed parameter, must instantiate `P` to a fresh variable at
+// each call site and unify it against the concrete callback argument.
+// Before the fix, the Surf desugarer misclassified the uppercase `P` as
+// a rigid ADT `(t-adt {} P)`, so every call site failed with
+// `type mismatch: P vs tensor[..]`.
+
+#[test]
+fn issue_293_general_tvar_through_arrow_param_checks_clean() {
+    crate::test_support::run(|operation| {
+        // Positive: the reproducer must check clean — no TypeMismatch.
+        let result = infer_surf(
+            r#"
+module Repro.GenericCallback
+def apply_resid[n, P](x: tensor[n, f32], inner_p: P, f: tensor[n, f32] -> P -> tensor[n, f32]) -> tensor[n, f32] =
+  add(x, f(x, inner_p))
+def use_it(x: tensor[3, f32], w: tensor[3, f32]) -> tensor[3, f32] =
+  apply_resid(x, w, fn (t, q) -> mul(t, q))
+"#,
+            operation,
+        );
+        assert!(
+            result.errors.is_empty(),
+            "expected the general-tvar-through-arrow reproducer to check clean, got: {:?}",
+            result.errors
+        );
+    })
+}
+
+#[test]
+fn issue_293_apply_resid_checks_clean_in_isolation() {
+    crate::test_support::run(|operation| {
+        // Control: the generic def alone already checked clean before the
+        // fix; it must keep checking clean.
+        let result = infer_surf(
+            r#"
+module Repro.GenericCallback
+def apply_resid[n, P](x: tensor[n, f32], inner_p: P, f: tensor[n, f32] -> P -> tensor[n, f32]) -> tensor[n, f32] =
+  add(x, f(x, inner_p))
+"#,
+            operation,
+        );
+        assert!(
+            result.errors.is_empty(),
+            "apply_resid must check clean in isolation, got: {:?}",
+            result.errors
+        );
+    })
+}
+
+#[test]
+fn issue_293_dim_var_callback_variant_checks_clean() {
+    crate::test_support::run(|operation| {
+        // Control (dim-var path): the same shape where the threaded
+        // parameter is a *dim* var `m` rather than a general type var
+        // already worked and must keep working.
+        let result = infer_surf(
+            r#"
+module Repro.DimCallback
+def apply_resid[n, m](x: tensor[n, f32], inner: tensor[m, f32], f: tensor[n, f32] -> tensor[m, f32] -> tensor[n, f32]) -> tensor[n, f32] =
+  f(x, inner)
+def use_it(x: tensor[3, f32], w: tensor[3, f32]) -> tensor[3, f32] =
+  apply_resid(x, w, fn (t, q) -> add(t, q))
+"#,
+            operation,
+        );
+        assert!(
+            result.errors.is_empty(),
+            "the dim-var callback control must check clean, got: {:?}",
+            result.errors
+        );
+    })
+}
+
+#[test]
+fn issue_293_monomorphic_callback_variant_checks_clean() {
+    crate::test_support::run(|operation| {
+        // Control (monomorphic path): a fully concrete callback already
+        // worked and must keep working.
+        let result = infer_surf(
+            r#"
+module Repro.MonoCallback
+def apply_resid[n](x: tensor[n, f32], inner: tensor[n, f32], f: tensor[n, f32] -> tensor[n, f32] -> tensor[n, f32]) -> tensor[n, f32] =
+  add(x, f(x, inner))
+def use_it(x: tensor[3, f32], w: tensor[3, f32]) -> tensor[3, f32] =
+  apply_resid(x, w, fn (t, q) -> mul(t, q))
+"#,
+            operation,
+        );
+        assert!(
+            result.errors.is_empty(),
+            "the monomorphic callback control must check clean, got: {:?}",
+            result.errors
+        );
+    })
+}
+
+#[test]
+fn issue_293_incompatible_callback_still_rejected() {
+    crate::test_support::run(|operation| {
+        // Negative parity: the fix must NOT over-loosen unification. Here
+        // the callback's second parameter `q` is multiplied with `t`
+        // (a `tensor[n, f32]`), so `q` must be `tensor[n, f32]`. But the
+        // `inner_p` argument supplied at the call site is a scalar `i32`,
+        // which is bound to the same `P`. `P` cannot be both a tensor and a
+        // scalar i32, so this must still produce a clear mismatch.
+        let result = infer_surf(
+            r#"
+module Repro.BadCallback
+def apply_resid[n, P](x: tensor[n, f32], inner_p: P, f: tensor[n, f32] -> P -> tensor[n, f32]) -> tensor[n, f32] =
+  add(x, f(x, inner_p))
+def use_it(x: tensor[3, f32]) -> tensor[3, f32] =
+  apply_resid(x, 1, fn (t, q) -> mul(t, q))
+"#,
+            operation,
+        );
+        assert!(
+            result.errors.iter().any(|e| matches!(
+                e.kind,
+                CheckErrorKind::TypeMismatch
+                    | CheckErrorKind::PrecisionMismatch
+                    | CheckErrorKind::DimensionMismatch
+            )),
+            "an incompatible callback/argument combination must still be rejected with a \
+         unification mismatch; unification must not have been over-loosened (chelis#293), \
+         got: {:?}",
+            result.errors
+        );
+    })
+}
+
+// ── #39 / chelis#405 wildcard-narrowing param-bound-dvar gate ────
+
+/// `narrow_wildcards_with` narrows a body `Wildcard` to a declared
+/// `Dim::Var` ONLY when that var is bound by a parameter tensor
+/// position. This is the `const_col[n](spots: tensor[n, ..]) ->
+/// tensor[n, 1]` family: the return dim `n` is the same var as the
+/// `spots` parameter axis-0, so the caller binds it. The narrow
+/// reconnects the wildcard return to that input dim.
+#[test]
+fn narrow_substitutes_param_bound_dim_var_for_wildcard() {
+    let n = DimVar(7);
+    let decl = Type::function(
+        vec![
+            Type::Tensor(
+                vec![Dim::Var(n), Dim::Lit(1)],
+                TensorPrec::Concrete(Prim::F64),
+            ),
+            Type::Prim(Prim::F64),
+        ],
+        Type::Tensor(
+            vec![Dim::Var(n), Dim::Lit(1)],
+            TensorPrec::Concrete(Prim::F64),
+        ),
+    );
+    // The inferred body return is the shape-erased `tensor[*, 1]`.
+    let body = Type::function(
+        vec![
+            Type::Tensor(
+                vec![Dim::Var(n), Dim::Lit(1)],
+                TensorPrec::Concrete(Prim::F64),
+            ),
+            Type::Prim(Prim::F64),
+        ],
+        Type::Tensor(
+            vec![Dim::Wildcard, Dim::Lit(1)],
+            TensorPrec::Concrete(Prim::F64),
+        ),
+    );
+    let param_dvars = param_bound_dims(&decl);
+    assert!(
+        param_dvars.contains(&Dim::Var(n)),
+        "n appears in a parameter tensor position, so it is param-bound"
+    );
+    let narrowed = narrow_wildcards_with(&body, &decl, &param_dvars);
+    let Type::Fn(_, ret) = &narrowed else {
+        panic!("expected Fn, got {narrowed:?}");
+    };
+    assert_eq!(
+        **ret,
+        Type::Tensor(
+            vec![Dim::Var(n), Dim::Lit(1)],
+            TensorPrec::Concrete(Prim::F64)
+        ),
+        "the return wildcard must narrow to the param-bound dim var n, not stay `*`"
+    );
+}
+
+#[test]
+fn declared_named_dimension_requires_its_own_signature_parameter() {
+    for has_parameter in [true, false] {
+        let parameter_dim = Dim::Name(if has_parameter { "rows" } else { "cols" }.into());
+        let declared = Type::function(
+            vec![Type::Tensor(
+                vec![parameter_dim],
+                TensorPrec::Concrete(Prim::F32),
+            )],
+            Type::Tensor(
+                vec![Dim::Name("rows".into()), Dim::Lit(2)],
+                TensorPrec::Concrete(Prim::F32),
+            ),
+        );
+        let Type::Fn(params, _) = &declared else {
+            unreachable!()
+        };
+        let body = Type::Fn(
+            params.clone(),
+            Arc::new(Type::Tensor(
+                vec![Dim::Wildcard, Dim::Lit(2)],
+                TensorPrec::Concrete(Prim::F32),
+            )),
+        );
+        let narrowed = narrow_wildcards_with(&body, &declared, &param_bound_dims(&declared));
+        assert_eq!(narrowed, if has_parameter { declared } else { body });
+    }
+}
+
+/// A *return-only* dim var (it appears in the declared return but in
+/// NO parameter tensor position, e.g. `arange[n](start: i32, stop:
+/// i32) -> tensor[n, i32]`) is NOT param-bound. The body wildcard
+/// must stay `Wildcard`: narrowing it to the unbound var would leak a
+/// free dim var into callers (the RT-39+44 soundness regression,
+/// commit 8067c9ce).
+#[test]
+fn narrow_keeps_wildcard_for_return_only_dim_var() {
+    let n = DimVar(11);
+    let decl = Type::function(
+        vec![Type::Prim(Prim::Int32), Type::Prim(Prim::Int32)],
+        Type::Tensor(vec![Dim::Var(n)], TensorPrec::Concrete(Prim::Int32)),
+    );
+    let body = Type::function(
+        vec![Type::Prim(Prim::Int32), Type::Prim(Prim::Int32)],
+        Type::Tensor(vec![Dim::Wildcard], TensorPrec::Concrete(Prim::Int32)),
+    );
+    let param_dvars = param_bound_dims(&decl);
+    assert!(
+        !param_dvars.contains(&Dim::Var(n)),
+        "n is return-only: it must not be in the param-bound set"
+    );
+    let narrowed = narrow_wildcards_with(&body, &decl, &param_dvars);
+    let Type::Fn(_, ret) = &narrowed else {
+        panic!("expected Fn, got {narrowed:?}");
+    };
+    assert_eq!(
+        **ret,
+        Type::Tensor(vec![Dim::Wildcard], TensorPrec::Concrete(Prim::Int32)),
+        "a return-only dim var's body wildcard must stay `*` (no free-var leak)"
+    );
+}
+
+/// `Wildcard` against a declared `Dim::Lit` is always narrowed
+/// regardless of the param-bound set -- concrete literals are
+/// self-contained (the original #39 behavior).
+#[test]
+fn narrow_substitutes_literal_for_wildcard_unconditionally() {
+    let empty = Vec::new();
+    let body = Type::Tensor(
+        vec![Dim::Wildcard, Dim::Wildcard],
+        TensorPrec::Concrete(Prim::F32),
+    );
+    let decl = Type::Tensor(
+        vec![Dim::Lit(4), Dim::Lit(1)],
+        TensorPrec::Concrete(Prim::F32),
+    );
+    let narrowed = narrow_wildcards_with(&body, &decl, &empty);
+    assert_eq!(
+        narrowed,
+        Type::Tensor(
+            vec![Dim::Lit(4), Dim::Lit(1)],
+            TensorPrec::Concrete(Prim::F32)
+        )
+    );
+}
+
+/// End-to-end regression lock (chelis#405 / WS-3): the
+/// `const_col`-style `shape -> to_tensor(map(range)) -> reshape` chain
+/// must publish a scheme whose return batch dim is the param-bound
+/// DECLARED dim, not the shape-erased `*`. Pre-fix the published scheme
+/// was `tensor[*, 1]`, so a CALLER that forwards the result observed
+/// `*` for its batch axis; that erased the link the C backend needs and
+/// ICEd the §345 `symbolic_occurrences` guard at the `vmap` lane
+/// kernel. The fix ties the return dim to the `spots` parameter dim
+/// var, so a caller forwarding `const_col`'s result sees a declared
+/// dim. (`type_env` records each def's body annotation; the call-site
+/// result type in the *caller's* body annotation is what reflects the
+/// narrowed published scheme, so the lock inspects the caller.)
+#[test]
+fn const_col_chain_propagates_declared_dim_to_callers() {
+    crate::test_support::run(|operation| {
+        let checked = checked_surf(
+            r#"
+def const_col[n](spots: tensor[n, f32], v: f64) -> tensor[n, 1, f64] = {
+  nn = cast(shape(copy(spots), cast(0, i32)), i64)
+  reshape(to_tensor(map(fn (i: i64) -> v, range(cast(0, i64), nn))), [nn, cast(1, i64)])
+}
+def caller[n](spots: tensor[n, f32]) -> tensor[n, 1, f64] = const_col(spots, cast(1.0, f64))
+"#,
+            operation,
+        );
+        let caller_ty = checked
+            .type_env()
+            .get("caller")
+            .expect("caller must be in the published type env");
+        let rendered = chelis_deep::printer::print_canonical_flat(core::slice::from_ref(caller_ty));
+        // The caller's body is `const_col(spots, ..)`; its annotated type
+        // is the call-site result. A param-bound declared dim narrows the
+        // wildcard, so the caller's batch axis is a `d-var`, never the
+        // shape-erased `(d-name {} *)`.
+        assert!(
+            !rendered.contains("(d-name {} *)"),
+            "const_col's result must not carry a wildcard `*` dim at the call \
+         site; got {rendered}"
+        );
+        assert!(
+            rendered.contains("d-var"),
+            "the const_col call-site batch dim must be a declared dim var; \
+         got {rendered}"
+        );
+    })
+}
+
+/// chelis#2413 (spec/04 §1.1): `key` is an active tensor element dtype, so
+/// `tensor[D, key]` is a valid tensor type, but it has no cast. The tensor
+/// cast scheme reads the data element dtypes, never the wider tensor element
+/// predicate, so no cast mode reaches a key target.
+#[test]
+fn a_tensor_cast_to_a_key_is_rejected() {
+    assert!(Prim::Key.is_valid_tensor_precision());
+    let source = Type::Tensor(vec![Dim::Lit(3)], TensorPrec::Concrete(Prim::F32));
+    for mode in [
+        chelis_deep::CastMode::Checked,
+        chelis_deep::CastMode::Named(chelis_numeric_core::named_cast::NamedCastMode::Trunc),
+    ] {
+        let error = chelis_type_core::decisions::cast::cast_result_from_settled_source(
+            source.clone(),
+            Prim::Key,
+            mode,
+            &chelis_type_core::Subst::<ErrorWitness>::new(),
+        )
+        .map_err(|error| CheckError::from(*error))
+        .expect_err("a key is never a cast target");
+        assert!(matches!(
+            error.kind,
+            CheckErrorKind::UnsupportedTensorPrecision
+        ));
+    }
+    assert!(
+        chelis_type_core::decisions::cast::cast_result_from_settled_source(
+            source,
+            Prim::Int64,
+            chelis_deep::CastMode::Checked,
+            &chelis_type_core::Subst::<ErrorWitness>::new(),
+        )
+        .is_ok()
+    );
+}
+
+/// chelis#3009: spec/04 §4.3 types `cumsum`, `trace` and `einsum` as
+/// `sum_result(p, default(p))`, which is i32 for an i8 or i16 operand, the
+/// dtype both evaluation lanes store. The operand dtype is rejected as the
+/// result, and a dtype with no default sum accumulator is rejected outright.
+#[test]
+fn cumsum_and_trace_are_typed_by_the_default_sum_result() {
+    crate::test_support::run(|operation| {
+        for (operand, result) in [
+            ("i8", "i32"),
+            ("i16", "i32"),
+            ("i32", "i32"),
+            ("i64", "i64"),
+            ("f16", "f16"),
+            ("bf16", "bf16"),
+            ("f32", "f32"),
+            ("f64", "f64"),
+        ] {
+            let cumsum =
+                format!("def f(x: tensor[3, {operand}]) -> tensor[3, {result}] = cumsum(x, 0)\n");
+            let errors = surf_check_errors(&cumsum, operation);
+            assert!(errors.is_empty(), "{cumsum}: {errors:?}");
+            let trace =
+                format!("def f(x: tensor[2, 2, {operand}]) -> tensor[{result}] = trace(x, 0, 1)\n");
+            let errors = surf_check_errors(&trace, operation);
+            assert!(errors.is_empty(), "{trace}: {errors:?}");
+            let einsum = format!(
+                "def f(a: tensor[1, 2, {operand}], b: tensor[2, 3, {operand}]) -> tensor[1, 3, {result}] = einsum(\"ij,jk->ik\", a, b)\n"
+            );
+            let errors = surf_check_errors(&einsum, operation);
+            assert!(errors.is_empty(), "{einsum}: {errors:?}");
+        }
+        for operand in ["i8", "i16"] {
+            let cumsum =
+                format!("def f(x: tensor[3, {operand}]) -> tensor[3, {operand}] = cumsum(x, 0)\n");
+            assert!(
+                !surf_check_errors(&cumsum, operation).is_empty(),
+                "{cumsum} must not check at the operand dtype"
+            );
+            let trace = format!(
+                "def f(x: tensor[2, 2, {operand}]) -> tensor[{operand}] = trace(x, 0, 1)\n"
+            );
+            assert!(
+                !surf_check_errors(&trace, operation).is_empty(),
+                "{trace} must not check at the operand dtype"
+            );
+            let einsum = format!(
+                "def f(a: tensor[1, 2, {operand}], b: tensor[2, 3, {operand}]) -> tensor[1, 3, {operand}] = einsum(\"ij,jk->ik\", a, b)\n"
+            );
+            assert!(
+                !surf_check_errors(&einsum, operation).is_empty(),
+                "{einsum} must not check at the operand dtype"
+            );
+            // A consumer that requires the operand dtype rejects the widened prefix.
+            let downstream = format!(
+                "def f(x: tensor[3, {operand}]) -> tensor[3, {operand}] = add(cumsum(copy(x), 0), x)\n"
+            );
+            assert!(
+                !surf_check_errors(&downstream, operation).is_empty(),
+                "{downstream} must not check"
+            );
+        }
+        // The output extents follow the equation's labels.
+        let errors = surf_check_errors(
+            "def f(a: tensor[1, 2, f32], b: tensor[2, 3, f32]) -> tensor[3, 1, f32] = einsum(\"ij,jk->ik\", a, b)\n",
+            operation,
+        );
+        assert!(
+            !errors.is_empty(),
+            "einsum output extents must follow the equation"
+        );
+        let errors = surf_check_errors(
+            "def f(a: tensor[2, bool], b: tensor[2, bool]) -> tensor[bool] = einsum(\"i,i->\", a, b)\n",
+            operation,
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.message.contains("default sum accumulator")),
+            "a bool einsum must be rejected for its dtype: {errors:?}"
+        );
+        // [05-OP-53] (chelis#3044): `cumsum` and `trace` carry the arithmetic
+        // operand family, as `sum` does, so a bool operand is refused at the
+        // operand before its result dtype is considered.
+        for (op, source) in [
+            (
+                "cumsum",
+                "def f(x: tensor[3, bool]) -> tensor[3, bool] = cumsum(x, 0)\n",
+            ),
+            (
+                "trace",
+                "def f(x: tensor[2, 2, bool]) -> tensor[bool] = trace(x, 0, 1)\n",
+            ),
+        ] {
+            let errors = surf_check_errors(source, operation);
+            assert!(
+                errors
+                    .iter()
+                    .any(|error| error.message.contains(&format!("`{op}`"))
+                        && error.message.contains("bool")),
+                "{source} must be rejected for its dtype: {errors:?}"
+            );
+        }
+    })
+}
+
+/// chelis#3009: a precision variable denotes every dtype its bound admits
+/// ([04-INF-6]), so `sum`, `cumsum`, `trace` and `einsum` over it type as
+/// `sum_result` only when that is one type across the bound: the variable
+/// itself for `Float` or `{i32, i64}`, one concrete dtype for `{i8, i16}`.
+/// `Int`, `Numeric` and an unbounded variable are rejected at the
+/// definition, where an i8 call would otherwise carry i32 data typed i8.
+#[test]
+fn generic_sum_result_is_one_type_across_the_bound_or_rejected() {
+    crate::test_support::run(|operation| {
+        // The binder's dtypes have no single sum_result; the diagnostic names
+        // the operation's result rule.
+        let rejects_the_bound = |error: &CheckError| {
+            error.message.contains("has no single result dtype")
+                && error.message.contains("sum_result")
+        };
+        let bodies = [
+            ("tensor[3, p]", "tensor[3, R]", "cumsum(x, 0i32)"),
+            ("tensor[3, p]", "tensor[R]", "sum(x, 0i32)"),
+            ("tensor[2, 2, p]", "tensor[R]", "trace(x, 0, 1)"),
+            ("tensor[2, p]", "tensor[R]", "einsum(\"i,i->\", copy(x), x)"),
+        ];
+        for (operand, result, body) in bodies {
+            for (bound, result_dtype) in [
+                ("Float", "p"),
+                ("{i32, i64}", "p"),
+                ("{f32, i64}", "p"),
+                ("{i8, i16}", "i32"),
+                ("{i8, i32}", "i32"),
+            ] {
+                let source = format!(
+                    "def f[p: {bound}](x: {operand}) -> {} = {body}\n",
+                    result.replace('R', result_dtype)
+                );
+                let errors = surf_check_errors(&source, operation);
+                assert!(errors.is_empty(), "{source}: {errors:?}");
+            }
+            for binder in ["p: Int", "p: Numeric", "p: {i8, i64}", "p"] {
+                let source = format!(
+                    "def f[{binder}](x: {operand}) -> {} = {body}\n",
+                    result.replace('R', "p")
+                );
+                let errors = surf_check_errors(&source, operation);
+                assert!(
+                    errors.iter().any(rejects_the_bound),
+                    "{source} must be rejected at the definition: {errors:?}"
+                );
+            }
+        }
+        // The reviewer's witness: at i8 the call would hold i32 data typed i8.
+        let errors = surf_check_errors(
+            "def f[p: Int](x: tensor[3, p]) -> tensor[3, p] = cumsum(x, 0i32)\n\
+         def g(x: tensor[3, i8]) -> tensor[3, i8] = add(f(copy(x)), x)\n\
+         out = g(to_tensor([10i8, 10i8, 10i8]))\n",
+            operation,
+        );
+        assert!(
+            errors.iter().any(rejects_the_bound),
+            "the generic i8 cumsum witness must be rejected: {errors:?}"
+        );
+        // A `Float` generic instantiates at f16 and keeps the operand dtype.
+        let errors = surf_check_errors(
+            "def f[p: Float](x: tensor[3, p]) -> tensor[3, p] = cumsum(x, 0i32)\n\
+         out = f(cast(to_tensor([1.0, 2.0, 3.0], f32), f16))\n",
+            operation,
+        );
+        assert!(errors.is_empty(), "{errors:?}");
+    })
+}
+
+/// chelis#3009: `einsum`'s operands share one dtype `p` ([05-OP-33]), so the
+/// checker identifies their precisions before deciding `sum_result(p)`.
+/// Two distinct binders, or two different concrete dtypes, are rejected,
+/// and no operand shape leaves the result undecided: an unresolved operand
+/// replays once it binds, and a malformed equation is rejected.
+#[test]
+fn einsum_operands_share_one_precision_and_the_result_is_always_decided() {
+    crate::test_support::run(|operation| {
+        // The reviewer's two-binder witness.
+        let errors = surf_check_errors(
+            "def a[p: Int, q: Int](x: tensor[2, p], y: tensor[2, q]) -> tensor[2, p] = einsum(\"i,i->i\", x, y)\n\
+         def g(x: tensor[2, i8]) -> tensor[2, i8] = add(a(copy(x), copy(x)), x)\n\
+         out = g(to_tensor([10i8, 10i8]))\n",
+            operation,
+        );
+        assert!(!errors.is_empty(), "two distinct binders must not check");
+        // A concrete i8/i16 pair.
+        let errors = surf_check_errors(
+            "def f(x: tensor[2, i8], y: tensor[2, i16]) -> tensor[i32] = einsum(\"i,i->\", x, y)\n",
+            operation,
+        );
+        assert!(
+            errors.iter().any(
+                |error| matches!(error.kind, CheckErrorKind::PrecisionMismatch)
+                    && error.message.contains("share one dtype")
+            ),
+            "{errors:?}"
+        );
+        // Equation, rank and output-label violations are decided statically.
+        for equation in ["i,i", "i->i", "I,i->i", "ij,i->i", "i,i->ii", "i,i->k"] {
+            let source = format!(
+                "def f(x: tensor[2, f32], y: tensor[2, f32]) -> tensor[2, f32] = einsum(\"{equation}\", x, y)\n"
+            );
+            assert!(
+                !surf_check_errors(&source, operation).is_empty(),
+                "{source} must not check"
+            );
+        }
+        // An unannotated lambda operand is decided when the call binds it.
+        let lambda = |declared: &str| {
+            format!(
+                "def f(x: tensor[2, i8]) -> tensor[{declared}] = {{\n  g = fn (a, b) -> einsum(\"i,i->\", a, b)\n  g(copy(x), x)\n}}\n"
+            )
+        };
+        let errors = surf_check_errors(&lambda("i32"), operation);
+        assert!(errors.is_empty(), "{errors:?}");
+        assert!(
+            !surf_check_errors(&lambda("i8"), operation).is_empty(),
+            "the replayed einsum must type at i32"
+        );
+    })
+}
+
+/// chelis#3009: a variadic named-axis `sum` over an operand whose type is
+/// not yet known replays once the operand binds, so its result is
+/// `sum_result` of the bound dtype rather than left undecided.
+#[test]
+fn variadic_sum_over_an_unresolved_operand_is_decided_when_it_binds() {
+    crate::test_support::run(|operation| {
+        let lambda = |declared: &str| {
+            format!(
+                "def f(x: tensor[seq, head, i8]) -> tensor[{declared}] = {{\n  g = fn (t) -> sum(t, seq, head)\n  g(x)\n}}\n"
+            )
+        };
+        let errors = surf_check_errors(&lambda("i32"), operation);
+        assert!(errors.is_empty(), "{errors:?}");
+        assert!(
+            !surf_check_errors(&lambda("i8"), operation).is_empty(),
+            "the replayed sum must type at i32"
+        );
+    })
+}
+
+/// Every rejection that spec/04 §5.7.1's widening causes (an i8 or i16
+/// `sum`, `cumsum`, `trace` or `einsum` returns i32) names the operation,
+/// the operand and result dtypes and the rule, and says how to repair it:
+/// declare the widened result, or narrow it explicitly.
+#[test]
+fn sum_result_widening_rejections_name_the_rule_and_the_repair() {
+    crate::test_support::run(|operation| {
+        let message_of = |source: &str| -> String {
+            let errors = surf_check_errors(source, operation);
+            assert_eq!(errors.len(), 1, "{source}: {errors:?}");
+            errors[0].message.clone()
+        };
+        let assert_contains = |message: &str, phrases: &[&str]| {
+            for phrase in phrases {
+                assert!(message.contains(phrase), "missing `{phrase}` in: {message}");
+            }
+        };
+        for operand in ["i8", "i16"] {
+            let narrow = format!("narrow it explicitly with `cast(..., {operand})`");
+            // The concrete mismatch against a declared result, per operation.
+            for (op, source) in [
+                (
+                    "cumsum",
+                    format!(
+                        "def f(x: tensor[3, {operand}]) -> tensor[3, {operand}] = cumsum(x, 0)\n"
+                    ),
+                ),
+                (
+                    "sum",
+                    format!("def f(x: tensor[3, {operand}]) -> tensor[{operand}] = sum(x, 0i32)\n"),
+                ),
+                (
+                    "trace",
+                    format!(
+                        "def f(x: tensor[2, 2, {operand}]) -> tensor[{operand}] = trace(x, 0, 1)\n"
+                    ),
+                ),
+                (
+                    "einsum",
+                    format!(
+                        "def f(a: tensor[2, {operand}], b: tensor[2, {operand}]) -> tensor[{operand}] = einsum(\"i,i->\", a, b)\n"
+                    ),
+                ),
+                (
+                    "cumsum",
+                    format!(
+                        "def f(x: tensor[3, {operand}]) -> tensor[3, {operand}] = {{\n  y: tensor[3, {operand}] = cumsum(x, 0)\n  y\n}}\n"
+                    ),
+                ),
+                (
+                    "sum",
+                    format!(
+                        "def f(x: tensor[3, {operand}]) -> tensor[i32] = {{\n  y: tensor[{operand}] = sum(x, 0i32)\n  cast(y, i32)\n}}\n"
+                    ),
+                ),
+            ] {
+                let message = message_of(&source);
+                assert_contains(
+                    &message,
+                    &[
+                        &format!("`{op}` over {operand} returns i32"),
+                        "spec/04 §5.7.1",
+                        "declare the result as i32",
+                        &narrow,
+                    ],
+                );
+                // Only `sum` and `einsum` take an accumulator.
+                assert_eq!(
+                    message.contains("pass `accumulator=i64` and declare i64"),
+                    matches!(op, "sum" | "einsum"),
+                    "{message}"
+                );
+            }
+            // A downstream operation that needs the operand dtype, and a call
+            // through a local function, cannot name the operation.
+            for source in [
+                format!(
+                    "def f(x: tensor[3, {operand}]) -> tensor[3, {operand}] = add(cumsum(copy(x), 0), x)\n"
+                ),
+                format!(
+                    "def f(x: tensor[seq, head, {operand}]) -> tensor[{operand}] = {{\n  g = fn (t) -> sum(t, seq, head)\n  g(x)\n}}\n"
+                ),
+            ] {
+                let message = message_of(&source);
+                assert_contains(
+                    &message,
+                    &[
+                        &format!(
+                            "if the i32 value is the result of `sum`, `cumsum`, `trace` or `einsum` over {operand}"
+                        ),
+                        "spec/04 §5.7.1",
+                        "declare the result as i32",
+                        "for `sum` and `einsum`, pass `accumulator=i64` and declare i64",
+                        &narrow,
+                    ],
+                );
+            }
+            // Both repairs check.
+            assert!(
+                surf_check_errors(
+                    &format!("def f(x: tensor[3, {operand}]) -> tensor[3, i32] = cumsum(x, 0)\n"),
+                    operation
+                )
+                .is_empty()
+            );
+            let narrowed = format!(
+                "def f(x: tensor[3, {operand}]) -> tensor[3, {operand}] = cast(cumsum(x, 0), {operand})\n"
+            );
+            assert!(
+                surf_check_errors(&narrowed, operation).is_empty(),
+                "{narrowed}"
+            );
+        }
+        // A mismatch the widening cannot explain carries no note.
+        let message = message_of("def f(x: tensor[3, i64]) -> tensor[3, i32] = cumsum(x, 0)\n");
+        assert!(!message.contains("§5.7.1"), "{message}");
+        // A binder whose bound admits i8 or i16 and that the widened result
+        // instantiates at i32.
+        for binder in ["{i8, i32}", "{i8, i16}"] {
+            let errors = surf_check_errors(
+                &format!("def f[P: {binder}](x: tensor[3, P]) -> tensor[P] = sum(x, 0i32)\n"),
+                operation,
+            );
+            assert!(
+            errors.iter().any(|error| error.message.contains(
+                "if this i32 is the result of `sum`, `cumsum`, `trace` or `einsum` over i8 or i16, spec/04 §5.7.1 widened it"
+            )),
+            "{binder}: {errors:?}"
+        );
+        }
+        // The generic-binder rejection, and the same rejection decided for a hole.
+        let generic = [
+            "spec/04 §5.7.1 sums an i8 or i16 operand in i32",
+            "bound the variable to dtypes that share one result",
+            "declare the widened result",
+        ];
+        assert_contains(
+            &message_of("def f[p: Int](x: tensor[3, p]) -> tensor[3, p] = cumsum(x, 0i32)\n"),
+            &generic,
+        );
+        let hole = chelis_deep::parser::parse_str(
+            include_str!("../../../../chelis-cli/tests/fixtures/sum_result_holes/g1h.dp"),
+            &chelis_syntax_host::NativeStack,
+        )
+        .expect("deep parse");
+        let errors = match crate::test_support::check_ir_program(&hole, operation) {
+            Ok(_) => Vec::new(),
+            Err(result) => result.errors,
+        };
+        assert!(
+            errors
+                .iter()
+                .any(|error| generic.iter().all(|phrase| error.message.contains(phrase))),
+            "{errors:?}"
+        );
+    })
+}
+
+/// chelis#2985: an explicit `accumulator=` on `matmul`, `sum` or `einsum`
+/// types the call by spec/04 §5.7.1's permitted-pairs table: `sum` and
+/// `einsum` return `sum_result(p, a)` and `matmul` its operand dtype. A pair
+/// the table omits (narrower than the default, or of the other numeric kind),
+/// any other callee, and an operand whose dtype is not concrete are rejected.
+#[test]
+fn explicit_accumulator_types_by_the_permitted_pairs_table() {
+    crate::test_support::run(|operation| {
+        let pairs = [
+            (
+                "bf16",
+                &["f32", "f64"][..],
+                &["bf16", "f16", "i32", "i64"][..],
+            ),
+            ("f16", &["f32", "f64"], &["f16", "bf16", "i32"]),
+            ("f32", &["f32", "f64"], &["f16", "bf16", "i32", "i64"]),
+            ("f64", &["f64"], &["f32", "i64"]),
+            ("i8", &["i32", "i64"], &["i8", "i16", "f32", "f64"]),
+            ("i16", &["i32", "i64"], &["i8", "i16", "f32"]),
+            ("i32", &["i32", "i64"], &["i16", "f64"]),
+            ("i64", &["i64"], &["i32", "f64"]),
+        ];
+        for (operand, permitted, rejected) in pairs {
+            let reduced = matches!(operand, "bf16" | "f16");
+            for accumulator in permitted {
+                let result = if reduced { operand } else { accumulator };
+                for source in [
+                    format!(
+                        "def f(x: tensor[3, {operand}]) -> tensor[{result}] = sum(x, 0i32, accumulator={accumulator})\n"
+                    ),
+                    format!(
+                        "def f(a: tensor[3, {operand}], b: tensor[3, {operand}]) -> tensor[{result}] = einsum(\"i,i->\", a, b, accumulator={accumulator})\n"
+                    ),
+                ] {
+                    let errors = surf_check_errors(&source, operation);
+                    assert!(errors.is_empty(), "{source}: {errors:?}");
+                }
+                if operand.starts_with('f') || operand == "bf16" {
+                    let source = format!(
+                        "def f(a: tensor[2, 2, {operand}], b: tensor[2, 2, {operand}]) -> tensor[2, 2, {operand}] = matmul(a, b, accumulator={accumulator})\n"
+                    );
+                    let errors = surf_check_errors(&source, operation);
+                    assert!(errors.is_empty(), "{source}: {errors:?}");
+                }
+            }
+            for accumulator in rejected {
+                let kind = if accumulator.starts_with('i') == operand.starts_with('i') {
+                    "at least as wide as its operand and its default"
+                } else {
+                    "has its operand's numeric kind"
+                };
+                let source = format!(
+                    "def f(x: tensor[3, {operand}]) -> tensor[{accumulator}] = sum(x, 0i32, accumulator={accumulator})\n"
+                );
+                let errors = surf_check_errors(&source, operation);
+                assert!(
+                    errors.iter().any(|error| error.message.contains(&format!(
+                        "`sum` over {operand} does not admit `accumulator={accumulator}`"
+                    )) && error.message.contains(kind)
+                        && error
+                            .message
+                            .contains("omit the argument to accumulate in the default")),
+                    "{source}: {errors:?}"
+                );
+            }
+        }
+        // A widened result no longer checks at the default result dtype.
+        assert!(
+            !surf_check_errors(
+                "def f(x: tensor[3, i8]) -> tensor[i32] = sum(x, 0i32, accumulator=i64)\n",
+                operation
+            )
+            .is_empty()
+        );
+        // Integer matmul stays rejected with or without an accumulator.
+        assert!(!surf_check_errors(
+        "def f(a: tensor[2, 2, i32], b: tensor[2, 2, i32]) -> tensor[2, 2, i32] = matmul(a, b, accumulator=i64)\n"
+    , operation)
+    .is_empty());
+        // Only `matmul`, `sum` and `einsum` take an accumulator.
+        for (name, source) in [
+            (
+                "cumsum",
+                "def f(x: tensor[3, i8]) -> tensor[3, i32] = cumsum(x, 0i32, accumulator=i64)\n",
+            ),
+            (
+                "trace",
+                "def f(x: tensor[2, 2, f32]) -> tensor[f32] = trace(x, 0, 1, accumulator=f64)\n",
+            ),
+            (
+                "mean",
+                "def f(x: tensor[3, f32]) -> tensor[f32] = mean(x, 0i32, accumulator=f64)\n",
+            ),
+        ] {
+            let errors = surf_check_errors(source, operation);
+            assert!(
+                errors.iter().any(|error| error
+                    .message
+                    .contains(&format!("`{name}` takes no `accumulator=` argument"))),
+                "{source}: {errors:?}"
+            );
+        }
+        let errors = surf_check_errors(
+            "def g(x: tensor[3, f32]) -> tensor[f32] = x\ndef f(x: tensor[3, f32]) -> tensor[3, f32] = g(x, accumulator=f64)\n",
+            operation,
+        );
+        assert!(!errors.is_empty(), "a user function takes no accumulator");
+        // The pair is decided at the call, over a concrete operand dtype.
+        for binder in ["p: Float", "p: {f32, f64}"] {
+            let source = format!(
+                "def f[{binder}](x: tensor[3, p]) -> tensor[f64] = sum(x, 0i32, accumulator=f64)\n"
+            );
+            let errors = surf_check_errors(&source, operation);
+            assert!(
+                errors.iter().any(|error| error
+                    .message
+                    .contains("this operand's dtype is a type variable")
+                    && !error.message.contains("declare the operand")),
+                "{source}: {errors:?}"
+            );
+        }
+        // A borrowed operand is decided on its referent.
+        for source in [
+            "def f(x: &tensor[3, f32]) -> tensor[f64] = sum(x, 0i32, accumulator=f64)\n",
+            "def f(x: &tensor[3, i8]) -> tensor[i64] = sum(x, 0i32, accumulator=i64)\n",
+            "def f(a: &tensor[3, i8], b: &tensor[3, i8]) -> tensor[i64] = einsum(\"i,i->\", a, b, accumulator=i64)\n",
+            "def f(a: &tensor[2, 2, f16], b: &tensor[2, 2, f16]) -> tensor[2, 2, f16] = matmul(a, b, accumulator=f64)\n",
+            "def f(x: &tensor[batch, seq, head, i8]) -> tensor[batch, i64] = sum(x, seq, head, accumulator=i64)\n",
+        ] {
+            let errors = surf_check_errors(source, operation);
+            assert!(errors.is_empty(), "{source}: {errors:?}");
+        }
+        let errors = surf_check_errors(
+            "def f(x: &tensor[3, i8]) -> tensor[i64] = sum(x, 0i32, accumulator=i8)\n",
+            operation,
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.message.contains("does not admit `accumulator=i8`")),
+            "{errors:?}"
+        );
+    })
+}

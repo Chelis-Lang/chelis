@@ -2,9 +2,9 @@
 //! Alias and record recursion are edges, not Rust recursion or depth fuses.
 
 use super::{ProducedPosition, children, symbol_text, tag};
+use chelis_checker_core::errors::ErrorWitness;
 use chelis_deep::{DeepTag, Expr};
 use chelis_type_core::Type;
-use chelis_types::errors::ErrorWitness;
 use std::collections::{BTreeMap, BTreeSet};
 
 pub(super) const DEFAULT_BUDGET: usize = 100_000;

@@ -5,10 +5,11 @@
 //! bound is checked through aliases, wrappers, higher-order values, and
 //! recursion rather than at a named callee.
 
+use chelis_checker_core::errors::CheckError;
+use chelis_checker_core::errors::CheckErrorKind;
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str as parse_surf;
 use chelis_types::check_typed_program;
-use chelis_types::errors::{CheckError, CheckErrorKind};
 
 const FLOATS: &[&str] = &["f16", "bf16", "f32", "f64"];
 const INTS: &[&str] = &["i8", "i16", "i32", "i64"];

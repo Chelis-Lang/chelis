@@ -7,6 +7,7 @@ repository.workspace = true
 
 [dependencies]
 chelis-effects-core.workspace = true
+chelis-checker-core = { workspace = true, features = ["serde"] }
 chelis-type-core = { workspace = true, default-features = false, features = ["serde"] }
 chelis-numeric-core = { workspace = true, default-features = false, features = ["alloc", "serde"] }
 chelis-unord.workspace = true

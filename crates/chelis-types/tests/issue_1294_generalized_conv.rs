@@ -1,7 +1,8 @@
 //! [05-OP-51] and spec/05 section 4.5: one convolution contract for every
 //! positive spatial rank, with exact per-axis metadata and no rank aliases.
+use chelis_checker_core::BUILTIN_NAMES;
 use chelis_surf::{desugar::desugar_program, parser::parse_str};
-use chelis_types::{BUILTIN_NAMES, check_ir_program};
+use chelis_types::check_ir_program;
 
 fn int64_metadata(value: &str) -> String {
     value

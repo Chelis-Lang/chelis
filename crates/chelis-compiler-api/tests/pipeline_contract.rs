@@ -128,7 +128,7 @@ fn destructured_components_still_obey_consuming_fanout() {
             PipelineRejection::Linearity { errors }
                 if errors.iter().any(|error| matches!(
                     &error.kind,
-                    chelis_types::errors::CheckErrorKind::KeyReuse
+                    chelis_checker_core::errors::CheckErrorKind::KeyReuse
                 ))
         ),
         "the rejection must be key affinity: {rejected:?}"

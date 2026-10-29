@@ -1,3 +1,4 @@
+use chelis_checker_core::errors::ErrorWitness;
 use chelis_shell::read_shell;
 use chelis_shell_core::{
     CollectionObligation, PackageId, SHELL_FORMAT_VERSION, ShellModule, ShellPackage, ShellSymbol,
@@ -8,7 +9,6 @@ use chelis_surf::ast::{
     PropertyOption, TypeExpr, TypeInvariant, Variant, VariantFields,
 };
 use chelis_syntax_host::module_identity::validate_module_path;
-use chelis_types::errors::ErrorWitness;
 use chelis_unord::{UnordMap, UnordSet};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -10387,16 +10387,16 @@ impl ShellTypeVariableRenamer {
 #[cfg(test)]
 mod shell_type_variable_canonicalization_tests {
     use super::{canonical_shell_scheme, canonical_shell_type_repr};
+    use chelis_checker_core::errors::ErrorWitness;
+    use chelis_checker_core::infer::type_to_deep_expr;
     use chelis_shell_core::{TypeVariableDomain, TypeVariableRestriction};
     use chelis_type_core::{
         Dim, DimVar, RankVar, Scheme, TensorPrec, Type, TypeVar, TypeVarRestriction,
     };
-    use chelis_types::errors::ErrorWitness;
-    use chelis_types::infer::type_to_deep_expr;
 
     #[test]
     fn key_operation_relations_are_part_of_published_scheme_identity() {
-        let (env, _) = chelis_types::builtin_env();
+        let (env, _) = chelis_checker_core::builtin_env();
         let mut previous = None;
         for name in ["key_from_seed", "split_key", "split_keys", "fold_in"] {
             let scheme = env.lookup(name).expect("registered key builtin");
@@ -10784,8 +10784,8 @@ fn exported_function_type(
 fn canonical_shell_scheme(
     scheme: &chelis_type_core::Scheme<ErrorWitness>,
 ) -> Result<CanonicalExportedType, String> {
+    use chelis_checker_core::infer::type_to_deep_expr;
     use chelis_type_core::TypeVarRestriction;
-    use chelis_types::infer::type_to_deep_expr;
 
     let mut renamer = SchemeVariableRenamer::default();
     let canonical_body = renamer.rewrite_type(&scheme.body);
@@ -10900,8 +10900,8 @@ fn render_collection_obligation(
     constraint: &chelis_type_core::CollectionConstraint<ErrorWitness>,
     renamer: &mut SchemeVariableRenamer,
 ) -> CollectionObligation {
+    use chelis_checker_core::infer::type_to_deep_expr;
     use chelis_type_core::CollectionConstraint;
-    use chelis_types::infer::type_to_deep_expr;
 
     let mut render = |ty| {
         let canonical = type_to_deep_expr(&renamer.rewrite_type(ty));
@@ -11439,7 +11439,7 @@ fn build_name_resolver(
                             "module `{}` does not export `{}` for import into {}",
                             import_module, name, module.module_name
                         );
-                        if chelis_types::BUILTIN_NAMES.contains(&name.as_str()) {
+                        if chelis_checker_core::BUILTIN_NAMES.contains(&name.as_str()) {
                             msg.push_str(&format!(
                                 ". Note: `{}` is a Chelis built-in function; call it directly without importing",
                                 name
@@ -11718,7 +11718,7 @@ fn find_imported_module<'a>(
 /// probably meant to call it directly without importing.
 fn builtin_module_note(module_name: &str) -> Option<String> {
     let lower = module_name.to_ascii_lowercase();
-    chelis_types::BUILTIN_NAMES.contains(&lower.as_str()).then(|| {
+    chelis_checker_core::BUILTIN_NAMES.contains(&lower.as_str()).then(|| {
         format!(". Note: `{lower}` is a Chelis built-in function; call it directly without importing")
     })
 }
@@ -18171,7 +18171,7 @@ module_prefix = "Nl"
             "module `{}` does not export `{}` for import into {}",
             import_module, name, module_name
         );
-        if chelis_types::BUILTIN_NAMES.contains(&name) {
+        if chelis_checker_core::BUILTIN_NAMES.contains(&name) {
             msg.push_str(&format!(
                 ". Note: `{}` is a Chelis built-in function; call it directly without importing",
                 name
@@ -18189,7 +18189,7 @@ module_prefix = "Nl"
     fn builtin_import_hint_in_unresolved_module() {
         let module_name = "Matmul"; // A module that doesn't exist but 'matmul' is a builtin
         let lower = module_name.to_ascii_lowercase();
-        let is_builtin = chelis_types::BUILTIN_NAMES.contains(&lower.as_str());
+        let is_builtin = chelis_checker_core::BUILTIN_NAMES.contains(&lower.as_str());
         assert!(is_builtin, "matmul should be in BUILTIN_NAMES");
         let msg = if is_builtin {
             format!(

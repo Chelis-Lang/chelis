@@ -1139,7 +1139,7 @@ fn assert_front_rejects(source: &str) {
     assert!(
         matches!(
             &error.kind,
-            chelis_types::errors::CheckErrorKind::UnboundVariable { identifier }
+            chelis_checker_core::errors::CheckErrorKind::UnboundVariable { identifier }
                 if identifier == "missing"
         ),
         "negative twin must reach its missing callee: {source}: {error:?}"

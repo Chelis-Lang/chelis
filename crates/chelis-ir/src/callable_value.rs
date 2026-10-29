@@ -1,7 +1,7 @@
 //! Static builtin values retain identity and every independent contract frame.
 
+use chelis_checker_core::errors::ErrorWitness;
 use chelis_deep::{DeepTag, Expr};
-use chelis_types::errors::ErrorWitness;
 use std::cell::Cell;
 use std::sync::Arc;
 
@@ -59,7 +59,7 @@ impl CallableContractFrame for Expr {
 /// ```
 #[derive(Clone, Debug)]
 pub struct ResolvedBuiltinValue<C: CallableContractFrame> {
-    operation: chelis_types::AdmittedBuiltin,
+    operation: chelis_checker_core::AdmittedBuiltin,
     contracts: Arc<Vec<C>>,
 }
 
@@ -67,7 +67,7 @@ impl<C: CallableContractFrame> ResolvedBuiltinValue<C> {
     /// Bare builtin producer formation, after lexical/declaration resolution.
     /// This is not an adapter or a conversion from a callable descriptor.
     pub fn resolve_bare(name: &str) -> Option<Self> {
-        chelis_types::AdmittedBuiltin::resolve(name).map(|operation| Self {
+        chelis_checker_core::AdmittedBuiltin::resolve(name).map(|operation| Self {
             operation,
             contracts: Arc::new(Vec::new()),
         })
@@ -82,7 +82,7 @@ impl<C: CallableContractFrame> ResolvedBuiltinValue<C> {
         .then(|| self.clone())
     }
 
-    pub fn operation(&self) -> chelis_types::AdmittedBuiltin {
+    pub fn operation(&self) -> chelis_checker_core::AdmittedBuiltin {
         self.operation
     }
     pub fn contracts(&self) -> &[C] {
@@ -94,7 +94,7 @@ impl<C: CallableContractFrame> ResolvedBuiltinValue<C> {
     pub fn scheme(&self) -> &chelis_type_core::Scheme<ErrorWitness> {
         self.operation.scheme()
     }
-    pub fn declaration(&self) -> &chelis_types::BuiltinDecl {
+    pub fn declaration(&self) -> &chelis_checker_core::BuiltinDecl {
         self.operation.declaration()
     }
     /// Conversion preserves every frame and its order, or returns a failure.
@@ -203,7 +203,7 @@ pub fn retain_outer_normalized_frame(
 
 impl NormalizedCallableContract {
     pub fn from_authored(
-        registry: &chelis_types::adt::AdtRegistry,
+        registry: &chelis_checker_core::adt::AdtRegistry,
         authored: &Expr,
     ) -> Result<Option<Self>, String> {
         CONTRACT_NORMALIZATIONS.with(|normalizations| normalizations.set(normalizations.get() + 1));
@@ -283,7 +283,7 @@ mod tests {
         let value = ResolvedBuiltinValue::<Expr>::resolve_bare("abs").unwrap();
         assert_eq!(
             value.operation(),
-            chelis_types::AdmittedBuiltin::resolve("abs").unwrap()
+            chelis_checker_core::AdmittedBuiltin::resolve("abs").unwrap()
         );
         assert!(value.contracts().is_empty());
         assert!(ResolvedBuiltinValue::<Expr>::resolve_bare("print").is_none());
@@ -406,7 +406,7 @@ mod tests {
     fn normalized_result_only_contract_keeps_full_signature_and_checked_origin() {
         let authored = function_contract("(t-tensor {} (d-lit {} 2) (t-prim {} bool))");
         let frame = NormalizedCallableContract::from_authored(
-            &chelis_types::adt::AdtRegistry::default(),
+            &chelis_checker_core::adt::AdtRegistry::default(),
             &authored,
         )
         .unwrap()
@@ -422,7 +422,7 @@ mod tests {
         assert_eq!(parts[1].tag(), Some(DeepTag::TTensor));
         assert!(
             NormalizedCallableContract::from_authored(
-                &chelis_types::adt::AdtRegistry::default(),
+                &chelis_checker_core::adt::AdtRegistry::default(),
                 &parts[1],
             )
             .unwrap()
@@ -462,7 +462,7 @@ mod tests {
         let values = crate::lower::resolved_builtin_producer_bindings(
             &definitions,
             &signatures,
-            &chelis_types::adt::AdtRegistry::default(),
+            &chelis_checker_core::adt::AdtRegistry::default(),
         )
         .unwrap();
         for name in ["f", "g", "h"] {
@@ -489,7 +489,7 @@ mod tests {
             .remove(0)
         };
         let definitions = BTreeMap::from([("neg".into(), var("abs")), ("f".into(), var("neg"))]);
-        let registry = chelis_types::adt::AdtRegistry::default();
+        let registry = chelis_checker_core::adt::AdtRegistry::default();
         let values = crate::lower::resolved_builtin_producer_bindings(
             &definitions,
             &BTreeMap::new(),
@@ -512,11 +512,11 @@ mod tests {
     fn nominal_callable_normalization_retains_borrowed_inputs_and_full_result() {
         use chelis_numeric_core::prim::Prim;
         use chelis_type_core::{Dim, DimVar, NominalArg, NominalParamKind, TensorPrec, Type};
-        let mut registry = chelis_types::adt::AdtRegistry::default();
+        let mut registry = chelis_checker_core::adt::AdtRegistry::default();
         let parameter = DimVar(77);
         registry.aliases.insert(
             "Contract".into(),
-            chelis_types::adt::TypeAliasDef {
+            chelis_checker_core::adt::TypeAliasDef {
                 params: vec!["n".into()],
                 param_kinds: vec![NominalParamKind::Dimension],
                 param_vars: Vec::new(),

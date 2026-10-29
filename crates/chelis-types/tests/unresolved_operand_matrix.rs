@@ -21,10 +21,10 @@
 //! times on chelis#1489's conversions). A cell that only checked "rejected"
 //! would pass on a rejection from an entirely different rule.
 
+use chelis_checker_core::errors::CheckError;
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str as parse_surf;
 use chelis_types::check_typed_program;
-use chelis_types::errors::CheckError;
 
 fn check(source: &str) -> Result<(), Vec<CheckError>> {
     let decls =
@@ -671,7 +671,7 @@ fn assert_family_error(errors: &[CheckError], family: &str, dtype: &str) {
     assert!(
         errors.iter().any(|error| matches!(
             error.kind,
-            chelis_types::errors::CheckErrorKind::PrecisionMismatch
+            chelis_checker_core::errors::CheckErrorKind::PrecisionMismatch
         ) && error.message.contains(&format!("dtype family `{family}`"))
             && error
                 .message
@@ -928,7 +928,7 @@ fn never_bound_collection_and_branch_operands_reject_at_the_boundary() {
             errors.iter().any(|error| {
                 matches!(
                     error.kind,
-                    chelis_types::errors::CheckErrorKind::TypeMismatch
+                    chelis_checker_core::errors::CheckErrorKind::TypeMismatch
                 ) && error.message.starts_with(&prefix)
                     && error.message.contains("never determined within `f`")
             }),
@@ -1291,7 +1291,7 @@ fn never_bound_dtype_operands_are_decided_at_the_boundary() {
                 errors.iter().any(|error| {
                     matches!(
                         error.kind,
-                        chelis_types::errors::CheckErrorKind::PrecisionMismatch
+                        chelis_checker_core::errors::CheckErrorKind::PrecisionMismatch
                     ) && error.message.contains(family)
                 }),
                 "{}",
@@ -1947,7 +1947,7 @@ fn expect_exact_error(program: &str, (expected, got): &(String, String)) {
         errors.iter().any(|e| {
             matches!(
                 e.kind,
-                chelis_types::errors::CheckErrorKind::DimensionMismatch
+                chelis_checker_core::errors::CheckErrorKind::DimensionMismatch
             ) && e.expected.as_ref() == Some(expected)
                 && e.got.as_ref() == Some(got)
         }),

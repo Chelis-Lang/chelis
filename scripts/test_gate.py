@@ -1374,7 +1374,7 @@ class ListOutputTests(unittest.TestCase):
     def test_list_includes_a_doctest_stage(self):
         # Regression guard (chelis#875): `cargo nextest` does not execute
         # doctests, so a gate made entirely of nextest stages runs none of
-        # the `compile_fail` oracles in crates/chelis-types/src/errors.rs.
+        # the `compile_fail` oracles in crates/chelis-checker-core/src/errors.rs.
         # Those oracles are the chelis#731 Phase 2 acceptance artifact; a
         # gate that does not drive them lets the plan claim a compile-time
         # guarantee no continuous job checks. If this stage is ever
@@ -2760,7 +2760,7 @@ class CiParityTests(unittest.TestCase):
         command = (
             "cargo nextest run --workspace --profile ci-full "
             "--ignore-default-filter "
-            "--features chelis-types/generalize-sweep-oracle --no-fail-fast "
+            "--features chelis-checker-core/generalize-sweep-oracle --no-fail-fast "
             "-E 'not (binary_id(/^chelis-compiler-api::capacity_census_wire$/) | "
             "binary_id(/^chelis-python::capacity_census_bindings$/) | "
             "binary_id(/^chelis-cli::stdlib_typecheck_cache_concurrency$/) "

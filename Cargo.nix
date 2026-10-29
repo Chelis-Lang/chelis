@@ -93,6 +93,16 @@ rec {
       # File a bug if you depend on any for non-debug work!
       debug = internal.debugCrate { inherit packageId; };
     };
+    "chelis-checker-core" = rec {
+      packageId = "chelis-checker-core";
+      build = internal.buildRustCrateWithFeatures {
+        packageId = "chelis-checker-core";
+      };
+
+      # Debug support which might change between releases.
+      # File a bug if you depend on any for non-debug work!
+      debug = internal.debugCrate { inherit packageId; };
+    };
     "chelis-clarabel-provider" = rec {
       packageId = "chelis-clarabel-provider";
       build = internal.buildRustCrateWithFeatures {
@@ -1787,6 +1797,11 @@ rec {
             packageId = "chelis-abi";
           }
           {
+            name = "chelis-checker-core";
+            packageId = "chelis-checker-core";
+            usesDefaultFeatures = false;
+          }
+          {
             name = "chelis-crmath";
             packageId = "chelis-crmath";
             usesDefaultFeatures = false;
@@ -1882,6 +1897,11 @@ rec {
             packageId = "chelis-backend-c";
           }
           {
+            name = "chelis-checker-core";
+            packageId = "chelis-checker-core";
+            usesDefaultFeatures = false;
+          }
+          {
             name = "chelis-dag-core";
             packageId = "chelis-dag-core";
             usesDefaultFeatures = false;
@@ -1952,6 +1972,11 @@ rec {
           {
             name = "chelis-backend-c";
             packageId = "chelis-backend-c";
+          }
+          {
+            name = "chelis-checker-core";
+            packageId = "chelis-checker-core";
+            usesDefaultFeatures = false;
           }
           {
             name = "chelis-dag-core";
@@ -2047,6 +2072,139 @@ rec {
         ];
 
       };
+      "chelis-checker-core" = rec {
+        crateName = "chelis-checker-core";
+        version = "0.22.1";
+        edition = "2024";
+        src = lib.cleanSourceWith { filter = sourceFilter;  src = ./crates/chelis-checker-core; };
+        libName = "chelis_checker_core";
+        dependencies = [
+          {
+            name = "chelis-abi";
+            packageId = "chelis-abi";
+            usesDefaultFeatures = false;
+          }
+          {
+            name = "chelis-deep";
+            packageId = "chelis-deep";
+            usesDefaultFeatures = false;
+          }
+          {
+            name = "chelis-numeric-core";
+            packageId = "chelis-numeric-core";
+            usesDefaultFeatures = false;
+            features = [ "alloc" ];
+          }
+          {
+            name = "chelis-pred";
+            packageId = "chelis-pred";
+            usesDefaultFeatures = false;
+          }
+          {
+            name = "chelis-stack-services";
+            packageId = "chelis-stack-services";
+            usesDefaultFeatures = false;
+          }
+          {
+            name = "chelis-type-core";
+            packageId = "chelis-type-core";
+            usesDefaultFeatures = false;
+          }
+          {
+            name = "chelis-unord";
+            packageId = "chelis-unord";
+            usesDefaultFeatures = false;
+          }
+          {
+            name = "chelis-vocab";
+            packageId = "chelis-vocab";
+            usesDefaultFeatures = false;
+          }
+          {
+            name = "serde";
+            packageId = "serde";
+            optional = true;
+            usesDefaultFeatures = false;
+            features = [ "alloc" "derive" "rc" ];
+          }
+          {
+            name = "sha2";
+            packageId = "sha2";
+            usesDefaultFeatures = false;
+          }
+          {
+            name = "spin";
+            packageId = "spin";
+            usesDefaultFeatures = false;
+            features = [ "once" ];
+          }
+          {
+            name = "thiserror";
+            packageId = "thiserror 2.0.18";
+            usesDefaultFeatures = false;
+          }
+        ];
+        devDependencies = [
+          {
+            name = "bincode";
+            packageId = "bincode";
+          }
+          {
+            name = "chelis-macros";
+            packageId = "chelis-macros";
+          }
+          {
+            name = "chelis-surf";
+            packageId = "chelis-surf";
+          }
+          {
+            name = "chelis-syntax-host";
+            packageId = "chelis-syntax-host";
+          }
+          {
+            name = "chelis-type-core";
+            packageId = "chelis-type-core";
+            usesDefaultFeatures = false;
+            features = [ "serde" "test-instrumentation" ];
+          }
+          {
+            name = "half";
+            packageId = "half";
+            features = [ "serde" ];
+          }
+          {
+            name = "proc-macro2";
+            packageId = "proc-macro2";
+          }
+          {
+            name = "quote";
+            packageId = "quote";
+          }
+          {
+            name = "serde";
+            packageId = "serde";
+            usesDefaultFeatures = false;
+            features = [ "alloc" "derive" "rc" ];
+          }
+          {
+            name = "serde_json";
+            packageId = "serde_json";
+          }
+          {
+            name = "stacker";
+            packageId = "stacker";
+          }
+          {
+            name = "syn";
+            packageId = "syn 2.0.117";
+            features = [ "full" "visit" "extra-traits" ];
+          }
+        ];
+        features = {
+          "serde" = [ "dep:serde" "chelis-type-core/serde" "chelis-unord/serde" "chelis-numeric-core/serde" ];
+        };
+        resolvedDefaultFeatures = [ "default" "serde" "test-instrumentation" ];
+      };
       "chelis-clarabel-provider" = rec {
         crateName = "chelis-clarabel-provider";
         version = "0.23.0";
@@ -2095,6 +2253,11 @@ rec {
           {
             name = "chelis-backend-metal";
             packageId = "chelis-backend-metal";
+          }
+          {
+            name = "chelis-checker-core";
+            packageId = "chelis-checker-core";
+            usesDefaultFeatures = false;
           }
           {
             name = "chelis-compiler-api";
@@ -2368,6 +2531,12 @@ rec {
           {
             name = "chelis-backend-hip";
             packageId = "chelis-backend-hip";
+          }
+          {
+            name = "chelis-checker-core";
+            packageId = "chelis-checker-core";
+            usesDefaultFeatures = false;
+            features = [ "serde" ];
           }
           {
             name = "chelis-clarabel-provider";
@@ -2817,6 +2986,11 @@ rec {
             packageId = "chelis-backend-c";
           }
           {
+            name = "chelis-checker-core";
+            packageId = "chelis-checker-core";
+            usesDefaultFeatures = false;
+          }
+          {
             name = "chelis-compiler-api";
             packageId = "chelis-compiler-api";
           }
@@ -2913,6 +3087,12 @@ rec {
         src = lib.cleanSourceWith { filter = sourceFilter;  src = ./crates/chelis-effects; };
         libName = "chelis_effects";
         dependencies = [
+          {
+            name = "chelis-checker-core";
+            packageId = "chelis-checker-core";
+            usesDefaultFeatures = false;
+            features = [ "serde" ];
+          }
           {
             name = "chelis-deep";
             packageId = "chelis-deep";
@@ -3051,6 +3231,11 @@ rec {
             packageId = "chelis-abi";
           }
           {
+            name = "chelis-checker-core";
+            packageId = "chelis-checker-core";
+            usesDefaultFeatures = false;
+          }
+          {
             name = "chelis-dag-core";
             packageId = "chelis-dag-core";
             usesDefaultFeatures = false;
@@ -3122,6 +3307,11 @@ rec {
           {
             name = "chelis-syntax-host";
             packageId = "chelis-syntax-host";
+          }
+          {
+            name = "chelis-types";
+            packageId = "chelis-types";
+            features = [ "test-instrumentation" ];
           }
           {
             name = "serde_json";
@@ -3204,6 +3394,11 @@ rec {
         src = lib.cleanSourceWith { filter = sourceFilter;  src = ./crates/chelis-lsp; };
         libName = "chelis_lsp";
         dependencies = [
+          {
+            name = "chelis-checker-core";
+            packageId = "chelis-checker-core";
+            usesDefaultFeatures = false;
+          }
           {
             name = "chelis-deep";
             packageId = "chelis-deep";
@@ -3361,6 +3556,12 @@ rec {
         libName = "chelis_pipeline_core";
         dependencies = [
           {
+            name = "chelis-checker-core";
+            packageId = "chelis-checker-core";
+            usesDefaultFeatures = false;
+            features = [ "serde" ];
+          }
+          {
             name = "chelis-dag-core";
             packageId = "chelis-dag-core";
             usesDefaultFeatures = false;
@@ -3462,6 +3663,11 @@ rec {
           {
             name = "bincode";
             packageId = "bincode";
+          }
+          {
+            name = "chelis-checker-core";
+            packageId = "chelis-checker-core";
+            usesDefaultFeatures = false;
           }
           {
             name = "chelis-compiler-api";
@@ -3698,6 +3904,11 @@ rec {
           {
             name = "bincode";
             packageId = "bincode";
+          }
+          {
+            name = "chelis-checker-core";
+            packageId = "chelis-checker-core";
+            usesDefaultFeatures = false;
           }
           {
             name = "chelis-deep";
@@ -4419,6 +4630,11 @@ rec {
             packageId = "chelis-abi";
           }
           {
+            name = "chelis-checker-core";
+            packageId = "chelis-checker-core";
+            features = [ "serde" ];
+          }
+          {
             name = "chelis-deep";
             packageId = "chelis-deep";
           }
@@ -4431,6 +4647,10 @@ rec {
           {
             name = "chelis-pred";
             packageId = "chelis-pred";
+          }
+          {
+            name = "chelis-stack-services";
+            packageId = "chelis-stack-services";
           }
           {
             name = "chelis-type-core";
@@ -4512,7 +4732,9 @@ rec {
           }
         ];
         features = {
+          "test-instrumentation" = [ "chelis-checker-core/test-instrumentation" ];
         };
+        resolvedDefaultFeatures = [ "test-instrumentation" ];
       };
       "chelis-unord" = rec {
         crateName = "chelis-unord";
@@ -12495,7 +12717,7 @@ rec {
           "ticket_mutex" = [ "mutex" ];
           "use_ticket_mutex" = [ "mutex" "ticket_mutex" ];
         };
-        resolvedDefaultFeatures = [ "mutex" "spin_mutex" ];
+        resolvedDefaultFeatures = [ "mutex" "once" "spin_mutex" ];
       };
       "stable_deref_trait" = rec {
         crateName = "stable_deref_trait";

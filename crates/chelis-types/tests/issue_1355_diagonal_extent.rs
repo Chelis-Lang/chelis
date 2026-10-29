@@ -18,11 +18,11 @@
 //! mixed literal/symbolic forms that keep the wildcard; it is not evidence for
 //! the full per-dtype [05-OP-33] runtime contract.
 
+use chelis_checker_core::errors::CheckErrorKind;
 use chelis_deep::Expr;
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str as parse_surf;
 use chelis_types::check_ir_program;
-use chelis_types::errors::CheckErrorKind;
 
 fn surf_to_deep(source: &str) -> Vec<Expr> {
     let decls = parse_surf(source, &chelis_syntax_host::NativeStack).expect("surf parse");

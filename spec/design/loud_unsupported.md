@@ -246,7 +246,7 @@ pub struct Unsupported {
 }
 ```
 
-Implemented as `chelis_types::unsupported::Unsupported`. The subject, context,
+Implemented as `chelis_checker_core::unsupported::Unsupported`. The subject, context,
 span, and supported-alternative storage shown above are boxed so the `Err`
 variant stays small on Result-typed emission paths; these are representation
 details, not changes to their projected values.
@@ -324,11 +324,11 @@ for as long as the two prerequisites are outstanding that prohibition is a
 permission - matching the `unsupported:` brand is the sanctioned machine
 surface, and the corpus doing so is correct rather than tolerated. The
 permission is given an expiry that fires on its own: the `compile_fail`
-doctest oracles in `crates/chelis-types/src/unsupported.rs`, one per type
+doctest oracles in `crates/chelis-checker-core/src/unsupported.rs`, one per type
 on the `Unsupported` path, go red the day any of the four gains
 `Serialize`, which is exactly the moment this note stops being true. They
 run in CI through the
-`cargo test -p chelis-types -p chelis-compiler-api --doc` gate stage
+`cargo test -p chelis-checker-core -p chelis-compiler-api --doc` gate stage
 ([#875]). When both prerequisites land, this STATUS block and those
 oracles come out together and the bullet above stands as written ([#871]).
 
@@ -404,7 +404,7 @@ REGISTRIES of what actually exists:
   paths, conditional or malformed path wiring, production `include!`, and
   production macro definitions that directly emit module wiring fail closed.
   The defining
-  `crates/chelis-types/src/unsupported.rs` remains the sole citation
+  `crates/chelis-checker-core/src/unsupported.rs` remains the sole citation
   exclusion. The direct-construction boundary checker consumes this exact
   source view rather than owning a second filesystem glob. The generator also
   runs Cargo's non-test production targets and reuses

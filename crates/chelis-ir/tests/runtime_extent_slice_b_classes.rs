@@ -426,7 +426,7 @@ fn a_member_whose_rtdim_slot_is_absent_is_a_typed_receipt_not_a_panic() {
     // And the malformed slot is reported where the rule puts it.
     let receipt = chelis_ir::axis_admission::check_axis_sources(
         &dag,
-        chelis_types::unsupported::Stage::Runtime,
+        chelis_checker_core::unsupported::Stage::Runtime,
     )
     .expect_err("an absent bound slot is a checked cardinality failure");
     let text = receipt.to_string();

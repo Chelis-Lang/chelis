@@ -1,10 +1,8 @@
 //! chelis#1125 PP7/E5e slice 1: annotation-reader carrier parity.
 
+use chelis_checker_core::errors::CheckError;
 use chelis_deep::{DeepTag, Expr, ExprCarrier, parse_and_stamp_file};
-use chelis_types::errors::CheckError;
 use chelis_types::{CheckedProgram, check_ir_program, check_typed_program};
-use std::collections::BTreeSet;
-use syn::visit::Visit;
 
 fn legacy(source: &str) -> Vec<Expr> {
     chelis_deep::parser::parse_str(source, &chelis_syntax_host::NativeStack)
@@ -230,94 +228,4 @@ fn present_structural_match_guards_reject_on_both_ingresses() {
         .errors;
     assert!(!ir_errors.is_empty());
     assert!(!stamped_errors.is_empty());
-}
-
-#[derive(Default)]
-struct DispatchMatches<'ast> {
-    node: Vec<&'ast syn::ExprMatch>,
-}
-
-fn path_name(expr: &syn::Expr) -> Option<String> {
-    let syn::Expr::Path(path) = expr else {
-        return None;
-    };
-    path.path
-        .segments
-        .last()
-        .map(|segment| segment.ident.to_string())
-}
-
-impl<'ast> Visit<'ast> for DispatchMatches<'ast> {
-    fn visit_expr_match(&mut self, node: &'ast syn::ExprMatch) {
-        match node.expr.as_ref() {
-            syn::Expr::MethodCall(call)
-                if call.method == "tag"
-                    && path_name(call.receiver.as_ref()).as_deref() == Some("node") =>
-            {
-                self.node.push(node);
-            }
-            _ => {}
-        }
-        syn::visit::visit_expr_match(self, node);
-    }
-}
-
-#[derive(Default)]
-struct DeepTags(BTreeSet<String>);
-
-impl<'ast> Visit<'ast> for DeepTags {
-    fn visit_path(&mut self, path: &'ast syn::Path) {
-        let segments = path.segments.iter().collect::<Vec<_>>();
-        if segments.len() >= 2 && segments[segments.len() - 2].ident == "DeepTag" {
-            self.0
-                .insert(segments[segments.len() - 1].ident.to_string());
-        }
-        syn::visit::visit_path(self, path);
-    }
-}
-
-fn dispatched_tags(dispatch: &syn::ExprMatch) -> BTreeSet<String> {
-    let mut result = BTreeSet::new();
-    for arm in &dispatch.arms {
-        let mut tags = DeepTags::default();
-        tags.visit_pat(&arm.pat);
-        for tag in tags.0 {
-            assert!(
-                result.insert(tag.clone()),
-                "duplicate disposition for {tag}"
-            );
-        }
-    }
-    result
-}
-
-#[test]
-fn root_node_dispatch_names_every_deep_tag() {
-    let source = include_str!("../src/infer/expr.rs");
-    let syntax = syn::parse_file(source).expect("inference source parses");
-    let function = syntax
-        .items
-        .iter()
-        .find_map(|item| match item {
-            syn::Item::Fn(function)
-                if function.sig.ident == "infer_expr_with_type_metadata_ownership" =>
-            {
-                Some(function)
-            }
-            _ => None,
-        })
-        .expect("root inference function remains present");
-    let mut matches = DispatchMatches::default();
-    matches.visit_block(&function.block);
-    assert_eq!(matches.node.len(), 1, "expected one stamped Node dispatch");
-
-    let vocabulary = DeepTag::ALL
-        .iter()
-        .map(|tag| format!("{tag:?}"))
-        .collect::<BTreeSet<_>>();
-    assert_eq!(
-        dispatched_tags(matches.node[0]),
-        vocabulary,
-        "the root dispatch must name every tag in an explicit arm, never absorb one in a catch-all"
-    );
 }

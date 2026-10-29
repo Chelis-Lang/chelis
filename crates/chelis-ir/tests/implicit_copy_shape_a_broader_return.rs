@@ -1,8 +1,7 @@
 //! Implicit-copy Shape A broader return: tail-position borrow-to-owned
 //! coercion in `let`, `if`, and `match` bodies.
 //!
-//! PR #91 (W4-A) introduced `shape_a_relaxed_return` in
-//! `crates/chelis-types/src/infer.rs` to handle the bare-var body shape:
+//! The checker accepts a borrowed variable at an owned return position:
 //!
 //! ```ignore
 //! def f(x: &T) -> T = x

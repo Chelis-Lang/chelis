@@ -34,7 +34,7 @@ Three tiers of check:
     omitting `--profile` does NOT mean unfiltered, because nextest then
     applies the `default` profile and its `default-filter` (chelis#1781).
   - `GeneralizationPartitionTests` lists the explicit generalization lane,
-    `--features chelis-types/generalize-sweep-oracle`, and asserts that the
+    `--features chelis-checker-core/generalize-sweep-oracle`, and asserts that the
     two nightly-owned contention cases stay out of it.
 
 The last two classes list different compiled configurations, and that is
@@ -135,7 +135,7 @@ HEAVY_E2E_YML = REPO_ROOT / ".github" / "workflows" / "heavy-e2e.yml"
 MODULE_ORACLES_FILTERSET = "${{ needs.module-oracles-plan.outputs.filterset }}"
 GENERALIZATION_LANE_PREFIX = (
     "cargo nextest run --workspace --profile ci-full --ignore-default-filter "
-    "--features chelis-types/generalize-sweep-oracle --no-fail-fast -E '"
+    "--features chelis-checker-core/generalize-sweep-oracle --no-fail-fast -E '"
 )
 
 
@@ -510,7 +510,7 @@ def _list_generalization_pr() -> dict[str, tuple[str, bool]]:
         "ci-full",
         "--ignore-default-filter",
         "--features",
-        "chelis-types/generalize-sweep-oracle",
+        "chelis-checker-core/generalize-sweep-oracle",
         "--message-format",
         "json",
         "-E",
@@ -913,7 +913,7 @@ class ProfilePartitionTests(unittest.TestCase):
 class GeneralizationPartitionTests(unittest.TestCase):
     """Set math for the explicit generalization lane's selection.
 
-    This class lists `--features chelis-types/generalize-sweep-oracle`, a
+    This class lists `--features chelis-checker-core/generalize-sweep-oracle`, a
     different compiled configuration from every `ProfilePartitionTests`
     listing, so CI runs it on generalization shard 1 where that build is
     warm. The nightly-side half of the contention contract stays in

@@ -11,15 +11,16 @@
 use chelis_unord::{ScopedMap, UnordSet};
 use std::collections::{BTreeMap, BTreeSet};
 
+use chelis_checker_core::known_tags::{LaneContribution, deep_tag_lane_contribution};
+use chelis_checker_core::{Realizability, builtin_decl};
 use chelis_deep::{
     DeepTag, ExprCarrier,
     ast::{Atom, Expr, Metadata},
 };
 use chelis_numeric_core::prim::Prim;
-use chelis_types::known_tags::{LaneContribution, deep_tag_lane_contribution};
+use chelis_types::CheckedProgram;
 use chelis_types::manifest::{HostReason, RootPathStep};
 use chelis_types::types::Lane;
-use chelis_types::{CheckedProgram, Realizability, builtin_decl};
 
 // ─── Public types ────────────────────────────────────────────────────────────
 
@@ -963,7 +964,7 @@ pub fn compute_root_manifest_in_context(
 fn collect_manifest_entries(
     expr: &Expr,
     type_env: &BTreeMap<String, Expr>,
-    adt_registry: &chelis_types::adt::AdtRegistry,
+    adt_registry: &chelis_checker_core::adt::AdtRegistry,
     effects_by_def: &BTreeMap<String, chelis_type_core::EffectSet>,
     realizability: &RealizabilityResult,
     out: &mut Vec<RootEntry>,
@@ -1104,7 +1105,7 @@ fn type_expr_has_unresolved_observation_parameter(expr: &Expr) -> bool {
 pub fn expand_manifest_root(
     template: RootEntry,
     value: Option<&Expr>,
-    adt_registry: &chelis_types::adt::AdtRegistry,
+    adt_registry: &chelis_checker_core::adt::AdtRegistry,
 ) -> Vec<RootEntry> {
     let name = template.name.clone();
     let ty = template.ty.clone();
@@ -1127,7 +1128,7 @@ fn expand_manifest_entry(
     name: &str,
     ty: &Expr,
     value: Option<&Expr>,
-    adt_registry: &chelis_types::adt::AdtRegistry,
+    adt_registry: &chelis_checker_core::adt::AdtRegistry,
     path: &[RootPathStep],
     template: &RootEntry,
     out: &mut Vec<RootEntry>,
@@ -1213,7 +1214,7 @@ fn expand_manifest_entry(
 fn static_adt_components<'a>(
     value: Option<&'a Expr>,
     adt_name: &str,
-    adt_registry: &chelis_types::adt::AdtRegistry,
+    adt_registry: &chelis_checker_core::adt::AdtRegistry,
 ) -> Option<Vec<(usize, String, &'a Expr)>> {
     let value = value?;
     let (tag, children) = tagged_children(value)?;
@@ -1665,7 +1666,7 @@ mod tests {
         collect_manifest_entries(
             &def,
             &type_env,
-            &chelis_types::adt::AdtRegistry::new(),
+            &chelis_checker_core::adt::AdtRegistry::new(),
             &effects_by_def,
             &realizability,
             &mut entries,

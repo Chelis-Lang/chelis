@@ -11,10 +11,11 @@
 //! the regression-lock negatives (distinct Names still error, distinct
 //! Lits still error, distinct Vars still error).
 
+use chelis_checker_core::errors::CheckError;
+use chelis_checker_core::errors::CheckErrorKind;
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str;
 use chelis_types::check_typed_program;
-use chelis_types::errors::{CheckError, CheckErrorKind};
 
 fn typecheck_surf(source: &str) -> Vec<CheckError> {
     let decls =

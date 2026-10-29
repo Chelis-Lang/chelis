@@ -105,6 +105,17 @@ back to public List does not by itself supersede this Phase-3 contract.
 
 ## Phase 2 architecture
 
+Semantic sessions and algorithms reside in `chelis-checker-core`.
+Ownership paths below are relative to `crates/chelis-checker-core/src` unless a native path is explicit.
+Native `CheckedProgram` and `TypeEnv` remain in `chelis-types`.
+Historical file and line citations identify earlier implementations.
+
+`CompletedCheck` has private construction and no default, deserialization, or raw-fact constructor.
+Only the native adapter's private check path consumes its own completion for fresh `CheckedProgram` construction.
+Ordinary `CheckFacts` and `ContextSnapshot` grant no native authority.
+Each operation retains one authoritative diagnostic session and explicit stack, cancellation, recursion, and opacity state.
+The existing diagnostic order, annotation evidence, totality rules, and cache contracts remain unchanged.
+
 The current implementation has one explicit ownership chain:
 
 1. `session::DiagnosticSink` owns the check's one canonical error vector. Its
@@ -840,13 +851,11 @@ and applicable CI checks on the candidate head are required supporting evidence,
 but neither replaces this oracle. `scripts/gate.py --validation` is an optional
 local reproduction of supporting checks.
 
-The witness doctests are `crates/chelis-types/src/errors.rs`'s eight
-` ```compile_fail ` blocks. `cargo nextest` does not execute doctests, so
-until chelis#875 they ran in no continuous job and this paragraph claimed
-supporting evidence the repo was not producing. They are now driven by the
-`cargo test -p chelis-types -p chelis-compiler-api --doc` stage in
-`scripts/gate.py`, which is in
-both the `--validation` subset and CI's `lint-rust` worker.
+The witness doctests reside in `crates/chelis-checker-core/src/errors.rs`.
+All eight blocks use `compile_fail`.
+`cargo nextest` does not execute doctests.
+Since chelis#875, `scripts/gate.py` executes them through `cargo test -p chelis-checker-core --doc`.
+The validation subset and CI `lint-rust` worker both execute this stage.
 
 Scope of the guarantee, so this section does not read stronger than the
 mechanism: the witness makes a `Type::Error` **without a diagnostic**

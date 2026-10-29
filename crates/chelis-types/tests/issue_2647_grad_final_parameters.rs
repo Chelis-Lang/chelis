@@ -1,9 +1,9 @@
 //! spec/06 sections 2.1-2.2: all differentiable parameters contribute, using
 //! their final inferred types. A type variable is not a discrete parameter.
 
+use chelis_checker_core::errors::ErrorWitness;
 use chelis_surf::{desugar::desugar_program, parser::parse_str};
 use chelis_types::check_typed_program;
-use chelis_types::errors::ErrorWitness;
 
 fn check(source: &str, accepted: bool) {
     let parsed = parse_str(source, &chelis_syntax_host::NativeStack).expect("fixture parses");

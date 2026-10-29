@@ -1,19 +1,24 @@
 //! Body evidence, ordered rows, and library ownership under spec/04 §4.5.3.
 //! Test-first: these use existing APIs; no production summary API is assumed.
 
+use chelis_checker_core::InferResult;
+use chelis_checker_core::errors::CheckErrorKind;
+use chelis_checker_core::infer::FunctionSignatureInference;
+use chelis_checker_core::infer::ParamSignatureInference;
+use chelis_checker_core::infer::SignatureInferenceMetadata;
 use chelis_deep::Expr;
 use chelis_surf::{desugar::desugar_program, parser::parse_str};
 use chelis_type_core::Type;
-use chelis_types::errors::CheckErrorKind;
-use chelis_types::infer::{
-    FunctionSignatureInference, ParamSignatureInference, SignatureInferenceMetadata,
-};
-use chelis_types::{
-    CheckedProgram, InferResult, TypeEnv, build_compiled_library_context,
-    build_compiled_library_context_with_base, check_ir_program, check_ir_with_context,
-    check_ir_with_signature_context, check_linearity, check_typed_program,
-    install_linked_program_guard,
-};
+use chelis_types::CheckedProgram;
+use chelis_types::TypeEnv;
+use chelis_types::build_compiled_library_context;
+use chelis_types::build_compiled_library_context_with_base;
+use chelis_types::check_ir_program;
+use chelis_types::check_ir_with_context;
+use chelis_types::check_ir_with_signature_context;
+use chelis_types::check_linearity;
+use chelis_types::check_typed_program;
+use chelis_types::install_linked_program_guard;
 
 fn parse(source: &str) -> Vec<Expr> {
     desugar_program(

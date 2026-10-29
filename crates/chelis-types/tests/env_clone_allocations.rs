@@ -1,9 +1,9 @@
 //! Lexical environment snapshots must not duplicate every function signature,
 //! nor copy the name map itself: a snapshot's cost does not depend on how
 //! many names are bound (chelis#3750).
+use chelis_checker_core::env::Env;
+use chelis_checker_core::errors::ErrorWitness;
 use chelis_type_core::{Scheme, Type};
-use chelis_types::env::Env;
-use chelis_types::errors::ErrorWitness;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};

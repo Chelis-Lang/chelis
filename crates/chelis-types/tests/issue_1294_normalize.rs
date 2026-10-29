@@ -1,6 +1,7 @@
 //! Spec/05 section 3.4: normalization is an authored composition.
+use chelis_checker_core::builtin_decl;
 use chelis_surf::{desugar::desugar_program, parser::parse_str};
-use chelis_types::{builtin_decl, check_typed_program};
+use chelis_types::check_typed_program;
 
 #[test]
 fn undeclared_normalize_is_an_unknown_binding() {
@@ -15,7 +16,7 @@ fn undeclared_normalize_is_an_unknown_binding() {
         report.errors.iter().any(|e| e.message.contains("normalize")
             && matches!(
                 e.kind,
-                chelis_types::errors::CheckErrorKind::UnboundVariable { .. }
+                chelis_checker_core::errors::CheckErrorKind::UnboundVariable { .. }
             )),
         "{:#?}",
         report.errors

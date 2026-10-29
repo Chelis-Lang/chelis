@@ -17,11 +17,11 @@
 //! rejection has an accepted control. Gather also requires a literal axis
 //! under [05-AXIS-2], so its positive control uses that static spelling.
 
+use chelis_checker_core::errors::CheckError;
 use chelis_deep::Expr;
 use chelis_macros::{ExpansionOptions, expand_program};
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str as parse_surf;
-use chelis_types::errors::CheckError;
 use chelis_types::{check_ir_program, check_typed_program};
 
 fn desugared(source: &str) -> Vec<Expr> {

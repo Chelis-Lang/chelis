@@ -1,5 +1,11 @@
 //! Shared checked descriptor metadata authority: [04-SHAPE-1], [05-OP-31/33/44].
 
+use alloc::borrow::Cow;
+use alloc::boxed::Box;
+use alloc::format;
+use alloc::vec;
+use alloc::vec::Vec;
+
 use chelis_vocab::RuntimeDType;
 
 /// The `Domain` detail every lane prints when an `expand`/`insert` axis or
@@ -11,12 +17,12 @@ pub const EXPANSION_DOMAIN: &str = "expansion axis or extent outside domain";
 
 #[derive(Debug, Eq, PartialEq)]
 pub enum MetadataError {
-    Domain(std::borrow::Cow<'static, str>),
+    Domain(Cow<'static, str>),
     Overflow(&'static str),
 }
 
-impl std::fmt::Display for MetadataError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for MetadataError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Domain(message) => write!(f, "Domain: {message}"),
             Self::Overflow(message) => write!(f, "Overflow: {message}"),
@@ -306,7 +312,7 @@ impl AffineProjection {
 }
 
 #[cfg(test)]
-thread_local! {
+std::thread_local! {
     static AFFINE_TERM_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 

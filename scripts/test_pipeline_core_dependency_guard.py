@@ -16,6 +16,7 @@ APPROVED_DEPENDENCIES = (
     "chelis-ir",
     "chelis-unord",
     "chelis-dag-core",
+    "chelis-checker-core",
 )
 
 
@@ -39,6 +40,10 @@ def approved_graph() -> dict[str, list[str]]:
         "chelis-types": ["chelis-deep", "chelis-type-core"],
         "chelis-effects": ["chelis-deep", "chelis-types", "chelis-effects-core"],
         "chelis-effects-core": ["chelis-deep", "chelis-type-core", "chelis-unord"],
+        "chelis-checker-core": ["chelis-deep", "chelis-type-core", "chelis-abi", "chelis-stack-services"],
+        "chelis-abi": ["chelis-vocab"],
+        "chelis-stack-services": [],
+        "chelis-vocab": [],
         "chelis-ir": ["chelis-deep", "chelis-types"],
         "chelis-type-core": ["chelis-numeric-core"],
         "chelis-numeric-core": [],
@@ -95,7 +100,7 @@ class PipelineCoreDependencyGuardTests(unittest.TestCase):
             guard.validate_fixture(manifest_with(*APPROVED_DEPENDENCIES), graph)
 
     def test_portable_cores_preserve_denied_and_unapproved_host_paths(self) -> None:
-        for core in ("chelis-numeric-core", "chelis-type-core", "chelis-effects-core"):
+        for core in ("chelis-numeric-core", "chelis-type-core", "chelis-effects-core", "chelis-checker-core"):
             for dependency, classification in (
                 ("chelis-compiler-api", "forbidden"),
                 ("chelis-conformance", "unapproved workspace"),

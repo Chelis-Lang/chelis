@@ -585,7 +585,7 @@ fn build_signatures(
             .and_then(|name| checked.signature_inference().functions.get(name))
             .filter(|inference| inference.authored_signature)
             .map(|inference| {
-                chelis_types::infer::type_to_deep_expr(
+                chelis_checker_core::infer::type_to_deep_expr(
                     inference
                         .authored_signature_type
                         .as_ref()

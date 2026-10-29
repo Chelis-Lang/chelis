@@ -18,10 +18,10 @@ use numbers::{NonnegativeCount, NonnegativeExtent, SourceFloat, SourceInteger, U
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use chelis_checker_core::unsupported::{Unsupported, UnsupportedIdentity};
 use chelis_numeric_core::dtype_semantics::ScalarValue;
 use chelis_numeric_core::prim::Prim;
 use chelis_types::types::{Lane, Target};
-use chelis_types::unsupported::{Unsupported, UnsupportedIdentity};
 use chelis_vocab::DiagnosticKind;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -340,9 +340,11 @@ impl Diagnostic {
 /// cannot move the wire.
 impl Diagnostic {
     /// Project a check diagnostic onto the wire carrier.
-    pub fn try_from_check_error(error: &chelis_types::errors::CheckError) -> Result<Self, String> {
+    pub fn try_from_check_error(
+        error: &chelis_checker_core::errors::CheckError,
+    ) -> Result<Self, String> {
         let _fp_env = chelis_runtime::FpEnvGuard::enter();
-        if let chelis_types::errors::CheckErrorKind::UnsupportedFeature { unsupported } =
+        if let chelis_checker_core::errors::CheckErrorKind::UnsupportedFeature { unsupported } =
             &error.kind
         {
             let mut diagnostic = Self::unsupported(unsupported.as_ref().clone());
@@ -409,7 +411,7 @@ impl Diagnostic {
 /// whether an extent was measured, so [04-FIT-16]'s requirement that a
 /// coordinate travel without an identity is met without weakening
 /// [04-FIT-17]'s prohibition on inventing one: `Point` has no `len` field.
-fn check_error_span(error: &chelis_types::errors::CheckError) -> Option<DiagnosticSpan> {
+fn check_error_span(error: &chelis_checker_core::errors::CheckError) -> Option<DiagnosticSpan> {
     // Always a point. `CheckError` carries `span_offset` and an opaque
     // `span_id`, and no measured extent -- so there is nothing here to build a
     // `Range` from.
@@ -434,8 +436,8 @@ fn check_error_span(error: &chelis_types::errors::CheckError) -> Option<Diagnost
 ///
 /// Exhaustive by construction: adding a `CheckErrorKind` variant does not
 /// compile until its wire identity is chosen here.
-fn check_error_kind(kind: &chelis_types::errors::CheckErrorKind) -> DiagnosticKind {
-    use chelis_types::errors::CheckErrorKind as K;
+fn check_error_kind(kind: &chelis_checker_core::errors::CheckErrorKind) -> DiagnosticKind {
+    use chelis_checker_core::errors::CheckErrorKind as K;
     match kind {
         K::TypeMismatch => DiagnosticKind::TypeMismatch,
         K::PrecisionMismatch => DiagnosticKind::PrecisionMismatch,
@@ -6558,10 +6560,10 @@ mod tests {
     #[test]
     fn unsupported_sidecar_storage_is_pointer_sized() {
         let diagnostic = Diagnostic::unsupported(Unsupported::new(
-            chelis_types::unsupported::UnsupportedKind::Builtin("softmax".into()),
+            chelis_checker_core::unsupported::UnsupportedKind::Builtin("softmax".into()),
             "`chelis build` host emission",
-            chelis_types::unsupported::Stage::Codegen("c"),
-            chelis_types::deliberate_rejection!(
+            chelis_checker_core::unsupported::Stage::Codegen("c"),
+            chelis_checker_core::deliberate_rejection!(
                 "[04-TOT-2]",
                 "the checked builtin vocabulary and C expression vocabulary disagree"
             ),
@@ -9984,9 +9986,9 @@ mod tests {
 #[cfg(test)]
 mod diagnostic_projection_contract {
     use super::{Diagnostic, DiagnosticSpan, check_error_kind, effect_error_kind};
+    use chelis_checker_core::errors::{CheckError, CheckErrorKind as K};
+    use chelis_checker_core::unsupported::{Stage, Unsupported, UnsupportedKind};
     use chelis_effects_core::EffectErrorKind as E;
-    use chelis_types::errors::{CheckError, CheckErrorKind as K};
-    use chelis_types::unsupported::{Stage, Unsupported, UnsupportedKind};
 
     /// Every check kind, so the pin below covers the whole enum rather than
     /// the three a CLI fixture happens to provoke. Adding a variant does not
@@ -10028,7 +10030,10 @@ mod diagnostic_projection_contract {
                     UnsupportedKind::Construct("test checker construct".to_string()),
                     "the diagnostic projection contract",
                     Stage::Checker,
-                    chelis_types::unimplemented_rejection!(2503, "test-only projection authority"),
+                    chelis_checker_core::unimplemented_rejection!(
+                        2503,
+                        "test-only projection authority"
+                    ),
                 )),
             },
             K::Other,

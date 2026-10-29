@@ -5,8 +5,9 @@
 //! unit axis, while `insert` is the rank-raising operation. That contract is
 //! behavioral; it does not depend on a hand-maintained inventory of source
 //! spellings.
+use chelis_checker_core::InferResult;
 use chelis_surf::{desugar::desugar_program, parser::parse_str};
-use chelis_types::{InferResult, check_ir_program};
+use chelis_types::check_ir_program;
 
 fn check(source: &str) -> Result<(), InferResult> {
     let parsed = parse_str(source, &chelis_syntax_host::NativeStack).expect("valid Surf fixture");

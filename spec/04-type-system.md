@@ -3661,7 +3661,7 @@ makes the §8.4 carrier set well-defined when keyed on the bare ADT name.
 ### 8.6 Builtin-Name Shadowing
 
 A top-level `def` or `sig` whose name appears in the closed builtin function
-vocabulary (`BUILTIN_NAMES` in `crates/chelis-types/src/builtins.rs`) is
+vocabulary (`BUILTIN_NAMES` in `crates/chelis-checker-core/src/builtins.rs`) is
 rejected at declaration time as `BuiltinShadowing`, before inference runs.
 
 Rationale: top-level builtin names identify the language's intrinsic call

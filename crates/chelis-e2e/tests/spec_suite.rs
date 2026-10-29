@@ -11,12 +11,12 @@ use chelis_unord::UnordMap;
 use std::io::Write;
 use std::process::Command;
 
+use chelis_checker_core::errors::CheckErrorKind;
 use chelis_dag_core::dag::{Dag, RiscOp, TensorType};
 use chelis_dag_core::grad::grad_dag;
 use chelis_deep::ast::Expr;
 use chelis_e2e::pipeline::compile_surf;
 use chelis_ir::eval::{TensorValue, eval_scalar, eval_tensor, eval_tensor_roots_with_strict};
-use chelis_types::errors::CheckErrorKind;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -355,7 +355,7 @@ fn spec_top_level_initialization_cycle_is_not_a_perfect_wrapperless_check() {
     );
     let report = chelis_types::check_program(&deep_exprs);
     assert!(report.score < 1.0, "a cycle cannot receive perfect fitness");
-    let diagnostics = |errors: &[chelis_types::errors::CheckError]| {
+    let diagnostics = |errors: &[chelis_checker_core::errors::CheckError]| {
         errors
             .iter()
             .map(|error| {

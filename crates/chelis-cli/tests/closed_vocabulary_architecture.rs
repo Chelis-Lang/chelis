@@ -133,12 +133,6 @@ const EFFECT_KIND_CRATES: &[CrateEvidence] = &[
         required: &["EffectKindInput", "Result<EffectKind"],
     },
     CrateEvidence {
-        crate_name: "chelis-types",
-        role: "checker handle-effect semantics",
-        roots: &["crates/chelis-types/src"],
-        required: &["use chelis_vocab::EffectKind", "decode_effect_kind("],
-    },
-    CrateEvidence {
         crate_name: "chelis-effects",
         role: "host target effect validation",
         roots: &["crates/chelis-effects/src"],
@@ -255,11 +249,6 @@ const EFFECT_KIND_FORBIDDEN_RULES: &[ForbiddenRule] = &[
         role: "Deep metadata decode boundary",
         roots: &["crates/chelis-deep/src"],
         forbidden: &["Option<EffectKind"],
-    },
-    ForbiddenRule {
-        role: "checker handle-effect semantics",
-        roots: &["crates/chelis-types/src"],
-        forbidden: &["EffectKind::from_symbol", ".and_then(EffectKind"],
     },
     ForbiddenRule {
         role: "effect inference and handler/target validation",

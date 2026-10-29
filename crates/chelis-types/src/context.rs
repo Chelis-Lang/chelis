@@ -1,90 +1,13 @@
-//! Stacked type-checker context for compiled-artifact caching.
-//! A [`TypeEnv`] snapshots the state of the type checker after
-//! processing a "library" set of decls (e.g. chelis-std + reef deps +
-//! the package's own modules). New code can then be type-checked against
-//! that context: name resolution walks the new-code's bindings first and
-//! falls through to the library snapshot, but the snapshot itself is
-//! never mutated.
-//!
-//! ## Stacking semantics
-//!
-//! - **Type-binding env (`Env`)**: cloned per check call. New-code
-//!   bindings overwrite library bindings of the same name within the
-//!   clone — that is shadowing, since the library snapshot is preserved
-//!   and a subsequent check call sees the unmodified library env.
-//! - **ADT registry**: cloned per check call. Library `deftype`s remain
-//!   visible (so `match libtype { ... }` exhaustivity sees the full
-//!   constructor set); new `deftype`s are registered in the clone only.
-//!   Naive inner-empty/outer-fallback registry stacking would either
-//!   silently accept any match (no constructors found ⇒ "exhaustive") or
-//!   reject every match (no constructors found ⇒ "missing all"), so we
-//!   use clone-then-extend instead — the cloned registry already
-//!   contains the library's constructor sets.
-//! - **Type-resolution environment**: rebuilt for each check from the cloned
-//!   registry's validated ADT/alias definitions plus the new unit's
-//!   precollected declaration headers. The provisional environment is a
-//!   serde-skipped runtime field: it permits self/forward references during
-//!   one check but cannot serialize a rejected declaration into the library
-//!   snapshot.
-//! - **`VarGen`**: cloned per check call. Library type-variable IDs are
-//!   already taken; new variables come from numbers above the library's
-//!   high-water mark.
-//! - **`Subst`**: cloned per check call. Library-derived constraints
-//!   stay visible to new-code unification.
-//! - **Ir type-env**: cloned per check call. Library declared types
-//!   remain visible to new-code shape validation; the new-code's own
-//!   declared types are added on top.
-//! - **Callable provenance**: immutable ordered formal-name identities are
-//!   retained for library values so contextual `grad` validation applies the
-//!   same metadata/index consistency rule as a monolithic check. New
-//!   declarations shadow this snapshot without mutating it.
-//!
-//! ## No leak invariant
-//!
-//! The library snapshot is shared via [`Arc`] and is never written to.
-//! Each `check_ir_with_context` call clones the inner state at the
-//! start, mutates the clone with new-code bindings, and discards the
-//! clone when the call returns. A binding declared in one new-code
-//! snippet is therefore invisible to a subsequent snippet checked
-//! against the same context.
-//!
-//! ## Position-sensitive errors
-//!
-//! Errors emitted by the new-code check carry spans from the new-code
-//! Deep AST nodes. The library was already checked when the context was
-//! built; its errors (if any) are surfaced at build time, not silently
-//! re-emitted with library spans during a new-code check.
-//!
-//! ## Deserialization boundary
-//!
-//! `TypeEnv` derives serde because compiler-api caches successful checker
-//! snapshots. Deserialization restores validated definitions; the transient
-//! type-resolution environment is skipped and is reconstructed at the next
-//! check. Serde can structurally decode the private `ErrorWitness` carried by
-//! `Type::Error`, but successful context construction rejects all checker
-//! errors and the totality invariant forbids error types in emitted snapshots.
-//! Compiler API cache decoding verifies the envelope and build identity.
-//! It requires one opaque identity on both type products.
-//! It adopts the producer's effect and linearity results where it re-lowers
-//! and compares a stored lowering, and reruns those checkers where the
-//! payload carries none (chelis#2558).
+//! Native context admission and format-14 cache transport.
 
-use crate::errors::ErrorWitness;
-use chelis_unord::UnordSet;
-use std::collections::BTreeMap;
+use chelis_checker_core::ContextSnapshot;
+use chelis_checker_core::ErrorWitness;
 use std::sync::Arc;
 
 use chelis_deep::ast as deep;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::adt::AdtRegistry;
-use crate::builtins;
-use crate::env::Env;
-use chelis_type_core::Subst;
-use chelis_type_core::VarGen;
-
-/// Opaque identity derived from an accepted checked library and its base.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LibraryProofId {
     digest: [u8; 32],
@@ -120,53 +43,25 @@ impl LibraryProofId {
     }
 }
 
-/// Outer-scope snapshot for stacked IR type checking.
-///
-/// Cheap to clone — internally `Arc`-shared. Build from a library decl
-/// list with [`crate::build_type_env_from_library`], or create an
-/// empty one with [`TypeEnv::empty`].
 #[derive(Debug, Clone)]
 pub struct TypeEnv {
-    inner: Arc<TypeEnvInner>,
+    inner: Arc<ContextSnapshot>,
     library_proof_id: Option<LibraryProofId>,
 }
 
-// Source-free snapshots are faithful transports from a trusted checker
-// producer, not independently re-proved programs. Structural validation does
-// not establish completeness of a maliciously edited label summary.
-// v2 added #2071's type-variable restrictions. v3 added checked collection
-// relations to `Scheme`; reading an older snapshot as an empty relation list
-// would change which indirect calls are admitted. v4 adds immutable callable
-// provenance; reading v3 as an empty map would reject valid contextual named
-// gradient selectors. v5 adds [04-LIN-10]'s key-free type-variable marks and
-// key-carrying data types; reading v4 as empty sets would let a library generic
-// be instantiated at a key. v6 records whether each mark's generic is a value
-// binding; reading v5 as function generics would change a value binding's
-// suggested repair after a round trip.
-// v7 carries result-equation origins with every generalized scheme. Omitting
-// them would let a cached helper turn a result check into a Grad input binding.
-// v8 requires transported fold/scan accumulator and result contracts.
-// v7 could serialize an alias with an unconstrained result slot.
-// v9 keeps every result-equality scope component wholly shared or quantified.
-// v8 could freshen an input while retaining its monomorphic published result.
-// v10 combines those origins with scalar/tensor key-operation relations.
-// Neither scalar-only v9 nor origin-free key-relation v7 snapshots can be reused.
-// v11 separates raw-origin restrictions from the solved public signature.
-// v13 transports declaration-owned rank body evidence and its dependencies.
-// v14 also retains private checked callable binding occurrences.
 const TYPE_ENV_FORMAT_VERSION: u32 = 14;
 
 #[derive(Serialize)]
 struct TypeEnvWireRef<'a> {
     format_version: u32,
-    inner: &'a Arc<TypeEnvInner>,
+    inner: &'a Arc<ContextSnapshot>,
     library_proof_id: Option<LibraryProofId>,
 }
 
 #[derive(Deserialize)]
 struct TypeEnvWire {
     format_version: u32,
-    inner: Arc<TypeEnvInner>,
+    inner: Arc<ContextSnapshot>,
     library_proof_id: Option<LibraryProofId>,
 }
 
@@ -189,17 +84,10 @@ impl<'de> Deserialize<'de> for TypeEnv {
                 "obsolete TypeEnv format; regenerate the checker snapshot",
             ));
         }
-        wire.inner
-            .subst
-            .validate_dimension_labels(&wire.inner.var_gen)
-            .map_err(serde::de::Error::custom)?;
-        wire.inner
-            .rank_bodies
-            .validate(&wire.inner.ir_types)
-            .map_err(serde::de::Error::custom)?;
+        wire.inner.validate().map_err(serde::de::Error::custom)?;
         let valid_rank_proof = match wire.library_proof_id {
-            Some(proof) => proof.rank_context_digest == wire.inner.rank_bodies.digest(),
-            None => wire.inner.rank_bodies.is_empty(),
+            Some(proof) => proof.rank_context_digest == wire.inner.rank_context_digest(),
+            None => !wire.inner.has_rank_bodies(),
         };
         if !valid_rank_proof {
             return Err(serde::de::Error::custom(
@@ -213,47 +101,7 @@ impl<'de> Deserialize<'de> for TypeEnv {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct TypeEnvInner {
-    /// Type-binding env: every name ever declared in the library, mapped
-    /// to its (generalized) scheme. Includes builtins and prelude ADT
-    /// constructors.
-    pub(crate) env: Env,
-    /// VarGen at the library's high-water mark — new fresh tvars/dvars
-    /// for new-code checking start above the library's last allocation.
-    pub(crate) var_gen: VarGen,
-    /// Substitution carrying any library-derived constraints.
-    pub(crate) subst: Subst<ErrorWitness>,
-    /// ADT registry containing library `deftype`s, type aliases, and
-    /// prelude ADTs (Option, List, etc).
-    pub(crate) adt_reg: AdtRegistry,
-    /// IR declared-type lookup: library def name → declared type
-    /// expression. Used by the validate pass (which checks shape
-    /// invariants against declared types).
-    pub(crate) ir_types: BTreeMap<String, deep::Expr>,
-    /// Set of names declared by the library — used by the new-code
-    /// cycle / unbound suppression logic to distinguish library
-    /// references from new-code references.
-    pub(crate) library_def_names: UnordSet<String>,
-    /// Module-scoped immutable callable identities and ordered formal names
-    /// accepted from the library source. Contextual `grad` validation seeds
-    /// its structural resolver from this snapshot.
-    pub(crate) selector_callables: crate::infer::SelectorCallableContext,
-    /// Checked body evidence and exact dependency ownership for §4.5.3.
-    /// Mandatory on the wire: absence cannot mean a verified empty body.
-    pub(crate) rank_bodies: crate::infer::RankBodyContext,
-    /// Checker-enforced opacity metadata (RFC D-CHECK): per-module
-    /// export sets, binding -> module attribution, and producer text,
-    /// accumulated across the library and new-code phases. Defaults
-    /// so older serialized payloads remain decodable in principle;
-    /// the cache format version still gates real reuse.
-    #[serde(default)]
-    pub(crate) opacity: crate::opacity::OpacityModuleMeta,
-}
-
 impl TypeEnv {
-    /// This scope with one extra binding, for tests that check a program
-    /// against an exact scheme under a name no builtin route claims.
     #[cfg(test)]
     pub(crate) fn with_test_binding(
         &self,
@@ -268,35 +116,14 @@ impl TypeEnv {
         }
     }
 
-    /// Empty outer scope — the result of building a context from `&[]`.
-    /// `check_ir_with_context(&TypeEnv::empty(), exprs)` is
-    /// behaviorally equivalent to [`crate::check_ir_program(exprs)`]
-    /// on the same `exprs`.
     pub fn empty() -> Self {
-        let (env, var_gen) = builtins::builtin_env();
-        let mut adt_reg = AdtRegistry::new();
-        let mut env = env;
-        let mut var_gen = var_gen;
-        builtins::register_prelude_adts(&mut env, &mut var_gen, &mut adt_reg);
         Self {
-            inner: Arc::new(TypeEnvInner {
-                env,
-                var_gen,
-                subst: Subst::<ErrorWitness>::new(),
-                adt_reg,
-                ir_types: BTreeMap::new(),
-                library_def_names: UnordSet::new(),
-                selector_callables: crate::infer::SelectorCallableContext::default(),
-                rank_bodies: crate::infer::RankBodyContext::default(),
-                opacity: crate::opacity::OpacityModuleMeta::default(),
-            }),
+            inner: Arc::new(ContextSnapshot::empty()),
             library_proof_id: None,
         }
     }
 
-    /// Internal constructor — only the `infer` module calls this after
-    /// running the library through the full IR pipeline.
-    pub(crate) fn from_inner(inner: TypeEnvInner) -> Self {
+    pub(crate) fn from_inner(inner: ContextSnapshot) -> Self {
         Self {
             inner: Arc::new(inner),
             library_proof_id: None,
@@ -311,56 +138,28 @@ impl TypeEnv {
         self.library_proof_id
     }
 
-    pub(crate) fn inner(&self) -> &TypeEnvInner {
+    pub(crate) fn inner(&self) -> &ContextSnapshot {
         &self.inner
     }
 
-    /// Clone this persisted checker snapshot for a new checking unit.
-    /// Variables imported from the snapshot are normalized to level zero
-    /// before any IDs for the new unit can be minted.
-    pub(crate) fn resume_for_new_check(&self) -> TypeEnvInner {
-        let mut inner = self.inner().clone();
-        inner.subst.resume_for_new_check(&inner.var_gen);
-        inner
-    }
-
-    /// Number of library defs in scope. Diagnostic helper.
     pub fn library_def_count(&self) -> usize {
         self.inner.library_def_names.len()
     }
 
-    /// Whether a name was declared by the library this context was built
-    /// from. Diagnostic helper — does NOT walk builtins or prelude.
     pub fn has_library_def(&self, name: &str) -> bool {
         self.inner.library_def_names.contains(name)
     }
 
-    /// Return the generalized checker scheme for a binding in this accepted
-    /// library context.
-    ///
-    /// Public package metadata uses this immutable view so quantified-domain
-    /// restrictions remain attached to function values at serialization
-    /// boundaries instead of being reconstructed from a printed type.
     pub fn scheme(&self, name: &str) -> Option<&chelis_type_core::Scheme<ErrorWitness>> {
         self.inner.env.lookup(name)
     }
 
-    /// Confirm that this context and a checked program are one library product pair.
-    ///
-    /// The library builders derive one opaque identity from accepted checked source
-    /// and its exact callable-selector provenance snapshot. Cache parsing requires
-    /// that identity, the provenance digest, and the declared-type map to match.
     pub fn matches_checked_program(&self, program: &crate::CheckedProgram) -> bool {
-        let selector_context_digest =
-            crate::infer::selector_callable_context_digest(&self.inner.selector_callables);
+        let selector_context_digest = self.inner.selector_context_digest();
         self.library_proof_id.is_some_and(|proof| {
             proof.selector_context_digest == selector_context_digest
-                && proof.rank_context_digest == self.inner.rank_bodies.digest()
-        }) && self
-            .inner
-            .rank_bodies
-            .validate(&self.inner.ir_types)
-            .is_ok()
+                && proof.rank_context_digest == self.inner.rank_context_digest()
+        }) && self.inner.validate_rank_bodies().is_ok()
             && self.library_proof_id == program.library_proof_id()
             && self.inner.ir_types.eq(program.type_env())
     }
@@ -391,7 +190,7 @@ mod tests {
     #[test]
     fn dimension_snapshot_rejects_obsolete_direct_encoding_and_missing_summary() {
         let context = TypeEnv::empty();
-        // Previous source-free wire had no leading format version.
+
         let old = bincode::serialize(&(&context.inner, context.library_proof_id)).unwrap();
         assert!(bincode::deserialize::<TypeEnv>(&old).is_err());
         let mut json = serde_json::to_value(&context).unwrap();
@@ -462,12 +261,14 @@ mod tests {
         assert_eq!(decoded.inner().subst.level_of_tvar(child_tvar), 1);
         assert_eq!(decoded.inner().subst.level_metadata_counts(), (2, 1, 1, 1));
 
-        let mut resumed = decoded.resume_for_new_check();
+        let mut resumed = decoded.inner().resume_for_new_check();
         assert_eq!(resumed.subst.level_of_tvar(child_tvar), 0);
         assert_eq!(resumed.subst.level_metadata_counts(), (1, 0, 0, 0));
-        let imported = resumed
-            .env
-            .generalize(&Type::Var(child_tvar), &resumed.subst);
+        let imported = resumed.env.generalize(
+            &Type::Var(child_tvar),
+            &resumed.subst,
+            &chelis_checker_core::Resources::new(&chelis_syntax_host::NativeStack),
+        );
         assert!(imported.tvars.is_empty());
 
         for cycle in 0..4 {
@@ -481,10 +282,14 @@ mod tests {
             let context = TypeEnv::from_inner(resumed);
             let encoded = bincode::serialize(&context).expect("cycle serializes");
             let decoded: TypeEnv = bincode::deserialize(&encoded).expect("cycle deserializes");
-            resumed = decoded.resume_for_new_check();
+            resumed = decoded.inner().resume_for_new_check();
             assert_eq!(resumed.subst.level_of_tvar(fresh), 0);
             assert_eq!(resumed.subst.level_metadata_counts(), (1, 0, 0, 0));
-            let imported = resumed.env.generalize(&Type::Var(fresh), &resumed.subst);
+            let imported = resumed.env.generalize(
+                &Type::Var(fresh),
+                &resumed.subst,
+                &chelis_checker_core::Resources::new(&chelis_syntax_host::NativeStack),
+            );
             assert!(imported.tvars.is_empty());
         }
     }
@@ -513,7 +318,7 @@ mod tests {
                 Prim::Bool,
             ),
         ] {
-            let mut resumed = decoded.resume_for_new_check();
+            let mut resumed = decoded.inner().resume_for_new_check();
             let scheme = resumed.env.lookup(name).unwrap().clone();
             assert!(
                 scheme
@@ -569,7 +374,7 @@ mod tests {
             Some(TypeVarRestriction::ActiveFloat)
         );
 
-        let mut resumed = decoded.resume_for_new_check();
+        let mut resumed = decoded.inner().resume_for_new_check();
         let scheme = resumed
             .env
             .lookup("test_assert_close_tensor")

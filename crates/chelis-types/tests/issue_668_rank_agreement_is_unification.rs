@@ -61,10 +61,10 @@
 //! scalar rewrite, which is PR B's subject; nothing here asserts on them
 //! either.
 
+use chelis_checker_core::errors::CheckError;
 use chelis_deep::printer::print_canonical;
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str as parse_surf;
-use chelis_types::errors::CheckError;
 use chelis_types::{check_ir_program, check_typed_program};
 
 fn deep(source: &str) -> Vec<chelis_deep::Expr> {

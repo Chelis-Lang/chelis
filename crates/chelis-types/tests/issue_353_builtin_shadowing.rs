@@ -33,10 +33,11 @@
 //!   package `def sum` neither collides nor mis-dispatches (pinned in the
 //!   CLI-level test file).
 
+use chelis_checker_core::BUILTIN_NAMES;
+use chelis_checker_core::errors::CheckErrorKind;
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str;
-use chelis_types::errors::CheckErrorKind;
-use chelis_types::{BUILTIN_NAMES, check_ir_program};
+use chelis_types::check_ir_program;
 
 fn surf_to_deep(source: &str) -> Vec<chelis_deep::Expr> {
     let decls = parse_str(source, &chelis_syntax_host::NativeStack).expect("surf parse");

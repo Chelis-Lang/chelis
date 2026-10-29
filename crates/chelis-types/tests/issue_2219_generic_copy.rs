@@ -8,9 +8,10 @@
 //! Before the fix the checker admitted only a tensor or a borrowed tensor and
 //! refused every other operand ("copy argument 1: expected tensor, got ...").
 
+use chelis_checker_core::errors::CheckError;
+use chelis_checker_core::errors::CheckErrorKind;
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str;
-use chelis_types::errors::{CheckError, CheckErrorKind};
 use chelis_types::{check_linearity, check_typed_program};
 
 /// Type errors, then linearity errors, of a Surf program.

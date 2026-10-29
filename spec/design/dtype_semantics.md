@@ -855,8 +855,8 @@ Deliverables, with phase homes:
    direct-primitive-only scan is incomplete and fails its mutation control.
    The prelude / stdlib value-ADT family has a second enumeration
    source: **Rust-registered prelude ADTs**
-   (`register_prelude_adts` in `crates/chelis-types/src/builtins.rs`)
-   enumerate through `prelude_adt_rows -> chelis_types::prelude_adt_defs`
+   (`register_prelude_adts` in `crates/chelis-checker-core/src/builtins.rs`)
+   enumerate through `prelude_adt_rows -> chelis_checker_core::prelude_adt_defs`
    as the `prelude-adt-numeric` leg, classified on the identical
    float-carrier / numeric-op rule with a shape-complete identity.
    The final public JSON ADT is exported from stdlib and is discovered by the

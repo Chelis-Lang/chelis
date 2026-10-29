@@ -11,9 +11,9 @@
 //! VIOLATED by an in-module constructor still type-checks. The invariant
 //! is recorded, never evaluated; this is not refinement typing.
 
+use chelis_checker_core::errors::CheckError;
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str;
-use chelis_types::errors::CheckError;
 use chelis_types::infer_ir_program;
 
 // ── Harness ──────────────────────────────────────────────────────

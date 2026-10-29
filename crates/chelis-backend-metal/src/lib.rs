@@ -29,10 +29,10 @@ pub const TENSOR_CAPABLE_PRIMS: &[chelis_numeric_core::prim::Prim] = &[
 
 use chelis_unord::UnordMap;
 
+use chelis_checker_core::unsupported::Unsupported;
 use chelis_dag_core::dag::DimExpr;
 use chelis_dag_core::dag::NodeId;
 use chelis_ir::ownership::{VerifiedDagProgram, VerifiedDagView};
-use chelis_types::unsupported::Unsupported;
 
 pub mod blas;
 pub mod dtype;
@@ -371,12 +371,12 @@ fn verified_host_helper_dag(
 ) -> Result<VerifiedDagProgram, Unsupported> {
     let unsupported = |error: chelis_ir::ownership::OwnershipError| {
         Unsupported::new(
-            chelis_types::unsupported::UnsupportedKind::Construct(format!(
+            chelis_checker_core::unsupported::UnsupportedKind::Construct(format!(
                 "Metal device helper `{helper_name}` ownership lowering"
             )),
             error.to_string(),
-            chelis_types::unsupported::Stage::Codegen("metal"),
-            chelis_types::deliberate_rejection!(
+            chelis_checker_core::unsupported::Stage::Codegen("metal"),
+            chelis_checker_core::deliberate_rejection!(
                 "[04-SHAPE-1]",
                 "a device-emitted host tensor helper requires the same verified ownership plan as a tensor entry"
             ),

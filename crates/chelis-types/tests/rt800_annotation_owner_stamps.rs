@@ -239,8 +239,8 @@ def bad(a: tensor[2, f32]) = {
         result.errors.iter().any(|error| {
             matches!(
                 error.kind,
-                chelis_types::errors::CheckErrorKind::TypeMismatch
-                    | chelis_types::errors::CheckErrorKind::DimensionMismatch
+                chelis_checker_core::errors::CheckErrorKind::TypeMismatch
+                    | chelis_checker_core::errors::CheckErrorKind::DimensionMismatch
             )
         }),
         "malformed nested concat needs an owning type error: {:?}",
@@ -361,7 +361,7 @@ fn guarded_match_arm_records_the_guard_owner_before_annotation() {
     assert!(
         matches!(
             errors[0].kind,
-            chelis_types::errors::CheckErrorKind::TypeMismatch
+            chelis_checker_core::errors::CheckErrorKind::TypeMismatch
         ) && errors[0].message.contains("guard")
             && !errors[0].message.contains("owner-stamp invariant"),
         "the guard owner must emit the user-facing mismatch: {errors:?}"

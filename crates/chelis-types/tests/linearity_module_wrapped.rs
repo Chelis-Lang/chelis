@@ -17,10 +17,10 @@
 //! top-level program ALSO surfaces as a hard error when the program
 //! is wrapped in `module Test`. This is the post-PR-2 contract.
 
+use chelis_checker_core::CopyRepairUseKind;
+use chelis_checker_core::errors::CheckErrorKind;
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str;
-use chelis_types::CopyRepairUseKind;
-use chelis_types::errors::CheckErrorKind;
 use chelis_types::{check_linearity, check_typed_program};
 use copy_repair::assert_copy_repaired;
 
@@ -30,7 +30,7 @@ mod copy_repair;
 /// Run the linearity check on a Surf source. Returns the errors so
 /// fixtures that assert a violation can match on
 /// `CheckErrorKind::UseAfterConsume` and message content.
-fn linearity_errors(source: &str) -> Vec<chelis_types::errors::CheckError> {
+fn linearity_errors(source: &str) -> Vec<chelis_checker_core::errors::CheckError> {
     let decls =
         parse_str(source, &chelis_syntax_host::NativeStack).expect("surf parse should succeed");
     let deep = desugar_program(&decls, &chelis_syntax_host::NativeStack)

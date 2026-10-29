@@ -28,10 +28,10 @@
 //! Every row here passes on the base commit as well, because S2b changes
 //! nothing about `Cons`.
 
+use chelis_checker_core::errors::CheckError;
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str as parse_surf;
 use chelis_types::check_typed_program;
-use chelis_types::errors::CheckError;
 
 fn check(source: &str) -> Result<(), Vec<CheckError>> {
     let decls =

@@ -368,7 +368,6 @@ PERMITTED_RUST_FORMAT_NARROWING_PATHS: frozenset[str] = frozenset(
         "crates/chelis-prove/src/erf_envelope.rs",
         "crates/chelis-prove/src/opaque.rs",
         "crates/chelis-runtime/src/format_shortest.rs",
-        "crates/chelis-types/src/infer/program.rs",
         "crates/chelis-numeric-core/src/observation.rs",
     }
 )

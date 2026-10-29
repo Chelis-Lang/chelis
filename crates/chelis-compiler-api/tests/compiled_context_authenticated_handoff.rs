@@ -390,7 +390,7 @@ fn cached_program_is_a_checker_fixed_point() {
 /// The fixture's `settle` is the source of those facts.
 fn assert_carries_reusable_inputs(layer: &str, stored: &chelis_types::CheckedProgram) {
     assert!(
-        *stored.linearity() != chelis_types::LinearityInfo::default(),
+        *stored.linearity() != chelis_checker_core::LinearityInfo::default(),
         "{layer}: the stored program records no reusable linear inputs, so the fixed-point \
          comparison cannot see a composition that loses them; the fixture's `settle` should \
          produce one"

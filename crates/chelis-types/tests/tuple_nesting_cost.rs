@@ -11,7 +11,7 @@
 //! threads cannot reach it. Doubling the depth must grow the bytes by at most
 //! 2.5 times: linear growth gives about 2, quadratic about 4.
 
-use chelis_types::errors::ErrorWitness;
+use chelis_checker_core::errors::ErrorWitness;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 

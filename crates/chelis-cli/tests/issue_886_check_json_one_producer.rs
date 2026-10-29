@@ -4,11 +4,10 @@
 //! enum. The producer is now `schema::Diagnostic`, so the emitted object and
 //! the type that describes it cannot drift apart.
 //!
-//! The carrier is deliberately the SCHEMA type rather than the checker's own
-//! `CheckError`. Serializing `CheckError` would make a `chelis-types` struct
-//! a numeric wire root outside the §C6 census, which is rooted in
-//! `chelis-compiler-api`; and it would spell `kind` from a Rust identifier
-//! instead of the sealed `DiagnosticKind` vocabulary.
+//! The carrier uses the schema type instead of `chelis_checker_core::CheckError`.
+//! Direct error serialization would add a numeric wire root outside the §C6 census.
+//! That census uses `chelis-compiler-api` as its root.
+//! The schema also uses the sealed `DiagnosticKind` vocabulary instead of Rust identifiers.
 //!
 //! The existing round-trip oracle (`dp_check_ingest.rs::check_dp_json_round_
 //! trips_through_schema`) uses a WELL-TYPED fixture, so its `errors` array is
