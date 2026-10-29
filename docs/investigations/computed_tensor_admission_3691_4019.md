@@ -44,7 +44,8 @@ precision conversion is added.
 
 A literal shape list retains its Cons/Nil spine. Its runtime leaves cross the
 boundary separately, preserving both checked rank and independently computed
-i64 extents. Integer constants retain their static selector evidence. Fresh
+i64 extents. Integer constants and named axes retain their static selector
+evidence; only runtime computations need a new boundary. Fresh
 binding names are reserved across recursive list preparation.
 
 Physical tensor types come from the produced host value; a logical generic
@@ -69,3 +70,16 @@ This establishes the tested producer/consumer boundaries. It does not certify
 every computed tensor family, close the broader computed-tensor admission
 tracker, or establish a compiler resource bound. Test wall times on a contended
 developer machine are not throughput measurements.
+
+The focused execution commands are:
+
+```sh
+CARGO_BUILD_JOBS=1 cargo nextest run -p chelis-cli --test computed_tensor_c_admission --test issue_2939_host_tensor_calls --test issue_2373_computed_concat_c_parity --test key_pair_host_staging --test-threads 1
+CARGO_BUILD_JOBS=1 cargo nextest run -p chelis-ir --test runtime_extent_slice_b_eval_guard --test runtime_extent_checked_transport --test-threads 1
+```
+
+The CLI run passes all 40 tests; the two IR targets pass all 24 tests. The new
+regression target executes 66 generated C programs, including failing domain
+controls, without skips. The example also passes canonical formatting, lint,
+strict check, evaluator execution and linked C execution; both lanes produce
+the six integer cells, total `6`, and f32 one third `0.33333334`.

@@ -66,7 +66,9 @@ separately, so the consumer retains checked rank and actual extent values.
 Computed inputs also retain local-producer identity: a numeric helper boundary
 does not turn a local expand precondition into an authored parameter claim.
 Earlier working operands move with a later host input when needed to preserve
-source evaluation order; integer constants retain static selector evidence.
+source evaluation order; integer constants and named axes retain static
+selector evidence. Names already in scope do not acquire a runtime computation
+merely because they are operation arguments.
 
 A tensor helper captures scalar and tensor values. Lexical ADTs, containers,
 strings and mapped files retain typed opaque bindings during numeric lowering.
