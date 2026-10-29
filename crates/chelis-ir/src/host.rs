@@ -16225,8 +16225,6 @@ fn lower_program_host_app(
         tensor_helpers,
         HoistedOperands::HostLane,
     )?;
-    let helper_context =
-        tensor_helper_context_for_bindings(program, &helper_scope, &helper_bindings);
     // Local callable params (e.g. `f` in `def apply(f: fn, x) = f(x)`) are
     // not representable in the tensor-helper DAG — the DAG path would box
     // the fn pointer into `chelis_scalar_tensor_from_f64` and emit C that
@@ -16300,7 +16298,7 @@ fn lower_program_host_app(
             helper_scope.as_ref(),
             tensor_helpers,
             tensor_ty.clone(),
-            &helper_context,
+            &tensor_helper_context_for_bindings(program, &helper_scope, &helper_bindings),
         )
     {
         if helper_bindings.is_empty() {
@@ -20871,7 +20869,11 @@ fn hoist_host_lane_tensor_bindings_with_names<'expr, 'scope>(
                 && crate::lower::extract_int_axis(arg).is_none()
                 && (should_keep_tensor_expr_in_host_lane(arg)
                     || operand_reads_host_record(arg, program, scope)
-                    || body_form_the_dag_cannot_carry(program, arg, &params, false).is_some()
+                    // Names already denote values or checked static selectors
+                    // (including named axes). Only runtime computations need
+                    // a new boundary; an axis name is not a missing host value.
+                    || (operand_does_work(arg)
+                        && body_form_the_dag_cannot_carry(program, arg, &params, false).is_some())
                     || (hoisted == HoistedOperands::EveryWorkingOperand && does_work(index, arg)))
         })
         .collect::<Vec<_>>();
