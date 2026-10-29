@@ -2164,6 +2164,9 @@ exist; the existing rules decide where each one executes.
   result binder whose only witnesses lie under variants absent at run time is
   the same unbound-binder case as the only-empty-List witness, and follows
   the decision #2805 owns.
+  C tensor-result and nested-result frames resolve binders through the exact
+  ordered witness-state roster of this entry work, including nominal-field
+  observations; they do not reconstruct a List-only subset from ABI types.
 - *Results and local ascriptions.* When the nested tensor's producer is in
   the activation, the obligation is producer-owned. The #1771 origin
   transport carries it through construction, aliases, selected branches and

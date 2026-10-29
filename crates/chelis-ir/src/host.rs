@@ -16678,18 +16678,21 @@ fn retain_actualized_result_claim_with_order(
     } = kind
     {
         let mut axes = literal_axes;
-        if let Some((contract, observations, positions)) = bindings.iter().find_map(|binding| {
-            let HostExprKind::SignatureEntry {
-                contract,
-                args,
-                positions,
-                ..
-            } = &binding.value.kind
-            else {
-                return None;
-            };
-            Some((contract, args, positions))
-        }) {
+        if let Some((contract, observations, positions, lists)) =
+            bindings.iter().find_map(|binding| {
+                let HostExprKind::SignatureEntry {
+                    contract,
+                    args,
+                    positions,
+                    lists,
+                    ..
+                } = &binding.value.kind
+                else {
+                    return None;
+                };
+                Some((contract, args, positions, lists))
+            })
+        {
             for (axis, dim) in result.dims.iter().enumerate() {
                 let DimInfo::Named(binder, _) = dim else {
                     continue;
@@ -16698,7 +16701,7 @@ fn retain_actualized_result_claim_with_order(
                     continue;
                 }
                 let requirement =
-                    signature_binder_requirement(contract, observations, positions, binder);
+                    signature_binder_requirement(contract, observations, positions, lists, binder);
                 if let Some(requirement) = requirement {
                     axes.push((axis, requirement));
                 }
@@ -16770,17 +16773,18 @@ fn signature_binder_requirement(
     contract: &EntryContract<HostTypeTerm>,
     observations: &[HostExpr],
     positions: &[usize],
+    nested: &[HostListEntry],
     binder: &str,
 ) -> Option<HostResultRequirementPlan> {
-    fn pattern_has_binder(pattern: &EntryPattern<HostTypeTerm>, binder: &str) -> bool {
-        match pattern {
-            EntryPattern::Tensor(HostTypeTerm::Tensor(tensor)) => tensor
-                .dims
-                .iter()
-                .any(|dim| matches!(dim, DimInfo::Named(name, _) if name == binder)),
-            EntryPattern::List(inner) => pattern_has_binder(inner, binder),
-            _ => false,
-        }
+    // Signature entry observes this complete roster in formal/field order.
+    // Its state is authoritative even when the first witness is nested in a
+    // nominal parameter instead of represented by a direct tensor input.
+    if let Some(state) = contract
+        .named_witness_binders(nested.iter().filter_map(|entry| entry.claim.as_deref()))
+        .iter()
+        .position(|name| name == binder)
+    {
+        return Some(HostResultRequirementPlan::NamedList { state });
     }
     let claim = crate::lower::extent_binder_label(binder);
     let first_direct = observations
@@ -16809,28 +16813,7 @@ fn signature_binder_requirement(
             ))
         })
         .min_by_key(|(position, _)| *position);
-    let first_list = contract
-        .formals()
-        .iter()
-        .enumerate()
-        .find_map(|(position, formal)| {
-            (matches!(formal.pattern(), EntryPattern::List(_))
-                && pattern_has_binder(formal.pattern(), binder))
-            .then_some(position)
-        });
-    if first_list.is_some_and(|list| {
-        first_direct
-            .as_ref()
-            .is_none_or(|(direct, _)| list < *direct)
-    }) {
-        contract
-            .named_list_binders()
-            .iter()
-            .position(|name| name == binder)
-            .map(|state| HostResultRequirementPlan::NamedList { state })
-    } else {
-        first_direct.map(|(_, requirement)| requirement)
-    }
+    first_direct.map(|(_, requirement)| requirement)
 }
 
 /// Keep an inlined declaration's nested result claim (runtime_extents.md
@@ -16881,12 +16864,13 @@ fn retain_nested_result_claim(
                 contract,
                 args,
                 positions,
+                lists,
                 ..
             } = &binding.value.kind
             else {
                 return None;
             };
-            Some((contract.clone(), args.clone(), positions.clone()))
+            Some((contract, args, positions, lists))
         });
         // The authored signature names each binder's witness; the entry
         // contract of a specialized invocation is built from actualized
@@ -16898,7 +16882,7 @@ fn retain_nested_result_claim(
             .binders()
             .iter()
             .map(|binder| {
-                let (contract, args, positions) = entry.as_ref()?;
+                let (contract, args, positions, lists) = entry.as_ref()?;
                 let direct = authored.iter().enumerate().find_map(|(position, param)| {
                     let HostTypeTerm::Tensor(tensor) = &param.ty else {
                         return None;
@@ -16931,7 +16915,7 @@ fn retain_nested_result_claim(
                             axis,
                         })
                     }
-                    _ => signature_binder_requirement(contract, args, positions, binder),
+                    _ => signature_binder_requirement(contract, args, positions, lists, binder),
                 }
             })
             .collect::<Vec<_>>();
