@@ -78,8 +78,9 @@ CARGO_BUILD_JOBS=1 cargo nextest run -p chelis-cli --test computed_tensor_c_admi
 CARGO_BUILD_JOBS=1 cargo nextest run -p chelis-ir --test runtime_extent_slice_b_eval_guard --test runtime_extent_checked_transport --test-threads 1
 ```
 
-The CLI run passes all 40 tests; the two IR targets pass all 24 tests. The new
-regression target executes 66 generated C programs, including failing domain
-controls, without skips. The example also passes canonical formatting, lint,
+The CLI checks pass all 12 new tests and 29 neighboring controls; the two IR
+targets pass all 24 tests. The new regression target executes 73 generated C
+programs, including failing domain controls and untaken branches for scalar
+and tensor results, without skips. The example also passes canonical formatting, lint,
 strict check, evaluator execution and linked C execution; both lanes produce
 the six integer cells, total `6`, and f32 one third `0.33333334`.

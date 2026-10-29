@@ -55,6 +55,15 @@ fn assert_native_matches_eval(source: &str, name: &str) -> String {
 }
 
 #[test]
+fn canonical_example_keeps_its_executable_tensor_boundaries() {
+    let source = include_str!("../../../examples/computed_tensor_consumers.ch");
+    checked_eval(source, "computed_tensor_consumers");
+    let native = assert_native_matches_eval(source, "computed_tensor_consumers");
+    assert!(native.contains("total = 6\n"), "{native}");
+    assert!(native.contains("one_third = 0.33333334\n"), "{native}");
+}
+
+#[test]
 fn inline_and_bound_range_tensors_keep_expand_admission() {
     for (name, body) in [
         (
@@ -295,31 +304,45 @@ fn a_computed_reshape_keeps_its_product_guard_before_mean() {
 #[test]
 fn mean_keeps_empty_axis_traps_and_untaken_guarded_branches() {
     for dtype in ["f16", "f32", "f64"] {
-        for guarded in [false, true] {
-            let reduction = "tensor_to_scalar(mean(reshape(x, [numel(x)]), 0i32))";
-            let body = if guarded {
-                format!("if gt(numel(x), 0i64) then {reduction} else 0.0{dtype}")
-            } else {
-                reduction.to_string()
-            };
-            let source = format!(
-                "def average[n](x: tensor[n, {dtype}]) -> {dtype} = {body}\ndef empty(size: i64) -> tensor[*, {dtype}] = insert(scalar_to_tensor(0.0{dtype}), 0i32, size)\nout = average(empty(0i64))\n"
-            );
-            let name = format!("empty_mean_{dtype}_{guarded}");
-            let evaluated = cli(&source, &name, &["eval", "--file"]);
-            let native = build_and_execute(&source, &name);
-            if guarded {
-                assert!(evaluated.status.success(), "{evaluated:?}");
-                assert!(native.status.success(), "{native:?}");
-                assert_eq!(native.stdout, evaluated.stdout);
-            } else {
-                for output in [evaluated, native] {
-                    assert!(!output.status.success(), "{output:?}");
-                    assert!(
-                        String::from_utf8_lossy(&output.stderr)
-                            .contains(&format!("numeric trap: domain in mean at {dtype}")),
-                        "{output:?}"
-                    );
+        for tensor in [false, true] {
+            for guarded in [false, true] {
+                let (result, reduction, zero) = if tensor {
+                    (
+                        format!("tensor[{dtype}]"),
+                        "mean(reshape(x, [numel(x)]), 0i32)",
+                        format!("scalar_to_tensor(0.0{dtype})"),
+                    )
+                } else {
+                    (
+                        dtype.to_string(),
+                        "tensor_to_scalar(mean(reshape(x, [numel(x)]), 0i32))",
+                        format!("0.0{dtype}"),
+                    )
+                };
+                let body = if guarded {
+                    format!("if gt(numel(x), 0i64) then {reduction} else {zero}")
+                } else {
+                    reduction.to_string()
+                };
+                let source = format!(
+                    "def average[n](x: tensor[n, {dtype}]) -> {result} = {body}\ndef empty(size: i64) -> tensor[*, {dtype}] = insert(scalar_to_tensor(0.0{dtype}), 0i32, size)\nout = average(empty(0i64))\n"
+                );
+                let name = format!("empty_mean_{dtype}_{tensor}_{guarded}");
+                let evaluated = cli(&source, &name, &["eval", "--file"]);
+                let native = build_and_execute(&source, &name);
+                if guarded {
+                    assert!(evaluated.status.success(), "{evaluated:?}");
+                    assert!(native.status.success(), "{native:?}");
+                    assert_eq!(native.stdout, evaluated.stdout);
+                } else {
+                    for output in [evaluated, native] {
+                        assert!(!output.status.success(), "{output:?}");
+                        assert!(
+                            String::from_utf8_lossy(&output.stderr)
+                                .contains(&format!("numeric trap: domain in mean at {dtype}")),
+                            "{output:?}"
+                        );
+                    }
                 }
             }
         }
