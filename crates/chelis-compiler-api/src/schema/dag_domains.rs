@@ -344,7 +344,7 @@ pub(crate) fn wire_slot_read(op: &WireRiscOp, slot: usize) -> SlotRead {
         | WireRiscOp::Argmin { .. }
         | WireRiscOp::Permute { .. }
         | WireRiscOp::OneHot { .. }
-        | WireRiscOp::CheckedReshapeExtent { .. }
+        | WireRiscOp::CheckedExtent { .. }
         | WireRiscOp::CheckedUnitAxis { .. }
         | WireRiscOp::Const { .. }
         | WireRiscOp::ConstTensor { .. }
@@ -466,7 +466,7 @@ fn is_same_shape_result_op(op: &WireRiscOp) -> bool {
         | WireRiscOp::Scatter { .. }
         | WireRiscOp::ScatterElements { .. }
         | WireRiscOp::ExtentWitness { .. }
-        | WireRiscOp::CheckedReshapeExtent { .. }
+        | WireRiscOp::CheckedExtent { .. }
         | WireRiscOp::CheckedUnitAxis { .. } => false,
     }
 }
@@ -597,7 +597,7 @@ fn literal_result_axis_is_supported(dag: &WireDag, node: &WireDagNode, axis: usi
         ),
         WireRiscOp::Shape { .. }
         | WireRiscOp::ExtentWitness { .. }
-        | WireRiscOp::CheckedReshapeExtent { .. } => false,
+        | WireRiscOp::CheckedExtent { .. } => false,
         WireRiscOp::CheckedUnitAxis { .. } => true,
         WireRiscOp::Const { .. } | WireRiscOp::ConstTensor { .. } => {
             match node.output_type.dims.get(axis) {

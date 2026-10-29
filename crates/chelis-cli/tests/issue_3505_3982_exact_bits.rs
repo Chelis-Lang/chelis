@@ -5,7 +5,7 @@ mod common;
 use assert_cmd::Command;
 use serde_json::Value;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command as NativeCommand;
 use tempfile::tempdir;
 
@@ -242,22 +242,7 @@ int main(void) {{
         output_rank = output_shape.len(), output_dimensions = numbers(output_shape),
         count = output_shape.iter().product::<usize>(),
     )).unwrap();
-    let executable = directory.join("native_bits");
-    let compiled = NativeCommand::new(chelis_backend_c::toolchain::c_compiler())
-        .args(["-O2", "-std=c11", "-I"])
-        .arg(&generated)
-        .arg(generated.join("compute.c"))
-        .arg(driver)
-        .arg(generated.join("libchelis_runtime.a"))
-        .args(["-lm", "-lpthread", "-ldl", "-o"])
-        .arg(&executable)
-        .output()
-        .unwrap();
-    assert!(
-        compiled.status.success(),
-        "{}",
-        String::from_utf8_lossy(&compiled.stderr)
-    );
+    let executable = compile_native_driver(directory, &generated, &driver);
     let output = NativeCommand::new(executable).output().unwrap();
     assert!(
         output.status.success(),
@@ -272,6 +257,26 @@ int main(void) {{
         .collect()
 }
 
+fn compile_native_driver(directory: &Path, generated: &Path, driver: &Path) -> PathBuf {
+    let executable = directory.join("native_bits");
+    let compiled = NativeCommand::new(chelis_backend_c::toolchain::c_compiler())
+        .args(["-O2", "-std=c11", "-I"])
+        .arg(generated)
+        .arg(generated.join("compute.c"))
+        .arg(driver)
+        .arg(generated.join("libchelis_runtime.a"))
+        .args(["-lm", "-lpthread", "-ldl", "-o"])
+        .arg(&executable)
+        .output()
+        .unwrap();
+    assert!(
+        compiled.status.success(),
+        "{}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+    executable
+}
+
 #[test]
 fn ingress_selection_concat_and_arithmetic_match_exact_words_on_eval_and_c() {
     for case in &CASES {
@@ -279,6 +284,9 @@ fn ingress_selection_concat_and_arithmetic_match_exact_words_on_eval_and_c() {
             "identity",
             "relu",
             "sqrt",
+            "floor",
+            "ceil",
+            "round",
             "concat",
             "vmap_concat",
             "vmap_runtime_concat",
@@ -309,6 +317,9 @@ fn ingress_selection_concat_and_arithmetic_match_exact_words_on_eval_and_c() {
                         "concat" => "concat([x, x], 0i32)",
                         "relu" => "relu(x)",
                         "sqrt" => "sqrt(x)",
+                        "floor" => "floor(x)",
+                        "ceil" => "ceil(x)",
+                        "round" => "round(x)",
                         _ => unreachable!(),
                     };
                     let size = if operation == "concat" { 20 } else { 10 };
@@ -316,6 +327,8 @@ fn ingress_selection_concat_and_arithmetic_match_exact_words_on_eval_and_c() {
                     if operation == "sqrt" {
                         expected[..6].fill(case.canonical);
                         expected[9] = case.two;
+                    } else if matches!(operation, "floor" | "ceil" | "round") {
+                        expected[..4].fill(case.canonical);
                     } else if operation == "relu" {
                         expected[4..6].fill(0);
                     } else if operation == "concat" {
@@ -373,4 +386,240 @@ fn original_concat_reciprocal_preserves_negative_zero_on_eval_and_c() {
     );
     let native = common::build_and_run(source, "negative_zero");
     assert!(native.contains("data=[-inf, -1.0, -inf, -1.0]"), "{native}");
+}
+
+#[test]
+fn metal_concat_reaches_the_typed_nonnumeric_gate() {
+    let source = "def compute(x: tensor[2, f32]) -> tensor[4, f32] = concat([x, x], 0i32)\n";
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("concat_metal.ch");
+    canonical_source(&path, source);
+    let checked = Command::cargo_bin("chelis")
+        .unwrap()
+        .arg("check")
+        .arg(&path)
+        .output()
+        .unwrap();
+    assert!(checked.status.success());
+    let report: Value = serde_json::from_slice(&checked.stdout).unwrap();
+    assert_eq!(report["score"].as_f64(), Some(1.0), "{report}");
+    assert_eq!(report["errors"], serde_json::json!([]), "{report}");
+    let emitted = Command::cargo_bin("chelis")
+        .unwrap()
+        .arg("build")
+        .arg(&path)
+        .args(["--target", "metal", "--output"])
+        .arg(directory.path().join("metal"))
+        .output()
+        .unwrap();
+    assert_eq!(emitted.status.code(), Some(1));
+    assert!(emitted.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&emitted.stderr);
+    assert!(stderr.contains("chelis#2266"), "{stderr}");
+    assert!(stderr.contains("codegen:metal"), "{stderr}");
+    let native = common::build_and_run(
+        &format!(
+            "{source}out = div(to_tensor([1.0f32, 1.0f32, 1.0f32, 1.0f32]), compute(to_tensor([cast(-0.0, f32), cast(-1.0, f32)])))\n"
+        ),
+        "concat_c_admission",
+    );
+    assert!(native.contains("data=[-inf, -1.0, -inf, -1.0]"), "{native}");
+}
+
+#[test]
+fn concat_checks_nonconcat_extents_independently_of_selected_elements() {
+    let tensor = |shape: [usize; 2]| {
+        let count = shape.iter().product::<usize>();
+        let data = if count == 0 {
+            "to_tensor([], f32)".to_string()
+        } else {
+            format!("to_tensor([{}])", vec!["1.0f32"; count].join(", "))
+        };
+        format!("reshape({data}, [{}i64, {}i64])", shape[0], shape[1])
+    };
+    for fixed_axis in [false, true] {
+        for (first, second, matching) in [
+            ([1, 2], [0, 3], false),
+            ([0, 2], [0, 3], false),
+            ([1, 0], [1, 3], false),
+            ([0, 2], [1, 3], false),
+            ([1, 2], [0, 2], true),
+            ([1, 0], [1, 0], true),
+        ] {
+            let first_width = if fixed_axis {
+                first[0].to_string()
+            } else {
+                "*".into()
+            };
+            let second_width = if fixed_axis {
+                second[0].to_string()
+            } else {
+                "*".into()
+            };
+            for consumer in ["grad", "discarded", "untaken"] {
+                let (parameters, body, call) = match consumer {
+                    "grad" => (
+                        String::new(),
+                        "tensor_to_scalar(sum(sum(concat([a, b], 0i32), 1i32), 0i32))",
+                        "grad(loss, wrt=a)(a0(), b0())",
+                    ),
+                    "discarded" => (
+                        String::new(),
+                        "{ _ = concat([a, b], 0i32)\n  1.0f32 }",
+                        "loss(a0(), b0())",
+                    ),
+                    "untaken" => (
+                        "flag: bool, ".to_string(),
+                        "if flag then tensor_to_scalar(sum(sum(concat([a, b], 0i32), 1i32), 0i32)) else tensor_to_scalar(sum(sum(a, 1i32), 0i32))",
+                        "grad(loss, wrt=a)(false, a0(), b0())",
+                    ),
+                    _ => unreachable!(),
+                };
+                let source = format!(
+                    "def loss({parameters}a: tensor[{first_width}, *, f32], b: tensor[{second_width}, *, f32]) -> f32 = {body}\ndef a0() -> tensor[{}, {}, f32] = {}\ndef b0() -> tensor[{}, {}, f32] = {}\nout = {call}\n",
+                    first[0],
+                    first[1],
+                    tensor(first),
+                    second[0],
+                    second[1],
+                    tensor(second),
+                );
+                let directory = tempdir().unwrap();
+                let path = directory.path().join("concat_metadata.ch");
+                canonical_source(&path, &source);
+                let checked = Command::cargo_bin("chelis")
+                    .unwrap()
+                    .arg("check")
+                    .arg(&path)
+                    .output()
+                    .unwrap();
+                assert!(
+                    checked.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&checked.stderr)
+                );
+                let report: Value = serde_json::from_slice(&checked.stdout).unwrap();
+                assert_eq!(report["score"].as_f64(), Some(1.0), "{report}");
+                assert_eq!(report["errors"], serde_json::json!([]), "{report}");
+                assert_eq!(report["untyped_nodes"], 0, "{report}");
+                assert_eq!(
+                    report["unresolved_names"],
+                    serde_json::json!([]),
+                    "{report}"
+                );
+                let evaluated = Command::cargo_bin("chelis")
+                    .unwrap()
+                    .args(["eval", "--file"])
+                    .arg(&path)
+                    .arg("--json")
+                    .output()
+                    .unwrap();
+                let context = format!(
+                    "{consumer}, fixed={fixed_axis}, {first:?}/{second:?}: {}",
+                    String::from_utf8_lossy(&evaluated.stderr)
+                );
+                if matching || consumer == "untaken" {
+                    assert!(evaluated.status.success(), "{context}");
+                } else {
+                    assert_eq!(
+                        evaluated.status.code(),
+                        Some(1),
+                        "{context}; unexpected success: {}",
+                        String::from_utf8_lossy(&evaluated.stdout)
+                    );
+                    assert!(
+                        String::from_utf8_lossy(&evaluated.stderr).contains("numeric trap: domain"),
+                        "{context}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn native_concat_checks_empty_and_zero_bystander_metadata() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("compute.ch");
+    canonical_source(
+        &path,
+        "def loss(a: tensor[*, *, f32], b: tensor[*, *, f32]) -> f32 = tensor_to_scalar(sum(sum(concat([a, b], 0i32), 1i32), 0i32))\ndef compute(a: tensor[*, *, f32], b: tensor[*, *, f32]) -> tensor[*, *, f32] = grad(loss, wrt=a)(a, b)\n",
+    );
+    let generated = directory.path().join("generated");
+    Command::cargo_bin("chelis")
+        .unwrap()
+        .args(["build", "--emit-c"])
+        .arg(&path)
+        .args(["--target", "c", "--output"])
+        .arg(&generated)
+        .assert()
+        .success();
+    let header = fs::read_to_string(generated.join("compute.h")).unwrap();
+    let symbol = common::authored_c_symbol("compute");
+    let invoke = if header.lines().any(|line| line.starts_with("void compute(")) {
+        "chelis_tensor *inputs[2] = {a, b};\nchelis_tensor *outputs[1] = {0};\ncompute(inputs, 2, outputs, 1);\nchelis_tensor *out = outputs[0];".to_string()
+    } else {
+        assert!(
+            header.contains(&format!("{symbol}(")),
+            "no declared tensor entry: {header}"
+        );
+        format!("chelis_tensor *out = {symbol}(a, b);")
+    };
+    let driver = directory.path().join("metadata_driver.c");
+    fs::write(&driver, format!(r#"
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include "chelis_runtime.h"
+#include "compute.h"
+int main(int argc, char **argv) {{
+    if (argc != 5) return 2;
+    int64_t ashape[2] = {{strtoll(argv[1], 0, 10), strtoll(argv[2], 0, 10)}};
+    int64_t bshape[2] = {{strtoll(argv[3], 0, 10), strtoll(argv[4], 0, 10)}};
+    float av[16], bv[16];
+    for (int i = 0; i < 16; ++i) {{ av[i] = 1.0f; bv[i] = 1.0f; }}
+    int64_t count = ashape[0] * ashape[1];
+    chelis_tensor *a = chelis_tensor_entry_borrow(2, ashape, CHELIS_DTYPE_F32, av, count * 4);
+    chelis_tensor *b = chelis_tensor_entry_borrow(2, bshape, CHELIS_DTYPE_F32, bv, bshape[0] * bshape[1] * 4);
+    {invoke}
+    chelis_read_view view = chelis_tensor_read_view(out);
+    if (view.dtype != CHELIS_DTYPE_F32 || view.count != count || chelis_tensor_rank(out) != 2) return 3;
+    if (chelis_tensor_shape(out, 0) != ashape[0] || chelis_tensor_shape(out, 1) != ashape[1]) return 4;
+    const float *values = (const float *)view.data;
+    for (int64_t i = 0; i < count; ++i) if (values[i] != 1.0f) return 5;
+    chelis_tensor_release(out);
+    chelis_tensor_release(a);
+    chelis_tensor_release(b);
+    puts("ok");
+    return 0;
+}}
+"#)).unwrap();
+    let executable = compile_native_driver(directory.path(), &generated, &driver);
+    for (first, second, matching) in [
+        ([1, 2], [0, 3], false),
+        ([0, 2], [0, 3], false),
+        ([1, 0], [1, 3], false),
+        ([0, 2], [1, 3], false),
+        ([1, 2], [0, 2], true),
+        ([1, 0], [1, 0], true),
+    ] {
+        let output = NativeCommand::new(&executable)
+            .args(first.iter().chain(second.iter()).map(ToString::to_string))
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(
+            output.status.code(),
+            Some(if matching { 0 } else { 1 }),
+            "{first:?}/{second:?}: {stderr}"
+        );
+        if matching {
+            assert_eq!(output.stdout, b"ok\n");
+        } else {
+            assert!(
+                stderr.contains("numeric trap: domain in concat at i64"),
+                "{stderr}"
+            );
+        }
+    }
 }

@@ -193,7 +193,7 @@ pub fn risc_nan_finalization(op: &chelis_dag_core::dag::RiscOp) -> Option<NanFin
         | RiscOp::Stride { .. }
         | RiscOp::Shape { .. }
         | RiscOp::ExtentWitness { .. }
-        | RiscOp::CheckedReshapeExtent { .. }
+        | RiscOp::CheckedExtent { .. }
         | RiscOp::CheckedUnitAxis { .. }
         | RiscOp::Const { .. }
         | RiscOp::ConstTensor { .. }

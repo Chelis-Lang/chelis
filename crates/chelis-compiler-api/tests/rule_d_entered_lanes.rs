@@ -1524,7 +1524,7 @@ const UNTAKEN: &str = "lt(100.0f32, s)";
 /// named result claims, and a guarded abort in a `grad` body spliced into
 /// the arm. The literal result claim is `tensor[2, 2, f32]` over a
 /// `reshape` whose target the tensor-entry lowering folds to 3, so it is a
-/// result claim, not a `CheckedReshapeExtent`.
+/// result claim, not a `CheckedExtent`.
 const GATED_KINDS: [GatedKind; 11] = [
     GatedKind {
         name: "consumed integer sum",

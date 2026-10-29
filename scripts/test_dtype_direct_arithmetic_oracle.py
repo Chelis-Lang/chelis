@@ -391,7 +391,7 @@ class SourceContractMutationTests(unittest.TestCase):
     def test_wire_identity_mutation_fails(self) -> None:
         self.mutate(
             "crates/chelis-compiler-api/src/schema.rs",
-            "pub const WIRE_DAG_SCHEMA_VERSION: u32 = 30;",
+            "pub const WIRE_DAG_SCHEMA_VERSION: u32 = 31;",
             "pub const WIRE_DAG_SCHEMA_VERSION: u32 = 27;",
         )
         with self.assertRaisesRegex(oracle.OracleFailure, "current WireDag identities"):

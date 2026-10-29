@@ -32,7 +32,8 @@ fn checked_extent(
     let required = scalar(dag, decl, required);
     dag.add_node(
         decl,
-        RiscOp::CheckedReshapeExtent {
+        RiscOp::CheckedExtent {
+            owner: chelis_dag_core::dag::ExtentCheckOwner::Reshape,
             claims: vec!["rows".into()],
             axis: RtAxis::Lit(0),
         },
@@ -41,6 +42,61 @@ fn checked_extent(
         Some("reshape-call".into()),
     )
 }
+
+#[test]
+fn checked_extent_owners_keep_scalar_checks_and_exact_diagnostics_through_rewrites() {
+    use chelis_dag_core::dag::ExtentCheckOwner;
+    for (owner, operation) in [
+        (ExtentCheckOwner::Reshape, "reshape"),
+        (ExtentCheckOwner::Concat, "concat"),
+    ] {
+        for actual in [2, 3] {
+            let mut dag = Dag::new();
+            let decl = dag.declare("test");
+            let check = checked_extent(&mut dag, decl, actual, 2);
+            let RiscOp::CheckedExtent { owner: field, .. } = &mut dag.node_mut(check).unwrap().op
+            else {
+                unreachable!()
+            };
+            *field = owner;
+            let result = scalar(&mut dag, decl, 9);
+            dag.add_shape_dep(result, check);
+            dag.add_root(result);
+            assert!(chelis_dag_core::verify::verify(&dag).is_empty());
+            let mut rewritten = common_subexpr_eliminate(&dag);
+            constant_fold(&mut rewritten);
+            let rewritten = dead_code_eliminate(&rewritten);
+            for graph in [&dag, &rewritten] {
+                let checks: Vec<_> = graph
+                    .nodes()
+                    .iter()
+                    .filter(|node| matches!(node.op, RiscOp::CheckedExtent { .. }))
+                    .collect();
+                assert_eq!(checks.len(), 1);
+                assert_eq!(checks[0].span_id.as_deref(), Some("reshape-call"));
+                assert_eq!(checks[0].output_type, scalar_type());
+                let evaluated = eval_tensor_with(graph, |_| None);
+                if actual == 2 {
+                    assert_eq!(
+                        evaluated.unwrap()[&graph.roots()[0]]
+                            .storage()
+                            .scalar_at(0)
+                            .as_i64_exact(),
+                        Some(9)
+                    );
+                } else {
+                    assert_eq!(
+                        evaluated.unwrap_err(),
+                        format!(
+                            "extent `rows`: claimed = 2, {operation} axis 0 = 3\nnumeric trap: domain in {operation} at i64"
+                        )
+                    );
+                }
+            }
+        }
+    }
+}
+
 fn unit_axis(dag: &mut Dag, decl: chelis_dag_core::dag::DeclId) -> (NodeId, NodeId, NodeId) {
     let x = dag.add_node(
         decl,
@@ -371,7 +427,8 @@ fn multiple_claims_keep_each_requirement_and_reject_missing_edges() {
         let outer = scalar(&mut dag, decl, second);
         let checked = dag.add_node(
             decl,
-            RiscOp::CheckedReshapeExtent {
+            RiscOp::CheckedExtent {
+                owner: chelis_dag_core::dag::ExtentCheckOwner::Reshape,
                 claims: vec!["inner".into(), "outer".into()],
                 axis: RtAxis::Lit(0),
             },
@@ -408,7 +465,8 @@ fn multiple_claims_keep_each_requirement_and_reject_missing_edges() {
         missing.node_mut(checked).unwrap().inputs.pop();
         assert!(!chelis_dag_core::verify::verify(&missing).is_empty());
         let mut empty = dag;
-        empty.node_mut(checked).unwrap().op = RiscOp::CheckedReshapeExtent {
+        empty.node_mut(checked).unwrap().op = RiscOp::CheckedExtent {
+            owner: chelis_dag_core::dag::ExtentCheckOwner::Reshape,
             claims: Vec::new(),
             axis: RtAxis::Lit(0),
         };
@@ -520,7 +578,7 @@ fn rewriting_preserves_discarded_checks_and_separate_call_provenance() {
         let checks: Vec<_> = dag
             .nodes()
             .iter()
-            .filter(|node| matches!(node.op, RiscOp::CheckedReshapeExtent { .. }))
+            .filter(|node| matches!(node.op, RiscOp::CheckedExtent { .. }))
             .collect();
         assert_eq!(checks.len(), 2);
         assert_eq!(checks[0].span_id.as_deref(), Some("reshape-call"));
@@ -560,7 +618,8 @@ fn computed_reshape() -> (Dag, NodeId, NodeId) {
     );
     let checked = dag.add_node(
         decl,
-        RiscOp::CheckedReshapeExtent {
+        RiscOp::CheckedExtent {
+            owner: chelis_dag_core::dag::ExtentCheckOwner::Reshape,
             claims: vec!["2".into()],
             axis: RtAxis::Lit(0),
         },
@@ -629,6 +688,108 @@ fn vectorization_transports_checked_shapes_and_shifts_observed_axes() {
             assert!(
                 error.contains("numeric trap: domain in reshape at i64"),
                 "{error}"
+            );
+        }
+    }
+}
+
+#[test]
+fn concat_extent_owner_survives_vmap_and_grad_as_an_original_scalar_check() {
+    use chelis_dag_core::dag::ExtentCheckOwner;
+    use chelis_ir::eval::eval_tensor_roots_with_strict;
+    let (mut dag, input, output) = computed_reshape();
+    let check = dag
+        .nodes()
+        .iter()
+        .find(|node| matches!(node.op, RiscOp::CheckedExtent { .. }))
+        .unwrap()
+        .id;
+    let node = dag.node_mut(check).unwrap();
+    let RiscOp::CheckedExtent { owner, .. } = &mut node.op else {
+        unreachable!()
+    };
+    *owner = ExtentCheckOwner::Concat;
+    node.span_id = Some("concat-call".into());
+    let mapped = chelis_ir::vmap::vectorize_axis0(&dag, DimInfo::Lit(2)).unwrap();
+    assert!(chelis_dag_core::verify::verify(&mapped).is_empty());
+    let mapped_check = mapped
+        .nodes()
+        .iter()
+        .find(|node| matches!(node.op, RiscOp::CheckedExtent { .. }))
+        .unwrap();
+    assert!(matches!(
+        mapped_check.op,
+        RiscOp::CheckedExtent {
+            owner: ExtentCheckOwner::Concat,
+            axis: RtAxis::Lit(1),
+            ..
+        }
+    ));
+    assert_eq!(mapped_check.output_type, scalar_type());
+    assert_eq!(mapped_check.span_id.as_deref(), Some("concat-call"));
+    for actual in [4, 6] {
+        let evaluated = eval_tensor_with(&mapped, |_| {
+            Some(TensorValue::from_vec(
+                vec![2, actual],
+                vec![7.0; 2 * actual],
+            ))
+        });
+        if actual == 4 {
+            assert_eq!(evaluated.unwrap()[&mapped.roots()[0]].shape, [2, 2, 2]);
+        } else {
+            assert_eq!(
+                evaluated.unwrap_err(),
+                "extent `2`: claimed = 2, concat axis 1 = 3\nnumeric trap: domain in concat at i64"
+            );
+        }
+    }
+    let decl = dag.get(output).unwrap().owner.decl;
+    let mut reduced = output;
+    while !dag.get(reduced).unwrap().output_type.dims.is_empty() {
+        let mut ty = dag.get(reduced).unwrap().output_type.clone();
+        ty.dims.remove(0);
+        reduced = dag.add_node(
+            decl,
+            RiscOp::Sum {
+                axis: 0,
+                accumulator: Prim::F32,
+            },
+            vec![reduced],
+            ty,
+            None,
+        );
+    }
+    let gradient = chelis_dag_core::grad::grad_dag(&dag, reduced, &[input]).unwrap();
+    let retained = gradient
+        .dag
+        .nodes()
+        .iter()
+        .filter(|node| matches!(node.op, RiscOp::CheckedExtent { .. }))
+        .collect::<Vec<_>>();
+    assert_eq!(retained.len(), 1);
+    assert!(matches!(
+        retained[0].op,
+        RiscOp::CheckedExtent {
+            owner: ExtentCheckOwner::Concat,
+            ..
+        }
+    ));
+    assert_eq!(retained[0].output_type, scalar_type());
+    assert_eq!(retained[0].span_id.as_deref(), Some("concat-call"));
+    let root = gradient.grad_nodes[&input];
+    for actual in [4, 6] {
+        let evaluated = eval_tensor_roots_with_strict(&gradient.dag, &[root], |_| {
+            Some(TensorValue::from_vec(vec![actual], vec![7.0; actual]))
+        });
+        if actual == 4 {
+            assert_eq!(
+                evaluated.unwrap()[&root].to_f64_lossy_vec(),
+                vec![1.0; actual]
+            );
+        } else {
+            assert_eq!(
+                evaluated.unwrap_err(),
+                "extent `2`: claimed = 2, concat axis 0 = 3\nnumeric trap: domain in concat at i64"
             );
         }
     }

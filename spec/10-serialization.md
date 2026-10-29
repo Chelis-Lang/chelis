@@ -23,9 +23,9 @@ before consuming any package or symbol metadata.
 
 ## 3. Compiler API Wire Contract
 
-WireDag JSON is an exact-version contract. Schema version 30 is explicitly
+WireDag JSON is an exact-version contract. Schema version 31 is explicitly
 present in every payload and is the only accepted version. A missing version,
-versions 1 through 29, and every future version are decode errors before any IR
+versions 1 through 30, and every future version are decode errors before any IR
 node is consumed. There is no versionless default, legacy migration, additive-
 variant tolerance, or best-effort compatibility path.
 
@@ -151,16 +151,20 @@ It has exactly two earlier input nodes, each with its output's integer dtype
 and dimension list. Other arities, dtypes or shapes are encoding and decoding
 errors.
 
-`WireRiscOp::CheckedReshapeExtent { claims, axis }` has an earlier rank-zero
-`int64` input for the independently computed target extent, followed by one
+`WireRiscOp::CheckedExtent { owner, claims, axis }` uses the wire kind
+`checked_extent` and requires the explicit closed owner `reshape` or `concat`.
+A missing or unknown owner is a decoding error. It has an earlier rank-zero
+`int64` input for the independently observed extent, followed by one
 earlier scalar `int64` input per requirement. The nonempty `claims` list contains
 diagnostic labels in the same order as those requirement inputs. Its rank-zero
-`int64` output carries the computed extent after all equality checks, in list
+`int64` output carries the observed extent after all equality checks, in list
 order. Labels are diagnostic text; input edges identify requirements, including
 each declaring signature's shape witness. The normalized
 `int32` result-axis position is nonnegative. Missing fields, invalid references,
 wrong arity, or non-scalar/non-`int64` inputs or output are encoding and decoding
-errors. A resolved result-type dimension does not substitute for either input.
+errors. The owner identifies the operation in diagnostics; it does not change
+the scalar equality contract. A resolved result-type dimension does not
+substitute for either input.
 
 `WireRiscOp::CheckedUnitAxis { axis }` has two earlier inputs: a tensor and an
 `ExtentWitness` reading exactly that tensor at the same normalized axis, with

@@ -707,6 +707,23 @@ pub enum ExtentWitnessSite {
     },
 }
 
+/// The source operation whose independently observed extents must agree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExtentCheckOwner {
+    Reshape,
+    Concat,
+}
+
+impl ExtentCheckOwner {
+    pub fn surf_name(self) -> &'static str {
+        match self {
+            Self::Reshape => "reshape",
+            Self::Concat => "concat",
+        }
+    }
+}
+
 /// One dimension-binder equality a witness owes against ANOTHER witness.
 ///
 /// `spec/04-type-system.md` §4.7.2: a declared result dimension claiming a
@@ -1239,12 +1256,13 @@ pub enum RiscOp {
         requirements: Vec<chelis_numeric_core::dtype_semantics::ScalarValue>,
         claims: Vec<ExtentClaim>,
     },
-    /// Checks an independently computed reshape target (input 0) against
+    /// Checks an independently observed extent (input 0) against
     /// its declaring witnesses or literal requirements (inputs 1..). Every
     /// input and the result is scalar i64. The nonempty `claims` labels
     /// correspond one-to-one to requirement edges, checked in order. Labels
     /// are diagnostic only; edges identify each activation's requirement.
-    CheckedReshapeExtent {
+    CheckedExtent {
+        owner: ExtentCheckOwner,
         claims: Vec<String>,
         axis: RtAxis,
     },
@@ -1859,7 +1877,7 @@ impl RiscOp {
             | Self::OrderedAdjointSum { .. }
             | Self::Iota
             | Self::ExtentWitness { .. }
-            | Self::CheckedReshapeExtent { .. }
+            | Self::CheckedExtent { .. }
             | Self::CheckedUnitAxis { .. }
             | Self::OneHot { .. }
             | Self::Const { .. }
@@ -2232,7 +2250,7 @@ impl RiscOp {
             // real-valued forward-bound story (chelis#513 / chelis#558).
             RiscOp::Shape { .. }
             | RiscOp::ExtentWitness { .. }
-            | RiscOp::CheckedReshapeExtent { .. }
+            | RiscOp::CheckedExtent { .. }
             | RiscOp::CheckedUnitAxis { .. } => false,
 
             // Sparse gather/scatter index data movement; no real-valued
@@ -2494,7 +2512,7 @@ impl DagNode {
     /// | `MeanDivisor` | float `Div` | a lowered `mean`'s empty count |
     /// | `EmptyAxis` | `MaxReduce` `MinReduce` `Argmax` `Argmin` | an empty reduced axis |
     /// | `MovementBounds` | `Shrink` `Stride` `Pad` | a runtime bound out of domain |
-    /// | `ExtentClaims` | `ExtentWitness` (checking sites), `CheckedReshapeExtent` | a claimed extent |
+    /// | `ExtentClaims` | `ExtentWitness` (checking sites), `CheckedExtent` | a claimed extent |
     /// | `Random` | `Dropout` `DropoutReplay` `UniformLike` `UniformBoundAdjoint` `SplitN` `FoldIn` `KeySelect` | controls, key extents, a negative count |
     /// | `Abort` | `GuardedFail` | its authored condition |
     /// | `Ungated` | `Reshape` `Expand` | a runtime target extent |
@@ -2571,7 +2589,7 @@ impl DagNode {
                 requirements,
                 ..
             } if !requirements.is_empty() => RuntimeCheck::Nothing,
-            RiscOp::ExtentWitness { .. } | RiscOp::CheckedReshapeExtent { .. } => {
+            RiscOp::ExtentWitness { .. } | RiscOp::CheckedExtent { .. } => {
                 RuntimeCheck::ExtentClaims
             }
             RiscOp::Dropout
@@ -2791,7 +2809,7 @@ impl TrapSeeds<'_> {
     }
 
     /// Whether an [`RuntimeCheck::ExtentClaims`] node compares anything. A
-    /// `CheckedReshapeExtent` always carries a claim. An `ExtentWitness`
+    /// `CheckedExtent` always carries a claim. An `ExtentWitness`
     /// compares its axis against its literal requirements, its named claims
     /// and the literal result claims observed at it
     /// ([`Self::literal_result_witness_requirements`], the evaluator's and

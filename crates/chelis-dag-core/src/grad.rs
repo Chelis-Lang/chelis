@@ -574,7 +574,7 @@ fn integer_computation(node: &DagNode) -> Option<IntegerComputation> {
         | RiscOp::Stride { .. }
         | RiscOp::Shape { .. }
         | RiscOp::ExtentWitness { .. }
-        | RiscOp::CheckedReshapeExtent { .. }
+        | RiscOp::CheckedExtent { .. }
         | RiscOp::CheckedUnitAxis { .. }
         | RiscOp::Const { .. }
         | RiscOp::ConstTensor { .. }
@@ -650,7 +650,7 @@ fn carries_dependence(op: &RiscOp, slot: usize) -> bool {
         RiscOp::UniformLike | RiscOp::UniformBoundAdjoint { .. } => slot != 0,
         RiscOp::ListMapCapture { .. } => slot == 0,
         RiscOp::GuardedFail { .. } => slot != 0,
-        RiscOp::CheckedReshapeExtent { .. } | RiscOp::CheckedUnitAxis { .. } => slot == 0,
+        RiscOp::CheckedExtent { .. } | RiscOp::CheckedUnitAxis { .. } => slot == 0,
         RiscOp::ExtentWitness { .. } => false,
         _ => true,
     }
@@ -697,7 +697,7 @@ fn operand_slot(op: &RiscOp, slot: usize) -> OperandSlot {
         | RiscOp::Expand { .. }
         | RiscOp::Gather { .. }
         | RiscOp::ListMapCapture { .. }
-        | RiscOp::CheckedReshapeExtent { .. }
+        | RiscOp::CheckedExtent { .. }
         | RiscOp::CheckedUnitAxis { .. }
         | RiscOp::Dropout
         | RiscOp::DropoutReplay => {
@@ -1122,7 +1122,7 @@ pub fn risc_op_name(op: &RiscOp) -> &'static str {
         RiscOp::Stride { .. } => "stride",
         RiscOp::Shape { .. } => "shape",
         RiscOp::ExtentWitness { .. } => "extent_witness",
-        RiscOp::CheckedReshapeExtent { .. } => "reshape",
+        RiscOp::CheckedExtent { owner, .. } => owner.surf_name(),
         RiscOp::CheckedUnitAxis { .. } => "load",
         RiscOp::Const { .. } => "const",
         RiscOp::ConstTensor { .. } => "const_tensor",
@@ -3400,7 +3400,7 @@ fn compute_adjoints(
             // is not yet supported.
             None
         }
-        RiscOp::CheckedReshapeExtent { .. } => Some(vec![]),
+        RiscOp::CheckedExtent { .. } => Some(vec![]),
         RiscOp::CheckedUnitAxis {
             axis: crate::dag::RtAxis::Lit(axis),
         } => {

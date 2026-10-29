@@ -6123,7 +6123,7 @@ pub fn reject_unsupported_hip_ops(dag: &Dag) -> std::result::Result<(), Compiler
                         .is_some() => {}
             RiscOp::Shape { .. }
             | RiscOp::ExtentWitness { .. }
-            | RiscOp::CheckedReshapeExtent { .. }
+            | RiscOp::CheckedExtent { .. }
             | RiscOp::CheckedUnitAxis { .. } => {
                 return Err(unsupported_gate_error(
                     format!(
@@ -7637,10 +7637,19 @@ fn wire_op(op: &RiscOp) -> WireResult<WireRiscOp> {
                 })
                 .collect(),
         },
-        RiscOp::CheckedReshapeExtent {
+        RiscOp::CheckedExtent {
+            owner,
             claims,
             axis: chelis_dag_core::dag::RtAxis::Lit(axis),
-        } => WireRiscOp::CheckedReshapeExtent {
+        } => WireRiscOp::CheckedExtent {
+            owner: match owner {
+                chelis_dag_core::dag::ExtentCheckOwner::Reshape => {
+                    crate::schema::WireExtentCheckOwner::Reshape
+                }
+                chelis_dag_core::dag::ExtentCheckOwner::Concat => {
+                    crate::schema::WireExtentCheckOwner::Concat
+                }
+            },
             claims: claims.clone(),
             axis: WireRtAxis::Lit { value: *axis },
         },
@@ -7770,6 +7779,26 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
+    fn checked_extent_wire_projection_preserves_explicit_owner() {
+        use chelis_dag_core::dag::{ExtentCheckOwner, RtAxis};
+        for (owner, label) in [
+            (ExtentCheckOwner::Reshape, "reshape"),
+            (ExtentCheckOwner::Concat, "concat"),
+        ] {
+            let op = RiscOp::CheckedExtent {
+                owner,
+                claims: vec!["rows".into()],
+                axis: RtAxis::Lit(1),
+            };
+            assert_eq!(
+                serde_json::to_value(wire_op(&op).unwrap()).unwrap(),
+                serde_json::json!({"kind": "checked_extent", "owner": label,
+                    "claims": ["rows"], "axis": {"axis": "lit", "value": 1}})
+            );
+        }
+    }
+
+    #[test]
     fn wire_producer_preserves_resolved_global_load_origin_at_v22() {
         let mut dag = Dag::new();
         let declaration = dag.declare("entry");
@@ -7788,7 +7817,7 @@ mod tests {
         );
         dag.add_root(root);
         let wire = wire_dag(&dag).expect("IR producer has a wire form");
-        assert_eq!(wire.schema_version, 30);
+        assert_eq!(wire.schema_version, 31);
         assert!(
             matches!(&wire.nodes[0].op, crate::schema::WireRiscOp::Load { name }
             if name == global.as_str())
@@ -8120,7 +8149,7 @@ mod tests {
         dag.add_root(right);
         let projected = wire_dag(&dag).unwrap();
         let json = serde_json::to_value(&projected).unwrap();
-        assert_eq!(json["schema_version"], 30);
+        assert_eq!(json["schema_version"], 31);
         let kinds: Vec<&serde_json::Value> = json["nodes"]
             .as_array()
             .unwrap()

@@ -1099,7 +1099,8 @@ const CACHE_MAGIC: &[u8] = b"CHELIS_CTX_V23\n";
 // Deep 0.20 (#3130) removes Pipe and SurfPipeStage from serialized syntax.
 // Rank-body evidence changes the mandatory TypeEnv and library-proof payload.
 // V44 combines rank evidence with checked callable occurrence metadata.
-const CACHE_FORMAT_VERSION: u32 = 44;
+// V45 requires explicit extent-check ownership in the lowered DAG.
+const CACHE_FORMAT_VERSION: u32 = 45;
 
 /// On-disk cache envelope. The full file layout is:
 ///
@@ -1888,7 +1889,7 @@ mod tests {
 
     #[test]
     fn context_version_rejection_names_pipe_removal_only_for_its_predecessor() {
-        for version in [39_u32, 40, 41, 42, 43, 99] {
+        for version in [39_u32, 40, 41, 42, 43, 44, 99] {
             let mut bytes = CACHE_MAGIC.to_vec();
             bytes.extend_from_slice(&version.to_le_bytes());
             let error = match CompiledContext::decode(&bytes) {
@@ -1903,7 +1904,7 @@ mod tests {
             assert_eq!(
                 error.to_string(),
                 format!(
-                    "decode CompiledContext: cache file format version {version} not supported by this binary (expects 44); {cause}regenerate the cache"
+                    "decode CompiledContext: cache file format version {version} not supported by this binary (expects 45); {cause}regenerate the cache"
                 )
             );
         }
@@ -1918,7 +1919,7 @@ mod tests {
     #[test]
     fn cache_format_version_tracks_result_origins_and_ordered_list_operations() {
         assert_eq!(CACHE_MAGIC, b"CHELIS_CTX_V23\n");
-        assert_eq!(CACHE_FORMAT_VERSION, 44);
+        assert_eq!(CACHE_FORMAT_VERSION, 45);
     }
 
     /// chelis#1156: the cache identity must distinguish two BUILDS, not

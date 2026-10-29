@@ -51,6 +51,10 @@ The Linux glibc-2.31 PR build and macOS nightly release build also run
 `cargo test --release -p chelis-cli --features smt --test issue_3505_3982_exact_bits -- --test-threads=1`
 against the release CLI. That target checks runtime ingress, JSON element bits,
 and executed C output for arithmetic NaNs and bit-preserving selection/concat.
+It also checks that Metal rejects the composed Bool8 logical/Where lowering
+through the typed gate owned by [#2266](https://github.com/Chelis-Lang/chelis/issues/2266).
+That tracker owns the experimental Metal kernels; C admission remains covered
+by executed native controls.
 
 Before `--fast`, `--validation`, or another long local validation, fetch
 `origin/main` so the changed-crate selection and inherited-failure comparison

@@ -753,7 +753,7 @@ fn variant_index(op: &RiscOp) -> usize {
         RiscOp::Relu => 55,
         RiscOp::ReluAdjoint => 56,
         RiscOp::ExtentWitness { .. } => 57,
-        RiscOp::CheckedReshapeExtent { .. } => 58,
+        RiscOp::CheckedExtent { .. } => 58,
         RiscOp::CheckedUnitAxis { .. } => 59,
         RiscOp::Mod => 60,
         RiscOp::Logical(_) => 61,
@@ -1220,7 +1220,8 @@ fn every_risc_op_yields_exactly_one_source_per_output_axis() {
     );
     nodes.push(add(
         &mut dag,
-        RiscOp::CheckedReshapeExtent {
+        RiscOp::CheckedExtent {
+            owner: chelis_dag_core::dag::ExtentCheckOwner::Reshape,
             claims: vec!["unit".into()],
             axis: RtAxis::Lit(0),
         },

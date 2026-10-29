@@ -100,8 +100,9 @@ fn wire_dag_operation_vocabulary_is_pinned_to_its_schema_version() {
         "scatter",
         "scatter_elements",
         // Version 10 (chelis#1747): checked reshape scalars, checked unit-axis
-        // refinements, and the explicit integer remainder operation.
-        "checked_reshape_extent",
+        // refinements, and the explicit integer remainder operation. Version 31
+        // generalizes the scalar check with explicit reshape/concat ownership.
+        "checked_extent",
         "checked_unit_axis",
         "mod",
         // Version 20 (chelis#2631): one tagged signed-integer bitwise family.
@@ -144,7 +145,7 @@ fn wire_dag_operation_vocabulary_is_pinned_to_its_schema_version() {
     actual.sort();
     expected.sort();
     assert_eq!(
-        WIRE_DAG_SCHEMA_VERSION, 30,
+        WIRE_DAG_SCHEMA_VERSION, 31,
         "review vocabulary and migration history with every version change"
     );
     assert_eq!(actual.len(), 84);
@@ -200,7 +201,7 @@ fn wire_dag_accepts_current_version_and_rejects_missing_old_and_future_versions(
 fn resolved_global_load_has_a_v22_wire_identity() {
     let global = chelis_dag_core::LoadStoreName::top_level("Lib.weights");
     let dag = WireDag {
-        schema_version: 30,
+        schema_version: 31,
         declarations: vec!["entry".to_string()],
         nodes: vec![WireDagNode {
             declaration: 0,
@@ -223,7 +224,7 @@ fn resolved_global_load_has_a_v22_wire_identity() {
     let encoded = serde_json::to_string(&dag).expect("v22 producer carries resolved origin");
     let decoded = WireDag::from_validated_json(&encoded).expect("v22 consumer retains origin");
     assert!(matches!(&decoded.nodes[0].op, WireRiscOp::Load { name } if name == global.as_str()));
-    let old = encoded.replace("\"schema_version\":30", "\"schema_version\":27");
+    let old = encoded.replace("\"schema_version\":31", "\"schema_version\":27");
     assert!(
         WireDag::from_validated_json(&old).is_err(),
         "v21 is rejected before label decode"

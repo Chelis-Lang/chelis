@@ -7,7 +7,7 @@ fn graph(p: &str, direction: &str) -> Value {
 }
 #[test]
 fn scan_wire_roundtrip_and_version_rejection() {
-    assert_eq!(WIRE_DAG_SCHEMA_VERSION, 30);
+    assert_eq!(WIRE_DAG_SCHEMA_VERSION, 31);
     for p in ["f16", "bf16", "f32", "f64"] {
         for d in ["increasing", "decreasing"] {
             let value = graph(p, d);
@@ -26,7 +26,7 @@ fn scan_wire_roundtrip_and_version_rejection() {
     let mut missing = graph("f32", "increasing");
     missing.as_object_mut().unwrap().remove("schema_version");
     assert!(WireDag::from_validated_json(&missing.to_string()).is_err());
-    for version in [29, WIRE_DAG_SCHEMA_VERSION + 1] {
+    for version in [29, 30, WIRE_DAG_SCHEMA_VERSION + 1] {
         let mut value = graph("f32", "increasing");
         value["schema_version"] = json!(version);
         assert!(WireDag::from_validated_json(&value.to_string()).is_err());

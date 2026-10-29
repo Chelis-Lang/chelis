@@ -100,7 +100,8 @@ impl CachePayload for crate::LibraryContext {
     // V29 combines rank evidence with checked callable occurrence metadata.
     // V30 (chelis#3729): the payload carries an optional lowering of the
     // composed library, so bincode's positional fields shift.
-    const FORMAT_VERSION: u32 = 30;
+    // V31 requires explicit extent-check ownership in the lowered DAG.
+    const FORMAT_VERSION: u32 = 31;
     const KEY_DOMAIN: &'static [u8] = b"chelis_library_typecheck_v";
 }
 
@@ -152,7 +153,8 @@ impl CachePayload for crate::StdLibContext {
     // V42 (#3130): Deep 0.20 removes Pipe and SurfPipeStage enum variants.
     // V44 carries mandatory rank-body evidence and its library-proof digest.
     // V45 combines rank evidence with checked callable occurrence metadata.
-    const FORMAT_VERSION: u32 = 45;
+    // V46 requires explicit extent-check ownership in the lowered DAG.
+    const FORMAT_VERSION: u32 = 46;
     const KEY_DOMAIN: &'static [u8] = b"chelis_std_typecheck_v";
 }
 

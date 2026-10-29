@@ -5259,24 +5259,26 @@ where
                     vec![i64::try_from(observed).map_err(|_| "extent exceeds i64")?],
                 )?
             }
-            RiscOp::CheckedReshapeExtent {
+            RiscOp::CheckedExtent {
+                owner,
                 claims,
                 axis: chelis_dag_core::dag::RtAxis::Lit(axis),
             } => {
+                let operation = owner.surf_name();
                 let actual = values[&node.inputs[0]]
                     .storage()
                     .scalar_at(0)
                     .as_i64_exact()
-                    .ok_or("checked reshape actual must be i64")?;
+                    .ok_or_else(|| format!("checked {operation} actual must be i64"))?;
                 for (claim, input) in claims.iter().zip(&node.inputs[1..]) {
                     let required = values[input]
                         .storage()
                         .scalar_at(0)
                         .as_i64_exact()
-                        .ok_or("checked reshape requirement must be i64")?;
+                        .ok_or_else(|| format!("checked {operation} requirement must be i64"))?;
                     if actual != required {
                         return Err(format!(
-                            "extent `{claim}`: claimed = {required}, reshape axis {axis} = {actual}\nnumeric trap: domain in reshape at i64"
+                            "extent `{claim}`: claimed = {required}, {operation} axis {axis} = {actual}\nnumeric trap: domain in {operation} at i64"
                         ));
                     }
                 }
@@ -6566,7 +6568,7 @@ fn inactive_unchecked_value(
                 )
                 .map(Some)
             }
-            RiscOp::CheckedReshapeExtent { .. } => Ok(Some(operand()?.clone())),
+            RiscOp::CheckedExtent { .. } => Ok(Some(operand()?.clone())),
             _ => Ok(None),
         },
         RuntimeCheck::Nothing
