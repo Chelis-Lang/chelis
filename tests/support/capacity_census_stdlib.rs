@@ -1,11 +1,11 @@
 //! C6 stdlib discovery: compiler-linked names and resolved declared types.
 
 use super::*;
+use chelis_checker_core::errors::ErrorWitness;
+use chelis_checker_core::{DeclaredSignature, DeclaredTypeSurface};
 use chelis_deep::node::Node;
 use chelis_deep::role::{ChildStampRole, child_stamp_role};
 use chelis_type_core::{NominalArg, TensorPrec, Type, TypeVar};
-use chelis_types::errors::ErrorWitness;
-use chelis_types::{DeclaredSignature, DeclaredTypeSurface};
 use std::collections::VecDeque;
 
 /// A finite transfer function: concrete numeric domains plus formal payload

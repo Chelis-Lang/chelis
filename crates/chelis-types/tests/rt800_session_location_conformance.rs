@@ -2,12 +2,13 @@
 //! The intentional `infer_var` mutation is represented by `errors::report`'s
 //! compile-fail oracle instead of being planted in production source.
 
+use chelis_checker_core::errors::CheckError;
+use chelis_checker_core::errors::CheckErrorKind;
 use chelis_deep::parser::parse_str as parse_deep_lenient;
 use chelis_macros::{ExpansionOptions, expand_program};
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str as parse_surf;
 use chelis_types::check_ir_program;
-use chelis_types::errors::{CheckError, CheckErrorKind};
 
 fn deep_errors(source: &str) -> Vec<CheckError> {
     let exprs = parse_deep_lenient(source, &chelis_syntax_host::NativeStack)

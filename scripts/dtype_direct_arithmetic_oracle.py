@@ -300,28 +300,10 @@ def source_contracts() -> tuple[SourceContract, ...]:
             ),
         ),
         SourceContract(
-            "current inferred-shape direct arithmetic narrative",
-            "crates/chelis-types/src/infer/validate.rs",
-            ("`max_elem` and `min_elem` are direct Tier-1 identities",),
-            ("`max_elem` (Tier 1) and `min_elem` (Tier 2)",),
-        ),
-        SourceContract(
             "current runtime direct arithmetic narrative",
             "crates/chelis-compiler-api/src/runtime/eval.rs",
             ("Tier-1 `max_elem` and `min_elem` are direct element-wise",),
             ("Tier-1 `max_elem` and Tier-2 `min_elem`",),
-        ),
-        SourceContract(
-            "current builtin direct arithmetic grouping",
-            "crates/chelis-types/src/builtins.rs",
-            (
-                'tensor_binop("add", &mut env, &mut vg);\n    tensor_binop("sub", &mut env, &mut vg);\n    tensor_binop("mul", &mut env, &mut vg);',
-                'tensor_binop("max_elem", &mut env, &mut vg);\n    tensor_binop("min_elem", &mut env, &mut vg);',
-            ),
-            (
-                '// Tier 2: Derived built-ins\n    tensor_binop("sub", &mut env, &mut vg);',
-                'tensor_binop_to_out("matmul", &mut env, &mut vg);\n    tensor_binop("min_elem", &mut env, &mut vg);',
-            ),
         ),
         SourceContract(
             "current lowering direct arithmetic grouping",

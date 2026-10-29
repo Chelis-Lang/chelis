@@ -3,11 +3,14 @@
 //! Named-query controls preserve the existing source contract; they do not
 //! authorize associating arbitrary same-spelled named values globally.
 
+use chelis_checker_core::InferResult;
+use chelis_checker_core::errors::CheckErrorKind;
 use chelis_surf::{desugar::desugar_program, parser::parse_str};
-use chelis_types::{
-    CheckedProgram, InferResult, TypeEnv, build_compiled_library_context, check_ir_program,
-    check_ir_with_context, errors::CheckErrorKind,
-};
+use chelis_types::CheckedProgram;
+use chelis_types::TypeEnv;
+use chelis_types::build_compiled_library_context;
+use chelis_types::check_ir_program;
+use chelis_types::check_ir_with_context;
 
 fn parse(source: &str) -> Vec<chelis_deep::Expr> {
     desugar_program(

@@ -1,8 +1,8 @@
+use chelis_checker_core::unsupported::{RejectionAuthorityKind, Stage, UnsupportedKind};
 use chelis_compiler_api::{
     compiler::compile,
     schema::{CompileRequest, CompileTarget, SourceKind},
 };
-use chelis_types::unsupported::{RejectionAuthorityKind, Stage, UnsupportedKind};
 
 #[test]
 fn c_softmax_emits_a_translation_unit() {

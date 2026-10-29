@@ -375,6 +375,42 @@ The extraction does not make host inference, target policy, or the complete comp
 Existing metadata-admission and diagnostic-report limits remain unchanged.
 
 
+## Checker core portability
+
+Run `uv run --managed-python --python 3.11 --no-project python scripts/checker_core_oracle.py` from a clean source commit.
+Use managed Python 3.11, `PyYAML==6.0.3`, Rust 1.98.0, matching LLVM tools, `thumbv7em-none-eabi`, `cargo-nextest`, and native compiler prerequisites.
+Both hosted Linux and macOS must execute the same complete command at the exact implementation head.
+
+The immutable comparison source is `7e6c0aa438c635889fd78c819ea7efffa86a9409`.
+The corpus retains both checker ingresses, complete checked bytes, signatures, local ascriptions, owner evidence, contexts, ordered diagnostics, and supplied severities.
+Missing source, incomplete evidence, failed commands, unexpected compile success, and skipped mandatory tests fail acceptance.
+
+The command checks:
+
+- Isolated default, no-default, and serde graphs without target `std`, host inference, native stacks, or DAG dependencies.
+- Independent inference, checked IR, typed input, declared-surface, context, linearity, and descriptor consumers.
+- Private witnesses, checkpoints, completion tokens, native checked products, proof pairs, effect-only reconstruction, and pipeline artifacts.
+- Nested and concurrent isolation, cancellation, recursive abort restoration, opacity policy, and native stack failures.
+- Full-host allocation and work fixtures, original stack resources, retained negative controls, and cache rerun counters.
+- Canonical ABI validation order, descriptor layouts, generated headers, and native metadata behavior.
+- Existing numeric, type-unification, DAG, effect-analysis, generalization, and checkpoint obligations.
+- Actual moved execution identities, unchanged measured timing values, exact CI ownership, and compiler failure controls.
+
+Evidence resides under `target/agents/checker-core/{linux,darwin}/run-*/`.
+Retain source digests, compiler identities, consumer locks, raw output, exact exits, inventories, execution identities, artifact sizes, and SHA-256 hashes.
+Obsolete implementation-spelling assertions retire explicitly without replacement wording tests.
+
+Linux integration support owns the complete command in its domain slice.
+macOS nightly validation owns it on workspace shard one.
+Default PR CI does not execute the complete command.
+Dedicated exact-source acceptance must pass on both platforms before source merge.
+
+The embedding supplies allocation and enough stack capacity.
+Target compilation does not prove device execution or resource capacity.
+The native checker facade and complete compiler pipeline still need `std`.
+Existing metadata-admission, cache-trust, and diagnostic-report limits remain unchanged.
+Owner: chelis#4054.
+
 ## Compiler feature acceptance gates
 
 The incremental [eval-performance suite](eval_performance.md) runs its sparse

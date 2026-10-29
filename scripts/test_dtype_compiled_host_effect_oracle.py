@@ -16,7 +16,7 @@ else:
 
 def contract_paths() -> set[str]:
     paths = {contract.path for contract in oracle.source_contracts()}
-    paths.add("crates/chelis-types/src/builtins.rs")
+    paths.add("crates/chelis-checker-core/src/builtins.rs")
     return paths
 
 
@@ -226,7 +226,7 @@ class OracleMutationTests(unittest.TestCase):
 
     def test_dtype_named_assertion_alias_fails(self):
         self.assert_mutation_fails(
-            "crates/chelis-types/src/builtins.rs",
+            "crates/chelis-checker-core/src/builtins.rs",
             '    "process_run",\n',
             '    "process_run",\n    "test_assert_eq_f64",\n',
         )

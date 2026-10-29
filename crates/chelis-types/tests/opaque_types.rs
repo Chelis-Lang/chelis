@@ -19,9 +19,9 @@
 //!
 //! with `none` when the module exports no producer of `<T>`.
 
+use chelis_checker_core::errors::CheckError;
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str;
-use chelis_types::errors::CheckError;
 use chelis_types::{infer_ir_program, infer_program};
 
 // ── Harness ──────────────────────────────────────────────────────

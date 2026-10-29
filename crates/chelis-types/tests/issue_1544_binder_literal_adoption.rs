@@ -9,7 +9,7 @@ fn deep(source: &str) -> Vec<Expr> {
 }
 
 fn diagnostics(program: &[Expr]) -> (Vec<String>, Vec<String>) {
-    let render = |result: Result<_, chelis_types::InferResult>| match result {
+    let render = |result: Result<_, chelis_checker_core::InferResult>| match result {
         Ok(_) => vec![],
         Err(result) => result
             .errors

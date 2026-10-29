@@ -210,9 +210,9 @@ fn the_replacement_spelling_the_diagnostic_names_type_checks() {
 // comparison must publish a concrete result rather than an inference
 // variable. It is a disposition lock under the single result shape.
 
+use chelis_checker_core::errors::CheckError;
 use chelis_deep::printer::print_canonical;
 use chelis_types::check_typed_program;
-use chelis_types::errors::CheckError;
 
 fn check_surf(source: &str) -> Result<String, Vec<CheckError>> {
     let deep = surf_to_deep(source);

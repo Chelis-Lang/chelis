@@ -9,9 +9,10 @@
 //! The random draws [05-OP-8] and [05-OP-37] take their key first and
 //! consume it, like the key operations.
 
+use chelis_checker_core::errors::CheckError;
+use chelis_checker_core::errors::CheckErrorKind;
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str;
-use chelis_types::errors::{CheckError, CheckErrorKind};
 use chelis_types::{
     TypeEnv, build_type_env_from_library, check_ir_with_context, check_linearity,
     check_typed_program,

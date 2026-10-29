@@ -1,9 +1,9 @@
 #![allow(dead_code)]
 
 use chelis_backend_c::{CodegenOptions, CodegenResult};
+use chelis_checker_core::unsupported::Unsupported;
 use chelis_dag_core::dag::Dag;
 use chelis_ir::host::ConcreteHostProgram;
-use chelis_types::unsupported::Unsupported;
 
 pub fn codegen(dag: &Dag, name: &str) -> Result<CodegenResult, Unsupported> {
     codegen_with_options(dag, name, CodegenOptions::default())

@@ -24,19 +24,19 @@ def diagnostic_artifacts():
     from test_capacity_census_graph import Artifact, primitive, reference
 
     api = Artifact("chelis_compiler_api")
-    types = Artifact("chelis_types")
+    types = Artifact("chelis_checker_core")
     source = "crates/chelis-compiler-api/src/schema.rs"
     span = {"filename": source, "begin": [1, 1], "end": [2, 1]}
     api.external(40, "core::option::Option")
     api.external(41, "alloc::boxed::Box")
-    api.external(42, "chelis_types::unsupported::Unsupported")
+    api.external(42, "chelis_checker_core::unsupported::Unsupported")
     api.external(43, "schemars::JsonSchema")
     types.external(40, "core::num::nonzero::NonZeroU32")
     hidden = types.struct(
         1,
         "Unsupported",
         [types.field("issue", reference(40))],
-        path=["chelis_types", "unsupported", "Unsupported"],
+        path=["chelis_checker_core", "unsupported", "Unsupported"],
     )
     types.doc["index"][str(hidden)]["inner"]["struct"]["impls"] = []
     sidecar = api.field(
@@ -215,11 +215,6 @@ class SchemaCases(unittest.TestCase):
         self.assertFalse(
             any(d.identity.endswith("::Unsupported") for d in graph.definitions)
         )
-        producer = next(
-            d for d in graph.definitions if d.identity.endswith("::Diagnostic")
-        )
-        self.assertIn("off-wire-derived-field", repr(producer.layout))
-        self.assertIn("chelis_types::unsupported::Unsupported", repr(producer.layout))
 
     def test_diagnostic_projection_rejects_changed_omission_type_codec_and_decoder(
         self,

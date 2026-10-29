@@ -16,12 +16,10 @@ Deep (.dp) → parse ────────────┘                  li
                                                     lower → RISC DAG
 ```
 
-Surf is the readable syntax. Deep is the canonical machine-facing syntax.
-Surf macros expand before semantic analysis; both source paths enter the
-pipeline as expanded Deep. `chelis-surf` and `chelis-deep` own their respective
-parsers, `chelis-types` owns type analysis, and `chelis-effects` owns effect
-checking. Linearity checking follows type analysis. For file inputs, the CLI
-runs its formatter and blocking lint checks before the compiler pipeline.
+Surf and Deep enter the pipeline as expanded Deep after their existing parser and macro stages.
+`chelis-checker-core` owns type and linearity analysis.
+`chelis-types` and `chelis-effects` retain host admission, target policy, and native resources.
+The CLI retains its existing formatter and lint sequence.
 
 `chelis-pipeline-core` owns the typed transitions from a prepared Deep
 program through semantic checks and lowering. Successful checks produce a
@@ -63,6 +61,8 @@ builds; [GPU backends](docs/gpu_backends.md) covers the HIP and Metal targets.
 | Numeric values and policy | `chelis-numeric-core`, `chelis-crmath`, `chelis-vocab` |
 | Type models and unification | `chelis-type-core` |
 | Effect data and analysis | `chelis-effects-core` |
+| Semantic checker data and algorithms | `chelis-checker-core` |
+| Checked descriptor data and validation | `chelis-abi` |
 | Semantic pipeline | `chelis-types`, `chelis-effects`, `chelis-pipeline-core`, `chelis-compiler-api` |
 | DAG models and graph transforms | `chelis-dag-core` |
 | Source lowering and evaluation | `chelis-ir` |
@@ -137,17 +137,40 @@ Mutable substitution clones remain independent.
 Normal concurrent queries wait for active store operations.
 Identifier reservation visits each shared allocation once across scheme bodies, collection contracts, and result equations.
 
-`chelis-types` uses `Type<ErrorWitness>`, `Scheme<ErrorWitness>`, and `Subst<ErrorWitness>` directly.
-It retains witness construction, diagnostic reports, private sinks and checkpoints, source resolution, recursion policy, and the successful-product veto.
-Pure decisions return portable failures and optional source labels.
-The host attaches source diagnostics through its existing report boundary.
-Trusted cache decoding does not establish authority for external payloads.
+`chelis-checker-core` uses `Type<ErrorWitness>`, `Scheme<ErrorWitness>`, and `Subst<ErrorWitness>` directly.
+Core sessions own witness construction, diagnostic reports, private sinks, checkpoints, source resolution, recursion state, and the final diagnostic veto.
+Host adapters project diagnostics and retain cache admission.
+Portable failures and cache payloads grant no native checked-product authority.
 
 The solver needs an allocator and target atomics.
 A reentrant interrupt must not enter a solver whose lock it preempts.
 Run `uv run --managed-python --python 3.11 --no-project python scripts/type_unification_core_oracle.py` from the repository root.
 The [acceptance gate](docs/manual_gates.md#type-unification-core-portability) separates immutable-source parity, host concurrency, and target compilation.
 No numbered language chapter transfers authority through this extraction.
+
+## Portable semantic checker
+
+`chelis-checker-core` uses unconditional `no_std`, explicit `alloc`, empty defaults, and optional ordinary-data serde.
+It borrows canonical Deep expressions and reuses existing type, numeric, predicate, effect, vocabulary, collection, ABI, and stack-service owners.
+Each operation receives explicit stack services, borrowed cancellation access, and caller policy.
+Mutable inference, recursion, opacity, and diagnostic state stays within that operation.
+
+`CheckFacts` and `ContextSnapshot` contain ordinary semantic data.
+`CompletedCheck` has private construction and no default, deserialization, or raw-facts conversion.
+Native `chelis-types` adapters consume only their own completion through private checked-product construction.
+External callers cannot adopt arbitrary facts as a `CheckedProgram`.
+Targets, manifests, library proofs, cache admission, native profiling, and native guards remain under host authority.
+
+`chelis-abi` retains its canonical descriptor constructors, validation order, layout schemas, and generated headers.
+It uses unconditional `no_std` and explicit `alloc`.
+No second descriptor implementation exists.
+
+Run `uv run --managed-python --python 3.11 --no-project python scripts/checker_core_oracle.py` from a clean source commit.
+The [complete oracle](docs/manual_gates.md#checker-core-portability) compares fixed-source semantics, bytes, diagnostics, contexts, costs, authority failures, and execution identities.
+The embedding supplies allocation and enough stack capacity.
+Target compilation does not prove device execution or resource capacity.
+The host facade and complete compiler pipeline still need `std`.
+
 
 ## Portable effect analysis
 

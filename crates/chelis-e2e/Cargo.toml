@@ -23,6 +23,7 @@ chelis-macros.workspace = true
 chelis-surf.workspace = true
 chelis-syntax-host.workspace = true
 chelis-types = { path = "../chelis-types" }
+chelis-checker-core.workspace = true
 chelis-effects.workspace = true
 chelis-ir = { path = "../chelis-ir" }
 chelis-runtime.workspace = true

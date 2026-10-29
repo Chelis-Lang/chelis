@@ -30,7 +30,7 @@ MOVED = {
     "faithful-observation-phase2-oracle": "python scripts/faithful_observation_phase2_oracle.py",
     "compiled-value-ownership-phase0-oracle": "python scripts/compiled_value_ownership_oracle.py --phase 2",
     "runtime-representation-phase0-oracle": "chelis-gate runtime-representation",
-    "generalize-sweep-oracle-shard": "cargo nextest run --workspace --profile ci-full --ignore-default-filter --features chelis-types/generalize-sweep-oracle",
+    "generalize-sweep-oracle-shard": "cargo nextest run --workspace --profile ci-full --ignore-default-filter --features chelis-checker-core/generalize-sweep-oracle",
 }
 # Negative control for a main-only warm route on a hosted nightly job.
 WARM_LABEL = "chelis-ci-warm-x64"

@@ -2,9 +2,9 @@
 
 mod support;
 
+use chelis_checker_core::unsupported::{RejectionAuthorityKind, Stage};
 use chelis_dag_core::dag::{ComparisonKind, Dag, DimInfo, LogicalKind, RiscOp, TensorType};
 use chelis_numeric_core::prim::Prim;
-use chelis_types::unsupported::{RejectionAuthorityKind, Stage};
 use support::try_codegen_metal;
 
 fn vector(precision: Prim) -> TensorType {

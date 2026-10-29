@@ -1,8 +1,8 @@
 use super::*;
 use crate::obligations::{ObligationProperty, collect_obligations};
 use crate::opaque::collect_opaque_invariants;
+use chelis_checker_core::errors::ErrorWitness;
 use chelis_type_core::Type;
-use chelis_types::errors::ErrorWitness;
 use std::collections::BTreeMap;
 
 fn deep_of(surf: &str) -> Vec<Expr> {

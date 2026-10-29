@@ -1,11 +1,12 @@
 //! chelis#1955 / [03-META-2]: every public semantic checker rejects a
 //! `grad` whose written parameter identity contradicts its operative index.
 
+use chelis_checker_core::errors::CheckError;
+use chelis_checker_core::errors::CheckErrorKind;
 use chelis_deep::Expr;
 use chelis_deep::printer::print_canonical;
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str as parse_surf;
-use chelis_types::errors::{CheckError, CheckErrorKind};
 use chelis_types::{
     CheckedProgram, TypeEnv, build_compiled_library_context,
     build_compiled_library_context_with_base, build_type_env_from_library, check_ir_fitness,

@@ -19,6 +19,7 @@ clarabel-provider = ["dep:chelis-clarabel-provider", "dep:chelis-runtime-bundle"
 
 [dependencies]
 chelis-type-core = { workspace = true, default-features = false, features = ["serde"] }
+chelis-checker-core = { workspace = true, features = ["serde"] }
 chelis-dag-core.workspace = true
 chelis-numeric-core = { workspace = true, default-features = false, features = ["alloc", "serde"] }
 chelis-abi.workspace = true

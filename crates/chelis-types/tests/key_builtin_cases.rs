@@ -10,13 +10,17 @@
 //!
 //! [04-LIN-9], [04-LIN-10] and spec/04 section 1.1.
 
+use chelis_checker_core::BUILTINS;
+use chelis_checker_core::BuiltinSiblingCaseId;
+use chelis_checker_core::CaseKeys;
+use chelis_checker_core::KeyRouting;
+use chelis_checker_core::case_keys;
+use chelis_checker_core::errors::CheckError;
+use chelis_checker_core::errors::CheckErrorKind;
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str;
-use chelis_types::errors::{CheckError, CheckErrorKind};
-use chelis_types::{
-    BUILTINS, BuiltinSiblingCaseId, CaseKeys, KeyRouting, case_keys, check_linearity,
-    check_typed_program,
-};
+use chelis_types::check_linearity;
+use chelis_types::check_typed_program;
 
 fn verdict(source: &str) -> Result<(), Vec<CheckError>> {
     let decls = parse_str(source, &chelis_syntax_host::NativeStack)

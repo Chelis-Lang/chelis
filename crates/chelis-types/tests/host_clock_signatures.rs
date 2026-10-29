@@ -5,12 +5,14 @@
 //! rejection has an accepted twin. The `IO` effect is checked separately, in
 //! `chelis-effects`.
 
+use chelis_checker_core::BUILTIN_NAMES;
+use chelis_checker_core::errors::CheckError;
 use chelis_deep::Expr;
 use chelis_macros::{ExpansionOptions, expand_program};
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str as parse_surf;
-use chelis_types::errors::CheckError;
-use chelis_types::{BUILTIN_NAMES, check_ir_program, check_typed_program};
+use chelis_types::check_ir_program;
+use chelis_types::check_typed_program;
 
 const CLOCKS: [&str; 2] = ["clock_wall_read", "clock_monotonic_read"];
 

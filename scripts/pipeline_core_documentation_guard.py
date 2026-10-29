@@ -23,6 +23,7 @@ REQUIRED_SECTIONS = (
 REQUIRED_CRATES = (
     "`chelis-deep`",
     "`chelis-types`",
+    "`chelis-checker-core`",
     "`chelis-effects`",
     "`chelis-effects-core`",
     "`chelis-ir`",

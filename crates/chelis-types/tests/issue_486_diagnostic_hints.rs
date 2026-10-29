@@ -3,7 +3,7 @@
 //! Tests that type mismatch errors involving opaque types and Option[T]
 //! produce targeted suggestions.
 
-use chelis_types::errors::enrich_type_mismatch_suggestions;
+use chelis_checker_core::errors::enrich_type_mismatch_suggestions;
 
 // ── Item 1: Opaque accessor hints ──────────────────────────────────
 

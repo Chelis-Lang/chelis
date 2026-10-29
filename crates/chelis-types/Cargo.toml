@@ -7,10 +7,11 @@ license.workspace = true
 repository.workspace = true
 
 [features]
-checkpoint-compile-probe = []
-generalize-sweep-oracle = []
+test-instrumentation = ["chelis-checker-core/test-instrumentation"]
 
 [dependencies]
+chelis-checker-core = { path = "../chelis-checker-core", features = ["serde"] }
+chelis-stack-services.workspace = true
 chelis-numeric-core = { workspace = true, default-features = false, features = ["alloc", "serde"] }
 chelis-type-core = { workspace = true, features = ["serde"] }
 chelis-unord.workspace = true

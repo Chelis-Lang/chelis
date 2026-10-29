@@ -175,8 +175,8 @@ fn producer_rejects_invalid_measurements_instead_of_emitting_repaired_reports() 
         let mut input = valid.clone();
         input.score = bad;
         assert!(CheckResult::try_from_fitness(&input).is_err());
-        let mut error = chelis_types::errors::CheckError::new(
-            chelis_types::errors::CheckErrorKind::Other,
+        let mut error = chelis_checker_core::errors::CheckError::new(
+            chelis_checker_core::errors::CheckErrorKind::Other,
             "bad".into(),
             vec![],
         );

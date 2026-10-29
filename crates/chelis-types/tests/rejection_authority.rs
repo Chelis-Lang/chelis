@@ -1,11 +1,14 @@
 //! chelis#730 Phase 3 / [05-UNS-5]: rejection authority is typed and
 //! registry-validated rather than inferred from free-form hint prose.
 
-use chelis_types::unsupported::{RejectionAuthorityKind, Stage, Unsupported, UnsupportedKind};
+use chelis_checker_core::unsupported::RejectionAuthorityKind;
+use chelis_checker_core::unsupported::Stage;
+use chelis_checker_core::unsupported::Unsupported;
+use chelis_checker_core::unsupported::UnsupportedKind;
 
 #[test]
 fn registered_atom_constructs_a_deliberate_authority() {
-    let authority = chelis_types::unsupported::__build_deliberate_rejection(
+    let authority = chelis_checker_core::unsupported::__build_deliberate_rejection(
         "[04-TOT-3]",
         "malformed typed forms are rejected",
     )
@@ -20,7 +23,7 @@ fn registered_atom_constructs_a_deliberate_authority() {
 fn atom_admission_rejects_every_invalid_route() {
     for atom in ["", "05-UNS-1", "[05-uns-1]", "[05-UNS-0]", "[05-ZZZ-999]"] {
         assert!(
-            chelis_types::unsupported::__build_deliberate_rejection(atom, "hint").is_err(),
+            chelis_checker_core::unsupported::__build_deliberate_rejection(atom, "hint").is_err(),
             "invalid or undeclared atom {atom:?} must not become authority"
         );
     }
@@ -37,7 +40,7 @@ fn response_contract_atoms_cannot_authorize_a_semantic_case() {
         "[05-UNS-6]",
     ] {
         assert!(
-            chelis_types::unsupported::__build_deliberate_rejection(atom, "hint").is_err(),
+            chelis_checker_core::unsupported::__build_deliberate_rejection(atom, "hint").is_err(),
             "response-contract atom {atom} must not authorize a semantic case"
         );
     }
@@ -45,7 +48,7 @@ fn response_contract_atoms_cannot_authorize_a_semantic_case() {
 
 #[test]
 fn registered_open_issue_constructs_an_unimplemented_authority() {
-    let authority = chelis_types::unsupported::__build_unimplemented_rejection(
+    let authority = chelis_checker_core::unsupported::__build_unimplemented_rejection(
         879,
         "general C closure ABI is pending",
     )
@@ -60,7 +63,8 @@ fn registered_open_issue_constructs_an_unimplemented_authority() {
 fn issue_admission_rejects_zero_closed_pr_and_missing_numbers() {
     for issue in [0, 944, 1, 999_999_999] {
         assert!(
-            chelis_types::unsupported::__build_unimplemented_rejection(issue, "hint").is_err(),
+            chelis_checker_core::unsupported::__build_unimplemented_rejection(issue, "hint")
+                .is_err(),
             "non-live issue authority chelis#{issue} must be rejected"
         );
     }
@@ -68,15 +72,19 @@ fn issue_admission_rejects_zero_closed_pr_and_missing_numbers() {
 
 #[test]
 fn both_authority_constructors_reject_empty_hints() {
-    assert!(chelis_types::unsupported::__build_deliberate_rejection("[04-TOT-3]", "").is_err());
-    assert!(chelis_types::unsupported::__build_unimplemented_rejection(879, "").is_err());
+    assert!(
+        chelis_checker_core::unsupported::__build_deliberate_rejection("[04-TOT-3]", "").is_err()
+    );
+    assert!(chelis_checker_core::unsupported::__build_unimplemented_rejection(879, "").is_err());
 }
 
 #[test]
 fn compile_time_helpers_accept_only_registered_authorities() {
-    let deliberate =
-        chelis_types::deliberate_rejection!("[04-TOT-3]", "malformed typed forms are rejected");
-    let unimplemented = chelis_types::unimplemented_rejection!(
+    let deliberate = chelis_checker_core::deliberate_rejection!(
+        "[04-TOT-3]",
+        "malformed typed forms are rejected"
+    );
+    let unimplemented = chelis_checker_core::unimplemented_rejection!(
         879,
         "general C first-class function values are not implemented"
     );
@@ -89,10 +97,10 @@ fn compile_time_helpers_accept_only_registered_authorities() {
 #[allow(clippy::inconsistent_digit_grouping, clippy::zero_prefixed_literal)]
 fn unimplemented_macro_accepts_every_valid_decimal_token_shape() {
     let authorities = [
-        chelis_types::unimplemented_rejection!(000879, "leading zeroes"),
-        chelis_types::unimplemented_rejection!(8__79, "repeated underscores"),
-        chelis_types::unimplemented_rejection!(879_, "trailing underscore"),
-        chelis_types::unimplemented_rejection!(0_879, "zero-prefixed digits"),
+        chelis_checker_core::unimplemented_rejection!(000879, "leading zeroes"),
+        chelis_checker_core::unimplemented_rejection!(8__79, "repeated underscores"),
+        chelis_checker_core::unimplemented_rejection!(879_, "trailing underscore"),
+        chelis_checker_core::unimplemented_rejection!(0_879, "zero-prefixed digits"),
     ];
     assert!(
         authorities
@@ -107,7 +115,7 @@ fn diagnostic_surface_exposes_deliberate_host_only_authority() {
         UnsupportedKind::Builtin("tensor_scan".to_string()),
         "`chelis build --target c` host emission",
         Stage::Codegen("c"),
-        chelis_types::deliberate_rejection!(
+        chelis_checker_core::deliberate_rejection!(
             "[05-HOST-1]",
             "host-runtime builders are intentionally excluded from compiled targets; run under `chelis eval`"
         ),
@@ -127,7 +135,7 @@ fn diagnostic_surface_exposes_deliberate_kind_and_validated_atom() {
         UnsupportedKind::Construct("a malformed Deep form".to_string()),
         "host lowering",
         Stage::Lowering,
-        chelis_types::deliberate_rejection!(
+        chelis_checker_core::deliberate_rejection!(
             "[04-TOT-3]",
             "the hint may mention an unrelated chelis#879 without replacing the authority"
         ),

@@ -28,11 +28,11 @@
 //! can never reappear. No "did not panic" assertions: every test pins the
 //! error kind and the operand precisions in the diagnostic.
 
+use chelis_checker_core::errors::CheckErrorKind;
 use chelis_macros::{ExpansionOptions, expand_program};
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str;
 use chelis_types::check_ir_program;
-use chelis_types::errors::CheckErrorKind;
 
 /// Parse → desugar → macro-expand → type-check, returning the
 /// `(kind, message)` pairs of any diagnostics. An empty vector means the

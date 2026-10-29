@@ -1,0 +1,69 @@
+{
+  "revision": "7e6c0aa438c635889fd78c819ea7efffa86a9409",
+  "files": {
+    "Cargo.lock": {
+      "sha256": "aecfab691b8d1c0c558802dac865289f02df825e4c82218bc57c4633276e2767",
+      "bytes": 125478
+    },
+    "Cargo.toml": {
+      "sha256": "80a164482dbd195e567a6aa5a4236c6a852044cab056bb11926dbeea5efc7646",
+      "bytes": 5640
+    },
+    "Cargo.nix": {
+      "sha256": "dbfac51e10b63b92b4ab70469a6701a83e3ca80060cf5437b552a226cd88d6a9",
+      "bytes": 619051
+    },
+    "rust-toolchain.toml": {
+      "sha256": "934e8401b0bb36dc08490bee24b397a4d5ffb783087fbd28d71d89194a5696dc",
+      "bytes": 1913
+    },
+    "scripts/test_timing_baseline.json": {
+      "sha256": "97c00c5e3769d76d75c63dc6d6ecfe3f7fb5e52661d34d6ff367e496e5354196",
+      "bytes": 771052
+    },
+    "scripts/fixtures/effect_analysis_core/corpus.json": {
+      "sha256": "3b333d0ecba1ea36da9925416f115e4f6091d10f78f0d408670e36909ad099e1",
+      "bytes": 3773
+    },
+    "scripts/fixtures/type_unification_core_corpus.json": {
+      "sha256": "b71743d5a060c56644a250f5fdd95de222f77afb539183da1a745422ed60fe5d",
+      "bytes": 3642
+    },
+    "crates/chelis-types/src/infer/checked.rs": {
+      "sha256": "71ea7c51dbb11186d7b97e360174b044a6919e7a09a217bd12bf13eb21b3455c",
+      "bytes": 104651
+    },
+    "crates/chelis-types/src/session.rs": {
+      "sha256": "3a03048dfb734e5252b256328db9b995de906d12ba5b849285b141e3d1af1600",
+      "bytes": 30834
+    },
+    "crates/chelis-types/src/context.rs": {
+      "sha256": "818ee5a0a4e7c9023c4e8fc22885988d61901bef086c60f35ad4c90595cc980e",
+      "bytes": 27049
+    },
+    "crates/chelis-types/tests/env_clone_allocations.rs": {
+      "sha256": "021d2639ac4e12b17b73bf43c20d2f4c962195c3b02d7a3ddfdf3443d5e25290",
+      "bytes": 3341
+    },
+    "crates/chelis-types/tests/let_chain_inference_cost.rs": {
+      "sha256": "82f665fc3d7565c2be2631e24d3f8c2a68e2c47c3b2d2e736c98aba83a8663a2",
+      "bytes": 4882
+    },
+    "crates/chelis-types/tests/tuple_nesting_cost.rs": {
+      "sha256": "14af02b9d5ca4d2e7ffd42f3cff0e911f4c25ed1bad892349f54492e28fc4476",
+      "bytes": 5771
+    },
+    "crates/chelis-types/tests/substitution_trial_cost.rs": {
+      "sha256": "b0bf032faa54178470a0a4c3c215160715d85177c5c2bd90aef9c789f6bc12a1",
+      "bytes": 6918
+    },
+    "crates/chelis-types/src/infer/tests/issue_1316.rs": {
+      "sha256": "db6bb4e281eb0dcd2520d85e6491c702c2a6286ae9c88f02f57645f9369d4abd",
+      "bytes": 12475
+    },
+    "crates/chelis-types/tests/infer_library_context_depth_guard.rs": {
+      "sha256": "bc2f50b7dac06317e00bdbe22bb9110535a59c58c7a5e494c351bfb23aef1859",
+      "bytes": 8888
+    }
+  }
+}

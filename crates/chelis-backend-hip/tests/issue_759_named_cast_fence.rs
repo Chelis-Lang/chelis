@@ -5,10 +5,10 @@
 
 mod support;
 
+use chelis_checker_core::unsupported::Unsupported;
 use chelis_dag_core::dag::{Dag, DimInfo, RiscOp, TensorType};
 use chelis_numeric_core::named_cast::NamedCastMode;
 use chelis_numeric_core::prim::Prim;
-use chelis_types::unsupported::Unsupported;
 
 fn vector(precision: Prim) -> TensorType {
     TensorType {

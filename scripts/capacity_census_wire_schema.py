@@ -648,7 +648,7 @@ class _SchemaShapeGraph(_CodecShapeGraph):
             ty = arguments["args"][0]["type"]
         nominal, arguments = self._nominal(crate, ty)
         _require(
-            nominal == "chelis_types::unsupported::Unsupported"
+            nominal == "chelis_checker_core::unsupported::Unsupported"
             and arguments
             in (None, {"angle_bracketed": {"args": [], "constraints": []}}),
             "diagnostic off-wire payload changed",

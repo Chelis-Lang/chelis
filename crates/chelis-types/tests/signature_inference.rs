@@ -1,6 +1,6 @@
+use chelis_checker_core::errors::ErrorWitness;
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str;
-use chelis_types::errors::ErrorWitness;
 use chelis_types::{
     CheckedProgram, build_compiled_library_context, check_ir_with_signature_context,
     check_typed_program,
@@ -246,7 +246,7 @@ fn module_wrapped_unknown_helper_reports_exactly_one_unbound_root() {
     assert_eq!(result.errors.len(), 1, "unknown helper owns one diagnostic");
     assert!(matches!(
         result.errors[0].kind,
-        chelis_types::errors::CheckErrorKind::UnboundVariable { .. }
+        chelis_checker_core::errors::CheckErrorKind::UnboundVariable { .. }
     ));
 }
 

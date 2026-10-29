@@ -1,7 +1,7 @@
 //! chelis#1618: multi-index `grad` reads the tuple through the total carrier.
 
+use chelis_checker_core::errors::CheckError;
 use chelis_deep::{Expr, parse_and_stamp_file};
-use chelis_types::errors::CheckError;
 use chelis_types::{check_ir_program, check_typed_program};
 
 const PAIR2: &str = "
@@ -15,7 +15,7 @@ fn stamped(source: &str) -> Vec<Expr> {
 }
 
 fn diagnostics(
-    result: Result<chelis_types::CheckedProgram, chelis_types::InferResult>,
+    result: Result<chelis_types::CheckedProgram, chelis_checker_core::InferResult>,
 ) -> Vec<String> {
     result
         .err()

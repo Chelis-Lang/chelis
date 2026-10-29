@@ -98,7 +98,9 @@ impl Diagnostic {
 /// Each error is projected with [`Diagnostic::try_from_check_error`], the
 /// projection `chelis check` publishes. A projection failure is returned as
 /// the failure it is; there is no fallback rendering.
-pub fn render_check_errors(errors: &[chelis_types::errors::CheckError]) -> Result<String, String> {
+pub fn render_check_errors(
+    errors: &[chelis_checker_core::errors::CheckError],
+) -> Result<String, String> {
     let _fp_env = chelis_runtime::FpEnvGuard::enter();
     errors
         .iter()
@@ -345,8 +347,8 @@ mod tests {
     fn an_integral_severity_uses_the_document_spelling() {
         let mut report = clean_report();
         report.errors = vec![
-            Diagnostic::try_from_check_error(&chelis_types::errors::CheckError {
-                kind: chelis_types::errors::CheckErrorKind::Other,
+            Diagnostic::try_from_check_error(&chelis_checker_core::errors::CheckError {
+                kind: chelis_checker_core::errors::CheckErrorKind::Other,
                 message: "probe".to_string(),
                 severity: 1.0,
                 expected: None,
@@ -489,13 +491,13 @@ mod tests {
     }
 
     fn check_error(
-        kind: chelis_types::errors::CheckErrorKind,
+        kind: chelis_checker_core::errors::CheckErrorKind,
         message: &str,
         span_offset: Option<usize>,
         span_id: Option<&str>,
         suggestions: &[&str],
-    ) -> chelis_types::errors::CheckError {
-        chelis_types::errors::CheckError {
+    ) -> chelis_checker_core::errors::CheckError {
+        chelis_checker_core::errors::CheckError {
             kind,
             message: message.into(),
             suggestions: suggestions.iter().map(|s| (*s).to_owned()).collect(),
@@ -512,7 +514,7 @@ mod tests {
     #[test]
     fn a_located_diagnostic_renders_its_projected_fields_on_one_line() {
         let error = check_error(
-            chelis_types::errors::CheckErrorKind::UnboundVariable {
+            chelis_checker_core::errors::CheckErrorKind::UnboundVariable {
                 identifier: "missing".into(),
             },
             "unbound variable: missing",
@@ -535,7 +537,7 @@ mod tests {
     #[test]
     fn an_unlocated_diagnostic_renders_no_location_and_no_debug_markers() {
         let rendered = super::render_check_errors(&[check_error(
-            chelis_types::errors::CheckErrorKind::DimensionMismatch,
+            chelis_checker_core::errors::CheckErrorKind::DimensionMismatch,
             "body has type `tensor[3, f32]`",
             None,
             None,
@@ -555,7 +557,7 @@ mod tests {
     #[test]
     fn a_measured_range_renders_its_length() {
         let mut diagnostic = Diagnostic::try_from_check_error(&check_error(
-            chelis_types::errors::CheckErrorKind::Other,
+            chelis_checker_core::errors::CheckErrorKind::Other,
             "m",
             None,
             None,
@@ -571,14 +573,14 @@ mod tests {
     fn each_diagnostic_occupies_its_own_line_in_order() {
         let errors = [
             check_error(
-                chelis_types::errors::CheckErrorKind::Other,
+                chelis_checker_core::errors::CheckErrorKind::Other,
                 "first",
                 None,
                 None,
                 &[],
             ),
             check_error(
-                chelis_types::errors::CheckErrorKind::TypeMismatch,
+                chelis_checker_core::errors::CheckErrorKind::TypeMismatch,
                 "second",
                 Some(7),
                 None,
@@ -597,7 +599,7 @@ mod tests {
     #[test]
     fn an_unprojectable_diagnostic_is_a_failure_not_a_debug_rendering() {
         let mut error = check_error(
-            chelis_types::errors::CheckErrorKind::Other,
+            chelis_checker_core::errors::CheckErrorKind::Other,
             "m",
             None,
             None,
@@ -606,7 +608,7 @@ mod tests {
         error.severity = f64::NAN;
         let failure = super::render_check_errors(&[
             check_error(
-                chelis_types::errors::CheckErrorKind::Other,
+                chelis_checker_core::errors::CheckErrorKind::Other,
                 "fine",
                 None,
                 None,
@@ -640,7 +642,7 @@ mod tests {
             errors: Vec::new(),
         };
         fitness.errors.push(check_error(
-            chelis_types::errors::CheckErrorKind::DimensionMismatch,
+            chelis_checker_core::errors::CheckErrorKind::DimensionMismatch,
             "declared type is `tensor[4, f32]`",
             None,
             None,

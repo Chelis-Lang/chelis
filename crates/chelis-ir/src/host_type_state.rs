@@ -25,7 +25,7 @@ use chelis_dag_core::dag::{DimInfo, TensorType};
 /// concrete callback formal selects one of its scalar/tensor signatures.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CheckedBuiltinCallable {
-    Admitted(chelis_types::AdmittedBuiltin),
+    Admitted(chelis_checker_core::AdmittedBuiltin),
     FloatClassify(chelis_numeric_core::dtype_semantics::FloatClassify),
     FromSeed,
     Split,
@@ -49,7 +49,7 @@ impl CheckedBuiltinCallable {
             "split_key" => Some(Self::Split),
             "split_keys" => Some(Self::SplitMany),
             "fold_in" => Some(Self::FoldIn),
-            _ => chelis_types::AdmittedBuiltin::resolve(name).map(Self::Admitted),
+            _ => chelis_checker_core::AdmittedBuiltin::resolve(name).map(Self::Admitted),
         }
     }
 

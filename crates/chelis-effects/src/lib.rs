@@ -3,6 +3,7 @@ use chelis_deep::DeepTag;
 #[cfg(test)]
 use std::cell::RefCell;
 
+use chelis_checker_core::InferResult;
 #[cfg(test)]
 use chelis_deep::Span;
 #[cfg(test)]
@@ -16,7 +17,7 @@ use chelis_effects_core::EffectWorkProfile;
 use chelis_effects_core::{DefEffectRows, EffectError, EffectErrorKind, infer_effect_rows};
 #[cfg(test)]
 use chelis_type_core::{Effect, EffectSet};
-use chelis_types::{CheckedProgram, InferResult};
+use chelis_types::CheckedProgram;
 use chelis_vocab::EffectKind;
 use chelis_vocab::EffectKindDecodeError;
 
@@ -960,14 +961,14 @@ def via_lambda(path: string) -> string = {
     /// with the direct call in chelis-types (`builtin_value_contract_tests`).
     #[test]
     fn every_admitted_builtin_value_performs_exactly_its_call_effect() {
-        let (env, _) = chelis_types::builtin_env();
+        let (env, _) = chelis_checker_core::builtin_env();
         let mut checked = 0;
-        for name in chelis_types::builtin_env_names() {
+        for name in chelis_checker_core::builtin_env_names() {
             let scheme = env.lookup(name).expect("bound builtin has a scheme");
-            let Some(decl) = chelis_types::builtin_decl(name) else {
+            let Some(decl) = chelis_checker_core::builtin_decl(name) else {
                 continue;
             };
-            if !chelis_types::builtin_value_contract_carried(decl, scheme) {
+            if !chelis_checker_core::builtin_value_contract_carried(decl, scheme) {
                 continue;
             }
             let program = surf_checked(&format!("alias = {}\n", decl.name));

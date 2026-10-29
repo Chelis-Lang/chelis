@@ -8,7 +8,7 @@ fn check(source: &str, expected: Option<&str>) {
         &chelis_syntax_host::NativeStack,
     )
     .expect("Surf fixture must desugar");
-    let messages = |result: Result<_, chelis_types::InferResult>| match result {
+    let messages = |result: Result<_, chelis_checker_core::InferResult>| match result {
         Ok(_) => vec![],
         Err(result) => result
             .errors

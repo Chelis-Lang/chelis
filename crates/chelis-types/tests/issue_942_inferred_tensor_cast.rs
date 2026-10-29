@@ -13,10 +13,11 @@
 //! `expand` operands all carry a unit extent at the axis and are therefore
 //! same-rank broadcasts under the single meaning.
 
+use chelis_checker_core::errors::CheckError;
+use chelis_checker_core::errors::CheckErrorKind;
 use chelis_deep::parse_and_stamp_file;
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str as parse_surf;
-use chelis_types::errors::{CheckError, CheckErrorKind};
 use chelis_types::{check_ir_program, check_typed_program};
 
 fn typecheck(source: &str) -> Vec<CheckError> {

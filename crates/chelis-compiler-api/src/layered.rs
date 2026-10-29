@@ -34,9 +34,10 @@
 //!   workload; the error path stays correct by deferring to the
 //!   existing checker.
 
+use chelis_checker_core::InferStats;
+use chelis_checker_core::errors::CheckError;
 use chelis_effects_core::{DefEffectRows, EffectError};
-use chelis_types::errors::CheckError;
-use chelis_types::{CheckedProgram, FitnessReport, InferStats, StructuralStats};
+use chelis_types::{CheckedProgram, FitnessReport, StructuralStats};
 
 use crate::compiler::CompilerError;
 use crate::stdlib_cache::{StdLibContext, load_or_build_stdlib_context};

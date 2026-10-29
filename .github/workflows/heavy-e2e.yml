@@ -541,7 +541,7 @@ jobs:
       - name: Typecheck level generalization oracle
         env:
           CHELIS_TEST_SHARED_REEF_HOME: ${{ runner.temp }}/chelis-test-shared-reef
-        run: cargo nextest run --workspace --profile ci-full --ignore-default-filter --features chelis-types/generalize-sweep-oracle --no-fail-fast -E 'not (binary_id(/^chelis-compiler-api::capacity_census_wire$/) | binary_id(/^chelis-python::capacity_census_bindings$/) | binary_id(/^chelis-cli::stdlib_typecheck_cache_concurrency$/) | (binary_id(/^chelis-cli::issue_1293_redteam_round4$/) & test(/^recursive_list_tuple_and_adt_cotangents_match_in_eval_and_c$/)) | ${{ needs.module-oracles-plan.outputs.filterset }})' --partition hash:${{ matrix.shard }}/4
+        run: cargo nextest run --workspace --profile ci-full --ignore-default-filter --features chelis-checker-core/generalize-sweep-oracle --no-fail-fast -E 'not (binary_id(/^chelis-compiler-api::capacity_census_wire$/) | binary_id(/^chelis-python::capacity_census_bindings$/) | binary_id(/^chelis-cli::stdlib_typecheck_cache_concurrency$/) | (binary_id(/^chelis-cli::issue_1293_redteam_round4$/) & test(/^recursive_list_tuple_and_adt_cotangents_match_in_eval_and_c$/)) | ${{ needs.module-oracles-plan.outputs.filterset }})' --partition hash:${{ matrix.shard }}/4
 
       - name: Verify generalization lane selection
         if: matrix.shard == 1
@@ -646,7 +646,7 @@ jobs:
       - name: Set up project CI
         uses: ./.github/actions/setup-project-ci
 
-      - name: Install effect oracle policy dependency
+      - name: Install portable core policy dependency
         if: matrix.slice == 'domain'
         run: uv pip install --python "$PYO3_PYTHON" PyYAML==6.0.3
 
@@ -679,6 +679,15 @@ jobs:
         with:
           name: effect-analysis-core-linux
           path: target/agents/effect-analysis-core/
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload checker core evidence
+        if: always() && matrix.slice == 'domain'
+        uses: actions/upload-artifact@v7
+        with:
+          name: checker-core-linux
+          path: target/agents/checker-core/
           if-no-files-found: error
           retention-days: 14
 

@@ -50,7 +50,7 @@ def assertions(root: Path) -> tuple[str, ...]:
     names = tuple(re.findall(r"`(test_[a-z_]+)`", section))
     if not names or len(names) != len(set(names)):
         raise ValueError("assertion-family inventory is missing or ambiguous")
-    builtins = literal_roster((root / "crates/chelis-types/src/builtins.rs").read_text(), "BUILTIN_NAMES")
+    builtins = literal_roster((root / "crates/chelis-checker-core/src/builtins.rs").read_text(), "BUILTIN_NAMES")
     if set(names) != {name for name in builtins if name.startswith("test_")}:
         raise ValueError("normative assertion family and builtin vocabulary disagree")
     return names

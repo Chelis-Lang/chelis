@@ -1034,7 +1034,7 @@ fn assert_linearity_edit_is_rejected<T: cache_envelope::CachePayload>(
                     errors.iter().any(|error| {
                         matches!(
                             error.kind,
-                            chelis_types::errors::CheckErrorKind::UseAfterConsume
+                            chelis_checker_core::errors::CheckErrorKind::UseAfterConsume
                         )
                     })
                 })

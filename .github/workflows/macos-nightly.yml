@@ -218,7 +218,7 @@ jobs:
 
       - name: Clippy macOS solver-free features
         if: matrix.shard == 1
-        run: cargo clippy --workspace --all-targets --features chelis-cli/ownership-ledger,chelis-compiler-api/compilation-trace,chelis-compiler-api/ownership-ledger,chelis-e2e/hip-local-gpu,chelis-ir/lowering-trace,chelis-numeric-core/alloc,chelis-numeric-core/serde,chelis-prove/clarabel,chelis-python/extension-module,chelis-runtime/ownership-ledger,chelis-types/checkpoint-compile-probe,chelis-types/generalize-sweep-oracle -- -D warnings
+        run: cargo clippy --workspace --all-targets --features chelis-cli/ownership-ledger,chelis-compiler-api/compilation-trace,chelis-compiler-api/ownership-ledger,chelis-e2e/hip-local-gpu,chelis-ir/lowering-trace,chelis-numeric-core/alloc,chelis-numeric-core/serde,chelis-prove/clarabel,chelis-python/extension-module,chelis-runtime/ownership-ledger,chelis-checker-core/checkpoint-compile-probe,chelis-checker-core/generalize-sweep-oracle -- -D warnings
 
       - name: Clippy effect core default features
         if: matrix.shard == 1
@@ -231,6 +231,18 @@ jobs:
       - name: Clippy effect core Serde
         if: matrix.shard == 1
         run: cargo clippy -p chelis-effects-core --all-targets --no-default-features --features serde -- -D warnings
+
+      - name: Clippy checker core default features
+        if: matrix.shard == 1
+        run: cargo clippy -p chelis-checker-core --all-targets -- -D warnings
+
+      - name: Clippy checker core without default features
+        if: matrix.shard == 1
+        run: cargo clippy -p chelis-checker-core --all-targets --no-default-features -- -D warnings
+
+      - name: Clippy checker core Serde
+        if: matrix.shard == 1
+        run: cargo clippy -p chelis-checker-core --all-targets --no-default-features --features serde -- -D warnings
 
       - name: Version core portability
         if: matrix.shard == 1
@@ -266,6 +278,19 @@ jobs:
         with:
           name: effect-analysis-core-darwin
           path: target/agents/effect-analysis-core/
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Checker core portability
+        if: matrix.shard == 1
+        run: uv run --managed-python --python 3.11 --no-project python scripts/checker_core_oracle.py
+
+      - name: Upload checker core evidence
+        if: always() && matrix.shard == 1
+        uses: actions/upload-artifact@v7
+        with:
+          name: checker-core-darwin
+          path: target/agents/checker-core/
           if-no-files-found: error
           retention-days: 14
 

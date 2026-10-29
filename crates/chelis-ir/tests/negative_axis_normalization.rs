@@ -30,12 +30,12 @@
 
 use chelis_unord::UnordMap;
 
+use chelis_checker_core::errors::{CheckError, CheckErrorKind};
 use chelis_dag_core::dag::{DimInfo, TensorType};
 use chelis_dag_core::verify;
 use chelis_ir::lower::{lower_program, try_lower_subexpr_program};
 use chelis_numeric_core::prim::Prim;
 use chelis_types::check_ir_program;
-use chelis_types::errors::{CheckError, CheckErrorKind};
 
 /// Surf source -> desugar -> macro-expand -> typecheck -> effects ->
 /// linearity -> lower. Returns the lowered DAG, or a stage-tagged error

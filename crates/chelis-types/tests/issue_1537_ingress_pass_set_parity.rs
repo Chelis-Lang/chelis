@@ -9,9 +9,9 @@
 //! constructor is the only way to build a vocabulary node), so its row proves
 //! that both Deep text ingresses reject it at admission. No row is ignored.
 
+use chelis_checker_core::errors::CheckError;
 use chelis_deep::{Expr, parse_and_stamp_file, parser::parse_str as parse_deep, printer};
 use chelis_surf::{desugar::desugar_program, parser::parse_str as parse_surf};
-use chelis_types::errors::CheckError;
 use chelis_types::{
     check_ir_fitness, check_ir_program, check_program, check_typed_program, infer_ir_program,
     infer_program,

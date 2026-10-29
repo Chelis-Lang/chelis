@@ -19,7 +19,7 @@ If this guide disagrees with an owning source, correct the guide:
 |---|---|
 | Language operations and adjoints | [`spec/05-risc-primitives.md`](../spec/05-risc-primitives.md), [`spec/06-transformations.md`](../spec/06-transformations.md) |
 | Syntax, types, dtypes and effects | [`spec/02-surf-syntax.md`](../spec/02-surf-syntax.md), [`spec/04-type-system.md`](../spec/04-type-system.md) |
-| Builtin registration | `BUILTIN_NAMES` and `builtin_env`, `crates/chelis-types/src/builtins.rs` |
+| Builtin registration | `BUILTIN_NAMES` and `builtin_env`, `crates/chelis-checker-core/src/builtins.rs` |
 | IR and target implementation | `RiscOp`, `crates/chelis-dag-core/src/dag.rs`, `crates/chelis-compiler-api/src/compiler.rs`, `crates/chelis-backend-{c,hip,metal}` |
 | Target contract | [`spec/08-backends.md`](../spec/08-backends.md) and the dtype matrix in `spec/04` §1.1.3 |
 | Command surface | `crates/chelis-cli/src/main.rs` and its CLI integration tests |
@@ -428,13 +428,10 @@ module (§11) provides a separate string-valued file interface.
 
 ## 4. Complete closed vocabulary (completeness check)
 
-Every name in `BUILTIN_NAMES` (`crates/chelis-types/src/builtins.rs`), verbatim. The
-fenced block below mirrors the array exactly and is locked to it by the
-`doc_surface_section_4_mirrors_builtin_names` test (`crates/chelis-types/src/builtins.rs`),
-so it cannot silently drift. Its group labels reflect the vocabulary
-organization. Target and AD support are described in their own sections.
-To change the array, review
-the owning spec, registration, and this exact list together.
+This list contains every name in `BUILTIN_NAMES` from `crates/chelis-checker-core/src/builtins.rs`.
+Group labels follow the vocabulary categories.
+Separate sections describe target and AD support.
+Review the owning specification, registration, and this list together when builtin names change.
 
 Two capabilities live *outside* the array and are intentionally absent below: `const`
 and `load` are `RiscOp` memory nodes produced during lowering. Both are documented in

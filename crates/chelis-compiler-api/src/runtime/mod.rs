@@ -1436,7 +1436,7 @@ struct EvalContext<'a> {
     declared_signatures: UnordMap<String, Expr>,
     /// Checker-owned nominal definitions used when the executed constructor
     /// alone cannot reveal whether the parameter type has a float leaf.
-    adt_registry: chelis_types::adt::AdtRegistry,
+    adt_registry: chelis_checker_core::adt::AdtRegistry,
     adt_fields: UnordMap<String, Vec<String>>,
     /// Each linker-named constructor's declared source spelling, keyed by
     /// its linker name (`collect_constructor_source_names`); an ADT value

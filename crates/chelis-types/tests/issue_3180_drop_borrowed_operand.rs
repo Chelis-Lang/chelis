@@ -2,10 +2,11 @@
 //! operand is a type error rather than an implicit consume of its owner. Before
 //! the fix `drop(&x)` and a `drop` of a borrowed parameter type checked.
 
+use chelis_checker_core::errors::CheckError;
+use chelis_checker_core::errors::CheckErrorKind;
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str;
 use chelis_types::check_typed_program;
-use chelis_types::errors::{CheckError, CheckErrorKind};
 
 fn type_errors(source: &str) -> Vec<CheckError> {
     let decls =

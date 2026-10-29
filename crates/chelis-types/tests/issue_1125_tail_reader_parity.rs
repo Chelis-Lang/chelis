@@ -1,7 +1,7 @@
 //! chelis#1125 PP7/E5e: structural function-tail readers preserve ingress parity.
 
+use chelis_checker_core::errors::CheckError;
 use chelis_deep::{Expr, parse_and_stamp_file};
-use chelis_types::errors::CheckError;
 use chelis_types::{check_ir_program, check_typed_program};
 
 fn stamped(source: &str) -> Vec<Expr> {

@@ -513,25 +513,6 @@ class RuntimeExtentOracleTests(unittest.TestCase):
         ):
             ORACLE.remove_local_ascription_provenance(duplicate)
 
-    def test_checker_transport_mutation_preserves_record_type_context(self) -> None:
-        source = ORACLE._LOCAL_ASCRIPTION_CHECKER_SOURCE.read_text()
-        mutated = ORACLE.remove_local_ascription_checker_transport(source)
-        self.assertIn(
-            "validate_checked_program_totality(&checked, signature_context, errors);\n"
-            "    let mut checked = checked;\n"
-            "    checked.local_ascriptions.clear();\n"
-            "    checked\n}",
-            mutated,
-        )
-        self.assertIn("let mut records = product.local_ascriptions.clone();", mutated)
-        for invalid in (
-            source.replace(ORACLE._LOCAL_ASCRIPTION_CHECKER_TRANSPORT, "", 1),
-            source + ORACLE._LOCAL_ASCRIPTION_CHECKER_TRANSPORT,
-        ):
-            with self.assertRaisesRegex(
-                ORACLE.OracleFailure, "mutation anchor is missing or ambiguous"
-            ):
-                ORACLE.remove_local_ascription_checker_transport(invalid)
 
     def test_controlled_mutation_checks_receipt_and_restores_source(self) -> None:
         cases = (

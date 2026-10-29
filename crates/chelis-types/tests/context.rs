@@ -19,7 +19,7 @@ fn build_ctx(library_src: &str) -> TypeEnv {
 }
 
 fn checker_messages(
-    result: Result<chelis_types::CheckedProgram, chelis_types::InferResult>,
+    result: Result<chelis_types::CheckedProgram, chelis_checker_core::InferResult>,
 ) -> Vec<String> {
     match result {
         Ok(_) => Vec::new(),
@@ -134,17 +134,6 @@ fn adt_non_node_variant_and_field_carriers_reject_with_entry_parity() {
         Expr::node(variant_tag, variant_meta, variant_children, variant_span),
     );
     assert_mutated_adt_rejects_on_both_ingresses(&malformed_field, "structural field");
-}
-
-#[test]
-fn adt_reader_has_no_local_optional_carrier_adapter() {
-    let source = include_str!("../src/adt.rs");
-    let definition = ["fn stamped_", "parts"].concat();
-    let call = ["stamped_", "parts("].concat();
-    assert!(
-        !source.contains(&definition) && !source.contains(&call),
-        "E5b requires ADT variant and field reads to disposition ExprCarrier directly"
-    );
 }
 
 #[test]

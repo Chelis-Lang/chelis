@@ -39,11 +39,11 @@ fn mat_f32(r: usize, c: usize) -> TensorType {
     }
 }
 
-fn assert_typed_unsupported(error: &chelis_types::unsupported::Unsupported, label: &str) {
+fn assert_typed_unsupported(error: &chelis_checker_core::unsupported::Unsupported, label: &str) {
     let rendered = error.to_string();
     assert!(
         rendered.starts_with("unsupported:")
-            && error.stage == chelis_types::unsupported::Stage::Codegen("metal"),
+            && error.stage == chelis_checker_core::unsupported::Stage::Codegen("metal"),
         "{label}: expected typed Metal codegen rejection, got:\n{rendered}"
     );
 }

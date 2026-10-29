@@ -18,6 +18,7 @@ chelis-pipeline-core.workspace = true
 chelis-surf.workspace = true
 chelis-syntax-host.workspace = true
 chelis-types.workspace = true
+chelis-checker-core.workspace = true
 chelis-effects.workspace = true
 chelis-shell.workspace = true
 chelis-shell-core.workspace = true

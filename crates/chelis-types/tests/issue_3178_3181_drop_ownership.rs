@@ -8,9 +8,10 @@
 //!   the parent and that component unusable, and disjoint components usable
 //!   ([04-LIN-11]).
 
+use chelis_checker_core::errors::CheckError;
+use chelis_checker_core::errors::CheckErrorKind;
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str;
-use chelis_types::errors::{CheckError, CheckErrorKind};
 use chelis_types::{check_linearity, check_typed_program};
 
 fn linearity(source: &str) -> Result<(), Vec<CheckError>> {

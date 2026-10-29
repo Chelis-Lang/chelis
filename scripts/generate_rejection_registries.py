@@ -34,9 +34,9 @@ ATOM = re.compile(r"^> \*\*(\[[0-9]{2}-[A-Z]+-[1-9][0-9]*\])\*\*", re.MULTILINE)
 NUMBERED_SPEC = re.compile(r"^(?:0[0-9]|1[0-2])-[^/]+\.md$")
 EXACT_ISSUE_LITERAL = re.compile(r"[0-9][0-9_]*")
 MANIFEST_REL = Path("spec/design/loud_unsupported_issue_manifest.json")
-OUTPUT_REL = Path("crates/chelis-types/src/rejection_registry_generated.rs")
+OUTPUT_REL = Path("crates/chelis-checker-core/src/rejection_registry_generated.rs")
 PRODUCTION_SOURCE_EXCLUSIONS = frozenset(
-    {Path("crates/chelis-types/src/unsupported.rs")}
+    {Path("crates/chelis-checker-core/src/unsupported.rs")}
 )
 
 

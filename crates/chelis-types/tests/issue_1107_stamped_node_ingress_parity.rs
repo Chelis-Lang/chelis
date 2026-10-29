@@ -33,8 +33,8 @@
 //! the same diagnostic set for the same program — so a future regression at any
 //! of these sites fails here regardless of which direction it drifts.
 
+use chelis_checker_core::errors::CheckError;
 use chelis_deep::{Expr, parse_and_stamp_file};
-use chelis_types::errors::CheckError;
 use chelis_types::{check_ir_program, check_typed_program};
 
 fn stamped(source: &str) -> Vec<Expr> {

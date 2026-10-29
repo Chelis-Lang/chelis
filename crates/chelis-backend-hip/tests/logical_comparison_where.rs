@@ -8,9 +8,9 @@ use support::codegen_hip;
 
 #[test]
 fn generated_hip_bitwise_math_matches_exact_width_reference_on_cpu() {
+    use chelis_checker_core::bitwise_scalar;
     use chelis_numeric_core::bitwise::BitwiseKind;
     use chelis_numeric_core::dtype_semantics::scalar_from_i64;
-    use chelis_types::bitwise_scalar;
     use std::process::Command;
 
     for (prim, signed, width, minimum, min_literal) in [

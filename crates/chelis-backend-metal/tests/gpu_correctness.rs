@@ -159,9 +159,9 @@ int main(void) {{
 #[test]
 #[ignore]
 fn bitwise_exact_signed_width_gpu_matches_reference() {
+    use chelis_checker_core::bitwise_scalar;
     use chelis_numeric_core::bitwise::BitwiseKind;
     use chelis_numeric_core::dtype_semantics::scalar_from_i64;
-    use chelis_types::bitwise_scalar;
     let kinds = [
         BitwiseKind::And,
         BitwiseKind::Or,

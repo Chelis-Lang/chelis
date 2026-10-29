@@ -15,8 +15,9 @@
 //! representative reducer per negative case so the four arms stay
 //! aligned.
 
+use chelis_checker_core::errors::CheckError;
+use chelis_checker_core::errors::CheckErrorKind;
 use chelis_types::check_ir_program;
-use chelis_types::errors::{CheckError, CheckErrorKind};
 
 fn check_surf(source: &str) -> Result<Vec<String>, Vec<CheckError>> {
     let decls = chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack)

@@ -1,13 +1,13 @@
 //! chelis#2388: `par` is rejected before any execution lane can erase an
 //! effectful non-final child. chelis#2503 owns the current fence and full support.
 
+use chelis_checker_core::unsupported::{RejectionAuthorityKind, Stage, UnsupportedKind};
 use chelis_compiler_api::{
     compiler::{check, compile, eval},
     schema::{
         CheckRequest, CompileRequest, CompileTarget, DiagnosticSpan, EvalRequest, SourceKind,
     },
 };
-use chelis_types::unsupported::{RejectionAuthorityKind, Stage, UnsupportedKind};
 use chelis_vocab::DiagnosticKind;
 
 const SURF_PAR: &str = "def loss(x: f32) -> f32 = par { fail(\"par boom\"); add(x, 1.0f32) }\n\

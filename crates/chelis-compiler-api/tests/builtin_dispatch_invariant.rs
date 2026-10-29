@@ -24,8 +24,8 @@ use chelis_unord::UnordSet;
 use std::fs;
 use std::path::PathBuf;
 
+use chelis_checker_core::BUILTIN_NAMES;
 use chelis_numeric_core::dtype_semantics::FloatClassify;
-use chelis_types::BUILTIN_NAMES;
 
 /// Builtins that legitimately do not need a host-runtime arm. Document
 /// the reason per the closed vocabulary above.

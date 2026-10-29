@@ -4,9 +4,11 @@
 
 use chelis_backend_hip::HipCodegenResult;
 mod support;
+use chelis_checker_core::unsupported::{
+    RejectionAuthorityKind, Stage, Unsupported, UnsupportedKind,
+};
 use chelis_dag_core::dag::{ComparisonKind, Dag, DimInfo, RiscOp, TensorType};
 use chelis_numeric_core::prim::Prim;
-use chelis_types::unsupported::{RejectionAuthorityKind, Stage, Unsupported, UnsupportedKind};
 use support::codegen_hip;
 
 fn scalar_f32() -> TensorType {

@@ -7,11 +7,11 @@
 //! operands `x` or `&x` does not change either rule, so `where(lt(&x, &y), x,
 //! y)` checks exactly as `where(lt(x, y), x, y)` does.
 
+use chelis_checker_core::errors::CheckErrorKind;
 use chelis_deep::Expr;
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str as parse_surf;
 use chelis_types::check_ir_program;
-use chelis_types::errors::CheckErrorKind;
 
 fn surf_to_deep(source: &str) -> Vec<Expr> {
     let decls = parse_surf(source, &chelis_syntax_host::NativeStack).expect("surf parse");

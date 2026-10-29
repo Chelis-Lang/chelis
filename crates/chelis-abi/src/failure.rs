@@ -9,6 +9,10 @@
 //! guard's `<prim>` slot is `i64`, because the guard finalizes an extent or
 //! an index (spec/04-type-system.md section 4.7).
 
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
+
 use chelis_vocab::failure::{NumericTrapKind, NumericTrapLine};
 
 /// The [04-NUM-9] line of a `Domain` trap in `op` that finalizes an extent,

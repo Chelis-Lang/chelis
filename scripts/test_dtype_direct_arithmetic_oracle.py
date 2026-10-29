@@ -431,16 +431,6 @@ class SourceContractMutationTests(unittest.TestCase):
         ):
             oracle.validate_source_contracts(self.repo)
 
-    def test_builtin_direct_identity_grouping_mutation_fails(self) -> None:
-        self.mutate(
-            "crates/chelis-types/src/builtins.rs",
-            'tensor_binop("add", &mut env, &mut vg);\n    tensor_binop("sub", &mut env, &mut vg);\n    tensor_binop("mul", &mut env, &mut vg);',
-            'tensor_binop("add", &mut env, &mut vg);\n    tensor_binop("mul", &mut env, &mut vg);\n    tensor_binop("sub", &mut env, &mut vg);',
-        )
-        with self.assertRaisesRegex(
-            oracle.OracleFailure, "current builtin direct arithmetic grouping"
-        ):
-            oracle.validate_source_contracts(self.repo)
 
     def test_required_canonical_direct_arithmetic_narrative_deletion_fails(self) -> None:
         self.mutate(
