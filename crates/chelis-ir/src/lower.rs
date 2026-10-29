@@ -2357,6 +2357,7 @@ pub fn try_lower_subexpr_program_with_context_and_controls(
                     #[cfg(feature = "lowering-trace")]
                     trace: None,
                 },
+                None,
             );
         LoweredSubexprWithControls {
             dag,
@@ -2541,53 +2542,6 @@ impl PreparedNamedCallHelper {
     }
 }
 
-/// Request the existing full call owner, not an extracted executable body.
-/// Admission is derived from the values that owner actually prepares.
-pub(crate) fn try_lower_prepared_named_call(
-    expr: &Expr,
-    scoped_bindings: Vec<(String, TensorType)>,
-    context: &SubexprLoweringContext,
-    expected: &TensorType,
-    collect_trace: bool,
-) -> Result<PreparedNamedCallHelper, LowerDiagnostic> {
-    #[cfg(feature = "lowering-trace")]
-    let collector = collect_trace.then(crate::lowering_trace::Collector::new_helper);
-    #[cfg(not(feature = "lowering-trace"))]
-    let _ = collect_trace;
-    assert_decode_once_at_boundary("prepared_named_call: expr", std::slice::from_ref(expr));
-    let (dag, value_root_count, list_checks, ordered_list_checks) = catch_lowering(
-        UnrollBudget::Unbounded,
-        std::panic::AssertUnwindSafe(|| {
-            lower_subexpr_program_inner_impl(
-                expr,
-                scoped_bindings,
-                context,
-                Some(expected),
-                SubexprLoweringOptions {
-                    root: SubexprRoot::PreparedClosedListCall,
-                    root_operation: None,
-                    include_list_controls: true,
-                    authored_signature: false,
-                    literal_result_claim_ownership:
-                        LiteralResultClaimOwnership::AuthoredTensorHelper,
-                    #[cfg(feature = "lowering-trace")]
-                    trace: collector.clone(),
-                },
-            )
-        }),
-    )?;
-    Ok(PreparedNamedCallHelper {
-        lowered: LoweredSubexprWithControls {
-            dag,
-            value_root_count,
-            list_checks,
-            ordered_list_checks,
-        },
-        #[cfg(feature = "lowering-trace")]
-        trace: collector.map(|collector| collector.finish_helper()),
-    })
-}
-
 pub(crate) fn try_lower_tensor_helper_program_with_ordered_inputs(
     expr: &Expr,
     scoped_bindings: Vec<(String, TensorType)>,
@@ -2669,6 +2623,85 @@ pub(crate) fn try_lower_tensor_helper_program_with_ordered_inputs_and_trace(
     Ok((dag, collector.finish_helper()))
 }
 
+/// Complete lexical input availability for a signatureless helper. Lookups
+/// retain checked types; no input value or shape claim is inferred here.
+pub(crate) trait SignaturelessScope {
+    fn numeric_type(&self, name: &str) -> Option<TensorType>;
+    fn contains_lexical_name(&self, name: &str) -> bool;
+    fn host_payload_type(&self, name: &str) -> Option<crate::host_type_state::HostTypeTerm>;
+    fn dimension_source(&self, binder: &str) -> Option<(String, TensorType)>;
+}
+
+pub(crate) enum ScopedHelperKind {
+    Tensor,
+    Controls,
+    Prepared,
+}
+
+pub(crate) fn try_lower_scoped_helper(
+    expr: &Expr,
+    scope: &dyn SignaturelessScope,
+    context: &SubexprLoweringContext,
+    kind: ScopedHelperKind,
+    expected: Option<&TensorType>,
+    root_operation: Option<ResolvedBuiltinValue>,
+    collect_trace: bool,
+) -> Result<PreparedNamedCallHelper, LowerDiagnostic> {
+    #[cfg(feature = "lowering-trace")]
+    let collector = collect_trace.then(crate::lowering_trace::Collector::new_helper);
+    #[cfg(not(feature = "lowering-trace"))]
+    let _ = collect_trace;
+    let (root, controls, ownership) = match kind {
+        ScopedHelperKind::Tensor => (
+            SubexprRoot::Expression,
+            false,
+            LiteralResultClaimOwnership::AuthoredTensorHelper,
+        ),
+        ScopedHelperKind::Controls => (
+            SubexprRoot::Expression,
+            true,
+            LiteralResultClaimOwnership::Legacy,
+        ),
+        ScopedHelperKind::Prepared => (
+            SubexprRoot::PreparedClosedListCall,
+            true,
+            LiteralResultClaimOwnership::AuthoredTensorHelper,
+        ),
+    };
+    assert_decode_once_at_boundary("scoped_helper: expr", std::slice::from_ref(expr));
+    let (dag, value_root_count, list_checks, ordered_list_checks) = catch_lowering(
+        UnrollBudget::Unbounded,
+        std::panic::AssertUnwindSafe(|| {
+            lower_subexpr_program_inner_impl(
+                expr,
+                Vec::new(),
+                context,
+                expected,
+                SubexprLoweringOptions {
+                    root,
+                    root_operation,
+                    include_list_controls: controls,
+                    authored_signature: false,
+                    literal_result_claim_ownership: ownership,
+                    #[cfg(feature = "lowering-trace")]
+                    trace: collector.clone(),
+                },
+                Some(scope),
+            )
+        }),
+    )?;
+    Ok(PreparedNamedCallHelper {
+        lowered: LoweredSubexprWithControls {
+            dag,
+            value_root_count,
+            list_checks,
+            ordered_list_checks,
+        },
+        #[cfg(feature = "lowering-trace")]
+        trace: collector.map(|collector| collector.finish_helper()),
+    })
+}
+
 fn try_lower_subexpr_program_with_ordered_inputs_impl(
     expr: &Expr,
     scoped_bindings: Vec<(String, TensorType)>,
@@ -2688,6 +2721,7 @@ fn try_lower_subexpr_program_with_ordered_inputs_impl(
                 context,
                 result_claim,
                 options,
+                None,
             );
             dag
         }),
@@ -2956,6 +2990,7 @@ fn lower_subexpr_program_inner_impl(
     context: &SubexprLoweringContext,
     result_claim: Option<&TensorType>,
     options: SubexprLoweringOptions,
+    signatureless_scope: Option<&dyn SignaturelessScope>,
 ) -> (
     Dag,
     usize,
@@ -3018,6 +3053,9 @@ fn lower_subexpr_program_inner_impl(
     let (parameter_names, parameter_types): (Vec<_>, Vec<_>) =
         scoped_bindings.clone().into_iter().unzip();
     for (name, tensor_ty) in scoped_bindings {
+        if !authored_signature {
+            crate::host::note_signatureless_input_load();
+        }
         let load = ctx.dag.add_node(
             ctx.owner(),
             RiscOp::Load {
@@ -3040,6 +3078,18 @@ fn lower_subexpr_program_inner_impl(
     // Kernel inputs already have structural interface-axis carriers. Keep
     // those reads intact; explicit checked claims still use signature witnesses.
     ctx.bindings.clear_witnesses();
+    if let Some(scope) = signatureless_scope {
+        ctx.signatureless_scope = Some(scope);
+        ctx.signatureless_owner = Some(ctx.owner());
+        ctx.signatureless_lookup = true;
+        ctx.signature_witnesses.signatureless = true;
+        // Runtime free inputs are captured before any branch or closure opens.
+        // Metadata-only extents retain point lookup through the complete scope.
+        crate::host::note_signatureless_scope_scan(expr);
+        for name in chelis_types::linearity::free_runtime_variables(expr) {
+            ctx.bind_signatureless_name(&name);
+        }
+    }
     ctx.prepare_local_ascription_tokens(expr, None);
     ctx.declaration_root_claim = authored_signature;
     let value = match root {
@@ -8694,6 +8744,7 @@ where
 /// separate fields; `capture_scope` and `replace_scope` move them together.
 #[derive(Clone, Default)]
 struct LexicalScope {
+    signatureless_lookup: bool,
     bindings: ValueScope,
     local_callables: PersistentMap<String, CallableExpr>,
     fn_typed_params: PersistentSet<String>,
@@ -9970,6 +10021,24 @@ struct PreparedValueResultClaim {
     authored_result_claim: bool,
 }
 
+#[derive(Clone, Default)]
+struct NamedWitnesses {
+    declared: Vec<(String, NodeId)>,
+    signatureless: bool,
+}
+impl NamedWitnesses {
+    fn iter(&self) -> std::slice::Iter<'_, (String, NodeId)> {
+        self.declared.iter()
+    }
+    fn push(&mut self, value: (String, NodeId)) {
+        self.declared.push(value);
+    }
+    fn clear(&mut self) {
+        self.declared.clear();
+        self.signatureless = false;
+    }
+}
+
 struct LowerCtx<'program> {
     host_program: Option<&'program crate::host::HostLoweringSession<'program>>,
     host_sources: Vec<crate::host::staged::HostSource>,
@@ -10025,7 +10094,12 @@ struct LowerCtx<'program> {
     /// first site inside a runtime `if` arm would bind on that arm's path
     /// alone, which a `Where` cannot express, so lowering routes such a body
     /// to host control flow (see [`Self::selected_arm_depth`]).
-    signature_witnesses: Vec<(String, NodeId)>,
+    signature_witnesses: NamedWitnesses,
+    signatureless_scope: Option<&'program dyn SignaturelessScope>,
+    signatureless_owner: Option<Owner>,
+    signatureless_values: UnordMap<String, LoweredValue>,
+    signatureless_axis_witnesses: UnordMap<(String, usize), NodeId>,
+    signatureless_lookup: bool,
     /// The first-site witnesses of binders in their declaration's
     /// [`DimBinderRoles::return_only`] set, so the declared result is a later
     /// site of exactly those. A witness id is unique in the graph, so the set
@@ -10315,7 +10389,12 @@ impl<'program> LowerCtx<'program> {
             interface_loads: UnordSet::new(),
             next_pin: 0,
             bindings: ValueScope::default(),
-            signature_witnesses: Vec::new(),
+            signature_witnesses: NamedWitnesses::default(),
+            signatureless_scope: None,
+            signatureless_owner: None,
+            signatureless_values: UnordMap::new(),
+            signatureless_axis_witnesses: UnordMap::new(),
+            signatureless_lookup: false,
             return_only_first_sites: UnordSet::new(),
             activation_witnesses: Vec::new(),
             signature_is_authored: false,
@@ -10364,6 +10443,89 @@ impl<'program> LowerCtx<'program> {
         }
     }
 
+    /// Materialize one already-evaluated host input. The complete lexical
+    /// type domain remains available, including inputs used only by claims.
+    fn signatureless_value(&mut self, name: &str) -> Option<LoweredValue> {
+        if let Some(value) = self.signatureless_values.get(name) {
+            return Some(value.clone());
+        }
+        let scope = self.signatureless_scope?;
+        let value = if let Some(ty) = scope.numeric_type(name) {
+            crate::host::note_signatureless_input_load();
+            let load = self.dag.add_node(
+                self.signatureless_owner.expect("signatureless root owner"),
+                RiscOp::Load { name: name.into() },
+                Vec::new(),
+                ty,
+                None,
+            );
+            self.interface_loads.insert(name.to_owned());
+            LoweredValue::Node(load)
+        } else if let Some(ty) = scope.host_payload_type(name) {
+            LoweredValue::HostPayload {
+                name: name.to_owned(),
+                ty,
+            }
+        } else if !scope.contains_lexical_name(name)
+            && let Some((global, ty)) = self.signatureless_global_type(name)
+        {
+            // A global is already initialized by the host program and retains
+            // its declaration identity. It is available to geometry readers,
+            // but is never a lexical parameter of this helper's interface.
+            crate::host::note_signatureless_input_load();
+            LoweredValue::Node(self.free_name_load(&global, ty, None))
+        } else {
+            return None;
+        };
+        self.signatureless_values
+            .insert(name.to_owned(), value.clone());
+        Some(value)
+    }
+
+    /// A checked global declaration is available even when this function's
+    /// lexical scope contains only its parameters. Read its complete checked
+    /// type; a nonnumeric value or unresolved precision supplies no tensor.
+    fn signatureless_global_type(&self, name: &str) -> Option<(String, TensorType)> {
+        let resolved = LoadStoreName::top_level_source_for_label(name)
+            .expect("compiler-created top-level label is well formed");
+        let source = match resolved.as_deref() {
+            Some(source) => source,
+            None => name,
+        };
+        crate::host::note_signatureless_global_lookup();
+        let body = self.program_defs.get(source)?;
+        let (tag, meta, _) = stamped_parts(body)?;
+        if tag == DeepTag::Fn {
+            return None;
+        }
+        let mut ty_expr = meta.ty()?.expression();
+        while let Some(inner) = Self::try_extract_ref_type(ty_expr) {
+            crate::host::note_signatureless_global_lookup();
+            ty_expr = inner;
+        }
+        // Global precision is declaration-owned. In particular, a caller's
+        // substitution for a same-spelled binder cannot make it concrete.
+        crate::host::note_signatureless_global_lookup();
+        let precision = match stamped_parts(ty_expr) {
+            Some((DeepTag::TPrim, _, _)) => Self::try_extract_prim(ty_expr)?,
+            Some((DeepTag::TTensor, _, kids)) => Self::try_extract_prim(kids.last()?)?,
+            _ => return None,
+        };
+        crate::host::note_signatureless_global_lookup();
+        let ty = self.program_types.get(source)?.clone();
+        assert_eq!(ty.precision, precision, "checked global type identity");
+        Some((LoadStoreName::top_level(source).as_str().to_owned(), ty))
+    }
+
+    fn bind_signatureless_name(&mut self, name: &str) {
+        if self.signatureless_lookup
+            && !self.bindings.contains_key(name)
+            && let Some(value) = self.signatureless_value(name)
+        {
+            self.bindings.insert(name.to_owned(), value);
+        }
+    }
+
     /// The `Load` for a name no enclosing scope binds. A known top-level
     /// value keeps its resolved declaration identity in the IR Load name;
     /// graph formals and ordinary external inputs keep their source names.
@@ -10380,7 +10542,12 @@ impl<'program> LowerCtx<'program> {
                     let declaration = self.dag.declaration(decl);
                     !declaration.value || declaration.name != name
                 });
-        if !top_level_value && self.interface_loads.contains(name) {
+        if !top_level_value
+            && (self.interface_loads.contains(name)
+                || self
+                    .signatureless_scope
+                    .is_some_and(|scope| scope.numeric_type(name).is_some()))
+        {
             raise_lowering_error(
                 format!(
                     "the name `{name}` that an inlined body reads from its own scope shares its \
@@ -10434,6 +10601,9 @@ impl<'program> LowerCtx<'program> {
         }
         let mut renames = BTreeMap::new();
         for name in chelis_types::linearity::free_runtime_variables(expr) {
+            if !top_level {
+                self.bind_signatureless_name(&name);
+            }
             let alias = format!("__chelis_pinned_{}_{name}", self.next_pin);
             let top = &mut self.top_level;
             let mut bound = false;
@@ -10484,6 +10654,7 @@ impl<'program> LowerCtx<'program> {
     /// The current lexical scope, for a function literal to close over.
     fn capture_scope(&self) -> LexicalScope {
         LexicalScope {
+            signatureless_lookup: self.signatureless_lookup,
             bindings: self.bindings.clone(),
             local_callables: self.local_callables.clone(),
             fn_typed_params: self.fn_typed_params.clone(),
@@ -10494,11 +10665,16 @@ impl<'program> LowerCtx<'program> {
     /// replaces so the caller can restore it.
     fn replace_scope(&mut self, scope: LexicalScope) -> LexicalScope {
         let LexicalScope {
+            signatureless_lookup,
             bindings,
             local_callables,
             fn_typed_params,
         } = scope;
         LexicalScope {
+            signatureless_lookup: std::mem::replace(
+                &mut self.signatureless_lookup,
+                signatureless_lookup,
+            ),
             bindings: std::mem::replace(&mut self.bindings, bindings),
             local_callables: std::mem::replace(&mut self.local_callables, local_callables),
             fn_typed_params: std::mem::replace(&mut self.fn_typed_params, fn_typed_params),
@@ -12052,8 +12228,8 @@ impl<'program> LowerCtx<'program> {
         }
     }
 
-    fn host_stage_scope(&self) -> UnordMap<String, crate::host_type_state::HostTypeTerm> {
-        let mut scope: UnordMap<String, crate::host_type_state::HostTypeTerm> = self
+    fn host_stage_scope(&self) -> crate::host::HostScope {
+        let mut scope: crate::host::HostScope = self
             .bindings
             .to_sorted()
             .into_iter()
@@ -12070,7 +12246,8 @@ impl<'program> LowerCtx<'program> {
                 let CallableExpr::Plain(function) = callable else {
                     continue;
                 };
-                let ty = crate::host::expr_host_type(function, program, &UnordMap::new());
+                let ty =
+                    crate::host::expr_host_type(function, program, &crate::host::HostScope::new());
                 if matches!(ty, crate::host_type_state::HostTypeTerm::Fn(..)) {
                     scope.insert(name.clone(), ty);
                 }
@@ -12238,6 +12415,9 @@ impl<'program> LowerCtx<'program> {
             ))
         ) {
             return None;
+        }
+        for name in chelis_types::linearity::free_runtime_variables(expr) {
+            self.bind_signatureless_name(&name);
         }
         let scope = self.host_stage_scope();
         let ty = if target {
@@ -13060,6 +13240,7 @@ impl<'program> LowerCtx<'program> {
     fn lower_atom(&mut self, atom: &Atom) -> LoweredValue {
         match atom {
             Atom::Name(name) => {
+                self.bind_signatureless_name(name);
                 let bound = self.bindings.get(name).cloned();
                 if let Some(inlined) = self.inline_value_reference(name, bound.as_ref()) {
                     return inlined;
@@ -13770,7 +13951,7 @@ impl<'program> LowerCtx<'program> {
     /// first producing site has not been lowered. Such a claim is resolved
     /// where its initializer lowers.
     fn local_claim_awaits_first_site(
-        &self,
+        &mut self,
         ascription: &chelis_types::CheckedLocalAscription,
         claim: &chelis_types::LocalAscriptionAxisClaim,
     ) -> bool {
@@ -24017,10 +24198,45 @@ impl<'program> LowerCtx<'program> {
     /// `required_extent_for_claim` answers the same question for a literal by
     /// materializing a constant; a named claim needs the node itself, because
     /// its diagnostic reads the declaring parameter and axis off it.
-    fn signature_witness(&self, binder: &str) -> Option<NodeId> {
-        self.signature_witnesses.iter().find_map(|(name, witness)| {
+    fn signature_witness(&mut self, binder: &str) -> Option<NodeId> {
+        if let Some(witness) = self.signature_witnesses.iter().find_map(|(name, witness)| {
             (name == binder || extent_binder_label(name) == binder).then_some(*witness)
-        })
+        }) {
+            return Some(witness);
+        }
+        if !self.signature_witnesses.signatureless {
+            return None;
+        }
+        let (name, ty) = self.signatureless_scope?.dimension_source(binder)?;
+        let axis = ty.dims.iter().position(|dim| {
+            matches!(dim, DimInfo::Named(label, _)
+            if label == binder || extent_binder_label(label) == binder)
+        })?;
+        let key = (name.clone(), axis);
+        if let Some(witness) = self.signatureless_axis_witnesses.get(&key) {
+            return Some(*witness);
+        }
+        let LoweredValue::Node(input) = self.signatureless_value(&name)? else {
+            return None;
+        };
+        let witness = self.dag.add_node(
+            self.signatureless_owner.expect("signatureless root owner"),
+            RiscOp::ExtentWitness {
+                site: chelis_dag_core::dag::ExtentWitnessSite::Caller,
+                parameter: name,
+                axis: RtAxis::Lit(i32::try_from(axis).expect("parameter rank fits i32")),
+                requirements: Vec::new(),
+                claims: Vec::new(),
+            },
+            vec![input],
+            TensorType {
+                dims: Vec::new(),
+                precision: Prim::Int64,
+            },
+            None,
+        );
+        self.signatureless_axis_witnesses.insert(key, witness);
+        Some(witness)
     }
 
     fn required_extent_for_claim(&mut self, dim: &DimInfo) -> Option<NodeId> {
@@ -24399,7 +24615,7 @@ impl<'program> LowerCtx<'program> {
     /// `signature_is_authored` must hold and the binder must name a parameter
     /// axis of this same activation, or there is nothing to refute.
     fn reject_refuted_result_axis(
-        &self,
+        &mut self,
         id: NodeId,
         axis: usize,
         dim: &DimInfo,
@@ -24722,8 +24938,9 @@ impl<'program> LowerCtx<'program> {
     /// where the declaring argument is graph-fixed - a constant, or any axis
     /// whose origin resolves to a literal - so the claim has a number and
     /// nothing else in the class can supply one.
-    fn signature_witness_extent(&self, binder: Option<&str>) -> Option<usize> {
-        self.graph_fixed_witness_extent(self.signature_witness(binder?)?)
+    fn signature_witness_extent(&mut self, binder: Option<&str>) -> Option<usize> {
+        let witness = self.signature_witness(binder?)?;
+        self.graph_fixed_witness_extent(witness)
     }
 
     /// The extent this witness observes, when the lowered graph fixes it.
@@ -32797,6 +33014,85 @@ mod tests {
     }
 
     // ── Tier-2 rank monomorphization (spec/design/rank_polymorphism.md) ──
+
+    #[test]
+    fn signatureless_global_types_do_not_capture_caller_precision_or_payloads() {
+        let mut ctx = LowerCtx::new(
+            BTreeMap::from([
+                (
+                    "rows".into(),
+                    TensorType {
+                        dims: vec![],
+                        precision: Prim::Int64,
+                    },
+                ),
+                (
+                    "cells".into(),
+                    TensorType {
+                        dims: vec![DimInfo::Lit(2)],
+                        precision: Prim::F16,
+                    },
+                ),
+            ]),
+            BTreeMap::from([
+                (
+                    "rows".into(),
+                    parse_type_expr("(lit {type: (t-prim {} i64)} 2)"),
+                ),
+                (
+                    "unresolved".into(),
+                    parse_type_expr("(lit {type: (t-var {} p)} 2)"),
+                ),
+                (
+                    "text".into(),
+                    parse_type_expr("(lit {type: (t-prim {} string)} \"text\")"),
+                ),
+                (
+                    "cells".into(),
+                    parse_type_expr(
+                        "(var {type: (t-tensor {} (d-lit {} 2) (t-prim {} f16))} input)",
+                    ),
+                ),
+            ]),
+            BTreeMap::new(),
+            LinearityInfo::default(),
+        )
+        .declared_for_test();
+        ctx.prec_substitutions.insert("p".into(), Prim::F64);
+        assert!(ctx.signatureless_global_type("unresolved").is_none());
+        assert!(ctx.signatureless_global_type("text").is_none());
+        assert!(ctx.signatureless_global_type("absent").is_none());
+        let (global, ty) = ctx.signatureless_global_type("rows").unwrap();
+        assert_eq!(global, LoadStoreName::top_level("rows").as_str());
+        assert_eq!(ty.precision, Prim::Int64);
+        assert!(ty.dims.is_empty());
+        let (_, cells) = ctx.signatureless_global_type("cells").unwrap();
+        assert_eq!(cells.precision, Prim::F16);
+        assert_eq!(cells.dims, vec![DimInfo::Lit(2)]);
+        let scope = crate::host::HostScope::from([(
+            "rows".into(),
+            crate::host_type_state::HostTypeTerm::String,
+        )]);
+        ctx.signatureless_scope = Some(&scope);
+        ctx.signatureless_owner = Some(ctx.owner());
+        assert!(matches!(
+            ctx.signatureless_value("rows"),
+            Some(LoweredValue::HostPayload {
+                ty: crate::host_type_state::HostTypeTerm::String,
+                ..
+            })
+        ));
+        let callable_scope = crate::host::HostScope::from([(
+            "rows".into(),
+            crate::host_type_state::HostTypeTerm::Fn(
+                Vec::new(),
+                Box::new(crate::host_type_state::HostTypeTerm::Int64),
+            ),
+        )]);
+        ctx.signatureless_values.clear();
+        ctx.signatureless_scope = Some(&callable_scope);
+        assert!(ctx.signatureless_value("rows").is_none());
+    }
 
     #[test]
     fn result_precision_requires_a_checked_numeric_type() {

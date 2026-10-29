@@ -48,8 +48,6 @@
 #[path = "../src/c_source_name.rs"]
 mod c_source_name;
 mod common;
-#[path = "common/unsupported_wording.rs"]
-mod unsupported_wording;
 
 use assert_cmd::Command;
 use common::{gcc_available, link_generated};
@@ -82,24 +80,6 @@ fn source_name_for_c_symbol(symbol: &str) -> String {
     bytes
         .and_then(|bytes| String::from_utf8(bytes).ok())
         .unwrap_or_else(|| symbol.to_string())
-}
-
-/// Examples the C backend refuses at a capability gate, with the
-/// diagnostic that refusal must carry. The census asserts the refusal rather
-/// than skipping the file: a bare skip stops measuring quietly, and deleting
-/// the assertion would make the census's claim smaller than its name.
-///
-/// Dropout, staged or fixed-control, is compiled and joins the ordinary guard
-/// census (chelis#2413). Annotated concat/softmax executes on Eval, but C
-/// host emission refuses softmax;
-/// `parity_annotated_concat_softmax_eval_and_c_rejection` owns the full-value
-/// positive and exact C diagnostic. No C guard artifact exists. When its
-/// build succeeds, its row fails and must join the guard census.
-fn refused_by_a_capability_gate() -> [(&'static str, &'static str); 1] {
-    [(
-        "annotated_concat_softmax.ch",
-        unsupported_wording::stderr("annotated_concat_softmax_c"),
-    )]
 }
 
 /// A two-row operand: `min(2, 4) = 2`.
@@ -1998,26 +1978,10 @@ fn no_shipped_example_gains_a_host_lane_guard() {
     let examples = executable_examples();
 
     let mut census: Vec<String> = Vec::new();
-    let mut refused: Vec<String> = Vec::new();
     for example in &examples {
         let stem = example.file_stem().expect("stem").to_str().expect("UTF-8");
-        let name = example.file_name().expect("name").to_str().expect("UTF-8");
         let path = example.to_str().expect("UTF-8 path");
         let out = dir.path().join(stem);
-        if let Some((_, diagnostic)) = refused_by_a_capability_gate()
-            .iter()
-            .find(|(refused_name, _)| *refused_name == name)
-        {
-            let build = build_c(path, &out);
-            let stderr = String::from_utf8_lossy(&build.stderr).to_string();
-            assert!(
-                build.status.code() == Some(1) && stderr.contains(diagnostic),
-                "{name} is recorded as refused by a capability gate, but the build \
-                 succeeded or failed for another reason: {stderr}"
-            );
-            refused.push(name.to_string());
-            continue;
-        }
         let source = emit_c(path, &out);
         let guards: Vec<_> = emitted_guards(&source)
             .into_iter()
@@ -2048,21 +2012,6 @@ fn no_shipped_example_gains_a_host_lane_guard() {
             &source,
         );
     }
-
-    // THE ENUMERATION WITNESS. Both sides are sorted, so this asks whether
-    // every recorded refusal was reached and nothing else was; the order the
-    // constant happens to be declared in is not part of the contract.
-    let mut expected_refusals: Vec<String> = refused_by_a_capability_gate()
-        .iter()
-        .map(|(name, _)| (*name).to_string())
-        .collect();
-    expected_refusals.sort();
-    refused.sort();
-    assert_eq!(
-        refused, expected_refusals,
-        "every recorded refusal must be reached: a name that no longer matches an \
-         example, or an enumeration that returned nothing, silently shrinks the census"
-    );
 
     assert_eq!(
         census,

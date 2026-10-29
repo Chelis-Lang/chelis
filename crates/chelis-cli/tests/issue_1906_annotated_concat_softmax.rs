@@ -1,4 +1,4 @@
-//! Executable annotation boundary; the evaluator repair does not claim C support.
+//! Annotated concat/softmax preserves its checked axis contract in Eval and C.
 use assert_cmd::Command;
 use std::fs;
 
@@ -48,13 +48,20 @@ fn invalid_axis_rejects_before_evaluation() {
         "negative fixture must mutate its source"
     );
     fs::write(&file, bad_source).unwrap();
-    let output = Command::cargo_bin("chelis")
-        .unwrap()
-        .current_dir(temp.path())
-        .args(["eval", "--json", "--file"])
-        .arg(&file)
-        .output()
-        .unwrap();
-    assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("axis"));
+    for lane in ["eval", "build"] {
+        let mut command = Command::cargo_bin("chelis").unwrap();
+        command.current_dir(temp.path());
+        if lane == "eval" {
+            command.args(["eval", "--json", "--file"]);
+        } else {
+            command.args(["build", "--target", "c", "--output"]);
+            command.arg(temp.path().join("bad_axis"));
+        }
+        let output = command.arg(&file).output().unwrap();
+        assert!(!output.status.success(), "{lane}: {output:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("axis"),
+            "{lane}: {output:?}"
+        );
+    }
 }

@@ -21,10 +21,10 @@ function definitions, such as `linreg.ch` and `native_library.ch`, check
 without printing values and build to static libraries. Invoke a function
 from a top-level binding to see its result.
 
-`annotated_concat_softmax.ch` demonstrates evaluation with local tensor
-ascriptions. Its host `softmax` call evaluates, but C emission rejects that
-form with a typed `unsupported` diagnostic. The corpus tests require this
-rejection alongside the evaluator result.
+`annotated_concat_softmax.ch` composes tensor concatenation and softmax.
+`computed_tensor_consumers.ch` expands a tensor produced from a range and
+reduces a symbolic input after reshape. Both examples run through the
+evaluator and C executable with the same printed values.
 
 ## Package examples
 

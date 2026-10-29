@@ -70,6 +70,43 @@ source evaluation order; integer constants and named axes retain static
 selector evidence. Names already in scope do not acquire a runtime computation
 merely because they are operation arguments.
 
+Operand preparation derives scoped disposition facts once for the working
+operand trees of an immutable owned application. A lowering-lifetime guard
+keeps those facts available to descendant preparation and removes them before
+the owner can be released or rewritten. A new activation of the same tree
+uses its own incoming scope. Callee and callback bodies do not populate the
+caller's address cache. Incoming type bindings are read on demand; preparing
+one operand does not materialize the entire enclosing type scope. The cache
+contains checked admission outcomes, not numeric values or replacement shape
+claims, and does not select an execution path by source-text inspection.
+
+Host type scopes use persistent lexical bindings and indexed dimension owners.
+Cloning a scope shares its prefix; rebinding updates the value and dimension
+indices together. Runtime dimension minting checks the complete host namespace
+without enumerating it. Caller-scope record-read disposition is folded with the
+same owner lifetime, stopping at callable binders.
+
+Signatureless helpers retain the complete typed lexical lookup domain. They
+materialize runtime free inputs before opening branches or closures and resolve
+metadata-only inputs and extent observations on demand. Canonical dimension
+sources use the same name-then-axis order as the ordered input interface;
+private top-level identities reserve names without becoming lexical inputs.
+Already initialized numeric globals retain their resolved identity and checked
+type when a helper reads them, including in geometry. Lexical bindings take
+precedence; global availability never fabricates a lexical parameter.
+
+Operand-name hygiene reads the existing checked-program name index. That
+index reserves every source identifier, including unread binders and names in
+annotations, once on demand for the program it owns. Preparation uses point ownership
+lookups and a local numeric suffix cursor shared by recursive list leaves;
+it does not rescan each application's descendants. Visible lexical bindings
+remain an additional collision check. The cursor belongs to one attempt, so
+independent lowerings and an unwound retry start from the same state. Legal
+source names remain available; the allocator chooses another internal name.
+A recorded expression pins its input identities before later shadowing, and an
+independent callee cannot read the caller's lexical input domain. Declared
+signatures retain their complete authored parameter order and entry claims.
+
 Numeric work classification includes checked casts. A syntactic integer
 reader supplies selector syntax, not evidence that evaluation cannot trap.
 Axis positions come from the resolved builtin's registered argument layout;

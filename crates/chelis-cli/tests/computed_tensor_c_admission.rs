@@ -417,6 +417,42 @@ fn a_computed_reshape_keeps_its_product_guard_before_mean() {
     }
 }
 
+// A branch can shadow an extent scalar with a tensor while the other branch
+// keeps the scalar. Admission facts must follow that lexical producer, and an
+// untaken branch must not contribute its shape failure.
+#[test]
+fn branch_local_extent_producers_keep_their_scopes_and_guards() {
+    for (branch, extra, fails) in [(false, 1, false), (true, 0, false), (true, 1, true)] {
+        let source = format!(
+            "def requested(size: i64) -> i64 = size\ndef average[n](x: tensor[n, f32], extra: i64, branch: bool) -> f32 = {{\n size = numel(x)\n if branch then {{\n  size = to_tensor([add(size, extra)])\n  tensor_to_scalar(mean(reshape(x, [requested(index(to_list(size), 0i64))]), 0i32))\n }} else tensor_to_scalar(mean(reshape(x, [requested(size)]), 0i32))\n}}\nout = average(to_tensor([1.0f32, 0.0f32, 0.0f32]), {extra}i64, {branch})\n"
+        );
+        let name = format!("branch_extent_{branch}_{extra}");
+        let checked = cli(&source, &name, &["check"]);
+        assert!(checked.status.success(), "{checked:?}");
+        let check: Value = serde_json::from_slice(&checked.stdout).unwrap();
+        assert_eq!(check["score"], 1);
+        assert_eq!(check["errors"], serde_json::json!([]));
+        let evaluated = cli(&source, &name, &["eval", "--file"]);
+        let native = build_and_execute(&source, &name);
+        if fails {
+            for output in [evaluated, native] {
+                assert!(!output.status.success(), "{output:?}");
+                assert!(output.stdout.is_empty(), "{output:?}");
+                assert!(
+                    String::from_utf8_lossy(&output.stderr)
+                        .contains("numeric trap: domain in reshape at i64"),
+                    "{output:?}"
+                );
+            }
+        } else {
+            for output in [evaluated, native] {
+                assert!(output.status.success(), "{output:?}");
+                assert_eq!(output.stdout, b"out = 0.33333334\n");
+            }
+        }
+    }
+}
+
 #[test]
 fn mean_keeps_empty_axis_traps_and_untaken_guarded_branches() {
     for dtype in ["f16", "f32", "f64"] {
@@ -460,6 +496,95 @@ fn mean_keeps_empty_axis_traps_and_untaken_guarded_branches() {
                         );
                     }
                 }
+            }
+        }
+    }
+}
+
+// Generated operand names may collide with legal source names. In particular,
+// a free global used by a later shape leaf must retain its value after the
+// earlier operand is prepared, including when the product guard fails.
+#[test]
+fn generated_operand_names_preserve_global_values_and_list_leaf_order() {
+    for global in ["__host_tensor_arg_1_0", "global_rows"] {
+        for wrapped in [false, true] {
+            for (width, fails) in [(3, false), (4, true)] {
+                let source = format!(
+                    "__host_tensor_arg_1_0 = 2i64\ndef operand(marker: i64) -> tensor[6, f32] ! {{ IO }} = {{\n _ = print(\"operand\")\n to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32, 5.0f32, 6.0f32])\n}}\ndef width(marker: i64) -> i64 ! {{ IO }} = {{\n _ = print(\"width\")\n {width}i64\n}}\ndef run(marker: i64) -> f32 ! {{ IO }} = tensor_to_scalar(sum(sum(reshape(operand(marker), [__host_tensor_arg_1_0, width(marker)]), 1i32), 0i32))\nout = run(0i64)\n"
+                );
+                let source = source.replace("__host_tensor_arg_1_0", global);
+                let source = if wrapped {
+                    source.replace(&format!("[{global},"), &format!("[add({global}, 0i64),"))
+                } else {
+                    source
+                };
+                for repetition in 0..2 {
+                    let name = format!("reserved_operand_{global}_{wrapped}_{width}_{repetition}");
+                    let checked = cli(&source, &name, &["check"]);
+                    assert!(checked.status.success(), "{checked:?}");
+                    let report: Value = serde_json::from_slice(&checked.stdout).unwrap();
+                    assert_eq!(report["score"], 1);
+                    assert_eq!(report["errors"], serde_json::json!([]));
+                    let evaluated = cli(&source, &name, &["eval", "--file"]);
+                    let native = build_and_execute(&source, &name);
+                    assert_eq!(native.stdout, evaluated.stdout);
+                    if fails {
+                        for output in [evaluated, native] {
+                            assert!(!output.status.success(), "{output:?}");
+                            assert_eq!(output.stdout, b"operand\nwidth\n");
+                            assert!(
+                                String::from_utf8_lossy(&output.stderr)
+                                    .contains("numeric trap: domain in reshape at i64"),
+                                "{output:?}"
+                            );
+                        }
+                    } else {
+                        for output in [evaluated, native] {
+                            assert!(output.status.success(), "{output:?}");
+                            assert_eq!(
+                                output.stdout,
+                                format!("operand\nwidth\n{global} = 2\nout = 21.0\n").as_bytes()
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn global_shape_inputs_keep_initialization_effects_and_traps() {
+    for fails in [false, true] {
+        let initializer = if fails {
+            "cast(cast(128i64, i8), i64)"
+        } else {
+            "initial(0i64)"
+        };
+        let source = format!(
+            "def initial(marker: i64) -> i64 ! {{ IO }} = {{\n _ = print(\"global\")\n 2i64\n}}\nglobal_rows = {initializer}\ndef operand(marker: i64) -> tensor[6, f32] ! {{ IO }} = {{\n _ = print(\"operand\")\n to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32, 5.0f32, 6.0f32])\n}}\ndef width(marker: i64) -> i64 ! {{ IO }} = {{\n _ = print(\"width\")\n 3i64\n}}\ndef run(marker: i64) -> f32 ! {{ IO }} = tensor_to_scalar(sum(sum(reshape(operand(marker), [global_rows, width(marker)]), 1i32), 0i32))\nout = run(0i64)\n"
+        );
+        let name = format!("global_initialization_{fails}");
+        let checked = cli(&source, &name, &["check"]);
+        assert!(checked.status.success(), "{checked:?}");
+        let evaluated = cli(&source, &name, &["eval", "--file"]);
+        let native = build_and_execute(&source, &name);
+        assert_eq!(native.stdout, evaluated.stdout);
+        for output in [evaluated, native] {
+            if fails {
+                assert!(!output.status.success(), "{output:?}");
+                assert!(output.stdout.is_empty(), "{output:?}");
+                assert!(
+                    String::from_utf8_lossy(&output.stderr)
+                        .contains("numeric trap: overflow in cast at i8"),
+                    "{output:?}"
+                );
+            } else {
+                assert!(output.status.success(), "{output:?}");
+                assert_eq!(
+                    output.stdout,
+                    b"global\noperand\nwidth\nglobal_rows = 2\nout = 21.0\n"
+                );
             }
         }
     }
