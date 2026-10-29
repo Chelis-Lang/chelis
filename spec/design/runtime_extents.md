@@ -1136,6 +1136,9 @@ When an authored reshape target cannot be represented in that graph, shared
 kernel lowering reports a host-control boundary and retains the complete
 runtime shape List in host execution. Result dimensions remain claim
 requirements; they never substitute for the target's producing values.
+A successfully parsed empty target is a represented rank-zero shape with
+element count one; it stays in tensor lowering rather than requesting host
+control.
 
 The host/C bitwise family uses that same scalar extent contract after its
 Tier-2 lowering: every [05-OP-47] operation over a `shape()`-derived `i64`

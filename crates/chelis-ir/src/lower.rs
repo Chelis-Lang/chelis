@@ -25316,36 +25316,34 @@ impl<'program> LowerCtx<'program> {
                 ty_dims.push(DimInfo::Named(format!("_rt_dim_{}_{axis}", actual.0), None));
             }
         }
-        if op_dims.is_empty() {
-            None
-        } else {
-            // The entire list evaluates before reshape introduces any claim
-            // guard (spec/04 §4.7.3). Reserve checking positions only after all
-            // target producers, and retain those producers even when a caller
-            // discards the reshape and only its required check remains live.
-            let mut shape_sources = inputs.clone();
-            shape_sources.extend(srcs.iter().copied());
-            for (axis, slot) in computed_targets {
-                let actual = inputs[slot];
-                let ty = self.dag.get(actual).expect("target").output_type.clone();
-                let target = self.dag.add_node(
-                    self.owner(),
-                    RiscOp::Copy,
-                    vec![actual],
-                    ty,
-                    self.current_span_id.clone(),
-                );
-                for &source in &shape_sources {
-                    self.dag.add_shape_dep(target, source);
-                }
-                self.reshape_targets.insert(target, axis);
-                inputs[slot] = target;
-                // `ty_dims[axis]` already holds `_rt_dim_{actual}_{axis}`:
-                // every branch that pushes to `computed_targets` sets it from
-                // the same node this loop reads back out of `inputs[slot]`.
+        // A complete Nil spine is a represented rank-zero target, with
+        // element count one. None means extraction failed, never zero axes.
+        // The entire list evaluates before reshape introduces any claim
+        // guard (spec/04 §4.7.3). Reserve checking positions only after all
+        // target producers, and retain those producers even when a caller
+        // discards the reshape and only its required check remains live.
+        let mut shape_sources = inputs.clone();
+        shape_sources.extend(srcs.iter().copied());
+        for (axis, slot) in computed_targets {
+            let actual = inputs[slot];
+            let ty = self.dag.get(actual).expect("target").output_type.clone();
+            let target = self.dag.add_node(
+                self.owner(),
+                RiscOp::Copy,
+                vec![actual],
+                ty,
+                self.current_span_id.clone(),
+            );
+            for &source in &shape_sources {
+                self.dag.add_shape_dep(target, source);
             }
-            Some((op_dims, ty_dims, srcs))
+            self.reshape_targets.insert(target, axis);
+            inputs[slot] = target;
+            // `ty_dims[axis]` already holds `_rt_dim_{actual}_{axis}`:
+            // every branch that pushes to `computed_targets` sets it from
+            // the same node this loop reads back out of `inputs[slot]`.
         }
+        Some((op_dims, ty_dims, srcs))
     }
 
     /// chelis#616: whether `expr` is a term variable bound to a rank-0

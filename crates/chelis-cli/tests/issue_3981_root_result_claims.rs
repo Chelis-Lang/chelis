@@ -3,6 +3,7 @@
 
 use std::{
     fs,
+    path::PathBuf,
     process::{Command, Output},
 };
 use tempfile::TempDir;
@@ -34,23 +35,29 @@ fn text(output: &Output) -> String {
     )
 }
 
-fn execute(dir: &TempDir, stem: &str, source: &str) -> (Output, Output) {
+fn prepare_source(dir: &TempDir, stem: &str, source: &str) -> PathBuf {
     let path = dir.path().join(format!("{stem}.ch"));
     let decls = chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack)
         .expect("fixture parses");
     fs::write(&path, chelis_surf::format::format_program(&decls)).unwrap();
-    let path = path.to_str().unwrap();
-    let fmt = command(&["fmt", "--check", path]);
+    let filename = path.to_str().unwrap();
+    let fmt = command(&["fmt", "--check", filename]);
     assert!(fmt.status.success(), "{}", text(&fmt));
-    let lint = command(&["lint", "--check", path]);
+    let lint = command(&["lint", "--check", filename]);
     assert!(lint.status.success(), "{}", text(&lint));
-    let checked = command(&["check", path]);
+    let checked = command(&["check", filename]);
     assert!(checked.status.success(), "{}", text(&checked));
     let report: serde_json::Value = serde_json::from_slice(&checked.stdout).expect("check JSON");
     assert_eq!(report["score"].as_f64(), Some(1.0));
     assert_eq!(report["errors"], serde_json::json!([]));
     assert_eq!(report["unresolved_names"], serde_json::json!([]));
     assert_eq!(report["untyped_nodes"], serde_json::json!(0));
+    path
+}
+
+fn execute(dir: &TempDir, stem: &str, source: &str) -> (Output, Output) {
+    let path = prepare_source(dir, stem, source);
+    let path = path.to_str().unwrap();
     let evaluated = command(&["eval", "--file", path]);
     let built = dir.path().join(format!("{stem}-built"));
     let output = command(&["build", path, "-o", built.to_str().unwrap()]);
@@ -374,5 +381,103 @@ fn opaque_runtime_reshape_targets_preserve_values_and_validation_without_result_
                 "{stdout}"
             );
         }
+    }
+}
+
+fn rank_zero_source(gradient: bool, invalid: bool) -> String {
+    let name = if gradient { "loss" } else { "value" };
+    let parameter = if invalid {
+        "[n](x: tensor[n, f32])"
+    } else {
+        "(x: tensor[1, f32])"
+    };
+    let callee = if gradient {
+        format!("grad({name})")
+    } else {
+        name.into()
+    };
+    let values = if invalid {
+        "[3.0f32, 4.0f32]"
+    } else {
+        "[3.0f32]"
+    };
+    format!(
+        "module RankZero\ndef {name}{parameter} -> f32 = tensor_to_scalar(reshape(x, []))\nout = {callee}(to_tensor({values}))\n"
+    )
+}
+
+#[test]
+fn represented_rank_zero_targets_preserve_scalar_and_gradient_execution() {
+    let dir = tempfile::tempdir().unwrap();
+    for gradient in [false, true] {
+        let source = rank_zero_source(gradient, false);
+        let (eval, native) = execute(&dir, &format!("rank_zero_{gradient}"), &source);
+        let expected = if gradient {
+            "out = tensor(shape=[1], data=[1.0])"
+        } else {
+            "out = 3.0"
+        };
+        for output in [&eval, &native] {
+            assert!(output.status.success(), "{}", text(output));
+            assert!(
+                String::from_utf8_lossy(&output.stdout)
+                    .lines()
+                    .any(|line| line == expected),
+                "{}",
+                text(output)
+            );
+        }
+    }
+}
+
+fn assert_rank_zero_product_rejection(output: &Output) {
+    assert_eq!(output.status.code(), Some(1), "{}", text(output));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("reshape target has 1 elements but the tensor has 2"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("numeric trap: domain in reshape at i64"),
+        "{stderr}"
+    );
+    assert!(
+        !String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .any(|line| line.starts_with("out = ")),
+        "{}",
+        text(output)
+    );
+}
+
+#[test]
+fn represented_rank_zero_targets_reject_nonunit_element_counts() {
+    let dir = tempfile::tempdir().unwrap();
+    let (eval, native) = execute(&dir, "rank_zero_bad", &rank_zero_source(false, true));
+    for output in [&eval, &native] {
+        assert_rank_zero_product_rejection(output);
+    }
+}
+
+#[test]
+fn represented_rank_zero_gradient_rejects_nonunit_element_count() {
+    let dir = tempfile::tempdir().unwrap();
+    let stem = "rank_zero_grad_bad";
+    let path = prepare_source(&dir, stem, &rank_zero_source(true, true));
+    let path = path.to_str().unwrap();
+    assert_rank_zero_product_rejection(&command(&["eval", "--file", path]));
+    let built = dir.path().join("built");
+    let output = command(&["build", path, "-o", built.to_str().unwrap()]);
+    if output.status.success() {
+        let native = Command::new(built.join(stem))
+            .output()
+            .expect("execute native gradient rejection");
+        assert_rank_zero_product_rejection(&native);
+    } else {
+        assert!(
+            text(&output).contains("reshape") && text(&output).contains("product mismatch"),
+            "{}",
+            text(&output)
+        );
     }
 }
