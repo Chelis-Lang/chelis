@@ -58,6 +58,16 @@ different shape or infer a precision from the first element. A static route
 remains valid only when its proof of representability survives graph rewrites;
 if a rewrite changes that proof, routing is recomputed before emission.
 
+Operation operand preparation consults the scoped admission facts beneath each
+operand before tensor-helper extraction. A host-owned producer becomes one
+typed input, retaining its physical rank, dtype and ordered axes. Literal shape
+lists keep their constructor spine and transport their runtime scalar leaves
+separately, so the consumer retains checked rank and actual extent values.
+Computed inputs also retain local-producer identity: a numeric helper boundary
+does not turn a local expand precondition into an authored parameter claim.
+Earlier working operands move with a later host input when needed to preserve
+source evaluation order; integer constants retain static selector evidence.
+
 A tensor helper captures scalar and tensor values. Lexical ADTs, containers,
 strings and mapped files retain typed opaque bindings during numeric lowering.
 These bindings represent caller values that have already been evaluated; they

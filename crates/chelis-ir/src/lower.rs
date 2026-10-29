@@ -1721,6 +1721,9 @@ fn fn_form_body(function: &Expr) -> Option<&Expr> {
 
 #[derive(Clone, Debug)]
 pub struct SubexprLoweringContext {
+    /// Computed host values crossing this numeric boundary are local
+    /// producers, rather than authored parameters of a new activation.
+    local_host_inputs: Arc<UnordSet<String>>,
     /// Already evaluated lexical host values. They remain bound while a
     /// numeric region specializes calls, even when it never reads them.
     host_payloads: Arc<BTreeMap<String, crate::host_type_state::HostTypeTerm>>,
@@ -1757,6 +1760,12 @@ pub enum ActivationRecord {
 }
 
 impl SubexprLoweringContext {
+    pub(crate) fn with_local_host_inputs(&self, inputs: impl IntoIterator<Item = String>) -> Self {
+        let mut context = self.clone();
+        Arc::make_mut(&mut context.local_host_inputs).extend(inputs);
+        context
+    }
+
     pub(crate) fn with_host_payloads(
         &self,
         payloads: impl IntoIterator<Item = (String, crate::host_type_state::HostTypeTerm)>,
@@ -2295,6 +2304,7 @@ pub(crate) fn prepare_subexpr_lowering_context(
         }
     }
     SubexprLoweringContext {
+        local_host_inputs: Arc::default(),
         host_payloads: Arc::default(),
         builtin_values: BTreeMap::new(),
         resolved_builtin_values: Arc::new(OnceLock::new()),
@@ -2735,6 +2745,7 @@ pub(crate) fn try_lower_staged_host_region(
             );
             // The staged region is this graph's only declaration.
             ctx.decl = Some(ctx.dag.declare(""));
+            ctx.local_host_inputs = Arc::clone(&context.local_host_inputs);
             ctx.local_ascriptions = context.local_ascriptions.clone();
             ctx.constructor_layouts = context.constructor_layouts.clone();
             ctx.resolved_builtin_values = Arc::clone(&context.resolved_builtin_values);
@@ -2971,6 +2982,7 @@ fn lower_subexpr_program_inner_impl(
             .insert(name.clone(), CallableExpr::Builtin(value.clone()));
     }
     ctx.decl = Some(ctx.dag.declare(""));
+    ctx.local_host_inputs = Arc::clone(&context.local_host_inputs);
     ctx.local_ascriptions = context.local_ascriptions.clone();
     ctx.constructor_layouts = context.constructor_layouts.clone();
     ctx.resolved_builtin_values = Arc::clone(&context.resolved_builtin_values);
@@ -10057,6 +10069,7 @@ struct LowerCtx<'program> {
     /// reads any other binder only through a region input whose type names
     /// it, so there a site with no witness keeps the refusal.
     activation_record: ActivationRecord,
+    local_host_inputs: Arc<UnordSet<String>>,
     /// Activation-local lowering tokens allocated before its body executes.
     /// `None` marks a claim on a binder no witness declares yet; it is
     /// resolved where the ascription's initializer lowers, as a claim if an
@@ -10309,6 +10322,7 @@ impl<'program> LowerCtx<'program> {
             literal_result_claim_ownership: LiteralResultClaimOwnership::Legacy,
             local_ascriptions: Arc::new(Vec::new()),
             activation_record: ActivationRecord::Nothing,
+            local_host_inputs: Arc::default(),
             local_ascription_tokens: Vec::new(),
             branch_path_condition: None,
             reshape_targets: BTreeMap::new(),
@@ -23875,10 +23889,10 @@ impl<'program> LowerCtx<'program> {
                 == activation
         });
         let local = bound.is_none()
-            && !matches!(
-                self.dag.get(input).expect("expand input").op,
-                RiscOp::Load { .. }
-            );
+            && match &self.dag.get(input).expect("expand input").op {
+                RiscOp::Load { name } => self.local_host_inputs.contains(name.as_str()),
+                _ => true,
+            };
         let scoped = local || (bound.is_some() && existing.is_none());
         if scoped
             && let Some(checked) = self
@@ -29337,6 +29351,7 @@ mod tests {
         .expect("parse typed duplicate tuple")
         .remove(0);
         let context = SubexprLoweringContext {
+            local_host_inputs: Arc::default(),
             host_payloads: Arc::default(),
             builtin_values: BTreeMap::new(),
             resolved_builtin_values: Arc::new(OnceLock::new()),
@@ -29709,6 +29724,7 @@ mod tests {
             panic!("fixture binding must decode as `bind`");
         };
         let context = SubexprLoweringContext {
+            local_host_inputs: Arc::default(),
             host_payloads: Arc::default(),
             builtin_values: BTreeMap::new(),
             resolved_builtin_values: Arc::new(OnceLock::new()),

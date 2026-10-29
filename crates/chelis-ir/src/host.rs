@@ -8003,6 +8003,22 @@ fn tensor_helper_context(
     bind_tensor_helper_payloads(cached_subexpr_lowering_context(program), scope)
 }
 
+fn tensor_helper_context_for_bindings<'a>(
+    program: &HostLoweringSession<'_>,
+    scope: &UnordMap<String, HostTypeTerm>,
+    bindings: impl IntoIterator<Item = &'a HostBinding>,
+) -> crate::lower::SubexprLoweringContext {
+    tensor_helper_context(program, scope).with_local_host_inputs(
+        bindings
+            .into_iter()
+            .filter(|binding| {
+                matches!(binding.ty, HostTypeTerm::Tensor(_))
+                    && !matches!(binding.value.kind, HostExprKind::Var(..))
+            })
+            .map(|binding| binding.name.clone()),
+    )
+}
+
 // Observation changes the returned product, never helper admission or failure
 // policy. Keep this guard outside both concrete lowering implementations.
 fn lower_tensor_helper_with<T>(
@@ -15541,13 +15557,14 @@ fn lower_closed_host_application(
             tensor_helpers,
             HoistedOperands::HostLane,
         )?;
+        let context = tensor_helper_context_for_bindings(program, &helper_scope, &bindings);
         if let Some(value) = try_lower_tensor_helper_call_inner(
             helper.as_ref(),
             program,
             helper_scope.as_ref(),
             tensor_helpers,
             tensor_ty.clone(),
-            None,
+            Some(&context),
             Some(value),
         ) {
             if bindings.is_empty() {
@@ -16208,6 +16225,8 @@ fn lower_program_host_app(
         tensor_helpers,
         HoistedOperands::HostLane,
     )?;
+    let helper_context =
+        tensor_helper_context_for_bindings(program, &helper_scope, &helper_bindings);
     // Local callable params (e.g. `f` in `def apply(f: fn, x) = f(x)`) are
     // not representable in the tensor-helper DAG — the DAG path would box
     // the fn pointer into `chelis_scalar_tensor_from_f64` and emit C that
@@ -16275,12 +16294,13 @@ fn lower_program_host_app(
         && !reaches_list_entry
         && (!should_keep_tensor_expr_in_host_lane(app_expr)
             || (callee_is_builtin && einsum_lowers_to_contraction(&name, list, program, scope)))
-        && let Some(tensor_call) = try_lower_tensor_helper_call(
+        && let Some(tensor_call) = try_lower_tensor_helper_call_with_context(
             helper_expr.as_ref(),
             program,
             helper_scope.as_ref(),
             tensor_helpers,
             tensor_ty.clone(),
+            &helper_context,
         )
     {
         if helper_bindings.is_empty() {
@@ -16316,6 +16336,11 @@ fn lower_program_host_app(
             tensor_helpers,
             HoistedOperands::EveryWorkingOperand,
         )?;
+        let operation_context = tensor_helper_context_for_bindings(
+            program,
+            &operation_scope,
+            helper_bindings.iter().chain(&bindings),
+        );
         // A call through a lexical callable is only admissible when the
         // enclosing host function has a callback place for it. This retry
         // cannot establish that fact: a local alias such as `f = helper`
@@ -16327,12 +16352,13 @@ fn lower_program_host_app(
                 .iter()
                 .chain(&bindings)
                 .any(|binding| host_expr_contains_local_call(&binding.value)))
-            && let Some(tensor_call) = try_lower_tensor_helper_call(
+            && let Some(tensor_call) = try_lower_tensor_helper_call_with_context(
                 operation.as_ref(),
                 program,
                 operation_scope.as_ref(),
                 tensor_helpers,
                 tensor_ty,
+                &operation_context,
             )
         {
             let mut all_bindings = helper_bindings;
@@ -20780,6 +20806,29 @@ fn hoist_host_lane_tensor_bindings<'expr, 'scope>(
     tensor_helpers: &mut TensorHelperSink,
     hoisted: HoistedOperands,
 ) -> Result<HoistedHostLaneBindings<'expr, 'scope>, crate::lower::LowerDiagnostic> {
+    let mut reserved = UnordSet::new();
+    collect_deep_var_names(expr, &mut reserved);
+    hoist_host_lane_tensor_bindings_with_names(
+        expr,
+        program,
+        scope,
+        fn_sig,
+        tensor_helpers,
+        hoisted,
+        &mut reserved,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn hoist_host_lane_tensor_bindings_with_names<'expr, 'scope>(
+    expr: &'expr Expr,
+    program: &HostLoweringSession<'_>,
+    scope: &'scope UnordMap<String, HostTypeTerm>,
+    fn_sig: Option<&(Vec<HostTypeTerm>, HostTypeTerm)>,
+    tensor_helpers: &mut TensorHelperSink,
+    hoisted: HoistedOperands,
+    reserved: &mut UnordSet<String>,
+) -> Result<HoistedHostLaneBindings<'expr, 'scope>, crate::lower::LowerDiagnostic> {
     let Expr::Node(list, span) = expr else {
         return Ok((Cow::Borrowed(expr), Cow::Borrowed(scope), Vec::new()));
     };
@@ -20800,29 +20849,33 @@ fn hoist_host_lane_tensor_bindings<'expr, 'scope>(
     // arguments, so this two-tensor boundary is specific to matmul.
     let callee = direct_var_name(&kids[0]);
     let hoist_matmul_operands = kids.len() == 3 && callee == Some("matmul");
-    // The checker fixes a reduction or insertion axis before this rewrite.
-    // A cast-wrapped integer literal is still a static axis: replacing it
-    // with a host binding turns it into a name and loses that decision in
-    // the tensor DAG. Its constant evaluation has no observable work, so it
-    // can stay at its original argument position while later operands move.
-    let static_axis = |index: usize, arg: &Expr| {
-        ((callee == Some("sum") && index >= 2) || (callee == Some("insert") && index == 2))
-            && crate::lower::extract_int_axis(arg).is_some()
+    // Preserve checked compile-time integer selectors, including cast-wrapped
+    // literals. Their evaluation has no observable work; a fresh runtime
+    // binding would instead erase the selector's compile-time evidence.
+    let does_work = |_index: usize, arg: &Expr| {
+        crate::lower::extract_int_axis(arg).is_none() && operand_does_work(arg)
     };
-    let does_work = |index: usize, arg: &Expr| !static_axis(index, arg) && operand_does_work(arg);
-    let host_operand = |index: usize, arg: &Expr| {
-        !static_axis(index, arg)
-            && (should_keep_tensor_expr_in_host_lane(arg)
-                || operand_reads_host_record(arg, program, scope)
-                || (hoisted == HoistedOperands::EveryWorkingOperand && does_work(index, arg)))
-    };
-    if !hoist_matmul_operands
-        && !kids
-            .iter()
-            .enumerate()
-            .skip(1)
-            .any(|(index, arg)| host_operand(index, arg))
-    {
+    let params = scope
+        .to_sorted()
+        .into_iter()
+        .map(|(name, ty)| HostParam {
+            name: name.clone(),
+            ty: ty.clone(),
+        })
+        .collect::<Vec<_>>();
+    let host_operands = kids
+        .iter()
+        .enumerate()
+        .map(|(index, arg)| {
+            index != 0
+                && crate::lower::extract_int_axis(arg).is_none()
+                && (should_keep_tensor_expr_in_host_lane(arg)
+                    || operand_reads_host_record(arg, program, scope)
+                    || body_form_the_dag_cannot_carry(program, arg, &params, false).is_some()
+                    || (hoisted == HoistedOperands::EveryWorkingOperand && does_work(index, arg)))
+        })
+        .collect::<Vec<_>>();
+    if !hoist_matmul_operands && !host_operands.iter().any(|host| *host) {
         return Ok((Cow::Borrowed(expr), Cow::Borrowed(scope), Vec::new()));
     }
 
@@ -20835,7 +20888,7 @@ fn hoist_host_lane_tensor_bindings<'expr, 'scope>(
         .iter()
         .enumerate()
         .skip(1)
-        .filter(|(index, arg)| hoist_matmul_operands || host_operand(*index, arg))
+        .filter(|(index, _)| hoist_matmul_operands || host_operands[*index])
         .map(|(index, _)| index)
         .next_back();
 
@@ -20846,15 +20899,49 @@ fn hoist_host_lane_tensor_bindings<'expr, 'scope>(
     for (index, arg) in kids.iter().enumerate().skip(1) {
         let precedes_a_hoisted_operand =
             last_hoisted.is_some_and(|last| index < last) && does_work(index, arg);
-        if hoist_matmul_operands || host_operand(index, arg) || precedes_a_hoisted_operand {
+        if hoist_matmul_operands || host_operands[index] || precedes_a_hoisted_operand {
+            // A checked literal list carries its arity in the numeric
+            // operation. Transport its runtime leaves, retaining the Cons/Nil
+            // spine so a reshape keeps both its target rank and each actual
+            // i64 extent. Treating the whole list as an opaque host capture
+            // would lose that geometry before the helper can consume it.
+            if crate::lower::collect_cons_chain(arg).is_some() {
+                let (rewritten, _, mut leaves) = hoist_host_lane_tensor_bindings_with_names(
+                    arg,
+                    program,
+                    &scoped,
+                    None,
+                    tensor_helpers,
+                    if precedes_a_hoisted_operand {
+                        HoistedOperands::EveryWorkingOperand
+                    } else {
+                        hoisted
+                    },
+                    reserved,
+                )?;
+                for leaf in &leaves {
+                    scoped.insert(leaf.name.clone(), leaf.ty.clone());
+                }
+                new_children.push(rewritten.into_owned());
+                bindings.append(&mut leaves);
+                continue;
+            }
             let value = lower_host_expr(arg, program, scope, tensor_helpers)?;
-            let preferred_ty = fn_sig
-                .and_then(|(param_tys, _)| param_tys.get(index - 1))
-                // The generic declaration is not an argument actualization.
-                // Keep the checked actual's dtype and extents so the helper's
-                // ordinary call inliner can bind the declaration identities.
-                .filter(|ty| !ty.is_unresolved())
-                .cloned()
+            // The produced value owns its physical rank and ordered axes.
+            // An operation's logical argument metadata can describe its
+            // generic declaration, not that independently formed value.
+            let produced = host_expr_type(&value);
+            let preferred_ty = matches!(produced, HostTypeTerm::Tensor(_))
+                .then_some(produced.clone())
+                .or_else(|| {
+                    fn_sig
+                        .and_then(|(param_tys, _)| param_tys.get(index - 1))
+                        // The generic declaration is not an argument actualization.
+                        // Keep the checked actual's dtype and extents so the helper's
+                        // ordinary call inliner can bind the declaration identities.
+                        .filter(|ty| !ty.is_unresolved())
+                        .cloned()
+                })
                 .or_else(|| expr_tensor_type(arg, program, scope).map(HostTypeTerm::Tensor))
                 .or_else(|| {
                     let ty = expr_host_type(arg, program, scope);
@@ -20862,7 +20949,11 @@ fn hoist_host_lane_tensor_bindings<'expr, 'scope>(
                 });
             let ty = preferred_ty.unwrap_or_else(|| host_expr_type(&value));
             let value = force_host_expr_type(value, ty.clone());
-            let name = format!("__host_tensor_arg_{index}");
+            let mut name = format!("__host_tensor_arg_{index}");
+            while scoped.contains_key(&name) || reserved.contains(&name) {
+                name.push('_');
+            }
+            reserved.insert(name.clone());
             bindings.push(HostBinding {
                 name: name.clone(),
                 display_name: None,
