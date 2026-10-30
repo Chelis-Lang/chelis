@@ -388,6 +388,7 @@ struct HostWorkProfile {
     reservation_lookups: usize,
     reservation_name_bytes: usize,
     operand_param_entries: usize,
+    operand_view_axes: usize,
     operand_scope_clone_entries: usize,
     host_scope_lookups: usize,
     host_scope_transport_entries: usize,
@@ -16701,14 +16702,21 @@ fn lower_program_host_app(
             grad_target_argument(callee, &kids[1..], program, scope)
                 .and_then(|target| expr_tensor_type(target, program, scope))
         });
-    let (helper_expr, helper_scope, helper_bindings) = hoist_host_lane_tensor_bindings(
-        app_expr,
-        program,
-        scope,
-        fn_sig.as_ref(),
-        tensor_helpers,
-        HoistedOperands::HostLane,
-    )?;
+    // Only a tensor-result candidate can consume this preparation. Ordinary
+    // host calls lower their original actuals below; speculatively lowering
+    // and discarding them here repeats all nested host work on that fallback.
+    let (helper_expr, helper_scope, helper_bindings) = if helper_tensor_ty.is_some() {
+        hoist_host_lane_tensor_bindings(
+            app_expr,
+            program,
+            scope,
+            fn_sig.as_ref(),
+            tensor_helpers,
+            HoistedOperands::HostLane,
+        )?
+    } else {
+        (Cow::Borrowed(app_expr), Cow::Borrowed(scope), Vec::new())
+    };
     // Local callable params (e.g. `f` in `def apply(f: fn, x) = f(x)`) are
     // not representable in the tensor-helper DAG — the DAG path would box
     // the fn pointer into `chelis_scalar_tensor_from_f64` and emit C that
@@ -21344,6 +21352,61 @@ fn collect_operand_source_names(expr: &Expr, names: &mut UnordSet<String>) {
     }
 }
 
+/// The checked parameter frame may be wider than a formed value's physical
+/// frame. Keep that view separate: it is neither a new equality claim nor
+/// permission to refine an unknown physical axis to a claimed literal.
+fn tensor_helper_operand_view(physical: &TensorType, checked: &TensorType) -> TensorType {
+    if physical.precision != checked.precision || physical.dims.len() != checked.dims.len() {
+        record_host_work(|profile| profile.operand_view_axes += physical.dims.len());
+        return physical.clone();
+    }
+    TensorType {
+        dims: physical
+            .dims
+            .iter()
+            .zip(&checked.dims)
+            .map(|(actual, checked)| {
+                record_host_work(|profile| profile.operand_view_axes += 1);
+                match checked {
+                    DimInfo::Named(_, None) => checked.clone(),
+                    _ => actual.clone(),
+                }
+            })
+            .collect(),
+        precision: physical.precision,
+    }
+}
+
+fn checked_operand_tensor_view(
+    expr: &Expr,
+    program: &HostLoweringSession<'_>,
+) -> Option<TensorType> {
+    let mut expr = expr;
+    while let Expr::MetaExpr(meta, _) = expr {
+        expr = &meta.expr;
+    }
+    let Expr::Node(node, _) = expr else {
+        return None;
+    };
+    let checked = node.meta().ty()?.expression();
+    // Borrow the active substitutions: no complete type-scope clone is
+    // introduced by reading one argument annotation.
+    let decoded = ACTIVE_TYPE_SUBST.with(|stack| {
+        let stack = stack.borrow();
+        match stack.last() {
+            Some(substitutions) => decode_host_type_or_raise(checked, substitutions),
+            None => decode_host_type_or_raise(checked, &UnordMap::new()),
+        }
+    });
+    match expand_host_type_aliases(program, decoded) {
+        HostTypeTerm::Tensor(ty) => {
+            record_host_work(|profile| profile.operand_view_axes += ty.dims.len());
+            Some(ty)
+        }
+        _ => None,
+    }
+}
+
 type HoistedHostLaneBindings<'expr, 'scope> =
     (Cow<'expr, Expr>, Cow<'scope, HostScope>, Vec<HostBinding>);
 
@@ -21486,22 +21549,21 @@ fn hoist_host_lane_tensor_bindings_with_names<'expr, 'scope>(
             // i64 extent. Treating the whole list as an opaque host capture
             // would lose that geometry before the helper can consume it.
             if crate::lower::collect_cons_chain(arg).is_some() {
-                let (rewritten, _, mut leaves) = hoist_host_lane_tensor_bindings_with_names(
-                    arg,
-                    program,
-                    &scoped,
-                    None,
-                    tensor_helpers,
-                    if precedes_a_hoisted_operand {
-                        HoistedOperands::EveryWorkingOperand
-                    } else {
-                        hoisted
-                    },
-                    names,
-                )?;
-                for leaf in &leaves {
-                    scoped.insert(leaf.name.clone(), leaf.ty.clone());
-                }
+                let (rewritten, leaf_scope, mut leaves) =
+                    hoist_host_lane_tensor_bindings_with_names(
+                        arg,
+                        program,
+                        &scoped,
+                        None,
+                        tensor_helpers,
+                        if precedes_a_hoisted_operand {
+                            HoistedOperands::EveryWorkingOperand
+                        } else {
+                            hoisted
+                        },
+                        names,
+                    )?;
+                scoped = leaf_scope.into_owned();
                 new_children.push(rewritten.into_owned());
                 bindings.append(&mut leaves);
                 continue;
@@ -21528,6 +21590,29 @@ fn hoist_host_lane_tensor_bindings_with_names<'expr, 'scope>(
                     (!ty.is_unresolved()).then_some(ty)
                 });
             let ty = preferred_ty.unwrap_or_else(|| host_expr_type(&value));
+            let helper_view = if let HostTypeTerm::Tensor(physical) = &ty {
+                let parameter_view = fn_sig
+                    .and_then(|(parameters, _)| parameters.get(index - 1))
+                    .and_then(|parameter| match parameter {
+                        HostTypeTerm::Tensor(checked)
+                            if checked.precision == physical.precision
+                                && checked.dims.len() == physical.dims.len() =>
+                        {
+                            Some(checked)
+                        }
+                        _ => None,
+                    });
+                if let Some(checked) = parameter_view {
+                    HostTypeTerm::Tensor(tensor_helper_operand_view(physical, checked))
+                } else if let Some(checked) = checked_operand_tensor_view(arg, program) {
+                    HostTypeTerm::Tensor(tensor_helper_operand_view(physical, &checked))
+                } else {
+                    record_host_work(|profile| profile.operand_view_axes += physical.dims.len());
+                    ty.clone()
+                }
+            } else {
+                ty.clone()
+            };
             let value = force_host_expr_type(value, ty.clone());
             let name = names.fresh(index, program, &scoped);
             bindings.push(HostBinding {
@@ -21537,7 +21622,7 @@ fn hoist_host_lane_tensor_bindings_with_names<'expr, 'scope>(
                 ty: ty.clone(),
                 value,
             });
-            scoped.insert(name.clone(), ty);
+            scoped.insert(name.clone(), helper_view);
             if static_selector(index, arg) {
                 // The host binding executes the numeric work (and can trap)
                 // before later operands. The helper consumes the checked
@@ -29519,6 +29604,41 @@ mod tests {
     }
 
     #[test]
+    fn helper_operand_views_widen_axes_without_refining_physical_claims() {
+        let physical = TensorType {
+            dims: vec![DimInfo::Lit(2), DimInfo::Lit(3)],
+            precision: Prim::F32,
+        };
+        let checked = TensorType {
+            dims: vec![
+                DimInfo::Named("*".into(), None),
+                DimInfo::Named("n".into(), None),
+            ],
+            precision: Prim::F32,
+        };
+        assert_eq!(tensor_helper_operand_view(&physical, &checked), checked);
+        assert_eq!(physical.dims, vec![DimInfo::Lit(2), DimInfo::Lit(3)]);
+        let mut wrong_rank = checked.clone();
+        wrong_rank.dims.pop();
+        assert_eq!(tensor_helper_operand_view(&physical, &wrong_rank), physical);
+        let mut wrong_precision = checked.clone();
+        wrong_precision.precision = Prim::F64;
+        assert_eq!(
+            tensor_helper_operand_view(&physical, &wrong_precision),
+            physical
+        );
+        let unknown = TensorType {
+            dims: vec![DimInfo::Named("runtime".into(), None)],
+            precision: Prim::F32,
+        };
+        let claimed_unit = TensorType {
+            dims: vec![DimInfo::Lit(1)],
+            precision: Prim::F32,
+        };
+        assert_eq!(tensor_helper_operand_view(&unknown, &claimed_unit), unknown);
+    }
+
+    #[test]
     fn operand_name_reservations_cover_unread_source_names_and_visible_bindings() {
         let checked = surf_check(
             "__host_tensor_arg_1_1 = 11i64\ndef unused(__host_tensor_arg_1_0: i64) -> i64 = {\n __host_tensor_arg_1_2 = 12i64\n 0i64\n}\n",
@@ -31972,6 +32092,56 @@ def main(x: tensor[4, f32], rate: f32) -> tensor[4, f32] =
         }
     }
 
+    // [05-OP-54] observes the exact size of an eagerly constructed List.
+    // A scalar consumer has no tensor helper to consume prepared operands;
+    // preparing them would lower and discard their work before the host call
+    // lowers the original actuals again (spec/03 §4.4).
+    #[test]
+    fn scalar_list_calls_do_not_prepare_unused_tensor_operands() {
+        std::thread::Builder::new()
+            .name("scalar-list-host-work".to_string())
+            .stack_size(64 * 1024 * 1024)
+            .spawn(|| {
+                let mut previous = None;
+                for depth in [2, 4, 8, 16, 32, 40] {
+                    let expression = (0..depth).fold("1i64".to_string(), |inner, _| {
+                        format!("f(len([{inner}, 2i64]))")
+                    });
+                    let typed =
+                        surf_check(&format!("def f(n: i64) -> i64 = n\na = {expression}\n"));
+                    let effected = chelis_effects::check_program(&typed).expect("effect check");
+                    let checked =
+                        chelis_types::check_linearity(&effected).expect("linearity check");
+                    reset_host_work_profile();
+                    try_lower_compiled_program(&checked).expect("nested scalar List calls lower");
+                    let profile = take_host_work_profile();
+                    eprintln!("scalar List depth={depth} profile={profile:?}");
+                    assert_eq!(
+                        profile.operand_view_axes, 0,
+                        "scalar host calls do not prepare tensor axis views"
+                    );
+                    assert_eq!(
+                        profile.app_clone_nodes, 0,
+                        "no tensor application is prepared"
+                    );
+                    assert_eq!(
+                        profile.operand_fact_nodes, 0,
+                        "no tensor operand admission is needed"
+                    );
+                    if let Some(visits) = previous {
+                        assert!(
+                            profile.host_expr_visits * 10 <= visits * 22,
+                            "ordinary host work grows with the nested source"
+                        );
+                    }
+                    previous = Some(profile.host_expr_visits);
+                }
+            })
+            .expect("scalar List profile thread starts")
+            .join()
+            .expect("scalar List profile thread completes");
+    }
+
     fn issue_1205_source(operations: usize, flat: bool) -> String {
         let module = if flat { "Flat" } else { "Nested" };
         let mut lines = vec![
@@ -32065,6 +32235,7 @@ def main(x: tensor[4, f32], rate: f32) -> tensor[4, f32] =
                     + profile.reservation_lookups
                     + profile.reservation_name_bytes
                     + profile.operand_param_entries
+                    + profile.operand_view_axes
                     + profile.operand_scope_clone_entries
                     + profile.host_scope_lookups
                     + profile.host_scope_transport_entries
@@ -32111,8 +32282,9 @@ def main(x: tensor[4, f32], rate: f32) -> tensor[4, f32] =
                     profile.reservation_expr_visits > 0
                         && profile.reservation_lookups > 0
                         && profile.reservation_name_bytes > 0
-                        && profile.helper_global_lookup_steps > 0,
-                    "#1205 fixture exercises source reservation, lookup and name ownership"
+                        && profile.helper_global_lookup_steps > 0
+                        && profile.operand_view_axes > 0,
+                    "#1205 fixture exercises source reservation, lookup, axis views and name ownership"
                 );
                 assert!(
                     profile.app_clone_nodes > 0 && profile.max_app_clone_nodes > 0,
@@ -32160,6 +32332,11 @@ def main(x: tensor[4, f32], rate: f32) -> tensor[4, f32] =
                         "name reservation bytes",
                         profile.reservation_name_bytes,
                         previous_profile.reservation_name_bytes,
+                    ),
+                    (
+                        "operand view axes",
+                        profile.operand_view_axes,
+                        previous_profile.operand_view_axes,
                     ),
                     (
                         "record operand visits",

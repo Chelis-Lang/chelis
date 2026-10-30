@@ -23787,15 +23787,33 @@ impl<'program> LowerCtx<'program> {
     /// distinguish a valid §4.7.2 Form-2 symbolic `expand` size (an in-scope
     /// tensor dim) from a sourceless scalar-parameter size that the
     /// backend cannot materialize.
-    fn tensor_source_for_symbol(&self, name: &str) -> Option<(NodeId, usize, DimInfo)> {
-        self.dag.nodes().iter().find_map(|node| {
+    fn tensor_source_for_symbol(&mut self, name: &str) -> Option<(NodeId, usize, DimInfo)> {
+        if let Some(source) = self.dag.nodes().iter().find_map(|node| {
             let axis = node
                 .output_type
                 .dims
                 .iter()
                 .position(|dim| matches!(dim, DimInfo::Named(n, _) if n == name))?;
             Some((node.id, axis, node.output_type.dims[axis].clone()))
-        })
+        }) {
+            return Some(source);
+        }
+        if !self.signatureless_lookup {
+            return None;
+        }
+        // A checked dimension may be read only as geometry. Its supplying
+        // tensor need not occur among the expression's runtime free values.
+        // Demand that source from the same complete lexical domain, without
+        // importing a caller's domain into a callee activation.
+        let (source, ty) = self.signatureless_scope?.dimension_source(name)?;
+        let axis = ty.dims.iter().position(|dim| {
+            matches!(dim, DimInfo::Named(label, _)
+                if label == name || extent_binder_label(label) == name)
+        })?;
+        let LoweredValue::Node(input) = self.signatureless_value(&source)? else {
+            return None;
+        };
+        Some((input, axis, ty.dims[axis].clone()))
     }
 
     /// True when `name` reads a value here: a parameter, local or captured
@@ -33014,6 +33032,43 @@ mod tests {
     }
 
     // ── Tier-2 rank monomorphization (spec/design/rank_polymorphism.md) ──
+
+    #[test]
+    fn signatureless_dimensions_are_demanded_without_crossing_activations() {
+        let scope = crate::host::HostScope::from([(
+            "shape_only".into(),
+            crate::host_type_state::HostTypeTerm::Tensor(TensorType {
+                dims: vec![DimInfo::Lit(2), DimInfo::Named("h".into(), None)],
+                precision: Prim::F32,
+            }),
+        )]);
+        let mut ctx = LowerCtx::new(
+            BTreeMap::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+            LinearityInfo::default(),
+        )
+        .declared_for_test();
+        ctx.signatureless_scope = Some(&scope);
+        ctx.signatureless_owner = Some(ctx.owner());
+        assert!(
+            ctx.tensor_source_for_symbol("h").is_none(),
+            "a callee cannot demand the caller's domain"
+        );
+        ctx.signatureless_lookup = true;
+        let source = ctx
+            .tensor_source_for_symbol("h")
+            .expect("checked shape-only owner");
+        assert_eq!(source.1, 1);
+        assert_eq!(source.2, DimInfo::Named("h".into(), None));
+        assert!(
+            matches!(&ctx.dag.get(source.0).unwrap().op, RiscOp::Load { name } if name.as_str() == "shape_only")
+        );
+        let nodes = ctx.dag.nodes().len();
+        assert_eq!(ctx.tensor_source_for_symbol("h"), Some(source));
+        assert!(ctx.tensor_source_for_symbol("missing").is_none());
+        assert_eq!(ctx.dag.nodes().len(), nodes);
+    }
 
     #[test]
     fn signatureless_global_types_do_not_capture_caller_precision_or_payloads() {

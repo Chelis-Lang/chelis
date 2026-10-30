@@ -320,6 +320,47 @@ controls require one IO effect and an earlier checked-cast trap that suppresses
 all later effects. No type is fabricated for a nonnumeric global.
 
 
+## Scalar host calls have no preparation consumer
+
+The package-expansion witness
+`overflow_cli_ingress::nested_surf_calls_build_without_a_stack_abort` builds
+`f(len([previous, 2i64]))` nested 40 times. On `d70bcbca7`, ordinary scalar
+calls enter tensor operand preparation even though neither tensor-helper
+branch can consume its result. Preparation lowers host-owned arguments and
+discards them; the ordinary host fallback then lowers the original arguments.
+Nesting repeats that work. This is an introduced admission-cost regression:
+the unchanged witness emits C on `786146e4d` in a bounded local probe, while
+`d70bcbca7` exceeds a ten-second cap already at depth 10.
+
+The spec-derived counter oracle records the actual host lowering and copied
+application nodes before the repair:
+
+| nesting depth | host expression visits | operand facts | application copies |
+| --- | ---: | ---: | ---: |
+| 2 | 63 | 98 | 133 |
+| 4 | 1023 | 1100 | 2653 |
+| 8 | 262143 | 237368 | 688093 |
+
+Every row makes zero tensor-helper attempts. Preparation therefore belongs
+behind the existing checked tensor-result candidate. Scalar and container
+host calls keep their original eager argument-lowering route. The repaired
+depths 2, 4, 8, 16, 32 and 40 visit 14, 24, 44, 84, 164 and 204 host
+expressions and build no operand facts or copied applications. The counter
+test checks the invariant at each
+depth before advancing, so a reintroduced preparation fails on the small
+case instead of running the deep exponential case.
+
+Spec/03 §4.4 requires eager ordered List element work, and [05-OP-54] observes
+the collection's size. An effectful element control prints each reached
+marker exactly once; its division-by-zero twin traps before later elements.
+The CLI regression compares complete Eval/native stdout and checks the exact
+numeric trap identity. These bounded tests retain the unchanged #1205
+resource thresholds and do not establish a whole-compiler complexity bound.
+The unchanged depth-40 CLI test passes in 0.562 seconds; a separate bounded
+C-emission probe takes 0.467 seconds, and Eval and the linked C executable
+both return `a = 2`. The profiling unit uses the same 64 MiB thread-stack
+setup as the #1205 profiles; the production CLI runs with its normal setup.
+
 ## Rejection-support ownership after admission
 
 The native concat/softmax parity migration removes the final Rust module
@@ -334,3 +375,50 @@ retain their stale-leg, fail-fast, ordering and read-only checks using live
 owners. Both tracked hook copies keep identical bytes. The general exact-wording
 review rule remains; live unsupported diagnostics, their negative controls,
 softmax native parity and invalid-axis rejection are unchanged.
+
+
+## Physical values and checked helper frames
+
+Package expansion on d70 identifies eight non-resource regressions: a matmul
+guard reports insert instead, wildcard where/comparison/generic-grad calls
+reach graph contradictions, two symbolic adjoints acquire concrete output
+axes beside ToEnd bounds, a metadata-only insert binder is unavailable, and
+the key-form fixture retains an obsolete host-RNG route assertion. Root's
+qualified numeric expansion 41014854125 executes all nine failing identities,
+including the separate List/len cost witness, successfully on a frozen tree
+byte-equal to main `786146e4d01a177aa4a6631b494c749f067975ed`.
+
+The formed-value type and the helper's parameter view have separate roles.
+Physical HostBinding/value types retain actual rank, dtype and geometry.
+The helper scope may widen axes through compatible checked parameter frames,
+or through an argument's checked annotation when no compatible parameter frame
+is available. Unknown physical axes never become claimed literals. Keeping this
+checked view restores the runtime guard owners and symbolic adjoint frame;
+no emitter default, new primitive or speculative whole-subtree retry is added.
+The new axis-view work is counted in the existing 2.2 category/aggregate oracle.
+
+A checked dimension read that has no runtime free-variable occurrence demands
+its lexical tensor source through the existing dimension index. Missing sources
+still reject, repeated reads reuse the Load, and a callee cannot consult its
+caller's borrowed domain. The key-form fixture keeps its Eval/C/key-carrier and
+reference-word checks; a host-produced computed template is an input of a DAG
+draw, so its route assertion names that actual preparation boundary.
+
+## Related composition regressions
+
+The #4074 inserted-scalar scale/mean-addback cases and #4083 symbolic
+reshape/extrema cases fail C admission on main `786146e4d` and execute through
+the existing #4085 operand boundary. Independent probes establish this on both
+the original d70 candidate and the repaired checked-frame candidate; these
+issues add regression coverage without another production mechanism. The
+`issue_4074_generic_insert` target covers dimension/precision specialization,
+independent instantiations and shape/precision/extent rejections. The
+`issue_4083_symbolic_extrema` target covers both extrema across f16/f32/f64,
+fixed/symbolic rank-one/rank-two shapes, empty/untaken branches, shape-product
+traps and effect order.
+
+The static-empty checker requirement remains distinct: main and the original
+candidate both accept direct and reshaped statically empty extrema despite
+[05-OP-12]/[05-OP-13]. Runtime-empty negative controls stay in the regression
+target. The finite admission corpus neither changes that normative rule nor
+qualifies the downstream catalog or the broader lowering trackers.

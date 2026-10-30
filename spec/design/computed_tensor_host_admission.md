@@ -63,12 +63,24 @@ operand before tensor-helper extraction. A host-owned producer becomes one
 typed input, retaining its physical rank, dtype and ordered axes. Literal shape
 lists keep their constructor spine and transport their runtime scalar leaves
 separately, so the consumer retains checked rank and actual extent values.
+The formed host binding retains its physical type. A numeric helper's
+parameter frame may separately widen axes through the checked callee parameter
+or argument annotation when rank and dtype agree. This view cannot refine an
+unknown physical axis to a claimed literal. Claimed equality and unit requirements
+remain owned by their original call or producer; a helper boundary does not
+turn a runtime disagreement into a statically contradictory graph.
+
 Computed inputs also retain local-producer identity: a numeric helper boundary
 does not turn a local expand precondition into an authored parameter claim.
 Earlier working operands move with a later host input when needed to preserve
 source evaluation order; integer constants and named axes retain static
 selector evidence. Names already in scope do not acquire a runtime computation
 merely because they are operation arguments.
+
+Only an application with a checked tensor-result candidate prepares operands
+for that helper. Scalar and container-result host calls lower their original
+arguments once through their ordinary eager invocation boundary. Speculative
+preparation has no consumer on that route and must not duplicate nested work.
 
 Operand preparation derives scoped disposition facts once for the working
 operand trees of an immutable owned application. A lowering-lifetime guard
@@ -88,7 +100,9 @@ same owner lifetime, stopping at callable binders.
 
 Signatureless helpers retain the complete typed lexical lookup domain. They
 materialize runtime free inputs before opening branches or closures and resolve
-metadata-only inputs and extent observations on demand. Canonical dimension
+metadata-only inputs and extent observations on demand. A dimension used only
+as movement geometry demands its supplying lexical tensor through that same
+indexed lookup domain, without importing a caller's scope into a callee. Canonical dimension
 sources use the same name-then-axis order as the ordered input interface;
 private top-level identities reserve names without becoming lexical inputs.
 Already initialized numeric globals retain their resolved identity and checked
