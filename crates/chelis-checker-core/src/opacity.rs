@@ -96,9 +96,7 @@ pub(crate) fn install_opacity_context<'operation>(
     data: OpacityContextData,
     operation: &'operation crate::resources::Operation<'_>,
 ) -> OpacityGuard<'operation> {
-    let previous = (|cell: &RefCell<Option<OpacityContextData>>| cell.borrow_mut().replace(data))(
-        &operation.opacity,
-    );
+    let previous = operation.opacity.borrow_mut().replace(data);
     OpacityGuard {
         previous,
         context: &operation.opacity,
@@ -124,12 +122,10 @@ pub(crate) fn set_current_item(
     decl: Option<String>,
     operation: &crate::resources::Operation<'_>,
 ) {
-    (|cell: &RefCell<Option<OpacityContextData>>| {
-        if let Some(data) = cell.borrow_mut().as_mut() {
-            data.current_module = module;
-            data.current_decl = decl;
-        }
-    })(&operation.opacity);
+    if let Some(data) = operation.opacity.borrow_mut().as_mut() {
+        data.current_module = module;
+        data.current_decl = decl;
+    }
 }
 
 /// Run `f` against the installed context, or return `None` when no
@@ -138,7 +134,7 @@ pub(crate) fn with_context<R>(
     f: impl FnOnce(&OpacityContextData) -> R,
     operation: &crate::resources::Operation<'_>,
 ) -> Option<R> {
-    (|cell: &RefCell<Option<OpacityContextData>>| cell.borrow().as_ref().map(f))(&operation.opacity)
+    operation.opacity.borrow().as_ref().map(f)
 }
 
 // ── Inference hooks (RFC D-CHECK rejection set) ──────────────────

@@ -338,8 +338,7 @@ pub(super) fn check_conv_signature(
     arg_exprs: &[deep::Expr],
     arg_tys: &[Type<ErrorWitness>],
     result_ty: &Type<ErrorWitness>,
-    vg: &mut VarGen,
-    subst: &mut Subst<ErrorWitness>,
+    InferenceVars { vg, subst }: InferenceVars<'_>,
     errors: &mut DiagnosticSink<'_>,
     operation: &crate::resources::Operation<'_>,
 ) -> Type<ErrorWitness> {

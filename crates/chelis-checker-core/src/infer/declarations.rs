@@ -492,6 +492,12 @@ pub(crate) fn param_has_consuming_use_in_session(
     )
 }
 
+struct ConsumingUseContext<'a> {
+    available_signatures: &'a UnordMap<String, Type<ErrorWitness>>,
+    type_env: &'a BTreeMap<String, deep::Expr>,
+    type_headers: &'a TypeResolutionEnv,
+}
+
 pub(super) fn param_has_consuming_use_with_headers(
     expr: &deep::Expr,
     param: &str,
@@ -506,21 +512,21 @@ pub(super) fn param_has_consuming_use_with_headers(
         expr,
         param,
         &mut bound,
-        available_signatures,
-        type_env,
-        type_headers,
+        &ConsumingUseContext {
+            available_signatures,
+            type_env,
+            type_headers,
+        },
         errors,
         operation,
     )
 }
 
-pub(super) fn param_has_consuming_use_inner(
+fn param_has_consuming_use_inner(
     expr: &deep::Expr,
     param: &str,
     bound: &mut BoundNames,
-    available_signatures: &UnordMap<String, Type<ErrorWitness>>,
-    type_env: &BTreeMap<String, deep::Expr>,
-    type_headers: &TypeResolutionEnv,
+    context: &ConsumingUseContext<'_>,
     errors: &mut DiagnosticSink<'_>,
     operation: &crate::resources::Operation<'_>,
 ) -> bool {
@@ -528,55 +534,21 @@ pub(super) fn param_has_consuming_use_inner(
     match expr {
         deep::Expr::Atom(_, _) => false,
         deep::Expr::Map(map, _) => map.any_syntax(&mut |value| {
-            param_has_consuming_use_inner(
-                value,
-                param,
-                bound,
-                available_signatures,
-                type_env,
-                type_headers,
-                errors,
-                operation,
-            )
+            param_has_consuming_use_inner(value, param, bound, context, errors, operation)
         }),
-        deep::Expr::MetaExpr(meta, _) => param_has_consuming_use_inner(
-            &meta.expr,
-            param,
-            bound,
-            available_signatures,
-            type_env,
-            type_headers,
-            errors,
-            operation,
-        ),
+        deep::Expr::MetaExpr(meta, _) => {
+            param_has_consuming_use_inner(&meta.expr, param, bound, context, errors, operation)
+        }
         deep::Expr::Node(node, _) => match node.tag() {
             DeepTag::Var => var_name_node(node) == Some(param) && !is_bound_name(param, bound),
             DeepTag::Borrow | DeepTag::Copy => node.children_slice().first().is_some_and(|child| {
-                param_nested_consuming_use(
-                    child,
-                    param,
-                    bound,
-                    available_signatures,
-                    type_env,
-                    type_headers,
-                    errors,
-                    operation,
-                )
+                param_nested_consuming_use(child, param, bound, context, errors, operation)
             }),
             DeepTag::Realize => node
                 .children_slice()
                 .first()
                 .is_some_and(|child| expr_mentions_unshadowed_name(child, param, bound, operation)),
-            DeepTag::App => app_consumes_param(
-                node,
-                param,
-                bound,
-                available_signatures,
-                type_env,
-                type_headers,
-                errors,
-                operation,
-            ),
+            DeepTag::App => app_consumes_param(node, param, bound, context, errors, operation),
             DeepTag::Fn => {
                 let kids = node.children_slice();
                 if kids.len() < 2 {
@@ -603,9 +575,7 @@ pub(super) fn param_has_consuming_use_inner(
                             &bind_kids[index + 1],
                             param,
                             bound,
-                            available_signatures,
-                            type_env,
-                            type_headers,
+                            context,
                             errors,
                             operation,
                         ) {
@@ -619,14 +589,7 @@ pub(super) fn param_has_consuming_use_inner(
                 }
                 within_binder(bound, let_names.into_sorted(), |bound| {
                     param_has_consuming_use_inner(
-                        &kids[1],
-                        param,
-                        bound,
-                        available_signatures,
-                        type_env,
-                        type_headers,
-                        errors,
-                        operation,
+                        &kids[1], param, bound, context, errors, operation,
                     )
                 })
             }
@@ -651,18 +614,14 @@ pub(super) fn param_has_consuming_use_inner(
                             &arm_kids[1],
                             param,
                             bound,
-                            available_signatures,
-                            type_env,
-                            type_headers,
+                            context,
                             errors,
                             operation,
                         ) || param_has_consuming_use_inner(
                             &arm_kids[2],
                             param,
                             bound,
-                            available_signatures,
-                            type_env,
-                            type_headers,
+                            context,
                             errors,
                             operation,
                         )
@@ -674,94 +633,50 @@ pub(super) fn param_has_consuming_use_inner(
                 false
             }
             _ => node.children_slice().iter().any(|child| {
-                param_has_consuming_use_inner(
-                    child,
-                    param,
-                    bound,
-                    available_signatures,
-                    type_env,
-                    type_headers,
-                    errors,
-                    operation,
-                )
+                param_has_consuming_use_inner(child, param, bound, context, errors, operation)
             }),
         },
         deep::Expr::BareList(elems, _) => elems.iter().any(|child| {
-            param_has_consuming_use_inner(
-                child,
-                param,
-                bound,
-                available_signatures,
-                type_env,
-                type_headers,
-                errors,
-                operation,
-            )
+            param_has_consuming_use_inner(child, param, bound, context, errors, operation)
         }),
         deep::Expr::UnknownForm(data) => data.children.iter().any(|child| {
-            param_has_consuming_use_inner(
-                child,
-                param,
-                bound,
-                available_signatures,
-                type_env,
-                type_headers,
-                errors,
-                operation,
-            )
+            param_has_consuming_use_inner(child, param, bound, context, errors, operation)
         }),
     }
 }
 
-pub(super) fn param_nested_consuming_use(
+fn param_nested_consuming_use(
     expr: &deep::Expr,
     param: &str,
     bound: &mut BoundNames,
-    available_signatures: &UnordMap<String, Type<ErrorWitness>>,
-    type_env: &BTreeMap<String, deep::Expr>,
-    type_headers: &TypeResolutionEnv,
+    context: &ConsumingUseContext<'_>,
     errors: &mut DiagnosticSink<'_>,
     operation: &crate::resources::Operation<'_>,
 ) -> bool {
     if is_direct_unshadowed_var(expr, param, bound) {
         return false;
     }
-    param_has_consuming_use_inner(
-        expr,
-        param,
-        bound,
-        available_signatures,
-        type_env,
-        type_headers,
-        errors,
-        operation,
-    )
+    param_has_consuming_use_inner(expr, param, bound, context, errors, operation)
 }
 
-pub(super) fn app_consumes_param(
+fn app_consumes_param(
     node: &DeepNode,
     param: &str,
     bound: &mut BoundNames,
-    available_signatures: &UnordMap<String, Type<ErrorWitness>>,
-    type_env: &BTreeMap<String, deep::Expr>,
-    type_headers: &TypeResolutionEnv,
+    context: &ConsumingUseContext<'_>,
     errors: &mut DiagnosticSink<'_>,
     operation: &crate::resources::Operation<'_>,
 ) -> bool {
+    let ConsumingUseContext {
+        available_signatures,
+        type_env,
+        type_headers,
+    } = *context;
     let kids = node.children_slice();
     let callee = kids.first().and_then(var_name_expr);
     if let Some(func) = kids.first()
         && !matches!(callee, Some(name) if name != param)
-        && param_has_consuming_use_inner(
-            func,
-            param,
-            bound,
-            available_signatures,
-            type_env,
-            type_headers,
-            errors,
-            operation,
-        )
+        && param_has_consuming_use_inner(func, param, bound, context, errors, operation)
     {
         return true;
     }
@@ -784,16 +699,7 @@ pub(super) fn app_consumes_param(
             }
             return true;
         }
-        if param_has_consuming_use_inner(
-            arg,
-            param,
-            bound,
-            available_signatures,
-            type_env,
-            type_headers,
-            errors,
-            operation,
-        ) {
+        if param_has_consuming_use_inner(arg, param, bound, context, errors, operation) {
             return true;
         }
     }

@@ -656,8 +656,10 @@ pub(super) fn link_group_references(
         solve(
             &raw_group,
             &mut raw_product,
-            vg,
-            &mut raw_subst,
+            InferenceVars {
+                vg,
+                subst: &mut raw_subst,
+            },
             adt_reg,
             errors,
             true,
@@ -675,7 +677,13 @@ pub(super) fn link_group_references(
         .map(|(_, ty)| Local::new(ty, &binder_classes, subst))
         .collect::<Vec<_>>();
     if let Some(links) = solve(
-        &group, product, vg, subst, adt_reg, errors, false, operation,
+        &group,
+        product,
+        InferenceVars { vg, subst },
+        adt_reg,
+        errors,
+        false,
+        operation,
     ) {
         decide(&group, &links, &locals, subst, errors);
     }
@@ -834,8 +842,7 @@ fn link_copies(
 fn solve(
     group: &Group<'_>,
     product: &mut InferenceProduct,
-    vg: &mut VarGen,
-    subst: &mut Subst<ErrorWitness>,
+    InferenceVars { vg, subst }: InferenceVars<'_>,
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
     carry_origins: bool,

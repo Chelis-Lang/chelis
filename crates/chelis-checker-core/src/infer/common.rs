@@ -10,6 +10,11 @@ use chelis_type_core::decisions::shape::{
     SumResultSlot, shape_route_result, sum_result_widening_note,
 };
 
+pub(super) struct InferenceVars<'a> {
+    pub(super) vg: &'a mut VarGen,
+    pub(super) subst: &'a mut Subst<ErrorWitness>,
+}
+
 /// Observe a decoded vocabulary node's tag, metadata and children.
 ///
 /// A vocabulary node has the single spelling `Expr::Node` whatever its

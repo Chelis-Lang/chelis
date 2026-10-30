@@ -158,8 +158,7 @@ pub(super) fn infer_app(
 pub(super) fn infer_callee(
     callee: &deep::Expr,
     env: &mut Env,
-    vg: &mut VarGen,
-    subst: &mut Subst<ErrorWitness>,
+    InferenceVars { vg, subst }: InferenceVars<'_>,
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
     product: &mut InferenceProduct,
@@ -421,7 +420,13 @@ fn infer_app_inner(
         }
     } else {
         infer_callee(
-            &kids[0], env, vg, subst, adt_reg, errors, product, operation,
+            &kids[0],
+            env,
+            InferenceVars { vg, subst },
+            adt_reg,
+            errors,
+            product,
+            operation,
         )
     };
     // The constructor callee no longer passes through `infer_expr`, but it is

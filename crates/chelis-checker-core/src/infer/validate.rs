@@ -46,6 +46,12 @@ fn trip_declaration_validation_cancellation_for_test() {
     });
 }
 
+pub(super) struct SemanticContext<'a> {
+    pub(super) type_env: &'a IrTypeEnv,
+    pub(super) selector_context: &'a SelectorCallableContext,
+    pub(super) rank_context: &'a RankBodyContext,
+}
+
 /// The ordered semantic pass protocol shared by every public checker entry.
 ///
 /// PP9 / [04-TOT-5] keeps language-required checks here and leaves backend
@@ -54,10 +60,12 @@ fn trip_declaration_validation_cancellation_for_test() {
 /// preserved and every reader in this protocol must consume it structurally.
 pub(super) fn validate_semantic_program(
     exprs: &[deep::Expr],
-    type_env: &IrTypeEnv,
+    SemanticContext {
+        type_env,
+        selector_context,
+        rank_context,
+    }: SemanticContext<'_>,
     top_level_references: &TopLevelReferenceGraph,
-    selector_context: &SelectorCallableContext,
-    rank_context: &RankBodyContext,
     product: &InferenceProduct,
     errors: &mut DiagnosticSink<'_>,
     operation: &crate::resources::Operation<'_>,

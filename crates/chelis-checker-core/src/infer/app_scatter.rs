@@ -139,8 +139,10 @@ pub(super) fn check_scatter_elements(
     }
     let axis = match resolve_builtin_axis(
         "scatter_elements",
-        kids.get(4),
-        &subst.apply(&arg_tys[3]),
+        AxisArgument {
+            expr: kids.get(4),
+            ty: &subst.apply(&arg_tys[3]),
+        },
         &data_ty,
         node,
         subst,
