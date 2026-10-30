@@ -2074,7 +2074,7 @@ rec {
       };
       "chelis-checker-core" = rec {
         crateName = "chelis-checker-core";
-        version = "0.22.1";
+        version = "0.23.0";
         edition = "2024";
         src = lib.cleanSourceWith { filter = sourceFilter;  src = ./crates/chelis-checker-core; };
         libName = "chelis_checker_core";

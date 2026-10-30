@@ -43,7 +43,7 @@ dependencies = [
 
 [[package]]
 name = "chelis-checker-core"
-version = "0.22.1"
+version = "0.23.0"
 dependencies = [
  "chelis-abi",
  "chelis-deep",

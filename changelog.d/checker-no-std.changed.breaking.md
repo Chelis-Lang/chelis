@@ -25,6 +25,8 @@ The inherited type oracle uses caller resources and executes moved authority doc
 The unresolved-operand inventory reads portable inference and ledger sources.
 Host tensor admission imports builtin declarations and axis layouts from `chelis-checker-core`.
 Builtin declaration examples use canonical core imports and reject declarations with missing mandatory fields.
+The portable checker preserves staged constructor equations and ordered result replay.
+Tensor-list regressions use explicit operation resources and retain their original counter boundaries.
 
 The complete checker oracle compares immutable-source behavior, native authority, full-host costs, independent consumers, and allocator-backed target compilation.
 The embedding supplies allocation and enough stack capacity.
