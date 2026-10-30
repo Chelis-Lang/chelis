@@ -1,8 +1,8 @@
 schema = "3"
 [package]
 name = "chelis-clarabel"
-version = "0.1.2"
-compiler = "=0.22.1"
+version = "0.1.3"
+compiler = "=0.23.0"
 module_prefix = "Clarabel"
 resolver = "2"
 description = "Optional Clarabel conic QP solver for Chelis"
