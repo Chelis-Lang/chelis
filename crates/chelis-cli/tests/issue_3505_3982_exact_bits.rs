@@ -623,3 +623,165 @@ int main(int argc, char **argv) {{
         }
     }
 }
+
+#[test]
+fn discarded_concat_uses_original_metadata_in_untaken_grad_branches() {
+    for (rank, axis) in [(2, 0), (3, -2)] {
+        for parts in 2..=4 {
+            let names = &['a', 'b', 'c', 'd'][..parts];
+            let dimensions = vec!["*"; rank].join(", ");
+            let parameters = names
+                .iter()
+                .map(|name| format!("{name}: tensor[{dimensions}, f32]"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let arguments = names
+                .iter()
+                .map(char::to_string)
+                .collect::<Vec<_>>()
+                .join(", ");
+            let mut total = "a".to_string();
+            for _ in 0..rank {
+                total = format!("sum({total}, 0i32)");
+            }
+            let total = format!("tensor_to_scalar({total})");
+            let source = format!(
+                "def loss(flag: bool, {parameters}) -> f32 = if flag then {{\n _ = concat([{arguments}], {axis}i32)\n {total}\n}} else {total}\ndef compute(flag: bool, {parameters}) -> tensor[{dimensions}, f32] = grad(loss, wrt=a)(flag, {arguments})\n"
+            );
+            let directory = tempdir().unwrap();
+            let path = directory.path().join("compute.ch");
+            canonical_source(&path, &source);
+            let generated = directory.path().join("generated");
+            Command::cargo_bin("chelis")
+                .unwrap()
+                .args(["build", "--emit-c"])
+                .arg(&path)
+                .args(["--target", "c", "--output"])
+                .arg(&generated)
+                .assert()
+                .success();
+            let symbol = common::authored_c_symbol("compute");
+            let header = fs::read_to_string(generated.join("compute.h")).unwrap();
+            assert!(header.contains(&format!("{symbol}(")), "{header}");
+            let c_arguments = (0..parts)
+                .map(|index| format!("inputs[{index}]"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let driver = directory.path().join("activation_driver.c");
+            fs::write(&driver, format!(r#"
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include "chelis_runtime.h"
+#include "compute.h"
+int main(int argc, char **argv) {{
+    if (argc != 3) return 2;
+    int kind = atoi(argv[2]);
+    bool flag = atoi(argv[1]) != 0;
+    int64_t shapes[{parts}][{rank}], counts[{parts}];
+    float values[{parts}][16] = {{0}};
+    chelis_tensor *inputs[{parts}];
+    for (int part = 0; part < {parts}; ++part) {{
+        for (int axis = 0; axis < {rank}; ++axis) shapes[part][axis] = 1;
+        shapes[part][{rank} - 2] = part == 0 ? 1 : 2;
+        shapes[part][{rank} - 1] = part == 1 && kind >= 2 ? 3 : 2;
+        if (part == 1 && kind % 2 == 1) shapes[part][{rank} - 2] = 0;
+        counts[part] = 1;
+        for (int axis = 0; axis < {rank}; ++axis) counts[part] *= shapes[part][axis];
+        inputs[part] = chelis_tensor_entry_borrow({rank}, shapes[part], CHELIS_DTYPE_F32, values[part], counts[part] * 4);
+    }}
+    chelis_tensor *out = {symbol}(flag, {c_arguments});
+    chelis_read_view view = chelis_tensor_read_view(out);
+    if (view.dtype != CHELIS_DTYPE_F32 || view.count != counts[0] || chelis_tensor_rank(out) != {rank}) return 3;
+    for (int axis = 0; axis < {rank}; ++axis)
+        if (chelis_tensor_shape(out, axis) != shapes[0][axis]) return 4;
+    const float *data = (const float *)view.data;
+    for (int64_t i = 0; i < view.count; ++i) if (data[i] != 1.0f) return 5;
+    chelis_tensor_release(out);
+    for (int part = 0; part < {parts}; ++part) chelis_tensor_release(inputs[part]);
+    puts("ok");
+    return 0;
+}}
+"#)).unwrap();
+            let executable = compile_native_driver(directory.path(), &generated, &driver);
+            for kind in 0..4 {
+                for flag in [false, true] {
+                    let should_succeed = !flag || kind < 2;
+                    let context = format!("rank={rank}, parts={parts}, kind={kind}, flag={flag}");
+                    let native = NativeCommand::new(&executable)
+                        .args([u8::from(flag).to_string(), kind.to_string()])
+                        .output()
+                        .unwrap();
+                    let native_stderr = String::from_utf8_lossy(&native.stderr);
+                    assert_eq!(
+                        native.status.code(),
+                        Some(if should_succeed { 0 } else { 1 }),
+                        "{context}: {native_stderr}"
+                    );
+                    if should_succeed {
+                        assert_eq!(native.stdout, b"ok\n", "{context}");
+                    } else {
+                        assert!(
+                            native_stderr.contains("numeric trap: domain in concat at i64"),
+                            "{context}: {native_stderr}"
+                        );
+                    }
+                    let arguments = (0..parts)
+                        .map(|part| {
+                            let mut shape = vec![1; rank];
+                            shape[rank - 2] = if part == 0 { 1 } else { 2 };
+                            shape[rank - 1] = if part == 1 && kind >= 2 { 3 } else { 2 };
+                            if part == 1 && kind % 2 == 1 {
+                                shape[rank - 2] = 0;
+                            }
+                            let count = shape.iter().product::<usize>();
+                            let flat = if count == 0 {
+                                "to_tensor([], f32)".to_string()
+                            } else {
+                                format!("to_tensor([{}])", vec!["0.0f32"; count].join(", "))
+                            };
+                            let shape = shape
+                                .iter()
+                                .map(|size| format!("{size}i64"))
+                                .collect::<Vec<_>>()
+                                .join(", ");
+                            format!("reshape({flat}, [{shape}])")
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    let path = directory.path().join("evaluate.ch");
+                    canonical_source(
+                        &path,
+                        &format!("{source}out = compute({flag}, {arguments})\n"),
+                    );
+                    let evaluated = Command::cargo_bin("chelis")
+                        .unwrap()
+                        .args(["eval", "--file"])
+                        .arg(path)
+                        .output()
+                        .unwrap();
+                    assert_eq!(
+                        evaluated.status.success(),
+                        should_succeed,
+                        "{context}: {}",
+                        String::from_utf8_lossy(&evaluated.stderr)
+                    );
+                    if should_succeed {
+                        let text = String::from_utf8(evaluated.stdout).unwrap();
+                        assert_eq!(
+                            common::parse_tensor_data(&text, "out"),
+                            [1.0, 1.0],
+                            "{context}: {text}"
+                        );
+                    } else {
+                        assert!(
+                            String::from_utf8_lossy(&evaluated.stderr)
+                                .contains("numeric trap: domain in concat at i64"),
+                            "{context}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}

@@ -9857,6 +9857,13 @@ fn same_physical_tensor_type(actual: &TensorType, view: &TensorType) -> bool {
             .all(|(actual, view)| extent(actual) == extent(view))
 }
 
+/// A slice's element source and the original source governing concat extents.
+/// The growing element prefix is never a metadata source.
+struct ConcatSliceSources {
+    value: NodeId,
+    first: NodeId,
+}
+
 /// The compiler's parameter layout and its physical caller value form one
 /// substitution. Observations use the physical frame; refinements return
 /// through these exact layout steps into the parameter frame.
@@ -20872,8 +20879,17 @@ impl<'program> LowerCtx<'program> {
             // non-concat dims need no concrete extent.
             let mut padding = vec![(RtDim::Lit(0), RtDim::Lit(0)); rank];
             padding[axis] = (RtDim::Lit(before), RtDim::Lit(after));
-            accumulator =
-                Some(self.append_concat_slice(*node, accumulator, axis, padding, &[], &out_ty));
+            accumulator = Some(self.append_concat_slice(
+                ConcatSliceSources {
+                    value: *node,
+                    first: nodes[0],
+                },
+                accumulator,
+                axis,
+                padding,
+                &[],
+                &out_ty,
+            ));
         }
         let result = accumulator.expect("a concat has at least one element");
         for check in extent_checks {
@@ -20951,7 +20967,10 @@ impl<'program> LowerCtx<'program> {
             let mut padding = vec![(RtDim::Lit(0), RtDim::Lit(0)); rank];
             padding[axis] = (RtDim::Node(1), RtDim::Node(2));
             accumulator = Some(self.append_concat_slice(
-                *node,
+                ConcatSliceSources {
+                    value: *node,
+                    first: nodes[0],
+                },
                 accumulator,
                 axis,
                 padding,
@@ -21030,13 +21049,14 @@ impl<'program> LowerCtx<'program> {
     /// Where's selected-branch checks, including for empty tensors.
     fn append_concat_slice(
         &mut self,
-        source: NodeId,
+        sources: ConcatSliceSources,
         previous: Option<NodeId>,
         concat_axis: usize,
         padding: Vec<(RtDim, RtDim)>,
         extent_inputs: &[NodeId],
         output_type: &TensorType,
     ) -> NodeId {
+        let source = sources.value;
         let source_type = self
             .dag
             .get(source)
@@ -21077,7 +21097,11 @@ impl<'program> LowerCtx<'program> {
                     vec![if axis == concat_axis {
                         source
                     } else {
-                        previous
+                        // Metadata comes from the original source whose axes
+                        // govern concat, independently of the element prefix.
+                        // Reading the prefix would keep inactive selection work
+                        // live when later slices need only these dimensions.
+                        sources.first
                     }],
                     TensorType {
                         dims: vec![],

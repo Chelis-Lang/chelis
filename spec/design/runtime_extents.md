@@ -1089,6 +1089,9 @@ carriers to the construction and consumer inventory above:
   substitution. Concat compares each later source's non-concat axes with the
   first source's axes, in source and axis order. Its checks are independent of
   element selection and remain live for empty tensors and discarded results.
+  Movement masks read bystander extents from that original first source,
+  independently of the growing element prefix, so metadata observations do
+  not keep inactive selection work live after the concat value is discarded.
   The nonempty `claims` list contains ordered diagnostic labels,
   not identities. Each requirement is checked in list order. The checked scalar
   becomes the reshape target before allocation for a reshape check. Its closed `ExtentCheckOwner`

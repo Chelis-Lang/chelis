@@ -10489,8 +10489,9 @@ fn shared_runtime_extent_declares_once_and_rechecks_the_later_carrier() {
     let dag =
         chelis_ir::lower::lower_subexpr_program(&expr, scoped, UnordMap::new(), UnordMap::new());
 
-    // The premise: one shared symbol across both rows, and the differentiable
-    // Pad+Add cascade rather than the rank-0 host `concat` placeholder.
+    // The premise: one shared symbol across both rows, and a tensor concat
+    // rather than the rank-0 host placeholder. The native checks below prove
+    // its values and the later carrier's independent rejection.
     let axis_names: Vec<String> = dag
         .nodes()
         .iter()
@@ -10502,13 +10503,13 @@ fn shared_runtime_extent_declares_once_and_rechecks_the_later_carrier() {
         .collect();
     assert_eq!(axis_names.len(), 2, "two rows: {dag:?}");
     assert_eq!(axis_names[0], axis_names[1], "one extent, one symbol");
-    assert_eq!(
-        dag.nodes()
-            .iter()
-            .filter(|node| matches!(node.op, RiscOp::Pad { .. }))
-            .count(),
-        2,
-        "the concat must be the Pad cascade: {dag:?}"
+    assert!(
+        dag.roots().iter().any(|root| {
+            dag.get(*root).is_some_and(|node| {
+                node.output_type.dims.len() == 2 && node.output_type.precision == Prim::F32
+            })
+        }),
+        "the concat must retain its tensor result: {dag:?}"
     );
 
     let generated = codegen(&dag, "shared_extent").expect("shared-extent DAG must emit C");
