@@ -21497,15 +21497,15 @@ fn hoist_host_lane_tensor_bindings_with_names<'expr, 'scope>(
         .or_else(|| {
             let name = callee?;
             (!host_lexically_binds(scope, name) && program.def_named(name).is_none())
-                .then(|| chelis_types::builtin_decl(name).map(|decl| decl.axis_arguments))
+                .then(|| chelis_checker_core::builtin_decl(name).map(|decl| decl.axis_arguments))
                 .flatten()
         })
-        .unwrap_or(chelis_types::AxisArgumentLayout::NoAxes);
+        .unwrap_or(chelis_checker_core::AxisArgumentLayout::NoAxes);
     let static_selector = |index: usize, arg: &Expr| {
         let axis = match axis_arguments {
-            chelis_types::AxisArgumentLayout::NoAxes => false,
-            chelis_types::AxisArgumentLayout::Fixed(slots) => slots.contains(&(index - 1)),
-            chelis_types::AxisArgumentLayout::VariadicFrom(first) => index > first,
+            chelis_checker_core::AxisArgumentLayout::NoAxes => false,
+            chelis_checker_core::AxisArgumentLayout::Fixed(slots) => slots.contains(&(index - 1)),
+            chelis_checker_core::AxisArgumentLayout::VariadicFrom(first) => index > first,
         };
         axis && crate::lower::extract_int_axis(arg).is_some()
     };
