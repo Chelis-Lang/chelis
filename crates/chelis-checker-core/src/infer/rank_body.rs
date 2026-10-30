@@ -184,22 +184,31 @@ fn rank_body_error(def_name: &str, message: String) -> CheckError {
     )
 }
 
+struct RankBodyScope<'a> {
+    def_name: &'a str,
+    graph: &'a TopLevelReferenceGraph,
+    available: &'a BTreeSet<usize>,
+    component: &'a BTreeSet<usize>,
+    context: &'a RankBodyContext,
+}
+
 fn check_body(
-    def_name: &str,
     expr: &deep::Expr,
-    graph: &TopLevelReferenceGraph,
-    available: &BTreeSet<usize>,
-    component: &BTreeSet<usize>,
-    context: &RankBodyContext,
+    scope: &RankBodyScope<'_>,
     errors: &mut Vec<CheckError>,
     operation: &crate::resources::Operation<'_>,
 ) {
+    let RankBodyScope {
+        def_name,
+        graph,
+        available,
+        component,
+        context,
+    } = *scope;
     stack_guard!(operation, "check_rank_body_discipline", expr);
     let Some((tag, _, kids)) = stamped_parts(expr) else {
         if let deep::Expr::MetaExpr(meta, _) = expr {
-            check_body(
-                def_name, &meta.expr, graph, available, component, context, errors, operation,
-            );
+            check_body(&meta.expr, scope, errors, operation);
         }
         return;
     };
@@ -243,9 +252,7 @@ fn check_body(
         _ => {}
     }
     for child in kids {
-        check_body(
-            def_name, child, graph, available, component, context, errors, operation,
-        );
+        check_body(child, scope, errors, operation);
     }
 }
 
@@ -309,12 +316,14 @@ pub(super) fn validate_rank_bodies(
             };
             let mut failures = Vec::new();
             check_body(
-                &definition.name,
                 body,
-                graph,
-                &accepted,
-                &candidate,
-                &context,
+                &RankBodyScope {
+                    def_name: &definition.name,
+                    graph,
+                    available: &accepted,
+                    component: &candidate,
+                    context: &context,
+                },
                 &mut failures,
                 operation,
             );

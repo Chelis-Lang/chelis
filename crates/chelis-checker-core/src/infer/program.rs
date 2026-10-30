@@ -410,7 +410,6 @@ fn sweep_recursive_collection_contracts(
 /// Same covered-or-rejected discipline as `StackExhaustionScope::drain_into` —
 /// a check unit that stopped early must fail, never return a partial `Ok`.
 #[must_use = "a tripped cancellation gate must end the check unit"]
-
 fn cancellation_gate(
     errors: &mut DiagnosticSink<'_>,
     operation: &crate::resources::Operation<'_>,
@@ -486,8 +485,10 @@ pub(super) fn infer_program_with_product_in_session(
         &items,
         &declaration_diagnostic_owners,
         &mut env,
-        &mut vg,
-        &mut subst,
+        InferenceVars {
+            vg: &mut vg,
+            subst: &mut subst,
+        },
         &mut adt_reg,
         errors,
         operation,
@@ -757,10 +758,12 @@ pub(super) fn infer_program_with_product_in_session(
     let semantic_type_env = build_ir_type_env(exprs, operation);
     validate_semantic_program(
         exprs,
-        &semantic_type_env,
+        SemanticContext {
+            type_env: &semantic_type_env,
+            selector_context: &SelectorCallableContext::default(),
+            rank_context: &RankBodyContext::default(),
+        },
         &top_level_references,
-        &SelectorCallableContext::default(),
-        &RankBodyContext::default(),
         &product,
         errors,
         operation,
@@ -804,7 +807,6 @@ pub(crate) fn check_ir_program_in_operation(
 
 /// Build an ordinary semantic library snapshot.
 /// The snapshot does not grant native library-proof authority.
-
 pub fn build_type_env_from_library<S: chelis_stack_services::StackServices>(
     library_exprs: &[deep::Expr],
     resources: &crate::Resources<'_, S>,
@@ -850,10 +852,12 @@ pub(crate) fn build_type_env_from_library_in_session(
     }
     let mut rank_bodies = validate_semantic_program(
         library_exprs,
-        &library_ir,
+        SemanticContext {
+            type_env: &library_ir,
+            selector_context: &SelectorCallableContext::default(),
+            rank_context: &RankBodyContext::default(),
+        },
         &product.top_level_references,
-        &SelectorCallableContext::default(),
-        &RankBodyContext::default(),
         &product,
         errors,
         operation,
@@ -947,7 +951,6 @@ pub(crate) fn build_type_env_from_library_in_session(
 
 /// Return a library snapshot and its opaque successful check.
 /// One annotation traversal supplies both products.
-
 pub fn build_compiled_library_context<S: chelis_stack_services::StackServices>(
     library_exprs: &[deep::Expr],
     resources: &crate::Resources<'_, S>,
@@ -994,10 +997,12 @@ pub(crate) fn build_compiled_library_context_in_session(
     }
     let mut rank_bodies = validate_semantic_program(
         library_exprs,
-        &library_ir,
+        SemanticContext {
+            type_env: &library_ir,
+            selector_context: &SelectorCallableContext::default(),
+            rank_context: &RankBodyContext::default(),
+        },
         &product.top_level_references,
-        &SelectorCallableContext::default(),
-        &RankBodyContext::default(),
         &product,
         errors,
         operation,
@@ -1099,7 +1104,6 @@ pub(crate) fn build_compiled_library_context_in_session(
 
 /// Continue library analysis from a borrowed semantic snapshot.
 /// Return the combined snapshot and the new layer completion.
-
 pub fn build_compiled_library_context_with_base<S: chelis_stack_services::StackServices>(
     base: &ContextSnapshot,
     library_exprs: &[deep::Expr],
@@ -1162,10 +1166,12 @@ pub(crate) fn build_compiled_library_context_with_base_in_session(
     }
     let mut rank_bodies = validate_semantic_program(
         library_exprs,
-        &combined_ir,
+        SemanticContext {
+            type_env: &combined_ir,
+            selector_context: &base.selector_callables,
+            rank_context: &base.rank_bodies,
+        },
         &product.top_level_references,
-        &base.selector_callables,
-        &base.rank_bodies,
         &product,
         errors,
         operation,
@@ -1278,7 +1284,6 @@ pub(crate) fn build_compiled_library_context_with_base_in_session(
 
 /// Check new expressions against a borrowed ordinary snapshot.
 /// The result contains only the new expressions.
-
 pub fn check_ir_with_context<S: chelis_stack_services::StackServices>(
     context: &ContextSnapshot,
     new_exprs: &[deep::Expr],
@@ -1374,10 +1379,12 @@ pub(crate) fn check_ir_with_signature_context_in_session(
     // resolve to the library's declared type during shape validation.
     validate_semantic_program(
         new_exprs,
-        &combined_ir,
+        SemanticContext {
+            type_env: &combined_ir,
+            selector_context: &context.selector_callables,
+            rank_context: &context.rank_bodies,
+        },
         &product.top_level_references,
-        &context.selector_callables,
-        &context.rank_bodies,
         &product,
         errors,
         operation,
@@ -1545,10 +1552,12 @@ pub(crate) fn infer_ir_program_in_session(
     }
     validate_semantic_program(
         exprs,
-        &type_env,
+        SemanticContext {
+            type_env: &type_env,
+            selector_context: &SelectorCallableContext::default(),
+            rank_context: &RankBodyContext::default(),
+        },
         &product.top_level_references,
-        &SelectorCallableContext::default(),
-        &RankBodyContext::default(),
         &product,
         errors,
         operation,
@@ -1614,8 +1623,10 @@ pub(super) fn infer_ir_program_with_state(
         &items,
         &declaration_diagnostic_owners,
         &mut state.env,
-        &mut state.var_gen,
-        &mut state.subst,
+        InferenceVars {
+            vg: &mut state.var_gen,
+            subst: &mut state.subst,
+        },
         &mut state.adt_reg,
         errors,
         operation,

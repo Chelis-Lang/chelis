@@ -352,8 +352,7 @@ pub(super) fn finish_unified_app(
                     &kids[1..],
                     &arg_tys,
                     &result_ty,
-                    vg,
-                    subst,
+                    InferenceVars { vg, subst },
                     errors,
                     operation,
                 );
@@ -1027,8 +1026,10 @@ pub(super) fn finish_unified_app(
                 let cumsum_operand = type_for_readonly_check(&arg_tys[0], subst);
                 let _axis = match resolve_builtin_axis(
                     "cumsum",
-                    kids.get(2),
-                    &subst.apply(&arg_tys[1]),
+                    AxisArgument {
+                        expr: kids.get(2),
+                        ty: &subst.apply(&arg_tys[1]),
+                    },
                     &cumsum_operand,
                     node,
                     subst,
@@ -1272,8 +1273,10 @@ pub(super) fn finish_unified_app(
                 let sort_operand = type_for_readonly_check(&arg_tys[0], subst);
                 let _axis = match resolve_builtin_axis(
                     "sort",
-                    kids.get(2),
-                    &subst.apply(&arg_tys[1]),
+                    AxisArgument {
+                        expr: kids.get(2),
+                        ty: &subst.apply(&arg_tys[1]),
+                    },
                     &sort_operand,
                     node,
                     subst,

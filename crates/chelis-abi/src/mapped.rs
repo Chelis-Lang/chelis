@@ -231,6 +231,9 @@ fn sha256(message: &[u8]) -> [u8; 32] {
 
 #[cfg(test)]
 mod tests {
+    use alloc::format;
+    use alloc::string::ToString;
+    use alloc::vec;
     use chelis_vocab::RuntimeDType;
 
     use super::{check_bool_payload, mapped_range, mapped_tensor_range, mapped_text, sha256_hex};

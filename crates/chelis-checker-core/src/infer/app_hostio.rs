@@ -306,7 +306,13 @@ pub(super) fn infer_mmap_tensor_app(
         );
     };
     let callee_ty = super::app::infer_callee(
-        &kids[0], env, vg, subst, adt_reg, errors, product, operation,
+        &kids[0],
+        env,
+        InferenceVars { vg, subst },
+        adt_reg,
+        errors,
+        product,
+        operation,
     );
     let arg_tys: Vec<Type<ErrorWitness>> = kids[1..4]
         .iter()

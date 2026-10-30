@@ -379,6 +379,9 @@ pub fn list_index_out_of_bounds(index: i64, len: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::{NumericTrapKind, NumericTrapLine};
+    use alloc::format;
+    use alloc::string::ToString;
+    use alloc::vec::Vec;
 
     /// [04-NUM-9]: the closed trap kinds and the one line every lane renders.
     #[test]

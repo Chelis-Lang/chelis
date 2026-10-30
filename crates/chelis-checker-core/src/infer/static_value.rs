@@ -636,6 +636,11 @@ pub(super) fn resolve_axis_pair_member(
     }
 }
 
+pub(super) struct AxisArgument<'a> {
+    pub(super) expr: Option<&'a deep::Expr>,
+    pub(super) ty: &'a Type<ErrorWitness>,
+}
+
 /// Resolve the axis argument of an axis-taking builtin against the
 /// operand `tensor_ty`, normalizing a negative literal to index from
 /// the end (`-1` is the last axis). On an axis still out of range
@@ -659,8 +664,10 @@ pub(super) fn resolve_axis_pair_member(
 /// while `sum` rejected one.
 pub(super) fn resolve_builtin_axis(
     op: &str,
-    axis_expr: Option<&deep::Expr>,
-    axis_ty: &Type<ErrorWitness>,
+    AxisArgument {
+        expr: axis_expr,
+        ty: axis_ty,
+    }: AxisArgument<'_>,
     tensor_ty: &Type<ErrorWitness>,
     node: &DeepNode,
     subst: &mut Subst<ErrorWitness>,

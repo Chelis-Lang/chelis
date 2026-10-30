@@ -319,9 +319,11 @@ pub(super) fn check_shape_route_signature(
         ShapeRouteKind::Reshape { input_var_name } => check_reshape_signature(
             site,
             node,
-            kids,
-            input_var_name.as_deref(),
-            arg_tys,
+            ReshapeOperands {
+                kids,
+                input_var_name: input_var_name.as_deref(),
+                arg_tys,
+            },
             subst,
             errors,
             operation,

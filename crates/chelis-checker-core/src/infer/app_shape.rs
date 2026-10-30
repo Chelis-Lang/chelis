@@ -51,7 +51,13 @@ pub(super) fn infer_reduction_app(
 
     let kids = node.children_slice();
     let _func_ty = super::app::infer_callee(
-        &kids[0], env, vg, subst, adt_reg, errors, product, operation,
+        &kids[0],
+        env,
+        InferenceVars { vg, subst },
+        adt_reg,
+        errors,
+        product,
+        operation,
     );
     let arg_tys: Vec<Type<ErrorWitness>> = kids[1..]
         .iter()
@@ -151,7 +157,13 @@ pub(super) fn infer_expand_app(
     }
 
     let _func_ty = super::app::infer_callee(
-        &kids[0], env, vg, subst, adt_reg, errors, product, operation,
+        &kids[0],
+        env,
+        InferenceVars { vg, subst },
+        adt_reg,
+        errors,
+        product,
+        operation,
     );
     let arg_tys: Vec<Type<ErrorWitness>> = kids[1..]
         .iter()
@@ -266,7 +278,13 @@ pub(super) fn infer_permute_app(
     }
 
     let _func_ty = super::app::infer_callee(
-        &kids[0], env, vg, subst, adt_reg, errors, product, operation,
+        &kids[0],
+        env,
+        InferenceVars { vg, subst },
+        adt_reg,
+        errors,
+        product,
+        operation,
     );
     let input_ty = infer_expr(
         &kids[1], env, vg, subst, adt_reg, errors, product, operation,
@@ -463,7 +481,13 @@ pub(super) fn infer_reshape_app(
     }
 
     let _func_ty = super::app::infer_callee(
-        &kids[0], env, vg, subst, adt_reg, errors, product, operation,
+        &kids[0],
+        env,
+        InferenceVars { vg, subst },
+        adt_reg,
+        errors,
+        product,
+        operation,
     );
     let input_ty = infer_expr(
         &kids[1], env, vg, subst, adt_reg, errors, product, operation,
@@ -542,14 +566,22 @@ pub(super) fn infer_reshape_app(
         _ => check_reshape_signature(
             CheckSite::Expr(expr),
             node,
-            kids,
-            input_var_name.as_deref(),
-            &arg_tys,
+            ReshapeOperands {
+                kids,
+                input_var_name: input_var_name.as_deref(),
+                arg_tys: &arg_tys,
+            },
             subst,
             errors,
             operation,
         ),
     }
+}
+
+pub(super) struct ReshapeOperands<'a> {
+    pub(super) kids: &'a [deep::Expr],
+    pub(super) input_var_name: Option<&'a str>,
+    pub(super) arg_tys: &'a [Type<ErrorWitness>],
 }
 
 /// `reshape`'s own rule, the single entry the eager pass and the deferred
@@ -567,9 +599,11 @@ pub(super) fn infer_reshape_app(
 pub(super) fn check_reshape_signature(
     site: CheckSite<'_>,
     node: &DeepNode,
-    kids: &[deep::Expr],
-    input_var_name: Option<&str>,
-    arg_tys: &[Type<ErrorWitness>],
+    ReshapeOperands {
+        kids,
+        input_var_name,
+        arg_tys,
+    }: ReshapeOperands<'_>,
     subst: &mut Subst<ErrorWitness>,
     errors: &mut DiagnosticSink<'_>,
     operation: &crate::resources::Operation<'_>,
@@ -685,7 +719,13 @@ pub(super) fn infer_shrink_app(
     }
 
     let _func_ty = super::app::infer_callee(
-        &kids[0], env, vg, subst, adt_reg, errors, product, operation,
+        &kids[0],
+        env,
+        InferenceVars { vg, subst },
+        adt_reg,
+        errors,
+        product,
+        operation,
     );
     let input_ty = infer_expr(
         &kids[1], env, vg, subst, adt_reg, errors, product, operation,
@@ -963,7 +1003,13 @@ pub(super) fn infer_stride_app(
     }
 
     let _func_ty = super::app::infer_callee(
-        &kids[0], env, vg, subst, adt_reg, errors, product, operation,
+        &kids[0],
+        env,
+        InferenceVars { vg, subst },
+        adt_reg,
+        errors,
+        product,
+        operation,
     );
     let input_ty = infer_expr(
         &kids[1], env, vg, subst, adt_reg, errors, product, operation,
@@ -1179,7 +1225,13 @@ pub(super) fn infer_pad_app(
     }
 
     let _func_ty = super::app::infer_callee(
-        &kids[0], env, vg, subst, adt_reg, errors, product, operation,
+        &kids[0],
+        env,
+        InferenceVars { vg, subst },
+        adt_reg,
+        errors,
+        product,
+        operation,
     );
     let input_ty = infer_expr(
         &kids[1], env, vg, subst, adt_reg, errors, product, operation,
@@ -1447,7 +1499,13 @@ pub(super) fn infer_reduce_window_app(
         );
     }
     let func_ty = super::app::infer_callee(
-        &kids[0], env, vg, subst, adt_reg, errors, product, operation,
+        &kids[0],
+        env,
+        InferenceVars { vg, subst },
+        adt_reg,
+        errors,
+        product,
+        operation,
     );
     let input_ty = infer_expr(
         &kids[1], env, vg, subst, adt_reg, errors, product, operation,

@@ -234,16 +234,14 @@ struct Occurrence {
 
 /// Clear recursive state before a new schedule.
 pub(super) fn reset(operation: &crate::resources::Operation<'_>) {
-    (|ctx: &RefCell<Option<GroupCtx>>| *ctx.borrow_mut() = None)(&operation.recursion);
+    *operation.recursion.borrow_mut() = None;
 }
 
 /// Abandon an in-flight recursive group without validating occurrences.
 /// Cancellation and other structured-abort paths use this to discard both
 /// the group record and every temporary generalization pin.
 pub(super) fn abort_group(operation: &crate::resources::Operation<'_>) {
-    (|ctx: &RefCell<Option<GroupCtx>>| {
-        ctx.borrow_mut().take();
-    })(&operation.recursion);
+    operation.recursion.borrow_mut().take();
 }
 
 /// Install the context for one recursive binding group. Member schemes are
@@ -271,23 +269,21 @@ pub(super) fn begin_group<'a>(
             },
         );
     }
-    (|ctx: &RefCell<Option<GroupCtx>>| {
-        *ctx.borrow_mut() = Some(GroupCtx {
-            members,
-            caller: None,
-            occurrences: Vec::new(),
-            pinned: UnordSet::new(),
-        });
-    })(&operation.recursion);
+    *operation.recursion.borrow_mut() = Some(GroupCtx {
+        members,
+        caller: None,
+        occurrences: Vec::new(),
+        pinned: UnordSet::new(),
+    });
 }
 
 /// Whether `name` is a member of the active recursive group.
 pub(super) fn group_member(name: &str, operation: &crate::resources::Operation<'_>) -> bool {
-    (|ctx: &RefCell<Option<GroupCtx>>| {
-        ctx.borrow()
-            .as_ref()
-            .is_some_and(|c| c.members.contains_key(name))
-    })(&operation.recursion)
+    operation
+        .recursion
+        .borrow()
+        .as_ref()
+        .is_some_and(|c| c.members.contains_key(name))
 }
 
 /// RAII guard clearing the current caller when the member's inference ends.
@@ -303,10 +299,10 @@ impl CallerGuard<'_> {
 
 impl Drop for CallerGuard<'_> {
     fn drop(&mut self) {
-        if let Some(context) = self.context {
-            if let Some(group) = context.borrow_mut().as_mut() {
-                group.caller = None;
-            }
+        if let Some(context) = self.context
+            && let Some(group) = context.borrow_mut().as_mut()
+        {
+            group.caller = None;
         }
     }
 }
@@ -331,15 +327,13 @@ pub(super) fn begin_caller<'operation>(
             _ => None,
         })
         .collect();
-    (|ctx: &RefCell<Option<GroupCtx>>| {
-        if let Some(c) = ctx.borrow_mut().as_mut() {
-            c.caller = Some(Caller {
-                name: name.to_string(),
-                binder_names: binders,
-                own_tvars,
-            });
-        }
-    })(&operation.recursion);
+    if let Some(c) = operation.recursion.borrow_mut().as_mut() {
+        c.caller = Some(Caller {
+            name: name.to_string(),
+            binder_names: binders,
+            own_tvars,
+        });
+    }
     CallerGuard {
         context: Some(&operation.recursion),
     }
@@ -421,11 +415,9 @@ pub(super) fn pin(
     vars: impl IntoIterator<Item = TypeVar>,
     operation: &crate::resources::Operation<'_>,
 ) {
-    (|ctx: &RefCell<Option<GroupCtx>>| {
-        if let Some(c) = ctx.borrow_mut().as_mut() {
-            c.pinned.extend(vars);
-        }
-    })(&operation.recursion);
+    if let Some(c) = operation.recursion.borrow_mut().as_mut() {
+        c.pinned.extend(vars);
+    }
 }
 
 /// Query pinned variables for the reference generalization oracle and group cleanup tests.
@@ -440,13 +432,11 @@ pub(crate) fn with_pinned_tvars<R>(
     consume: impl FnOnce(&UnordSet<TypeVar>) -> R,
     operation: &crate::resources::Operation<'_>,
 ) -> R {
-    (|ctx: &RefCell<Option<GroupCtx>>| {
-        let context = ctx.borrow();
-        match context.as_ref() {
-            Some(group) => consume(&group.pinned),
-            None => consume(&UnordSet::new()),
-        }
-    })(&operation.recursion)
+    let context = operation.recursion.borrow();
+    match context.as_ref() {
+        Some(group) => consume(&group.pinned),
+        None => consume(&UnordSet::new()),
+    }
 }
 
 #[cfg(test)]
@@ -471,9 +461,8 @@ pub(super) fn finish_group(
     errors: &mut DiagnosticSink<'_>,
     operation: &crate::resources::Operation<'_>,
 ) {
-    let Some(ctx) =
-        (|ctx: &RefCell<Option<GroupCtx>>| ctx.borrow_mut().take())(&operation.recursion)
-    else {
+    let ctx = operation.recursion.borrow_mut().take();
+    let Some(ctx) = ctx else {
         return;
     };
     for occ in ctx.occurrences {

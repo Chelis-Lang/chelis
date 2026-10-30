@@ -587,7 +587,16 @@ fn walk_grad_selector_identity(
         && let Some(wrt) = metadata.wrt()
     {
         validate_one_grad_selector(
-            expr, children, wrt, callables, locals, identities, errors, operation,
+            expr,
+            children,
+            wrt,
+            SelectorScope {
+                callables,
+                locals,
+                identities,
+            },
+            errors,
+            operation,
         );
     }
 
@@ -596,13 +605,21 @@ fn walk_grad_selector_identity(
     }
 }
 
+struct SelectorScope<'a> {
+    callables: &'a BTreeMap<String, SelectorCallableOrigin>,
+    locals: &'a mut SelectorLocals,
+    identities: &'a SelectorIdentityTable,
+}
+
 fn validate_one_grad_selector(
     expr: &deep::Expr,
     children: &[deep::Expr],
     wrt: &chelis_deep::annotations::WrtTargets,
-    callables: &BTreeMap<String, SelectorCallableOrigin>,
-    locals: &mut SelectorLocals,
-    identities: &SelectorIdentityTable,
+    SelectorScope {
+        callables,
+        locals,
+        identities,
+    }: SelectorScope<'_>,
     errors: &mut DiagnosticSink<'_>,
     operation: &crate::resources::Operation<'_>,
 ) {

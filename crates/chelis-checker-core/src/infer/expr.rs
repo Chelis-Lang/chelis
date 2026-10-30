@@ -254,9 +254,15 @@ pub(super) fn infer_expr_with_type_metadata_ownership(
             // variant fails to compile until this dispatch chooses its
             // disposition.
             match node.tag() {
-                DeepTag::Var => {
-                    infer_var(node, env, vg, subst, adt_reg, errors, product, operation)
-                }
+                DeepTag::Var => infer_var(
+                    node,
+                    env,
+                    InferenceVars { vg, subst },
+                    adt_reg,
+                    errors,
+                    product,
+                    operation,
+                ),
                 DeepTag::Lit => infer_lit(
                     node,
                     env,
@@ -886,8 +892,7 @@ fn reject_builtin_applicable_only_by_name(
 pub(super) fn infer_var(
     node: &DeepNode,
     env: &mut Env,
-    vg: &mut VarGen,
-    subst: &mut Subst<ErrorWitness>,
+    InferenceVars { vg, subst }: InferenceVars<'_>,
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
     product: &mut InferenceProduct,
@@ -911,7 +916,7 @@ pub(super) fn infer_var(
                 with_node_provenance(node, format!("unknown constructor: {name}")),
                 vec![format!(
                     "Constructor '{name}' is not in scope. Declare it locally or add it \
-                     to an import (e.g. `import Mod ({name})`)"
+                 to an import (e.g. `import Mod ({name})`)"
                 )],
             );
             if let Some(sid) = node_span_id(node) {
