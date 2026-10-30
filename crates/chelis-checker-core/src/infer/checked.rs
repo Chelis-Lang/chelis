@@ -2395,15 +2395,20 @@ fn binding_owner_invariant_traces(
     let mut traces = Vec::new();
     let mut attachments = BTreeMap::<LocalAscriptionId, usize>::new();
     for expr in checked.annotated_exprs() {
-        if let Err(error) = visit_binding_owner_tokens(expr, &mut |token| {
-            if let Some(token) = token {
-                let id = LocalAscriptionId::from_checked_owner_token(token).ok_or_else(|| {
-                    BindingOwnerRewriteError("malformed checked binding occurrence".into())
-                })?;
-                *attachments.entry(id).or_default() += 1;
-            }
-            Ok(())
-        }, operation) {
+        if let Err(error) = visit_binding_owner_tokens(
+            expr,
+            &mut |token| {
+                if let Some(token) = token {
+                    let id =
+                        LocalAscriptionId::from_checked_owner_token(token).ok_or_else(|| {
+                            BindingOwnerRewriteError("malformed checked binding occurrence".into())
+                        })?;
+                    *attachments.entry(id).or_default() += 1;
+                }
+                Ok(())
+            },
+            operation,
+        ) {
             traces.push(error.0);
         }
     }
@@ -2770,7 +2775,10 @@ fn metadata_matches_except_effects(
     ignore_effects: bool,
     operation: &crate::resources::Operation<'_>,
 ) -> bool {
-    fn owners(metadata: &deep::Metadata, operation: &crate::resources::Operation<'_>) -> Option<Vec<Option<String>>> {
+    fn owners(
+        metadata: &deep::Metadata,
+        operation: &crate::resources::Operation<'_>,
+    ) -> Option<Vec<Option<String>>> {
         let mut owners = Vec::new();
         rewrite_binding_owner_metadata(
             metadata,
@@ -2789,7 +2797,8 @@ fn metadata_matches_except_effects(
     ) {
         (Ok(before), Ok(after)) => {
             before == after
-                && owners(&before, operation).is_some_and(|before| owners(&after, operation).as_ref() == Some(&before))
+                && owners(&before, operation)
+                    .is_some_and(|before| owners(&after, operation).as_ref() == Some(&before))
         }
         _ => false,
     }
