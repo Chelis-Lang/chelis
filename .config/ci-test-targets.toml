@@ -4932,6 +4932,24 @@ reason = "The controls reject host dependencies, missing execution evidence, sta
 tracking_issue = "chelis#4054"
 
 [[path_rule]]
+prefix = "scripts/check_checkpoint_compile_fail.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "lint-rust"
+cadence = "pull_request and push"
+reason = "The Rust policy gate rejects raw diagnostic offsets through the portable checker checkpoint fixture"
+tracking_issue = "chelis#4054"
+
+[[path_rule]]
+prefix = "scripts/test_check_rejection_authority_boundary.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "The mutation controls reject public rejection authority constructors and direct production builder calls"
+tracking_issue = "chelis#4054"
+
+[[path_rule]]
 prefix = "scripts/fixtures/checker_core/"
 disposition = "owner"
 workflow = "heavy-e2e.yml"
