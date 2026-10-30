@@ -237,7 +237,7 @@ fn tensor_lists(count: usize) -> String {
 
 fn replay_work(source: &str) -> usize {
     take_result_replay_work();
-    checked_surf(source);
+    crate::test_support::run(|operation| checked_surf(source, operation));
     take_result_replay_work().iter().sum()
 }
 
