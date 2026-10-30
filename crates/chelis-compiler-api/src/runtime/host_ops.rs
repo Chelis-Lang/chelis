@@ -286,7 +286,7 @@ pub(crate) fn collect_adt_ctor_fields(exprs: &[Expr]) -> UnordMap<String, Vec<St
 /// Each linker-named constructor that `exprs` declare, mapped to its
 /// declared source spelling: the spelling left after its data type's module
 /// qualification, by the rule the compiled lane stores
-/// ([`chelis_types::linked_constructor_source_name`], chelis#2889). A
+/// ([`chelis_checker_core::opacity::linked_constructor_source_name`], chelis#2889). A
 /// constructor outside linker format has no entry and keeps its name.
 pub(crate) fn collect_constructor_source_names(exprs: &[Expr]) -> UnordMap<String, String> {
     let mut out = UnordMap::new();
@@ -304,7 +304,9 @@ pub(crate) fn collect_constructor_source_names(exprs: &[Expr]) -> UnordMap<Strin
             let Some(ctor) = variant_kids.first().and_then(symbol_name) else {
                 continue;
             };
-            if let Some(source) = chelis_types::linked_constructor_source_name(type_name, ctor) {
+            if let Some(source) =
+                chelis_checker_core::opacity::linked_constructor_source_name(type_name, ctor)
+            {
                 out.insert(ctor.to_string(), source.to_string());
             }
         }

@@ -1395,8 +1395,14 @@ fn lower_program_with_context_inner(
             None,
         )
     });
+    let cancellation = chelis_types::current_cancel_token();
+    let mut checker_resources =
+        chelis_checker_core::Resources::new(&chelis_syntax_host::NativeStack);
+    checker_resources.cancellation = cancellation
+        .as_ref()
+        .map(|token| token as &dyn chelis_checker_core::Cancellation);
     let incoming_exprs = composition
-        .incoming_exprs(new_program.exprs())
+        .incoming_exprs(new_program.exprs(), &checker_resources)
         .unwrap_or_else(|| {
             raise_fatal_lowering_error("unowned incoming checked binding occurrence", None, None)
         });
@@ -1405,7 +1411,7 @@ fn lower_program_with_context_inner(
         .iter()
         .map(|(name, body)| {
             let mut rewritten = composition
-                .library_exprs(std::slice::from_ref(body))
+                .library_exprs(std::slice::from_ref(body), &checker_resources)
                 .unwrap_or_else(|| {
                     raise_fatal_lowering_error(
                         "unowned library checked binding occurrence",

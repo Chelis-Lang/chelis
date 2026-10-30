@@ -601,8 +601,9 @@ fn validate_export_symbol(
             definition.symbol == format!("{program_identity}__main")
         }
         ExportKind::Authored
-            if chelis_types::is_linker_format_name(&definition.source_name)
-                && chelis_types::demangle_ident(&definition.source_name) == "main" =>
+            if chelis_checker_core::opacity::is_linker_format_name(&definition.source_name)
+                && chelis_checker_core::opacity::demangle_ident(&definition.source_name)
+                    == "main" =>
         {
             definition.symbol == definition.source_name
         }

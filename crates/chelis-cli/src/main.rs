@@ -12900,8 +12900,8 @@ fn display_root_name(name: &str) -> String {
     } else {
         (name, None)
     };
-    let root = if chelis_types::is_linker_format_name(root) {
-        chelis_types::demangle_ident(root)
+    let root = if chelis_checker_core::opacity::is_linker_format_name(root) {
+        chelis_checker_core::opacity::demangle_ident(root)
     } else {
         root.to_string()
     };

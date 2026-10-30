@@ -322,7 +322,7 @@ fn runtime_string_literal(value: &str) -> String {
 fn stored_constructor_name(ty: &HostType, ctor: &str) -> String {
     let source = match ty {
         HostType::Adt(type_name, _) => {
-            chelis_types::linked_constructor_source_name(type_name, ctor)
+            chelis_checker_core::opacity::linked_constructor_source_name(type_name, ctor)
         }
         _ => None,
     };
@@ -964,8 +964,8 @@ pub(crate) fn concrete_tensor_helper_codegen(
 fn emitted_function_name(program_name: &str, function_name: &str) -> String {
     if function_name == "main" {
         format!("{program_name}__main")
-    } else if chelis_types::is_linker_format_name(function_name)
-        && chelis_types::demangle_ident(function_name) == "main"
+    } else if chelis_checker_core::opacity::is_linker_format_name(function_name)
+        && chelis_checker_core::opacity::demangle_ident(function_name) == "main"
     {
         function_name.to_string()
     } else {
@@ -5568,11 +5568,12 @@ fn emit_main(
     for binding in &program.globals {
         for display in &binding.display_roots {
             let mut entries = manifest.entries.iter().enumerate().filter(|(_, root)| {
-                let short_def = if chelis_types::is_linker_format_name(&root.def_name) {
-                    chelis_types::demangle_ident(&root.def_name)
-                } else {
-                    root.def_name.clone()
-                };
+                let short_def =
+                    if chelis_checker_core::opacity::is_linker_format_name(&root.def_name) {
+                        chelis_checker_core::opacity::demangle_ident(&root.def_name)
+                    } else {
+                        root.def_name.clone()
+                    };
                 let suffix = root.name.strip_prefix(root.def_name.as_str()).unwrap_or("");
                 let selected = binding.name == root.def_name
                     || matches!(

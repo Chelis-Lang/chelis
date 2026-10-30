@@ -196,7 +196,9 @@ pub(crate) fn fresh_module_probe_name_in(
     linked_terminal: &str,
     lexical_stem: &str,
 ) -> (String, bool) {
-    if let Some(linked) = chelis_types::linked_binding_in_module_of(type_name, linked_terminal) {
+    if let Some(linked) =
+        chelis_checker_core::opacity::linked_binding_in_module_of(type_name, linked_terminal)
+    {
         (names.fresh(&linked), true)
     } else {
         (names.fresh(lexical_stem), false)
@@ -342,7 +344,10 @@ mod tests {
         let root = fresh_root_name(&program, "pkg__m__M__chelis_prop_probe");
         assert_eq!(root, "pkg__m__M__chelis_prop_probe_1");
         assert_eq!(
-            chelis_types::linked_binding_in_module_of("Pkg__m__M__T", "chelis_prop_probe_1"),
+            chelis_checker_core::opacity::linked_binding_in_module_of(
+                "Pkg__m__M__T",
+                "chelis_prop_probe_1"
+            ),
             Some(root),
             "the suffixed name is the linker-format binding of the same module"
         );

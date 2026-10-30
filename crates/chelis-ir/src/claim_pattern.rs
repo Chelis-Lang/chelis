@@ -520,9 +520,12 @@ impl Builder<'_> {
                 });
             }
             constructors.push(ClaimConstructor {
-                stored_name: chelis_types::linked_constructor_source_name(name, &variant.name)
-                    .unwrap_or(&variant.name)
-                    .to_string(),
+                stored_name: chelis_checker_core::opacity::linked_constructor_source_name(
+                    name,
+                    &variant.name,
+                )
+                .unwrap_or(&variant.name)
+                .to_string(),
                 name: variant.name.clone(),
                 fields,
             });
