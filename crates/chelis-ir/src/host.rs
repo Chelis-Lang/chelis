@@ -36612,7 +36612,7 @@ mod record_hoist_binder_vocabulary_tests {
                 Arc::new(
                     crate::claim_pattern::ClaimPattern::derive(
                         &syntax,
-                        &chelis_types::adt::AdtRegistry::default(),
+                        &chelis_checker_core::adt::AdtRegistry::default(),
                     )
                     .unwrap(),
                 )

@@ -102,20 +102,6 @@ impl<'de> Deserialize<'de> for TypeEnv {
 }
 
 impl TypeEnv {
-    #[cfg(test)]
-    pub(crate) fn with_test_binding(
-        &self,
-        name: &str,
-        scheme: chelis_type_core::Scheme<ErrorWitness>,
-    ) -> Self {
-        let mut inner = (*self.inner).clone();
-        inner.env.bind(name.to_string(), scheme);
-        Self {
-            inner: Arc::new(inner),
-            library_proof_id: None,
-        }
-    }
-
     pub fn empty() -> Self {
         Self {
             inner: Arc::new(ContextSnapshot::empty()),

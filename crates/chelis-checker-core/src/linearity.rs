@@ -5805,6 +5805,21 @@ fn expr_scope_end(expr: &Expr) -> usize {
     expr.span().offset + expr.span().len
 }
 
+#[cfg(any(test, feature = "test-instrumentation"))]
+pub fn free_runtime_variables_with_work(expr: &Expr, work: &FreeVariableWalkWork) -> Vec<String> {
+    free_vars(expr, &[], work)
+}
+#[cfg(any(test, feature = "test-instrumentation"))]
+pub fn rename_free_runtime_variables_with_work(
+    expr: &Expr,
+    renames: &BTreeMap<String, String>,
+    work: &FreeVariableWalkWork,
+) -> Expr {
+    if renames.is_empty() {
+        return unrenamed(expr, work);
+    }
+    rename_free_vars(expr, renames, &mut BoundNames::new(), work)
+}
 #[cfg(test)]
 mod tests {
     //! Unit tests for the private linearity helpers. Locks the contract
@@ -6535,20 +6550,4 @@ mod tests {
             })
         }
     }
-}
-
-#[cfg(any(test, feature = "test-instrumentation"))]
-pub fn free_runtime_variables_with_work(expr: &Expr, work: &FreeVariableWalkWork) -> Vec<String> {
-    free_vars(expr, &[], work)
-}
-#[cfg(any(test, feature = "test-instrumentation"))]
-pub fn rename_free_runtime_variables_with_work(
-    expr: &Expr,
-    renames: &BTreeMap<String, String>,
-    work: &FreeVariableWalkWork,
-) -> Expr {
-    if renames.is_empty() {
-        return unrenamed(expr, work);
-    }
-    rename_free_vars(expr, renames, &mut BoundNames::new(), work)
 }

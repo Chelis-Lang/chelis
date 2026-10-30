@@ -14,6 +14,8 @@ pub fn is_cancellation(message: &str) -> bool {
 }
 
 #[cfg(test)]
+pub(crate) use native::{CancelToken, current_cancel_token, install_cancel_token};
+#[cfg(test)]
 mod native {
 
     use std::cell::RefCell;
@@ -70,5 +72,3 @@ mod native {
         }
     }
 }
-#[cfg(test)]
-pub(crate) use native::{CancelToken, current_cancel_token, install_cancel_token};
