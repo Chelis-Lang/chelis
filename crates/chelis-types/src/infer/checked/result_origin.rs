@@ -38,11 +38,71 @@ impl InferenceProduct {
         if ready {
             return false;
         }
-        self.result_type_constraints.push(ResultTypeConstraint {
-            actual: actual.clone(),
-            declared: declared.clone(),
-        });
+        let constraint = self.new_result_type_constraint(actual.clone(), declared.clone());
+        self.result_type_constraints.push(constraint);
         true
+    }
+
+    fn new_result_type_constraint(
+        &mut self,
+        actual: Type<ErrorWitness>,
+        declared: Type<ErrorWitness>,
+    ) -> ResultTypeConstraint {
+        let id = self.next_result_type_constraint_id;
+        self.next_result_type_constraint_id += 1;
+        ResultTypeConstraint {
+            id,
+            actual,
+            declared,
+        }
+    }
+
+    /// Reserve provenance order before inferring constructor arguments without
+    /// activating the generic route's equations. Nested generic constructors
+    /// may publish first, but must not reverse the parent's raw result graph.
+    pub(in crate::infer) fn stage_constructor_result_constraints(
+        &mut self,
+        equations: Vec<ResultConstraint<ErrorWitness>>,
+        subst: &Subst<ErrorWitness>,
+    ) -> StagedResultConstraints {
+        self.import_result_constraints(subst);
+        let mut staged = StagedResultConstraints {
+            annotations: Vec::new(),
+            joins: Vec::new(),
+        };
+        for equation in equations {
+            match equation {
+                ResultConstraint::Annotation { actual, declared } => {
+                    staged
+                        .annotations
+                        .push(self.new_result_type_constraint(actual, declared));
+                }
+                ResultConstraint::Join { inputs, result } => {
+                    self.defer_shape_check(
+                        DeferredShapeRule::ResultJoin {
+                            last_propagated: None,
+                        },
+                        Vec::new(),
+                        inputs,
+                        result,
+                    );
+                    staged.joins.push(
+                        self.deferred_shape_checks
+                            .pop()
+                            .expect("staging immediately removes the newly reserved result join"),
+                    );
+                }
+            }
+        }
+        staged
+    }
+
+    pub(in crate::infer) fn commit_constructor_result_constraints(
+        &mut self,
+        staged: StagedResultConstraints,
+    ) {
+        self.result_type_constraints.extend(staged.annotations);
+        self.deferred_shape_checks.extend(staged.joins);
     }
 
     /// Equality is ready per structural slot. A callable can have an ordinary
@@ -115,9 +175,10 @@ impl InferenceProduct {
         let imported = !equations.is_empty();
         for equation in equations {
             match equation {
-                ResultConstraint::Annotation { actual, declared } => self
-                    .result_type_constraints
-                    .push(ResultTypeConstraint { actual, declared }),
+                ResultConstraint::Annotation { actual, declared } => {
+                    let constraint = self.new_result_type_constraint(actual, declared);
+                    self.result_type_constraints.push(constraint);
+                }
                 ResultConstraint::Join { inputs, result } => self.defer_shape_check(
                     DeferredShapeRule::ResultJoin {
                         last_propagated: None,
@@ -230,6 +291,7 @@ impl InferenceProduct {
     pub(in crate::infer) fn origin_component(&self) -> Self {
         Self {
             next_deferred_shape_id: self.next_deferred_shape_id,
+            next_result_type_constraint_id: self.next_result_type_constraint_id,
             deferred_shape_checks: self.deferred_shape_checks.clone(),
             result_type_constraints: self.result_type_constraints.clone(),
             closing_group_types: self.closing_group_types.clone(),
@@ -281,9 +343,16 @@ impl InferenceProduct {
         body: &Type<ErrorWitness>,
         subst: &Subst<ErrorWitness>,
     ) -> Vec<ResultConstraint<ErrorWitness>> {
-        let mut available: Vec<ResultConstraint<ErrorWitness>> = self
-            .result_type_constraints
+        let mut annotations = self.result_type_constraints.iter().collect::<Vec<_>>();
+        annotations.sort_unstable_by_key(|constraint| constraint.id);
+        let mut joins = self
+            .deferred_shape_checks
             .iter()
+            .filter(|check| matches!(check.rule, DeferredShapeRule::ResultJoin { .. }))
+            .collect::<Vec<_>>();
+        joins.sort_unstable_by_key(|check| check.id);
+        let mut available: Vec<ResultConstraint<ErrorWitness>> = annotations
+            .into_iter()
             .map(|constraint| {
                 #[cfg(test)]
                 super::record_result_replay_work(0);
@@ -293,44 +362,77 @@ impl InferenceProduct {
                 }
             })
             .collect();
-        available.extend(
-            self.deferred_shape_checks
-                .iter()
-                .filter(|check| matches!(check.rule, DeferredShapeRule::ResultJoin { .. }))
-                .map(|check| {
-                    #[cfg(test)]
-                    super::record_result_replay_work(0);
-                    ResultConstraint::Join {
-                        inputs: check.arg_tys.iter().map(|ty| resolved(ty, subst)).collect(),
-                        result: resolved(&check.result_ty, subst),
-                    }
-                }),
-        );
-        let mut visible = chelis_type_core::free_tvars(body);
-        let mut equations = Vec::new();
-        loop {
-            let before = equations.len();
-            available.retain(|equation| {
+        available.extend(joins.into_iter().map(|check| {
+            #[cfg(test)]
+            super::record_result_replay_work(0);
+            ResultConstraint::Join {
+                inputs: check.arg_tys.iter().map(|ty| resolved(ty, subst)).collect(),
+                result: resolved(&check.result_ty, subst),
+            }
+        }));
+        // Equations form an undirected dependency graph. Registration order
+        // must not determine the number of closure passes: staged constructors
+        // can publish an outer result after its nested input equations.
+        let mut by_variable = BTreeMap::<TypeVar, Vec<usize>>::new();
+        let variables = available
+            .iter()
+            .enumerate()
+            .map(|(index, equation)| {
                 #[cfg(test)]
                 super::record_result_replay_work(0);
-                let variables: Vec<_> = equation
+                let mut variables: Vec<_> = equation
                     .types()
                     .into_iter()
                     .flat_map(chelis_type_core::free_tvars)
                     .collect();
-                if variables.iter().any(|variable| visible.contains(variable)) {
-                    visible.extend(variables);
-                    equations.push(equation.clone());
-                    false
-                } else {
-                    true
+                variables.sort_unstable();
+                variables.dedup();
+                for &variable in &variables {
+                    by_variable.entry(variable).or_default().push(index);
                 }
-            });
-            if equations.len() == before {
-                break;
+                variables
+            })
+            .collect::<Vec<_>>();
+        // Preserve the sweep's discovery order as well as its connected set.
+        // Generalization solves this ordered raw graph to choose signature
+        // representatives; ledger order (annotations before joins) is not an
+        // equivalent sequence. A newly reached earlier entry belongs to the
+        // next sweep, while a later entry is reachable in this sweep.
+        let mut ready = BTreeSet::new();
+        for variable in chelis_type_core::free_tvars(body) {
+            if let Some(indices) = by_variable.remove(&variable) {
+                ready.extend(indices.into_iter().map(|index| (0usize, index)));
             }
         }
-        equations
+        let mut included = vec![false; available.len()];
+        let mut order = Vec::new();
+        while let Some((sweep, index)) = ready.pop_first() {
+            if included[index] {
+                continue;
+            }
+            #[cfg(test)]
+            super::record_result_replay_work(0);
+            included[index] = true;
+            order.push(index);
+            for variable in &variables[index] {
+                if let Some(indices) = by_variable.remove(variable) {
+                    for next in indices {
+                        if !included[next] {
+                            ready.insert((sweep + usize::from(next < index), next));
+                        }
+                    }
+                }
+            }
+        }
+        let mut available = available.into_iter().map(Some).collect::<Vec<_>>();
+        order
+            .into_iter()
+            .map(|index| {
+                available[index]
+                    .take()
+                    .expect("each equation is visited once")
+            })
+            .collect()
     }
 
     fn result_has_pending_producer_with(
@@ -564,7 +666,7 @@ impl InferenceProduct {
                             .is_empty()
                 });
         // Keep the complete producer graph visible while deciding readiness.
-        let joins: Vec<_> = self
+        let mut joins: Vec<_> = self
             .deferred_shape_checks
             .iter()
             .filter_map(|check| match &check.rule {
@@ -577,6 +679,7 @@ impl InferenceProduct {
                 _ => None,
             })
             .collect();
+        joins.sort_unstable_by_key(|(id, ..)| *id);
         let mut progressed = false;
         for (id, inputs, published, last_propagated) in joins {
             #[cfg(test)]
@@ -665,6 +768,8 @@ impl InferenceProduct {
         subst: &mut Subst<ErrorWitness>,
         errors: &mut DiagnosticSink<'_>,
     ) {
+        self.result_type_constraints
+            .sort_unstable_by_key(|constraint| constraint.id);
         for constraint in std::mem::take(&mut self.result_type_constraints) {
             #[cfg(test)]
             super::record_result_replay_work(3);

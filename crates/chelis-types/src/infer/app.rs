@@ -355,6 +355,10 @@ fn infer_app_inner(
     // inferring this callee are the exact capabilities this application may
     // consume.
     let collection_contract_mark = subst.collection_contract_mark();
+    // A specialized constructor route does not consume the fallback generic
+    // signature. Keep its result equations local until that route is selected,
+    // so fresh, unbound generic variables cannot become orphan replay work.
+    let mut constructor_result_equations = Vec::new();
     let func_ty = if applied_constructor_head {
         let source_name = source_func_name.as_deref().unwrap();
         let resolved_constructor = if constructor_out_of_scope(source_name, env) {
@@ -362,7 +366,9 @@ fn infer_app_inner(
         } else {
             constructor_for_shape(source_name, CallShape::Positional, env, adt_reg).map(
                 |(_, scheme, _)| {
-                    let instantiated = chelis_type_core::instantiate_scheme(scheme, vg, subst);
+                    let (instantiated, equations) =
+                        chelis_type_core::instantiate_scheme_staged(scheme, vg, subst);
+                    constructor_result_equations = equations;
                     // chelis#1801: a constructor head is instantiated here
                     // rather than through the Var rule, so it records its
                     // own fresh dimension variables or the bracket above
@@ -404,13 +410,18 @@ fn infer_app_inner(
         if !matches!(func_ty, Type::Error(_)) {
             product.typed_nodes += 1;
         }
-        product.record_canonical(&kids[0], func_ty.clone());
     }
+    let constructor_result_constraints = applied_constructor_head
+        .then(|| product.stage_constructor_result_constraints(constructor_result_equations, subst));
+    let mut constructor_callee_stamp = applied_constructor_head.then(|| func_ty.clone());
     let instantiation_dvars = product.instantiation_dvars_since(instantiation_mark);
     let callee_collection_contracts = subst.collection_contract_ids_since(collection_contract_mark);
     macro_rules! return_with_collection_cleanup {
         ($value:expr) => {{
             subst.cancel_collection_contract_application(collection_contract_mark);
+            if let Some(signature) = constructor_callee_stamp.take() {
+                product.record_canonical(&kids[0], signature);
+            }
             return $value;
         }};
     }
@@ -956,7 +967,12 @@ fn infer_app_inner(
             }
             let joined_prec = subst.apply_tensor_prec(head_prec);
             let elem = Type::Tensor(joined_dims, joined_prec);
-            return_with_collection_cleanup!(Type::adt("List".to_string(), vec![elem]));
+            let result = Type::adt("List".to_string(), vec![elem]);
+            constructor_callee_stamp = Some(Type::function(
+                vec![head_resolved, tail_resolved],
+                result.clone(),
+            ));
+            return_with_collection_cleanup!(result);
         }
     }
 
@@ -971,6 +987,12 @@ fn infer_app_inner(
         )),
         _ => None,
     };
+    if let Some(staged) = constructor_result_constraints {
+        product.commit_constructor_result_constraints(staged);
+    }
+    if let Some(signature) = constructor_callee_stamp.take() {
+        product.record_canonical(&kids[0], signature);
+    }
     let mut ret_tv = match unify_checked_call_contract(
         expr,
         source_func_name.as_deref(),
