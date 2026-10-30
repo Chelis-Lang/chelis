@@ -369,6 +369,8 @@ PERMITTED_RUST_FORMAT_NARROWING_PATHS: frozenset[str] = frozenset(
         "crates/chelis-prove/src/opaque.rs",
         "crates/chelis-runtime/src/format_shortest.rs",
         "crates/chelis-numeric-core/src/observation.rs",
+        # Native duration profiles move from infer/program.rs (chelis#4054).
+        "crates/chelis-types/src/infer.rs",
     }
 )
 
