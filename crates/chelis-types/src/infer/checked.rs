@@ -81,6 +81,7 @@ pub(super) struct InferenceProduct {
     replaying_post_app: Option<(usize, usize)>,
     next_deferred_shape_id: u64,
     deferred_shape_checks: Vec<DeferredShapeCheck>,
+    next_result_type_constraint_id: u64,
     /// Result annotations check what inference produces. They are not input
     /// constraints for a suspended type derivation ([04-INF-1]). Keeping them
     /// separate lets readiness follow a producer whose constructor or nested
@@ -203,8 +204,14 @@ impl InferredAdmissionContract {
 
 #[derive(Clone)]
 struct ResultTypeConstraint {
+    id: u64,
     actual: Type<ErrorWitness>,
     declared: Type<ErrorWitness>,
+}
+
+pub(super) struct StagedResultConstraints {
+    annotations: Vec<ResultTypeConstraint>,
+    joins: Vec<DeferredShapeCheck>,
 }
 
 #[derive(Clone)]

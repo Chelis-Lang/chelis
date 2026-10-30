@@ -1,6 +1,185 @@
 //! spec/04 §3.1 and §4.5.2: selected constructor contracts own their equations.
 use super::*;
 
+// Exact connection-closure traversal from parent 799d8f580. Its output order
+// is consumed by raw result-origin solving; do not normalize the oracle.
+fn parent_sweep(
+    mut available: Vec<ResultConstraint<ErrorWitness>>,
+    body: &Type<ErrorWitness>,
+) -> Vec<ResultConstraint<ErrorWitness>> {
+    let mut visible = chelis_type_core::free_tvars(body);
+    let mut equations = Vec::new();
+    loop {
+        let before = equations.len();
+        available.retain(|equation| {
+            let variables: Vec<_> = equation
+                .types()
+                .into_iter()
+                .flat_map(chelis_type_core::free_tvars)
+                .collect();
+            if variables.iter().any(|variable| visible.contains(variable)) {
+                visible.extend(variables);
+                equations.push(equation.clone());
+                false
+            } else {
+                true
+            }
+        });
+        if equations.len() == before {
+            break;
+        }
+    }
+    equations
+}
+
+#[test]
+fn indexed_reachability_matches_parent_sweep_on_four_vertex_graphs() {
+    let edges = [(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)];
+    for mask in 0..64 {
+        for reverse in [false, true] {
+            let mut equations = edges
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| mask & (1 << *index) != 0)
+                .map(|(index, &(a, b))| {
+                    let actual = Type::Var(TypeVar(a));
+                    let declared = Type::Var(TypeVar(b));
+                    if index % 2 == 0 {
+                        ResultConstraint::Annotation { actual, declared }
+                    } else {
+                        ResultConstraint::Join {
+                            inputs: vec![actual],
+                            result: declared,
+                        }
+                    }
+                })
+                .collect::<Vec<_>>();
+            if reverse {
+                equations.reverse();
+            }
+            let subst = Subst::new();
+            for equation in &equations {
+                subst.record_result_constraint(equation.clone());
+            }
+            let mut product = InferenceProduct::default();
+            product.import_result_constraints(&subst);
+            // Both implementations collect annotations before join entries.
+            let available = equations
+                .iter()
+                .filter(|equation| matches!(equation, ResultConstraint::Annotation { .. }))
+                .chain(
+                    equations
+                        .iter()
+                        .filter(|equation| matches!(equation, ResultConstraint::Join { .. })),
+                )
+                .cloned()
+                .collect::<Vec<_>>();
+            for root in 0..=4 {
+                let body = Type::Var(TypeVar(root));
+                assert_eq!(
+                    product.result_equations_for(&body, &subst),
+                    parent_sweep(available.clone(), &body),
+                    "mask={mask}, reverse={reverse}, root={root}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn staged_constructor_publication_preserves_parent_child_provenance_order() {
+    let variable = |id| Type::Var(TypeVar(id));
+    let parent_join = ResultConstraint::Join {
+        inputs: vec![variable(2)],
+        result: variable(3),
+    };
+    let child_join = ResultConstraint::Join {
+        inputs: vec![variable(1)],
+        result: variable(2),
+    };
+    let parent_annotation = ResultConstraint::Annotation {
+        actual: variable(4),
+        declared: variable(5),
+    };
+    let child_annotation = ResultConstraint::Annotation {
+        actual: variable(1),
+        declared: variable(4),
+    };
+    let mut product = InferenceProduct::default();
+    let subst = Subst::new();
+    let parent = product.stage_constructor_result_constraints(
+        vec![parent_join.clone(), parent_annotation.clone()],
+        &subst,
+    );
+    let child = product.stage_constructor_result_constraints(
+        vec![child_join.clone(), child_annotation.clone()],
+        &subst,
+    );
+    assert!(
+        product
+            .result_equations_for(&variable(3), &subst)
+            .is_empty()
+    );
+    product.commit_constructor_result_constraints(child);
+    assert!(
+        product
+            .result_equations_for(&variable(3), &subst)
+            .is_empty()
+    );
+    product.commit_constructor_result_constraints(parent);
+    let actual = product.result_equations_for(&variable(3), &subst);
+    let expected = parent_sweep(
+        vec![
+            parent_annotation.clone(),
+            child_annotation.clone(),
+            parent_join.clone(),
+            child_join.clone(),
+        ],
+        &variable(3),
+    );
+    assert_eq!(actual, expected);
+    assert_eq!(
+        actual,
+        vec![parent_join, child_join, child_annotation, parent_annotation]
+    );
+}
+
+#[test]
+fn indexed_result_reachability_preserves_parent_sweep_discovery_order() {
+    let variable = |id| Type::Var(TypeVar(id));
+    let first = ResultConstraint::Annotation {
+        actual: variable(1),
+        declared: variable(2),
+    };
+    let second = ResultConstraint::Annotation {
+        actual: variable(3),
+        declared: variable(4),
+    };
+    let bridge = ResultConstraint::Join {
+        inputs: vec![variable(2), variable(4)],
+        result: variable(5),
+    };
+    let subst = Subst::new();
+    for equation in [first.clone(), second.clone(), bridge.clone()] {
+        subst.record_result_constraint(equation);
+    }
+    let mut product = InferenceProduct::default();
+    product.import_result_constraints(&subst);
+    // The result first reaches the join, then the annotations in the next
+    // sweep. Emitting annotation-ledger order instead changes the order in
+    // which generalization solves the raw result-provenance graph.
+    assert_eq!(
+        product.result_equations_for(&variable(5), &subst),
+        vec![bridge.clone(), first.clone(), second.clone()]
+    );
+    // A directly visible annotation is processed before its later bridge;
+    // newly visible earlier entries wait for the following sweep.
+    assert_eq!(
+        product.result_equations_for(&variable(3), &subst),
+        vec![second, bridge, first]
+    );
+}
+
 fn equation_chain_work(count: u32, reverse: bool) -> usize {
     let subst = Subst::new();
     let mut equations = (0..count)

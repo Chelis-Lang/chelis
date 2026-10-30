@@ -411,6 +411,8 @@ fn infer_app_inner(
             product.typed_nodes += 1;
         }
     }
+    let constructor_result_constraints = applied_constructor_head
+        .then(|| product.stage_constructor_result_constraints(constructor_result_equations, subst));
     let mut constructor_callee_stamp = applied_constructor_head.then(|| func_ty.clone());
     let instantiation_dvars = product.instantiation_dvars_since(instantiation_mark);
     let callee_collection_contracts = subst.collection_contract_ids_since(collection_contract_mark);
@@ -985,8 +987,8 @@ fn infer_app_inner(
         )),
         _ => None,
     };
-    for equation in constructor_result_equations {
-        subst.record_result_constraint(equation);
+    if let Some(staged) = constructor_result_constraints {
+        product.commit_constructor_result_constraints(staged);
     }
     if let Some(signature) = constructor_callee_stamp.take() {
         product.record_canonical(&kids[0], signature);
