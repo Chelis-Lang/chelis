@@ -4,6 +4,107 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.23.0] - 2026-10-30
+
+### Changed
+
+- **BREAKING:** WireDag schema v31 carries an explicit operation owner on checked extents. Rebuild v30 serialized DAGs and older library, standard-library and compiled-context cache artifacts.
+
+- **BREAKING:** Move pure effect analysis and shared effect data into allocation-based `chelis-effects-core` with unconditional `no_std`.
+
+  Consumers import `EffectError`, `EffectErrorKind`, and `DefEffectRows` directly from the portable core.
+  The old host definitions and compatibility re-exports do not remain.
+  The core borrows Deep expressions and an optional library input for inference, annotation, handler checks, and declared-row checks.
+  Deep owns the shared lexical and string readers, and the effect core owns the single builtin effect table.
+
+  Host adapters retain checked occurrence identity, checked reconstruction, type-totality rejection, diagnostics, target admission, realizability, root policy, and cache trust.
+  The complete acceptance command preserves immutable-source parity, full-host cost bounds, exact execution identities, timing values, and independent target graphs.
+  The vocabulary control checks numeric admission before dependent consumers and restores both source owners after each probe.
+  Policy commands retain repository-root imports and raw compiler rejections.
+  Remove obsolete setup-copy assertions between numeric and support jobs.
+  Retain numeric budgets, canonical command ownership, and the shared cache-writer authority guard.
+  The host compiler pipeline still needs `std`.
+  See [#4042](https://github.com/Chelis-Lang/chelis/issues/4042).
+
+### Fixed
+
+- Tensor concatenation preserves signed zero and NaN payload bits through static and runtime-width lowering. Optimized tensor square roots return canonical arithmetic NaNs consistently with scalar operations.
+
+  Discarded concat reads extents from its original sources, avoiding internal element-selection checks in untaken differentiated branches.
+
+  Metal rejects the composed concat lowering through its typed logical/selection gate; [#2266](https://github.com/Chelis-Lang/chelis/issues/2266) owns the experimental Metal kernels.
+
+- Preserve named result-extent guards in native C when parameterized record fields declare the extent, including shape-preserving composition and empty tensor data.
+  Retain authored runtime reshape targets and their validation on the host route when tensor lowering cannot represent them.
+
+- Require an explicit Clarabel package version during compiler release bumps, reject reuse of the previous compiler's provider identity before writing files, and preserve allocated versions across dry runs and retries.
+
+- The Reef bootstrap portability oracle requires the release-page budget and window-based tag charging tests, preserving its mandatory-test checks after release discovery changes. This repairs the shared stale-test failure in Linux Extended Validation and macOS Nightly Validation.
+
+- Reef remote discovery downloads a release's source archive only when resolution
+  selects that release. An exact requirement downloads one archive, and a range
+  downloads the newest matching release unless resolution has to walk back past
+  it, so an anonymous `chelis reef build` of a package with many releases no
+  longer exhausts GitHub's 60-request anonymous limit. Discovery now reads a
+  package's complete release listing, up to 1,000 releases, and considers the 64
+  newest releases satisfying each known requirement: the root's, and those of
+  every candidate manifest Reef has read, including local registry entries and
+  requirements learned after the package was first listed. Previously the
+  candidates were one 64-release window ranked when the package was first
+  listed, so a package with many releases could miss an older matching release
+  and fail to resolve.
+
+  Resolution selects what resolver 2 selects over those candidates with every
+  manifest read, and this can differ from the previous discovery in both
+  directions. The wider windows can select a release the previous window dropped
+  or resolve where it failed, and each search now has the whole explored-state
+  limit. The previous discovery could do better in three cases. It read the
+  manifest of every release in its window, including releases it never
+  selected, so a requirement that only such a release declared could lead it to
+  an earlier graph, or to a resolution where discovery now fails. A package with
+  five or more known requirements whose 64 newest matches are disjoint exceeds
+  the 256-candidate limit and fails with the accepted release tags budget. A
+  package with more than 1,000 listed releases fails with the release-page
+  budget, where the previous early-stopping listing could resolve. Because
+  local-first resolution reads the local registry, and a cached release that is
+  never selected still contributes its requirements, a run with a warm registry
+  can select differently from a cold one.
+
+  When GitHub's rate limit refuses a discovery request, the error names the
+  anonymous, token, or secondary limit, gives its reset or retry time, and names
+  `chelis reef install --from-github <org>/<repo>@<tag>` as a way to install
+  without discovery. See [#4063](https://github.com/Chelis-Lang/chelis/issues/4063).
+
+- The `nautilus_quantile_contract` example's vendored `quantile_vec` computes its
+  lower order-statistic index with the truncating cast `cast_trunc`, as Nautilus
+  does. Previously it used the checked `cast`, which traps `domain` whenever
+  `q * (n - 1)` is fractional. Evaluation therefore failed for almost every level,
+  and `chelis prove` reported the example's machine arithmetic as unchecked. The
+  example now evaluates at every level in `[0, 1]`, and its default-tier proof
+  reports machine arithmetic as corroborated. See
+  [#4065](https://github.com/Chelis-Lang/chelis/issues/4065).
+
+- Read complete Surf signatures in `type-suffix-policy`, accepting input-dtype suffixes on tensor conversions while preserving mismatched-suffix and container-dispatch rejections.
+
+- Reduce memory and allocation overhead when checking generated programs by comparing checked binding owners without rebuilding entire expression bodies.
+
+- Avoid replaying unused generic constructor result constraints after tensor-list
+  dimension joining, reducing checker work in shape-heavy function bodies while
+  preserving rank, precision, dimension, and deferred-producer checks.
+
+- Keep host-owned producer operands and computed reshape targets as typed inputs to C tensor helpers, preserving inline range/reshape/expand and symbolic reshape/mean admission, dtypes and runtime guards. Retain checked casts and source-order effects while preparing shape values and registered axis selectors.
+
+  Computed concat/softmax examples also execute through the C parity corpus.
+
+  Reuse scoped operand facts, persistent host type bindings, demanded helper inputs and source-owned name reservations to avoid repeated operand classification, scope-prefix transport and per-application name scans.
+
+  Limit operand preparation to tensor-result candidates so ordinary scalar and List host calls retain one eager argument-lowering pass.
+
+  Retain physical values separately from checked helper axis views so runtime shape guards and symbolic adjoints keep their original frame. Resolve geometry-only dimension inputs on demand.
+
+- The runtime extent oracle recognizes the local-ascription barrier mutation's
+  primitive-attribution rejection while continuing to reject unrelated failures.
+
 ## [0.22.1] - 2026-10-25
 
 ### Fixed
