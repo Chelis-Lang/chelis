@@ -523,7 +523,7 @@ class InvocationOwnership(unittest.TestCase):
             "lowered_library_payload_matches"
         )
         ascription = nominal(
-            "chelis_types::infer::checked::CheckedLocalAscription"
+            "chelis_checker_core::infer::checked::CheckedLocalAscription"
         )
         payload = {"tag": "slice", "element": ascription}
         self.assertEqual(
@@ -549,7 +549,7 @@ class InvocationOwnership(unittest.TestCase):
                 {
                     "tag": "slice",
                     "element": nominal(
-                        "chelis_types::infer::checked::LocalAscriptionId"
+                        "chelis_checker_core::infer::checked::LocalAscriptionId"
                     ),
                 },
             ),

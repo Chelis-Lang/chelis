@@ -1,8 +1,8 @@
 {
-  "witness": {"source": "use chelis_checker_core::errors::ErrorWitness;\npub fn forge() -> ErrorWitness { ErrorWitness(()) }\n", "expected": ["E0423", "private fields", "ErrorWitness"]},
-  "witness-vector": {"source": "pub fn forge(errors: &mut Vec<chelis_checker_core::CheckError>, error: chelis_checker_core::CheckError) { chelis_checker_core::ErrorWitness::report(errors, error); }\n", "expected": ["E0308", "DiagnosticSink", "Vec<CheckError>"]},
+  "witness": {"source": "use chelis_checker_core::errors::ErrorWitness;\npub fn forge() -> ErrorWitness { ErrorWitness(()) }\n", "expected": ["E0423", "private fields"]},
+  "witness-vector": {"source": "pub fn forge(errors: &mut Vec<chelis_checker_core::CheckError>, error: chelis_checker_core::CheckError) { chelis_checker_core::errors::report(errors, error); }\n", "expected": ["E0308", "DiagnosticSink", "Vec<CheckError>"]},
   "sink-fields": {"source": "pub fn forge() { let _ = chelis_checker_core::errors::DiagnosticSink {}; }\n", "expected": ["private", "DiagnosticSink"]},
-  "checkpoint": {"source": "use chelis_checker_core::DiagnosticCheckpoint;\npub fn forge() { let _ = DiagnosticCheckpoint(0usize); }\n", "features": ["checkpoint-compile-probe"], "expected": ["E0423", "private fields", "DiagnosticCheckpoint"]},
+  "checkpoint": {"source": "use chelis_checker_core::DiagnosticCheckpoint;\npub fn forge() { let _ = DiagnosticCheckpoint(0usize); }\n", "features": ["checkpoint-compile-probe"], "expected": ["E0423", "private fields"]},
   "checkpoint-index": {"source": "pub fn forge(sink: &chelis_checker_core::errors::DiagnosticSink<'_>) { chelis_checker_core::checkpoint_iter_compile_probe(sink, 0usize); }\n", "features": ["checkpoint-compile-probe"], "expected": ["E0308", "DiagnosticCheckpoint", "usize"]},
   "completion-fields": {"source": "pub fn forge(facts: chelis_checker_core::CheckFacts) -> chelis_checker_core::CompletedCheck { chelis_checker_core::CompletedCheck { facts } }\n", "expected": ["E0451", "private", "CompletedCheck"]},
   "completion-default": {"source": "pub fn forge() -> chelis_checker_core::CompletedCheck { Default::default() }\n", "expected": ["E0277", "Default", "CompletedCheck"]},

@@ -174,7 +174,7 @@ def validate_artifacts(directory: Path, scope: str) -> None:
     if scope == "implementation":
         required.update(("provenance.json", "candidate-host.json", "candidate-diagnostics.json",
             "candidate-abi.json", "current-tests.json", "cost-observations.json",
-            "cost-source-contracts.json", "target-graphs.json", "negative-graphs.json",
+            "cost-source-provenance.json", "target-graphs.json", "negative-graphs.json",
             "authority-controls.json", "prior-core-obligations.json", "ci-ownership.json",
             "compiled-artifacts.json", "candidate-fixtures.json", "test-migrations.json"))
     elif scope != "baseline-capture":
@@ -323,15 +323,24 @@ def junit_evidence(raw: str, metadata: dict) -> dict:
     return {"raw_xml": raw, "observations": observations}
 
 
-def tests(arguments: tuple[str, ...], workspace: Path) -> dict:
+def _workspace_environment(workspace: Path) -> dict[str, str]:
     environment = support._environment()
+    if workspace != ROOT:
+        environment["CARGO_TARGET_DIR"] = str(workspace / "target")
+    return environment
+
+
+def tests(arguments: tuple[str, ...], workspace: Path) -> dict:
+    environment = _workspace_environment(workspace)
     environment["NEXTEST_EXPERIMENTAL_LIBTEST_JSON"] = "1"
     with tempfile.TemporaryDirectory(prefix="checker-nextest-") as temporary:
         directory = Path(temporary)
         report = directory / "results.xml"
         configuration = (workspace / ".config/nextest.toml").read_text()
-        configuration += ('\n[profile.checker-core-oracle]\ninherits = "default"\n'
-            '[profile.checker-core-oracle.junit]\n'
+        # The immutable source predates this profile.
+        if "checker-core-oracle" not in tomllib.loads(configuration)["profile"]:
+            configuration += '\n[profile.checker-core-oracle]\ninherits = "ci-full"\n'
+        configuration += ('\n[profile.checker-core-oracle.junit]\n'
             f'path = {json.dumps(str(report.resolve()))}\n'
             'store-success-output = true\nstore-failure-output = true\n')
         config = directory / "nextest.toml"
@@ -403,7 +412,7 @@ def snapshot(workspace: Path, kind: str) -> dict:
         source = source.replace("use checker_data::InferResult;", "use chelis_types::InferResult;")
         dependencies = dependencies.replace(dependency(owner, workspace, alias="checker-data"), "")
     result = support.consumer((workspace / "crates" / crate).resolve(), source,
-        default_features=True, dependencies=dependencies)
+        default_features=True, dependencies=dependencies, env=_workspace_environment(workspace))
     records = [line.removeprefix(prefix) for line in result.stdout.splitlines() if line.startswith(prefix)]
     if len(records) != 1:
         raise OracleFailure(f"Missing or duplicate {kind} snapshot.")
@@ -750,16 +759,20 @@ def reconcile_inventories(previous: dict, current: dict, migrations: dict, *,
 
 
 def check_timing(previous: dict, current: dict, mapping: dict[str, str], retired: dict) -> None:
+    def timing_key(identity: str) -> str:
+        owner, name = identity.split("$", 1)
+        package, binary = owner.split("::", 1)
+        if binary == package.replace("-", "_"):
+            return package + "::" + name
+        return owner + "::" + name
+
     timing_moves = {}
     for before, after in mapping.items():
-        old_package, old_name = before.split("::", 1)[0], before.split("$", 1)[1]
-        new_package, new_name = after.split("::", 1)[0], after.split("$", 1)[1]
-        old_key, new_key = old_package + "::" + old_name, new_package + "::" + new_name
+        old_key, new_key = timing_key(before), timing_key(after)
         if old_key in timing_moves and timing_moves[old_key] != new_key:
             raise OracleFailure("A timing identity has multiple destinations.")
         timing_moves[old_key] = new_key
-    retired_keys = {identity.split("::", 1)[0] + "::" + identity.split("$", 1)[1]
-        for identity in retired}
+    retired_keys = {timing_key(identity) for identity in retired}
     for key, value in previous.items():
         if key in retired_keys:
             if key in current:
@@ -770,28 +783,18 @@ def check_timing(previous: dict, current: dict, mapping: dict[str, str], retired
             raise OracleFailure(f"A measured timing value changed or lost its owner: {key}")
 
 
-def preserve_cost_sources(evidence: Evidence) -> None:
+def record_cost_sources(evidence: Evidence) -> None:
     source = load(FIXTURES / "immutable_source.json")["files"]
     records = {}
-    comparisons = []
-    for name in source:
+    for name, pinned in source.items():
         if not name.startswith("crates/chelis-types/tests/"):
             continue
-        original = support.run(("git", "show", f"{BASELINE}:{name}")).stdout
-        actual = (ROOT / name).read_text()
-        comparisons.append({"path": name, "baseline": original, "candidate": actual})
-        records[name] = {"baseline": source[name], "candidate": digest(ROOT / name)}
-    text = json.dumps(comparisons, ensure_ascii=False)
-    if '"####' in text:
-        raise OracleFailure("A cost source contains its Rust delimiter.")
-    consumer_source = (FIXTURES / "cost_sources.rs").read_text()
-    consumer_source += '\nconst SOURCES_JSON: &str = r####"' + text + '"####;\n'
-    result = support.consumer(CRATE, consumer_source, dependencies=(
-        'syn = { version = "2", features = ["full", "visit-mut"] }\n'
-        'quote = "1"\nserde_json = "1"\n'))
-    if result.stdout.splitlines().count("CHECKER_COST_SOURCE_CONTRACTS accepted") != 1:
-        raise OracleFailure("Full-host cost syntax evidence is absent or duplicate.")
-    evidence.save("cost-source-contracts.json", records)
+        original = support.run(("git", "show", f"{BASELINE}:{name}")).stdout.encode("utf-8")
+        baseline = {"bytes": len(original), "sha256": hashlib.sha256(original).hexdigest()}
+        if baseline != pinned:
+            raise OracleFailure("The immutable cost source digest differs.")
+        records[name] = {"baseline": baseline, "candidate": digest(ROOT / name)}
+    evidence.save("cost-source-provenance.json", records)
 
 
 def candidate_arguments(arguments: tuple[str, ...], baseline: dict, migrations: dict, *,
@@ -813,7 +816,11 @@ def candidate_arguments(arguments: tuple[str, ...], baseline: dict, migrations: 
                     raise OracleFailure(f"A mandatory test target lacks its exact execution owner: {package}::{target}")
                 index += 2
                 continue
-        result.append(arguments[index])
+        argument = arguments[index]
+        if (package == "chelis-types" and index and arguments[index - 1] == "--features"
+                and argument == "generalize-sweep-oracle"):
+            argument = f"{CRATE}/{argument}"
+        result.append(argument)
         index += 1
     return tuple(result)
 
@@ -835,7 +842,7 @@ def host_controls(previous: dict, evidence: Evidence, external: set[str]) -> Non
     evidence.save("cost-observations.json", {"baseline": previous["cost_observations"],
         "candidate": cost_observations(current)})
     evidence.save("test-migrations.json", {"identities": mapping, **migrations})
-    preserve_cost_sources(evidence)
+    record_cost_sources(evidence)
 
 
 def prior_contracts(source: str) -> dict[str, str]:

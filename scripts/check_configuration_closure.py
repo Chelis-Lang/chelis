@@ -438,7 +438,6 @@ UNCOMPILED_EXCEPTIONS: tuple[UncompiledException, ...] = (
         sources=(
             "scripts/fixtures/checker_core/abi.rs",
             "scripts/fixtures/checker_core/core.rs",
-            "scripts/fixtures/checker_core/cost_sources.rs",
             "scripts/fixtures/checker_core/diagnostics.rs",
             "scripts/fixtures/checker_core/host.rs",
             "scripts/fixtures/checker_core/host_core.rs",

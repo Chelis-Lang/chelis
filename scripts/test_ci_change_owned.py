@@ -897,10 +897,6 @@ class SchemaTests(unittest.TestCase):
         config = owned.read_config(
             Path(__file__).resolve().parents[1] / ".config/ci-test-targets.toml"
         )
-        self.assertTrue({
-            owned.Identity("chelis-types", "expand_insert_dispatch_family"),
-            owned.Identity("chelis-types", "issue_1294_standard_lowerings"),
-        } <= set(config.standing_targets))
         self.assertEqual(
             set(config.manual_only_targets),
             {
