@@ -895,8 +895,12 @@ FAST_TRIPWIRE_NEXTEST: list[str] = [
     "--test", "skill_set_uniformity",
     "-p", "chelis-compiler-api", "--test", "phase3_gate_inventory",
     "-p", "chelis-types",
-    "--test", "stack_guard_coverage",
     "--test", "runtime_extent_target_manifest",
+]
+FAST_CHECKER_STACK_BOUNDARY: list[str] = [
+    "cargo", "nextest", "run", "--no-fail-fast",
+    "-p", "chelis-checker-core", "--lib",
+    "-E", "test(=infer::tests::stack_exhaustion_drains_into_a_located_error)",
 ]
 FAST_STATIC_COMMANDS: list[list[str]] = [
     REGEN_TIER0_WRITE,
@@ -919,7 +923,7 @@ FAST_DYNAMIC_NOTE = (
     "# --fast runs, fixing in place: <managed-python> scripts/regen_all.py "
     "--tier 0; cargo fmt --all; the chelis lint, eval-system guard, and "
     "std-bundle tracking rows above; cargo clippy -p <crate> --all-targets -- "
-    "-D warnings per changed crate; one nextest run over the drift tripwires; "
+    "-D warnings per changed crate; nextest drift tripwires and the portable checker stack regression; "
     "and when a std path changed, cargo nextest run -p chelis-std-bundle --lib"
 )
 LOCAL_DYNAMIC_NOTE = (
@@ -1463,6 +1467,8 @@ def fast_command_list(
     over the drift tripwires. When a std path changed, the bundle crate's own
     tests follow them. Every writer precedes every check.
 
+    The portable checker stack regression follows the drift tripwires.
+
     The classification is first among the checks because it is the cheapest
     thing here that can reject a push, and because until chelis#2250 an
     unrouted new file passed every local check and then failed `Plan Changed
@@ -1484,6 +1490,7 @@ def fast_command_list(
     for crate in crates:
         commands.append(per_crate_clippy(crate))
     commands.append(FAST_TRIPWIRE_NEXTEST)
+    commands.append(FAST_CHECKER_STACK_BOUNDARY)
     if std_changed:
         commands.append(STD_BUNDLE_SELF_CONSISTENCY)
     return commands

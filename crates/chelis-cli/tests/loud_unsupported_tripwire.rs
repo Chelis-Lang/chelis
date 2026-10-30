@@ -657,6 +657,13 @@ const BASELINE: &[Entry] = &[
     ),
     (
         Pat::RustFormatNarrowing,
+        "crates/chelis-types/src/infer.rs",
+        2,
+        "Native checker elapsed-time profiles replace the three former \
+         inference-program format sites without language payload output (chelis#4054)",
+    ),
+    (
+        Pat::RustFormatNarrowing,
         "crates/chelis-runtime/src/format_shortest.rs",
         2,
         "the sanctioned compiled-lane routine's own spec/05 8.1 \

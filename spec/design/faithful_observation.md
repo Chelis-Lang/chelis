@@ -483,6 +483,12 @@ For every dtype and every storable value:
    and its allowance of two.
    The source collection includes this moved file, not the integration-test tree.
    `loud_unsupported.md` §C5 records the accepted-base relocation.
+
+   Checker extraction [#4054](https://github.com/Chelis-Lang/chelis/issues/4054) moves duration profiles from
+   `crates/chelis-types/src/infer/program.rs` to `crates/chelis-types/src/infer.rs`.
+   One native phase observer serves both phase timers. One declaration timer remains.
+   The exact source allowance decreases from three to two.
+   These sites format elapsed time, not language numeric payloads.
 5. **Discoveries fork** (shared rule): new unfaithful exits found
    mid-phase are filed, added to the census in the tracking issue, and
    scheduled - not silently absorbed.
