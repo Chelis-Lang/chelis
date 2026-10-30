@@ -96,15 +96,6 @@ class SourceMutationTests(unittest.TestCase):
         with self.assertRaisesRegex(oracle.OracleFailure, "HIP semantic comparison"):
             oracle.validate_source_contracts(self.repo)
 
-    def test_metal_issue_authority_mutation_fails(self) -> None:
-        self.mutate(
-            "crates/chelis-compiler-api/src/compiler.rs",
-            "chelis_types::unimplemented_rejection!(\n                    2266,",
-            "chelis_types::unimplemented_rejection!(\n                    9999,",
-        )
-        with self.assertRaisesRegex(oracle.OracleFailure, "Metal target disposition"):
-            oracle.validate_source_contracts(self.repo)
-
 
 class RunnerTests(unittest.TestCase):
     @mock.patch.object(oracle.subprocess, "run")

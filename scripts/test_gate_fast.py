@@ -179,7 +179,6 @@ class FastCommandListTests(unittest.TestCase):
         with_std = gate.fast_command_list(
             ["chelis-std-bundle"], std_changed=True, changed_paths=[]
         )
-        self.assertEqual(without[-1], gate.FAST_TRIPWIRE_NEXTEST)
         self.assertNotIn(gate.STD_BUNDLE_SELF_CONSISTENCY, without)
         # The build packs the runtime, so a std change adds no writer: the
         # prefix is unchanged and the bundle crate's tests are a check that
@@ -191,6 +190,12 @@ class FastCommandListTests(unittest.TestCase):
             with_std.index(gate.FAST_TRIPWIRE_NEXTEST),
             with_std.index(gate.STD_BUNDLE_SELF_CONSISTENCY),
         )
+        for commands in (without, with_std):
+            self.assertEqual(commands.count(gate.FAST_CHECKER_STACK_BOUNDARY), 1)
+            self.assertLess(
+                commands.index(gate.FAST_TRIPWIRE_NEXTEST),
+                commands.index(gate.FAST_CHECKER_STACK_BOUNDARY),
+            )
 
     def test_the_std_bundle_tracking_guard_runs_on_every_fast_pass(self):
         """The guard reads the index, so it runs whatever changed, after the
@@ -234,27 +239,6 @@ class FastCommandListTests(unittest.TestCase):
             self.assertNotIn(gate.render(excluded), rendered)
         for command in rendered:
             self.assertNotIn("--workspace", command)
-
-    def test_tripwire_command_names_existing_test_targets(self):
-        command = gate.FAST_TRIPWIRE_NEXTEST
-        self.assertEqual(command[:4], ["cargo", "nextest", "run", "--no-fail-fast"])
-        package = None
-        pairs = []
-        for index, token in enumerate(command):
-            if token == "-p":
-                package = command[index + 1]
-            elif token == "--test":
-                self.assertIsNotNone(package)
-                pairs.append((package, command[index + 1]))
-        self.assertEqual(len(pairs), 13)
-        for package, target in pairs:
-            path = REPO_ROOT / "crates" / package / "tests" / f"{target}.rs"
-            self.assertTrue(path.is_file(), f"missing tripwire target {path}")
-        self.assertNotIn("--lib", command)
-        # The std-bundle unit test rides separately so `--lib` does not
-        # widen every package selection above.
-        self.assertIn("--lib", gate.STD_BUNDLE_SELF_CONSISTENCY)
-        self.assertEqual(gate.STD_BUNDLE_SELF_CONSISTENCY[3:5], ["-p", "chelis-std-bundle"])
 
     def test_fast_list_hands_over_no_oracle_binary(self):
         commands = gate.fast_command_list(

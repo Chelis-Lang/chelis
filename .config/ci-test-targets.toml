@@ -1173,10 +1173,6 @@ name = "reshape_symbolic_dim_vmap_column"
 # receive ordinary pull-request ownership.
 [[standing_target]]
 package = "chelis-types"
-name = "expand_insert_dispatch_family"
-
-[[standing_target]]
-package = "chelis-types"
 name = "issue_1294_standard_lowerings"
 
 # chelis#2205: the counted receipts for the container-consumer table. Each

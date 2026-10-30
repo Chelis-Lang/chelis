@@ -300,7 +300,7 @@ fn main() {
 
 def authority_fixtures() -> None:
     """Require real Rust failures at each independent authority boundary."""
-    core_dependency = dependency(CRATE)
+    core_dependency = dependency(CRATE) + dependency("chelis-stack-services")
     cases = (
         (
             'use chelis_type_core::Type; use chelis_checker_core::errors::ErrorWitness;\n'
@@ -331,8 +331,10 @@ def authority_fixtures() -> None:
         (
             'use chelis_type_core::{Subst, Type};\n'
             'use chelis_checker_core::{env::Env, errors::ErrorWitness};\n'
-            'pub fn bad() { let foreign: Type<()> = Type::Error(());\n'
-            'Env::new().generalize(&foreign, &Subst::<ErrorWitness>::new()); }\n',
+            'pub fn bad(stack: &impl chelis_stack_services::StackServices) {\n'
+            'let foreign: Type<()> = Type::Error(());\n'
+            'let resources = chelis_checker_core::Resources::new(stack);\n'
+            'Env::new().generalize(&foreign, &Subst::<ErrorWitness>::new(), &resources); }\n',
             ("mismatched types", "ErrorWitness"),
         ),
     )
@@ -514,10 +516,12 @@ def host_parity() -> None:
          "--all-targets", "--no-default-features"))
     # Exclude only the pre-existing census regeneration helper, not behavior tests.
     run(("cargo", "nextest", "run", "--no-fail-fast", "-p", "chelis-types", "--all-targets",
+         "-p", "chelis-checker-core",
          "-E", "not (binary(unresolved_operand_census) & test(=dump_census_rows))"))
     run(("cargo", "nextest", "run", "--no-fail-fast", "-p", "chelis-types",
-         "--lib", "--features", "generalize-sweep-oracle"))
-    run(("cargo", "test", "-p", "chelis-types", "--doc"))
+         "-p", "chelis-checker-core",
+         "--lib", "--features", "chelis-checker-core/generalize-sweep-oracle"))
+    run(("cargo", "test", "-p", "chelis-types", "-p", "chelis-checker-core", "--doc"))
     run(("cargo", "check", "-p", "chelis-cli", "-p", "chelis-effects",
          "-p", "chelis-ir", "-p", "chelis-prove", "-p", "chelis-compiler-api",
          "-p", "chelis-reef", "--all-targets"))

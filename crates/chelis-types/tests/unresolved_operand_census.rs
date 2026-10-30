@@ -9,7 +9,7 @@
 //! shape fails too.
 //!
 //! The census enumerates `match` arms and `if matches!(...)` guards.
-//! It scans `crates/chelis-types/src/infer/**` and the core sources in
+//! It scans `crates/chelis-checker-core/src/infer/**` and the core sources in
 //! `CORE_DECISION_SOURCES`.
 //!
 //! Patterns name `Type::Var` beside `Type::Error`, or a tensor operand with
@@ -22,6 +22,7 @@ use std::path::{Path, PathBuf};
 
 use syn::visit::Visit;
 
+const INFER_SOURCE: &str = "../chelis-checker-core/src/infer";
 const FIXTURE: &str = "tests/fixtures/unresolved_operand_census.json";
 const MATRIX: &str = "tests/unresolved_operand_matrix.rs";
 /// Canonical sources for decisions that moved from host inference.
@@ -34,8 +35,8 @@ const CORE_DECISION_SOURCES: &[&str] = &[
 /// row asserts that the enclosing rule is replayed from here, so the name has
 /// to appear in one of these two files.
 const LEDGER_SOURCES: &[&str] = &[
-    "src/infer/checked/deferred_shape.rs",
-    "src/infer/operand_deferral.rs",
+    "../chelis-checker-core/src/infer/checked/deferred_shape.rs",
+    "../chelis-checker-core/src/infer/operand_deferral.rs",
 ];
 
 /// One enumerated site.
@@ -244,7 +245,7 @@ impl<'ast> Visit<'ast> for Census {
 
 fn infer_sources(root: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
-    let mut stack = vec![root.join("src/infer")];
+    let mut stack = vec![root.join(INFER_SOURCE)];
     while let Some(dir) = stack.pop() {
         for entry in std::fs::read_dir(&dir).expect("readable inference directory") {
             let path = entry.expect("readable entry").path();
@@ -267,7 +268,7 @@ fn collect(root: &Path) -> Vec<Site> {
     let mut sites = Vec::new();
     let sources = infer_sources(root).into_iter().map(|path| {
         let key = path
-            .strip_prefix(root.join("src/infer"))
+            .strip_prefix(root.join(INFER_SOURCE))
             .expect("path under src/infer")
             .to_string_lossy()
             .into_owned();
@@ -865,7 +866,7 @@ fn a_planted_inference_source_is_walked() {
         std::thread::current().id()
     ));
     let host = root.join("chelis-types");
-    let infer = host.join("src/infer");
+    let infer = host.join(INFER_SOURCE);
     std::fs::create_dir_all(infer.join("nested")).expect("temporary tree");
     std::fs::write(
         infer.join("nested/planted_route.rs"),

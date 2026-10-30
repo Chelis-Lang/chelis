@@ -62,6 +62,7 @@ This portable dependency does not make the pipeline core portable.
 `chelis-ir` uses standard collections, thread-local state, and `OnceLock`. Lowering uses `std::panic::catch_unwind` to convert selected panic payloads into diagnostics.
 
 Lowering uses `stacker::grow` and `stacker::maybe_grow`. The IR crate also retains panic paths for internal compiler invariants.
+Checked-product reconstruction uses `chelis-syntax-host::NativeStack` for portable checker operations.
 
 The default dependencies include `serde`, `thiserror`, and `stacker`. `chelis-ir` also inherits blockers from `chelis-types` and `chelis-effects`.
 

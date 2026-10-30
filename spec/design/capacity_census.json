@@ -49,8 +49,8 @@
       },
       {
         "leg": "prelude-adt-numeric",
-        "artifact": "chelis_types::builtins::register_prelude_adts Rust-registered prelude value ADTs",
-        "enumerator": "prelude_adt_rows -> chelis_types::prelude_adt_defs",
+        "artifact": "chelis_checker_core::prelude_adt_defs Rust-registered prelude value ADTs",
+        "enumerator": "prelude_adt_rows -> chelis_checker_core::prelude_adt_defs",
         "command": "cargo nextest run -p chelis-cli --test capacity_census_tripwire",
         "expected_success": "capacity_census_matches_public_surface passes",
         "mutations": [

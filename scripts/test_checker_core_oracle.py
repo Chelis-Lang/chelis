@@ -242,6 +242,22 @@ class MigrationEvidenceTests(unittest.TestCase):
             with self.subTest(current=current), self.assertRaises(oracle.OracleFailure):
                 oracle.check_timing({"old::algorithm": 1.234}, current, mapping, {})
 
+    def test_integration_timing_migration_preserves_binary_and_value(self):
+        mapping = {"old::first$algorithm": "new::second$algorithm"}
+        previous = {"old::first::algorithm": 1.234}
+        oracle.check_timing(previous, {"new::second::algorithm": 1.234}, mapping, {})
+        for current in ({"new::algorithm": 1.234}, {"new::second::algorithm": 0},
+                {"new::second::algorithm": 1.234, "old::first::algorithm": 1.234}):
+            with self.subTest(current=current), self.assertRaises(oracle.OracleFailure):
+                oracle.check_timing(previous, current, mapping, {})
+
+    def test_retired_integration_timing_requires_its_exact_key_to_be_absent(self):
+        previous = {"old::consumer::source_assertion": 0.009}
+        retired = {"old::consumer$source_assertion": {}}
+        oracle.check_timing(previous, {}, {}, retired)
+        with self.assertRaisesRegex(oracle.OracleFailure, "stale timing owner"):
+            oracle.check_timing(previous, previous, {}, retired)
+
 
 class AdditionalFailureControls(unittest.TestCase):
     def test_new_behavior_identities_must_execute_once(self):
@@ -310,11 +326,11 @@ class AdditionalFailureControls(unittest.TestCase):
             source = "pub fn forge() {}"
             fixture = directory / "src/lib.rs"
             record = {"reason": "compiler-message", "target": {"src_path": str(fixture)}, "message": {
-                "level": "error", "message": "ErrorWitness has private fields",
+                "level": "error", "message": "cannot initialize a tuple struct which contains private fields",
                 "code": {"code": "E0423"}, "children": [], "spans": [{
                     "is_primary": True, "file_name": str(fixture), "line_start": 1,
                     "text": [{"text": source}], "label": "private fields"}]}}
-            expected = ["E0423", "ErrorWitness", "private fields"]
+            expected = ["E0423", "private fields"]
             oracle.negative_diagnostics(json.dumps(record), directory, source, expected)
             for mutation in ("dependency", "wrong-code", "wrong-line", "missing-private", "missing-error"):
                 changed = deepcopy(record)

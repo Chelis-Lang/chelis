@@ -905,7 +905,9 @@ class UnattendedBackstopTests(unittest.TestCase):
     def test_the_scan_finds_the_profiles_hosted_jobs_actually_run(self):
         # A scan that silently found nothing would pass every other test here.
         found = unattended_nextest_profiles()
-        self.assertLessEqual({"ci", "ci-fast", "ci-full", "nightly"}, found)
+        self.assertLessEqual(
+            {"ci", "ci-fast", "ci-full", "nightly", "checker-core-oracle"}, found
+        )
         for name in found:
             self.assertIn(name, self.config["profile"], name)
 
@@ -932,9 +934,10 @@ class UnattendedBackstopTests(unittest.TestCase):
                 profiles["ci-full"].pop("slow-timeout")
             else:
                 profiles["ci-full"]["slow-timeout"].pop("terminate-after")
-            with self.subTest(mutation=mutation):
-                timeout = resolved_slow_timeout(profiles, "ci-full")
-                self.assertTrue(timeout is None or "terminate-after" not in timeout)
+            for name in ("ci-full", "checker-core-oracle"):
+                with self.subTest(mutation=mutation, profile=name):
+                    timeout = resolved_slow_timeout(profiles, name)
+                    self.assertTrue(timeout is None or "terminate-after" not in timeout)
 
     def test_the_local_default_profile_keeps_no_backstop(self):
         # chelis#1607: a load-sensitive cap on a contended workstation fires as

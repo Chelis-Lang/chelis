@@ -163,7 +163,7 @@ _NODE = _nominal("chelis_dag_core::dag::NodeId")
 _TYPE = _nominal("chelis_dag_core::dag::TensorType")
 _DEEP = _nominal("chelis_deep::ast::Expr")
 _LOCAL_TENSOR_ASCRIPTION = _nominal(
-    "chelis_types::infer::checked::CheckedLocalAscription"
+    "chelis_checker_core::infer::checked::CheckedLocalAscription"
 )
 _BOOL = ("primitive", "bool")
 _CHECK_REPORT = _nominal(CHECK_REPORT_PROTOCOL.producer_owner)

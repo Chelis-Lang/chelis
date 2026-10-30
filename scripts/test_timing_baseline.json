@@ -1584,7 +1584,7 @@
   "chelis-cli::issue_1314_json_bigint::json_bigint_preserves_exact_tokens_and_refuses_numeric_accessors": 4.061,
   "chelis-cli::issue_1314_json_bigint::json_object_serialization_is_recursive_canonical_unicode_order_in_eval_and_c": 5.451,
   "chelis-cli::issue_1314_json_bigint::parse_json_rejects_float_overflow_loudly": 3.943,
-  "chelis-cli::issue_1314_json_bigint::to_json_rejects_invalid_constructed_bigint_loudly": 3,
+  "chelis-cli::issue_1314_json_bigint::to_json_rejects_invalid_constructed_bigint_loudly": 3.0,
   "chelis-cli::issue_1344_block_alias_ownership::binding_mediated_parameter_return_composes_exactly_once": 0.863,
   "chelis-cli::issue_1344_block_alias_ownership::call_escape_of_parameter_retains_the_result": 0.811,
   "chelis-cli::issue_1344_block_alias_ownership::captured_top_level_copy_in_function_body_frees_once": 0.832,

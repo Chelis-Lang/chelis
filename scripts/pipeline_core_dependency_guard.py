@@ -30,7 +30,7 @@ APPROVED_DIRECT_DEPENDENCIES = frozenset(
 # chelis-type-core owns portable type models and unification.
 # chelis-effects-core owns portable effect data and analysis.
 # chelis-checker-core owns portable semantic checks without host authority.
-# These crates stay below host services.
+# Native IR continuation uses the existing syntax stack adapter.
 APPROVED_WORKSPACE_CLOSURE = frozenset(
     {
         CORE_PACKAGE,
@@ -42,6 +42,7 @@ APPROVED_WORKSPACE_CLOSURE = frozenset(
         "chelis-type-core",
         "chelis-vocab",
         "chelis-stack-services",
+        "chelis-syntax-host",
     }
 )
 DENIED_PACKAGES = frozenset(
