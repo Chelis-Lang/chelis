@@ -5,40 +5,24 @@ use chelis_compiler_api::{
 use chelis_types::unsupported::{RejectionAuthorityKind, Stage, UnsupportedKind};
 
 #[test]
-fn c_softmax_exposes_the_production_unsupported_identity() {
+fn c_softmax_emits_a_translation_unit() {
     let source = include_str!("../../../examples/annotated_concat_softmax.ch");
-    let error = compile(CompileRequest {
+    let result = compile(CompileRequest {
         source_kind: SourceKind::Surf,
         source: source.into(),
         target: CompileTarget::C,
         entry_name: None,
     })
-    .expect_err("C host emission must reject softmax");
-    let diagnostic = error.errors.first().expect("one diagnostic");
-    let identity = diagnostic
-        .unsupported_identity()
-        .expect("unsupported diagnostics retain their typed identity");
-    assert_eq!(identity.brand, "unsupported:");
-    assert_eq!(identity.kind.as_str(), "unsupported_feature");
+    .expect("annotated concat/softmax is admitted by C host emission");
+    assert_eq!(result.target, CompileTarget::C);
     assert_eq!(
-        identity.payload.what,
-        UnsupportedKind::Builtin("softmax".into())
-    );
-    assert_eq!(identity.payload.context, "`chelis build` host emission");
-    assert_eq!(identity.payload.stage, Stage::Codegen("c"));
-    assert_eq!(
-        identity.payload.disposition,
-        RejectionAuthorityKind::Deliberate
-    );
-    assert_eq!(
-        identity.payload.atom.map(|atom| atom.as_str()),
-        Some("[04-TOT-2]")
-    );
-    assert_eq!(identity.payload.tracking_issue, None);
-    assert_eq!(identity.payload.span, None);
-    assert_eq!(
-        identity.payload.supported_alternative.as_deref(),
-        Some("run this program with `chelis eval`")
+        result
+            .files
+            .iter()
+            .filter(|file| file.path.ends_with(".c"))
+            .count(),
+        1,
+        "C compilation emits one translation unit"
     );
 }
 
@@ -68,7 +52,16 @@ fn lowering_rejection_retains_stage_span_and_tracking_metadata() {
         let identity = diagnostic
             .unsupported_identity()
             .expect("lowering must preserve the typed unsupported value");
+        assert_eq!(identity.brand, "unsupported:");
         assert_eq!(identity.kind.as_str(), "unsupported_feature");
+        assert_eq!(
+            identity.payload.what,
+            UnsupportedKind::Construct("a non-literal window list for `reduce_window_max`".into())
+        );
+        assert_eq!(
+            identity.payload.context,
+            "the compiled-backend lowering of `reduce_window_*`"
+        );
         let wire = serde_json::to_value(diagnostic).expect("diagnostic wire value");
         assert_eq!(wire["kind"], "unsupported_feature");
         assert_eq!(wire["span_id"], "surf:82..85");
