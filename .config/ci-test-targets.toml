@@ -4717,6 +4717,15 @@ reason = "The domain slice executes bootstrap target consumers, graph policy, an
 tracking_issue = "chelis#3984"
 
 [[path_rule]]
+prefix = "scripts/test_reef_bootstrap_core_oracle.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "The script tests bind bootstrap oracle requirements to CLI test declarations and reject omitted or filtered cases"
+tracking_issue = "chelis#4059"
+
+[[path_rule]]
 prefix = "scripts/shell_metadata_core_oracle.py"
 disposition = "owner"
 workflow = "heavy-e2e.yml"
