@@ -212,7 +212,7 @@ pub enum RuntimeValue {
         /// The constructor's declared source spelling, the name every exit
         /// renders ([05-OBS-7]). It is the spelling the compiled lane stores,
         /// derived by the same rule
-        /// ([`chelis_types::linked_constructor_source_name`] against the
+        /// ([`chelis_checker_core::opacity::linked_constructor_source_name`] against the
         /// constructor's declared type); in a program without linker names it
         /// equals `ctor`.
         source_name: String,

@@ -3464,7 +3464,7 @@ pub fn rewrite_isolated_entry_modules_with_reef_graph(
         }
         for declaration in &entry.declarations {
             if let Some(name) = entry_decl_binding_name(declaration)
-                && chelis_types::is_linker_format_name(name)
+                && chelis_checker_core::opacity::is_linker_format_name(name)
             {
                 return Err(format!(
                     "`{name}` uses the reef package-linker's reserved internal-name format \
@@ -11646,7 +11646,7 @@ fn rewrite_eval_module_decls(
 /// reserved internal-name format (RFC v6).
 fn reject_linker_format_binding(decl: &Decl) -> Result<(), String> {
     match entry_decl_binding_name(decl) {
-        Some(name) if chelis_types::is_linker_format_name(name) => Err(format!(
+        Some(name) if chelis_checker_core::opacity::is_linker_format_name(name) => Err(format!(
             "`{name}` uses the reef package-linker's reserved internal-name format \
              (`Pkg__`/`pkg__`...), which only the linker may produce; rename the declaration"
         )),
@@ -12720,8 +12720,8 @@ mod tests {
     fn reserved_linker_name_predicate_matches_only_full_mangled_names() {
         // RFC v6: the entry-boundary reserved-name reject must match
         // exactly the names that could self-key via `reef_module_stem`.
-        // CR-7: reef shares the single chelis-types predicate.
-        use chelis_types::is_linker_format_name as is_reserved;
+        // CR-7: Reef uses the canonical portable checker predicate.
+        use chelis_checker_core::opacity::is_linker_format_name as is_reserved;
         assert!(is_reserved("pkg__opq__Demo__Types__forge"));
         assert!(is_reserved("Pkg__opq__Demo__Types__Probability"));
         assert!(is_reserved("pkg__forgepkg__Smoke__Types__forge"));
@@ -12741,7 +12741,7 @@ mod tests {
         // checker now use ONE predicate, so they cannot drift. Pin the
         // borderline cases from the review: a single-underscore name
         // (`pkg_count`) is NOT reserved; the full mangled form is.
-        use chelis_types::is_linker_format_name as is_reserved;
+        use chelis_checker_core::opacity::is_linker_format_name as is_reserved;
         assert!(!is_reserved("pkg_count"));
         assert!(!is_reserved("pkg"));
         assert!(!is_reserved("count_pkg"));

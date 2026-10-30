@@ -3255,6 +3255,10 @@ rec {
             features = [ "alloc" "serde" ];
           }
           {
+            name = "chelis-syntax-host";
+            packageId = "chelis-syntax-host";
+          }
+          {
             name = "chelis-type-core";
             packageId = "chelis-type-core";
             usesDefaultFeatures = false;
@@ -3303,10 +3307,6 @@ rec {
           {
             name = "chelis-surf";
             packageId = "chelis-surf";
-          }
-          {
-            name = "chelis-syntax-host";
-            packageId = "chelis-syntax-host";
           }
           {
             name = "chelis-types";

@@ -20,6 +20,7 @@ chelis-deep.workspace = true
 chelis-effects.workspace = true
 chelis-checker-core.workspace = true
 chelis-types = { path = "../chelis-types" }
+chelis-syntax-host.workspace = true
 chelis-vocab.workspace = true
 num-bigint = "0.4"
 serde.workspace = true
@@ -27,7 +28,6 @@ stacker.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
-chelis-syntax-host.workspace = true
 chelis-types = { path = "../chelis-types", features = ["test-instrumentation"] }
 syn.workspace = true
 chelis-surf.workspace = true
