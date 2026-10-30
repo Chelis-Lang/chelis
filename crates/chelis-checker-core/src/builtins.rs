@@ -940,9 +940,12 @@ pub(crate) fn has_registered_inference_route(name: &str, rule: BuiltinInferenceR
 /// All fields are required — adding a builtin without any field is a
 /// compile error (missing struct field). No `Default` implementation.
 ///
-/// ```compile_fail
-/// // Omitting `realizability` must fail to compile.
-/// use chelis_types::{AxisArgumentLayout, BuiltinCapabilityDecl, BuiltinDecl, BuiltinInferenceRule, InferenceDisposition, ShapeClass};
+/// ```rust,compile_fail
+/// // A declaration needs `realizability`.
+/// use chelis_checker_core::{
+///     AxisArgumentLayout, BuiltinCapabilityDecl, BuiltinDecl, BuiltinInferenceRule,
+///     InferenceDisposition, ShapeClass,
+/// };
 /// let _ = BuiltinDecl {
 ///     name: "x",
 ///     capability: BuiltinCapabilityDecl::NUMERIC_ONLY,
@@ -952,9 +955,12 @@ pub(crate) fn has_registered_inference_route(name: &str, rule: BuiltinInferenceR
 /// };
 /// ```
 ///
-/// ```compile_fail
-/// // Omitting `shape_class` must fail to compile.
-/// use chelis_types::{AxisArgumentLayout, BuiltinCapabilityDecl, BuiltinDecl, BuiltinInferenceRule, InferenceDisposition, Realizability};
+/// ```rust,compile_fail
+/// // A declaration needs `shape_class`.
+/// use chelis_checker_core::{
+///     AxisArgumentLayout, BuiltinCapabilityDecl, BuiltinDecl, BuiltinInferenceRule,
+///     InferenceDisposition, Realizability,
+/// };
 /// let _ = BuiltinDecl {
 ///     name: "x",
 ///     capability: BuiltinCapabilityDecl::NUMERIC_ONLY,
@@ -964,9 +970,11 @@ pub(crate) fn has_registered_inference_route(name: &str, rule: BuiltinInferenceR
 /// };
 /// ```
 ///
-/// ```compile_fail
-/// // Omitting `inference` must fail to compile.
-/// use chelis_types::{AxisArgumentLayout, BuiltinCapabilityDecl, BuiltinDecl, Realizability, ShapeClass};
+/// ```rust,compile_fail
+/// // A declaration needs `inference`.
+/// use chelis_checker_core::{
+///     AxisArgumentLayout, BuiltinCapabilityDecl, BuiltinDecl, Realizability, ShapeClass,
+/// };
 /// let _ = BuiltinDecl {
 ///     name: "x",
 ///     capability: BuiltinCapabilityDecl::NUMERIC_ONLY,
@@ -976,9 +984,12 @@ pub(crate) fn has_registered_inference_route(name: &str, rule: BuiltinInferenceR
 /// };
 /// ```
 ///
-/// ```compile_fail
-/// // Omitting `axis_arguments` must fail to compile.
-/// use chelis_types::{BuiltinCapabilityDecl, BuiltinDecl, BuiltinInferenceRule, InferenceDisposition, Realizability, ShapeClass};
+/// ```rust,compile_fail
+/// // A declaration needs `axis_arguments`.
+/// use chelis_checker_core::{
+///     BuiltinCapabilityDecl, BuiltinDecl, BuiltinInferenceRule, InferenceDisposition,
+///     Realizability, ShapeClass,
+/// };
 /// let _ = BuiltinDecl {
 ///     name: "x",
 ///     capability: BuiltinCapabilityDecl::NUMERIC_ONLY,
@@ -988,9 +999,12 @@ pub(crate) fn has_registered_inference_route(name: &str, rule: BuiltinInferenceR
 /// };
 /// ```
 ///
-/// ```compile_fail
-/// // Omitting `capability` must fail to compile.
-/// use chelis_types::{AxisArgumentLayout, BuiltinDecl, BuiltinInferenceRule, InferenceDisposition, Realizability, ShapeClass};
+/// ```rust,compile_fail
+/// // A declaration needs `capability`.
+/// use chelis_checker_core::{
+///     AxisArgumentLayout, BuiltinDecl, BuiltinInferenceRule, InferenceDisposition,
+///     Realizability, ShapeClass,
+/// };
 /// let _ = BuiltinDecl {
 ///     name: "x",
 ///     inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
