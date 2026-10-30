@@ -5,6 +5,30 @@ use chelis_numeric_core::dtype_semantics::{
 use chelis_numeric_core::prim::Prim;
 
 #[test]
+fn checked_extent_owner_is_explicit_and_closed_in_graph_codecs() {
+    for owner in ["reshape", "concat"] {
+        let json = serde_json::json!({"CheckedExtent": {
+            "owner": owner, "claims": ["rows"], "axis": {"Lit": 1}
+        }});
+        let op: RiscOp = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&op).unwrap(), json);
+        let binary = bincode::serialize(&op).unwrap();
+        let decoded: RiscOp = bincode::deserialize(&binary).unwrap();
+        assert_eq!(serde_json::to_value(decoded).unwrap(), json);
+
+        let mut missing = json.clone();
+        missing["CheckedExtent"]
+            .as_object_mut()
+            .unwrap()
+            .remove("owner");
+        assert!(serde_json::from_value::<RiscOp>(missing).is_err());
+        let mut unknown = json;
+        unknown["CheckedExtent"]["owner"] = serde_json::json!("expand");
+        assert!(serde_json::from_value::<RiscOp>(unknown).is_err());
+    }
+}
+
+#[test]
 fn node_json_and_positional_binary_fields_stay_stable() {
     let node = DagNode {
         id: NodeId(1),

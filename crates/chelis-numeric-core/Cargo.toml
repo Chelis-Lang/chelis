@@ -31,6 +31,10 @@ name = "random_key_reference"
 required-features = ["alloc"]
 
 [[test]]
+name = "issue_3982_sqrt_nan_finalization"
+required-features = ["alloc"]
+
+[[test]]
 name = "scalar_wire"
 required-features = ["serde"]
 

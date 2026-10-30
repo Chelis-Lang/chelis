@@ -321,6 +321,14 @@ CLIPPY_NUMERIC_NO_DEFAULT_FEATURES: list[str] = [
     "cargo", "clippy", "-p", "chelis-numeric-core",
     "--all-targets", "--no-default-features", "--", "-D", "warnings",
 ]
+# The compiler's unified dependency features expose std float intrinsics.
+# Optimized NaN finalization must also run with that graph, not only in the
+# portable core's ordinary debug/default-feature tests (chelis#3982).
+OPTIMIZED_FLOAT_FINALIZATION_TESTS: list[str] = [
+    "cargo", "nextest", "run", "--release", "-p", "chelis-numeric-core",
+    "--features", "serde,serde/std,half/std,chelis-crmath/std",
+    "--test", "issue_3982_sqrt_nan_finalization",
+]
 # Hosted callers enable core Serde and instrumentation through feature unification.
 CLIPPY_TYPE_NO_DEFAULT_FEATURES: list[str] = [
     "cargo", "clippy", "-p", "chelis-type-core",
@@ -652,6 +660,7 @@ STAGES: dict[str, list[list[str]]] = {
         CLIPPY_EFFECT_SERDE,
         FMT_CHECK,
         CHELIS_LINT_CHECK,
+        OPTIMIZED_FLOAT_FINALIZATION_TESTS,
         STD_BUNDLE_REPRODUCIBILITY,
         DOCTEST_TYPES,
         DOCTEST_IR,
@@ -3139,6 +3148,8 @@ def selected_stage_commands(
                 for package in packages
                 if package in TARGETED_DOCTESTS
             )
+            if "chelis-numeric-core" in packages:
+                commands.append(OPTIMIZED_FLOAT_FINALIZATION_TESTS)
     if tests_only:
         selected = [list(commands[0])]
     elif support_only:

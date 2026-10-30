@@ -19,7 +19,10 @@ use chelis_dag_core::dag::{Dag, DimInfo, NodeId, RiscOp, TensorType};
 use chelis_dag_core::grad::grad_dag_checked;
 use chelis_deep::Expr;
 use chelis_ir::axis_admission::check_axis_sources;
+use chelis_ir::eval::{TensorValue, eval_tensor_roots_exact};
 use chelis_ir::lower::lower_subexpr_program;
+use chelis_numeric_core::dtype_semantics::tensor_from_le_payload;
+use chelis_numeric_core::observation::ElementRef;
 use chelis_numeric_core::prim::Prim;
 use chelis_types::unsupported::Stage;
 use chelis_unord::UnordMap;
@@ -89,13 +92,6 @@ fn has_host_concat_placeholder(dag: &Dag) -> bool {
         .any(|node| matches!(&node.op, RiscOp::Load { name } if name.as_str() == "concat"))
 }
 
-fn pad_count(dag: &Dag) -> usize {
-    dag.nodes()
-        .iter()
-        .filter(|node| matches!(node.op, RiscOp::Pad { .. }))
-        .count()
-}
-
 /// REGRESSION TEST (measured red before the repair: with the axis named after
 /// the consuming reshape's `Copy` wrapper the two rows disagree, `concat`
 /// bails, and the pruned DAG is a rank-0 `Load { name: "concat" }` placeholder
@@ -120,31 +116,47 @@ fn two_reshapes_from_one_producer_share_the_extent_name() {
 }
 
 /// REGRESSION TEST (same red measurement as above): the shared name is what
-/// lets `concat` stay on its differentiable Pad+Add cascade instead of the
+/// lets `concat` retain its differentiable tensor lowering instead of the
 /// rank-0 host placeholder that #368 exists to avoid.
 #[test]
-fn shared_producer_concat_lowers_to_pad_add_not_the_host_placeholder() {
+fn shared_producer_concat_keeps_tensor_shape_and_element_bits() {
     let dag = lower_over_symbolic_x(&concat_of_two_rows("(var {} m)", "(var {} m)"));
 
     assert!(
         !has_host_concat_placeholder(&dag),
         "concat must not fall back to the rank-0 host placeholder: {dag:?}"
     );
-    assert_eq!(pad_count(&dag), 2, "one Pad per concat element: {dag:?}");
-
-    // The concat result is the summed pair, widened on the concat axis to 2
+    // The concat result joins two rows, widening the concat axis to 2
     // and unchanged on the shared runtime axis.
     let extent = reshape_axis_dims(&dag)[0].clone();
-    let sum = dag
-        .nodes()
-        .iter()
-        .rev()
-        .find(|node| matches!(node.op, RiscOp::Add))
-        .expect("the Pad cascade ends in an Add");
+    let result = dag.get(dag.roots()[0]).expect("the concat result");
     assert_eq!(
-        sum.output_type.dims,
+        result.output_type.dims,
         vec![DimInfo::Lit(2), extent],
         "concat widens only the concat axis"
+    );
+    let words = [0x8000_0000u32, 0xffc0_0011, 0x7f80_0001];
+    let bytes: Vec<_> = words.iter().flat_map(|word| word.to_le_bytes()).collect();
+    let input =
+        TensorValue::from_storage(vec![3], tensor_from_le_payload(Prim::F32, &bytes).unwrap());
+    let values = eval_tensor_roots_exact(&dag, dag.roots(), |name| {
+        (name == "x").then(|| input.clone())
+    })
+    .expect("the shared runtime extent evaluates");
+    let result = &values[&dag.roots()[0]];
+    assert_eq!(result.shape, [2, 3]);
+    let actual: Vec<_> = (0..result.len())
+        .map(|index| {
+            let ElementRef::F32(value) = result.storage().scalar_at(index).element_ref() else {
+                panic!("the concat retains f32 storage");
+            };
+            value.to_bits()
+        })
+        .collect();
+    assert_eq!(
+        actual,
+        words.repeat(2),
+        "both rows retain their stored element bits"
     );
 }
 

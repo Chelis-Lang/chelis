@@ -2420,7 +2420,8 @@ pub struct WireRecordPatternField {
 ///   version-27 reader does not know the operation.
 /// - `29`: `FloatClassify` retains the stored-width predicates [05-OP-20..22].
 /// - `30`: `Cumsum` retains inclusive ordered prefix/suffix scans [05-OP-33].
-pub const WIRE_DAG_SCHEMA_VERSION: u32 = 30;
+/// - `31`: `CheckedExtent` requires an explicit reshape or concat owner.
+pub const WIRE_DAG_SCHEMA_VERSION: u32 = 31;
 
 /// A typed failure from validating a serialized [`WireDag`] against the
 /// supported schema version (WI-2). This is deliberately its own error
@@ -2884,7 +2885,8 @@ impl WireDag {
                         )));
                     }
                 }
-                WireRiscOp::CheckedReshapeExtent {
+                WireRiscOp::CheckedExtent {
+                    owner,
                     axis: WireRtAxis::Lit { value: axis },
                     claims,
                 } => {
@@ -2901,8 +2903,12 @@ impl WireDag {
                                 .is_none_or(|input| !scalar(&input.output_type))
                         })
                     {
+                        let diagnostic_owner = match owner {
+                            WireExtentCheckOwner::Reshape => "Reshape",
+                            WireExtentCheckOwner::Concat => "Concat",
+                        };
                         return Err(WireDagContractError::new(format!(
-                            "WireDag CheckedReshapeExtent node {} requires an earlier scalar int64 actual, one earlier scalar int64 input per nonempty claim, and a scalar int64 output",
+                            "WireDag Checked{diagnostic_owner}Extent node {} requires an earlier scalar int64 actual, one earlier scalar int64 input per nonempty claim, and a scalar int64 output",
                             node.id
                         )));
                     }
@@ -5717,7 +5723,7 @@ fn wire_axis_origin_uncached(
         WireRiscOp::Shape { .. }
         | WireRiscOp::UniformBoundAdjoint { .. }
         | WireRiscOp::ExtentWitness { .. }
-        | WireRiscOp::CheckedReshapeExtent { .. }
+        | WireRiscOp::CheckedExtent { .. }
         | WireRiscOp::Sum { .. }
         | WireRiscOp::Count { .. }
         | WireRiscOp::MaxReduce { .. }
@@ -6275,6 +6281,14 @@ pub struct WireExtentClaim {
     pub requirement_declares: bool,
 }
 
+/// Closed source-operation ownership for extent equality checks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WireExtentCheckOwner {
+    Reshape,
+    Concat,
+}
+
 /// Closed traversal metadata for the ordered scan wire operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -6478,7 +6492,8 @@ pub enum WireRiscOp {
         requirements: Vec<NonnegativeExtent>,
         claims: Vec<WireExtentClaim>,
     },
-    CheckedReshapeExtent {
+    CheckedExtent {
+        owner: WireExtentCheckOwner,
         claims: Vec<String>,
         axis: WireRtAxis,
     },

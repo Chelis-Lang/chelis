@@ -237,10 +237,12 @@ fn vectorize_axis0_impl(
                 // same prepended batch axis, so the obligation is unchanged.
                 claims: claims.clone(),
             },
-            RiscOp::CheckedReshapeExtent {
+            RiscOp::CheckedExtent {
+                owner,
                 claims,
                 axis: RtAxis::Lit(axis),
-            } => RiscOp::CheckedReshapeExtent {
+            } => RiscOp::CheckedExtent {
+                owner: *owner,
                 claims: claims.clone(),
                 axis: RtAxis::Lit(axis + 1),
             },
@@ -716,7 +718,7 @@ fn bound_input_slots(op: &RiscOp) -> UnordSet<usize> {
         RiscOp::CheckedUnitAxis { .. } => {
             slots.insert(1);
         }
-        RiscOp::CheckedReshapeExtent { claims, .. } => {
+        RiscOp::CheckedExtent { claims, .. } => {
             slots.extend(0..=claims.len());
         }
         _ => {}
@@ -736,7 +738,7 @@ fn shared_bound_nodes(dag: &Dag) -> Result<UnordSet<NodeId>, String> {
         // its scalar result (spec/05 §2.5.1, spec/06 §3.7; chelis#2003).
         if matches!(
             owner.op,
-            RiscOp::CheckedReshapeExtent { .. } | RiscOp::Shape { .. }
+            RiscOp::CheckedExtent { .. } | RiscOp::Shape { .. }
         ) {
             mark_shared_bound(dag, owner.id, &mut shared)?;
         }
@@ -777,7 +779,7 @@ fn shared_bound_nodes(dag: &Dag) -> Result<UnordSet<NodeId>, String> {
 fn shared_scalar_op(op: &RiscOp) -> bool {
     matches!(
         op,
-        RiscOp::CheckedReshapeExtent { .. }
+        RiscOp::CheckedExtent { .. }
             | RiscOp::Cast { .. }
             | RiscOp::NamedCast { .. }
             | RiscOp::Copy
@@ -829,7 +831,7 @@ fn mark_shared_bound(dag: &Dag, id: NodeId, shared: &mut UnordSet<NodeId>) -> Re
                 mark_shared_bound(dag, *input, shared)?;
             }
         }
-        RiscOp::CheckedReshapeExtent { .. }
+        RiscOp::CheckedExtent { .. }
         | RiscOp::Add
         | RiscOp::Sub
         | RiscOp::Mul

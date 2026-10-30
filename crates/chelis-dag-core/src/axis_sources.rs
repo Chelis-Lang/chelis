@@ -406,7 +406,7 @@ pub fn is_same_shape_result_op(op: &RiscOp) -> bool {
         | RiscOp::Scatter { .. }
         | RiscOp::ScatterElements { .. }
         | RiscOp::ExtentWitness { .. }
-        | RiscOp::CheckedReshapeExtent { .. }
+        | RiscOp::CheckedExtent { .. }
         | RiscOp::CheckedUnitAxis { .. } => false,
     }
 }
@@ -858,9 +858,9 @@ pub fn output_axis_sources(dag: &Dag, node: NodeId) -> Vec<AxisSource> {
             .collect(),
 
         // --- Shape query: a rank-0 scalar has no output axis ---
-        RiscOp::Shape { .. }
-        | RiscOp::ExtentWitness { .. }
-        | RiscOp::CheckedReshapeExtent { .. } => Vec::new(),
+        RiscOp::Shape { .. } | RiscOp::ExtentWitness { .. } | RiscOp::CheckedExtent { .. } => {
+            Vec::new()
+        }
         RiscOp::CheckedUnitAxis { .. } => (0..rank).map(|axis| pass_through(id, 0, axis)).collect(),
 
         // --- Memory ---

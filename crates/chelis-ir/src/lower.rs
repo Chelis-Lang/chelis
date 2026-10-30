@@ -9857,6 +9857,13 @@ fn same_physical_tensor_type(actual: &TensorType, view: &TensorType) -> bool {
             .all(|(actual, view)| extent(actual) == extent(view))
 }
 
+/// A slice's element source and the original source governing concat extents.
+/// The growing element prefix is never a metadata source.
+struct ConcatSliceSources {
+    value: NodeId,
+    first: NodeId,
+}
+
 /// The compiler's parameter layout and its physical caller value form one
 /// substitution. Observations use the physical frame; refinements return
 /// through these exact layout steps into the parameter frame.
@@ -20795,7 +20802,7 @@ impl<'program> LowerCtx<'program> {
     }
 
     /// The node-level tail of [`Self::lower_tensor_concat`]: type-check the
-    /// already-lowered elements and emit the Pad+Add cascade. Split out
+    /// already-lowered elements and select their disjoint padded slices. Split out
     /// (chelis#620) so a list that is only statically known as a lowered
     /// VALUE (an [`adt_cons_chain_values`] spine from an unrolled recursive
     /// builder) shares the exact same construction as the expr-level path.
@@ -20868,8 +20875,9 @@ impl<'program> LowerCtx<'program> {
             dims: out_dims,
             precision,
         };
+        let extent_checks = self.concat_extent_checks(nodes, axis);
 
-        // Pad each element to the full shape and sum. `offset` tracks the
+        // Pad each element to the full shape and select its slice. `offset` tracks the
         // start of the current element's slice along the concat axis.
         let mut accumulator: Option<NodeId> = None;
         let mut offset = 0usize;
@@ -20881,28 +20889,26 @@ impl<'program> LowerCtx<'program> {
             // non-concat dims need no concrete extent.
             let mut padding = vec![(RtDim::Lit(0), RtDim::Lit(0)); rank];
             padding[axis] = (RtDim::Lit(before), RtDim::Lit(after));
-            let padded = self.dag.add_node(
-                self.owner(),
-                RiscOp::zero_pad(out_ty.precision, padding),
-                vec![*node],
-                out_ty.clone(),
-                self.current_span_id.clone(),
-            );
-            accumulator = Some(match accumulator {
-                None => padded,
-                Some(prev) => self.dag.add_node(
-                    self.owner(),
-                    RiscOp::Add,
-                    vec![prev, padded],
-                    out_ty.clone(),
-                    self.current_span_id.clone(),
-                ),
-            });
+            accumulator = Some(self.append_concat_slice(
+                ConcatSliceSources {
+                    value: *node,
+                    first: nodes[0],
+                },
+                accumulator,
+                axis,
+                padding,
+                &[],
+                &out_ty,
+            ));
         }
-        accumulator
+        let result = accumulator.expect("a concat has at least one element");
+        for check in extent_checks {
+            self.dag.add_shape_dep(result, check);
+        }
+        Some(result)
     }
 
-    /// chelis#3390: the Pad+Add cascade of [`Self::tensor_concat_from_nodes`]
+    /// chelis#3390: the padded selection of [`Self::tensor_concat_from_nodes`]
     /// inside a `grad` or `vmap` body when some element's concat-axis extent
     /// is known only at run time (a signature name or a wildcard). spec/04 section 4.5.4 rule 3 types the
     /// concat axis `*`; every other axis is the elements' shared axis.
@@ -20927,6 +20933,7 @@ impl<'program> LowerCtx<'program> {
             dims: out_dims,
             precision,
         };
+        let extent_checks = self.concat_extent_checks(nodes, axis);
         let i64_ty = TensorType {
             dims: Vec::new(),
             precision: Prim::Int64,
@@ -20969,25 +20976,192 @@ impl<'program> LowerCtx<'program> {
             let after = sum_extents(self, &extents[index + 1..]);
             let mut padding = vec![(RtDim::Lit(0), RtDim::Lit(0)); rank];
             padding[axis] = (RtDim::Node(1), RtDim::Node(2));
-            let padded = self.dag.add_node(
+            accumulator = Some(self.append_concat_slice(
+                ConcatSliceSources {
+                    value: *node,
+                    first: nodes[0],
+                },
+                accumulator,
+                axis,
+                padding,
+                &[before, after],
+                &out_ty,
+            ));
+        }
+        let result = accumulator.expect("a concat has at least one element");
+        for check in extent_checks {
+            self.dag.add_shape_dep(result, check);
+        }
+        result
+    }
+
+    /// Concat's metadata obligations apply to every source, independently of
+    /// selection and element counts. These scalar checks also remain observable
+    /// when a derivative or dead-result pass no longer needs the moved data.
+    fn concat_extent_checks(&mut self, nodes: &[NodeId], concat_axis: usize) -> Vec<NodeId> {
+        if nodes.len() < 2 {
+            return Vec::new();
+        }
+        let first = nodes[0];
+        let rank = self
+            .dag
+            .get(first)
+            .expect("concat source")
+            .output_type
+            .dims
+            .len();
+        let scalar_type = TensorType {
+            dims: vec![],
+            precision: Prim::Int64,
+        };
+        let mut checks = Vec::new();
+        let mut requirements = Vec::new();
+        for axis in 0..rank {
+            if axis == concat_axis {
+                continue;
+            }
+            let required = self.dag.add_node(
                 self.owner(),
-                RiscOp::zero_pad(precision, padding),
-                vec![*node, before, after],
-                out_ty.clone(),
+                RiscOp::Shape { axis },
+                vec![first],
+                scalar_type.clone(),
                 self.current_span_id.clone(),
             );
-            accumulator = Some(match accumulator {
-                None => padded,
-                Some(prev) => self.dag.add_node(
-                    self.owner(),
-                    RiscOp::Add,
-                    vec![prev, padded],
-                    out_ty.clone(),
-                    self.current_span_id.clone(),
-                ),
-            });
+            requirements.push((axis, required));
         }
-        accumulator.expect("a concat has at least one element")
+        for &source in &nodes[1..] {
+            for &(axis, required) in &requirements {
+                let actual = self.dag.add_node(
+                    self.owner(),
+                    RiscOp::Shape { axis },
+                    vec![source],
+                    scalar_type.clone(),
+                    self.current_span_id.clone(),
+                );
+                checks.push(self.dag.add_node(
+                    self.owner(),
+                    RiscOp::CheckedExtent {
+                        owner: chelis_dag_core::dag::ExtentCheckOwner::Concat,
+                        claims: vec![format!("concat axis {axis}")],
+                        axis: RtAxis::Lit(i32::try_from(axis).expect("tensor rank fits i32")),
+                    },
+                    vec![actual, required],
+                    scalar_type.clone(),
+                    self.current_span_id.clone(),
+                ));
+            }
+        }
+        checks
+    }
+
+    /// Append one disjoint source slice without performing arithmetic on its
+    /// elements ([05-OP-62]). Metadata validation is retained separately from
+    /// Where's selected-branch checks, including for empty tensors.
+    fn append_concat_slice(
+        &mut self,
+        sources: ConcatSliceSources,
+        previous: Option<NodeId>,
+        concat_axis: usize,
+        padding: Vec<(RtDim, RtDim)>,
+        extent_inputs: &[NodeId],
+        output_type: &TensorType,
+    ) -> NodeId {
+        let source = sources.value;
+        let source_type = self
+            .dag
+            .get(source)
+            .expect("lowered concat source")
+            .output_type
+            .clone();
+        let mut inputs = vec![source];
+        inputs.extend_from_slice(extent_inputs);
+        let padded = self.dag.add_node(
+            self.owner(),
+            RiscOp::zero_pad(output_type.precision, padding.clone()),
+            inputs,
+            output_type.clone(),
+            self.current_span_id.clone(),
+        );
+        let Some(previous) = previous else {
+            return padded;
+        };
+        let mut mask_dimensions = output_type.dims.clone();
+        mask_dimensions[concat_axis] = source_type.dims[concat_axis].clone();
+        let mut mask = self.dag.add_node(
+            self.owner(),
+            RiscOp::synth_const(Prim::Bool, 1.0),
+            vec![],
+            TensorType {
+                dims: vec![],
+                precision: Prim::Bool,
+            },
+            self.current_span_id.clone(),
+        );
+        for (axis, dimension) in mask_dimensions.iter().enumerate() {
+            let (size, inputs) = if let Some(extent) = concrete_dim_len(dimension) {
+                (RtDim::Lit(extent), vec![mask])
+            } else {
+                let extent = self.dag.add_node(
+                    self.owner(),
+                    RiscOp::Shape { axis },
+                    vec![if axis == concat_axis {
+                        source
+                    } else {
+                        // Metadata comes from the original source whose axes
+                        // govern concat, independently of the element prefix.
+                        // Reading the prefix would keep inactive selection work
+                        // live when later slices need only these dimensions.
+                        sources.first
+                    }],
+                    TensorType {
+                        dims: vec![],
+                        precision: Prim::Int64,
+                    },
+                    self.current_span_id.clone(),
+                );
+                (RtDim::Node(1), vec![mask, extent])
+            };
+            mask = self.dag.add_node(
+                self.owner(),
+                RiscOp::Expand { axis, size },
+                inputs,
+                TensorType {
+                    dims: mask_dimensions[..=axis].to_vec(),
+                    precision: Prim::Bool,
+                },
+                self.current_span_id.clone(),
+            );
+        }
+        let mut mask_inputs = vec![mask];
+        mask_inputs.extend_from_slice(extent_inputs);
+        let mask = self.dag.add_node(
+            self.owner(),
+            RiscOp::zero_pad(Prim::Bool, padding),
+            mask_inputs,
+            TensorType {
+                dims: output_type.dims.clone(),
+                precision: Prim::Bool,
+            },
+            self.current_span_id.clone(),
+        );
+        // Keep the established prefix first for operand-shape attribution.
+        let outside_slice = self.dag.add_node(
+            self.owner(),
+            RiscOp::Logical(chelis_dag_core::dag::LogicalKind::Not),
+            vec![mask],
+            TensorType {
+                dims: output_type.dims.clone(),
+                precision: Prim::Bool,
+            },
+            self.current_span_id.clone(),
+        );
+        self.dag.add_node(
+            self.owner(),
+            RiscOp::Where,
+            vec![outside_slice, previous, padded],
+            output_type.clone(),
+            self.current_span_id.clone(),
+        )
     }
 
     /// chelis#620: `concat` over list VALUES that are only statically known
@@ -20997,7 +21171,7 @@ impl<'program> LowerCtx<'program> {
     ///     concat; when the list expr is NOT expr-enumerable (so the
     ///     builtin arm's `lower_tensor_concat` would fall to the host
     ///     placeholder) but lowers to a static spine of single tensor
-    ///     nodes, emit the same Pad+Add cascade via
+    ///     nodes, select their disjoint padded slices via
     ///     [`Self::tensor_concat_from_nodes`].
     ///   * `concat(list, list)` — static list append; rebuild the appended
     ///     spine as a `LoweredValue::Adt`.
@@ -23381,7 +23555,7 @@ impl<'program> LowerCtx<'program> {
             // After all checks succeed, actual and required values agree.
             // Retaining the producing tensor keeps every check executable,
             // including when a known actual contradicts a known requirement.
-            RiscOp::CheckedReshapeExtent { .. } => node
+            RiscOp::CheckedExtent { .. } => node
                 .inputs
                 .iter()
                 .find_map(|input| self.independently_known_scalar_extent(*input)),
@@ -24224,12 +24398,13 @@ impl<'program> LowerCtx<'program> {
                 if required.0 < target.0 {
                     let node = self.dag.node_mut(target).expect("reshape target");
                     if matches!(node.op, RiscOp::Copy) {
-                        node.op = RiscOp::CheckedReshapeExtent {
+                        node.op = RiscOp::CheckedExtent {
+                            owner: chelis_dag_core::dag::ExtentCheckOwner::Reshape,
                             claims: Vec::new(),
                             axis,
                         };
                     }
-                    let RiscOp::CheckedReshapeExtent { claims, .. } = &mut node.op else {
+                    let RiscOp::CheckedExtent { claims, .. } = &mut node.op else {
                         unreachable!("reshape target remains a scalar carrier during lowering")
                     };
                     if !node.inputs[1..].contains(&required) {
@@ -24241,7 +24416,8 @@ impl<'program> LowerCtx<'program> {
                     let actual = self.dag.get(target).expect("target").inputs[0];
                     let checked = self.dag.add_node(
                         self.owner(),
-                        RiscOp::CheckedReshapeExtent {
+                        RiscOp::CheckedExtent {
+                            owner: chelis_dag_core::dag::ExtentCheckOwner::Reshape,
                             claims: vec![label],
                             axis,
                         },
@@ -24860,7 +25036,7 @@ impl<'program> LowerCtx<'program> {
             .filter(|witness| {
                 matches!(
                     &self.dag.get(*witness).expect("witness").op,
-                    RiscOp::CheckedReshapeExtent { .. }
+                    RiscOp::CheckedExtent { .. }
                 ) || matches!(&self.dag.get(*witness).expect("witness").op,
                 RiscOp::ExtentWitness { requirements, claims, .. }
                     if !requirements.is_empty() || !claims.is_empty())
@@ -28571,7 +28747,8 @@ mod fused_zero_tests {
             let required = constant(&mut dag, 2);
             let witness = dag.add_node(
                 decl,
-                RiscOp::CheckedReshapeExtent {
+                RiscOp::CheckedExtent {
+                    owner: chelis_dag_core::dag::ExtentCheckOwner::Reshape,
                     claims: vec!["rows".into()],
                     axis: chelis_dag_core::dag::RtAxis::Lit(0),
                 },
@@ -28640,7 +28817,7 @@ mod fused_zero_tests {
                 pruned
                     .nodes()
                     .iter()
-                    .filter(|n| matches!(n.op, RiscOp::CheckedReshapeExtent { .. }))
+                    .filter(|n| matches!(n.op, RiscOp::CheckedExtent { .. }))
                     .count(),
                 1
             );
@@ -34800,7 +34977,7 @@ mod regression_tests {
         // chelis#620: `concat([a], [b])` builds a static Cons spine as a
         // lowered VALUE (invisible to the expr-level collect_cons_chain
         // once bound to a var), and `concat(xs, axis)` over that value
-        // emits the same Pad+Add cascade as the expr-level path. This is
+        // selects the same disjoint slices as the expr-level path. This is
         // the minimal shape of an unrolled recursive patch collector.
         let dag = parse_and_lower_unchecked(
             "(def {} xs (app {} (var {} concat) \
@@ -34810,18 +34987,42 @@ mod regression_tests {
                 (var {type: (t-tensor {} (d-lit {} 2) (t-prim {} f32))} b) (var {} Nil)))) \
              (def {} out (app {} (var {} concat) (var {} xs) (cast {} (lit {} 0) i32)))",
         );
-        let pads = dag
-            .nodes()
-            .iter()
-            .filter(|node| matches!(node.op, RiscOp::Pad { .. }))
-            .count();
-        assert_eq!(pads, 2, "one Pad per appended element: {dag:?}");
         assert!(
             !dag.nodes()
                 .iter()
                 .any(|node| matches!(&node.op, RiscOp::Load { name } if name.as_str() == "concat")),
             "the host-lane concat placeholder must not appear: {dag:?}"
         );
+        let input = |words: &[u32]| {
+            let payload: Vec<_> = words.iter().flat_map(|word| word.to_le_bytes()).collect();
+            crate::eval::TensorValue::from_storage(
+                vec![2],
+                chelis_numeric_core::dtype_semantics::tensor_from_le_payload(Prim::F32, &payload)
+                    .unwrap(),
+            )
+        };
+        let first = input(&[0x8000_0000, 0xffc0_0011]);
+        let second = input(&[0x7f80_0001, 0xbf80_0000]);
+        // This unchecked helper lowers bindings without publishing program roots.
+        let root = dag.nodes().last().expect("tensor concat result").id;
+        let values = crate::eval::eval_tensor_roots_exact(&dag, &[root], |name| match name {
+            "a" => Some(first.clone()),
+            "b" => Some(second.clone()),
+            _ => None,
+        })
+        .unwrap();
+        let output = &values[&root];
+        assert_eq!(output.shape, [4]);
+        assert_eq!(output.prim(), Prim::F32);
+        let words: Vec<_> = (0..output.len())
+            .map(
+                |index| match output.storage().scalar_at(index).element_ref() {
+                    chelis_numeric_core::observation::ElementRef::F32(value) => value.to_bits(),
+                    _ => panic!("concat preserves f32 storage"),
+                },
+            )
+            .collect();
+        assert_eq!(words, [0x8000_0000, 0xffc0_0011, 0x7f80_0001, 0xbf80_0000]);
     }
 
     #[test]

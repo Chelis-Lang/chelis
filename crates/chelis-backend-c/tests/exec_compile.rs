@@ -10489,8 +10489,9 @@ fn shared_runtime_extent_declares_once_and_rechecks_the_later_carrier() {
     let dag =
         chelis_ir::lower::lower_subexpr_program(&expr, scoped, UnordMap::new(), UnordMap::new());
 
-    // The premise: one shared symbol across both rows, and the differentiable
-    // Pad+Add cascade rather than the rank-0 host `concat` placeholder.
+    // The premise: one shared symbol across both rows, and a tensor concat
+    // rather than the rank-0 host placeholder. The native checks below prove
+    // its values and the later carrier's independent rejection.
     let axis_names: Vec<String> = dag
         .nodes()
         .iter()
@@ -10502,13 +10503,13 @@ fn shared_runtime_extent_declares_once_and_rechecks_the_later_carrier() {
         .collect();
     assert_eq!(axis_names.len(), 2, "two rows: {dag:?}");
     assert_eq!(axis_names[0], axis_names[1], "one extent, one symbol");
-    assert_eq!(
-        dag.nodes()
-            .iter()
-            .filter(|node| matches!(node.op, RiscOp::Pad { .. }))
-            .count(),
-        2,
-        "the concat must be the Pad cascade: {dag:?}"
+    assert!(
+        dag.roots().iter().any(|root| {
+            dag.get(*root).is_some_and(|node| {
+                node.output_type.dims.len() == 2 && node.output_type.precision == Prim::F32
+            })
+        }),
+        "the concat must retain its tensor result: {dag:?}"
     );
 
     let generated = codegen(&dag, "shared_extent").expect("shared-extent DAG must emit C");
@@ -11213,7 +11214,7 @@ fn gated_check_graph(kind: &str, bound: i64) -> (Dag, Vec<GatedInput>) {
             };
             return (dag, vec![x_input, n_input, y_input]);
         }
-        "checked reshape" => {
+        "checked reshape" | "checked concat" => {
             // The target extent `n` against the claimed extent 3.
             let required = dag.add_node(
                 owner,
@@ -11231,7 +11232,12 @@ fn gated_check_graph(kind: &str, bound: i64) -> (Dag, Vec<GatedInput>) {
             );
             dag.add_node(
                 owner,
-                RiscOp::CheckedReshapeExtent {
+                RiscOp::CheckedExtent {
+                    owner: if kind == "checked reshape" {
+                        chelis_dag_core::dag::ExtentCheckOwner::Reshape
+                    } else {
+                        chelis_dag_core::dag::ExtentCheckOwner::Concat
+                    },
                     claims: vec!["rows".into()],
                     axis: RtAxis::Lit(0),
                 },
@@ -11250,7 +11256,7 @@ fn gated_check_graph(kind: &str, bound: i64) -> (Dag, Vec<GatedInput>) {
 /// cannot reach from source, because a runtime-extent result has no C
 /// representation there (chelis#600): runtime `shrink`, `stride` and `pad`
 /// bounds, a call's extent claim (`ExtentWitness`) and a checked reshape
-/// target (`CheckedReshapeExtent`), each under a rank-0 activation `a`. The
+/// target (`CheckedExtent`), each under a rank-0 activation `a`. The
 /// DAG evaluator and the compiled C run the same graph. With `a` false both
 /// return the same value (a movement's zeros of its operand's extent; a
 /// claim's unchanged value) and trap nothing; with `a` true both trap, with
@@ -11293,6 +11299,12 @@ fn a_gated_movement_or_extent_claim_checks_only_where_its_activation_holds_in_ev
             2,
             "domain in reshape at i64",
             "numeric trap: domain in reshape at i64",
+        ),
+        (
+            "checked concat",
+            2,
+            "domain in concat at i64",
+            "numeric trap: domain in concat at i64",
         ),
     ];
     let mut failures = Vec::new();
@@ -11379,6 +11391,17 @@ int main(void) {{
                 }
                 text
             });
+            if active && matches!(kind, "checked reshape" | "checked concat") {
+                let operation = kind.strip_prefix("checked ").unwrap();
+                let claim = format!("extent `rows`: claimed = 3, {operation} axis 0 = 2");
+                if !eval.as_ref().is_err_and(|error| error.contains(&claim))
+                    || !c.as_ref().is_err_and(|error| error.contains(&claim))
+                {
+                    failures.push(format!(
+                        "{kind}: expected {claim:?}, eval {eval:?}, C {c:?}"
+                    ));
+                }
+            }
             match (active, &eval, &c) {
                 (false, Ok(eval), Ok(c)) if eval == c => {}
                 (true, Err(eval), Err(c)) if eval.contains(eval_trap) && c.contains(c_trap) => {}

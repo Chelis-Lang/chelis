@@ -122,5 +122,4 @@ The bounded reconstruction oracle and generated fixture cover this copying
 mechanism. They do not establish completion of #4079's original model audits,
 all compiler allocation bounds, or all C-emission/toolchain costs. In particular,
 the large T5, sentiment and LCM components require their own current-head
-measurements. The upstream issue remains open for that work and for further
-unavoidable-input versus avoidable-work attribution.
+measurements and further unavoidable-input versus avoidable-work attribution.

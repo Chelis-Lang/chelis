@@ -486,7 +486,7 @@ class SchemaCases(unittest.TestCase):
                 ]
                 self.assertTrue(any(c.expected is not None for c in selected))
                 self.assertTrue(any(c.expected is None for c in selected))
-            future = f"{carrier}/json/version-31"
+            future = f"{carrier}/json/version-32"
             self.assertIsNone(next(c for c in cases if c.identity == future).expected)
 
     def test_source_coordinates_preserve_point_empty_absent_and_checked_access(self):
@@ -632,7 +632,7 @@ class SchemaCases(unittest.TestCase):
 
         cases = {c.identity: c for c in dag_cases()}
         current = cases["WireDag/json/empty"]
-        self.assertEqual(current.expected["schema_version"], 30)
+        self.assertEqual(current.expected["schema_version"], 31)
         self.assertIsNone(cases["WireDag/json/version-16"].expected)
         self.assertIsNone(cases["WireDag/json/version-17"].expected)
         self.assertIsNone(cases["WireDag/json/version-18"].expected)
@@ -646,7 +646,8 @@ class SchemaCases(unittest.TestCase):
         self.assertIsNone(cases["WireDag/json/version-27"].expected)
         self.assertIsNone(cases["WireDag/json/version-28"].expected)
         self.assertIsNone(cases["WireDag/json/version-29"].expected)
-        self.assertIsNone(cases["WireDag/json/version-31"].expected)
+        self.assertIsNone(cases["WireDag/json/version-30"].expected)
+        self.assertIsNone(cases["WireDag/json/version-32"].expected)
         from capacity_census_wire_structural import structural_evidence
 
         for accepted, rejected in structural_evidence()["dag-version"]:

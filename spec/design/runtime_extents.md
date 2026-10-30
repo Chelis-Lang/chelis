@@ -1082,14 +1082,23 @@ host execution receipts do not certify device execution.
 The checked-extent integration owns #1686 and #1687. It adds two checked
 carriers to the construction and consumer inventory above:
 
-- `CheckedReshapeExtent { claims, axis }` consumes an ordinary scalar `i64`
-  input for the independently computed target and one for each required value.
-  Each requirement is a tagged literal constant or the declaring parameter's
+- `CheckedExtent { owner, claims, axis }` consumes an ordinary scalar `i64`
+  input for the independently observed extent and one for each required value.
+  A reshape requirement is a tagged literal constant or the declaring parameter's
   `ExtentWitness`, selected within the current signature activation before
-  substitution. The nonempty `claims` list contains ordered diagnostic labels,
+  substitution. Concat compares each later source's non-concat axes with the
+  first source's axes, in source and axis order. Its checks are independent of
+  element selection and remain live for empty tensors and discarded results.
+  Movement masks read bystander extents from that original first source,
+  independently of the growing element prefix, so metadata observations do
+  not keep inactive selection work live after the concat value is discarded.
+  The nonempty `claims` list contains ordered diagnostic labels,
   not identities. Each requirement is checked in list order. The checked scalar
-  becomes the reshape target before allocation. All shape-list expressions
-  lower before any of its check carriers; existing `shape_deps` retain every
+  becomes the reshape target before allocation for a reshape check. Its closed `ExtentCheckOwner`
+  distinguishes `Reshape` and `Concat` diagnostic attribution without changing
+  the scalar equality contract or the carrier's check liveness. All reshape
+  shape-list expressions lower before any of its check carriers; existing
+  `shape_deps` retain every
   target producer when only a discarded result's check remains live. Thus a
   later target's arithmetic failure precedes a reshape claim check, as §4.7.3
   requires. Existing static arithmetic folding is retained only when producing

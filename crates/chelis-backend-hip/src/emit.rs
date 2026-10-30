@@ -1800,7 +1800,7 @@ impl HipEmitter {
             // below is a defensive `todo!` if one ever reaches codegen.
             RiscOp::Shape { .. }
             | RiscOp::ExtentWitness { .. }
-            | RiscOp::CheckedReshapeExtent { .. }
+            | RiscOp::CheckedExtent { .. }
             | RiscOp::CheckedUnitAxis { .. } => None,
             RiscOp::Const { .. } => {
                 Some(format!("kernel_fill_{}", node.output_type.precision.name()))
@@ -2898,7 +2898,7 @@ impl HipEmitter {
             // stubs above, reached only if some path bypasses that guard.
             RiscOp::Shape { .. }
             | RiscOp::ExtentWitness { .. }
-            | RiscOp::CheckedReshapeExtent { .. }
+            | RiscOp::CheckedExtent { .. }
             | RiscOp::CheckedUnitAxis { .. } => {
                 todo!(
                     "runtime `shape` value read must have been rejected before HIP codegen by [05-SHAPE-1]. Use `--target c`."
@@ -5534,7 +5534,7 @@ impl HipEmitter {
             // `Shape` materializes a fresh rank-0 scalar (trivially
             // contiguous). It is HIP-rejected before codegen under
             // [05-SHAPE-1], so this arm is only for classification completeness.
-            | RiscOp::Shape { .. } | RiscOp::ExtentWitness { .. } | RiscOp::CheckedReshapeExtent { .. } | RiscOp::CheckedUnitAxis { .. } => true,
+            | RiscOp::Shape { .. } | RiscOp::ExtentWitness { .. } | RiscOp::CheckedExtent { .. } | RiscOp::CheckedUnitAxis { .. } => true,
             RiscOp::Count { .. } => true,
             RiscOp::Store { .. } => {
                 Self::node_is_statically_contiguous(dag, dag.get(id).unwrap().inputs[0])

@@ -650,6 +650,17 @@ REVIEWED: tuple[Row, ...] = (
         ),
     ),
     Row(
+        "crates/chelis-cli/tests/issue_3505_3982_exact_bits.rs",
+        "archive-name",
+        lines=(
+            '.arg(generated.join("libchelis_runtime.a"))',
+        ),
+        disposition="not-lookup",
+        reason=(
+            "links the exact archive `chelis build --emit-c` staged in its output directory"
+        ),
+    ),
+    Row(
         "crates/chelis-cli/tests/issue_352_captured_global_c_emit.rs",
         "archive-name",
         lines=(

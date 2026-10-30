@@ -209,7 +209,12 @@ def a0() -> tensor[1, 2, f32] = reshape(to_tensor([1.0f32, 2.0f32]), [1i64, 2i64
 def b0() -> tensor[1, 3, f32] = reshape(to_tensor([3.0f32, 4.0f32, 5.0f32]), [1i64, 3i64])
 out = reshape(grad(loss, wrt=a)(a0(), b0()), [2i64])
 "#;
-    assert_refused(source, "disagree at axis 1", "disagreeing_bystanders");
+    assert_refused(
+        source,
+        "extent `concat axis 1`: claimed = 2, concat axis 1 = 3\n\
+         numeric trap: domain in concat at i64",
+        "disagreeing_bystanders",
+    );
     let dir = tempdir().unwrap();
     let path = dir.path().join("disagreeing_bystanders.ch");
     write_file(&path, source);

@@ -714,7 +714,8 @@ mod tests {
         );
         let checked = dag.add_node(
             decl,
-            RiscOp::CheckedReshapeExtent {
+            RiscOp::CheckedExtent {
+                owner: chelis_dag_core::dag::ExtentCheckOwner::Reshape,
                 claims: vec!["2".into()],
                 axis: RtAxis::Lit(0),
             },
@@ -1128,7 +1129,8 @@ mod tests {
         );
         let checked = dag.add_node(
             decl,
-            RiscOp::CheckedReshapeExtent {
+            RiscOp::CheckedExtent {
+                owner: chelis_dag_core::dag::ExtentCheckOwner::Reshape,
                 claims: vec!["2".into()],
                 axis: RtAxis::Lit(0),
             },
@@ -1260,7 +1262,8 @@ mod tests {
         );
         let checked = dag.add_node(
             decl,
-            RiscOp::CheckedReshapeExtent {
+            RiscOp::CheckedExtent {
+                owner: chelis_dag_core::dag::ExtentCheckOwner::Reshape,
                 claims: vec!["2".into()],
                 axis: RtAxis::Lit(0),
             },

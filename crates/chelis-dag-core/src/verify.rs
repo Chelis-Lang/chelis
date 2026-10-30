@@ -1342,7 +1342,7 @@ pub fn slot_read(op: &RiscOp, slot: usize) -> SlotRead {
         | RiscOp::Permute { .. }
         | RiscOp::OneHot { .. }
         // Every input and the result are i64 scalars.
-        | RiscOp::CheckedReshapeExtent { .. }
+        | RiscOp::CheckedExtent { .. }
         // Input 0 is the refined tensor itself, not only its extent.
         | RiscOp::CheckedUnitAxis { .. }
         | RiscOp::Const { .. }
@@ -3216,10 +3216,11 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                     ));
                 }
             }
-            RiscOp::CheckedReshapeExtent { claims, .. } => {
+            RiscOp::CheckedExtent { owner, claims, .. } => {
                 if claims.is_empty() || arity != claims.len() + 1 {
                     errors.push(format!(
-                        "checked reshape extent at node {} requires an actual and one scalar input per nonempty claim",
+                        "checked {} extent at node {} requires an actual and one scalar input per nonempty claim",
+                        owner.surf_name(),
                         node.id.0
                     ));
                 }
@@ -3788,14 +3789,16 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
             }
         }
 
-        if let RiscOp::CheckedReshapeExtent {
+        if let RiscOp::CheckedExtent {
+            owner,
             axis: crate::dag::RtAxis::Lit(axis),
             ..
         } = node.op
         {
             if axis < 0 {
                 errors.push(format!(
-                    "checked reshape extent at node {} requires a nonnegative result axis",
+                    "checked {} extent at node {} requires a nonnegative result axis",
+                    owner.surf_name(),
                     node.id.0
                 ));
             }
@@ -3809,7 +3812,8 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                     }))
             {
                 errors.push(format!(
-                    "checked reshape extent at node {} requires scalar i64 inputs and output",
+                    "checked {} extent at node {} requires scalar i64 inputs and output",
+                    owner.surf_name(),
                     node.id.0
                 ));
             }

@@ -620,7 +620,7 @@ pub fn common_subexpr_eliminate(dag: &Dag) -> Dag {
             && !matches!(
                 node.op,
                 RiscOp::ExtentWitness { .. }
-                    | RiscOp::CheckedReshapeExtent { .. }
+                    | RiscOp::CheckedExtent { .. }
                     | RiscOp::CheckedUnitAxis { .. }
                     // Equal capture values in two List calls still have
                     // distinct invocation identities for a later AD pass.
@@ -1220,7 +1220,7 @@ mod tests {
             ("one_hot", RiscOp::OneHot { vocab: 2 }, 1, Prim::Int32, true),
             // Ungated: still not a seeded class. A reshape DOES carry a
             // runtime element-count check of its own, distinct from the
-            // `CheckedReshapeExtent` extent claim (`ExtentClaims`); it is
+            // `CheckedExtent` extent claim (`ExtentClaims`); it is
             // simply not seeded, which chelis#2440 lists as residual.
             (
                 "reshape is Ungated",

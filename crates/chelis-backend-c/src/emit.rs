@@ -2271,10 +2271,12 @@ impl CEmitter {
                 }
                 self.emit_shape(id, *axis as usize, &node.inputs, &node.output_type);
             }
-            RiscOp::CheckedReshapeExtent {
+            RiscOp::CheckedExtent {
+                owner,
                 claims,
                 axis: RtAxis::Lit(axis),
             } => {
+                let operation = owner.surf_name();
                 let actual = node.inputs[0].0;
                 for (claim, input) in claims.iter().zip(&node.inputs[1..]) {
                     let required = input.0;
@@ -2284,8 +2286,10 @@ impl CEmitter {
                     ));
                     self.line(&format!("if ({differs}) {{"));
                     self.indent += 1;
-                    self.line(&format!("fprintf(stderr, \"extent `{claim}`: claimed = %lld, reshape axis {axis} = %lld\\n\", (long long)((const int64_t*)t{required}_data)[0], (long long)((const int64_t*)t{actual}_data)[0]);"));
-                    self.line("chelis_numeric_trap(\"numeric trap: domain in reshape at i64\");");
+                    self.line(&format!("fprintf(stderr, \"extent `{claim}`: claimed = %lld, {operation} axis {axis} = %lld\\n\", (long long)((const int64_t*)t{required}_data)[0], (long long)((const int64_t*)t{actual}_data)[0]);"));
+                    self.line(&format!(
+                        "chelis_numeric_trap(\"numeric trap: domain in {operation} at i64\");"
+                    ));
                     self.indent -= 1;
                     self.line("}");
                 }

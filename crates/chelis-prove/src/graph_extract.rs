@@ -297,7 +297,7 @@ fn check_finite_floats(wire_dag: &WireDag) -> Result<(), GraphExtractError> {
             | WireRiscOp::Stride { .. }
             | WireRiscOp::Shape { .. }
             | WireRiscOp::ExtentWitness { .. }
-            | WireRiscOp::CheckedReshapeExtent { .. }
+            | WireRiscOp::CheckedExtent { .. }
             | WireRiscOp::CheckedUnitAxis { .. }
             | WireRiscOp::Load { .. }
             | WireRiscOp::Store { .. }
@@ -648,7 +648,8 @@ const _: () = {
     // Version 29 adds stored-bit FloatClassify predicates with no embedded
     // numeric payload; they have no real-valued envelope transformer.
     // Version 30 retains ordered scan metadata without embedded numeric payload.
-    assert!(WIRE_DAG_SCHEMA_VERSION == 30);
+    // Version 31 adds closed extent-check ownership, with no embedded numeric payload.
+    assert!(WIRE_DAG_SCHEMA_VERSION == 31);
 };
 
 #[cfg(test)]

@@ -629,7 +629,8 @@ fn checked_fixture() -> WireDag {
         declaration: 0,
         activation: None,
         id: 5,
-        op: WireRiscOp::CheckedReshapeExtent {
+        op: WireRiscOp::CheckedExtent {
+            owner: WireExtentCheckOwner::Reshape,
             claims: vec!["rows".into()],
             axis: WireRtAxis::Lit { value: 0 },
         },
@@ -669,9 +670,44 @@ fn checked_extent_edges_roundtrip_exactly_and_legacy_versions_are_rejected() {
 }
 
 #[test]
+fn checked_extent_wire_requires_a_known_explicit_owner() {
+    for owner in ["reshape", "concat"] {
+        let mut json = serde_json::to_value(checked_fixture()).unwrap();
+        json["nodes"][5]["op"]["kind"] = serde_json::json!("checked_extent");
+        json["nodes"][5]["op"]["owner"] = serde_json::json!(owner);
+        let decoded = WireDag::from_validated_json(&json.to_string()).unwrap();
+        assert_eq!(serde_json::to_value(decoded).unwrap(), json);
+
+        let mut wrong_type = json.clone();
+        wrong_type["nodes"][5]["output_type"]["precision"] = serde_json::json!("f32");
+        let error = WireDag::from_validated_json(&wrong_type.to_string())
+            .unwrap_err()
+            .to_string();
+        let diagnostic_owner = if owner == "reshape" {
+            "Reshape"
+        } else {
+            "Concat"
+        };
+        assert!(error.contains(&format!("WireDag Checked{diagnostic_owner}Extent node 5 requires an earlier scalar int64 actual, one earlier scalar int64 input per nonempty claim, and a scalar int64 output")), "{error}");
+
+        let mut missing = json.clone();
+        missing["nodes"][5]["op"]
+            .as_object_mut()
+            .unwrap()
+            .remove("owner");
+        assert!(WireDag::from_validated_json(&missing.to_string()).is_err());
+        let mut unknown = json.clone();
+        unknown["nodes"][5]["op"]["owner"] = serde_json::json!("expand");
+        assert!(WireDag::from_validated_json(&unknown.to_string()).is_err());
+        json["nodes"][5]["op"]["kind"] = serde_json::json!("checked_reshape_extent");
+        assert!(WireDag::from_validated_json(&json.to_string()).is_err());
+    }
+}
+
+#[test]
 fn multiple_claim_edges_are_bijective_with_labels_on_the_wire() {
     let mut dag = checked_fixture();
-    let WireRiscOp::CheckedReshapeExtent { claims, .. } = &mut dag.nodes[5].op else {
+    let WireRiscOp::CheckedExtent { claims, .. } = &mut dag.nodes[5].op else {
         unreachable!()
     };
     claims.push("outer".into());
@@ -684,7 +720,7 @@ fn multiple_claim_edges_are_bijective_with_labels_on_the_wire() {
     let mut missing = dag.clone();
     missing.nodes[5].inputs.pop();
     assert!(missing.validate_wire_contract().is_err());
-    let WireRiscOp::CheckedReshapeExtent { claims, .. } = &mut dag.nodes[5].op else {
+    let WireRiscOp::CheckedExtent { claims, .. } = &mut dag.nodes[5].op else {
         unreachable!()
     };
     claims.clear();
