@@ -612,8 +612,8 @@ fn a_bumped_envelope_version_byte_is_rejected_as_unsupported() {
         Ok(Some(_)) => panic!("a bumped envelope version must NEVER load as Ok(Some(_))"),
         Ok(None) => { /* tolerated: the envelope may fail to decode first */ }
         Err(CacheError::UnsupportedVersion { stored, expected }) => {
-            assert_eq!(expected, 44, "the running binary expects format version 44");
-            assert_ne!(stored, 44, "the forged version must differ from 44");
+            assert_eq!(expected, 45, "the running binary expects format version 45");
+            assert_ne!(stored, 45, "the forged version must differ from 45");
         }
         Err(CacheError::Corrupt(_) | CacheError::Decode(_)) => {
             // Also acceptable: bumping a byte can break the bincode shape
@@ -713,12 +713,12 @@ fn stdlib_cache_key_folds_the_compiler_version() {
 
     // Byte-for-byte mirror of `stdlib_cache_key`, parameterized on the
     // compiler-version string. The independently expected current stdlib
-    // format is 45, including rank-body evidence and private checked callable occurrence metadata.
+    // format is 46, including explicit extent-check ownership.
     // Assertion (a) verifies that the mirror reproduces the actual writer.
     let recompute = |compiler_version: &str| -> [u8; 32] {
         let mut hasher = Sha256::new();
         hasher.update(b"chelis_std_typecheck_v");
-        hasher.update(45u32.to_le_bytes());
+        hasher.update(46u32.to_le_bytes());
         hasher.update(b"compiler_version");
         hasher.update((compiler_version.len() as u64).to_le_bytes());
         hasher.update(compiler_version.as_bytes());
