@@ -306,31 +306,50 @@ impl InferenceProduct {
                     }
                 }),
         );
-        let mut visible = chelis_type_core::free_tvars(body);
-        let mut equations = Vec::new();
-        loop {
-            let before = equations.len();
-            available.retain(|equation| {
+        // Equations form an undirected dependency graph. Registration order
+        // must not determine the number of closure passes: staged constructors
+        // can publish an outer result after its nested input equations.
+        let mut by_variable = BTreeMap::<TypeVar, Vec<usize>>::new();
+        let variables = available
+            .iter()
+            .enumerate()
+            .map(|(index, equation)| {
                 #[cfg(test)]
                 super::record_result_replay_work(0);
-                let variables: Vec<_> = equation
+                let mut variables: Vec<_> = equation
                     .types()
                     .into_iter()
                     .flat_map(chelis_type_core::free_tvars)
                     .collect();
-                if variables.iter().any(|variable| visible.contains(variable)) {
-                    visible.extend(variables);
-                    equations.push(equation.clone());
-                    false
-                } else {
-                    true
+                variables.sort_unstable();
+                variables.dedup();
+                for &variable in &variables {
+                    by_variable.entry(variable).or_default().push(index);
                 }
-            });
-            if equations.len() == before {
-                break;
+                variables
+            })
+            .collect::<Vec<_>>();
+        let mut visible = chelis_type_core::free_tvars(body);
+        let mut included = vec![false; available.len()];
+        let mut cursor = 0;
+        while let Some(&variable) = visible.get(cursor) {
+            cursor += 1;
+            if let Some(indices) = by_variable.remove(&variable) {
+                for index in indices {
+                    if !included[index] {
+                        #[cfg(test)]
+                        super::record_result_replay_work(0);
+                        included[index] = true;
+                        visible.extend(&variables[index]);
+                    }
+                }
             }
         }
-        equations
+        available
+            .into_iter()
+            .zip(included)
+            .filter_map(|(equation, included)| included.then_some(equation))
+            .collect()
     }
 
     fn result_has_pending_producer_with(

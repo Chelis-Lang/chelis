@@ -98,6 +98,48 @@ fn shared_resolution_preserves_quantifier_alias_boundaries() {
 }
 
 #[test]
+fn staged_instantiation_retains_all_generic_result_equations() {
+    let mut vars = VarGen::default();
+    let variable = vars.fresh_tvar();
+    let body = Type::<Infallible>::function(
+        vec![Type::Var(variable), Type::Var(variable)],
+        Type::Var(variable),
+    );
+    let origin = ResultOrigin::aggregate(&body, &[variable], &[], &[], &mut vars).unwrap();
+    let scheme = Scheme {
+        body,
+        tvars: vec![variable],
+        dvars: vec![],
+        rvars: vec![],
+        constraints: vec![],
+        tvar_restrictions: vec![],
+        result_origin: Some(origin),
+    };
+    let staged_subst = Subst::new();
+    let mut staged_vars = vars.clone();
+    let (staged, equations) = instantiate_scheme_staged(&scheme, &mut staged_vars, &staged_subst);
+    assert!(staged_subst.take_result_constraints().is_empty());
+    assert!(
+        equations
+            .iter()
+            .any(|equation| matches!(equation, ResultConstraint::Join { .. }))
+    );
+    assert!(
+        equations
+            .iter()
+            .any(|equation| matches!(equation, ResultConstraint::Annotation { .. }))
+    );
+    let ordinary_subst = Subst::new();
+    let ordinary = instantiate_scheme(&scheme, &mut vars, &ordinary_subst);
+    assert_eq!(staged.ty, ordinary.ty);
+    assert_eq!(equations, ordinary_subst.take_result_constraints());
+    for equation in equations {
+        staged_subst.record_result_constraint(equation);
+    }
+    assert!(!staged_subst.take_result_constraints().is_empty());
+}
+
+#[test]
 fn shared_scheme_instances_are_independent() {
     let mut vars = VarGen::default();
     let precision = vars.fresh_tvar();

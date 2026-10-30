@@ -55,6 +55,22 @@ pub fn instantiate_scheme<E: Clone + PartialEq>(
     var_gen: &mut VarGen,
     inference_subst: &Subst<E>,
 ) -> InstantiatedScheme<E> {
+    let (instantiated, equations) = instantiate_scheme_staged(scheme, var_gen, inference_subst);
+    for equation in equations {
+        inference_subst.record_result_constraint(equation);
+    }
+    instantiated
+}
+
+/// Freshen a scheme while retaining its result equations outside the ledger.
+/// The caller publishes these equations only if it selects this generic
+/// contract. A specialized route must instead check and stamp its own signature.
+/// Collection contracts and variable restrictions retain ordinary instantiation.
+pub fn instantiate_scheme_staged<E: Clone + PartialEq>(
+    scheme: &Scheme<E>,
+    var_gen: &mut VarGen,
+    inference_subst: &Subst<E>,
+) -> (InstantiatedScheme<E>, Vec<ResultConstraint<E>>) {
     reserve_scheme_ids(scheme, var_gen);
     let origin = scheme.result_origin.as_ref();
     let mut tvars = origin.map_or(&scheme.tvars, |origin| &origin.tvars).clone();
@@ -172,27 +188,31 @@ pub fn instantiate_scheme<E: Clone + PartialEq>(
         let renamed = constraint.map_types(|ty| subst.apply(ty));
         inference_subst.record_collection_contract(renamed);
     }
+    let mut equations = Vec::new();
     if let Some(origin) = origin {
         for equation in &origin.equations {
-            inference_subst.record_result_constraint(equation.map_types(|ty| subst.apply(ty)));
+            equations.push(equation.map_types(|ty| subst.apply(ty)));
         }
         // Origin controls when an equation may supply input evidence; it
         // never replaces the checked signature's required equalities.
         // Instantiate both views together and retain their compatibility
         // as a result constraint, so it cannot admit an unresolved Grad.
         if origin.body != scheme.body {
-            inference_subst.record_result_constraint(crate::model::ResultConstraint::Annotation {
+            equations.push(crate::model::ResultConstraint::Annotation {
                 actual: subst.apply(&origin.body),
                 declared: subst.apply(&scheme.body),
             });
         }
     }
-    InstantiatedScheme {
-        ty: subst.apply(origin.map_or(&scheme.body, |origin| &origin.body)),
-        tvars: tvar_mapping,
-        dvars: dvar_mapping,
-        rvars: rvar_mapping,
-    }
+    (
+        InstantiatedScheme {
+            ty: subst.apply(origin.map_or(&scheme.body, |origin| &origin.body)),
+            tvars: tvar_mapping,
+            dvars: dvar_mapping,
+            rvars: rvar_mapping,
+        },
+        equations,
+    )
 }
 
 pub fn free_tvars<E>(ty: &Type<E>) -> Vec<TypeVar> {

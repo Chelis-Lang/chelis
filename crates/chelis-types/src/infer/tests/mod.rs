@@ -1974,3 +1974,5 @@ mod more;
 mod post_app_ledger_key;
 mod recursion_uniformity;
 mod schedule_invariants;
+
+mod issue_4096;
