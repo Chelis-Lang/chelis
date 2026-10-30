@@ -33,8 +33,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use chelis_checker_core::errors::CheckError;
-#[cfg(test)]
-use chelis_checker_core::errors::CheckErrorKind;
 
 /// Stable sentinel for the error a cancelled evaluation returns.
 ///
@@ -170,6 +168,11 @@ pub fn is_cancellation(message: &str) -> bool {
     chelis_checker_core::cancel::is_cancellation(message)
 }
 
+impl chelis_checker_core::Cancellation for CancelToken {
+    fn is_cancelled(&self) -> bool {
+        self.is_cancelled()
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -302,11 +305,5 @@ mod tests {
                 "{message:?} must not be mistaken for the cancellation sentinel"
             );
         }
-    }
-}
-
-impl chelis_checker_core::Cancellation for CancelToken {
-    fn is_cancelled(&self) -> bool {
-        self.is_cancelled()
     }
 }

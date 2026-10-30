@@ -423,9 +423,11 @@ pub(super) fn pin(
 /// Query pinned variables for the reference generalization oracle and group cleanup tests.
 #[cfg(any(test, feature = "generalize-sweep-oracle"))]
 pub(crate) fn tvar_pinned(v: TypeVar, operation: &crate::resources::Operation<'_>) -> bool {
-    (|ctx: &RefCell<Option<GroupCtx>>| ctx.borrow().as_ref().is_some_and(|c| c.pinned.contains(&v)))(
-        &operation.recursion,
-    )
+    operation
+        .recursion
+        .borrow()
+        .as_ref()
+        .is_some_and(|context| context.pinned.contains(&v))
 }
 
 pub(crate) fn with_pinned_tvars<R>(
@@ -441,11 +443,11 @@ pub(crate) fn with_pinned_tvars<R>(
 
 #[cfg(test)]
 pub(super) fn group_state_counts(operation: &crate::resources::Operation<'_>) -> (usize, usize) {
-    (|ctx: &RefCell<Option<GroupCtx>>| {
-        ctx.borrow()
-            .as_ref()
-            .map_or((0, 0), |group| (group.members.len(), group.pinned.len()))
-    })(&operation.recursion)
+    operation
+        .recursion
+        .borrow()
+        .as_ref()
+        .map_or((0, 0), |group| (group.members.len(), group.pinned.len()))
 }
 
 /// Validate every recorded in-group instantiation under the group's final

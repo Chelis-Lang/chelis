@@ -15,7 +15,7 @@
 //! `build_type_env_from_library`), so `check`, `eval`, `build`, and
 //! `test` all reject the program with the same diagnostic.
 //!
-//! The rejection derives from `chelis_types::BUILTIN_NAMES` — the exact
+//! The rejection derives from `chelis_checker_core::BUILTIN_NAMES` — the exact
 //! table both the evaluator dispatch and IR lowering import — so the
 //! rejected set and the dispatched set can never drift. The
 //! `every_builtin_name_def_is_rejected` sweep pins that table-completeness
