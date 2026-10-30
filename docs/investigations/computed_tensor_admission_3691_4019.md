@@ -318,3 +318,19 @@ also reject unresolved precision without reading caller substitutions; lexical
 payload and callable bindings shadow same-spelled globals. Global-initializer
 controls require one IO effect and an earlier checked-cast trap that suppresses
 all later effects. No type is fabricated for a nonnumeric global.
+
+
+## Rejection-support ownership after admission
+
+The native concat/softmax parity migration removes the final Rust module
+consumer of `tests/common/unsupported_wording.rs`. Its sole snapshot row is
+the superseded C softmax rejection, and the reviewed-wording generator owns
+only that row. Configuration closure therefore exposes an orphaned Rust test
+helper after the admission change.
+
+Retire that helper, its snapshot, the exclusively owned generator/test, and
+their regeneration and hook rows together. The remaining regeneration tests
+retain their stale-leg, fail-fast, ordering and read-only checks using live
+owners. Both tracked hook copies keep identical bytes. The general exact-wording
+review rule remains; live unsupported diagnostics, their negative controls,
+softmax native parity and invalid-axis rejection are unchanged.

@@ -140,7 +140,6 @@ class LegManifestTests(unittest.TestCase):
             [
                 f"{PYTHON} scripts/generate_rejection_registries.py --write",
                 f"{PYTHON} scripts/regenerate_conformance_assets.py",
-                f"{PYTHON} scripts/generate_reviewed_unsupported_wording_snapshot.py",
                 f"{PYTHON} tests/corpus/opaque_invariants/generate_corpus.py",
             ],
         )
@@ -154,7 +153,7 @@ class LegManifestTests(unittest.TestCase):
             recorder = _Recorder()
             code, output = _run(["--tier", "0"], repo_root=root, recorder=recorder)
         self.assertEqual(code, 0, output)
-        self.assertEqual(len(recorder.calls), 4)
+        self.assertEqual(len(recorder.calls), 3)
         for argv, _env in recorder.calls:
             self.assertEqual(argv[0], PYTHON)
             self.assertNotEqual(argv[0], "cargo")
@@ -167,7 +166,7 @@ class LegManifestTests(unittest.TestCase):
         self.assertEqual(code, 0, output)
         rendered = recorder.rendered()
         self.assertEqual(
-            rendered[4:],
+            rendered[3:],
             [
                 "cargo nextest run -p chelis-cli --test capacity_census_tripwire",
                 f"{PYTHON} scripts/runtime_representation_oracle.py --phase 0 --regenerate",
@@ -218,21 +217,17 @@ class CheckModeTests(unittest.TestCase):
         self.assertEqual(
             rendered[1], f"{PYTHON} scripts/regenerate_conformance_assets.py --check"
         )
-        self.assertEqual(
-            rendered[2],
-            f"{PYTHON} scripts/generate_reviewed_unsupported_wording_snapshot.py --check",
-        )
         self.assertTrue(
-            rendered[3].startswith(
+            rendered[2].startswith(
                 f"{PYTHON} tests/corpus/opaque_invariants/generate_corpus.py --out-dir "
             ),
-            rendered[3],
+            rendered[2],
         )
         self.assertEqual(
-            rendered[4], "cargo nextest run -p chelis-cli --test capacity_census_tripwire"
+            rendered[3], "cargo nextest run -p chelis-cli --test capacity_census_tripwire"
         )
         self.assertEqual(
-            rendered[5], f"{PYTHON} scripts/runtime_representation_oracle.py --phase 0"
+            rendered[4], f"{PYTHON} scripts/runtime_representation_oracle.py --phase 0"
         )
         for line in rendered:
             self.assertNotIn("--write", line)
@@ -245,17 +240,17 @@ class CheckModeTests(unittest.TestCase):
             recorder = _Recorder(
                 returncodes={
                     "generate_rejection_registries.py --check": 1,
-                    "generate_reviewed_unsupported_wording_snapshot.py --check": 3,
+                    "regenerate_conformance_assets.py --check": 3,
                 },
                 corpus=root / regen_all.OPAQUE_CORPUS_DIR,
             )
             code, output = _run(["--check"], repo_root=root, recorder=recorder)
         self.assertEqual(code, 1)
         # Every leg still ran (no fail-fast in check mode).
-        self.assertEqual(len(recorder.calls), 4)
+        self.assertEqual(len(recorder.calls), 3)
         self.assertTrue(
             output.rstrip().endswith(
-                "REGEN ALL: STALE (rejection-registry, reviewed-unsupported-wording)"
+                "REGEN ALL: STALE (rejection-registry, conformance-assets)"
             ),
             output,
         )
@@ -312,7 +307,7 @@ class CensusEnvTests(unittest.TestCase):
             checker = _Recorder(corpus=root / regen_all.OPAQUE_CORPUS_DIR)
             code, _out = _run(["--check", "--full"], repo_root=root, recorder=checker, environ=ambient)
         self.assertEqual(code, 0)
-        self.assertGreaterEqual(len(checker.calls), 8)
+        self.assertEqual(len(checker.calls), 7)
         for argv, env in checker.calls:
             self.assertNotIn(regen_all.CENSUS_WRITE_ENV, env, argv)
             self.assertEqual(env.get("KEEP"), "yes")
@@ -484,7 +479,7 @@ class LaunchFailureTests(unittest.TestCase):
         self.assertTrue(
             output.rstrip().endswith(
                 "REGEN ALL: STALE (rejection-registry, conformance-assets, "
-                "reviewed-unsupported-wording, opaque-corpus)"
+                "opaque-corpus)"
             ),
             output,
         )
@@ -562,18 +557,6 @@ class OpaqueCorpusCheckTests(unittest.TestCase):
 
 
 class WriteModeTests(unittest.TestCase):
-    def test_tier_zero_owns_the_reviewed_unsupported_wording_snapshot(self):
-        legs = regen_all.regen_legs(PYTHON)
-        wording = next(
-            leg for leg in legs if leg.name == "reviewed-unsupported-wording"
-        )
-        self.assertEqual(wording.tier, 0)
-        self.assertIn(
-            "scripts/generate_reviewed_unsupported_wording_snapshot.py",
-            wording.write_argv,
-        )
-        self.assertIn("--check", wording.check_argv)
-
     def test_write_mode_stops_at_first_failure_and_names_the_leg(self):
         with tempfile.TemporaryDirectory() as td:
             root = _fake_repo(Path(td))
@@ -585,7 +568,7 @@ class WriteModeTests(unittest.TestCase):
         self.assertTrue(
             output.rstrip().endswith("REGEN ALL: FAIL (conformance-assets, exit 1)"), output
         )
-        self.assertIn("2 later leg(s) not run", output)
+        self.assertIn("1 later leg(s) not run", output)
 
     def test_leg_lines_name_tier_position_and_owned_paths(self):
         with tempfile.TemporaryDirectory() as td:
@@ -593,15 +576,15 @@ class WriteModeTests(unittest.TestCase):
             recorder = _Recorder()
             _code, output = _run([], repo_root=root, recorder=recorder)
         self.assertIn(
-            "[tier 0 1/4] rejection-registry (cargo + python):", output
+            "[tier 0 1/3] rejection-registry (cargo + python):", output
         )
-        self.assertIn("[tier 0 4/4] opaque-corpus (python):", output)
+        self.assertIn("[tier 0 3/3] opaque-corpus (python):", output)
         self.assertIn(
             "owns: spec/design/loud_unsupported_issue_manifest.json, "
             "crates/chelis-types/src/rejection_registry_generated.rs",
             output,
         )
-        self.assertIn("regen_all: write mode, tiers 0, 4 leg(s)", output)
+        self.assertIn("regen_all: write mode, tiers 0, 3 leg(s)", output)
 
 
 class NeverWritesFrozenArtifactsTests(unittest.TestCase):

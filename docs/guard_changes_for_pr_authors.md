@@ -341,12 +341,10 @@ them with complete structured checks. Some public error contracts deliberately
 require exact bytes.
 
 For a message already using a shared reviewed expectation, update that one
-expectation and regenerate its artifact with the owning tool, then run its
-consumer tests. The current softmax wording generator is
-[`generate_reviewed_unsupported_wording_snapshot.py`](../scripts/generate_reviewed_unsupported_wording_snapshot.py).
-It generates a reviewed expectation, not text inferred from the production
-emitter; a changed emitter does not automatically make its new wording correct.
-Do not add another parser for the rendered sentence.
+expectation and regenerate its artifact with the owning tool, then run every
+consumer test. A reviewed expectation records the required wording; changing
+the emitter does not automatically make its new wording correct. Do not add
+another parser for the rendered sentence.
 
 After changing a production `unimplemented_rejection!` citation, regenerate:
 

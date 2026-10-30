@@ -120,7 +120,7 @@ class LegInputDeclarations(unittest.TestCase):
         rows = regen_hooks.parse_commit_legs(commit_leg_table())
         self.assertEqual(
             [row.name for row in rows],
-            ["conformance-assets", "reviewed-unsupported-wording", "opaque-corpus",
+            ["conformance-assets", "opaque-corpus",
              "std-bundle-untracked"],
         )
         for row in rows:
@@ -173,7 +173,7 @@ class PrePushReadOnly(unittest.TestCase):
         legs = regen_hooks.pre_push_legs("PY")
         self.assertEqual(
             [leg.name for leg in legs],
-            ["conformance-assets", "reviewed-unsupported-wording", "opaque-corpus"],
+            ["conformance-assets", "opaque-corpus"],
         )
         self.assertTrue(all(leg.tier == 0 and leg.needs == "python" for leg in legs))
 
