@@ -53,6 +53,7 @@ thread_local! {
     // `HostLoweringSession` (chelis#1835). The push/pop stacks stay: they
     // track where the lowerer currently IS, which is a property of the
     // thread's call stack rather than of the program.
+    static OPERAND_ADMISSION_STACK: RefCell<Vec<OperandAdmissionFacts>> = const { RefCell::new(Vec::new()) };
     static TENSOR_HELPER_PREFLIGHT_STACK:
         RefCell<Vec<UnordMap<usize, TensorHelperPreflightFacts>>> = const { RefCell::new(Vec::new()) };
     // chelis#1829: kernel-decision summary probes that missed the memo and ran
@@ -168,11 +169,238 @@ pub(crate) fn active_native_provider_call() -> Option<(String, String)> {
     NATIVE_PROVIDER_CALL.with(|slot| slot.borrow().clone())
 }
 
+type HostDimensionOwners = PersistentMap<(std::cmp::Reverse<bool>, std::cmp::Reverse<String>), ()>;
+
+/// Lexical host types share storage across nested scopes. All ordered exits
+/// are explicit; input transport can read a name without copying its prefix.
+#[derive(Default)]
+pub(crate) struct HostScope {
+    bindings: PersistentMap<String, HostTypeTerm>,
+    dimension_labels: PersistentMap<String, HostDimensionOwners>,
+    dimensions: PersistentMap<String, HostDimensionOwners>,
+}
+
+impl Clone for HostScope {
+    fn clone(&self) -> Self {
+        record_host_work(|profile| profile.host_scope_clones += 1);
+        Self {
+            bindings: self.bindings.clone(),
+            dimensions: self.dimensions.clone(),
+            dimension_labels: self.dimension_labels.clone(),
+        }
+    }
+}
+
+impl HostScope {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+    fn len(&self) -> usize {
+        self.bindings.len()
+    }
+    #[cfg(test)]
+    fn clear(&mut self) {
+        *self = Self::default();
+    }
+    pub(crate) fn get(&self, name: &str) -> Option<&HostTypeTerm> {
+        record_host_work(|profile| profile.host_scope_lookups += 1);
+        self.bindings.get(name)
+    }
+    pub(crate) fn contains_key(&self, name: &str) -> bool {
+        self.get(name).is_some()
+    }
+    fn dimension_names(ty: &HostTypeTerm) -> BTreeSet<String> {
+        match ty {
+            HostTypeTerm::Tensor(ty) => ty
+                .dims
+                .iter()
+                .filter_map(|dim| match dim {
+                    DimInfo::Named(name, _) => Some(name.clone()),
+                    DimInfo::Lit(_) => None,
+                })
+                .collect(),
+            _ => BTreeSet::new(),
+        }
+    }
+    fn index_dimensions(&mut self, name: &str, names: BTreeSet<String>, add: bool) {
+        let lexical = LoadStoreName::top_level_source_for_label(name)
+            .ok()
+            .flatten()
+            .is_none();
+        let key = (
+            std::cmp::Reverse(lexical),
+            std::cmp::Reverse(name.to_owned()),
+        );
+        for dim in names {
+            for (index, label) in [
+                (&mut self.dimensions, dim.clone()),
+                (
+                    &mut self.dimension_labels,
+                    crate::lower::extent_binder_label(&dim),
+                ),
+            ] {
+                record_host_work(|profile| profile.host_scope_bindings += 1);
+                if add {
+                    index
+                        .get_or_insert_with(label, PersistentMap::new)
+                        .insert(key.clone(), ());
+                } else if let Some(owners) = index.get_mut(&label) {
+                    owners.remove(&key);
+                    if owners.is_empty() {
+                        index.remove(&label);
+                    }
+                }
+            }
+        }
+    }
+
+    pub(crate) fn insert(&mut self, name: String, ty: HostTypeTerm) -> Option<HostTypeTerm> {
+        if let Some(previous) = self.bindings.get(&name) {
+            let before = Self::dimension_names(previous);
+            self.index_dimensions(&name, before, false);
+        }
+        self.index_dimensions(&name, Self::dimension_names(&ty), true);
+        record_host_work(|profile| profile.host_scope_bindings += 1);
+        self.bindings.insert(name, ty)
+    }
+    fn remove(&mut self, name: &str) -> Option<HostTypeTerm> {
+        if let Some(previous) = self.bindings.get(name) {
+            let before = Self::dimension_names(previous);
+            self.index_dimensions(name, before, false);
+        }
+        record_host_work(|profile| profile.host_scope_lookups += 1);
+        self.bindings.remove(name)
+    }
+    #[track_caller]
+    pub(crate) fn to_sorted(&self) -> Vec<(&String, &HostTypeTerm)> {
+        record_host_work(|profile| profile.host_scope_transport_entries += self.len());
+        self.bindings.to_sorted()
+    }
+    fn has_dimension(&self, name: &str) -> bool {
+        record_host_work(|profile| profile.host_scope_lookups += 1);
+        self.dimensions.contains_key(name)
+    }
+    fn dimension_source(&self, binder: &str) -> Option<(String, TensorType)> {
+        // Wildcards reserve names but declare no named equality, as in the
+        // ordered interface's parameter witness construction.
+        if binder.is_empty() || binder == "*" {
+            return None;
+        }
+        record_host_work(|profile| profile.host_scope_lookups += 2);
+        let source = [&self.dimensions, &self.dimension_labels]
+            .into_iter()
+            .filter_map(|index| index.get(binder)?.last_where(|(lexical, _), _| lexical.0))
+            .map(|(key, _)| &key.1.0)
+            .min()?;
+        Some((
+            source.clone(),
+            tensor_type_from_host_input(self.get(source)?)?,
+        ))
+    }
+}
+
+impl crate::lower::SignaturelessScope for HostScope {
+    fn numeric_type(&self, name: &str) -> Option<TensorType> {
+        if LoadStoreName::top_level_source_for_label(name)
+            .ok()
+            .flatten()
+            .is_some()
+        {
+            return None;
+        }
+        tensor_type_from_host_input(self.get(name)?)
+    }
+    fn contains_lexical_name(&self, name: &str) -> bool {
+        LoadStoreName::top_level_source_for_label(name)
+            .ok()
+            .flatten()
+            .is_none()
+            && self.contains_key(name)
+    }
+    fn host_payload_type(&self, name: &str) -> Option<HostTypeTerm> {
+        if LoadStoreName::top_level_source_for_label(name)
+            .ok()
+            .flatten()
+            .is_some()
+        {
+            return None;
+        }
+        self.get(name)
+            .filter(|ty| tensor_helper_input_is_host_payload(ty))
+            .cloned()
+    }
+    fn dimension_source(&self, binder: &str) -> Option<(String, TensorType)> {
+        HostScope::dimension_source(self, binder)
+    }
+}
+
+pub(crate) fn note_signatureless_scope_scan(expr: &Expr) {
+    record_host_work(|profile| profile.helper_scope_expr_nodes += deep_expr_nodes(expr));
+}
+
+pub(crate) fn note_signatureless_input_load() {
+    record_host_work(|profile| profile.helper_input_loads += 1);
+}
+
+pub(crate) fn note_signatureless_global_lookup() {
+    record_host_work(|profile| profile.helper_global_lookup_steps += 1);
+}
+
+impl Extend<(String, HostTypeTerm)> for HostScope {
+    fn extend<T: IntoIterator<Item = (String, HostTypeTerm)>>(&mut self, iter: T) {
+        for (name, ty) in iter {
+            self.insert(name, ty);
+        }
+    }
+}
+impl FromIterator<(String, HostTypeTerm)> for HostScope {
+    fn from_iter<T: IntoIterator<Item = (String, HostTypeTerm)>>(iter: T) -> Self {
+        let mut scope = Self::new();
+        scope.extend(iter);
+        scope
+    }
+}
+impl From<UnordMap<String, HostTypeTerm>> for HostScope {
+    fn from(map: UnordMap<String, HostTypeTerm>) -> Self {
+        record_host_work(|profile| profile.host_scope_transport_entries += map.len());
+        map.into_sorted().into_iter().collect()
+    }
+}
+impl<const N: usize> From<[(String, HostTypeTerm); N]> for HostScope {
+    fn from(bindings: [(String, HostTypeTerm); N]) -> Self {
+        bindings.into_iter().collect()
+    }
+}
+
+impl std::ops::Index<&str> for HostScope {
+    type Output = HostTypeTerm;
+    fn index(&self, name: &str) -> &Self::Output {
+        self.get(name).expect("bound host name")
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct HostWorkProfile {
     host_expr_visits: usize,
     max_host_expr_depth: usize,
+    admission_expr_visits: usize,
+    reservation_expr_visits: usize,
+    reservation_lookups: usize,
+    reservation_name_bytes: usize,
+    operand_param_entries: usize,
+    operand_view_axes: usize,
+    operand_scope_clone_entries: usize,
+    host_scope_lookups: usize,
+    host_scope_transport_entries: usize,
+    host_scope_bindings: usize,
+    host_scope_clones: usize,
+    helper_input_loads: usize,
+    helper_global_lookup_steps: usize,
+    helper_scope_expr_nodes: usize,
+    operand_fact_nodes: usize,
+    record_operand_visits: usize,
     app_clone_nodes: usize,
+    max_app_clone_nodes: usize,
     tensor_helper_attempts: usize,
     tensor_helper_successes: usize,
     tensor_helper_fallbacks: usize,
@@ -364,7 +592,7 @@ fn pop_inlining(name: &str) {
 fn inlining_would_capture(
     program: &HostLoweringSession<'_>,
     callee: &str,
-    scope: &UnordMap<String, HostTypeTerm>,
+    scope: &HostScope,
     _site: &Expr,
 ) -> bool {
     let Some((_, body)) = program.def_named(callee) else {
@@ -399,17 +627,13 @@ fn builtin_payload_origin_key(name: &str) -> String {
 }
 
 /// Bind a lexical host name and invalidate inherited callable provenance.
-fn bind_host_local(scope: &mut UnordMap<String, HostTypeTerm>, name: String, ty: HostTypeTerm) {
+fn bind_host_local(scope: &mut HostScope, name: String, ty: HostTypeTerm) {
     scope.remove(&callable_origin_key(&name));
     scope.remove(&builtin_payload_origin_key(&name));
     scope.insert(name, ty);
 }
 
-fn bind_top_level_callable(
-    scope: &mut UnordMap<String, HostTypeTerm>,
-    name: &str,
-    ty: HostTypeTerm,
-) {
+fn bind_top_level_callable(scope: &mut HostScope, name: &str, ty: HostTypeTerm) {
     scope.insert(name.to_string(), ty);
     scope.insert(callable_origin_key(name), HostTypeTerm::Unit);
 }
@@ -417,7 +641,7 @@ fn bind_top_level_callable(
 /// Whether `name` is lexically bound in `scope`, rather than recorded there
 /// as a visible top-level callable. A lexical binding shadows every
 /// definition of its spelling.
-fn host_lexically_binds(scope: &UnordMap<String, HostTypeTerm>, name: &str) -> bool {
+fn host_lexically_binds(scope: &HostScope, name: &str) -> bool {
     scope.contains_key(name) && !scope.contains_key(&callable_origin_key(name))
 }
 
@@ -640,6 +864,10 @@ pub struct HostLoweringSession<'program> {
 /// covariant in its program lifetime.
 #[derive(Default)]
 struct TopLevelNameIndex {
+    /// Every checked source name, including unread binders and metadata.
+    /// Read-only ownership lookup for fresh operand names, shared with this
+    /// index's program lifetime rather than rebuilt at each application.
+    operand_source_names: OnceLock<UnordSet<String>>,
     defs: NameTable,
     defsigs: NameTable,
     /// The functions whose signature inference records an authored
@@ -791,6 +1019,22 @@ impl<'program> HostLoweringSession<'program> {
             Some(shared) => shared.names.get_or_init(build),
             None => self.names.get_or_init(build),
         }
+    }
+
+    fn operand_name_is_source_owned(&self, name: &str) -> bool {
+        self.names()
+            .operand_source_names
+            .get_or_init(|| {
+                let mut names = UnordSet::new();
+                for expr in self.program.exprs() {
+                    collect_operand_source_names(expr, &mut names);
+                }
+                for name in self.program.type_env().keys() {
+                    reserve_operand_source_name(name, &mut names);
+                }
+                names
+            })
+            .contains(name)
     }
 
     fn item_at(&self, path: &[usize]) -> Option<&'program Expr> {
@@ -1053,6 +1297,183 @@ impl CallableScope {
             }
         }
     }
+}
+
+/// Facts belong to one owned application and its lexical lowering. Rewritten
+/// expressions and callee bodies obtain independent guards; no pointer escapes
+/// the corresponding immutable expression's lifetime.
+struct OperandAdmissionFacts {
+    root: usize,
+    scope: usize,
+    operands: UnordMap<usize, AdmissionOutcome>,
+    record_reads: UnordMap<usize, bool>,
+}
+
+struct OperandAdmissionGuard<'expr, 'scope> {
+    _owner: std::marker::PhantomData<(&'expr Expr, &'scope HostScope, std::rc::Rc<()>)>,
+}
+
+impl<'expr, 'scope> OperandAdmissionGuard<'expr, 'scope> {
+    fn begin(
+        expr: &'expr Expr,
+        program: &HostLoweringSession<'_>,
+        scope: &'scope HostScope,
+    ) -> Self {
+        let defs = cached_program_defs(program);
+        let declaration_type = |name: &str| lookup_declared_host_type(program, name);
+        let mut walk = UncarriableWalk {
+            defs: &defs,
+            declaration_type: &declaration_type,
+            incoming_scope: Some(scope),
+            operand_capture: Some(UnordMap::new()),
+            active: UnordSet::new(),
+            completed: UnordMap::new(),
+            cycle_cutoff: false,
+            #[cfg(test)]
+            def_visits: 0,
+            admit_dropout: false,
+            scopes: vec![UnordMap::new()],
+        };
+        if let Some((DeepTag::App, _, children)) = stamped_parts(expr) {
+            // Only operands are prepared. Inert callable values and a callee's
+            // body do not become another scan of the enclosing application.
+            for operand in children.iter().skip(1).filter(|arg| operand_does_work(arg)) {
+                walk.analyze_expr(operand);
+            }
+        }
+        let operands = walk
+            .operand_capture
+            .take()
+            .expect("operand capture remains owned by its caller");
+        let record_reads = scoped_record_operand_facts(expr, program, scope);
+        OPERAND_ADMISSION_STACK.with(|stack| {
+            stack.borrow_mut().push(OperandAdmissionFacts {
+                root: expr as *const Expr as usize,
+                scope: scope as *const _ as usize,
+                operands,
+                record_reads,
+            });
+        });
+        Self {
+            _owner: std::marker::PhantomData,
+        }
+    }
+}
+
+impl Drop for OperandAdmissionGuard<'_, '_> {
+    fn drop(&mut self) {
+        OPERAND_ADMISSION_STACK.with(|stack| {
+            stack
+                .borrow_mut()
+                .pop()
+                .expect("operand fact guard is balanced");
+        });
+    }
+}
+
+fn cached_operand_admission(parent: &Expr, operand: &Expr, scope: &HostScope) -> Option<bool> {
+    OPERAND_ADMISSION_STACK.with(|stack| {
+        for facts in stack.borrow().iter().rev() {
+            // Re-entering the same tree under a new activation cannot inherit
+            // the previous activation's scope, even before the old guard drops.
+            if facts.root == parent as *const Expr as usize
+                && facts.scope != scope as *const _ as usize
+            {
+                return None;
+            }
+            if facts.scope != scope as *const _ as usize {
+                continue;
+            }
+            if let Some(host) = facts.operands.get(&(operand as *const Expr as usize)) {
+                return Some(host.reason.is_some());
+            }
+        }
+        None
+    })
+}
+
+fn cached_operand_record_read(parent: &Expr, operand: &Expr, scope: &HostScope) -> Option<bool> {
+    OPERAND_ADMISSION_STACK.with(|stack| {
+        for facts in stack.borrow().iter().rev() {
+            if facts.root == parent as *const Expr as usize
+                && facts.scope != scope as *const _ as usize
+            {
+                return None;
+            }
+            if facts.scope != scope as *const _ as usize {
+                continue;
+            }
+            if let Some(reads) = facts.record_reads.get(&(operand as *const Expr as usize)) {
+                return Some(*reads);
+            }
+        }
+        None
+    })
+}
+
+/// The record-read predicate has the same caller scope and immutable tree
+/// lifetime as admission. Fold it once, without entering callable binders.
+fn scoped_record_operand_facts(
+    expr: &Expr,
+    program: &HostLoweringSession<'_>,
+    scope: &HostScope,
+) -> UnordMap<usize, bool> {
+    let mut subterms = UnordMap::new();
+    let mut reads = UnordMap::new();
+    let mut pending = vec![(expr, false)];
+    while let Some((expr, ready)) = pending.pop() {
+        let key = expr as *const Expr as usize;
+        if subterms.contains_key(&key) {
+            continue;
+        }
+        let children: &[Expr] = match expr {
+            Expr::MetaExpr(meta, _) => std::slice::from_ref(&meta.expr),
+            _ => match stamped_parts(expr) {
+                Some((DeepTag::Fn | DeepTag::Var, _, _)) | None => &[],
+                Some((_, _, children)) => children,
+            },
+        };
+        if !ready {
+            pending.push((expr, true));
+            pending.extend(children.iter().rev().map(|child| (child, false)));
+            continue;
+        }
+        record_host_work(|profile| profile.record_operand_visits += 1);
+        let children_hold = children.iter().any(|child| {
+            *subterms
+                .get(&(child as *const Expr as usize))
+                .expect("post-order child record disposition")
+        });
+        let (holds, operand_read) = match expr {
+            Expr::MetaExpr(_, _) => (
+                children_hold,
+                *reads
+                    .get(&(&children[0] as *const Expr as usize))
+                    .expect("post-order child record-read fact"),
+            ),
+            _ => match stamped_parts(expr) {
+                Some((DeepTag::Var, _, children)) => {
+                    let holds = children
+                        .first()
+                        .and_then(symbol_name)
+                        .and_then(|name| scope.get(name))
+                        .is_some_and(holds_adt_value);
+                    (holds, holds)
+                }
+                Some((DeepTag::Fn, _, _)) | None => (false, false),
+                Some(_) => (
+                    children_hold
+                        || checked_type_expr(expr)
+                            .and_then(|ty| decode_expanded_host_type_expr(program, ty))
+                            .is_some_and(|ty| holds_adt_value(&ty)),
+                    children_hold,
+                ),
+            },
+        };
+        subterms.insert(key, holds);
+        reads.insert(key, operand_read);
+    }
+    reads
 }
 
 /// Limits pointer-keyed tensor-helper preflight facts to the lifetime of the
@@ -3673,7 +4094,7 @@ fn lower_host_program_with_execution(
     let mut host = HostProgram::default();
     let mut global_tensor_helpers = TensorHelperSink::new(collect_trace);
     let mut function_execution = Vec::new();
-    let mut global_scope = UnordMap::new();
+    let mut global_scope = HostScope::new();
     // Count pure-tensor `fn`-body top-level defs in the program. When there
     // is more than one, the legacy DAG-only path would collapse them into a
     // single file-named entry point that drops all but one def's parameters
@@ -4863,7 +5284,7 @@ pub struct HostDefKernel {
 struct HostDefSignature {
     name: String,
     params: Vec<HostParam>,
-    scope: UnordMap<String, HostTypeTerm>,
+    scope: HostScope,
     ret_ty: HostTypeTerm,
     body_expr: Expr,
     /// The authored result's claims on tensors nested below its top level,
@@ -5253,6 +5674,8 @@ pub(crate) fn body_form_the_dag_cannot_carry(
     let mut walk = UncarriableWalk {
         defs: &defs,
         declaration_type: &declaration_type,
+        incoming_scope: None,
+        operand_capture: None,
         active: UnordSet::new(),
         completed: UnordMap::new(),
         cycle_cutoff: false,
@@ -5322,6 +5745,8 @@ fn contains_computed_callable_application(expr: &Expr) -> bool {
 /// Lexical scopes retain constructor scrutinees, checked concat producers,
 /// and callable representation evidence. None evaluates arbitrary expressions.
 struct UncarriableWalk<'a> {
+    incoming_scope: Option<&'a HostScope>,
+    operand_capture: Option<UnordMap<usize, AdmissionOutcome>>,
     defs: &'a BTreeMap<String, Expr>,
     declaration_type: &'a dyn Fn(&str) -> Option<HostTypeTerm>,
     active: UnordSet<String>,
@@ -5607,11 +6032,26 @@ impl UncarriableWalk<'_> {
         self.analyze_expr(expr).callable
     }
 
-    fn bound(&self, name: &str) -> Option<bool> {
+    fn binding(&self, name: &str) -> Option<Cow<'_, AdmissionBinding>> {
         self.scopes
             .iter()
             .rev()
-            .find_map(|scope| scope.get(name).map(|binding| binding.constructor))
+            .find_map(|scope| scope.get(name))
+            .map(Cow::Borrowed)
+            .or_else(|| {
+                let ty = self.incoming_scope?.get(name)?;
+                record_host_work(|profile| profile.operand_param_entries += 1);
+                Some(Cow::Owned(AdmissionBinding {
+                    tuple: CallableProductFacts::from_type(ty).tuple,
+                    callable: CallableFacts::from_parameter(Some(ty)),
+                    constructor: false,
+                    concat: ConcatInputFact::from_type(ty),
+                }))
+            })
+    }
+
+    fn bound(&self, name: &str) -> Option<bool> {
+        self.binding(name).map(|binding| binding.constructor)
     }
 
     fn concat_input_fact(&self, expr: &Expr) -> ConcatInputFact {
@@ -5619,10 +6059,8 @@ impl UncarriableWalk<'_> {
             && let Some(name) = kids.first().and_then(symbol_name)
         {
             return self
-                .scopes
-                .iter()
-                .rev()
-                .find_map(|scope| scope.get(name).map(|binding| binding.concat.clone()))
+                .binding(name)
+                .map(|binding| binding.concat.clone())
                 .unwrap_or(ConcatInputFact::Unknown);
         }
         if let Some(elements) = crate::lower::collect_cons_chain(expr) {
@@ -5791,6 +6229,26 @@ impl UncarriableWalk<'_> {
     /// One result per lexical visit: no recursive callable prewalk precedes
     /// the representation walk. Original expressions retain every contract.
     fn analyze_expr(&mut self, expr: &Expr) -> AdmissionOutcome {
+        record_host_work(|profile| profile.admission_expr_visits += 1);
+        let key = expr as *const Expr as usize;
+        if let Some(outcome) = self
+            .operand_capture
+            .as_ref()
+            .and_then(|facts| facts.get(&key))
+        {
+            return outcome.clone();
+        }
+        // An operand fact must also cover children beneath a host-only call.
+        // Capture their scoped outcomes once before the ordinary application
+        // analysis, which can return immediately on the parent's host reason.
+        // The ordinary non-capturing admission decision keeps its traversal.
+        if self.operand_capture.is_some()
+            && let Some((DeepTag::App, _, children)) = stamped_parts(expr)
+        {
+            for child in children {
+                self.analyze_expr(child);
+            }
+        }
         let mut outcome = match expr {
             Expr::Atom(Atom::Str(_), _) => AdmissionOutcome::host(
                 "a string literal, which has no numeric IR constant (chelis#856)",
@@ -5823,6 +6281,10 @@ impl UncarriableWalk<'_> {
                 "inconsistent checked callable evidence has no tensor-DAG admission proof"
                     .to_string(),
             );
+        }
+        if let Some(facts) = &mut self.operand_capture {
+            record_host_work(|profile| profile.operand_fact_nodes += 1);
+            facts.insert(key, outcome.clone());
         }
         outcome
     }
@@ -5881,7 +6343,7 @@ impl UncarriableWalk<'_> {
                 let Some(name) = kids.first().and_then(symbol_name) else {
                     return AdmissionOutcome::default();
                 };
-                if let Some(binding) = self.scopes.iter().rev().find_map(|scope| scope.get(name)) {
+                if let Some(binding) = self.binding(name) {
                     let mut outcome = AdmissionOutcome::value(binding.callable);
                     outcome.tuple = binding.tuple.clone();
                     return outcome;
@@ -6136,6 +6598,10 @@ impl UncarriableWalk<'_> {
                 }
             }
             DeepTag::Fn => {
+                // A callback's body is lowered with its own parameter scope.
+                // Its admission contributes to this value's disposition, but
+                // its node addresses cannot cache the caller's context.
+                let capture = self.operand_capture.take();
                 self.scopes
                     .push(admission_parameters(kids, None).into_iter().collect());
                 let reason = kids
@@ -6143,6 +6609,7 @@ impl UncarriableWalk<'_> {
                     .map(|body| self.analyze_expr(body))
                     .and_then(|outcome| outcome.reason);
                 self.scopes.pop();
+                self.operand_capture = capture;
                 AdmissionOutcome {
                     tuple: None,
                     reason,
@@ -6368,6 +6835,8 @@ impl UncarriableWalk<'_> {
         // A declaration never inherits the caller's lexical bindings. The
         // same canonical owner and exact-input cache serve aliases and calls.
         let saved = std::mem::replace(&mut self.scopes, vec![params.into_iter().collect()]);
+        let incoming = self.incoming_scope.take();
+        let capture = self.operand_capture.take();
         let outcome = match function {
             // Stamped Fn nodes have exactly params and body: Node validates
             // arity at construction and transactional replacement boundaries.
@@ -6375,6 +6844,8 @@ impl UncarriableWalk<'_> {
             None => self.analyze_expr(body),
         };
         self.scopes = saved;
+        self.incoming_scope = incoming;
+        self.operand_capture = capture;
         self.active.remove(name);
         if !self.cycle_cutoff {
             self.completed
@@ -6963,14 +7434,11 @@ fn record_literal_result_transfer(signature: &HostDefSignature, sink: &mut Tenso
 /// A `Load` named after a builtin means the lowerer treated a host-lane
 /// builtin as a free variable; emitting that DAG would reference a symbol
 /// that does not exist.
-fn kernel_dag_loads_builtin(
-    dag: &chelis_dag_core::Dag,
-    scope: &UnordMap<String, HostTypeTerm>,
-) -> Option<String> {
+fn kernel_dag_loads_builtin(dag: &chelis_dag_core::Dag, scope: &HostScope) -> Option<String> {
     crate::lower::builtin_loads(dag)
         .find(|name| {
             scope
-                .get(*name)
+                .get(name)
                 .and_then(tensor_type_from_host_input)
                 .is_none()
         })
@@ -6983,7 +7451,7 @@ fn kernel_dag_loads_builtin(
 fn lower_kernel_dag(
     expr: &Expr,
     program: &HostLoweringSession<'_>,
-    scope: &UnordMap<String, HostTypeTerm>,
+    scope: &HostScope,
     declaring_params: Option<&[HostParam]>,
     expected: &TensorType,
     transfer_literal_result_claims: bool,
@@ -7013,7 +7481,7 @@ fn lower_kernel_dag(
 
 fn kernel_scope_types(
     program: &HostLoweringSession<'_>,
-    scope: &UnordMap<String, HostTypeTerm>,
+    scope: &HostScope,
     declaring_params: Option<&[HostParam]>,
 ) -> Vec<(String, TensorType)> {
     match declaring_params {
@@ -7062,7 +7530,7 @@ fn host_def_signature(
         .or_else(|| lookup_declared_fn_type(program, name))
         .unwrap_or((Vec::new(), fresh_host_inference()));
 
-    let mut scope = UnordMap::new();
+    let mut scope = HostScope::new();
     let mut params = Vec::new();
     let body_expr = if let Expr::Node(node, _) = body {
         if node.tag() == DeepTag::Fn {
@@ -7331,7 +7799,7 @@ fn synthesize_callable_application(
 fn try_lower_prepared_named_call_helper(
     expr: &Expr,
     program: &HostLoweringSession<'_>,
-    scope: &UnordMap<String, HostTypeTerm>,
+    scope: &HostScope,
     helpers: &mut TensorHelperSink,
     expected: TensorType,
 ) -> Option<HostExpr> {
@@ -7347,11 +7815,13 @@ fn try_lower_prepared_named_call_helper(
         context = context.with_tensor_callsite_specialization(specialization.clone());
     }
     let product = lower_tensor_helper_with(expr, program, || {
-        crate::lower::try_lower_prepared_named_call(
+        crate::lower::try_lower_scoped_helper(
             expr,
-            collect_tensor_scope(program, scope, Some(expr)).into_sorted(),
+            scope,
             &context,
-            &expected,
+            crate::lower::ScopedHelperKind::Prepared,
+            Some(&expected),
+            None,
             helpers.collect_trace,
         )
     })?;
@@ -7390,7 +7860,7 @@ fn try_lower_prepared_named_call_helper(
 fn try_lower_tensor_helper_call(
     expr: &Expr,
     program: &HostLoweringSession<'_>,
-    scope: &UnordMap<String, HostTypeTerm>,
+    scope: &HostScope,
     tensor_helpers: &mut TensorHelperSink,
     expected: TensorType,
 ) -> Option<HostExpr> {
@@ -7400,7 +7870,7 @@ fn try_lower_tensor_helper_call(
 fn try_lower_tensor_helper_call_with_context(
     expr: &Expr,
     program: &HostLoweringSession<'_>,
-    scope: &UnordMap<String, HostTypeTerm>,
+    scope: &HostScope,
     tensor_helpers: &mut TensorHelperSink,
     expected: TensorType,
     lowering_context: &crate::lower::SubexprLoweringContext,
@@ -7419,7 +7889,7 @@ fn try_lower_tensor_helper_call_with_context(
 fn try_lower_tensor_helper_call_inner(
     expr: &Expr,
     program: &HostLoweringSession<'_>,
-    scope: &UnordMap<String, HostTypeTerm>,
+    scope: &HostScope,
     tensor_helpers: &mut TensorHelperSink,
     expected: TensorType,
     lowering_context: Option<&crate::lower::SubexprLoweringContext>,
@@ -7511,7 +7981,7 @@ fn try_lower_tensor_helper_call_inner(
 fn identity_tensor_helper_matches_expected(
     dag: &chelis_dag_core::Dag,
     expected: &TensorType,
-    scope: &UnordMap<String, HostTypeTerm>,
+    scope: &HostScope,
 ) -> bool {
     let [root] = dag.roots() else {
         return true;
@@ -7591,7 +8061,7 @@ fn hoisted_local_name(hoists: &mut Vec<HoistedProjection>, candidate: HoistedPro
 fn hoist_record_projections(
     expr: &Expr,
     program: &HostLoweringSession<'_>,
-    scope: &UnordMap<String, HostTypeTerm>,
+    scope: &HostScope,
     bound: &UnordSet<String>,
     hoists: &mut Vec<HoistedProjection>,
 ) -> Expr {
@@ -7911,7 +8381,7 @@ fn is_bound_bare_projection(node_tag: DeepTag, index: usize, child: &Expr) -> bo
 fn record_projection_hoist(
     expr: &Expr,
     program: &HostLoweringSession<'_>,
-    scope: &UnordMap<String, HostTypeTerm>,
+    scope: &HostScope,
     bound: &UnordSet<String>,
 ) -> Option<HoistedProjection> {
     let HostTypeTerm::Tensor(ty) = expr_host_type(expr, program, scope) else {
@@ -7985,7 +8455,7 @@ fn tensor_helper_input_is_host_payload(ty: &HostTypeTerm) -> bool {
 
 fn bind_tensor_helper_payloads(
     context: crate::lower::SubexprLoweringContext,
-    scope: &UnordMap<String, HostTypeTerm>,
+    scope: &HostScope,
 ) -> crate::lower::SubexprLoweringContext {
     context.with_host_payloads(scope.to_sorted().into_iter().filter_map(|(name, ty)| {
         let lexical = LoadStoreName::top_level_source_for_label(name)
@@ -7998,9 +8468,26 @@ fn bind_tensor_helper_payloads(
 
 fn tensor_helper_context(
     program: &HostLoweringSession<'_>,
-    scope: &UnordMap<String, HostTypeTerm>,
+    scope: &HostScope,
 ) -> crate::lower::SubexprLoweringContext {
     bind_tensor_helper_payloads(cached_subexpr_lowering_context(program), scope)
+}
+
+fn tensor_helper_context_for_bindings<'a>(
+    program: &HostLoweringSession<'_>,
+    scope: &HostScope,
+    bindings: impl IntoIterator<Item = &'a HostBinding>,
+) -> crate::lower::SubexprLoweringContext {
+    let _ = scope;
+    cached_subexpr_lowering_context(program).with_local_host_inputs(
+        bindings
+            .into_iter()
+            .filter(|binding| {
+                matches!(binding.ty, HostTypeTerm::Tensor(_))
+                    && !matches!(binding.value.kind, HostExprKind::Var(..))
+            })
+            .map(|binding| binding.name.clone()),
+    )
 }
 
 // Observation changes the returned product, never helper admission or failure
@@ -8055,22 +8542,26 @@ fn lower_tensor_helper_with<T>(
 fn lower_tensor_helper_dag(
     expr: &Expr,
     program: &HostLoweringSession<'_>,
-    scope: &UnordMap<String, HostTypeTerm>,
+    scope: &HostScope,
     expected: &TensorType,
     context: &crate::lower::SubexprLoweringContext,
     root_operation: Option<StaticBuiltinValue>,
 ) -> Option<chelis_dag_core::Dag> {
-    let context = bind_tensor_helper_payloads(context.clone(), scope);
     lower_tensor_helper_with(expr, program, || {
-        let dag = crate::lower::try_lower_tensor_helper_program_with_ordered_inputs(
+        let product = crate::lower::try_lower_scoped_helper(
             expr,
-            collect_tensor_scope(program, scope, Some(expr)).into_sorted(),
-            &context,
+            scope,
+            context,
+            crate::lower::ScopedHelperKind::Tensor,
             None,
-            false,
             root_operation,
+            false,
         )?;
-        remap_tensor_helper_dim_symbols(&dag, scope, expected)
+        #[cfg(feature = "lowering-trace")]
+        let (lowered, _) = product.into_parts();
+        #[cfg(not(feature = "lowering-trace"))]
+        let (lowered,) = product.into_parts();
+        remap_tensor_helper_dim_symbols(&lowered.dag, scope, expected)
     })
 }
 
@@ -8083,7 +8574,7 @@ struct LoweredTensorHelper {
 fn lower_tensor_helper_product(
     expr: &Expr,
     program: &HostLoweringSession<'_>,
-    scope: &UnordMap<String, HostTypeTerm>,
+    scope: &HostScope,
     expected: &TensorType,
     collect_trace: bool,
     lowering_context: Option<&crate::lower::SubexprLoweringContext>,
@@ -8097,28 +8588,24 @@ fn lower_tensor_helper_product(
         record_host_work(|profile| profile.tensor_helper_dag_rejections += 1);
         return None;
     }
-    let context = bind_tensor_helper_payloads(
-        lowering_context
-            .cloned()
-            .unwrap_or_else(|| cached_subexpr_lowering_context(program)),
-        scope,
-    );
-    // Host payload binding preserves the separately supplied whole callable values.
+    let context = lowering_context
+        .cloned()
+        .unwrap_or_else(|| cached_subexpr_lowering_context(program));
     #[cfg(feature = "lowering-trace")]
     if collect_trace {
         return lower_tensor_helper_with(expr, program, || {
-            let scoped = collect_tensor_scope(program, scope, Some(expr)).into_sorted();
-            let (dag, trace) =
-                crate::lower::try_lower_tensor_helper_program_with_ordered_inputs_and_trace(
-                    expr,
-                    scoped,
-                    &context,
-                    None,
-                    false,
-                    root_operation,
-                )?;
-            let dag = remap_tensor_helper_dim_symbols(&dag, scope, expected)?;
-            let mut trace = trace;
+            let product = crate::lower::try_lower_scoped_helper(
+                expr,
+                scope,
+                &context,
+                crate::lower::ScopedHelperKind::Tensor,
+                None,
+                root_operation,
+                true,
+            )?;
+            let (lowered, trace) = product.into_parts();
+            let dag = remap_tensor_helper_dim_symbols(&lowered.dag, scope, expected)?;
+            let mut trace = trace.expect("requested helper trace");
             trace.record_dimension_rebinding(&dag);
             Ok(LoweredTensorHelper {
                 dag,
@@ -8138,16 +8625,24 @@ fn lower_tensor_helper_product(
 fn lower_tensor_helper_dag_with_controls(
     expr: &Expr,
     program: &HostLoweringSession<'_>,
-    scope: &UnordMap<String, HostTypeTerm>,
+    scope: &HostScope,
     expected: &TensorType,
 ) -> Option<crate::lower::LoweredSubexprWithControls> {
-    let context = tensor_helper_context(program, scope);
+    let context = cached_subexpr_lowering_context(program);
     lower_tensor_helper_with(expr, program, || {
-        let mut lowered = crate::lower::try_lower_subexpr_program_with_context_and_controls(
+        let product = crate::lower::try_lower_scoped_helper(
             expr,
-            collect_tensor_scope(program, scope, Some(expr)),
+            scope,
             &context,
+            crate::lower::ScopedHelperKind::Controls,
+            None,
+            None,
+            false,
         )?;
+        #[cfg(feature = "lowering-trace")]
+        let (mut lowered, _) = product.into_parts();
+        #[cfg(not(feature = "lowering-trace"))]
+        let (mut lowered,) = product.into_parts();
         lowered.dag = remap_tensor_helper_dim_symbols(&lowered.dag, scope, expected)?;
         Ok(lowered)
     })
@@ -8156,7 +8651,7 @@ fn lower_tensor_helper_dag_with_controls(
 fn finish_tensor_helper_call(
     dag: chelis_dag_core::Dag,
     program: &HostLoweringSession<'_>,
-    scope: &UnordMap<String, HostTypeTerm>,
+    scope: &HostScope,
     tensor_helpers: &mut TensorHelperSink,
     expected: TensorType,
 ) -> HostExpr {
@@ -8175,7 +8670,7 @@ fn finish_tensor_helper_product(
     dag: chelis_dag_core::Dag,
     #[cfg(feature = "lowering-trace")] trace: Option<crate::lowering_trace::HelperLoweringTrace>,
     program: &HostLoweringSession<'_>,
-    scope: &UnordMap<String, HostTypeTerm>,
+    scope: &HostScope,
     tensor_helpers: &mut TensorHelperSink,
     expected: TensorType,
 ) -> HostExpr {
@@ -8273,7 +8768,7 @@ fn finish_tensor_helper_product(
 fn lower_staged_host_plan(
     plan: &staged::HostStagedPlan,
     program: &HostLoweringSession<'_>,
-    scope: &UnordMap<String, HostTypeTerm>,
+    scope: &HostScope,
     helpers: &mut TensorHelperSink,
 ) -> Result<HostExpr, crate::lower::LowerDiagnostic> {
     let mut scope = scope.clone();
@@ -9304,7 +9799,7 @@ fn summary_dims_bind_to_inputs(input_tys: &[TensorType], dims: &[DimExpr]) -> bo
 fn lower_host_expr(
     expr: &Expr,
     program: &HostLoweringSession<'_>,
-    scope: &UnordMap<String, HostTypeTerm>,
+    scope: &HostScope,
     tensor_helpers: &mut TensorHelperSink,
 ) -> Result<HostExpr, crate::lower::LowerDiagnostic> {
     lower_host_expr_with_expected(expr, program, scope, tensor_helpers, None)
@@ -9316,7 +9811,7 @@ fn lower_host_expr(
 fn lower_host_expr_with_expected_opt(
     expr: &Expr,
     program: &HostLoweringSession<'_>,
-    scope: &UnordMap<String, HostTypeTerm>,
+    scope: &HostScope,
     tensor_helpers: &mut TensorHelperSink,
     expected_ty: Option<&HostTypeTerm>,
 ) -> Result<HostExpr, crate::lower::LowerDiagnostic> {
@@ -9326,7 +9821,7 @@ fn lower_host_expr_with_expected_opt(
 fn lower_host_expr_with_expected(
     expr: &Expr,
     program: &HostLoweringSession<'_>,
-    scope: &UnordMap<String, HostTypeTerm>,
+    scope: &HostScope,
     tensor_helpers: &mut TensorHelperSink,
     expected_ty: Option<&HostTypeTerm>,
 ) -> Result<HostExpr, crate::lower::LowerDiagnostic> {
@@ -9421,7 +9916,7 @@ struct SequentialHostLetChain<'expr> {
 fn sequential_host_let_chain<'expr>(
     expr: &'expr Expr,
     program: &HostLoweringSession<'_>,
-    scope: &UnordMap<String, HostTypeTerm>,
+    scope: &HostScope,
 ) -> Option<SequentialHostLetChain<'expr>> {
     let mut bindings = Vec::new();
     let mut layers = Vec::new();
@@ -9542,7 +10037,7 @@ fn lower_checked_local_ascription_region(
     local_region: &crate::lower::LocalAscriptionBindingRegion,
     checked_lowering: &crate::lower::SubexprLoweringContext,
     program: &HostLoweringSession<'_>,
-    scope: &UnordMap<String, HostTypeTerm>,
+    scope: &HostScope,
     tensor_helpers: &mut TensorHelperSink,
 ) -> Result<HostExpr, crate::lower::LowerDiagnostic> {
     if let Some(claims) = checked_lowering.host_local_ascription_claims(local_region)? {
@@ -9686,7 +10181,7 @@ fn malformed_host_authority(
 fn lower_host_expr_kind(
     expr: &Expr,
     program: &HostLoweringSession<'_>,
-    scope: &UnordMap<String, HostTypeTerm>,
+    scope: &HostScope,
     tensor_helpers: &mut TensorHelperSink,
     expected_ty: Option<&HostTypeTerm>,
 ) -> Result<HostExpr, crate::lower::LowerDiagnostic> {
@@ -11454,7 +11949,7 @@ fn lower_match_host_expr(
     match_expr: &Expr,
     list: &Node,
     program: &HostLoweringSession<'_>,
-    scope: &UnordMap<String, HostTypeTerm>,
+    scope: &HostScope,
     tensor_helpers: &mut TensorHelperSink,
     // chelis#1201: the match's RESULT type, when the caller knows it. Arm
     // bodies are result positions, so a generic ADT constructed in an arm
@@ -11677,7 +12172,7 @@ fn lower_host_match_arm(
     (pattern, guard, body): (&Expr, Option<&Expr>, &Expr),
     scrutinee_ty: &HostTypeTerm,
     program: &HostLoweringSession<'_>,
-    scope: &UnordMap<String, HostTypeTerm>,
+    scope: &HostScope,
     tensor_helpers: &mut TensorHelperSink,
     expected_ty: Option<&HostTypeTerm>,
     names: &mut HostMatchNameSupply,
@@ -11943,7 +12438,7 @@ impl HostPatternPlan {
         }
     }
 
-    fn extend_scope(&self, scope: &mut UnordMap<String, HostTypeTerm>) {
+    fn extend_scope(&self, scope: &mut HostScope) {
         match self {
             Self::Bind {
                 lowered_name, ty, ..
@@ -12016,20 +12511,26 @@ impl HostPatternPlan {
 
 struct HostMatchNameSupply {
     avoid: UnordSet<String>,
+    scope: HostScope,
 }
 
 impl HostMatchNameSupply {
-    fn new(expr: &Expr, scope: &UnordMap<String, HostTypeTerm>) -> Self {
+    fn new(expr: &Expr, scope: &HostScope) -> Self {
         let mut avoid = UnordSet::new();
         collect_occurring_names(expr, &mut avoid);
-        for (name, _) in scope.to_sorted() {
-            avoid.insert(name.clone());
+        Self {
+            avoid,
+            scope: scope.clone(),
         }
-        Self { avoid }
     }
 
     fn fresh(&mut self, stem: &str) -> String {
-        let name = fresh_binder_name(stem, &self.avoid);
+        let name = (1..)
+            .map(|index| format!("{stem}__inl{index}"))
+            .find(|candidate| {
+                !self.avoid.contains(candidate) && !self.scope.contains_key(candidate)
+            })
+            .expect("an unused binder name exists");
         self.avoid.insert(name.clone());
         name
     }
@@ -12792,7 +13293,7 @@ fn lower_record_host_expr(
     record_expr: &Expr,
     list: &Node,
     program: &HostLoweringSession<'_>,
-    scope: &UnordMap<String, HostTypeTerm>,
+    scope: &HostScope,
     tensor_helpers: &mut TensorHelperSink,
     expected_ty: Option<&HostTypeTerm>,
 ) -> Result<HostExpr, crate::lower::LowerDiagnostic> {
@@ -12958,7 +13459,7 @@ fn lower_access_host_expr(
     access_expr: &Expr,
     list: &Node,
     program: &HostLoweringSession<'_>,
-    scope: &UnordMap<String, HostTypeTerm>,
+    scope: &HostScope,
     tensor_helpers: &mut TensorHelperSink,
 ) -> Result<HostExpr, crate::lower::LowerDiagnostic> {
     let kids = list.children_slice();
@@ -13044,7 +13545,7 @@ fn lower_tuple_get_host_expr(
     tuple_get_expr: &Expr,
     list: &Node,
     program: &HostLoweringSession<'_>,
-    scope: &UnordMap<String, HostTypeTerm>,
+    scope: &HostScope,
     tensor_helpers: &mut TensorHelperSink,
 ) -> Result<HostExpr, crate::lower::LowerDiagnostic> {
     let kids = list.children_slice();
@@ -13251,7 +13752,7 @@ fn resolve_list_grad_shape_expr(
     actual: &Expr,
     program: &HostLoweringSession<'_>,
     defs: &BTreeMap<String, Expr>,
-    scope: &UnordMap<String, HostTypeTerm>,
+    scope: &HostScope,
 ) -> Result<Expr, crate::lower::LowerDiagnostic> {
     let mut resolved = actual.clone();
     for _ in 0..=MAX_LIST_SHAPE_RESOLUTION_DEPTH {
@@ -13511,7 +14012,7 @@ fn runtime_grad_adt_plan(
     actual: Option<&Expr>,
     span: chelis_deep::Span,
     program: &HostLoweringSession<'_>,
-    scope: &UnordMap<String, HostTypeTerm>,
+    scope: &HostScope,
 ) -> Result<Option<RuntimeGradAdtPlan>, crate::lower::LowerDiagnostic> {
     let ty = expand_host_type_aliases(program, ty.clone());
     let kind = if matches!(ty, HostTypeTerm::List(_)) {
@@ -13600,7 +14101,7 @@ fn runtime_grad_adt_plan(
 /// fields have runtime extents. An unknown sum tag still needs runtime dispatch.
 struct RuntimeGradAdtOutputs<'a> {
     bindings: &'a mut Vec<HostBinding>,
-    leaf_scope: &'a mut UnordMap<String, HostTypeTerm>,
+    leaf_scope: &'a mut HostScope,
     eager_arguments: &'a mut UnordSet<String>,
 }
 
@@ -13608,7 +14109,7 @@ fn materialize_runtime_grad_adt(
     actual: &Expr,
     ty: &HostTypeTerm,
     program: &HostLoweringSession<'_>,
-    scope: &UnordMap<String, HostTypeTerm>,
+    scope: &HostScope,
     used_names: &mut UnordSet<String>,
     tensor_helpers: &mut TensorHelperSink,
     outputs: RuntimeGradAdtOutputs<'_>,
@@ -13621,7 +14122,7 @@ fn materialize_runtime_grad_adt(
     else {
         return Ok(None);
     };
-    let value = if let Some(name) = direct_var_name(actual).filter(|name| scope.contains_key(*name))
+    let value = if let Some(name) = direct_var_name(actual).filter(|name| scope.contains_key(name))
     {
         HostExpr::new(HostExprKind::Var(name.to_string(), ty.clone()))
     } else {
@@ -13673,7 +14174,7 @@ fn materialize_runtime_grad_adt_value(
     program: &HostLoweringSession<'_>,
     used_names: &mut UnordSet<String>,
     bindings: &mut Vec<HostBinding>,
-    leaf_scope: &mut UnordMap<String, HostTypeTerm>,
+    leaf_scope: &mut HostScope,
 ) -> Option<Expr> {
     if let RuntimeGradAdtPlanKind::List = &plan.kind {
         let HostTypeTerm::List(element_ty) = &plan.ty else {
@@ -13751,7 +14252,7 @@ fn materialize_runtime_grad_list(
     program: &HostLoweringSession<'_>,
     used_names: &mut UnordSet<String>,
     bindings: &mut Vec<HostBinding>,
-    leaf_scope: &mut UnordMap<String, HostTypeTerm>,
+    leaf_scope: &mut HostScope,
 ) -> Option<Expr> {
     let fresh = |used_names: &mut UnordSet<String>| {
         let mut index = used_names.len();
@@ -13813,7 +14314,7 @@ fn materialize_runtime_grad_list_element(
     program: &HostLoweringSession<'_>,
     used_names: &mut UnordSet<String>,
     bindings: &mut Vec<HostBinding>,
-    leaf_scope: &mut UnordMap<String, HostTypeTerm>,
+    leaf_scope: &mut HostScope,
 ) -> Option<Expr> {
     let ty = expand_host_type_aliases(program, ty.clone());
     if let HostTypeTerm::Adt(adt_name, _) = &ty {
@@ -13987,7 +14488,7 @@ fn materialize_runtime_packed_grad_leaf(
     span: chelis_deep::Span,
     used_names: &mut UnordSet<String>,
     bindings: &mut Vec<HostBinding>,
-    leaf_scope: &mut UnordMap<String, HostTypeTerm>,
+    leaf_scope: &mut HostScope,
 ) -> Expr {
     let HostTypeTerm::Tensor(tensor) = ty else {
         unreachable!()
@@ -14538,7 +15039,7 @@ fn try_lower_general_list_grad_app(
     app_expr: &Expr,
     list: &Node,
     program: &HostLoweringSession<'_>,
-    scope: &UnordMap<String, HostTypeTerm>,
+    scope: &HostScope,
     tensor_helpers: &mut TensorHelperSink,
     expected_ty: Option<&HostTypeTerm>,
 ) -> Result<Option<HostExpr>, crate::lower::LowerDiagnostic> {
@@ -15006,7 +15507,7 @@ fn grad_target_argument<'a>(
     grad_list: &Node,
     args: &'a [Expr],
     program: &HostLoweringSession<'_>,
-    scope: &UnordMap<String, HostTypeTerm>,
+    scope: &HostScope,
 ) -> Option<&'a Expr> {
     let not_a_function =
         |arg: &&Expr| !matches!(expr_host_type(arg, program, scope), HostTypeTerm::Fn(..));
@@ -15121,7 +15622,7 @@ fn lower_app_host_expr(
     app_expr: &Expr,
     list: &Node,
     program: &HostLoweringSession<'_>,
-    scope: &UnordMap<String, HostTypeTerm>,
+    scope: &HostScope,
     tensor_helpers: &mut TensorHelperSink,
     expected_ty: Option<&HostTypeTerm>,
 ) -> Result<HostExpr, crate::lower::LowerDiagnostic> {
@@ -15230,7 +15731,7 @@ fn lower_app_host_expr(
 fn resolve_host_builtin_value(
     expr: &Expr,
     program: &HostLoweringSession<'_>,
-    scope: &UnordMap<String, HostTypeTerm>,
+    scope: &HostScope,
     helpers: &TensorHelperSink,
 ) -> Result<Option<StaticBuiltinValue>, crate::lower::LowerDiagnostic> {
     Ok(
@@ -15244,7 +15745,7 @@ fn resolve_host_builtin_value(
 fn resolve_host_builtin_payload(
     expr: &Expr,
     program: &HostLoweringSession<'_>,
-    scope: &UnordMap<String, HostTypeTerm>,
+    scope: &HostScope,
     helpers: &TensorHelperSink,
 ) -> Result<Option<HostBuiltinPayload>, crate::lower::LowerDiagnostic> {
     resolve_host_builtin_payload_in_scope(
@@ -15261,7 +15762,7 @@ fn resolve_host_builtin_payload(
 fn resolve_host_builtin_payload_in_scope(
     expr: &Expr,
     program: &HostLoweringSession<'_>,
-    scope: &UnordMap<String, HostTypeTerm>,
+    scope: &HostScope,
     values: &BTreeMap<String, StaticBuiltinValue>,
     tuples: &BTreeMap<String, Vec<Option<HostBuiltinPayload>>>,
 ) -> Result<Option<HostBuiltinPayload>, crate::lower::LowerDiagnostic> {
@@ -15287,7 +15788,7 @@ fn resolve_host_builtin_payload_in_scope(
 fn resolve_host_builtin_payload_inner(
     expr: &Expr,
     program: &HostLoweringSession<'_>,
-    scope: &UnordMap<String, HostTypeTerm>,
+    scope: &HostScope,
     values: &BTreeMap<String, StaticBuiltinValue>,
     tuples: &BTreeMap<String, Vec<Option<HostBuiltinPayload>>>,
 ) -> Result<Option<HostBuiltinPayload>, crate::lower::LowerDiagnostic> {
@@ -15473,7 +15974,7 @@ fn einsum_lowers_to_contraction(
     name: &str,
     list: &Node,
     program: &HostLoweringSession<'_>,
-    scope: &UnordMap<String, HostTypeTerm>,
+    scope: &HostScope,
 ) -> bool {
     let [_, equation, lhs, rhs] = list.children_slice() else {
         return false;
@@ -15501,7 +16002,7 @@ fn lower_closed_host_application(
     list: &Node,
     operation: CheckedBuiltinCallable,
     program: &HostLoweringSession<'_>,
-    scope: &UnordMap<String, HostTypeTerm>,
+    scope: &HostScope,
     tensor_helpers: &mut TensorHelperSink,
     expected_ty: Option<&HostTypeTerm>,
 ) -> Result<HostExpr, crate::lower::LowerDiagnostic> {
@@ -15541,13 +16042,14 @@ fn lower_closed_host_application(
             tensor_helpers,
             HoistedOperands::HostLane,
         )?;
+        let context = tensor_helper_context_for_bindings(program, &helper_scope, &bindings);
         if let Some(value) = try_lower_tensor_helper_call_inner(
             helper.as_ref(),
             program,
             helper_scope.as_ref(),
             tensor_helpers,
             tensor_ty.clone(),
-            None,
+            Some(&context),
             Some(value),
         ) {
             if bindings.is_empty() {
@@ -15704,7 +16206,7 @@ fn lower_lexical_host_call(
     list: &Node,
     lexical: callee::LexicalCallee<'_>,
     program: &HostLoweringSession<'_>,
-    scope: &UnordMap<String, HostTypeTerm>,
+    scope: &HostScope,
     tensor_helpers: &mut TensorHelperSink,
     expected_ty: Option<&HostTypeTerm>,
 ) -> Result<HostExpr, crate::lower::LowerDiagnostic> {
@@ -15768,7 +16270,7 @@ fn lower_program_host_app(
     list: &Node,
     program_callee: callee::ProgramCallee,
     program: &HostLoweringSession<'_>,
-    scope: &UnordMap<String, HostTypeTerm>,
+    scope: &HostScope,
     tensor_helpers: &mut TensorHelperSink,
     expected_ty: Option<&HostTypeTerm>,
 ) -> Result<HostExpr, crate::lower::LowerDiagnostic> {
@@ -16200,14 +16702,21 @@ fn lower_program_host_app(
             grad_target_argument(callee, &kids[1..], program, scope)
                 .and_then(|target| expr_tensor_type(target, program, scope))
         });
-    let (helper_expr, helper_scope, helper_bindings) = hoist_host_lane_tensor_bindings(
-        app_expr,
-        program,
-        scope,
-        fn_sig.as_ref(),
-        tensor_helpers,
-        HoistedOperands::HostLane,
-    )?;
+    // Only a tensor-result candidate can consume this preparation. Ordinary
+    // host calls lower their original actuals below; speculatively lowering
+    // and discarding them here repeats all nested host work on that fallback.
+    let (helper_expr, helper_scope, helper_bindings) = if helper_tensor_ty.is_some() {
+        hoist_host_lane_tensor_bindings(
+            app_expr,
+            program,
+            scope,
+            fn_sig.as_ref(),
+            tensor_helpers,
+            HoistedOperands::HostLane,
+        )?
+    } else {
+        (Cow::Borrowed(app_expr), Cow::Borrowed(scope), Vec::new())
+    };
     // Local callable params (e.g. `f` in `def apply(f: fn, x) = f(x)`) are
     // not representable in the tensor-helper DAG — the DAG path would box
     // the fn pointer into `chelis_scalar_tensor_from_f64` and emit C that
@@ -16275,12 +16784,13 @@ fn lower_program_host_app(
         && !reaches_list_entry
         && (!should_keep_tensor_expr_in_host_lane(app_expr)
             || (callee_is_builtin && einsum_lowers_to_contraction(&name, list, program, scope)))
-        && let Some(tensor_call) = try_lower_tensor_helper_call(
+        && let Some(tensor_call) = try_lower_tensor_helper_call_with_context(
             helper_expr.as_ref(),
             program,
             helper_scope.as_ref(),
             tensor_helpers,
             tensor_ty.clone(),
+            &tensor_helper_context_for_bindings(program, &helper_scope, &helper_bindings),
         )
     {
         if helper_bindings.is_empty() {
@@ -16316,6 +16826,11 @@ fn lower_program_host_app(
             tensor_helpers,
             HoistedOperands::EveryWorkingOperand,
         )?;
+        let operation_context = tensor_helper_context_for_bindings(
+            program,
+            &operation_scope,
+            helper_bindings.iter().chain(&bindings),
+        );
         // A call through a lexical callable is only admissible when the
         // enclosing host function has a callback place for it. This retry
         // cannot establish that fact: a local alias such as `f = helper`
@@ -16327,12 +16842,13 @@ fn lower_program_host_app(
                 .iter()
                 .chain(&bindings)
                 .any(|binding| host_expr_contains_local_call(&binding.value)))
-            && let Some(tensor_call) = try_lower_tensor_helper_call(
+            && let Some(tensor_call) = try_lower_tensor_helper_call_with_context(
                 operation.as_ref(),
                 program,
                 operation_scope.as_ref(),
                 tensor_helpers,
                 tensor_ty,
+                &operation_context,
             )
         {
             let mut all_bindings = helper_bindings;
@@ -17122,7 +17638,7 @@ fn prepare_retained_actual(
     actual: &Expr,
     callable: bool,
     program: &HostLoweringSession<'_>,
-    scope: &UnordMap<String, HostTypeTerm>,
+    scope: &HostScope,
     tensor_helpers: &mut TensorHelperSink,
 ) -> Result<PreparedRetainedActual, crate::lower::LowerDiagnostic> {
     if callable {
@@ -17705,7 +18221,7 @@ fn prepare_retained_payload_actuals(
     name: &str,
     signature: &HostDefSignature,
     program: &HostLoweringSession<'_>,
-    scope: &UnordMap<String, HostTypeTerm>,
+    scope: &HostScope,
     tensor_helpers: &mut TensorHelperSink,
 ) -> Result<Vec<PreparedRetainedActual>, crate::lower::LowerDiagnostic> {
     let app_args = as_node(expr)
@@ -18214,7 +18730,7 @@ fn retain_callable_invocation_contract(
 fn lower_inline_host_invocation(
     expr: &Expr,
     program: &HostLoweringSession<'_>,
-    scope: &UnordMap<String, HostTypeTerm>,
+    scope: &HostScope,
     tensor_helpers: &mut TensorHelperSink,
     expected: Option<&HostTypeTerm>,
 ) -> Result<Option<HostExpr>, crate::lower::LowerDiagnostic> {
@@ -18316,7 +18832,7 @@ fn lower_named_retained_host_invocation(
     name: &str,
     expected: &HostTypeTerm,
     program: &HostLoweringSession<'_>,
-    scope: &UnordMap<String, HostTypeTerm>,
+    scope: &HostScope,
     tensor_helpers: &mut TensorHelperSink,
     actualize_polymorphic_contract: bool,
 ) -> Result<Option<(HostExpr, Option<TensorType>)>, crate::lower::LowerDiagnostic> {
@@ -18446,7 +18962,7 @@ fn lower_retained_host_invocation(
     invocation: RetainedHostInvocation<'_>,
     expected: Option<&HostTypeTerm>,
     program: &HostLoweringSession<'_>,
-    scope: &UnordMap<String, HostTypeTerm>,
+    scope: &HostScope,
     tensor_helpers: &mut TensorHelperSink,
     preparation: RetainedHostPreparation,
 ) -> Result<HostExpr, crate::lower::LowerDiagnostic> {
@@ -18842,7 +19358,7 @@ fn retain_prepared_payload_storage(
 fn reduce_named_host_call_for_shape_evidence(
     expr: &Expr,
     program: &HostLoweringSession<'_>,
-    scope: &UnordMap<String, HostTypeTerm>,
+    scope: &HostScope,
 ) -> Option<Expr> {
     let Some((DeepTag::App, _, kids)) = stamped_parts(expr) else {
         return None;
@@ -18899,7 +19415,7 @@ fn lower_recursive_generic_call(
     explicit_ty: &HostTypeTerm,
     inferred_ret_ty: &HostTypeTerm,
     program: &HostLoweringSession<'_>,
-    scope: &UnordMap<String, HostTypeTerm>,
+    scope: &HostScope,
     tensor_helpers: &mut TensorHelperSink,
 ) -> Result<HostExpr, crate::lower::LowerDiagnostic> {
     let name = program_callee.name();
@@ -19402,7 +19918,7 @@ fn ensure_mono_specialization(
             ),
         ));
     }
-    let mut spec_scope = UnordMap::new();
+    let mut spec_scope = HostScope::new();
     let mut spec_params = Vec::with_capacity(param_exprs.len());
     for (param, param_ty) in param_exprs.iter().zip(param_tys.iter()) {
         let Some(pname) = param_name(param) else {
@@ -19511,7 +20027,7 @@ struct MonoSpecializedFunctionInput<'a> {
     body_expr: &'a Expr,
     fn_expr: &'a Expr,
     program: &'a HostLoweringSession<'a>,
-    spec_scope: &'a UnordMap<String, HostTypeTerm>,
+    spec_scope: &'a HostScope,
     collect_trace: bool,
 }
 
@@ -20784,19 +21300,166 @@ enum HoistedOperands {
     EveryWorkingOperand,
 }
 
-type HoistedHostLaneBindings<'expr, 'scope> = (
-    Cow<'expr, Expr>,
-    Cow<'scope, UnordMap<String, HostTypeTerm>>,
-    Vec<HostBinding>,
-);
+/// A local allocation cursor, shared only by one preparation and its list
+/// leaves. Generated names are disjoint from every legal checked source name
+/// and every visible binding. No state survives an independent lowering or
+/// a failed/unwound attempt.
+#[derive(Default)]
+struct OperandNameSupply {
+    next: usize,
+}
+
+impl OperandNameSupply {
+    fn fresh(
+        &mut self,
+        index: usize,
+        program: &HostLoweringSession<'_>,
+        scope: &HostScope,
+    ) -> String {
+        loop {
+            let name = format!("__host_tensor_arg_{index}_{}", self.next);
+            self.next += 1;
+            record_host_work(|profile| {
+                profile.reservation_lookups += 1;
+                profile.reservation_name_bytes += name.len();
+            });
+            if !program.operand_name_is_source_owned(&name) && !scope.contains_key(&name) {
+                return name;
+            }
+        }
+    }
+}
+
+fn reserve_operand_source_name(name: &str, names: &mut UnordSet<String>) {
+    record_host_work(|profile| {
+        profile.reservation_lookups += 1;
+        profile.reservation_name_bytes += name.len();
+    });
+    names.insert(name.to_owned());
+}
+
+/// Borrow every carrier and annotation without cloning a subtree. This runs
+/// once on demand in the existing checked-program name index.
+fn collect_operand_source_names(expr: &Expr, names: &mut UnordSet<String>) {
+    let mut pending = vec![expr];
+    while let Some(expr) = pending.pop() {
+        record_host_work(|profile| profile.reservation_expr_visits += 1);
+        match expr {
+            Expr::Atom(Atom::Name(name), _) => reserve_operand_source_name(name, names),
+            Expr::Atom(_, _) => {}
+            Expr::Node(node, _) => {
+                pending.extend(node.children_slice());
+                node.meta()
+                    .visit_expressions(&mut |value, _| pending.push(value));
+            }
+            Expr::Map(metadata, _) => {
+                metadata.visit_expressions(&mut |value, _| pending.push(value))
+            }
+            Expr::MetaExpr(meta, _) => {
+                pending.push(&meta.expr);
+                meta.metadata
+                    .visit_expressions(&mut |value, _| pending.push(value));
+            }
+            Expr::BareList(items, _) => pending.extend(items),
+            Expr::UnknownForm(data) => {
+                pending.extend(&data.children);
+                data.meta
+                    .visit_expressions(&mut |value, _| pending.push(value));
+            }
+        }
+    }
+}
+
+/// The checked parameter frame may be wider than a formed value's physical
+/// frame. Keep that view separate: it is neither a new equality claim nor
+/// permission to refine an unknown physical axis to a claimed literal.
+fn tensor_helper_operand_view(physical: &TensorType, checked: &TensorType) -> TensorType {
+    if physical.precision != checked.precision || physical.dims.len() != checked.dims.len() {
+        record_host_work(|profile| profile.operand_view_axes += physical.dims.len());
+        return physical.clone();
+    }
+    TensorType {
+        dims: physical
+            .dims
+            .iter()
+            .zip(&checked.dims)
+            .map(|(actual, checked)| {
+                record_host_work(|profile| profile.operand_view_axes += 1);
+                match checked {
+                    DimInfo::Named(_, None) => checked.clone(),
+                    _ => actual.clone(),
+                }
+            })
+            .collect(),
+        precision: physical.precision,
+    }
+}
+
+fn checked_operand_tensor_view(
+    expr: &Expr,
+    program: &HostLoweringSession<'_>,
+) -> Option<TensorType> {
+    let mut expr = expr;
+    while let Expr::MetaExpr(meta, _) = expr {
+        expr = &meta.expr;
+    }
+    let Expr::Node(node, _) = expr else {
+        return None;
+    };
+    let checked = node.meta().ty()?.expression();
+    // Borrow the active substitutions: no complete type-scope clone is
+    // introduced by reading one argument annotation.
+    let decoded = ACTIVE_TYPE_SUBST.with(|stack| {
+        let stack = stack.borrow();
+        match stack.last() {
+            Some(substitutions) => decode_host_type_or_raise(checked, substitutions),
+            None => decode_host_type_or_raise(checked, &UnordMap::new()),
+        }
+    });
+    match expand_host_type_aliases(program, decoded) {
+        HostTypeTerm::Tensor(ty) => {
+            record_host_work(|profile| profile.operand_view_axes += ty.dims.len());
+            Some(ty)
+        }
+        _ => None,
+    }
+}
+
+type HoistedHostLaneBindings<'expr, 'scope> =
+    (Cow<'expr, Expr>, Cow<'scope, HostScope>, Vec<HostBinding>);
 
 fn hoist_host_lane_tensor_bindings<'expr, 'scope>(
     expr: &'expr Expr,
     program: &HostLoweringSession<'_>,
-    scope: &'scope UnordMap<String, HostTypeTerm>,
+    scope: &'scope HostScope,
     fn_sig: Option<&(Vec<HostTypeTerm>, HostTypeTerm)>,
     tensor_helpers: &mut TensorHelperSink,
     hoisted: HoistedOperands,
+) -> Result<HoistedHostLaneBindings<'expr, 'scope>, crate::lower::LowerDiagnostic> {
+    // This attempt owns only its suffix cursor. Checked source ownership is
+    // indexed once per program; nested list leaves share the cursor, while
+    // independent attempts and unwind/retry begin with the same state.
+    let mut names = OperandNameSupply::default();
+    hoist_host_lane_tensor_bindings_with_names(
+        expr,
+        program,
+        scope,
+        fn_sig,
+        tensor_helpers,
+        hoisted,
+        &mut names,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn hoist_host_lane_tensor_bindings_with_names<'expr, 'scope>(
+    expr: &'expr Expr,
+    program: &HostLoweringSession<'_>,
+    scope: &'scope HostScope,
+    fn_sig: Option<&(Vec<HostTypeTerm>, HostTypeTerm)>,
+    tensor_helpers: &mut TensorHelperSink,
+    hoisted: HoistedOperands,
+    names: &mut OperandNameSupply,
 ) -> Result<HoistedHostLaneBindings<'expr, 'scope>, crate::lower::LowerDiagnostic> {
     let Expr::Node(list, span) = expr else {
         return Ok((Cow::Borrowed(expr), Cow::Borrowed(scope), Vec::new()));
@@ -20818,29 +21481,62 @@ fn hoist_host_lane_tensor_bindings<'expr, 'scope>(
     // arguments, so this two-tensor boundary is specific to matmul.
     let callee = direct_var_name(&kids[0]);
     let hoist_matmul_operands = kids.len() == 3 && callee == Some("matmul");
-    // The checker fixes a reduction or insertion axis before this rewrite.
-    // A cast-wrapped integer literal is still a static axis: replacing it
-    // with a host binding turns it into a name and loses that decision in
-    // the tensor DAG. Its constant evaluation has no observable work, so it
-    // can stay at its original argument position while later operands move.
-    let static_axis = |index: usize, arg: &Expr| {
-        ((callee == Some("sum") && index >= 2) || (callee == Some("insert") && index == 2))
-            && crate::lower::extract_int_axis(arg).is_some()
+    // The resolved operation's registration owns selector positions. A
+    // syntactic integer reader is not proof that evaluating a cast is safe:
+    // numeric operands, including shape-list leaves, retain all their work.
+    let axis_arguments = resolve_host_builtin_value(&kids[0], program, scope, tensor_helpers)?
+        .map(|value| value.declaration().axis_arguments)
+        // Direct-only builtins such as insert have no first-class value.
+        // Their unshadowed source declaration still owns argument roles.
+        .or_else(|| {
+            let name = callee?;
+            (!host_lexically_binds(scope, name) && program.def_named(name).is_none())
+                .then(|| chelis_types::builtin_decl(name).map(|decl| decl.axis_arguments))
+                .flatten()
+        })
+        .unwrap_or(chelis_types::AxisArgumentLayout::NoAxes);
+    let static_selector = |index: usize, arg: &Expr| {
+        let axis = match axis_arguments {
+            chelis_types::AxisArgumentLayout::NoAxes => false,
+            chelis_types::AxisArgumentLayout::Fixed(slots) => slots.contains(&(index - 1)),
+            chelis_types::AxisArgumentLayout::VariadicFrom(first) => index > first,
+        };
+        axis && crate::lower::extract_int_axis(arg).is_some()
     };
-    let does_work = |index: usize, arg: &Expr| !static_axis(index, arg) && operand_does_work(arg);
-    let host_operand = |index: usize, arg: &Expr| {
-        !static_axis(index, arg)
-            && (should_keep_tensor_expr_in_host_lane(arg)
-                || operand_reads_host_record(arg, program, scope)
-                || (hoisted == HoistedOperands::EveryWorkingOperand && does_work(index, arg)))
-    };
-    if !hoist_matmul_operands
-        && !kids
-            .iter()
-            .enumerate()
-            .skip(1)
-            .any(|(index, arg)| host_operand(index, arg))
-    {
+    let does_work = |_index: usize, arg: &Expr| operand_does_work(arg);
+    let mut _admission_guard = None;
+    let host_operands = kids
+        .iter()
+        .enumerate()
+        .map(|(index, arg)| {
+            index != 0
+                && (should_keep_tensor_expr_in_host_lane(arg)
+                    || {
+                        if let Some(reads) = cached_operand_record_read(expr, arg, scope) { reads }
+                        else {
+                            _admission_guard.get_or_insert_with(|| OperandAdmissionGuard::begin(expr, program, scope));
+                            cached_operand_record_read(expr, arg, scope).expect("prepared operand has record-read facts")
+                        }
+                    }
+                    // Names already denote values or checked static selectors
+                    // (including named axes). Only runtime computations need
+                    // a new boundary; an axis name is not a missing host value.
+                    || (operand_does_work(arg)
+                        && {
+                            if let Some(host) = cached_operand_admission(expr, arg, scope) {
+                                host
+                            } else {
+                                _admission_guard.get_or_insert_with(|| {
+                                    OperandAdmissionGuard::begin(expr, program, scope)
+                                });
+                                cached_operand_admission(expr, arg, scope)
+                                    .expect("prepared operand has a scoped admission fact")
+                            }
+                        })
+                    || (hoisted == HoistedOperands::EveryWorkingOperand && does_work(index, arg)))
+        })
+        .collect::<Vec<_>>();
+    if !hoist_matmul_operands && !host_operands.iter().any(|host| *host) {
         return Ok((Cow::Borrowed(expr), Cow::Borrowed(scope), Vec::new()));
     }
 
@@ -20853,7 +21549,7 @@ fn hoist_host_lane_tensor_bindings<'expr, 'scope>(
         .iter()
         .enumerate()
         .skip(1)
-        .filter(|(index, arg)| hoist_matmul_operands || host_operand(*index, arg))
+        .filter(|(index, _)| hoist_matmul_operands || host_operands[*index])
         .map(|(index, _)| index)
         .next_back();
 
@@ -20864,23 +21560,79 @@ fn hoist_host_lane_tensor_bindings<'expr, 'scope>(
     for (index, arg) in kids.iter().enumerate().skip(1) {
         let precedes_a_hoisted_operand =
             last_hoisted.is_some_and(|last| index < last) && does_work(index, arg);
-        if hoist_matmul_operands || host_operand(index, arg) || precedes_a_hoisted_operand {
+        if hoist_matmul_operands || host_operands[index] || precedes_a_hoisted_operand {
+            // A checked literal list carries its arity in the numeric
+            // operation. Transport its runtime leaves, retaining the Cons/Nil
+            // spine so a reshape keeps both its target rank and each actual
+            // i64 extent. Treating the whole list as an opaque host capture
+            // would lose that geometry before the helper can consume it.
+            if crate::lower::collect_cons_chain(arg).is_some() {
+                let (rewritten, leaf_scope, mut leaves) =
+                    hoist_host_lane_tensor_bindings_with_names(
+                        arg,
+                        program,
+                        &scoped,
+                        None,
+                        tensor_helpers,
+                        if precedes_a_hoisted_operand {
+                            HoistedOperands::EveryWorkingOperand
+                        } else {
+                            hoisted
+                        },
+                        names,
+                    )?;
+                scoped = leaf_scope.into_owned();
+                new_children.push(rewritten.into_owned());
+                bindings.append(&mut leaves);
+                continue;
+            }
             let value = lower_host_expr(arg, program, scope, tensor_helpers)?;
-            let preferred_ty = fn_sig
-                .and_then(|(param_tys, _)| param_tys.get(index - 1))
-                // The generic declaration is not an argument actualization.
-                // Keep the checked actual's dtype and extents so the helper's
-                // ordinary call inliner can bind the declaration identities.
-                .filter(|ty| !ty.is_unresolved())
-                .cloned()
+            // The produced value owns its physical rank and ordered axes.
+            // An operation's logical argument metadata can describe its
+            // generic declaration, not that independently formed value.
+            let produced = host_expr_type(&value);
+            let preferred_ty = matches!(produced, HostTypeTerm::Tensor(_))
+                .then_some(produced.clone())
+                .or_else(|| {
+                    fn_sig
+                        .and_then(|(param_tys, _)| param_tys.get(index - 1))
+                        // The generic declaration is not an argument actualization.
+                        // Keep the checked actual's dtype and extents so the helper's
+                        // ordinary call inliner can bind the declaration identities.
+                        .filter(|ty| !ty.is_unresolved())
+                        .cloned()
+                })
                 .or_else(|| expr_tensor_type(arg, program, scope).map(HostTypeTerm::Tensor))
                 .or_else(|| {
                     let ty = expr_host_type(arg, program, scope);
                     (!ty.is_unresolved()).then_some(ty)
                 });
             let ty = preferred_ty.unwrap_or_else(|| host_expr_type(&value));
+            let helper_view = if let HostTypeTerm::Tensor(physical) = &ty {
+                let parameter_view = fn_sig
+                    .and_then(|(parameters, _)| parameters.get(index - 1))
+                    .and_then(|parameter| match parameter {
+                        HostTypeTerm::Tensor(checked)
+                            if checked.precision == physical.precision
+                                && checked.dims.len() == physical.dims.len() =>
+                        {
+                            Some(checked)
+                        }
+                        _ => None,
+                    });
+                if let Some(checked) = parameter_view {
+                    HostTypeTerm::Tensor(tensor_helper_operand_view(physical, checked))
+                } else if let Some(checked) = checked_operand_tensor_view(arg, program) {
+                    HostTypeTerm::Tensor(tensor_helper_operand_view(physical, &checked))
+                } else {
+                    record_host_work(|profile| profile.operand_view_axes += physical.dims.len());
+                    ty.clone()
+                }
+            } else {
+                ty.clone()
+            };
             let value = force_host_expr_type(value, ty.clone());
-            let name = format!("__host_tensor_arg_{index}");
+            let name = names.fresh(index, program, &scoped);
             bindings.push(HostBinding {
                 name: name.clone(),
                 display_name: None,
@@ -20888,20 +21640,32 @@ fn hoist_host_lane_tensor_bindings<'expr, 'scope>(
                 ty: ty.clone(),
                 value,
             });
-            scoped.insert(name.clone(), ty);
-            new_children.push(Expr::node(
-                DeepTag::Var,
-                chelis_deep::Metadata::default(),
-                vec![Expr::Atom(Atom::Name(name), *span)],
-                *span,
-            ));
+            scoped.insert(name.clone(), helper_view);
+            if static_selector(index, arg) {
+                // The host binding executes the numeric work (and can trap)
+                // before later operands. The helper consumes the checked
+                // selector syntax, not a runtime scalar name; its axis reader
+                // does not evaluate that syntax a second time.
+                new_children.push(arg.clone());
+            } else {
+                new_children.push(Expr::node(
+                    DeepTag::Var,
+                    chelis_deep::Metadata::default(),
+                    vec![Expr::Atom(Atom::Name(name), *span)],
+                    *span,
+                ));
+            }
         } else {
             new_children.push(arg.clone());
         }
     }
 
     let rewritten = Expr::node(list.tag(), list.meta().clone(), new_children, *span);
-    record_host_work(|profile| profile.app_clone_nodes += deep_expr_nodes(&rewritten));
+    record_host_work(|profile| {
+        let nodes = deep_expr_nodes(&rewritten);
+        profile.app_clone_nodes += nodes;
+        profile.max_app_clone_nodes = profile.max_app_clone_nodes.max(nodes);
+    });
     Ok((Cow::Owned(rewritten), Cow::Owned(scoped), bindings))
 }
 
@@ -20931,10 +21695,11 @@ fn operand_does_work(expr: &Expr) -> bool {
 /// input, exactly as if bound to a name. The operand's own type is what the
 /// operation consumes, not what the operand reads, so an ADT constructed in
 /// place for a definition's activation stays there.
+#[cfg(test)]
 fn operand_reads_host_record(
     expr: &Expr,
     program: &HostLoweringSession<'_>,
-    scope: &UnordMap<String, HostTypeTerm>,
+    scope: &HostScope,
 ) -> bool {
     if let Expr::MetaExpr(meta, _) = expr {
         return operand_reads_host_record(&meta.expr, program, scope);
@@ -20952,11 +21717,8 @@ fn operand_reads_host_record(
 /// A name is typed by the scope, and every other subterm by its checked
 /// type. Callable values are not entered, so no binder inside one can shadow
 /// the name the scope types.
-fn subterm_holds_adt(
-    expr: &Expr,
-    program: &HostLoweringSession<'_>,
-    scope: &UnordMap<String, HostTypeTerm>,
-) -> bool {
+#[cfg(test)]
+fn subterm_holds_adt(expr: &Expr, program: &HostLoweringSession<'_>, scope: &HostScope) -> bool {
     let mut pending = vec![expr];
     while let Some(mut expr) = pending.pop() {
         while let Expr::MetaExpr(meta, _) = expr {
@@ -21473,7 +22235,7 @@ pub fn stationary_accumulator_proof(
 fn lower_host_callback(
     expr: &Expr,
     program: &HostLoweringSession<'_>,
-    scope: &UnordMap<String, HostTypeTerm>,
+    scope: &HostScope,
     tensor_helpers: &mut TensorHelperSink,
 ) -> Result<Option<HostCallback>, crate::lower::LowerDiagnostic> {
     match expr {
@@ -21858,7 +22620,7 @@ fn named_host_callback(
 fn lower_list_literal_items(
     expr: &Expr,
     program: &HostLoweringSession<'_>,
-    scope: &UnordMap<String, HostTypeTerm>,
+    scope: &HostScope,
     tensor_helpers: &mut TensorHelperSink,
 ) -> Result<Option<Vec<HostExpr>>, crate::lower::LowerDiagnostic> {
     let mut spine = ConsSpine::with_metadata_wrappers(expr);
@@ -21882,7 +22644,7 @@ fn lower_list_literal_items(
 fn tensor_helper_args(
     program: &HostLoweringSession<'_>,
     inputs: &[HostTensorInput],
-    scope: &UnordMap<String, HostTypeTerm>,
+    scope: &HostScope,
 ) -> Vec<HostExpr> {
     inputs
         .iter()
@@ -21920,7 +22682,7 @@ fn top_level_value_host_type(
         return None;
     }
     lookup_declared_host_type(program, declaration)
-        .or_else(|| Some(expr_host_type(value, program, &UnordMap::new())))
+        .or_else(|| Some(expr_host_type(value, program, &HostScope::new())))
 }
 
 fn tensor_helper_inputs(dag: &chelis_dag_core::Dag) -> Vec<HostTensorInput> {
@@ -21947,7 +22709,7 @@ fn tensor_helper_inputs(dag: &chelis_dag_core::Dag) -> Vec<HostTensorInput> {
 /// unwinding past the caller as a payload no handler renders (chelis#3340).
 fn remap_tensor_helper_dim_symbols(
     dag: &chelis_dag_core::Dag,
-    scope: &UnordMap<String, HostTypeTerm>,
+    scope: &HostScope,
     expected_output: &TensorType,
 ) -> Result<chelis_dag_core::Dag, crate::lower::LowerDiagnostic> {
     crate::lower::catch_lowering_diagnostic(
@@ -21960,7 +22722,7 @@ fn remap_tensor_helper_dim_symbols(
 
 fn remap_tensor_helper_dim_symbols_raising(
     dag: &chelis_dag_core::Dag,
-    scope: &UnordMap<String, HostTypeTerm>,
+    scope: &HostScope,
     expected_output: &TensorType,
 ) -> chelis_dag_core::Dag {
     fn tensor_type_has_synthetic_dims(tensor_ty: &TensorType) -> bool {
@@ -22141,13 +22903,9 @@ fn raise_conflicting_checker_dimension(
 
 fn actualize_tensor_helper_types(
     dag: &chelis_dag_core::Dag,
-    scope: &UnordMap<String, HostTypeTerm>,
+    scope: &HostScope,
 ) -> chelis_dag_core::Dag {
-    fn inferred_load_type(
-        name: &str,
-        scope: &UnordMap<String, HostTypeTerm>,
-        fallback: &TensorType,
-    ) -> TensorType {
+    fn inferred_load_type(name: &str, scope: &HostScope, fallback: &TensorType) -> TensorType {
         match scope.get(name) {
             Some(HostTypeTerm::Tensor(actual)) => actual.clone(),
             _ => fallback.clone(),
@@ -22209,8 +22967,18 @@ fn actualize_tensor_helper_types(
         }
     }
 
+    struct RuntimeDimNames<'a> {
+        local: UnordSet<String>,
+        scope: &'a HostScope,
+    }
+    impl RuntimeDimNames<'_> {
+        fn insert(&mut self, name: String) -> bool {
+            !self.scope.has_dimension(&name) && self.local.insert(name)
+        }
+    }
+
     fn reserve_runtime_dim_name(
-        occupied: &mut UnordSet<String>,
+        occupied: &mut RuntimeDimNames<'_>,
         operation: &str,
         node: chelis_dag_core::dag::NodeId,
         axis: usize,
@@ -22273,7 +23041,7 @@ fn actualize_tensor_helper_types(
         node_id: chelis_dag_core::dag::NodeId,
         input: &TensorType,
         fallback: &TensorType,
-        occupied_dim_names: &mut UnordSet<String>,
+        occupied_dim_names: &mut RuntimeDimNames<'_>,
     ) -> Option<TensorType> {
         // Pad, Shrink, and Stride all preserve input rank, but each axis can
         // either forward the input extent, compute a static extent, or mint
@@ -22286,7 +23054,7 @@ fn actualize_tensor_helper_types(
             axis: usize,
             input_rank: usize,
             fallback: &TensorType,
-            occupied_dim_names: &mut UnordSet<String>,
+            occupied_dim_names: &mut RuntimeDimNames<'_>,
         ) -> chelis_dag_core::dag::DimInfo {
             if fallback.dims.len() == input_rank
                 && let Some(dim) = fallback.dims.get(axis)
@@ -22607,24 +23375,11 @@ fn actualize_tensor_helper_types(
     // names that host-scope actualization can introduce later, then mint by
     // insertion into that finite set. A prefix convention alone is not an
     // identity boundary (chelis#1137 red-team rounds 2-3).
-    let mut occupied_dim_names = chelis_dag_core::dag::dimension_identity_names(dag);
-    // `to_sorted` here is an order-insensitive drain, not an order claim:
-    // every element lands in a set whose membership is what the minting
-    // loop below reads.
-    occupied_dim_names.extend(
-        scope
-            .to_sorted()
-            .into_iter()
-            .filter_map(|(_, term)| match term {
-                HostTypeTerm::Tensor(tensor) => Some(tensor),
-                _ => None,
-            })
-            .flat_map(|tensor| tensor.dims.iter())
-            .filter_map(|dim| match dim {
-                chelis_dag_core::dag::DimInfo::Named(name, _) => Some(name.clone()),
-                chelis_dag_core::dag::DimInfo::Lit(_) => None,
-            }),
-    );
+    let occupied_dim_names = chelis_dag_core::dag::dimension_identity_names(dag);
+    let mut occupied_dim_names = RuntimeDimNames {
+        local: occupied_dim_names,
+        scope,
+    };
     let mut uses =
         UnordMap::<chelis_dag_core::dag::NodeId, Vec<chelis_dag_core::dag::NodeId>>::new();
     for node in dag.nodes() {
@@ -23626,7 +24381,7 @@ fn collect_top_level_items<'a>(expr: &'a Expr, out: &mut Vec<&'a Expr>) {
 /// formal or local input. Dead inputs are removed after lowering.
 fn collect_tensor_scope(
     _program: &HostLoweringSession<'_>,
-    scope: &UnordMap<String, HostTypeTerm>,
+    scope: &HostScope,
     _site: Option<&Expr>,
 ) -> UnordMap<String, TensorType> {
     scope
@@ -23683,7 +24438,7 @@ fn host_type_from_tensor_input(ty: &TensorType) -> HostTypeTerm {
 pub(crate) fn expr_host_type(
     expr: &Expr,
     program: &HostLoweringSession<'_>,
-    scope: &UnordMap<String, HostTypeTerm>,
+    scope: &HostScope,
 ) -> HostTypeTerm {
     let raw = expr_host_type_raw(expr, program, scope);
     let subst = active_type_subst();
@@ -23890,7 +24645,7 @@ fn apply_host_type_subst(
 fn expr_host_type_raw(
     expr: &Expr,
     program: &HostLoweringSession<'_>,
-    scope: &UnordMap<String, HostTypeTerm>,
+    scope: &HostScope,
 ) -> HostTypeTerm {
     match expr {
         Expr::Atom(Atom::Int(_), _) => HostTypeTerm::Int64,
@@ -23970,7 +24725,7 @@ fn permute_host_tensor_type(input: &TensorType, axes: &[i64]) -> Option<TensorTy
 fn infer_app_expr_host_type(
     expr: &Expr,
     program: &HostLoweringSession<'_>,
-    scope: &UnordMap<String, HostTypeTerm>,
+    scope: &HostScope,
 ) -> Option<HostTypeTerm> {
     let (DeepTag::App, _, kids) = stamped_parts(expr)? else {
         return None;
@@ -24545,7 +25300,7 @@ fn find_top_level_def_named<'a>(exprs: &'a [Expr], name: &str) -> Option<(&'a st
 fn expr_tensor_type(
     expr: &Expr,
     program: &HostLoweringSession<'_>,
-    scope: &UnordMap<String, HostTypeTerm>,
+    scope: &HostScope,
 ) -> Option<TensorType> {
     match expr_host_type(expr, program, scope) {
         HostTypeTerm::Tensor(ty) => Some(ty),
@@ -27936,7 +28691,7 @@ mod tests {
             None,
         )
         .expect("a whole checked call must retain its closed List actual values");
-        assert!(kernel_dag_loads_builtin(&dag, &UnordMap::new()).is_none());
+        assert!(kernel_dag_loads_builtin(&dag, &HostScope::new()).is_none());
         assert_eq!(
             dag.get(dag.roots()[0]).unwrap().output_type.dims,
             [DimInfo::Lit(2)]
@@ -28867,11 +29622,188 @@ mod tests {
     }
 
     #[test]
+    fn helper_operand_views_widen_axes_without_refining_physical_claims() {
+        let physical = TensorType {
+            dims: vec![DimInfo::Lit(2), DimInfo::Lit(3)],
+            precision: Prim::F32,
+        };
+        let checked = TensorType {
+            dims: vec![
+                DimInfo::Named("*".into(), None),
+                DimInfo::Named("n".into(), None),
+            ],
+            precision: Prim::F32,
+        };
+        assert_eq!(tensor_helper_operand_view(&physical, &checked), checked);
+        assert_eq!(physical.dims, vec![DimInfo::Lit(2), DimInfo::Lit(3)]);
+        let mut wrong_rank = checked.clone();
+        wrong_rank.dims.pop();
+        assert_eq!(tensor_helper_operand_view(&physical, &wrong_rank), physical);
+        let mut wrong_precision = checked.clone();
+        wrong_precision.precision = Prim::F64;
+        assert_eq!(
+            tensor_helper_operand_view(&physical, &wrong_precision),
+            physical
+        );
+        let unknown = TensorType {
+            dims: vec![DimInfo::Named("runtime".into(), None)],
+            precision: Prim::F32,
+        };
+        let claimed_unit = TensorType {
+            dims: vec![DimInfo::Lit(1)],
+            precision: Prim::F32,
+        };
+        assert_eq!(tensor_helper_operand_view(&unknown, &claimed_unit), unknown);
+    }
+
+    #[test]
+    fn operand_name_reservations_cover_unread_source_names_and_visible_bindings() {
+        let checked = surf_check(
+            "__host_tensor_arg_1_1 = 11i64\ndef unused(__host_tensor_arg_1_0: i64) -> i64 = {\n __host_tensor_arg_1_2 = 12i64\n 0i64\n}\n",
+        );
+        let session = HostLoweringSession::new(&checked);
+        let scope = HostScope::from([("__host_tensor_arg_1_3".into(), HostTypeTerm::Int64)]);
+        let mut names = OperandNameSupply::default();
+        assert_eq!(names.fresh(1, &session, &scope), "__host_tensor_arg_1_4");
+        assert_eq!(names.fresh(1, &session, &scope), "__host_tensor_arg_1_5");
+        assert_eq!(names.fresh(2, &session, &scope), "__host_tensor_arg_2_6");
+        let other = surf_check("out = 0i64\n");
+        let mut independent = OperandNameSupply::default();
+        assert_eq!(
+            independent.fresh(1, &HostLoweringSession::new(&other), &HostScope::new()),
+            "__host_tensor_arg_1_0"
+        );
+    }
+
+    #[test]
+    fn operand_name_reservations_include_metadata_carriers() {
+        let name = "__host_tensor_arg_1_0";
+        let reference = deep_expr("(var {} __host_tensor_arg_1_0)");
+        let metadata = Metadata::from(chelis_deep::annotations::MetadataValue::PropertySeed(
+            chelis_deep::annotations::RuntimeExpression::try_new(reference)
+                .expect("runtime name metadata"),
+        ));
+        let span = chelis_deep::Span::new(0, 0);
+        for expr in [
+            Expr::Map(metadata.clone(), span),
+            Expr::MetaExpr(
+                chelis_deep::ast::MetaExpr {
+                    metadata: metadata.clone(),
+                    expr: Box::new(deep_expr("(lit {} 1)")),
+                },
+                span,
+            ),
+            Expr::UnknownForm(Box::new(chelis_deep::ast::UnknownFormData {
+                head: "future-form".into(),
+                meta: metadata,
+                children: Vec::new(),
+                span,
+            })),
+        ] {
+            let mut names = UnordSet::new();
+            collect_operand_source_names(&expr, &mut names);
+            assert!(names.contains(name));
+            assert!(!names.contains("__host_tensor_arg_1_1"));
+        }
+    }
+
+    #[test]
+    fn operand_name_reservations_repeat_across_sessions_and_unwind() {
+        let checked = surf_check("__host_tensor_arg_1_0 = 7i64\nout = 0i64\n");
+        let prepared = PreparedHostProgram::new(checked);
+        let scope = HostScope::new();
+        take_top_level_name_index_builds();
+        let allocate = |session: &HostLoweringSession<'_>| {
+            let mut names = OperandNameSupply::default();
+            (
+                names.fresh(1, session, &scope),
+                names.fresh(1, session, &scope),
+            )
+        };
+        let expected = allocate(&prepared.session());
+        assert_eq!(
+            expected,
+            (
+                "__host_tensor_arg_1_1".into(),
+                "__host_tensor_arg_1_2".into()
+            )
+        );
+        let interrupted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let session = prepared.session();
+            let mut names = OperandNameSupply::default();
+            assert_eq!(names.fresh(1, &session, &scope), expected.0);
+            panic!("interrupt an operand-preparation attempt");
+        }));
+        assert!(interrupted.is_err());
+        assert_eq!(allocate(&prepared.session()), expected);
+        assert_eq!(allocate(&prepared.session()), expected);
+        assert_eq!(take_top_level_name_index_builds(), 1);
+    }
+
+    #[test]
+    fn persistent_host_scope_preserves_order_shadowing_and_dimension_identity() {
+        let tensor = |names: &[&str]| {
+            HostTypeTerm::Tensor(TensorType {
+                dims: names
+                    .iter()
+                    .map(|name| DimInfo::Named((*name).into(), None))
+                    .collect(),
+                precision: Prim::F32,
+            })
+        };
+        let mut scope = HostScope::from([
+            ("b".into(), tensor(&["n"])),
+            ("a".into(), tensor(&["n", "other"])),
+            (
+                LoadStoreName::top_level("global").as_str().into(),
+                tensor(&["n", "global_only"]),
+            ),
+        ]);
+        let snapshot = scope.clone();
+        assert_eq!(scope.dimension_source("n").unwrap().0, "a");
+        assert!(
+            scope.has_dimension("global_only"),
+            "private globals reserve identities"
+        );
+        assert!(
+            scope.dimension_source("global_only").is_none(),
+            "private global is not an input"
+        );
+        scope.insert("a".into(), HostTypeTerm::Int64);
+        assert_eq!(scope.dimension_source("n").unwrap().0, "b");
+        assert!(!scope.has_dimension("other"));
+        assert_eq!(snapshot.dimension_source("n").unwrap().0, "a");
+        assert!(snapshot.has_dimension("other"));
+        scope.remove("b");
+        assert!(scope.dimension_source("n").is_none());
+        let normalized = "\0rank-axis:r:0".to_string();
+        scope.insert("a".into(), tensor(&[&normalized]));
+        scope.insert("z".into(), tensor(&["r[0]"]));
+        assert_eq!(
+            scope.dimension_source("r[0]").unwrap().0,
+            "a",
+            "source selection uses the old sorted-name then axis order across aliases"
+        );
+        scope.insert("wild".into(), tensor(&["*", ""]));
+        for wildcard in ["*", ""] {
+            assert!(
+                scope.has_dimension(wildcard),
+                "wildcards remain namespace reservations"
+            );
+            assert!(
+                scope.dimension_source(wildcard).is_none(),
+                "wildcards do not declare binders"
+            );
+        }
+        assert!(!scope.has_dimension("absent"));
+    }
+
+    #[test]
     fn tensor_helper_scope_keeps_shape_only_binders_and_excludes_global_aliases() {
         let checked = surf_check("w = to_tensor([1.0f32])\n");
         let session = HostLoweringSession::new(&checked);
         let (_, site) = session.def_named("w").expect("checked declaration");
-        let scope = UnordMap::from([
+        let scope = HostScope::from([
             (
                 "n".to_string(),
                 HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(Prim::Int64)),
@@ -28918,7 +29850,7 @@ mod tests {
                 },
                 None,
             );
-            let mut scope = UnordMap::new();
+            let mut scope = HostScope::new();
             assert_eq!(kernel_dag_loads_builtin(&dag, &scope), Some(name.into()));
             scope.insert(
                 "unrelated".into(),
@@ -29080,7 +30012,7 @@ mod tests {
         );
         dag.add_root(root);
 
-        let scalar_scope = UnordMap::from([(
+        let scalar_scope = HostScope::from([(
             "index".to_string(),
             HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(Prim::Int64)),
         )]);
@@ -29097,7 +30029,7 @@ mod tests {
         assert!(identity_tensor_helper_matches_expected(
             &dag,
             &vector,
-            &UnordMap::new()
+            &HostScope::new()
         ));
     }
 
@@ -29119,6 +30051,8 @@ mod tests {
             let mut walk = UncarriableWalk {
                 defs: &defs,
                 declaration_type: &no_declaration_type,
+                incoming_scope: None,
+                operand_capture: None,
                 active: UnordSet::new(),
                 completed: UnordMap::new(),
                 cycle_cutoff: false,
@@ -29207,6 +30141,8 @@ mod tests {
         let mut walk = UncarriableWalk {
             defs: &defs,
             declaration_type: &no_declaration_type,
+            incoming_scope: None,
+            operand_capture: None,
             active: UnordSet::new(),
             completed: UnordMap::new(),
             cycle_cutoff: false,
@@ -29239,6 +30175,8 @@ mod tests {
         let mut walk = UncarriableWalk {
             defs: &defs,
             declaration_type: &no_declaration_type,
+            incoming_scope: None,
+            operand_capture: None,
             active: UnordSet::new(),
             completed: UnordMap::new(),
             cycle_cutoff: false,
@@ -29302,6 +30240,8 @@ mod tests {
         UncarriableWalk {
             defs,
             declaration_type: &no_declaration_type,
+            incoming_scope: None,
+            operand_capture: None,
             active: UnordSet::new(),
             completed: UnordMap::new(),
             cycle_cutoff: false,
@@ -31042,6 +31982,184 @@ def main(x: tensor[4, f32], rate: f32) -> tensor[4, f32] =
         );
     }
 
+    #[test]
+    fn record_operand_facts_match_the_scoped_reader_and_stop_at_callbacks() {
+        for width in ["width(x)", "(fn (z: i64) -> add(z, width(x)))(0i64)"] {
+            let checked = surf_check(&format!(
+                "type Box = | Box {{ value: i64 }}\ndef width(b: Box) -> i64 = b.value\ndef run(x: Box, y: tensor[1, f32]) -> tensor[*, f32] = reshape(y, [{width}])\n"
+            ));
+            let session = HostLoweringSession::new(&checked);
+            let (_, body) = session.def_named("run").unwrap();
+            let signature = host_def_signature("run", body, None, &session).unwrap();
+            let root = issue_1205_find_named_app(&signature.body_expr, "reshape").unwrap();
+            let facts = scoped_record_operand_facts(root, &session, &signature.scope);
+            let mut pending = vec![root];
+            while let Some(expr) = pending.pop() {
+                let key = expr as *const Expr as usize;
+                assert_eq!(
+                    facts[&key],
+                    operand_reads_host_record(expr, &session, &signature.scope)
+                );
+                match expr {
+                    Expr::MetaExpr(meta, _) => pending.push(&meta.expr),
+                    _ => {
+                        if let Some((tag, _, children)) = stamped_parts(expr)
+                            && !matches!(tag, DeepTag::Var | DeepTag::Fn)
+                        {
+                            pending.extend(children);
+                        }
+                    }
+                }
+            }
+            assert!(facts.len() <= deep_expr_nodes(root));
+        }
+    }
+
+    #[test]
+    fn operand_admission_facts_are_bounded_to_a_lowering_scope() {
+        let checked = surf_check(
+            "def width(v: tensor[*, f32]) -> i64 = numel(v)\ndef run[n](x: tensor[n, f32]) -> tensor[*, f32] = reshape(x, [width(x)])\n",
+        );
+        let session = HostLoweringSession::new(&checked);
+        let (_, body) = session.def_named("run").unwrap();
+        let signature = host_def_signature("run", body, None, &session).unwrap();
+        let parent = issue_1205_find_named_app(&signature.body_expr, "reshape").unwrap();
+        let operand = &stamped_parts(parent).unwrap().2[2];
+        let scope = signature
+            .params
+            .iter()
+            .map(|param| (param.name.clone(), param.ty.clone()))
+            .collect::<HostScope>();
+        let before = OPERAND_ADMISSION_STACK.with(|stack| stack.borrow().len());
+        assert_eq!(cached_operand_admission(parent, operand, &scope), None);
+        {
+            let _outer = OperandAdmissionGuard::begin(parent, &session, &scope);
+            assert_eq!(
+                cached_operand_admission(parent, operand, &scope),
+                Some(true)
+            );
+            OPERAND_ADMISSION_STACK.with(|stack| {
+                assert!(stack.borrow().last().unwrap().operands.len() <= deep_expr_nodes(parent));
+            });
+            let independent = scope.clone();
+            assert_eq!(
+                cached_operand_admission(parent, operand, &independent),
+                None
+            );
+            {
+                let _inner = OperandAdmissionGuard::begin(parent, &session, &independent);
+                assert_eq!(
+                    cached_operand_admission(parent, operand, &independent),
+                    Some(true)
+                );
+            }
+            assert_eq!(
+                cached_operand_admission(parent, operand, &scope),
+                Some(true)
+            );
+            assert_eq!(
+                cached_operand_admission(parent, operand, &independent),
+                None
+            );
+        }
+        assert_eq!(cached_operand_admission(parent, operand, &scope), None);
+        assert_eq!(
+            OPERAND_ADMISSION_STACK.with(|stack| stack.borrow().len()),
+            before
+        );
+    }
+
+    #[test]
+    fn operand_admission_does_not_cache_callee_or_callback_nodes() {
+        for anonymous in [false, true] {
+            let target = if anonymous {
+                "(fn (y: tensor[n, f32]) -> numel(y))(x)"
+            } else {
+                "width(x)"
+            };
+            let checked = surf_check(&format!(
+                "def width(v: tensor[*, f32]) -> i64 = numel(v)\ndef run[n](x: tensor[n, f32]) -> tensor[*, f32] = reshape(x, [{target}])\n"
+            ));
+            let session = HostLoweringSession::new(&checked);
+            let (_, body) = session.def_named("run").unwrap();
+            let signature = host_def_signature("run", body, None, &session).unwrap();
+            let parent = issue_1205_find_named_app(&signature.body_expr, "reshape").unwrap();
+            let scope = signature
+                .params
+                .iter()
+                .map(|param| (param.name.clone(), param.ty.clone()))
+                .collect::<HostScope>();
+            let defs = cached_program_defs(&session);
+            let callee_body = if anonymous {
+                &signature.body_expr
+            } else {
+                &defs["width"]
+            };
+            let numel = issue_1205_find_named_app(callee_body, "numel").unwrap();
+            let _guard = OperandAdmissionGuard::begin(parent, &session, &scope);
+            OPERAND_ADMISSION_STACK.with(|stack| {
+                assert!(
+                    !stack
+                        .borrow()
+                        .last()
+                        .unwrap()
+                        .operands
+                        .contains_key(&(numel as *const Expr as usize))
+                );
+            });
+        }
+    }
+
+    // [05-OP-54] observes the exact size of an eagerly constructed List.
+    // A scalar consumer has no tensor helper to consume prepared operands;
+    // preparing them would lower and discard their work before the host call
+    // lowers the original actuals again (spec/03 §4.4).
+    #[test]
+    fn scalar_list_calls_do_not_prepare_unused_tensor_operands() {
+        std::thread::Builder::new()
+            .name("scalar-list-host-work".to_string())
+            .stack_size(64 * 1024 * 1024)
+            .spawn(|| {
+                let mut previous = None;
+                for depth in [2, 4, 8, 16, 32, 40] {
+                    let expression = (0..depth).fold("1i64".to_string(), |inner, _| {
+                        format!("f(len([{inner}, 2i64]))")
+                    });
+                    let typed =
+                        surf_check(&format!("def f(n: i64) -> i64 = n\na = {expression}\n"));
+                    let effected = chelis_effects::check_program(&typed).expect("effect check");
+                    let checked =
+                        chelis_types::check_linearity(&effected).expect("linearity check");
+                    reset_host_work_profile();
+                    try_lower_compiled_program(&checked).expect("nested scalar List calls lower");
+                    let profile = take_host_work_profile();
+                    eprintln!("scalar List depth={depth} profile={profile:?}");
+                    assert_eq!(
+                        profile.operand_view_axes, 0,
+                        "scalar host calls do not prepare tensor axis views"
+                    );
+                    assert_eq!(
+                        profile.app_clone_nodes, 0,
+                        "no tensor application is prepared"
+                    );
+                    assert_eq!(
+                        profile.operand_fact_nodes, 0,
+                        "no tensor operand admission is needed"
+                    );
+                    if let Some(visits) = previous {
+                        assert!(
+                            profile.host_expr_visits * 10 <= visits * 22,
+                            "ordinary host work grows with the nested source"
+                        );
+                    }
+                    previous = Some(profile.host_expr_visits);
+                }
+            })
+            .expect("scalar List profile thread starts")
+            .join()
+            .expect("scalar List profile thread completes");
+    }
+
     fn issue_1205_source(operations: usize, flat: bool) -> String {
         let module = if flat { "Flat" } else { "Nested" };
         let mut lines = vec![
@@ -31130,6 +32248,22 @@ def main(x: tensor[4, f32], rate: f32) -> tensor[4, f32] =
             for operations in [20, 40, 80, 160] {
                 let profile = issue_1205_host_profile(operations, flat);
                 let total_work = profile.host_expr_visits
+                    + profile.admission_expr_visits
+                    + profile.reservation_expr_visits
+                    + profile.reservation_lookups
+                    + profile.reservation_name_bytes
+                    + profile.operand_param_entries
+                    + profile.operand_view_axes
+                    + profile.operand_scope_clone_entries
+                    + profile.host_scope_lookups
+                    + profile.host_scope_transport_entries
+                    + profile.host_scope_bindings
+                    + profile.host_scope_clones
+                    + profile.helper_input_loads
+                    + profile.helper_global_lookup_steps
+                    + profile.helper_scope_expr_nodes
+                    + profile.operand_fact_nodes
+                    + profile.record_operand_visits
                     + profile.app_clone_nodes
                     + profile.tensor_helper_input_nodes
                     + profile.tensor_helper_preflight_nodes
@@ -31162,14 +32296,122 @@ def main(x: tensor[4, f32], rate: f32) -> tensor[4, f32] =
                     profile.tensor_helper_preflight_rejections > 0,
                     "#1205 fixture must exercise the dynamic to_tensor preflight"
                 );
+                assert!(
+                    profile.reservation_expr_visits > 0
+                        && profile.reservation_lookups > 0
+                        && profile.reservation_name_bytes > 0
+                        && profile.helper_global_lookup_steps > 0
+                        && profile.operand_view_axes > 0,
+                    "#1205 fixture exercises source reservation, lookup, axis views and name ownership"
+                );
+                assert!(
+                    profile.app_clone_nodes > 0 && profile.max_app_clone_nodes > 0,
+                    "#1205 fixture must exercise prepared application cloning"
+                );
+                assert!(
+                    profile.host_scope_clones > 0
+                        && profile.host_scope_lookups > 0
+                        && profile.helper_input_loads > 0
+                        && profile.helper_scope_expr_nodes > 0
+                        && profile.record_operand_visits > 0,
+                    "#1205 fixture exercises the input/scope work being bounded"
+                );
                 rows.push((operations, total_work, profile));
             }
             for pair in rows.windows(2) {
                 let (previous_n, previous, previous_profile) = pair[0];
                 let (current_n, current, profile) = pair[1];
+                assert!(
+                    profile.admission_expr_visits * 10
+                        <= previous_profile.admission_expr_visits * 22,
+                    "#1205 scoped admission visits must grow linearly"
+                );
+                assert!(
+                    profile.operand_param_entries * 10
+                        <= previous_profile.operand_param_entries * 22,
+                    "#1205 operand scope materialization must grow linearly"
+                );
                 assert_eq!(
-                    profile.app_clone_nodes, previous_profile.app_clone_nodes,
-                    "#1205 descendant app cloning must not grow with expression nesting"
+                    profile.operand_scope_clone_entries, 0,
+                    "#1205 persistent host scopes do not copy prefixes"
+                );
+                for (category, current, previous) in [
+                    (
+                        "name reservation visits",
+                        profile.reservation_expr_visits,
+                        previous_profile.reservation_expr_visits,
+                    ),
+                    (
+                        "name reservation lookups",
+                        profile.reservation_lookups,
+                        previous_profile.reservation_lookups,
+                    ),
+                    (
+                        "name reservation bytes",
+                        profile.reservation_name_bytes,
+                        previous_profile.reservation_name_bytes,
+                    ),
+                    (
+                        "operand view axes",
+                        profile.operand_view_axes,
+                        previous_profile.operand_view_axes,
+                    ),
+                    (
+                        "record operand visits",
+                        profile.record_operand_visits,
+                        previous_profile.record_operand_visits,
+                    ),
+                    (
+                        "global type lookup steps",
+                        profile.helper_global_lookup_steps,
+                        previous_profile.helper_global_lookup_steps,
+                    ),
+                    (
+                        "input scope scan",
+                        profile.helper_scope_expr_nodes,
+                        previous_profile.helper_scope_expr_nodes,
+                    ),
+                    (
+                        "scope lookups",
+                        profile.host_scope_lookups,
+                        previous_profile.host_scope_lookups,
+                    ),
+                    (
+                        "scope transport",
+                        profile.host_scope_transport_entries,
+                        previous_profile.host_scope_transport_entries,
+                    ),
+                    (
+                        "scope bindings",
+                        profile.host_scope_bindings,
+                        previous_profile.host_scope_bindings,
+                    ),
+                    (
+                        "scope clones",
+                        profile.host_scope_clones,
+                        previous_profile.host_scope_clones,
+                    ),
+                    (
+                        "input loads",
+                        profile.helper_input_loads,
+                        previous_profile.helper_input_loads,
+                    ),
+                ] {
+                    assert!(
+                        current * 10 <= previous * 22,
+                        "#1205 {category} must grow linearly: {previous}->{current}"
+                    );
+                }
+                // Operand preparation rebuilds one small application at each
+                // host boundary. Its count may grow with source operations;
+                // the copied subtree must not grow with expression nesting.
+                assert_eq!(
+                    profile.max_app_clone_nodes, previous_profile.max_app_clone_nodes,
+                    "#1205 each prepared application must have bounded descendant cloning"
+                );
+                assert!(
+                    profile.app_clone_nodes * 10 <= previous_profile.app_clone_nodes * 22,
+                    "#1205 total prepared application cloning must grow linearly"
                 );
                 assert!(
                     current * 10 <= previous * 22,
@@ -31952,7 +33194,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
         // Empty checked program: the arm under test must not depend on
         // program-level lookups for the precision recovery.
         let program = surf_check("unrelated = 1\n");
-        infer_app_expr_host_type(&app, &HostLoweringSession::new(&program), &UnordMap::new())
+        infer_app_expr_host_type(&app, &HostLoweringSession::new(&program), &HostScope::new())
     }
 
     #[test]
@@ -32141,7 +33383,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
             "(app {{}} (var {{}} concat) (var {{}} rows) {axis_src})"
         ));
         let program = surf_check("unrelated = 1\n");
-        let mut scope = UnordMap::new();
+        let mut scope = HostScope::new();
         scope.insert(
             "rows".to_string(),
             HostTypeTerm::List(Box::new(HostTypeTerm::Tensor(rank2_element()))),
@@ -32690,7 +33932,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
         let body = lookup_program_def(&defs, "softplus").unwrap();
         let fn_node = as_node(body).unwrap();
         let body = fn_node.children_slice().get(1).unwrap();
-        let mut scope = UnordMap::new();
+        let mut scope = HostScope::new();
         scope.insert(
             "x".to_string(),
             HostTypeTerm::Tensor(TensorType {
@@ -32965,7 +34207,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
             None,
         );
         before.add_root(root);
-        let mut scope = UnordMap::new();
+        let mut scope = HostScope::new();
         scope.insert("x".into(), HostTypeTerm::Tensor(concrete.clone()));
 
         let after = remap_tensor_helper_dim_symbols(&before, &scope, &concrete)
@@ -33140,7 +34382,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
         );
         dag.add_root(root);
 
-        let mut scope = UnordMap::new();
+        let mut scope = HostScope::new();
         scope.insert(
             "x".into(),
             HostTypeTerm::Tensor(TensorType {
@@ -33230,7 +34472,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
         );
         dag.add_root(root);
 
-        let mut scope = UnordMap::new();
+        let mut scope = HostScope::new();
         scope.insert(
             "x".into(),
             HostTypeTerm::Tensor(TensorType {
@@ -33320,7 +34562,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
         );
         dag.add_root(root);
 
-        let mut scope = UnordMap::new();
+        let mut scope = HostScope::new();
         scope.insert(
             "x".into(),
             HostTypeTerm::Tensor(TensorType {
@@ -33380,7 +34622,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
         );
         dag.add_root(shrink);
 
-        let mut scope = UnordMap::new();
+        let mut scope = HostScope::new();
         scope.insert(
             "expanded".into(),
             HostTypeTerm::Tensor(TensorType {
@@ -33424,7 +34666,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
             );
             dag.add_root(load);
         }
-        let scope = UnordMap::from([
+        let scope = HostScope::from([
             (
                 "x".to_string(),
                 HostTypeTerm::Tensor(TensorType {
@@ -33475,7 +34717,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
         );
 
         // The control: one extent for the binder is a rename, not a refusal.
-        let agreeing = UnordMap::from([
+        let agreeing = HostScope::from([
             ("x".to_string(), scope["x"].clone()),
             ("y".to_string(), scope["x"].clone()),
         ]);
@@ -33534,7 +34776,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
         );
         dag.add_root(shrink);
 
-        let mut scope = UnordMap::new();
+        let mut scope = HostScope::new();
         scope.insert(
             "x".into(),
             HostTypeTerm::Tensor(TensorType {
@@ -33600,7 +34842,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
         );
         dag.add_root(shrink);
 
-        let scope = UnordMap::from([(
+        let scope = HostScope::from([(
             "x".into(),
             HostTypeTerm::Tensor(TensorType {
                 dims: vec![DimInfo::Lit(4)],
@@ -33684,7 +34926,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
             dag.add_root(node);
         }
 
-        let scope = UnordMap::from([(
+        let scope = HostScope::from([(
             "x".into(),
             HostTypeTerm::Tensor(TensorType {
                 dims: vec![DimInfo::Named("actual_input".into(), None)],
@@ -33765,7 +35007,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
 
         let base = format!("_rt_shrink_dim_{}_0", shrink.0);
         let suffixed = format!("{base}_1");
-        let mut scope = UnordMap::from([(
+        let mut scope = HostScope::from([(
             "x".into(),
             HostTypeTerm::Tensor(TensorType {
                 dims: vec![DimInfo::Lit(8)],
@@ -33851,7 +35093,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
             dag.add_root(shrink);
             assert_eq!(shrink.0, expected_shrink_id);
 
-            let scope = UnordMap::from([(
+            let scope = HostScope::from([(
                 "x".into(),
                 HostTypeTerm::Tensor(TensorType {
                     dims: vec![DimInfo::Lit(8)],
@@ -33947,7 +35189,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
         for consumer in consumers {
             dag.add_root(consumer);
         }
-        let scope = UnordMap::from([(
+        let scope = HostScope::from([(
             "x".into(),
             HostTypeTerm::Tensor(TensorType {
                 dims: vec![DimInfo::Lit(8)],
@@ -34395,7 +35637,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
     fn lower_against(program: &CheckedProgram, source: &str) -> Result<HostExpr, String> {
         let program = &HostLoweringSession::new(program);
         let mut helpers = TensorHelperSink::new(false);
-        lower_host_expr(&deep_expr(source), program, &UnordMap::new(), &mut helpers)
+        lower_host_expr(&deep_expr(source), program, &HostScope::new(), &mut helpers)
             .map_err(|diagnostic| diagnostic.message)
     }
 

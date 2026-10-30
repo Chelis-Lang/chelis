@@ -34,8 +34,9 @@ use common::{gcc_available, parse_tensor_data, write_file};
 /// The draw inside a tensor kernel: the template folds, so the kernel reads
 /// the key as its rank-0 key input.
 const DAG_DRAW: &str = "def draw(k: key, c: f32) -> tensor[4, f32] = uniform_like(k, to_tensor([c, c, c, c]), 2.0f32, 5.0f32)\n";
-/// The draw in host code: the template is a runtime value.
-const HOST_DRAW: &str = "def bc(c: f32) -> tensor[4, f32] = to_tensor([c, c, c, c])\ndef draw(k: key, c: f32) -> tensor[4, f32] = uniform_like(k, bc(c), 2.0f32, 5.0f32)\n";
+/// A host-produced template enters the draw as a typed tensor input. The
+/// draw itself can run in a tensor helper after operand preparation.
+const COMPUTED_TEMPLATE_DRAW: &str = "def bc(c: f32) -> tensor[4, f32] = to_tensor([c, c, c, c])\ndef draw(k: key, c: f32) -> tensor[4, f32] = uniform_like(k, bc(c), 2.0f32, 5.0f32)\n";
 /// #2318's two programs, verbatim.
 const KEYLESS_DAG: &str =
     "def draw(c: f32) -> tensor[4, f32] = uniform_like(to_tensor([c, c, c, c]), 2.0f32, 5.0f32)\n";
@@ -205,7 +206,11 @@ fn key_form_2318_draws_match_eval_and_the_reference_in_both_lanes() {
             DAG_DRAW,
             "__tensor_0__private: input `k` at slot",
         ),
-        ("host_draw", HOST_DRAW, "__uniform_low_"),
+        (
+            "computed_template_draw",
+            COMPUTED_TEMPLATE_DRAW,
+            "__tensor_0__private: input `k` at slot",
+        ),
     ] {
         let out_dir = build(dir.path(), stem, source);
         let header = std::fs::read_to_string(out_dir.join(format!("{stem}.h"))).unwrap();
@@ -220,6 +225,12 @@ fn key_form_2318_draws_match_eval_and_the_reference_in_both_lanes() {
             emitted.contains(lane_marker),
             "{stem}: the draw is not in the lane this case exercises"
         );
+        if stem == "computed_template_draw" {
+            assert!(
+                emitted.contains("= chelis_fn_6263__chelis_owned_body("),
+                "the computed template retains its host producer call"
+            );
+        }
         let printed = stdout_of(&run_driver(&out_dir, stem, &driver, &[]));
         assert_eq!(
             printed.trim(),

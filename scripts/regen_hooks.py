@@ -63,13 +63,13 @@ EXIT_ERROR = 2
 
 # The legs pre-push may run: pure-Python tier-0 legs whose --check never
 # writes a file in the worktree, not even transiently. Each was read for that
-# property: conformance-assets and reviewed-unsupported-wording compare and
-# print; opaque-corpus regenerates into a temporary directory. No hook ever
+# property: conformance-assets compares and prints; opaque-corpus regenerates
+# into a temporary directory. No hook ever
 # invokes cargo, so the rejection registry, whose check builds the workspace,
 # is CI's alone, as is every tier-1 leg. test_regen_hooks.py runs these
 # checks against a copy and requires the copy to stay byte-identical.
 READ_ONLY_CHECKS = frozenset(
-    {"conformance-assets", "reviewed-unsupported-wording", "opaque-corpus"}
+    {"conformance-assets", "opaque-corpus"}
 )
 
 

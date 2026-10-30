@@ -58,6 +58,77 @@ different shape or infer a precision from the first element. A static route
 remains valid only when its proof of representability survives graph rewrites;
 if a rewrite changes that proof, routing is recomputed before emission.
 
+Operation operand preparation consults the scoped admission facts beneath each
+operand before tensor-helper extraction. A host-owned producer becomes one
+typed input, retaining its physical rank, dtype and ordered axes. Literal shape
+lists keep their constructor spine and transport their runtime scalar leaves
+separately, so the consumer retains checked rank and actual extent values.
+The formed host binding retains its physical type. A numeric helper's
+parameter frame may separately widen axes through the checked callee parameter
+or argument annotation when rank and dtype agree. This view cannot refine an
+unknown physical axis to a claimed literal. Claimed equality and unit requirements
+remain owned by their original call or producer; a helper boundary does not
+turn a runtime disagreement into a statically contradictory graph.
+
+Computed inputs also retain local-producer identity: a numeric helper boundary
+does not turn a local expand precondition into an authored parameter claim.
+Earlier working operands move with a later host input when needed to preserve
+source evaluation order; integer constants and named axes retain static
+selector evidence. Names already in scope do not acquire a runtime computation
+merely because they are operation arguments.
+
+Only an application with a checked tensor-result candidate prepares operands
+for that helper. Scalar and container-result host calls lower their original
+arguments once through their ordinary eager invocation boundary. Speculative
+preparation has no consumer on that route and must not duplicate nested work.
+
+Operand preparation derives scoped disposition facts once for the working
+operand trees of an immutable owned application. A lowering-lifetime guard
+keeps those facts available to descendant preparation and removes them before
+the owner can be released or rewritten. A new activation of the same tree
+uses its own incoming scope. Callee and callback bodies do not populate the
+caller's address cache. Incoming type bindings are read on demand; preparing
+one operand does not materialize the entire enclosing type scope. The cache
+contains checked admission outcomes, not numeric values or replacement shape
+claims, and does not select an execution path by source-text inspection.
+
+Host type scopes use persistent lexical bindings and indexed dimension owners.
+Cloning a scope shares its prefix; rebinding updates the value and dimension
+indices together. Runtime dimension minting checks the complete host namespace
+without enumerating it. Caller-scope record-read disposition is folded with the
+same owner lifetime, stopping at callable binders.
+
+Signatureless helpers retain the complete typed lexical lookup domain. They
+materialize runtime free inputs before opening branches or closures and resolve
+metadata-only inputs and extent observations on demand. A dimension used only
+as movement geometry demands its supplying lexical tensor through that same
+indexed lookup domain, without importing a caller's scope into a callee. Canonical dimension
+sources use the same name-then-axis order as the ordered input interface;
+private top-level identities reserve names without becoming lexical inputs.
+Already initialized numeric globals retain their resolved identity and checked
+type when a helper reads them, including in geometry. Lexical bindings take
+precedence; global availability never fabricates a lexical parameter.
+
+Operand-name hygiene reads the existing checked-program name index. That
+index reserves every source identifier, including unread binders and names in
+annotations, once on demand for the program it owns. Preparation uses point ownership
+lookups and a local numeric suffix cursor shared by recursive list leaves;
+it does not rescan each application's descendants. Visible lexical bindings
+remain an additional collision check. The cursor belongs to one attempt, so
+independent lowerings and an unwound retry start from the same state. Legal
+source names remain available; the allocator chooses another internal name.
+A recorded expression pins its input identities before later shadowing, and an
+independent callee cannot read the caller's lexical input domain. Declared
+signatures retain their complete authored parameter order and entry claims.
+
+Numeric work classification includes checked casts. A syntactic integer
+reader supplies selector syntax, not evidence that evaluation cannot trap.
+Axis positions come from the resolved builtin's registered argument layout;
+direct-only builtins use their unshadowed declaration. When operand preparation
+moves a selector's numeric work before a later host operand, that work executes
+in the host prelude and the helper retains the checked selector form. Shape-list
+leaves transport their evaluated values, including every checked cast.
+
 A tensor helper captures scalar and tensor values. Lexical ADTs, containers,
 strings and mapped files retain typed opaque bindings during numeric lowering.
 These bindings represent caller values that have already been evaluated; they

@@ -1916,6 +1916,13 @@ prefix = "examples/checked_reshape.ch"
 disposition = "packages"
 packages = ["chelis-e2e"]
 
+# Executed by chelis-cli::computed_tensor_c_admission and checked by the
+# executable example corpus in chelis-e2e.
+[[path_rule]]
+prefix = "examples/computed_tensor_consumers.ch"
+disposition = "packages"
+packages = ["chelis-cli", "chelis-e2e"]
+
 [[path_rule]]
 prefix = "examples/checked_sparse_axes.ch"
 disposition = "packages"

@@ -19,8 +19,8 @@
 //! are all tested. The fixed-stream example runs the ordinary three-lane
 //! driver and also pins its exact values, including the draw from the second
 //! half of its split key after AD.
-//! The annotated concat/softmax example likewise pins check, all eval values,
-//! and its explicit C rejection; it is not a C parity claim.
+//! The annotated concat/softmax example runs the ordinary three-lane driver
+//! and pins every evaluator cell before the native comparison.
 //!
 //! There is deliberately NO tolerant fallback for tensor lines. The old
 //! mismatch path (re-parse both lines as `Vec<f64>`, compare under 1e-6)
@@ -99,9 +99,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command as StdCommand;
 use tempfile::tempdir;
-
-#[path = "common/unsupported_wording.rs"]
-mod unsupported_wording;
 
 #[path = "common/parity_corpus.rs"]
 mod parity_corpus;
@@ -861,30 +858,24 @@ fn parity_wildcard_extents() {
 }
 
 #[test]
-fn parity_annotated_concat_softmax_eval_and_c_rejection() {
+fn parity_annotated_concat_softmax() {
     let path = examples_root().join("annotated_concat_softmax.ch");
     assert_check_clean(&path);
     assert_eq!(
         run_eval(&path),
         b"output = tensor(shape=[2, 4], data=[0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25])\n",
     );
-    let directory = tempdir().unwrap();
-    let output = Command::cargo_bin("chelis")
-        .unwrap()
-        .args(["build", path.to_str().unwrap(), "--target", "c", "--output"])
-        .arg(directory.path().join("out"))
-        .output()
-        .unwrap();
+    drive_parity(&path, true);
+}
+
+#[test]
+fn parity_computed_tensor_consumers() {
+    let path = examples_root().join("computed_tensor_consumers.ch");
     assert_eq!(
-        output.status.code(),
-        Some(1),
-        "C host softmax rejects without a crash"
+        run_eval(&path),
+        b"rows = tensor(shape=[2, 3], data=[0, 1, 2, 0, 1, 2])\ntotal = 6\none_third = 0.33333334\n",
     );
-    assert!(output.stdout.is_empty());
-    assert_eq!(
-        String::from_utf8(output.stderr).unwrap(),
-        unsupported_wording::stderr("annotated_concat_softmax_c")
-    );
+    drive_parity(&path, true);
 }
 
 #[test]

@@ -6,8 +6,7 @@ and the parity test (`crates/chelis-cli/tests/parity.rs`) checks each one. For
 most, it runs the program in the evaluator, builds and runs it through C, and
 requires the two outputs to agree. A program with nothing to print, such as
 `linreg.ch`, has its C built as an object and must print nothing in the
-evaluator. `annotated_concat_softmax.ch` is the exception: the test pins its
-evaluator output and the C build's rejection instead.
+evaluator.
 
 Every `.ch` file in this directory passes `chelis fmt --check` and
 `chelis check`, but is not held to that parity run. Each is here for one of

@@ -7,7 +7,7 @@
 //! [`resolve`], [`resolve_value`] or a named constructor whose documentation
 //! says why the name it is given cannot be a lexical binding at the call.
 
-use super::{HostTypeTerm, UnordMap, host_lexically_binds, is_host_unresolved_marker};
+use super::{HostTypeTerm, host_lexically_binds, is_host_unresolved_marker};
 use std::fmt;
 
 /// The callee a call or named callback resolved to during host lowering.
@@ -160,7 +160,7 @@ impl ProgramCallee {
 }
 
 /// Resolve an applied callee head.
-pub(super) fn resolve(name: String, scope: &UnordMap<String, HostTypeTerm>) -> HostAppCallee<'_> {
+pub(super) fn resolve(name: String, scope: &super::HostScope) -> HostAppCallee<'_> {
     // spec/01-nomenclature.md section 3.2: an applied uppercase head is a
     // constructor head, even where a single-letter value binding shares its
     // spelling.
@@ -174,10 +174,7 @@ pub(super) fn resolve(name: String, scope: &UnordMap<String, HostTypeTerm>) -> H
 /// Resolve a callee named in value position, such as a loop callback. A
 /// value reference to a single-letter uppercase binding is that binding
 /// (spec/01-nomenclature.md section 3.2).
-pub(super) fn resolve_value(
-    name: String,
-    scope: &UnordMap<String, HostTypeTerm>,
-) -> HostAppCallee<'_> {
+pub(super) fn resolve_value(name: String, scope: &super::HostScope) -> HostAppCallee<'_> {
     match scope.get(&name) {
         Some(binding) if host_lexically_binds(scope, &name) => {
             HostAppCallee::Lexical(LexicalCallee { name, binding })
@@ -196,7 +193,7 @@ pub(super) enum ResolvedHostApplication<'s> {
 
 pub(super) fn resolve_application<'s>(
     name: String,
-    scope: &'s UnordMap<String, HostTypeTerm>,
+    scope: &'s super::HostScope,
     declarations: &std::collections::BTreeMap<String, crate::callable_value::StaticBuiltinValue>,
     has_definition: bool,
 ) -> ResolvedHostApplication<'s> {
@@ -246,7 +243,7 @@ mod checked_application_tests {
         let value = crate::callable_value::StaticBuiltinValue::resolve_bare("is_finite").unwrap();
         let declarations =
             BTreeMap::from([("predicate".into(), value.clone()), ("Some".into(), value)]);
-        let mut scope = UnordMap::new();
+        let mut scope = super::super::HostScope::new();
         assert!(
             matches!(resolve_application("predicate".into(), &scope, &declarations, false), ResolvedHostApplication::Closed(op) if op == finite)
         );
