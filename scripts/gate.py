@@ -749,13 +749,13 @@ INTEGRATION_SUPPORT_SLICES: dict[str, tuple[list[str], ...]] = {
         REEF_BOOTSTRAP_CORE_ORACLE,
         SHELL_METADATA_CORE_ORACLE,
         CERTIFICATE_CORE_ORACLE,
-        TYPE_UNIFICATION_CORE_ORACLE,
-        DAG_CORE_ORACLE,
-        EFFECT_ANALYSIS_CORE_ORACLE,
-        CHECKER_CORE_ORACLE,
         OWNERSHIP_LEDGER_CLI_TESTS,
     ),
     "numeric-core": (NUMERIC_CORE_ORACLE,),
+    "type-unification-core": (TYPE_UNIFICATION_CORE_ORACLE,),
+    "dag-core": (DAG_CORE_ORACLE,),
+    "effect-analysis-core": (EFFECT_ANALYSIS_CORE_ORACLE,),
+    "checker-core": (CHECKER_CORE_ORACLE,),
 }
 
 

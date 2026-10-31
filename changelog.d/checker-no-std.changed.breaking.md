@@ -28,6 +28,13 @@ Builtin declaration examples use canonical core imports and reject declarations 
 The portable checker preserves staged constructor equations and ordered result replay.
 Tensor-list regressions use explicit operation resources and retain their original counter boundaries.
 
+Diagnostic tests remove the obsolete C softmax rejection and the full-message assertion.
+The remaining tests retain typed rejection metadata.
+Separate hosted jobs execute the complete core oracles without reduced selections.
+Workflow tests remove obsolete literal-layout snapshots.
+Ownership guards still reject missing, duplicate, stale, and unknown commands.
+Deadline receipt tests accept timeout before child output.
+
 The complete checker oracle compares immutable-source behavior, native authority, full-host costs, independent consumers, and allocator-backed target compilation.
 The embedding supplies allocation and enough stack capacity.
 Target compilation does not prove device execution or resource capacity.
