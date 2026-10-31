@@ -13,6 +13,7 @@
 //! use chelis_backend_c::host_abi::HostAbiType;
 //! ```
 
+use chelis_checker_core::unsupported::{RejectionAuthority, Stage, Unsupported, UnsupportedKind};
 use chelis_ir::ConcreteHostType;
 use chelis_ir::host::{
     ConcreteHostBinding, ConcreteHostCallback, ConcreteHostCallbackKind, ConcreteHostExpr,
@@ -26,7 +27,6 @@ use chelis_ir::ownership::{
     VerifiedHostSiteActionKind, VerifiedHostTensorHelperView,
 };
 use chelis_numeric_core::prim::Prim;
-use chelis_types::unsupported::{RejectionAuthority, Stage, Unsupported, UnsupportedKind};
 use chelis_unord::UnordSet;
 
 /// A host value's C ABI or a nominal argument retained for layout identity.
@@ -248,7 +248,7 @@ impl HostAbiType {
             ConcreteHostType::Scalar(Prim::F8e4m3) => {
                 return Err(rejected_dtype(
                     Prim::F8e4m3,
-                    chelis_types::deliberate_rejection!(
+                    chelis_checker_core::deliberate_rejection!(
                         "[04-DTYPE-1]",
                         "f8e4m3 is reserved but not active; use an active dtype"
                     ),
@@ -280,7 +280,7 @@ impl HostAbiType {
                 if tensor.precision == Prim::F8e4m3 {
                     return Err(rejected_dtype(
                         Prim::F8e4m3,
-                        chelis_types::deliberate_rejection!(
+                        chelis_checker_core::deliberate_rejection!(
                             "[04-DTYPE-1]",
                             "f8e4m3 is reserved but not active; use an active dtype"
                         ),
@@ -1214,7 +1214,7 @@ fn unsupported_function_value(ty: &ConcreteHostType, context: &'static str) -> U
         UnsupportedKind::HostAbi(format!("function value `{ty:?}`")),
         context,
         Stage::Codegen("c"),
-        chelis_types::unimplemented_rejection!(
+        chelis_checker_core::unimplemented_rejection!(
             879,
             "the C host backend supports typed callback parameters and direct statically-known \
              callback arguments, but no first-class function-value ABI; specialize the call or \
@@ -1228,7 +1228,7 @@ fn unsupported_function_symbol(name: &str) -> Unsupported {
         UnsupportedKind::HostAbi(format!("function value `{name}`")),
         "C host callback argument selection",
         Stage::Codegen("c"),
-        chelis_types::unimplemented_rejection!(
+        chelis_checker_core::unimplemented_rejection!(
             879,
             "only a declared function symbol or an in-scope typed callback parameter can cross \
              this boundary; dynamic function values have no C host ABI"
@@ -1245,7 +1245,7 @@ fn unsupported_callable_use(marker: &str) -> Unsupported {
             UnsupportedKind::HostAbi("unresolved `grad`/`vmap` transform application".to_string()),
             "C host ABI callable-use projection",
             Stage::Codegen("c"),
-            chelis_types::unimplemented_rejection!(
+            chelis_checker_core::unimplemented_rejection!(
                 879,
                 "general C-host transformed function values are not implemented; rewrite the \
                  differentiated body to pure tensor ops (sum, add, mul, einsum) or run under \
@@ -1257,7 +1257,7 @@ fn unsupported_callable_use(marker: &str) -> Unsupported {
         UnsupportedKind::HostAbi("unresolved function value".to_string()),
         "C host ABI callable-use projection",
         Stage::Codegen("c"),
-        chelis_types::unimplemented_rejection!(
+        chelis_checker_core::unimplemented_rejection!(
             879,
             "the host lowerer did not resolve this application to a declared function symbol or \
              typed callback parameter; unresolved callables have no raw C call target"
@@ -1270,7 +1270,7 @@ fn invalid_callback_shape(detail: String) -> Unsupported {
         UnsupportedKind::Construct(detail),
         "C host callback ABI projection",
         Stage::Codegen("c"),
-        chelis_types::deliberate_rejection!(
+        chelis_checker_core::deliberate_rejection!(
             "[04-TOT-2]",
             "checked callable metadata and the resolved host program disagree; no fallback \
              callable representation is permitted"

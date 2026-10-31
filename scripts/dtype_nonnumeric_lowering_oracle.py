@@ -86,7 +86,7 @@ def source_contracts() -> tuple[SourceContract, ...]:
             "crates/chelis-compiler-api/src/compiler.rs",
             (
                 "RiscOp::Compare(kind) => Some(format!",
-                "chelis_types::unimplemented_rejection!(\n                    2266,",
+                "chelis_checker_core::unimplemented_rejection!(\n                    2266,",
                 "use `--target c` or `--target hip`",
             ),
         ),

@@ -1,0 +1,691 @@
+{
+  "native_retained": {
+    "infer/tests/mod.rs": [
+      "checked_program_preserves_alias_resolved_generic_adt_registry"
+    ],
+    "infer/tests/more.rs": [
+      "fitness_uses_the_structured_identifier_instead_of_rendered_prose",
+      "fix10_fitness_has_untyped_nodes",
+      "fix12_structure_score_measured",
+      "fix7_fitness_unresolved_names",
+      "ir_preserves_unresolved_name_errors",
+      "ir_rejects_out_of_scope_terminal_constructor_name"
+    ],
+    "opacity.rs": [
+      "linked_program_flag_defaults_false_and_guard_scopes"
+    ]
+  },
+  "new_tests": [
+    "chelis-checker-core::chelis_checker_core$infer::vmap_extent::tests::expand_and_insert_track_only_extent_parameter_dependencies",
+    "chelis-checker-core::chelis_checker_core$infer::vmap_extent::tests::constant_expand_and_insert_extents_keep_input_dependencies_out_of_bounds"
+  ],
+  "renamed": {
+    "chelis-types::chelis_types$adt::alias_syntax_materialization_tests::alias_normalization_preserves_productive_recursion_as_a_finite_graph": "chelis-checker-core::chelis_checker_core$adt::alias_syntax_materialization_tests::alias_normalization_preserves_productive_recursion_as_a_finite_graph",
+    "chelis-types::chelis_types$adt::alias_syntax_materialization_tests::alias_syntax_preserves_borrow_full_result_and_actual_argument_metadata": "chelis-checker-core::chelis_checker_core$adt::alias_syntax_materialization_tests::alias_syntax_preserves_borrow_full_result_and_actual_argument_metadata",
+    "chelis-types::chelis_types$adt::alias_syntax_materialization_tests::alias_syntax_preserves_scoped_actual_names_and_rejects_cycles_or_ambiguous_aliases": "chelis-checker-core::chelis_checker_core$adt::alias_syntax_materialization_tests::alias_syntax_preserves_scoped_actual_names_and_rejects_cycles_or_ambiguous_aliases",
+    "chelis-types::chelis_types$adt::alias_syntax_materialization_tests::alias_syntax_rejects_kind_arity_unknown_and_error_recovery": "chelis-checker-core::chelis_checker_core$adt::alias_syntax_materialization_tests::alias_syntax_rejects_kind_arity_unknown_and_error_recovery",
+    "chelis-types::chelis_types$adt::alias_syntax_materialization_tests::registry_normalization_context_preserves_nominal_precedence_and_rejects_ambiguity": "chelis-checker-core::chelis_checker_core$adt::alias_syntax_materialization_tests::registry_normalization_context_preserves_nominal_precedence_and_rejects_ambiguity",
+    "chelis-types::chelis_types$adt::alias_syntax_materialization_tests::registry_normalization_context_public_registration_retains_full_signature": "chelis-checker-core::chelis_checker_core$adt::alias_syntax_materialization_tests::registry_normalization_context_public_registration_retains_full_signature",
+    "chelis-types::chelis_types$adt::alias_syntax_materialization_tests::registry_normalization_context_rejects_cycles_recovery_and_provisional_only_names": "chelis-checker-core::chelis_checker_core$adt::alias_syntax_materialization_tests::registry_normalization_context_rejects_cycles_recovery_and_provisional_only_names",
+    "chelis-types::chelis_types$adt::alias_syntax_materialization_tests::registry_normalization_context_rejects_malformed_stored_alignment": "chelis-checker-core::chelis_checker_core$adt::alias_syntax_materialization_tests::registry_normalization_context_rejects_malformed_stored_alignment",
+    "chelis-types::chelis_types$adt::alias_syntax_materialization_tests::registry_normalization_context_rejects_wrong_arguments_and_unknown_names": "chelis-checker-core::chelis_checker_core$adt::alias_syntax_materialization_tests::registry_normalization_context_rejects_wrong_arguments_and_unknown_names",
+    "chelis-types::chelis_types$adt::alias_syntax_materialization_tests::registry_normalization_context_serde_roundtrip_retains_arguments_and_borrows": "chelis-checker-core::chelis_checker_core$adt::alias_syntax_materialization_tests::registry_normalization_context_serde_roundtrip_retains_arguments_and_borrows",
+    "chelis-types::chelis_types$bitwise::tests::exact_signed_width_patterns_and_boundary_counts": "chelis-checker-core::chelis_checker_core$bitwise::tests::exact_signed_width_patterns_and_boundary_counts",
+    "chelis-types::chelis_types$bitwise::tests::negative_counts_and_nonmatching_domains_are_errors": "chelis-checker-core::chelis_checker_core$bitwise::tests::negative_counts_and_nonmatching_domains_are_errors",
+    "chelis-types::chelis_types$builtin_discovery::tests::builtin_atom_discovery_scalar_bounds_choose_numeric_not_recursive_cases": "chelis-checker-core::chelis_checker_core$builtin_discovery::tests::builtin_atom_discovery_scalar_bounds_choose_numeric_not_recursive_cases",
+    "chelis-types::chelis_types$builtin_discovery::tests::operation_value_bounds_do_not_choose_a_scalar_case_before_binding": "chelis-checker-core::chelis_checker_core$builtin_discovery::tests::operation_value_bounds_do_not_choose_a_scalar_case_before_binding",
+    "chelis-types::chelis_types$builtin_value_contract_tests::admitted_builtin_values_are_exactly_the_schemes_that_reproduce_the_direct_rule": "chelis-checker-core::chelis_checker_core$builtin_value_contract_tests::admitted_builtin_values_are_exactly_the_schemes_that_reproduce_the_direct_rule",
+    "chelis-types::chelis_types$builtin_value_contract_tests::runtime_builtin_tokens_are_exactly_whole_contract_admitted_registry_functions": "chelis-checker-core::chelis_checker_core$builtin_value_contract_tests::runtime_builtin_tokens_are_exactly_whole_contract_admitted_registry_functions",
+    "chelis-types::chelis_types$builtins::tests::a_builtin_with_an_axis_argument_is_name_tracked_or_untracked": "chelis-checker-core::chelis_checker_core$builtins::tests::a_builtin_with_an_axis_argument_is_name_tracked_or_untracked",
+    "chelis-types::chelis_types$builtins::tests::add_args_unify_with_same_tensor": "chelis-checker-core::chelis_checker_core$builtins::tests::add_args_unify_with_same_tensor",
+    "chelis-types::chelis_types$builtins::tests::add_rejects_mixed_precision": "chelis-checker-core::chelis_checker_core$builtins::tests::add_rejects_mixed_precision",
+    "chelis-types::chelis_types$builtins::tests::add_rejects_tensor_plus_int": "chelis-checker-core::chelis_checker_core$builtins::tests::add_rejects_tensor_plus_int",
+    "chelis-types::chelis_types$builtins::tests::builtin_env_does_not_register_unknown_name": "chelis-checker-core::chelis_checker_core$builtins::tests::builtin_env_does_not_register_unknown_name",
+    "chelis-types::chelis_types$builtins::tests::builtin_env_has_add": "chelis-checker-core::chelis_checker_core$builtins::tests::builtin_env_has_add",
+    "chelis-types::chelis_types$builtins::tests::builtin_env_has_cmplt": "chelis-checker-core::chelis_checker_core$builtins::tests::builtin_env_has_cmplt",
+    "chelis-types::chelis_types$builtins::tests::builtin_env_has_csv_io_builtins": "chelis-checker-core::chelis_checker_core$builtins::tests::builtin_env_has_csv_io_builtins",
+    "chelis-types::chelis_types$builtins::tests::builtin_env_has_layer_norm_and_conv": "chelis-checker-core::chelis_checker_core$builtins::tests::builtin_env_has_layer_norm_and_conv",
+    "chelis-types::chelis_types$builtins::tests::builtin_env_has_logical_ops": "chelis-checker-core::chelis_checker_core$builtins::tests::builtin_env_has_logical_ops",
+    "chelis-types::chelis_types$builtins::tests::builtin_env_has_matmul": "chelis-checker-core::chelis_checker_core$builtins::tests::builtin_env_has_matmul",
+    "chelis-types::chelis_types$builtins::tests::builtin_env_has_phase3c_integer_helpers": "chelis-checker-core::chelis_checker_core$builtins::tests::builtin_env_has_phase3c_integer_helpers",
+    "chelis-types::chelis_types$builtins::tests::builtin_env_has_phase3c_string_helpers": "chelis-checker-core::chelis_checker_core$builtins::tests::builtin_env_has_phase3c_string_helpers",
+    "chelis-types::chelis_types$builtins::tests::builtin_env_has_process_run_and_it_is_a_known_name": "chelis-checker-core::chelis_checker_core$builtins::tests::builtin_env_has_process_run_and_it_is_a_known_name",
+    "chelis-types::chelis_types$builtins::tests::builtin_env_missing_name_returns_none": "chelis-checker-core::chelis_checker_core$builtins::tests::builtin_env_missing_name_returns_none",
+    "chelis-types::chelis_types$builtins::tests::builtins_table_matches_builtin_names": "chelis-checker-core::chelis_checker_core$builtins::tests::builtins_table_matches_builtin_names",
+    "chelis-types::chelis_types$builtins::tests::every_builtin_has_an_exact_nondefault_semantic_discovery_declaration": "chelis-checker-core::chelis_checker_core$builtins::tests::every_builtin_has_an_exact_nondefault_semantic_discovery_declaration",
+    "chelis-types::chelis_types$builtins::tests::every_checked_builtin_has_an_exact_inference_route": "chelis-checker-core::chelis_checker_core$builtins::tests::every_checked_builtin_has_an_exact_inference_route",
+    "chelis-types::chelis_types$builtins::tests::every_inference_route_is_owned_by_the_exact_checked_declaration": "chelis-checker-core::chelis_checker_core$builtins::tests::every_inference_route_is_owned_by_the_exact_checked_declaration",
+    "chelis-types::chelis_types$builtins::tests::instantiate_add_produces_fn_type": "chelis-checker-core::chelis_checker_core$builtins::tests::instantiate_add_produces_fn_type",
+    "chelis-types::chelis_types$builtins::tests::mapped_ingress_is_untracked_inside_a_rank_polymorphic_body": "chelis-checker-core::chelis_checker_core$builtins::tests::mapped_ingress_is_untracked_inside_a_rank_polymorphic_body",
+    "chelis-types::chelis_types$builtins::tests::register_prelude_adts_adds_option_constructors": "chelis-checker-core::chelis_checker_core$builtins::tests::register_prelude_adts_adds_option_constructors",
+    "chelis-types::chelis_types$builtins::tests::shape_classes_named_by_the_rank_polymorphism_soundness_rule": "chelis-checker-core::chelis_checker_core$builtins::tests::shape_classes_named_by_the_rank_polymorphism_soundness_rule",
+    "chelis-types::chelis_types$deep_type::diagnostic_location_tests::fallback_location_never_combines_coordinates_from_two_different_nodes": "chelis-checker-core::chelis_checker_core$deep_type::diagnostic_location_tests::fallback_location_never_combines_coordinates_from_two_different_nodes",
+    "chelis-types::chelis_types$deep_type::diagnostic_location_tests::portable_source_label_preserves_one_host_location": "chelis-checker-core::chelis_checker_core$deep_type::diagnostic_location_tests::portable_source_label_preserves_one_host_location",
+    "chelis-types::chelis_types$env::module_scope_tests::authored_binders_stay_monomorphic_inside_their_declaration_then_generalize_at_boundary": "chelis-checker-core::chelis_checker_core$env::module_scope_tests::authored_binders_stay_monomorphic_inside_their_declaration_then_generalize_at_boundary",
+    "chelis-types::chelis_types$env::module_scope_tests::deferred_equalities_reaching_the_environment_stay_shared_at_a_let_boundary": "chelis-checker-core::chelis_checker_core$env::module_scope_tests::deferred_equalities_reaching_the_environment_stay_shared_at_a_let_boundary",
+    "chelis-types::chelis_types$env::module_scope_tests::exact_lookup_does_not_promote_a_unique_terminal_match": "chelis-checker-core::chelis_checker_core$env::module_scope_tests::exact_lookup_does_not_promote_a_unique_terminal_match",
+    "chelis-types::chelis_types$env::module_scope_tests::recursive_group_variable_is_monomorphic_until_group_close": "chelis-checker-core::chelis_checker_core$env::module_scope_tests::recursive_group_variable_is_monomorphic_until_group_close",
+    "chelis-types::chelis_types$env::module_scope_tests::same_level_monomorphic_contracts_keep_distinct_declaration_owners": "chelis-checker-core::chelis_checker_core$env::module_scope_tests::same_level_monomorphic_contracts_keep_distinct_declaration_owners",
+    "chelis-types::chelis_types$env::tests::active_constructor_identity_is_last_declaration_wins_and_serialized": "chelis-checker-core::chelis_checker_core$env::tests::active_constructor_identity_is_last_declaration_wins_and_serialized",
+    "chelis-types::chelis_types$env::tests::closed_key_variables_require_the_exact_owned_callable": "chelis-checker-core::chelis_checker_core$env::tests::closed_key_variables_require_the_exact_owned_callable",
+    "chelis-types::chelis_types$env::tests::declaration_binder_identities_remap_and_complete_all_roles": "chelis-checker-core::chelis_checker_core$env::tests::declaration_binder_identities_remap_and_complete_all_roles",
+    "chelis-types::chelis_types$env::tests::dvar_mapping_instantiation_matches_plain_instantiation": "chelis-checker-core::chelis_checker_core$env::tests::dvar_mapping_instantiation_matches_plain_instantiation",
+    "chelis-types::chelis_types$env::tests::every_instantiation_route_installs_quantified_restrictions": "chelis-checker-core::chelis_checker_core$env::tests::every_instantiation_route_installs_quantified_restrictions",
+    "chelis-types::chelis_types$env::tests::free_variables_protect_quantified_ids_from_global_substitutions": "chelis-checker-core::chelis_checker_core$env::tests::free_variables_protect_quantified_ids_from_global_substitutions",
+    "chelis-types::chelis_types$env::tests::free_variables_still_follow_unquantified_substitutions": "chelis-checker-core::chelis_checker_core$env::tests::free_variables_still_follow_unquantified_substitutions",
+    "chelis-types::chelis_types$env::tests::free_variables_stop_alias_chains_at_quantified_ids": "chelis-checker-core::chelis_checker_core$env::tests::free_variables_stop_alias_chains_at_quantified_ids",
+    "chelis-types::chelis_types$env::tests::lexical_value_shadowing_does_not_replace_constructor_authority": "chelis-checker-core::chelis_checker_core$env::tests::lexical_value_shadowing_does_not_replace_constructor_authority",
+    "chelis-types::chelis_types$env::tests::mapped_axis_metadata_follows_the_fresh_scheme_dimension": "chelis-checker-core::chelis_checker_core$env::tests::mapped_axis_metadata_follows_the_fresh_scheme_dimension",
+    "chelis-types::chelis_types$env::tests::production_measurement_scope_restores_nested_and_panicking_oracle_state": "chelis-checker-core::chelis_checker_core$env::tests::production_measurement_scope_restores_nested_and_panicking_oracle_state",
+    "chelis-types::chelis_types$env::tests::shared_collection_constraint_keeps_key_relation_variable_key_free": "chelis-checker-core::chelis_checker_core$env::tests::shared_collection_constraint_keeps_key_relation_variable_key_free",
+    "chelis-types::chelis_types$infer::annotate::monotone_writeback_tests::unresolved_dimension_can_be_written_when_no_annotation_exists": "chelis-checker-core::chelis_checker_core$infer::annotate::monotone_writeback_tests::unresolved_dimension_can_be_written_when_no_annotation_exists",
+    "chelis-types::chelis_types$infer::annotate::monotone_writeback_tests::unresolved_dimension_variable_cannot_replace_concrete_metadata": "chelis-checker-core::chelis_checker_core$infer::annotate::monotone_writeback_tests::unresolved_dimension_variable_cannot_replace_concrete_metadata",
+    "chelis-types::chelis_types$infer::app_collection::aggregate_origin_tests::aggregate_admission_diagnostics_name_expected_operands": "chelis-checker-core::chelis_checker_core$infer::app_collection::aggregate_origin_tests::aggregate_admission_diagnostics_name_expected_operands",
+    "chelis-types::chelis_types$infer::app_collection::aggregate_origin_tests::every_registered_aggregate_returns_equality_without_operand_bindings": "chelis-checker-core::chelis_checker_core$infer::app_collection::aggregate_origin_tests::every_registered_aggregate_returns_equality_without_operand_bindings",
+    "chelis-types::chelis_types$infer::app_helpers::dimension_observation_tests::conv_formula_reads_known_constraints_without_inventing_unknown_extents": "chelis-checker-core::chelis_checker_core$infer::app_helpers::dimension_observation_tests::conv_formula_reads_known_constraints_without_inventing_unknown_extents",
+    "chelis-types::chelis_types$infer::app_helpers::dimension_observation_tests::observations_keep_constraint_label_and_identity_policies_separate": "chelis-checker-core::chelis_checker_core$infer::app_helpers::dimension_observation_tests::observations_keep_constraint_label_and_identity_policies_separate",
+    "chelis-types::chelis_types$infer::app_route::tests::unobserved_checked_route_is_a_loud_internal_error": "chelis-checker-core::chelis_checker_core$infer::app_route::tests::unobserved_checked_route_is_a_loud_internal_error",
+    "chelis-types::chelis_types$infer::app_shape_helpers::source_identity_tests::a_partially_recorded_signature_renders_each_variable_from_its_own_provenance": "chelis-checker-core::chelis_checker_core$infer::app_shape_helpers::source_identity_tests::a_partially_recorded_signature_renders_each_variable_from_its_own_provenance",
+    "chelis-types::chelis_types$infer::app_shape_helpers::source_identity_tests::a_recorded_parameter_renders_its_source_spelling": "chelis-checker-core::chelis_checker_core$infer::app_shape_helpers::source_identity_tests::a_recorded_parameter_renders_its_source_spelling",
+    "chelis-types::chelis_types$infer::app_shape_helpers::source_identity_tests::an_unrecorded_parameter_renders_a_distinguishable_synthesized_id": "chelis-checker-core::chelis_checker_core$infer::app_shape_helpers::source_identity_tests::an_unrecorded_parameter_renders_a_distinguishable_synthesized_id",
+    "chelis-types::chelis_types$infer::declaration_graph::top_level_reference_graph_tests::backward_and_independent_values_stay_out_of_the_later_set": "chelis-checker-core::chelis_checker_core$infer::declaration_graph::top_level_reference_graph_tests::backward_and_independent_values_stay_out_of_the_later_set",
+    "chelis-types::chelis_types$infer::declaration_graph::top_level_reference_graph_tests::cancellation_during_later_reachability_emits_only_cancellation": "chelis-checker-core::chelis_checker_core$infer::declaration_graph::top_level_reference_graph_tests::cancellation_during_later_reachability_emits_only_cancellation",
+    "chelis-types::chelis_types$infer::declaration_graph::top_level_reference_graph_tests::cancellation_during_later_reachability_survives_prior_source_errors": "chelis-checker-core::chelis_checker_core$infer::declaration_graph::top_level_reference_graph_tests::cancellation_during_later_reachability_survives_prior_source_errors",
+    "chelis-types::chelis_types$infer::declaration_graph::top_level_reference_graph_tests::checker_reports_one_root_later_diagnostic_for_the_indirect_shape": "chelis-checker-core::chelis_checker_core$infer::declaration_graph::top_level_reference_graph_tests::checker_reports_one_root_later_diagnostic_for_the_indirect_shape",
+    "chelis-types::chelis_types$infer::declaration_graph::top_level_reference_graph_tests::direct_forward_reference_with_an_indirect_alternative_is_reported_once": "chelis-checker-core::chelis_checker_core$infer::declaration_graph::top_level_reference_graph_tests::direct_forward_reference_with_an_indirect_alternative_is_reported_once",
+    "chelis-types::chelis_types$infer::declaration_graph::top_level_reference_graph_tests::eager_lambda_cycle_is_one_component": "chelis-checker-core::chelis_checker_core$infer::declaration_graph::top_level_reference_graph_tests::eager_lambda_cycle_is_one_component",
+    "chelis-types::chelis_types$infer::declaration_graph::top_level_reference_graph_tests::indirect_later_value_dependency_is_reported_once_per_pair": "chelis-checker-core::chelis_checker_core$infer::declaration_graph::top_level_reference_graph_tests::indirect_later_value_dependency_is_reported_once_per_pair",
+    "chelis-types::chelis_types$infer::declaration_graph::top_level_reference_graph_tests::prior_context_direct_binding_does_not_hide_current_unit_indirect_dependency": "chelis-checker-core::chelis_checker_core$infer::declaration_graph::top_level_reference_graph_tests::prior_context_direct_binding_does_not_hide_current_unit_indirect_dependency",
+    "chelis-types::chelis_types$infer::declaration_graph::top_level_reference_graph_tests::pure_direct_forward_reference_remains_one_diagnostic": "chelis-checker-core::chelis_checker_core$infer::declaration_graph::top_level_reference_graph_tests::pure_direct_forward_reference_remains_one_diagnostic",
+    "chelis-types::chelis_types$infer::declaration_graph::top_level_reference_graph_tests::separate_reachable_cycle_preserves_root_later_diagnostic": "chelis-checker-core::chelis_checker_core$infer::declaration_graph::top_level_reference_graph_tests::separate_reachable_cycle_preserves_root_later_diagnostic",
+    "chelis-types::chelis_types$infer::declaration_graph::top_level_reference_graph_tests::unrelated_direct_error_does_not_suppress_another_roots_indirect_dependency": "chelis-checker-core::chelis_checker_core$infer::declaration_graph::top_level_reference_graph_tests::unrelated_direct_error_does_not_suppress_another_roots_indirect_dependency",
+    "chelis-types::chelis_types$infer::declared_surface::tests::malformed_declaration_parts_never_form_a_partial_surface": "chelis-checker-core::chelis_checker_core$infer::declared_surface::tests::malformed_declaration_parts_never_form_a_partial_surface",
+    "chelis-types::chelis_types$infer::declared_surface::tests::valid_recursive_declarations_preserve_alias_edges": "chelis-checker-core::chelis_checker_core$infer::declared_surface::tests::valid_recursive_declarations_preserve_alias_edges",
+    "chelis-types::chelis_types$infer::expr_transform::grad_argument_type_tests::list_cotangent_recurses_and_preserves_the_container_shape": "chelis-checker-core::chelis_checker_core$infer::expr_transform::grad_argument_type_tests::list_cotangent_recurses_and_preserves_the_container_shape",
+    "chelis-types::chelis_types$infer::expr_transform::grad_argument_type_tests::recursively_all_discrete_list_is_not_a_gradient_target": "chelis-checker-core::chelis_checker_core$infer::expr_transform::grad_argument_type_tests::recursively_all_discrete_list_is_not_a_gradient_target",
+    "chelis-types::chelis_types$infer::program::component_level_scope_tests::component_scope_abort_restores_bindings_levels_pins_and_visibility": "chelis-checker-core::chelis_checker_core$infer::program::component_level_scope_tests::component_scope_abort_restores_bindings_levels_pins_and_visibility",
+    "chelis-types::chelis_types$infer::program::component_level_scope_tests::component_scope_mints_provisionals_and_restores_visibility_on_completion": "chelis-checker-core::chelis_checker_core$infer::program::component_level_scope_tests::component_scope_mints_provisionals_and_restores_visibility_on_completion",
+    "chelis-types::chelis_types$infer::program::component_level_scope_tests::primary_driver_mid_scc_cancellation_aborts_before_return": "chelis-checker-core::chelis_checker_core$infer::program::component_level_scope_tests::primary_driver_mid_scc_cancellation_aborts_before_return",
+    "chelis-types::chelis_types$infer::tests::adt_deftype_and_construct": "chelis-checker-core::chelis_checker_core$infer::tests::adt_deftype_and_construct",
+    "chelis-types::chelis_types$infer::tests::adt_no_type_params": "chelis-checker-core::chelis_checker_core$infer::tests::adt_no_type_params",
+    "chelis-types::chelis_types$infer::tests::adt_nullary_constructor": "chelis-checker-core::chelis_checker_core$infer::tests::adt_nullary_constructor",
+    "chelis-types::chelis_types$infer::tests::alias_field_rejects_wrong_list_element_type": "chelis-checker-core::chelis_checker_core$infer::tests::alias_field_rejects_wrong_list_element_type",
+    "chelis-types::chelis_types$infer::tests::alias_typed_ctor_field_constructs_with_empty_list_literal": "chelis-checker-core::chelis_checker_core$infer::tests::alias_typed_ctor_field_constructs_with_empty_list_literal",
+    "chelis-types::chelis_types$infer::tests::alias_typed_ctor_field_constructs_with_list_value": "chelis-checker-core::chelis_checker_core$infer::tests::alias_typed_ctor_field_constructs_with_list_value",
+    "chelis-types::chelis_types$infer::tests::app_add_tensors": "chelis-checker-core::chelis_checker_core$infer::tests::app_add_tensors",
+    "chelis-types::chelis_types$infer::tests::app_dimension_mismatch": "chelis-checker-core::chelis_checker_core$infer::tests::app_dimension_mismatch",
+    "chelis-types::chelis_types$infer::tests::app_not_a_function": "chelis-checker-core::chelis_checker_core$infer::tests::app_not_a_function",
+    "chelis-types::chelis_types$infer::tests::app_precision_mismatch": "chelis-checker-core::chelis_checker_core$infer::tests::app_precision_mismatch",
+    "chelis-types::chelis_types$infer::tests::bitand_rejects_mismatched_integer_widths": "chelis-checker-core::chelis_checker_core$infer::tests::bitand_rejects_mismatched_integer_widths",
+    "chelis-types::chelis_types$infer::tests::builtin_batched_matmul_rank4": "chelis-checker-core::chelis_checker_core$infer::tests::builtin_batched_matmul_rank4",
+    "chelis-types::chelis_types$infer::tests::builtin_batched_matmul_rejects_incompatible_leading_dim": "chelis-checker-core::chelis_checker_core$infer::tests::builtin_batched_matmul_rejects_incompatible_leading_dim",
+    "chelis-types::chelis_types$infer::tests::builtin_conv_accepts_int_stride_padding": "chelis-checker-core::chelis_checker_core$infer::tests::builtin_conv_accepts_int_stride_padding",
+    "chelis-types::chelis_types$infer::tests::builtin_conv_rejects_channel_mismatch": "chelis-checker-core::chelis_checker_core$infer::tests::builtin_conv_rejects_channel_mismatch",
+    "chelis-types::chelis_types$infer::tests::builtin_conv_rejects_kernel_precision_mismatch": "chelis-checker-core::chelis_checker_core$infer::tests::builtin_conv_rejects_kernel_precision_mismatch",
+    "chelis-types::chelis_types$infer::tests::builtin_exp": "chelis-checker-core::chelis_checker_core$infer::tests::builtin_exp",
+    "chelis-types::chelis_types$infer::tests::builtin_layer_norm": "chelis-checker-core::chelis_checker_core$infer::tests::builtin_layer_norm",
+    "chelis-types::chelis_types$infer::tests::builtin_layer_norm_rejects_precision_mismatch": "chelis-checker-core::chelis_checker_core$infer::tests::builtin_layer_norm_rejects_precision_mismatch",
+    "chelis-types::chelis_types$infer::tests::builtin_layer_norm_rejects_rank2_gamma": "chelis-checker-core::chelis_checker_core$infer::tests::builtin_layer_norm_rejects_rank2_gamma",
+    "chelis-types::chelis_types$infer::tests::builtin_matmul": "chelis-checker-core::chelis_checker_core$infer::tests::builtin_matmul",
+    "chelis-types::chelis_types$infer::tests::builtin_neg": "chelis-checker-core::chelis_checker_core$infer::tests::builtin_neg",
+    "chelis-types::chelis_types$infer::tests::cast_accepts_alias_precision": "chelis-checker-core::chelis_checker_core$infer::tests::cast_accepts_alias_precision",
+    "chelis-types::chelis_types$infer::tests::cast_prim": "chelis-checker-core::chelis_checker_core$infer::tests::cast_prim",
+    "chelis-types::chelis_types$infer::tests::cast_prim_to_f64_is_allowed": "chelis-checker-core::chelis_checker_core$infer::tests::cast_prim_to_f64_is_allowed",
+    "chelis-types::chelis_types$infer::tests::cast_tensor": "chelis-checker-core::chelis_checker_core$infer::tests::cast_tensor",
+    "chelis-types::chelis_types$infer::tests::cast_tensor_accepts_bf16": "chelis-checker-core::chelis_checker_core$infer::tests::cast_tensor_accepts_bf16",
+    "chelis-types::chelis_types$infer::tests::cast_tensor_accepts_f64": "chelis-checker-core::chelis_checker_core$infer::tests::cast_tensor_accepts_f64",
+    "chelis-types::chelis_types$infer::tests::cast_tensor_rejects_f8e4m3": "chelis-checker-core::chelis_checker_core$infer::tests::cast_tensor_rejects_f8e4m3",
+    "chelis-types::chelis_types$infer::tests::copy_accepts_scalar": "chelis-checker-core::chelis_checker_core$infer::tests::copy_accepts_scalar",
+    "chelis-types::chelis_types$infer::tests::copy_accepts_tensor": "chelis-checker-core::chelis_checker_core$infer::tests::copy_accepts_tensor",
+    "chelis-types::chelis_types$infer::tests::copy_rejects_unconstrained_generic": "chelis-checker-core::chelis_checker_core$infer::tests::copy_rejects_unconstrained_generic",
+    "chelis-types::chelis_types$infer::tests::ctx_list_of_tuple_alias_used_in_value_position": "chelis-checker-core::chelis_checker_core$infer::tests::ctx_list_of_tuple_alias_used_in_value_position",
+    "chelis-types::chelis_types$infer::tests::def_returning_option_tuple_with_alias_field_type_checks": "chelis-checker-core::chelis_checker_core$infer::tests::def_returning_option_tuple_with_alias_field_type_checks",
+    "chelis-types::chelis_types$infer::tests::defsig_fn_signature": "chelis-checker-core::chelis_checker_core$infer::tests::defsig_fn_signature",
+    "chelis-types::chelis_types$infer::tests::defsig_tensor_signature": "chelis-checker-core::chelis_checker_core$infer::tests::defsig_tensor_signature",
+    "chelis-types::chelis_types$infer::tests::deftype_colliding_with_prelude_option_is_rejected": "chelis-checker-core::chelis_checker_core$infer::tests::deftype_colliding_with_prelude_option_is_rejected",
+    "chelis-types::chelis_types$infer::tests::deftype_then_typealias_with_same_name_is_rejected": "chelis-checker-core::chelis_checker_core$infer::tests::deftype_then_typealias_with_same_name_is_rejected",
+    "chelis-types::chelis_types$infer::tests::distinct_deftypes_with_overlapping_variant_names_are_accepted": "chelis-checker-core::chelis_checker_core$infer::tests::distinct_deftypes_with_overlapping_variant_names_are_accepted",
+    "chelis-types::chelis_types$infer::tests::distinct_name_defs_are_accepted": "chelis-checker-core::chelis_checker_core$infer::tests::distinct_name_defs_are_accepted",
+    "chelis-types::chelis_types$infer::tests::duplicate_def_in_same_program_is_rejected": "chelis-checker-core::chelis_checker_core$infer::tests::duplicate_def_in_same_program_is_rejected",
+    "chelis-types::chelis_types$infer::tests::duplicate_defsig_conflicting_order_a_is_rejected": "chelis-checker-core::chelis_checker_core$infer::tests::duplicate_defsig_conflicting_order_a_is_rejected",
+    "chelis-types::chelis_types$infer::tests::duplicate_defsig_conflicting_order_b_is_rejected": "chelis-checker-core::chelis_checker_core$infer::tests::duplicate_defsig_conflicting_order_b_is_rejected",
+    "chelis-types::chelis_types$infer::tests::duplicate_defsig_identical_signature_is_rejected": "chelis-checker-core::chelis_checker_core$infer::tests::duplicate_defsig_identical_signature_is_rejected",
+    "chelis-types::chelis_types$infer::tests::duplicate_deftype_in_same_program_is_rejected": "chelis-checker-core::chelis_checker_core$infer::tests::duplicate_deftype_in_same_program_is_rejected",
+    "chelis-types::chelis_types$infer::tests::duplicate_typealias_is_rejected": "chelis-checker-core::chelis_checker_core$infer::tests::duplicate_typealias_is_rejected",
+    "chelis-types::chelis_types$infer::tests::duplicate_value_def_in_same_program_is_rejected": "chelis-checker-core::chelis_checker_core$infer::tests::duplicate_value_def_in_same_program_is_rejected",
+    "chelis-types::chelis_types$infer::tests::fn_identity": "chelis-checker-core::chelis_checker_core$infer::tests::fn_identity",
+    "chelis-types::chelis_types$infer::tests::fn_two_params": "chelis-checker-core::chelis_checker_core$infer::tests::fn_two_params",
+    "chelis-types::chelis_types$infer::tests::fn_with_body_app": "chelis-checker-core::chelis_checker_core$infer::tests::fn_with_body_app",
+    "chelis-types::chelis_types$infer::tests::generalized_unannotated_function_is_not_an_authored_signature": "chelis-checker-core::chelis_checker_core$infer::tests::generalized_unannotated_function_is_not_an_authored_signature",
+    "chelis-types::chelis_types$infer::tests::genuine_mismatch_against_expanded_alias_still_rejected": "chelis-checker-core::chelis_checker_core$infer::tests::genuine_mismatch_against_expanded_alias_still_rejected",
+    "chelis-types::chelis_types$infer::tests::grad_function": "chelis-checker-core::chelis_checker_core$infer::tests::grad_function",
+    "chelis-types::chelis_types$infer::tests::grad_non_float_param_is_ignored_by_default": "chelis-checker-core::chelis_checker_core$infer::tests::grad_non_float_param_is_ignored_by_default",
+    "chelis-types::chelis_types$infer::tests::grad_of_vmap_is_rejected_for_non_scalar_output": "chelis-checker-core::chelis_checker_core$infer::tests::grad_of_vmap_is_rejected_for_non_scalar_output",
+    "chelis-types::chelis_types$infer::tests::grad_over_adt_plus_tensor_multi_target_returns_tuple": "chelis-checker-core::chelis_checker_core$infer::tests::grad_over_adt_plus_tensor_multi_target_returns_tuple",
+    "chelis-types::chelis_types$infer::tests::grad_over_all_float_field_adt_types_as_same_adt": "chelis-checker-core::chelis_checker_core$infer::tests::grad_over_all_float_field_adt_types_as_same_adt",
+    "chelis-types::chelis_types$infer::tests::grad_over_enum_plus_tensor_keeps_tensor_only_payload": "chelis-checker-core::chelis_checker_core$infer::tests::grad_over_enum_plus_tensor_keeps_tensor_only_payload",
+    "chelis-types::chelis_types$infer::tests::grad_over_mixed_field_adt_preserves_the_nominal_cotangent_shape": "chelis-checker-core::chelis_checker_core$infer::tests::grad_over_mixed_field_adt_preserves_the_nominal_cotangent_shape",
+    "chelis-types::chelis_types$infer::tests::grad_over_pure_enum_stays_unit": "chelis-checker-core::chelis_checker_core$infer::tests::grad_over_pure_enum_stays_unit",
+    "chelis-types::chelis_types$infer::tests::grad_rejects_non_scalar_output": "chelis-checker-core::chelis_checker_core$infer::tests::grad_rejects_non_scalar_output",
+    "chelis-types::chelis_types$infer::tests::grad_rejects_nondifferentiable_explicit_wrt_target": "chelis-checker-core::chelis_checker_core$infer::tests::grad_rejects_nondifferentiable_explicit_wrt_target",
+    "chelis-types::chelis_types$infer::tests::grad_with_explicit_wrt_returns_selected_gradient_only": "chelis-checker-core::chelis_checker_core$infer::tests::grad_with_explicit_wrt_returns_selected_gradient_only",
+    "chelis-types::chelis_types$infer::tests::grad_with_multiple_wrt_returns_flat_tuple": "chelis-checker-core::chelis_checker_core$infer::tests::grad_with_multiple_wrt_returns_flat_tuple",
+    "chelis-types::chelis_types$infer::tests::grad_wrt_adt_in_multi_arg_call_returns_struct": "chelis-checker-core::chelis_checker_core$infer::tests::grad_wrt_adt_in_multi_arg_call_returns_struct",
+    "chelis-types::chelis_types$infer::tests::if_branch_mismatch": "chelis-checker-core::chelis_checker_core$infer::tests::if_branch_mismatch",
+    "chelis-types::chelis_types$infer::tests::if_correct": "chelis-checker-core::chelis_checker_core$infer::tests::if_correct",
+    "chelis-types::chelis_types$infer::tests::integer_mod_and_bitwise_builtins_are_allowed": "chelis-checker-core::chelis_checker_core$infer::tests::integer_mod_and_bitwise_builtins_are_allowed",
+    "chelis-types::chelis_types$infer::tests::issue_1316::issue_1316_components_remain_callee_first_and_source_ordered": "chelis-checker-core::chelis_checker_core$infer::tests::issue_1316::issue_1316_components_remain_callee_first_and_source_ordered",
+    "chelis-types::chelis_types$infer::tests::issue_1316::issue_1316_each_public_driver_builds_one_shared_plan": "chelis-checker-core::chelis_checker_core$infer::tests::issue_1316::issue_1316_each_public_driver_builds_one_shared_plan",
+    "chelis-types::chelis_types$infer::tests::issue_1316::issue_1316_iterative_scc_handles_a_hundred_thousand_vertex_chain": "chelis-checker-core::chelis_checker_core$infer::tests::issue_1316::issue_1316_iterative_scc_handles_a_hundred_thousand_vertex_chain",
+    "chelis-types::chelis_types$infer::tests::issue_1316::issue_1316_linear_scc_matches_the_previous_order_on_every_three_vertex_graph": "chelis-checker-core::chelis_checker_core$infer::tests::issue_1316::issue_1316_linear_scc_matches_the_previous_order_on_every_three_vertex_graph",
+    "chelis-types::chelis_types$infer::tests::issue_1316::issue_1316_malformed_group_is_rejected_before_either_driver": "chelis-checker-core::chelis_checker_core$infer::tests::issue_1316::issue_1316_malformed_group_is_rejected_before_either_driver",
+    "chelis-types::chelis_types$infer::tests::issue_1316::issue_1316_mid_scc_cancellation_returns_no_partial_plan": "chelis-checker-core::chelis_checker_core$infer::tests::issue_1316::issue_1316_mid_scc_cancellation_returns_no_partial_plan",
+    "chelis-types::chelis_types$infer::tests::issue_1316::issue_1316_planner_work_is_linear_on_generated_graph_axes": "chelis-checker-core::chelis_checker_core$infer::tests::issue_1316::issue_1316_planner_work_is_linear_on_generated_graph_axes",
+    "chelis-types::chelis_types$infer::tests::issue_1316::issue_1316_unknown_call_diagnostic_order_is_stable_across_drivers": "chelis-checker-core::chelis_checker_core$infer::tests::issue_1316::issue_1316_unknown_call_diagnostic_order_is_stable_across_drivers",
+    "chelis-types::chelis_types$infer::tests::issue_2622::issue_2622_a_deep_annotated_type_applies_linearly": "chelis-checker-core::chelis_checker_core$infer::tests::issue_2622::issue_2622_a_deep_annotated_type_applies_linearly",
+    "chelis-types::chelis_types$infer::tests::issue_2622::issue_2622_a_literal_tuple_chain_applies_linearly": "chelis-checker-core::chelis_checker_core$infer::tests::issue_2622::issue_2622_a_literal_tuple_chain_applies_linearly",
+    "chelis-types::chelis_types$infer::tests::issue_2622::issue_2622_a_variable_tuple_chain_applies_linearly": "chelis-checker-core::chelis_checker_core$infer::tests::issue_2622::issue_2622_a_variable_tuple_chain_applies_linearly",
+    "chelis-types::chelis_types$infer::tests::issue_2622::issue_2622_the_detector_rejects_a_semantic_view_that_reapplies_per_level": "chelis-checker-core::chelis_checker_core$infer::tests::issue_2622::issue_2622_the_detector_rejects_a_semantic_view_that_reapplies_per_level",
+    "chelis-types::chelis_types$infer::tests::issue_2975::callable_list_replay_work_is_linear": "chelis-checker-core::chelis_checker_core$infer::tests::issue_2975::callable_list_replay_work_is_linear",
+    "chelis-types::chelis_types$infer::tests::issue_2975::delayed_list_equality_still_rejects_mixed_elements": "chelis-checker-core::chelis_checker_core$infer::tests::issue_2975::delayed_list_equality_still_rejects_mixed_elements",
+    "chelis-types::chelis_types$infer::tests::issue_2975::list_equality_cannot_choose_an_unresolved_grad_parameter": "chelis-checker-core::chelis_checker_core$infer::tests::issue_2975::list_equality_cannot_choose_an_unresolved_grad_parameter",
+    "chelis-types::chelis_types$infer::tests::issue_2975::nested_numeric_list_replay_work_is_linear": "chelis-checker-core::chelis_checker_core$infer::tests::issue_2975::nested_numeric_list_replay_work_is_linear",
+    "chelis-types::chelis_types$infer::tests::issue_2975::numeric_list_check_time_scales_with_element_count": "chelis-checker-core::chelis_checker_core$infer::tests::issue_2975::numeric_list_check_time_scales_with_element_count",
+    "chelis-types::chelis_types$infer::tests::issue_2975::numeric_list_replay_work_is_linear": "chelis-checker-core::chelis_checker_core$infer::tests::issue_2975::numeric_list_replay_work_is_linear",
+    "chelis-types::chelis_types$infer::tests::issue_3717::issue_3717_consuming_callee_keeps_its_callers_owned": "chelis-checker-core::chelis_checker_core$infer::tests::issue_3717::issue_3717_consuming_callee_keeps_its_callers_owned",
+    "chelis-types::chelis_types$infer::tests::issue_3717::issue_3717_signature_sweep_visits_each_declaration_once": "chelis-checker-core::chelis_checker_core$infer::tests::issue_3717::issue_3717_signature_sweep_visits_each_declaration_once",
+    "chelis-types::chelis_types$infer::tests::issue_3797::issue_3797_declaration_walks_consult_linearly_many_binder_tables": "chelis-checker-core::chelis_checker_core$infer::tests::issue_3797::issue_3797_declaration_walks_consult_linearly_many_binder_tables",
+    "chelis-types::chelis_types$infer::tests::issue_3797::issue_3797_detector_rejects_work_per_enclosing_layer": "chelis-checker-core::chelis_checker_core$infer::tests::issue_3797::issue_3797_detector_rejects_work_per_enclosing_layer",
+    "chelis-types::chelis_types$infer::tests::issue_3819::issue_3819_a_ground_child_is_returned_without_a_walk": "chelis-checker-core::chelis_checker_core$infer::tests::issue_3819::issue_3819_a_ground_child_is_returned_without_a_walk",
+    "chelis-types::chelis_types$infer::tests::issue_3819::issue_3819_an_open_constructor_chain_applies_at_most_quadratically": "chelis-checker-core::chelis_checker_core$infer::tests::issue_3819::issue_3819_an_open_constructor_chain_applies_at_most_quadratically",
+    "chelis-types::chelis_types$infer::tests::issue_3819::issue_3819_nested_constructor_applications_apply_linearly": "chelis-checker-core::chelis_checker_core$infer::tests::issue_3819::issue_3819_nested_constructor_applications_apply_linearly",
+    "chelis-types::chelis_types$infer::tests::issue_3819::issue_3819_one_occurs_check_visits_the_type_once": "chelis-checker-core::chelis_checker_core$infer::tests::issue_3819::issue_3819_one_occurs_check_visits_the_type_once",
+    "chelis-types::chelis_types$infer::tests::issue_3819::issue_3819_the_detector_rejects_an_occurs_check_that_reapplies_per_level": "chelis-checker-core::chelis_checker_core$infer::tests::issue_3819::issue_3819_the_detector_rejects_an_occurs_check_that_reapplies_per_level",
+    "chelis-types::chelis_types$infer::tests::let_multiple_bindings": "chelis-checker-core::chelis_checker_core$infer::tests::let_multiple_bindings",
+    "chelis-types::chelis_types$infer::tests::let_scoping": "chelis-checker-core::chelis_checker_core$infer::tests::let_scoping",
+    "chelis-types::chelis_types$infer::tests::let_simple": "chelis-checker-core::chelis_checker_core$infer::tests::let_simple",
+    "chelis-types::chelis_types$infer::tests::lit_bool": "chelis-checker-core::chelis_checker_core$infer::tests::lit_bool",
+    "chelis-types::chelis_types$infer::tests::lit_default_float": "chelis-checker-core::chelis_checker_core$infer::tests::lit_default_float",
+    "chelis-types::chelis_types$infer::tests::lit_default_int": "chelis-checker-core::chelis_checker_core$infer::tests::lit_default_int",
+    "chelis-types::chelis_types$infer::tests::lit_f32": "chelis-checker-core::chelis_checker_core$infer::tests::lit_f32",
+    "chelis-types::chelis_types$infer::tests::lit_int32": "chelis-checker-core::chelis_checker_core$infer::tests::lit_int32",
+    "chelis-types::chelis_types$infer::tests::lit_string": "chelis-checker-core::chelis_checker_core$infer::tests::lit_string",
+    "chelis-types::chelis_types$infer::tests::match_non_exhaustive": "chelis-checker-core::chelis_checker_core$infer::tests::match_non_exhaustive",
+    "chelis-types::chelis_types$infer::tests::match_simple_adt": "chelis-checker-core::chelis_checker_core$infer::tests::match_simple_adt",
+    "chelis-types::chelis_types$infer::tests::mod_admits_float_input": "chelis-checker-core::chelis_checker_core$infer::tests::mod_admits_float_input",
+    "chelis-types::chelis_types$infer::tests::mod_rejects_mixed_float_widths": "chelis-checker-core::chelis_checker_core$infer::tests::mod_rejects_mixed_float_widths",
+    "chelis-types::chelis_types$infer::tests::moderate_chain_does_not_trip_sibling_guard": "chelis-checker-core::chelis_checker_core$infer::tests::moderate_chain_does_not_trip_sibling_guard",
+    "chelis-types::chelis_types$infer::tests::more::a_tensor_cast_to_a_key_is_rejected": "chelis-checker-core::chelis_checker_core$infer::tests::more::a_tensor_cast_to_a_key_is_rejected",
+    "chelis-types::chelis_types$infer::tests::more::adt_with_fields": "chelis-checker-core::chelis_checker_core$infer::tests::more::adt_with_fields",
+    "chelis-types::chelis_types$infer::tests::more::builtin_relu": "chelis-checker-core::chelis_checker_core$infer::tests::more::builtin_relu",
+    "chelis-types::chelis_types$infer::tests::more::checked_program_annotates_apps_and_updates_type_env": "chelis-checker-core::chelis_checker_core$infer::tests::more::checked_program_annotates_apps_and_updates_type_env",
+    "chelis-types::chelis_types$infer::tests::more::checked_program_annotates_fn_bodies": "chelis-checker-core::chelis_checker_core$infer::tests::more::checked_program_annotates_fn_bodies",
+    "chelis-types::chelis_types$infer::tests::more::checked_program_annotates_symbolic_expand_apps_from_surf": "chelis-checker-core::chelis_checker_core$infer::tests::more::checked_program_annotates_symbolic_expand_apps_from_surf",
+    "chelis-types::chelis_types$infer::tests::more::const_col_chain_propagates_declared_dim_to_callers": "chelis-checker-core::chelis_checker_core$infer::tests::more::const_col_chain_propagates_declared_dim_to_callers",
+    "chelis-types::chelis_types$infer::tests::more::cumsum_and_trace_are_typed_by_the_default_sum_result": "chelis-checker-core::chelis_checker_core$infer::tests::more::cumsum_and_trace_are_typed_by_the_default_sum_result",
+    "chelis-types::chelis_types$infer::tests::more::declared_named_dimension_requires_its_own_signature_parameter": "chelis-checker-core::chelis_checker_core$infer::tests::more::declared_named_dimension_requires_its_own_signature_parameter",
+    "chelis-types::chelis_types$infer::tests::more::def_with_fn_body": "chelis-checker-core::chelis_checker_core$infer::tests::more::def_with_fn_body",
+    "chelis-types::chelis_types$infer::tests::more::destructured_match_payload_keeps_scrutinee_join_intermediates_shared": "chelis-checker-core::chelis_checker_core$infer::tests::more::destructured_match_payload_keeps_scrutinee_join_intermediates_shared",
+    "chelis-types::chelis_types$infer::tests::more::einsum_operands_share_one_precision_and_the_result_is_always_decided": "chelis-checker-core::chelis_checker_core$infer::tests::more::einsum_operands_share_one_precision_and_the_result_is_always_decided",
+    "chelis-types::chelis_types$infer::tests::more::empty_program": "chelis-checker-core::chelis_checker_core$infer::tests::more::empty_program",
+    "chelis-types::chelis_types$infer::tests::more::explicit_accumulator_types_by_the_permitted_pairs_table": "chelis-checker-core::chelis_checker_core$infer::tests::more::explicit_accumulator_types_by_the_permitted_pairs_table",
+    "chelis-types::chelis_types$infer::tests::more::fix11_pat_record_rejects_unknown_field": "chelis-checker-core::chelis_checker_core$infer::tests::more::fix11_pat_record_rejects_unknown_field",
+    "chelis-types::chelis_types$infer::tests::more::fix11b_pat_record_accepts_valid_field": "chelis-checker-core::chelis_checker_core$infer::tests::more::fix11b_pat_record_accepts_valid_field",
+    "chelis-types::chelis_types$infer::tests::more::fix1_tensor_op_rejects_non_tensor_args": "chelis-checker-core::chelis_checker_core$infer::tests::more::fix1_tensor_op_rejects_non_tensor_args",
+    "chelis-types::chelis_types$infer::tests::more::fix2_unsound_generalization_rejected": "chelis-checker-core::chelis_checker_core$infer::tests::more::fix2_unsound_generalization_rejected",
+    "chelis-types::chelis_types$infer::tests::more::fix3_defsig_enforced": "chelis-checker-core::chelis_checker_core$infer::tests::more::fix3_defsig_enforced",
+    "chelis-types::chelis_types$infer::tests::more::fix4_dvar_names_shared": "chelis-checker-core::chelis_checker_core$infer::tests::more::fix4_dvar_names_shared",
+    "chelis-types::chelis_types$infer::tests::more::fix5_if_condition_must_be_bool": "chelis-checker-core::chelis_checker_core$infer::tests::more::fix5_if_condition_must_be_bool",
+    "chelis-types::chelis_types$infer::tests::more::fix6a_wildcard_exhaustive": "chelis-checker-core::chelis_checker_core$infer::tests::more::fix6a_wildcard_exhaustive",
+    "chelis-types::chelis_types$infer::tests::more::fix6b_pat_as_binds_name": "chelis-checker-core::chelis_checker_core$infer::tests::more::fix6b_pat_as_binds_name",
+    "chelis-types::chelis_types$infer::tests::more::fix7b_suggestions_for_unbound": "chelis-checker-core::chelis_checker_core$infer::tests::more::fix7b_suggestions_for_unbound",
+    "chelis-types::chelis_types$infer::tests::more::fix8_typed_params": "chelis-checker-core::chelis_checker_core$infer::tests::more::fix8_typed_params",
+    "chelis-types::chelis_types$infer::tests::more::fix8b_typed_param_enforced": "chelis-checker-core::chelis_checker_core$infer::tests::more::fix8b_typed_param_enforced",
+    "chelis-types::chelis_types$infer::tests::more::fix9_logical_ops_reject_non_bool_tensors": "chelis-checker-core::chelis_checker_core$infer::tests::more::fix9_logical_ops_reject_non_bool_tensors",
+    "chelis-types::chelis_types$infer::tests::more::fix9b_logical_ops_reject_non_tensor": "chelis-checker-core::chelis_checker_core$infer::tests::more::fix9b_logical_ops_reject_non_tensor",
+    "chelis-types::chelis_types$infer::tests::more::fix9c_not_rejects_non_bool_tensor": "chelis-checker-core::chelis_checker_core$infer::tests::more::fix9c_not_rejects_non_bool_tensor",
+    "chelis-types::chelis_types$infer::tests::more::fix9d_logical_ops_accept_bool_tensors": "chelis-checker-core::chelis_checker_core$infer::tests::more::fix9d_logical_ops_accept_bool_tensors",
+    "chelis-types::chelis_types$infer::tests::more::fn_applied_to_args": "chelis-checker-core::chelis_checker_core$infer::tests::more::fn_applied_to_args",
+    "chelis-types::chelis_types$infer::tests::more::generic_sum_result_is_one_type_across_the_bound_or_rejected": "chelis-checker-core::chelis_checker_core$infer::tests::more::generic_sum_result_is_one_type_across_the_bound_or_rejected",
+    "chelis-types::chelis_types$infer::tests::more::if_with_tensor_branches": "chelis-checker-core::chelis_checker_core$infer::tests::more::if_with_tensor_branches",
+    "chelis-types::chelis_types$infer::tests::more::independent_binding_generalization_visits_zero_environment_bindings": "chelis-checker-core::chelis_checker_core$infer::tests::more::independent_binding_generalization_visits_zero_environment_bindings",
+    "chelis-types::chelis_types$infer::tests::more::ir_accepts_symbolic_normalized_axis_for_layer_norm": "chelis-checker-core::chelis_checker_core$infer::tests::more::ir_accepts_symbolic_normalized_axis_for_layer_norm",
+    "chelis-types::chelis_types$infer::tests::more::ir_literal_dimension_mismatch_surfaces_error": "chelis-checker-core::chelis_checker_core$infer::tests::more::ir_literal_dimension_mismatch_surfaces_error",
+    "chelis-types::chelis_types$infer::tests::more::ir_rejects_polymorphic_dims_pinned_by_body": "chelis-checker-core::chelis_checker_core$infer::tests::more::ir_rejects_polymorphic_dims_pinned_by_body",
+    "chelis-types::chelis_types$infer::tests::more::ir_resolves_consistently_mangled_constructor_names": "chelis-checker-core::chelis_checker_core$infer::tests::more::ir_resolves_consistently_mangled_constructor_names",
+    "chelis-types::chelis_types$infer::tests::more::issue594_mixed_wildcard_element_wildcards_direct_concat_axis": "chelis-checker-core::chelis_checker_core$infer::tests::more::issue594_mixed_wildcard_element_wildcards_direct_concat_axis",
+    "chelis-types::chelis_types$infer::tests::more::issue594_ragged_direct_literal_concat_sums_extents": "chelis-checker-core::chelis_checker_core$infer::tests::more::issue594_ragged_direct_literal_concat_sums_extents",
+    "chelis-types::chelis_types$infer::tests::more::issue594_ragged_let_bound_list_stays_wildcard": "chelis-checker-core::chelis_checker_core$infer::tests::more::issue594_ragged_let_bound_list_stays_wildcard",
+    "chelis-types::chelis_types$infer::tests::more::issue594_ragged_three_element_mid_axis_concat_sums_extents": "chelis-checker-core::chelis_checker_core$infer::tests::more::issue594_ragged_three_element_mid_axis_concat_sums_extents",
+    "chelis-types::chelis_types$infer::tests::more::issue631_concat_axis0_let_bound_list_counts_elements": "chelis-checker-core::chelis_checker_core$infer::tests::more::issue631_concat_axis0_let_bound_list_counts_elements",
+    "chelis-types::chelis_types$infer::tests::more::issue631_concat_axis0_literal_list_counts_elements": "chelis-checker-core::chelis_checker_core$infer::tests::more::issue631_concat_axis0_literal_list_counts_elements",
+    "chelis-types::chelis_types$infer::tests::more::issue631_concat_axis_out_of_bounds_rejected": "chelis-checker-core::chelis_checker_core$infer::tests::more::issue631_concat_axis_out_of_bounds_rejected",
+    "chelis-types::chelis_types$infer::tests::more::issue631_concat_dynamic_axis_wildcards_all_axes": "chelis-checker-core::chelis_checker_core$infer::tests::more::issue631_concat_dynamic_axis_wildcards_all_axes",
+    "chelis-types::chelis_types$infer::tests::more::issue631_concat_mid_axis_preserves_last_axis": "chelis-checker-core::chelis_checker_core$infer::tests::more::issue631_concat_mid_axis_preserves_last_axis",
+    "chelis-types::chelis_types$infer::tests::more::issue631_concat_negative_axis_indexes_from_end": "chelis-checker-core::chelis_checker_core$infer::tests::more::issue631_concat_negative_axis_indexes_from_end",
+    "chelis-types::chelis_types$infer::tests::more::issue631_concat_param_list_wildcards_concat_axis_only": "chelis-checker-core::chelis_checker_core$infer::tests::more::issue631_concat_param_list_wildcards_concat_axis_only",
+    "chelis-types::chelis_types$infer::tests::more::issue631_concat_param_shadow_clears_outer_length": "chelis-checker-core::chelis_checker_core$infer::tests::more::issue631_concat_param_shadow_clears_outer_length",
+    "chelis-types::chelis_types$infer::tests::more::issue631_concat_rebound_list_clears_stale_length": "chelis-checker-core::chelis_checker_core$infer::tests::more::issue631_concat_rebound_list_clears_stale_length",
+    "chelis-types::chelis_types$infer::tests::more::issue631_concat_wrong_sum_annotation_rejected": "chelis-checker-core::chelis_checker_core$infer::tests::more::issue631_concat_wrong_sum_annotation_rejected",
+    "chelis-types::chelis_types$infer::tests::more::issue_293_apply_resid_checks_clean_in_isolation": "chelis-checker-core::chelis_checker_core$infer::tests::more::issue_293_apply_resid_checks_clean_in_isolation",
+    "chelis-types::chelis_types$infer::tests::more::issue_293_dim_var_callback_variant_checks_clean": "chelis-checker-core::chelis_checker_core$infer::tests::more::issue_293_dim_var_callback_variant_checks_clean",
+    "chelis-types::chelis_types$infer::tests::more::issue_293_general_tvar_through_arrow_param_checks_clean": "chelis-checker-core::chelis_checker_core$infer::tests::more::issue_293_general_tvar_through_arrow_param_checks_clean",
+    "chelis-types::chelis_types$infer::tests::more::issue_293_incompatible_callback_still_rejected": "chelis-checker-core::chelis_checker_core$infer::tests::more::issue_293_incompatible_callback_still_rejected",
+    "chelis-types::chelis_types$infer::tests::more::issue_293_monomorphic_callback_variant_checks_clean": "chelis-checker-core::chelis_checker_core$infer::tests::more::issue_293_monomorphic_callback_variant_checks_clean",
+    "chelis-types::chelis_types$infer::tests::more::level_generalization_quantifies_only_the_ignored_inner_argument": "chelis-checker-core::chelis_checker_core$infer::tests::more::level_generalization_quantifies_only_the_ignored_inner_argument",
+    "chelis-types::chelis_types$infer::tests::more::narrow_keeps_wildcard_for_return_only_dim_var": "chelis-checker-core::chelis_checker_core$infer::tests::more::narrow_keeps_wildcard_for_return_only_dim_var",
+    "chelis-types::chelis_types$infer::tests::more::narrow_substitutes_literal_for_wildcard_unconditionally": "chelis-checker-core::chelis_checker_core$infer::tests::more::narrow_substitutes_literal_for_wildcard_unconditionally",
+    "chelis-types::chelis_types$infer::tests::more::narrow_substitutes_param_bound_dim_var_for_wildcard": "chelis-checker-core::chelis_checker_core$infer::tests::more::narrow_substitutes_param_bound_dim_var_for_wildcard",
+    "chelis-types::chelis_types$infer::tests::more::nautilus_self_reference_is_allowed": "chelis-checker-core::chelis_checker_core$infer::tests::more::nautilus_self_reference_is_allowed",
+    "chelis-types::chelis_types$infer::tests::more::nested_let": "chelis-checker-core::chelis_checker_core$infer::tests::more::nested_let",
+    "chelis-types::chelis_types$infer::tests::more::pad_sequences_to_literal_width_matches_declared_shape": "chelis-checker-core::chelis_checker_core$infer::tests::more::pad_sequences_to_literal_width_matches_declared_shape",
+    "chelis-types::chelis_types$infer::tests::more::pad_sequences_to_mismatched_width_through_shared_sig_dim_is_rejected": "chelis-checker-core::chelis_checker_core$infer::tests::more::pad_sequences_to_mismatched_width_through_shared_sig_dim_is_rejected",
+    "chelis-types::chelis_types$infer::tests::more::pad_sequences_to_wrong_literal_width_is_rejected": "chelis-checker-core::chelis_checker_core$infer::tests::more::pad_sequences_to_wrong_literal_width_is_rejected",
+    "chelis-types::chelis_types$infer::tests::more::pipe_with_lambda": "chelis-checker-core::chelis_checker_core$infer::tests::more::pipe_with_lambda",
+    "chelis-types::chelis_types$infer::tests::more::sum_result_widening_rejections_name_the_rule_and_the_repair": "chelis-checker-core::chelis_checker_core$infer::tests::more::sum_result_widening_rejections_name_the_rule_and_the_repair",
+    "chelis-types::chelis_types$infer::tests::more::surf_3g_io_and_exact_padding_builtins_type_check": "chelis-checker-core::chelis_checker_core$infer::tests::more::surf_3g_io_and_exact_padding_builtins_type_check",
+    "chelis-types::chelis_types$infer::tests::more::surf_3h_sort_and_trace_type_check": "chelis-checker-core::chelis_checker_core$infer::tests::more::surf_3h_sort_and_trace_type_check",
+    "chelis-types::chelis_types$infer::tests::more::surf_3h_structural_tensor_builtins_type_check": "chelis-checker-core::chelis_checker_core$infer::tests::more::surf_3h_structural_tensor_builtins_type_check",
+    "chelis-types::chelis_types$infer::tests::more::surf_3h_tensor_numeric_builtins_type_check": "chelis-checker-core::chelis_checker_core$infer::tests::more::surf_3h_tensor_numeric_builtins_type_check",
+    "chelis-types::chelis_types$infer::tests::more::surf_append_rejects_wrong_element_type": "chelis-checker-core::chelis_checker_core$infer::tests::more::surf_append_rejects_wrong_element_type",
+    "chelis-types::chelis_types$infer::tests::more::surf_chunk_rejects_non_integer_size": "chelis-checker-core::chelis_checker_core$infer::tests::more::surf_chunk_rejects_non_integer_size",
+    "chelis-types::chelis_types$infer::tests::more::surf_collection_helper_builtins_type_check": "chelis-checker-core::chelis_checker_core$infer::tests::more::surf_collection_helper_builtins_type_check",
+    "chelis-types::chelis_types$infer::tests::more::surf_dict_and_iteration_builtins_type_check": "chelis-checker-core::chelis_checker_core$infer::tests::more::surf_dict_and_iteration_builtins_type_check",
+    "chelis-types::chelis_types$infer::tests::more::surf_dict_entries_rejects_non_dict_input": "chelis-checker-core::chelis_checker_core$infer::tests::more::surf_dict_entries_rejects_non_dict_input",
+    "chelis-types::chelis_types$infer::tests::more::surf_dict_insert_rejects_value_type_mismatch": "chelis-checker-core::chelis_checker_core$infer::tests::more::surf_dict_insert_rejects_value_type_mismatch",
+    "chelis-types::chelis_types$infer::tests::more::surf_dict_merge_rejects_mismatched_dict_value_types": "chelis-checker-core::chelis_checker_core$infer::tests::more::surf_dict_merge_rejects_mismatched_dict_value_types",
+    "chelis-types::chelis_types$infer::tests::more::surf_dict_remove_rejects_mismatched_key_type": "chelis-checker-core::chelis_checker_core$infer::tests::more::surf_dict_remove_rejects_mismatched_key_type",
+    "chelis-types::chelis_types$infer::tests::more::surf_einsum_rejects_ellipsis_in_3h": "chelis-checker-core::chelis_checker_core$infer::tests::more::surf_einsum_rejects_ellipsis_in_3h",
+    "chelis-types::chelis_types$infer::tests::more::surf_einsum_rejects_static_extent_mismatch": "chelis-checker-core::chelis_checker_core$infer::tests::more::surf_einsum_rejects_static_extent_mismatch",
+    "chelis-types::chelis_types$infer::tests::more::surf_filter_rejects_non_bool_callback": "chelis-checker-core::chelis_checker_core$infer::tests::more::surf_filter_rejects_non_bool_callback",
+    "chelis-types::chelis_types$infer::tests::more::surf_flat_map_rejects_non_list_callback": "chelis-checker-core::chelis_checker_core$infer::tests::more::surf_flat_map_rejects_non_list_callback",
+    "chelis-types::chelis_types$infer::tests::more::surf_flatten_rejects_non_nested_list_input": "chelis-checker-core::chelis_checker_core$infer::tests::more::surf_flatten_rejects_non_nested_list_input",
+    "chelis-types::chelis_types$infer::tests::more::surf_fold_rejects_accumulator_mismatch": "chelis-checker-core::chelis_checker_core$infer::tests::more::surf_fold_rejects_accumulator_mismatch",
+    "chelis-types::chelis_types$infer::tests::more::surf_list_builtins_type_check": "chelis-checker-core::chelis_checker_core$infer::tests::more::surf_list_builtins_type_check",
+    "chelis-types::chelis_types$infer::tests::more::surf_map_filter_fold_type_check": "chelis-checker-core::chelis_checker_core$infer::tests::more::surf_map_filter_fold_type_check",
+    "chelis-types::chelis_types$infer::tests::more::surf_pad_sequences_type_checks": "chelis-checker-core::chelis_checker_core$infer::tests::more::surf_pad_sequences_type_checks",
+    "chelis-types::chelis_types$infer::tests::more::surf_partition_rejects_non_bool_callback": "chelis-checker-core::chelis_checker_core$infer::tests::more::surf_partition_rejects_non_bool_callback",
+    "chelis-types::chelis_types$infer::tests::more::surf_permute_with_axis_arguments_type_checks": "chelis-checker-core::chelis_checker_core$infer::tests::more::surf_permute_with_axis_arguments_type_checks",
+    "chelis-types::chelis_types$infer::tests::more::surf_polymorphic_tuple_fold_with_tensor_slot_annotates_ir": "chelis-checker-core::chelis_checker_core$infer::tests::more::surf_polymorphic_tuple_fold_with_tensor_slot_annotates_ir",
+    "chelis-types::chelis_types$infer::tests::more::surf_polymorphic_tuple_fold_with_tensor_slot_infers_ir": "chelis-checker-core::chelis_checker_core$infer::tests::more::surf_polymorphic_tuple_fold_with_tensor_slot_infers_ir",
+    "chelis-types::chelis_types$infer::tests::more::surf_polymorphic_tuple_fold_with_tensor_slot_type_checks": "chelis-checker-core::chelis_checker_core$infer::tests::more::surf_polymorphic_tuple_fold_with_tensor_slot_type_checks",
+    "chelis-types::chelis_types$infer::tests::more::surf_scan_rejects_accumulator_mismatch": "chelis-checker-core::chelis_checker_core$infer::tests::more::surf_scan_rejects_accumulator_mismatch",
+    "chelis-types::chelis_types$infer::tests::more::surf_scatter_replace_accepts_static_duplicate_indices": "chelis-checker-core::chelis_checker_core$infer::tests::more::surf_scatter_replace_accepts_static_duplicate_indices",
+    "chelis-types::chelis_types$infer::tests::more::surf_scatter_replace_rejects_unknown_mode": "chelis-checker-core::chelis_checker_core$infer::tests::more::surf_scatter_replace_rejects_unknown_mode",
+    "chelis-types::chelis_types$infer::tests::more::surf_take_rejects_non_integer_count": "chelis-checker-core::chelis_checker_core$infer::tests::more::surf_take_rejects_non_integer_count",
+    "chelis-types::chelis_types$infer::tests::more::surf_to_list_rejects_rank2_tensor": "chelis-checker-core::chelis_checker_core$infer::tests::more::surf_to_list_rejects_rank2_tensor",
+    "chelis-types::chelis_types$infer::tests::more::surf_where_rejects_non_bool_condition_tensor": "chelis-checker-core::chelis_checker_core$infer::tests::more::surf_where_rejects_non_bool_condition_tensor",
+    "chelis-types::chelis_types$infer::tests::more::tensor_2d": "chelis-checker-core::chelis_checker_core$infer::tests::more::tensor_2d",
+    "chelis-types::chelis_types$infer::tests::more::tensor_literal_dim": "chelis-checker-core::chelis_checker_core$infer::tests::more::tensor_literal_dim",
+    "chelis-types::chelis_types$infer::tests::more::three_hop_binding_cycle_is_detected": "chelis-checker-core::chelis_checker_core$infer::tests::more::three_hop_binding_cycle_is_detected",
+    "chelis-types::chelis_types$infer::tests::more::total_nodes_counted": "chelis-checker-core::chelis_checker_core$infer::tests::more::total_nodes_counted",
+    "chelis-types::chelis_types$infer::tests::more::tuple_three_elems": "chelis-checker-core::chelis_checker_core$infer::tests::more::tuple_three_elems",
+    "chelis-types::chelis_types$infer::tests::more::two_hop_binding_cycle_is_detected": "chelis-checker-core::chelis_checker_core$infer::tests::more::two_hop_binding_cycle_is_detected",
+    "chelis-types::chelis_types$infer::tests::more::unrelated_defs_do_not_trigger_cycle_false_positive": "chelis-checker-core::chelis_checker_core$infer::tests::more::unrelated_defs_do_not_trigger_cycle_false_positive",
+    "chelis-types::chelis_types$infer::tests::more::variadic_sum_over_an_unresolved_operand_is_decided_when_it_binds": "chelis-checker-core::chelis_checker_core$infer::tests::more::variadic_sum_over_an_unresolved_operand_is_decided_when_it_binds",
+    "chelis-types::chelis_types$infer::tests::multiple_errors_collected": "chelis-checker-core::chelis_checker_core$infer::tests::multiple_errors_collected",
+    "chelis-types::chelis_types$infer::tests::partial_inference_continues_after_error": "chelis-checker-core::chelis_checker_core$infer::tests::partial_inference_continues_after_error",
+    "chelis-types::chelis_types$infer::tests::pipe_chain": "chelis-checker-core::chelis_checker_core$infer::tests::pipe_chain",
+    "chelis-types::chelis_types$infer::tests::pipe_simple": "chelis-checker-core::chelis_checker_core$infer::tests::pipe_simple",
+    "chelis-types::chelis_types$infer::tests::post_app_ledger_key::a_route_that_re_registers_during_a_replay_keeps_the_original_key": "chelis-checker-core::chelis_checker_core$infer::tests::post_app_ledger_key::a_route_that_re_registers_during_a_replay_keeps_the_original_key",
+    "chelis-types::chelis_types$infer::tests::post_app_ledger_key::two_distinct_eager_calls_keep_distinct_keys": "chelis-checker-core::chelis_checker_core$infer::tests::post_app_ledger_key::two_distinct_eager_calls_keep_distinct_keys",
+    "chelis-types::chelis_types$infer::tests::rank_builtin_requires_tensor_input": "chelis-checker-core::chelis_checker_core$infer::tests::rank_builtin_requires_tensor_input",
+    "chelis-types::chelis_types$infer::tests::recursion_uniformity::direct_polymorphic_recursion_is_rejected_with_the_atom": "chelis-checker-core::chelis_checker_core$infer::tests::recursion_uniformity::direct_polymorphic_recursion_is_rejected_with_the_atom",
+    "chelis-types::chelis_types$infer::tests::recursion_uniformity::direct_uniform_recursion_is_accepted": "chelis-checker-core::chelis_checker_core$infer::tests::recursion_uniformity::direct_uniform_recursion_is_accepted",
+    "chelis-types::chelis_types$infer::tests::recursion_uniformity::inferred_recursive_members_generalize_after_both_driver_scc_boundaries": "chelis-checker-core::chelis_checker_core$infer::tests::recursion_uniformity::inferred_recursive_members_generalize_after_both_driver_scc_boundaries",
+    "chelis-types::chelis_types$infer::tests::recursion_uniformity::monomorphic_caller_in_group_names_the_missing_type_parameters": "chelis-checker-core::chelis_checker_core$infer::tests::recursion_uniformity::monomorphic_caller_in_group_names_the_missing_type_parameters",
+    "chelis-types::chelis_types$infer::tests::recursion_uniformity::mutual_polymorphic_recursion_growing_across_the_cycle_is_rejected": "chelis-checker-core::chelis_checker_core$infer::tests::recursion_uniformity::mutual_polymorphic_recursion_growing_across_the_cycle_is_rejected",
+    "chelis-types::chelis_types$infer::tests::recursion_uniformity::mutual_uniform_recursion_is_accepted": "chelis-checker-core::chelis_checker_core$infer::tests::recursion_uniformity::mutual_uniform_recursion_is_accepted",
+    "chelis-types::chelis_types$infer::tests::recursion_uniformity::out_of_group_calls_at_fresh_instantiations_are_unrestricted": "chelis-checker-core::chelis_checker_core$infer::tests::recursion_uniformity::out_of_group_calls_at_fresh_instantiations_are_unrestricted",
+    "chelis-types::chelis_types$infer::tests::recursion_uniformity::polymorphic_recursion_behind_a_let_alias_is_rejected": "chelis-checker-core::chelis_checker_core$infer::tests::recursion_uniformity::polymorphic_recursion_behind_a_let_alias_is_rejected",
+    "chelis-types::chelis_types$infer::tests::recursion_uniformity::recursive_group_errors_clear_scope_before_the_next_check_in_both_drivers": "chelis-checker-core::chelis_checker_core$infer::tests::recursion_uniformity::recursive_group_errors_clear_scope_before_the_next_check_in_both_drivers",
+    "chelis-types::chelis_types$infer::tests::recursion_uniformity::uniform_recursion_behind_a_let_alias_is_accepted": "chelis-checker-core::chelis_checker_core$infer::tests::recursion_uniformity::uniform_recursion_behind_a_let_alias_is_accepted",
+    "chelis-types::chelis_types$infer::tests::scalar_add_is_allowed": "chelis-checker-core::chelis_checker_core$infer::tests::scalar_add_is_allowed",
+    "chelis-types::chelis_types$infer::tests::schedule_invariants::a_below_floor_reader_of_a_hole_signature_function_follows_it": "chelis-checker-core::chelis_checker_core$infer::tests::schedule_invariants::a_below_floor_reader_of_a_hole_signature_function_follows_it",
+    "chelis-types::chelis_types$infer::tests::schedule_invariants::a_genuine_binding_cycle_stays_total_as_one_component": "chelis-checker-core::chelis_checker_core$infer::tests::schedule_invariants::a_genuine_binding_cycle_stays_total_as_one_component",
+    "chelis-types::chelis_types$infer::tests::schedule_invariants::a_mixed_bare_and_module_component_follows_the_value_a_member_reads": "chelis-checker-core::chelis_checker_core$infer::tests::schedule_invariants::a_mixed_bare_and_module_component_follows_the_value_a_member_reads",
+    "chelis-types::chelis_types$infer::tests::schedule_invariants::a_textual_chain_would_close_a_cycle_this_graph_does_not_have": "chelis-checker-core::chelis_checker_core$infer::tests::schedule_invariants::a_textual_chain_would_close_a_cycle_this_graph_does_not_have",
+    "chelis-types::chelis_types$infer::tests::schedule_invariants::a_value_naming_a_function_that_reads_it_back_is_a_recorded_stall": "chelis-checker-core::chelis_checker_core$infer::tests::schedule_invariants::a_value_naming_a_function_that_reads_it_back_is_a_recorded_stall",
+    "chelis-types::chelis_types$infer::tests::schedule_invariants::a_value_reading_a_later_function_does_not_stall": "chelis-checker-core::chelis_checker_core$infer::tests::schedule_invariants::a_value_reading_a_later_function_does_not_stall",
+    "chelis-types::chelis_types$infer::tests::schedule_invariants::anchor_value_reader_matrix_satisfies_the_schedule_invariants": "chelis-checker-core::chelis_checker_core$infer::tests::schedule_invariants::anchor_value_reader_matrix_satisfies_the_schedule_invariants",
+    "chelis-types::chelis_types$infer::tests::schedule_invariants::cycle_precedence_value_is_available_before_the_cyclic_component": "chelis-checker-core::chelis_checker_core$infer::tests::schedule_invariants::cycle_precedence_value_is_available_before_the_cyclic_component",
+    "chelis-types::chelis_types$infer::tests::schedule_invariants::function_visibility_layouts_satisfy_the_schedule_invariants": "chelis-checker-core::chelis_checker_core$infer::tests::schedule_invariants::function_visibility_layouts_satisfy_the_schedule_invariants",
+    "chelis-types::chelis_types$infer::tests::schedule_invariants::recursive_component_layouts_satisfy_the_schedule_invariants": "chelis-checker-core::chelis_checker_core$infer::tests::schedule_invariants::recursive_component_layouts_satisfy_the_schedule_invariants",
+    "chelis-types::chelis_types$infer::tests::schedule_invariants::round_eight_alphabet_satisfies_the_schedule_invariants": "chelis-checker-core::chelis_checker_core$infer::tests::schedule_invariants::round_eight_alphabet_satisfies_the_schedule_invariants",
+    "chelis-types::chelis_types$infer::tests::schedule_invariants::round_eight_stall_free_program_keeps_planner_order": "chelis-checker-core::chelis_checker_core$infer::tests::schedule_invariants::round_eight_stall_free_program_keeps_planner_order",
+    "chelis-types::chelis_types$infer::tests::schedule_invariants::round_five_hoisted_reader_follows_the_value_it_reads": "chelis-checker-core::chelis_checker_core$infer::tests::schedule_invariants::round_five_hoisted_reader_follows_the_value_it_reads",
+    "chelis-types::chelis_types$infer::tests::schedule_invariants::round_seven_value_reading_a_caller_waits_for_the_defsig_less_chain": "chelis-checker-core::chelis_checker_core$infer::tests::schedule_invariants::round_seven_value_reading_a_caller_waits_for_the_defsig_less_chain",
+    "chelis-types::chelis_types$infer::tests::schedule_invariants::round_six_recursive_component_follows_the_value_a_member_reads": "chelis-checker-core::chelis_checker_core$infer::tests::schedule_invariants::round_six_recursive_component_follows_the_value_a_member_reads",
+    "chelis-types::chelis_types$infer::tests::shape_builtin_accepts_tensor_input": "chelis-checker-core::chelis_checker_core$infer::tests::shape_builtin_accepts_tensor_input",
+    "chelis-types::chelis_types$infer::tests::shape_builtin_rejects_negative_axis_when_rank_is_known": "chelis-checker-core::chelis_checker_core$infer::tests::shape_builtin_rejects_negative_axis_when_rank_is_known",
+    "chelis-types::chelis_types$infer::tests::shl_rejects_non_integer_shift_amount": "chelis-checker-core::chelis_checker_core$infer::tests::shl_rejects_non_integer_shift_amount",
+    "chelis-types::chelis_types$infer::tests::sig_plus_def_same_name_is_not_a_duplicate": "chelis-checker-core::chelis_checker_core$infer::tests::sig_plus_def_same_name_is_not_a_duplicate",
+    "chelis-types::chelis_types$infer::tests::stack_exhaustion_drains_into_a_located_error": "chelis-checker-core::chelis_checker_core$infer::tests::stack_exhaustion_drains_into_a_located_error",
+    "chelis-types::chelis_types$infer::tests::string_len_builtin_is_allowed": "chelis-checker-core::chelis_checker_core$infer::tests::string_len_builtin_is_allowed",
+    "chelis-types::chelis_types$infer::tests::string_predicates_and_transforms_are_allowed": "chelis-checker-core::chelis_checker_core$infer::tests::string_predicates_and_transforms_are_allowed",
+    "chelis-types::chelis_types$infer::tests::string_slice_rejects_non_string_input": "chelis-checker-core::chelis_checker_core$infer::tests::string_slice_rejects_non_string_input",
+    "chelis-types::chelis_types$infer::tests::surf_source_accepts_cast_to_f64_tensor": "chelis-checker-core::chelis_checker_core$infer::tests::surf_source_accepts_cast_to_f64_tensor",
+    "chelis-types::chelis_types$infer::tests::surf_source_accepts_f64_tensor_ascription": "chelis-checker-core::chelis_checker_core$infer::tests::surf_source_accepts_f64_tensor_ascription",
+    "chelis-types::chelis_types$infer::tests::tensor_ascription_accepts_bf16": "chelis-checker-core::chelis_checker_core$infer::tests::tensor_ascription_accepts_bf16",
+    "chelis-types::chelis_types$infer::tests::tensor_ascription_accepts_bool": "chelis-checker-core::chelis_checker_core$infer::tests::tensor_ascription_accepts_bool",
+    "chelis-types::chelis_types$infer::tests::tensor_ascription_accepts_f16": "chelis-checker-core::chelis_checker_core$infer::tests::tensor_ascription_accepts_f16",
+    "chelis-types::chelis_types$infer::tests::tensor_ascription_accepts_f64": "chelis-checker-core::chelis_checker_core$infer::tests::tensor_ascription_accepts_f64",
+    "chelis-types::chelis_types$infer::tests::tensor_ascription_accepts_int64": "chelis-checker-core::chelis_checker_core$infer::tests::tensor_ascription_accepts_int64",
+    "chelis-types::chelis_types$infer::tests::tensor_ascription_rejects_f8e4m3": "chelis-checker-core::chelis_checker_core$infer::tests::tensor_ascription_rejects_f8e4m3",
+    "chelis-types::chelis_types$infer::tests::to_float_builtin_uses_prelude_option_without_local_deftype": "chelis-checker-core::chelis_checker_core$infer::tests::to_float_builtin_uses_prelude_option_without_local_deftype",
+    "chelis-types::chelis_types$infer::tests::to_int_builtin_rejects_non_string_input": "chelis-checker-core::chelis_checker_core$infer::tests::to_int_builtin_rejects_non_string_input",
+    "chelis-types::chelis_types$infer::tests::to_int_builtin_uses_prelude_option_without_local_deftype": "chelis-checker-core::chelis_checker_core$infer::tests::to_int_builtin_uses_prelude_option_without_local_deftype",
+    "chelis-types::chelis_types$infer::tests::tuple_creation": "chelis-checker-core::chelis_checker_core$infer::tests::tuple_creation",
+    "chelis-types::chelis_types$infer::tests::tuple_get_index_reads_bare_atom_and_lit_node": "chelis-checker-core::chelis_checker_core$infer::tests::tuple_get_index_reads_bare_atom_and_lit_node",
+    "chelis-types::chelis_types$infer::tests::tuple_get_lit_node_index_out_of_bounds": "chelis-checker-core::chelis_checker_core$infer::tests::tuple_get_lit_node_index_out_of_bounds",
+    "chelis-types::chelis_types$infer::tests::tuple_get_lit_node_index_valid": "chelis-checker-core::chelis_checker_core$infer::tests::tuple_get_lit_node_index_valid",
+    "chelis-types::chelis_types$infer::tests::tuple_get_out_of_bounds": "chelis-checker-core::chelis_checker_core$infer::tests::tuple_get_out_of_bounds",
+    "chelis-types::chelis_types$infer::tests::tuple_get_valid": "chelis-checker-core::chelis_checker_core$infer::tests::tuple_get_valid",
+    "chelis-types::chelis_types$infer::tests::two_level_alias_in_ctor_field_resolves": "chelis-checker-core::chelis_checker_core$infer::tests::two_level_alias_in_ctor_field_resolves",
+    "chelis-types::chelis_types$infer::tests::typealias_parameterized_resolves_in_defsig": "chelis-checker-core::chelis_checker_core$infer::tests::typealias_parameterized_resolves_in_defsig",
+    "chelis-types::chelis_types$infer::tests::typealias_resolves_in_literal_metadata": "chelis-checker-core::chelis_checker_core$infer::tests::typealias_resolves_in_literal_metadata",
+    "chelis-types::chelis_types$infer::tests::typealias_resolves_in_typed_param_metadata": "chelis-checker-core::chelis_checker_core$infer::tests::typealias_resolves_in_typed_param_metadata",
+    "chelis-types::chelis_types$infer::tests::typealias_then_deftype_with_same_name_is_rejected": "chelis-checker-core::chelis_checker_core$infer::tests::typealias_then_deftype_with_same_name_is_rejected",
+    "chelis-types::chelis_types$infer::tests::typealias_zero_param_resolves_in_defsig": "chelis-checker-core::chelis_checker_core$infer::tests::typealias_zero_param_resolves_in_defsig",
+    "chelis-types::chelis_types$infer::tests::unbound_variable": "chelis-checker-core::chelis_checker_core$infer::tests::unbound_variable",
+    "chelis-types::chelis_types$infer::tests::var_lookup_defined": "chelis-checker-core::chelis_checker_core$infer::tests::var_lookup_defined",
+    "chelis-types::chelis_types$infer::tests::vmap_axis_out_of_bounds_is_rejected": "chelis-checker-core::chelis_checker_core$infer::tests::vmap_axis_out_of_bounds_is_rejected",
+    "chelis-types::chelis_types$infer::tests::vmap_function_inserts_axis_zero_batch_dim": "chelis-checker-core::chelis_checker_core$infer::tests::vmap_function_inserts_axis_zero_batch_dim",
+    "chelis-types::chelis_types$infer::tests::vmap_grad_multiple_params_type_checks_with_tuple_result": "chelis-checker-core::chelis_checker_core$infer::tests::vmap_grad_multiple_params_type_checks_with_tuple_result",
+    "chelis-types::chelis_types$infer::tests::vmap_grad_single_tensor_param_type_checks": "chelis-checker-core::chelis_checker_core$infer::tests::vmap_grad_single_tensor_param_type_checks",
+    "chelis-types::chelis_types$infer::tests::vmap_non_function_is_rejected": "chelis-checker-core::chelis_checker_core$infer::tests::vmap_non_function_is_rejected",
+    "chelis-types::chelis_types$infer::tests::walk_for_tensor_precision_sibling_is_guarded_not_sigsegv": "chelis-checker-core::chelis_checker_core$infer::tests::walk_for_tensor_precision_sibling_is_guarded_not_sigsegv",
+    "chelis-types::chelis_types$infer::validate::cancellation_tests::cancellation_inside_shared_semantic_validation_is_hard_at_every_public_entry": "chelis-checker-core::chelis_checker_core$infer::validate::cancellation_tests::cancellation_inside_shared_semantic_validation_is_hard_at_every_public_entry",
+    "chelis-types::chelis_types$infer::validate_core_transform::core_transform_fragment_tests::alternate_result_join_preserves_aliases_and_tuple_siblings": "chelis-checker-core::chelis_checker_core$infer::validate_core_transform::core_transform_fragment_tests::alternate_result_join_preserves_aliases_and_tuple_siblings",
+    "chelis-types::chelis_types$infer::validate_core_transform::core_transform_fragment_tests::core_transform_provenance_is_scoped_by_enclosing_module": "chelis-checker-core::chelis_checker_core$infer::validate_core_transform::core_transform_fragment_tests::core_transform_provenance_is_scoped_by_enclosing_module",
+    "chelis-types::chelis_types$infer::validate_core_transform::core_transform_fragment_tests::match_pattern_provenance_transfer_is_structural_and_conservative": "chelis-checker-core::chelis_checker_core$infer::validate_core_transform::core_transform_fragment_tests::match_pattern_provenance_transfer_is_structural_and_conservative",
+    "chelis-types::chelis_types$infer::validate_core_transform::core_transform_fragment_tests::module_transform_values_use_structural_projection": "chelis-checker-core::chelis_checker_core$infer::validate_core_transform::core_transform_fragment_tests::module_transform_values_use_structural_projection",
+    "chelis-types::chelis_types$infer::validate_core_transform::core_transform_fragment_tests::surf_vmap_tensor_slot_holes_have_earlier_or_safe_boundaries": "chelis-checker-core::chelis_checker_core$infer::validate_core_transform::core_transform_fragment_tests::surf_vmap_tensor_slot_holes_have_earlier_or_safe_boundaries",
+    "chelis-types::chelis_types$known_tags::tests::every_deep_tag_has_a_typed_lane_disposition": "chelis-checker-core::chelis_checker_core$known_tags::tests::every_deep_tag_has_a_typed_lane_disposition",
+    "chelis-types::chelis_types$known_tags::tests::host_forcing_tag_set_is_exact": "chelis-checker-core::chelis_checker_core$known_tags::tests::host_forcing_tag_set_is_exact",
+    "chelis-types::chelis_types$known_tags::tests::tags_omitted_by_the_old_partial_table_propagate": "chelis-checker-core::chelis_checker_core$known_tags::tests::tags_omitted_by_the_old_partial_table_propagate",
+    "chelis-types::chelis_types$linearity::tests::admitted_literal_atoms_are_ownership_neutral": "chelis-checker-core::chelis_checker_core$linearity::tests::admitted_literal_atoms_are_ownership_neutral",
+    "chelis-types::chelis_types$linearity::tests::effect_handler_payload_retains_nested_ownership_traversal": "chelis-checker-core::chelis_checker_core$linearity::tests::effect_handler_payload_retains_nested_ownership_traversal",
+    "chelis-types::chelis_types$linearity::tests::every_non_runtime_carrier_is_diagnosed_in_runtime_position": "chelis-checker-core::chelis_checker_core$linearity::tests::every_non_runtime_carrier_is_diagnosed_in_runtime_position",
+    "chelis-types::chelis_types$linearity::tests::issue_3719::declaration_forks_copy_linear_records": "chelis-checker-core::chelis_checker_core$linearity::tests::issue_3719::declaration_forks_copy_linear_records",
+    "chelis-types::chelis_types$linearity::tests::issue_3719::declarations_see_the_program_scope_but_not_each_other": "chelis-checker-core::chelis_checker_core$linearity::tests::issue_3719::declarations_see_the_program_scope_but_not_each_other",
+    "chelis-types::chelis_types$linearity::tests::issue_3719::the_guard_catches_a_per_declaration_scope_copy": "chelis-checker-core::chelis_checker_core$linearity::tests::issue_3719::the_guard_catches_a_per_declaration_scope_copy",
+    "chelis-types::chelis_types$linearity::tests::malformed_type_carrier_cannot_authorize_borrowing": "chelis-checker-core::chelis_checker_core$linearity::tests::malformed_type_carrier_cannot_authorize_borrowing",
+    "chelis-types::chelis_types$linearity::tests::pat_as_returns_outer_and_inner_bindings": "chelis-checker-core::chelis_checker_core$linearity::tests::pat_as_returns_outer_and_inner_bindings",
+    "chelis-types::chelis_types$linearity::tests::pat_ctor_walks_into_positional_subpatterns": "chelis-checker-core::chelis_checker_core$linearity::tests::pat_ctor_walks_into_positional_subpatterns",
+    "chelis-types::chelis_types$linearity::tests::pat_record_walks_into_kv_children": "chelis-checker-core::chelis_checker_core$linearity::tests::pat_record_walks_into_kv_children",
+    "chelis-types::chelis_types$linearity::tests::pat_tuple_walks_into_children": "chelis-checker-core::chelis_checker_core$linearity::tests::pat_tuple_walks_into_children",
+    "chelis-types::chelis_types$linearity::tests::pat_var_with_type_metadata_returns_some_ty": "chelis-checker-core::chelis_checker_core$linearity::tests::pat_var_with_type_metadata_returns_some_ty",
+    "chelis-types::chelis_types$linearity::tests::pat_var_without_type_metadata_returns_none": "chelis-checker-core::chelis_checker_core$linearity::tests::pat_var_without_type_metadata_returns_none",
+    "chelis-types::chelis_types$linearity::tests::pat_wild_returns_no_bindings": "chelis-checker-core::chelis_checker_core$linearity::tests::pat_wild_returns_no_bindings",
+    "chelis-types::chelis_types$linearity::tests::redteam_malformed_match_arm_cannot_hide_nested_consume": "chelis-checker-core::chelis_checker_core$linearity::tests::redteam_malformed_match_arm_cannot_hide_nested_consume",
+    "chelis-types::chelis_types$linearity::tests::rejected_non_runtime_carriers_still_walk_nested_content": "chelis-checker-core::chelis_checker_core$linearity::tests::rejected_non_runtime_carriers_still_walk_nested_content",
+    "chelis-types::chelis_types$linearity::tests::singleton_structural_binder_list_is_not_a_runtime_form": "chelis-checker-core::chelis_checker_core$linearity::tests::singleton_structural_binder_list_is_not_a_runtime_form",
+    "chelis-types::chelis_types$linearity::tests::undecodable_runtime_carrier_cannot_hide_nested_ownership_uses": "chelis-checker-core::chelis_checker_core$linearity::tests::undecodable_runtime_carrier_cannot_hide_nested_ownership_uses",
+    "chelis-types::chelis_types$linearity::tests::undecodable_runtime_carrier_is_diagnosed_even_without_children": "chelis-checker-core::chelis_checker_core$linearity::tests::undecodable_runtime_carrier_is_diagnosed_even_without_children",
+    "chelis-types::chelis_types$opacity::tests::demangle_ident_distinguishes_synthetic_modules_from_authored_underscores": "chelis-checker-core::chelis_checker_core$opacity::tests::demangle_ident_distinguishes_synthetic_modules_from_authored_underscores",
+    "chelis-types::chelis_types$opacity::tests::demangle_ident_strips_marker_else_passthrough": "chelis-checker-core::chelis_checker_core$opacity::tests::demangle_ident_strips_marker_else_passthrough",
+    "chelis-types::chelis_types$opacity::tests::demangle_module_strips_package_for_reef_keeps_lexical": "chelis-checker-core::chelis_checker_core$opacity::tests::demangle_module_strips_package_for_reef_keeps_lexical",
+    "chelis-types::chelis_types$opacity::tests::demangle_type_rewrites_adt_names_in_signatures": "chelis-checker-core::chelis_checker_core$opacity::tests::demangle_type_rewrites_adt_names_in_signatures",
+    "chelis-types::chelis_types$opacity::tests::is_linker_format_name_matches_only_full_mangled_names": "chelis-checker-core::chelis_checker_core$opacity::tests::is_linker_format_name_matches_only_full_mangled_names",
+    "chelis-types::chelis_types$opacity::tests::linked_binding_is_attributed_to_the_type_module": "chelis-checker-core::chelis_checker_core$opacity::tests::linked_binding_is_attributed_to_the_type_module",
+    "chelis-types::chelis_types$opacity::tests::linked_constructor_keeps_its_whole_source_spelling": "chelis-checker-core::chelis_checker_core$opacity::tests::linked_constructor_keeps_its_whole_source_spelling",
+    "chelis-types::chelis_types$opacity::tests::linked_constructor_needs_the_types_own_qualification": "chelis-checker-core::chelis_checker_core$opacity::tests::linked_constructor_needs_the_types_own_qualification",
+    "chelis-types::chelis_types$opacity::tests::module_key_prefers_lexical_wrapper": "chelis-checker-core::chelis_checker_core$opacity::tests::module_key_prefers_lexical_wrapper",
+    "chelis-types::chelis_types$opacity::tests::reef_stem_parses_both_marker_cases": "chelis-checker-core::chelis_checker_core$opacity::tests::reef_stem_parses_both_marker_cases",
+    "chelis-types::chelis_types$opacity::tests::reef_stem_rejects_unmangled_names": "chelis-checker-core::chelis_checker_core$opacity::tests::reef_stem_rejects_unmangled_names",
+    "chelis-types::chelis_types$result_scope::tests::a_component_is_freshened_whole_or_kept_shared": "chelis-checker-core::chelis_checker_core$result_scope::tests::a_component_is_freshened_whole_or_kept_shared",
+    "chelis-types::chelis_types$result_scope::tests::independent_structural_fields_keep_their_polymorphism": "chelis-checker-core::chelis_checker_core$result_scope::tests::independent_structural_fields_keep_their_polymorphism",
+    "chelis-types::chelis_types$result_scope::tests::known_tensor_fields_have_independent_scope": "chelis-checker-core::chelis_checker_core$result_scope::tests::known_tensor_fields_have_independent_scope",
+    "chelis-types::chelis_types$result_scope::tests::the_solved_signature_cannot_freshen_a_shared_origin": "chelis-checker-core::chelis_checker_core$result_scope::tests::the_solved_signature_cannot_freshen_a_shared_origin",
+    "chelis-types::chelis_types$result_scope::tests::unknown_constructor_scope_reaches_dimensions_ranks_and_precision": "chelis-checker-core::chelis_checker_core$result_scope::tests::unknown_constructor_scope_reaches_dimensions_ranks_and_precision",
+    "chelis-types::chelis_types$session::annotated_totality_finalization_tests::missing_runtime_stamp_is_rejected_at_shared_finalization": "chelis-checker-core::chelis_checker_core$session::annotated_totality_finalization_tests::missing_runtime_stamp_is_rejected_at_shared_finalization",
+    "chelis-types::chelis_types$session::annotated_totality_finalization_tests::silent_error_owner_is_rejected_at_shared_finalization": "chelis-checker-core::chelis_checker_core$session::annotated_totality_finalization_tests::silent_error_owner_is_rejected_at_shared_finalization",
+    "chelis-types::chelis_types$session::annotated_totality_finalization_tests::silent_error_signature_is_rejected_at_private_finalization": "chelis-checker-core::chelis_checker_core$session::annotated_totality_finalization_tests::silent_error_signature_is_rejected_at_private_finalization",
+    "chelis-types::chelis_types$session::authoritative_type_stamp_tests::compatible_repeated_owner_write_is_accepted": "chelis-checker-core::chelis_checker_core$session::authoritative_type_stamp_tests::compatible_repeated_owner_write_is_accepted",
+    "chelis-types::chelis_types$session::authoritative_type_stamp_tests::incompatible_repeated_owner_write_is_loud": "chelis-checker-core::chelis_checker_core$session::authoritative_type_stamp_tests::incompatible_repeated_owner_write_is_loud",
+    "chelis-types::chelis_types$session::authoritative_type_stamp_tests::inferred_runtime_non_stamp_owner_is_available_to_contextual_consumers": "chelis-checker-core::chelis_checker_core$session::authoritative_type_stamp_tests::inferred_runtime_non_stamp_owner_is_available_to_contextual_consumers",
+    "chelis-types::chelis_types$session::authoritative_type_stamp_tests::missing_registered_owner_stamp_is_loud_and_has_no_fallback": "chelis-checker-core::chelis_checker_core$session::authoritative_type_stamp_tests::missing_registered_owner_stamp_is_loud_and_has_no_fallback",
+    "chelis-types::chelis_types$session::authoritative_type_stamp_tests::unregistered_synthesized_node_cannot_enter_owner_registry": "chelis-checker-core::chelis_checker_core$session::authoritative_type_stamp_tests::unregistered_synthesized_node_cannot_enter_owner_registry",
+    "chelis-types::chelis_types$session::builtin_selection_tests::builtin_atom_discovery_inference_resolves_enclosing_operands_and_preserves_shadows": "chelis-checker-core::chelis_checker_core$session::builtin_selection_tests::builtin_atom_discovery_inference_resolves_enclosing_operands_and_preserves_shadows",
+    "chelis-types::chelis_types$session::diagnostic_checkpoint_tests::iter_since_excludes_diagnostics_before_the_checkpoint": "chelis-checker-core::chelis_checker_core$session::diagnostic_checkpoint_tests::iter_since_excludes_diagnostics_before_the_checkpoint",
+    "chelis-types::chelis_types$session::diagnostic_checkpoint_tests::iter_since_includes_diagnostics_after_the_checkpoint": "chelis-checker-core::chelis_checker_core$session::diagnostic_checkpoint_tests::iter_since_includes_diagnostics_after_the_checkpoint",
+    "chelis-types::chelis_types$session::rejected_signature_resolution_tests::only_a_rejected_outcome_carries_partial_signature_structure": "chelis-checker-core::chelis_checker_core$session::rejected_signature_resolution_tests::only_a_rejected_outcome_carries_partial_signature_structure",
+    "chelis-types::chelis_types$session::rejected_signature_resolution_tests::ordinary_resolution_never_returns_partial_structure_as_success": "chelis-checker-core::chelis_checker_core$session::rejected_signature_resolution_tests::ordinary_resolution_never_returns_partial_structure_as_success",
+    "chelis-types::chelis_types$session::rejected_signature_resolution_tests::parameter_holes_are_distinct_from_named_binders": "chelis-checker-core::chelis_checker_core$session::rejected_signature_resolution_tests::parameter_holes_are_distinct_from_named_binders",
+    "chelis-types::chelis_types$session::rejected_signature_resolution_tests::valid_structure_resolves_without_an_error_witness": "chelis-checker-core::chelis_checker_core$session::rejected_signature_resolution_tests::valid_structure_resolves_without_an_error_witness",
+    "chelis-types::chelis_types$session::result_boundary_tests::run_result_rejects_ok_after_an_authoritative_diagnostic": "chelis-checker-core::chelis_checker_core$session::result_boundary_tests::run_result_rejects_ok_after_an_authoritative_diagnostic",
+    "chelis-types::chelis_types$session::unresolved_operand_reconcile_tests::a_replayed_answer_that_agrees_reports_nothing_and_binds_the_published_variable": "chelis-checker-core::chelis_checker_core$session::unresolved_operand_reconcile_tests::a_replayed_answer_that_agrees_reports_nothing_and_binds_the_published_variable",
+    "chelis-types::chelis_types$session::unresolved_operand_reconcile_tests::a_replayed_answer_that_disagrees_is_reported_and_never_silently_overridden": "chelis-checker-core::chelis_checker_core$session::unresolved_operand_reconcile_tests::a_replayed_answer_that_disagrees_is_reported_and_never_silently_overridden",
+    "chelis-types::chelis_types$session::unresolved_operand_reconcile_tests::replay_preserves_the_consumers_dtype_family_contract": "chelis-checker-core::chelis_checker_core$session::unresolved_operand_reconcile_tests::replay_preserves_the_consumers_dtype_family_contract",
+    "chelis-types::chelis_types$static_seed::tests::optional_scalar_reader_reads_undecodable_carrier_metadata": "chelis-checker-core::chelis_checker_core$static_seed::tests::optional_scalar_reader_reads_undecodable_carrier_metadata",
+    "chelis-types::chelis_types$static_seed::tests::seed_reader_declines_every_nondecoded_carrier": "chelis-checker-core::chelis_checker_core$static_seed::tests::seed_reader_declines_every_nondecoded_carrier",
+    "chelis-types::chelis_types$static_seed::tests::seed_reader_reads_a_decoded_literal": "chelis-checker-core::chelis_checker_core$static_seed::tests::seed_reader_reads_a_decoded_literal",
+    "chelis-types::chelis_types$unsupported::tests::every_kind_renders_branded": "chelis-checker-core::chelis_checker_core$unsupported::tests::every_kind_renders_branded",
+    "chelis-types::chelis_types$unsupported::tests::rendering_exposes_the_authority_bearing_format": "chelis-checker-core::chelis_checker_core$unsupported::tests::rendering_exposes_the_authority_bearing_format"
+  },
+  "retired": {
+    "chelis-types::builtin_atom_discovery$every_declared_case_is_a_live_enum_member_and_every_member_is_declared": {
+      "behavior_identities": [
+        "chelis-types::builtin_atom_discovery$every_declared_identity_has_a_unique_case_selector_witness"
+      ],
+      "reason": "The incidental source assertion retires. The retained behavior evidence preserves its applicable boundary."
+    },
+    "chelis-types::chelis_types$builtins::tests::doc_surface_section_4_mirrors_builtin_names": {
+      "behavior_identities": [
+        "chelis-checker-core::chelis_checker_core$builtins::tests::builtins_table_matches_builtin_names"
+      ],
+      "reason": "The incidental source assertion retires. The retained behavior evidence preserves its applicable boundary."
+    },
+    "chelis-types::chelis_types$source_arch::tests::compliant_tree_has_no_violations": {
+      "behavior_identities": [
+        "consumer::independent-core"
+      ],
+      "reason": "The incidental source assertion retires. The retained behavior evidence preserves its applicable boundary."
+    },
+    "chelis-types::chelis_types$source_arch::tests::every_required_role_is_individually_enforced": {
+      "behavior_identities": [
+        "consumer::independent-core"
+      ],
+      "reason": "The incidental source assertion retires. The retained behavior evidence preserves its applicable boundary."
+    },
+    "chelis-types::chelis_types$source_arch::tests::file_exactly_at_the_limit_is_accepted": {
+      "behavior_identities": [
+        "consumer::independent-core"
+      ],
+      "reason": "The incidental source assertion retires. The retained behavior evidence preserves its applicable boundary."
+    },
+    "chelis-types::chelis_types$source_arch::tests::inference_source_tree_satisfies_architecture": {
+      "behavior_identities": [
+        "consumer::independent-core"
+      ],
+      "reason": "The incidental source assertion retires. The retained behavior evidence preserves its applicable boundary."
+    },
+    "chelis-types::chelis_types$source_arch::tests::legacy_monolith_is_rejected_and_named": {
+      "behavior_identities": [
+        "consumer::independent-core"
+      ],
+      "reason": "The incidental source assertion retires. The retained behavior evidence preserves its applicable boundary."
+    },
+    "chelis-types::chelis_types$source_arch::tests::missing_role_module_is_rejected_and_named": {
+      "behavior_identities": [
+        "consumer::independent-core"
+      ],
+      "reason": "The incidental source assertion retires. The retained behavior evidence preserves its applicable boundary."
+    },
+    "chelis-types::chelis_types$source_arch::tests::non_rust_file_in_the_inference_tree_is_not_measured": {
+      "behavior_identities": [
+        "consumer::independent-core"
+      ],
+      "reason": "The incidental source assertion retires. The retained behavior evidence preserves its applicable boundary."
+    },
+    "chelis-types::chelis_types$source_arch::tests::oversized_file_outside_the_inference_tree_is_not_measured": {
+      "behavior_identities": [
+        "consumer::independent-core"
+      ],
+      "reason": "The incidental source assertion retires. The retained behavior evidence preserves its applicable boundary."
+    },
+    "chelis-types::chelis_types$source_arch::tests::oversized_inference_file_is_rejected_with_its_line_count": {
+      "behavior_identities": [
+        "consumer::independent-core"
+      ],
+      "reason": "The incidental source assertion retires. The retained behavior evidence preserves its applicable boundary."
+    },
+    "chelis-types::chelis_types$source_arch::tests::violations_accumulate_rather_than_stopping_at_the_first": {
+      "behavior_identities": [
+        "consumer::independent-core"
+      ],
+      "reason": "The incidental source assertion retires. The retained behavior evidence preserves its applicable boundary."
+    },
+    "chelis-types::chelis_types$static_seed::tests::static_seed_reader_has_no_local_optional_carrier_adapter": {
+      "behavior_identities": [
+        "chelis-checker-core::chelis_checker_core$static_seed::tests::seed_reader_reads_a_decoded_literal",
+        "chelis-checker-core::chelis_checker_core$static_seed::tests::seed_reader_declines_every_nondecoded_carrier"
+      ],
+      "reason": "The incidental source assertion retires. The retained behavior evidence preserves its applicable boundary."
+    },
+    "chelis-types::context$adt_reader_has_no_local_optional_carrier_adapter": {
+      "behavior_identities": [
+        "chelis-types::context$adt_variant_and_field_readers_match_both_carriers",
+        "chelis-types::context$adt_non_node_variant_and_field_carriers_reject_with_entry_parity"
+      ],
+      "reason": "The incidental source assertion retires. The retained behavior evidence preserves its applicable boundary."
+    },
+    "chelis-types::expand_insert_dispatch_family$each_dispatch_family_operation_is_mutation_live": {
+      "behavior_identities": [
+        "chelis-checker-core::chelis_checker_core$infer::vmap_extent::tests::expand_and_insert_track_only_extent_parameter_dependencies",
+        "chelis-checker-core::chelis_checker_core$infer::vmap_extent::tests::constant_expand_and_insert_extents_keep_input_dependencies_out_of_bounds"
+      ],
+      "reason": "The incidental source assertion retires. The retained behavior evidence preserves its applicable boundary."
+    },
+    "chelis-types::expand_insert_dispatch_family$unrelated_literals_cannot_authorize_a_dispatch_family": {
+      "behavior_identities": [
+        "chelis-checker-core::chelis_checker_core$infer::vmap_extent::tests::expand_and_insert_track_only_extent_parameter_dependencies",
+        "chelis-checker-core::chelis_checker_core$infer::vmap_extent::tests::constant_expand_and_insert_extents_keep_input_dependencies_out_of_bounds"
+      ],
+      "reason": "The incidental source assertion retires. The retained behavior evidence preserves its applicable boundary."
+    },
+    "chelis-types::expand_insert_dispatch_family$vmap_movement_dispatch_families_cover_expand_and_insert": {
+      "behavior_identities": [
+        "chelis-checker-core::chelis_checker_core$infer::vmap_extent::tests::expand_and_insert_track_only_extent_parameter_dependencies",
+        "chelis-checker-core::chelis_checker_core$infer::vmap_extent::tests::constant_expand_and_insert_extents_keep_input_dependencies_out_of_bounds"
+      ],
+      "reason": "The incidental source assertion retires. The retained behavior evidence preserves its applicable boundary."
+    },
+    "chelis-types::issue_1125_annotation_reader_parity$root_node_dispatch_names_every_deep_tag": {
+      "behavior_identities": [
+        "chelis-types::issue_1125_annotation_reader_parity$declared_function_parameter_types_are_written_on_both_carriers",
+        "chelis-types::issue_1125_annotation_reader_parity$present_structural_match_guards_reject_on_both_ingresses"
+      ],
+      "reason": "The incidental source assertion retires. The retained behavior evidence preserves its applicable boundary."
+    },
+    "chelis-types::issue_1125_e5b_linearity$carrier_totality_ratchet_is_signature_and_visibility_independent": {
+      "behavior_identities": [
+        "chelis-types::issue_1125_e5b_linearity$nested_destructure_alias_reuse_preserves_diagnostic_order_across_entries"
+      ],
+      "reason": "The incidental source assertion retires. The retained behavior evidence preserves its applicable boundary."
+    },
+    "chelis-types::issue_1125_e5b_linearity$linearity_reader_has_only_role_total_carrier_matches": {
+      "behavior_identities": [
+        "chelis-types::issue_1125_e5b_linearity$nested_destructure_alias_reuse_preserves_diagnostic_order_across_entries"
+      ],
+      "reason": "The incidental source assertion retires. The retained behavior evidence preserves its applicable boundary."
+    },
+    "chelis-types::issue_1923_pipe_fold_placement$the_public_checker_entries_are_the_ones_this_file_covers": {
+      "behavior_identities": [
+        "chelis-types::issue_1923_pipe_fold_placement$every_public_checker_entry_folds_its_input"
+      ],
+      "reason": "The incidental source assertion retires. The retained behavior evidence preserves its applicable boundary."
+    },
+    "chelis-types::rt800_checker_session_source_contract$annotation_consumes_owner_stamps_without_semantic_reinference": {
+      "behavior_identities": [
+        "chelis-checker-core::chelis_checker_core$session::result_boundary_tests::run_result_rejects_ok_after_an_authoritative_diagnostic"
+      ],
+      "reason": "The incidental source assertion retires. The retained behavior evidence preserves its applicable boundary."
+    },
+    "chelis-types::rt800_checker_session_source_contract$annotation_ownership_uses_the_canonical_exhaustive_child_role_table": {
+      "behavior_identities": [
+        "chelis-checker-core::chelis_checker_core$session::result_boundary_tests::run_result_rejects_ok_after_an_authoritative_diagnostic"
+      ],
+      "reason": "The incidental source assertion retires. The retained behavior evidence preserves its applicable boundary."
+    },
+    "chelis-types::rt800_checker_session_source_contract$arbitrary_vec_diagnostic_output_is_test_only": {
+      "behavior_identities": [
+        "chelis-checker-core::chelis_checker_core$session::result_boundary_tests::run_result_rejects_ok_after_an_authoritative_diagnostic"
+      ],
+      "reason": "The incidental source assertion retires. The retained behavior evidence preserves its applicable boundary."
+    },
+    "chelis-types::rt800_checker_session_source_contract$binder_and_signature_resolution_have_no_ambient_symbols": {
+      "behavior_identities": [
+        "chelis-checker-core::chelis_checker_core$session::result_boundary_tests::run_result_rejects_ok_after_an_authoritative_diagnostic"
+      ],
+      "reason": "The incidental source assertion retires. The retained behavior evidence preserves its applicable boundary."
+    },
+    "chelis-types::rt800_checker_session_source_contract$checked_result_reconstruction_is_effect_only_fallible_and_session_owned": {
+      "behavior_identities": [
+        "chelis-checker-core::chelis_checker_core$session::result_boundary_tests::run_result_rejects_ok_after_an_authoritative_diagnostic"
+      ],
+      "reason": "The incidental source assertion retires. The retained behavior evidence preserves its applicable boundary."
+    },
+    "chelis-types::rt800_checker_session_source_contract$checked_results_share_one_totality_finalizer": {
+      "behavior_identities": [
+        "chelis-checker-core::chelis_checker_core$session::result_boundary_tests::run_result_rejects_ok_after_an_authoritative_diagnostic"
+      ],
+      "reason": "The incidental source assertion retires. The retained behavior evidence preserves its applicable boundary."
+    },
+    "chelis-types::rt800_checker_session_source_contract$diagnostic_sink_is_append_only_and_cycle_errors_are_never_erased": {
+      "behavior_identities": [
+        "chelis-checker-core::chelis_checker_core$session::result_boundary_tests::run_result_rejects_ok_after_an_authoritative_diagnostic"
+      ],
+      "reason": "The incidental source assertion retires. The retained behavior evidence preserves its applicable boundary."
+    },
+    "chelis-types::rt800_checker_session_source_contract$every_production_sink_constructor_has_a_returned_diagnostic_owner": {
+      "behavior_identities": [
+        "chelis-checker-core::chelis_checker_core$session::result_boundary_tests::run_result_rejects_ok_after_an_authoritative_diagnostic"
+      ],
+      "reason": "The incidental source assertion retires. The retained behavior evidence preserves its applicable boundary."
+    },
+    "chelis-types::rt800_checker_session_source_contract$sink_construction_and_storage_stay_inside_the_owner": {
+      "behavior_identities": [
+        "chelis-checker-core::chelis_checker_core$session::result_boundary_tests::run_result_rejects_ok_after_an_authoritative_diagnostic"
+      ],
+      "reason": "The incidental source assertion retires. The retained behavior evidence preserves its applicable boundary."
+    },
+    "chelis-types::rt800_checker_session_source_contract$witness_minting_requires_the_session_sink": {
+      "behavior_identities": [
+        "chelis-checker-core::chelis_checker_core$session::result_boundary_tests::run_result_rejects_ok_after_an_authoritative_diagnostic"
+      ],
+      "reason": "The incidental source assertion retires. The retained behavior evidence preserves its applicable boundary."
+    },
+    "chelis-types::stack_guard_coverage$every_self_recursive_deep_walker_carries_stack_guard": {
+      "behavior_identities": [
+        "chelis-checker-core::chelis_checker_core$infer::tests::stack_exhaustion_drains_into_a_located_error"
+      ],
+      "reason": "The incidental source assertion retires. The retained behavior evidence preserves its applicable boundary."
+    },
+    "chelis-types::stack_guard_coverage$scan_covers_the_whole_inference_tree": {
+      "behavior_identities": [
+        "chelis-checker-core::chelis_checker_core$infer::tests::stack_exhaustion_drains_into_a_located_error"
+      ],
+      "reason": "The incidental source assertion retires. The retained behavior evidence preserves its applicable boundary."
+    },
+    "chelis-types::stack_guard_coverage$scan_detects_an_unguarded_recursive_deep_walker": {
+      "behavior_identities": [
+        "chelis-checker-core::chelis_checker_core$infer::tests::stack_exhaustion_drains_into_a_located_error"
+      ],
+      "reason": "The incidental source assertion retires. The retained behavior evidence preserves its applicable boundary."
+    },
+    "chelis-types::stack_guard_coverage$scan_ignores_a_non_recursive_deep_consumer": {
+      "behavior_identities": [
+        "chelis-checker-core::chelis_checker_core$infer::tests::stack_exhaustion_drains_into_a_located_error"
+      ],
+      "reason": "The incidental source assertion retires. The retained behavior evidence preserves its applicable boundary."
+    },
+    "chelis-types::stack_guard_coverage$scan_ignores_a_qualified_delegation_with_the_same_terminal_name": {
+      "behavior_identities": [
+        "chelis-checker-core::chelis_checker_core$infer::tests::stack_exhaustion_drains_into_a_located_error"
+      ],
+      "reason": "The incidental source assertion retires. The retained behavior evidence preserves its applicable boundary."
+    }
+  }
+}

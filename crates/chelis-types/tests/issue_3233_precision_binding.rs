@@ -12,7 +12,7 @@ fn diagnostics(source: &str) -> Vec<String> {
     )
     .expect("expand")
     .into_exprs();
-    let render = |errors: Vec<chelis_types::errors::CheckError>| {
+    let render = |errors: Vec<chelis_checker_core::errors::CheckError>| {
         errors.into_iter().map(|e| e.message).collect::<Vec<_>>()
     };
     let ir = render(check_ir_program(&deep).err().map_or(vec![], |r| r.errors));

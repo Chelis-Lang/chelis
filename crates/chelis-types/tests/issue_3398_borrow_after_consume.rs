@@ -16,10 +16,14 @@
 //! binding, the consume that receives the copy, and every later use that
 //! forced it, and the report is a function of the program text.
 
+use chelis_checker_core::CopyRepair;
+use chelis_checker_core::CopyRepairUseKind;
+use chelis_checker_core::errors::CheckError;
+use chelis_checker_core::errors::CheckErrorKind;
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str;
-use chelis_types::errors::{CheckError, CheckErrorKind};
-use chelis_types::{CopyRepair, CopyRepairUseKind, check_typed_program, copy_repairs};
+use chelis_types::check_typed_program;
+use chelis_types::copy_repairs;
 
 const PRELUDE: &str = "\
 def eats(x: tensor[2, f32]) -> f32 = tensor_to_scalar(sum(x, 0i32))

@@ -1,12 +1,14 @@
 //! Authored generic contracts must entail every operation's dtype requirements.
+use chelis_checker_core::builtin_decl;
+use chelis_checker_core::builtin_env;
+use chelis_checker_core::builtin_value_contract_carried;
+use chelis_checker_core::errors::CheckError;
+use chelis_checker_core::errors::CheckErrorKind;
 use chelis_deep::Expr;
 use chelis_macros::{ExpansionOptions, expand_program};
 use chelis_surf::{desugar::desugar_program, parser::parse_str};
-use chelis_types::{
-    builtin_decl, builtin_env, builtin_value_contract_carried, check_ir_program,
-    check_typed_program,
-    errors::{CheckError, CheckErrorKind},
-};
+use chelis_types::check_ir_program;
+use chelis_types::check_typed_program;
 
 fn check(source: &str, accepted: bool) {
     let program = desugar_program(

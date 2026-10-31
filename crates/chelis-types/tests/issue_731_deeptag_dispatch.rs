@@ -19,10 +19,10 @@
 //! * both polarities: the dispatched tags still check cleanly on a
 //!   well-typed control program.
 
+use chelis_checker_core::errors::CheckErrorKind;
 use chelis_deep::parser::parse_str;
 use chelis_deep::role::{AritySpec, ChildStampRole, arity_contract, child_stamp_role};
 use chelis_deep::{Atom, DeepTag, Expr, Metadata, Span};
-use chelis_types::errors::CheckErrorKind;
 use chelis_types::infer_program;
 
 /// The 30 in-vocabulary tags with no expression-position inference case as
@@ -92,7 +92,7 @@ fn stamped_body(tag: DeepTag) -> Expr {
     Expr::node(tag, Metadata::default(), children, zero())
 }
 
-fn errors_for_stamped_body(tag: DeepTag) -> Vec<chelis_types::errors::CheckError> {
+fn errors_for_stamped_body(tag: DeepTag) -> Vec<chelis_checker_core::errors::CheckError> {
     let def = Expr::node(
         DeepTag::Def,
         Metadata::default(),

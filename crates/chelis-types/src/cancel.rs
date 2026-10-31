@@ -32,7 +32,7 @@ use std::cell::RefCell;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use crate::errors::{CheckError, CheckErrorKind};
+use chelis_checker_core::errors::CheckError;
 
 /// Stable sentinel for the error a cancelled evaluation returns.
 ///
@@ -56,7 +56,7 @@ use crate::errors::{CheckError, CheckErrorKind};
 /// cancellation structurally as `Diagnostic::kind ==
 /// chelis_compiler_api::EVAL_CANCELLED_KIND`. Embedders should test that kind
 /// (or `CompilerError::is_cancellation`) rather than matching on text.
-pub const EVAL_CANCELLED_MSG: &str = "chelis::eval::cancelled";
+pub const EVAL_CANCELLED_MSG: &str = chelis_checker_core::cancel::EVAL_CANCELLED_MSG;
 
 /// Shared cancellation flag handed to an evaluation.
 ///
@@ -144,11 +144,7 @@ pub fn cancellation_requested() -> bool {
 /// only ever sees flattened error text — the CLI's `--timeout` boundary, where
 /// the typed error is already gone — still classifies it correctly.
 pub fn cancellation_check_error() -> CheckError {
-    CheckError::new(
-        CheckErrorKind::Other,
-        EVAL_CANCELLED_MSG.to_string(),
-        vec![],
-    )
+    chelis_checker_core::cancel::cancellation_check_error()
 }
 
 /// Restores the previously installed token when dropped.
@@ -169,9 +165,14 @@ impl Drop for CancelTokenGuard {
 /// Uses `contains` rather than `starts_with` because the eval lanes wrap
 /// lane-level failures with stage context before they reach the caller.
 pub fn is_cancellation(message: &str) -> bool {
-    message.contains(EVAL_CANCELLED_MSG)
+    chelis_checker_core::cancel::is_cancellation(message)
 }
 
+impl chelis_checker_core::Cancellation for CancelToken {
+    fn is_cancelled(&self) -> bool {
+        self.is_cancelled()
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;

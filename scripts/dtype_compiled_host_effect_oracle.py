@@ -143,7 +143,7 @@ def source_contracts() -> tuple[SourceContract, ...]:
         ),
         SourceContract(
             "no compiled-target rejection constructor",
-            "crates/chelis-types/src/unsupported.rs",
+            "crates/chelis-checker-core/src/unsupported.rs",
             (),
             ("fn compiled_host_only_builtin",),
         ),
@@ -224,7 +224,7 @@ def validate_source_contracts(repo_root: Path = REPO_ROOT) -> None:
         for forbidden in contract.forbidden:
             if forbidden in source:
                 raise OracleFailure(f"{contract.name}: forbidden {forbidden!r} in {contract.path}")
-    builtins = (repo_root / "crates/chelis-types/src/builtins.rs").read_text()
+    builtins = (repo_root / "crates/chelis-checker-core/src/builtins.rs").read_text()
     match = ALIAS.search(builtins)
     if match:
         raise OracleFailure(f"assertion identities are generic: alias {match.group(0)!r}")

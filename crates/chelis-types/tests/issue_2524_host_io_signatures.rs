@@ -10,11 +10,11 @@
 //! Every program is asserted on both checker ingresses (chelis#1107), and each
 //! rejection has an accepted twin.
 
+use chelis_checker_core::errors::CheckError;
 use chelis_deep::Expr;
 use chelis_macros::{ExpansionOptions, expand_program};
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str as parse_surf;
-use chelis_types::errors::CheckError;
 use chelis_types::{check_ir_program, check_typed_program};
 
 fn desugared(source: &str) -> Vec<Expr> {
@@ -101,7 +101,7 @@ fn a_path_must_be_a_string() {
                 report.errors.iter().any(|error| {
                     matches!(
                         error.kind,
-                        chelis_types::errors::CheckErrorKind::PrecisionMismatch
+                        chelis_checker_core::errors::CheckErrorKind::PrecisionMismatch
                     ) && error.expected.as_deref() == Some("string")
                         && error.got.as_deref() == Some("f32")
                         && error.message.contains(builtin)

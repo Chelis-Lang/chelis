@@ -3,8 +3,9 @@
 //! Produces a 0.0-1.0 fitness score measuring "how close to valid" a program
 //! is. This is the feedback an agent acts on (see spec section 6).
 
-use crate::errors::CheckError;
-use crate::infer::{CheckedProgram, InferResult, InferStats};
+use crate::infer::CheckedProgram;
+use chelis_checker_core::errors::CheckError;
+use chelis_checker_core::{InferResult, InferStats};
 
 /// Weights for each fitness component (spec section 6.1).
 const W_PARSE: f64 = 0.1;
@@ -357,13 +358,13 @@ mod tests {
             &chelis_syntax_host::NativeStack,
         )
         .unwrap();
-        crate::session::reset_type_analysis_session_count();
+        crate::infer::reset_type_analysis_session_count();
 
         assert!(matches!(
             analyze_ir_program(&exprs),
             TypeAnalysisOutcome::Accepted { .. }
         ));
-        assert_eq!(crate::session::type_analysis_session_count(), 1);
+        assert_eq!(crate::infer::type_analysis_session_count(), 1);
     }
 
     #[test]
@@ -373,13 +374,13 @@ mod tests {
             &chelis_syntax_host::NativeStack,
         )
         .unwrap();
-        crate::session::reset_type_analysis_session_count();
+        crate::infer::reset_type_analysis_session_count();
 
         assert!(matches!(
             analyze_ir_program(&exprs),
             TypeAnalysisOutcome::Rejected { .. }
         ));
-        assert_eq!(crate::session::type_analysis_session_count(), 1);
+        assert_eq!(crate::infer::type_analysis_session_count(), 1);
     }
 
     #[test]
@@ -405,14 +406,14 @@ mod tests {
         let result = InferResult {
             errors: vec![
                 CheckError::new(
-                    crate::errors::CheckErrorKind::UnboundVariable {
+                    chelis_checker_core::errors::CheckErrorKind::UnboundVariable {
                         identifier: "missing_value".to_string(),
                     },
                     "rendered value message may change".to_string(),
                     vec![],
                 ),
                 CheckError::new(
-                    crate::errors::CheckErrorKind::UnknownConstructor {
+                    chelis_checker_core::errors::CheckErrorKind::UnknownConstructor {
                         identifier: "MissingCtor".to_string(),
                     },
                     "rendered constructor message may change".to_string(),

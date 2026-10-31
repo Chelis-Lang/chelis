@@ -372,8 +372,8 @@ fn dimension_observations_cover_arithmetic_comparison_and_propagation() {
         failures.join("\n")
     );
 }
+use chelis_checker_core::errors::CheckErrorKind;
 use chelis_surf::{desugar::desugar_program, parser::parse_str};
-use chelis_types::errors::CheckErrorKind;
 use chelis_types::{
     TypeEnv, build_compiled_library_context, build_compiled_library_context_with_base,
     check_ir_program, check_ir_with_context,

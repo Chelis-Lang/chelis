@@ -1,15 +1,17 @@
+use chelis_checker_core::LocalAscriptionOrigin;
+use chelis_checker_core::errors::CheckErrorKind;
+use chelis_checker_core::errors::ErrorWitness;
 use chelis_deep::printer::print_expr;
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str;
 use chelis_type_core::{Dim, Type};
-use chelis_types::errors::CheckErrorKind;
-use chelis_types::errors::ErrorWitness;
-use chelis_types::{
-    CheckedProgram, LocalAscriptionOrigin, build_compiled_library_context, check_ir_program,
-    check_ir_with_context, check_linearity,
-};
+use chelis_types::CheckedProgram;
+use chelis_types::build_compiled_library_context;
+use chelis_types::check_ir_program;
+use chelis_types::check_ir_with_context;
+use chelis_types::check_linearity;
 
-fn check_surf(source: &str) -> Result<CheckedProgram, chelis_types::InferResult> {
+fn check_surf(source: &str) -> Result<CheckedProgram, chelis_checker_core::InferResult> {
     let decls = parse_str(source, &chelis_syntax_host::NativeStack).expect("Surf parse");
     check_ir_program(
         &desugar_program(&decls, &chelis_syntax_host::NativeStack)
@@ -21,7 +23,7 @@ fn checked_surf(source: &str) -> CheckedProgram {
     check_surf(source).unwrap_or_else(|result| panic!("type check failed: {:?}", result.errors))
 }
 
-fn check_deep(source: &str) -> Result<CheckedProgram, chelis_types::InferResult> {
+fn check_deep(source: &str) -> Result<CheckedProgram, chelis_checker_core::InferResult> {
     let program = chelis_deep::parser::parse_str(source, &chelis_syntax_host::NativeStack)
         .expect("Deep parse");
     check_ir_program(&program)

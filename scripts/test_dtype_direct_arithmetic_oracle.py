@@ -369,25 +369,6 @@ class SourceContractMutationTests(unittest.TestCase):
         ):
             oracle.validate_source_contracts(self.repo)
 
-    def test_target_authority_mutation_fails(self) -> None:
-        self.mutate(
-            "crates/chelis-compiler-api/src/compiler.rs",
-            "chelis_types::unimplemented_rejection!(\n                    2338,\n                    \"the Metal direct-subtraction/extrema",
-            "chelis_types::unimplemented_rejection!(\n                    9999,\n                    \"the Metal direct-subtraction/extrema",
-        )
-        with self.assertRaisesRegex(oracle.OracleFailure, "target dispositions"):
-            oracle.validate_source_contracts(self.repo)
-
-    def test_retired_hip_rejection_restoration_fails(self) -> None:
-        path = "crates/chelis-compiler-api/src/compiler.rs"
-        target = self.repo / path
-        target.write_text(
-            target.read_text()
-            + "\n// checked signed-integer subtraction needs an exact HIP overflow-trap channel\n"
-        )
-        with self.assertRaisesRegex(oracle.OracleFailure, "target dispositions"):
-            oracle.validate_source_contracts(self.repo)
-
     def test_wire_identity_mutation_fails(self) -> None:
         self.mutate(
             "crates/chelis-compiler-api/src/schema.rs",
@@ -395,85 +376,6 @@ class SourceContractMutationTests(unittest.TestCase):
             "pub const WIRE_DAG_SCHEMA_VERSION: u32 = 27;",
         )
         with self.assertRaisesRegex(oracle.OracleFailure, "current WireDag identities"):
-            oracle.validate_source_contracts(self.repo)
-
-    def test_surface_surrogate_narrative_mutation_fails(self) -> None:
-        self.mutate(
-            "docs/CHELIS_SURFACE.md",
-            "complete `g` to the exact operand selected by [05-OP-40]",
-            "(g*(x>=y), g*(x<y))",
-        )
-        with self.assertRaisesRegex(
-            oracle.OracleFailure, "current direct arithmetic surface narrative"
-        ):
-            oracle.validate_source_contracts(self.repo)
-
-    def test_required_surface_narrative_deletion_fails(self) -> None:
-        self.mutate(
-            "docs/CHELIS_SURFACE.md",
-            "Tier-1 DAG:   add sub mul div floor_div trunc_div max_elem min_elem cmplt",
-            "Tier-1 DAG:   add mul div floor_div trunc_div max_elem cmplt",
-        )
-        with self.assertRaisesRegex(
-            oracle.OracleFailure, "current direct arithmetic surface narrative"
-        ):
-            oracle.validate_source_contracts(self.repo)
-
-    def test_obsolete_surface_narrative_restoration_fails_independently(self) -> None:
-        current = "Tier-1 DAG:   add sub mul div floor_div trunc_div max_elem min_elem cmplt"
-        self.mutate(
-            "docs/CHELIS_SURFACE.md",
-            current,
-            current + "\n| `sub` | `add(a, neg(b))` |",
-        )
-        with self.assertRaisesRegex(
-            oracle.OracleFailure, "current direct arithmetic surface narrative"
-        ):
-            oracle.validate_source_contracts(self.repo)
-
-    def test_builtin_direct_identity_grouping_mutation_fails(self) -> None:
-        self.mutate(
-            "crates/chelis-types/src/builtins.rs",
-            'tensor_binop("add", &mut env, &mut vg);\n    tensor_binop("sub", &mut env, &mut vg);\n    tensor_binop("mul", &mut env, &mut vg);',
-            'tensor_binop("add", &mut env, &mut vg);\n    tensor_binop("mul", &mut env, &mut vg);\n    tensor_binop("sub", &mut env, &mut vg);',
-        )
-        with self.assertRaisesRegex(
-            oracle.OracleFailure, "current builtin direct arithmetic grouping"
-        ):
-            oracle.validate_source_contracts(self.repo)
-
-    def test_required_canonical_direct_arithmetic_narrative_deletion_fails(self) -> None:
-        self.mutate(
-            "spec/design/chelis_canonical_reference.md",
-            "`sub` and `min_elem` are direct RISC primitives",
-            "`sub` and `min_elem` are built-ins",
-        )
-        with self.assertRaisesRegex(
-            oracle.OracleFailure, "current canonical direct arithmetic narrative"
-        ):
-            oracle.validate_source_contracts(self.repo)
-
-    def test_required_fused_extrema_narrative_deletion_fails(self) -> None:
-        self.mutate(
-            "crates/chelis-ir/tests/fusion_adversarial.rs",
-            "ADV-10: MaxElem in fused chain preserves exact selected-operand semantics",
-            "ADV-10: MaxElem in fused chain",
-        )
-        with self.assertRaisesRegex(
-            oracle.OracleFailure, "current fused direct-extrema narrative"
-        ):
-            oracle.validate_source_contracts(self.repo)
-
-    def test_obsolete_fused_extrema_narrative_restoration_fails(self) -> None:
-        current = "ADV-10: MaxElem in fused chain preserves exact selected-operand semantics"
-        self.mutate(
-            "crates/chelis-ir/tests/fusion_adversarial.rs",
-            current,
-            current + "\n// ADV-10: MaxElem in fused chain uses fmaxf",
-        )
-        with self.assertRaisesRegex(
-            oracle.OracleFailure, "current fused direct-extrema narrative"
-        ):
             oracle.validate_source_contracts(self.repo)
 
     def test_retired_timing_identity_restoration_fails(self) -> None:

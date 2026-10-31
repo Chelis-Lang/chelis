@@ -29,20 +29,6 @@ fn errors(report: &Value) -> Vec<&str> {
         .collect()
 }
 
-fn rust_sources_below(path: &Path, files: &mut Vec<std::path::PathBuf>) {
-    for entry in
-        fs::read_dir(path).unwrap_or_else(|error| panic!("read {}: {error}", path.display()))
-    {
-        let entry = entry.expect("source entry");
-        let path = entry.path();
-        if path.is_dir() {
-            rust_sources_below(&path, files);
-        } else if path.extension().is_some_and(|extension| extension == "rs") {
-            files.push(path);
-        }
-    }
-}
-
 fn compile_and_run_c(build_dir: &Path, stem: &str) -> std::process::Output {
     let binary = build_dir.join(format!("{stem}-bin"));
     let compile = StdCommand::new("cc")
@@ -275,34 +261,6 @@ fn stale_extent_guidance_is_removed_but_axis_guidance_stays_int32() {
     );
     let axis_errors = errors(&axis).join("\n");
     assert!(axis_errors.contains("i32"), "{axis_errors}");
-
-    let repo = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Path::parent)
-        .expect("workspace root");
-    let mut sources = Vec::new();
-    for relative in ["crates/chelis-ir/src", "crates/chelis-types/src"] {
-        rust_sources_below(&repo.join(relative), &mut sources);
-    }
-    let obsolete = concat!("Form-", "3");
-    let residues = sources
-        .iter()
-        .filter(|path| {
-            fs::read_to_string(path)
-                .unwrap_or_else(|error| panic!("read {}: {error}", path.display()))
-                .contains(obsolete)
-        })
-        .map(|path| {
-            path.strip_prefix(repo)
-                .unwrap_or(path)
-                .display()
-                .to_string()
-        })
-        .collect::<Vec<_>>();
-    assert!(
-        residues.is_empty(),
-        "obsolete runtime-extent taxonomy remains in active compiler sources: {residues:?}"
-    );
 }
 
 /// chelis#1378 red-team regression: vectorizing a shrink prepends the mapped

@@ -348,6 +348,24 @@ CLIPPY_EFFECT_SERDE: list[str] = [
     "--all-targets", "--no-default-features", "--features", "serde",
     "--", "-D", "warnings",
 ]
+# Compile each checker feature state without host feature unification.
+CLIPPY_CHECKER_DEFAULT_FEATURES: list[str] = [
+    "cargo", "clippy", "-p", "chelis-checker-core",
+    "--all-targets", "--", "-D", "warnings",
+]
+CLIPPY_CHECKER_NO_DEFAULT_FEATURES: list[str] = [
+    "cargo", "clippy", "-p", "chelis-checker-core",
+    "--all-targets", "--no-default-features", "--", "-D", "warnings",
+]
+CLIPPY_CHECKER_SERDE: list[str] = [
+    "cargo", "clippy", "-p", "chelis-checker-core",
+    "--all-targets", "--no-default-features", "--features", "serde",
+    "--", "-D", "warnings",
+]
+CLIPPY_NATIVE_CHECKER_NO_DEFAULT_FEATURES: list[str] = [
+    "cargo", "clippy", "-p", "chelis-types",
+    "--lib", "--no-default-features", "--", "-D", "warnings",
+]
 CLIPPY_SOLVER_FREE_FEATURES: list[str] = [
     "cargo", "clippy", "--workspace", "--all-targets", "--features",
     "chelis-cli/ownership-ledger,"
@@ -360,8 +378,8 @@ CLIPPY_SOLVER_FREE_FEATURES: list[str] = [
     "chelis-prove/clarabel,"
     "chelis-python/extension-module,"
     "chelis-runtime/ownership-ledger,"
-    "chelis-types/checkpoint-compile-probe,"
-    "chelis-types/generalize-sweep-oracle",
+    "chelis-checker-core/checkpoint-compile-probe,"
+    "chelis-checker-core/generalize-sweep-oracle",
     "--", "-D", "warnings",
 ]
 # The Nix CI provider adds one native-library selection without changing the
@@ -430,6 +448,7 @@ TARGETED_PACKAGES_ENV = "CHELIS_TARGETED_PACKAGES"
 # makes every workspace doc example part of the gate without a reviewed
 # scope change.
 DOCTEST_TYPES: list[str] = ["cargo", "test", "-p", "chelis-types", "--doc"]
+DOCTEST_CHECKER_CORE: list[str] = ["cargo", "test", "-p", "chelis-checker-core", "--doc"]
 DOCTEST_IR: list[str] = ["cargo", "test", "-p", "chelis-ir", "--doc"]
 DOCTEST_COMPILER_API: list[str] = [
     "cargo",
@@ -447,6 +466,7 @@ DOCTEST_PIPELINE_CORE: list[str] = [
 ]
 TARGETED_DOCTESTS: dict[str, list[str]] = {
     "chelis-types": DOCTEST_TYPES,
+    "chelis-checker-core": DOCTEST_CHECKER_CORE,
     "chelis-ir": DOCTEST_IR,
     "chelis-compiler-api": DOCTEST_COMPILER_API,
     "chelis-pipeline-core": DOCTEST_PIPELINE_CORE,
@@ -539,6 +559,10 @@ DAG_CORE_ORACLE: list[str] = [
 EFFECT_ANALYSIS_CORE_ORACLE: list[str] = [
     "uv", "run", "--managed-python", "--python", "3.11", "--no-project", "python",
     "scripts/effect_analysis_core_oracle.py",
+]
+CHECKER_CORE_ORACLE: list[str] = [
+    "uv", "run", "--managed-python", "--python", "3.11", "--no-project", "python",
+    "scripts/checker_core_oracle.py",
 ]
 # Generated chelis-std files stay out of the index: the bundle crate's build
 # script packs the runtime, so a tracked dist pair or a lock recording the
@@ -658,11 +682,16 @@ STAGES: dict[str, list[list[str]]] = {
         CLIPPY_EFFECT_DEFAULT_FEATURES,
         CLIPPY_EFFECT_NO_DEFAULT_FEATURES,
         CLIPPY_EFFECT_SERDE,
+        CLIPPY_CHECKER_DEFAULT_FEATURES,
+        CLIPPY_CHECKER_NO_DEFAULT_FEATURES,
+        CLIPPY_CHECKER_SERDE,
+        CLIPPY_NATIVE_CHECKER_NO_DEFAULT_FEATURES,
         FMT_CHECK,
         CHELIS_LINT_CHECK,
         OPTIMIZED_FLOAT_FINALIZATION_TESTS,
         STD_BUNDLE_REPRODUCIBILITY,
         DOCTEST_TYPES,
+        DOCTEST_CHECKER_CORE,
         DOCTEST_IR,
         DOCTEST_COMPILER_API,
         DOCTEST_PIPELINE_CORE,
@@ -694,6 +723,7 @@ STAGES: dict[str, list[list[str]]] = {
         TYPE_UNIFICATION_CORE_ORACLE,
         DAG_CORE_ORACLE,
         EFFECT_ANALYSIS_CORE_ORACLE,
+        CHECKER_CORE_ORACLE,
         OWNERSHIP_LEDGER_CLI_TESTS,
     ],
     "runtime-representation": [
@@ -719,12 +749,13 @@ INTEGRATION_SUPPORT_SLICES: dict[str, tuple[list[str], ...]] = {
         REEF_BOOTSTRAP_CORE_ORACLE,
         SHELL_METADATA_CORE_ORACLE,
         CERTIFICATE_CORE_ORACLE,
-        TYPE_UNIFICATION_CORE_ORACLE,
-        DAG_CORE_ORACLE,
-        EFFECT_ANALYSIS_CORE_ORACLE,
         OWNERSHIP_LEDGER_CLI_TESTS,
     ),
     "numeric-core": (NUMERIC_CORE_ORACLE,),
+    "type-unification-core": (TYPE_UNIFICATION_CORE_ORACLE,),
+    "dag-core": (DAG_CORE_ORACLE,),
+    "effect-analysis-core": (EFFECT_ANALYSIS_CORE_ORACLE,),
+    "checker-core": (CHECKER_CORE_ORACLE,),
 }
 
 
@@ -769,10 +800,15 @@ LOCAL_STATIC_COMMANDS: list[list[str]] = [
     CLIPPY_EFFECT_DEFAULT_FEATURES,
     CLIPPY_EFFECT_NO_DEFAULT_FEATURES,
     CLIPPY_EFFECT_SERDE,
+    CLIPPY_CHECKER_DEFAULT_FEATURES,
+    CLIPPY_CHECKER_NO_DEFAULT_FEATURES,
+    CLIPPY_CHECKER_SERDE,
+    CLIPPY_NATIVE_CHECKER_NO_DEFAULT_FEATURES,
     FMT_CHECK,
     CHELIS_LINT_CHECK,
     STD_BUNDLE_REPRODUCIBILITY,
     DOCTEST_TYPES,
+    DOCTEST_CHECKER_CORE,
     DOCTEST_IR,
     DOCTEST_COMPILER_API,
     DOCTEST_PIPELINE_CORE,
@@ -798,6 +834,7 @@ LOCAL_STATIC_COMMANDS: list[list[str]] = [
     TYPE_UNIFICATION_CORE_ORACLE,
     DAG_CORE_ORACLE,
     EFFECT_ANALYSIS_CORE_ORACLE,
+    CHECKER_CORE_ORACLE,
     OWNERSHIP_LEDGER_CLI_TESTS,
 ]
 
@@ -858,8 +895,12 @@ FAST_TRIPWIRE_NEXTEST: list[str] = [
     "--test", "skill_set_uniformity",
     "-p", "chelis-compiler-api", "--test", "phase3_gate_inventory",
     "-p", "chelis-types",
-    "--test", "stack_guard_coverage",
     "--test", "runtime_extent_target_manifest",
+]
+FAST_CHECKER_STACK_BOUNDARY: list[str] = [
+    "cargo", "nextest", "run", "--no-fail-fast",
+    "-p", "chelis-checker-core", "--lib",
+    "-E", "test(=infer::tests::stack_exhaustion_drains_into_a_located_error)",
 ]
 FAST_STATIC_COMMANDS: list[list[str]] = [
     REGEN_TIER0_WRITE,
@@ -882,7 +923,7 @@ FAST_DYNAMIC_NOTE = (
     "# --fast runs, fixing in place: <managed-python> scripts/regen_all.py "
     "--tier 0; cargo fmt --all; the chelis lint, eval-system guard, and "
     "std-bundle tracking rows above; cargo clippy -p <crate> --all-targets -- "
-    "-D warnings per changed crate; one nextest run over the drift tripwires; "
+    "-D warnings per changed crate; nextest drift tripwires and the portable checker stack regression; "
     "and when a std path changed, cargo nextest run -p chelis-std-bundle --lib"
 )
 LOCAL_DYNAMIC_NOTE = (
@@ -1426,6 +1467,8 @@ def fast_command_list(
     over the drift tripwires. When a std path changed, the bundle crate's own
     tests follow them. Every writer precedes every check.
 
+    The portable checker stack regression follows the drift tripwires.
+
     The classification is first among the checks because it is the cheapest
     thing here that can reject a push, and because until chelis#2250 an
     unrouted new file passed every local check and then failed `Plan Changed
@@ -1447,6 +1490,7 @@ def fast_command_list(
     for crate in crates:
         commands.append(per_crate_clippy(crate))
     commands.append(FAST_TRIPWIRE_NEXTEST)
+    commands.append(FAST_CHECKER_STACK_BOUNDARY)
     if std_changed:
         commands.append(STD_BUNDLE_SELF_CONSISTENCY)
     return commands

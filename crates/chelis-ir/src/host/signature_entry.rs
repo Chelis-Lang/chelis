@@ -638,7 +638,7 @@ mod tests {
             ty: HostTypeTerm::List(Box::new(tensor(&["seq"]))),
         }]);
         let span = chelis_deep::Span::new(0, 0);
-        let registry = chelis_types::adt::AdtRegistry::default();
+        let registry = chelis_checker_core::adt::AdtRegistry::default();
         let first = super::super::host_type_syntax(
             &HostTypeTerm::Tuple(vec![tensor(&["rows", "seq"])]),
             span,

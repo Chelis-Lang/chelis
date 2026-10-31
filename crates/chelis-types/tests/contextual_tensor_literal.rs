@@ -28,7 +28,7 @@ use chelis_types::infer::infer_program;
 /// Deep AST as a printable string vector so tests can pin exact literal
 /// type metadata, plus the inference result so tests can pin error
 /// counts.
-fn pipeline(src: &str) -> (Vec<String>, chelis_types::infer::InferResult) {
+fn pipeline(src: &str) -> (Vec<String>, chelis_checker_core::infer::InferResult) {
     let decls =
         chelis_surf::parser::parse_str(src, &chelis_syntax_host::NativeStack).expect("surf parse");
     let exprs = chelis_surf::desugar::desugar_program(&decls, &chelis_syntax_host::NativeStack)
@@ -80,7 +80,7 @@ fn contains_lit_with_prim(printed: &[String], prec: &str) -> bool {
     })
 }
 
-fn errors_summary(result: &chelis_types::infer::InferResult) -> String {
+fn errors_summary(result: &chelis_checker_core::infer::InferResult) -> String {
     if result.errors.is_empty() {
         "(no errors)".to_string()
     } else {
@@ -363,8 +363,8 @@ fn negative_deep_mixed_dtype_in_to_tensor_body_errors() {
     let any_dtype_diagnostic = result.errors.iter().any(|e| {
         matches!(
             e.kind,
-            chelis_types::errors::CheckErrorKind::TypeMismatch
-                | chelis_types::errors::CheckErrorKind::PrecisionMismatch
+            chelis_checker_core::errors::CheckErrorKind::TypeMismatch
+                | chelis_checker_core::errors::CheckErrorKind::PrecisionMismatch
         ) && e.message.contains("f32")
             && e.message.contains("f64")
     });
@@ -469,7 +469,7 @@ fn an_inline_result_type_decides_over_a_standalone_sig() {
     }
 }
 
-fn suggestions(result: &chelis_types::infer::InferResult) -> String {
+fn suggestions(result: &chelis_checker_core::infer::InferResult) -> String {
     result
         .errors
         .iter()

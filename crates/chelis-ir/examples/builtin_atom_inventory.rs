@@ -2,7 +2,7 @@
 use chelis_dag_core::dag::RiscAtomIdentity;
 
 fn main() {
-    let builtins = chelis_types::builtin_discovery::builtin_semantic_identities()
+    let builtins = chelis_checker_core::builtin_discovery::builtin_semantic_identities()
         .expect("complete typed builtin discovery");
     let risc: Vec<_> = RiscAtomIdentity::ALL
         .iter()

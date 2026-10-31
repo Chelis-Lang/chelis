@@ -284,7 +284,7 @@ def main() -> None:
     spec = (ROOT / "spec/05-risc-primitives.md").read_text()
     table = (ROOT / "spec/registry/builtin_semantic_identities.md").read_text()
     generated = set(re.findall(r'"(\[05-OP-[1-9][0-9]*\])"',
-        (ROOT / "crates/chelis-types/src/rejection_registry_generated.rs").read_text()))
+        (ROOT / "crates/chelis-checker-core/src/rejection_registry_generated.rs").read_text()))
     cases = closure_cases(discovery, table, spec, generated)
     unit_suite = unittest.defaultTestLoader.loadTestsFromNames([
         "scripts.test_builtin_atom_registry", "scripts.test_dtype_builtin_atom_closure_oracle"])

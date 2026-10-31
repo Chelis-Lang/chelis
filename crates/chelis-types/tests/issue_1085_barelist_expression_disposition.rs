@@ -21,8 +21,9 @@
 //!   `deftype` type-parameter list -- are consumed by their owning form and
 //!   must keep checking cleanly. Those are the over-rejection controls.
 
+use chelis_checker_core::errors::CheckError;
+use chelis_checker_core::errors::CheckErrorKind;
 use chelis_deep::{Atom, DeepTag, Expr, Metadata, Span, parse_and_stamp};
-use chelis_types::errors::{CheckError, CheckErrorKind};
 use chelis_types::{check_ir_program, check_typed_program};
 
 fn zero() -> Span {

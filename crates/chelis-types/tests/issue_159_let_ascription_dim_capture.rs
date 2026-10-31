@@ -21,10 +21,11 @@
 //! The probes below pin the observed behavior so the design is
 //! discoverable and so future refactors don't silently change it.
 
+use chelis_checker_core::errors::CheckError;
+use chelis_checker_core::errors::CheckErrorKind;
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str;
 use chelis_types::check_typed_program;
-use chelis_types::errors::{CheckError, CheckErrorKind};
 
 fn typecheck_surf(source: &str) -> Vec<CheckError> {
     let decls =

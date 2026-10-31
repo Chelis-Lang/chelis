@@ -280,7 +280,7 @@ pub fn standard_contract_registry_with_prover(
     prover: &crate::beacon_contract_prover::BeaconContractProver,
     widths: &[Prim],
     runtime: &'static EmbeddedRuntime,
-) -> Result<AssumptionRegistry, chelis_types::unsupported::Unsupported> {
+) -> Result<AssumptionRegistry, chelis_checker_core::unsupported::Unsupported> {
     standard_contract_registry_for(None, widths, Some(prover), runtime)
 }
 
@@ -293,7 +293,7 @@ pub fn standard_contract_registry_for(
     widths: &[Prim],
     prover: Option<&crate::beacon_contract_prover::BeaconContractProver>,
     runtime: &'static EmbeddedRuntime,
-) -> Result<AssumptionRegistry, chelis_types::unsupported::Unsupported> {
+) -> Result<AssumptionRegistry, chelis_checker_core::unsupported::Unsupported> {
     let mut registry = AssumptionRegistry::new();
     let selected = |id: &str| contracts.is_none_or(|contracts| contracts.contains(id));
     for contract in standard_contracts_selected(widths, selected, runtime) {

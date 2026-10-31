@@ -6,9 +6,9 @@
 //! code-generation boundary an unresolved variable is a typed lowering
 //! rejection under [05-UNS-1], never a panic and never an invented ABI type.
 
+use chelis_checker_core::unsupported::{RejectionAuthorityKind, Stage, UnsupportedKind};
 use chelis_compiler_api::compiler::{CompilerError, compile, compile_for_execution};
 use chelis_compiler_api::schema::{CompileRequest, CompileTarget, SourceKind};
-use chelis_types::unsupported::{RejectionAuthorityKind, Stage, UnsupportedKind};
 use chelis_vocab::DiagnosticKind;
 
 fn c_request(source: &str) -> CompileRequest {

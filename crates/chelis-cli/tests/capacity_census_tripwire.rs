@@ -27,7 +27,7 @@
 //! The wire aggregate requires final authority and execution receipts;
 //! relabeling JSON cannot claim an enumerator or mutation oracle exists.
 
-use chelis_types::errors::ErrorWitness;
+use chelis_checker_core::errors::ErrorWitness;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -4767,10 +4767,9 @@ fn coverage_manifest() -> CoverageManifest {
             },
             CoveredLeg {
                 leg: "prelude-adt-numeric".to_string(),
-                artifact: "chelis_types::builtins::register_prelude_adts Rust-registered \
-                           prelude value ADTs"
+                artifact: "chelis_checker_core::prelude_adt_defs Rust-registered prelude value ADTs"
                     .to_string(),
-                enumerator: "prelude_adt_rows -> chelis_types::prelude_adt_defs".to_string(),
+                enumerator: "prelude_adt_rows -> chelis_checker_core::prelude_adt_defs".to_string(),
                 command: "cargo nextest run -p chelis-cli --test capacity_census_tripwire"
                     .to_string(),
                 expected_success: "capacity_census_matches_public_surface passes".to_string(),
@@ -6076,17 +6075,15 @@ fn collect_prelude_numeric_prims(
     }
 }
 
-/// The prelude-adt-numeric leg (spec/design/dtype_semantics.md §C6): the
-/// Rust-registered prelude value ADTs, enumerated from the single
-/// registration path (`chelis_types::prelude_adt_defs`, which rebuilds
-/// through `register_prelude_adts`). The final #1293 surface intentionally
-/// has no numeric prelude ADT, but this leg stays executable so adding one
-/// cannot create an unenumerated numeric channel. Same classification rule
-/// as every other family: a float primitive is a `float-carrier` seam, an
-/// integer primitive is `numeric-op`.
+/// The prelude-adt-numeric leg (spec/design/dtype_semantics.md §C6) reads
+/// Rust-registered prelude value ADTs from `chelis_checker_core::prelude_adt_defs`.
+/// The #1293 surface has no numeric prelude ADT.
+/// This leg detects numeric fields in new prelude ADTs.
+/// A float primitive is a `float-carrier` seam.
+/// An integer primitive is a `numeric-op`.
 fn prelude_adt_rows() -> Vec<Row> {
     let mut rows = Vec::new();
-    for def in chelis_types::prelude_adt_defs() {
+    for def in chelis_checker_core::prelude_adt_defs() {
         let mut prims = BTreeSet::new();
         for variant in &def.variants {
             for (_, ty) in &variant.fields {
@@ -6168,7 +6165,7 @@ fn teaching_footer() -> String {
      spec/05 and add the family-qualified complete `NumericOperationRegistration`. \
      Re-check the highest allocated atom number on current \
      main, run .venv/bin/python scripts/generate_rejection_registries.py --write, \
-     and commit crates/chelis-types/src/rejection_registry_generated.rs. The \
+     and commit crates/chelis-checker-core/src/rejection_registry_generated.rs. The \
      generated registry is required but is not semantic authority; an unrelated or \
      nonexistent atom still fails.\n\
      4. An identity change is removal plus addition: remove the old descriptor, \
@@ -6864,7 +6861,6 @@ fn sanctioned_actions_name_complete_identity_change_and_new_atom_paths() {
         "No transition exception",
         "highest allocated atom number",
         "scripts/generate_rejection_registries.py --write",
-        "crates/chelis-types/src/rejection_registry_generated.rs",
     ] {
         assert!(
             guidance.contains(required),
@@ -8628,8 +8624,8 @@ fn a_spliced_line_directive_is_caught_by_the_ban_itself() {
 /// `register_prelude_adts` source.
 #[test]
 fn planted_prelude_adt_with_f64_variant_is_detected() {
+    use chelis_checker_core::adt::{AdtDef, VariantInfo};
     use chelis_type_core::Type;
-    use chelis_types::adt::{AdtDef, VariantInfo};
     let planted = AdtDef {
         name: "Planted".to_string(),
         type_params: Vec::new(),

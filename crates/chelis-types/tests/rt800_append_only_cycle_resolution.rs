@@ -78,7 +78,7 @@ fn genuinely_unknown_callable_still_reports_exactly_once() {
         .filter(|error| {
             matches!(
                 error.kind,
-                chelis_types::errors::CheckErrorKind::UnboundVariable { .. }
+                chelis_checker_core::errors::CheckErrorKind::UnboundVariable { .. }
             )
         })
         .collect::<Vec<_>>();
@@ -125,7 +125,7 @@ fn bare_acyclic_later_helper_remains_textually_unavailable() {
         .filter(|error| {
             matches!(
                 error.kind,
-                chelis_types::errors::CheckErrorKind::UnboundVariable { .. }
+                chelis_checker_core::errors::CheckErrorKind::UnboundVariable { .. }
             )
         })
         .collect::<Vec<_>>();

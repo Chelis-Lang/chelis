@@ -31,7 +31,7 @@ FORBIDDEN = (
     "chelis-types", "chelis-surf", "chelis-syntax-host", "chelis-compiler-api",
     "chelis-pipeline-core", "chelis-runtime", "chelis-prove", "chelis-stdlib",
     "stacker", "psm", "tokio", "rayon", "parking_lot", "getrandom",
-    "chelis-dag-core",
+    "chelis-dag-core", "chelis-checker-core",
 )
 
 PORTABLE_SOURCE = r'''
@@ -300,55 +300,57 @@ fn main() {
 
 def authority_fixtures() -> None:
     """Require real Rust failures at each independent authority boundary."""
-    core_dependency = dependency(CRATE)
+    core_dependency = dependency(CRATE) + dependency("chelis-stack-services")
     cases = (
         (
-            'use chelis_type_core::Type; use chelis_types::errors::ErrorWitness;\n'
+            'use chelis_type_core::Type; use chelis_checker_core::errors::ErrorWitness;\n'
             'pub fn bad() -> Type<ErrorWitness> { Type::Error }\n',
             ("mismatched types",),
         ),
         (
-            'use chelis_types::errors::ErrorWitness;\n'
+            'use chelis_checker_core::errors::ErrorWitness;\n'
             'pub fn bad() -> ErrorWitness { ErrorWitness(()) }\n',
             ("E0423", "private fields"),
         ),
         (
-            'use chelis_types::errors::{CheckError, CheckErrorKind, report};\n'
+            'use chelis_checker_core::errors::{CheckError, CheckErrorKind, report};\n'
             'pub fn bad() { let mut errors = Vec::new();\n'
             'report(&mut errors, CheckError::new(CheckErrorKind::Other, "bad".into(), vec![])); }\n',
             ("mismatched types", "DiagnosticSink"),
         ),
         (
-            'use chelis_types::errors::DiagnosticSink;\n'
+            'use chelis_checker_core::errors::DiagnosticSink;\n'
             'pub fn bad() { let mut errors = Vec::new(); let _ = DiagnosticSink { errors: &mut errors }; }\n',
             ("DiagnosticSink", "private fields"),
         ),
         (
-            'use chelis_types::errors::DiagnosticSink;\n'
+            'use chelis_checker_core::errors::DiagnosticSink;\n'
             'pub fn bad(sink: &mut DiagnosticSink<\'_>) { sink.errors.clear(); }\n',
             ("field `errors`", "private"),
         ),
         (
             'use chelis_type_core::{Subst, Type};\n'
-            'use chelis_types::{env::Env, errors::ErrorWitness};\n'
-            'pub fn bad() { let foreign: Type<()> = Type::Error(());\n'
-            'Env::new().generalize(&foreign, &Subst::<ErrorWitness>::new()); }\n',
+            'use chelis_checker_core::{env::Env, errors::ErrorWitness};\n'
+            'pub fn bad(stack: &impl chelis_stack_services::StackServices) {\n'
+            'let foreign: Type<()> = Type::Error(());\n'
+            'let resources = chelis_checker_core::Resources::new(stack);\n'
+            'Env::new().generalize(&foreign, &Subst::<ErrorWitness>::new(), &resources); }\n',
             ("mismatched types", "ErrorWitness"),
         ),
     )
     for source, expected in cases:
-        compile_rejected("chelis-types", source, expected=expected, dependencies=core_dependency)
+        compile_rejected("chelis-checker-core", source, expected=expected, dependencies=core_dependency)
     compile_rejected(
-        "chelis-types",
-        'use chelis_types::{DiagnosticCheckpoint, checkpoint_iter_compile_probe};\n'
-        'use chelis_types::errors::DiagnosticSink;\n'
+        "chelis-checker-core",
+        'use chelis_checker_core::{DiagnosticCheckpoint, checkpoint_iter_compile_probe};\n'
+        'use chelis_checker_core::errors::DiagnosticSink;\n'
         'pub fn bad(sink: &DiagnosticSink<\'_>) { checkpoint_iter_compile_probe(sink, 0usize); }\n',
         features=("checkpoint-compile-probe",),
         expected=("mismatched types", "DiagnosticCheckpoint", "usize"),
     )
     compile_rejected(
-        "chelis-types",
-        'use chelis_types::DiagnosticCheckpoint;\n'
+        "chelis-checker-core",
+        'use chelis_checker_core::DiagnosticCheckpoint;\n'
         'pub fn bad() { let _ = DiagnosticCheckpoint(0usize); }\n',
         features=("checkpoint-compile-probe",),
         expected=("E0423", "private fields"),
@@ -363,7 +365,8 @@ def authority_fixtures() -> None:
     ):
         for name in names:
             compile_rejected(
-                "chelis-types", f"use chelis_types::{module}::{name};\n",
+                "chelis-checker-core" if module == "env" else "chelis-types",
+                f"use {'chelis_checker_core' if module == 'env' else 'chelis_types'}::{module}::{name};\n",
                 expected=("private", name) if module == "env" else ("E0432", module),
             )
     for name in ("Type", "Scheme", "Subst", "TypeVar", "DimVar", "RankVar", "Dim", "TensorPrec",
@@ -406,6 +409,10 @@ def host_snapshot(workspace: Path) -> dict:
         raise OracleFailure("the Surf corpus contains its Rust delimiter")
     source += '\nconst SURF_CORPUS_JSON: &str = r####"' + text + '"####;\n'
     dependencies = 'bincode = "=1.3.3"\nserde_json = { version = "1", features = ["float_roundtrip"] }\n'
+    if workspace == ROOT:
+        source = "use chelis_checker_core::InferResult;\n" + source.replace(
+            "CheckedProgram, InferResult,", "CheckedProgram,")
+        dependencies += dependency("chelis-checker-core")
     for crate in ("chelis-deep", "chelis-syntax-host", "chelis-surf", "chelis-macros"):
         dependencies += f'{crate} = {{ path = {json.dumps(str(workspace / "crates" / crate))} }}\n'
     environment = support._environment()
@@ -509,10 +516,12 @@ def host_parity() -> None:
          "--all-targets", "--no-default-features"))
     # Exclude only the pre-existing census regeneration helper, not behavior tests.
     run(("cargo", "nextest", "run", "--no-fail-fast", "-p", "chelis-types", "--all-targets",
+         "-p", "chelis-checker-core",
          "-E", "not (binary(unresolved_operand_census) & test(=dump_census_rows))"))
     run(("cargo", "nextest", "run", "--no-fail-fast", "-p", "chelis-types",
-         "--lib", "--features", "generalize-sweep-oracle"))
-    run(("cargo", "test", "-p", "chelis-types", "--doc"))
+         "-p", "chelis-checker-core",
+         "--lib", "--features", "chelis-checker-core/generalize-sweep-oracle"))
+    run(("cargo", "test", "-p", "chelis-types", "-p", "chelis-checker-core", "--doc"))
     run(("cargo", "check", "-p", "chelis-cli", "-p", "chelis-effects",
          "-p", "chelis-ir", "-p", "chelis-prove", "-p", "chelis-compiler-api",
          "-p", "chelis-reef", "--all-targets"))

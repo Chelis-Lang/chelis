@@ -1,7 +1,8 @@
+use chelis_checker_core::errors::CheckErrorKind;
 use chelis_reef::{BuildOptions, build_package_with_options, package_schema, verify_artifact_pair};
 use chelis_shell::read_shell;
 use chelis_surf::{desugar::desugar_program, parser::parse_str};
-use chelis_types::{check_typed_program, errors::CheckErrorKind};
+use chelis_types::check_typed_program;
 use serde::Serialize;
 use std::fs;
 use std::path::{Path, PathBuf};

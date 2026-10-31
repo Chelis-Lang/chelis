@@ -31,10 +31,11 @@
 //! Spec authority: spec/04-type-system.md (tuple projection, nominal ADT
 //! equality).
 
+use chelis_checker_core::InferResult;
 use chelis_deep::Expr;
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str as parse_surf;
-use chelis_types::{InferResult, check_ir_program};
+use chelis_types::check_ir_program;
 
 fn surf_to_deep(source: &str) -> Vec<Expr> {
     let decls = parse_surf(source, &chelis_syntax_host::NativeStack).expect("surf parse");

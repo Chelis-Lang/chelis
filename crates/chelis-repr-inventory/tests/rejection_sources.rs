@@ -129,7 +129,7 @@ mod outside;
     write(
         fixture.path(),
         "tests/support/outside.rs",
-        "fn outside(issue: u32) {\n    chelis_types::unsupported::__build_unimplemented_rejection(issue, \"dynamic\");\n}\n",
+        "fn outside(issue: u32) {\n    chelis_checker_core::unsupported::__build_unimplemented_rejection(issue, \"dynamic\");\n}\n",
     );
 
     let sources =

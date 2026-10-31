@@ -4,7 +4,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use chelis_types::unsupported::Unsupported;
+use chelis_checker_core::unsupported::Unsupported;
 
 use crate::beacon_shim::BEACON_BIN_ENV;
 use crate::beacon_supervisor::{self, Input, Invocation, Outcome, ProcessOps, SystemOps};

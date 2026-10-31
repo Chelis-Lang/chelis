@@ -5,11 +5,11 @@
 #[path = "../examples/support/wire_materialization.rs"]
 mod materialization;
 
+use chelis_checker_core::errors::CheckErrorKind;
 use chelis_compiler_api::{
     compiler,
     schema::{CheckRequest, EvalRequest, SourceKind},
 };
-use chelis_types::errors::CheckErrorKind;
 use chelis_vocab::DiagnosticKind;
 use serde_json::json;
 

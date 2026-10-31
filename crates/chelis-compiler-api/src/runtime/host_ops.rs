@@ -1,5 +1,6 @@
 use chelis_unord::UnordMap;
 
+use chelis_checker_core::BUILTIN_NAMES;
 use chelis_dag_core::dag::{Dag, DeclId, DimInfo, NodeId, RiscOp, TensorType};
 use chelis_dag_core::tier2;
 use chelis_deep::ast::{Atom, Expr, ExprCarrier};
@@ -18,7 +19,6 @@ use chelis_numeric_core::dtype_semantics::{
 };
 use chelis_numeric_core::dtype_semantics::{PreparedUniformLike, RandomKey};
 use chelis_numeric_core::prim::Prim;
-use chelis_types::BUILTIN_NAMES;
 
 use super::transforms::*;
 use super::*;
@@ -286,7 +286,7 @@ pub(crate) fn collect_adt_ctor_fields(exprs: &[Expr]) -> UnordMap<String, Vec<St
 /// Each linker-named constructor that `exprs` declare, mapped to its
 /// declared source spelling: the spelling left after its data type's module
 /// qualification, by the rule the compiled lane stores
-/// ([`chelis_types::linked_constructor_source_name`], chelis#2889). A
+/// ([`chelis_checker_core::opacity::linked_constructor_source_name`], chelis#2889). A
 /// constructor outside linker format has no entry and keeps its name.
 pub(crate) fn collect_constructor_source_names(exprs: &[Expr]) -> UnordMap<String, String> {
     let mut out = UnordMap::new();
@@ -304,7 +304,9 @@ pub(crate) fn collect_constructor_source_names(exprs: &[Expr]) -> UnordMap<Strin
             let Some(ctor) = variant_kids.first().and_then(symbol_name) else {
                 continue;
             };
-            if let Some(source) = chelis_types::linked_constructor_source_name(type_name, ctor) {
+            if let Some(source) =
+                chelis_checker_core::opacity::linked_constructor_source_name(type_name, ctor)
+            {
                 out.insert(ctor.to_string(), source.to_string());
             }
         }
@@ -549,7 +551,7 @@ pub(super) fn bitwise_binop(
 ) -> Result<RuntimeValue, String> {
     match (args.first(), args.get(1)) {
         (Some(RuntimeValue::Scalar(lhs)), Some(RuntimeValue::Scalar(rhs))) => {
-            let value = chelis_types::bitwise_scalar(op, lhs.value(), rhs.value())
+            let value = chelis_checker_core::bitwise_scalar(op, lhs.value(), rhs.value())
                 .map_err(|error| error.to_string())?;
             Ok(RuntimeValue::from_scalar_value(value))
         }
@@ -566,7 +568,7 @@ pub(super) fn bitwise_binop(
                 ));
             }
             let storage =
-                chelis_types::bitwise_tensor(op, lhs.value.storage(), rhs.value.storage())
+                chelis_checker_core::bitwise_tensor(op, lhs.value.storage(), rhs.value.storage())
                     .map_err(|error| error.to_string())?;
             Ok(tensor_result(lhs, storage))
         }

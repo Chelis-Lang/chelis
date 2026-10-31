@@ -2,6 +2,7 @@
 
 import copy
 from pathlib import Path
+import re
 import unittest
 from unittest import mock
 
@@ -217,19 +218,16 @@ def assert_hosted_coverage(test, workflow, nightly):
     test.assertIn("macos-dag-core", aggregate["needs"])
     test.assertEqual(aggregate.get("if"), "always()")
     test.assertFalse(aggregate.get("continue-on-error", False))
-    command = (
-        "python3 scripts/ci_require_success.py"
-        " macos-workspace-shard=${{ needs.macos-workspace-shard.result }}"
-        " macos-binding-census=${{ needs.macos-binding-census.result }}"
-        " macos-wire-census=${{ needs.macos-wire-census.result }}"
-        " macos-ownership-ledger=${{ needs.macos-ownership-ledger.result }}"
-        " macos-numeric-core=${{ needs.macos-numeric-core.result }}"
-        " macos-dag-core=${{ needs.macos-dag-core.result }}"
-    )
-    steps = [step for step in aggregate["steps"] if step.get("run") == command]
+    steps = [step for step in aggregate["steps"]
+             if step.get("run", "").startswith("python3 scripts/ci_require_success.py ")]
     test.assertEqual(len(steps), 1)
     test.assertNotIn("if", steps[0])
     test.assertFalse(steps[0].get("continue-on-error", False))
+    results = re.findall(
+        r"([\w-]+)\s*=\s*\$\{\{\s*needs\.([\w-]+)\.result\s*\}\}",
+        steps[0]["run"],
+    )
+    test.assertCountEqual(results, [(name, name) for name in aggregate["needs"]])
 
 
 class HostedCoverageTests(unittest.TestCase):
@@ -271,22 +269,6 @@ class HostedCoverageTests(unittest.TestCase):
                 with self.assertRaises(AssertionError):
                     assert_hosted_coverage(self, self.workflow, nightly)
 
-    def test_numeric_core_cannot_be_dropped_from_the_macos_aggregate(self):
-        assert_hosted_coverage(self, self.workflow, self.nightly)
-        argument = " macos-numeric-core=${{ needs.macos-numeric-core.result }}"
-        for change in ("missing-need", "missing-result", "missing-both"):
-            with self.subTest(change=change):
-                nightly = copy.deepcopy(self.nightly)
-                aggregate = nightly["jobs"]["macos-smoke"]
-                if change in ("missing-need", "missing-both"):
-                    aggregate["needs"].remove("macos-numeric-core")
-                if change in ("missing-result", "missing-both"):
-                    step = next(step for step in aggregate["steps"]
-                                if "ci_require_success.py" in step.get("run", ""))
-                    self.assertIn(argument, step["run"])
-                    step["run"] = step["run"].replace(argument, "")
-                with self.assertRaises(AssertionError):
-                    assert_hosted_coverage(self, self.workflow, nightly)
 
     def test_macos_census_cannot_be_dropped_from_its_dedicated_job(self):
         for change in ("remove-job", "skip-job", "skip-step", "wrong-selector", "no-workspace-exclusion", "no-aggregate", "no-timing"):

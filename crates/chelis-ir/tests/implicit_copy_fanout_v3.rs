@@ -5,9 +5,9 @@
 //! `def identity_dim[a](x: &tensor[a, f32]) -> tensor[a, f32] = x` fails
 //! today with a type mismatch ("def 'identity_dim' body doesn't match
 //! declared signature"). The body's inferred type is `&tensor[a, f32]`
-//! and the declared return is owned `tensor[a, f32]`. The existing
-//! auto-borrow path at `chelis_types::infer::auto_borrow_call_arg_types`
-//! coerces owned->borrow at argument positions only. The mirror coercion
+//! and the declared return is owned `tensor[a, f32]`.
+//! Argument coercion converts owned values to borrowed values only.
+//! The mirror coercion
 //! at return position (body borrow -> owned via inserted copy) was
 //! missing.
 //!

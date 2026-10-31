@@ -20,12 +20,12 @@
 //! Spec authority: spec/04-type-system.md §10 [04-TOT-2];
 //! spec/design/checker_totality.md §C3.
 
+use chelis_checker_core::errors::CheckErrorKind;
 use chelis_deep::Expr;
 use chelis_deep::parser::parse_str_strict as parse_deep;
 use chelis_deep::printer::print_canonical;
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str as parse_surf;
-use chelis_types::errors::CheckErrorKind;
 use chelis_types::{FitnessReport, check_ir_fitness, check_ir_program};
 
 const ACTIVE_CAST_TARGETS: [&str; 9] = [

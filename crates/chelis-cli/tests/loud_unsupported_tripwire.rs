@@ -657,6 +657,13 @@ const BASELINE: &[Entry] = &[
     ),
     (
         Pat::RustFormatNarrowing,
+        "crates/chelis-types/src/infer.rs",
+        2,
+        "Native checker elapsed-time profiles replace the three former \
+         inference-program format sites without language payload output (chelis#4054)",
+    ),
+    (
+        Pat::RustFormatNarrowing,
         "crates/chelis-runtime/src/format_shortest.rs",
         2,
         "the sanctioned compiled-lane routine's own spec/05 8.1 \
@@ -664,13 +671,6 @@ const BASELINE: &[Entry] = &[
          inside its panic diagnostic (round-4 F5 widening) - the \
          normative grammar's implementation and its self-check, not \
          additional exits",
-    ),
-    (
-        Pat::RustFormatNarrowing,
-        "crates/chelis-types/src/infer/program.rs",
-        3,
-        "checker timing eprintln ({:>8.4}s) - duration displays, not \
-         stored-value exits",
     ),
     (
         Pat::RustFormatNarrowing,

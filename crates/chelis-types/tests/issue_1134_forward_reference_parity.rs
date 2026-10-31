@@ -31,7 +31,7 @@ fn surf_program(source: &str) -> Vec<chelis_deep::Expr> {
 }
 
 fn diagnostics(program: &[chelis_deep::Expr]) -> (Diagnostics, Diagnostics) {
-    let summarize = |result: Result<_, chelis_types::InferResult>| match result {
+    let summarize = |result: Result<_, chelis_checker_core::InferResult>| match result {
         Ok(_) => Vec::new(),
         Err(result) => result
             .errors
@@ -521,7 +521,7 @@ x: i32 = x
         assert!(
             result.errors.iter().any(|error| matches!(
                 error.kind,
-                chelis_types::errors::CheckErrorKind::UnboundVariable { .. }
+                chelis_checker_core::errors::CheckErrorKind::UnboundVariable { .. }
             ) && error.message.contains("x")),
             "expected x to remain unbound: {result:#?}"
         );

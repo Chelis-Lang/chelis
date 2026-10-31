@@ -541,7 +541,7 @@ jobs:
       - name: Typecheck level generalization oracle
         env:
           CHELIS_TEST_SHARED_REEF_HOME: ${{ runner.temp }}/chelis-test-shared-reef
-        run: cargo nextest run --workspace --profile ci-full --ignore-default-filter --features chelis-types/generalize-sweep-oracle --no-fail-fast -E 'not (binary_id(/^chelis-compiler-api::capacity_census_wire$/) | binary_id(/^chelis-python::capacity_census_bindings$/) | binary_id(/^chelis-cli::stdlib_typecheck_cache_concurrency$/) | (binary_id(/^chelis-cli::issue_1293_redteam_round4$/) & test(/^recursive_list_tuple_and_adt_cotangents_match_in_eval_and_c$/)) | ${{ needs.module-oracles-plan.outputs.filterset }})' --partition hash:${{ matrix.shard }}/4
+        run: cargo nextest run --workspace --profile ci-full --ignore-default-filter --features chelis-checker-core/generalize-sweep-oracle --no-fail-fast -E 'not (binary_id(/^chelis-compiler-api::capacity_census_wire$/) | binary_id(/^chelis-python::capacity_census_bindings$/) | binary_id(/^chelis-cli::stdlib_typecheck_cache_concurrency$/) | (binary_id(/^chelis-cli::issue_1293_redteam_round4$/) & test(/^recursive_list_tuple_and_adt_cotangents_match_in_eval_and_c$/)) | ${{ needs.module-oracles-plan.outputs.filterset }})' --partition hash:${{ matrix.shard }}/4
 
       - name: Verify generalization lane selection
         if: matrix.shard == 1
@@ -627,12 +627,24 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        slice: [frontend, domain]
+        include:
+          - slice: frontend
+            timeout: 70
+          - slice: domain
+            timeout: 70
+          - slice: type-unification-core
+            timeout: 115
+          - slice: dag-core
+            timeout: 115
+          - slice: effect-analysis-core
+            timeout: 115
+          - slice: checker-core
+            timeout: 300
     runs-on: ubuntu-latest
     defaults:
       run:
         shell: chelis-ci-shell run {0}
-    timeout-minutes: 70
+    timeout-minutes: ${{ matrix.timeout }}
     env:
       CARGO_PROFILE_DEV_DEBUG: 0
       CARGO_PROFILE_TEST_DEBUG: 0
@@ -646,8 +658,8 @@ jobs:
       - name: Set up project CI
         uses: ./.github/actions/setup-project-ci
 
-      - name: Install effect oracle policy dependency
-        if: matrix.slice == 'domain'
+      - name: Install portable core policy dependency
+        if: matrix.slice == 'domain' || matrix.slice == 'effect-analysis-core' || matrix.slice == 'checker-core'
         run: uv pip install --python "$PYO3_PYTHON" PyYAML==6.0.3
 
       - name: Cache cargo registry and build
@@ -674,11 +686,20 @@ jobs:
           retention-days: 14
 
       - name: Upload effect analysis core evidence
-        if: always() && matrix.slice == 'domain'
+        if: always() && matrix.slice == 'effect-analysis-core'
         uses: actions/upload-artifact@v7
         with:
           name: effect-analysis-core-linux
           path: target/agents/effect-analysis-core/
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload checker core evidence
+        if: always() && matrix.slice == 'checker-core'
+        uses: actions/upload-artifact@v7
+        with:
+          name: checker-core-linux
+          path: target/agents/checker-core/
           if-no-files-found: error
           retention-days: 14
 

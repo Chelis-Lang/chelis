@@ -183,7 +183,7 @@ impl CExpressionBuiltin {
                 UnsupportedKind::Builtin(name.to_string()),
                 "`chelis build` host emission",
                 Stage::Codegen("c"),
-                chelis_types::deliberate_rejection!(
+                chelis_checker_core::deliberate_rejection!(
                     "[04-TOT-2]",
                     "the checked builtin vocabulary and C expression vocabulary disagree; \
                      no fallback expression is permitted"
@@ -322,7 +322,7 @@ fn runtime_string_literal(value: &str) -> String {
 fn stored_constructor_name(ty: &HostType, ctor: &str) -> String {
     let source = match ty {
         HostType::Adt(type_name, _) => {
-            chelis_types::linked_constructor_source_name(type_name, ctor)
+            chelis_checker_core::opacity::linked_constructor_source_name(type_name, ctor)
         }
         _ => None,
     };
@@ -335,6 +335,7 @@ use crate::host_abi::{
     HostAbiMatchArm as HostMatchArm, HostAbiParam as HostParam, HostAbiProgram as HostProgram,
     HostAbiType, HostAbiType as HostType, ProjectedHostProgram, ProjectedHostSite,
 };
+use chelis_checker_core::unsupported::{Stage, Unsupported, UnsupportedKind};
 use chelis_dag_core::dag::{ComparisonKind, DimInfo, RiscOp, TensorType};
 use chelis_ir::ownership::{
     HostSiteId, VerifiedApplyKind, VerifiedBlockId, VerifiedEdgeView, VerifiedHostAction,
@@ -347,7 +348,6 @@ use chelis_numeric_core::observation::ElementRef;
 use chelis_numeric_core::prim::Prim;
 use chelis_types::manifest::{RootManifest, RootPathStep};
 use chelis_types::types::Lane;
-use chelis_types::unsupported::{Stage, Unsupported, UnsupportedKind};
 use chelis_unord::{UnordMap, UnordSet};
 
 thread_local! {
@@ -964,8 +964,8 @@ pub(crate) fn concrete_tensor_helper_codegen(
 fn emitted_function_name(program_name: &str, function_name: &str) -> String {
     if function_name == "main" {
         format!("{program_name}__main")
-    } else if chelis_types::is_linker_format_name(function_name)
-        && chelis_types::demangle_ident(function_name) == "main"
+    } else if chelis_checker_core::opacity::is_linker_format_name(function_name)
+        && chelis_checker_core::opacity::demangle_ident(function_name) == "main"
     {
         function_name.to_string()
     } else {
@@ -1015,7 +1015,7 @@ fn reject_duplicate_emitted_function_names(
         )),
         "C host identifier emission",
         Stage::Codegen("c"),
-        chelis_types::deliberate_rejection!(
+        chelis_checker_core::deliberate_rejection!(
             "[01-CID-1]",
             "generated C symbols must remain one-to-one; an internal naming path overlapped \
              another emitted definition (chelis#840)"
@@ -5568,11 +5568,12 @@ fn emit_main(
     for binding in &program.globals {
         for display in &binding.display_roots {
             let mut entries = manifest.entries.iter().enumerate().filter(|(_, root)| {
-                let short_def = if chelis_types::is_linker_format_name(&root.def_name) {
-                    chelis_types::demangle_ident(&root.def_name)
-                } else {
-                    root.def_name.clone()
-                };
+                let short_def =
+                    if chelis_checker_core::opacity::is_linker_format_name(&root.def_name) {
+                        chelis_checker_core::opacity::demangle_ident(&root.def_name)
+                    } else {
+                        root.def_name.clone()
+                    };
                 let suffix = root.name.strip_prefix(root.def_name.as_str()).unwrap_or("");
                 let selected = binding.name == root.def_name
                     || matches!(
@@ -6775,7 +6776,7 @@ impl<'a> HostEmitter<'a> {
                     UnsupportedKind::Builtin("uniform_like".to_string()),
                     "`chelis build` host emission",
                     Stage::Codegen("c"),
-                    chelis_types::deliberate_rejection!(
+                    chelis_checker_core::deliberate_rejection!(
                         "[04-TOT-2]",
                         "uniform_like's first operand must be a key; the checker types it \
                          as one, so a non-key here is an internal desync"
@@ -6793,7 +6794,7 @@ impl<'a> HostEmitter<'a> {
                     UnsupportedKind::Builtin("uniform_like".to_string()),
                     "`chelis build` host emission",
                     Stage::Codegen("c"),
-                    chelis_types::deliberate_rejection!(
+                    chelis_checker_core::deliberate_rejection!(
                         "[04-TOT-2]",
                         "uniform_like's first operand must be a tensor template; the checker \
                          types it as one, so a non-tensor here is an internal desync"
@@ -10715,7 +10716,7 @@ impl<'a> HostEmitter<'a> {
                  emission arm for this op)"
                     .to_string(),
                 Stage::Codegen("c"),
-                chelis_types::deliberate_rejection!(
+                chelis_checker_core::deliberate_rejection!(
                     "[04-TOT-2]",
                     "a checked tensor operation must route through the typed DAG lane; the C \
                      host scalar lane has no fallback tensor expression"
@@ -11038,7 +11039,7 @@ impl<'a> HostEmitter<'a> {
                             )),
                             "`chelis build` host emission",
                             Stage::Codegen("c"),
-                            chelis_types::unimplemented_rejection!(
+                            chelis_checker_core::unimplemented_rejection!(
                                 1059,
                                 "the compiled lane stringifies admitted numeric/bool/string scalars \
                                  only today; chelis#1059 owns compiled tensor/list rendering \
@@ -11173,7 +11174,7 @@ impl<'a> HostEmitter<'a> {
                                 )),
                                 "`scalar_to_tensor` C host emission",
                                 Stage::Codegen("c"),
-                                chelis_types::unimplemented_rejection!(
+                                chelis_checker_core::unimplemented_rejection!(
                                     729,
                                     "the resolved result dtype has no scalar-tensor constructor; \
                                      implement the exact target capability instead of selecting f32"
@@ -14229,7 +14230,7 @@ impl<'a> HostEmitter<'a> {
                 )),
                 "`chelis build` host emission",
                 Stage::Codegen("c"),
-                chelis_types::deliberate_rejection!(
+                chelis_checker_core::deliberate_rejection!(
                     "[04-TOT-2]",
                     "internal desync: the checker guarantees a two-list tuple type for \
                      partition results (chelis#730 census row 15)"
@@ -14694,7 +14695,7 @@ impl<'a> HostEmitter<'a> {
                     UnsupportedKind::HostType(format!("{other:?}")),
                     "a `print` site in `chelis build` host emission",
                     Stage::Codegen("c"),
-                    chelis_types::deliberate_rejection!(
+                    chelis_checker_core::deliberate_rejection!(
                         "[04-TOT-2]",
                         "the value's host type never resolved to a printable representation \
                          (chelis#714's Unknown chain); previously this compiled to the \
@@ -14816,7 +14817,7 @@ impl<'a> HostEmitter<'a> {
                     UnsupportedKind::HostType(format!("{other:?}")),
                     "a labeled-root print in `chelis build` host emission",
                     Stage::Codegen("c"),
-                    chelis_types::deliberate_rejection!(
+                    chelis_checker_core::deliberate_rejection!(
                         "[04-TOT-2]",
                         "the value's host type never resolved to a printable representation \
                          (chelis#714's Unknown chain); previously this compiled to the \
@@ -15086,7 +15087,7 @@ fn equality_entry(
                 UnsupportedKind::Builtin(name.to_string()),
                 format!("`{lhs:?}` and `{rhs:?}` operands in `chelis build` host emission"),
                 Stage::Codegen("c"),
-                chelis_types::deliberate_rejection!(
+                chelis_checker_core::deliberate_rejection!(
                     "[04-TOT-2]",
                     "the host scalar lane has no comparison for this operand pair; a heap \
                      value is never compared by address"
@@ -15567,7 +15568,7 @@ fn admit_host_elementwise(
             operand.precision.name()
         ),
         Stage::Codegen("c"),
-        chelis_types::deliberate_rejection!(
+        chelis_checker_core::deliberate_rejection!(
             "[04-TOT-2]",
             "a checked tensor operation must route through the typed DAG lane; the C \
              host lane's elementwise loops are no fallback for a dtype they do not cover"
@@ -15595,7 +15596,7 @@ fn invalid_abi_shape(detail: String, context: &'static str) -> Unsupported {
         UnsupportedKind::Construct(detail),
         context,
         Stage::Codegen("c"),
-        chelis_types::deliberate_rejection!(
+        chelis_checker_core::deliberate_rejection!(
             "[04-TOT-2]",
             "the resolved host IR and C ABI projection disagree; this is an internal \
              compiler error, never a request to select a fallback representation \
@@ -15606,18 +15607,18 @@ fn invalid_abi_shape(detail: String, context: &'static str) -> Unsupported {
 
 fn unsupported_value_boxing(ty: &HostType, context: &'static str) -> Unsupported {
     let authority = match ty {
-        HostType::Callback(_, _) => chelis_types::unimplemented_rejection!(
+        HostType::Callback(_, _) => chelis_checker_core::unimplemented_rejection!(
             879,
             "the C host lane has no general first-class function-value box"
         ),
         HostType::Option(_) | HostType::MappedFile | HostType::Unit => {
-            chelis_types::deliberate_rejection!(
+            chelis_checker_core::deliberate_rejection!(
                 "[04-TOT-2]",
                 "this checked host value cannot reach the generic boxing path; no fallback \
                  representation is permitted"
             )
         }
-        _ => chelis_types::deliberate_rejection!(
+        _ => chelis_checker_core::deliberate_rejection!(
             "[04-TOT-2]",
             "the resolved host type and boxing dispatcher disagree; no fallback \
              representation is permitted"
@@ -15787,7 +15788,7 @@ fn checked_cast_plan_error(detail: String) -> Unsupported {
         UnsupportedKind::HostAbi(detail),
         "C host checked-cast emission",
         Stage::Codegen("c"),
-        chelis_types::deliberate_rejection!(
+        chelis_checker_core::deliberate_rejection!(
             "[04-NUM-14]",
             "checked cast requires an active numeric or bool source/target pair on one surface; \
              no identity fallback is permitted"
@@ -16166,11 +16167,10 @@ impl BinaryElementwiseFunc {
 /// Fold a `uniform_like` bound to the exact compile-time value the emitter
 /// bakes into the generated call (chelis#2120).
 ///
-/// The checker already restricts these bounds to static literals
-/// (`chelis-types` `infer::app_operand_dtype`, whose message is the
-/// chelis#776 gate), and this mirrors the shapes `is_static_numeric_bound`
-/// admits there: a bare float or integer literal, a float-target `cast`
-/// around one, and `neg` of either. Anything else is an internal desync
+/// The checker restricts these bounds to static literals.
+/// This fold accepts the same forms: a float or integer literal, a
+/// float-target `cast` around one, and `neg` of either.
+/// Anything else is an internal desync
 /// between that gate and this emitter, and is rejected loudly rather than
 /// defaulted — silently substituting `[0, 1)` for an unreadable bound is the
 /// exact chelis#776 failure this must not reintroduce.
@@ -16315,7 +16315,7 @@ fn uniform_bound_desync(which: &str) -> Unsupported {
         UnsupportedKind::Builtin("uniform_like".to_string()),
         "`chelis build` host emission",
         Stage::Codegen("c"),
-        chelis_types::deliberate_rejection!(
+        chelis_checker_core::deliberate_rejection!(
             "[04-TOT-2]",
             "uniform_like's template is a tensor of an admitted dtype `p` and its bounds \
              have dtype `p`; the checker types them so, so any other operand here is an \
@@ -16451,8 +16451,8 @@ mod expression_dispatch_tests {
 
     #[test]
     fn closed_callable_identity_mismatch_remains_an_internal_error() {
+        use chelis_checker_core::unsupported::RejectionAuthorityKind;
         use chelis_ir::host_type_state::CheckedBuiltinCallable;
-        use chelis_types::unsupported::RejectionAuthorityKind;
         let nan = CheckedBuiltinCallable::from_symbol("is_nan").unwrap();
         assert!(validate_checked_builtin_identity(nan, "is_nan").is_ok());
         let error = validate_checked_builtin_identity(nan, "is_finite").unwrap_err();

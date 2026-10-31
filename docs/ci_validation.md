@@ -88,10 +88,13 @@ The runtime-representation inventory admits Clang's canonical resource `include`
 
 The Linux workspace worker passes `--ignore-default-filter` and deliberately includes the PR selection. Only `chelis-compiler-api::capacity_census_wire` and `chelis-python::capacity_census_bindings` are excluded: the dtype worker executes both. The generalization worker uses the same census exclusions and the same derived `module-oracles` filterset; census authority is checked on the default-feature configuration. Executable listing set-math proves that workspace plus dtype still covers every non-ignored test in the unfiltered corpus, with none in neither selection and no census test in both. The two selections do overlap elsewhere: the dtype oracle also owns several non-census binaries. A featureless workspace run skips every target whose Cargo `required-features` are not default-enabled. The `ownership-ledger` targets therefore run with that feature as the gate's own integration commands: in the `integration-support` slices on Linux, and on macOS in `macos-nightly.yml`'s `macos-ownership-ledger` job, which `macos-smoke` requires. Each command runs `scripts/ownership_ledger_tests.py` for one package, which reads the package's targets that require `ownership-ledger` from Cargo metadata, so neither the gate nor the workflow repeats the list. The `chelis-compiler-api` command runs in the frontend slice. The `chelis-cli` command runs last in the domain slice, because it rebuilds `target/debug/chelis` against the instrumented runtime, and the gate hands that path to the unrepresentable-domain oracle when an earlier command built it.
 
-Integration support assigns each canonical gate command to exactly one of
-`frontend`, `domain`, and `numeric-core`. Missing, duplicate, or stale ownership
-stops sliced execution. The unsliced integration gate retains every command in
-its canonical order. The numeric-core slice runs the complete
+Integration support assigns each canonical gate command to exactly one named slice.
+`frontend` and `domain` retain the short support commands.
+Separate `numeric-core`, `type-unification-core`, `dag-core`, `effect-analysis-core`, and `checker-core` slices execute their complete oracles.
+Missing, duplicate, or stale ownership stops sliced execution.
+The unsliced integration gate retains every command in its canonical order.
+
+The numeric-core slice runs the complete
 `scripts/numeric_core_oracle.py` acceptance command, including its immutable-base
 comparisons, surface censuses, numeric suites, and complete-evidence check.
 On Linux the `numeric-core-oracle` job owns this whole acceptance phase with a
@@ -99,8 +102,12 @@ On Linux the `numeric-core-oracle` job owns this whole acceptance phase with a
 of cold setup headroom, also used by dtype and runtime extent. Its baseline
 builds, generated-code comparisons and nested surface censuses exceed the short
 support execution allowance; [#4031](https://github.com/Chelis-Lang/chelis/issues/4031)
-records the measured isolated timeout. The `integration-support` matrix runs
-only `frontend` and `domain`, each with its 70-minute total limit.
+records the measured isolated timeout.
+
+The Linux `integration-support` matrix gives `frontend` and `domain` 70 minutes each.
+Type, DAG, and effect rows receive 115 minutes each.
+The complete checker row receives 300 minutes.
+Each row retains the complete oracle and its evidence.
 
 On macOS `macos-numeric-core` runs three required matrix phases, each with a
 120-minute job budget: `extraction` runs portable consumers, immutable-baseline
@@ -123,6 +130,19 @@ and complete-evidence check. It restores the workspace cache without saving over
 it. `macos-smoke` requires its success alongside the workspace shards, censuses,
 ownership ledger, and numeric-core matrix; failure, cancellation, or skipping
 fails the aggregate.
+
+`macos-core-portability` runs separate type, effect, and checker rows.
+Type and effect rows receive 120 minutes each.
+The complete checker row receives 300 minutes.
+Each row executes its unchanged complete command outside the workspace shard budget.
+`macos-smoke` needs successful execution from every row.
+Artifact uploads retain complete outputs and oracle evidence.
+The bootstrap step selects managed Python for the venv.
+The managed oracle commands then use the same interpreter and installed policy dependencies.
+
+The checker oracle retains the pinned baseline in the candidate object store.
+It also verifies a separate scratch checkout against the original revision and source digests.
+Later cost and existing-core checks can read the pinned objects after scratch checkout removal.
 
 Neither numeric owner spends its budget on other support or workspace commands.
 Both use the gate's exit status and upload `target/gate-reports/` with `always()`;

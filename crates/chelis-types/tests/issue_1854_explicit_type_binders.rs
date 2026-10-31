@@ -34,7 +34,7 @@ struct Diagnostic {
 }
 
 fn diagnostics(
-    result: Result<chelis_types::CheckedProgram, chelis_types::InferResult>,
+    result: Result<chelis_types::CheckedProgram, chelis_checker_core::InferResult>,
 ) -> Vec<Diagnostic> {
     result.err().map_or_else(Vec::new, |report| {
         report

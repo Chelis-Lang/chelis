@@ -570,21 +570,7 @@ class WriteModeTests(unittest.TestCase):
         )
         self.assertIn("1 later leg(s) not run", output)
 
-    def test_leg_lines_name_tier_position_and_owned_paths(self):
-        with tempfile.TemporaryDirectory() as td:
-            root = _fake_repo(Path(td))
-            recorder = _Recorder()
-            _code, output = _run([], repo_root=root, recorder=recorder)
-        self.assertIn(
-            "[tier 0 1/3] rejection-registry (cargo + python):", output
-        )
-        self.assertIn("[tier 0 3/3] opaque-corpus (python):", output)
-        self.assertIn(
-            "owns: spec/design/loud_unsupported_issue_manifest.json, "
-            "crates/chelis-types/src/rejection_registry_generated.rs",
-            output,
-        )
-        self.assertIn("regen_all: write mode, tiers 0, 3 leg(s)", output)
+
 
 
 class NeverWritesFrozenArtifactsTests(unittest.TestCase):

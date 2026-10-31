@@ -2,11 +2,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::sync::OnceLock;
 
+use chelis_checker_core::InferResult;
 use chelis_dag_core::Dag;
 use chelis_dag_core::dag::NodeId;
 use chelis_deep::Expr as DeepExpr;
 use chelis_ir::lower::LowerDiagnostic;
-use chelis_types::{CheckedProgram, FitnessReport, InferResult, TypeEnv};
+use chelis_types::{CheckedProgram, FitnessReport, TypeEnv};
 
 /// A closed policy for nonfatal lowering failures.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,7 +68,7 @@ pub enum SemanticRejection {
         errors: Vec<chelis_effects_core::EffectError>,
     },
     Linearity {
-        errors: Vec<chelis_types::errors::CheckError>,
+        errors: Vec<chelis_checker_core::errors::CheckError>,
     },
 }
 
@@ -97,7 +98,7 @@ pub enum LibraryRejection {
         errors: Vec<chelis_effects_core::EffectError>,
     },
     Linearity {
-        errors: Vec<chelis_types::errors::CheckError>,
+        errors: Vec<chelis_checker_core::errors::CheckError>,
     },
 }
 

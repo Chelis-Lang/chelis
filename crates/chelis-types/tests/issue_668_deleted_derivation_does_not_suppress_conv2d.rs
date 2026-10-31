@@ -3,9 +3,9 @@
 //! backend-only symbolic-metadata rejection and applies the surviving semantic
 //! checks at both public checker ingresses.
 
+use chelis_checker_core::errors::CheckError;
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str as parse_surf;
-use chelis_types::errors::CheckError;
 use chelis_types::{check_ir_program, check_typed_program};
 
 fn deep(source: &str) -> Vec<chelis_deep::Expr> {

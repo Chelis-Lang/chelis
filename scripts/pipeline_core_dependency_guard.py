@@ -19,7 +19,7 @@ CORE_MANIFEST = REPO_ROOT / "crates" / CORE_PACKAGE / "Cargo.toml"
 APPROVED_DIRECT_DEPENDENCIES = frozenset(
     {
         "chelis-deep", "chelis-types", "chelis-effects", "chelis-effects-core",
-        "chelis-ir", "chelis-unord", "chelis-dag-core",
+        "chelis-ir", "chelis-unord", "chelis-dag-core", "chelis-checker-core",
     }
 )
 # chelis-abi is the leaf checked-metadata authority (it depends only on
@@ -29,7 +29,8 @@ APPROVED_DIRECT_DEPENDENCIES = frozenset(
 # chelis-crmath for correctly rounded transcendentals (chelis#2957).
 # chelis-type-core owns portable type models and unification.
 # chelis-effects-core owns portable effect data and analysis.
-# These crates stay below host services.
+# chelis-checker-core owns portable semantic checks without host authority.
+# Native IR continuation uses the existing syntax stack adapter.
 APPROVED_WORKSPACE_CLOSURE = frozenset(
     {
         CORE_PACKAGE,
@@ -41,6 +42,7 @@ APPROVED_WORKSPACE_CLOSURE = frozenset(
         "chelis-type-core",
         "chelis-vocab",
         "chelis-stack-services",
+        "chelis-syntax-host",
     }
 )
 DENIED_PACKAGES = frozenset(

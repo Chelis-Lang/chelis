@@ -1,8 +1,8 @@
 //! A checker rejection uses the Deep producer's coordinate and identity,
 //! without inventing a length or changing the accepted/rejected boundary.
 
+use chelis_checker_core::errors::CheckErrorKind;
 use chelis_types::check_ir_program;
-use chelis_types::errors::CheckErrorKind;
 
 /// A `copy` whose operand's type is a declared type parameter that never
 /// resolves, which spec/04 section 8.2 refuses: `copy` is generic, so this is

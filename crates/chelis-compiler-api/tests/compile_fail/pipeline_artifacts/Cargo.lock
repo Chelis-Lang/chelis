@@ -110,6 +110,7 @@ name = "chelis-backend-c"
 version = "0.23.0"
 dependencies = [
  "chelis-abi",
+ "chelis-checker-core",
  "chelis-crmath",
  "chelis-dag-core",
  "chelis-ir",
@@ -128,12 +129,31 @@ name = "chelis-backend-hip"
 version = "0.23.0"
 dependencies = [
  "chelis-backend-c",
+ "chelis-checker-core",
  "chelis-dag-core",
  "chelis-ir",
  "chelis-numeric-core",
  "chelis-types",
  "chelis-unord",
  "chelis-vocab",
+]
+
+[[package]]
+name = "chelis-checker-core"
+version = "0.23.0"
+dependencies = [
+ "chelis-abi",
+ "chelis-deep",
+ "chelis-numeric-core",
+ "chelis-pred",
+ "chelis-stack-services",
+ "chelis-type-core",
+ "chelis-unord",
+ "chelis-vocab",
+ "serde",
+ "sha2",
+ "spin",
+ "thiserror",
 ]
 
 [[package]]
@@ -144,6 +164,7 @@ dependencies = [
  "chelis-abi",
  "chelis-backend-c",
  "chelis-backend-hip",
+ "chelis-checker-core",
  "chelis-dag-core",
  "chelis-deep",
  "chelis-effects",
@@ -206,6 +227,7 @@ dependencies = [
 name = "chelis-effects"
 version = "0.23.0"
 dependencies = [
+ "chelis-checker-core",
  "chelis-deep",
  "chelis-effects-core",
  "chelis-numeric-core",
@@ -239,10 +261,12 @@ name = "chelis-ir"
 version = "0.23.0"
 dependencies = [
  "chelis-abi",
+ "chelis-checker-core",
  "chelis-dag-core",
  "chelis-deep",
  "chelis-effects",
  "chelis-numeric-core",
+ "chelis-syntax-host",
  "chelis-type-core",
  "chelis-types",
  "chelis-unord",
@@ -277,6 +301,7 @@ dependencies = [
 name = "chelis-pipeline-core"
 version = "0.23.0"
 dependencies = [
+ "chelis-checker-core",
  "chelis-dag-core",
  "chelis-deep",
  "chelis-effects",
@@ -299,6 +324,7 @@ name = "chelis-reef"
 version = "0.23.0"
 dependencies = [
  "bincode",
+ "chelis-checker-core",
  "chelis-deep",
  "chelis-effects",
  "chelis-image-id",
@@ -412,9 +438,11 @@ name = "chelis-types"
 version = "0.23.0"
 dependencies = [
  "chelis-abi",
+ "chelis-checker-core",
  "chelis-deep",
  "chelis-numeric-core",
  "chelis-pred",
+ "chelis-stack-services",
  "chelis-type-core",
  "chelis-unord",
  "chelis-vocab",

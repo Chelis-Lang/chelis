@@ -10,9 +10,10 @@
 //! not the operand's type. Before the fix both queries refused every
 //! `&List`/`&Dict` operand as if the source had written `&`.
 
+use chelis_checker_core::errors::CheckError;
+use chelis_checker_core::errors::CheckErrorKind;
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str;
-use chelis_types::errors::{CheckError, CheckErrorKind};
 use chelis_types::{check_linearity, check_typed_program};
 
 /// Type errors, then linearity errors, of a Surf program.

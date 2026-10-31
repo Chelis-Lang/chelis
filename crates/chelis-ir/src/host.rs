@@ -4,7 +4,7 @@ pub mod staged;
 use crate::callable_value::{NormalizedCallableContract, StaticBuiltinValue};
 use callee::HostAppCallee;
 pub use callee::{HostCallee, HostCalleeView};
-use chelis_types::errors::ErrorWitness;
+use chelis_checker_core::errors::ErrorWitness;
 pub use signature_entry::{
     EntryContract, EntryPattern, FixedEntryObservation, FixedEntryType, SignatureEntryPlan,
     fixed_entry_observations,
@@ -22,14 +22,15 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
+use chelis_checker_core::BUILTIN_NAMES;
+use chelis_checker_core::adt::{AdtDef, AdtRegistry, TypeAliasDef};
+use chelis_checker_core::infer::type_to_deep_expr;
 use chelis_deep::ast::{Atom, Expr, Metadata};
 use chelis_deep::decode_effect_kind;
 use chelis_deep::node::Node;
 use chelis_numeric_core::prim::Prim;
 use chelis_type_core::{Dim, NominalArg, NominalParamKind, TensorPrec, Type};
-use chelis_types::adt::{AdtDef, AdtRegistry, TypeAliasDef};
-use chelis_types::infer::type_to_deep_expr;
-use chelis_types::{BUILTIN_NAMES, CheckedProgram};
+use chelis_types::CheckedProgram;
 use chelis_vocab::EffectKind;
 
 use crate::host_type_state::{
@@ -1151,9 +1152,9 @@ pub fn host_elementwise_loop_admits(builtin: &str, precision: Prim) -> Option<bo
 /// host-evaluated operands without changing what it computes or where its
 /// randomness is drawn (chelis#2734, chelis#2318).
 fn elementwise_function_of_operands(builtin: &str) -> bool {
-    chelis_types::shape_class(builtin) == Some(chelis_types::ShapeClass::Identity)
+    chelis_checker_core::shape_class(builtin) == Some(chelis_checker_core::ShapeClass::Identity)
         && chelis_numeric_core::key_admission::KeyPrimitive::of_builtin(builtin).is_none()
-        && !chelis_types::COMPARISON_OPS.contains(&builtin)
+        && !chelis_checker_core::COMPARISON_OPS.contains(&builtin)
 }
 
 pub fn host_summary_probe_builds() -> u64 {
@@ -2646,7 +2647,7 @@ pub const BUILTIN_PROJECTIONS: &[&str] = &["index", "skip", "take"];
 /// without editing a list. `tests/builtin_result_producers.rs` checks the
 /// projections against the spec's own statement of them.
 pub fn produces_its_result(name: &str) -> bool {
-    !BUILTIN_PROJECTIONS.contains(&name) && chelis_types::builtin_decl(name).is_some()
+    !BUILTIN_PROJECTIONS.contains(&name) && chelis_checker_core::builtin_decl(name).is_some()
 }
 
 /// One invocation-local result obligation retained when host specialization
@@ -6118,7 +6119,7 @@ impl UncarriableWalk<'_> {
         // using the checked result type alone could conceal an earlier fatal
         // producer lowering (for example, an unsupported insert).
         if name == "matmul"
-            && chelis_types::builtin_decl(name).is_some()
+            && chelis_checker_core::builtin_decl(name).is_some()
             && kids[1..].len() == 2
             && kids[1..]
                 .iter()
@@ -6126,7 +6127,8 @@ impl UncarriableWalk<'_> {
         {
             return ConcatInputFact::Tensor(output);
         }
-        if chelis_types::shape_class(name) != Some(chelis_types::ShapeClass::Identity) {
+        if chelis_checker_core::shape_class(name) != Some(chelis_checker_core::ShapeClass::Identity)
+        {
             return ConcatInputFact::Unknown;
         }
         // Shape-identity is an operation contract, but its source geometry
@@ -6391,7 +6393,7 @@ impl UncarriableWalk<'_> {
                     }
                     return outcome;
                 }
-                if chelis_types::builtin_decl(name).is_some() {
+                if chelis_checker_core::builtin_decl(name).is_some() {
                     let callable = if builtin_requires_host_execution(name) {
                         CallableFacts::HOST_TEMPLATE
                     } else {
@@ -6947,8 +6949,8 @@ fn collect_whole_value_aliases(pattern: &Expr, out: &mut UnordSet<String>) {
 /// Whether a canonical builtin needs the host execution lane. Callers resolve
 /// lexical bindings and program declarations before consulting builtin policy.
 pub(crate) fn builtin_requires_host_execution(name: &str) -> bool {
-    chelis_types::builtin_decl(name).is_some_and(|declaration| {
-        declaration.realizability == chelis_types::Realizability::HostOnly
+    chelis_checker_core::builtin_decl(name).is_some_and(|declaration| {
+        declaration.realizability == chelis_checker_core::Realizability::HostOnly
             // Host realizability does not exclude an existing numeric IR
             // implementation. These operations lower their scalar/shape
             // observations directly; concat's geometry is checked at the call.
@@ -10116,7 +10118,7 @@ fn host_expr_lowering_error(
             if node.tag() == DeepTag::Fn {
                 (
                     "anonymous function value `fn`".to_string(),
-                    chelis_types::unimplemented_rejection!(
+                    chelis_checker_core::unimplemented_rejection!(
                         879,
                         "general C-host function values are not implemented; use a contextual \
                          callback position or run under `chelis eval`"
@@ -10131,10 +10133,10 @@ fn host_expr_lowering_error(
             malformed_host_authority(&format!("unknown form `{}`", data.head))
         }
     };
-    let unsupported = chelis_types::unsupported::Unsupported::new(
-        chelis_types::unsupported::UnsupportedKind::Construct(construct),
+    let unsupported = chelis_checker_core::unsupported::Unsupported::new(
+        chelis_checker_core::unsupported::UnsupportedKind::Construct(construct),
         format!("host expression lowering: {}", detail.into()),
-        chelis_types::unsupported::Stage::Lowering,
+        chelis_checker_core::unsupported::Stage::Lowering,
         authority,
     );
     crate::lower::LowerDiagnostic::new(
@@ -10149,11 +10151,13 @@ fn host_callable_capability_error(
     expr: &Expr,
     detail: impl Into<String>,
 ) -> crate::lower::LowerDiagnostic {
-    let unsupported = chelis_types::unsupported::Unsupported::new(
-        chelis_types::unsupported::UnsupportedKind::Construct("closed callable invocation".into()),
+    let unsupported = chelis_checker_core::unsupported::Unsupported::new(
+        chelis_checker_core::unsupported::UnsupportedKind::Construct(
+            "closed callable invocation".into(),
+        ),
         detail.into(),
-        chelis_types::unsupported::Stage::Lowering,
-        chelis_types::unimplemented_rejection!(
+        chelis_checker_core::unsupported::Stage::Lowering,
+        chelis_checker_core::unimplemented_rejection!(
             879,
             "C host execution requires one selected whole callable authority"
         ),
@@ -10168,10 +10172,10 @@ fn host_callable_capability_error(
 
 fn malformed_host_authority(
     construct: &str,
-) -> (String, chelis_types::unsupported::RejectionAuthority) {
+) -> (String, chelis_checker_core::unsupported::RejectionAuthority) {
     (
         construct.to_string(),
-        chelis_types::deliberate_rejection!(
+        chelis_checker_core::deliberate_rejection!(
             "[04-TOT-3]",
             "a malformed or unhandled Deep form cannot lower to a substitute host value"
         ),
@@ -10725,11 +10729,11 @@ fn lower_host_expr_kind(
                     .unwrap_or("an unresolved cast target")
             });
             if let Some(bogus) = bogus_target_name.or(unresolved_target_name) {
-                let unsupported = chelis_types::unsupported::Unsupported::new(
-                    chelis_types::unsupported::UnsupportedKind::Dtype(bogus.to_string()),
+                let unsupported = chelis_checker_core::unsupported::Unsupported::new(
+                    chelis_checker_core::unsupported::UnsupportedKind::Dtype(bogus.to_string()),
                     "a `cast` target in host lowering",
-                    chelis_types::unsupported::Stage::Lowering,
-                    chelis_types::deliberate_rejection!(
+                    chelis_checker_core::unsupported::Stage::Lowering,
+                    chelis_checker_core::deliberate_rejection!(
                         "[04-DTYPE-1]",
                         "the cast target must name an active primitive type \
                          (spec/04-type-system.md section 1.1); a bogus target previously \
@@ -10792,11 +10796,13 @@ fn lower_host_expr_kind(
             // error here. A decode error raises the same
             // fatal branded diagnostic as the IR-lane arm.
             let effect_kind = decode_effect_kind(list.meta()).map_err(|error| {
-                let unsupported = chelis_types::unsupported::Unsupported::new(
-                    chelis_types::unsupported::UnsupportedKind::EffectKind(error.to_string()),
+                let unsupported = chelis_checker_core::unsupported::Unsupported::new(
+                    chelis_checker_core::unsupported::UnsupportedKind::EffectKind(
+                        error.to_string(),
+                    ),
                     "a `handle-effect` form in host lowering",
-                    chelis_types::unsupported::Stage::Lowering,
-                    chelis_types::deliberate_rejection!(
+                    chelis_checker_core::unsupported::Stage::Lowering,
+                    chelis_checker_core::deliberate_rejection!(
                         "[04-EFF-1]",
                         "the known effect kind is `resource` \
                          (spec/03-deep-syntax.md); an unknown kind previously dropped its \
@@ -11893,7 +11899,7 @@ pub(crate) fn should_keep_tensor_expr_in_host_lane(expr: &Expr) -> bool {
         return false;
     }
     let name = callee.children_slice().first().and_then(symbol_name);
-    if name.is_some_and(|name| chelis_types::COMPARISON_OPS.contains(&name))
+    if name.is_some_and(|name| chelis_checker_core::COMPARISON_OPS.contains(&name))
         && list
             .children_slice()
             .iter()
@@ -13778,13 +13784,13 @@ fn resolve_list_grad_shape_expr(
                     continue;
                 }
             } else if matches!(scope.get(name), Some(HostTypeTerm::List(_))) {
-                let unsupported = chelis_types::unsupported::Unsupported::new(
-                    chelis_types::unsupported::UnsupportedKind::Construct(format!(
+                let unsupported = chelis_checker_core::unsupported::Unsupported::new(
+                    chelis_checker_core::unsupported::UnsupportedKind::Construct(format!(
                         "List gradient actual `{name}`"
                     )),
                     format!("C List gradient cannot reconstruct the local List actual `{name}`"),
-                    chelis_types::unsupported::Stage::Lowering,
-                    chelis_types::unimplemented_rejection!(
+                    chelis_checker_core::unsupported::Stage::Lowering,
+                    chelis_checker_core::unimplemented_rejection!(
                         2740,
                         "C List-gradient shape reconstruction does not carry lexical local List values"
                     ),
@@ -14049,13 +14055,13 @@ fn runtime_grad_adt_plan(
                 return Ok(None);
             }
             let [definition] = variants.as_slice() else {
-                let unsupported = chelis_types::unsupported::Unsupported::new(
-                    chelis_types::unsupported::UnsupportedKind::Construct(format!(
+                let unsupported = chelis_checker_core::unsupported::Unsupported::new(
+                    chelis_checker_core::unsupported::UnsupportedKind::Construct(format!(
                         "runtime ADT gradient for `{adt_name}`"
                     )),
                     format!("C gradient cannot select a constructor of runtime ADT `{adt_name}`"),
-                    chelis_types::unsupported::Stage::Lowering,
-                    chelis_types::unimplemented_rejection!(
+                    chelis_checker_core::unsupported::Stage::Lowering,
+                    chelis_checker_core::unimplemented_rejection!(
                         618,
                         "runtime ADT constructor selection under a C gradient needs compiled tag dispatch"
                     ),
@@ -16011,14 +16017,14 @@ fn lower_closed_host_application(
         .filter(|_| checked_ty.is_unresolved())
         .cloned()
         .unwrap_or(checked_ty);
-    let numeric_owner =
-        chelis_types::AdmittedBuiltin::resolve(operation.symbol()).is_some_and(|token| {
-            token.declaration().realizability != chelis_types::Realizability::HostOnly
+    let numeric_owner = chelis_checker_core::AdmittedBuiltin::resolve(operation.symbol())
+        .is_some_and(|token| {
+            token.declaration().realizability != chelis_checker_core::Realizability::HostOnly
                 && token
                     .declaration()
                     .capability
                     .domains
-                    .contains(&chelis_types::BuiltinSemanticDomain::Numeric)
+                    .contains(&chelis_checker_core::BuiltinSemanticDomain::Numeric)
         });
     if let HostTypeTerm::Tensor(tensor_ty) = &expected
         && ((numeric_owner
@@ -21491,15 +21497,15 @@ fn hoist_host_lane_tensor_bindings_with_names<'expr, 'scope>(
         .or_else(|| {
             let name = callee?;
             (!host_lexically_binds(scope, name) && program.def_named(name).is_none())
-                .then(|| chelis_types::builtin_decl(name).map(|decl| decl.axis_arguments))
+                .then(|| chelis_checker_core::builtin_decl(name).map(|decl| decl.axis_arguments))
                 .flatten()
         })
-        .unwrap_or(chelis_types::AxisArgumentLayout::NoAxes);
+        .unwrap_or(chelis_checker_core::AxisArgumentLayout::NoAxes);
     let static_selector = |index: usize, arg: &Expr| {
         let axis = match axis_arguments {
-            chelis_types::AxisArgumentLayout::NoAxes => false,
-            chelis_types::AxisArgumentLayout::Fixed(slots) => slots.contains(&(index - 1)),
-            chelis_types::AxisArgumentLayout::VariadicFrom(first) => index > first,
+            chelis_checker_core::AxisArgumentLayout::NoAxes => false,
+            chelis_checker_core::AxisArgumentLayout::Fixed(slots) => slots.contains(&(index - 1)),
+            chelis_checker_core::AxisArgumentLayout::VariadicFrom(first) => index > first,
         };
         axis && crate::lower::extract_int_axis(arg).is_some()
     };
@@ -22160,7 +22166,7 @@ impl StationaryAccumulatorProof {
 /// equal spelling under a shadowing let is not that binding.
 pub fn stationary_accumulator_proof(
     expr: &Expr,
-    registry: &chelis_types::adt::AdtRegistry,
+    registry: &chelis_checker_core::adt::AdtRegistry,
 ) -> Option<StationaryAccumulatorProof> {
     fn forwards(expr: &Expr, parameter: &str) -> bool {
         if let Expr::MetaExpr(meta, _) = expr {
@@ -22878,8 +22884,8 @@ fn raise_conflicting_checker_dimension(
         DimInfo::Lit(value) => value.to_string(),
         DimInfo::Named(label, _) => format!("`{label}`"),
     };
-    let unsupported = chelis_types::unsupported::Unsupported::new(
-        chelis_types::unsupported::UnsupportedKind::Construct(format!(
+    let unsupported = chelis_checker_core::unsupported::Unsupported::new(
+        chelis_checker_core::unsupported::UnsupportedKind::Construct(format!(
             "checker dimension `{name}` with two extents"
         )),
         format!(
@@ -22887,8 +22893,8 @@ fn raise_conflicting_checker_dimension(
             extent(first),
             extent(second)
         ),
-        chelis_types::unsupported::Stage::Lowering,
-        chelis_types::unimplemented_rejection!(
+        chelis_checker_core::unsupported::Stage::Lowering,
+        chelis_checker_core::unimplemented_rejection!(
             1277,
             "a checker dimension that two activations share without a per-activation binding \
              has no single extent"
@@ -25479,7 +25485,15 @@ pub(crate) fn normalize_authored_entry_type(
     registry: &AdtRegistry,
     expr: &Expr,
 ) -> Result<Expr, String> {
-    registry.normalize_alias_syntax(expr)
+    struct CurrentCancellation;
+    impl chelis_checker_core::Cancellation for CurrentCancellation {
+        fn is_cancelled(&self) -> bool {
+            chelis_types::cancel::cancellation_requested()
+        }
+    }
+    let mut resources = chelis_checker_core::Resources::new(&chelis_syntax_host::NativeStack);
+    resources.cancellation = Some(&CurrentCancellation);
+    registry.normalize_alias_syntax(expr, &resources)
 }
 
 fn parse_expanded_fn_type_expr(
@@ -26621,8 +26635,8 @@ fn term_matches_or_is_unresolved(
 /// scheme but a procedural output-shape rule. Use the existing cached admitted
 /// declarations, never a second operation-name list or a result annotation.
 fn type_preserving_builtin_argument(name: &str) -> Option<(usize, usize)> {
-    let operation = chelis_types::AdmittedBuiltin::resolve(name)?;
-    if operation.declaration().shape_class != chelis_types::ShapeClass::Identity {
+    let operation = chelis_checker_core::AdmittedBuiltin::resolve(name)?;
+    if operation.declaration().shape_class != chelis_checker_core::ShapeClass::Identity {
         return None;
     }
     let Type::Fn(params, result) = &operation.scheme().body else {
@@ -26941,7 +26955,7 @@ fn infer_builtin_host_type_from_arg_tys_unchecked(
         },
         "mod" | "bitand" | "bitor" | "bitxor" | "shl" | "shr" | "char_code" | "string_len"
         | "rank" | "shape" | "numel" => Some(HostTypeTerm::Int64),
-        name if chelis_types::COMPARISON_OPS.contains(&name) => match arg_tys.first() {
+        name if chelis_checker_core::COMPARISON_OPS.contains(&name) => match arg_tys.first() {
             Some(HostTypeTerm::Tensor(tensor_ty)) => Some(HostTypeTerm::Tensor(TensorType {
                 dims: tensor_ty.dims.clone(),
                 precision: chelis_numeric_core::prim::Prim::Bool,
@@ -27064,9 +27078,8 @@ fn infer_builtin_host_type_from_arg_tys_unchecked(
         // precision we picked would be a guess — e.g. an earlier version
         // mapped `Float64 -> F32`, which is wrong for an `f64` initial,
         // and `Int64` for an `i32` initial. The authoritative element
-        // type lives in the real type checker (`chelis-types`
-        // `infer.rs::infer_app` "tensor_scan" arm) and in the runtime,
-        // which reads the precision straight off the initial value.
+        // type comes from `chelis-checker-core` inference and the runtime,
+        // which reads the precision from the initial value.
         //
         // Returning `Unknown` is sound because this host type is *never
         // consumed*: `tensor_scan` is host-only, so any compiled-backend
@@ -28521,7 +28534,7 @@ mod tests {
                 (t-tensor {span: "result-origin"} (d-lit {} 2) (t-var {} p)))"#,
         );
         let contract = NormalizedCallableContract::from_authored(
-            &chelis_types::adt::AdtRegistry::default(),
+            &chelis_checker_core::adt::AdtRegistry::default(),
             &authored,
         )
         .unwrap()
@@ -28586,7 +28599,7 @@ mod tests {
                 (t-tensor {span: "result-origin"} (d-lit {} 2) (t-var {} p)))"#,
         );
         let contract = NormalizedCallableContract::from_authored(
-            &chelis_types::adt::AdtRegistry::default(),
+            &chelis_checker_core::adt::AdtRegistry::default(),
             &authored,
         )
         .unwrap()
@@ -28649,7 +28662,7 @@ mod tests {
             "(t-fn {} (t-tensor {} (d-lit {} 2) (d-name {} anchor) (d-rank {} rest) (t-var {} p)) (t-tensor {} (d-lit {} 2) (t-var {} p)))",
         );
         let contract = NormalizedCallableContract::from_authored(
-            &chelis_types::adt::AdtRegistry::default(),
+            &chelis_checker_core::adt::AdtRegistry::default(),
             &authored,
         )
         .unwrap()
@@ -36599,7 +36612,7 @@ mod record_hoist_binder_vocabulary_tests {
                 Arc::new(
                     crate::claim_pattern::ClaimPattern::derive(
                         &syntax,
-                        &chelis_types::adt::AdtRegistry::default(),
+                        &chelis_checker_core::adt::AdtRegistry::default(),
                     )
                     .unwrap(),
                 )
@@ -37009,7 +37022,7 @@ impl AccumulatorDeltaProof {
 /// never from runtime storage identity, equal extents, or inferred result types.
 pub fn accumulator_delta_proof(
     expr: &Expr,
-    registry: &chelis_types::adt::AdtRegistry,
+    registry: &chelis_checker_core::adt::AdtRegistry,
 ) -> Option<AccumulatorDeltaProof> {
     let (types, result) = expr_fn_type(expr)?;
     if types.first()? != &result {
@@ -37023,7 +37036,7 @@ pub fn accumulator_delta_proof(
 /// proves nor invalidates reuse of the exact first formal's components.
 pub fn accumulator_construction_proof(
     expr: &Expr,
-    registry: &chelis_types::adt::AdtRegistry,
+    registry: &chelis_checker_core::adt::AdtRegistry,
 ) -> Option<AccumulatorDeltaProof> {
     accumulator_construction_proof_impl(expr, registry, None, true)
 }
@@ -37632,7 +37645,7 @@ impl AccumulatorCompositionProof {
 pub fn accumulator_composition_proof(
     callback: &Expr,
     callee: &Expr,
-    registry: &chelis_types::adt::AdtRegistry,
+    registry: &chelis_checker_core::adt::AdtRegistry,
 ) -> Option<AccumulatorCompositionProof> {
     fn bare(expr: &Expr) -> &Expr {
         match expr {
@@ -37682,7 +37695,7 @@ pub fn accumulator_composition_proof(
 
 fn accumulator_construction_proof_impl(
     expr: &Expr,
-    registry: &chelis_types::adt::AdtRegistry,
+    registry: &chelis_checker_core::adt::AdtRegistry,
     forwarded_formal: Option<&Expr>,
     admission: bool,
 ) -> Option<AccumulatorDeltaProof> {
@@ -38065,7 +38078,7 @@ mod accumulator_delta_tests {
         .unwrap();
         let changed = crate::claim_pattern::ClaimPattern::derive(
             &changed[0],
-            &chelis_types::adt::AdtRegistry::default(),
+            &chelis_checker_core::adt::AdtRegistry::default(),
         )
         .unwrap();
         assert!(!proof.validates_pattern(&changed));

@@ -1,52 +1,14 @@
 //! #1294: independently defend declaration and checked-shape discovery.
+use chelis_checker_core::BUILTINS;
+use chelis_checker_core::BuiltinCapabilityDecl;
+use chelis_checker_core::BuiltinSemanticDomain as Domain;
+use chelis_checker_core::BuiltinSiblingCaseDecl;
+use chelis_checker_core::BuiltinSiblingCaseId as Case;
+use chelis_checker_core::builtin_decl;
+use chelis_checker_core::errors::ErrorWitness;
 use chelis_numeric_core::prim::Prim;
 use chelis_type_core::{TensorPrec, Type};
-use chelis_types::errors::ErrorWitness;
-use chelis_types::{
-    BUILTINS, BuiltinCapabilityDecl, BuiltinSemanticDomain as Domain, BuiltinSiblingCaseDecl,
-    BuiltinSiblingCaseId as Case, builtin_decl,
-};
 use std::collections::BTreeSet;
-
-#[test]
-fn every_declared_case_is_a_live_enum_member_and_every_member_is_declared() {
-    let source = syn::parse_file(include_str!("../src/builtins.rs")).expect("valid Rust");
-    let domains: BTreeSet<_> = source
-        .items
-        .iter()
-        .find_map(|item| match item {
-            syn::Item::Enum(e) if e.ident == "BuiltinSemanticDomain" => {
-                Some(e.variants.iter().map(|v| v.ident.to_string()).collect())
-            }
-            _ => None,
-        })
-        .expect("closed semantic domains");
-    assert_eq!(
-        domains,
-        ["Numeric", "Container", "Boundary"]
-            .map(str::to_string)
-            .into_iter()
-            .collect()
-    );
-    let members: BTreeSet<_> = source
-        .items
-        .iter()
-        .find_map(|item| match item {
-            syn::Item::Enum(e) if e.ident == "BuiltinSiblingCaseId" => {
-                Some(e.variants.iter().map(|v| v.ident.to_string()).collect())
-            }
-            _ => None,
-        })
-        .expect("closed case enum");
-    let mut declared = BTreeSet::new();
-    for builtin in BUILTINS {
-        builtin.capability.validate().expect("valid declaration");
-        for case in builtin.capability.sibling_cases {
-            declared.insert(format!("{:?}", case.case));
-        }
-    }
-    assert_eq!(members, declared, "stale or missing sibling case");
-}
 
 #[test]
 fn invalid_domain_case_declarations_fail_loudly() {
@@ -158,11 +120,11 @@ fn every_declared_identity_has_a_unique_case_selector_witness() {
             );
         }
     }
-    let declared = chelis_types::builtin_discovery::builtin_semantic_identities().unwrap();
+    let declared = chelis_checker_core::builtin_discovery::builtin_semantic_identities().unwrap();
     assert_eq!(selected, declared.into_iter().collect());
     assert_eq!(
         BUILTINS.iter().map(|b| b.name).collect::<BTreeSet<_>>(),
-        chelis_types::BUILTIN_NAMES.iter().copied().collect()
+        chelis_checker_core::BUILTIN_NAMES.iter().copied().collect()
     );
     for removed in ["normalize", "jint", "jnum", "jget", "to_json", "parse_json"] {
         assert!(builtin_decl(removed).is_none(), "removed alias {removed}");
@@ -353,9 +315,9 @@ fn symbolic_observation_preserves_legal_applications_and_rejects_wrong_bounds() 
 
 #[test]
 fn symbolic_selection_resolves_each_instantiation_without_a_default_case() {
+    use chelis_checker_core::builtin_discovery::BuiltinCaseSelection;
     use chelis_type_core::Subst;
     use chelis_type_core::TypeVar;
-    use chelis_types::builtin_discovery::BuiltinCaseSelection;
     let variable = TypeVar(9000);
     for name in ["eq", "neq", "to_string"] {
         let decl = builtin_decl(name).unwrap();

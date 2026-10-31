@@ -648,7 +648,7 @@ class _SchemaShapeGraph(_CodecShapeGraph):
             ty = arguments["args"][0]["type"]
         nominal, arguments = self._nominal(crate, ty)
         _require(
-            nominal == "chelis_types::unsupported::Unsupported"
+            nominal == "chelis_checker_core::unsupported::Unsupported"
             and arguments
             in (None, {"angle_bracketed": {"args": [], "constraints": []}}),
             "diagnostic off-wire payload changed",
@@ -1799,7 +1799,11 @@ def verify_schema_codecs(root: Path, target: Path) -> VerifiedSchemaCodecs:
             "PYO3_PYTHON": sys.executable,
             "VIRTUAL_ENV": sys.prefix,
         }
-        for package in ("chelis-types", "chelis-compiler-api", "chelis-pipeline-core", "chelis-python"):
+        for package in (
+            "chelis-checker-core", "chelis-types", "chelis-compiler-api",
+            "chelis-pipeline-core", "chelis-python",
+        ):
+            features = ("--features", "serde") if package == "chelis-checker-core" else ()
             command = [
                 "cargo",
                 "rustdoc",
@@ -1807,6 +1811,7 @@ def verify_schema_codecs(root: Path, target: Path) -> VerifiedSchemaCodecs:
                 "-p",
                 package,
                 "--lib",
+                *features,
                 "--",
                 "--output-format",
                 "json",
@@ -1829,7 +1834,10 @@ def verify_schema_codecs(root: Path, target: Path) -> VerifiedSchemaCodecs:
         document = json.loads((target / "doc/chelis_compiler_api.json").read_text())
         imported_documents = [
             json.loads((target / f"doc/{name}.json").read_text())
-            for name in ("chelis_types", "chelis_pipeline_core", "chelis_python")
+            for name in (
+                "chelis_checker_core", "chelis_types", "chelis_pipeline_core",
+                "chelis_python",
+            )
         ]
         documents = [json.loads(codec.document), document, *imported_documents]
         vocabulary = json.loads(codec.vocabulary)

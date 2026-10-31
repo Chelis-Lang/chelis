@@ -12,6 +12,7 @@ lowering-trace = ["chelis-ir/lowering-trace"]
 
 [dependencies]
 chelis-dag-core.workspace = true
+chelis-checker-core = { workspace = true, features = ["serde"] }
 chelis-unord.workspace = true
 chelis-deep.workspace = true
 chelis-types.workspace = true

@@ -842,7 +842,7 @@ fn revalidate_adt_value_inner(
         named_axis_route_visiting: UnordSet::new(),
         program: super::ProgramScope::new(module_constants.clone(), UnordMap::new()),
         declared_signatures: UnordMap::new(),
-        adt_registry: chelis_types::adt::AdtRegistry::default(),
+        adt_registry: chelis_checker_core::adt::AdtRegistry::default(),
         adt_fields: adt_fields.clone(),
         // A predicate returns a verdict; a value it builds is never rendered
         // at an exit, so its constructors keep their checked names.

@@ -1,11 +1,11 @@
 //! chelis#1592 checker ingress parity for canonical and retired signed integer
 //! primitive spellings.
 
+use chelis_checker_core::errors::ErrorWitness;
 use chelis_numeric_core::prim::Prim;
 use chelis_surf::parser::parse_str;
 use chelis_type_core::Type;
 use chelis_types::check_ir_program;
-use chelis_types::errors::ErrorWitness;
 
 fn error_messages(program: &[chelis_deep::Expr]) -> Vec<String> {
     match check_ir_program(program) {

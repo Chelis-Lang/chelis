@@ -20,10 +20,11 @@
 //! initializer ([04-LIN-2]), and a declaration that reads a value some
 //! initializer consumes, whether the def sits before or after that consume.
 
+use chelis_checker_core::CopyRepairUseKind;
+use chelis_checker_core::errors::CheckError;
+use chelis_checker_core::errors::CheckErrorKind;
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str;
-use chelis_types::CopyRepairUseKind;
-use chelis_types::errors::{CheckError, CheckErrorKind};
 use chelis_types::{
     build_type_env_from_library, check_ir_program, check_ir_with_context, check_linearity,
     check_linearity_with_context, check_typed_program,

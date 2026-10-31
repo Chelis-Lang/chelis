@@ -13,6 +13,7 @@ chelis-abi.workspace = true
 chelis-crmath = { workspace = true, features = ["std"] }
 chelis-unord.workspace = true
 chelis-ir = { path = "../chelis-ir" }
+chelis-checker-core.workspace = true
 chelis-types = { path = "../chelis-types" }
 chelis-vocab.workspace = true
 # WS-1/chelis#729 reduced-float reference values in the C-backend regression

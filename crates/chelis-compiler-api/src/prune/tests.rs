@@ -331,9 +331,9 @@ const INVARIANT_MODULE: &str = "module Demo.Invariant\n\
     def entry() -> f32 = 2.0\n\
     def unrelated() -> f32 = 99.0\n";
 
-fn invariant_errors(exprs: &[DeepExpr]) -> Vec<chelis_types::errors::CheckError> {
+fn invariant_errors(exprs: &[DeepExpr]) -> Vec<chelis_checker_core::errors::CheckError> {
     let mut errors = Vec::new();
-    chelis_types::invariants::validate_type_invariants_in_program(exprs, &mut errors);
+    chelis_checker_core::invariants::validate_type_invariants_in_program(exprs, &mut errors);
     errors
 }
 
@@ -381,7 +381,7 @@ fn pruning_does_not_admit_missing_or_parameterized_invariant_constants() {
         assert!(after.iter().all(|error| {
             matches!(
                 error.kind,
-                chelis_types::errors::CheckErrorKind::OpaqueTypeViolation
+                chelis_checker_core::errors::CheckErrorKind::OpaqueTypeViolation
             ) && error.message.contains("in-module zero-argument constant")
         }));
     }

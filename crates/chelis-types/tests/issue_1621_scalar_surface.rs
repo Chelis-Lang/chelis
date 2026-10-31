@@ -1,6 +1,8 @@
 //! [04-DTYPE-2], [04-INF-6], [05-OP-36] and spec/05 §1.2:
 //! a dtype binder denotes a scalar dtype, never an implicit tensor shape.
-use chelis_types::{check_ir_program, check_typed_program, errors::CheckError};
+use chelis_checker_core::errors::CheckError;
+use chelis_types::check_ir_program;
+use chelis_types::check_typed_program;
 
 const COMPARISONS: [&str; 7] = ["cmplt", "eq", "neq", "lt", "gt", "lte", "gte"];
 const ARITHMETIC: [&str; 8] = [

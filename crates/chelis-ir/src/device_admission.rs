@@ -41,7 +41,7 @@ const fn fused_device_fenced_name(op: FusedStepOp) -> Option<&'static str> {
 pub fn reject_device_correctly_rounded_ops(
     nodes: &[DagNode],
     target: &'static str,
-) -> Result<(), chelis_types::unsupported::Unsupported> {
+) -> Result<(), chelis_checker_core::unsupported::Unsupported> {
     for node in nodes {
         let name = match &node.op {
             RiscOp::Exp => Some("exp"),
@@ -73,24 +73,24 @@ pub fn reject_device_correctly_rounded_ops(
 pub fn device_correctly_rounded_rejection(
     name: &str,
     target: &'static str,
-) -> chelis_types::unsupported::Unsupported {
+) -> chelis_checker_core::unsupported::Unsupported {
     let authority = if name == "pow" {
-        chelis_types::deliberate_rejection!(
+        chelis_checker_core::deliberate_rejection!(
             "[05-OP-79]",
             "device pow is fenced until the device lane has a correctly rounded kernel"
         )
     } else {
-        chelis_types::deliberate_rejection!(
+        chelis_checker_core::deliberate_rejection!(
             "[05-OP-46]",
             "device transcendentals and sqrt are fenced until the device lane has correctly rounded kernels"
         )
     };
-    chelis_types::unsupported::Unsupported::new(
-        chelis_types::unsupported::UnsupportedKind::Op(name.to_string()),
+    chelis_checker_core::unsupported::Unsupported::new(
+        chelis_checker_core::unsupported::UnsupportedKind::Op(name.to_string()),
         format!(
             "`{name}` must be correctly rounded and the {target} device lane has no correctly rounded kernel for it; build for `--target c`"
         ),
-        chelis_types::unsupported::Stage::Codegen(target),
+        chelis_checker_core::unsupported::Stage::Codegen(target),
         authority,
     )
 }

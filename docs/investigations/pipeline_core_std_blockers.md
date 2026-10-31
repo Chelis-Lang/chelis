@@ -2,7 +2,7 @@
 
 `chelis-pipeline-core` requires `std`.
 
-This inventory records direct core use and transitive blockers in its seven direct dependencies.
+This inventory records direct core use and transitive blockers in its direct dependencies.
 It does not claim current `#![no_std]` support for `chelis-pipeline-core`.
 
 ## Direct Core Use
@@ -27,11 +27,22 @@ This portable dependency does not make the pipeline core portable.
 
 ### `chelis-types`
 
-`chelis-types` uses standard collections, `Arc`, `Mutex`, cells, and thread-local state. Cancellation and linked-program guards use thread-local storage.
+`chelis-types` retains native checked-product construction, library proofs, context admission, target types, native profiling, and thread-local guards.
+Cancellation and linked-program guards remain thread-local.
+Native adapters supply `stacker` services and borrowed cancellation access to the portable checker.
+The facade still needs `std`.
 
-Type inference uses `stacker::grow` and `stacker::remaining_stack`. The `stacker` dependency uses platform stack and memory services.
+### `chelis-checker-core`
 
-The checker also retains panic paths for internal invariant failures. Its default dependencies include `serde`, `thiserror`, `half`, and `stacker`.
+`chelis-checker-core` uses unconditional `no_std`, explicit `alloc`, empty defaults, and optional ordinary-data serde.
+It owns inference, semantic validation, totality, diagnostic sessions, environments, ADTs, builtin data, and linearity algorithms.
+Each operation receives explicit stack services and caller policy.
+The embedding supplies allocation and enough stack capacity.
+The normal graph contains no native stack provider, clock, filesystem, process, or hosted checker.
+The canonical `chelis-abi` dependency also uses unconditional `no_std` and `alloc`.
+
+Portable facts and contexts grant no native checked-product authority.
+This dependency does not make `chelis-pipeline-core` portable.
 
 ### `chelis-effects`
 
@@ -51,6 +62,7 @@ This portable dependency does not make the pipeline core portable.
 `chelis-ir` uses standard collections, thread-local state, and `OnceLock`. Lowering uses `std::panic::catch_unwind` to convert selected panic payloads into diagnostics.
 
 Lowering uses `stacker::grow` and `stacker::maybe_grow`. The IR crate also retains panic paths for internal compiler invariants.
+Checked-product reconstruction uses `chelis-syntax-host::NativeStack` for portable checker operations.
 
 The default dependencies include `serde`, `thiserror`, and `stacker`. `chelis-ir` also inherits blockers from `chelis-types` and `chelis-effects`.
 

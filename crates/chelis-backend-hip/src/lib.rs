@@ -104,11 +104,11 @@ pub fn runtime_dir() -> &'static str {
 pub fn codegen_hip(
     dag: chelis_ir::ownership::VerifiedDagProgram,
     func_name: &str,
-) -> Result<HipCodegenResult, chelis_types::unsupported::Unsupported> {
+) -> Result<HipCodegenResult, chelis_checker_core::unsupported::Unsupported> {
     // chelis#1277 C4.1/C4.5: derived after the last rewrite, so this runs on
     // the specialized DAG the emitter actually consumes.
     dag.emission()
-        .check_axis_sources(chelis_types::unsupported::Stage::Codegen("hip"))?;
+        .check_axis_sources(chelis_checker_core::unsupported::Stage::Codegen("hip"))?;
     chelis_ir::device_admission::reject_device_correctly_rounded_ops(
         dag.emission().nodes(),
         "hip",
@@ -125,11 +125,11 @@ pub fn codegen_hip(
         )
     };
     let plan = chelis_ir::ownership::plan_hip_storage(dag).map_err(|error| {
-        chelis_types::unsupported::Unsupported::new(
-            chelis_types::unsupported::UnsupportedKind::Op("storage planning".to_string()),
+        chelis_checker_core::unsupported::Unsupported::new(
+            chelis_checker_core::unsupported::UnsupportedKind::Op("storage planning".to_string()),
             error.to_string(),
-            chelis_types::unsupported::Stage::Codegen("hip"),
-            chelis_types::deliberate_rejection!(
+            chelis_checker_core::unsupported::Stage::Codegen("hip"),
+            chelis_checker_core::deliberate_rejection!(
                 "[04-SHAPE-1]",
                 "HIP storage placement requires the verified exact-capacity plan"
             ),
@@ -242,7 +242,7 @@ pub fn codegen_hip_host_program(
     program: &chelis_ir::ownership::VerifiedHostProgram,
     func_name: &str,
     helpers: Vec<chelis_backend_c::HostTensorHelperCodegen>,
-) -> Result<HipHostProgramCodegenResult, chelis_types::unsupported::Unsupported> {
+) -> Result<HipHostProgramCodegenResult, chelis_checker_core::unsupported::Unsupported> {
     let count_helpers = helpers
         .into_iter()
         .filter(|helper| {
@@ -271,7 +271,7 @@ pub fn codegen_hip_host_program(
                 name: helper.name,
             })
         })
-        .collect::<Result<Vec<_>, chelis_types::unsupported::Unsupported>>()?;
+        .collect::<Result<Vec<_>, chelis_checker_core::unsupported::Unsupported>>()?;
     Ok(HipHostProgramCodegenResult {
         host,
         device_helpers,
@@ -283,16 +283,17 @@ pub fn codegen_hip_host_program(
 fn verified_host_helper_dag(
     helper_name: &str,
     dag: chelis_dag_core::dag::Dag,
-) -> Result<chelis_ir::ownership::VerifiedDagProgram, chelis_types::unsupported::Unsupported> {
+) -> Result<chelis_ir::ownership::VerifiedDagProgram, chelis_checker_core::unsupported::Unsupported>
+{
     let selected = prepare_dag_for_codegen(dag);
     let unsupported = |error: chelis_ir::ownership::OwnershipError| {
-        chelis_types::unsupported::Unsupported::new(
-            chelis_types::unsupported::UnsupportedKind::Construct(format!(
+        chelis_checker_core::unsupported::Unsupported::new(
+            chelis_checker_core::unsupported::UnsupportedKind::Construct(format!(
                 "HIP device helper `{helper_name}` ownership lowering"
             )),
             error.to_string(),
-            chelis_types::unsupported::Stage::Codegen("hip"),
-            chelis_types::deliberate_rejection!(
+            chelis_checker_core::unsupported::Stage::Codegen("hip"),
+            chelis_checker_core::deliberate_rejection!(
                 "[04-SHAPE-1]",
                 "a device-emitted host tensor helper requires the same verified ownership plan as a tensor entry"
             ),

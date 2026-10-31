@@ -4196,9 +4196,10 @@ where
 {
     // chelis#1277 C4.1: eval is a production path, so the source check runs
     // here too, before `bind_symbolic_dims` resolves any extent.
-    if let Err(unsupported) =
-        crate::axis_admission::check_axis_sources(dag, chelis_types::unsupported::Stage::Runtime)
-    {
+    if let Err(unsupported) = crate::axis_admission::check_axis_sources(
+        dag,
+        chelis_checker_core::unsupported::Stage::Runtime,
+    ) {
         return Err(unsupported.to_string());
     }
     let required_symbols = required_symbolic_dims(dag, live);
@@ -5387,8 +5388,9 @@ where
                 let lhs = &values[&node.inputs[0]];
                 let rhs = &values[&node.inputs[1]];
                 require_matching_comparison_shapes(kind.name(), lhs, rhs)?;
-                let storage = chelis_types::bitwise_tensor(*kind, lhs.storage(), rhs.storage())
-                    .map_err(|error| error.to_string())?;
+                let storage =
+                    chelis_checker_core::bitwise_tensor(*kind, lhs.storage(), rhs.storage())
+                        .map_err(|error| error.to_string())?;
                 TensorValue::from_storage(lhs.shape.clone(), storage)
             }
             RiscOp::Mod => {

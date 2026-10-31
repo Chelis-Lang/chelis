@@ -64,7 +64,7 @@ class LoudUnsupportedPhase2OracleTests(unittest.TestCase):
         evidence = (
             "non-exhaustive patterns",
             "crates/chelis-surf/src/resugar.rs",
-            "crates/chelis-types/src/infer/expr.rs",
+            "crates/chelis-checker-core/src/infer/expr.rs",
             "crates/chelis-effects-core/src/lib.rs",
             "crates/chelis-runtime/src/lib.rs",
         )

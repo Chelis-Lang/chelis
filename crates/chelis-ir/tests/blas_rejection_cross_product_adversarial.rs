@@ -32,9 +32,7 @@
 //!
 //! ## Surf-reachable vs DAG-only paths
 //!
-//! Surf accepts `matmul(a, b)` for any precision as long as `lhs_prec
-//! == rhs_prec` (see
-//! `crates/chelis-types/src/infer.rs::check_matmul_signature`). Some
+//! Surf checks that `matmul(a, b)` operands use the same precision. Some
 //! exotic precisions (`f8e4m3`, `bf16`) may not lower cleanly through
 //! every IR pass; this file's IR-level tests drive the recognizer
 //! directly via the public test entry point

@@ -164,8 +164,8 @@ CLIPPY_MATRIX: tuple[ClippyRun, ...] = (
             "chelis-prove/clarabel,"
             "chelis-python/extension-module,"
             "chelis-runtime/ownership-ledger,"
-            "chelis-types/checkpoint-compile-probe,"
-            "chelis-types/generalize-sweep-oracle,"
+            "chelis-checker-core/checkpoint-compile-probe,"
+            "chelis-checker-core/generalize-sweep-oracle,"
             "chelis-prove/ci-openblas-system",
             "--",
             "-D",
@@ -253,6 +253,47 @@ CLIPPY_MATRIX: tuple[ClippyRun, ...] = (
         cadence=PER_PULL_REQUEST,
     ),
     ClippyRun(
+        label="checker-default-features",
+        command=(
+            "cargo", "clippy", "-p", "chelis-checker-core",
+            "--all-targets", "--", "-D", "warnings",
+        ),
+        owner="scripts/gate.py",
+        hosts=("linux",),
+        cadence=PER_PULL_REQUEST,
+    ),
+    ClippyRun(
+        label="checker-without-default-features",
+        command=(
+            "cargo", "clippy", "-p", "chelis-checker-core",
+            "--all-targets", "--no-default-features", "--", "-D", "warnings",
+        ),
+        owner="scripts/gate.py",
+        hosts=("linux",),
+        cadence=PER_PULL_REQUEST,
+    ),
+    ClippyRun(
+        label="checker-serde",
+        command=(
+            "cargo", "clippy", "-p", "chelis-checker-core",
+            "--all-targets", "--no-default-features", "--features", "serde",
+            "--", "-D", "warnings",
+        ),
+        owner="scripts/gate.py",
+        hosts=("linux",),
+        cadence=PER_PULL_REQUEST,
+    ),
+    ClippyRun(
+        label="native-checker-without-default-features",
+        command=(
+            "cargo", "clippy", "-p", "chelis-types",
+            "--lib", "--no-default-features", "--", "-D", "warnings",
+        ),
+        owner="scripts/gate.py",
+        hosts=("linux",),
+        cadence=PER_PULL_REQUEST,
+    ),
+    ClippyRun(
         label="clarabel-provider",
         command=(
             "cargo", "clippy", "--workspace", "--all-targets", "--features",
@@ -299,6 +340,7 @@ CLIPPY_MATRIX += tuple(
     if run.label in {
         "default-features", "solver-free-features",
         "effect-default-features", "effect-without-default-features", "effect-serde",
+        "checker-default-features", "checker-without-default-features", "checker-serde",
     }
 )
 
@@ -390,6 +432,20 @@ UNCOMPILED_EXCEPTIONS: tuple[UncompiledException, ...] = (
         ),
     ),
     UncompiledException(
+        directory="scripts/fixtures/checker_core",
+        reason="standalone checker and ABI consumers compiled by the complete checker oracle",
+        owning_gate="scripts/checker_core_oracle.py",
+        sources=(
+            "scripts/fixtures/checker_core/abi.rs",
+            "scripts/fixtures/checker_core/core.rs",
+            "scripts/fixtures/checker_core/diagnostics.rs",
+            "scripts/fixtures/checker_core/host.rs",
+            "scripts/fixtures/checker_core/host_core.rs",
+            "scripts/fixtures/checker_core/pipeline_forgery.rs",
+            "scripts/fixtures/checker_core/target.rs",
+        ),
+    ),
+    UncompiledException(
         directory="scripts/fixtures/capacity_graph",
         reason="standalone rustdoc fixtures; the owning suite compiles their typed artifacts",
         owning_gate="scripts/test_capacity_census_graph.py",
@@ -400,7 +456,7 @@ UNCOMPILED_EXCEPTIONS: tuple[UncompiledException, ...] = (
         owning_gate="scripts/check_hash_order_phase_b_compile_fail.py",
     ),
     UncompiledException(
-        directory="crates/chelis-types/tests/compile_fail",
+        directory="crates/chelis-checker-core/tests/compile_fail",
         reason="standalone rejection fixtures; compiling them is the test",
         owning_gate="scripts/check_checkpoint_compile_fail.py",
     ),

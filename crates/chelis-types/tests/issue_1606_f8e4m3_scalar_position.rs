@@ -107,7 +107,7 @@ fn assert_api_diagnostic_counts(
     mismatches: usize,
     label: &str,
 ) {
-    use chelis_types::errors::CheckErrorKind;
+    use chelis_checker_core::errors::CheckErrorKind;
 
     for (entry, result) in [
         ("ir", check_ir_program(program)),
@@ -236,7 +236,7 @@ fn assert_one_report_per_site(source: &str, names: &[&str]) {
             assert!(
                 matches!(
                     error.kind,
-                    chelis_types::errors::CheckErrorKind::UnsupportedTensorPrecision
+                    chelis_checker_core::errors::CheckErrorKind::UnsupportedTensorPrecision
                 ),
                 "{entry}: {error:?}"
             );
@@ -332,7 +332,7 @@ fn hand_authored_property_parameter_contract_remains_independent_from_defsig() {
         assert!(
             matches!(
                 report.errors[0].kind,
-                chelis_types::errors::CheckErrorKind::TypeMismatch
+                chelis_checker_core::errors::CheckErrorKind::TypeMismatch
             ),
             "{entry}: {:?}",
             report.errors
@@ -360,7 +360,7 @@ fn matching_hand_authored_property_parameter_contract_remains_valid() {
 
 #[test]
 fn property_copy_ownership_uses_spanless_semantic_type_syntax() {
-    use chelis_types::errors::CheckErrorKind;
+    use chelis_checker_core::errors::CheckErrorKind;
 
     for name in ["f8e4m3", "f8e5m2"] {
         for ty in [
@@ -414,7 +414,7 @@ fn property_copy_ownership_uses_spanless_semantic_type_syntax() {
 
 #[test]
 fn property_copy_ownership_ignores_nonsemantic_metadata_differences() {
-    use chelis_types::errors::CheckErrorKind;
+    use chelis_checker_core::errors::CheckErrorKind;
 
     for name in ["f8e4m3", "f8e5m2"] {
         for (signature, parameter) in [
@@ -532,7 +532,7 @@ fn property_copy_ownership_is_per_slot_when_parameter_arity_disagrees() {
 
 #[test]
 fn property_copy_ownership_fails_closed_per_invalid_or_noncanonical_slot() {
-    use chelis_types::errors::CheckErrorKind;
+    use chelis_checker_core::errors::CheckErrorKind;
 
     for name in ["f8e4m3", "f8e5m2"] {
         let reserved = format!("(t-prim {{}} {name})");
@@ -644,7 +644,7 @@ fn nominal_arity_recovery_visits_every_header_owned_type_argument() {
 
 #[test]
 fn property_quantifier_recovery_keeps_an_independent_body_error() {
-    use chelis_types::errors::CheckErrorKind;
+    use chelis_checker_core::errors::CheckErrorKind;
 
     let program = surf_to_deep("@property classify forall(x: f8e4m3):\n  0i32");
     for result in [check_ir_program(&program), check_typed_program(&program)] {
@@ -691,7 +691,7 @@ fn legacy_unknown_tensor_precision_spans_do_not_inherit_the_tensor_span() {
             assert!(
                 matches!(
                     error.kind,
-                    chelis_types::errors::CheckErrorKind::UnsupportedTensorPrecision
+                    chelis_checker_core::errors::CheckErrorKind::UnsupportedTensorPrecision
                 ),
                 "{entry}/{name}: {error:?}"
             );
@@ -767,7 +767,7 @@ fn a_failed_signature_does_not_hide_an_independent_body_site() {
             assert!(
                 matches!(
                     error.kind,
-                    chelis_types::errors::CheckErrorKind::UnsupportedTensorPrecision
+                    chelis_checker_core::errors::CheckErrorKind::UnsupportedTensorPrecision
                 ),
                 "{error:?}"
             );
@@ -808,7 +808,7 @@ fn declaration_ownership_does_not_absorb_a_same_spelling_cast_failure() {
 
 #[test]
 fn a_rejected_tensor_precision_preserves_dimensions_for_the_body() {
-    use chelis_types::errors::CheckErrorKind;
+    use chelis_checker_core::errors::CheckErrorKind;
 
     for name in ["f8e4m3", "f8e5m2"] {
         let source = format!("def inspect(x: tensor[3, {name}]) -> i64 = shape(x, 1i32)");
@@ -904,7 +904,7 @@ fn deep_surf_deep_roundtrip_preserves_tensor_precision_diagnostic_span() {
                 assert!(
                     matches!(
                         error.kind,
-                        chelis_types::errors::CheckErrorKind::UnsupportedTensorPrecision
+                        chelis_checker_core::errors::CheckErrorKind::UnsupportedTensorPrecision
                     ),
                     "{carrier}/{entry}/{name}: {error:?}"
                 );
@@ -921,7 +921,7 @@ fn deep_surf_deep_roundtrip_preserves_tensor_precision_diagnostic_span() {
 
 #[test]
 fn valid_parts_of_a_failed_signature_still_constrain_the_body() {
-    use chelis_types::errors::CheckErrorKind;
+    use chelis_checker_core::errors::CheckErrorKind;
     for (source, expected_kind) in [
         (
             "def classify(x: f8e4m3) -> i32 = true",
@@ -938,7 +938,7 @@ fn valid_parts_of_a_failed_signature_still_constrain_the_body() {
             assert_eq!(report.errors.len(), 2, "{source}: {:?}", report.errors);
             assert!(matches!(
                 report.errors[0].kind,
-                chelis_types::errors::CheckErrorKind::UnsupportedTensorPrecision
+                chelis_checker_core::errors::CheckErrorKind::UnsupportedTensorPrecision
             ));
             assert!(
                 matches!(
@@ -1021,7 +1021,7 @@ fn an_arity_mismatch_does_not_recheck_parameter_annotations() {
                 .filter(|error| {
                     matches!(
                         error.kind,
-                        chelis_types::errors::CheckErrorKind::UnsupportedTensorPrecision
+                        chelis_checker_core::errors::CheckErrorKind::UnsupportedTensorPrecision
                     )
                 })
                 .collect();
@@ -1128,7 +1128,7 @@ fn a_parameter_hole_does_not_erase_an_independent_body_mismatch() {
                 assert!(
                     report.errors.iter().any(|error| matches!(
                         error.kind,
-                        chelis_types::errors::CheckErrorKind::TypeMismatch
+                        chelis_checker_core::errors::CheckErrorKind::TypeMismatch
                     )),
                     "{:?}",
                     report.errors
@@ -1181,7 +1181,7 @@ fn multiple_reserved_sites_survive_printing_and_serialization() {
                     assert!(
                         matches!(
                             error.kind,
-                            chelis_types::errors::CheckErrorKind::UnsupportedTensorPrecision
+                            chelis_checker_core::errors::CheckErrorKind::UnsupportedTensorPrecision
                         ),
                         "{error:?}"
                     );

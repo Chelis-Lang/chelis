@@ -27,7 +27,7 @@ fn surf_to_deep(source: &str) -> Vec<chelis_deep::Expr> {
     .into_exprs()
 }
 
-fn err_messages(rep: &chelis_types::infer::InferResult) -> Vec<String> {
+fn err_messages(rep: &chelis_checker_core::infer::InferResult) -> Vec<String> {
     rep.errors.iter().map(|e| e.message.clone()).collect()
 }
 

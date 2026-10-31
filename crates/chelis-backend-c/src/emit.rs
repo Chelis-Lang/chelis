@@ -2,6 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use chelis_checker_core::unsupported::{Stage, Unsupported, UnsupportedKind};
 use chelis_dag_core::dag::{
     ComparisonKind, Dag, DagNode, DimExpr, DimInfo, ExtremaKind, ExtremaOperand, FusedInput,
     FusedStep, FusedStepOp, LogicalKind, NodeId, ReduceWindowKind, RiscOp, RtAxis, RtDim,
@@ -17,7 +18,6 @@ use chelis_numeric_core::dtype_semantics::{
 use chelis_numeric_core::named_cast::NamedCastMode;
 use chelis_numeric_core::observation::ElementRef;
 use chelis_numeric_core::prim::Prim;
-use chelis_types::unsupported::{Stage, Unsupported, UnsupportedKind};
 
 use crate::memory::{MemoryPlan, NodeMemoryKind};
 
@@ -26,7 +26,7 @@ fn unsupported_verified_dag_action(node: NodeId, detail: &str) -> Unsupported {
         UnsupportedKind::Op("Drop".to_string()),
         format!("verified DAG ownership action at node {}: {detail}", node.0),
         Stage::Codegen("c"),
-        chelis_types::deliberate_rejection!(
+        chelis_checker_core::deliberate_rejection!(
             "[04-TOT-2]",
             "verified ownership and the retained DAG payload must agree exactly; no backend-local ownership fallback is permitted"
         ),
@@ -38,7 +38,7 @@ fn unsupported_storage_plan(error: chelis_ir::ownership::OwnershipError) -> Unsu
         UnsupportedKind::Op("storage planning".to_string()),
         error.to_string(),
         Stage::Codegen("c"),
-        chelis_types::deliberate_rejection!(
+        chelis_checker_core::deliberate_rejection!(
             "[04-SHAPE-1]",
             "C storage placement requires the verified exact-capacity plan"
         ),
@@ -50,7 +50,7 @@ fn unsupported_recurrence_graph(detail: &str) -> Unsupported {
         UnsupportedKind::Op("runtime recurrence callback".into()),
         detail,
         Stage::Codegen("c"),
-        chelis_types::deliberate_rejection!(
+        chelis_checker_core::deliberate_rejection!(
             "[05-OP-55]",
             "a runtime recurrence callback must have an exact private graph"
         ),
@@ -360,7 +360,7 @@ impl CEmitter {
                 UnsupportedKind::Op("nested runtime recurrence".into()),
                 "nested runtime recurrence C callback",
                 Stage::Codegen("c"),
-                chelis_types::unimplemented_rejection!(
+                chelis_checker_core::unimplemented_rejection!(
                     3366,
                     "nested runtime recurrence C callbacks are not implemented"
                 ),
@@ -381,7 +381,7 @@ impl CEmitter {
                     UnsupportedKind::Op("runtime recurrence callback".into()),
                     "private callback C definition",
                     Stage::Codegen("c"),
-                    chelis_types::deliberate_rejection!(
+                    chelis_checker_core::deliberate_rejection!(
                         "[05-OP-55]",
                         "a runtime recurrence callback must have a private C definition"
                     ),
@@ -908,12 +908,12 @@ impl CEmitter {
         // program's tensor helpers reach the emitter through
         // `host_emit::append_helper`, which does not go through that entry,
         // and because the declaration derivation below reads those sources.
-        dag.check_axis_sources(chelis_types::unsupported::Stage::Codegen("c"))?;
+        dag.check_axis_sources(chelis_checker_core::unsupported::Stage::Codegen("c"))?;
         // chelis#665: and every NAME this emitter will render as a C
         // identifier resolves to one place that assigns it. The check above
         // is per AXIS and this one is per NAME, which is the half the
         // occurrence walk's `panic!` covered; a receipt replaces the panic.
-        dag.check_rendered_dim_origins(chelis_types::unsupported::Stage::Codegen("c"))?;
+        dag.check_rendered_dim_origins(chelis_checker_core::unsupported::Stage::Codegen("c"))?;
         Self::reject_fused_integer_abs(dag)?;
         Self::validate_supported_precisions(dag);
         Self::validate_load_abi(dag);
@@ -1013,7 +1013,7 @@ impl CEmitter {
                 UnsupportedKind::Construct("producer extent guard".into()),
                 reason,
                 Stage::Codegen("c"),
-                chelis_types::deliberate_rejection!(
+                chelis_checker_core::deliberate_rejection!(
                     "[04-TOT-2]",
                     "a producer extent claim requires its exact checked output axis"
                 ),
@@ -1546,13 +1546,13 @@ impl CEmitter {
             declared.contains(name) || rendered.iter().any(|known| known == name)
         });
         let unwritten_mark = |defect: String| {
-            chelis_types::unsupported::Unsupported::new(
-                chelis_types::unsupported::UnsupportedKind::Construct(format!(
+            chelis_checker_core::unsupported::Unsupported::new(
+                chelis_checker_core::unsupported::UnsupportedKind::Construct(format!(
                     "extent mark the emitter did not write ({defect})"
                 )),
                 format!("emitted function `{func_name}`"),
-                chelis_types::unsupported::Stage::Codegen("c"),
-                chelis_types::unimplemented_rejection!(
+                chelis_checker_core::unsupported::Stage::Codegen("c"),
+                chelis_checker_core::unimplemented_rejection!(
                     1277,
                     "the emitter marks each extent read and declaration once; see runtime_extents.md C4"
                 ),
@@ -1565,13 +1565,13 @@ impl CEmitter {
             .map(|name| (name, "is rendered but never declared"))
             .or_else(|| read_first.map(|name| (name, "is rendered before it is declared")));
         if let Some((missing, how)) = violation {
-            return Err(chelis_types::unsupported::Unsupported::new(
-                chelis_types::unsupported::UnsupportedKind::Construct(format!(
+            return Err(chelis_checker_core::unsupported::Unsupported::new(
+                chelis_checker_core::unsupported::UnsupportedKind::Construct(format!(
                     "extent `{missing}` {how}"
                 )),
                 format!("emitted function `{func_name}`"),
-                chelis_types::unsupported::Stage::Codegen("c"),
-                chelis_types::unimplemented_rejection!(
+                chelis_checker_core::unsupported::Stage::Codegen("c"),
+                chelis_checker_core::unimplemented_rejection!(
                     1277,
                     "declare the name from its resolved extent origin; see runtime_extents.md C4.4"
                 ),
@@ -2147,7 +2147,7 @@ impl CEmitter {
                     UnsupportedKind::Op("softmax".into()),
                     "undecomposed softmax reached C emission",
                     Stage::Codegen("c"),
-                    chelis_types::deliberate_rejection!(
+                    chelis_checker_core::deliberate_rejection!(
                         "[05-OP-48]",
                         "prepare the retained softmax identity after AD and before ownership/codegen"
                     ),
@@ -2839,7 +2839,7 @@ impl CEmitter {
                     }
                 ),
                 Stage::Codegen("c"),
-                chelis_types::unimplemented_rejection!(
+                chelis_checker_core::unimplemented_rejection!(
                     2413,
                     "its untaken arm has no zero value both branches define (spec/10 section 3.2)"
                 ),
@@ -3027,7 +3027,7 @@ impl CEmitter {
                 UnsupportedKind::Op("Abs".to_string()),
                 format!("a fused integer tensor at C DAG node {}", node.0),
                 Stage::Codegen("c"),
-                chelis_types::unimplemented_rejection!(
+                chelis_checker_core::unimplemented_rejection!(
                     729,
                     "direct integer abs is implemented with an exact trapping kernel; \
                      general fused integer emission remains dtype capability work, so \
@@ -4145,19 +4145,19 @@ impl CEmitter {
                 // must stay distinguishable per [05-UNS-5]: f8e4m3 is
                 // decided by spec, a string constant cell is unbuilt.
                 let authority = match other {
-                    Prim::F8e4m3 => chelis_types::deliberate_rejection!(
+                    Prim::F8e4m3 => chelis_checker_core::deliberate_rejection!(
                         "[04-DTYPE-1]",
                         "no C constant representation exists for this dtype: f8e4m3 is \
                          reserved but inactive and must not reach backend emission \
                          (spec/04-type-system.md section 1.1.1)"
                     ),
-                    Prim::String => chelis_types::unimplemented_rejection!(
+                    Prim::String => chelis_checker_core::unimplemented_rejection!(
                         729,
                         "no C constant representation exists for this dtype: the \
                          exhaustive target capability table has no C string storage cell \
                          (spec/04-type-system.md section 1.1)"
                     ),
-                    Prim::Key => chelis_types::deliberate_rejection!(
+                    Prim::Key => chelis_checker_core::deliberate_rejection!(
                         "[05-RNG-1]",
                         "a random key has no literal carrier; every key is produced by a draw node"
                     ),
@@ -4238,7 +4238,7 @@ impl CEmitter {
                 UnsupportedKind::Construct("an inconsistent finalized tensor literal".into()),
                 format!("the C DAG emitter (node {id}): {detail}"),
                 Stage::Codegen("c"),
-                chelis_types::deliberate_rejection!(
+                chelis_checker_core::deliberate_rejection!(
                     "[05-OP-33]",
                     "literal count and dtype must agree with the checked result metadata"
                 ),
@@ -6905,28 +6905,28 @@ impl CEmitter {
             // census row 24, not row 11.
             let authority = match ty.precision {
                 Prim::Int8 | Prim::Int16 | Prim::Int32 | Prim::Int64 => {
-                    chelis_types::unimplemented_rejection!(
+                    chelis_checker_core::unimplemented_rejection!(
                         729,
                         "integer fused elementwise chains need exact integer step operators rather than libm calls"
                     )
                 }
-                Prim::F16 | Prim::Bf16 => chelis_types::unimplemented_rejection!(
+                Prim::F16 | Prim::Bf16 => chelis_checker_core::unimplemented_rejection!(
                     729,
                     "reduced-float fused chains need the target capability table's convert-compute-finalize kernel"
                 ),
-                Prim::F8e4m3 => chelis_types::deliberate_rejection!(
+                Prim::F8e4m3 => chelis_checker_core::deliberate_rejection!(
                     "[04-DTYPE-1]",
                     "f8e4m3 is reserved but inactive and must not reach backend emission"
                 ),
-                Prim::Bool => chelis_types::deliberate_rejection!(
+                Prim::Bool => chelis_checker_core::deliberate_rejection!(
                     "[04-NUM-4]",
                     "bool has no arithmetic width and arithmetic fused chains are rejected"
                 ),
-                Prim::String => chelis_types::unimplemented_rejection!(
+                Prim::String => chelis_checker_core::unimplemented_rejection!(
                     729,
                     "the exhaustive target capability table has no C fused-chain string cell"
                 ),
-                Prim::Key => chelis_types::deliberate_rejection!(
+                Prim::Key => chelis_checker_core::deliberate_rejection!(
                     "[05-RNG-1]",
                     "a random key has no arithmetic and never joins a fused chain"
                 ),
@@ -8815,7 +8815,7 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
                     input_node.output_type.precision.name()
                 ),
                 Stage::Codegen("c"),
-                chelis_types::unimplemented_rejection!(
+                chelis_checker_core::unimplemented_rejection!(
                     729,
                     "the C reduce kernels are f32-hardcoded today (WS-A1/F1); cast to f32 \
                      before the reduction. The target capability table owns non-f32 widening"
@@ -8916,7 +8916,7 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
                             UnsupportedKind::Construct("a window parameter outside i64".into()),
                             format!("the C DAG emitter (node {id})"),
                             Stage::Codegen("c"),
-                            chelis_types::deliberate_rejection!(
+                            chelis_checker_core::deliberate_rejection!(
                                 "[05-RWIN-1]",
                                 "window extents and strides require positive i64 values"
                             ),
@@ -8977,7 +8977,7 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
                     ty.precision.name()
                 ),
                 Stage::Codegen("c"),
-                chelis_types::deliberate_rejection!(
+                chelis_checker_core::deliberate_rejection!(
                     "[05-OP-39]",
                     "window reductions preserve the operand dtype"
                 ),
@@ -8988,7 +8988,7 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
                 UnsupportedKind::Op("reduce_window_mean".to_string()),
                 format!("`{}` tensors in the C DAG emitter (node {id})", prim.name()),
                 Stage::Codegen("c"),
-                chelis_types::deliberate_rejection!(
+                chelis_checker_core::deliberate_rejection!(
                     "[05-OP-39]",
                     "reduce_window_mean admits only active float tensor dtypes"
                 ),
@@ -9008,7 +9008,7 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
                 )),
                 format!("the C DAG emitter (node {id})"),
                 Stage::Codegen("c"),
-                chelis_types::deliberate_rejection!(
+                chelis_checker_core::deliberate_rejection!(
                     "[05-RWIN-1]",
                     "internal desync: lowering guarantees equal-length literal window and \
                      stride lists (chelis#725; chelis#730 census rows 8/12)"
@@ -9025,7 +9025,7 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
                 )),
                 format!("the C DAG emitter (node {id})"),
                 Stage::Codegen("c"),
-                chelis_types::deliberate_rejection!(
+                chelis_checker_core::deliberate_rejection!(
                     "[05-RWIN-1]",
                     "internal desync: the checker guarantees window arity <= input rank \
                      (chelis#730 census row 12)"
@@ -9053,7 +9053,7 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
                     )),
                     format!("the C DAG emitter (node {id})"),
                     Stage::Codegen("c"),
-                    chelis_types::unimplemented_rejection!(
+                    chelis_checker_core::unimplemented_rejection!(
                         1277,
                         "the windowed output extent floor((d - window) / stride) + 1 is \
                          not statically representable; bind the axis to a concrete size \
@@ -9243,7 +9243,7 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
                     ty.precision.name()
                 ),
                 Stage::Codegen("c"),
-                chelis_types::deliberate_rejection!(
+                chelis_checker_core::deliberate_rejection!(
                     "[05-OP-39]",
                     "window adjoints require one matching active float dtype"
                 ),
@@ -9592,7 +9592,7 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
                     out_ty.precision.name()
                 ),
                 Stage::Codegen("c"),
-                chelis_types::unimplemented_rejection!(
+                chelis_checker_core::unimplemented_rejection!(
                     951,
                     "the fused reduction kernel is f32-hardcoded (WS-A1/F1): \
                      `chelis_fill_f32` zero, a `float` accumulator cascade, and `fmaxf`. \
@@ -11870,7 +11870,7 @@ mod tests {
         assert_eq!(identity.stage, Stage::Codegen("c"));
         assert_eq!(
             identity.disposition,
-            chelis_types::unsupported::RejectionAuthorityKind::Unimplemented
+            chelis_checker_core::unsupported::RejectionAuthorityKind::Unimplemented
         );
         assert_eq!(
             identity.tracking_issue.map(|issue| issue.number()),

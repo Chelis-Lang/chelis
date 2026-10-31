@@ -360,19 +360,19 @@ reason = "Deep defsig typed-carrier changes require the complete chelis-types in
 tracking_issue = "chelis#1854"
 
 [[required_package_rule]]
-prefix = "crates/chelis-types/src/deep_type.rs"
+prefix = "crates/chelis-checker-core/src/deep_type.rs"
 packages = ["chelis-types"]
 reason = "Deep defsig shape changes require the complete chelis-types integration owner set"
 tracking_issue = "chelis#1854"
 
 [[required_package_rule]]
-prefix = "crates/chelis-types/src/infer/"
+prefix = "crates/chelis-checker-core/src/infer/"
 packages = ["chelis-types"]
 reason = "declaration-binder resolution and diagnostic ownership changes require the complete chelis-types integration owner set"
 tracking_issue = "chelis#1854"
 
 [[required_package_rule]]
-prefix = "crates/chelis-types/src/session.rs"
+prefix = "crates/chelis-checker-core/src/session.rs"
 packages = ["chelis-types"]
 reason = "binder diagnostic owner-key changes require the complete chelis-types integration owner set"
 tracking_issue = "chelis#1854"
@@ -1171,10 +1171,6 @@ name = "reshape_symbolic_dim_vmap_column"
 # chelis#1824 / Jeff's incoming-main audit: the retired spelling inventories
 # stay retired, while their small AST-position and behavioral replacements
 # receive ordinary pull-request ownership.
-[[standing_target]]
-package = "chelis-types"
-name = "expand_insert_dispatch_family"
-
 [[standing_target]]
 package = "chelis-types"
 name = "issue_1294_standard_lowerings"
@@ -4774,7 +4770,7 @@ disposition = "owner"
 workflow = "heavy-e2e.yml"
 job = "integration-support"
 cadence = "daily and workflow_dispatch"
-reason = "The domain slice checks portable type graphs, immutable host parity, concurrency, and diagnostic authority"
+reason = "The type-unification-core slice checks portable type graphs, immutable host parity, concurrency, and diagnostic authority"
 tracking_issue = "chelis#4002"
 
 [[path_rule]]
@@ -4820,7 +4816,7 @@ disposition = "owner"
 workflow = "heavy-e2e.yml"
 job = "integration-support"
 cadence = "daily and workflow_dispatch"
-reason = "The domain slice checks portable graph consumers, immutable parity, source owners, and transform allocation costs"
+reason = "The dag-core slice checks portable graph consumers, immutable parity, source owners, and transform allocation costs"
 tracking_issue = "chelis#4003"
 
 [[path_rule]]
@@ -4838,7 +4834,7 @@ disposition = "owner"
 workflow = "heavy-e2e.yml"
 job = "integration-support"
 cadence = "daily and workflow_dispatch"
-reason = "The domain slice checks portable effects, fixed-source parity, host authority, and full-host costs"
+reason = "The effect-analysis-core slice checks portable effects, fixed-source parity, host authority, and full-host costs"
 tracking_issue = "chelis#4042"
 
 [[path_rule]]
@@ -4912,6 +4908,51 @@ job = "integration-support"
 cadence = "daily and workflow_dispatch"
 reason = "The domain slice binds moved effect tests to actual selection and execution evidence"
 tracking_issue = "chelis#4042"
+
+[[path_rule]]
+prefix = "scripts/checker_core_oracle.py"
+disposition = "owner"
+workflow = "heavy-e2e.yml"
+job = "integration-support"
+cadence = "daily and workflow_dispatch"
+reason = "The checker-core slice checks portable checker consumers, fixed-source parity, private host authority, and full-host costs"
+tracking_issue = "chelis#4054"
+
+[[path_rule]]
+prefix = "scripts/test_checker_core_oracle.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "The controls reject host dependencies, missing execution evidence, stale owners, and weakened authority boundaries"
+tracking_issue = "chelis#4054"
+
+[[path_rule]]
+prefix = "scripts/check_checkpoint_compile_fail.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "lint-rust"
+cadence = "pull_request and push"
+reason = "The Rust policy gate rejects raw diagnostic offsets through the portable checker checkpoint fixture"
+tracking_issue = "chelis#4054"
+
+[[path_rule]]
+prefix = "scripts/test_check_rejection_authority_boundary.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "The mutation controls reject public rejection authority constructors and direct production builder calls"
+tracking_issue = "chelis#4054"
+
+[[path_rule]]
+prefix = "scripts/fixtures/checker_core/"
+disposition = "owner"
+workflow = "heavy-e2e.yml"
+job = "integration-support"
+cadence = "daily and workflow_dispatch"
+reason = "The domain slice executes the complete checker corpus, independent consumers, ABI checks, and resource controls"
+tracking_issue = "chelis#4054"
 
 [[path_rule]]
 prefix = "scripts/dtype_phase1_oracle.py"

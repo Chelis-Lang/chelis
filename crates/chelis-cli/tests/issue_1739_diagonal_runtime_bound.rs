@@ -1314,7 +1314,7 @@ fn census_checked_program(source: &str) -> chelis_types::CheckedProgram {
 /// plan or host IR. Inference supplies a contract only when none was authored.
 fn signature_entry_inventory(
     checked: &chelis_types::CheckedProgram,
-    signature: &chelis_types::infer::FunctionSignatureInference,
+    signature: &chelis_checker_core::infer::FunctionSignatureInference,
     c_parameters: &[String],
 ) -> Vec<EntryGuardReceipt> {
     use chelis_type_core::{Dim, Type};

@@ -4,10 +4,10 @@
 //! bool tensors, one or more compile-time i32 axes, and returns an i64
 //! tensor with every selected axis removed.
 
+use chelis_checker_core::errors::CheckError;
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str as parse_surf;
 use chelis_types::check_typed_program;
-use chelis_types::errors::CheckError;
 
 fn errors(source: &str) -> Vec<CheckError> {
     let decls = parse_surf(source, &chelis_syntax_host::NativeStack).expect("Surf fixture parses");

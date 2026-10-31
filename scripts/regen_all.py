@@ -186,7 +186,7 @@ def regen_legs(python: str) -> tuple[RegenLeg, ...]:
             check_argv=(python, "scripts/generate_rejection_registries.py", "--check"),
             writes=(
                 "spec/design/loud_unsupported_issue_manifest.json",
-                "crates/chelis-types/src/rejection_registry_generated.rs",
+                "crates/chelis-checker-core/src/rejection_registry_generated.rs",
             ),
             needs="cargo + python",
         ),

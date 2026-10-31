@@ -3,8 +3,10 @@
 //! Authority: `spec/design/checker_totality.md` section C4.2 successor
 //! acceptance and `spec/design/unrepresentable_ast_domain.md` Tasks 6-8.
 
+use chelis_checker_core::errors::CheckErrorKind;
 use chelis_deep::{DeepTag, Expr, Metadata, Span, parse_and_stamp};
-use chelis_types::{check_linearity, check_typed_program, errors::CheckErrorKind};
+use chelis_types::check_linearity;
+use chelis_types::check_typed_program;
 
 /// Push a metadata entry onto the first stamped node carrying `tag`.
 ///

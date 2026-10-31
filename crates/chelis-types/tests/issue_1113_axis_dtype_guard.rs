@@ -15,10 +15,13 @@
 //!
 //! Both polarities per op: the i32 axis stays accepted.
 
+use chelis_checker_core::AxisArgumentLayout;
+use chelis_checker_core::BUILTIN_NAMES;
+use chelis_checker_core::BUILTINS;
+use chelis_checker_core::errors::CheckError;
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str as parse_surf;
-use chelis_types::errors::CheckError;
-use chelis_types::{AxisArgumentLayout, BUILTIN_NAMES, BUILTINS, check_typed_program};
+use chelis_types::check_typed_program;
 
 fn typecheck_surf(source: &str) -> Vec<CheckError> {
     let decls =

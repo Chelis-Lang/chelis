@@ -1,3 +1,4 @@
+use chelis_checker_core::unsupported::{RejectionAuthorityKind, Stage, UnsupportedKind};
 use chelis_compiler_api::compiler::{
     BuildTarget, CompilerError, reject_inexact_device_reduction_cells, reject_unsupported_hip_ops,
     reject_unsupported_metal_ops,
@@ -8,7 +9,6 @@ use chelis_dag_core::{
     tier2::lower_mean,
 };
 use chelis_numeric_core::prim::Prim;
-use chelis_types::unsupported::{RejectionAuthorityKind, Stage, UnsupportedKind};
 
 fn ty(dims: &[usize], precision: Prim) -> TensorType {
     TensorType {

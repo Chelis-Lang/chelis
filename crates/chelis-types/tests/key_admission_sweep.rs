@@ -1,5 +1,5 @@
 //! chelis#2413: key admission is a closed allow-list ([04-LIN-9], spec/04
-//! section 1.1; `chelis_types::key_admission`). A key-carrying value reaches
+//! section 1.1 and `chelis_checker_core::key_admission`). A key-carrying value reaches
 //! an operation only when the list admits it: a key primitive's key operand,
 //! `drop`, a branch's join, construction and destructuring, a move, a
 //! builtin case that routes each value to one consumer, or a parameter whose
@@ -15,17 +15,22 @@
 //! on `realize` (accepted), and the builtin sweep's `realize`-free rows
 //! passed; see the per-test notes.
 
+use chelis_checker_core::BUILTINS;
+use chelis_checker_core::BuiltinSiblingCaseId;
+use chelis_checker_core::builtin_env;
+use chelis_checker_core::errors::CheckError;
+use chelis_checker_core::errors::CheckErrorKind;
+use chelis_checker_core::errors::ErrorWitness;
+use chelis_checker_core::key_admission::TagKeys;
+use chelis_checker_core::key_admission::builtin_key_operand;
+use chelis_checker_core::key_admission::tag_keys;
 use chelis_deep::DeepTag;
 use chelis_numeric_core::key_admission::{KeyAdmission, KeyPrimitive};
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str;
 use chelis_type_core::Type;
-use chelis_types::errors::ErrorWitness;
-use chelis_types::errors::{CheckError, CheckErrorKind};
-use chelis_types::key_admission::{TagKeys, builtin_key_operand, tag_keys};
-use chelis_types::{
-    BUILTINS, BuiltinSiblingCaseId, builtin_env, check_linearity, check_typed_program,
-};
+use chelis_types::check_linearity;
+use chelis_types::check_typed_program;
 
 fn verdict(source: &str) -> Result<(), Vec<CheckError>> {
     let decls = parse_str(source, &chelis_syntax_host::NativeStack)

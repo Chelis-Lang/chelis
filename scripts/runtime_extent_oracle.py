@@ -3405,16 +3405,16 @@ _LOCAL_ASCRIPTION_PROVENANCE_REMOVED = """\
                             )),
                         );
 """
-_LOCAL_ASCRIPTION_CHECKER_SOURCE = REPO_ROOT / "crates/chelis-types/src/infer/checked.rs"
+_LOCAL_ASCRIPTION_CHECKER_SOURCE = REPO_ROOT / "crates/chelis-checker-core/src/infer/checked.rs"
 # Remove transport after the internal owner/record invariant has been checked,
 # so the public receipt must observe the missing records itself.
 _LOCAL_ASCRIPTION_CHECKER_TRANSPORT = """\
-    validate_checked_program_totality(&checked, signature_context, errors);
+    validate_checked_program_totality(&checked, signature_context, errors, operation);
     checked
 }
 """
 _LOCAL_ASCRIPTION_CHECKER_TRANSPORT_REMOVED = """\
-    validate_checked_program_totality(&checked, signature_context, errors);
+    validate_checked_program_totality(&checked, signature_context, errors, operation);
     let mut checked = checked;
     checked.local_ascriptions.clear();
     checked

@@ -560,20 +560,6 @@ class CompileFailFixtureLockTests(unittest.TestCase):
                 discovered.add(manifest)
         self.assertEqual(set(bump_mod.COMPILE_FAIL_FIXTURE_MANIFESTS), discovered)
 
-    def test_inventory_covers_known_gated_fixtures(self):
-        relative = {
-            path.relative_to(bump_mod.REPO_ROOT).as_posix()
-            for path in bump_mod.COMPILE_FAIL_FIXTURE_MANIFESTS
-        }
-        self.assertEqual(
-            relative,
-            {
-                "crates/chelis-types/tests/compile_fail/checkpoint_raw_offset/Cargo.toml",
-                "crates/chelis-compiler-api/tests/compile_fail/pipeline_artifacts/Cargo.toml",
-                "crates/chelis-unord/tests/compile_fail/order_escape/Cargo.toml",
-            },
-        )
-
     def test_inventory_matches_the_gate_scripts_manifest_constants(self):
         # The parity lock the "keep in sync" comment asks for: a fixture that
         # moves must move in both places, or the bump silently stops

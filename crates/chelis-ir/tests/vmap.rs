@@ -85,7 +85,7 @@ fn vmap_ordinary_shape_roots_and_consumers_keep_the_scalar_operation() {
         assert!(chelis_dag_core::verify::verify(&mapped).is_empty());
         chelis_ir::axis_admission::check_axis_sources(
             &mapped,
-            chelis_types::unsupported::Stage::Runtime,
+            chelis_checker_core::unsupported::Stage::Runtime,
         )
         .unwrap();
         let values = eval_tensor_roots_with_strict(&mapped, mapped.roots(), |name| {
@@ -1061,10 +1061,15 @@ fn issue524_runtime_vmap_axis_is_rejected_at_check_time() {
     let Err(result) = check_ir_program(&exprs) else {
         panic!("a runtime vmap axis must REJECT at check, not check clean and default to 0");
     };
-    let malformed: Vec<&chelis_types::errors::CheckError> = result
+    let malformed: Vec<&chelis_checker_core::errors::CheckError> = result
         .errors
         .iter()
-        .filter(|e| matches!(e.kind, chelis_types::errors::CheckErrorKind::MalformedForm))
+        .filter(|e| {
+            matches!(
+                e.kind,
+                chelis_checker_core::errors::CheckErrorKind::MalformedForm
+            )
+        })
         .collect();
     assert!(
         !malformed.is_empty(),

@@ -26,6 +26,7 @@ Dependency features
 `chelis-types`
 `chelis-effects`
 `chelis-effects-core`
+`chelis-checker-core`
 `chelis-ir`
 `chelis-unord`
 `chelis-dag-core`
@@ -143,6 +144,7 @@ Dependency features
 `chelis-types`
 `chelis-effects`
 `chelis-effects-core`
+`chelis-checker-core`
 `chelis-ir`
 `chelis-unord`
 `chelis-dag-core`

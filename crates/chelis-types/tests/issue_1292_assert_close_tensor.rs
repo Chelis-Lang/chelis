@@ -1,10 +1,11 @@
 //! chelis#1292: `test_assert_close_tensor` is float-only and its tolerance
 //! has exactly the tensor element dtype.
 
+use chelis_checker_core::errors::CheckError;
+use chelis_checker_core::errors::CheckErrorKind;
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str as parse_surf;
 use chelis_types::check_typed_program;
-use chelis_types::errors::{CheckError, CheckErrorKind};
 
 const FLOAT_DTYPES: &[&str] = &["f16", "bf16", "f32", "f64"];
 const REJECTED_DTYPES: &[&str] = &["i8", "i16", "i32", "i64", "bool"];
