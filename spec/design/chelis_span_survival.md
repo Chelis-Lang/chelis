@@ -134,6 +134,13 @@ immediately preceding the line(s) that implement the operation. Order:
 canonical first, then `merged_spans` lex-sorted (deterministic,
 reproducible across runs).
 
+When private C tensor implementations share code, each corresponding statement
+retains the contributing sites' annotation union: the first canonical span,
+then the remaining spans sorted and deduplicated. Site adapters retain their
+individual symbols and diagnostic names. The
+[implementation-sharing design](c_tensor_helper_sharing.md) defines the exact
+code-equality boundary.
+
 There are two emission paths:
 
 | Path | Reads | Owning module | Phase |

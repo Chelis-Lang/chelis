@@ -1,0 +1,1 @@
+The C backend shares identical private tensor-kernel implementations across extraction sites while retaining site-specific diagnostics, source spans, extent checks, and result provenance. Shared kernels remain out of line during native compilation.

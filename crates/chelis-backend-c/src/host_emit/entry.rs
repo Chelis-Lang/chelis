@@ -654,6 +654,7 @@ mod tests {
             "dominated",
             options,
             &projection.variants[0][0],
+            false,
         )
         .unwrap();
         let seq_diagnostic = "extent `seq`: a axis 0 = %lld, b axis 0 = %lld";
@@ -661,9 +662,14 @@ mod tests {
             "if (chelis_tensor_shape(inputs[1], 0) != chelis_tensor_shape(inputs[0], 0)) {";
         assert!(!discharged.contains(seq_diagnostic), "{discharged}");
         assert!(!discharged.contains(seq_comparison), "{discharged}");
-        let full =
-            CEmitter::emit_verified_dag_with_options(dag.emission(), "unguarded", options, &[])
-                .unwrap();
+        let full = CEmitter::emit_verified_dag_with_options(
+            dag.emission(),
+            "unguarded",
+            options,
+            &[],
+            false,
+        )
+        .unwrap();
         assert_eq!(full.matches(seq_diagnostic).count(), 1, "{full}");
         assert_eq!(full.matches(seq_comparison).count(), 1, "{full}");
         let standalone = crate::codegen_with_options(dag, "standalone", options).unwrap();

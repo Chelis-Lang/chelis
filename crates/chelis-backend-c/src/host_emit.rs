@@ -4,6 +4,7 @@ use chelis_ir::host::{
 };
 mod entry;
 mod entry_walk;
+mod helper_pool;
 mod origin_elision;
 use entry_walk::function_entry_plan;
 
@@ -581,6 +582,8 @@ pub(crate) fn emit_host_abi_program(
         body.push(String::new());
     }
 
+    let helper_definitions_index = body.len();
+    let mut helper_pool = helper_pool::HelperPool::default();
     let global_entry_coverage = entry::global_helper_coverage(program);
     for index in 0..program.global_tensor_helpers.len() {
         let helper_name = global_tensor_helper_name(program_name, index);
@@ -590,6 +593,7 @@ pub(crate) fn emit_host_abi_program(
             for (variant, coverage) in global_entry_coverage.variants[index].iter().enumerate() {
                 helper_requirements.merge(append_helper(
                     &mut body,
+                    &mut helper_pool,
                     projected
                         .global_tensor_helper(index)
                         .expect("projected global helper retains verified child"),
@@ -719,6 +723,7 @@ pub(crate) fn emit_host_abi_program(
                 for (variant, coverage) in entry_coverage.variants[index].iter().enumerate() {
                     helper_requirements.merge(append_helper(
                         &mut body,
+                        &mut helper_pool,
                         projected
                             .function_tensor_helper(function_index, index)
                             .expect("projected function helper retains verified child"),
@@ -730,6 +735,10 @@ pub(crate) fn emit_host_abi_program(
         }
     }
 
+    body.splice(
+        helper_definitions_index..helper_definitions_index,
+        helper_pool.render(),
+    );
     body.extend(function_bodies);
 
     if !program.globals.is_empty() {
@@ -2629,6 +2638,7 @@ impl HelperRequirements {
 /// so each one is emitted exactly once at file scope.
 fn append_helper(
     out: &mut Vec<String>,
+    pool: &mut helper_pool::HelperPool,
     verified: VerifiedHostTensorHelperView<'_>,
     helper_name: &str,
     entry_coverage: &[chelis_dag_core::axis_sources::EntryExtentGuard],
@@ -2664,8 +2674,19 @@ fn append_helper(
         use_blas: uses_blas,
         static_entry: true,
     };
-    let helper_src =
-        CEmitter::emit_verified_dag_with_options(dag, &helper_name, options, entry_coverage)?;
+    let shared = !dag.nodes().iter().any(|node| {
+        matches!(
+            node.op,
+            RiscOp::RuntimeRecurrence(_) | RiscOp::RuntimeRecurrenceAdjoint { .. }
+        )
+    });
+    let helper_src = CEmitter::emit_verified_dag_with_options(
+        dag,
+        &helper_name,
+        options,
+        entry_coverage,
+        shared,
+    )?;
     // The CEmitter prepends dtype-specific uniform sampling helpers to
     // every DAG it emits so that a standalone-emitted kernel
     // stays self-contained. When multiple helpers get concatenated into a
@@ -2674,6 +2695,7 @@ fn append_helper(
     // `emit_host_program` to emit exactly one copy at file scope.
     let mut skipping_helper_prelude = false;
     let mut requirements = HelperRequirements::default();
+    let mut lines = Vec::new();
     for line in helper_src.lines() {
         if line.starts_with("#include ") {
             if line.contains("\"chelis_blas.h\"") {
@@ -2691,12 +2713,17 @@ fn append_helper(
             }
             continue;
         }
-        if line.is_empty() && out.last().is_some_and(|last| last.is_empty()) {
+        if line.is_empty() && lines.last().is_some_and(|last: &String| last.is_empty()) {
             continue;
         }
-        out.push(line.to_string());
+        lines.push(line.to_string());
     }
-    out.push(String::new());
+    lines.push(String::new());
+    if shared {
+        pool.append_adapter(out, lines, &helper_name);
+    } else {
+        out.extend(lines);
+    }
     Ok(requirements)
 }
 
