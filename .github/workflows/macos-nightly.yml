@@ -550,6 +550,8 @@ jobs:
         uses: astral-sh/setup-uv@v8.1.0
 
       - name: Create uv-managed venv + wire libpython rpath
+        env:
+          UV_MANAGED_PYTHON: "1"
         run: python3 scripts/ci_setup_uv_python.py
 
       - name: Install oracle policy dependency

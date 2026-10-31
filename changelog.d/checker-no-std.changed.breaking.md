@@ -34,6 +34,7 @@ Separate hosted jobs execute the complete core oracles without reduced selection
 Workflow tests remove obsolete literal-layout snapshots.
 Ownership guards still reject missing, duplicate, stale, and unknown commands.
 Deadline receipt tests accept timeout before child output.
+The macOS core jobs create their venv from managed Python for consistent policy imports.
 
 The checker oracle retains pinned baseline objects in the candidate repository for shallow hosted checkouts.
 The scratch checkout still checks the original revision and every frozen source digest.

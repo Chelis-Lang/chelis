@@ -137,6 +137,8 @@ The complete checker row receives 300 minutes.
 Each row executes its unchanged complete command outside the workspace shard budget.
 `macos-smoke` needs successful execution from every row.
 Artifact uploads retain complete outputs and oracle evidence.
+The bootstrap step selects managed Python for the venv.
+The managed oracle commands then use the same interpreter and installed policy dependencies.
 
 The checker oracle retains the pinned baseline in the candidate object store.
 It also verifies a separate scratch checkout against the original revision and source digests.
