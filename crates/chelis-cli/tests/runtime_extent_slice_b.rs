@@ -1539,10 +1539,7 @@ fn assert_effect_order_in_emitted_c(emitted: &str, effect_first: bool) {
             let rest = &emitted[at..];
             let name_end = rest.find('(').expect("kernel signature");
             let name = &rest["static void ".len()..name_end];
-            let body_end = rest[1..]
-                .find("\nstatic ")
-                .map_or(rest.len(), |end| end + 1);
-            (name, &rest[..body_end])
+            (name, common::tensor_kernel_definition(emitted, name))
         })
         .find(|(_, kernel)| kernel.contains(trap))
         .expect("one extracted kernel carries the result guard");

@@ -1,4 +1,5 @@
 //! spec/08 §2: extraction-site growth does not duplicate identical kernels.
+mod common;
 use std::{fs, path::Path, process::Command};
 
 fn source(count: usize, chain: bool) -> String {
@@ -79,4 +80,48 @@ fn built_shared_pipeline_matches_evaluation_and_effect_order() {
     let native = String::from_utf8(output.stdout).unwrap();
     assert_eq!(native, evaluated);
     assert_eq!(native.lines().filter(|line| *line == "site").count(), 8);
+}
+
+#[test]
+fn kernel_locator_follows_the_site_and_excludes_decoys() {
+    let source = concat!(
+        "// static __attribute__((noinline)) void __chelis_tensor_impl_7() { decoy }\n",
+        "const char *text = \"static void __chelis_tensor_impl_7() { decoy }\";\n",
+        "static void __chelis_tensor_impl_7();\n",
+        "static void decoy__chelis_tensor_impl_7() {\nwrong();\n}\n",
+        "static __attribute__((noinline)) void __chelis_tensor_impl_7() {\nreal_f32();\n}\n",
+        "static __attribute__((noinline)) void __chelis_tensor_impl_8() {\ndouble forbidden;\n}\n",
+        "static void site() {\n    __chelis_tensor_impl_7();\n}\n",
+        "static void direct() {\nidentity();\n}\n",
+    );
+    let selected = common::tensor_kernel_definition(source, "site");
+    assert!(
+        selected.contains("real_f32()")
+            && !selected.contains("decoy")
+            && !selected.contains("double")
+    );
+    assert!(common::tensor_kernel_definition(source, "direct").contains("identity()"));
+    let changed_call = source.replace(
+        "    __chelis_tensor_impl_7();",
+        "    __chelis_tensor_impl_8();",
+    );
+    assert!(
+        common::tensor_kernel_definition(&changed_call, "site").contains("double forbidden"),
+        "the dtype oracle must inspect the actual callee"
+    );
+}
+
+#[test]
+fn kernel_locator_rejects_missing_or_ambiguous_callees() {
+    for source in [
+        "static void site() {\n    __chelis_tensor_impl_7();\n}\n",
+        "static void __chelis_tensor_impl_7();\nstatic void site() {\n    __chelis_tensor_impl_7();\n}\n",
+        "static void site() {\n    __chelis_tensor_impl_bad();\n}\n",
+        "static void site() {\n    __chelis_tensor_impl_7();\n    __chelis_tensor_impl_8();\n}\n",
+    ] {
+        assert!(
+            std::panic::catch_unwind(|| common::tensor_kernel_definition(source, "site")).is_err(),
+            "{source}"
+        );
+    }
 }

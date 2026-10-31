@@ -871,6 +871,60 @@ pub fn host_body_definition<'a>(emitted: &'a str, name: &str) -> &'a str {
     );
 }
 
+/// One private tensor definition in the emitter's line-oriented C format.
+/// Inspect declaration lines, so comments, literals, look-alike symbols and
+/// forward declarations cannot supply a different kernel's body.
+fn private_tensor_definition<'a>(emitted: &'a str, name: &str) -> &'a str {
+    let needle = format!("{name}(");
+    let mut offset = 0;
+    for line in emitted.split_inclusive('\n') {
+        let signature = line
+            .strip_prefix("static void ")
+            .or_else(|| line.strip_prefix("static __attribute__((noinline)) void "));
+        if signature.is_some_and(|signature| signature.starts_with(&needle))
+            && line.trim_end().ends_with('{')
+        {
+            let rest = &emitted[offset..];
+            let end = rest
+                .find("\n}\n")
+                .expect("private tensor definition closes");
+            return &rest[..end + 2];
+        }
+        offset += line.len();
+    }
+    panic!("no private tensor definition of `{name}`");
+}
+
+/// The computation called by one tensor site. Pooled sites forward to one
+/// exact implementation; identity, recurrence and external adapters retain
+/// direct definitions. Never include an unrelated implementation or the
+/// translation unit's trailing functions in a source-shape assertion.
+pub fn tensor_kernel_definition<'a>(emitted: &'a str, site: &str) -> &'a str {
+    let adapter = private_tensor_definition(emitted, site);
+    let mut implementations = adapter.lines().filter_map(|line| {
+        let line = line.trim();
+        if !line.starts_with("__chelis_tensor_impl_") || !line.ends_with(");") {
+            return None;
+        }
+        let (name, _) = line.split_once('(').expect("implementation call");
+        let index = name.strip_prefix("__chelis_tensor_impl_").unwrap();
+        assert!(
+            !index.is_empty() && index.bytes().all(|byte| byte.is_ascii_digit()),
+            "an exact pooled implementation symbol: {name}"
+        );
+        Some(name)
+    });
+    if let Some(implementation) = implementations.next() {
+        assert!(
+            implementations.next().is_none(),
+            "one implementation per tensor site"
+        );
+        private_tensor_definition(emitted, implementation)
+    } else {
+        adapter
+    }
+}
+
 /// [05-RNG-2]'s key derivations and draw words, and the f32 arms of
 /// [05-OP-8] and [05-OP-37] over them, transcribed from
 /// `briefs/switch-design-probes/key_ref.py` (the design pass's transcription of
