@@ -35,6 +35,9 @@ Workflow tests remove obsolete literal-layout snapshots.
 Ownership guards still reject missing, duplicate, stale, and unknown commands.
 Deadline receipt tests accept timeout before child output.
 
+The checker oracle retains pinned baseline objects in the candidate repository for shallow hosted checkouts.
+The scratch checkout still checks the original revision and every frozen source digest.
+
 The complete checker oracle compares immutable-source behavior, native authority, full-host costs, independent consumers, and allocator-backed target compilation.
 The embedding supplies allocation and enough stack capacity.
 Target compilation does not prove device execution or resource capacity.

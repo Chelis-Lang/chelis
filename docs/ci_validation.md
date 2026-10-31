@@ -138,6 +138,10 @@ Each row executes its unchanged complete command outside the workspace shard bud
 `macos-smoke` needs successful execution from every row.
 Artifact uploads retain complete outputs and oracle evidence.
 
+The checker oracle retains the pinned baseline in the candidate object store.
+It also verifies a separate scratch checkout against the original revision and source digests.
+Later cost and existing-core checks can read the pinned objects after scratch checkout removal.
+
 Neither numeric owner spends its budget on other support or workspace commands.
 Both use the gate's exit status and upload `target/gate-reports/` with `always()`;
 macOS artifacts include the phase name, and each recorded command includes its

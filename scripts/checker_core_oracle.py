@@ -226,7 +226,7 @@ def validate_receipts(directory: Path) -> list[dict]:
                 raise OracleFailure("Command tool identity is absent or differs.")
             if item["exit"] != 0:
                 failure = item.get("expected_failure")
-                missing_source = item["command"] == ["git", "cat-file", "-e", f"{BASELINE}^{{commit}}"]
+                missing_source = item["command"] == ["git", "cat-file", "-e", f"{BASELINE}^{{tree}}"]
                 if not missing_source and (not failure or not failure["fragments"]
                         or any(text not in failure["diagnostic"] for text in failure["fragments"])):
                     raise OracleFailure("Failed command lacks intended negative evidence.")
@@ -368,8 +368,12 @@ def dependency(crate: str, workspace: Path, *, alias=None, defaults=True) -> str
 
 def checkout_baseline(destination: Path) -> Path:
     destination = destination.resolve()
+    # The candidate must retain baseline objects after scratch checkout removal.
+    present = support._execute(("git", "cat-file", "-e", f"{BASELINE}^{{tree}}"), cwd=ROOT)
+    if present.returncode:
+        support.run(("git", "fetch", "--quiet", "--no-tags", "--depth=1", REPOSITORY, BASELINE), cwd=ROOT)
     support.run(("git", "clone", "--quiet", "--shared", "--no-checkout", str(ROOT.resolve()), str(destination)))
-    present = support._execute(("git", "cat-file", "-e", f"{BASELINE}^{{commit}}"), cwd=destination)
+    present = support._execute(("git", "cat-file", "-e", f"{BASELINE}^{{tree}}"), cwd=destination)
     if present.returncode:
         support.run(("git", "fetch", "--quiet", "--no-tags", "--depth=1", REPOSITORY, BASELINE), cwd=destination)
     support.run(("git", "checkout", "--quiet", "--detach", BASELINE), cwd=destination)
