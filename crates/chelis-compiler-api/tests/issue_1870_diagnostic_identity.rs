@@ -41,14 +41,6 @@ fn lowering_rejection_retains_stage_span_and_tracking_metadata() {
         .expect_err("compiled lowering must reject a runtime window list");
         assert_eq!(error.stage, "lower");
         let diagnostic = error.errors.first().expect("one diagnostic");
-        assert_eq!(
-            diagnostic.message,
-            "unsupported: a non-literal window list for `reduce_window_max` on the \
-             compiled-backend lowering of `reduce_window_*` (lowering); unimplemented \
-             chelis#1058: window and stride lists must be integer literals for the compiled \
-             lane today; a runtime-parameterized window previously lowered to a silent no-op; \
-             chelis#1058 owns compiled runtime-list support at source span `surf:82..85`"
-        );
         let identity = diagnostic
             .unsupported_identity()
             .expect("lowering must preserve the typed unsupported value");

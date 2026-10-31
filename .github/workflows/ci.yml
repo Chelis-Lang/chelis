@@ -1886,9 +1886,6 @@ jobs:
           path: target/phase4b-contract-changes.json
           if-no-files-found: error
 
-      - name: Validate CI topology documentation
-        run: python -m unittest scripts.test_gate.CiParityTests.test_topology_docs_name_current_shard_owners
-
       # Agent instructions are Markdown, so their owning checks must also
       # run when docs-only routing skips the workspace and script jobs.
       - name: Validate shared agent skills

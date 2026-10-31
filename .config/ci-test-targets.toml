@@ -4770,7 +4770,7 @@ disposition = "owner"
 workflow = "heavy-e2e.yml"
 job = "integration-support"
 cadence = "daily and workflow_dispatch"
-reason = "The domain slice checks portable type graphs, immutable host parity, concurrency, and diagnostic authority"
+reason = "The type-unification-core slice checks portable type graphs, immutable host parity, concurrency, and diagnostic authority"
 tracking_issue = "chelis#4002"
 
 [[path_rule]]
@@ -4816,7 +4816,7 @@ disposition = "owner"
 workflow = "heavy-e2e.yml"
 job = "integration-support"
 cadence = "daily and workflow_dispatch"
-reason = "The domain slice checks portable graph consumers, immutable parity, source owners, and transform allocation costs"
+reason = "The dag-core slice checks portable graph consumers, immutable parity, source owners, and transform allocation costs"
 tracking_issue = "chelis#4003"
 
 [[path_rule]]
@@ -4834,7 +4834,7 @@ disposition = "owner"
 workflow = "heavy-e2e.yml"
 job = "integration-support"
 cadence = "daily and workflow_dispatch"
-reason = "The domain slice checks portable effects, fixed-source parity, host authority, and full-host costs"
+reason = "The effect-analysis-core slice checks portable effects, fixed-source parity, host authority, and full-host costs"
 tracking_issue = "chelis#4042"
 
 [[path_rule]]
@@ -4915,7 +4915,7 @@ disposition = "owner"
 workflow = "heavy-e2e.yml"
 job = "integration-support"
 cadence = "daily and workflow_dispatch"
-reason = "The domain slice checks portable checker consumers, fixed-source parity, private host authority, and full-host costs"
+reason = "The checker-core slice checks portable checker consumers, fixed-source parity, private host authority, and full-host costs"
 tracking_issue = "chelis#4054"
 
 [[path_rule]]
