@@ -1625,12 +1625,14 @@ fn build_c_host_tensor_helper_dedups_repeated_inputs_at_callsite() {
         .success();
 
     let generated = fs::read_to_string(out_dir.join("gram_bug5.c")).expect("generated source");
+    let gram = authored_c_symbol("gram");
+    let kernel =
+        common::tensor_kernel_definition(&generated, &format!("{gram}__tensor_0__private"));
     assert!(
-        generated.contains("expected %d inputs, got %d\\n\", 1, n_in"),
-        "expected helper ABI to dedup repeated tensor loads, got:\n{generated}"
+        kernel.contains("if (n_in != 1) {"),
+        "expected gram's helper ABI to dedup repeated tensor loads, got:\n{kernel}"
     );
 
-    let gram = authored_c_symbol("gram");
     write_file(
         &out_dir.join("driver.c"),
         &r#"#include "chelis_runtime.h"

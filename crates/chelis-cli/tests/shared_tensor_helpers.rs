@@ -89,8 +89,8 @@ fn kernel_locator_follows_the_site_and_excludes_decoys() {
         "const char *text = \"static void __chelis_tensor_impl_7() { decoy }\";\n",
         "static void __chelis_tensor_impl_7();\n",
         "static void decoy__chelis_tensor_impl_7() {\nwrong();\n}\n",
-        "static __attribute__((noinline)) void __chelis_tensor_impl_7() {\nreal_f32();\n}\n",
-        "static __attribute__((noinline)) void __chelis_tensor_impl_8() {\ndouble forbidden;\n}\n",
+        "static __attribute__((noinline)) void __chelis_tensor_impl_7() {\n    real_f32();\n    if (n_in != 1) {\n        abort();\n    }\n    if (chelis_tensor_read_view(inputs[0]).dtype != CHELIS_DTYPE_KEY) {\n        abort();\n    }\n}\n",
+        "static __attribute__((noinline)) void __chelis_tensor_impl_8() {\n    double forbidden;\n    if (n_in != 2) {\n        abort();\n    }\n    if (chelis_tensor_read_view(inputs[0]).dtype != CHELIS_DTYPE_F32) {\n        abort();\n    }\n}\n",
         "static void site() {\n    __chelis_tensor_impl_7();\n}\n",
         "static void direct() {\nidentity();\n}\n",
     );
@@ -100,15 +100,20 @@ fn kernel_locator_follows_the_site_and_excludes_decoys() {
             && !selected.contains("decoy")
             && !selected.contains("double")
     );
+    assert!(selected.contains("if (n_in != 1) {"));
+    assert!(selected.contains(").dtype != CHELIS_DTYPE_KEY) {"));
     assert!(common::tensor_kernel_definition(source, "direct").contains("identity()"));
     let changed_call = source.replace(
         "    __chelis_tensor_impl_7();",
         "    __chelis_tensor_impl_8();",
     );
+    let changed_kernel = common::tensor_kernel_definition(&changed_call, "site");
     assert!(
-        common::tensor_kernel_definition(&changed_call, "site").contains("double forbidden"),
+        changed_kernel.contains("double forbidden"),
         "the dtype oracle must inspect the actual callee"
     );
+    assert!(!changed_kernel.contains("if (n_in != 1) {"));
+    assert!(!changed_kernel.contains(").dtype != CHELIS_DTYPE_KEY) {"));
 }
 
 #[test]
