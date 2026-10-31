@@ -200,17 +200,9 @@ fn key_form_2318_draws_match_eval_and_the_reference_in_both_lanes() {
          }}\n"
     );
     let dir = tempdir().expect("tempdir");
-    for (stem, source, lane_marker) in [
-        (
-            "dag_draw",
-            DAG_DRAW,
-            "__tensor_0__private: input `k` at slot",
-        ),
-        (
-            "computed_template_draw",
-            COMPUTED_TEMPLATE_DRAW,
-            "__tensor_0__private: input `k` at slot",
-        ),
+    for (stem, source) in [
+        ("dag_draw", DAG_DRAW),
+        ("computed_template_draw", COMPUTED_TEMPLATE_DRAW),
     ] {
         let out_dir = build(dir.path(), stem, source);
         let header = std::fs::read_to_string(out_dir.join(format!("{stem}.h"))).unwrap();
@@ -221,9 +213,14 @@ fn key_form_2318_draws_match_eval_and_the_reference_in_both_lanes() {
             "{stem}: the export takes the published key carrier:\n{header}"
         );
         let emitted = std::fs::read_to_string(out_dir.join(format!("{stem}.c"))).unwrap();
+        let kernel = common::tensor_kernel_definition(
+            &emitted,
+            &format!("{DRAW_SYMBOL}__tensor_0__private"),
+        );
         assert!(
-            emitted.contains(lane_marker),
-            "{stem}: the draw is not in the lane this case exercises"
+            kernel.contains("input `k` expected dtype key")
+                && kernel.contains(").dtype != CHELIS_DTYPE_KEY) {"),
+            "{stem}: the draw's tensor kernel must admit the key input:\n{kernel}"
         );
         if stem == "computed_template_draw" {
             assert!(

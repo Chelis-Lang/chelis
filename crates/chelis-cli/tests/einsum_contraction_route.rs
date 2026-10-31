@@ -301,11 +301,7 @@ fn converted_contractions_allocate_no_accumulator_width_copy() {
 /// The C function a routed definition's tensor body compiles to.
 fn tensor_helper<'a>(emitted: &'a str, name: &str) -> &'a str {
     let hex: String = name.bytes().map(|b| format!("{b:02x}")).collect();
-    let start = emitted
-        .find(&format!("static void chelis_fn_{hex}__tensor_0__private("))
-        .unwrap_or_else(|| panic!("no tensor helper for `{name}`"));
-    let rest = &emitted[start..];
-    &rest[..rest.find("\n}\n").expect("the helper closes")]
+    common::tensor_kernel_definition(emitted, &format!("chelis_fn_{hex}__tensor_0__private"))
 }
 
 /// chelis#3802: a routed contraction reads its row operand through the

@@ -166,7 +166,7 @@ fn gradient_code(emitted: &str) -> Vec<&str> {
     let mut code = vec![definition(emitted, "main")];
     let mut index = 0;
     while emitted.contains(&format!("p__global__tensor_{index}__private(")) {
-        code.push(definition(
+        code.push(common::tensor_kernel_definition(
             emitted,
             &format!("p__global__tensor_{index}__private"),
         ));

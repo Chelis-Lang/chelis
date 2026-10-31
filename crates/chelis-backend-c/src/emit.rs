@@ -324,8 +324,11 @@ struct CFusedReuse {
 /// Public tensor entries construct this without discharged host obligations.
 struct InvocationEmission<'a> {
     private_invocation_context: bool,
+    shared_implementation: bool,
     entry_coverage: &'a [chelis_dag_core::axis_sources::EntryExtentGuard],
 }
+
+pub(crate) const SHARED_HELPER_TEMPLATE_NAME: &str = "__chelis_tensor_implementation";
 
 impl CEmitter {
     /// Emit C source for an entire DAG as a function.
@@ -851,6 +854,7 @@ impl CEmitter {
             options,
             InvocationEmission {
                 private_invocation_context: false,
+                shared_implementation: false,
                 entry_coverage: &[],
             },
         )
@@ -863,6 +867,7 @@ impl CEmitter {
         func_name: &str,
         options: crate::CodegenOptions,
         entry_coverage: &[chelis_dag_core::axis_sources::EntryExtentGuard],
+        shared_implementation: bool,
     ) -> Result<String, Unsupported> {
         let mut plan = plan_c_storage_layout(dag).map_err(unsupported_storage_plan)?;
         let memory_plan = MemoryPlan::from_layout(&plan);
@@ -884,6 +889,7 @@ impl CEmitter {
             options,
             InvocationEmission {
                 private_invocation_context: true,
+                shared_implementation,
                 entry_coverage,
             },
         )
@@ -900,6 +906,7 @@ impl CEmitter {
         let recurrence_children = Self::emit_recurrence_children(dag, func_name, options)?;
         let InvocationEmission {
             private_invocation_context,
+            shared_implementation,
             entry_coverage,
         } = invocation;
         // chelis#1277 C4.1/C4.3: before anything reads a shape, every
@@ -1284,7 +1291,13 @@ impl CEmitter {
             e.line("");
         }
 
-        let linkage = if options.static_entry { "static " } else { "" };
+        let linkage = if shared_implementation {
+            "static __attribute__((noinline)) "
+        } else if options.static_entry {
+            "static "
+        } else {
+            ""
+        };
         // Producer-supplied `func_name` (typically the source filename's
         // stem) flows into both an identifier context (the `void {name}(...)`
         // declarator) and a format-string context (the `fprintf(stderr,
@@ -1293,7 +1306,14 @@ impl CEmitter {
         // context inherits whatever the upstream chooses; if `func_name`
         // contains non-identifier bytes the emitted C will fail to compile,
         // which is the desired outcome (loud failure, not silent injection).
-        let func_name_fmt = chelis_ir::span_sanitize::sanitize_for_format_string(func_name);
+        let (func_name_fmt, diagnostic_args) = if shared_implementation {
+            ("%s".into(), ", __chelis_helper_site")
+        } else {
+            (
+                chelis_ir::span_sanitize::sanitize_for_format_string(func_name),
+                "",
+            )
+        };
         // Only host-owned tensor helpers receive the invocation context.
         // Standalone/public kernels keep the four-argument tensor ABI.
         let invocation_param = if private_invocation_context {
@@ -1301,8 +1321,18 @@ impl CEmitter {
         } else {
             String::new()
         };
+        let site_param = if shared_implementation {
+            ", const char *__chelis_helper_site"
+        } else {
+            ""
+        };
+        let emitted_name = if shared_implementation {
+            SHARED_HELPER_TEMPLATE_NAME
+        } else {
+            func_name
+        };
         let declaration = format!(
-            "void {func_name}(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out{invocation_param});"
+            "void {emitted_name}(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out{invocation_param}{site_param});"
         );
         if !options.static_entry {
             e.line(&crate::generated_header::render_direct_export_begin(
@@ -1328,7 +1358,7 @@ impl CEmitter {
         e.line(&format!("if (n_in != {expected_inputs}) {{"));
         e.indent += 1;
         e.line(&format!(
-            "fprintf(stderr, \"{func_name_fmt}: expected %d inputs, got %d\\n\", {expected_inputs}, n_in);"
+            "fprintf(stderr, \"{func_name_fmt}: expected %d inputs, got %d\\n\"{diagnostic_args}, {expected_inputs}, n_in);"
         ));
         e.line("abort();");
         e.indent -= 1;
@@ -1337,7 +1367,7 @@ impl CEmitter {
             e.line("if (inputs == NULL) {");
             e.indent += 1;
             e.line(&format!(
-                "fprintf(stderr, \"{func_name_fmt}: inputs array is NULL but %d inputs are required\\n\", {expected_inputs});"
+                "fprintf(stderr, \"{func_name_fmt}: inputs array is NULL but %d inputs are required\\n\"{diagnostic_args}, {expected_inputs});"
             ));
             e.line("abort();");
             e.indent -= 1;
@@ -1347,7 +1377,7 @@ impl CEmitter {
         e.line(&format!("if (n_out != {expected_outputs}) {{"));
         e.indent += 1;
         e.line(&format!(
-            "fprintf(stderr, \"{func_name_fmt}: expected %d outputs, got %d\\n\", {expected_outputs}, n_out);"
+            "fprintf(stderr, \"{func_name_fmt}: expected %d outputs, got %d\\n\"{diagnostic_args}, {expected_outputs}, n_out);"
         ));
         e.line("abort();");
         e.indent -= 1;
@@ -1356,14 +1386,14 @@ impl CEmitter {
             e.line("if (outputs == NULL) {");
             e.indent += 1;
             e.line(&format!(
-                "fprintf(stderr, \"{func_name_fmt}: outputs array is NULL but %d outputs are required\\n\", {expected_outputs});"
+                "fprintf(stderr, \"{func_name_fmt}: outputs array is NULL but %d outputs are required\\n\"{diagnostic_args}, {expected_outputs});"
             ));
             e.line("abort();");
             e.indent -= 1;
             e.line("}");
         }
 
-        e.emit_input_shape_preamble(dag, &input_slots, func_name);
+        e.emit_input_shape_preamble(dag, &input_slots, &func_name_fmt, diagnostic_args);
 
         for node in dag.nodes() {
             // Skip FusedElem nodes inlined into a trailing reduction.
@@ -3308,13 +3338,9 @@ impl CEmitter {
         &mut self,
         dag: VerifiedDagView<'_>,
         input_slots: &chelis_unord::UnordMap<String, usize>,
-        func_name: &str,
+        func_name_fmt: &str,
+        diagnostic_args: &str,
     ) {
-        // Producer-supplied strings flowing into the fprintf format string
-        // baked into a `"..."` C string literal. Sanitize once per emission
-        // boundary.
-        let func_name_fmt = chelis_ir::span_sanitize::sanitize_for_format_string(func_name);
-
         // The shared IR plan follows ABI slots, interleaves each input's
         // metadata checks with its due extent witnesses, and excludes exact
         // duplicate literal comparisons. A second label/guard traversal
@@ -3335,14 +3361,14 @@ impl CEmitter {
                     let (node, slot, label) = input(load);
                     self.line(&format!("if (inputs[{slot}] == NULL) {{"));
                     self.indent += 1;
-                    self.line(&format!("fprintf(stderr, \"{func_name_fmt}: input `{label}` at slot {slot} is NULL\\n\");"));
+                    self.line(&format!("fprintf(stderr, \"{func_name_fmt}: input `{label}` at slot {slot} is NULL\\n\"{diagnostic_args});"));
                     self.line("abort();");
                     self.indent -= 1;
                     self.line("}");
                     for line in Self::entry_dtype_guard(
                         &format!("inputs[{slot}]"),
                         &format!("{func_name_fmt}: input `{label}`"),
-                        "",
+                        diagnostic_args,
                         &node.output_type,
                     ) {
                         self.line(&line);
@@ -3355,7 +3381,7 @@ impl CEmitter {
                         "if (chelis_tensor_rank(inputs[{slot}]) != {rank}) {{"
                     ));
                     self.indent += 1;
-                    self.line(&format!("fprintf(stderr, \"{func_name_fmt}: input `{label}` expected rank {rank}, got %d\\n\", chelis_tensor_rank(inputs[{slot}]));"));
+                    self.line(&format!("fprintf(stderr, \"{func_name_fmt}: input `{label}` expected rank {rank}, got %d\\n\"{diagnostic_args}, chelis_tensor_rank(inputs[{slot}]));"));
                     self.line("chelis_numeric_trap(\"numeric trap: domain in load at i64\");");
                     self.indent -= 1;
                     self.line("}");
@@ -3376,7 +3402,7 @@ impl CEmitter {
                         "if (chelis_tensor_shape(inputs[{slot}], {axis}) != {required}) {{"
                     ));
                     self.indent += 1;
-                    self.line(&format!("fprintf(stderr, \"{func_name_fmt}: input `{label}` axis {axis} expected {required}, got %lld\\n\", (long long)chelis_tensor_shape(inputs[{slot}], {axis}));"));
+                    self.line(&format!("fprintf(stderr, \"{func_name_fmt}: input `{label}` axis {axis} expected {required}, got %lld\\n\"{diagnostic_args}, (long long)chelis_tensor_shape(inputs[{slot}], {axis}));"));
                     self.line("chelis_numeric_trap(\"numeric trap: domain in load at i64\");");
                     self.indent -= 1;
                     self.line("}");
