@@ -5,6 +5,7 @@ from __future__ import annotations
 from copy import deepcopy
 import json
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -52,6 +53,100 @@ def host_snapshot():
         "library": deepcopy(checked), "layer": deepcopy(checked),
         "context": deepcopy(context), "layered_context": deepcopy(context),
         "isolation": [deepcopy(accepted) for _ in range(8)]}
+
+
+class BaselineAcquisitionTests(unittest.TestCase):
+    def test_shallow_candidate_retains_baseline_objects_after_scratch_removal(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            remote = root / "remote"
+            remote.mkdir()
+
+            def git(*arguments, cwd=remote):
+                return subprocess.run(
+                    ["git", "-c", "user.name=CheckerOracleTest",
+                        "-c", "user.email=checker@example.invalid", *arguments],
+                    cwd=cwd, check=True, text=True, capture_output=True,
+                ).stdout
+
+            git("init", "--quiet", "--initial-branch=main")
+            (remote / "input.txt").write_text("baseline\n")
+            git("add", "input.txt")
+            git("commit", "--quiet", "-m", "baseline")
+            baseline = git("rev-parse", "HEAD").strip()
+            identity = oracle.digest(remote / "input.txt")
+            (remote / "input.txt").write_text("candidate\n")
+            git("commit", "--quiet", "-am", "candidate")
+            candidate = root / "candidate"
+            git("clone", "--quiet", "--depth=1", remote.as_uri(), str(candidate), cwd=root)
+            head = git("rev-parse", "HEAD", cwd=candidate).strip()
+            missing = subprocess.run(
+                ["git", "cat-file", "-e", f"{baseline}^{{commit}}"],
+                cwd=candidate, capture_output=True, check=False,
+            )
+            self.assertNotEqual(missing.returncode, 0)
+            fixtures = root / "fixtures"
+            fixtures.mkdir()
+            (fixtures / "immutable_source.json").write_text(json.dumps({
+                "revision": baseline, "files": {"input.txt": identity},
+            }))
+            with (
+                patch.object(oracle, "ROOT", candidate),
+                patch.object(oracle, "BASELINE", baseline),
+                patch.object(oracle, "REPOSITORY", remote.as_uri()),
+                patch.object(oracle, "FIXTURES", fixtures),
+                tempfile.TemporaryDirectory(dir=root) as scratch,
+            ):
+                checkout = oracle.checkout_baseline(Path(scratch) / "source")
+                self.assertEqual((checkout / "input.txt").read_text(), "baseline\n")
+            self.assertEqual(git("show", f"{baseline}:input.txt", cwd=candidate), "baseline\n")
+            self.assertEqual(git("rev-parse", "HEAD", cwd=candidate).strip(), head)
+            self.assertEqual(git("status", "--porcelain=v1", cwd=candidate), "")
+            identity["sha256"] = "0" * 64
+            (fixtures / "immutable_source.json").write_text(json.dumps({
+                "revision": baseline, "files": {"input.txt": identity},
+            }))
+            with (
+                patch.object(oracle, "ROOT", candidate),
+                patch.object(oracle, "BASELINE", baseline),
+                patch.object(oracle, "REPOSITORY", remote.as_uri()),
+                patch.object(oracle, "FIXTURES", fixtures),
+                tempfile.TemporaryDirectory(dir=root) as scratch,
+                self.assertRaisesRegex(oracle.OracleFailure, "Immutable source file differs"),
+            ):
+                oracle.checkout_baseline(Path(scratch) / "source")
+
+    def test_only_the_pinned_tree_probe_can_fail_without_compiler_evidence(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repository = root / "repository"
+            subprocess.run(
+                ["git", "init", "--quiet", str(repository)],
+                check=True, capture_output=True,
+            )
+            evidence = oracle.Evidence(root / "evidence", "implementation")
+            evidence.execute(
+                ("git", "cat-file", "-e", f"{oracle.BASELINE}^{{tree}}"),
+                cwd=repository,
+            )
+            document = {
+                "status": "passed", "scope": "implementation", "platform": sys.platform,
+                "machine": oracle.platform.machine(), "python": sys.executable,
+                "python_version": oracle.platform.python_version(),
+                "invocation": [sys.executable, __file__],
+                "script": oracle.digest(Path(oracle.__file__)),
+                "command_count": 1, "receipts": evidence.receipts,
+            }
+            evidence.save("receipts.json", document)
+            self.assertEqual(oracle.validate_receipts(evidence.directory)[0]["exit"], 128)
+            evidence.execute(
+                ("git", "cat-file", "-e", f"{'0' * 40}^{{tree}}"),
+                cwd=repository,
+            )
+            document["command_count"] = 2
+            evidence.save("receipts.json", document)
+            with self.assertRaisesRegex(oracle.OracleFailure, "Failed command lacks intended negative evidence"):
+                oracle.validate_receipts(evidence.directory)
 
 
 class ExecutionEvidenceTests(unittest.TestCase):
