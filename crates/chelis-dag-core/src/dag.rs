@@ -1165,10 +1165,9 @@ pub enum RiscOp {
     /// storage widening lives in the host-runtime adapter that attaches
     /// the precision tag.
     ///
-    /// The C/HIP backend lanes do not yet carry Int64 tensors natively,
-    /// so the backend-runtime continues to store integer-valued floats.
-    /// The Std wrapper layer is responsible for any casts the backend
-    /// needs (see `packages/chelis-std/src/tensor/reduce.ch`).
+    /// The node's output precision is always `Prim::Int64` ([05-OP-15]);
+    /// the verifier rejects any other label, because the C backend sizes
+    /// and stores the result buffer from it (chelis#4105).
     Argmax {
         axis: usize,
     },
