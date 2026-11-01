@@ -2634,3 +2634,101 @@ fn alias_consumers_never_consume_a_binding_read_after_them() {
         }
     }
 }
+
+/// chelis#4111 beyond the reported `if`: a block result aliased through a
+/// nested `if` arm, returned by a `map` callback that captures it, projected
+/// out of a nested block inside an ADT `match` arm (the `resolve_out` path
+/// rather than `consume`), and minted inside a loop body and returned by an
+/// arm there. Each is read again afterwards and failed verification while the
+/// block result kept the depth its block minted it at.
+#[test]
+fn nested_aliases_of_a_block_result_keep_it_live_for_its_later_read() {
+    for (label, source) in [
+        (
+            "nested_if",
+            r#"def go(xs: List[i64], f1: bool, f2: bool) -> i64 = {
+  s = {
+    p0 = 1i64
+    p1 = 2i64
+    p2 = 3i64
+    concat(xs, xs)
+  }
+  c = if f1 then if f2 then s else xs else {
+    q = s
+    q
+  }
+  add(len(c), len(s))
+}
+out = go([1i64, 2i64], true, true)
+out2 = go([1i64, 2i64, 3i64], true, false)
+out3 = go([1i64], false, false)
+"#,
+        ),
+        (
+            "map_callback_capture",
+            r#"def go(xs: List[i64]) -> i64 = {
+  s = {
+    p0 = 1i64
+    p1 = 2i64
+    p2 = 3i64
+    concat(xs, xs)
+  }
+  ys = map(fn (v: i64) -> if gt(v, 1i64) then s else xs, xs)
+  add(len(ys), len(s))
+}
+out = go([1i64, 2i64])
+out2 = go([1i64, 2i64, 3i64])
+"#,
+        ),
+        (
+            "adt_arm_nested_block",
+            r#"type Pick =
+  | Left(i64)
+  | Right(i64)
+def go(xs: List[i64], p: Pick) -> i64 = {
+  s = {
+    p0 = 1i64
+    p1 = 2i64
+    p2 = 3i64
+    concat(xs, xs)
+  }
+  c = match p with {
+    | Left(k) => s
+    | Right(k) => {
+    inner = {
+      z = 1i64
+      s
+    }
+    inner
+  }
+  }
+  add(len(c), len(s))
+}
+out = go([1i64, 2i64], Left(1i64))
+out2 = go([1i64, 2i64, 3i64], Right(2i64))
+"#,
+        ),
+        (
+            "loop_body_local",
+            r#"def go(xs: List[i64], flag: bool) -> i64 = {
+  ys = map(fn (v: i64) -> {
+    s = {
+      p0 = 1i64
+      p1 = 2i64
+      append(xs, v)
+    }
+    c = if flag then s else concat(s, s)
+    add(len(c), len(s))
+  }, xs)
+  index(ys, 0i64)
+}
+out = go([1i64, 2i64], true)
+out2 = go([1i64, 2i64, 3i64], false)
+"#,
+        ),
+    ] {
+        let lowered =
+            lower_source(source).unwrap_or_else(|error| panic!("{label}: {error}\n{source}"));
+        verify_ownership(lowered).unwrap_or_else(|error| panic!("{label}: {error}\n{source}"));
+    }
+}
