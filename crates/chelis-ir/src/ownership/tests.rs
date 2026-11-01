@@ -4831,3 +4831,84 @@ fn owner_lookup_guard_catches_a_reintroduced_per_owner_scan() {
         );
     }
 }
+
+/// The join chelis#4111 lowered: one arm returns an enclosing owner, so the
+/// join reads it moved on one path and released on the other. `alias_copies`
+/// is the corrected form, where the alias arm hands the join a copy and the
+/// enclosing owner stays live for its later read and its own release.
+fn alias_arm_join(alias_copies: bool) -> RawProgram {
+    let (alias_ops, alias_arg, fresh_ops) = if alias_copies {
+        (vec![copy_op(4, 1)], 4, vec![define(2)])
+    } else {
+        (
+            vec![],
+            1,
+            vec![
+                define(2),
+                Op::Drop {
+                    owner: Operand::move_(OwnerId(1)),
+                },
+            ],
+        )
+    };
+    let mut owners = string_owners(if alias_copies { 5 } else { 4 });
+    owners.insert(OwnerId(0), info(Prim::Bool, OwnerOrigin::ExternalBorrow));
+    let mut join_ops = vec![borrow_op(1)];
+    if alias_copies {
+        join_ops.push(Op::Drop {
+            owner: Operand::move_(OwnerId(1)),
+        });
+    }
+    join_ops.push(root(3));
+    roots(
+        vec![
+            block(
+                0,
+                vec![BlockParam {
+                    owner: OwnerId(0),
+                    mode: ParamMode::EntryBorrow,
+                }],
+                vec![define(1)],
+                Terminator::Branch {
+                    condition: Operand::borrow(OwnerId(0)),
+                    then_edge: edge(1, Vec::new()),
+                    else_edge: edge(2, Vec::new()),
+                },
+            ),
+            block(
+                1,
+                vec![],
+                alias_ops,
+                Terminator::Jump(edge(3, vec![Operand::move_(OwnerId(alias_arg))])),
+            ),
+            block(
+                2,
+                vec![],
+                fresh_ops,
+                Terminator::Jump(edge(3, vec![Operand::move_(OwnerId(2))])),
+            ),
+            block(
+                3,
+                vec![BlockParam {
+                    owner: OwnerId(3),
+                    mode: ParamMode::Owned,
+                }],
+                join_ops,
+                Terminator::Exit,
+            ),
+        ],
+        owners,
+    )
+}
+
+/// chelis#4111 negative control: lowering's fix must not be absorbed by a
+/// weaker verifier. An arm that moves an enclosing owner into the join while
+/// the join still reads that owner is rejected; the copying form verifies.
+#[test]
+fn an_alias_arm_that_moves_an_enclosing_owner_read_after_the_join_is_rejected() {
+    assert!(matches!(
+        verify_raw(alias_arm_join(false)),
+        Err(OwnershipError::OwnerNotLive { owner: 1, .. })
+    ));
+    verify_raw(alias_arm_join(true)).expect("the copying alias arm verifies");
+}

@@ -2387,3 +2387,250 @@ fn owner_spans(rendered: &str, source: &str) -> Vec<(String, String)> {
     }
     found
 }
+
+/// chelis#4111's reported program: a block-bound tensor whose rank-three
+/// extents are gathered from a tensor, aliased inside a second block whose
+/// `if` returns the alias on one arm, and read again after that block.
+const ISSUE_4111: &str = "\
+sig forward[n]: tensor[n, f32] -> tensor[3, i64] -> tensor[1, i64]
+def forward(data: tensor[n, f32], target: tensor[3, i64]) = {
+  scores = {
+    k0 = tensor_to_scalar(reshape(gather(target, to_tensor([0], i64), cast(0, i32)), []))
+    k1 = tensor_to_scalar(reshape(gather(target, to_tensor([1], i64), cast(0, i32)), []))
+    k2 = tensor_to_scalar(reshape(gather(target, to_tensor([2], i64), cast(0, i32)), []))
+    reshape(data, [k0, k1, k2])
+  }
+  chosen = {
+    input = scores
+    if eq(shape(input, cast(0, i32)), cast(0, i64)) then input else exp(input)
+  }
+  extent = shape(scores, cast(0, i32))
+  to_tensor([extent])
+}
+out = forward(to_tensor([1.0, 2.0, 3.0, 4.0, 5.0, 6.0], f32), to_tensor([1, 2, 3], i64))
+";
+
+/// chelis#4111: the block result `scores` is minted inside its block and
+/// bound in the function body, so the body is its home scope. The `if` arm
+/// that returns the alias `input` therefore hands the join a copy, and
+/// neither arm consumes `scores`, which the later `shape` still reads. The
+/// block's three nested bindings had left `scores` recorded at a depth
+/// deeper than the arm, so the arm moved it and verification rejected the
+/// later read with `owner %N is not live`.
+#[test]
+fn an_alias_arm_copies_a_block_result_its_enclosing_scope_reads_later() {
+    let forward = owned_body(&unit_text(&verified_source(ISSUE_4111), "forward")).to_string();
+    let scores = forward
+        .lines()
+        .find_map(|line| {
+            let (dest, rest) = line.trim().split_once(" = ")?;
+            rest.starts_with("tensor:__host_tensor_helper_3(")
+                .then(|| dest.to_string())
+        })
+        .unwrap_or_else(|| panic!("missing the reshape result in:\n{forward}"));
+    let alias_copy = forward
+        .lines()
+        .find_map(|line| {
+            let (dest, rest) = line.trim().split_once(" = copy clone ")?;
+            (rest == scores).then(|| dest.to_string())
+        })
+        .unwrap_or_else(|| panic!("the alias arm must copy {scores}:\n{forward}"));
+    assert!(
+        forward.contains(&format!("[move {alias_copy}]")),
+        "the alias arm hands the join its copy:\n{forward}"
+    );
+    assert!(
+        !forward.contains(&format!("[move {scores}]")),
+        "no arm moves {scores} into the join:\n{forward}"
+    );
+    let read = line_index(&forward, &format!("builtin:shape(borrow {scores}"));
+    let last_read = forward
+        .lines()
+        .enumerate()
+        .filter(|(_, line)| line.contains(&format!("builtin:shape(borrow {scores}")))
+        .map(|(index, _)| index)
+        .max()
+        .unwrap();
+    assert!(read <= last_read);
+    assert_eq!(
+        count(&forward, &format!("drop move {scores}\n")),
+        1,
+        "{scores} is released exactly once:\n{forward}"
+    );
+    assert!(
+        line_index(&forward, &format!("drop move {scores}")) > last_read,
+        "{scores} is released after its later read:\n{forward}"
+    );
+}
+
+/// One value kind for the chelis#4111 sweep: the parameters it needs, a
+/// producer expression over them (with any extent bindings it reads), a
+/// fresh consuming expression over `input`, and a later read of `scores`.
+struct SweepKind {
+    name: &'static str,
+    sig: Option<&'static str>,
+    params: &'static str,
+    ret: &'static str,
+    args: &'static str,
+    extents: &'static [&'static str],
+    value: &'static str,
+    fresh: &'static str,
+    later: &'static str,
+    result: &'static str,
+}
+
+const SWEEP_KINDS: &[SweepKind] = &[
+    SweepKind {
+        name: "tensor_runtime_extents",
+        sig: Some("sig run[n]: tensor[n, f32] -> tensor[3, i64] -> bool -> tensor[1, i64]"),
+        params: "data: tensor[n, f32], target: tensor[3, i64], flag: bool",
+        ret: "",
+        args: "to_tensor([1.0, 2.0, 3.0, 4.0, 5.0, 6.0], f32), to_tensor([1, 2, 3], i64), true",
+        extents: &[
+            "k0 = tensor_to_scalar(reshape(gather(target, to_tensor([0], i64), cast(0, i32)), []))",
+            "k1 = tensor_to_scalar(reshape(gather(target, to_tensor([1], i64), cast(0, i32)), []))",
+            "k2 = tensor_to_scalar(reshape(gather(target, to_tensor([2], i64), cast(0, i32)), []))",
+        ],
+        value: "reshape(data, [k0, k1, k2])",
+        fresh: "exp(input)",
+        later: "shape(scores, cast(0, i32))",
+        result: "to_tensor([later])",
+    },
+    SweepKind {
+        name: "tensor_static_extents",
+        sig: Some("sig run: tensor[6, f32] -> bool -> tensor[1, i64]"),
+        params: "data: tensor[6, f32], flag: bool",
+        ret: "",
+        args: "to_tensor([1.0, 2.0, 3.0, 4.0, 5.0, 6.0], f32), true",
+        extents: &[],
+        value: "reshape(data, [2i64, 3i64, 1i64])",
+        fresh: "exp(input)",
+        later: "shape(scores, cast(0, i32))",
+        result: "to_tensor([later])",
+    },
+    SweepKind {
+        name: "list",
+        sig: None,
+        params: "xs: List[i64], flag: bool",
+        ret: " -> i64",
+        args: "[1i64, 2i64], true",
+        extents: &[],
+        value: "concat(xs, xs)",
+        fresh: "concat(input, input)",
+        later: "len(scores)",
+        result: "later",
+    },
+    SweepKind {
+        name: "string",
+        sig: None,
+        params: "text: string, flag: bool",
+        ret: " -> i64",
+        args: "\"ab\", true",
+        extents: &[],
+        value: "string_concat(text, text)",
+        fresh: "string_concat(input, input)",
+        later: "string_len(scores)",
+        result: "later",
+    },
+    SweepKind {
+        name: "scalar",
+        sig: None,
+        params: "x: i64, flag: bool",
+        ret: " -> i64",
+        args: "3i64, true",
+        extents: &[],
+        value: "add(x, 1i64)",
+        fresh: "mul(input, 2i64)",
+        later: "add(scores, 1i64)",
+        result: "later",
+    },
+];
+
+/// The consumer forms: the alias on either `if` arm, on an option `match`
+/// arm, and as a plain block's result.
+fn sweep_consumer(form: &str, fresh: &str) -> String {
+    match form {
+        "if_then" => format!("if flag then input else {fresh}"),
+        "if_else" => format!("if flag then {fresh} else input"),
+        "match" => format!(
+            "pick: Option[bool] = Some(flag)\n    match pick with {{\n      | None => {fresh}\n      | Some(b) => input\n    }}"
+        ),
+        "block" => "input".to_string(),
+        other => unreachable!("{other}"),
+    }
+}
+
+/// `scores` either bound directly or as a block result behind `padding`
+/// extra nested bindings (beside the kind's extent bindings), each of which
+/// raises the depth `scores` is minted at by one.
+fn sweep_source(kind: &SweepKind, block: bool, padding: usize, form: &str) -> String {
+    let mut inner: Vec<String> = (0..padding)
+        .map(|index| format!("p{index} = cast({index}, i64)"))
+        .collect();
+    inner.extend(kind.extents.iter().map(|line| line.to_string()));
+    let producer = if block {
+        format!(
+            "  scores = {{\n{}    {}\n  }}\n",
+            inner
+                .iter()
+                .map(|line| format!("    {line}\n"))
+                .collect::<String>(),
+            kind.value
+        )
+    } else {
+        format!(
+            "{}  scores = {}\n",
+            inner
+                .iter()
+                .map(|line| format!("  {line}\n"))
+                .collect::<String>(),
+            kind.value
+        )
+    };
+    format!(
+        "{sig}def run({params}){ret} = {{\n{producer}  chosen = {{\n    input = scores\n    {consumer}\n  }}\n  later = {later}\n  {result}\n}}\nout = run({args})\n",
+        sig = kind.sig.map(|sig| format!("{sig}\n")).unwrap_or_default(),
+        params = kind.params,
+        ret = kind.ret,
+        consumer = sweep_consumer(form, kind.fresh),
+        later = kind.later,
+        result = kind.result,
+        args = kind.args,
+    )
+}
+
+/// chelis#4111, closed as a class: an owner's home is the scope that binds
+/// it, whatever depth it was minted at. For every value kind (heap tensor
+/// with runtime or static extents, list, string, copy scalar), every alias
+/// consumer (either `if` arm, an option `match` arm, a block result), a
+/// direct binding or a block result, and a block padded to every depth
+/// relative to the consumer, the alias consumer leaves `scores` live for its
+/// later read and the unit verifies. The reported shape needed the block to
+/// mint `scores` at least as deep as the alias arm; the padding sweep covers
+/// both sides of that boundary.
+#[test]
+fn alias_consumers_never_consume_a_binding_read_after_them() {
+    for kind in SWEEP_KINDS {
+        for form in ["if_then", "if_else", "match", "block"] {
+            for (block, padding) in std::iter::once((false, 0)).chain((0..=6).map(|p| (true, p))) {
+                // A block needs at least one binding before its tail.
+                if block && padding + kind.extents.len() == 0 {
+                    continue;
+                }
+                let source = sweep_source(kind, block, padding, form);
+                let lowered = lower_source(&source).unwrap_or_else(|error| {
+                    panic!(
+                        "{} {form} block={block} padding={padding}: {error}\n{source}",
+                        kind.name
+                    )
+                });
+                verify_ownership(lowered).unwrap_or_else(|error| {
+                    panic!(
+                        "{} {form} block={block} padding={padding}: {error}\n{source}",
+                        kind.name
+                    )
+                });
+            }
+        }
+    }
+}

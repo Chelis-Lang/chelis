@@ -311,12 +311,31 @@ definition, receives its own copy (chelis#2577).
 
 A loop's exit-block parameter carries the loop result into the *enclosing*
 scope, which is where binding it registers it, so that is its home scope even
-though it is minted while the body scope is still open. Recording the body's
-depth instead makes a later loop body at the same depth read the result as
-body-local and consume it by move; the moved owner then reaches that loop's
-header live on the entry path and dead on the back edge, and the join is
-rejected (chelis#2781). A move inside a body that may run more than once is
-never correct for an owner the body did not create.
+though it is minted while the body scope is still open (see [Home
+scopes](#home-scopes)). Recording the body's depth instead makes a later loop
+body at the same depth read the result as body-local and consume it by move;
+the moved owner then reaches that loop's header live on the entry path and dead
+on the back edge, and the join is rejected (chelis#2781). A move inside a body
+that may run more than once is never correct for an owner the body did not
+create.
+
+### Home scopes
+
+An owner's home scope is the scope that registers it for release: the scope
+that binds it, borrows it as a fresh value, or binds it as a parameter, payload,
+accumulator or loop item. Lowering records the home scope's depth when it
+registers the owner, not when it mints it. A block's projected result, a join
+parameter and a loop's exit parameter are all minted while a nested scope is
+open and registered by the scope that receives them, so the depth they were
+minted at says nothing about where they live. A scope result (a join arm, a
+callable's return, a loop's carried state) moves a named owner only when that
+owner's home is the result's own scope or a deeper one; for any other named
+owner it takes an inserted copy, because the owner's home still reads or
+releases it. Recording the minting depth instead lets a block result minted
+behind several nested bindings look local to a later join arm at a shallower
+depth; an arm that returns an alias of that result then moves it, and a later
+read of the binding is rejected as reading an owner that is not live
+(chelis#4111).
 
 ### Manifested roots
 

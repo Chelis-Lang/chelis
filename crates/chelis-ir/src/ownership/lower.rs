@@ -982,29 +982,6 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
         Ok(id)
     }
 
-    /// Mint an owner whose home scope is `depth`, not the scope that happens to
-    /// be open.
-    ///
-    /// A loop's exit-block parameter carries the loop result into the
-    /// *enclosing* scope - that is where `bind` registers it - but it is minted
-    /// while the loop body scope is open, so `mint` records the body's depth.
-    /// `consume` then reads that depth as "local to this body" and moves the
-    /// owner on a use inside the body, leaving it live on the path into the
-    /// loop header and dead on the back edge. Host ownership verification
-    /// rejects the join (chelis#2781).
-    fn mint_at_depth(
-        &mut self,
-        ty: &ConcreteHostType,
-        placement: Placement,
-        origin: OwnerOrigin,
-        names: Vec<String>,
-        depth: usize,
-    ) -> Result<OwnerId, OwnershipError> {
-        let id = self.mint(ty, placement, origin, names)?;
-        self.owner_depth.insert(id, depth);
-        Ok(id)
-    }
-
     fn info(&self, owner: OwnerId) -> Result<&OwnerInfo, OwnershipError> {
         self.owners
             .get(&owner)
@@ -1019,8 +996,22 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
         })
     }
 
+    /// Make the open scope the owner's home: its exit releases the owner, and
+    /// `consume` and `resolve_out` read this depth to decide whether a use is
+    /// local to the scope whose result it is.
+    ///
+    /// The depth recorded at `mint` is only provisional. A value produced
+    /// inside a nested scope (a block's projected result, a join, a loop's
+    /// exit parameter) is minted while that scope is open and lives on in the
+    /// scope that binds or borrows it. Keeping the minting depth makes a later
+    /// scope at that depth or shallower read an outer owner as its own and
+    /// move it: a join arm that returns an alias then consumes a binding the
+    /// enclosing scope still reads (chelis#4111), and a later loop body moves
+    /// a loop result on its first iteration (chelis#2781).
     fn register(&mut self, owner: OwnerId) -> Result<(), OwnershipError> {
+        let depth = self.depth();
         self.scope_mut()?.owners.push(owner);
+        self.owner_depth.insert(owner, depth);
         Ok(())
     }
 
@@ -2432,7 +2423,6 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
         let init = self.consume(init, None)?;
         let list = self.lower_expr(list)?;
         let list = self.borrow(list)?;
-        let outer_depth = self.depth();
         let header_owner = self.mint(ty, Placement::Value, OwnerOrigin::Owned, Vec::new())?;
         let header = self.new_block(vec![BlockParam {
             owner: header_owner,
@@ -2460,13 +2450,7 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
             owner: acc,
             mode: ParamMode::Owned,
         }]);
-        let exit_owner = self.mint_at_depth(
-            ty,
-            Placement::Value,
-            OwnerOrigin::Owned,
-            Vec::new(),
-            outer_depth,
-        )?;
+        let exit_owner = self.mint(ty, Placement::Value, OwnerOrigin::Owned, Vec::new())?;
         let exit = self.new_block(vec![BlockParam {
             owner: exit_owner,
             mode: ParamMode::Owned,
@@ -2552,7 +2536,6 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
             label: "empty_list".to_string(),
         });
         self.moved.insert(seed);
-        let outer_depth = self.depth();
         let header_owner = self.mint(ty, Placement::Value, OwnerOrigin::Owned, Vec::new())?;
         let header = self.new_block(vec![BlockParam {
             owner: header_owner,
@@ -2571,13 +2554,7 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
             owner: acc,
             mode: ParamMode::Owned,
         }]);
-        let exit_owner = self.mint_at_depth(
-            ty,
-            Placement::Value,
-            OwnerOrigin::Owned,
-            Vec::new(),
-            outer_depth,
-        )?;
+        let exit_owner = self.mint(ty, Placement::Value, OwnerOrigin::Owned, Vec::new())?;
         let exit = self.new_block(vec![BlockParam {
             owner: exit_owner,
             mode: ParamMode::Owned,
@@ -2667,7 +2644,6 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
             label: format!("{step}:empty"),
         });
         self.moved.insert(seed);
-        let outer_depth = self.depth();
         let header_owner = self.mint(ty, Placement::Value, OwnerOrigin::Owned, Vec::new())?;
         let header = self.new_block(vec![BlockParam {
             owner: header_owner,
@@ -2686,13 +2662,7 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
             owner: acc,
             mode: ParamMode::Owned,
         }]);
-        let exit_owner = self.mint_at_depth(
-            ty,
-            Placement::Value,
-            OwnerOrigin::Owned,
-            Vec::new(),
-            outer_depth,
-        )?;
+        let exit_owner = self.mint(ty, Placement::Value, OwnerOrigin::Owned, Vec::new())?;
         let exit = self.new_block(vec![BlockParam {
             owner: exit_owner,
             mode: ParamMode::Owned,
@@ -2809,7 +2779,6 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
             label: "scan:empty".to_string(),
         });
         self.moved.insert(output_seed);
-        let outer_depth = self.depth();
         let header_state =
             self.mint(&state_ty, Placement::Value, OwnerOrigin::Owned, Vec::new())?;
         let header_output = self.mint(ty, Placement::Value, OwnerOrigin::Owned, Vec::new())?;
@@ -2850,20 +2819,8 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
                 mode: ParamMode::Owned,
             },
         ]);
-        let exit_state = self.mint_at_depth(
-            &state_ty,
-            Placement::Value,
-            OwnerOrigin::Owned,
-            Vec::new(),
-            outer_depth,
-        )?;
-        let exit_output = self.mint_at_depth(
-            ty,
-            Placement::Value,
-            OwnerOrigin::Owned,
-            Vec::new(),
-            outer_depth,
-        )?;
+        let exit_state = self.mint(&state_ty, Placement::Value, OwnerOrigin::Owned, Vec::new())?;
+        let exit_output = self.mint(ty, Placement::Value, OwnerOrigin::Owned, Vec::new())?;
         let exit = self.new_block(vec![
             BlockParam {
                 owner: exit_state,
