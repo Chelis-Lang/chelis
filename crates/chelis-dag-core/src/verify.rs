@@ -4192,6 +4192,38 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
             _ => {}
         }
 
+        // [05-OP-15]: an index reduction yields i64 positions whatever the
+        // operand dtype. Backends size the result storage from this label.
+        if matches!(node.op, RiscOp::Argmax { .. } | RiscOp::Argmin { .. })
+            && node.output_type.precision != Prim::Int64
+        {
+            errors.push(format!(
+                "index reduction at node {} requires i64 output, got {:?}",
+                node.id.0, node.output_type.precision
+            ));
+        }
+
+        // A shape-only movement relabels or re-indexes elements; it never
+        // converts them. Backends copy element storage between the operand
+        // and result buffers, so a dtype change here would reinterpret bytes.
+        // `Pad` carries the same rule beside its fill check.
+        if matches!(
+            node.op,
+            RiscOp::Reshape { .. }
+                | RiscOp::Permute { .. }
+                | RiscOp::Expand { .. }
+                | RiscOp::Shrink { .. }
+                | RiscOp::Stride { .. }
+        ) && references_valid
+            && let Some(input) = node.inputs.first().and_then(|input| dag.get(*input))
+            && input.output_type.precision != node.output_type.precision
+        {
+            errors.push(format!(
+                "movement at node {}: output precision {:?} != input precision {:?}",
+                node.id.0, node.output_type.precision, input.output_type.precision
+            ));
+        }
+
         // C10: Movement op shape validation.
         match &node.op {
             RiscOp::Expand { axis, size } => {

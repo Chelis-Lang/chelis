@@ -19803,7 +19803,11 @@ impl<'program> LowerCtx<'program> {
                     .unwrap_or_else(|| ty.clone());
                 let axis = self.resolve_reduce_axis(&args[1], x, x_ty.dims.len(), name);
                 let dims = Self::reduction_out_dims(&x_ty.dims, ty, axis);
-                let precision = if any_wildcard_dim(&ty.dims) || *ty == Self::default_type() {
+                // [05-OP-15]: index reductions yield i64 positions whatever
+                // the operand dtype or the meta type's completeness.
+                let precision = if matches!(name, "argmax_reduce" | "argmin_reduce") {
+                    Prim::Int64
+                } else if any_wildcard_dim(&ty.dims) || *ty == Self::default_type() {
                     x_ty.precision
                 } else {
                     ty.precision

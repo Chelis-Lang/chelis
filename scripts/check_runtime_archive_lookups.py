@@ -683,6 +683,17 @@ REVIEWED: tuple[Row, ...] = (
         ),
     ),
     Row(
+        "crates/chelis-cli/tests/issue_4105_index_reduction_storage.rs",
+        "archive-name",
+        lines=(
+            'let runtime = out.join("libchelis_runtime.a");',
+        ),
+        disposition="not-lookup",
+        reason=(
+            "links the archive `chelis build` staged in the library output directory beside the module archive"
+        ),
+    ),
+    Row(
         "crates/chelis-cli/tests/issue_513_reshape_shape_derived_grad.rs",
         "archive-name",
         lines=(
