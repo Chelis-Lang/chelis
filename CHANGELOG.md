@@ -4,6 +4,34 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.23.1] - 2026-11-01
+
+### Changed
+
+- The C backend shares identical private tensor-kernel implementations across extraction sites while retaining site-specific diagnostics, source spans, extent checks, and result provenance. Shared kernels remain out of line during native compilation.
+
+### Fixed
+
+- `argmax_reduce` and `argmin_reduce` produce i64 indices in compiled C builds
+  when their operand comes from a computed reshape. Previously the compiled lane
+  stored those indices at the operand's dtype (for example i32) and a following
+  reshape copied them by byte count into an i64 result, so two rows `[1, 2]` read
+  back as `[8589934593, 0]` while `chelis eval` returned `[1, 2]`. The graph
+  verifier now rejects an index reduction whose result is not i64 and a reshape,
+  permute, expand, shrink or stride whose result dtype differs from its operand,
+  so a mislabeled graph fails the build instead of reinterpreting bytes. See
+  [#4105](https://github.com/Chelis-Lang/chelis/issues/4105).
+
+- `chelis build` accepts a program in which a join arm (an `if` or `match` arm,
+  or a block's result) returns an alias of a binding the enclosing scope reads
+  afterwards, when that binding holds a block's result. Ownership lowering
+  recorded such a result at the depth its block minted it rather than the scope
+  that binds it, so behind enough nested bindings the arm moved the binding and
+  the build failed with `owner %N ... is not live` for a program `chelis check`
+  and `chelis eval` accepted. The arm now receives a copy and the binding stays
+  live for its later read. See
+  [#4111](https://github.com/Chelis-Lang/chelis/issues/4111).
+
 ## [0.23.0] - 2026-10-30
 
 ### Changed
