@@ -408,6 +408,7 @@ when picking one up.
 - Create a dedicated worktree before the first write of every task, including small
   documentation edits and throwaway probes, and give it its own `.venv` with
   `uv venv --python 3.11`; never copy or symlink another checkout's `.venv`.
+  Worktrees live under `.claude/worktrees/<name>` (gitignored), never beside the clone.
 - A worktree isolates the working tree, the index, and its HEAD reflog. The stash
   stack, `.git/info/exclude`, the hooks directory, and branch reflogs are shared by
   every worktree on the clone. Do not run `git stash` in a shared clone: to discard your
@@ -416,8 +417,9 @@ when picking one up.
 - Do not repurpose an unrelated worktree because it appears idle. Reuse only for the
   same PR or immediate follow-up after checking ownership, exact head, status, and active
   processes. Never share a worktree with a reviewer while either of you writes to it.
-- After a PR merges, remove its worktree and task-owned target with individual
-  `git worktree remove <path>` and `cargo clean --target-dir <path>` commands, never a
+- After a PR merges or is abandoned, run `cargo clean` in its worktree (and
+  `cargo clean --target-dir <exact path>` for any task-owned target), then
+  `git worktree remove <path>` and `git worktree prune`: individual commands, never a
   blanket loop, after confirming the PR is merged, nothing uncommitted is worth keeping,
   and no process owns the target. Squash merges mean "commits ahead of `origin/main`"
   proves nothing; compare patch ids when in doubt. Branch deletion is a separate decision.
@@ -466,7 +468,10 @@ python3 scripts/gate.py --list         # the canonical command list with ownersh
   exact rerun command. A detached run's verdict comes from `--status`, never from the
   launch exit code.
 - Concurrent builds use an isolated target: `CARGO_TARGET_DIR=target/agents/<name>` as
-  an absolute path, or a separate worktree. Before building, run
+  an absolute path, or a separate worktree's own `target/`. A shared or home-level
+  `CARGO_TARGET_DIR` outside the worktree is rejected by `scripts/gate.py` by design.
+  When the agent finishes, remove its `target/agents/<name>` with
+  `cargo clean --target-dir <exact path>`. Before building, run
   `python3 scripts/reap_orphans.py`, review the listing, and reap with `--kill`; at
   session end confirm your cargo, rustc, and nextest processes are gone. Several
   unrelated tests failing at near-identical wall-clock times is CPU starvation, not
