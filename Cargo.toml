@@ -134,3 +134,18 @@ ryu = "1"
 # how the dependency is compiled, never what it computes.
 [profile.dev.package.sha2]
 opt-level = 3
+
+# Full DWARF grows every agent worktree's target/ to tens of gigabytes; line
+# tables keep backtraces readable. For a debugger session, build with
+# CARGO_PROFILE_DEV_DEBUG=2 (or CARGO_PROFILE_TEST_DEBUG=2).
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+
+[profile.test]
+debug = "line-tables-only"
+
+[profile.test.package."*"]
+debug = false
