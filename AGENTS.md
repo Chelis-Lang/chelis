@@ -404,7 +404,8 @@ when picking one up.
 
 - The primary checkout (the main worktree in `git worktree list --porcelain`) is live
   developer state. Read-only queries are fine there; never switch branches, edit, build,
-  or create scratch artifacts in it.
+  or create scratch artifacts in it. The gitignored `.claude/worktrees/` directory is
+  the one exception: task worktrees are created there.
 - Create a dedicated worktree before the first write of every task, including small
   documentation edits and throwaway probes, and give it its own `.venv` with
   `uv venv --python 3.11`; never copy or symlink another checkout's `.venv`.
@@ -420,8 +421,8 @@ when picking one up.
 - After a PR merges or is abandoned, run `cargo clean` in its worktree (and
   `cargo clean --target-dir <exact path>` for any task-owned target), then
   `git worktree remove <path>` and `git worktree prune`: individual commands, never a
-  blanket loop, after confirming the PR is merged, nothing uncommitted is worth keeping,
-  and no process owns the target. Squash merges mean "commits ahead of `origin/main`"
+  blanket loop, after confirming the PR is merged or closed, nothing uncommitted is
+  worth keeping, and no process owns the target. Squash merges mean "commits ahead of `origin/main`"
   proves nothing; compare patch ids when in doubt. Branch deletion is a separate decision.
 
 ### Python And Scripts
