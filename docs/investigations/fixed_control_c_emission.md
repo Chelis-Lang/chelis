@@ -69,13 +69,13 @@ do not establish its agreement with the canonical RNG formula.
 Use the worktree's managed Python/target, one Cargo job and the normal pre-push
 `python3 scripts/gate.py --fast`. The owning focused commands are:
 
-- `cargo check -p chelis-backend-c -p chelis-compiler-api -p chelis-ir -p chelis-types --tests`
+- `cargo check -p chelis-backend-c -p chelis-compiler-api -p chelis-ir -p chelis-types -p chelis-checker-core --tests`
 - `cargo nextest run -p chelis-compiler-api --test fixed_control_c --test-threads 2 --no-fail-fast`
 - `cargo nextest run -p chelis-ir -p chelis-types --lib -E 'test(ownership_seal) | test(dropout_parameters) | test(prepared_dropout)' --no-fail-fast`
-- `cargo test -p chelis-types -p chelis-backend-c --doc`
+- `cargo test -p chelis-types -p chelis-checker-core -p chelis-backend-c --doc`
 
-All tests must pass. The integration is registered in normal PR CI; doctests
-run in the existing types/backend CI owners. It compiles and executes real C
+All tests must pass. Normal PR CI includes the integration tests.
+The types, checker-core, and backend CI owners execute doctests. The integration compiles and executes real C
 against the ownership-ledger runtime. Cases include all four active float
 dtypes with 0/1/32 elements, varied finite inputs and four public invocations;
 nested equal/different seeds, saved-mask gradients and the following draw;

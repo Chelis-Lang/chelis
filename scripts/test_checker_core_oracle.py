@@ -469,6 +469,32 @@ class AdditionalFailureControls(unittest.TestCase):
         with self.assertRaises(oracle.OracleFailure):
             oracle.prior_contracts('REQUIRED = {"semantic"}\n')
 
+    def test_only_the_exact_approved_dag_source_reference_can_extend_contracts(self):
+        original = ('BASELINE_REVISION = "graph"\nPRODUCTION_BASELINE_REVISION = "production"\n'
+            'EVIDENCE = {"wire", "allocation", "native"}\n')
+        extension = 'GENERATED_SOURCE_BASELINE_REVISION = "ec322a9568c09cf73a4855860227aa9d86fc2d32"\n'
+        accepted = original + extension
+        self.assertEqual(oracle.validate_prior_contracts("dag_core_oracle.py", accepted, original),
+            oracle.prior_contracts(accepted))
+        for changed in (
+            original,
+            accepted.replace("ec322a9568c09cf73a4855860227aa9d86fc2d32", "wrong-reference"),
+            accepted.replace('"graph"', '"different-graph"'),
+            accepted.replace('"production"', '"different-production"'),
+            accepted.replace('{"wire", "allocation", "native"}', '{"wire"}'),
+            accepted + 'EXTRA_BASELINE = "unapproved"\n',
+        ):
+            with self.subTest(source=changed), self.assertRaises(oracle.OracleFailure):
+                oracle.validate_prior_contracts("dag_core_oracle.py", changed, original)
+        for name in ("numeric_core_oracle.py", "type_unification_core_oracle.py",
+                "effect_analysis_core_oracle.py"):
+            self.assertEqual(oracle.validate_prior_contracts(name, original, original),
+                oracle.prior_contracts(original))
+            for changed in (accepted, original.replace('"graph"', '"different-graph"'),
+                    original.replace('{"wire", "allocation", "native"}', '{"wire"}')):
+                with self.subTest(oracle=name, source=changed), self.assertRaises(oracle.OracleFailure):
+                    oracle.validate_prior_contracts(name, changed, original)
+
     def test_missing_cost_observation_fails(self):
         with self.assertRaises(oracle.OracleFailure):
             oracle.cost_observations({"full-host": {"junit": {"observations": {}}}})

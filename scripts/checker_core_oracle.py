@@ -865,6 +865,18 @@ def prior_contracts(source: str) -> dict[str, str]:
     return contracts
 
 
+def validate_prior_contracts(name: str, source: str, original: str) -> dict[str, str]:
+    expected = prior_contracts(original)
+    if name == "dag_core_oracle.py":
+        # The accepted checker plan adds only this exact C/HIP source reference.
+        expected["GENERATED_SOURCE_BASELINE_REVISION"] = ast.dump(
+            ast.Constant(value="ec322a9568c09cf73a4855860227aa9d86fc2d32"), include_attributes=False)
+    actual = prior_contracts(source)
+    if actual != expected:
+        raise OracleFailure(f"A previous core oracle changed its accepted baseline or obligations: {name}")
+    return actual
+
+
 def prior_core_obligations(evidence: Evidence) -> None:
     scripts = ("numeric_core_oracle.py", "type_unification_core_oracle.py",
         "dag_core_oracle.py", "effect_analysis_core_oracle.py")
@@ -872,11 +884,10 @@ def prior_core_obligations(evidence: Evidence) -> None:
     for name in scripts:
         path = ROOT / "scripts" / name
         original = support.run(("git", "show", f"{BASELINE}:scripts/{name}")).stdout
-        if prior_contracts(path.read_text()) != prior_contracts(original):
-            raise OracleFailure(f"A previous core oracle changed its accepted baseline or obligations: {name}")
+        accepted = validate_prior_contracts(name, path.read_text(), original)
         identities[name] = {"candidate": digest(path),
             "baseline_sha256": hashlib.sha256(original.encode()).hexdigest(),
-            "contracts": prior_contracts(original)}
+            "contracts": prior_contracts(original), "accepted_contracts": accepted}
         support.run((sys.executable, str(path)))
     evidence.save("prior-core-obligations.json", identities)
 

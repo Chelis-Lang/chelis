@@ -525,6 +525,10 @@ Public binding maps retain `chelis_unord`.
 Hash-based graph lookups use fixed hashes.
 
 The production lanes compare native C execution and C/HIP/Metal source, headers, span comments, and admission diagnostics.
+Native output, toolchain, admission, and complete Metal artifacts compare against `137ba12e2cf9bcdcac4b4d3ed3662832a93e44a4`.
+Complete C/HIP generated artifacts compare against `ec322a9568c09cf73a4855860227aa9d86fc2d32`, which owns private tensor-helper sharing.
+The earlier graph, wire, transform, allocation, and historical behavior reference stays fixed.
+Both generated-artifact comparisons include support headers, source spans, and source/header seals without text normalization.
 Build lanes use `--emit-c` and compare native compiler flags.
 Raw logs retain build paths and archive hashes.
 Host suite commands use the Cargo feature requirements from each source manifest.

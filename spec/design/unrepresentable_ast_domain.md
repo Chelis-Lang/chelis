@@ -355,7 +355,7 @@ This file. All design forks resolved before implementation.
   deny-lint)
 - Completeness tests for all
 
-**Demo:** `cargo nextest run -p chelis-deep -p chelis-types` green.
+**Demo:** `cargo nextest run -p chelis-deep -p chelis-types -p chelis-checker-core` passes.
 
 ### Task 3: Introduce `RawExpr`, `Node`, `Expr::Node`, `Expr::BareList`, `Expr::UnknownForm`, `ChildRef`, custom Deserialize, trybuild
 
@@ -414,7 +414,7 @@ This file. All design forks resolved before implementation.
   EffectSet enum, not user text)
 - Deny-lint per-crate
 
-**Demo:** `cargo nextest run -p chelis-effects -p chelis-types` green.
+**Demo:** `cargo nextest run -p chelis-effects -p chelis-types -p chelis-checker-core` passes.
 
 ### Task 7: Migrate chelis-ir, chelis-compiler-api, chelis-prove; remove dead guards
 

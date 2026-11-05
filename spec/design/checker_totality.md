@@ -841,6 +841,7 @@ migration forces.
 
 ```sh
 cargo nextest run --profile ci --no-fail-fast \
+  -p chelis-checker-core \
   -p chelis-types -p chelis-effects -p chelis-surf -p chelis-cli \
   -p chelis-ir -p chelis-compiler-api -p chelis-e2e -p chelis-prove
 ```
@@ -2692,13 +2693,13 @@ watch the stamped [#1485] spelling split again.
 
 ```sh
 cargo nextest run -p chelis-types --test issue_1134_forward_reference_parity --no-fail-fast
-cargo nextest run -p chelis-types --lib infer::tests::schedule_invariants
+cargo nextest run -p chelis-checker-core --lib infer::tests::schedule_invariants
 cargo nextest run -p chelis-cli --test issue_1134_forward_reference_cli --no-fail-fast
 ```
 
 The first is the verdict oracle for all three issues at both ingresses, the
 second the order oracle, the third the public-surface oracle. Before
-pushing, the implementer also runs the complete `chelis-types` corpus,
+publication, the implementer also runs both complete corpora, `chelis-types` and `chelis-checker-core`. Other tests are
 `issue_1124_ir_defsig_unification_parity`,
 `rt800_append_only_cycle_resolution`, `recursive_generic_monomorphization`,
 the `issue_1339_top_level_initialization` CLI oracle,

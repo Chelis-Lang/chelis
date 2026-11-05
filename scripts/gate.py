@@ -140,15 +140,15 @@ streamed live; a failed command's complete transcript and a 200-line replay
 are written under `target/gate-failures/`. Cargo output is pinned to this
 worktree, and nextest continues after failures to expose the complete set.
 
-Why four explicit rustdoc stages
+Why five explicit rustdoc stages
 ---------------------------------
-`cargo nextest` does not execute doctests, so a crate with a doctest
-contract needs an explicit `cargo test -p <crate> --doc` command or that
-contract runs nowhere. The `chelis-types` command runs the chelis#731
-`ErrorWitness` contracts; `chelis-ir` runs the chelis#1286 verified-ownership
-privacy contracts; the `chelis-compiler-api` and
-`chelis-pipeline-core` commands run the compiler pipeline artifact
-contracts. The `backend-sanitizers` CI job separately runs an unfiltered
+`cargo nextest` does not execute doctests.
+Each crate with a doctest contract needs an explicit `cargo test -p <crate> --doc` command.
+The `chelis-types` command tests the native checker boundary.
+The `chelis-checker-core` command tests the chelis#731 `ErrorWitness` contracts.
+The `chelis-ir` command tests the chelis#1286 verified-ownership privacy contracts.
+The `chelis-compiler-api` and `chelis-pipeline-core` commands test the compiler pipeline artifact contracts.
+The `backend-sanitizers` CI job separately runs an unfiltered
 `cargo test -p chelis-backend-c`, which picks up that crate's doctests.
 
 The gate deliberately does not use `--workspace --doc`: that would make

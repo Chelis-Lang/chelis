@@ -39,6 +39,11 @@ The macOS core jobs create their venv from managed Python for consistent policy 
 The checker oracle retains pinned baseline objects in the candidate repository for shallow hosted checkouts.
 The scratch checkout still checks the original revision and every frozen source digest.
 
+Executable and documented test commands select moved tests from their portable owners.
+The DAG oracle uses the approved integration-base reference only for complete generated C/HIP sources and headers.
+Original graph, wire, cost, native behavior, admission, and Metal comparisons retain their references.
+The checker records and enforces the exact accepted contract transition.
+
 The complete checker oracle compares immutable-source behavior, native authority, full-host costs, independent consumers, and allocator-backed target compilation.
 The embedding supplies allocation and enough stack capacity.
 Target compilation does not prove device execution or resource capacity.
