@@ -4928,6 +4928,24 @@ reason = "The controls reject host dependencies, missing execution evidence, sta
 tracking_issue = "chelis#4054"
 
 [[path_rule]]
+prefix = "scripts/compiler_pipeline_oracle.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "The script suite checks pipeline failure propagation and checkpoint diagnostic rejection"
+tracking_issue = "chelis#4054"
+
+[[path_rule]]
+prefix = "scripts/test_compiler_pipeline_oracle.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "The script suite executes pipeline failure and checkpoint boundary controls"
+tracking_issue = "chelis#4054"
+
+[[path_rule]]
 prefix = "scripts/check_checkpoint_compile_fail.py"
 disposition = "owner"
 workflow = "ci.yml"

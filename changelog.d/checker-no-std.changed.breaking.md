@@ -40,6 +40,8 @@ The checker oracle retains pinned baseline objects in the candidate repository f
 The scratch checkout still checks the original revision and every frozen source digest.
 
 Executable and documented test commands select moved tests from their portable owners.
+The CI script suite owns the pipeline oracle controls.
+The release rebase preserves registry pins and updates the Cargo package identities.
 The DAG oracle uses the approved integration-base reference only for complete generated C/HIP sources and headers.
 Original graph, wire, cost, native behavior, admission, and Metal comparisons retain their references.
 The checker records and enforces the exact accepted contract transition.
