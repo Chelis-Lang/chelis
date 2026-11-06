@@ -1,0 +1,1 @@
+Linux native ownership probes select GNU feature declarations before any libc header. Generated source and header seals remain unchanged. See [#4115](https://github.com/Chelis-Lang/chelis/issues/4115).
