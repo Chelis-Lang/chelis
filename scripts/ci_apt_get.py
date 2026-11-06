@@ -29,6 +29,11 @@ replaces every moving apt source with one immutable snapshot before the first
 update. That prevents the mirror race
 where a freshly downloaded index names a package version that its selected
 CDN edge no longer serves (a persistent 404 which retries cannot heal).
+APT selects package versions from the signed snapshot indexes.
+A private worker requests a SHA-256 URI plan and uses Debian Archive only
+as a verified byte carrier. It publishes verified files atomically, then
+calls APT with downloads disabled. The worker and all its children share
+one install timeout.
 
 The retry loop is intentionally NARROW: it only retries the apt-get pair, it
 does not retry the cargo build or any test, and a genuine non-transient
@@ -36,7 +41,7 @@ failure (an unknown package, a held broken dep) still surfaces after the
 attempts are exhausted -- the retries cannot turn a real packaging error
 green, only ride out a flaky download.
 
-Each individual `apt-get` invocation runs under a per-command WALL-CLOCK
+Each update and install phase runs under a per-command WALL-CLOCK
 TIMEOUT. A connection *reset* returns a non-zero exit that the retry loop
 already handles, but a stalled mirror that accepts the TCP socket and then
 stops sending data produces no exit at all: an unbounded `apt-get` would
@@ -91,10 +96,20 @@ Per repo policy this is Python, not a shell script.
 from __future__ import annotations
 
 import argparse
+import hashlib
+import os
+import re
+import signal
 import subprocess
 import sys
+import tempfile
 import time
+from contextlib import nullcontext
+from dataclasses import dataclass
+from http.client import HTTPException
 from pathlib import Path
+from urllib.parse import unquote, urlsplit
+from urllib.request import HTTPRedirectHandler, build_opener
 
 # apt-get's own documented "transient failure" exit code is 100, but a
 # connection reset can also surface as a generic non-zero. We retry on ANY
@@ -141,15 +156,162 @@ TIMEOUT_EXIT_CODES = (124, 137)
 # successful hosted glibc-2.31 run as evidence.
 BULLSEYE_SNAPSHOT_TIMESTAMP = "20260901T000000Z"
 
+_BULLSEYE_WORKER_FLAG = "--_bullseye-install-worker"
+
+
+@dataclass(frozen=True)
+class _ArchivePackage:
+    uri: str
+    filename: str
+    size: int
+    sha256: str
+
+
+def _archive_uri(uri: str) -> str:
+    """Map only pinned snapshot package paths to the untrusted byte carrier."""
+    url = urlsplit(uri)
+    if url.query or url.fragment:
+        raise ValueError(f"unexpected package URI: {uri!r}")
+    for archive in ("debian", "debian-security"):
+        prefix = (
+            "https://snapshot-cloudflare.debian.org/archive/"
+            f"{archive}/{BULLSEYE_SNAPSHOT_TIMESTAMP}/"
+        )
+        if not uri.startswith(prefix):
+            continue
+        relative = uri[len(prefix):]
+        decoded = unquote(relative, errors="strict")
+        if (
+            not re.fullmatch(r"pool/(?:[A-Za-z0-9+_.:~\-]+/)*[A-Za-z0-9+_.:~\-]+\.deb", decoded)
+            or any(part in (".", "..") for part in decoded.split("/"))
+        ):
+            raise ValueError(f"unsafe package path: {uri!r}")
+        return f"https://archive.debian.org/{archive}/{relative}"
+    raise ValueError(f"unrecognized snapshot package origin: {uri!r}")
+
+
+def _parse_archive_plan(output: str) -> list[_ArchivePackage]:
+    """Accept only APT URI records with exact sizes and SHA-256 hashes."""
+    packages = []
+    names = set()
+    for line in output.splitlines():
+        line = line.strip()
+        if not line.startswith("'"):
+            continue
+        record = re.fullmatch(
+            r"'([^'\s]+)'\s+(\S+)\s+([0-9]+)\s+SHA256:([0-9a-fA-F]{64})",
+            line,
+        )
+        if record is None:
+            raise ValueError(f"invalid SHA-256 package record: {line!r}")
+        uri, name, size, digest = record.groups()
+        if (
+            not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9+_.:%~\-]*\.deb", name)
+            or not re.fullmatch(
+                r"[A-Za-z0-9][A-Za-z0-9+_.:~\-]*\.deb",
+                unquote(name, errors="strict"),
+            )
+            or name in names
+        ):
+            raise ValueError(f"unsafe or duplicate APT cache name: {name!r}")
+        if int(size) <= 0:
+            raise ValueError(f"invalid package size: {size!r}")
+        names.add(name)
+        packages.append(_ArchivePackage(_archive_uri(uri), name, int(size), digest.lower()))
+    return packages
+
+
+class _RejectArchiveRedirects(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        fp.close()
+        raise ValueError(f"Archive carrier redirect is not permitted: {newurl!r}")
+
+
+def _cache_archive(package: _ArchivePackage, archives: Path) -> None:
+    """Publish a complete verified package, never a partial destination."""
+    destination = archives / package.filename
+    if destination.is_symlink():
+        raise ValueError(f"APT cache destination is a symbolic link: {destination}")
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            prefix=".ci-apt-", suffix=".partial", dir=archives, delete=False
+        ) as target:
+            temporary = Path(target.name)
+            digest = hashlib.sha256()
+            size = 0
+            with build_opener(_RejectArchiveRedirects()).open(package.uri) as response:
+                while True:
+                    chunk = response.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    size += len(chunk)
+                    if size > package.size:
+                        raise ValueError(f"Archive package exceeds expected size: {package.filename}")
+                    digest.update(chunk)
+                    target.write(chunk)
+            if size != package.size or digest.hexdigest() != package.sha256:
+                raise ValueError(f"Archive package size or SHA-256 mismatch: {package.filename}")
+            target.flush()
+            os.fsync(target.fileno())
+            os.fchmod(target.fileno(), 0o644)
+        os.replace(temporary, destination)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
+def _bullseye_install(
+    packages: list[str],
+    *,
+    no_install_recommends: bool,
+    archives: Path,
+) -> int:
+    """Resolve from authenticated snapshot metadata, then verify carrier bytes.
+
+    Only the preceding complete signed update establishes metadata trust.
+    URI output and no-download mode do not authenticate repository metadata.
+    The final APT install retains package validation without a bypass.
+    The outer coreutils timeout controls this worker and all its children.
+    The parent owns one private cache for all attempts and removes it afterward.
+    """
+    install = [
+        "apt-get", "install", "-y", "-o", "Acquire::ForceHash=SHA256",
+        "-o", f"Dir::Cache::archives={archives}",
+    ]
+    if no_install_recommends:
+        install.append("--no-install-recommends")
+    try:
+        plan = subprocess.run(
+            install + ["--print-uris", "--", *packages],
+            check=False,
+            stdout=subprocess.PIPE,
+            text=True,
+        )
+        print(plan.stdout, end="", flush=True)
+        if plan.returncode != 0:
+            return plan.returncode
+        selected = _parse_archive_plan(plan.stdout)
+        for package in selected:
+            if (archives / package.filename).is_symlink():
+                raise ValueError(f"APT cache destination is a symbolic link: {package.filename}")
+        archives.mkdir(parents=True, exist_ok=True)
+        for package in selected:
+            _cache_archive(package, archives)
+    except (OSError, ValueError, HTTPException) as exc:
+        print(f"ci_apt_get: Bullseye carrier failed: {exc}", file=sys.stderr)
+        return 1
+    return _run(install + ["--no-download", "--", *packages])
+
 
 def bullseye_snapshot_sources() -> str:
     """Return the complete immutable apt source set for the Bullseye lanes."""
     main = (
-        "https://snapshot.debian.org/archive/debian/"
+        "https://snapshot-cloudflare.debian.org/archive/debian/"
         f"{BULLSEYE_SNAPSHOT_TIMESTAMP}/"
     )
     security = (
-        "https://snapshot.debian.org/archive/debian-security/"
+        "https://snapshot-cloudflare.debian.org/archive/debian-security/"
         f"{BULLSEYE_SNAPSHOT_TIMESTAMP}/"
     )
     option = "[check-valid-until=no]"
@@ -243,6 +405,7 @@ def _attempt(
     sudo: bool,
     no_install_recommends: bool,
     timeout: float | None,
+    archives: Path | None,
 ) -> int:
     """One full update+install attempt. Returns the first non-zero exit of
     the pair, or 0 if both succeed."""
@@ -250,10 +413,22 @@ def _attempt(
     # the apt-get command itself.
     prefix = (["sudo"] if sudo else []) + _timeout_wrapper(timeout)
     update = prefix + ["apt-get", "update"]
-    install = prefix + ["apt-get", "install", "-y"]
+    if archives is not None:
+        update += [
+            "-o", "APT::Update::Error-Mode=any",
+            "-o", "Acquire::AllowInsecureRepositories=false",
+            "-o", "Acquire::AllowDowngradeToInsecureRepositories=false",
+        ]
+        install = prefix + [
+            sys.executable, str(Path(__file__).resolve()),
+            _BULLSEYE_WORKER_FLAG, str(archives),
+            "--timeout", f"{timeout:g}" if timeout is not None else "0",
+        ]
+    else:
+        install = prefix + ["apt-get", "install", "-y"]
     if no_install_recommends:
         install.append("--no-install-recommends")
-    install += packages
+    install += ["--", *packages] if archives is not None else packages
 
     rc = _run(update)
     if rc != 0:
@@ -266,6 +441,7 @@ def apt_get(
     *,
     sudo: bool = True,
     no_install_recommends: bool = False,
+    debian_bullseye_snapshot: bool = False,
     attempts: int = DEFAULT_ATTEMPTS,
     backoff_seconds: float = BACKOFF_SECONDS,
     timeout: float | None = PER_COMMAND_TIMEOUT_SECONDS,
@@ -275,37 +451,44 @@ def apt_get(
     non-zero exit (a reset, a spawn failure, or a per-command timeout).
     Returns 0 on success or the last attempt's exit code.
 
-    `timeout` bounds each individual `apt-get` invocation in wall-clock
-    seconds; None disables it. `sleep` is injectable so the unit tests don't
-    actually wait."""
+    `timeout` bounds each update and install phase in wall-clock seconds.
+    The Bullseye install phase includes its plan and byte transfer.
+    None disables the ceiling. Tests inject `sleep` to avoid a delay."""
     if not packages:
         print("ci_apt_get: no packages requested; nothing to do.")
         return 0
 
-    last_rc = 1
-    for i in range(1, attempts + 1):
-        print(f"ci_apt_get: attempt {i}/{attempts}: installing {' '.join(packages)}")
-        last_rc = _attempt(
-            packages,
-            sudo=sudo,
-            no_install_recommends=no_install_recommends,
-            timeout=timeout,
-        )
-        if last_rc == 0:
-            return 0
-        if i < attempts:
-            if last_rc == 124:
-                cause = "timed out at the wall-clock ceiling"
-            elif last_rc == 137:
-                cause = "SIGKILLed (--kill-after, or an external signal such as OOM)"
-            else:
-                cause = "likely a transient mirror/network reset"
-            print(
-                f"ci_apt_get: apt-get exited {last_rc} "
-                f"({cause}); retrying in {backoff_seconds:g}s",
-                file=sys.stderr,
+    cache = (
+        tempfile.TemporaryDirectory(prefix="ci-apt-archives-")
+        if debian_bullseye_snapshot else nullcontext(None)
+    )
+    with cache as directory:
+        archives = Path(directory) if directory is not None else None
+        last_rc = 1
+        for i in range(1, attempts + 1):
+            print(f"ci_apt_get: attempt {i}/{attempts}: installing {' '.join(packages)}")
+            last_rc = _attempt(
+                packages,
+                sudo=sudo,
+                no_install_recommends=no_install_recommends,
+                timeout=timeout,
+                archives=archives,
             )
-            sleep(backoff_seconds)
+            if last_rc == 0:
+                return 0
+            if i < attempts:
+                if last_rc == 124:
+                    cause = "timed out at the wall-clock ceiling"
+                elif last_rc == 137:
+                    cause = "SIGKILLed (--kill-after, or an external signal such as OOM)"
+                else:
+                    cause = "likely a transient mirror/network reset"
+                print(
+                    f"ci_apt_get: apt-get exited {last_rc} "
+                    f"({cause}); retrying in {backoff_seconds:g}s",
+                    file=sys.stderr,
+                )
+                sleep(backoff_seconds)
 
     print(
         f"ci_apt_get: apt-get still failing after {attempts} attempts "
@@ -318,6 +501,9 @@ def apt_get(
 def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="apt-get update+install with retries on transient flakes."
+    )
+    parser.add_argument(
+        _BULLSEYE_WORKER_FLAG, type=Path, help=argparse.SUPPRESS
     )
     parser.add_argument(
         "--no-sudo",
@@ -367,8 +553,23 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def _wait_for_timeout_kill(_signum, _frame) -> None:
+    """Keep the timeout monitor alive until its process-group kill."""
+    while True:
+        signal.pause()
+
+
 def main(argv: list[str]) -> int:
     args = _parse_args(argv)
+    if args._bullseye_install_worker:
+        # Retain the monitor until its group-wide kill escalation.
+        # Child executables retain their normal SIGTERM behavior.
+        if args.timeout and args.timeout > 0:
+            signal.signal(signal.SIGTERM, _wait_for_timeout_kill)
+        return _bullseye_install(
+            args.packages, no_install_recommends=args.no_install_recommends,
+            archives=args._bullseye_install_worker,
+        )
     if args.github_hosted_ubuntu_mirrors:
         configure_hosted_ubuntu_mirrors()
     if args.debian_bullseye_snapshot:
@@ -380,6 +581,7 @@ def main(argv: list[str]) -> int:
         args.packages,
         sudo=not args.no_sudo,
         no_install_recommends=args.no_install_recommends,
+        debian_bullseye_snapshot=args.debian_bullseye_snapshot,
         attempts=args.attempts,
         timeout=timeout,
     )

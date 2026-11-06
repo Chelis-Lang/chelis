@@ -56,6 +56,16 @@ The `nix-eval` job of `ci.yml` is the pull request check for the Nix files. It b
 
 Rust policy and the native SMT feature lane retain total job timeouts of 75 and 90 minutes respectively. These are cold-build safety limits, not a measured performance result.
 
+Bullseye prerequisite jobs authenticate all indexes from the official `snapshot-cloudflare.debian.org` endpoint for snapshot `20260901T000000Z`. An index failure stops the attempt. APT resolves the exact package selection from those signed indexes.
+
+`archive.debian.org` supplies package bytes, not metadata or version choices. The helper verifies each package size and SHA-256 before atomic cache publication.
+
+A helper-owned private cache retains only verified packages across attempts. The helper removes this cache after success or failure. APT installs from this cache with downloads disabled. Metadata authentication occurs during the update, not URI output.
+
+Each update and complete package phase keeps the 300-second ceiling and 30-second kill grace. The package phase includes the URI plan, byte transfer, verification, and installation. Four attempts and the five-second backoff remain unchanged.
+
+On timeout, the private worker waits for the existing process-group kill escalation. Child executables retain normal SIGTERM behavior. A timed-out worker can use the full 30-second grace.
+
 GitHub-hosted runners run every job for ordinary pull-request and push events. `Fast Tests (Linux)` stays hosted; the warm pool host admits pull requests only against `main`. Explicit dispatches keep their existing route: `execution_target=self-hosted` requires an exact candidate SHA and a matching reviewed route on the runner host, and `github-hosted` dispatches stay hosted. The workflows grant no runner routing for ordinary events.
 
 Every `heavy-e2e.yml` job runs on GitHub-hosted Ubuntu on `main` and on dispatched branches. The full workspace, feature, integration, and phase-oracle jobs keep their complete selections and run in parallel. The workflow-level `linux-extended-${{ github.ref }}` concurrency group prevents two runs for the same ref from overlapping; no job-level concurrency lane serializes the selection. The module-oracle shard's five-hour limit stays inside the six-hour hosted job limit. `scripts/test_ci_cadence.py` locks the routing, job timeouts, and full selection.

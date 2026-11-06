@@ -3,20 +3,28 @@
 Run via: `python3 -m unittest scripts.test_ci_apt_get` from repo root,
 or `python3 scripts/test_ci_apt_get.py`.
 
-The helper runs `apt-get` as a subprocess, so the tests mock
-`subprocess.run` and assert the *behavior* (command shape, the retry loop,
-that a transient flake self-heals, and that a genuinely-broken install still
-fails after the attempts are exhausted) without touching the real package
-manager. `time.sleep` is injected so the retry backoff does not actually
-wait.
+The tests verify transfer integrity, source replacement, retry failures, and
+process containment without the real package manager. A task-local APT fixture
+supplies subprocess behavior for the signal tests. Other tests replace subprocess
+and network operations.
 """
 
+import fcntl
+import hashlib
 import importlib.util
+import io
+import os
+import signal
+import socket
+import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
+from urllib.parse import urlsplit
+from urllib.request import HTTPSHandler, build_opener
+from urllib.response import addinfourl
 
 
 def _load_module():
@@ -36,72 +44,7 @@ def _completed(returncode=0):
     return mock.Mock(returncode=returncode, stdout="", stderr="")
 
 
-def _wrap(timeout=cag.PER_COMMAND_TIMEOUT_SECONDS):
-    """The coreutils `timeout` prefix the helper inserts before apt-get."""
-    return ["timeout", f"--kill-after={cag.KILL_AFTER_SECONDS:g}s", f"{timeout:g}s"]
-
-
 class CommandShapeTests(unittest.TestCase):
-    def test_first_success_runs_update_then_install_with_sudo(self):
-        with mock.patch.object(
-            cag.subprocess, "run", return_value=_completed()
-        ) as run:
-            rc = cag.apt_get(["gcc", "libopenblas-dev"], sleep=lambda _s: None)
-        self.assertEqual(rc, 0)
-        cmds = [call.args[0] for call in run.call_args_list]
-        # `timeout` sits AFTER `sudo` so it is apt-get's direct parent.
-        self.assertEqual(cmds[0], ["sudo", *_wrap(), "apt-get", "update"])
-        self.assertEqual(
-            cmds[1],
-            ["sudo", *_wrap(), "apt-get", "install", "-y", "gcc", "libopenblas-dev"],
-        )
-        # Exactly the update+install pair on a clean first attempt.
-        self.assertEqual(len(cmds), 2)
-
-    def test_no_sudo_drops_the_sudo_prefix_but_keeps_the_timeout(self):
-        # The debian:11 container job runs as root and has no `sudo`, but the
-        # timeout wrapper must still bound the command.
-        with mock.patch.object(
-            cag.subprocess, "run", return_value=_completed()
-        ) as run:
-            cag.apt_get(["m4"], sudo=False, sleep=lambda _s: None)
-        cmds = [call.args[0] for call in run.call_args_list]
-        self.assertEqual(cmds[0], [*_wrap(), "apt-get", "update"])
-        self.assertEqual(cmds[1], [*_wrap(), "apt-get", "install", "-y", "m4"])
-
-    def test_no_install_recommends_is_forwarded_to_install_only(self):
-        with mock.patch.object(
-            cag.subprocess, "run", return_value=_completed()
-        ) as run:
-            cag.apt_get(
-                ["cmake", "git"],
-                sudo=False,
-                no_install_recommends=True,
-                sleep=lambda _s: None,
-            )
-        cmds = [call.args[0] for call in run.call_args_list]
-        # update never carries --no-install-recommends; install does, before
-        # the package names.
-        self.assertEqual(cmds[0], [*_wrap(), "apt-get", "update"])
-        self.assertEqual(
-            cmds[1],
-            [*_wrap(), "apt-get", "install", "-y", "--no-install-recommends",
-             "cmake", "git"],
-        )
-
-    def test_disabled_timeout_omits_the_wrapper(self):
-        # `timeout=None` (from `--timeout 0`) runs apt-get unbounded: no
-        # `timeout` token at all.
-        with mock.patch.object(
-            cag.subprocess, "run", return_value=_completed()
-        ) as run:
-            cag.apt_get(["gcc"], timeout=None, sleep=lambda _s: None)
-        cmds = [call.args[0] for call in run.call_args_list]
-        self.assertEqual(cmds[0], ["sudo", "apt-get", "update"])
-        self.assertEqual(cmds[1], ["sudo", "apt-get", "install", "-y", "gcc"])
-        for cmd in cmds:
-            self.assertNotIn("timeout", cmd)
-
     def test_empty_package_list_is_a_noop(self):
         with mock.patch.object(cag.subprocess, "run") as run:
             self.assertEqual(cag.apt_get([], sleep=lambda _s: None), 0)
@@ -148,20 +91,6 @@ class HostedUbuntuMirrorTests(unittest.TestCase):
 
 
 class BullseyeSnapshotTests(unittest.TestCase):
-    def test_snapshot_sources_are_immutable_and_complete(self):
-        expected = (
-            "deb [check-valid-until=no] "
-            "https://snapshot.debian.org/archive/debian/20260901T000000Z/ "
-            "bullseye main\n"
-            "deb [check-valid-until=no] "
-            "https://snapshot.debian.org/archive/debian/20260901T000000Z/ "
-            "bullseye-updates main\n"
-            "deb [check-valid-until=no] "
-            "https://snapshot.debian.org/archive/debian-security/20260901T000000Z/ "
-            "bullseye-security main\n"
-        )
-        self.assertEqual(cag.bullseye_snapshot_sources(), expected)
-
     def test_configure_snapshot_replaces_every_moving_source(self):
         with tempfile.TemporaryDirectory() as tmp:
             apt_root = Path(tmp)
@@ -183,10 +112,36 @@ class BullseyeSnapshotTests(unittest.TestCase):
 
             cag.configure_bullseye_snapshot(apt_root)
 
+            entries = [
+                line.split()
+                for line in (apt_root / "sources.list")
+                .read_text(encoding="utf-8")
+                .splitlines()
+            ]
             self.assertEqual(
-                (apt_root / "sources.list").read_text(encoding="utf-8"),
-                cag.bullseye_snapshot_sources(),
+                {entry[3] for entry in entries},
+                {"bullseye", "bullseye-updates", "bullseye-security"},
             )
+            self.assertEqual(len(entries), 3)
+            for source_type, options, address, suite, component in entries:
+                with self.subTest(suite=suite):
+                    url = urlsplit(address)
+                    self.assertEqual((source_type, component), ("deb", "main"))
+                    self.assertEqual(options, "[check-valid-until=no]")
+                    self.assertEqual(
+                        (url.scheme, url.netloc),
+                        ("https", "snapshot-cloudflare.debian.org"),
+                    )
+                    archive = (
+                        "debian-security"
+                        if suite == "bullseye-security"
+                        else "debian"
+                    )
+                    self.assertEqual(
+                        url.path, f"/archive/{archive}/20260901T000000Z/"
+                    )
+                    self.assertFalse(url.query)
+                    self.assertFalse(url.fragment)
             self.assertFalse((fragments / "debian.list").exists())
             self.assertFalse((fragments / "debian.sources").exists())
             self.assertEqual(
@@ -199,6 +154,464 @@ class BullseyeSnapshotTests(unittest.TestCase):
             with self.assertRaises(FileNotFoundError):
                 cag.configure_bullseye_snapshot(absent)
             self.assertFalse(absent.exists())
+
+
+class BullseyeCarrierTests(unittest.TestCase):
+    payload = b"exact package bytes"
+    main_origin = (
+        "https://snapshot-cloudflare.debian.org/archive/debian/"
+        "20260901T000000Z/"
+    )
+    security_origin = (
+        "https://snapshot-cloudflare.debian.org/archive/debian-security/"
+        "20260901T000000Z/"
+    )
+    cache_name = "libdemo_1%3a2.0_arm64.deb"
+
+    def record(self, *, origin=None, path="pool/main/d/demo/demo_2.0_arm64.deb",
+               name=None, size=None, digest=None):
+        return (
+            f"'{origin or self.main_origin}{path}' "
+            f"{self.cache_name if name is None else name} "
+            f"{len(self.payload) if size is None else size} "
+            f"{digest or 'SHA256:' + hashlib.sha256(self.payload).hexdigest()}\n"
+        )
+
+    def exercise(self, root, plan, *, payload=None, plan_code=0, install_code=0,
+                 transfer_error=None, opener=None):
+        installed = []
+        requested = []
+        calls = []
+
+        def apt(cmd, **kwargs):
+            calls.append(cmd)
+            if len(calls) == 1:
+                return mock.Mock(returncode=plan_code, stdout=plan)
+            installed.append({
+                path.name: path.read_bytes()
+                for path in root.glob("*.deb")
+            })
+            return mock.Mock(returncode=install_code)
+
+        def transfer(uri):
+            requested.append(uri)
+            if transfer_error:
+                raise transfer_error
+            if hasattr(payload, "read"):
+                return payload
+            return io.BytesIO(self.payload if payload is None else payload)
+
+        if opener is None:
+            opener = mock.Mock()
+            opener.open.side_effect = transfer
+        with (
+            mock.patch.object(cag.subprocess, "run", side_effect=apt),
+            mock.patch.object(cag, "build_opener", return_value=opener),
+        ):
+            rc = cag._bullseye_install(
+                ["libdemo"], no_install_recommends=True, archives=root
+            )
+        return rc, installed, requested
+
+    def test_exact_bytes_reach_apt_with_its_selected_cache_name(self):
+        for origin, archive in (
+            (self.main_origin, "debian"),
+            (self.security_origin, "debian-security"),
+        ):
+            with self.subTest(archive=archive), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                rc, installed, requested = self.exercise(
+                    root, "APT status text\n" + self.record(origin=origin)
+                )
+                self.assertEqual(rc, 0)
+                self.assertEqual(installed, [{self.cache_name: self.payload}])
+                self.assertEqual(requested, [
+                    f"https://archive.debian.org/{archive}/"
+                    "pool/main/d/demo/demo_2.0_arm64.deb"
+                ])
+                self.assertEqual(list(root.glob(".ci-apt-*")), [])
+
+    def test_corrupt_truncated_and_excess_bytes_never_reach_apt(self):
+        for payload in (
+            b"x" * len(self.payload), self.payload[:-1], self.payload + b"x"
+        ):
+            with self.subTest(payload=payload), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                rc, installed, _ = self.exercise(root, self.record(), payload=payload)
+                self.assertNotEqual(rc, 0)
+                self.assertEqual(installed, [])
+                self.assertEqual(list(root.iterdir()), [])
+
+    def test_unsafe_names_fail_before_any_transfer_or_cache_write(self):
+        for name in (
+            "../escape.deb", "/tmp/escape.deb", "sub/package.deb",
+            r"sub\package.deb", "%2e%2e%2fescape.deb", "-option.deb",
+            "package.txt",
+        ):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                rc, installed, requested = self.exercise(
+                    root, self.record() + self.record(name=name)
+                )
+                self.assertNotEqual(rc, 0)
+                self.assertEqual((installed, requested), ([], []))
+                self.assertEqual(list(root.iterdir()), [])
+
+    def test_weak_absent_and_malformed_hashes_fail_before_transfer(self):
+        hashes = (
+            "MD5Sum:" + "a" * 32, "SHA1:" + "a" * 40,
+            "SHA256:" + "a" * 63, "SHA256:" + "g" * 64,
+            "SHA512:" + "a" * 128,
+        )
+        plans = [self.record(digest=digest) for digest in hashes]
+        plans.append(self.record().rsplit(" ", 1)[0] + "\n")
+        for plan in plans:
+            with self.subTest(plan=plan), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                rc, installed, requested = self.exercise(root, plan)
+                self.assertNotEqual(rc, 0)
+                self.assertEqual((installed, requested), ([], []))
+                self.assertEqual(list(root.iterdir()), [])
+
+    def test_unrecognized_origins_and_unsafe_paths_fail_before_transfer(self):
+        records = [
+            self.record(origin="https://archive.debian.org/debian/"),
+            self.record(origin=self.main_origin.replace("https:", "http:")),
+            self.record(origin=self.main_origin.replace(
+                "snapshot-cloudflare.debian.org",
+                "snapshot-cloudflare.debian.org.evil.test",
+            )),
+            self.record(origin=self.main_origin.replace(
+                "20260901T000000Z", "20260801T000000Z"
+            )),
+        ]
+        records += [self.record(path=path) for path in (
+            "pool/../escape.deb", "pool/%2e%2e/escape.deb",
+            "pool/%252e%252e/escape.deb", "pool/main//demo.deb",
+            "pool/main/demo.deb?redirect=1", "pool/main/demo.deb#fragment",
+            "pool/main/%2fescape.deb", "pool/main/%5cescape.deb",
+            "dists/bullseye/Release",
+        )]
+        for plan in records:
+            with self.subTest(plan=plan), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                rc, installed, requested = self.exercise(root, plan)
+                self.assertNotEqual(rc, 0)
+                self.assertEqual((installed, requested), ([], []))
+                self.assertEqual(list(root.iterdir()), [])
+
+    def test_invalid_sizes_and_duplicate_destinations_fail_before_transfer(self):
+        plans = [
+            self.record(size=0), self.record(size=-1), self.record(size="NaN"),
+            self.record() + self.record(path="pool/main/d/demo/other.deb"),
+        ]
+        for plan in plans:
+            with self.subTest(plan=plan), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                rc, installed, requested = self.exercise(root, plan)
+                self.assertNotEqual(rc, 0)
+                self.assertEqual((installed, requested), ([], []))
+                self.assertEqual(list(root.iterdir()), [])
+
+    def test_plan_failure_never_transfers_or_installs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rc, installed, requested = self.exercise(
+                root, self.record(), plan_code=100
+            )
+            self.assertEqual(rc, 100)
+            self.assertEqual((installed, requested), ([], []))
+            self.assertEqual(list(root.iterdir()), [])
+
+    def test_transfer_error_leaves_no_package_and_never_installs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rc, installed, _ = self.exercise(
+                root, self.record(), transfer_error=OSError("connection reset")
+            )
+            self.assertNotEqual(rc, 0)
+            self.assertEqual(installed, [])
+            self.assertEqual(list(root.iterdir()), [])
+
+    def test_interrupted_body_leaves_no_partial_package(self):
+        class InterruptedBody(io.BytesIO):
+            def read(self, size=-1):
+                if self.tell():
+                    raise OSError("connection reset")
+                return super().read(4)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rc, installed, _ = self.exercise(
+                root, self.record(), payload=InterruptedBody(self.payload)
+            )
+            self.assertNotEqual(rc, 0)
+            self.assertEqual(installed, [])
+            self.assertEqual(list(root.iterdir()), [])
+
+    def test_publication_occurs_only_after_complete_verification(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            destination = root / self.cache_name
+            previous = b"previous complete package"
+            destination.write_bytes(previous)
+            observed = []
+
+            class ObservedBody(io.BytesIO):
+                def read(self, size=-1):
+                    observed.append(destination.read_bytes())
+                    return super().read(4)
+
+            rc, installed, _ = self.exercise(
+                root, self.record(), payload=ObservedBody(self.payload)
+            )
+            self.assertEqual(rc, 0)
+            self.assertTrue(observed)
+            self.assertEqual(set(observed), {previous})
+            self.assertEqual(destination.read_bytes(), self.payload)
+            self.assertEqual(installed, [{self.cache_name: self.payload}])
+
+    def test_failed_transfer_preserves_a_previous_complete_package(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            destination = root / self.cache_name
+            previous = b"previous complete package"
+            destination.write_bytes(previous)
+            rc, installed, _ = self.exercise(
+                root, self.record(), payload=self.payload[:-1]
+            )
+            self.assertNotEqual(rc, 0)
+            self.assertEqual(installed, [])
+            self.assertEqual(destination.read_bytes(), previous)
+            self.assertEqual(list(root.iterdir()), [destination])
+
+    def test_symlink_destination_never_changes_its_target(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            outside = root / "outside"
+            outside.write_bytes(b"do not change")
+            (root / self.cache_name).symlink_to(outside)
+            rc, installed, requested = self.exercise(root, self.record())
+            self.assertNotEqual(rc, 0)
+            self.assertEqual((installed, requested), ([], []))
+            self.assertEqual(outside.read_bytes(), b"do not change")
+
+    def test_install_failure_remains_a_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            rc, installed, _ = self.exercise(
+                Path(tmp), self.record(), install_code=100
+            )
+            self.assertEqual(rc, 100)
+            self.assertEqual(installed, [{self.cache_name: self.payload}])
+
+    def test_redirects_never_reach_another_origin_or_the_install(self):
+        for location in (
+            "http://archive.debian.org/debian/pool/demo.deb",
+            "https://unexpected.test/demo.deb",
+            "https://archive.debian.org/debian/pool/other.deb",
+        ):
+            requested = []
+
+            class RedirectCarrier(HTTPSHandler):
+                def https_open(self, request):
+                    requested.append(request.full_url)
+                    response = addinfourl(
+                        io.BytesIO(b""), {"location": location},
+                        request.full_url, code=302,
+                    )
+                    response.msg = "Found"
+                    return response
+
+            opener = build_opener(RedirectCarrier(), cag._RejectArchiveRedirects())
+            with self.subTest(location=location), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                rc, installed, _ = self.exercise(
+                    root, self.record(), opener=opener
+                )
+                self.assertNotEqual(rc, 0)
+                self.assertEqual(installed, [])
+                self.assertEqual(requested, [
+                    "https://archive.debian.org/debian/"
+                    "pool/main/d/demo/demo_2.0_arm64.deb"
+                ])
+                self.assertEqual(list(root.iterdir()), [])
+
+    def test_encoded_remote_path_preserves_the_apt_cache_basename(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            name = "libclang-dev_1%3a11.0-51+nmu5_arm64.deb"
+            path = "pool/main/l/llvm-defaults/libclang-dev_11.0-51%2bnmu5_arm64.deb"
+            rc, installed, requested = self.exercise(
+                root, self.record(path=path, name=name)
+            )
+            self.assertEqual(rc, 0)
+            self.assertEqual(installed, [{name: self.payload}])
+            self.assertEqual(requested, [
+                f"https://archive.debian.org/debian/{path}"
+            ])
+
+    def test_later_package_failure_prevents_the_entire_install(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            plan = self.record() + self.record(
+                name="other.deb", path="pool/main/d/demo/other.deb",
+                digest="SHA256:" + "0" * 64,
+            )
+            rc, installed, _ = self.exercise(root, plan)
+            self.assertNotEqual(rc, 0)
+            self.assertEqual(installed, [])
+            self.assertEqual(
+                {path.name: path.read_bytes() for path in root.iterdir()},
+                {self.cache_name: self.payload},
+            )
+
+    def test_empty_plan_can_install_without_transfer(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            rc, installed, requested = self.exercise(
+                Path(tmp), "All packages are already installed.\n"
+            )
+            self.assertEqual(rc, 0)
+            self.assertEqual(installed, [{}])
+            self.assertEqual(requested, [])
+
+
+class BullseyeUpdateGateTests(unittest.TestCase):
+    def test_refused_update_never_enters_the_carrier(self):
+        outcomes = iter([_completed(returncode=100)])
+        with (
+            mock.patch.object(
+                cag.subprocess, "run", side_effect=lambda *args, **kwargs: next(outcomes)
+            ),
+            mock.patch.object(cag, "build_opener") as opener,
+        ):
+            rc = cag.apt_get(
+                ["libdemo"], debian_bullseye_snapshot=True,
+                sudo=False, attempts=1, sleep=lambda _seconds: None,
+            )
+        self.assertEqual(rc, 100)
+        opener.assert_not_called()
+
+
+class BullseyePrivateCacheTests(unittest.TestCase):
+    def test_verified_files_survive_retries_then_the_cache_is_removed(self):
+        roots = []
+        payload = b"verified carrier bytes"
+
+        def attempt(packages, *, archives, **kwargs):
+            roots.append(archives)
+            self.assertIsNotNone(archives)
+            destination = archives / "demo.deb"
+            if len(roots) == 1:
+                self.assertEqual(list(archives.iterdir()), [])
+                destination.write_bytes(payload)
+                return 100
+            self.assertEqual(destination.read_bytes(), payload)
+            return 0
+
+        with mock.patch.object(cag, "_attempt", side_effect=attempt):
+            rc = cag.apt_get(
+                ["libdemo"], debian_bullseye_snapshot=True,
+                attempts=2, sleep=lambda _seconds: None,
+            )
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(roots), 2)
+        self.assertEqual(roots[0], roots[1])
+        self.assertFalse(roots[0].exists())
+
+    def test_failed_invocations_remove_their_private_cache(self):
+        roots = []
+
+        def attempt(packages, *, archives, **kwargs):
+            roots.append(archives)
+            self.assertEqual(list(archives.iterdir()), [])
+            (archives / "demo.deb").write_bytes(b"verified carrier bytes")
+            return 100
+
+        with mock.patch.object(cag, "_attempt", side_effect=attempt):
+            rc = cag.apt_get(
+                ["libdemo"], debian_bullseye_snapshot=True,
+                attempts=1, sleep=lambda _seconds: None,
+            )
+        self.assertEqual(rc, 100)
+        self.assertEqual(len(roots), 1)
+        self.assertFalse(roots[0].exists())
+
+
+class BullseyeWorkerSignalTests(unittest.TestCase):
+    def test_worker_preserves_group_kill_and_child_termination(self):
+        for ignore_term, timeout in ((False, 1), (True, 1), (False, 0)):
+            with (
+                self.subTest(ignore_term=ignore_term, timeout=timeout),
+                tempfile.TemporaryDirectory() as tmp,
+                socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server,
+            ):
+                root = Path(tmp)
+                endpoint = root / "ready.sock"
+                server.bind(str(endpoint))
+                server.listen(1)
+                server.settimeout(5)
+                fixture = root / "apt-get"
+                fixture.write_text(
+                    "#!/usr/bin/env python3\n"
+                    "import fcntl\n"
+                    "from pathlib import Path\n"
+                    "import signal\n"
+                    "import socket\n"
+                    "import sys\n"
+                    "import time\n"
+                    "if '--print-uris' in sys.argv:\n"
+                    "    raise SystemExit(0)\n"
+                    "root = Path(__file__).resolve().parent\n"
+                    "with (root / 'install.lock').open('w') as lock:\n"
+                    "    fcntl.flock(lock, fcntl.LOCK_EX)\n"
+                    f"    if {ignore_term!r}:\n"
+                    "        signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+                    "    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:\n"
+                    "        client.connect(str(root / 'ready.sock'))\n"
+                    "        client.sendall(b'R')\n"
+                    "        time.sleep(60)\n",
+                    encoding="utf-8",
+                )
+                fixture.chmod(0o755)
+                archives = root / "archives"
+                archives.mkdir()
+                environment = dict(os.environ)
+                environment["PATH"] = os.pathsep.join(
+                    (str(root), str(Path(sys.executable).parent), os.environ["PATH"])
+                )
+                worker = subprocess.Popen(
+                    [
+                        sys.executable, cag.__file__, cag._BULLSEYE_WORKER_FLAG,
+                        str(archives), "--timeout", str(timeout), "--", "probe-package",
+                    ],
+                    env=environment, start_new_session=True,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                )
+                try:
+                    channel, _ = server.accept()
+                    with channel, (root / "install.lock").open("a") as lock:
+                        channel.settimeout(5)
+                        self.assertEqual(channel.recv(1), b"R")
+                        with self.assertRaises(BlockingIOError):
+                            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        os.killpg(worker.pid, signal.SIGTERM)
+                        if timeout:
+                            with self.assertRaises(subprocess.TimeoutExpired):
+                                worker.wait(timeout=0.2)
+                        else:
+                            self.assertEqual(worker.wait(timeout=5), -signal.SIGTERM)
+                        if ignore_term:
+                            with self.assertRaises(BlockingIOError):
+                                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        else:
+                            self.assertEqual(channel.recv(1), b"")
+                            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                finally:
+                    try:
+                        os.killpg(worker.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    worker.communicate(timeout=5)
 
 
 class RetryTests(unittest.TestCase):
@@ -284,48 +697,6 @@ class TimeoutTests(unittest.TestCase):
     # attempt manifests as `timeout` exiting non-zero (124/137), which the mock
     # returns as an ordinary returncode.
 
-    def test_custom_timeout_is_baked_into_the_command(self):
-        with mock.patch.object(
-            cag.subprocess, "run", return_value=_completed()
-        ) as run:
-            cag.apt_get(["gcc"], timeout=42, sleep=lambda _s: None)
-        self.assertEqual(run.call_count, 2)  # update + install
-        for call in run.call_args_list:
-            cmd = call.args[0]
-            # `timeout` immediately follows `sudo`, carrying the ceiling and
-            # the --kill-after escalation.
-            self.assertEqual(cmd[0], "sudo")
-            self.assertEqual(cmd[1], "timeout")
-            self.assertEqual(cmd[2], f"--kill-after={cag.KILL_AFTER_SECONDS:g}s")
-            self.assertEqual(cmd[3], "42s")
-            # subprocess.run is never given a Python-level timeout kwarg.
-            self.assertNotIn("timeout", call.kwargs)
-
-    def test_default_timeout_is_the_module_constant(self):
-        with mock.patch.object(
-            cag.subprocess, "run", return_value=_completed()
-        ) as run:
-            cag.apt_get(["gcc"], sleep=lambda _s: None)
-        for call in run.call_args_list:
-            self.assertIn(
-                f"{cag.PER_COMMAND_TIMEOUT_SECONDS:g}s", call.args[0]
-            )
-
-    def test_shipped_default_wrapper_tokens_are_pinned_literally(self):
-        # Everything else derives the wrapper tokens from the constants and so
-        # would move silently with them. Pin the SHIPPED values literally here
-        # so an accidental change to PER_COMMAND_TIMEOUT_SECONDS (300) or
-        # KILL_AFTER_SECONDS (30) trips this test instead of shipping quietly.
-        with mock.patch.object(
-            cag.subprocess, "run", return_value=_completed()
-        ) as run:
-            cag.apt_get(["gcc"], sleep=lambda _s: None)
-        update_cmd = run.call_args_list[0].args[0]
-        self.assertEqual(
-            update_cmd[:5],
-            ["sudo", "timeout", "--kill-after=30s", "300s", "apt-get"],
-        )
-
     def test_timed_out_command_is_retried_and_self_heals(self):
         # attempt 1 `update` is killed by the wrapper (coreutils `timeout`
         # returns 124); the loop must treat it as a failed attempt and retry,
@@ -367,76 +738,6 @@ class TimeoutTests(unittest.TestCase):
 
 
 class CliTests(unittest.TestCase):
-    def test_main_parses_packages_and_flags(self):
-        captured = {}
-
-        def fake_apt_get(packages, *, sudo, no_install_recommends, attempts, timeout):
-            captured.update(
-                packages=packages,
-                sudo=sudo,
-                no_install_recommends=no_install_recommends,
-                attempts=attempts,
-                timeout=timeout,
-            )
-            return 0
-
-        with mock.patch.object(cag, "apt_get", fake_apt_get):
-            rc = cag.main(
-                ["--no-sudo", "--no-install-recommends", "cmake", "libclang-dev"]
-            )
-        self.assertEqual(rc, 0)
-        self.assertEqual(captured["packages"], ["cmake", "libclang-dev"])
-        self.assertFalse(captured["sudo"])
-        self.assertTrue(captured["no_install_recommends"])
-        # Default timeout is the module constant when --timeout is not passed.
-        self.assertEqual(captured["timeout"], cag.PER_COMMAND_TIMEOUT_SECONDS)
-
-    def test_main_defaults_to_sudo_and_recommends(self):
-        captured = {}
-
-        def fake_apt_get(packages, *, sudo, no_install_recommends, attempts, timeout):
-            captured.update(sudo=sudo, no_install_recommends=no_install_recommends)
-            return 0
-
-        with mock.patch.object(cag, "apt_get", fake_apt_get):
-            cag.main(["gcc"])
-        self.assertTrue(captured["sudo"])
-        self.assertFalse(captured["no_install_recommends"])
-
-    def test_main_forwards_custom_timeout(self):
-        captured = {}
-
-        def fake_apt_get(packages, *, sudo, no_install_recommends, attempts, timeout):
-            captured.update(timeout=timeout)
-            return 0
-
-        with mock.patch.object(cag, "apt_get", fake_apt_get):
-            cag.main(["--timeout", "90", "gcc"])
-        self.assertEqual(captured["timeout"], 90)
-
-    def test_main_zero_timeout_disables_the_ceiling(self):
-        # `--timeout 0` maps to None so subprocess.run applies no ceiling.
-        captured = {}
-
-        def fake_apt_get(packages, *, sudo, no_install_recommends, attempts, timeout):
-            captured.update(timeout=timeout)
-            return 0
-
-        with mock.patch.object(cag, "apt_get", fake_apt_get):
-            cag.main(["--timeout", "0", "gcc"])
-        self.assertIsNone(captured["timeout"])
-
-    def test_main_configures_hosted_mirrors_before_apt(self):
-        events = []
-        with (
-            mock.patch.object(cag, "configure_hosted_ubuntu_mirrors", side_effect=lambda: events.append("mirrors")),
-            mock.patch.object(cag, "apt_get", side_effect=lambda *args, **kwargs: events.append("apt") or 0) as apt,
-        ):
-            self.assertEqual(cag.main(["--github-hosted-ubuntu-mirrors", "--no-sudo", "gcc"]), 0)
-        self.assertEqual(events, ["mirrors", "apt"])
-        self.assertEqual(apt.call_args.args, (["gcc"],))
-        self.assertFalse(apt.call_args.kwargs["sudo"])
-
     def test_hosted_and_snapshot_sources_are_mutually_exclusive(self):
         with (
             mock.patch.object(cag, "configure_hosted_ubuntu_mirrors") as hosted,
@@ -449,25 +750,6 @@ class CliTests(unittest.TestCase):
         hosted.assert_not_called()
         snapshot.assert_not_called()
         apt.assert_not_called()
-
-    def test_main_configures_snapshot_before_apt(self):
-        events = []
-
-        def fake_configure():
-            events.append("snapshot")
-
-        def fake_apt_get(packages, *, sudo, no_install_recommends, attempts, timeout):
-            events.append("apt")
-            return 0
-
-        with (
-            mock.patch.object(cag, "configure_bullseye_snapshot", fake_configure),
-            mock.patch.object(cag, "apt_get", fake_apt_get),
-        ):
-            rc = cag.main(["--debian-bullseye-snapshot", "--no-sudo", "cmake"])
-
-        self.assertEqual(rc, 0)
-        self.assertEqual(events, ["snapshot", "apt"])
 
 
 if __name__ == "__main__":
