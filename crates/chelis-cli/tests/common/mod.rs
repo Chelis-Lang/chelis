@@ -411,6 +411,10 @@ pub fn link_generated(out_dir: &Path, source: &str, binary: &str) -> std::proces
     )
     .expect("declared C directories");
     let mut cmd = StdCommand::new(&toolchain.compiler);
+    if cfg!(target_os = "linux") {
+        // Select GNU declarations before a harness includes generated C.
+        cmd.arg("-D_GNU_SOURCE=1");
+    }
     cmd.current_dir(out_dir);
     cmd.arg("-O2");
     cmd.args(&toolchain.compile_flags);
