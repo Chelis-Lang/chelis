@@ -56,6 +56,8 @@ The `nix-eval` job of `ci.yml` is the pull request check for the Nix files. It b
 
 Rust policy and the native SMT feature lane retain total job timeouts of 75 and 90 minutes respectively. These are cold-build safety limits, not a measured performance result.
 
+Bullseye prerequisite jobs use the official `snapshot-cloudflare.debian.org` endpoint for snapshot `20260901T000000Z`. APT verifies Debian archive signatures. This transport preserves the snapshot, package versions, validity option, and bounded retry policy.
+
 GitHub-hosted runners run every job for ordinary pull-request and push events. `Fast Tests (Linux)` stays hosted; the warm pool host admits pull requests only against `main`. Explicit dispatches keep their existing route: `execution_target=self-hosted` requires an exact candidate SHA and a matching reviewed route on the runner host, and `github-hosted` dispatches stay hosted. The workflows grant no runner routing for ordinary events.
 
 Every `heavy-e2e.yml` job runs on GitHub-hosted Ubuntu on `main` and on dispatched branches. The full workspace, feature, integration, and phase-oracle jobs keep their complete selections and run in parallel. The workflow-level `linux-extended-${{ github.ref }}` concurrency group prevents two runs for the same ref from overlapping; no job-level concurrency lane serializes the selection. The module-oracle shard's five-hour limit stays inside the six-hour hosted job limit. `scripts/test_ci_cadence.py` locks the routing, job timeouts, and full selection.

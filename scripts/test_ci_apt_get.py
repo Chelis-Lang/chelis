@@ -17,6 +17,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
+from urllib.parse import urlsplit
 
 
 def _load_module():
@@ -148,20 +149,6 @@ class HostedUbuntuMirrorTests(unittest.TestCase):
 
 
 class BullseyeSnapshotTests(unittest.TestCase):
-    def test_snapshot_sources_are_immutable_and_complete(self):
-        expected = (
-            "deb [check-valid-until=no] "
-            "https://snapshot.debian.org/archive/debian/20260901T000000Z/ "
-            "bullseye main\n"
-            "deb [check-valid-until=no] "
-            "https://snapshot.debian.org/archive/debian/20260901T000000Z/ "
-            "bullseye-updates main\n"
-            "deb [check-valid-until=no] "
-            "https://snapshot.debian.org/archive/debian-security/20260901T000000Z/ "
-            "bullseye-security main\n"
-        )
-        self.assertEqual(cag.bullseye_snapshot_sources(), expected)
-
     def test_configure_snapshot_replaces_every_moving_source(self):
         with tempfile.TemporaryDirectory() as tmp:
             apt_root = Path(tmp)
@@ -183,10 +170,36 @@ class BullseyeSnapshotTests(unittest.TestCase):
 
             cag.configure_bullseye_snapshot(apt_root)
 
+            entries = [
+                line.split()
+                for line in (apt_root / "sources.list")
+                .read_text(encoding="utf-8")
+                .splitlines()
+            ]
             self.assertEqual(
-                (apt_root / "sources.list").read_text(encoding="utf-8"),
-                cag.bullseye_snapshot_sources(),
+                {entry[3] for entry in entries},
+                {"bullseye", "bullseye-updates", "bullseye-security"},
             )
+            self.assertEqual(len(entries), 3)
+            for source_type, options, address, suite, component in entries:
+                with self.subTest(suite=suite):
+                    url = urlsplit(address)
+                    self.assertEqual((source_type, component), ("deb", "main"))
+                    self.assertEqual(options, "[check-valid-until=no]")
+                    self.assertEqual(
+                        (url.scheme, url.netloc),
+                        ("https", "snapshot-cloudflare.debian.org"),
+                    )
+                    archive = (
+                        "debian-security"
+                        if suite == "bullseye-security"
+                        else "debian"
+                    )
+                    self.assertEqual(
+                        url.path, f"/archive/{archive}/20260901T000000Z/"
+                    )
+                    self.assertFalse(url.query)
+                    self.assertFalse(url.fragment)
             self.assertFalse((fragments / "debian.list").exists())
             self.assertFalse((fragments / "debian.sources").exists())
             self.assertEqual(

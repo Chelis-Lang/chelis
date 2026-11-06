@@ -145,11 +145,11 @@ BULLSEYE_SNAPSHOT_TIMESTAMP = "20260901T000000Z"
 def bullseye_snapshot_sources() -> str:
     """Return the complete immutable apt source set for the Bullseye lanes."""
     main = (
-        "https://snapshot.debian.org/archive/debian/"
+        "https://snapshot-cloudflare.debian.org/archive/debian/"
         f"{BULLSEYE_SNAPSHOT_TIMESTAMP}/"
     )
     security = (
-        "https://snapshot.debian.org/archive/debian-security/"
+        "https://snapshot-cloudflare.debian.org/archive/debian-security/"
         f"{BULLSEYE_SNAPSHOT_TIMESTAMP}/"
     )
     option = "[check-valid-until=no]"

@@ -1,0 +1,1 @@
+CI installs pinned Bullseye prerequisites through the official Cloudflare snapshot endpoint. The snapshot date, package versions, archive signature checks, and bounded retry policy stay unchanged. See [#4117](https://github.com/Chelis-Lang/chelis/issues/4117).
