@@ -309,6 +309,10 @@ fn compile_program(
     .unwrap();
     let binary = dir.path().join("probe");
     let mut cc = Command::new("cc");
+    if cfg!(target_os = "linux") {
+        // Select GNU declarations before the harness includes libc headers.
+        cc.arg("-D_GNU_SOURCE=1");
+    }
     cc.args(["-std=c11", "-O0"])
         .arg(&c)
         .arg("-I")
