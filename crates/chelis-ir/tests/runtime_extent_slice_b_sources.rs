@@ -1,6 +1,7 @@
 //! Slice B executable contract for chelis#1277: one checked source per
 //! realized output axis (`spec/design/runtime_extents.md` C4).
 
+use chelis_checker_core::unsupported::Stage;
 use chelis_dag_core::axis_sources::{
     AxisSource, ExtentOrigin, dim_extent_origins, output_axis_sources, resolve_axis_extent,
     unresolved_dim_names,
@@ -12,7 +13,6 @@ use chelis_dag_core::dag::{
 };
 use chelis_ir::axis_admission::check_axis_sources;
 use chelis_numeric_core::prim::Prim;
-use chelis_types::unsupported::Stage;
 
 fn ty(dims: Vec<DimInfo>, precision: Prim) -> TensorType {
     TensorType { dims, precision }

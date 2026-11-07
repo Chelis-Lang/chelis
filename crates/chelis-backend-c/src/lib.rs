@@ -62,7 +62,7 @@ impl CodegenResult {
     pub fn reseal_artifact(
         &mut self,
         program_identity: &str,
-    ) -> Result<(), chelis_types::unsupported::Unsupported> {
+    ) -> Result<(), chelis_checker_core::unsupported::Unsupported> {
         let (source, header) = generated_header::reseal_generated_artifact(
             program_identity,
             &self.c_source,
@@ -123,7 +123,7 @@ pub struct CodegenOptions {
 pub fn codegen(
     dag: chelis_ir::ownership::VerifiedDagProgram,
     func_name: &str,
-) -> Result<CodegenResult, chelis_types::unsupported::Unsupported> {
+) -> Result<CodegenResult, chelis_checker_core::unsupported::Unsupported> {
     codegen_with_options(dag, func_name, CodegenOptions::default())
 }
 
@@ -138,7 +138,7 @@ pub fn codegen(
 pub fn codegen_host_program(
     program: &chelis_ir::ownership::VerifiedHostProgram,
     func_name: &str,
-) -> Result<CodegenResult, chelis_types::unsupported::Unsupported> {
+) -> Result<CodegenResult, chelis_checker_core::unsupported::Unsupported> {
     codegen_host_program_with_external_tensor_helpers(program, func_name, &[])
 }
 
@@ -153,7 +153,7 @@ pub fn codegen_host_program_with_external_tensor_helpers(
     program: &chelis_ir::ownership::VerifiedHostProgram,
     func_name: &str,
     external_helpers: &[String],
-) -> Result<CodegenResult, chelis_types::unsupported::Unsupported> {
+) -> Result<CodegenResult, chelis_checker_core::unsupported::Unsupported> {
     // Resolve the backend capability boundary once.  All emission below is
     // over the private, fully-resolved ABI vocabulary; neither source nor
     // header generation can re-interpret logical types independently.
@@ -163,13 +163,13 @@ pub fn codegen_host_program_with_external_tensor_helpers(
         .iter()
         .find(|name| !known_helpers.iter().any(|known| known == *name))
     {
-        return Err(chelis_types::unsupported::Unsupported::new(
-            chelis_types::unsupported::UnsupportedKind::Construct(format!(
+        return Err(chelis_checker_core::unsupported::Unsupported::new(
+            chelis_checker_core::unsupported::UnsupportedKind::Construct(format!(
                 "unknown external host tensor helper `{unknown}`"
             )),
             "C host tensor-helper composition",
-            chelis_types::unsupported::Stage::Codegen("c"),
-            chelis_types::deliberate_rejection!(
+            chelis_checker_core::unsupported::Stage::Codegen("c"),
+            chelis_checker_core::deliberate_rejection!(
                 "[04-TOT-2]",
                 "an external helper selection must name an exact manifest member; no missing-definition fallback is permitted"
             ),
@@ -222,7 +222,7 @@ pub fn host_tensor_helper_codegen(
         Vec<HostTensorHelperCodegen>,
         chelis_ir::host::ConcreteHostProgram,
     ),
-    chelis_types::unsupported::Unsupported,
+    chelis_checker_core::unsupported::Unsupported,
 > {
     let helpers = host_emit::concrete_tensor_helper_codegen(&program, func_name)?
         .into_iter()
@@ -239,7 +239,7 @@ pub fn codegen_with_options(
     dag: chelis_ir::ownership::VerifiedDagProgram,
     func_name: &str,
     options: CodegenOptions,
-) -> Result<CodegenResult, chelis_types::unsupported::Unsupported> {
+) -> Result<CodegenResult, chelis_checker_core::unsupported::Unsupported> {
     let h_header = generated_header::render_declaration(
         func_name,
         func_name,
@@ -286,21 +286,21 @@ fn seal_generated_artifact(
     program_identity: &str,
     source: &str,
     header: &str,
-) -> Result<(String, String), chelis_types::unsupported::Unsupported> {
+) -> Result<(String, String), chelis_checker_core::unsupported::Unsupported> {
     generated_header::seal_generated_artifact(program_identity, source, header)
         .map_err(generated_artifact_error)
 }
 
 fn generated_artifact_error(
     error: generated_header::GeneratedHeaderError,
-) -> chelis_types::unsupported::Unsupported {
-    chelis_types::unsupported::Unsupported::new(
-        chelis_types::unsupported::UnsupportedKind::Construct(
+) -> chelis_checker_core::unsupported::Unsupported {
+    chelis_checker_core::unsupported::Unsupported::new(
+        chelis_checker_core::unsupported::UnsupportedKind::Construct(
             "generated C artifact contract".to_string(),
         ),
         error.to_string(),
-        chelis_types::unsupported::Stage::Codegen("c"),
-        chelis_types::deliberate_rejection!(
+        chelis_checker_core::unsupported::Stage::Codegen("c"),
+        chelis_checker_core::deliberate_rejection!(
             "[01-CID-1]",
             "generated C source and header must carry one exact program/export artifact envelope"
         ),
@@ -327,7 +327,7 @@ pub fn prepare_dag_for_codegen(
 /// Select the exact nested C helper DAGs before host ownership lowering.
 pub fn prepare_host_program_for_codegen(
     mut program: chelis_ir::host::ConcreteHostProgram,
-) -> Result<chelis_ir::host::ConcreteHostProgram, chelis_types::unsupported::Unsupported> {
+) -> Result<chelis_ir::host::ConcreteHostProgram, chelis_checker_core::unsupported::Unsupported> {
     prepare_concrete_host_program_for_codegen(&mut program, true)?;
     Ok(program)
 }
@@ -337,18 +337,18 @@ pub fn prepare_host_program_for_codegen(
 /// lowered, without the payload rewrites of the ordinary host lane.
 pub fn prepare_host_execution_plan_for_codegen(
     plan: chelis_ir::host::HostExecutionPlan,
-) -> Result<chelis_ir::host::HostExecutionPlan, chelis_types::unsupported::Unsupported> {
+) -> Result<chelis_ir::host::HostExecutionPlan, chelis_checker_core::unsupported::Unsupported> {
     for helper in &plan.program().global_tensor_helpers {
         chelis_ir::axis_admission::check_axis_sources(
             &helper.dag,
-            chelis_types::unsupported::Stage::Codegen("c"),
+            chelis_checker_core::unsupported::Stage::Codegen("c"),
         )?;
     }
     for function in &plan.program().functions {
         for helper in &function.tensor_helpers {
             chelis_ir::axis_admission::check_axis_sources(
                 &helper.dag,
-                chelis_types::unsupported::Stage::Codegen("c"),
+                chelis_checker_core::unsupported::Stage::Codegen("c"),
             )?;
         }
     }
@@ -358,11 +358,11 @@ pub fn prepare_host_execution_plan_for_codegen(
 fn prepare_concrete_host_program_for_codegen(
     program: &mut chelis_ir::host::ConcreteHostProgram,
     specialize_exact_arithmetic: bool,
-) -> Result<(), chelis_types::unsupported::Unsupported> {
+) -> Result<(), chelis_checker_core::unsupported::Unsupported> {
     fn prepare(
         helper: &mut chelis_ir::host::HostTensorHelper,
         specialize_exact_arithmetic: bool,
-    ) -> Result<(), chelis_types::unsupported::Unsupported> {
+    ) -> Result<(), chelis_checker_core::unsupported::Unsupported> {
         // A shape-derived BLAS summary is not proof of the primitive
         // contraction's arithmetic. Keep the source graph as the payload.
         if matches!(
@@ -379,7 +379,7 @@ fn prepare_concrete_host_program_for_codegen(
         };
         chelis_ir::axis_admission::check_axis_sources(
             &specialized,
-            chelis_types::unsupported::Stage::Codegen("c"),
+            chelis_checker_core::unsupported::Stage::Codegen("c"),
         )?;
         helper.dag = emit::CEmitter::rename_anonymous_dims(specialized);
         Ok(())
@@ -429,7 +429,7 @@ mod tests {
     fn codegen(
         dag: &Dag,
         name: &str,
-    ) -> Result<CodegenResult, chelis_types::unsupported::Unsupported> {
+    ) -> Result<CodegenResult, chelis_checker_core::unsupported::Unsupported> {
         codegen_with_options(dag, name, CodegenOptions::default())
     }
 
@@ -437,7 +437,7 @@ mod tests {
         dag: &Dag,
         name: &str,
         options: CodegenOptions,
-    ) -> Result<CodegenResult, chelis_types::unsupported::Unsupported> {
+    ) -> Result<CodegenResult, chelis_checker_core::unsupported::Unsupported> {
         let verified = crate::testing::verified_dag(dag, options)
             .expect("C backend unit-test DAG must verify ownership");
         super::codegen_with_options(verified, name, options)
@@ -446,7 +446,7 @@ mod tests {
     fn codegen_host_program(
         program: &chelis_ir::host::ConcreteHostProgram,
         name: &str,
-    ) -> Result<CodegenResult, chelis_types::unsupported::Unsupported> {
+    ) -> Result<CodegenResult, chelis_checker_core::unsupported::Unsupported> {
         let source = program
             .functions
             .iter()

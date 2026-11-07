@@ -1,4 +1,4 @@
-//! Consumer compile controls over the actual std+vocab ABI owner.
+//! Consumer compile controls over the portable ABI owner.
 
 use std::path::PathBuf;
 use std::process::{Command, Output};
@@ -118,7 +118,11 @@ impl Probe {
         // The unchanged contract's imports and qualified type references
         // select the actual source under mutation, never an external copy.
         let source = tests
-            .replacen(marker, "mod metadata;\nuse metadata::{\n    ByteCount,", 1)
+            .replacen(
+                marker,
+                "extern crate alloc;\nmod metadata;\nuse metadata::{\n    ByteCount,",
+                1,
+            )
             .replace("chelis_abi::metadata::", "metadata::");
         assert!(!source.contains("chelis_abi::metadata::"));
         std::fs::write(self.0.join("metadata.rs"), owner).unwrap();

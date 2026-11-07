@@ -11,10 +11,11 @@
 //! (#2413) reach this shape: their pure layers rebuild a tensor with
 //! `to_tensor` over a `List[p]`.
 
+use chelis_checker_core::errors::CheckError;
+use chelis_checker_core::errors::CheckErrorKind;
 use chelis_deep::Expr;
 use chelis_macros::{ExpansionOptions, expand_program};
 use chelis_surf::{desugar::desugar_program, parser::parse_str};
-use chelis_types::errors::{CheckError, CheckErrorKind};
 use chelis_types::{check_ir_program, check_typed_program};
 
 fn rendered(errors: &[CheckError]) -> String {

@@ -6,10 +6,12 @@
 //! position-restricted constructor and have no standalone/opaque C spelling.
 
 use crate::host_abi::HostAbiType;
+use chelis_checker_core::unsupported::{
+    RejectionAuthorityKind, Stage, Unsupported, UnsupportedKind,
+};
 use chelis_dag_core::{DimInfo, TensorType};
 use chelis_ir::ConcreteHostType;
 use chelis_numeric_core::prim::Prim;
-use chelis_types::unsupported::{RejectionAuthorityKind, Stage, Unsupported, UnsupportedKind};
 
 #[test]
 fn public_callable_fence_recurses_through_every_host_container() {

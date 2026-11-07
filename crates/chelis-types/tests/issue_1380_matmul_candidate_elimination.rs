@@ -22,11 +22,11 @@
 //! deferred operand, which is what its name says, so the single result shape
 //! leaves it untouched.
 
+use chelis_checker_core::errors::CheckError;
 use chelis_deep::printer::print_canonical;
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str as parse_surf;
 use chelis_types::check_typed_program;
-use chelis_types::errors::CheckError;
 
 fn check(source: &str) -> Result<String, Vec<CheckError>> {
     let decls =

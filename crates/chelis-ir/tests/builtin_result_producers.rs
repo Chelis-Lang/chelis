@@ -14,7 +14,7 @@ const SPEC_PROJECTIONS: &[&str] = &["index", "skip", "take"];
 fn every_builtin_but_the_projections_produces_its_result() {
     assert_eq!(BUILTIN_PROJECTIONS, SPEC_PROJECTIONS);
     let mut wrong = Vec::new();
-    for builtin in chelis_types::BUILTINS {
+    for builtin in chelis_checker_core::BUILTINS {
         let expected = !SPEC_PROJECTIONS.contains(&builtin.name);
         if produces_its_result(builtin.name) != expected {
             wrong.push(format!("{}: expected {expected}", builtin.name));
@@ -22,7 +22,7 @@ fn every_builtin_but_the_projections_produces_its_result() {
     }
     for projection in SPEC_PROJECTIONS {
         assert!(
-            chelis_types::builtin_decl(projection).is_some(),
+            chelis_checker_core::builtin_decl(projection).is_some(),
             "{projection} is not a catalogue builtin"
         );
     }

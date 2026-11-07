@@ -38,7 +38,9 @@ fn assert_legal() {
         .unwrap_or_else(|result| panic!("legal explicit binder must check: {:?}", result.errors));
 }
 
-fn assert_rogue_rejected(result: Result<chelis_types::CheckedProgram, chelis_types::InferResult>) {
+fn assert_rogue_rejected(
+    result: Result<chelis_types::CheckedProgram, chelis_checker_core::InferResult>,
+) {
     let errors = result
         .expect_err("a sibling without a signature must not inherit `n`")
         .errors;

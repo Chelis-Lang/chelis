@@ -474,7 +474,7 @@ fn matmul_int_rejected_at_codegen_returns_typed_unsupported() {
         let error = try_codegen_metal(&dag, "mmk_int").unwrap_err();
         assert_eq!(
             error.stage,
-            chelis_types::unsupported::Stage::Codegen("metal")
+            chelis_checker_core::unsupported::Stage::Codegen("metal")
         );
         assert!(error.to_string().starts_with("unsupported:"), "{error}");
     }

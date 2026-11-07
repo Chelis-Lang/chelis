@@ -996,7 +996,7 @@ fn check_signature_entry_plan(
 /// or nominal value (runtime_extents.md C6.5), derived once per type.
 #[derive(Clone, Copy)]
 struct EntryClaimPatterns<'a> {
-    registry: &'a chelis_types::adt::AdtRegistry,
+    registry: &'a chelis_checker_core::adt::AdtRegistry,
     cache: &'a std::cell::RefCell<
         UnordMap<String, Option<Arc<chelis_ir::claim_pattern::ClaimPattern>>>,
     >,
@@ -5373,8 +5373,9 @@ impl<'a> EvalContext<'a> {
         claims: &[DeclaredResultClaim],
     ) -> Result<bool, String> {
         if claims.is_empty()
-            || chelis_types::AdmittedBuiltin::resolve(name).is_none()
-            || chelis_types::shape_class(name) != Some(chelis_types::ShapeClass::Identity)
+            || chelis_checker_core::AdmittedBuiltin::resolve(name).is_none()
+            || chelis_checker_core::shape_class(name)
+                != Some(chelis_checker_core::ShapeClass::Identity)
         {
             return Ok(false);
         }
@@ -5442,12 +5443,12 @@ impl<'a> EvalContext<'a> {
         // The checked builtin catalog owns the numeric operation set.
         // Mixed-domain equality is trusted only for numeric arguments;
         // recursive container comparison can include authored strings.
-        let trusted_numeric_source = chelis_types::builtin_decl(name).is_some_and(|decl| {
-            decl.capability.domains == [chelis_types::BuiltinSemanticDomain::Numeric]
+        let trusted_numeric_source = chelis_checker_core::builtin_decl(name).is_some_and(|decl| {
+            decl.capability.domains == [chelis_checker_core::BuiltinSemanticDomain::Numeric]
                 || (decl
                     .capability
                     .domains
-                    .contains(&chelis_types::BuiltinSemanticDomain::Numeric)
+                    .contains(&chelis_checker_core::BuiltinSemanticDomain::Numeric)
                     && args.iter().all(|arg| {
                         matches!(
                             arg,
@@ -8169,7 +8170,7 @@ mod nested_claim_order_tests {
     use super::*;
 
     fn pattern(extent: usize) -> Arc<ClaimPattern> {
-        let registry = chelis_types::adt::AdtRegistry::default();
+        let registry = chelis_checker_core::adt::AdtRegistry::default();
         let claimed = chelis_deep::parser::parse_str(
             &format!("(t-tuple {{}} (t-tensor {{}} (d-lit {{}} {extent}) (t-prim {{}} f32)))"),
             &chelis_syntax_host::NativeStack,
@@ -9259,7 +9260,7 @@ mod legacy_capture_order_tests {
     }
 
     /// The checker's messages, for an assertion's failure text.
-    fn messages(errors: &[chelis_types::errors::CheckError]) -> String {
+    fn messages(errors: &[chelis_checker_core::errors::CheckError]) -> String {
         errors
             .iter()
             .map(|error| error.message.as_str())
@@ -9284,7 +9285,7 @@ mod legacy_capture_order_tests {
             report.errors.iter().any(|error| {
                 matches!(
                     error.kind,
-                    chelis_types::errors::CheckErrorKind::TypeMismatch
+                    chelis_checker_core::errors::CheckErrorKind::TypeMismatch
                 ) && error.message.contains("() -> tensor[2, f32]")
             }),
             "{}",

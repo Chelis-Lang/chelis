@@ -15,7 +15,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 MANIFEST = (
     REPO_ROOT
     / "crates"
-    / "chelis-types"
+    / "chelis-checker-core"
     / "tests"
     / "compile_fail"
     / "checkpoint_raw_offset"

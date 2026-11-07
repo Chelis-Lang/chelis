@@ -355,7 +355,7 @@ multi-letter PascalCase name is a type or constructor, §3.1). The parser
 accepts the single-letter uppercase value binder directly; in
 value-*reference* position the name lexes as a constructor head and the
 resolver binds it to the in-scope value
-(`crates/chelis-types/src/infer/` resolves `var`/constructor heads by
+(`crates/chelis-checker-core/src/infer/` resolves `var`/constructor heads by
 environment lookup, so an uppercase reference with a value binding in
 scope is a value, and an uppercase reference with no binding remains an
 unknown-constructor error).

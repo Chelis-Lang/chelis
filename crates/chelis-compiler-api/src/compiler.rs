@@ -1,12 +1,13 @@
 use crate::schema::numbers::{NonnegativeCount, NonnegativeExtent, SourceInteger};
+use chelis_checker_core::errors::ErrorWitness;
 use chelis_deep::DeepTag;
 use chelis_numeric_core::prim::Prim;
-use chelis_types::errors::ErrorWitness;
 use chelis_unord::{UnordMap, UnordSet};
 use std::collections::{BTreeMap, BTreeSet};
 
 use chelis_backend_c::CodegenResult;
 use chelis_backend_hip::HipCodegenResult;
+use chelis_checker_core::errors::CheckError;
 use chelis_dag_core::dag::{
     ComparisonKind, Dag, DimInfo, ExtremaKind, ExtremaOperand, FusedInput, FusedStepOp,
     LogicalKind, NodeId, ReduceWindowKind, RiscOp, RtDim, TensorType,
@@ -20,7 +21,6 @@ use chelis_surf::ast::{
 };
 use chelis_types::{
     CheckedProgram,
-    errors::CheckError,
     manifest::{ManifestedProgram, RootEntry, RootManifest},
     types::{Lane, Target},
 };
@@ -1868,8 +1868,8 @@ fn resolve_in_context_entry<'a>(
 /// not-yet-implemented capability.
 pub fn reef_context_hip_unsupported_error() -> CompilerError {
     let _fp_env = chelis_runtime::FpEnvGuard::enter();
-    unsupported_stage_error(chelis_types::unsupported::Unsupported::new(
-        chelis_types::unsupported::UnsupportedKind::Construct(
+    unsupported_stage_error(chelis_checker_core::unsupported::Unsupported::new(
+        chelis_checker_core::unsupported::UnsupportedKind::Construct(
             "reef-context compilation (a `project_root=` with \
              reef-declared imports)"
                 .to_string(),
@@ -1878,8 +1878,8 @@ pub fn reef_context_hip_unsupported_error() -> CompilerError {
          selection the C path uses and would merge every reef-linked \
          def's inputs/outputs into a single kernel instead of compiling \
          the requested entry",
-        chelis_types::unsupported::Stage::Codegen("hip"),
-        chelis_types::unimplemented_rejection!(
+        chelis_checker_core::unsupported::Stage::Codegen("hip"),
+        chelis_checker_core::unimplemented_rejection!(
             829,
             "compile the entry with `target=\"c\"`, or run it through `eval`, \
              until HIP reef-context support lands"
@@ -2851,12 +2851,12 @@ fn unbound_call_inputs(
 /// (chelis#3804): a call argument other than a scalar, a boolean or a string,
 /// or a tensor parameter whose type is not literal.
 fn unimplemented_call_input(what: String) -> CompilerError {
-    let mut error = unsupported_stage_error(chelis_types::unsupported::Unsupported::new(
-        chelis_types::unsupported::UnsupportedKind::Construct(what),
+    let mut error = unsupported_stage_error(chelis_checker_core::unsupported::Unsupported::new(
+        chelis_checker_core::unsupported::UnsupportedKind::Construct(what),
         "a call admits numeric scalar, boolean and string arguments and tensor bindings \
          of a literal type",
-        chelis_types::unsupported::Stage::Runtime,
-        chelis_types::unimplemented_rejection!(
+        chelis_checker_core::unsupported::Stage::Runtime,
+        chelis_checker_core::unimplemented_rejection!(
             3804,
             "declare the value in the program and call a definition whose parameters are \
              scalars, booleans, strings or tensors of a literal type"
@@ -3712,14 +3712,14 @@ fn unavailable_root_error(entry: &RootEntry, reason: &str) -> CompilerError {
         .first()
         .map(|reason| format!("; routing evidence: {reason:?}"))
         .unwrap_or_default();
-    unsupported_stage_error(chelis_types::unsupported::Unsupported::new(
-        chelis_types::unsupported::UnsupportedKind::Construct(format!(
+    unsupported_stage_error(chelis_checker_core::unsupported::Unsupported::new(
+        chelis_checker_core::unsupported::UnsupportedKind::Construct(format!(
             "[05-UNS-1] unavailable root `{}`",
             entry.name
         )),
         format!("{:?} lane: {reason}{routing_reason}", entry.lane),
-        chelis_types::unsupported::Stage::Runtime,
-        chelis_types::unimplemented_rejection!(
+        chelis_checker_core::unsupported::Stage::Runtime,
+        chelis_checker_core::unimplemented_rejection!(
             912,
             "this is a root-realization defect; file a bug with the program and target"
         ),
@@ -5150,7 +5150,7 @@ fn reject_unsized_named_dims(dag: &Dag, target: &'static str) -> Result<()> {
                         node.id.0
                     ),
                     target,
-                    chelis_types::unimplemented_rejection!(
+                    chelis_checker_core::unimplemented_rejection!(
                         1277,
                         "dynamic output shapes do not yet have a backend representation"
                     ),
@@ -5208,7 +5208,7 @@ pub fn reject_symbolic_windowed_reduce(
                         node.id.0
                     ),
                     target,
-                    chelis_types::unimplemented_rejection!(
+                    chelis_checker_core::unimplemented_rejection!(
                         1277,
                         "the runtime-derived window output extent needs a dynamic output shape"
                     ),
@@ -5254,7 +5254,7 @@ pub fn reject_unsupported_reduce_window_precision(
                     prec.name(),
                 ),
                 target,
-                chelis_types::unimplemented_rejection!(
+                chelis_checker_core::unimplemented_rejection!(
                     729,
                     "the dtype capability table and typed window kernels do not yet cover this cell"
                 ),
@@ -5321,12 +5321,12 @@ impl TryFrom<&str> for BuildTarget {
 fn unsupported_gate_error(
     message: impl Into<String>,
     target: &'static str,
-    authority: chelis_types::unsupported::RejectionAuthority,
+    authority: chelis_checker_core::unsupported::RejectionAuthority,
 ) -> CompilerError {
-    unsupported_stage_error(chelis_types::unsupported::Unsupported::new(
-        chelis_types::unsupported::UnsupportedKind::Construct(message.into()),
+    unsupported_stage_error(chelis_checker_core::unsupported::Unsupported::new(
+        chelis_checker_core::unsupported::UnsupportedKind::Construct(message.into()),
         format!("`chelis build --target {target}` early capability gate"),
-        chelis_types::unsupported::Stage::Codegen(target),
+        chelis_checker_core::unsupported::Stage::Codegen(target),
         authority,
     ))
 }
@@ -5451,7 +5451,7 @@ pub fn reject_inexact_device_reduction_cells(
                 precision.name(),
             ),
             target,
-            chelis_types::unimplemented_rejection!(
+            chelis_checker_core::unimplemented_rejection!(
                 2339,
                 "the admitted HIP/Metal reduction cell lacks exact stored-dtype selection, \
                  empty-domain, index, or extrema-adjoint behavior; use the C target"
@@ -5482,7 +5482,7 @@ pub fn reject_unsupported_effect_ops(
             return Err(unsupported_gate_error(
                 format!("compiled `dropout` op at lowered node {}", node.id.0),
                 target.as_str(),
-                chelis_types::unimplemented_rejection!(
+                chelis_checker_core::unimplemented_rejection!(
                     1192,
                     "compiled `dropout` kernels are not implemented; run this program with `chelis eval`"
                 ),
@@ -5575,7 +5575,7 @@ pub fn reject_unsupported_hip_ops_in_host_program(
                         node.id.0
                     ),
                     "hip",
-                    chelis_types::unimplemented_rejection!(
+                    chelis_checker_core::unimplemented_rejection!(
                         2493,
                         "HIP pad and shrink device routing is not implemented for C-host tensor helpers; use `--target c`"
                     ),
@@ -5625,7 +5625,7 @@ pub fn reject_unsupported_metal_ops(dag: &Dag) -> std::result::Result<(), Compil
                     node.id.0
                 ),
                 "metal",
-                chelis_types::unimplemented_rejection!(
+                chelis_checker_core::unimplemented_rejection!(
                     2266,
                     "the Metal exact comparison, Bool8 logical, and raw stored-bit where kernels are not implemented; use `--target c` or `--target hip`"
                 ),
@@ -5656,7 +5656,7 @@ pub fn reject_unsupported_metal_ops(dag: &Dag) -> std::result::Result<(), Compil
                     node.id.0
                 ),
                 "metal",
-                chelis_types::unimplemented_rejection!(
+                chelis_checker_core::unimplemented_rejection!(
                     2338,
                     "the Metal direct-subtraction/extrema kernel and exact trap/bit-selection cells are not implemented"
                 ),
@@ -5670,7 +5670,7 @@ pub fn reject_unsupported_metal_ops(dag: &Dag) -> std::result::Result<(), Compil
                     node.id.0
                 ),
                 "metal",
-                chelis_types::unimplemented_rejection!(
+                chelis_checker_core::unimplemented_rejection!(
                     1383,
                     "the Metal device scalar path for runtime expand extents is not implemented; use `--target c`"
                 ),
@@ -5693,7 +5693,7 @@ pub fn reject_unsupported_metal_ops(dag: &Dag) -> std::result::Result<(), Compil
                     node.id.0
                 ),
                 "metal",
-                chelis_types::deliberate_rejection!(
+                chelis_checker_core::deliberate_rejection!(
                     "[05-MOV-1]",
                     "runtime movement bounds and reshape targets are defined on eval and C; use `--target c`"
                 ),
@@ -5713,7 +5713,7 @@ pub fn reject_unsupported_metal_ops(dag: &Dag) -> std::result::Result<(), Compil
                 return Err(unsupported_gate_error(
                     format!("f64 value at lowered node {}", node.id.0),
                     "metal",
-                    chelis_types::deliberate_rejection!(
+                    chelis_checker_core::deliberate_rejection!(
                         "[04-TGT-1]",
                         "Apple Silicon GPUs lack FP64 ALUs; use `--target c` or `--target hip` for f64 workloads"
                     ),
@@ -5727,7 +5727,7 @@ pub fn reject_unsupported_metal_ops(dag: &Dag) -> std::result::Result<(), Compil
                         node.id.0
                     ),
                     "metal",
-                    chelis_types::unimplemented_rejection!(
+                    chelis_checker_core::unimplemented_rejection!(
                         729,
                         "the Metal target dtype capability cell is not implemented; supported: f32/f16/bf16/i8/i16/i32/i64/bool (spec/04-type-system.md §1.1.3)"
                     ),
@@ -6058,7 +6058,7 @@ pub fn reject_unsupported_hip_ops(dag: &Dag) -> std::result::Result<(), Compiler
                         mode.atom()
                     ),
                     "hip",
-                    chelis_types::unimplemented_rejection!(
+                    chelis_checker_core::unimplemented_rejection!(
                         3411,
                         "the HIP cast kernels emit an unguarded device-side conversion, \
                          so the named cast traps have no device implementation; the C \
@@ -6075,7 +6075,7 @@ pub fn reject_unsupported_hip_ops(dag: &Dag) -> std::result::Result<(), Compiler
                         node.id.0
                     ),
                     "hip",
-                    chelis_types::deliberate_rejection!(
+                    chelis_checker_core::deliberate_rejection!(
                         "[05-RWIN-2]",
                         "windowed reduction kernels are intentionally excluded from the HIP target; use the C target"
                     ),
@@ -6090,7 +6090,7 @@ pub fn reject_unsupported_hip_ops(dag: &Dag) -> std::result::Result<(), Compiler
                         node.id.0
                     ),
                     "hip",
-                    chelis_types::deliberate_rejection!(
+                    chelis_checker_core::deliberate_rejection!(
                         "[05-RWIN-2]",
                         "windowed reduction adjoint kernels are intentionally excluded from the HIP target; use the C target"
                     ),
@@ -6104,7 +6104,7 @@ pub fn reject_unsupported_hip_ops(dag: &Dag) -> std::result::Result<(), Compiler
                         node.id.0
                     ),
                     "hip",
-                    chelis_types::deliberate_rejection!(
+                    chelis_checker_core::deliberate_rejection!(
                         "[05-SPARSE-2]",
                         "OneHot is internal-only and must be consumed before backend emission"
                     ),
@@ -6133,7 +6133,7 @@ pub fn reject_unsupported_hip_ops(dag: &Dag) -> std::result::Result<(), Compiler
                         node.id.0
                     ),
                     "hip",
-                    chelis_types::deliberate_rejection!(
+                    chelis_checker_core::deliberate_rejection!(
                         "[05-SHAPE-1]",
                         "runtime shape-value reads are intentionally excluded from the HIP device lane; use the C target"
                     ),
@@ -6146,7 +6146,7 @@ pub fn reject_unsupported_hip_ops(dag: &Dag) -> std::result::Result<(), Compiler
                         node.id.0
                     ),
                     "hip",
-                    chelis_types::unimplemented_rejection!(
+                    chelis_checker_core::unimplemented_rejection!(
                         1298,
                         "the HIP device scalar path for runtime movement bounds is not implemented; use `--target c`"
                     ),
@@ -6160,7 +6160,7 @@ pub fn reject_unsupported_hip_ops(dag: &Dag) -> std::result::Result<(), Compiler
                         node.id.0
                     ),
                     "hip",
-                    chelis_types::deliberate_rejection!(
+                    chelis_checker_core::deliberate_rejection!(
                         "[05-MOV-1]",
                         "runtime movement bounds are defined on eval and C; use `--target c`"
                     ),
@@ -6173,7 +6173,7 @@ pub fn reject_unsupported_hip_ops(dag: &Dag) -> std::result::Result<(), Compiler
                         node.id.0
                     ),
                     "hip",
-                    chelis_types::deliberate_rejection!(
+                    chelis_checker_core::deliberate_rejection!(
                         "[05-MOV-1]",
                         "runtime movement bounds are defined on eval and C; use `--target c`"
                     ),
@@ -6186,7 +6186,7 @@ pub fn reject_unsupported_hip_ops(dag: &Dag) -> std::result::Result<(), Compiler
                         node.id.0
                     ),
                     "hip",
-                    chelis_types::deliberate_rejection!(
+                    chelis_checker_core::deliberate_rejection!(
                         "[05-MOV-1]",
                         "runtime movement bounds are defined on eval and C; use `--target c`"
                     ),
@@ -6199,7 +6199,7 @@ pub fn reject_unsupported_hip_ops(dag: &Dag) -> std::result::Result<(), Compiler
                         node.id.0
                     ),
                     "hip",
-                    chelis_types::deliberate_rejection!(
+                    chelis_checker_core::deliberate_rejection!(
                         "[05-MOV-1]",
                         "runtime reshape targets are defined on eval and C; use `--target c`"
                     ),
@@ -6221,7 +6221,7 @@ pub fn reject_unsupported_hip_ops(dag: &Dag) -> std::result::Result<(), Compiler
                             node.output_type.precision.name()
                         ),
                         "hip",
-                        chelis_types::unimplemented_rejection!(
+                        chelis_checker_core::unimplemented_rejection!(
                             729,
                             "the HIP sparse payload dtype cell is not implemented"
                         ),
@@ -6239,7 +6239,7 @@ pub fn reject_unsupported_hip_ops(dag: &Dag) -> std::result::Result<(), Compiler
                             indices.precision.name()
                         ),
                         "hip",
-                        chelis_types::deliberate_rejection!(
+                        chelis_checker_core::deliberate_rejection!(
                             "[05-SPARSE-1]",
                             "sparse indices must use the specified i32 or i64 dtype"
                         ),
@@ -6254,7 +6254,7 @@ pub fn reject_unsupported_hip_ops(dag: &Dag) -> std::result::Result<(), Compiler
                             node.id.0, index_node.op
                         ),
                         "hip",
-                        chelis_types::unimplemented_rejection!(
+                        chelis_checker_core::unimplemented_rejection!(
                             729,
                             "non-load sparse index producers need typed integer HIP kernels"
                         ),
@@ -6309,7 +6309,7 @@ pub fn reject_unsupported_hip_ops(dag: &Dag) -> std::result::Result<(), Compiler
                             node.output_type.precision.name()
                         ),
                         "hip",
-                        chelis_types::unimplemented_rejection!(
+                        chelis_checker_core::unimplemented_rejection!(
                             729,
                             "the HIP sparse payload dtype cell is not implemented"
                         ),
@@ -6327,7 +6327,7 @@ pub fn reject_unsupported_hip_ops(dag: &Dag) -> std::result::Result<(), Compiler
                             indices.precision.name()
                         ),
                         "hip",
-                        chelis_types::deliberate_rejection!(
+                        chelis_checker_core::deliberate_rejection!(
                             "[05-SPARSE-1]",
                             "sparse indices must use the specified i32 or i64 dtype"
                         ),
@@ -6342,7 +6342,7 @@ pub fn reject_unsupported_hip_ops(dag: &Dag) -> std::result::Result<(), Compiler
                             node.id.0, index_node.op
                         ),
                         "hip",
-                        chelis_types::unimplemented_rejection!(
+                        chelis_checker_core::unimplemented_rejection!(
                             729,
                             "non-load sparse index producers need typed integer HIP kernels"
                         ),
@@ -6414,7 +6414,10 @@ pub fn reject_unsupported_hip_ops(dag: &Dag) -> std::result::Result<(), Compiler
                             node.output_type.precision.name(),
                         ),
                         "hip",
-                        chelis_types::unimplemented_rejection!(729, HIP_NARROW_FLOAT_KERNEL_HINT),
+                        chelis_checker_core::unimplemented_rejection!(
+                            729,
+                            HIP_NARROW_FLOAT_KERNEL_HINT
+                        ),
                     ));
                 }
             }
@@ -6427,7 +6430,7 @@ pub fn reject_unsupported_hip_ops(dag: &Dag) -> std::result::Result<(), Compiler
                         node.id.0,
                     ),
                     "hip",
-                    chelis_types::unimplemented_rejection!(729, HIP_UNSUPPORTED_DTYPE_HINT),
+                    chelis_checker_core::unimplemented_rejection!(729, HIP_UNSUPPORTED_DTYPE_HINT),
                 ));
             }
         }

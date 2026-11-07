@@ -18,11 +18,12 @@
 //!     (the unbound var), and never ICE. Covers all five signature checkers:
 //!     matmul, conv, a reduction (sum), expand, layer_norm.
 
+use chelis_checker_core::InferResult;
 use chelis_deep::parser::parse_str;
 use chelis_deep::{Atom, Expr};
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str as parse_surf;
-use chelis_types::{InferResult, check_ir_program};
+use chelis_types::check_ir_program;
 
 // ── Part A helpers (Deep source, mirror issue_778 clobber test) ───────────
 

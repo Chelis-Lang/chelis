@@ -1,10 +1,10 @@
 //! Post-Phase checker-totality contracts for deferred shape checks (#780)
 //! and rigid declaration dimensions (#847).
 
+use chelis_checker_core::errors::CheckError;
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str as parse_surf;
 use chelis_types::check_typed_program;
-use chelis_types::errors::CheckError;
 
 fn diagnostics(source: &str) -> Vec<CheckError> {
     let decls =
@@ -285,8 +285,8 @@ def wrong[n, m](x: tensor[n, f32], y: tensor[m, f32]) -> tensor[n, f32] = y
     assert!(
         errors.iter().any(|error| matches!(
             error.kind,
-            chelis_types::errors::CheckErrorKind::DimensionMismatch
-                | chelis_types::errors::CheckErrorKind::TypeMismatch
+            chelis_checker_core::errors::CheckErrorKind::DimensionMismatch
+                | chelis_checker_core::errors::CheckErrorKind::TypeMismatch
         )),
         "a genuine n-versus-m contract violation must stay rejected"
     );

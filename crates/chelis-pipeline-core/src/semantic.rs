@@ -1,9 +1,9 @@
 use std::cell::Cell;
 
-use chelis_types::infer::SignatureInferenceMetadata;
+use chelis_checker_core::InferResult;
+use chelis_checker_core::infer::SignatureInferenceMetadata;
 use chelis_types::{
-    CheckedProgram, InferResult, TypeAnalysisOutcome, TypeEnv, analyze_ir_program,
-    clean_fitness_from_stats,
+    CheckedProgram, TypeAnalysisOutcome, TypeEnv, analyze_ir_program, clean_fitness_from_stats,
 };
 
 use crate::{

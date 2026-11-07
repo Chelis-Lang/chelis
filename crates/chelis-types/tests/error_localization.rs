@@ -1,10 +1,11 @@
 //! Error localization tests: verify that check diagnostics carry
 //! `span_offset` so downstream tools can pinpoint WHERE an error occurs.
 
+use chelis_checker_core::errors::CheckError;
+use chelis_checker_core::errors::CheckErrorKind;
 use chelis_macros::{ExpansionOptions, expand_program};
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str;
-use chelis_types::errors::{CheckError, CheckErrorKind};
 use chelis_types::{check_ir_program, check_typed_program};
 
 /// Parse → desugar → macro-expand → type-check, returning the full

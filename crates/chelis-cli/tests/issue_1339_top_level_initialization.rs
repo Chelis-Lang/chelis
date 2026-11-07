@@ -158,7 +158,7 @@ fn surf_program(source: &str) -> Vec<chelis_deep::Expr> {
 }
 
 fn ingress_diagnostics_for(program: &[chelis_deep::Expr]) -> (Diagnostics, Diagnostics) {
-    let summarize = |result: Result<_, chelis_types::InferResult>| match result {
+    let summarize = |result: Result<_, chelis_checker_core::InferResult>| match result {
         Ok(_) => Vec::new(),
         Err(result) => result
             .errors

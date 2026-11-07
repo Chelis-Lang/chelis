@@ -404,7 +404,7 @@ fn m4_oversize_reduction_returns_typed_unsupported_until_two_pass_lands() {
     let error = try_codegen_metal(&dag, "big").unwrap_err();
     assert_eq!(
         error.stage,
-        chelis_types::unsupported::Stage::Codegen("metal")
+        chelis_checker_core::unsupported::Stage::Codegen("metal")
     );
     assert!(error.to_string().contains("n=4097"), "{error}");
 }

@@ -18,7 +18,7 @@ from pathlib import Path
 from generate_rejection_registries import ProductionSource, discover_production_sources
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCE = ROOT / "crates/chelis-types/src/unsupported.rs"
+SOURCE = ROOT / "crates/chelis-checker-core/src/unsupported.rs"
 
 ALLOWED_PUBLIC_METHODS = {
     "SpecAtomRef": {"as_str", "registry"},
@@ -141,12 +141,11 @@ def validate_source(source: str) -> list[str]:
 
 def validate_usage_source(path: str, source: str) -> list[str]:
     errors: list[str] = []
-    if path != "crates/chelis-types/src/lib.rs":
-        for builder in sorted(set(DIRECT_BUILDER.findall(source))):
-            errors.append(
-                f"{path}: direct authority builder `{builder}` bypasses the canonical "
-                "literal macro; use deliberate_rejection! or unimplemented_rejection!"
-            )
+    for builder in sorted(set(DIRECT_BUILDER.findall(source))):
+        errors.append(
+            f"{path}: direct authority builder `{builder}` bypasses the canonical "
+            "literal macro; use deliberate_rejection! or unimplemented_rejection!"
+        )
     for atom in DELIBERATE_LITERAL.findall(source):
         if atom in RESPONSE_ONLY_ATOMS:
             errors.append(

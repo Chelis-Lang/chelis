@@ -31,6 +31,7 @@ EVIDENCE = frozenset({"thumb-default", "thumb-no-default", "standalone-alloc", "
     "dependency-features", "negative-controls", "scale-allocations", "current-host-suites", "python-controls", "source-owner-controls", "moved-host-tests"})
 BASELINE_REVISION = "3ca99faa7a46158eb6a0d90c2c812a7e3a5f44c1"
 PRODUCTION_BASELINE_REVISION = "137ba12e2cf9bcdcac4b4d3ed3662832a93e44a4"
+GENERATED_SOURCE_BASELINE_REVISION = "ec322a9568c09cf73a4855860227aa9d86fc2d32"
 FORBIDDEN = frozenset({
     "chelis-types", "chelis-type-core", "chelis-deep", "chelis-surf", "chelis-ir",
     "chelis-effects", "chelis-pipeline-core", "chelis-compiler-api",
@@ -496,6 +497,24 @@ def production_snapshot(workspace: Path, path: Path, directory: Path) -> dict:
     return snapshots
 
 
+def compare_production_snapshots(historical: dict, production: dict, generated: dict, actual: dict) -> None:
+    generated_backends = {"c", "hip", "metal"}
+    historical_behavior = {key: value for key, value in historical.items() if key not in generated_backends}
+    actual_behavior = {key: value for key, value in actual.items() if key not in generated_backends}
+    if actual_behavior != historical_behavior:
+        raise OracleFailure("historical production behavior differs")
+    # Only C/HIP generated artifacts use the accepted private-helper source reference.
+    production_fields = {key: value for key, value in production.items() if key not in ("c", "hip")}
+    actual_fields = {key: value for key, value in actual.items() if key not in ("c", "hip")}
+    if actual_fields != production_fields:
+        differing = sorted(key for key in production_fields.keys() | actual_fields.keys()
+            if actual_fields.get(key) != production_fields.get(key))
+        raise OracleFailure("production baseline mismatch: " + ", ".join(differing))
+    differing = [backend for backend in ("c", "hip") if actual[backend] != generated[backend]]
+    if differing:
+        raise OracleFailure("C/HIP generated-source baseline mismatch: " + ", ".join(differing))
+
+
 def immutable_parity() -> None:
     source = ("def f(x: tensor[4, f32]) -> tensor[4, f32] = neg(x)\n"
         "out = f(to_tensor([1.0, -2.0, 3.5, 0.25], f32))\n")
@@ -516,18 +535,16 @@ def immutable_parity() -> None:
         expected = production_snapshot(production_baseline, path, outputs)
         shutil.rmtree(outputs)
         outputs.mkdir()
+        generated_baseline = baseline_clone(directory, GENERATED_SOURCE_BASELINE_REVISION)
+        generated = production_snapshot(generated_baseline, path, outputs)
+        shutil.rmtree(outputs)
+        outputs.mkdir()
         actual = production_snapshot(ROOT, path, outputs)
-        generated_backends = {"c", "hip", "metal"}
-        historical_behavior = {key: value for key, value in historical.items() if key not in generated_backends}
-        actual_behavior = {key: value for key, value in actual.items() if key not in generated_backends}
-        if actual_behavior != historical_behavior:
-            raise OracleFailure("historical production behavior differs")
-        if actual != expected:
-            differing = sorted(key for key in expected if actual.get(key) != expected[key])
-            raise OracleFailure("production baseline mismatch: " + ", ".join(differing))
+        compare_production_snapshots(historical, expected, generated, actual)
         preserved_suites(baseline)
         print(f"DAG graph and behavior baseline: {BASELINE_REVISION}", flush=True)
-        print(f"DAG generated-source baseline: {PRODUCTION_BASELINE_REVISION}", flush=True)
+        print(f"DAG production and Metal source baseline: {PRODUCTION_BASELINE_REVISION}", flush=True)
+        print(f"DAG C/HIP generated-source baseline: {GENERATED_SOURCE_BASELINE_REVISION}", flush=True)
 
 
 SUITES = (
@@ -785,7 +802,9 @@ def run_oracle() -> None:
     if completed != EVIDENCE:
         raise OracleFailure(f"incomplete DAG evidence: missing={sorted(EVIDENCE - completed)}")
     print(json.dumps({"platform": platform.platform(), "machine": platform.machine(), "baseline": BASELINE_REVISION,
-        "production_baseline": PRODUCTION_BASELINE_REVISION, "evidence": sorted(completed)}, sort_keys=True), flush=True)
+        "production_baseline": PRODUCTION_BASELINE_REVISION,
+        "generated_source_baseline": GENERATED_SOURCE_BASELINE_REVISION,
+        "evidence": sorted(completed)}, sort_keys=True), flush=True)
     print("DAG core oracle: PASS")
     print("Target compilation is not microcontroller execution. Host execution uses an explicit allocator and an 8 MiB stack.")
     print("HIP and Metal evidence covers source generation and admission, not GPU device execution.")

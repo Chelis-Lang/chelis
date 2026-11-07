@@ -71,12 +71,20 @@ class RejectionAuthorityBoundaryTests(unittest.TestCase):
         )
 
     def test_direct_public_builder_call_is_rejected_in_production(self):
-        errors = MODULE.validate_usage_source(
+        for path in (
             "crates/example/src/lib.rs",
-            'let _ = chelis_types::unsupported::__build_deliberate_rejection('
-            '"[04-TOT-2]", "hint");',
-        )
-        self.assertTrue(any("direct authority builder" in error for error in errors), errors)
+            "crates/chelis-types/src/lib.rs",
+            "crates/chelis-checker-core/src/lib.rs",
+        ):
+            with self.subTest(path=path):
+                errors = MODULE.validate_usage_source(
+                    path,
+                    'let _ = chelis_checker_core::unsupported::__build_deliberate_rejection('
+                    '"[04-TOT-2]", "hint");',
+                )
+                self.assertTrue(
+                    any("direct authority builder" in error for error in errors), errors
+                )
 
     def test_public_builder_cannot_skip_registry_validation(self):
         mutated = self.source.replace(
@@ -121,7 +129,7 @@ class RejectionAuthorityBoundaryTests(unittest.TestCase):
                     path=Path("tests/support/outside.rs"),
                     source=(
                         "fn outside(issue: u32) { "
-                        "chelis_types::unsupported::__build_unimplemented_rejection("
+                        "chelis_checker_core::unsupported::__build_unimplemented_rejection("
                         'issue, "dynamic"); }'
                     ),
                 )

@@ -1,8 +1,8 @@
 #![allow(dead_code)]
 
 use chelis_backend_hip::HipCodegenResult;
+use chelis_checker_core::unsupported::Unsupported;
 use chelis_dag_core::dag::Dag;
-use chelis_types::unsupported::Unsupported;
 
 pub fn codegen_hip(dag: &Dag, name: &str) -> Result<HipCodegenResult, Unsupported> {
     let verified = verified_dag(dag);

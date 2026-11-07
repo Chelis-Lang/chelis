@@ -845,7 +845,7 @@ fn injection_assumptions(
     // A reef-linked program carries linker-format names; the record names
     // the source spellings so a package property's assumption matches the
     // same property's assumption as a bare file (chelis#2416).
-    let property_name = chelis_types::demangle_ident(property_name);
+    let property_name = chelis_checker_core::opacity::demangle_ident(property_name);
     fn collect(
         plan: &ValuePlan,
         path: &str,
@@ -856,7 +856,7 @@ fn injection_assumptions(
     ) {
         match plan {
             ValuePlan::Opaque(inv) => {
-                let type_name = chelis_types::demangle_ident(&inv.type_name);
+                let type_name = chelis_checker_core::opacity::demangle_ident(&inv.type_name);
                 out.push(
                     AssumptionRecord::new(
                         format!("invariant:{type_name}:binder:{path}"),

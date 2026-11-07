@@ -1,4 +1,4 @@
-//! chelis#2413: the key allow-list (`chelis_types::key_admission`) is one
+//! chelis#2413: the key allow-list (`chelis_checker_core::key_admission`) is one
 //! list for the checker and the lowered graph's key rules, so a program the
 //! checker admits evaluates in the DAG evaluator and in compiled C, and a
 //! key reaching an operation the list does not name is refused at the

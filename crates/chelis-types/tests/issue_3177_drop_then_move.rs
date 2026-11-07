@@ -4,9 +4,10 @@
 //! consuming call, or moves it by bare name into a result, an aggregate, or a
 //! new binding. Before the fix only a borrowing call argument was refused.
 
+use chelis_checker_core::errors::CheckError;
+use chelis_checker_core::errors::CheckErrorKind;
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str;
-use chelis_types::errors::{CheckError, CheckErrorKind};
 use chelis_types::{check_linearity, check_typed_program};
 
 fn linearity(source: &str) -> Result<(), Vec<CheckError>> {

@@ -100,7 +100,7 @@ pub fn analyze_prepared_library(
 pub fn analyze_prepared_library_with_base(
     prepared: PreparedProgram,
     library: &CheckedLibrary,
-) -> Result<ContextualLibraryTypeAnalysis<'_>, chelis_types::InferResult> {
+) -> Result<ContextualLibraryTypeAnalysis<'_>, chelis_checker_core::InferResult> {
     let _fp_env = chelis_runtime::FpEnvGuard::enter();
     chelis_pipeline_core::analyze_prepared_library_with_base(prepared, library)
 }
@@ -110,7 +110,7 @@ pub fn analyze_prepared_library_with_base(
 pub fn analyze_prepared_with_library(
     prepared: PreparedProgram,
     library: &CheckedLibrary,
-) -> Result<ContextualTypeAnalysis<'_>, chelis_types::InferResult> {
+) -> Result<ContextualTypeAnalysis<'_>, chelis_checker_core::InferResult> {
     let _fp_env = chelis_runtime::FpEnvGuard::enter();
     chelis_pipeline_core::analyze_prepared_with_library(prepared, library)
 }
@@ -237,7 +237,7 @@ pub enum PipelineRejection {
         errors: Vec<chelis_effects_core::EffectError>,
     },
     Linearity {
-        errors: Vec<chelis_types::errors::CheckError>,
+        errors: Vec<chelis_checker_core::errors::CheckError>,
     },
     Lower(LowerDiagnostic),
     RootCount {

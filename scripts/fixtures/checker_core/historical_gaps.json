@@ -1,0 +1,5 @@
+{
+  "revision": "7e6c0aa438c635889fd78c819ea7efffa86a9409",
+  "observations": [],
+  "policy": "Record source gaps apart from semantic comparisons. Do not change the corpus or remove fields after candidate observations."
+}

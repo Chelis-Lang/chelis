@@ -1,0 +1,26 @@
+{
+  "revision": "7e6c0aa438c635889fd78c819ea7efffa86a9409",
+  "version": 1,
+  "comparison": "Complete logical values and complete serialized bytes. No semantic field exclusions.",
+  "snapshot_fields": ["cases", "extensions", "library", "context", "layer", "layered_context", "isolation"],
+  "case_fields": ["status", "source_tree", "inference", "ir_inference", "ir", "typed", "declared_surface"],
+  "checked_fields": ["bytes", "payload", "tree", "type_env", "signatures", "local_ascriptions", "linearity", "adt_registry", "library_proof_id", "typed_nodes", "total_nodes"],
+  "checked_payload_fields": ["annotated_exprs", "type_env", "local_ascriptions", "linearity", "signature_inference", "type_headers", "adt_registry", "infer_stats", "library_proof_id", "context_library_proof_id"],
+  "context_fields": ["bytes", "payload", "library_def_count", "matches_program"],
+  "report_fields": ["typed_nodes", "total_nodes", "errors"],
+  "error_fields": ["debug", "kind", "identifier", "message", "suggestions", "severity_bits", "expected", "got", "span_offset", "span_id"],
+  "extension_fields": ["contextual", "restored", "layered", "restored_layered", "monolithic", "composition", "foreign_composition"],
+  "abi_fields": ["descriptors", "ranges", "tensor_ranges", "payloads", "text", "digests", "byte_counts", "host_header", "device_header"],
+  "cost_contracts": {
+    "env_clone_allocations": {"bindings": [1, 512], "signature_arguments": 256, "snapshot_allocation": "equal", "scope": "full-host"},
+    "let_chain_inference_cost": {"bindings": [256, 512, 1024], "growth_bound": 2.5, "negative_control": "map-copy", "scope": "full-host"},
+    "tuple_nesting_cost": {"depths": [128, 256, 512, 1024], "stack_bytes": 268435456, "shapes": 2, "negative_control": "full-copy", "scope": "full-host"},
+    "substitution_trial_cost": {"snapshot_bindings": 4096, "definitions": [128, 256, 512], "growth_bound": 2.5, "scope": "full-host"},
+    "issue_1316": {"chain_vertices": 100000, "small_graphs": "exhaustive", "counters": "exact", "interruption": "no partial SCC"},
+    "infer_library_context_depth_guard": {"depth": 4000, "segment_bytes": 8388608, "shallow_controls": true},
+    "generalization": {"feature": "generalize-sweep-oracle"}
+  },
+  "cache_contracts": ["warm-path counters", "fresh-process exact bytes", "stored-lowering comparison", "no-lowering semantic reruns", "source binding", "build identity", "payload integrity", "proof-pair agreement", "cancellation precedence", "authenticated worker external digest", "authenticated handoff without transmitted lowering", "external digest substitution rejection"],
+  "authority_contracts": ["witness", "checkpoint construction", "checkpoint raw index", "completion construction", "completion Default", "completion Deserialize", "raw checked construction", "facts adoption", "foreign completion adoption", "pipeline forgery"],
+  "historical_gaps": "Separate evidence only. Baseline differences remain fatal."
+}

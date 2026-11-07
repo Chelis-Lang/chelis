@@ -11,9 +11,9 @@
 //! through tide is identical to the CLI on the same module (the parity
 //! the cross-surface test locks).
 
+use chelis_checker_core::errors::ErrorWitness;
 use chelis_deep::annotations::{MetadataKey as K, MetadataValue as M, TypeSyntax};
 use chelis_deep::{DeepTag, ExprCarrier};
-use chelis_types::errors::ErrorWitness;
 use std::collections::BTreeMap;
 
 use chelis_compiler_api::schema::{EvalRequest, ExecutionValue, SourceKind};

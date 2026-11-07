@@ -1,0 +1,45 @@
+[package]
+name = "chelis-checker-core"
+description = "Portable semantic checker for Chelis"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = []
+serde = ["dep:serde", "chelis-type-core/serde", "chelis-unord/serde", "chelis-numeric-core/serde"]
+checkpoint-compile-probe = []
+generalize-sweep-oracle = []
+test-instrumentation = []
+
+[dependencies]
+chelis-numeric-core = { path = "../chelis-numeric-core", default-features = false, features = ["alloc"] }
+chelis-type-core = { path = "../chelis-type-core", default-features = false }
+chelis-unord = { path = "../chelis-unord", default-features = false }
+chelis-deep = { path = "../chelis-deep", default-features = false }
+chelis-pred = { path = "../chelis-pred", default-features = false }
+chelis-abi = { path = "../chelis-abi", default-features = false }
+chelis-vocab = { path = "../chelis-vocab", default-features = false }
+chelis-stack-services = { path = "../chelis-stack-services", default-features = false }
+serde = { version = "1", default-features = false, features = ["alloc", "derive", "rc"], optional = true }
+sha2 = { version = "0.10", default-features = false }
+spin = { version = "0.10", default-features = false, features = ["once"] }
+thiserror = { version = "2", default-features = false }
+
+[dev-dependencies]
+chelis-type-core = { path = "../chelis-type-core", default-features = false, features = ["serde", "test-instrumentation"] }
+chelis-syntax-host.workspace = true
+chelis-surf.workspace = true
+chelis-macros.workspace = true
+serde = { version = "1", default-features = false, features = ["alloc", "derive", "rc"] }
+serde_json = "1"
+bincode = "1"
+half.workspace = true
+proc-macro2 = "1"
+syn.workspace = true
+quote.workspace = true
+stacker.workspace = true
+
+[lints]
+workspace = true

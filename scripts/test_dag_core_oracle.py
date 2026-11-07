@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 import json
 from pathlib import Path
 import sys
@@ -15,6 +16,7 @@ from dag_core_oracle import (
     SOURCE_MODULES,
     inspect_source_owners,
     compare_costs,
+    compare_production_snapshots,
     inspect_costs,
     snapshot_record,
     ROOT,
@@ -110,6 +112,75 @@ fn main() {
             changed[counter] += 1
             with self.subTest(counter=counter), self.assertRaises(OracleFailure):
                 compare_costs([original], [changed])
+
+
+    def production_controls(self):
+        production = {
+            "toolchain": {"compiler": "cc", "compile_flags": ["-O2"], "link_flags": ["-lm"]},
+            "native-c": {"stdout": "out = [-1.0, 2.0, -3.5, -0.25]\n", "stderr": ""},
+            "metal-rejection": {"status": 1, "stdout": "", "stderr": "f64 rejected"},
+            "c-admission": {"status": 0},
+            "hip-admission": {"status": 1, "stdout": "", "stderr": "[05-OP-46] exp"},
+            "metal-admission": {"status": 1, "stdout": "", "stderr": "[05-OP-46] exp"},
+        }
+        for backend, extension in (("c", ".c"), ("hip", ".cpp"), ("metal", ".mm")):
+            production[backend] = {"generated": {
+                "graph" + extension: "static void original(void) {}\n",
+                "graph.h": "/* chelis-source-sha256: original */\n",
+                "support.h": "#define SUPPORT 1\n",
+            }}
+        historical = deepcopy(production)
+        generated = deepcopy(production)
+        actual = deepcopy(production)
+        for backend in ("c", "hip"):
+            for name in generated[backend]["generated"]:
+                generated[backend]["generated"][name] += "/* shared implementation */\n"
+            actual[backend] = deepcopy(generated[backend])
+        generated["metal"]["generated"]["graph.mm"] = "not the Metal reference"
+        return historical, production, generated, actual
+
+    def test_wrong_generated_reference_and_each_changed_leaf_fail(self):
+        from no_std_core_support import OracleFailure
+        historical, production, generated, actual = self.production_controls()
+        for backend in ("c", "hip"):
+            wrong = deepcopy(generated)
+            wrong[backend]["generated"]["support.h"] += "wrong reference\n"
+            with self.subTest(reference=backend), self.assertRaisesRegex(OracleFailure, backend):
+                compare_production_snapshots(historical, production, wrong, actual)
+        for backend in ("c", "hip", "metal"):
+            for name in actual[backend]["generated"]:
+                changed = deepcopy(actual)
+                changed[backend]["generated"][name] += "changed bytes\n"
+                with self.subTest(backend=backend, leaf=name), self.assertRaisesRegex(OracleFailure, backend):
+                    compare_production_snapshots(historical, production, generated, changed)
+            for mutation in ("missing", "extra"):
+                changed = deepcopy(actual)
+                if mutation == "missing":
+                    del changed[backend]["generated"]["graph.h"]
+                else:
+                    changed[backend]["generated"]["extra.h"] = "new artifact\n"
+                with self.subTest(backend=backend, mutation=mutation), self.assertRaises(OracleFailure):
+                    compare_production_snapshots(historical, production, generated, changed)
+
+    def test_original_production_behavior_still_rejects_a_changed_native_result(self):
+        from no_std_core_support import OracleFailure
+        historical, production, generated, actual = self.production_controls()
+        for field in ("toolchain", "native-c", "metal-rejection",
+                "c-admission", "hip-admission", "metal-admission"):
+            changed = deepcopy(actual)
+            if field == "native-c":
+                changed[field]["stdout"] = "out = [0.0, 0.0, 0.0, 0.0]\n"
+            elif field == "toolchain":
+                changed[field]["compiler"] = "different-cc"
+            else:
+                changed[field]["status"] += 1
+            # Agreement with the historical lane cannot replace the production control.
+            matching_historical = deepcopy(historical)
+            matching_historical[field] = deepcopy(changed[field])
+            with self.subTest(field=field), self.assertRaisesRegex(OracleFailure, "production baseline mismatch"):
+                compare_production_snapshots(matching_historical, production, generated, changed)
+            with self.subTest(historical=field), self.assertRaisesRegex(OracleFailure, "historical production behavior"):
+                compare_production_snapshots(historical, production, generated, changed)
 
 
     def test_source_owner_receipt_needs_every_destination_and_failure_lane(self) -> None:

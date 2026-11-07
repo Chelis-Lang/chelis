@@ -38,7 +38,7 @@ fn check_library_with_linearity(library_src: &str) -> chelis_types::CheckedProgr
 fn check_new_with_context(
     library_src: &str,
     new_src: &str,
-) -> Result<(), Vec<chelis_types::errors::CheckError>> {
+) -> Result<(), Vec<chelis_checker_core::errors::CheckError>> {
     let library_program = check_library_with_linearity(library_src);
     let ctx =
         build_type_env_from_library(&surf_to_deep(library_src)).expect("library context build OK");
@@ -51,7 +51,7 @@ fn check_new_with_context(
 fn check_monolithic_combined(
     library_src: &str,
     new_src: &str,
-) -> Result<(), Vec<chelis_types::errors::CheckError>> {
+) -> Result<(), Vec<chelis_checker_core::errors::CheckError>> {
     let combined_src = format!("{library_src}\n{new_src}");
     let combined_deep = surf_to_deep(&combined_src);
     let checked = check_typed_program(&combined_deep)
@@ -607,9 +607,12 @@ def consume_outer[n](o: Outer[n]) -> bool = borrow_outer(&o)
              a stale carrier set from a prior library-A call would silently mis-accept it",
         );
         let errors = r_b.expect_err("library B must error");
-        let cites_invalid_borrow = errors
-            .iter()
-            .any(|e| matches!(e.kind, chelis_types::errors::CheckErrorKind::InvalidBorrow));
+        let cites_invalid_borrow = errors.iter().any(|e| {
+            matches!(
+                e.kind,
+                chelis_checker_core::errors::CheckErrorKind::InvalidBorrow
+            )
+        });
         assert!(
             cites_invalid_borrow,
             "library B rejection must be `InvalidBorrow` (the carrier-set-driven diagnostic), \

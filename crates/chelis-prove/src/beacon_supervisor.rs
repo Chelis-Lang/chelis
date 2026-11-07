@@ -8,7 +8,7 @@ use std::process::{Child, Command, ExitStatus, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use chelis_types::unsupported::{Stage, Unsupported, UnsupportedKind};
+use chelis_checker_core::unsupported::{Stage, Unsupported, UnsupportedKind};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(5);
 const REAP_BUDGET: Duration = Duration::from_secs(1);
@@ -306,7 +306,7 @@ fn degraded_detail(mechanism: &str, cleanup: Option<&str>) -> Unsupported {
         UnsupportedKind::Construct(what),
         "prove external Beacon engine",
         Stage::Runtime,
-        chelis_types::unimplemented_rejection!(
+        chelis_checker_core::unimplemented_rejection!(
             730,
             "Beacon subprocess supervision failed; retry in a supported execution environment"
         ),

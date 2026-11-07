@@ -1,8 +1,8 @@
 use super::*;
 use crate::opaque::collect_opaque_invariants;
+use chelis_checker_core::errors::ErrorWitness;
 use chelis_deep::Metadata;
 use chelis_type_core::Type;
-use chelis_types::errors::ErrorWitness;
 use std::collections::BTreeMap;
 
 #[test]

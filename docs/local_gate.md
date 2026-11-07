@@ -30,6 +30,10 @@ calls `python3 scripts/gate.py ci-fast`: every default-feature lib/bin unit
 target plus the reviewed integrations in `.config/ci-test-targets.toml`. The
 legacy/full/manual gate selections remain available.
 
+The fast gate retains the checker stack obligation through a runtime regression in `chelis-checker-core`.
+This replaces the retired Rust source scanner.
+The complete checker oracle also reconciles the retired source tests with executed behavioral identities.
+
 `scripts/test_gate.py` pins the complete ordered set of single-line `run:`
 commands permitted in the gate-owned CI jobs, so shell syntax cannot hide an
 unreviewed command. `--list` prints the canonical full list. Each printed

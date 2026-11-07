@@ -42,17 +42,17 @@
 //!    surfaced to the orchestrator as a downstream-source fix on
 //!    coral, not a chelis fix.
 
+use chelis_checker_core::CopyRepairUseKind;
+use chelis_checker_core::errors::CheckErrorKind;
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str;
-use chelis_types::CopyRepairUseKind;
-use chelis_types::errors::CheckErrorKind;
 use chelis_types::{check_linearity, check_typed_program};
 use copy_repair::assert_copy_repaired;
 
 #[path = "support/copy_repair.rs"]
 mod copy_repair;
 
-fn check_surf(source: &str) -> Result<(), Vec<chelis_types::errors::CheckError>> {
+fn check_surf(source: &str) -> Result<(), Vec<chelis_checker_core::errors::CheckError>> {
     let decls =
         parse_str(source, &chelis_syntax_host::NativeStack).expect("surf parse should succeed");
     let deep = desugar_program(&decls, &chelis_syntax_host::NativeStack)

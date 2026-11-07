@@ -14,7 +14,7 @@
 //! Reference generalization sweeps are excluded from the measured production
 //! path; feature builds check each identical program again with parity enabled.
 
-use chelis_types::errors::ErrorWitness;
+use chelis_checker_core::errors::ErrorWitness;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 use std::fmt::Write as _;
@@ -97,13 +97,12 @@ fn check_bytes(source: &str) -> usize {
         chelis_surf::desugar::desugar_program(&declarations, &chelis_syntax_host::NativeStack)
             .expect("the probe desugars");
     let measure = || allocated(|| chelis_types::check_typed_program(&program));
-    #[cfg(feature = "generalize-sweep-oracle")]
-    let (checked, bytes) = chelis_types::env::without_generalize_sweep_oracle(measure);
-    #[cfg(not(feature = "generalize-sweep-oracle"))]
-    let (checked, bytes) = measure();
+    let (checked, bytes) = chelis_types::without_generalize_sweep_oracle(measure);
     checked.expect("the probe checks");
-    #[cfg(feature = "generalize-sweep-oracle")]
-    chelis_types::check_typed_program(&program).expect("the same probe passes level/sweep parity");
+    if chelis_checker_core::env::generalize_sweep_oracle_available() {
+        chelis_types::check_typed_program(&program)
+            .expect("the same probe passes level/sweep parity");
+    }
     bytes
 }
 

@@ -1,8 +1,8 @@
 #![allow(dead_code)]
 
 use chelis_backend_metal::MetalCodegenResult;
+use chelis_checker_core::unsupported::Unsupported;
 use chelis_dag_core::dag::Dag;
-use chelis_types::unsupported::Unsupported;
 
 pub fn codegen_metal(dag: &Dag, name: &str) -> MetalCodegenResult {
     try_codegen_metal(dag, name).expect("backend test DAG must be supported by Metal")

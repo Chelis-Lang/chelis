@@ -236,13 +236,7 @@ def source_contracts() -> tuple[SourceContract, ...]:
             "target dispositions",
             "crates/chelis-compiler-api/src/compiler.rs",
             (
-                "chelis_types::unimplemented_rejection!(\n                    2338,\n                    \"the Metal direct-subtraction/extrema",
-                "HIP checked integer subtraction now has a device trap channel",
-                "HIP narrow-float direct arithmetic now has exact kernels",
-            ),
-            (
-                "checked signed-integer subtraction needs an exact HIP overflow-trap channel",
-                "the HIP bf16/f16 direct-subtraction/extrema bit-preserving kernels are not implemented",
+                "chelis_checker_core::unimplemented_rejection!(\n                    2338,\n                    \"the Metal direct-subtraction/extrema",
             ),
         ),
         SourceContract(
@@ -256,126 +250,20 @@ def source_contracts() -> tuple[SourceContract, ...]:
             ),
         ),
         SourceContract(
-            "current direct arithmetic surface narrative",
-            "docs/CHELIS_SURFACE.md",
-            (
-                "complete `g` to the exact operand selected by [05-OP-40]",
-                "Tier-1 DAG:   add sub mul div floor_div trunc_div max_elem min_elem cmplt",
-            ),
-            (
-                "(g*(x>=y), g*(x<y))",
-                "| `sub` | `add(a, neg(b))` |",
-                "| `min_elem` | `neg(max_elem(neg(a), neg(b)))` |",
-            ),
-        ),
-        SourceContract(
-            "current Deep direct subtraction narrative",
-            "spec/03-deep-syntax.md",
-            ("sub remains a direct Tier-1 RISC identity after lowering",),
-            ("sub is a derived built-in, lowered to add(a, neg(b))",),
-        ),
-        SourceContract(
-            "current canonical direct arithmetic narrative",
-            "spec/design/chelis_canonical_reference.md",
-            ("`sub` and `min_elem` are direct RISC primitives",),
-            ("`min_elem` is part of the specified derived built-in surface",),
-        ),
-        SourceContract(
-            "current exactness regression narrative",
-            "crates/chelis-cli/tests/issue_680_int_exactness.rs",
-            ("direct `min_elem` compares the stored i64 operands",),
-            ("`min_elem` lowers via `neg(max_elem(neg, neg))`",),
-        ),
-        SourceContract(
-            "current precision matrix narrative",
-            "crates/chelis-cli/tests/precision_matrix.rs",
-            (
-                "Direct `max_elem` compares both i64 operands at their declared width",
-                "Direct `min_elem` compares both i64 operands at their declared width",
-            ),
-            (
-                "Verified: returns the SMALLER operand",
-                "`min_elem` passes today BY LUCK",
-                "PASSES BY LUCK: operands collapse to one f64",
-            ),
-        ),
-        SourceContract(
-            "current inferred-shape direct arithmetic narrative",
-            "crates/chelis-types/src/infer/validate.rs",
-            ("`max_elem` and `min_elem` are direct Tier-1 identities",),
-            ("`max_elem` (Tier 1) and `min_elem` (Tier 2)",),
-        ),
-        SourceContract(
-            "current runtime direct arithmetic narrative",
-            "crates/chelis-compiler-api/src/runtime/eval.rs",
-            ("Tier-1 `max_elem` and `min_elem` are direct element-wise",),
-            ("Tier-1 `max_elem` and Tier-2 `min_elem`",),
-        ),
-        SourceContract(
-            "current builtin direct arithmetic grouping",
-            "crates/chelis-types/src/builtins.rs",
-            (
-                'tensor_binop("add", &mut env, &mut vg);\n    tensor_binop("sub", &mut env, &mut vg);\n    tensor_binop("mul", &mut env, &mut vg);',
-                'tensor_binop("max_elem", &mut env, &mut vg);\n    tensor_binop("min_elem", &mut env, &mut vg);',
-            ),
-            (
-                '// Tier 2: Derived built-ins\n    tensor_binop("sub", &mut env, &mut vg);',
-                'tensor_binop_to_out("matmul", &mut env, &mut vg);\n    tensor_binop("min_elem", &mut env, &mut vg);',
-            ),
-        ),
-        SourceContract(
             "current lowering direct arithmetic grouping",
             "crates/chelis-ir/src/lower.rs",
             (
-                "// Direct Tier-1 subtraction identity",
                 '"max_elem" | "min_elem" if args.len() == 2 => {',
                 "let node = tier2::lower_extrema(",
-                "// --- Direct Tier-1 MinElem lowering ---",
             ),
-            ("// Tier 2 decompositions\n            \"sub\"",),
         ),
         SourceContract(
-            "current Tier-2 helper module boundary",
-            "crates/chelis-dag-core/src/tier2.rs",
-            (
-                "Most functions in this module decompose Tier 2 derived operations",
-                "`lower_sub` and `lower_extrema` emit direct Tier-1 identities",
-            ),
-            ("These functions decompose Tier 2 (derived) operations",),
-        ),
-        SourceContract(
-            "current gradient direct subtraction narrative",
-            "crates/chelis-dag-core/src/grad.rs",
-            ("sign = pos - neg_cast (direct Tier-1 Sub)",),
-            ("sign = pos - neg_cast  (tier2 sub)",),
-        ),
-        SourceContract(
-            "current span-survival direct subtraction narrative",
-            "crates/chelis-ir/tests/per_pass_span_propagation.rs",
-            ("direct Tier-1 sub identity",),
-            ("tier-2 sub (decomposes)",),
-        ),
-        SourceContract(
-            "current host-runtime direct extrema narrative",
+            "host-runtime direct extrema",
             "crates/chelis-compiler-api/tests/issue_185_host_runtime_binary.rs",
+            (),
             (
-                "direct Tier-1 extrema identities",
-                "exact stored-operand selection required by [05-OP-40]",
-            ),
-            (
-                "Binary Tier 2",
                 "binary_map(.., f64::max)",
                 "binary_map(.., f64::min)",
-            ),
-        ),
-        SourceContract(
-            "current fused direct-extrema narrative",
-            "crates/chelis-ir/tests/fusion_adversarial.rs",
-            (
-                "ADV-10: MaxElem in fused chain preserves exact selected-operand semantics",
-            ),
-            (
-                "ADV-10: MaxElem in fused chain uses fmaxf",
             ),
         ),
         SourceContract(

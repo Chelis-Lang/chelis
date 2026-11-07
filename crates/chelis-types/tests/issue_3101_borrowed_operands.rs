@@ -6,10 +6,10 @@
 //! admitted unchanged. The borrow changes nothing else, so the result and
 //! every refusal are the owned call's.
 
+use chelis_checker_core::CopyRepairUseKind;
 use chelis_deep::Expr;
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str as parse_surf;
-use chelis_types::CopyRepairUseKind;
 use chelis_types::{check_ir_program, check_linearity, check_typed_program};
 use copy_repair::copy_repairs_of;
 

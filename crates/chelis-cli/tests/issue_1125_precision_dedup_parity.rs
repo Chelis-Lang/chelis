@@ -1,7 +1,7 @@
 //! chelis#1125 PP7: tensor-precision diagnostic ownership is carrier-independent.
 
+use chelis_checker_core::errors::{CheckError, CheckErrorKind};
 use chelis_deep::{Expr, parse_and_stamp_file};
-use chelis_types::errors::{CheckError, CheckErrorKind};
 use chelis_types::{check_ir_program, check_typed_program};
 use serde_json::Value;
 use std::fs;

@@ -9,6 +9,10 @@
 //! guard's `<prim>` slot is `i64`, because the guard finalizes an extent or
 //! an index (spec/04-type-system.md section 4.7).
 
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
+
 use chelis_vocab::failure::{NumericTrapKind, NumericTrapLine};
 
 /// The [04-NUM-9] line of a `Domain` trap in `op` that finalizes an extent,
@@ -375,6 +379,9 @@ pub fn list_index_out_of_bounds(index: i64, len: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::{NumericTrapKind, NumericTrapLine};
+    use alloc::format;
+    use alloc::string::ToString;
+    use alloc::vec::Vec;
 
     /// [04-NUM-9]: the closed trap kinds and the one line every lane renders.
     #[test]

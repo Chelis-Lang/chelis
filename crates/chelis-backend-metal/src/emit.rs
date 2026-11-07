@@ -129,8 +129,8 @@ fn metal_pairs_to_usize(bounds: &[(RtDim, RtDim)]) -> Result<Vec<(usize, usize)>
         .map(|(s, e)| Ok((metal_bound_to_usize(s)?, metal_bound_to_usize(e)?)))
         .collect()
 }
+use chelis_checker_core::unsupported::{Stage, Unsupported, UnsupportedKind};
 use chelis_numeric_core::prim::Prim;
-use chelis_types::unsupported::{Stage, Unsupported, UnsupportedKind};
 
 use crate::blas;
 use crate::dtype;
@@ -317,7 +317,7 @@ pub(crate) fn emit_verified_dag(
                 node.id.0
             ),
             Stage::Codegen("metal"),
-            chelis_types::unimplemented_rejection!(
+            chelis_checker_core::unimplemented_rejection!(
                 965,
                 "stored-width classification has no metal kernel; use the C target"
             ),
@@ -333,7 +333,7 @@ pub(crate) fn emit_verified_dag(
             UnsupportedKind::Op("softmax".into()),
             "undecomposed softmax reached Metal emission",
             Stage::Codegen("metal"),
-            chelis_types::deliberate_rejection!(
+            chelis_checker_core::deliberate_rejection!(
                 "[05-OP-48]",
                 "prepare the retained softmax identity after AD and before ownership/codegen"
             ),
@@ -353,7 +353,7 @@ pub(crate) fn emit_verified_dag(
             UnsupportedKind::Op("Abs".into()),
             format!("an activated integer abs at Metal DAG node {}", node.id.0),
             Stage::Codegen("metal"),
-            chelis_types::unimplemented_rejection!(
+            chelis_checker_core::unimplemented_rejection!(
                 693,
                 "Metal has no operand activation gate for checked integer abs; use the C or HIP target"
             ),
@@ -370,7 +370,7 @@ pub(crate) fn emit_verified_dag(
             UnsupportedKind::Op(kind.name().to_string()),
             format!("an activated bitwise shift at Metal DAG node {}", node.id.0),
             Stage::Codegen("metal"),
-            chelis_types::unimplemented_rejection!(
+            chelis_checker_core::unimplemented_rejection!(
                 2702,
                 "Metal bitwise shifts have no operand activation gate; use the C or HIP target"
             ),
@@ -400,7 +400,7 @@ fn reject_direct_nonnumeric(dag: VerifiedDagView<'_>) -> Result<(), Unsupported>
         UnsupportedKind::Op("direct nonnumeric".to_string()),
         format!("a Metal DAG value at node {}", node.id.0),
         Stage::Codegen("metal"),
-        chelis_types::unimplemented_rejection!(
+        chelis_checker_core::unimplemented_rejection!(
             2266,
             "the Metal exact comparison, Bool8 logical, and raw stored-bit where kernels are not implemented; use `--target c` or `--target hip`"
         ),
@@ -423,7 +423,7 @@ fn reject_guarded_fail(dag: VerifiedDagView<'_>) -> Result<(), Unsupported> {
         UnsupportedKind::Op("guarded_fail".to_string()),
         format!("a Metal DAG value at node {}", node.id.0),
         Stage::Codegen("metal"),
-        chelis_types::unimplemented_rejection!(
+        chelis_checker_core::unimplemented_rejection!(
             2360,
             "a guarded abort reaching Metal kernel selection has no device form; it is emitted host-side"
         ),
@@ -440,7 +440,7 @@ fn reject_f64(dag: VerifiedDagView<'_>) -> Result<(), Unsupported> {
             UnsupportedKind::Dtype("f64".to_string()),
             format!("a Metal DAG value at node {}", node.id.0),
             Stage::Codegen("metal"),
-            chelis_types::deliberate_rejection!(
+            chelis_checker_core::deliberate_rejection!(
                 "[04-TGT-1]",
                 "Apple Silicon has no FP64 ALUs; use `--target c` or `--target hip`"
             ),
@@ -454,7 +454,7 @@ fn invalid_count(node: &DagNode, detail: String) -> Unsupported {
         UnsupportedKind::Op("count".to_string()),
         format!("malformed Count at Metal DAG node {}: {detail}", node.id.0),
         Stage::Codegen("metal"),
-        chelis_types::deliberate_rejection!(
+        chelis_checker_core::deliberate_rejection!(
             "[05-OP-29]",
             "Count accepts one bool tensor, a non-empty strictly descending in-range axis \
              list, and produces the complementary shape at i64"
@@ -472,7 +472,7 @@ fn count_device_limit(node: &DagNode, detail: String) -> Unsupported {
         UnsupportedKind::Op("count".to_string()),
         format!("Count at Metal DAG node {}: {detail}", node.id.0),
         Stage::Codegen("metal"),
-        chelis_types::unimplemented_rejection!(
+        chelis_checker_core::unimplemented_rejection!(
             1844,
             "the Metal Count kernel indexes its device tensors in uint under a fixed rank \
              cap; chelis#1844 moves Metal device tensors onto the dynamic-rank i64 carrier"
@@ -600,7 +600,7 @@ fn metal_emission_unsupported(detail: String) -> Unsupported {
         UnsupportedKind::Construct("Metal DAG lowering".to_string()),
         detail,
         Stage::Codegen("metal"),
-        chelis_types::unimplemented_rejection!(
+        chelis_checker_core::unimplemented_rejection!(
             1383,
             "Metal's typed no-reuse boundary rejects unsupported DAGs before artifact emission; use a supported Metal graph or select another compiled target"
         ),
@@ -615,7 +615,7 @@ fn reject_integer_abs(dag: VerifiedDagView<'_>) -> Result<(), Unsupported> {
             UnsupportedKind::Op("Abs".to_string()),
             format!("an integer tensor at Metal DAG node {}", node.0),
             Stage::Codegen("metal"),
-            chelis_types::unimplemented_rejection!(
+            chelis_checker_core::unimplemented_rejection!(
                 729,
                 "fused integer abs requires per-step numeric traps; keep abs as a direct node"
             ),
@@ -2713,7 +2713,7 @@ impl<'plan> Emitter<'plan> {
                     UnsupportedKind::Dtype(prec.name().to_string()),
                     "a Metal pad-fill host scalar literal",
                     Stage::Codegen("metal"),
-                    chelis_types::deliberate_rejection!(
+                    chelis_checker_core::deliberate_rejection!(
                         "[04-TGT-1]",
                         "the Metal backend rejects f64 because Apple GPUs have no FP64 ALUs; use the C or HIP target"
                     ),
@@ -2725,7 +2725,7 @@ impl<'plan> Emitter<'plan> {
                     UnsupportedKind::Dtype(prec.name().to_string()),
                     "a Metal pad-fill host scalar literal",
                     Stage::Codegen("metal"),
-                    chelis_types::deliberate_rejection!(
+                    chelis_checker_core::deliberate_rejection!(
                         "[04-DTYPE-1]",
                         "f8e4m3 is a reserved but inactive dtype and must be rejected before emission"
                     ),
@@ -2737,7 +2737,7 @@ impl<'plan> Emitter<'plan> {
                     UnsupportedKind::Dtype(prec.name().to_string()),
                     "a Metal pad-fill host scalar literal",
                     Stage::Codegen("metal"),
-                    chelis_types::unimplemented_rejection!(
+                    chelis_checker_core::unimplemented_rejection!(
                         729,
                         "the exhaustive target capability table has not implemented a Metal string storage cell"
                     ),

@@ -8,6 +8,7 @@ mod native_build;
 mod prove;
 mod style_gate;
 
+use chelis_checker_core::errors::ErrorWitness;
 use chelis_compiler_api::compiler::{BuildTarget, CompilerError};
 use chelis_compiler_api::schema::{
     CheckDirectoryEntry, CheckDirectoryReport, CheckResult, Diagnostic, EntryPath, EvalRequest,
@@ -19,7 +20,6 @@ use chelis_deep::ast::{Atom as DeepAtom, Expr as DeepExpr, ExprCarrier as DeepEx
 use chelis_std_bundle::EMBEDDED_RUNTIME;
 use chelis_surf::ast::Decl;
 use chelis_type_core::{Dim, Effect, EffectSet, NominalArg, TensorPrec, Type};
-use chelis_types::errors::ErrorWitness;
 use chelis_unord::{UnordMap, UnordSet};
 use chelis_vocab::DiagnosticKind;
 use clap::{ArgAction, ArgGroup, Parser, Subcommand};
@@ -2084,11 +2084,11 @@ type CliLoweredBuildProgram = (
 fn compiled_host_lowering_error_for_cli(diagnostic: chelis_ir::lower::LowerDiagnostic) -> String {
     let is_cross_lane_nonliteral_window = diagnostic.unsupported().is_some_and(|unsupported| {
         let identity = unsupported.identity();
-        identity.stage == chelis_types::unsupported::Stage::Lowering
+        identity.stage == chelis_checker_core::unsupported::Stage::Lowering
             && identity.context == "the compiled-backend lowering of `reduce_window_*`"
             && matches!(
-                identity.what,
-                chelis_types::unsupported::UnsupportedKind::Construct(ref what)
+                &identity.what,
+                chelis_checker_core::unsupported::UnsupportedKind::Construct(what)
                     if what == "a non-literal window list for `reduce_window_max`"
             )
             && identity
@@ -2161,7 +2161,7 @@ fn verified_dag_codegen_program(
 fn require_build_manifest_inputs(
     manifest: &chelis_types::manifest::RootManifest,
     target: BuildTarget,
-) -> Result<(), chelis_types::unsupported::Unsupported> {
+) -> Result<(), chelis_checker_core::unsupported::Unsupported> {
     if let Some(entry) = manifest
         .entries
         .iter()
@@ -2188,9 +2188,9 @@ fn build_unavailable_root_error(
     entry: &chelis_types::manifest::RootEntry,
     target: BuildTarget,
     reason: impl Into<String>,
-) -> chelis_types::unsupported::Unsupported {
-    chelis_types::unsupported::Unsupported::new(
-        chelis_types::unsupported::UnsupportedKind::Construct(format!(
+) -> chelis_checker_core::unsupported::Unsupported {
+    chelis_checker_core::unsupported::Unsupported::new(
+        chelis_checker_core::unsupported::UnsupportedKind::Construct(format!(
             "[05-UNS-1] unavailable root `{}`",
             entry.name
         )),
@@ -2200,8 +2200,8 @@ fn build_unavailable_root_error(
             target.as_str(),
             reason.into()
         ),
-        chelis_types::unsupported::Stage::Codegen(target.as_str()),
-        chelis_types::unimplemented_rejection!(
+        chelis_checker_core::unsupported::Stage::Codegen(target.as_str()),
+        chelis_checker_core::unimplemented_rejection!(
             912,
             "this is a root-realization defect; file a bug with the program and target"
         ),
@@ -2583,7 +2583,7 @@ fn cmd_cost(file: &Path, json: bool) -> Result<(), Box<dyn std::error::Error>> {
 /// smaller than the number of repairs.
 struct CopyCostReport {
     summary: chelis_dag_core::analysis::CopyCostSummary,
-    repairs: Vec<chelis_types::CopyRepair>,
+    repairs: Vec<chelis_checker_core::CopyRepair>,
 }
 
 fn copy_cost_for_file(file: &Path) -> Result<CopyCostReport, Box<dyn std::error::Error>> {
@@ -2647,7 +2647,7 @@ fn copy_cost_for_file(file: &Path) -> Result<CopyCostReport, Box<dyn std::error:
 fn entry_copy_repairs(
     checked: &chelis_types::CheckedProgram,
     entry_exprs: &[DeepExpr],
-) -> Result<Vec<chelis_types::CopyRepair>, Box<dyn std::error::Error>> {
+) -> Result<Vec<chelis_checker_core::CopyRepair>, Box<dyn std::error::Error>> {
     let mut entry_names = BTreeSet::new();
     collect_declaration_names(entry_exprs, &mut entry_names);
     let repairs = chelis_types::copy_repairs(checked, Some(&entry_names)).map_err(|errors| {
@@ -2668,7 +2668,7 @@ fn entry_copy_repairs(
                 .as_ref()
                 .is_some_and(|name| entry_names.contains(name))
         })
-        .map(|repair| chelis_types::CopyRepair {
+        .map(|repair| chelis_checker_core::CopyRepair {
             declaration: repair.declaration.as_deref().map(display_root_name),
             ..repair
         })
@@ -2861,13 +2861,13 @@ fn copy_cost_human(file: &Path, report: &CopyCostReport) -> String {
     out
 }
 
-fn copy_repair_use_label(kind: chelis_types::CopyRepairUseKind) -> &'static str {
+fn copy_repair_use_label(kind: chelis_checker_core::CopyRepairUseKind) -> &'static str {
     match kind {
-        chelis_types::CopyRepairUseKind::Consume => "consume",
-        chelis_types::CopyRepairUseKind::Borrow => "borrow",
-        chelis_types::CopyRepairUseKind::Capture => "capture",
-        chelis_types::CopyRepairUseKind::Drop => "drop",
-        chelis_types::CopyRepairUseKind::Root => "root",
+        chelis_checker_core::CopyRepairUseKind::Consume => "consume",
+        chelis_checker_core::CopyRepairUseKind::Borrow => "borrow",
+        chelis_checker_core::CopyRepairUseKind::Capture => "capture",
+        chelis_checker_core::CopyRepairUseKind::Drop => "drop",
+        chelis_checker_core::CopyRepairUseKind::Root => "root",
     }
 }
 
@@ -2898,11 +2898,11 @@ fn synthetic_check_report_with_error(message: &str) -> CheckResult {
 }
 
 fn synthetic_check_report_with_typed_error(
-    kind: chelis_types::errors::CheckErrorKind,
+    kind: chelis_checker_core::errors::CheckErrorKind,
     message: String,
     span_offset: Option<usize>,
 ) -> CheckResult {
-    synthetic_check_report_from_errors(vec![chelis_types::errors::CheckError {
+    synthetic_check_report_from_errors(vec![chelis_checker_core::errors::CheckError {
         kind,
         message,
         severity: 0.5,
@@ -2929,10 +2929,10 @@ fn synthetic_check_report_with_errors(messages: &[String]) -> CheckResult {
     // and renders it through the same serializer, so a failure that
     // short-circuits the pipeline is transported by the report's type
     // rather than by a template that happens to agree with it.
-    let errors: Vec<chelis_types::errors::CheckError> = messages
+    let errors: Vec<chelis_checker_core::errors::CheckError> = messages
         .iter()
-        .map(|message| chelis_types::errors::CheckError {
-            kind: chelis_types::errors::CheckErrorKind::Other,
+        .map(|message| chelis_checker_core::errors::CheckError {
+            kind: chelis_checker_core::errors::CheckErrorKind::Other,
             message: message.clone(),
             severity: 0.5,
             expected: None,
@@ -2946,7 +2946,7 @@ fn synthetic_check_report_with_errors(messages: &[String]) -> CheckResult {
 }
 
 fn synthetic_check_report_from_errors(
-    errors: Vec<chelis_types::errors::CheckError>,
+    errors: Vec<chelis_checker_core::errors::CheckError>,
 ) -> CheckResult {
     let report = chelis_types::FitnessReport {
         score: 0.0,
@@ -3603,7 +3603,7 @@ fn check_prepared_file(
                 return match error {
                     chelis_compiler_api::pipeline::PreparationError::SurfDesugar(error) => {
                         synthetic_check_report_with_typed_error(
-                            chelis_types::errors::CheckErrorKind::TypeMismatch,
+                            chelis_checker_core::errors::CheckErrorKind::TypeMismatch,
                             message,
                             error.span().map(|span| span.offset),
                         )
@@ -3629,7 +3629,7 @@ fn check_prepared_file(
 type PreparedCliReport = (
     chelis_types::FitnessReport,
     Vec<chelis_effects_core::EffectError>,
-    Vec<chelis_types::errors::CheckError>,
+    Vec<chelis_checker_core::errors::CheckError>,
     Option<Vec<chelis_compiler_api::schema::WireInferredSignature>>,
 );
 
@@ -3689,7 +3689,7 @@ fn check_prepared_for_cli(
 fn assemble_check_report(
     report: chelis_types::FitnessReport,
     effect_errors: &[chelis_effects_core::EffectError],
-    linearity_errors: &[chelis_types::errors::CheckError],
+    linearity_errors: &[chelis_checker_core::errors::CheckError],
     inferred_signatures: Option<Vec<chelis_compiler_api::schema::WireInferredSignature>>,
 ) -> CheckResult {
     // Infallible by construction (chelis#886 [04-FIT-12]). A validation
@@ -3722,7 +3722,7 @@ fn assemble_check_report(
 fn assemble_validated_check_report(
     mut report: chelis_types::FitnessReport,
     effect_errors: &[chelis_effects_core::EffectError],
-    linearity_errors: &[chelis_types::errors::CheckError],
+    linearity_errors: &[chelis_checker_core::errors::CheckError],
     inferred_signatures: Option<Vec<chelis_compiler_api::schema::WireInferredSignature>>,
 ) -> Result<CheckResult, String> {
     use chelis_compiler_api::schema::numbers::UnitInterval;
@@ -3867,7 +3867,7 @@ mod check_path_totality_tests {
     type AssembleCheckReport = fn(
         chelis_types::FitnessReport,
         &[chelis_effects_core::EffectError],
-        &[chelis_types::errors::CheckError],
+        &[chelis_checker_core::errors::CheckError],
         Option<Vec<chelis_compiler_api::schema::WireInferredSignature>>,
     ) -> CheckResult;
 
@@ -3886,7 +3886,7 @@ mod check_path_totality_tests {
     ) -> (
         chelis_types::FitnessReport,
         Vec<chelis_effects_core::EffectError>,
-        Vec<chelis_types::errors::CheckError>,
+        Vec<chelis_checker_core::errors::CheckError>,
         Option<Vec<chelis_compiler_api::schema::WireInferredSignature>>,
     );
 
@@ -4068,16 +4068,18 @@ fn report_inferred_signature_failure(
     // not for the terminal line to be taken away. When this failure
     // propagated, `main`'s error arm printed it; now nothing would.
     eprintln!("error: {message}");
-    fitness.errors.push(chelis_types::errors::CheckError {
-        kind: chelis_types::errors::CheckErrorKind::Other,
-        message,
-        severity: 0.5,
-        expected: None,
-        got: None,
-        span_offset: None,
-        span_id: None,
-        suggestions: Vec::new(),
-    });
+    fitness
+        .errors
+        .push(chelis_checker_core::errors::CheckError {
+            kind: chelis_checker_core::errors::CheckErrorKind::Other,
+            message,
+            severity: 0.5,
+            expected: None,
+            got: None,
+            span_offset: None,
+            span_id: None,
+            suggestions: Vec::new(),
+        });
     None
 }
 
@@ -11919,7 +11921,7 @@ fn tensor_manifest_root_names(
     root_manifest: &chelis_types::manifest::RootManifest,
     target: BuildTarget,
     lowering_name: &str,
-) -> Result<Vec<String>, chelis_types::unsupported::Unsupported> {
+) -> Result<Vec<String>, chelis_checker_core::unsupported::Unsupported> {
     if !root_manifest.requires_main() {
         return Ok(Vec::new());
     }
@@ -12681,7 +12683,7 @@ fn apply_manifest_display_roots(
     program: &mut chelis_ir::host::ConcreteHostProgram,
     manifest: &chelis_types::manifest::RootManifest,
     target: BuildTarget,
-) -> Result<(), chelis_types::unsupported::Unsupported> {
+) -> Result<(), chelis_checker_core::unsupported::Unsupported> {
     apply_manifest_display_roots_to_globals(
         &mut program.globals,
         &program.functions,
@@ -12695,7 +12697,7 @@ fn apply_manifest_display_roots_to_globals(
     functions: &[chelis_ir::host::ConcreteHostFunction],
     manifest: &chelis_types::manifest::RootManifest,
     target: BuildTarget,
-) -> Result<(), chelis_types::unsupported::Unsupported> {
+) -> Result<(), chelis_checker_core::unsupported::Unsupported> {
     use chelis_ir::host::{HostBinding, HostExpr, HostExprKind};
     use chelis_types::types::Lane;
 
@@ -12898,8 +12900,8 @@ fn display_root_name(name: &str) -> String {
     } else {
         (name, None)
     };
-    let root = if chelis_types::is_linker_format_name(root) {
-        chelis_types::demangle_ident(root)
+    let root = if chelis_checker_core::opacity::is_linker_format_name(root) {
+        chelis_checker_core::opacity::demangle_ident(root)
     } else {
         root.to_string()
     };

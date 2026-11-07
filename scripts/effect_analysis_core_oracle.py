@@ -222,6 +222,10 @@ def host_snapshot(workspace: Path) -> dict:
         raise OracleFailure("corpus contains its Rust delimiter")
     source += '\nconst CORPUS_JSON: &str = r####"' + corpus + '"####;\n'
     dependencies = 'bincode = "=1.3.3"\nserde_json = { version = "1", features = ["float_roundtrip"] }\n'
+    if workspace == ROOT:
+        source = "use chelis_checker_core::InferResult;\n" + source.replace(
+            "CheckedProgram, InferResult,", "CheckedProgram,")
+        dependencies += dependency("chelis-checker-core", workspace)
     for crate in ("chelis-types", "chelis-deep", "chelis-surf", "chelis-syntax-host"):
         dependencies += dependency(crate, workspace, defaults=True)
     result = support.consumer(workspace / "crates/chelis-effects", source,
@@ -448,18 +452,19 @@ fn main() {
 
 
 def authority_controls() -> None:
-    dependencies = dependency("chelis-types", defaults=True) + dependency("chelis-deep")
+    dependencies = (dependency("chelis-types", defaults=True) + dependency("chelis-deep")
+        + dependency("chelis-checker-core"))
     support.compile_rejected(CRATE, r'''
 pub fn forge(expressions: &[chelis_deep::Expr]) -> chelis_types::CheckedProgram {
     chelis_effects_core::analyze_effects(expressions, None).unwrap()
 }
 ''', dependencies=dependencies, expected=("mismatched types", "CheckedProgram"))
     support.compile_rejected(CRATE,
-        'use chelis_types::errors::ErrorWitness;\n'
+        'use chelis_checker_core::errors::ErrorWitness;\n'
         'pub fn forge() -> ErrorWitness { ErrorWitness(()) }\n',
         dependencies=dependencies, expected=("E0423", "private fields"))
-    support.compile_rejected("chelis-types",
-        'use chelis_types::DiagnosticCheckpoint;\n'
+    support.compile_rejected("chelis-checker-core",
+        'use chelis_checker_core::DiagnosticCheckpoint;\n'
         'pub fn forge() { let _ = DiagnosticCheckpoint(0usize); }\n',
         features=("checkpoint-compile-probe",), expected=("E0423", "private fields"))
     for name in ("EffectError", "EffectErrorKind", "DefEffectRows"):

@@ -1,9 +1,9 @@
 //! `scatter_elements` must be checked through a registered inference rule.
 
+use chelis_checker_core::errors::CheckError;
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str as parse_surf;
 use chelis_types::check_typed_program;
-use chelis_types::errors::CheckError;
 
 fn typecheck_errors(source: &str) -> Vec<CheckError> {
     let decls =

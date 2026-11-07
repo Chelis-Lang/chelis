@@ -5,6 +5,7 @@
 
 use std::collections::BTreeMap;
 
+use chelis_checker_core::unsupported::{Stage, Unsupported, UnsupportedKind};
 use chelis_dag_core::dag::{
     ComparisonKind, DagNode, DimExpr, DimInfo, ExtremaKind, ExtremaOperand, FusedStepOp,
     LogicalKind, NodeId, RiscOp, RtDim, TensorType,
@@ -16,14 +17,13 @@ use chelis_numeric_core::dtype_semantics::{NumericTrap, ScalarValue};
 use chelis_numeric_core::named_cast::NamedCastMode;
 use chelis_numeric_core::observation::ElementRef;
 use chelis_numeric_core::prim::Prim;
-use chelis_types::unsupported::{Stage, Unsupported, UnsupportedKind};
 
 fn unsupported_verified_dag_action(node: NodeId, detail: &str) -> Unsupported {
     Unsupported::new(
         UnsupportedKind::Op("Drop".to_string()),
         format!("verified DAG ownership action at node {}: {detail}", node.0),
         Stage::Codegen("hip"),
-        chelis_types::deliberate_rejection!(
+        chelis_checker_core::deliberate_rejection!(
             "[04-TOT-2]",
             "verified ownership and the retained DAG payload must agree exactly; no backend-local ownership fallback is permitted"
         ),
@@ -35,7 +35,7 @@ fn unsupported_storage_plan(error: chelis_ir::ownership::OwnershipError) -> Unsu
         UnsupportedKind::Op("storage planning".to_string()),
         error.to_string(),
         Stage::Codegen("hip"),
-        chelis_types::deliberate_rejection!(
+        chelis_checker_core::deliberate_rejection!(
             "[04-SHAPE-1]",
             "HIP storage placement requires the verified exact-capacity plan"
         ),
@@ -254,7 +254,7 @@ impl HipEmitter {
                 UnsupportedKind::Op("Abs".to_string()),
                 format!("an integer tensor at HIP DAG node {}", node.0),
                 Stage::Codegen("hip"),
-                chelis_types::unimplemented_rejection!(
+                chelis_checker_core::unimplemented_rejection!(
                     689,
                     "fused integer abs requires per-step numeric traps; keep abs as a direct node"
                 ),
@@ -320,7 +320,7 @@ impl HipEmitter {
                 node.id.0
             ),
             Stage::Codegen("hip"),
-            chelis_types::unimplemented_rejection!(
+            chelis_checker_core::unimplemented_rejection!(
                 2413,
                 "this HIP emitter has no activation gate, so it would check where the \
                  activation is false (spec/10 section 3.2); use `--target c`"
@@ -396,7 +396,7 @@ impl HipEmitter {
             UnsupportedKind::Op("count".to_string()),
             format!("malformed Count at HIP DAG node {}: {detail}", node.id.0),
             Stage::Codegen("hip"),
-            chelis_types::deliberate_rejection!(
+            chelis_checker_core::deliberate_rejection!(
                 "[05-OP-29]",
                 "Count accepts one bool tensor, a non-empty strictly descending in-range axis \
                  list, and produces the complementary shape at i64"
@@ -504,7 +504,7 @@ impl HipEmitter {
                     node.id.0
                 ),
                 Stage::Codegen("hip"),
-                chelis_types::unimplemented_rejection!(
+                chelis_checker_core::unimplemented_rejection!(
                     965,
                     "stored-width classification has no hip kernel; use the C target"
                 ),
@@ -1547,7 +1547,7 @@ impl HipEmitter {
                     UnsupportedKind::Op("runtime recurrence".into()),
                     "runtime recurrence on HIP",
                     Stage::Codegen("hip"),
-                    chelis_types::unimplemented_rejection!(
+                    chelis_checker_core::unimplemented_rejection!(
                         3366,
                         "HIP runtime recurrence is not implemented"
                     ),
@@ -1558,7 +1558,7 @@ impl HipEmitter {
                     UnsupportedKind::Op(format!("{:?}", node.op)),
                     "ordered List capture cotangents",
                     Stage::Codegen("hip"),
-                    chelis_types::unimplemented_rejection!(
+                    chelis_checker_core::unimplemented_rejection!(
                         2515,
                         "HIP ordered List capture cotangents are not implemented"
                     ),
@@ -1569,7 +1569,7 @@ impl HipEmitter {
                     UnsupportedKind::Op("softmax".into()),
                     "undecomposed softmax reached HIP emission",
                     Stage::Codegen("hip"),
-                    chelis_types::deliberate_rejection!(
+                    chelis_checker_core::deliberate_rejection!(
                         "[05-OP-48]",
                         "prepare the retained softmax identity after AD and before ownership/codegen"
                     ),
@@ -1580,7 +1580,7 @@ impl HipEmitter {
                     UnsupportedKind::Op("Iota".into()),
                     "runtime integer range generation",
                     Stage::Codegen("hip"),
-                    chelis_types::unimplemented_rejection!(
+                    chelis_checker_core::unimplemented_rejection!(
                         3410,
                         "HIP runtime range source is not implemented"
                     ),
@@ -2298,7 +2298,7 @@ impl HipEmitter {
                                 node.id.0
                             ),
                             Stage::Codegen("hip"),
-                            chelis_types::unimplemented_rejection!(
+                            chelis_checker_core::unimplemented_rejection!(
                                 729,
                                 "this narrow-float fused chain has no complete typed HIP kernel"
                             ),
@@ -2485,7 +2485,7 @@ impl HipEmitter {
                     UnsupportedKind::Op("runtime recurrence".into()),
                     "runtime recurrence on HIP",
                     Stage::Codegen("hip"),
-                    chelis_types::unimplemented_rejection!(
+                    chelis_checker_core::unimplemented_rejection!(
                         3366,
                         "HIP runtime recurrence is not implemented"
                     ),
@@ -2496,7 +2496,7 @@ impl HipEmitter {
                     UnsupportedKind::Op("softmax".into()),
                     "undecomposed softmax reached HIP emission",
                     Stage::Codegen("hip"),
-                    chelis_types::deliberate_rejection!(
+                    chelis_checker_core::deliberate_rejection!(
                         "[05-OP-48]",
                         "prepare the retained softmax identity after AD and before ownership/codegen"
                     ),
@@ -2507,7 +2507,7 @@ impl HipEmitter {
                     UnsupportedKind::Op(format!("{:?}", node.op)),
                     "ordered List capture cotangents",
                     Stage::Codegen("hip"),
-                    chelis_types::unimplemented_rejection!(
+                    chelis_checker_core::unimplemented_rejection!(
                         2515,
                         "HIP ordered List capture cotangents are not implemented"
                     ),
@@ -2518,7 +2518,7 @@ impl HipEmitter {
                     UnsupportedKind::Op("Iota".into()),
                     "runtime integer range generation",
                     Stage::Codegen("hip"),
-                    chelis_types::unimplemented_rejection!(
+                    chelis_checker_core::unimplemented_rejection!(
                         3410,
                         "HIP runtime range source is not implemented"
                     ),
@@ -2764,7 +2764,7 @@ impl HipEmitter {
                     UnsupportedKind::Op(chelis_dag_core::grad::risc_op_name(&node.op).to_string()),
                     "a key-operand random node in the HIP DAG emitter",
                     Stage::Codegen("hip"),
-                    chelis_types::unimplemented_rejection!(
+                    chelis_checker_core::unimplemented_rejection!(
                         1192,
                         "the HIP lane has no port of the key-operand random kernels or the \
                          draw key yet; compiled dropout on every target is phase 6 of chelis#2413"
@@ -3571,7 +3571,7 @@ impl HipEmitter {
                     UnsupportedKind::Op(chelis_dag_core::grad::risc_op_name(&node.op).to_string()),
                     "a key result in the HIP DAG emitter",
                     Stage::Codegen("hip"),
-                    chelis_types::unimplemented_rejection!(
+                    chelis_checker_core::unimplemented_rejection!(
                         1192,
                         "the HIP lane computes keys at emission, so a key has no device value \
                          to return; compiled randomness on every target is phase 6 of chelis#2413"
@@ -3597,7 +3597,7 @@ impl HipEmitter {
                 UnsupportedKind::Op(name.to_string()),
                 format!("a HIP {name} {reason}"),
                 Stage::Codegen("hip"),
-                chelis_types::unimplemented_rejection!(
+                chelis_checker_core::unimplemented_rejection!(
                     1192,
                     "the HIP lane derives a key only at emission, from literal seeds and \
                      indices and rank-0 keys; compiled randomness on every target is phase 6 \
@@ -3657,7 +3657,7 @@ impl HipEmitter {
                 UnsupportedKind::Op("UniformLike".to_string()),
                 "a HIP uniform_like without an emission-time key",
                 Stage::Codegen("hip"),
-                chelis_types::unimplemented_rejection!(
+                chelis_checker_core::unimplemented_rejection!(
                     1192,
                     "the HIP lane draws only with a rank-0 key it derives at emission from \
                      literal seeds and indices, with literal bounds; compiled randomness on \
@@ -5409,7 +5409,7 @@ impl HipEmitter {
             UnsupportedKind::Op("guarded_fail".to_string()),
             format!("the HIP kernel set (node {})", node.id.0),
             Stage::Codegen("hip"),
-            chelis_types::unimplemented_rejection!(
+            chelis_checker_core::unimplemented_rejection!(
                 2360,
                 "a guarded abort reaching device kernel selection has no device form; it is emitted host-side"
             ),
@@ -5421,7 +5421,7 @@ impl HipEmitter {
             UnsupportedKind::Op("mod".to_string()),
             format!("the HIP kernel set (node {})", node.id.0),
             Stage::Codegen("hip"),
-            chelis_types::unimplemented_rejection!(
+            chelis_checker_core::unimplemented_rejection!(
                 1277,
                 "checked integer remainder has no device kernel; the C host path preserves [05-OP-64] DivZero traps"
             ),
@@ -5438,7 +5438,7 @@ impl HipEmitter {
             UnsupportedKind::Op(mode.keyword().to_string()),
             format!("the HIP kernel set (node {})", node.id.0),
             Stage::Codegen("hip"),
-            chelis_types::unimplemented_rejection!(
+            chelis_checker_core::unimplemented_rejection!(
                 3411,
                 "the HIP cast kernels emit an unguarded device-side conversion, \
                  so the named cast traps have no device implementation; the C \
@@ -5751,7 +5751,7 @@ impl HipEmitter {
                 UnsupportedKind::Dtype(Prim::Bool.name().to_string()),
                 format!("HIP {operation} materialization requiring a one-byte bool kernel family"),
                 Stage::Codegen("hip"),
-                chelis_types::unimplemented_rejection!(
+                chelis_checker_core::unimplemented_rejection!(
                     1364,
                     "HIP has no Bool8 materialization family: casts to bool need a checked \
                      one-byte writer, casts from bool need a one-byte reader, and bool \
@@ -5809,7 +5809,7 @@ impl HipEmitter {
                     UnsupportedKind::Dtype(ty.precision.name().to_string()),
                     "a HIP kernel family with f32/f64 variants only",
                     Stage::Codegen("hip"),
-                    chelis_types::unimplemented_rejection!(
+                    chelis_checker_core::unimplemented_rejection!(
                         689,
                         "this op has no typed HIP kernel for the operand dtype; the former \
                          silent F32 fallback emitted a corrupting kernel (chelis#689). \

@@ -29,11 +29,11 @@
 //! interpret) must fall back to `Dim::Wildcard` -- no regression in
 //! diagnostic quality.
 
+use chelis_checker_core::errors::CheckError;
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str;
 use chelis_types::CheckedProgram;
 use chelis_types::check_typed_program;
-use chelis_types::errors::CheckError;
 
 fn typecheck_surf(source: &str) -> Vec<CheckError> {
     let decls =
@@ -216,7 +216,7 @@ def cross_dim(x, y) = reshape(x, [cast(shape(y, cast(0, i32)), i64), cast(4, i64
     let has_dim_mismatch = errors.iter().any(|e| {
         matches!(
             e.kind,
-            chelis_types::errors::CheckErrorKind::DimensionMismatch
+            chelis_checker_core::errors::CheckErrorKind::DimensionMismatch
         )
     });
     assert!(
@@ -255,7 +255,7 @@ def add_one_dim(x) = reshape(x, [cast(add(shape(x, cast(0, i32)), 1), i64), cast
     let has_dim_mismatch = errors.iter().any(|e| {
         matches!(
             e.kind,
-            chelis_types::errors::CheckErrorKind::DimensionMismatch
+            chelis_checker_core::errors::CheckErrorKind::DimensionMismatch
         )
     });
     assert!(

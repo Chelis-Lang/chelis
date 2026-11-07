@@ -3,10 +3,10 @@ use chelis_deep::annotations::{DtypeBounds, MetadataValue as M, RuntimeExpressio
 use chelis_deep::node::Node;
 use chelis_deep::{Atom, DeepTag, Expr, Metadata, Span};
 const SPAN: Span = Span { offset: 0, len: 0 };
-fn verdicts(source: &str) -> Vec<Vec<chelis_types::errors::CheckError>> {
+fn verdicts(source: &str) -> Vec<Vec<chelis_checker_core::errors::CheckError>> {
     verdicts_for(&chelis_deep::parser::parse_str(source, &chelis_syntax_host::NativeStack).unwrap())
 }
-fn verdicts_for(exprs: &[chelis_deep::Expr]) -> Vec<Vec<chelis_types::errors::CheckError>> {
+fn verdicts_for(exprs: &[chelis_deep::Expr]) -> Vec<Vec<chelis_checker_core::errors::CheckError>> {
     use chelis_types::*;
     let library = chelis_deep::parser::parse_str(
         "(def {} library_value (lit {} 1))",

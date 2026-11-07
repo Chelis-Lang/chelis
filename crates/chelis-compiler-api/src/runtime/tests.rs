@@ -255,7 +255,7 @@ fn issue_1125_eval_raw_expr(expr: &Expr) -> Result<RuntimeValue, String> {
         declared_signatures: UnordMap::new(),
         adt_fields: UnordMap::new(),
         constructor_names: UnordMap::new(),
-        adt_registry: chelis_types::adt::AdtRegistry::default(),
+        adt_registry: chelis_checker_core::adt::AdtRegistry::default(),
         tensor_bindings: &empty_tensors,
         session: None,
         active_declaration_names: Vec::new(),
@@ -2498,7 +2498,7 @@ fn eval_deep_with_bindings(
         declared_signatures: UnordMap::new(),
         adt_fields: UnordMap::new(),
         constructor_names: UnordMap::new(),
-        adt_registry: chelis_types::adt::AdtRegistry::default(),
+        adt_registry: chelis_checker_core::adt::AdtRegistry::default(),
         tensor_bindings: &empty_tensors,
         session: None,
         active_declaration_names: Vec::new(),
@@ -2887,7 +2887,7 @@ fn issue_458_div_f32_over_i32_literal_rejected_before_eval_not_folded() {
     assert!(
         err.errors.iter().any(|e| matches!(
             e.kind,
-            chelis_types::errors::CheckErrorKind::PrecisionMismatch
+            chelis_checker_core::errors::CheckErrorKind::PrecisionMismatch
         )),
         "spec §5.1: mixed (f32, i32) div must surface a PrecisionMismatch; got: {:?}",
         err.errors

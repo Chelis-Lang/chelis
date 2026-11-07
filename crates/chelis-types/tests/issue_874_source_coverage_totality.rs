@@ -41,9 +41,10 @@
 //! enumerated here, and the `pat-var` / `pat-as` / `pat-lit` rows are named
 //! instances rather than a statement about their roles.
 
+use chelis_checker_core::errors::CheckError;
+use chelis_checker_core::errors::CheckErrorKind;
 use chelis_deep::{Expr, parse_and_stamp_file};
 use chelis_types::check_ir_program;
-use chelis_types::errors::{CheckError, CheckErrorKind};
 
 // ── Harness ────────────────────────────────────────────────────────────────
 

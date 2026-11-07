@@ -1,9 +1,10 @@
 //! Checked library contexts transport family contracts without source-body validation.
+use chelis_checker_core::errors::CheckErrorKind;
 use chelis_compiler_api::{
     LibraryContext, StdLibContext, build_library_context, build_stdlib_context,
 };
 use chelis_surf::{desugar::desugar_program, parser::parse_str};
-use chelis_types::{check_ir_with_context, errors::CheckErrorKind};
+use chelis_types::check_ir_with_context;
 
 #[test]
 fn checked_library_round_trips_preserve_generic_function_values() {

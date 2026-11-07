@@ -55,7 +55,11 @@ impl Probe {
     fn compile_abi(&self, metadata: &str) {
         let source_dir = self.0.join("chelis_abi");
         fs::create_dir_all(&source_dir).unwrap();
-        fs::write(source_dir.join("lib.rs"), "pub mod metadata;\n").unwrap();
+        fs::write(
+            source_dir.join("lib.rs"),
+            "extern crate alloc;\npub mod metadata;\n",
+        )
+        .unwrap();
         fs::write(source_dir.join("metadata.rs"), metadata).unwrap();
         compiled(
             Command::new(std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into()))

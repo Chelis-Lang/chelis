@@ -155,6 +155,7 @@ charset checker was added: that would be a second source of truth for
   - `cargo run -p chelis-cli --bin chelis --quiet -- lint --check .`
   - `<managed-python> scripts/check_std_bundle_reproducible.py`
   - `cargo test -p chelis-types --doc`
+  - `cargo test -p chelis-checker-core --doc`
   - `cargo test -p chelis-compiler-api --doc`
   - `cargo test -p chelis-pipeline-core --doc`
   - `<managed-python> scripts/check_checkpoint_compile_fail.py`

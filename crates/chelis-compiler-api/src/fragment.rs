@@ -311,7 +311,7 @@ fn resolve_error_to_replacement_error(error: chelis_deep::ResolveError) -> Repla
     }
 }
 
-/// Map a type-check [`chelis_types::InferResult`] failure to a
+/// Map a type-check [`chelis_checker_core::InferResult`] failure to a
 /// [`ReplacementError::Type`]. The underlying `CheckError`s carry no span
 /// today, so `location` is `None`.
 fn edit_error_to_replacement_error(error: EditValidationError) -> ReplacementError {

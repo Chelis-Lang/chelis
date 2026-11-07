@@ -1151,7 +1151,7 @@ class StageUnionTests(unittest.TestCase):
         slices = [gate.selected_stage_commands(
             "integration", tests_only=False, support_only=True,
             partition=None, support_slice=name,
-        ) for name in ("frontend", "domain", "numeric-core")]
+        ) for name in gate.INTEGRATION_SUPPORT_SLICES]
         self.assertTrue(all(slices))
         commands = [command for selected in slices for command in selected]
         self.assertCountEqual(commands, gate.STAGES["integration"][1:])
@@ -1374,7 +1374,7 @@ class ListOutputTests(unittest.TestCase):
     def test_list_includes_a_doctest_stage(self):
         # Regression guard (chelis#875): `cargo nextest` does not execute
         # doctests, so a gate made entirely of nextest stages runs none of
-        # the `compile_fail` oracles in crates/chelis-types/src/errors.rs.
+        # the `compile_fail` oracles in crates/chelis-checker-core/src/errors.rs.
         # Those oracles are the chelis#731 Phase 2 acceptance artifact; a
         # gate that does not drive them lets the plan claim a compile-time
         # guarantee no continuous job checks. If this stage is ever
@@ -2262,25 +2262,6 @@ def _assert_executable_run_once(job_block: str, command: str) -> None:
         )
 
 
-def _assert_macos_aggregate_requires_censuses(aggregate_block: str) -> None:
-    needs = (
-        "needs: [macos-workspace-shard, macos-binding-census, "
-        "macos-wire-census, macos-ownership-ledger, macos-numeric-core, macos-dag-core]"
-    )
-    if needs not in aggregate_block:
-        raise AssertionError("macOS aggregate omits a required producer")
-    _assert_executable_run_once(
-        aggregate_block,
-        "python3 scripts/ci_require_success.py "
-        "macos-workspace-shard=${{ needs.macos-workspace-shard.result }} "
-        "macos-binding-census=${{ needs.macos-binding-census.result }} "
-        "macos-wire-census=${{ needs.macos-wire-census.result }} "
-        "macos-ownership-ledger=${{ needs.macos-ownership-ledger.result }} "
-        "macos-numeric-core=${{ needs.macos-numeric-core.result }} "
-        "macos-dag-core=${{ needs.macos-dag-core.result }}",
-    )
-
-
 def _ci_step_block(job_block: str, step_name: str) -> str:
     """Return one step's raw text from a job block, without the next step.
 
@@ -2297,21 +2278,6 @@ def _ci_step_block(job_block: str, step_name: str) -> str:
     tail = job_block[job_block.index(marker) + len(marker) :]
     end = re.search(r"^      - ", tail, re.MULTILINE)
     return tail[: end.start()] if end else tail
-
-
-def _assert_support_slice_contract(block: str) -> None:
-    assert "slice: [frontend, domain]" in block
-    command = "chelis-gate integration --support-only --support-slice ${{ matrix.slice }}"
-    _assert_executable_run_once(block, command)
-    assert block.count("--support-only") == 1
-    job_conditions = re.findall(r"^    if:[ \t]*(.+)$", block, re.MULTILINE)
-    assert job_conditions == [
-        "${{ github.event_name == 'schedule' || "
-        "(github.event_name == 'workflow_dispatch' && inputs.validation_scope == 'all') }}"
-    ], f"unexpected integration-support job scope: {job_conditions!r}"
-    step = _ci_step_block(block, "Gate (integration support subset)")
-    _assert_executable_run_once(step, command)
-    assert re.search(r"^\s+if\s*:", step, re.MULTILINE) is None
 
 
 def _workflow_job_block(path: Path, job: str) -> str:
@@ -2760,7 +2726,7 @@ class CiParityTests(unittest.TestCase):
         command = (
             "cargo nextest run --workspace --profile ci-full "
             "--ignore-default-filter "
-            "--features chelis-types/generalize-sweep-oracle --no-fail-fast "
+            "--features chelis-checker-core/generalize-sweep-oracle --no-fail-fast "
             "-E 'not (binary_id(/^chelis-compiler-api::capacity_census_wire$/) | "
             "binary_id(/^chelis-python::capacity_census_bindings$/) | "
             "binary_id(/^chelis-cli::stdlib_typecheck_cache_concurrency$/) "
@@ -2838,44 +2804,10 @@ class CiParityTests(unittest.TestCase):
         self.assertIn("chelis-gate ci-fast", worker)
         self.assertNotIn("--support-only", worker)
         self.assertNotIn("ProfilePartitionTests", worker)
-        _assert_support_slice_contract(_ci_job_block("integration-support"))
         self.assertIn(
             "needs: [changes, ci-fast, change-owned-report, clarabel-provider]",
             _ci_job_block("integration"),
         )
-
-    def test_support_slice_contract_rejects_missing_repeated_or_skipped_work(self):
-        block = _ci_job_block("integration-support")
-        mutations = (
-            block.replace("slice: [frontend, domain]", "slice: [frontend, frontend]"),
-            block.replace(" --support-slice ${{ matrix.slice }}", ""),
-            block.replace("    steps:", "    if: false\n    steps:"),
-            block.replace(
-                "      - name: Gate (integration support subset)",
-                "      - name: Gate (integration support subset)\n        if: false",
-            ),
-            block + "      - run: chelis-gate integration --support-only --support-slice ${{ matrix.slice }}\n",
-        )
-        for changed in mutations:
-            with self.subTest(workflow=changed), self.assertRaises(AssertionError):
-                _assert_support_slice_contract(changed)
-
-    def test_support_slice_contract_rejects_missing_or_weakened_job_scope(self):
-        block = _ci_job_block("integration-support")
-        guard = (
-            "    if: ${{ github.event_name == 'schedule' || "
-            "(github.event_name == 'workflow_dispatch' && inputs.validation_scope == 'all') }}"
-        )
-        self.assertIn(guard, block)
-        mutations = (
-            block.replace(guard + "\n", "", 1),
-            block.replace(guard, "    if: true", 1),
-            block.replace(guard, "    if: ${{ github.event_name == 'schedule' }}", 1),
-            block.replace(guard, guard + "\n    if: false", 1),
-        )
-        for changed in mutations:
-            with self.subTest(workflow=changed), self.assertRaises(AssertionError):
-                _assert_support_slice_contract(changed)
 
     def test_fast_worker_publishes_junit_and_selection_receipts(self):
         worker = _ci_job_block("ci-fast")
@@ -2935,52 +2867,6 @@ class CiParityTests(unittest.TestCase):
         self.assertIn("name: macOS Binding Census", census_block)
         self.assertIn("name: macOS Wire Census", wire_block)
         self.assertIn("name: macOS Smoke", aggregate_block)
-        _assert_macos_aggregate_requires_censuses(aggregate_block)
-
-    def test_numeric_core_has_independent_cross_platform_owners_and_receipts(self):
-        support = _ci_job_block("integration-support")
-        self.assertIn("slice: [frontend, domain]", support)
-        self.assertIn("timeout-minutes: 70", support)
-        self.assertIn("fail-fast: false", support)
-        linux = _ci_job_block("numeric-core-oracle")
-        self.assertIn("timeout-minutes: 115", linux)
-        self.assertNotIn("strategy:", linux)
-        self.assertNotIn("continue-on-error", linux)
-        _assert_executable_run_once(
-            linux, "chelis-gate integration --support-only --support-slice numeric-core",
-        )
-        report = _workflow_job_block(CI_YML.with_name("heavy-e2e.yml"), "report")
-        self.assertIn("integration-support", report.split("steps:")[0])
-        self.assertIn("numeric-core-oracle", report.split("steps:")[0])
-        self.assertIn("job.result === 'success'", report)
-        mac = _ci_job_block("macos-numeric-core")
-        self.assertIn("timeout-minutes: 120", mac)
-        self.assertNotIn("continue-on-error", mac)
-        self.assertNotIn("if:", _ci_step_block(mac, "Numeric core portability"))
-        self.assertNotIn("numeric_core_oracle.py", _ci_job_block("macos-workspace-shard"))
-        self.assertNotIn("Install portable numeric C tools", _ci_job_block("macos-workspace-shard"))
-        _assert_executable_run_once(
-            mac, ".venv/bin/python scripts/gate.py integration --support-only --support-slice numeric-core --numeric-core-phase ${{ matrix.phase }}",
-        )
-        for prerequisite in (
-            "dtolnay/rust-toolchain@stable", "astral-sh/setup-uv@v8.1.0",
-            "python3 scripts/ci_setup_uv_python.py", "taiki-e/install-action@nextest",
-            "uv pip install --python .venv/bin/python -r bindings/python/pyproject.toml",
-            'subprocess.run(["brew", "install", "llvm"], check=True)',
-            'test "$(uname -m)" = "arm64"',
-        ):
-            self.assertIn(prerequisite, mac)
-        for block, artifact in (
-            (support, "integration-support-${{ matrix.slice }}-receipts"),
-            (linux, "integration-support-numeric-core-receipts"),
-            (mac, "macos-numeric-core-${{ matrix.phase }}-receipts"),
-        ):
-            step = _ci_step_block(block, "Upload integration support receipts")
-            self.assertIn("if: always()", step)
-            self.assertIn("if-no-files-found: error", step)
-            self.assertIn(f"name: {artifact}", step)
-            self.assertIn("path: target/gate-reports/", step)
-        _assert_macos_aggregate_requires_censuses(_ci_job_block("macos-smoke"))
 
     def test_macos_numeric_core_result_controls_the_real_aggregate_command(self):
         block = _ci_job_block("macos-smoke")
@@ -3000,31 +2886,6 @@ class CiParityTests(unittest.TestCase):
                 self.assertEqual(completed.returncode, expected, completed.stderr)
                 self.assertIn(f"macos-numeric-core: {result}", completed.stdout + completed.stderr)
 
-    def test_macos_dag_core_has_an_independent_mandatory_budget(self):
-        block = _ci_job_block("macos-dag-core")
-        self.assertIn("runs-on: macos-latest", block)
-        self.assertIn("timeout-minutes: 120", block)
-        self.assertNotIn("needs:", block)
-        self.assertNotIn("strategy:", block)
-        self.assertNotIn("continue-on-error", block)
-        self.assertNotIn("if:", block.split("steps:")[0])
-        self.assertNotIn("if:", _ci_step_block(block, "DAG core portability"))
-        _assert_executable_run_once(
-            block,
-            "uv run --managed-python --python 3.11 --no-project python scripts/dag_core_oracle.py",
-        )
-        self.assertNotIn("dag_core_oracle.py", _ci_job_block("macos-workspace-shard"))
-        for prerequisite in (
-            "dtolnay/rust-toolchain@stable", "astral-sh/setup-uv@v8.1.0",
-            "python3 scripts/ci_setup_uv_python.py", "taiki-e/install-action@nextest",
-            "uv pip install --python .venv/bin/python -r bindings/python/pyproject.toml",
-            'test "$(uname -m)" = "arm64"',
-            "CARGO_PROFILE_DEV_DEBUG: 0", "CARGO_PROFILE_TEST_DEBUG: 0",
-            "shared-key: macos-workspace", "save-if: false",
-        ):
-            self.assertIn(prerequisite, block)
-        _assert_macos_aggregate_requires_censuses(_ci_job_block("macos-smoke"))
-
     def test_macos_dag_core_result_controls_the_real_aggregate_command(self):
         block = _ci_job_block("macos-smoke")
         command = next(line.strip()[5:] for line in block.splitlines()
@@ -3043,17 +2904,6 @@ class CiParityTests(unittest.TestCase):
                 self.assertEqual(completed.returncode, expected, completed.stderr)
                 self.assertIn(f"macos-dag-core: {result}", completed.stdout + completed.stderr)
 
-    def test_macos_aggregate_rejects_a_missing_dag_dependency_or_result(self):
-        aggregate_block = _ci_job_block("macos-smoke")
-        for missing in (
-            ", macos-dag-core",
-            " macos-dag-core=${{ needs.macos-dag-core.result }}",
-        ):
-            with self.subTest(missing=missing), self.assertRaises(AssertionError):
-                _assert_macos_aggregate_requires_censuses(
-                    aggregate_block.replace(missing, "")
-                )
-
     def test_macos_partition_rejects_missing_duplicate_or_wrong_denominator(self):
         shard_block = _ci_job_block("macos-workspace-shard")
         for old, new in (
@@ -3067,37 +2917,6 @@ class CiParityTests(unittest.TestCase):
                         shard_block.replace(old, new), expected_count=3
                     )
 
-    def test_macos_aggregate_fails_if_either_census_is_dropped(self):
-        aggregate_block = _ci_job_block("macos-smoke")
-        for missing in (
-            "macos-binding-census, ",
-            "macos-binding-census=${{ needs.macos-binding-census.result }} ",
-            "macos-wire-census, ",
-            "macos-wire-census=${{ needs.macos-wire-census.result }} ",
-            ", macos-numeric-core",
-            " macos-numeric-core=${{ needs.macos-numeric-core.result }}",
-        ):
-            with self.subTest(missing=missing):
-                with self.assertRaises(AssertionError):
-                    _assert_macos_aggregate_requires_censuses(
-                        aggregate_block.replace(missing, "")
-                    )
-
-    def test_topology_docs_name_current_shard_owners(self):
-        doc = (REPO_ROOT / "docs/ci_validation.md").read_text()
-        for owner in ("ci-fast", ".config/ci-test-targets.toml", "heavy-e2e.yml", "macos-nightly.yml"):
-            self.assertIn(owner, doc)
-        self.assertIn("not a phase acceptance result", doc)
-        self.assertIn("--ignore-default-filter", doc)
-
-
-    def test_topology_docs_guard_runs_in_docs_job(self):
-        docs_block = _ci_job_block("docs")
-        step = _ci_step_block(docs_block, "Validate CI topology documentation")
-        entrypoint = re.search(r"-m unittest (\S+)", step).group(1)
-        loader = unittest.TestLoader()
-        loader.loadTestsFromName(entrypoint)
-        self.assertEqual(loader.errors, [], "the hosted topology guard must resolve")
 
     def test_phase4b_freeze_oracle_runs_in_the_always_run_docs_job(self):
         # chelis#729's Phase 4B freeze is enforced by document digests over

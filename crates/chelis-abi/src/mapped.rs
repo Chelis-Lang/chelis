@@ -7,7 +7,9 @@
 //! functions, so the lanes cannot disagree about which ranges are valid or
 //! how a failure reads. Each `Err` is the complete failure message.
 
-use std::ops::Range;
+use alloc::format;
+use alloc::string::{String, ToString};
+use core::ops::Range;
 
 use chelis_vocab::RuntimeDType;
 
@@ -122,7 +124,7 @@ pub fn check_bool_payload(bytes: &[u8]) -> Result<(), String> {
 /// offset `start` ([05-OP-81]). Invalid UTF-8 fails with the mapping offset
 /// of the first byte that does not begin or continue a valid sequence.
 pub fn mapped_text(start: usize, bytes: &[u8]) -> Result<String, String> {
-    match std::str::from_utf8(bytes) {
+    match core::str::from_utf8(bytes) {
         Ok(text) => Ok(text.to_string()),
         Err(error) => Err(format!(
             "mmap_text: invalid UTF-8 at byte {}",
@@ -229,6 +231,9 @@ fn sha256(message: &[u8]) -> [u8; 32] {
 
 #[cfg(test)]
 mod tests {
+    use alloc::format;
+    use alloc::string::ToString;
+    use alloc::vec;
     use chelis_vocab::RuntimeDType;
 
     use super::{check_bool_payload, mapped_range, mapped_tensor_range, mapped_text, sha256_hex};

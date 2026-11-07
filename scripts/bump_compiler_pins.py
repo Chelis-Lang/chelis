@@ -30,7 +30,7 @@ changes, its coupled release inputs must change with it:
    still fails that PR loudly.
 
 4. The committed `Cargo.lock` beside each out-of-workspace compile-fail
-   fixture (`crates/chelis-types/tests/compile_fail/checkpoint_raw_offset/`
+   fixture (`crates/chelis-checker-core/tests/compile_fail/checkpoint_raw_offset/`,
    `crates/chelis-compiler-api/tests/compile_fail/pipeline_artifacts/`, and
    `crates/chelis-unord/tests/compile_fail/order_escape/`).
    Each fixture is its own one-crate workspace that depends on the real
@@ -188,7 +188,7 @@ PINNED_FIXTURE_JSON_FILES: list[Path] = [
 # refuses to update a stale lock. Keep in sync with the `MANIFEST` constant
 # in the matching `scripts/check_*_compile_fail.py`.
 COMPILE_FAIL_FIXTURE_MANIFESTS: list[Path] = [
-    REPO_ROOT / "crates/chelis-types/tests/compile_fail/checkpoint_raw_offset/Cargo.toml",
+    REPO_ROOT / "crates/chelis-checker-core/tests/compile_fail/checkpoint_raw_offset/Cargo.toml",
     REPO_ROOT / "crates/chelis-compiler-api/tests/compile_fail/pipeline_artifacts/Cargo.toml",
     REPO_ROOT / "crates/chelis-unord/tests/compile_fail/order_escape/Cargo.toml",
 ]

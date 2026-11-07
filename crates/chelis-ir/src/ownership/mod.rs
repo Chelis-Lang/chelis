@@ -402,8 +402,8 @@ impl<'a> VerifiedDagView<'a> {
 
     pub fn check_axis_sources(
         self,
-        stage: chelis_types::unsupported::Stage,
-    ) -> Result<(), chelis_types::unsupported::Unsupported> {
+        stage: chelis_checker_core::unsupported::Stage,
+    ) -> Result<(), chelis_checker_core::unsupported::Unsupported> {
         crate::axis_admission::check_axis_sources(self.dag, stage)
     }
 
@@ -412,8 +412,8 @@ impl<'a> VerifiedDagView<'a> {
     /// planning and evaluation do not, for the reason the derivation records.
     pub fn check_rendered_dim_origins(
         self,
-        stage: chelis_types::unsupported::Stage,
-    ) -> Result<(), chelis_types::unsupported::Unsupported> {
+        stage: chelis_checker_core::unsupported::Stage,
+    ) -> Result<(), chelis_checker_core::unsupported::Unsupported> {
         crate::axis_admission::check_rendered_dim_origins(self.dag, stage)
     }
 

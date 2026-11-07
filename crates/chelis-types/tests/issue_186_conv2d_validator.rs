@@ -297,7 +297,7 @@ def f(x: tensor[3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 6, 6,
         rep.errors.iter().any(|e| {
             matches!(
                 e.kind,
-                chelis_types::errors::CheckErrorKind::DimensionMismatch
+                chelis_checker_core::errors::CheckErrorKind::DimensionMismatch
             ) && e.expected.as_deref() == Some("rank 3")
                 && e.got.as_deref() == Some("rank 4")
                 && e.message.contains("conv argument 2 (kernel)")
@@ -386,7 +386,7 @@ def f(x: tensor[1, 3, 8, 8, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8,
 /// uses for inference-layer shape errors.
 #[test]
 fn red_team_205_f6_validator_error_uses_dimension_mismatch_kind() {
-    use chelis_types::errors::CheckErrorKind;
+    use chelis_checker_core::errors::CheckErrorKind;
     let src = r#"
 def f(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 6, 6, f32] =
   conv(&x, &k, [0i64, 0i64], [(0i64, 0i64), (0i64, 0i64)])
@@ -700,7 +700,7 @@ def f(x: tensor[1, 3, 8, 8, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8,
         rep.errors.iter().any(|e| {
             matches!(
                 e.kind,
-                chelis_types::errors::CheckErrorKind::DimensionMismatch
+                chelis_checker_core::errors::CheckErrorKind::DimensionMismatch
             ) && e.expected.as_deref() == Some("rank 3")
                 && e.got.as_deref() == Some("rank 4")
                 && e.message.contains("conv argument 2 (kernel)")
@@ -755,7 +755,7 @@ def f(x: tensor[1, 3, 8, 8, 2, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8,
         .filter(|e| {
             matches!(
                 e.kind,
-                chelis_types::errors::CheckErrorKind::DimensionMismatch
+                chelis_checker_core::errors::CheckErrorKind::DimensionMismatch
             ) && e.expected.as_deref() == Some("rank 5")
                 && e.got.as_deref() == Some("rank 4")
                 && e.message.contains("conv argument 2 (kernel)")
@@ -785,7 +785,7 @@ def f(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, 2, f32]) -> tensor[1, 8,
         .filter(|e| {
             matches!(
                 e.kind,
-                chelis_types::errors::CheckErrorKind::DimensionMismatch
+                chelis_checker_core::errors::CheckErrorKind::DimensionMismatch
             ) && e.expected.as_deref() == Some("rank 4")
                 && e.got.as_deref() == Some("rank 5")
                 && e.message.contains("conv argument 2 (kernel)")
@@ -849,7 +849,7 @@ def f(x: tensor[1, 3, 8, 8, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8,
         rep.errors.iter().any(|e| {
             matches!(
                 e.kind,
-                chelis_types::errors::CheckErrorKind::DimensionMismatch
+                chelis_checker_core::errors::CheckErrorKind::DimensionMismatch
             ) && e.expected.as_deref() == Some("rank 4")
                 && e.got.as_deref() == Some("rank 3")
                 && e.message.contains("conv argument 2 (kernel)")
@@ -1117,7 +1117,7 @@ def f(x: tensor[batch, 3, 8, 8, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16
             |e| e.message.contains("body doesn't match declared signature")
                 || matches!(
                     e.kind,
-                    chelis_types::errors::CheckErrorKind::DimensionMismatch
+                    chelis_checker_core::errors::CheckErrorKind::DimensionMismatch
                 )
         ),
         "expected batch-dim mismatch error, got {:?}",
