@@ -8,9 +8,11 @@ repository.workspace = true
 
 [features]
 # Explicit in-memory observations of production lowering; no default capture.
-lowering-trace = []
+lowering-trace = ["chelis-ir-core/lowering-trace"]
 
 [dependencies]
+chelis-ir-core = { workspace = true, features = ["serde"] }
+critical-section = { version = "1", features = ["std"] }
 chelis-type-core = { workspace = true, default-features = false, features = ["serde"] }
 chelis-dag-core.workspace = true
 chelis-numeric-core = { workspace = true, default-features = false, features = ["alloc", "serde"] }
@@ -21,19 +23,23 @@ chelis-effects.workspace = true
 chelis-checker-core.workspace = true
 chelis-types = { path = "../chelis-types" }
 chelis-syntax-host.workspace = true
+chelis-stack-services.workspace = true
 chelis-vocab.workspace = true
-num-bigint = "0.4"
 serde.workspace = true
-stacker.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+chelis-ir-core = { workspace = true, features = ["serde", "test-instrumentation"] }
 chelis-types = { path = "../chelis-types", features = ["test-instrumentation"] }
 syn.workspace = true
 chelis-surf.workspace = true
 chelis-macros.workspace = true
 bincode = "1"
 serde_json = "1"
+
+[[test]]
+name = "lowering_trace"
+required-features = ["lowering-trace"]
 
 [[test]]
 name = "helper_lowering_trace"

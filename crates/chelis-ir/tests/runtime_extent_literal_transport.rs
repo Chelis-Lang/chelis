@@ -1,7 +1,8 @@
 //! [04] §4.7 / [06] §5.2: literal claims retain independent call witnesses.
 use chelis_dag_core::dag::{Dag, DimInfo, RiscOp, RtAxis, TensorType};
 use chelis_dag_core::optimize::dead_code_eliminate;
-use chelis_ir::eval::{TensorValue, eval_tensor_with};
+use chelis_ir::eval::eval_tensor_with;
+use chelis_ir_core::eval::TensorValue;
 use chelis_numeric_core::dtype_semantics::scalar_from_i64;
 use chelis_numeric_core::prim::Prim;
 
@@ -228,7 +229,7 @@ fn vectorization_shares_witness_and_shifts_its_source_axis() {
         let decl = dag.declare("test");
         let witness = claimed_witness(&mut dag, decl, &[4]);
         dag.add_root(witness);
-        let dag = chelis_ir::vmap::vectorize_axis0(&dag, DimInfo::Lit(2)).unwrap();
+        let dag = chelis_ir_core::vmap::vectorize_axis0(&dag, DimInfo::Lit(2)).unwrap();
         let witness = dag
             .nodes()
             .iter()

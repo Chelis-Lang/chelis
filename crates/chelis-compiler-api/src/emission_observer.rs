@@ -5,8 +5,8 @@
 //! the enclosing compilation result. The callback cannot mutate selected payloads.
 
 use chelis_dag_core::dag::Dag;
-use chelis_ir::host::ConcreteHostProgram;
 use chelis_ir::ownership::{VerifiedDagView, VerifiedHostEmission};
+use chelis_ir_core::host::ConcreteHostProgram;
 use chelis_types::manifest::ManifestedProgram;
 
 /// The selected payload, after ownership verification and before code generation.

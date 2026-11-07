@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use chelis_e2e::data::{default_mnist_dir, load_mnist};
 use chelis_e2e::train::{accuracy, build_mnist_program, init_params, train_step};
-use chelis_ir::grad_then_fuse;
+use chelis_ir_core::pipeline::grad_then_fuse;
 
 struct Config {
     mnist_dir: PathBuf,

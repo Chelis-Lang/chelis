@@ -36,9 +36,9 @@ program can contain both. The host interpreter and generated host code call
 tensor helpers admitted by the selected target (§6).
 
 - **DAG:** `chelis-dag-core` owns tensor nodes, structural checks, graph transforms, and derived-op decomposition.
-  `crates/chelis-ir/src/lower.rs` retains source conversion.
+  `chelis-ir-core` owns source conversion and tensor evaluation.
   Eval and the C, HIP, and Metal emitters check capability separately by dtype, shape, and target.
-- **Host execution:** `crates/chelis-ir/src/host.rs` represents calls, control,
+- **Host execution:** `crates/chelis-ir-core/src/host.rs` represents calls, control,
   scalar and collection values, and tensor helpers. Eval uses
   `chelis-compiler-api/src/runtime/host_ops.rs`; compiled host programs use
   target host emitters and the carried runtime. I/O, decimal rounding, and
@@ -48,6 +48,15 @@ Transform rules include host values, lists, branches, and recursion;
 implementation coverage is in §5. The prover's supported subset is in §12.
 The checker's alias-resolved ADT information and authored signatures feed
 host representation decisions.
+
+`chelis-ir-core` uses unconditional `no_std`, explicit `alloc`, and empty default features.
+The caller supplies allocation, stack services, cancellation access, and operation-local caches.
+The embedding must provide enough heap and stack capacity for the selected program.
+
+`chelis-ir` retains native checked-product authority, wire admission, panic adapters, and runtime seals.
+Portable data cannot create native execution authority.
+The Thumb checks establish target compilation and link closure, not physical device execution.
+This boundary does not make the compiler pipeline portable.
 
 **Lane legend used in the tables below:**
 

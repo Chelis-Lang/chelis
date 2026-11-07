@@ -5,9 +5,9 @@ use chelis_dag_core::dag::{Dag, RiscOp};
 #[cfg(feature = "lowering-trace")]
 use chelis_ir::lower::try_lower_program_to_library;
 #[cfg(feature = "lowering-trace")]
-use chelis_ir::lowering_trace::{
-    BoundaryKind, ContextId, ContextKind, try_lower_program_to_library_with_trace,
-};
+use chelis_ir::lowering_trace::try_lower_program_to_library_with_trace;
+#[cfg(feature = "lowering-trace")]
+use chelis_ir_core::lowering_trace::{BoundaryKind, ContextId, ContextKind};
 #[cfg(feature = "lowering-trace")]
 use chelis_surf::{desugar::desugar_program, parser::parse_str};
 #[cfg(feature = "lowering-trace")]
@@ -40,14 +40,6 @@ fn same_dag(left: &Dag, right: &Dag) {
         bincode::serialize(right).unwrap()
     );
 }
-
-// The feature-enabled support lane below owns the trace oracle. The generic
-// change-owned lane lists directly modified integration targets without
-// features, so retain one active feature-off test instead of compiling an
-// empty integration binary.
-#[cfg(not(feature = "lowering-trace"))]
-#[test]
-fn feature_off_lane_defers_to_the_feature_owned_trace_oracle() {}
 
 #[cfg(feature = "lowering-trace")]
 #[test]
@@ -91,7 +83,8 @@ def derivative(x: tensor[32, f32]) -> tensor[32, f32] = grad(loss)(x)
         &gradient.backward,
         &[gradient.gradients[&gradient.wrt[0]]],
         |name| {
-            (name == "x").then(|| chelis_ir::eval::TensorValue::from_vec(vec![32], vec![1.0; 32]))
+            (name == "x")
+                .then(|| chelis_ir_core::eval::TensorValue::from_vec(vec![32], vec![1.0; 32]))
         },
     )
     .unwrap();
@@ -227,7 +220,7 @@ fn trace_captures_actual_ad_ports_roots_and_ordered_wrt() {
     let expected = application.remap[&grad.gradients[&grad.wrt[0]]];
     assert_eq!(
         application.result,
-        chelis_ir::lowering_trace::Value::Node(expected)
+        chelis_ir_core::lowering_trace::Value::Node(expected)
     );
     assert!(application.after_packing.get(expected).is_some());
 }
@@ -284,10 +277,10 @@ def derivative(x: tensor[3, f32], y: tensor[3, f32]) -> (tensor[3, f32], tensor[
     let application = grad.application.as_ref().unwrap();
     assert_eq!(
         application.result,
-        chelis_ir::lowering_trace::Value::Tuple(
+        chelis_ir_core::lowering_trace::Value::Tuple(
             grad.wrt
                 .iter()
-                .map(|id| chelis_ir::lowering_trace::Value::Node(
+                .map(|id| chelis_ir_core::lowering_trace::Value::Node(
                     application.remap[&grad.gradients[id]]
                 ))
                 .collect()
@@ -347,7 +340,8 @@ def derivative(x: tensor[3, f32]) -> tensor[3, f32] = grad(constant)(x)
         vec![chelis_dag_core::dag::DimInfo::Lit(3)]
     );
     let values = chelis_ir::eval::eval_tensor_roots_exact(&grad.backward, &[raw_zero], |name| {
-        (name == "x").then(|| chelis_ir::eval::TensorValue::from_vec(vec![3], vec![1.0, -2.0, 3.0]))
+        (name == "x")
+            .then(|| chelis_ir_core::eval::TensorValue::from_vec(vec![3], vec![1.0, -2.0, 3.0]))
     })
     .unwrap();
     let zero_value = &values[&raw_zero];
@@ -373,7 +367,7 @@ def derivative(x: tensor[3, f32]) -> tensor[3, f32] = grad(constant)(x)
     );
     same_dag(&trace.normalization.after_drops, library.dag());
     let application = grad.application.as_ref().unwrap();
-    let chelis_ir::lowering_trace::Value::Node(zero) = application.result else {
+    let chelis_ir_core::lowering_trace::Value::Node(zero) = application.result else {
         panic!("single disconnected cotangent remains a tensor result");
     };
     assert_eq!(zero, application.remap[&raw_zero]);
@@ -420,7 +414,7 @@ def derivative(y: tensor[3, f32]) -> tensor[3, f32] = grad(loss)(y)
     assert!(matches!(&application.before_splice.get(actual).unwrap().op,
         RiscOp::Load { name } if name.as_str() == "y"));
     assert_eq!(application.wrt_actuals, vec![actual]);
-    let chelis_ir::lowering_trace::Value::Node(result) = application.result else {
+    let chelis_ir_core::lowering_trace::Value::Node(result) = application.result else {
         panic!("one tensor result");
     };
     let dce = trace.normalization.dce_remap[&result];
@@ -523,7 +517,7 @@ fn completed_application_snapshots_do_not_alias_later_mutations() {
     let application = grad.application.as_mut().unwrap();
     let specialized = bincode::serialize(&application.specialized).unwrap();
     let spliced = bincode::serialize(&application.after_splice).unwrap();
-    let chelis_ir::lowering_trace::Value::Node(result) = application.result else {
+    let chelis_ir_core::lowering_trace::Value::Node(result) = application.result else {
         panic!("single gradient result");
     };
     application

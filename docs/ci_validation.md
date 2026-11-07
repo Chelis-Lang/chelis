@@ -141,14 +141,21 @@ it. `macos-smoke` requires its success alongside the workspace shards, censuses,
 ownership ledger, and numeric-core matrix; failure, cancellation, or skipping
 fails the aggregate.
 
-`macos-core-portability` runs separate type, effect, and checker rows.
+`macos-core-portability` runs separate type, effect, checker, and IR rows.
 Type and effect rows receive 120 minutes each.
-The complete checker row receives 300 minutes.
+The complete checker and IR rows receive 300 minutes each.
 Each row executes its unchanged complete command outside the workspace shard budget.
 `macos-smoke` needs successful execution from every row.
 Artifact uploads retain complete outputs and oracle evidence.
 The bootstrap step selects managed Python for the venv.
 The managed oracle commands then use the same interpreter and installed policy dependencies.
+
+Linux gives the complete IR command an independent `integration-support` matrix row named `ir-core`.
+The row receives 300 minutes and retains `target/agents/ir-core/` evidence.
+Both platform owners execute `scripts/ir_core_oracle.py` without a reduced selection.
+The local phase command is `chelis-gate integration --support-only --support-slice ir-core`.
+The fixture directory and oracle have one Linux owner.
+The behavioral controls have one `script-unit` owner.
 
 The checker oracle retains the pinned baseline in the candidate object store.
 It also verifies a separate scratch checkout against the original revision and source digests.

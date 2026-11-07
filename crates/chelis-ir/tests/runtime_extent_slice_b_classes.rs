@@ -424,7 +424,7 @@ fn a_member_whose_rtdim_slot_is_absent_is_a_typed_receipt_not_a_panic() {
     );
 
     // And the malformed slot is reported where the rule puts it.
-    let receipt = chelis_ir::axis_admission::check_axis_sources(
+    let receipt = chelis_ir_core::axis_admission::check_axis_sources(
         &dag,
         chelis_checker_core::unsupported::Stage::Runtime,
     )
@@ -812,7 +812,7 @@ fn classes_survive_vectorize_axis0_as_the_same_set_in_the_same_order() {
     );
     dag.add_root(joined);
     let before = derive_runtime_dim_classes(&dag);
-    let batched = chelis_ir::vmap::vectorize_axis0(&dag, DimInfo::Lit(3))
+    let batched = chelis_ir_core::vmap::vectorize_axis0(&dag, DimInfo::Lit(3))
         .expect("vectorize a two-Load graph");
     let after = derive_runtime_dim_classes(&batched);
     assert_eq!(
@@ -1092,7 +1092,7 @@ fn every_rebuild_pass_preserves_the_derived_classes() {
         "bind_symbolic_dims preserves node ids, so the members are identical",
     );
 
-    let batched = chelis_ir::vmap::vectorize_axis0(&dag, DimInfo::Lit(3)).expect("vectorize");
+    let batched = chelis_ir_core::vmap::vectorize_axis0(&dag, DimInfo::Lit(3)).expect("vectorize");
     assert_rebuild_preserves_classes("vectorize_axis0", &dag, &batched, "y", "nn", 1, &[]);
 
     // `constant_fold` folds a binary op over two `Const` operands. It mutates
@@ -1272,7 +1272,7 @@ fn every_rebuild_pass_preserves_the_derived_classes() {
         None,
     );
     contraction.add_root(contracted);
-    let specialized = chelis_ir::specialize::specialize_for_blas(&contraction);
+    let specialized = chelis_ir_core::specialize::specialize_for_blas(&contraction);
     assert!(
         specialized
             .nodes()
@@ -2043,7 +2043,7 @@ fn a_resolved_canonical_traps_on_eval_against_its_literal() {
         "the checker resolved the claim, so the canonical value is that literal",
     );
     let err = chelis_ir::eval::eval_tensor_with(&dag, |name| {
-        (name == "x").then(|| chelis_ir::eval::TensorValue::from_vec(vec![4], vec![1.0; 4]))
+        (name == "x").then(|| chelis_ir_core::eval::TensorValue::from_vec(vec![4], vec![1.0; 4]))
     })
     .expect_err("the reshape computes 16 against a claim of 4");
     assert!(

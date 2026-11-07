@@ -22,9 +22,10 @@
 //! and `SummaryRejectionDetail::BlasOutputPrecisionMismatch { observed }`.
 //! No `contains()` on rendered text.
 
-use chelis_ir::host::{
+use chelis_ir::host::try_lower_compiled_program;
+use chelis_ir_core::host::{
     SummaryRejection, SummaryRejectionClass, SummaryRejectionDetail,
-    host_program_summary_rejections, try_lower_compiled_program,
+    host_program_summary_rejections,
 };
 use chelis_numeric_core::prim::Prim;
 use chelis_surf::desugar::desugar_program;

@@ -1,7 +1,8 @@
 //! [05-OP-54]: the integer sequence source is exact, runtime-sized and has
 //! no cotangent; malformed arity/dtype/rank cannot reach execution.
 use chelis_dag_core::dag::{Dag, DimInfo, RiscOp, TensorType};
-use chelis_ir::eval::{TensorValue, eval_tensor_roots_with_strict};
+use chelis_ir::eval::eval_tensor_roots_with_strict;
+use chelis_ir_core::eval::TensorValue;
 use chelis_numeric_core::dtype_semantics::{RawTensor, finalize_tensor};
 use chelis_numeric_core::prim::Prim;
 
@@ -212,7 +213,7 @@ fn anonymous_batch_comparisons_keep_physical_input_authority() {
         None,
     );
     scalar.add_root(comparison);
-    let mut batched = chelis_ir::vmap::vectorize_axis0_with_captures(
+    let mut batched = chelis_ir_core::vmap::vectorize_axis0_with_captures(
         &scalar,
         DimInfo::Named("*".into(), None),
         &["selected".to_string()].into_iter().collect(),
@@ -356,7 +357,7 @@ fn ordered_cotangent_rejects_malformed_groups_and_dtype_rank() {
             .is_none(),
         "higher-order accumulation must not fall back to ordinary Sum"
     );
-    let error = chelis_ir::vmap::vectorize_axis0(&dag, DimInfo::Lit(2)).unwrap_err();
+    let error = chelis_ir_core::vmap::vectorize_axis0(&dag, DimInfo::Lit(2)).unwrap_err();
     assert!(error.contains("nested invocation provenance"), "{error}");
 }
 

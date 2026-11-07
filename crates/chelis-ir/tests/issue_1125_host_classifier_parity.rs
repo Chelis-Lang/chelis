@@ -1,4 +1,4 @@
-use chelis_ir::host::{find_direct_builtin_call, program_has_top_level_value_bindings};
+use chelis_ir_core::host::{find_direct_builtin_call, program_has_top_level_value_bindings};
 use chelis_types::{CheckedProgram, check_ir_program, check_typed_program};
 
 fn checked_ingresses(source: &str) -> (CheckedProgram, CheckedProgram) {
@@ -14,8 +14,8 @@ fn checked_ingresses(source: &str) -> (CheckedProgram, CheckedProgram) {
 #[test]
 fn top_level_value_detection_has_positive_and_negative_carrier_parity() {
     let (typed_value, ir_value) = checked_ingresses("(def {} global_value (lit {} 1))");
-    assert!(program_has_top_level_value_bindings(&typed_value));
-    assert!(program_has_top_level_value_bindings(&ir_value));
+    assert!(program_has_top_level_value_bindings(typed_value.facts()));
+    assert!(program_has_top_level_value_bindings(ir_value.facts()));
 
     let function_only = "
         (defsig {} identity (t-fn {} (t-prim {} i32) (t-prim {} i32)))
@@ -23,8 +23,10 @@ fn top_level_value_detection_has_positive_and_negative_carrier_parity() {
           (fn {} (params {} (x {type: (t-prim {} i32)})) (var {} x)))
     ";
     let (typed_function, ir_function) = checked_ingresses(function_only);
-    assert!(!program_has_top_level_value_bindings(&typed_function));
-    assert!(!program_has_top_level_value_bindings(&ir_function));
+    assert!(!program_has_top_level_value_bindings(
+        typed_function.facts()
+    ));
+    assert!(!program_has_top_level_value_bindings(ir_function.facts()));
 }
 
 #[test]
@@ -35,12 +37,12 @@ fn top_level_value_detection_flattens_modules_on_both_ingresses() {
     ";
     let (typed_value, ir_value) = checked_ingresses(module_with_value);
     assert!(
-        program_has_top_level_value_bindings(&typed_value),
+        program_has_top_level_value_bindings(typed_value.facts()),
         "typed ingress: {:#?}",
         typed_value.exprs()
     );
     assert!(
-        program_has_top_level_value_bindings(&ir_value),
+        program_has_top_level_value_bindings(ir_value.facts()),
         "IR ingress: {:#?}",
         ir_value.exprs()
     );
@@ -56,11 +58,11 @@ fn direct_builtin_detection_has_positive_and_negative_carrier_parity() {
     ";
     let (typed_abs, ir_abs) = checked_ingresses(with_abs);
     assert_eq!(
-        find_direct_builtin_call(&typed_abs, &["abs"]),
+        find_direct_builtin_call(typed_abs.facts(), &["abs"]),
         Some("abs".to_string())
     );
     assert_eq!(
-        find_direct_builtin_call(&ir_abs, &["abs"]),
+        find_direct_builtin_call(ir_abs.facts(), &["abs"]),
         Some("abs".to_string())
     );
 
@@ -70,8 +72,14 @@ fn direct_builtin_detection_has_positive_and_negative_carrier_parity() {
           (fn {} (params {} (x {type: (t-prim {} i32)})) (var {} x)))
     ";
     let (typed_identity, ir_identity) = checked_ingresses(without_abs);
-    assert_eq!(find_direct_builtin_call(&typed_identity, &["abs"]), None);
-    assert_eq!(find_direct_builtin_call(&ir_identity, &["abs"]), None);
+    assert_eq!(
+        find_direct_builtin_call(typed_identity.facts(), &["abs"]),
+        None
+    );
+    assert_eq!(
+        find_direct_builtin_call(ir_identity.facts(), &["abs"]),
+        None
+    );
 }
 
 #[test]
@@ -83,11 +91,11 @@ fn direct_builtin_detection_traverses_decoded_node_metadata() {
     ";
     let (typed, ir) = checked_ingresses(with_metadata_call);
     assert_eq!(
-        find_direct_builtin_call(&typed, &["abs"]),
+        find_direct_builtin_call(typed.facts(), &["abs"]),
         Some("abs".to_string())
     );
     assert_eq!(
-        find_direct_builtin_call(&ir, &["abs"]),
+        find_direct_builtin_call(ir.facts(), &["abs"]),
         Some("abs".to_string())
     );
 }

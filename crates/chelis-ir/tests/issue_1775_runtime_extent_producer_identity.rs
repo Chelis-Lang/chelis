@@ -19,9 +19,10 @@ use chelis_checker_core::unsupported::Stage;
 use chelis_dag_core::dag::{Dag, DimInfo, NodeId, RiscOp, TensorType};
 use chelis_dag_core::grad::grad_dag_checked;
 use chelis_deep::Expr;
-use chelis_ir::axis_admission::check_axis_sources;
-use chelis_ir::eval::{TensorValue, eval_tensor_roots_exact};
-use chelis_ir::lower::lower_subexpr_program;
+use chelis_ir::eval::eval_tensor_roots_exact;
+use chelis_ir_core::axis_admission::check_axis_sources;
+use chelis_ir_core::eval::TensorValue;
+use chelis_ir_core::lower::try_lower_subexpr_program;
 use chelis_numeric_core::dtype_semantics::tensor_from_le_payload;
 use chelis_numeric_core::observation::ElementRef;
 use chelis_numeric_core::prim::Prim;
@@ -67,15 +68,18 @@ fn concat_of_two_rows(first: &str, second: &str) -> Expr {
 }
 
 fn lower_over_symbolic_x(expr: &Expr) -> Dag {
-    let mut scoped = UnordMap::new();
-    scoped.insert(
-        "x".to_string(),
-        TensorType {
-            dims: vec![DimInfo::Named("n".into(), None)],
-            precision: Prim::F32,
-        },
-    );
-    lower_subexpr_program(expr, scoped, UnordMap::new(), UnordMap::new())
+    chelis_ir::resources::with_operation(|operation| {
+        let mut scoped = UnordMap::new();
+        scoped.insert(
+            "x".to_string(),
+            TensorType {
+                dims: vec![DimInfo::Named("n".into(), None)],
+                precision: Prim::F32,
+            },
+        );
+        try_lower_subexpr_program(expr, scoped, UnordMap::new(), UnordMap::new(), operation)
+            .expect("subexpression lowers")
+    })
 }
 
 fn reshape_axis_dims(dag: &Dag) -> Vec<DimInfo> {
@@ -170,23 +174,26 @@ fn shared_producer_concat_keeps_tensor_shape_and_element_bits() {
 /// disposition is evidence of actual Host execution.
 #[test]
 fn two_reshapes_from_distinct_producers_reject_forced_dag() {
-    let error = chelis_ir::lower::try_lower_subexpr_program(
-        &concat_of_two_rows("(var {} m)", "(var {} k)"),
-        UnordMap::from([(
-            "x".to_string(),
-            TensorType {
-                dims: vec![DimInfo::Named("n".into(), None)],
-                precision: Prim::F32,
-            },
-        )]),
-        UnordMap::new(),
-        UnordMap::new(),
-    )
-    .expect_err("distinct producers cannot prove the non-concat axes equal");
-    assert_eq!(
-        error.message,
-        "tensor concat cannot be represented by the static tensor DAG; use its host execution path (chelis#1906)"
-    );
+    chelis_ir::resources::with_operation(|operation| {
+        let error = chelis_ir_core::lower::try_lower_subexpr_program(
+            &concat_of_two_rows("(var {} m)", "(var {} k)"),
+            UnordMap::from([(
+                "x".to_string(),
+                TensorType {
+                    dims: vec![DimInfo::Named("n".into(), None)],
+                    precision: Prim::F32,
+                },
+            )]),
+            UnordMap::new(),
+            UnordMap::new(),
+            operation,
+        )
+        .expect_err("distinct producers cannot prove the non-concat axes equal");
+        assert_eq!(
+            error.message,
+            "tensor concat cannot be represented by the static tensor DAG; use its host execution path (chelis#1906)"
+        );
+    })
 }
 
 /// REGRESSION TEST (measured red before the repair: the summed stack does not

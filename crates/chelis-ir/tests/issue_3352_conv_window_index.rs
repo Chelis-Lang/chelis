@@ -12,7 +12,8 @@ use chelis_unord::UnordMap;
 use chelis_dag_core::dag::{Dag, DimInfo, NodeId, Owner, RiscOp, TensorType};
 use chelis_dag_core::tier2::lower_conv;
 use chelis_dag_core::verify;
-use chelis_ir::eval::{TensorValue, eval_tensor};
+use chelis_ir::eval::eval_tensor;
+use chelis_ir_core::eval::TensorValue;
 use chelis_numeric_core::prim::Prim;
 
 struct Case {

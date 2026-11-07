@@ -2,9 +2,9 @@
 
 use chelis_dag_core::dag::{DimExpr, NodeId};
 use chelis_ir::ownership::{
-    CStorageLane, StoragePlacement, StorageSlotPlan, VerifiedDagView, VerifiedStorageLayout,
-    VerifiedStoragePlan,
+    CStorageLane, VerifiedDagView, VerifiedStorageLayout, VerifiedStoragePlan,
 };
+use chelis_ir_core::ownership::storage::{StoragePlacement, StorageSlotPlan};
 use chelis_numeric_core::prim::Prim;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

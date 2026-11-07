@@ -10,7 +10,8 @@ use support::codegen;
 /// Use scratch-free operators: this plan bounds DAG slots, not kernel scratch.
 #[test]
 fn physical_slot_bound_covers_executed_allocation_lifetimes() {
-    use chelis_ir::ownership::{LiveByteBound, plan_c_storage};
+    use chelis_ir::ownership::plan_c_storage;
+    use chelis_ir_core::ownership::LiveByteBound;
 
     for (reduce, drop_first, expected_bound, expected_peak, expected_result) in [
         (false, false, 8, 8, "1"),

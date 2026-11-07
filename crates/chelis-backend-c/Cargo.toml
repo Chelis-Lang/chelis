@@ -8,6 +8,8 @@ repository.workspace = true
 
 [dependencies]
 chelis-dag-core.workspace = true
+chelis-ir-core.workspace = true
+chelis-type-core.workspace = true
 chelis-numeric-core = { workspace = true, default-features = false, features = ["alloc", "serde"] }
 chelis-abi.workspace = true
 chelis-crmath = { workspace = true, features = ["std"] }

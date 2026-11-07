@@ -1,6 +1,6 @@
 //! Every producer-supplied string flowing into a HIP-backend `printf`-
 //! style format string is routed through
-//! `chelis_ir::span_sanitize::sanitize_for_format_string`.
+//! `chelis_ir_core::span_sanitize::sanitize_for_format_string`.
 //!
 //! HIP emits TWO entrypoints:
 //! - host entrypoint (`{func_name}` taking `chelis_tensor**`)

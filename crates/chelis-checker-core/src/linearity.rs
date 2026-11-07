@@ -5805,11 +5805,9 @@ fn expr_scope_end(expr: &Expr) -> usize {
     expr.span().offset + expr.span().len
 }
 
-#[cfg(any(test, feature = "test-instrumentation"))]
 pub fn free_runtime_variables_with_work(expr: &Expr, work: &FreeVariableWalkWork) -> Vec<String> {
     free_vars(expr, &[], work)
 }
-#[cfg(any(test, feature = "test-instrumentation"))]
 pub fn rename_free_runtime_variables_with_work(
     expr: &Expr,
     renames: &BTreeMap<String, String>,

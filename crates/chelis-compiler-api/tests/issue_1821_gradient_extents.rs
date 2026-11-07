@@ -379,67 +379,73 @@ fn fixed_control_gradients_keep_the_same_authored_activation_claim() {
 
 #[test]
 fn subexpression_context_does_not_replace_an_authored_binder_with_inferred_spelling() {
-    use chelis_dag_core::dag::{DimInfo, TensorType};
-    use chelis_ir::eval::{TensorValue, eval_tensor_roots_with_strict};
-    use chelis_ir::lower::SubexprLoweringContext;
-    use chelis_numeric_core::prim::Prim;
-    use chelis_unord::UnordMap;
-    let parse = |source: &str| {
-        chelis_deep::parser::parse_str(source, &chelis_syntax_host::NativeStack)
-            .unwrap()
-            .remove(0)
-    };
-    let signature = |first, second| {
-        parse(&format!(
-            "(t-fn {{}} (t-tensor {{}} (d-var {{}} {first}) (t-prim {{}} f32)) (t-tensor {{}} (d-var {{}} {second}) (t-prim {{}} f32)) (t-tensor {{}} (d-var {{}} {first}) (t-prim {{}} f32)))"
-        ))
-    };
-    let definition = parse(
-        "(fn {} (params {} (x {type: (t-tensor {} (d-var {} n) (t-prim {} f32))}) (y {type: (t-tensor {} (d-var {} m) (t-prim {} f32))})) (app {} (var {} insert) (lit {type: (t-prim {} f32)} 7.0) (lit {type: (t-prim {} i32)} 0) (app {} (var {} shape) (var {} y) (lit {type: (t-prim {} i32)} 0))))",
-    );
-    let expression = parse("(app {} (var {} f) (var {} left) (var {} right))");
-    let context = SubexprLoweringContext::new(
-        UnordMap::from([("f".into(), signature("d43", "d44"))]),
-        UnordMap::from([("f".into(), definition)]),
-        UnordMap::from([("f".into(), signature("n", "m"))]),
-    );
-    let shape_type = |name: &str| TensorType {
-        dims: vec![DimInfo::Named(name.into(), None)],
-        precision: Prim::F32,
-    };
-    let dag = chelis_ir::lower::try_lower_subexpr_program_with_context(
-        &expression,
-        UnordMap::from([
-            ("left".into(), shape_type("left_length")),
-            ("right".into(), shape_type("right_length")),
-        ]),
-        &context,
-    )
-    .unwrap();
-    for width in [2, 3] {
-        let result = eval_tensor_roots_with_strict(&dag, dag.roots(), |name| {
-            Some(TensorValue::from_vec(
-                vec![if name == "left" { 2 } else { width }],
-                vec![1.0; if name == "left" { 2 } else { width }],
+    chelis_ir::resources::with_operation(|operation| {
+        use chelis_dag_core::dag::{DimInfo, TensorType};
+        use chelis_ir::eval::eval_tensor_roots_with_strict;
+        use chelis_ir_core::eval::TensorValue;
+        use chelis_ir_core::lower::SubexprLoweringContext;
+        use chelis_numeric_core::prim::Prim;
+        use chelis_unord::UnordMap;
+        let parse = |source: &str| {
+            chelis_deep::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+                .unwrap()
+                .remove(0)
+        };
+        let signature = |first, second| {
+            parse(&format!(
+                "(t-fn {{}} (t-tensor {{}} (d-var {{}} {first}) (t-prim {{}} f32)) (t-tensor {{}} (d-var {{}} {second}) (t-prim {{}} f32)) (t-tensor {{}} (d-var {{}} {first}) (t-prim {{}} f32)))"
             ))
-        });
-        if width == 3 {
-            let error = result.unwrap_err();
-            assert!(
-                error.contains("extent `n`: x axis 0 = 2, y axis 0 = 3"),
-                "{error}"
-            );
-            assert!(
-                error
-                    .lines()
-                    .any(|line| line == "numeric trap: domain in load at i64"),
-                "{error}"
-            );
-        } else {
-            let values = result.unwrap();
-            assert_eq!(values[&dag.roots()[0]].to_f64_lossy_vec(), [7.0, 7.0]);
+        };
+        let definition = parse(
+            "(fn {} (params {} (x {type: (t-tensor {} (d-var {} n) (t-prim {} f32))}) (y {type: (t-tensor {} (d-var {} m) (t-prim {} f32))})) (app {} (var {} insert) (lit {type: (t-prim {} f32)} 7.0) (lit {type: (t-prim {} i32)} 0) (app {} (var {} shape) (var {} y) (lit {type: (t-prim {} i32)} 0))))",
+        );
+        let expression = parse("(app {} (var {} f) (var {} left) (var {} right))");
+        let context = SubexprLoweringContext::new(
+            UnordMap::from([("f".into(), signature("d43", "d44"))]),
+            UnordMap::from([("f".into(), definition)]),
+            UnordMap::from([("f".into(), signature("n", "m"))]),
+            operation,
+        )
+        .expect("subexpression context");
+        let shape_type = |name: &str| TensorType {
+            dims: vec![DimInfo::Named(name.into(), None)],
+            precision: Prim::F32,
+        };
+        let dag = chelis_ir_core::lower::try_lower_subexpr_program_with_context(
+            &expression,
+            UnordMap::from([
+                ("left".into(), shape_type("left_length")),
+                ("right".into(), shape_type("right_length")),
+            ]),
+            &context,
+            operation,
+        )
+        .unwrap();
+        for width in [2, 3] {
+            let result = eval_tensor_roots_with_strict(&dag, dag.roots(), |name| {
+                Some(TensorValue::from_vec(
+                    vec![if name == "left" { 2 } else { width }],
+                    vec![1.0; if name == "left" { 2 } else { width }],
+                ))
+            });
+            if width == 3 {
+                let error = result.unwrap_err();
+                assert!(
+                    error.contains("extent `n`: x axis 0 = 2, y axis 0 = 3"),
+                    "{error}"
+                );
+                assert!(
+                    error
+                        .lines()
+                        .any(|line| line == "numeric trap: domain in load at i64"),
+                    "{error}"
+                );
+            } else {
+                let values = result.unwrap();
+                assert_eq!(values[&dag.roots()[0]].to_f64_lossy_vec(), [7.0, 7.0]);
+            }
         }
-    }
+    })
 }
 
 #[test]

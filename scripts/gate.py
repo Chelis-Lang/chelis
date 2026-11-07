@@ -564,6 +564,10 @@ CHECKER_CORE_ORACLE: list[str] = [
     "uv", "run", "--managed-python", "--python", "3.11", "--no-project", "python",
     "scripts/checker_core_oracle.py",
 ]
+IR_CORE_ORACLE: list[str] = [
+    "uv", "run", "--managed-python", "--python", "3.11", "--no-project", "python",
+    "scripts/ir_core_oracle.py",
+]
 # Generated chelis-std files stay out of the index: the bundle crate's build
 # script packs the runtime, so a tracked dist pair or a lock recording the
 # bundled runtime would go stale with the first std edit. Pure git and Python.
@@ -724,6 +728,7 @@ STAGES: dict[str, list[list[str]]] = {
         DAG_CORE_ORACLE,
         EFFECT_ANALYSIS_CORE_ORACLE,
         CHECKER_CORE_ORACLE,
+        IR_CORE_ORACLE,
         OWNERSHIP_LEDGER_CLI_TESTS,
     ],
     "runtime-representation": [
@@ -756,6 +761,7 @@ INTEGRATION_SUPPORT_SLICES: dict[str, tuple[list[str], ...]] = {
     "dag-core": (DAG_CORE_ORACLE,),
     "effect-analysis-core": (EFFECT_ANALYSIS_CORE_ORACLE,),
     "checker-core": (CHECKER_CORE_ORACLE,),
+    "ir-core": (IR_CORE_ORACLE,),
 }
 
 
@@ -835,6 +841,7 @@ LOCAL_STATIC_COMMANDS: list[list[str]] = [
     DAG_CORE_ORACLE,
     EFFECT_ANALYSIS_CORE_ORACLE,
     CHECKER_CORE_ORACLE,
+    IR_CORE_ORACLE,
     OWNERSHIP_LEDGER_CLI_TESTS,
 ]
 

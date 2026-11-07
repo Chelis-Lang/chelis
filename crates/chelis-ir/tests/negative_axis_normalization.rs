@@ -33,7 +33,8 @@ use chelis_unord::UnordMap;
 use chelis_checker_core::errors::{CheckError, CheckErrorKind};
 use chelis_dag_core::dag::{DimInfo, TensorType};
 use chelis_dag_core::verify;
-use chelis_ir::lower::{lower_program, try_lower_subexpr_program};
+use chelis_ir::lower::lower_program;
+use chelis_ir_core::lower::try_lower_subexpr_program;
 use chelis_numeric_core::prim::Prim;
 use chelis_types::check_ir_program;
 
@@ -246,40 +247,44 @@ def run(x) = sum(x, 5)
 /// own (now also present) axis validation.
 #[test]
 fn lowering_rejects_out_of_range_axis_without_panicking() {
-    // `(app softmax (var x) (lit 9))` with `x` scoped as a rank-2
-    // tensor: axis 9 is out of `0..2`. `try_lower_subexpr_program`
-    // lowers a bare expr with `scoped_tensor_types` and no checker in
-    // the loop, so this exercises `normalize_axis` at the lowering
-    // boundary directly.
-    let deep_src = r#"
+    chelis_ir::resources::with_operation(|operation| {
+        // `(app softmax (var x) (lit 9))` with `x` scoped as a rank-2
+        // tensor: axis 9 is out of `0..2`. `try_lower_subexpr_program`
+        // lowers a bare expr with `scoped_tensor_types` and no checker in
+        // the loop, so this exercises `normalize_axis` at the lowering
+        // boundary directly.
+        let deep_src = r#"
 (app {type: (t-tensor {} (d-lit {} 2) (d-lit {} 3) (t-prim {} f32))}
   (var {} softmax)
   (var {type: (t-tensor {} (d-lit {} 2) (d-lit {} 3) (t-prim {} f32))} x)
   (lit {type: (t-prim {} i32)} 9))
 "#;
-    let expr = chelis_deep::parser::parse_str(deep_src, &chelis_syntax_host::NativeStack)
-        .expect("parse failed")
-        .into_iter()
-        .next()
-        .expect("one expr");
-    let scoped = UnordMap::from([(
-        "x".to_string(),
-        TensorType {
-            dims: vec![DimInfo::Lit(2), DimInfo::Lit(3)],
-            precision: Prim::F32,
-        },
-    )]);
-    // `try_lower_subexpr_program` returns a `LowerDiagnostic` instead
-    // of panicking when lowering rejects a form. An out-of-range
-    // softmax axis must take that path -- it must not unwind through
-    // `require_dim`.
-    let result = try_lower_subexpr_program(&expr, scoped, UnordMap::new(), UnordMap::new());
-    let diagnostic = result.expect_err("out-of-range softmax axis must be a lowering diagnostic");
-    let rendered = diagnostic.to_string();
-    assert!(
-        rendered.contains("softmax") && rendered.contains("out of range"),
-        "expected a clean out-of-range softmax axis diagnostic, got `{rendered}`"
-    );
+        let expr = chelis_deep::parser::parse_str(deep_src, &chelis_syntax_host::NativeStack)
+            .expect("parse failed")
+            .into_iter()
+            .next()
+            .expect("one expr");
+        let scoped = UnordMap::from([(
+            "x".to_string(),
+            TensorType {
+                dims: vec![DimInfo::Lit(2), DimInfo::Lit(3)],
+                precision: Prim::F32,
+            },
+        )]);
+        // `try_lower_subexpr_program` returns a `LowerDiagnostic` instead
+        // of panicking when lowering rejects a form. An out-of-range
+        // softmax axis must take that path -- it must not unwind through
+        // `require_dim`.
+        let result =
+            try_lower_subexpr_program(&expr, scoped, UnordMap::new(), UnordMap::new(), operation);
+        let diagnostic =
+            result.expect_err("out-of-range softmax axis must be a lowering diagnostic");
+        let rendered = diagnostic.to_string();
+        assert!(
+            rendered.contains("softmax") && rendered.contains("out of range"),
+            "expected a clean out-of-range softmax axis diagnostic, got `{rendered}`"
+        );
+    })
 }
 
 // ---------------------------------------------------------------------

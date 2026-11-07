@@ -19,17 +19,17 @@
 //! boundary, since each invocation needs its own extent witness.
 
 use super::*;
-use chelis_ir::host::{
+use chelis_ir_core::host::{
     EntryPattern, HostAdtLayout, HostFunctionOrigin, HostTensorInput, SignatureEntryPlan,
 };
 
-pub(super) use chelis_ir::host::FixedEntryObservation as EntryObservation;
+pub(super) use chelis_ir_core::host::FixedEntryObservation as EntryObservation;
 
 /// Direct tensor obligations use the authored contract: a specialized call's
 /// ABI can have wildcard axes even when its callee binds them. The shared IR
 /// roster also owns staged witnesses, including unused tuple fields.
 pub(super) fn entry_observations(function: &HostFunction) -> Vec<EntryObservation> {
-    chelis_ir::host::fixed_entry_observations(function.params.iter().enumerate().map(
+    chelis_ir_core::host::fixed_entry_observations(function.params.iter().enumerate().map(
         |(index, param)| {
             let declared = function
                 .entry_contract
@@ -650,7 +650,7 @@ impl<'a> EntryWalkers<'a> {
                 work.owners.push(param);
             }
             HostAbiType::Tuple(items) if self.has_work(ty, walk) => {
-                let label = chelis_ir::span_sanitize::sanitize_for_format_string(&path);
+                let label = chelis_ir_core::span_sanitize::sanitize_for_format_string(&path);
                 work.params[param].fetch.push(format!(
                     "if ({value} == NULL) {{ fprintf(stderr, \"input `{label}` is NULL\\n\"); abort(); }}"
                 ));
@@ -1099,12 +1099,12 @@ static void __chelis_entry_claim_walk(const __chelis_host_result_claim *frame, i
 pub(super) fn delta_list_metadata(
     param: &HostParam,
     value: &str,
-    proof: &chelis_ir::host::AccumulatorDeltaProof,
+    proof: &chelis_ir_core::host::AccumulatorDeltaProof,
     old: Option<&str>,
 ) -> String {
     if matches!(
         proof.recipe(),
-        chelis_ir::host::AccumulatorDeltaRecipe::Inherited
+        chelis_ir_core::host::AccumulatorDeltaRecipe::Inherited
     ) {
         return String::new();
     }
@@ -1114,7 +1114,7 @@ pub(super) fn delta_list_metadata(
     let HostAbiType::Tensor(tensor) = inner.as_ref() else {
         unreachable!("eligible direct tensor List");
     };
-    let chelis_ir::host::AccumulatorDeltaRecipe::ListInterval { before, .. } = proof.recipe()
+    let chelis_ir_core::host::AccumulatorDeltaRecipe::ListInterval { before, .. } = proof.recipe()
     else {
         unreachable!("List interval");
     };
@@ -1151,7 +1151,7 @@ pub(super) fn delta_list_metadata(
 }
 
 pub(super) struct DeltaWalkContext<'a> {
-    pub proof: &'a chelis_ir::host::AccumulatorDeltaProof,
+    pub proof: &'a chelis_ir_core::host::AccumulatorDeltaProof,
     pub checked: &'a str,
     pub prior_states: Option<(&'a str, usize)>,
     pub old_list_len: Option<&'a str>,
@@ -1175,7 +1175,7 @@ pub(super) fn delta_entry_step(
 }
 
 pub(super) fn nested_entry_step(
-    pattern: &chelis_ir::claim_pattern::ClaimPattern,
+    pattern: &chelis_ir_core::claim_pattern::ClaimPattern,
     param: &HostParam,
     value: &str,
     index: usize,
@@ -1185,7 +1185,7 @@ pub(super) fn nested_entry_step(
 }
 
 fn nested_entry_step_impl(
-    pattern: &chelis_ir::claim_pattern::ClaimPattern,
+    pattern: &chelis_ir_core::claim_pattern::ClaimPattern,
     param: &HostParam,
     value: &str,
     index: usize,
@@ -1268,8 +1268,8 @@ fn nested_entry_step_impl(
 fn emit_delta_recipe(
     lines: &mut Vec<String>,
     delta: &DeltaWalkContext<'_>,
-    node: chelis_ir::claim_pattern::ClaimNodeId,
-    recipe: &chelis_ir::host::AccumulatorDeltaRecipe,
+    node: chelis_ir_core::claim_pattern::ClaimNodeId,
+    recipe: &chelis_ir_core::host::AccumulatorDeltaRecipe,
     value: &str,
     path: &str,
     frame: &str,
@@ -1278,8 +1278,8 @@ fn emit_delta_recipe(
     count: usize,
     serial: &mut usize,
 ) -> Result<(), Unsupported> {
-    use chelis_ir::claim_pattern::ClaimNode;
-    use chelis_ir::host::AccumulatorDeltaRecipe as Recipe;
+    use chelis_ir_core::claim_pattern::ClaimNode;
+    use chelis_ir_core::host::AccumulatorDeltaRecipe as Recipe;
     let id = *serial;
     *serial += 1;
     let replay = |lines: &mut Vec<String>, path: &str, suffix: bool| {
@@ -1409,7 +1409,7 @@ pub(super) struct TensorLabel {
 impl TensorLabel {
     /// A tensor named at compile time, `input `x``.
     pub fn fixed(name: &str) -> Self {
-        let name = chelis_ir::span_sanitize::sanitize_for_format_string(name);
+        let name = chelis_ir_core::span_sanitize::sanitize_for_format_string(name);
         Self {
             format: format!("input `{name}`"),
             args: String::new(),
@@ -1566,8 +1566,8 @@ pub(super) fn literal_extent_check(
 #[cfg(test)]
 mod entry_contract_tests {
     use super::*;
-    use chelis_ir::host::{EntryContract, HostFunctionOrigin, HostParam};
-    use chelis_ir::host_type_state::HostTypeTerm;
+    use chelis_ir_core::host::{EntryContract, HostFunctionOrigin, HostParam};
+    use chelis_ir_core::host_type_state::HostTypeTerm;
     use chelis_numeric_core::prim::Prim;
 
     fn function() -> HostFunction {

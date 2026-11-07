@@ -1,7 +1,7 @@
 //! Sealed ownership boundary for compiled-value-ownership Phase 2.
 //!
 //! Ownership lowering consumes the exact post-selection emission payload.
-//! [`verify_ownership`] is the only transition to a backend-admissible value;
+//! [`verify_ownership`] is the only transition to a backend-admissible value.
 //! neither payload specialization exposes an owned or mutable raw payload.
 //!
 //! `HostSiteId` is opaque and structurally allocated. It is not a public
@@ -35,7 +35,7 @@
 //! Neither concrete emission payload exposes a public constructor:
 //!
 //! ```compile_fail
-//! # use chelis_ir::host::ConcreteHostProgram;
+//! # use chelis_ir_core::host::ConcreteHostProgram;
 //! # use chelis_types::manifest::RootManifest;
 //! use chelis_ir::ownership::HostEmissionPayload;
 //! fn forge(program: ConcreteHostProgram, manifest: RootManifest) -> HostEmissionPayload {
@@ -52,7 +52,7 @@
 //! survive the boundary:
 //!
 //! ```compile_fail
-//! # use chelis_ir::host::ConcreteHostProgram;
+//! # use chelis_ir_core::host::ConcreteHostProgram;
 //! # use chelis_types::manifest::ManifestedProgram;
 //! use chelis_ir::ownership::lower_host_ownership;
 //! fn mutate_after_lowering(manifested: &ManifestedProgram, mut host: ConcreteHostProgram) {
@@ -77,7 +77,7 @@
 //! fn forge() -> HostSiteId { HostSiteId::from_index(7) }
 //! ```
 //!
-//! The live-set result is produced only by ownership verification; callers
+//! The live-set result is produced only by ownership verification. callers
 //! cannot forge a smaller bound:
 //!
 //! ```compile_fail
@@ -98,44 +98,32 @@
 //! }
 //! ```
 
-use std::collections::BTreeMap;
+use chelis_ir_core::ownership::dag::{DagAnalysisView, DagDirective};
+use chelis_ir_core::ownership::{HostSiteId, HostSiteKind, LiveByteBound, OwnershipError};
+use chelis_ir_core::ownership::{ir, last_use, locations, lower, render, verify};
+use std::cell::Cell;
+use std::ops::Deref;
 
 use chelis_types::manifest::{ManifestedProgram, RootManifest};
 
-use crate::host::{
+use chelis_dag_core::dag::{Dag, DagNode, NodeId, SymbolicDimBinding};
+use chelis_ir_core::host::{
     ConcreteHostBinding, ConcreteHostExpr, ConcreteHostFunction, ConcreteHostParam,
     ConcreteHostProgram, HostFunctionOrigin, HostFunctionSpecialization, HostTensorHelper,
     HostTensorInput, HostTensorSpecialization, SummaryRejection,
 };
-use chelis_dag_core::dag::{Dag, DagNode, NodeId, RiscOp, SymbolicDimBinding};
 
-#[expect(
-    dead_code,
-    reason = "the closed heap census includes planner-only TensorStorage"
-)]
-mod classify;
-mod error;
-mod ir;
-mod last_use;
-mod locations;
-mod lower;
-mod render;
 mod storage;
-mod verify;
 
 use chelis_dag_core::axis_sources::{LocalGuardClaim, LocalGuardSite};
-pub use error::OwnershipError;
-pub use ir::{HostSiteId, HostSiteKind};
-pub use locations::counting_site_lookup_entries;
 pub use storage::{
-    CStorageLane, ExactStorageCapacity, HipStorageLane, ReusableOwnedStorage, StorageLane,
-    StoragePlacement, StorageSlotId, StorageSlotPlan, VerifiedStorageLayout, VerifiedStoragePlan,
-    plan_c_storage, plan_c_storage_layout, plan_hip_storage,
+    CStorageLane, HipStorageLane, ReusableOwnedStorage, StorageLane, VerifiedStorageLayout,
+    VerifiedStoragePlan, plan_c_storage, plan_c_storage_layout, plan_hip_storage,
 };
 
-/// Immutable cursor over the exact verified DAG payload. The raw [`Dag`]
-/// remains private so a backend can inspect only the payload whose ownership
-/// plan was verified, without recovering an unchecked sibling graph.
+/// Immutable cursor over the exact verified DAG payload.
+/// The raw [`Dag`] remains private so a backend can inspect only the payload whose ownership plan was verified.
+/// Without recovering an unchecked sibling graph.
 #[derive(Clone, Copy)]
 pub struct VerifiedDagView<'a> {
     dag: &'a Dag,
@@ -143,6 +131,9 @@ pub struct VerifiedDagView<'a> {
 }
 
 impl<'a> VerifiedDagView<'a> {
+    pub(crate) fn analysis(self) -> DagAnalysisView<'a> {
+        DagAnalysisView::new(self.dag, self.plan.capacity_scope)
+    }
     /// The declaration `decl` names in the verified graph.
     pub fn declaration(
         self,
@@ -175,10 +166,9 @@ impl<'a> VerifiedDagView<'a> {
         self.dag.is_root(id)
     }
 
-    /// The trap seed and activation-gate queries over this graph
-    /// ([`chelis_dag_core::dag::TrapSeeds`]: whether a node checks nothing where its
-    /// activation is false, the one gate declaration, and the literal result
-    /// claims a witness checks). An emitter takes one per graph.
+    /// The trap seed and activation-gate queries over this graph ([`chelis_dag_core::dag::TrapSeeds`].
+    /// Whether a node checks nothing where its activation is false, the one gate declaration, and the literal result claims a witness checks).
+    /// An emitter takes one per graph.
     pub fn trap_seeds(self) -> chelis_dag_core::dag::TrapSeeds<'a> {
         self.dag.trap_seeds()
     }
@@ -187,61 +177,50 @@ impl<'a> VerifiedDagView<'a> {
         self.dag.topological_order()
     }
 
-    /// Every name this graph renders as a C identifier, paired with the
-    /// origin that produces its value (chelis#665, C4.4). A declaration
-    /// consumer reads this instead of searching for a `Load` whose type
-    /// carries a matching string.
+    /// Every name this graph renders as a C identifier, paired with the origin that produces its value (chelis#665, C4.4).
+    /// A declaration consumer reads this instead of searching for a `Load` whose type carries a matching string.
     pub fn dim_extent_origins(self) -> Vec<(String, chelis_dag_core::axis_sources::ExtentOrigin)> {
         chelis_dag_core::axis_sources::dim_extent_origins(self.dag)
     }
 
-    /// The names this graph renders that resolve to no origin. A lane turns
-    /// each into a typed receipt; the legacy walk panicked instead.
+    /// The names this graph renders that resolve to no origin.
+    /// A lane turns each into a typed receipt.
+    /// the legacy walk panicked instead.
     pub fn unresolved_dim_names(self) -> Vec<String> {
         chelis_dag_core::axis_sources::unresolved_dim_names(self.dag)
     }
 
-    /// Every name this graph can render as an identifier, whether or not the
-    /// entry supplies its extent. An emitter checks its own declarations
-    /// against this set.
+    /// Every name this graph can render as an identifier, whether or not the entry supplies its extent.
+    /// An emitter checks its own declarations against this set.
     pub fn rendered_dim_names(self) -> Vec<String> {
         chelis_dag_core::axis_sources::rendered_dim_names(self.dag)
     }
 
-    /// The INTERFACE bindings: the declaration and entry-guard set, derived
-    /// from the class witnesses rather than recovered by walking for a `Load`
-    /// that carries a matching string (chelis#1277).
+    /// The INTERFACE bindings: the declaration and entry-guard set.
+    /// Derived from the class witnesses rather than recovered by walking for a `Load` that carries a matching string (chelis#1277).
     pub fn symbolic_bindings_interface(self) -> Vec<SymbolicDimBinding> {
         chelis_dag_core::dag::symbolic_bindings_interface(self.dag)
     }
 
-    /// The runtime-dimension equality classes whose guards `spec/04` section
-    /// 4.7 places at function ENTRY, because every operand they compare is an
-    /// interface value.
+    /// The runtime-dimension equality classes whose guards `spec/04` section 4.7 places at function ENTRY.
+    /// Because every operand they compare is an interface value.
+    /// The view answers the placement question rather than handing out the graph.
+    /// Placement has to resolve a slot's producer to decide whether an operand is an input tensor's.
+    /// Axis, a scalar parameter, or a computed value.
     ///
-    /// The view answers the placement question rather than handing out the
-    /// graph. Placement has to resolve a slot's producer to decide whether an
-    /// operand is an input tensor's axis, a scalar parameter, or a computed
-    /// value, and an emitter doing that itself would be reaching behind this
-    /// façade to re-derive what the view already knows.
-    /// C1.3's local guard sites: `(node id, axis)` paired with the claim each
-    /// site guards against.
+    /// And an emitter doing that itself would reach behind this façade to re-derive what the view already knows.
+    /// C1.3's local guard sites: `(node id, axis)` paired with the claim each site guards against.
+    /// A `Local` class's guard "takes the source position of the operation that introduces the guarded extent".
+    /// (`spec/04-type-system.md` section 4.7), so unlike the entry classes these are keyed by node.
+    /// Only `InputAxis` members are sites: an `ExternalAxis` member is the prologue's canonical declaration.
     ///
-    /// A `Local` class's guard "takes the source position of the operation
-    /// that introduces the guarded extent" (`spec/04-type-system.md` section
-    /// 4.7), so unlike the entry classes these are keyed by node. Only
-    /// `InputAxis` members are sites: an `ExternalAxis` member is the
-    /// prologue's canonical declaration, and an `OpComputed` member's guard
-    /// needs the derivation narrowed first, because the claim over a
-    /// statically determined operation output (a matmul's `Literal(64)` axis)
-    /// would guard a value against itself.
+    /// And an `OpComputed` member's guard needs the derivation narrowed first.
+    /// Because the claim over a statically determined operation output (a matmul's `Literal(64)` axis) would guard a value against itself.
     /// The `Load` whose axis a class member's operand names, and that axis.
+    /// The view is where the C and HIP lanes ask every class question under chelis#1538's discipline.
+    /// So this one is asked here too rather than by reaching around the facade for a raw `Dag`.
     ///
-    /// The view is where the C and HIP lanes ask every class question under
-    /// chelis#1538's discipline, so this one is asked here too rather than by
-    /// reaching around the facade for a raw `Dag`; see
-    /// [`chelis_dag_core::axis_sources::member_load_axis`] for what it answers and why
-    /// three consumers share it.
+    /// see [`(node id, axis)`0] for what it answers and why three consumers share it.
     pub fn member_load_axis(
         self,
         member: &chelis_dag_core::axis_sources::ClassMember,
@@ -249,21 +228,17 @@ impl<'a> VerifiedDagView<'a> {
         chelis_dag_core::axis_sources::member_load_axis(self.dag, member)
     }
 
-    /// Closed primitive form from the verified IR rank relation. Backends and
-    /// local extent diagnostics consume the same derivation.
+    /// Closed primitive form from the verified IR rank relation.
+    /// Backends and local extent diagnostics consume the same derivation.
     pub fn expansion_kind(self, id: NodeId) -> chelis_dag_core::axis_sources::ExpansionKind {
         chelis_dag_core::axis_sources::expansion_kind(self.dag, id)
             .expect("verified expansion node has a rank-preserving or inserting form")
     }
 
     /// C1.3's local guard sites for this verified payload.
-    ///
-    /// The derivation is [`chelis_dag_core::axis_sources::local_dim_guard_sites`], which
-    /// the DAG evaluator also reads, so the two lanes cannot place a local
-    /// guard at two different sites or compare it against two different
-    /// values. The view asks it here rather than handing a backend a raw
-    /// [`Dag`], under the same chelis#1538 discipline as
-    /// [`Self::member_load_axis`].
+    /// The derivation is [`chelis_dag_core::axis_sources::local_dim_guard_sites`], which the DAG evaluator also reads.
+    /// So the two lanes cannot place a local guard at two different sites or compare it against two different values.
+    /// The view asks it here rather than handing a backend a raw [`Dag`], under the same chelis#1538 discipline as [`Self::member_load_axis`].
     pub fn local_dim_guard_sites(self) -> Result<Vec<(LocalGuardSite, LocalGuardClaim)>, String> {
         chelis_dag_core::axis_sources::local_dim_guard_sites(self.dag)
     }
@@ -275,9 +250,8 @@ impl<'a> VerifiedDagView<'a> {
         chelis_dag_core::axis_sources::result_extent_sites(self.dag, root)
     }
 
-    /// The complete positive-rank operand relation for a verified same-shape
-    /// result. Verification rejects malformed or empty relations before a
-    /// backend can obtain this view.
+    /// The complete positive-rank operand relation for a verified same-shape result.
+    /// Verification rejects malformed or empty relations before a backend can get this view.
     pub fn same_shape_result_agreement(
         self,
         node: NodeId,
@@ -305,26 +279,21 @@ impl<'a> VerifiedDagView<'a> {
         chelis_dag_core::axis_sources::entry_validation_plan(self.dag)
     }
 
-    /// The named witness claims the entry schedule above already compares, so
-    /// an emitter checks each such pair once (`spec/04-type-system.md` §4.7).
-    /// The view answers this for the same reason it answers placement: the
-    /// question needs the class derivation, not the graph.
+    /// The named witness claims the entry schedule above already compares.
+    /// So an emitter checks each such pair once (`spec/04-type-system.md` §4.7).
+    /// The view answers this for the same reason it answers placement: the question needs the class derivation, not the graph.
     pub fn entry_covered_witness_claims(self) -> Vec<(NodeId, usize)> {
         chelis_dag_core::axis_sources::entry_covered_witness_claims(self.dag)
     }
 
-    /// Is this witness retained purely as a section 4.7 entry obligation, with
-    /// nothing reading its value?
-    ///
-    /// A target whose device lane excludes runtime shape reads asks this to
-    /// tell an obligation it can discharge in its host prologue from a read it
-    /// must refuse.
+    /// Is this witness retained purely as a section 4.7 entry obligation, with nothing reading its value?
+    /// A target whose device lane excludes runtime shape reads asks this to tell an obligation it can discharge.
+    /// In its host prologue from a read it must refuse.
     pub fn witness_is_entry_obligation(self, id: NodeId) -> bool {
         chelis_dag_core::axis_sources::witness_is_entry_obligation(self.dag, id)
     }
 
-    /// The obligations that witness owes, reduced to input reads, or `None`
-    /// when one of them cannot be rendered from the interface alone.
+    /// The obligations that witness owes, reduced to input reads, or `None` when one of them cannot be rendered from the interface alone.
     pub fn witness_entry_obligations(
         self,
         id: NodeId,
@@ -333,9 +302,7 @@ impl<'a> VerifiedDagView<'a> {
     }
 
     /// The unit-extent claims whose guard section 4.7 places at entry.
-    ///
-    /// The sibling of [`Self::entry_dim_classes`], filtered by the same
-    /// placement rule through the same shared predicate.
+    /// The sibling of [`Self::entry_dim_classes`], filtered by the same placement rule through the same shared predicate.
     pub fn entry_unit_extent_claims(self) -> Vec<chelis_dag_core::axis_sources::UnitExtentClaim> {
         chelis_dag_core::axis_sources::derive_unit_extent_claims(self.dag)
             .into_iter()
@@ -346,15 +313,13 @@ impl<'a> VerifiedDagView<'a> {
     }
 
     /// The `(Load, axis)` each entry-placed unit-extent claim reads.
+    /// Both compiled lanes need the same three steps: derive the claims.
+    /// Keep the ones section 4.7 places at entry, and resolve each to the input tensor axis whose extent the guard compares.
+    /// Doing it here rather than twice is the same discipline `member_load_axis` records.
+    /// The C emitter's `member_input_slot` deliberately admits only the folded-read spelling.
     ///
-    /// Both compiled lanes need the same three steps: derive the claims, keep
-    /// the ones section 4.7 places at entry, and resolve each to the input
-    /// tensor axis whose extent the guard compares. Doing it here rather than
-    /// twice is the same discipline `member_load_axis` records: the C
-    /// emitter's `member_input_slot` deliberately admits only the folded-read
-    /// spelling, because a `Load`'s own axis is already declared by the
-    /// binding loop, and reusing it here would silently drop every claim whose
-    /// operand IS an input tensor, which is the common case.
+    /// Because a `Load`'s own axis is already declared by the binding loop.
+    /// And reusing it here would silently drop every claim whose operand IS an input tensor, which is the common case.
     pub fn entry_unit_extent_reads(self) -> Vec<(NodeId, usize)> {
         self.entry_unit_extent_claims()
             .iter()
@@ -376,15 +341,14 @@ impl<'a> VerifiedDagView<'a> {
         chelis_dag_core::fuse::reduction_inlined_products(self.dag)
     }
 
-    /// Additional checked recipes, leaving the existing specialized product
-    /// kernel's component nodes to that kernel's independent metadata path.
-    pub fn contraction_views(self) -> crate::contraction_views::ContractionViews {
+    /// More checked recipes, leaving the existing specialized product kernel's component nodes to that kernel's independent metadata path.
+    pub fn contraction_views(self) -> chelis_ir_core::contraction_views::ContractionViews {
         let products = self.reduction_inlined_products();
         let specialized = products
             .iter()
             .flat_map(chelis_dag_core::fuse::InlinedProduct::skipped)
             .collect::<Vec<_>>();
-        crate::contraction_views::contraction_views_with_products(
+        chelis_ir_core::contraction_views::contraction_views_with_products(
             self.dag,
             &[],
             &specialized,
@@ -404,53 +368,34 @@ impl<'a> VerifiedDagView<'a> {
         self,
         stage: chelis_checker_core::unsupported::Stage,
     ) -> Result<(), chelis_checker_core::unsupported::Unsupported> {
-        crate::axis_admission::check_axis_sources(self.dag, stage)
+        chelis_ir_core::axis_admission::check_axis_sources(self.dag, stage)
     }
 
-    /// Every name a lane renders as an identifier resolves to one origin
-    /// (chelis#665). An emission boundary calls this; lowering, capacity
-    /// planning and evaluation do not, for the reason the derivation records.
+    /// Every name a lane renders as an identifier resolves to one origin (chelis#665).
+    /// An emission boundary calls this.
+    /// lowering, capacity planning and evaluation do not, for the reason the derivation records.
     pub fn check_rendered_dim_origins(
         self,
         stage: chelis_checker_core::unsupported::Stage,
     ) -> Result<(), chelis_checker_core::unsupported::Unsupported> {
-        crate::axis_admission::check_rendered_dim_origins(self.dag, stage)
-    }
-
-    /// The checked extent source for each output axis of `node`.
-    ///
-    /// Kept crate-private so the exact-capacity owner can consume typed
-    /// provenance without exposing the raw DAG or a backend normalization
-    /// seam.
-    pub(crate) fn output_axis_sources(
-        self,
-        node: NodeId,
-    ) -> Vec<chelis_dag_core::axis_sources::AxisSource> {
-        chelis_dag_core::axis_sources::output_axis_sources(self.dag, node)
-    }
-
-    /// The opaque program scope that makes DAG-local extent sources globally
-    /// non-interchangeable.
-    pub(crate) const fn capacity_scope(self) -> crate::capacity_key::CapacityScope {
-        self.plan.capacity_scope
+        chelis_ir_core::axis_admission::check_rendered_dim_origins(self.dag, stage)
     }
 
     /// The exact verified ownership directive attached to `node`.
-    ///
-    /// Every retained DAG node has exactly one directive; backends use this
-    /// typed view instead of rediscovering terminal ownership from `RiscOp`.
+    /// Every retained DAG node has exactly one directive.
+    /// backends use this typed view instead of rediscovering terminal ownership from `RiscOp`.
     pub fn action_for_node(self, node: NodeId) -> Option<VerifiedDagAction<'a>> {
         self.plan
             .directives
             .iter()
             .take(self.dag.len())
             .find(|directive| directive.node() == Some(node))
-            .map(DagDirective::view)
+            .map(verified_dag_action)
     }
 
     /// All verified DAG actions, including root transfers and scope drops.
     pub fn actions(self) -> impl ExactSizeIterator<Item = VerifiedDagAction<'a>> + 'a {
-        self.plan.directives.iter().map(DagDirective::view)
+        self.plan.directives.iter().map(verified_dag_action)
     }
 }
 
@@ -477,12 +422,12 @@ pub enum VerifiedDagAction<'a> {
 pub struct VerifiedHostSiteView<'a> {
     record: &'a ir::HostSiteRecord,
     program: &'a ir::OwnershipProgram,
-    verification: &'a verify::HostVerification,
+    verification: &'a verify::HostVerification<VerifiedLiveSetBound>,
 }
 
-/// Closed classification for a verified ownership directive attached to a
-/// host-emission site. The verifier's block, operation, and owner identities
-/// remain private; consumers can branch only on this typed semantic role.
+/// Closed classification for a verified ownership directive attached to a host-emission site.
+/// The verifier's block, operation, and owner identities remain private.
+/// consumers can branch only on this typed semantic role.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VerifiedHostSiteActionKind {
     Operation,
@@ -491,9 +436,9 @@ pub enum VerifiedHostSiteActionKind {
     ManifestRoot,
 }
 
-/// Opaque identity for one verified logical owner. Backends may associate an
-/// emitted value with this identity, but cannot manufacture an owner from an
-/// integer or infer ownership from a source spelling.
+/// Opaque identity for one verified logical owner.
+/// Backends may associate an emitted value with this identity.
+/// But cannot manufacture an owner from an integer or infer ownership from a source spelling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct VerifiedOwnerId {
     key: u32,
@@ -511,8 +456,8 @@ pub struct VerifiedUnitId {
     key: u32,
 }
 
-/// Feature-only view of a source expression at its ownership-verified host
-/// site, before host ABI erasure. This is not a Surf elaboration certificate.
+/// Feature-only view of a source expression at its ownership-verified host site, before host ABI erasure.
+/// This is not a Surf elaboration certificate.
 #[cfg(feature = "lowering-trace")]
 #[derive(Clone, Copy)]
 pub struct VerifiedHostSourceSite<'a> {
@@ -572,15 +517,15 @@ pub enum VerifiedApplyKind {
     IndirectCall,
     NativeProviderCall,
     /// The indirect callee owner was produced by this closed key operation.
-    CheckedBuiltinCall(crate::host_type_state::CheckedBuiltinCallable),
+    CheckedBuiltinCall(chelis_ir_core::host_type_state::CheckedBuiltinCallable),
     DirectCall {
         callee: VerifiedUnitId,
         tail: bool,
     },
 }
 
-/// Closed edge-local terminal domain. No definition, application, or clone
-/// can be smuggled into a selected control-flow edge.
+/// Closed edge-local terminal domain.
+/// No definition, application, or clone can be smuggled into a selected control-flow edge.
 #[derive(Debug, Clone, Copy)]
 pub enum VerifiedTerminalView<'a> {
     Drop {
@@ -613,7 +558,7 @@ impl<'a> VerifiedOwnerView<'a> {
         self.id
     }
 
-    pub fn ty(self) -> &'a crate::host_type_state::ConcreteHostType {
+    pub fn ty(self) -> &'a chelis_ir_core::host_type_state::ConcreteHostType {
         &self.info.ty
     }
 
@@ -623,10 +568,8 @@ impl<'a> VerifiedOwnerView<'a> {
 }
 
 /// A binder spelling projected by one exact, verified binding operation.
-///
-/// This capability is intentionally separate from [`VerifiedOwnerView`]: a
-/// clone, drop, return, or edge operand cannot expose source spelling to a
-/// backend and therefore cannot seed backend-local lifetime reconstruction.
+/// This capability is intentionally separate from [`VerifiedOwnerView`]: a clone, drop, return.
+/// Or edge operand cannot expose source spelling to a backend and therefore cannot seed backend-local lifetime reconstruction.
 #[derive(Debug, Clone, Copy)]
 pub struct VerifiedBindingName<'a> {
     name: &'a str,
@@ -638,9 +581,8 @@ impl<'a> VerifiedBindingName<'a> {
     }
 }
 
-/// Exact association between one verified function-body owner and the
-/// retained payload spelling that binds it. This includes declared parameters
-/// and verifier-certified captured globals.
+/// Exact association between one verified function-body owner and the retained payload spelling that binds it.
+/// This includes declared parameters and verifier-certified captured globals.
 #[derive(Debug, Clone, Copy)]
 pub struct VerifiedHostBodyBinding<'a> {
     owner: VerifiedOwnerView<'a>,
@@ -664,8 +606,7 @@ pub struct VerifiedOperandView<'a> {
     use_: VerifiedOwnershipUse,
 }
 
-/// One verified control-flow edge, including the exact owned/borrowed values
-/// supplied to the target block parameters.
+/// One verified control-flow edge, including the exact owned/borrowed values supplied to the target block parameters.
 #[derive(Debug, Clone)]
 pub struct VerifiedEdgeView<'a> {
     target: VerifiedBlockId,
@@ -702,9 +643,9 @@ impl<'a> VerifiedOperandView<'a> {
     }
 }
 
-/// Closed, typed operation directive. Labels are diagnostic renderings only;
-/// ownership behavior is selected exclusively by these variants and operand
-/// dispositions.
+/// Closed, typed operation directive.
+/// Labels are diagnostic renderings only.
+/// ownership behavior is selected exclusively by these variants and operand dispositions.
 #[derive(Debug, Clone)]
 pub enum VerifiedHostOperation<'a> {
     Define {
@@ -728,8 +669,7 @@ pub enum VerifiedHostOperation<'a> {
         dest: VerifiedOwnerView<'a>,
         source: VerifiedOperandView<'a>,
     },
-    /// A non-owning projection of a logical owner into the host payload slot
-    /// at this exact site.
+    /// A non-owning projection of a logical owner into the host payload slot at this exact site.
     Project {
         operation: VerifiedOperationId,
         block: VerifiedBlockId,
@@ -906,7 +846,7 @@ fn verified_edge<'a>(
 
 fn verified_host_action<'a>(
     program: &'a ir::OwnershipProgram,
-    verification: &'a verify::HostVerification,
+    verification: &'a verify::HostVerification<VerifiedLiveSetBound>,
     action: &'a ir::HostSiteAction,
 ) -> Option<VerifiedHostAction<'a>> {
     let block_id = |block: ir::BlockId| VerifiedBlockId { key: block.0 };
@@ -916,7 +856,7 @@ fn verified_host_action<'a>(
             block,
             operation,
         } => {
-            let locations = verification.locations();
+            let locations = verification.locations().observed(Some(&SiteObserver));
             locations.block(program, unit, block)?;
             if let Some((_, terminal)) = locations.terminal(program, unit, block, operation) {
                 let operation = VerifiedOperationId { key: operation.0 };
@@ -1072,6 +1012,7 @@ fn verified_host_action<'a>(
         } => {
             let edge = verification
                 .locations()
+                .observed(Some(&SiteObserver))
                 .edge(program, unit, source, edge_id, target)?;
             Some(VerifiedHostAction::ControlEdge {
                 source: block_id(source),
@@ -1099,7 +1040,8 @@ pub struct VerifiedHostTensorHelperView<'a> {
 }
 
 impl<'a> VerifiedHostTensorHelperView<'a> {
-    /// Observation-only owning unit and helper-slot words; not function labels.
+    /// Observation-only owning unit and helper-slot words.
+    /// not function labels.
     #[cfg(feature = "lowering-trace")]
     pub fn source_location(self) -> (usize, usize) {
         self.source_location
@@ -1120,13 +1062,12 @@ impl<'a> VerifiedHostTensorHelperView<'a> {
         self.helper.specialization.as_ref()
     }
 
-    /// The input this helper returns unchanged, by the one definition the
-    /// ownership lowering read ([`crate::host::HostTensorHelper::identity_input`]).
+    /// The input this helper returns unchanged, by the one definition the ownership lowering read ([`chelis_ir_core::host::HostTensorHelper::identity_input`]).
     pub fn identity_input(self) -> Option<&'a HostTensorInput> {
         self.helper.identity_input()
     }
 
-    pub fn summary_rejection(self) -> Option<&'a crate::host::HelperSummaryRejection> {
+    pub fn summary_rejection(self) -> Option<&'a chelis_ir_core::host::HelperSummaryRejection> {
         self.helper.summary_rejection.as_ref()
     }
 
@@ -1155,17 +1096,22 @@ impl<'a> VerifiedHostFunctionView<'a> {
         &self.function().helper_result_claim_axes
     }
 
-    pub fn result_claim(self) -> Option<&'a std::sync::Arc<crate::claim_pattern::ClaimPattern>> {
+    pub fn result_claim(
+        self,
+    ) -> Option<&'a std::sync::Arc<chelis_ir_core::claim_pattern::ClaimPattern>> {
         self.function().result_claim.as_ref()
     }
 
-    pub fn entry_claims(self) -> &'a [Option<std::sync::Arc<crate::claim_pattern::ClaimPattern>>] {
+    pub fn entry_claims(
+        self,
+    ) -> &'a [Option<std::sync::Arc<chelis_ir_core::claim_pattern::ClaimPattern>>] {
         &self.function().entry_claims
     }
 
     pub fn entry_contract(
         self,
-    ) -> &'a crate::host::EntryContract<crate::host_type_state::ConcreteHostType> {
+    ) -> &'a chelis_ir_core::host::EntryContract<chelis_ir_core::host_type_state::ConcreteHostType>
+    {
         &self.function().entry_contract
     }
 
@@ -1173,10 +1119,8 @@ impl<'a> VerifiedHostFunctionView<'a> {
         &self.function().params
     }
 
-    /// Function-body owner identities paired with their exact payload
-    /// parameters or captured globals. Authored entry-adapter owners are
-    /// deliberately excluded: their verified jump transfers into these
-    /// consuming body owners.
+    /// Function-body owner identities paired with their exact payload parameters or captured globals.
+    /// Authored entry-adapter owners are deliberately excluded: their verified jump transfers into these consuming body owners.
     pub fn body_bindings(self) -> Vec<VerifiedHostBodyBinding<'a>> {
         let unit_index = self.index + 1;
         let unit = &self.emission.ownership_program().units[unit_index];
@@ -1212,9 +1156,8 @@ impl<'a> VerifiedHostFunctionView<'a> {
                 let name = if let Some(payload) = self.function().params.get(index) {
                     payload.name.as_str()
                 } else {
-                    // The capture is identified by the spelling it was minted
-                    // under, never by its owner's alias names: a later local
-                    // alias may be spelled like any top-level value.
+                    // The capture is identified by the spelling it was minted under, never by its owner's alias names.
+                    // A later local alias may be spelled like any top-level value.
                     let name = unit
                         .captured_globals
                         .get(&param.owner)
@@ -1239,7 +1182,7 @@ impl<'a> VerifiedHostFunctionView<'a> {
             .collect()
     }
 
-    pub fn ret_ty(self) -> &'a crate::host_type_state::ConcreteHostType {
+    pub fn ret_ty(self) -> &'a chelis_ir_core::host_type_state::ConcreteHostType {
         &self.function().ret_ty
     }
 
@@ -1289,23 +1232,26 @@ impl<'a> VerifiedHostFunctionView<'a> {
         let records = self.emission.sites;
         self.emission
             .sites_by_unit
-            .of(unit)
+            .of_observed(unit, Some(&SiteObserver))
             .iter()
             .map(move |&position| VerifiedHostSiteView {
-                record: records.record(position).expect("indexed site record"),
+                record: records
+                    .record_observed(position, Some(&SiteObserver))
+                    .expect("indexed site record"),
                 program,
                 verification: self.emission.verification,
             })
     }
 }
 
-/// Immutable view of the exact verified host emission payload. Its fields are
-/// private; nested DAGs are reachable only as verified child cursors.
+/// Immutable view of the exact verified host emission payload.
+/// Its fields are private.
+/// nested DAGs are reachable only as verified child cursors.
 #[derive(Clone, Copy)]
 pub struct VerifiedHostEmission<'a> {
     payload: &'a HostEmissionPayload,
     program: &'a ir::OwnershipProgram,
-    verification: &'a verify::HostVerification,
+    verification: &'a verify::HostVerification<VerifiedLiveSetBound>,
     sites: &'a ir::HostSiteMap,
     sites_by_unit: &'a locations::SitesByUnit,
     nested_dags: &'a [NestedDagProof],
@@ -1314,12 +1260,11 @@ pub struct VerifiedHostEmission<'a> {
 impl<'a> VerifiedHostEmission<'a> {
     #[cfg(feature = "lowering-trace")]
     pub fn source_expressions(self) -> Vec<VerifiedHostSourceSite<'a>> {
-        verify::source_expressions(self)
+        source_expressions(self)
     }
     fn ownership_program(self) -> &'a ir::OwnershipProgram {
         // The emission cursor is built only from the host proof variant.
-        // Its program reference is threaded explicitly below rather than
-        // recovered from a raw sibling payload.
+        // Its program reference is threaded explicitly below rather than recovered from a raw sibling payload.
         self.program
     }
 
@@ -1366,7 +1311,9 @@ impl<'a> VerifiedHostEmission<'a> {
     /// The constructor layouts of the ADTs the functions' parameters carry.
     pub fn adt_layouts(
         self,
-    ) -> &'a [crate::host::HostAdtLayout<crate::host_type_state::ConcreteHostType>] {
+    ) -> &'a [chelis_ir_core::host::HostAdtLayout<
+        chelis_ir_core::host_type_state::ConcreteHostType,
+    >] {
         &self.payload.program.adt_layouts
     }
 
@@ -1377,7 +1324,7 @@ impl<'a> VerifiedHostEmission<'a> {
     pub fn sites(self) -> impl ExactSizeIterator<Item = VerifiedHostSiteView<'a>> + 'a {
         let program = self.ownership_program();
         self.sites
-            .records()
+            .records_observed(Some(&SiteObserver))
             .map(move |record| VerifiedHostSiteView {
                 record,
                 program,
@@ -1389,18 +1336,19 @@ impl<'a> VerifiedHostEmission<'a> {
         let program = self.ownership_program();
         let records = self.sites;
         self.sites_by_unit
-            .of(0)
+            .of_observed(0, Some(&SiteObserver))
             .iter()
             .map(move |&position| VerifiedHostSiteView {
-                record: records.record(position).expect("indexed site record"),
+                record: records
+                    .record_observed(position, Some(&SiteObserver))
+                    .expect("indexed site record"),
                 program,
                 verification: self.verification,
             })
     }
 }
-
-/// Closed payload identity. Public only so the sealed generic verifier can
-/// carry a public bound without exposing its private representation.
+/// Closed payload identity.
+/// Public only so the sealed generic verifier can carry a public bound without exposing its private representation.
 #[doc(hidden)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PayloadKind {
@@ -1408,48 +1356,14 @@ pub enum PayloadKind {
     Dag,
 }
 
-/// Sealed verifier-derived live-byte upper bound.
-///
-/// Verification composes local owner costs through the direct-call graph and
-/// classifies runtime-dependent or positively recursive storage explicitly.
-/// `Unbounded` also covers a statically known total beyond u64: no finite
-/// bound is representable, and each allocation keeps its own checked
-/// admission, so an oversized summary never refuses a program.
-/// The oracle handoff remains an integration step with the reuse proof because
-/// physical reused-slot capacity can exceed a tensor's logical shape.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LiveByteBound {
-    Exact(u64),
-    Unknown,
-    Unbounded,
-}
-
-impl LiveByteBound {
-    fn maximum(self, other: Self) -> Self {
-        match (self, other) {
-            (Self::Unbounded, _) | (_, Self::Unbounded) => Self::Unbounded,
-            (Self::Unknown, _) | (_, Self::Unknown) => Self::Unknown,
-            (Self::Exact(lhs), Self::Exact(rhs)) => Self::Exact(lhs.max(rhs)),
-        }
-    }
-}
-
 #[derive(Debug)]
 pub struct VerifiedLiveSetBound {
-    max_live_heap_owners: usize,
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "Phase 3 physical-storage and ledger handoff awaits chelis#893 CapacityKey"
-        )
-    )]
-    max_live_bytes: LiveByteBound,
+    data: chelis_ir_core::ownership::LiveSetBound,
 }
 
 impl VerifiedLiveSetBound {
     pub fn max_live_heap_owners(&self) -> usize {
-        self.max_live_heap_owners
+        self.data.max_live_heap_owners
     }
 }
 
@@ -1457,8 +1371,8 @@ mod sealed {
     pub trait Sealed {}
 }
 
-/// A sealed emission-payload specialization. Downstream crates can name the
-/// concrete host and DAG payloads but cannot add a third unchecked lane.
+/// A sealed emission-payload specialization.
+/// Downstream crates can name the concrete host and DAG payloads but cannot add a third unchecked lane.
 pub trait EmissionPayload: sealed::Sealed + 'static {
     #[doc(hidden)]
     const KIND: PayloadKind;
@@ -1473,7 +1387,7 @@ pub struct HostEmissionPayload {
 
 impl Drop for HostEmissionPayload {
     fn drop(&mut self) {
-        crate::host::drain_host_program_expressions(&mut self.program);
+        chelis_ir_core::host::drain_host_program_expressions(&mut self.program);
     }
 }
 
@@ -1499,11 +1413,9 @@ enum OwnershipProof {
         program: ir::OwnershipProgram,
         sites: ir::HostSiteMap,
         nested_dags: Vec<NestedDagProof>,
-        /// The verification `last_use::schedule` computed for exactly
-        /// `program`. No code mutates a constructed proof, so the boundary
-        /// reuses it instead of verifying the same program again
-        /// (chelis#3730).
-        verification: verify::HostVerification,
+        /// The verification `last_use::schedule` computed for exactly `program`.
+        /// No code mutates a constructed proof, so the boundary reuses it instead of verifying the same program again (chelis#3730).
+        verification: verify::HostVerification<VerifiedLiveSetBound>,
     },
     Dag(DagOwnershipPlan),
 }
@@ -1520,23 +1432,24 @@ enum NestedDagLocation {
     Function { function: usize, helper: usize },
 }
 
-/// Unverified ownership-lowered form. Its fields and constructor are private.
+/// Unverified ownership-lowered form.
+/// Its fields and constructor are private.
 #[derive(Debug)]
 pub struct OwnershipProgram<P: EmissionPayload> {
     payload: P,
     proof: OwnershipProof,
 }
 
-/// Verified host or DAG payload. Only [`verify_ownership`] constructs it.
+/// Verified host or DAG payload.
+/// Only [`verify_ownership`] constructs it.
 #[derive(Debug)]
 pub struct VerifiedOwnershipProgram<P: EmissionPayload>(OwnershipProgram<P>, VerificationProof);
 
-/// The specialization [`verify_ownership`] checked. A host program's
-/// [`verify::HostVerification`] travels in its [`OwnershipProof::Host`].
+/// The specialization [`verify_ownership`] checked.
+/// A host program's [`verify::HostVerification`] travels in its [`OwnershipProof::Host`].
 #[derive(Debug)]
 enum VerificationProof {
-    /// The verified site map's records, indexed by unit for the emission
-    /// views.
+    /// The verified site map's records, indexed by unit for the emission views.
     Host(locations::SitesByUnit),
     Dag,
 }
@@ -1546,8 +1459,7 @@ pub type DagOwnershipProgram = OwnershipProgram<DagEmissionPayload>;
 pub type VerifiedHostProgram = VerifiedOwnershipProgram<HostEmissionPayload>;
 pub type VerifiedDagProgram = VerifiedOwnershipProgram<DagEmissionPayload>;
 
-/// Consume a concrete host program, materialize every manifested host root,
-/// and lower the exact resulting payload to ownership IR.
+/// Consume a concrete host program, materialize every manifested host root, and lower the exact resulting payload to ownership IR.
 pub fn lower_host_ownership(
     manifested: &ManifestedProgram,
     host: ConcreteHostProgram,
@@ -1555,8 +1467,7 @@ pub fn lower_host_ownership(
     lower_host_ownership_impl(manifested, host)
 }
 
-/// Consume the opaque host carrier, whose helper traces the caller has
-/// already snapshotted, and lower its exact host payload to ownership IR.
+/// Consume the opaque host carrier, whose helper traces the caller snapshots, and lower its exact host payload to ownership IR.
 pub fn lower_host_execution_ownership(
     manifested: &ManifestedProgram,
     plan: crate::host::HostExecutionPlan,
@@ -1568,34 +1479,45 @@ fn lower_host_ownership_impl(
     manifested: &ManifestedProgram,
     mut host: ConcreteHostProgram,
 ) -> Result<HostOwnershipProgram, OwnershipError> {
-    let root_bindings = lower::materialize_manifest_roots(&mut host, manifested.manifest())?;
-    let mut sites = ir::HostSiteBuilder::default();
-    let mut program = lower::lower(
-        manifested.checked(),
-        &host,
-        manifested.manifest(),
-        &root_bindings,
-        &mut sites,
-    )?;
-    let mut sites = sites.finish();
-    let verification = last_use::schedule(&mut program, &mut sites)?.into_verification();
-    let nested_dags = lower_nested_dags(&host)?;
-    Ok(OwnershipProgram {
-        payload: HostEmissionPayload {
-            program: host,
-            manifest: manifested.manifest().clone(),
-        },
-        proof: OwnershipProof::Host {
-            program,
-            sites,
-            nested_dags,
-            verification,
-        },
+    crate::resources::with_operation(|operation| {
+        let root_bindings =
+            lower::materialize_manifest_roots(&mut host, &NativeManifest(manifested.manifest()))?;
+        let mut sites = ir::HostSiteBuilder::default();
+        let mut program = operation.host.with_native_provider_call(
+            crate::host::active_native_provider_call(),
+            || {
+                lower::lower(
+                    manifested.checked().facts(),
+                    &host,
+                    &NativeManifest(manifested.manifest()),
+                    &root_bindings,
+                    &mut sites,
+                    operation,
+                )
+            },
+        )?;
+        let mut sites = sites.finish();
+        let verification =
+            last_use::schedule_observed(&mut program, &mut sites, operation.resources.observer)?
+                .into_verification()
+                .map_live_set_bound(|data| VerifiedLiveSetBound { data });
+        let nested_dags = lower_nested_dags(&host)?;
+        Ok(OwnershipProgram {
+            payload: HostEmissionPayload {
+                program: host,
+                manifest: manifested.manifest().clone(),
+            },
+            proof: OwnershipProof::Host {
+                program,
+                sites,
+                nested_dags,
+                verification,
+            },
+        })
     })
 }
 
-/// Consume a standalone DAG and attach an explicit ownership directive for
-/// every node, root, and implicit scope-exit drop.
+/// Consume a standalone DAG and attach an explicit ownership directive for every node, root, and implicit scope-exit drop.
 pub fn lower_dag_ownership(dag: Dag) -> Result<DagOwnershipProgram, OwnershipError> {
     let plan = DagOwnershipPlan::lower(&dag)?;
     Ok(OwnershipProgram {
@@ -1619,10 +1541,19 @@ pub fn verify_ownership<P: EmissionPayload>(
             PayloadKind::Host,
         ) => {
             let payload = host_payload(&program)?;
-            verify::verify_host_sites(&payload.program, &payload.manifest, ir_program, sites)?;
+            verify::verify_host_sites_observed(
+                &payload.program,
+                &NativeManifest(&payload.manifest),
+                ir_program,
+                sites,
+                Some(&SiteObserver),
+            )?;
             verify_manifest_sinks(payload, ir_program, sites)?;
             verify_nested_dags(&program, nested_dags)?;
-            VerificationProof::Host(locations::SitesByUnit::new(sites))
+            VerificationProof::Host(locations::SitesByUnit::new_observed(
+                sites,
+                Some(&SiteObserver),
+            ))
         }
         (OwnershipProof::Dag(plan), PayloadKind::Dag) => {
             let dag = dag_payload(&program)?;
@@ -1653,7 +1584,7 @@ fn verify_manifest_sinks(
         .map(|entry| entry.name.as_str())
         .collect::<Vec<_>>();
     let actual = sites
-        .records()
+        .records_observed(Some(&SiteObserver))
         .filter(|site| {
             site.actions.iter().any(|action| {
                 matches!(
@@ -1833,684 +1764,196 @@ fn verify_nested_dags<P: EmissionPayload>(
     Ok(())
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DagOwnerOrigin {
-    BorrowedLoad,
-    OwnedProducer,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DagOwnerState {
-    BorrowedLive,
-    OwnedLive,
-    OwnedTerminal,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum DagDirective {
-    BorrowLoad { node: NodeId },
-    Produce { node: NodeId, borrows: Vec<NodeId> },
-    Clone { node: NodeId, source: NodeId },
-    CloneProduce { node: NodeId, source: NodeId },
-    MoveProduce { node: NodeId, source: NodeId },
-    CloneStore { node: NodeId, source: NodeId },
-    MoveStore { node: NodeId, source: NodeId },
-    StoreRoot { node: NodeId },
-    BorrowedDrop { node: NodeId, source: NodeId },
-    OwnedDrop { node: NodeId, source: NodeId },
-    Root { source: NodeId },
-    RootClone { source: NodeId },
-    ScopeDrop { source: NodeId },
-}
-
-impl DagDirective {
-    fn node(&self) -> Option<NodeId> {
-        match *self {
-            Self::BorrowLoad { node }
-            | Self::Produce { node, .. }
-            | Self::Clone { node, .. }
-            | Self::CloneProduce { node, .. }
-            | Self::MoveProduce { node, .. }
-            | Self::CloneStore { node, .. }
-            | Self::MoveStore { node, .. }
-            | Self::StoreRoot { node }
-            | Self::BorrowedDrop { node, .. }
-            | Self::OwnedDrop { node, .. } => Some(node),
-            Self::Root { .. } | Self::RootClone { .. } | Self::ScopeDrop { .. } => None,
-        }
-    }
-
-    fn view(&self) -> VerifiedDagAction<'_> {
-        match self {
-            Self::BorrowLoad { node } => VerifiedDagAction::BorrowLoad { node: *node },
-            Self::Produce { node, borrows } => VerifiedDagAction::Produce {
-                node: *node,
-                borrows,
-            },
-            Self::Clone { node, source } => VerifiedDagAction::Clone {
-                node: *node,
-                source: *source,
-            },
-            Self::CloneProduce { node, source } => VerifiedDagAction::CloneProduce {
-                node: *node,
-                source: *source,
-            },
-            Self::MoveProduce { node, source } => VerifiedDagAction::MoveProduce {
-                node: *node,
-                source: *source,
-            },
-            Self::CloneStore { node, source } => VerifiedDagAction::CloneStore {
-                node: *node,
-                source: *source,
-            },
-            Self::MoveStore { node, source } => VerifiedDagAction::MoveStore {
-                node: *node,
-                source: *source,
-            },
-            Self::StoreRoot { node } => VerifiedDagAction::StoreRoot { node: *node },
-            Self::BorrowedDrop { node, source } => VerifiedDagAction::BorrowedDrop {
-                node: *node,
-                source: *source,
-            },
-            Self::OwnedDrop { node, source } => VerifiedDagAction::OwnedDrop {
-                node: *node,
-                source: *source,
-            },
-            Self::Root { source } => VerifiedDagAction::Root { source: *source },
-            Self::RootClone { source } => VerifiedDagAction::RootClone { source: *source },
-            Self::ScopeDrop { source } => VerifiedDagAction::ScopeDrop { source: *source },
-        }
-    }
-}
-
 #[derive(Debug)]
 struct DagOwnershipPlan {
-    capacity_scope: crate::capacity_key::CapacityScope,
-    owners: BTreeMap<NodeId, DagOwnerOrigin>,
-    directives: Vec<DagDirective>,
+    data: chelis_ir_core::ownership::dag::DagOwnershipPlan,
+    capacity_scope: chelis_ir_core::capacity_key::CapacityScope,
 }
-
+impl Deref for DagOwnershipPlan {
+    type Target = chelis_ir_core::ownership::dag::DagOwnershipPlan;
+    fn deref(&self) -> &Self::Target {
+        &self.data
+    }
+}
 impl DagOwnershipPlan {
     fn lower(dag: &Dag) -> Result<Self, OwnershipError> {
-        let structural_errors = chelis_dag_core::verify::verify_ownership_input(dag);
-        if !structural_errors.is_empty() {
-            return Err(OwnershipError::LoweringInvariant {
-                unit: "dag".to_string(),
-                detail: structural_errors.join("; "),
-            });
-        }
-        let mut owners = BTreeMap::new();
-        let mut states = BTreeMap::new();
-        let mut directives = Vec::new();
-        for node in dag.nodes() {
-            validate_dag_dependencies(dag, node)?;
-            match &node.op {
-                RiscOp::Load { .. } => {
-                    require_dag_arity(node.id, "load", 0, node.inputs.len())?;
-                    owners.insert(node.id, DagOwnerOrigin::BorrowedLoad);
-                    states.insert(node.id, DagOwnerState::BorrowedLive);
-                    directives.push(DagDirective::BorrowLoad { node: node.id });
-                }
-                RiscOp::Copy => {
-                    require_dag_arity(node.id, "copy", 1, node.inputs.len())?;
-                    require_live_dag_owner(&states, node.inputs[0], node.id)?;
-                    owners.insert(node.id, DagOwnerOrigin::OwnedProducer);
-                    states.insert(node.id, DagOwnerState::OwnedLive);
-                    directives.push(DagDirective::Clone {
-                        node: node.id,
-                        source: node.inputs[0],
-                    });
-                }
-                RiscOp::Drop => {
-                    require_dag_arity(node.id, "drop", 1, node.inputs.len())?;
-                    match states.get(&node.inputs[0]).copied() {
-                        Some(DagOwnerState::BorrowedLive) => {
-                            directives.push(DagDirective::BorrowedDrop {
-                                node: node.id,
-                                source: node.inputs[0],
-                            });
-                        }
-                        Some(DagOwnerState::OwnedLive) => {
-                            consume_dag_owner(&mut states, node.inputs[0], node.id)?;
-                            directives.push(DagDirective::OwnedDrop {
-                                node: node.id,
-                                source: node.inputs[0],
-                            });
-                        }
-                        Some(DagOwnerState::OwnedTerminal) => {
-                            return Err(OwnershipError::DagDuplicateTerminal {
-                                owner: node.inputs[0].0,
-                            });
-                        }
-                        None => {
-                            return Err(OwnershipError::DagInput {
-                                node: node.id.0,
-                                input: node.inputs[0].0,
-                            });
-                        }
-                    }
-                }
-                RiscOp::Realize => {
-                    require_dag_arity(node.id, "realize", 1, node.inputs.len())?;
-                    let source_state = require_live_dag_owner(&states, node.inputs[0], node.id)?;
-                    owners.insert(node.id, DagOwnerOrigin::OwnedProducer);
-                    states.insert(node.id, DagOwnerState::OwnedLive);
-                    match source_state {
-                        DagOwnerState::BorrowedLive => {
-                            directives.push(DagDirective::CloneProduce {
-                                node: node.id,
-                                source: node.inputs[0],
-                            });
-                        }
-                        DagOwnerState::OwnedLive
-                            if dag_owner_used_after(dag, node.inputs[0], node.id) =>
-                        {
-                            directives.push(DagDirective::CloneProduce {
-                                node: node.id,
-                                source: node.inputs[0],
-                            });
-                        }
-                        DagOwnerState::OwnedLive => {
-                            consume_dag_owner(&mut states, node.inputs[0], node.id)?;
-                            directives.push(DagDirective::MoveProduce {
-                                node: node.id,
-                                source: node.inputs[0],
-                            });
-                        }
-                        DagOwnerState::OwnedTerminal => {
-                            unreachable!("require_live_dag_owner rejects terminal owners")
-                        }
-                    }
-                }
-                RiscOp::Store { .. } => {
-                    require_dag_arity(node.id, "store", 1, node.inputs.len())?;
-                    let source_state = require_live_dag_owner(&states, node.inputs[0], node.id)?;
-                    if source_state == DagOwnerState::BorrowedLive {
-                        directives.push(DagDirective::CloneStore {
-                            node: node.id,
-                            source: node.inputs[0],
-                        });
-                    } else {
-                        consume_dag_owner(&mut states, node.inputs[0], node.id)?;
-                        directives.push(DagDirective::MoveStore {
-                            node: node.id,
-                            source: node.inputs[0],
-                        });
-                    }
-                }
-                _ => {
-                    let mut borrows = node.inputs.clone();
-                    // A node reads its activation to decide whether it checks.
-                    for dependency in node.shape_deps.iter().chain(&node.owner.activation) {
-                        if !borrows.contains(dependency) {
-                            borrows.push(*dependency);
-                        }
-                    }
-                    for source in &borrows {
-                        require_live_dag_owner(&states, *source, node.id)?;
-                    }
-                    owners.insert(node.id, DagOwnerOrigin::OwnedProducer);
-                    states.insert(node.id, DagOwnerState::OwnedLive);
-                    directives.push(DagDirective::Produce {
-                        node: node.id,
-                        borrows,
-                    });
-                }
-            }
-        }
-        for (root_index, root) in dag.roots().iter().enumerate() {
-            if matches!(
-                dag.get(*root).map(|node| &node.op),
-                Some(RiscOp::Store { .. })
-            ) {
-                directives.push(DagDirective::StoreRoot { node: *root });
-                continue;
-            }
-            let consumer = NodeId(dag.nodes().len() + root_index);
-            match states.get(root).copied() {
-                Some(DagOwnerState::OwnedLive) => {
-                    consume_dag_owner(&mut states, *root, consumer)?;
-                    directives.push(DagDirective::Root { source: *root });
-                }
-                Some(DagOwnerState::BorrowedLive) => {
-                    directives.push(DagDirective::RootClone { source: *root });
-                }
-                Some(DagOwnerState::OwnedTerminal) => {
-                    return Err(OwnershipError::DagDuplicateTerminal { owner: root.0 });
-                }
-                None => return Err(OwnershipError::DagInvalidRoot { root: root.0 }),
-            }
-        }
-        let live_owned = states
-            .iter()
-            .filter_map(|(owner, state)| (*state == DagOwnerState::OwnedLive).then_some(*owner))
-            .collect::<Vec<_>>();
-        for owner in live_owned {
-            consume_dag_owner(
-                &mut states,
-                owner,
-                NodeId(dag.nodes().len() + dag.roots().len()),
-            )?;
-            directives.push(DagDirective::ScopeDrop { source: owner });
-        }
-        for (&owner, origin) in &owners {
-            if *origin == DagOwnerOrigin::OwnedProducer
-                && states.get(&owner) != Some(&DagOwnerState::OwnedTerminal)
-            {
-                return Err(OwnershipError::DagMissingTerminal { owner: owner.0 });
-            }
-        }
+        let data = chelis_ir_core::ownership::dag::DagOwnershipPlan::lower(dag)?;
         Ok(Self {
+            data,
             capacity_scope: crate::capacity_key::fresh_capacity_scope(),
-            owners,
-            directives,
-        })
-    }
-
-    fn verify(&self, dag: &Dag) -> Result<(), OwnershipError> {
-        let structural_errors = chelis_dag_core::verify::verify_ownership_input(dag);
-        if !structural_errors.is_empty() {
-            return Err(OwnershipError::LoweringInvariant {
-                unit: "dag".to_string(),
-                detail: structural_errors.join("; "),
-            });
-        }
-
-        let mut owners = BTreeMap::new();
-        let mut states = BTreeMap::new();
-        let mut cursor = 0;
-        for node in dag.nodes() {
-            validate_dag_dependencies(dag, node)?;
-            let directive = self.directives.get(cursor).ok_or_else(|| {
-                dag_directive_error(format!("node n{} has no directive", node.id.0))
-            })?;
-            cursor += 1;
-            match &node.op {
-                RiscOp::Load { .. } => {
-                    require_dag_arity(node.id, "load", 0, node.inputs.len())?;
-                    require_exact_dag_directive(
-                        directive,
-                        &DagDirective::BorrowLoad { node: node.id },
-                        node.id,
-                    )?;
-                    owners.insert(node.id, DagOwnerOrigin::BorrowedLoad);
-                    states.insert(node.id, DagOwnerState::BorrowedLive);
-                }
-                RiscOp::Copy => {
-                    require_dag_arity(node.id, "copy", 1, node.inputs.len())?;
-                    require_live_dag_owner(&states, node.inputs[0], node.id)?;
-                    require_exact_dag_directive(
-                        directive,
-                        &DagDirective::Clone {
-                            node: node.id,
-                            source: node.inputs[0],
-                        },
-                        node.id,
-                    )?;
-                    owners.insert(node.id, DagOwnerOrigin::OwnedProducer);
-                    states.insert(node.id, DagOwnerState::OwnedLive);
-                }
-                RiscOp::Drop => {
-                    require_dag_arity(node.id, "drop", 1, node.inputs.len())?;
-                    match states.get(&node.inputs[0]).copied() {
-                        Some(DagOwnerState::BorrowedLive) => require_exact_dag_directive(
-                            directive,
-                            &DagDirective::BorrowedDrop {
-                                node: node.id,
-                                source: node.inputs[0],
-                            },
-                            node.id,
-                        )?,
-                        Some(DagOwnerState::OwnedLive) => {
-                            consume_dag_owner(&mut states, node.inputs[0], node.id)?;
-                            require_exact_dag_directive(
-                                directive,
-                                &DagDirective::OwnedDrop {
-                                    node: node.id,
-                                    source: node.inputs[0],
-                                },
-                                node.id,
-                            )?;
-                        }
-                        Some(DagOwnerState::OwnedTerminal) => {
-                            return Err(OwnershipError::DagDuplicateTerminal {
-                                owner: node.inputs[0].0,
-                            });
-                        }
-                        None => {
-                            return Err(OwnershipError::DagInput {
-                                node: node.id.0,
-                                input: node.inputs[0].0,
-                            });
-                        }
-                    }
-                }
-                RiscOp::Realize => {
-                    require_dag_arity(node.id, "realize", 1, node.inputs.len())?;
-                    let source_state = require_live_dag_owner(&states, node.inputs[0], node.id)?;
-                    match source_state {
-                        DagOwnerState::BorrowedLive => require_exact_dag_directive(
-                            directive,
-                            &DagDirective::CloneProduce {
-                                node: node.id,
-                                source: node.inputs[0],
-                            },
-                            node.id,
-                        )?,
-                        DagOwnerState::OwnedLive
-                            if dag_owner_used_after(dag, node.inputs[0], node.id) =>
-                        {
-                            require_exact_dag_directive(
-                                directive,
-                                &DagDirective::CloneProduce {
-                                    node: node.id,
-                                    source: node.inputs[0],
-                                },
-                                node.id,
-                            )?;
-                        }
-                        DagOwnerState::OwnedLive => {
-                            consume_dag_owner(&mut states, node.inputs[0], node.id)?;
-                            require_exact_dag_directive(
-                                directive,
-                                &DagDirective::MoveProduce {
-                                    node: node.id,
-                                    source: node.inputs[0],
-                                },
-                                node.id,
-                            )?;
-                        }
-                        DagOwnerState::OwnedTerminal => {
-                            unreachable!("require_live_dag_owner rejects terminal owners")
-                        }
-                    }
-                    owners.insert(node.id, DagOwnerOrigin::OwnedProducer);
-                    states.insert(node.id, DagOwnerState::OwnedLive);
-                }
-                RiscOp::Store { .. } => {
-                    require_dag_arity(node.id, "store", 1, node.inputs.len())?;
-                    let source_state = require_live_dag_owner(&states, node.inputs[0], node.id)?;
-                    if source_state == DagOwnerState::BorrowedLive {
-                        require_exact_dag_directive(
-                            directive,
-                            &DagDirective::CloneStore {
-                                node: node.id,
-                                source: node.inputs[0],
-                            },
-                            node.id,
-                        )?;
-                    } else {
-                        consume_dag_owner(&mut states, node.inputs[0], node.id)?;
-                        require_exact_dag_directive(
-                            directive,
-                            &DagDirective::MoveStore {
-                                node: node.id,
-                                source: node.inputs[0],
-                            },
-                            node.id,
-                        )?;
-                    }
-                }
-                _ => {
-                    let mut borrows = node.inputs.clone();
-                    // A node reads its activation to decide whether it checks.
-                    for dependency in node.shape_deps.iter().chain(&node.owner.activation) {
-                        if !borrows.contains(dependency) {
-                            borrows.push(*dependency);
-                        }
-                    }
-                    for source in &borrows {
-                        require_live_dag_owner(&states, *source, node.id)?;
-                    }
-                    require_exact_dag_directive(
-                        directive,
-                        &DagDirective::Produce {
-                            node: node.id,
-                            borrows,
-                        },
-                        node.id,
-                    )?;
-                    owners.insert(node.id, DagOwnerOrigin::OwnedProducer);
-                    states.insert(node.id, DagOwnerState::OwnedLive);
-                }
-            }
-        }
-        if self.owners != owners {
-            return Err(dag_directive_error(
-                "owner origins diverge from the retained DAG payload".to_string(),
-            ));
-        }
-
-        for (root_index, root) in dag.roots().iter().enumerate() {
-            let directive = self
-                .directives
-                .get(cursor)
-                .ok_or_else(|| dag_directive_error(format!("root n{} has no directive", root.0)))?;
-            cursor += 1;
-            if matches!(
-                dag.get(*root).map(|node| &node.op),
-                Some(RiscOp::Store { .. })
-            ) {
-                require_exact_dag_directive(
-                    directive,
-                    &DagDirective::StoreRoot { node: *root },
-                    *root,
-                )?;
-                continue;
-            }
-            let consumer = NodeId(dag.nodes().len() + root_index);
-            match states.get(root).copied() {
-                Some(DagOwnerState::OwnedLive) => {
-                    consume_dag_owner(&mut states, *root, consumer)?;
-                    require_exact_dag_directive(
-                        directive,
-                        &DagDirective::Root { source: *root },
-                        consumer,
-                    )?;
-                }
-                Some(DagOwnerState::BorrowedLive) => require_exact_dag_directive(
-                    directive,
-                    &DagDirective::RootClone { source: *root },
-                    consumer,
-                )?,
-                Some(DagOwnerState::OwnedTerminal) => {
-                    return Err(OwnershipError::DagDuplicateTerminal { owner: root.0 });
-                }
-                None => return Err(OwnershipError::DagInvalidRoot { root: root.0 }),
-            }
-        }
-
-        let live_owned = states
-            .iter()
-            .filter_map(|(owner, state)| (*state == DagOwnerState::OwnedLive).then_some(*owner))
-            .collect::<Vec<_>>();
-        for owner in live_owned {
-            let directive = self.directives.get(cursor).ok_or_else(|| {
-                dag_directive_error(format!("owned producer n{} has no terminal", owner.0))
-            })?;
-            cursor += 1;
-            let consumer = NodeId(dag.nodes().len() + dag.roots().len());
-            consume_dag_owner(&mut states, owner, consumer)?;
-            require_exact_dag_directive(
-                directive,
-                &DagDirective::ScopeDrop { source: owner },
-                consumer,
-            )?;
-        }
-        if cursor != self.directives.len() {
-            return Err(dag_directive_error(format!(
-                "{} directives remain after the payload is exhausted",
-                self.directives.len() - cursor
-            )));
-        }
-        for (&owner, origin) in &owners {
-            if *origin == DagOwnerOrigin::OwnedProducer
-                && states.get(&owner) != Some(&DagOwnerState::OwnedTerminal)
-            {
-                return Err(OwnershipError::DagMissingTerminal { owner: owner.0 });
-            }
-        }
-        Ok(())
-    }
-
-    fn render(&self) -> String {
-        use std::fmt::Write as _;
-        let mut out = String::new();
-        for directive in &self.directives {
-            match directive {
-                DagDirective::BorrowLoad { node } => {
-                    let _ = writeln!(out, "borrow load n{}", node.0);
-                }
-                DagDirective::Produce { node, borrows } => {
-                    let inputs = borrows
-                        .iter()
-                        .map(|input| format!("n{}", input.0))
-                        .collect::<Vec<_>>()
-                        .join(",");
-                    let _ = writeln!(out, "produce n{} borrow [{inputs}]", node.0);
-                }
-                DagDirective::Clone { node, source } => {
-                    let _ = writeln!(out, "clone n{} from n{}", node.0, source.0);
-                }
-                DagDirective::CloneProduce { node, source } => {
-                    let _ = writeln!(out, "produce n{} clone n{}", node.0, source.0);
-                }
-                DagDirective::MoveProduce { node, source } => {
-                    let _ = writeln!(out, "produce n{} move n{}", node.0, source.0);
-                }
-                DagDirective::CloneStore { node, source } => {
-                    let _ = writeln!(out, "store n{} clone n{}", node.0, source.0);
-                }
-                DagDirective::MoveStore { node, source } => {
-                    let _ = writeln!(out, "store n{} move n{}", node.0, source.0);
-                }
-                DagDirective::StoreRoot { node } => {
-                    let _ = writeln!(out, "store-root n{}", node.0);
-                }
-                DagDirective::BorrowedDrop { node, source } => {
-                    let _ = writeln!(out, "drop n{} borrow n{}", node.0, source.0);
-                }
-                DagDirective::OwnedDrop { node, source } => {
-                    let _ = writeln!(out, "drop n{} move n{}", node.0, source.0);
-                }
-                DagDirective::Root { source } => {
-                    let _ = writeln!(out, "root move n{}", source.0);
-                }
-                DagDirective::RootClone { source } => {
-                    let _ = writeln!(out, "root clone n{}", source.0);
-                }
-                DagDirective::ScopeDrop { source } => {
-                    let _ = writeln!(out, "scope-drop move n{}", source.0);
-                }
-            }
-        }
-        out
-    }
-}
-
-fn require_dag_arity(
-    node: NodeId,
-    operation: &'static str,
-    expected: usize,
-    actual: usize,
-) -> Result<(), OwnershipError> {
-    if expected == actual {
-        Ok(())
-    } else {
-        Err(OwnershipError::DagArity {
-            node: node.0,
-            operation,
-            expected,
-            actual,
         })
     }
 }
 
-fn validate_dag_dependencies(
-    dag: &Dag,
-    node: &chelis_dag_core::dag::DagNode,
-) -> Result<(), OwnershipError> {
-    for input in node.dependencies() {
-        if input.0 >= node.id.0 || dag.get(input).is_none() {
-            return Err(OwnershipError::DagInput {
-                node: node.id.0,
-                input: input.0,
-            });
+fn verified_dag_action(directive: &DagDirective) -> VerifiedDagAction<'_> {
+    match directive {
+        DagDirective::BorrowLoad { node } => VerifiedDagAction::BorrowLoad { node: *node },
+        DagDirective::Produce { node, borrows } => VerifiedDagAction::Produce {
+            node: *node,
+            borrows,
+        },
+        DagDirective::Clone { node, source } => VerifiedDagAction::Clone {
+            node: *node,
+            source: *source,
+        },
+        DagDirective::CloneProduce { node, source } => VerifiedDagAction::CloneProduce {
+            node: *node,
+            source: *source,
+        },
+        DagDirective::MoveProduce { node, source } => VerifiedDagAction::MoveProduce {
+            node: *node,
+            source: *source,
+        },
+        DagDirective::CloneStore { node, source } => VerifiedDagAction::CloneStore {
+            node: *node,
+            source: *source,
+        },
+        DagDirective::MoveStore { node, source } => VerifiedDagAction::MoveStore {
+            node: *node,
+            source: *source,
+        },
+        DagDirective::StoreRoot { node } => VerifiedDagAction::StoreRoot { node: *node },
+        DagDirective::BorrowedDrop { node, source } => VerifiedDagAction::BorrowedDrop {
+            node: *node,
+            source: *source,
+        },
+        DagDirective::OwnedDrop { node, source } => VerifiedDagAction::OwnedDrop {
+            node: *node,
+            source: *source,
+        },
+        DagDirective::Root { source } => VerifiedDagAction::Root { source: *source },
+        DagDirective::RootClone { source } => VerifiedDagAction::RootClone { source: *source },
+        DagDirective::ScopeDrop { source } => VerifiedDagAction::ScopeDrop { source: *source },
+    }
+}
+
+struct NativeManifest<'a>(&'a RootManifest);
+impl chelis_ir_core::ownership::manifest::ManifestSource for NativeManifest<'_> {
+    fn len(&self) -> usize {
+        self.0.entries.len()
+    }
+    fn entry(
+        &self,
+        index: usize,
+    ) -> Option<chelis_ir_core::ownership::manifest::RootEntryView<'_>> {
+        self.0
+            .entries
+            .get(index)
+            .map(|entry| chelis_ir_core::ownership::manifest::RootEntryView {
+                name: &entry.name,
+                def_name: &entry.def_name,
+                path: &entry.path,
+                host: entry.lane == chelis_types::types::Lane::Host,
+            })
+    }
+}
+
+thread_local! {
+    static SITE_LOOKUP_ENTRIES: Cell<Option<u64>> = const { Cell::new(None) };
+    #[cfg(test)]
+    static OWNERSHIP_VERIFICATIONS: Cell<u64> = const { Cell::new(0) };
+}
+
+pub(crate) fn observe_site_lookup_entries(entries: u64) {
+    SITE_LOOKUP_ENTRIES.with(|count| {
+        if let Some(value) = count.get() {
+            count.set(Some(value + entries));
+        }
+    });
+}
+
+pub(crate) fn observe_ownership_verification() {
+    #[cfg(test)]
+    OWNERSHIP_VERIFICATIONS.with(|count| count.set(count.get() + 1));
+}
+
+struct SiteObserver;
+impl chelis_ir_core::resources::Observer for SiteObserver {
+    fn ownership_reference_checks_enabled(&self) -> bool {
+        cfg!(test)
+    }
+    fn ownership_lookup_entries(&self, entries: u64) {
+        observe_ownership_lookup_entries(entries);
+    }
+    fn ownership_reference_scan_entries(&self, entries: u64) {
+        observe_ownership_reference_scan_entries(entries);
+    }
+    fn site_lookup_entries(&self, entries: u64) {
+        observe_site_lookup_entries(entries);
+    }
+}
+
+/// Run `work`, counting the entries the host-site lookups visit on this thread meanwhile: each table entry built, and each lookup answered.
+#[doc(hidden)]
+pub fn counting_site_lookup_entries<R>(work: impl FnOnce() -> R) -> (R, u64) {
+    struct Restore(Option<u64>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            SITE_LOOKUP_ENTRIES.with(|count| count.set(self.0));
         }
     }
-    Ok(())
-}
-
-fn dag_owner_used_after(dag: &Dag, owner: NodeId, consumer: NodeId) -> bool {
-    dag.nodes().iter().skip(consumer.0 + 1).any(|node| {
-        node.inputs.contains(&owner)
-            || node.shape_deps.contains(&owner)
-            || node.result_claim_deps.contains(&owner)
-            || node.owner.activation == Some(owner)
-    }) || dag.roots().contains(&owner)
-}
-
-fn require_live_dag_owner(
-    states: &BTreeMap<NodeId, DagOwnerState>,
-    owner: NodeId,
-    consumer: NodeId,
-) -> Result<DagOwnerState, OwnershipError> {
-    match states.get(&owner).copied() {
-        Some(DagOwnerState::BorrowedLive) => Ok(DagOwnerState::BorrowedLive),
-        Some(DagOwnerState::OwnedLive) => Ok(DagOwnerState::OwnedLive),
-        Some(DagOwnerState::OwnedTerminal) => Err(OwnershipError::DagUseAfterTerminal {
-            owner: owner.0,
-            consumer: consumer.0,
-        }),
-        None => Err(OwnershipError::DagInput {
-            node: consumer.0,
-            input: owner.0,
-        }),
-    }
-}
-
-fn consume_dag_owner(
-    states: &mut BTreeMap<NodeId, DagOwnerState>,
-    owner: NodeId,
-    consumer: NodeId,
-) -> Result<(), OwnershipError> {
-    match states.get(&owner).copied() {
-        Some(DagOwnerState::BorrowedLive) => Err(OwnershipError::DagBorrowConsumed {
-            owner: owner.0,
-            consumer: consumer.0,
-        }),
-        Some(DagOwnerState::OwnedLive) => {
-            states.insert(owner, DagOwnerState::OwnedTerminal);
-            Ok(())
-        }
-        Some(DagOwnerState::OwnedTerminal) => {
-            Err(OwnershipError::DagDuplicateTerminal { owner: owner.0 })
-        }
-        None => Err(OwnershipError::DagInput {
-            node: consumer.0,
-            input: owner.0,
-        }),
-    }
-}
-
-fn require_exact_dag_directive(
-    actual: &DagDirective,
-    expected: &DagDirective,
-    consumer: NodeId,
-) -> Result<(), OwnershipError> {
-    if actual == expected {
-        Ok(())
-    } else {
-        Err(dag_directive_error(format!(
-            "directive for ownership consumer n{} does not match its payload operation",
-            consumer.0
-        )))
-    }
-}
-
-fn dag_directive_error(detail: String) -> OwnershipError {
-    OwnershipError::DagDirectiveMap { detail }
+    let restore = Restore(SITE_LOOKUP_ENTRIES.with(|count| count.replace(Some(0))));
+    let result = work();
+    let counted = SITE_LOOKUP_ENTRIES
+        .with(Cell::get)
+        .expect("the count stays armed while the work runs");
+    drop(restore);
+    (result, counted)
 }
 
 #[cfg(test)]
 mod tests;
+
+/// Project only the already-verified, retained source-structural census.
+/// No emitted spelling or separately supplied source may construct this cursor.
+#[cfg(feature = "lowering-trace")]
+fn source_expressions(emission: VerifiedHostEmission<'_>) -> Vec<VerifiedHostSourceSite<'_>> {
+    let expected = verify::census_host_payload(
+        &emission.payload.program,
+        &NativeManifest(&emission.payload.manifest),
+    )
+    .expect("verified host payload census");
+    expected
+        .into_iter()
+        .zip(emission.sites())
+        .filter_map(|(expected, site)| {
+            expected
+                .expression
+                .map(|expression| VerifiedHostSourceSite { site, expression })
+        })
+        .collect()
+}
+
+#[cfg(test)]
+thread_local! {
+    static OWNERSHIP_LOOKUP_ENTRIES: Cell<u64> = const { Cell::new(0) };
+    static OWNERSHIP_REFERENCE_SCANS: Cell<bool> = const { Cell::new(false) };
+}
+
+pub(crate) fn observe_ownership_lookup_entries(entries: u64) {
+    #[cfg(test)]
+    OWNERSHIP_LOOKUP_ENTRIES.with(|count| count.set(count.get() + entries));
+    #[cfg(not(test))]
+    let _ = entries;
+}
+pub(crate) fn observe_ownership_reference_scan_entries(entries: u64) {
+    #[cfg(test)]
+    if OWNERSHIP_REFERENCE_SCANS.with(Cell::get) {
+        observe_ownership_lookup_entries(entries);
+    }
+    #[cfg(not(test))]
+    let _ = entries;
+}
+#[cfg(test)]
+fn with_reference_scans_counted<T>(run: impl FnOnce() -> T) -> T {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            OWNERSHIP_REFERENCE_SCANS.with(|flag| flag.set(self.0));
+        }
+    }
+    let restore = Restore(OWNERSHIP_REFERENCE_SCANS.with(|flag| flag.replace(true)));
+    let result = run();
+    drop(restore);
+    result
+}

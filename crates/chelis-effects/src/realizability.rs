@@ -18,8 +18,9 @@ use chelis_deep::{
     ast::{Atom, Expr, Metadata},
 };
 use chelis_numeric_core::prim::Prim;
+use chelis_type_core::RootPathStep;
 use chelis_types::CheckedProgram;
-use chelis_types::manifest::{HostReason, RootPathStep};
+use chelis_types::manifest::HostReason;
 use chelis_types::types::Lane;
 
 // ─── Public types ────────────────────────────────────────────────────────────

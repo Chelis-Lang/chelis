@@ -13,6 +13,7 @@ path = "src/main.rs"
 [dependencies]
 chelis-type-core = { workspace = true, default-features = false, features = ["serde"] }
 chelis-dag-core.workspace = true
+chelis-ir-core.workspace = true
 chelis-numeric-core = { workspace = true, default-features = false, features = ["alloc", "serde"] }
 chelis-unord.workspace = true
 clap = { version = "4", features = ["derive"] }

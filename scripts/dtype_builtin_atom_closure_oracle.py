@@ -33,6 +33,7 @@ FILTER = ('binary(builtin_atom_discovery) + binary(issue_1294_normalize) '
           '+ test(builtin_atom_discovery_)')
 CARGO_TESTS = ["-p", "chelis-types", "-p", "chelis-checker-core",
                "-p", "chelis-dag-core", "-p", "chelis-ir",
+               "-p", "chelis-ir-core",
                "-p", "chelis-cli", "--lib", "--test", "builtin_atom_discovery",
                "--test", "issue_1294_normalize", "--test", "issue_1294_generalized_conv",
                "--test", "issue_1294_standard_lowerings", "-E", FILTER]

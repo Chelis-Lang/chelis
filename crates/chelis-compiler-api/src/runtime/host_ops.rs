@@ -4,9 +4,9 @@ use chelis_checker_core::BUILTIN_NAMES;
 use chelis_dag_core::dag::{Dag, DeclId, DimInfo, NodeId, RiscOp, TensorType};
 use chelis_dag_core::tier2;
 use chelis_deep::ast::{Atom, Expr, ExprCarrier};
-use chelis_ir::eval::{
+use chelis_ir::eval::eval_tensor_roots_with;
+use chelis_ir_core::eval::{
     AdmittedResult, TensorValue as IrTensorValue, admit_padded_shape, admit_result, admit_tensor,
-    eval_tensor_roots_with,
 };
 use chelis_numeric_core::dtype_semantics::{
     ArgReduceOp, CompareOp, FloatBinOp, FloatUnOp, IntBinOp, IntUnOp, NumericKernelError,
@@ -957,7 +957,7 @@ pub(super) fn cast_tensor_value(
     // (f16/bf16 casts genuinely round, chelis#717), and out-of-range or
     // out-of-domain elements TRAP per spec/04 section 5.2; the named
     // lossy forms remain chelis#759's future surface.
-    chelis_ir::eval::cast_tensor(&ir_value, src_prim, target_prim)
+    chelis_ir_core::eval::cast_tensor(&ir_value, src_prim, target_prim)
         .map(|value| RuntimeValue::Tensor(RuntimeTensorValue::new(value)))
 }
 
@@ -972,7 +972,7 @@ pub(super) fn named_cast_tensor_value(
         value: ir_value,
         precision: _,
     } = tensor;
-    chelis_ir::eval::named_cast_tensor(mode, &ir_value, target_prim)
+    chelis_ir_core::eval::named_cast_tensor(mode, &ir_value, target_prim)
         .map(|value| RuntimeValue::Tensor(RuntimeTensorValue::new(value)))
 }
 
@@ -1320,7 +1320,7 @@ pub(super) fn normalize_axis(rank: usize, axis: i64, op: &str) -> Result<usize, 
     // chelis#522: apply the from-the-end negative-axis convention uniformly
     // (`-1` == last axis, `-rank` == axis 0), matching the type checker
     // (`chelis_type_core::decisions::shape::normalize_static_axis`), the IR lowerer
-    // (`chelis_ir::lower::normalize_axis`), and spec/05-risc-primitives.md.
+    // (`chelis_ir_core::lower::normalize_axis`), and spec/05-risc-primitives.md.
     // Before this the host evaluator rejected every negative axis with
     // "requires non-negative axis", so `sum(x, -1)` passed `chelis check` /
     // `chelis build` (both normalize) but failed `chelis eval` — a check↔eval
@@ -1477,7 +1477,7 @@ pub(super) fn tensor_count_host(
     tensor: &RuntimeTensorValue,
     axes: &[usize],
 ) -> Result<RuntimeTensorValue, String> {
-    chelis_ir::eval::count_tensor(&tensor.value, axes).map(RuntimeTensorValue::new)
+    chelis_ir_core::eval::count_tensor(&tensor.value, axes).map(RuntimeTensorValue::new)
 }
 
 /// Permute axes of a tensor, given an `axes` permutation. `axes[i]` is the
@@ -1745,7 +1745,7 @@ pub(super) fn tensor_expand_host(
 }
 
 /// Strided windowed reduction host evaluator. Mirrors
-/// `chelis_ir::eval::reduce_window` so host-runtime evaluation and
+/// `chelis_ir_core::eval::reduce_window` so host-runtime evaluation and
 /// IR-evaluator runs produce byte-identical output for the four
 /// `reduce_window_*` builtins. See `spec/05-risc-primitives.md`
 /// §2.3.1 for the surface semantics.

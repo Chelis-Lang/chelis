@@ -1,7 +1,8 @@
 //! Spec/04 §4.7: declarations own distinct ordered obligations at their producer.
 use chelis_dag_core::dag::{Dag, DimInfo, ExtentWitnessSite, NodeId, RiscOp, RtAxis, TensorType};
 use chelis_dag_core::optimize::{common_subexpr_eliminate, dead_code_eliminate};
-use chelis_ir::eval::{TensorValue, eval_tensor_with};
+use chelis_ir::eval::eval_tensor_with;
+use chelis_ir_core::eval::TensorValue;
 use chelis_numeric_core::dtype_semantics::scalar_from_i64;
 use chelis_numeric_core::prim::Prim;
 
@@ -71,7 +72,7 @@ fn distinct_literal_tokens_keep_declaration_order_and_primitive_through_rebuilds
                 dag.clone(),
                 common_subexpr_eliminate(&dag),
                 dead_code_eliminate(&dag),
-                chelis_ir::specialize::specialize_for_exact_arithmetic(&dag),
+                chelis_ir_core::specialize::specialize_for_exact_arithmetic(&dag),
             ] {
                 assert!(chelis_dag_core::verify::verify(&rebuilt).is_empty());
                 assert_eq!(
@@ -221,7 +222,7 @@ fn administrative_copies_preserve_literal_producer_through_fusion() {
                 chelis_dag_core::fuse::fuse(&dag),
                 common_subexpr_eliminate(&dag),
                 dead_code_eliminate(&dag),
-                chelis_ir::specialize::specialize_for_exact_arithmetic(&dag),
+                chelis_ir_core::specialize::specialize_for_exact_arithmetic(&dag),
                 folded,
             ] {
                 assert!(chelis_dag_core::verify::verify(&rebuilt).is_empty());

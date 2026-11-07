@@ -5,7 +5,7 @@
 //! the type. A derived fact describes the exact tables it was built from, so a
 //! table that can still be written after a fact is cached is how a stale fact
 //! happens; chelis#1835 and chelis#1921 are that defect on the host side.
-//! `chelis_ir::host::HostLoweringSession` closes it by binding its facts to a
+//! `chelis_ir_core::host::HostLoweringSession` closes it by binding its facts to a
 //! borrowed program they cannot outlive. These tables are owned rather than
 //! borrowed, so the guarantee has to come from visibility instead: the
 //! constructor is the only writer and no accessor hands out a mutable
@@ -32,8 +32,7 @@ use std::rc::Rc;
 
 use chelis_deep::DeepTag;
 use chelis_deep::ast::Expr;
-use chelis_ir::lower::SubexprLoweringContext;
-use chelis_types::CheckedProgram;
+use chelis_ir_core::lower::SubexprLoweringContext;
 use chelis_unord::{UnordMap, UnordSet};
 
 thread_local! {
@@ -71,12 +70,14 @@ pub(super) struct ProgramScope {
     /// (chelis#2207). Preparing one folds the pipes in every definition, so
     /// before this a routed reduction re-folded the whole program, all of
     /// `chelis-std` included, on every call.
-    routing_lowering_context: OnceCell<SubexprLoweringContext>,
+    routing_lowering_context:
+        OnceCell<Result<SubexprLoweringContext, chelis_ir_core::lower::LowerDiagnostic>>,
     /// The lowering context `grad` and `vmap` applications lower through
     /// (chelis#2439). It also reads the checked program and the declared
     /// signatures, which are fixed for the evaluation context that owns this
     /// scope, so its first application builds it and the rest reuse it.
-    transform_lowering_context: OnceCell<SubexprLoweringContext>,
+    transform_lowering_context:
+        OnceCell<Result<SubexprLoweringContext, chelis_ir_core::lower::LowerDiagnostic>>,
     /// Every definition key grouped by its terminal segment, each group
     /// sorted (chelis#2393). A short or import-qualified reference resolves
     /// through one group instead of sorting and scanning the whole linked
@@ -243,8 +244,8 @@ impl ProgramScope {
     /// reused for the scope's lifetime (chelis#2439).
     pub(super) fn transform_lowering_context(
         &self,
-        build: impl FnOnce() -> SubexprLoweringContext,
-    ) -> SubexprLoweringContext {
+        build: impl FnOnce() -> Result<SubexprLoweringContext, chelis_ir_core::lower::LowerDiagnostic>,
+    ) -> Result<SubexprLoweringContext, chelis_ir_core::lower::LowerDiagnostic> {
         self.transform_lowering_context.get_or_init(build).clone()
     }
 
@@ -254,15 +255,17 @@ impl ProgramScope {
     /// obligations are independent of the type environment.
     pub(super) fn routing_lowering_context(
         &self,
-        checked: &CheckedProgram,
+        checked: &chelis_checker_core::CheckFacts,
         declared_signatures: &UnordMap<String, Expr>,
-    ) -> SubexprLoweringContext {
+        operation: &chelis_ir_core::resources::Operation<'_, chelis_syntax_host::NativeStack>,
+    ) -> Result<SubexprLoweringContext, chelis_ir_core::lower::LowerDiagnostic> {
         self.routing_lowering_context
             .get_or_init(|| {
                 SubexprLoweringContext::from_checked_program(
                     checked,
                     self.defs.as_ref().clone(),
                     declared_signatures.clone(),
+                    operation,
                 )
             })
             .clone()

@@ -1,4 +1,4 @@
-use chelis_ir::host::{
+use chelis_ir_core::host::{
     HostBlasMatmulSummary, HostCallee, HostCalleeView, HostFunctionSpecialization,
     HostSparseOpSummary, HostTensorHelper, HostTensorSpecialization,
 };
@@ -339,15 +339,17 @@ use crate::host_abi::{
 use chelis_checker_core::unsupported::{Stage, Unsupported, UnsupportedKind};
 use chelis_dag_core::dag::{ComparisonKind, DimInfo, RiscOp, TensorType};
 use chelis_ir::ownership::{
-    HostSiteId, VerifiedApplyKind, VerifiedBlockId, VerifiedEdgeView, VerifiedHostAction,
+    VerifiedApplyKind, VerifiedBlockId, VerifiedEdgeView, VerifiedHostAction,
     VerifiedHostOperation, VerifiedHostTensorHelperView, VerifiedHostTerminator,
     VerifiedOperationId, VerifiedOwnerId, VerifiedOwnershipUse, VerifiedTerminalView,
 };
+use chelis_ir_core::ownership::HostSiteId;
 use chelis_numeric_core::dtype_semantics::{CheckedCastKind, CheckedCastPlan, NumericTrap};
 use chelis_numeric_core::named_cast::NamedCastMode;
 use chelis_numeric_core::observation::ElementRef;
 use chelis_numeric_core::prim::Prim;
-use chelis_types::manifest::{RootManifest, RootPathStep};
+use chelis_type_core::RootPathStep;
+use chelis_types::manifest::RootManifest;
 use chelis_types::types::Lane;
 use chelis_unord::{UnordMap, UnordSet};
 
@@ -524,7 +526,7 @@ pub(crate) fn emit_host_abi_program(
         body.push(String::new());
     }
     for function in &program.functions {
-        if function.origin != chelis_ir::host::HostFunctionOrigin::Authored {
+        if function.origin != chelis_ir_core::host::HostFunctionOrigin::Authored {
             continue;
         }
         let params = function
@@ -545,7 +547,7 @@ pub(crate) fn emit_host_abi_program(
     if program
         .functions
         .iter()
-        .any(|function| function.origin == chelis_ir::host::HostFunctionOrigin::Authored)
+        .any(|function| function.origin == chelis_ir_core::host::HostFunctionOrigin::Authored)
     {
         body.push(String::new());
     }
@@ -565,7 +567,7 @@ pub(crate) fn emit_host_abi_program(
     // value, the checker rejects the initiating root before this emitter runs.
     // `main()` remains source ordered; the checker, not a reordered backend,
     // owns the top-level initialization frontier (chelis#1339).
-    let captured_globals = chelis_ir::host::captured_global_names(program);
+    let captured_globals = chelis_ir_core::host::captured_global_names(program);
     if !captured_globals.is_empty() {
         body.push("// Top-level bindings captured by compiled functions (issue #352):".to_string());
         for name in &captured_globals {
@@ -946,7 +948,7 @@ pub(crate) fn tensor_helper_names(
 
 /// Helper symbols paired with their concrete, pre-lowering source DAGs.
 pub(crate) fn concrete_tensor_helper_codegen(
-    program: &chelis_ir::host::ConcreteHostProgram,
+    program: &chelis_ir_core::host::ConcreteHostProgram,
     program_name: &str,
 ) -> Result<Vec<(String, chelis_dag_core::dag::Dag)>, Unsupported> {
     let symbols = tensor_helper_symbols(
@@ -1060,7 +1062,8 @@ fn internal_function_names(
             let public = emitted_names
                 .get(&function.name)
                 .expect("every host function has an emitted name");
-            let internal = if function.origin == chelis_ir::host::HostFunctionOrigin::Authored {
+            let internal = if function.origin == chelis_ir_core::host::HostFunctionOrigin::Authored
+            {
                 owned_body_name(public)
             } else {
                 public.clone()
@@ -2849,7 +2852,7 @@ fn append_unreachable_fn_abort_stub(
     }
     out.push(format!("{} {{", declaration.trim_end_matches(';')));
     let rendered = unsupported.to_string();
-    let safe = chelis_ir::span_sanitize::sanitize_for_format_string(&rendered);
+    let safe = chelis_ir_core::span_sanitize::sanitize_for_format_string(&rendered);
     out.push(format!("    fprintf(stderr, \"%s\\n\", \"{safe}\");"));
     out.push("    abort();".to_string());
     out.push("}".to_string());
@@ -2934,8 +2937,8 @@ enum HostResultRequirement {
 }
 
 impl HostResultClaim {
-    fn from_plan(plan: &chelis_ir::host::HostResultClaimPlan) -> Self {
-        use chelis_ir::host::HostResultRequirementPlan;
+    fn from_plan(plan: &chelis_ir_core::host::HostResultClaimPlan) -> Self {
+        use chelis_ir_core::host::HostResultRequirementPlan;
         Self {
             rank: plan.result().dims.len(),
             axes: plan
@@ -3008,7 +3011,7 @@ impl HostResultClaim {
                     Some((
                         axis,
                         HostResultRequirement::Named {
-                            claim: chelis_ir::lower::extent_binder_label(binder),
+                            claim: chelis_ir_core::lower::extent_binder_label(binder),
                             prepared: function.params[observation.param].name.clone(),
                             parameter: observation.path.clone(),
                             steps: observation.steps.clone(),
@@ -3170,13 +3173,13 @@ impl HostResultClaim {
 /// Static C tables for a claim pattern (runtime_extents.md C6.5), the node
 /// array named `name`. Binder slots follow [`ClaimPattern::binders`].
 pub(super) fn claim_pattern_table_lines(
-    pattern: &chelis_ir::claim_pattern::ClaimPattern,
+    pattern: &chelis_ir_core::claim_pattern::ClaimPattern,
     name: &str,
     indent: &str,
 ) -> Vec<String> {
-    use chelis_ir::claim_pattern::{ClaimAxisPosition, ClaimDim, ClaimNode};
+    use chelis_ir_core::claim_pattern::{ClaimAxisPosition, ClaimDim, ClaimNode};
     let binders = pattern.binders();
-    let child = |node: Option<chelis_ir::claim_pattern::ClaimNodeId>| {
+    let child = |node: Option<chelis_ir_core::claim_pattern::ClaimNodeId>| {
         node.map_or("-1".to_string(), |node| node.index().to_string())
     };
     let mut lines = Vec::new();
@@ -3342,7 +3345,7 @@ const UNWITNESSED_BINDER_SLOT: &str = "{ 0, 0, NULL, NULL, 0 }";
 /// The frame of a nested result claim (runtime_extents.md C6.5): its static
 /// tables, its binder slots and the frame itself, linked to `parent`.
 fn nested_claim_frame_lines(
-    pattern: &chelis_ir::claim_pattern::ClaimPattern,
+    pattern: &chelis_ir_core::claim_pattern::ClaimPattern,
     binders: Vec<String>,
     frame: &str,
     parent: &str,
@@ -3382,7 +3385,7 @@ fn nested_claim_frame_lines(
 fn nested_result_frame_lines(
     function: &HostFunction,
     entry: &entry_walk::FunctionEntryWork,
-    pattern: &chelis_ir::claim_pattern::ClaimPattern,
+    pattern: &chelis_ir_core::claim_pattern::ClaimPattern,
     frame: &str,
     parent: &str,
     indent: &str,
@@ -3403,7 +3406,7 @@ fn nested_result_frame_lines(
                 .iter()
                 .zip(&function.params)
                 .map(|(formal, param)| match formal.pattern() {
-                    chelis_ir::host::EntryPattern::Tensor(ty) => (param, ty),
+                    chelis_ir_core::host::EntryPattern::Tensor(ty) => (param, ty),
                     _ => (param, &param.ty),
                 });
             let declared = function.params.iter().map(|param| (param, &param.ty));
@@ -3425,7 +3428,7 @@ fn nested_result_frame_lines(
                         .position(|dim| matches!(dim, DimInfo::Named(name, _) if name == binder))
                         .map(|axis| {
                             direct_binder_slot(
-                                &chelis_ir::lower::extent_binder_label(binder),
+                                &chelis_ir_core::lower::extent_binder_label(binder),
                                 &param.name,
                                 &param.name,
                                 axis,
@@ -3440,13 +3443,13 @@ fn nested_result_frame_lines(
 
 /// An inlined declaration's nested result frame, from its retained plan.
 fn nested_plan_frame_lines(
-    plan: &chelis_ir::host::NestedResultClaimPlan,
+    plan: &chelis_ir_core::host::NestedResultClaimPlan,
     frame: &str,
     parent: &str,
     indent: &str,
     outer_claims_first: bool,
 ) -> Vec<String> {
-    use chelis_ir::host::NestedBinderWitness;
+    use chelis_ir_core::host::NestedBinderWitness;
     let binders = plan
         .binders()
         .iter()
@@ -4730,7 +4733,7 @@ fn entry_named_state_lines_named(names: &[String], variable: &str) -> Vec<String
         lines.push(format!(
             "    {{ {}, {}, 0, 0, 0, {{0}}, 0, 0 }},",
             c_string_literal(name),
-            c_string_literal(&chelis_ir::lower::extent_binder_label(name))
+            c_string_literal(&chelis_ir_core::lower::extent_binder_label(name))
         ));
     }
     lines.push("};".into());
@@ -4738,12 +4741,12 @@ fn entry_named_state_lines_named(names: &[String], variable: &str) -> Vec<String
 }
 
 fn validate_retained_entry_contract(
-    contract: &chelis_ir::host::EntryContract<HostType>,
-    plan: &chelis_ir::host::SignatureEntryPlan,
+    contract: &chelis_ir_core::host::EntryContract<HostType>,
+    plan: &chelis_ir_core::host::SignatureEntryPlan,
     positions: &[usize],
-    lists: &[chelis_ir::host::HostListEntry<HostType>],
+    lists: &[chelis_ir_core::host::HostListEntry<HostType>],
 ) -> Result<(), Unsupported> {
-    use chelis_ir::host::EntryPattern;
+    use chelis_ir_core::host::EntryPattern;
     let mut represented = vec![false; contract.formals().len()];
     if positions.len() != plan.observations().nodes().len() {
         return Err(invalid_abi_shape(
@@ -4827,7 +4830,7 @@ fn validate_retained_entry_contract(
 }
 
 fn signature_entry_lines(
-    plan: &chelis_ir::host::SignatureEntryPlan,
+    plan: &chelis_ir_core::host::SignatureEntryPlan,
     args: &[String],
     indent: &str,
     delegated: &[chelis_dag_core::axis_sources::EntryExtentGuard],
@@ -4912,7 +4915,7 @@ fn signature_entry_lines(
         let RiscOp::Load { name } = &node.op else {
             unreachable!("signature observation")
         };
-        let label = chelis_ir::span_sanitize::sanitize_for_format_string(name.as_str());
+        let label = chelis_ir_core::span_sanitize::sanitize_for_format_string(name.as_str());
         (
             format!("chelis_tensor_shape({}, {axis})", args[load.0]),
             label.into_owned(),
@@ -4928,7 +4931,7 @@ fn signature_entry_lines(
             } => {
                 let (left, first, first_axis) = read(*canonical);
                 let (right, later, later_axis) = read(*observed);
-                let claim = chelis_ir::span_sanitize::sanitize_for_format_string(claim);
+                let claim = chelis_ir_core::span_sanitize::sanitize_for_format_string(claim);
                 vec![
                     format!("if ({right} != {left}) {{"),
                     format!(
@@ -5079,7 +5082,7 @@ fn emit_function(
         .map(|param| c_decl(&param.ty, &param.name))
         .collect::<Result<Vec<_>, _>>()?
         .join(", ");
-    let authored = function.origin == chelis_ir::host::HostFunctionOrigin::Authored;
+    let authored = function.origin == chelis_ir_core::host::HostFunctionOrigin::Authored;
     let body_name = internal_names
         .get(&function.name)
         .expect("verified function has an internal emitted name");
@@ -5189,7 +5192,7 @@ fn emit_function(
     }
     let entry = ownership_sites
         .iter()
-        .find(|site| site.kind == chelis_ir::ownership::HostSiteKind::FunctionEntry)
+        .find(|site| site.kind == chelis_ir_core::ownership::HostSiteKind::FunctionEntry)
         .ok_or_else(|| {
             invalid_abi_shape(
                 "verified host function has no FunctionEntry site".to_string(),
@@ -5319,7 +5322,7 @@ fn emit_function(
     emitter.lines.splice(claims_at..claims_at, claim_lines);
     let terminal = ownership_sites
         .iter()
-        .find(|site| site.kind == chelis_ir::ownership::HostSiteKind::FunctionReturn)
+        .find(|site| site.kind == chelis_ir_core::ownership::HostSiteKind::FunctionReturn)
         .ok_or_else(|| {
             invalid_abi_shape(
                 "verified host function has no FunctionReturn site".to_string(),
@@ -5468,7 +5471,7 @@ fn authored_entry_uses(
 ) -> Result<Vec<VerifiedOwnershipUse>, Unsupported> {
     let entry = sites
         .iter()
-        .find(|site| site.kind == chelis_ir::ownership::HostSiteKind::FunctionEntry)
+        .find(|site| site.kind == chelis_ir_core::ownership::HostSiteKind::FunctionEntry)
         .ok_or_else(|| {
             invalid_abi_shape(
                 "verified authored function has no FunctionEntry site".to_string(),
@@ -5589,7 +5592,7 @@ fn emit_main(
     }
     let root_sites = ownership_sites
         .iter()
-        .filter(|site| site.kind == chelis_ir::ownership::HostSiteKind::ManifestRoot)
+        .filter(|site| site.kind == chelis_ir_core::ownership::HostSiteKind::ManifestRoot)
         .collect::<Vec<_>>();
     let mut consumed_root_sites = UnordSet::new();
     for binding in &program.globals {
@@ -5723,7 +5726,7 @@ fn emit_main(
     }
     let terminal = ownership_sites
         .iter()
-        .find(|site| site.kind == chelis_ir::ownership::HostSiteKind::FunctionReturn)
+        .find(|site| site.kind == chelis_ir_core::ownership::HostSiteKind::FunctionReturn)
         .ok_or_else(|| {
             invalid_abi_shape(
                 "verified roots unit has no terminal site".to_string(),
@@ -5746,7 +5749,7 @@ fn emit_main(
 /// gate below: an over-counted reference makes a failing wrapper a hard
 /// build error rather than a loud stub.
 fn collect_referenced_fn_names(expr: &HostExpr, out: &mut UnordSet<String>) {
-    chelis_ir::host::collect_host_var_names(expr, out);
+    chelis_ir_core::host::collect_host_var_names(expr, out);
     collect_called_fn_names(expr, out);
 }
 
@@ -6047,12 +6050,12 @@ fn stationary_callback_entry(callback: &HostCallback) -> Option<&HostExpr> {
 fn retained_accumulator_entries<'a>(
     params: &[HostParam],
     body: &'a HostExpr,
-    proofs: &[std::sync::Arc<chelis_ir::host::AccumulatorDeltaProof>],
-    forwarding: Option<&chelis_ir::host::AccumulatorForwardingPlan>,
+    proofs: &[std::sync::Arc<chelis_ir_core::host::AccumulatorDeltaProof>],
+    forwarding: Option<&chelis_ir_core::host::AccumulatorForwardingPlan>,
 ) -> Option<
     Vec<(
         &'a HostExpr,
-        std::sync::Arc<chelis_ir::host::AccumulatorDeltaProof>,
+        std::sync::Arc<chelis_ir_core::host::AccumulatorDeltaProof>,
     )>,
 > {
     fn variable(value: &HostExpr) -> Option<&str> {
@@ -6068,7 +6071,10 @@ fn retained_accumulator_entries<'a>(
         std::collections::BTreeMap<String, String>,
         String,
     );
-    fn selected_root(value: &HostExpr, plan: &chelis_ir::host::AccumulatorForwardingPlan) -> bool {
+    fn selected_root(
+        value: &HostExpr,
+        plan: &chelis_ir_core::host::AccumulatorForwardingPlan,
+    ) -> bool {
         let mut value = value;
         loop {
             match &value.kind {
@@ -6086,7 +6092,7 @@ fn retained_accumulator_entries<'a>(
         value: &'a HostExpr,
         aliases: &mut std::collections::BTreeMap<String, String>,
         out: &mut Vec<Candidate<'a>>,
-        selected: Option<&chelis_ir::host::AccumulatorForwardingPlan>,
+        selected: Option<&chelis_ir_core::host::AccumulatorForwardingPlan>,
     ) -> Option<()> {
         match &value.kind {
             HostExprKind::Let { bindings, body, .. }
@@ -6148,7 +6154,7 @@ fn retained_accumulator_entries<'a>(
     ]);
     let selected = forwarding.filter(|plan| plan.is_returned_invocation());
     if let Some(plan) = selected {
-        chelis_ir::host::returned_accumulator_invocation(body, plan)?;
+        chelis_ir_core::host::returned_accumulator_invocation(body, plan)?;
     }
     let mut candidates = Vec::new();
     collect(body, &mut aliases, &mut candidates, selected)?;
@@ -6192,7 +6198,7 @@ fn retained_accumulator_entries<'a>(
                         proofs
                             .last()
                             .is_some_and(|inner| inner.recipe() == proof.recipe())
-                            && chelis_ir::host::returned_accumulator_invocation(tail, plan)
+                            && chelis_ir_core::host::returned_accumulator_invocation(tail, plan)
                                 .is_some()
                     })))
             .then(|| (value, proof.clone()))
@@ -6222,7 +6228,7 @@ struct StationaryEntryGuard {
     checked: String,
     states: Option<(String, usize)>,
     binders: Vec<String>,
-    delta: Option<std::sync::Arc<chelis_ir::host::AccumulatorDeltaProof>>,
+    delta: Option<std::sync::Arc<chelis_ir_core::host::AccumulatorDeltaProof>>,
     old_list_len: Option<String>,
 }
 
@@ -6278,8 +6284,8 @@ struct HostEmitter<'a> {
 
 /// The claim frame of one output-inferred binder of the function being
 /// emitted (spec/04-type-system.md section 4.4.1): a binder in the
-/// declaration's [`chelis_ir::lower::DimBinderRoles`] `return_only` set,
-/// which a site marks [`chelis_ir::lower::LocalAscriptionNamedSite::output_inferred`].
+/// declaration's [`chelis_ir_core::lower::DimBinderRoles`] `return_only` set,
+/// which a site marks [`chelis_ir_core::lower::LocalAscriptionNamedSite::output_inferred`].
 /// The frame starts empty and the first site the body executes fills it
 /// ([`HostExprKind::ExtentSites`]). Every later site, and the declared result
 /// where the result is a tensor, is then a claim against that site. The frame
@@ -6393,7 +6399,7 @@ impl FirstSiteFrames {
                     .enumerate()
                     .filter(|(_, dim)| {
                         matches!(dim, DimInfo::Named(name, _)
-                            if chelis_ir::lower::extent_binder_label(name) == binder)
+                            if chelis_ir_core::lower::extent_binder_label(name) == binder)
                     })
                     .map(|(axis, _)| axis)
                     .collect();
@@ -6721,7 +6727,7 @@ impl<'a> HostEmitter<'a> {
             tensor_helper_result_origins: tensor_helpers.result_origins,
             expression_sites: ownership_sites
                 .iter()
-                .filter(|site| site.kind == chelis_ir::ownership::HostSiteKind::Expression)
+                .filter(|site| site.kind == chelis_ir_core::ownership::HostSiteKind::Expression)
                 .cloned()
                 .collect(),
             expression_site_index: 0,
@@ -6942,7 +6948,7 @@ impl<'a> HostEmitter<'a> {
         let initializer = match producer {
             Some("load") => Self::interface_result_origin_expr(ty),
             Some(op) if matches!(ty, HostType::Tensor(_)) => {
-                let op = chelis_ir::span_sanitize::sanitize_for_format_string(op);
+                let op = chelis_ir_core::span_sanitize::sanitize_for_format_string(op);
                 format!(
                     "__chelis_host_result_origin_leaf(__chelis_origin_arena, \"{op}\", \"numeric trap: domain in {op} at i64\")"
                 )
@@ -7943,7 +7949,7 @@ impl<'a> HostEmitter<'a> {
     /// lex-sorted and deduped against `span_id`. Same shape as the DAG-side
     /// helper at `chelis_backend_c::emit::CEmitter::emit_span_comments`
     /// (S4.1). Span IDs are sanitized via
-    /// `chelis_ir::span_sanitize::sanitize_for_comment` before
+    /// `chelis_ir_core::span_sanitize::sanitize_for_comment` before
     /// interpolation so a forbidden control byte cannot break out of the
     /// `// ` line comment, mirroring the DAG-side path.
     ///
@@ -7956,7 +7962,7 @@ impl<'a> HostEmitter<'a> {
             return;
         }
         if let Some(canonical) = expr.span_id.as_deref() {
-            let safe = chelis_ir::span_sanitize::sanitize_for_comment(canonical);
+            let safe = chelis_ir_core::span_sanitize::sanitize_for_comment(canonical);
             self.lines.push(format!("{}// span: {safe}", self.indent));
         }
         let mut merged: Vec<&str> = expr
@@ -7968,7 +7974,7 @@ impl<'a> HostEmitter<'a> {
         merged.sort();
         merged.dedup();
         for span in merged {
-            let safe = chelis_ir::span_sanitize::sanitize_for_comment(span);
+            let safe = chelis_ir_core::span_sanitize::sanitize_for_comment(span);
             self.lines.push(format!("{}// span: {safe}", self.indent));
         }
     }
@@ -8140,7 +8146,7 @@ impl<'a> HostEmitter<'a> {
     fn prepare_one_stationary_entry(
         &mut self,
         entry: &HostExpr,
-        delta: Option<std::sync::Arc<chelis_ir::host::AccumulatorDeltaProof>>,
+        delta: Option<std::sync::Arc<chelis_ir_core::host::AccumulatorDeltaProof>>,
     ) -> Option<StationaryEntryGuard> {
         let HostExprKind::SignatureEntry {
             contract, lists, ..
@@ -8163,7 +8169,7 @@ impl<'a> HostEmitter<'a> {
         let old_list_len = delta.as_ref().and_then(|proof| {
             matches!(
                 proof.recipe(),
-                chelis_ir::host::AccumulatorDeltaRecipe::ListInterval { .. }
+                chelis_ir_core::host::AccumulatorDeltaRecipe::ListInterval { .. }
             )
             .then(|| {
                 let name = self.next_temp("delta_prior_length");
@@ -8445,7 +8451,7 @@ impl<'a> HostEmitter<'a> {
             } => {
                 require_same_abi_type(ty, expr_ty, "builtin expression")?;
                 self.assign_builtin(target, name, args, ty, site, result_claims.as_deref())?;
-                if chelis_ir::host::produces_its_result(name) {
+                if chelis_ir_core::host::produces_its_result(name) {
                     self.stamp_combinator_result_origin(target, ty, name);
                 } else if !matches!(name.as_str(), "tuple-get" | "index") {
                     self.stamp_result_origin(target, ty, name);
@@ -9105,7 +9111,7 @@ impl<'a> HostEmitter<'a> {
         if !matches!(ty, HostType::Tensor(_)) {
             return;
         }
-        let op = chelis_ir::span_sanitize::sanitize_for_format_string(op);
+        let op = chelis_ir_core::span_sanitize::sanitize_for_format_string(op);
         let origin = result_origin_name(target);
         self.lines.push(format!(
             "{}__chelis_global_origin_assign(&{origin}, __chelis_host_result_origin_leaf(__chelis_origin_arena, \"{op}\", \"numeric trap: domain in {op} at i64\"));",
@@ -9123,7 +9129,7 @@ impl<'a> HostEmitter<'a> {
         &mut self,
         target: &str,
         ty: &HostType,
-        sites: &[chelis_ir::lower::LocalAscriptionNamedSite],
+        sites: &[chelis_ir_core::lower::LocalAscriptionNamedSite],
     ) -> Result<(), Unsupported> {
         let origin = result_origin_name(target);
         self.emit_list_element_sites(target, ty, sites)?;
@@ -9197,7 +9203,7 @@ impl<'a> HostEmitter<'a> {
         &mut self,
         target: &str,
         ty: &HostType,
-        sites: &[chelis_ir::lower::LocalAscriptionNamedSite],
+        sites: &[chelis_ir_core::lower::LocalAscriptionNamedSite],
     ) -> Result<(), Unsupported> {
         let origin = result_origin_name(target);
         for site in sites
@@ -9213,26 +9219,25 @@ impl<'a> HostEmitter<'a> {
                     "verified C host List element site emission",
                 ));
             }
-            let binder = chelis_ir::lower::extent_binder_label(&site.binder);
-            let state = self
-                .first_site_frames
-                .as_ref()
-                .and_then(|frames| {
-                    frames
-                        .list_states
-                        .iter()
-                        .position(|name| chelis_ir::lower::extent_binder_label(name) == binder)
-                })
-                .ok_or_else(|| {
-                    invalid_abi_shape(
-                        format!(
-                            "local ascription `{}` names List element binder `{}`, which the \
+            let binder = chelis_ir_core::lower::extent_binder_label(&site.binder);
+            let state =
+                self.first_site_frames
+                    .as_ref()
+                    .and_then(|frames| {
+                        frames.list_states.iter().position(|name| {
+                            chelis_ir_core::lower::extent_binder_label(name) == binder
+                        })
+                    })
+                    .ok_or_else(|| {
+                        invalid_abi_shape(
+                            format!(
+                                "local ascription `{}` names List element binder `{}`, which the \
                              invocation records no extent for",
-                            site.binding, site.binder
-                        ),
-                        "verified C host List element site emission",
-                    )
-                })?;
+                                site.binding, site.binder
+                            ),
+                            "verified C host List element site emission",
+                        )
+                    })?;
             let indent = self.indent.clone();
             let axis = site.axis;
             let recorded = format!("__chelis_entry_named_states[{state}]");
@@ -10477,7 +10482,7 @@ impl<'a> HostEmitter<'a> {
             // [05-HOST-1]: each callback application's returned state keeps
             // the initial state's shape, checked before the next application.
             // Both operands are borrowed; the check returns unit or traps.
-            name if name == chelis_ir::host::TENSOR_SCAN_STATE => {
+            name if name == chelis_ir_core::host::TENSOR_SCAN_STATE => {
                 self.lines.push(format!(
                     "{}chelis_tensor_scan_check_state({}, {});",
                     self.indent, arg_vars[0].0, arg_vars[1].0
@@ -10487,7 +10492,7 @@ impl<'a> HostEmitter<'a> {
             }
             // [05-HOST-1]: `tensor_scan`'s tensor states, stacked against the
             // initial state's copy by the runtime.
-            name if name == chelis_ir::host::TENSOR_SCAN_STACK => {
+            name if name == chelis_ir_core::host::TENSOR_SCAN_STACK => {
                 self.lines.push(format!(
                     "{}{target} = chelis_tensor_scan_stack({}, {});",
                     self.indent, arg_vars[0].0, arg_vars[1].0
@@ -13252,7 +13257,8 @@ impl<'a> HostEmitter<'a> {
         let guarded = matches!(callee, VerifiedCallee::Definition(_))
             && self.recursive_functions.contains(function);
         if guarded {
-            let span = chelis_ir::span_sanitize::sanitize_for_comment(span.unwrap_or("<unknown>"));
+            let span =
+                chelis_ir_core::span_sanitize::sanitize_for_comment(span.unwrap_or("<unknown>"));
             self.lines.push(format!(
                 "{}__chelis_host_recursive_call_guard(__chelis_origin_arena, {});",
                 self.indent,
@@ -14779,7 +14785,7 @@ impl<'a> HostEmitter<'a> {
         // emits `\u{XX}` for forbidden bytes, which is NOT valid C —
         // route through the format-string sanitizer (which emits
         // C-compatible `\xNN`/`\\`/`\"` escapes).
-        let safe_name = chelis_ir::span_sanitize::sanitize_for_format_string(name);
+        let safe_name = chelis_ir_core::span_sanitize::sanitize_for_format_string(name);
         self.lines.push(format!(
             "{}printf(\"%s = \", \"{safe_name}\");",
             self.indent
@@ -14915,7 +14921,7 @@ impl<'a> HostEmitter<'a> {
     }
 
     fn emit_labeled_boxed_root(&mut self, name: &str, value: &str) {
-        let safe_name = chelis_ir::span_sanitize::sanitize_for_format_string(name);
+        let safe_name = chelis_ir_core::span_sanitize::sanitize_for_format_string(name);
         self.lines.push(format!(
             "{}printf(\"%s = \", \"{safe_name}\");",
             self.indent
@@ -15562,7 +15568,7 @@ fn host_elementwise_arms(
 }
 
 /// Refuse a host elementwise loop over a dtype the shared host-loop table
-/// ([`chelis_ir::host::host_elementwise_loop_admits`]) does not admit. The
+/// ([`chelis_ir_core::host::host_elementwise_loop_admits`]) does not admit. The
 /// loop's `arms` are that table's admitted dtypes, which
 /// `host_elementwise_arms_match_the_shared_table` checks.
 fn admit_host_elementwise(
@@ -15574,7 +15580,7 @@ fn admit_host_elementwise(
         return Ok(());
     };
     let admitted =
-        chelis_ir::host::host_elementwise_loop_admits(name, operand.precision) == Some(true);
+        chelis_ir_core::host::host_elementwise_loop_admits(name, operand.precision) == Some(true);
     if admitted {
         if !arms.iter().any(|arm| arm.prim() == operand.precision) {
             return Err(invalid_abi_shape(
@@ -15606,7 +15612,7 @@ fn admit_host_elementwise(
 /// A statically closed descriptor is still an invariant, independently of
 /// the target's rejection of a valid runtime callable choice.
 fn validate_checked_builtin_identity(
-    operation: chelis_ir::host_type_state::CheckedBuiltinCallable,
+    operation: chelis_ir_core::host_type_state::CheckedBuiltinCallable,
     name: &str,
 ) -> Result<(), Unsupported> {
     if operation.symbol() != name {
@@ -16479,7 +16485,7 @@ mod expression_dispatch_tests {
     #[test]
     fn closed_callable_identity_mismatch_remains_an_internal_error() {
         use chelis_checker_core::unsupported::RejectionAuthorityKind;
-        use chelis_ir::host_type_state::CheckedBuiltinCallable;
+        use chelis_ir_core::host_type_state::CheckedBuiltinCallable;
         let nan = CheckedBuiltinCallable::from_symbol("is_nan").unwrap();
         assert!(validate_checked_builtin_identity(nan, "is_nan").is_ok());
         let error = validate_checked_builtin_identity(nan, "is_finite").unwrap_err();
@@ -16526,7 +16532,7 @@ mod expression_dispatch_tests {
                 let arms = host_elementwise_arms(name, &[tensor(prim), tensor(prim)])
                     .unwrap_or_else(|| panic!("`{name}` has a host loop"));
                 assert_eq!(
-                    chelis_ir::host::host_elementwise_loop_admits(name, prim),
+                    chelis_ir_core::host::host_elementwise_loop_admits(name, prim),
                     Some(arms.iter().any(|arm| arm.prim() == prim)),
                     "{name} at {prim:?}"
                 );

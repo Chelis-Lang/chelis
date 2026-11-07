@@ -1,6 +1,6 @@
 //! [05-OP-62], spec/04 §4.5, spec/05 §4.2: actual concat capability,
 //! not result-annotation spelling, decides whether a helper has a DAG.
-use chelis_ir::host::{HostLoweringSession, host_def_kernel};
+use chelis_ir_core::host::{HostLoweringSession, host_def_kernel};
 
 fn checked(src: &str) -> chelis_types::CheckedProgram {
     let parsed =
@@ -18,11 +18,13 @@ fn checked(src: &str) -> chelis_types::CheckedProgram {
 }
 
 fn decision(source: &str, name: &str, kernel: bool) {
-    let program = checked(source);
-    let result = host_def_kernel(&HostLoweringSession::new(&program), name)
-        .map(|value| value.is_some())
-        .map_err(|error| error.to_string());
-    assert_eq!(result, Ok(kernel), "{source}");
+    chelis_ir::resources::with_operation(|operation| {
+        let program = checked(source);
+        let result = host_def_kernel(&HostLoweringSession::new(program.facts(), operation), name)
+            .map(|value| value.is_some())
+            .map_err(|error| error.to_string());
+        assert_eq!(result, Ok(kernel), "{source}");
+    })
 }
 
 const JOIN: &str =
@@ -163,23 +165,30 @@ fn checked_matmul_producer_selects_host_for_runtime_concat_geometry() {
 
 #[test]
 fn forced_dynamic_concat_rejects_instead_of_fabricating_a_load() {
-    use chelis_dag_core::dag::{DimInfo, TensorType};
-    use chelis_numeric_core::prim::Prim;
-    use chelis_unord::UnordMap;
-    let expr = chelis_deep::parser::parse_str("(app {} (var {} concat) (app {} (var {} Cons) (var {} x) (app {} (var {} Cons) (var {} x) (var {} Nil))) (lit {} 1))", &chelis_syntax_host::NativeStack).unwrap().remove(0);
-    let scope = UnordMap::from([(
-        "x".to_string(),
-        TensorType {
-            dims: vec![DimInfo::Lit(2), DimInfo::Named("*".to_string(), None)],
-            precision: Prim::F32,
-        },
-    )]);
-    let error =
-        chelis_ir::lower::try_lower_subexpr_program(&expr, scope, UnordMap::new(), UnordMap::new())
-            .expect_err("no fabricated input");
-    assert!(
-        error
-            .to_string()
-            .contains("tensor concat cannot be represented by the static tensor DAG")
-    );
+    chelis_ir::resources::with_operation(|operation| {
+        use chelis_dag_core::dag::{DimInfo, TensorType};
+        use chelis_numeric_core::prim::Prim;
+        use chelis_unord::UnordMap;
+        let expr = chelis_deep::parser::parse_str("(app {} (var {} concat) (app {} (var {} Cons) (var {} x) (app {} (var {} Cons) (var {} x) (var {} Nil))) (lit {} 1))", &chelis_syntax_host::NativeStack).unwrap().remove(0);
+        let scope = UnordMap::from([(
+            "x".to_string(),
+            TensorType {
+                dims: vec![DimInfo::Lit(2), DimInfo::Named("*".to_string(), None)],
+                precision: Prim::F32,
+            },
+        )]);
+        let error = chelis_ir_core::lower::try_lower_subexpr_program(
+            &expr,
+            scope,
+            UnordMap::new(),
+            UnordMap::new(),
+            operation,
+        )
+        .expect_err("no fabricated input");
+        assert!(
+            error
+                .to_string()
+                .contains("tensor concat cannot be represented by the static tensor DAG")
+        );
+    })
 }

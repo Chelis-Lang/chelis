@@ -382,17 +382,17 @@ fn bf16_div_agrees_with_evaluator() {
         None,
     );
     dag.add_node(decl, RiscOp::Div, vec![a, b], vec_ty(n, Prim::Bf16), None);
-    let inputs: UnordMap<String, chelis_ir::eval::TensorValue> = [
+    let inputs: UnordMap<String, chelis_ir_core::eval::TensorValue> = [
         (
             "a".into(),
-            chelis_ir::eval::TensorValue::from_vec(
+            chelis_ir_core::eval::TensorValue::from_vec(
                 vec![n],
                 lhs.iter().map(|&v| v as f64).collect(),
             ),
         ),
         (
             "b".into(),
-            chelis_ir::eval::TensorValue::from_vec(
+            chelis_ir_core::eval::TensorValue::from_vec(
                 vec![n],
                 rhs.iter().map(|&v| v as f64).collect(),
             ),
@@ -436,17 +436,17 @@ fn f16_div_agrees_with_evaluator() {
         None,
     );
     dag.add_node(decl, RiscOp::Div, vec![a, b], vec_ty(n, Prim::F16), None);
-    let inputs: UnordMap<String, chelis_ir::eval::TensorValue> = [
+    let inputs: UnordMap<String, chelis_ir_core::eval::TensorValue> = [
         (
             "a".into(),
-            chelis_ir::eval::TensorValue::from_vec(
+            chelis_ir_core::eval::TensorValue::from_vec(
                 vec![n],
                 lhs.iter().map(|&v| v as f64).collect(),
             ),
         ),
         (
             "b".into(),
-            chelis_ir::eval::TensorValue::from_vec(
+            chelis_ir_core::eval::TensorValue::from_vec(
                 vec![n],
                 rhs.iter().map(|&v| v as f64).collect(),
             ),
@@ -484,9 +484,12 @@ fn unary_eval(op: RiscOp, prec: Prim, vals: &[f32]) -> Vec<f64> {
         None,
     );
     dag.add_node(decl, op, vec![load], vec_ty(n, prec), None);
-    let inputs: UnordMap<String, chelis_ir::eval::TensorValue> = [(
+    let inputs: UnordMap<String, chelis_ir_core::eval::TensorValue> = [(
         "x".into(),
-        chelis_ir::eval::TensorValue::from_vec(vec![n], vals.iter().map(|&v| v as f64).collect()),
+        chelis_ir_core::eval::TensorValue::from_vec(
+            vec![n],
+            vals.iter().map(|&v| v as f64).collect(),
+        ),
     )]
     .into_iter()
     .collect();
@@ -814,9 +817,12 @@ fn scalar_reduce_eval(op: RiscOp, prec: Prim, vals: &[f32]) -> f64 {
         None,
     );
     dag.add_node(decl, op, vec![load], scalar_ty(prec), None);
-    let inputs: UnordMap<String, chelis_ir::eval::TensorValue> = [(
+    let inputs: UnordMap<String, chelis_ir_core::eval::TensorValue> = [(
         "x".into(),
-        chelis_ir::eval::TensorValue::from_vec(vec![n], vals.iter().map(|&v| v as f64).collect()),
+        chelis_ir_core::eval::TensorValue::from_vec(
+            vec![n],
+            vals.iter().map(|&v| v as f64).collect(),
+        ),
     )]
     .into_iter()
     .collect();

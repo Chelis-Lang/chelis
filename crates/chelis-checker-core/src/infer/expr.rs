@@ -763,7 +763,7 @@ pub(super) fn infer_handle_effect(
 /// scored the program a perfect 1.0 while `chelis build` refused to lower it,
 /// so the score lied about the one output spec/04-type-system.md §10
 /// designates as agent feedback. The rule already existed one lane down
-/// in `chelis_ir::lower::lower_atom`, whose diagnostic states the law this
+/// in `chelis_ir_core::lower::lower_atom`, whose diagnostic states the law this
 /// site was breaking: unhandled or malformed forms cannot become Unit or
 /// another value ([05-UNS-1]; chelis#730). Reporting here says the same thing
 /// at the lane that is the oracle, and re-types the site `Type::Error` so it

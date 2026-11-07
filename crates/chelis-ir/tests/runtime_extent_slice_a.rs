@@ -2,8 +2,9 @@
 
 use chelis_dag_core::dag::{Dag, DimInfo, RiscOp, RtAxis, TensorType};
 use chelis_dag_core::verify;
-use chelis_ir::eval::{TensorValue, eval_tensor_roots_with_strict};
-use chelis_ir::vmap::vectorize_axis0;
+use chelis_ir::eval::eval_tensor_roots_with_strict;
+use chelis_ir_core::eval::TensorValue;
+use chelis_ir_core::vmap::vectorize_axis0;
 use chelis_numeric_core::prim::Prim;
 use chelis_unord::UnordMap;
 

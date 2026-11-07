@@ -6,13 +6,13 @@
 //! same application.
 use chelis_deep::ExprCarrier;
 use chelis_deep::ast::{Atom, Expr};
-use chelis_ir::ConcreteHostType as HostType;
 use chelis_ir::eval::eval_tensor_roots_with_strict;
-use chelis_ir::host::{
+use chelis_ir::host::try_lower_compiled_program;
+use chelis_ir_core::host::{
     ConcreteHostExpr as HostExpr, ConcreteHostExprKind as HostExprKind, HostTensorHelper,
-    try_lower_compiled_program,
 };
-use chelis_ir::lower::lower_subexpr_program;
+use chelis_ir_core::host_type_state::ConcreteHostType as HostType;
+use chelis_ir_core::lower::try_lower_subexpr_program;
 use chelis_numeric_core::prim::Prim;
 use chelis_unord::UnordMap;
 
@@ -106,31 +106,35 @@ fn def_name_and_body(expr: &Expr) -> Option<(String, Expr)> {
 /// The eval lane's value for `out`: the subexpression lowered to a DAG and
 /// evaluated, as `chelis eval` does for a gradient application.
 fn eval_lane_out(src: &str) -> String {
-    let checked = checked_surf(src);
-    let mut defs = UnordMap::new();
-    let mut out_expr = None;
-    for expr in checked.exprs() {
-        if let Some((name, body)) = def_name_and_body(expr) {
-            if name == "out" {
-                out_expr = Some(body.clone());
+    chelis_ir::resources::with_operation(|operation| {
+        let checked = checked_surf(src);
+        let mut defs = UnordMap::new();
+        let mut out_expr = None;
+        for expr in checked.exprs() {
+            if let Some((name, body)) = def_name_and_body(expr) {
+                if name == "out" {
+                    out_expr = Some(body.clone());
+                }
+                defs.insert(name, body);
             }
-            defs.insert(name, body);
         }
-    }
-    let type_env = checked
-        .type_env()
-        .iter()
-        .map(|(name, ty)| (name.clone(), ty.clone()))
-        .collect();
-    let dag = lower_subexpr_program(
-        &out_expr.expect("source must define out"),
-        UnordMap::new(),
-        type_env,
-        defs,
-    );
-    let roots = dag.roots().to_vec();
-    let values = eval_tensor_roots_with_strict(&dag, &roots, |_| None).expect("eval lane");
-    format!("{:?}", values[&roots[0]].storage())
+        let type_env = checked
+            .type_env()
+            .iter()
+            .map(|(name, ty)| (name.clone(), ty.clone()))
+            .collect();
+        let dag = try_lower_subexpr_program(
+            &out_expr.expect("source must define out"),
+            UnordMap::new(),
+            type_env,
+            defs,
+            operation,
+        )
+        .expect("subexpression lowers");
+        let roots = dag.roots().to_vec();
+        let values = eval_tensor_roots_with_strict(&dag, &roots, |_| None).expect("eval lane");
+        format!("{:?}", values[&roots[0]].storage())
+    })
 }
 
 fn helper_value(helper: &HostTensorHelper) -> String {
@@ -225,8 +229,8 @@ fn host_collection_transform_body_keeps_its_rejection() {
         panic!("{src}: expected the unresolved-transform marker, got {value:?}");
     };
     assert!(
-        matches!(callee.view(), chelis_ir::host::HostCalleeView::Unresolved(marker)
-            if chelis_ir::host::is_host_unresolved_marker(marker)),
+        matches!(callee.view(), chelis_ir_core::host::HostCalleeView::Unresolved(marker)
+            if chelis_ir_core::host::is_host_unresolved_marker(marker)),
         "{src}: {callee:?}"
     );
 }

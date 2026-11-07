@@ -33,7 +33,7 @@ use chelis_compiler_api::schema::{
     CompileRequest, CompileTarget, EvalRequest, EvalResult, ExecutionValue, SourceKind, TensorValue,
 };
 use chelis_compiler_api::{COMPILER_VERSION, compile_reef_context, eval_in_context_with_bindings};
-use chelis_ir::eval::TensorValue as DagTensor;
+use chelis_ir_core::eval::TensorValue as DagTensor;
 use chelis_numeric_core::dtype_semantics::{RawTensor, finalize_tensor};
 use chelis_numeric_core::prim::Prim;
 use chelis_types::types::Lane;
@@ -1695,20 +1695,27 @@ impl GatedKind {
 /// give it, and evaluated by the DAG evaluator: the root's values, or the
 /// evaluator's error.
 fn dag_evaluator(source: &str, inputs: &UnordMap<String, DagTensor>) -> Result<Vec<f64>, String> {
-    let declarations =
-        chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack).expect("parse");
-    let deep =
-        chelis_surf::desugar::desugar_program(&declarations, &chelis_syntax_host::NativeStack)
-            .expect("desugar");
-    let checked = chelis_types::check_typed_program(&deep)
-        .unwrap_or_else(|errors| panic!("check: {:?}", errors.errors));
-    let checked = chelis_effects::check_program(&checked).expect("effects");
-    let checked = chelis_types::check_linearity(&checked).expect("linearity");
-    let dag = chelis_ir::host::lower_named_tensor_entry_dag(&checked, "selected")
+    chelis_ir::resources::with_operation(|operation| {
+        let declarations = chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+            .expect("parse");
+        let deep =
+            chelis_surf::desugar::desugar_program(&declarations, &chelis_syntax_host::NativeStack)
+                .expect("desugar");
+        let checked = chelis_types::check_typed_program(&deep)
+            .unwrap_or_else(|errors| panic!("check: {:?}", errors.errors));
+        let checked = chelis_effects::check_program(&checked).expect("effects");
+        let checked = chelis_types::check_linearity(&checked).expect("linearity");
+        let dag = chelis_ir_core::host::lower_named_tensor_entry_dag(
+            (checked).facts(),
+            "selected",
+            operation,
+        )
+        .expect("named entry decision")
         .unwrap_or_else(|| panic!("`selected` lowers as a tensor entry:\n{source}"));
-    let root = *dag.roots().last().expect("a root");
-    let values = chelis_ir::eval::eval_tensor(&dag, inputs)?;
-    Ok(values[&root].to_f64_lossy_vec())
+        let root = *dag.roots().last().expect("a root");
+        let values = chelis_ir::eval::eval_tensor(&dag, inputs)?;
+        Ok(values[&root].to_f64_lossy_vec())
+    })
 }
 
 /// `outcome` must fail with a message containing `trap`.

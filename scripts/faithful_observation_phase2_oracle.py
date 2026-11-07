@@ -362,7 +362,8 @@ PERMITTED_RUST_FORMAT_NARROWING_PATHS: frozenset[str] = frozenset(
         "crates/chelis-e2e/src/bench.rs",
         "crates/chelis-e2e/src/bin/train_mnist.rs",
         "crates/chelis-ir/tests/dag_grad_host.rs",
-        "crates/chelis-ir/src/lower.rs",
+        # The two native duration reports move from lower.rs (chelis#4120).
+        "crates/chelis-ir/src/resources.rs",
         "crates/chelis-prove/src/bin/certify_erf_envelope.rs",
         "crates/chelis-prove/src/bin/certify_special_fn_envelope.rs",
         "crates/chelis-prove/src/erf_envelope.rs",

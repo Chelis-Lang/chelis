@@ -11,12 +11,7 @@ use chelis_deep::ast::Expr;
 use crate::CheckedProgram;
 use crate::types::{Lane, Target};
 
-/// One structural lookup from a top-level root to a dotted leaf.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RootPathStep {
-    Tuple(usize),
-    Adt(usize),
-}
+use chelis_type_core::RootPathStep;
 
 /// A single root entry in the manifest.
 #[derive(Debug, Clone)]

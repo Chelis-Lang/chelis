@@ -31,7 +31,7 @@ fn fatal_summary_diagnostic_returns_and_later_eval_recovers() {
         if let Err(payload) = &caught {
             eprintln!(
                 "escaped diagnostic: {:?}",
-                payload.downcast_ref::<chelis_ir::lower::LowerDiagnostic>()
+                payload.downcast_ref::<chelis_ir_core::lower::LowerDiagnostic>()
             );
         }
         let error = caught

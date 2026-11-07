@@ -16,8 +16,9 @@ use chelis_dag_core::dag::{
 use chelis_dag_core::grad::grad_dag_checked;
 use chelis_dag_core::optimize::{common_subexpr_eliminate, constant_fold, dead_code_eliminate};
 use chelis_dag_core::verify::verify;
-use chelis_ir::eval::{TensorValue, eval_tensor_roots_exact};
-use chelis_ir::vmap::vectorize_axis0;
+use chelis_ir::eval::eval_tensor_roots_exact;
+use chelis_ir_core::eval::TensorValue;
+use chelis_ir_core::vmap::vectorize_axis0;
 use chelis_numeric_core::dtype_semantics::{RandomKey, ScalarValue, scalar_from_i64};
 use chelis_numeric_core::dtype_semantics::{
     RawTensor, StorageView, TensorStorage, finalize_tensor,
@@ -2574,8 +2575,9 @@ fn vmap_refuses_to_broadcast_a_captured_key() {
     let drawn = draw(&mut dag, decl, key, None);
     dag.add_root(drawn);
     let captured = chelis_unord::UnordSet::from_iter(["k".to_string()]);
-    let error = chelis_ir::vmap::vectorize_axis0_with_captures(&dag, DimInfo::Lit(3), &captured)
-        .unwrap_err();
+    let error =
+        chelis_ir_core::vmap::vectorize_axis0_with_captures(&dag, DimInfo::Lit(3), &captured)
+            .unwrap_err();
     assert!(error.contains("captured key"), "{error}");
 }
 
@@ -2669,33 +2671,36 @@ fn a_batched_uniform_bound_adjoint_sums_shared_bounds_and_splits_per_row_bounds(
 /// `dropout(key_from_seed(42i64), x, rate)` over `x = [1; count]` through
 /// lowering and the DAG evaluator.
 fn lowered_dropout(rate: f64, count: usize) -> Result<Vec<f64>, String> {
-    let source = format!(
-        "(app {{}} (var {{}} dropout) \
+    chelis_ir::resources::with_operation(|operation| {
+        let source = format!(
+            "(app {{}} (var {{}} dropout) \
          (app {{}} (var {{}} key_from_seed) (lit {{type: (t-prim {{}} i64)}} 42)) \
          (var {{}} x) (lit {{type: (t-prim {{}} f32)}} {rate:?}))"
-    );
-    let expression = chelis_deep::parser::parse_str(&source, &chelis_syntax_host::NativeStack)
-        .unwrap()
-        .pop()
+        );
+        let expression = chelis_deep::parser::parse_str(&source, &chelis_syntax_host::NativeStack)
+            .unwrap()
+            .pop()
+            .unwrap();
+        let inputs = UnordMap::from_iter([(
+            "x".to_string(),
+            TensorType {
+                dims: vec![DimInfo::Lit(count)],
+                precision: Prim::F32,
+            },
+        )]);
+        let dag = chelis_ir_core::lower::try_lower_subexpr_program(
+            &expression,
+            inputs,
+            UnordMap::new(),
+            UnordMap::new(),
+            operation,
+        )
         .unwrap();
-    let inputs = UnordMap::from_iter([(
-        "x".to_string(),
-        TensorType {
-            dims: vec![DimInfo::Lit(count)],
-            precision: Prim::F32,
-        },
-    )]);
-    let dag = chelis_ir::lower::try_lower_subexpr_program(
-        &expression,
-        inputs,
-        UnordMap::new(),
-        UnordMap::new(),
-    )
-    .unwrap();
-    let values = eval_tensor_roots_exact(&dag, dag.roots(), |name| {
-        (name == "x").then(|| TensorValue::from_vec(vec![count], vec![1.0; count]))
-    })?;
-    Ok(values[&dag.roots()[0]].to_f64_lossy_vec())
+        let values = eval_tensor_roots_exact(&dag, dag.roots(), |name| {
+            (name == "x").then(|| TensorValue::from_vec(vec![count], vec![1.0; count]))
+        })?;
+        Ok(values[&dag.roots()[0]].to_f64_lossy_vec())
+    })
 }
 
 /// [05-OP-37]: a zero rate keeps every element, at empty and nonempty

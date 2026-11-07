@@ -172,7 +172,7 @@ pub fn codegen_hip(
 /// device caller supplies noncontiguous inputs.
 pub fn prepare_dag_for_codegen(dag: chelis_dag_core::dag::Dag) -> chelis_dag_core::dag::Dag {
     use chelis_dag_core::dag::{Dag, NodeId, RiscOp};
-    let selected = chelis_ir::specialize::specialize_for_blas(&dag);
+    let selected = chelis_ir_core::specialize::specialize_for_blas(&dag);
     let mut out = Dag::new();
     out.inherit_declarations(&selected);
     let mut remap: UnordMap<NodeId, NodeId> = UnordMap::new();
@@ -286,7 +286,7 @@ fn verified_host_helper_dag(
 ) -> Result<chelis_ir::ownership::VerifiedDagProgram, chelis_checker_core::unsupported::Unsupported>
 {
     let selected = prepare_dag_for_codegen(dag);
-    let unsupported = |error: chelis_ir::ownership::OwnershipError| {
+    let unsupported = |error: chelis_ir_core::ownership::OwnershipError| {
         chelis_checker_core::unsupported::Unsupported::new(
             chelis_checker_core::unsupported::UnsupportedKind::Construct(format!(
                 "HIP device helper `{helper_name}` ownership lowering"
@@ -307,7 +307,8 @@ fn verified_host_helper_dag(
 
 #[cfg(test)]
 pub(crate) mod testing {
-    use chelis_ir::ownership::{OwnershipError, VerifiedDagProgram};
+    use chelis_ir::ownership::VerifiedDagProgram;
+    use chelis_ir_core::ownership::OwnershipError;
 
     pub(crate) fn verified_dag(
         dag: &chelis_dag_core::dag::Dag,
@@ -321,9 +322,8 @@ pub(crate) mod testing {
 mod preparation_tests {
     use super::*;
     use chelis_dag_core::dag::{Dag, DimInfo, RiscOp, TensorType};
-    use chelis_ir::ownership::{
-        StoragePlacement, lower_dag_ownership, plan_hip_storage, verify_ownership,
-    };
+    use chelis_ir::ownership::{lower_dag_ownership, plan_hip_storage, verify_ownership};
+    use chelis_ir_core::ownership::storage::StoragePlacement;
     use chelis_numeric_core::prim::Prim;
 
     fn matrix_program(precision: Prim) -> Dag {

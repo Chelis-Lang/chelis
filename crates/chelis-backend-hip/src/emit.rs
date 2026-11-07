@@ -11,8 +11,9 @@ use chelis_dag_core::dag::{
     LogicalKind, NodeId, RiscOp, RtDim, TensorType,
 };
 use chelis_ir::ownership::{
-    HipStorageLane, StoragePlacement, VerifiedDagAction, VerifiedDagView, VerifiedStoragePlan,
+    HipStorageLane, VerifiedDagAction, VerifiedDagView, VerifiedStoragePlan,
 };
+use chelis_ir_core::ownership::storage::StoragePlacement;
 use chelis_numeric_core::dtype_semantics::{NumericTrap, ScalarValue};
 use chelis_numeric_core::named_cast::NamedCastMode;
 use chelis_numeric_core::observation::ElementRef;
@@ -30,7 +31,7 @@ fn unsupported_verified_dag_action(node: NodeId, detail: &str) -> Unsupported {
     )
 }
 
-fn unsupported_storage_plan(error: chelis_ir::ownership::OwnershipError) -> Unsupported {
+fn unsupported_storage_plan(error: chelis_ir_core::ownership::OwnershipError) -> Unsupported {
     Unsupported::new(
         UnsupportedKind::Op("storage planning".to_string()),
         error.to_string(),
@@ -532,7 +533,7 @@ impl HipEmitter {
                         Some(StoragePlacement::OwnedSlot { .. })
                     ) {
                         return Err(unsupported_storage_plan(
-                            chelis_ir::ownership::OwnershipError::LoweringInvariant {
+                            chelis_ir_core::ownership::OwnershipError::LoweringInvariant {
                                 unit: "hip-blas-layout".into(),
                                 detail: format!(
                                     "BLAS operand {} needs prepare_dag_for_codegen before ownership lowering; borrowed or view storage does not prove contiguous materialization",
@@ -672,7 +673,7 @@ impl HipEmitter {
         // context of the fprintf below; sanitize it so a
         // forbidden byte cannot break the C string literal or be misread
         // as a `%`-specifier.
-        let func_name_fmt = chelis_ir::span_sanitize::sanitize_for_format_string(func_name);
+        let func_name_fmt = chelis_ir_core::span_sanitize::sanitize_for_format_string(func_name);
 
         // Input/output count validation
         e.line(&format!("if (n_in != {expected_inputs}) {{"));
@@ -851,7 +852,7 @@ impl HipEmitter {
         self.indent = 1;
 
         // Escape `func_name` before emitting it in a format string.
-        let func_name_fmt = chelis_ir::span_sanitize::sanitize_for_format_string(func_name);
+        let func_name_fmt = chelis_ir_core::span_sanitize::sanitize_for_format_string(func_name);
 
         self.line(&format!("if (n_in != {expected_inputs}) {{"));
         self.indent += 1;
@@ -1092,14 +1093,14 @@ impl HipEmitter {
         let input_types = Self::input_types(dag);
         let sorted_labels = input_types.to_sorted();
         // Producer-supplied `func_name` flows into a format string.
-        let func_name_fmt = chelis_ir::span_sanitize::sanitize_for_format_string(func_name);
+        let func_name_fmt = chelis_ir_core::span_sanitize::sanitize_for_format_string(func_name);
         for (label, _) in sorted_labels {
             let ty = &input_types[label];
             let slot = input_slots[label];
             // `label` is `LoadStoreName::as_str()` (validated); route
             // through the format-string sanitizer to lock the
             // architectural pattern.
-            let label_fmt = chelis_ir::span_sanitize::sanitize_for_format_string(label);
+            let label_fmt = chelis_ir_core::span_sanitize::sanitize_for_format_string(label);
             self.line(&format!("if (inputs[{slot}] == NULL) {{"));
             self.indent += 1;
             self.line(&format!(
@@ -1142,7 +1143,7 @@ impl HipEmitter {
             let canonical_slot = input_slots[canonical_label];
             // `binding.name` flows into format-string context; sanitize.
             let binding_name_fmt =
-                chelis_ir::span_sanitize::sanitize_for_format_string(&binding.name);
+                chelis_ir_core::span_sanitize::sanitize_for_format_string(&binding.name);
             self.line(&format!(
                 "chelis_device_metadata {} = chelis_tensor_shape(inputs[{canonical_slot}], {canonical_axis});",
                 binding.name
@@ -1150,7 +1151,8 @@ impl HipEmitter {
             for occurrence in &binding.others {
                 let (occ_label, occ_axis) = require_load_source(occurrence);
                 let slot = input_slots[occ_label];
-                let occ_label_fmt = chelis_ir::span_sanitize::sanitize_for_format_string(occ_label);
+                let occ_label_fmt =
+                    chelis_ir_core::span_sanitize::sanitize_for_format_string(occ_label);
                 self.line(&format!(
                     "if (chelis_tensor_shape(inputs[{slot}], {occ_axis}) != {}) {{",
                     binding.name
@@ -1185,7 +1187,8 @@ impl HipEmitter {
             let Some(&slot) = input_slots.get(label.as_str()) else {
                 continue;
             };
-            let label_fmt = chelis_ir::span_sanitize::sanitize_for_format_string(label.as_str());
+            let label_fmt =
+                chelis_ir_core::span_sanitize::sanitize_for_format_string(label.as_str());
             self.line(&format!(
                 "if (chelis_tensor_shape(inputs[{slot}], {read_axis}) != 1) {{"
             ));
@@ -1228,7 +1231,7 @@ impl HipEmitter {
                         };
                         let slot = *input_slots.get(name.as_str())?;
                         let parameter =
-                            chelis_ir::span_sanitize::sanitize_for_format_string(parameter);
+                            chelis_ir_core::span_sanitize::sanitize_for_format_string(parameter);
                         Some((
                             format!("{parameter} axis {axis} = %lld"),
                             format!("(long long)chelis_tensor_shape(inputs[{slot}], {axis})"),
@@ -1258,7 +1261,8 @@ impl HipEmitter {
                 ) else {
                     continue;
                 };
-                let label = chelis_ir::span_sanitize::sanitize_for_format_string(&obligation.label);
+                let label =
+                    chelis_ir_core::span_sanitize::sanitize_for_format_string(&obligation.label);
                 let operation = obligation.operation;
                 self.line(&format!("if ({left} != {right}) {{"));
                 self.indent += 1;
@@ -1317,11 +1321,11 @@ impl HipEmitter {
         let sorted_labels = input_types.to_sorted();
         // Escape producer-supplied strings before emitting them in a
         // format string.
-        let func_name_fmt = chelis_ir::span_sanitize::sanitize_for_format_string(func_name);
+        let func_name_fmt = chelis_ir_core::span_sanitize::sanitize_for_format_string(func_name);
         for (label, _) in sorted_labels {
             let ty = &input_types[label];
             let slot = input_slots[label];
-            let label_fmt = chelis_ir::span_sanitize::sanitize_for_format_string(label);
+            let label_fmt = chelis_ir_core::span_sanitize::sanitize_for_format_string(label);
             self.line(&format!("if (inputs[{slot}] == NULL) {{"));
             self.indent += 1;
             self.line(&format!(
@@ -1364,7 +1368,7 @@ impl HipEmitter {
             let (canonical_label, canonical_axis) = require_load_source(&binding.canonical);
             let canonical_slot = input_slots[canonical_label];
             let binding_name_fmt =
-                chelis_ir::span_sanitize::sanitize_for_format_string(&binding.name);
+                chelis_ir_core::span_sanitize::sanitize_for_format_string(&binding.name);
             self.line(&format!(
                 "chelis_device_metadata {} = input_view_{canonical_slot}->shape[{canonical_axis}];",
                 binding.name
@@ -1372,7 +1376,8 @@ impl HipEmitter {
             for occurrence in &binding.others {
                 let (occ_label, occ_axis) = require_load_source(occurrence);
                 let slot = input_slots[occ_label];
-                let occ_label_fmt = chelis_ir::span_sanitize::sanitize_for_format_string(occ_label);
+                let occ_label_fmt =
+                    chelis_ir_core::span_sanitize::sanitize_for_format_string(occ_label);
                 self.line(&format!(
                     "if (input_view_{slot}->shape[{occ_axis}] != {}) {{",
                     binding.name
@@ -5119,7 +5124,7 @@ impl HipEmitter {
         // sanitizer (which targets the line-comment context). The
         // control-byte sanitizer below still applies as defense in
         // depth.
-        let safe_name = chelis_ir::span_sanitize::sanitize_for_comment(name);
+        let safe_name = chelis_ir_core::span_sanitize::sanitize_for_comment(name);
         self.line(&format!("/* store: {safe_name} */"));
     }
 
@@ -5574,7 +5579,7 @@ impl HipEmitter {
             return out;
         }
         if let Some(canonical) = node.span_id.as_deref() {
-            let safe = chelis_ir::span_sanitize::sanitize_for_comment(canonical);
+            let safe = chelis_ir_core::span_sanitize::sanitize_for_comment(canonical);
             out.push(format!("// span: {safe}"));
         }
         let mut merged: Vec<&str> = node
@@ -5586,7 +5591,7 @@ impl HipEmitter {
         merged.sort();
         merged.dedup();
         for span in merged {
-            let safe = chelis_ir::span_sanitize::sanitize_for_comment(span);
+            let safe = chelis_ir_core::span_sanitize::sanitize_for_comment(span);
             out.push(format!("// span: {safe}"));
         }
         out

@@ -9,16 +9,15 @@ use std::collections::BTreeSet;
 
 use chelis_dag_core::{Dag, DimInfo, RiscOp, TensorType};
 use chelis_effects::realizability::{compute_root_manifest, infer_realizability};
-use chelis_ir::ConcreteHostType;
-use chelis_ir::host::{
-    ConcreteHostProgram, HostExpr, HostExprKind, HostFunctionOrigin,
-    try_lower_compiled_program_with_manifest,
-};
+use chelis_ir::host::try_lower_compiled_program_with_manifest;
 use chelis_ir::ownership::{
-    HostOwnershipProgram, OwnershipError, VerifiedDagAction, VerifiedHostAction,
-    VerifiedHostOperation, VerifiedHostProgram, VerifiedHostTerminator, VerifiedOwnershipUse,
-    lower_dag_ownership, lower_host_ownership, verify_ownership,
+    HostOwnershipProgram, VerifiedDagAction, VerifiedHostAction, VerifiedHostOperation,
+    VerifiedHostProgram, VerifiedHostTerminator, VerifiedOwnershipUse, lower_dag_ownership,
+    lower_host_ownership, verify_ownership,
 };
+use chelis_ir_core::host::{ConcreteHostProgram, HostExpr, HostExprKind, HostFunctionOrigin};
+use chelis_ir_core::host_type_state::ConcreteHostType;
+use chelis_ir_core::ownership::OwnershipError;
 use chelis_numeric_core::prim::Prim;
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str as surf_parse;
@@ -1163,7 +1162,7 @@ fn malformed_real_host_programs_fail_at_typed_boundaries() {
     let mut wrong_arity = front.host.clone();
     wrong_arity.globals[0].value = HostExpr::new(HostExprKind::Call {
         // A global's call of a def has the shape of a root driver's.
-        callee: chelis_ir::host::HostCallee::root_driver("id".to_string()),
+        callee: chelis_ir_core::host::HostCallee::root_driver("id".to_string()),
         args: Vec::new(),
         arg_tys: Vec::new(),
         ty: ConcreteHostType::Int64,
@@ -1901,12 +1900,13 @@ fn signature_entry_requires_tensor_observations_and_preserves_borrows() {
         ConcreteHostType::Tensor(ty) => ty.clone(),
         other => panic!("{other:?}"),
     };
-    let plan = chelis_ir::host::SignatureEntryPlan::new([chelis_ir::host::HostTensorInput {
-        name: "x".into(),
-        ty,
-    }]);
+    let plan =
+        chelis_ir_core::host::SignatureEntryPlan::new([chelis_ir_core::host::HostTensorInput {
+            name: "x".into(),
+            ty,
+        }]);
     function.body = HostExpr::new(HostExprKind::Let {
-        bindings: vec![chelis_ir::host::HostBinding {
+        bindings: vec![chelis_ir_core::host::HostBinding {
             name: "checked".into(),
             display_name: None,
             display_roots: Vec::new(),

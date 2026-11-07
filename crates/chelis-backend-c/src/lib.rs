@@ -130,7 +130,7 @@ pub fn codegen(
 /// Compile a sealed, verified host payload.
 ///
 /// ```compile_fail
-/// # use chelis_ir::host::ConcreteHostProgram;
+/// # use chelis_ir_core::host::ConcreteHostProgram;
 /// fn bypass(raw: &ConcreteHostProgram) {
 ///     let _ = chelis_backend_c::codegen_host_program(raw, "unchecked");
 /// }
@@ -215,12 +215,12 @@ pub fn codegen_host_program_with_external_tensor_helpers(
 /// returned source DAG through its own preparation pipeline, exactly as it
 /// would a tensor entry, rather than reusing the C lane's selected payload.
 pub fn host_tensor_helper_codegen(
-    program: chelis_ir::host::ConcreteHostProgram,
+    program: chelis_ir_core::host::ConcreteHostProgram,
     func_name: &str,
 ) -> Result<
     (
         Vec<HostTensorHelperCodegen>,
-        chelis_ir::host::ConcreteHostProgram,
+        chelis_ir_core::host::ConcreteHostProgram,
     ),
     chelis_checker_core::unsupported::Unsupported,
 > {
@@ -312,9 +312,9 @@ pub fn prepare_dag_for_codegen(
     dag: chelis_dag_core::dag::Dag,
     options: CodegenOptions,
 ) -> chelis_dag_core::dag::Dag {
-    let dag = chelis_ir::compositions::decompose(&dag);
+    let dag = chelis_ir_core::compositions::decompose(&dag);
     let dag = if options.use_blas {
-        chelis_ir::specialize::specialize_for_exact_arithmetic(&dag)
+        chelis_ir_core::specialize::specialize_for_exact_arithmetic(&dag)
     } else {
         dag
     };
@@ -326,8 +326,9 @@ pub fn prepare_dag_for_codegen(
 
 /// Select the exact nested C helper DAGs before host ownership lowering.
 pub fn prepare_host_program_for_codegen(
-    mut program: chelis_ir::host::ConcreteHostProgram,
-) -> Result<chelis_ir::host::ConcreteHostProgram, chelis_checker_core::unsupported::Unsupported> {
+    mut program: chelis_ir_core::host::ConcreteHostProgram,
+) -> Result<chelis_ir_core::host::ConcreteHostProgram, chelis_checker_core::unsupported::Unsupported>
+{
     prepare_concrete_host_program_for_codegen(&mut program, true)?;
     Ok(program)
 }
@@ -339,14 +340,14 @@ pub fn prepare_host_execution_plan_for_codegen(
     plan: chelis_ir::host::HostExecutionPlan,
 ) -> Result<chelis_ir::host::HostExecutionPlan, chelis_checker_core::unsupported::Unsupported> {
     for helper in &plan.program().global_tensor_helpers {
-        chelis_ir::axis_admission::check_axis_sources(
+        chelis_ir_core::axis_admission::check_axis_sources(
             &helper.dag,
             chelis_checker_core::unsupported::Stage::Codegen("c"),
         )?;
     }
     for function in &plan.program().functions {
         for helper in &function.tensor_helpers {
-            chelis_ir::axis_admission::check_axis_sources(
+            chelis_ir_core::axis_admission::check_axis_sources(
                 &helper.dag,
                 chelis_checker_core::unsupported::Stage::Codegen("c"),
             )?;
@@ -356,28 +357,30 @@ pub fn prepare_host_execution_plan_for_codegen(
 }
 
 fn prepare_concrete_host_program_for_codegen(
-    program: &mut chelis_ir::host::ConcreteHostProgram,
+    program: &mut chelis_ir_core::host::ConcreteHostProgram,
     specialize_exact_arithmetic: bool,
 ) -> Result<(), chelis_checker_core::unsupported::Unsupported> {
     fn prepare(
-        helper: &mut chelis_ir::host::HostTensorHelper,
+        helper: &mut chelis_ir_core::host::HostTensorHelper,
         specialize_exact_arithmetic: bool,
     ) -> Result<(), chelis_checker_core::unsupported::Unsupported> {
         // A shape-derived BLAS summary is not proof of the primitive
         // contraction's arithmetic. Keep the source graph as the payload.
         if matches!(
             helper.specialization,
-            Some(chelis_ir::host::HostTensorSpecialization::BlasMatmul(_))
+            Some(chelis_ir_core::host::HostTensorSpecialization::BlasMatmul(
+                _
+            ))
         ) {
             helper.specialization = None;
         }
-        let decomposed = chelis_ir::compositions::decompose(&helper.dag);
+        let decomposed = chelis_ir_core::compositions::decompose(&helper.dag);
         let specialized = if specialize_exact_arithmetic {
-            chelis_ir::specialize::specialize_for_exact_arithmetic(&decomposed)
+            chelis_ir_core::specialize::specialize_for_exact_arithmetic(&decomposed)
         } else {
             decomposed
         };
-        chelis_ir::axis_admission::check_axis_sources(
+        chelis_ir_core::axis_admission::check_axis_sources(
             &specialized,
             chelis_checker_core::unsupported::Stage::Codegen("c"),
         )?;
@@ -392,7 +395,7 @@ fn prepare_concrete_host_program_for_codegen(
         // summary; clear that route as well before ownership binds payloads.
         if matches!(
             function.specialization,
-            Some(chelis_ir::host::HostFunctionSpecialization::BlasMatmul(_))
+            Some(chelis_ir_core::host::HostFunctionSpecialization::BlasMatmul(_))
         ) {
             function.specialization = None;
         }
@@ -405,7 +408,8 @@ fn prepare_concrete_host_program_for_codegen(
 
 #[cfg(test)]
 pub(crate) mod testing {
-    use chelis_ir::ownership::{OwnershipError, VerifiedDagProgram};
+    use chelis_ir::ownership::VerifiedDagProgram;
+    use chelis_ir_core::ownership::OwnershipError;
 
     pub(crate) fn verified_dag(
         dag: &chelis_dag_core::dag::Dag,
@@ -444,7 +448,7 @@ mod tests {
     }
 
     fn codegen_host_program(
-        program: &chelis_ir::host::ConcreteHostProgram,
+        program: &chelis_ir_core::host::ConcreteHostProgram,
         name: &str,
     ) -> Result<CodegenResult, chelis_checker_core::unsupported::Unsupported> {
         let source = program
@@ -733,12 +737,12 @@ mod tests {
         // For a HostProgram with a tensor helper, the emitted `.c` source must
         // mark the helper function as `static` (preventing PLT export) while
         // the user-facing HostFunction entry keeps external linkage.
-        use chelis_ir::ConcreteHostType as HostType;
-        use chelis_ir::host::{
+        use chelis_ir_core::host::{
             ConcreteHostExpr as HostExpr, ConcreteHostExprKind as HostExprKind,
             ConcreteHostFunction as HostFunction, ConcreteHostParam as HostParam,
             ConcreteHostProgram as HostProgram, HostTensorHelper,
         };
+        use chelis_ir_core::host_type_state::ConcreteHostType as HostType;
 
         // Build a simple 1-element scalar DAG for the helper.
         let mut helper_dag = Dag::new();
@@ -775,7 +779,7 @@ mod tests {
             // but the helper must still be emitted into the file.
             body: HostExpr::new(HostExprKind::Float(0.0)),
             tensor_helpers: vec![helper],
-            origin: chelis_ir::host::HostFunctionOrigin::Authored,
+            origin: chelis_ir_core::host::HostFunctionOrigin::Authored,
             specialization: None,
             summary_rejections: Vec::new(),
         };
@@ -818,12 +822,12 @@ mod tests {
 
     #[test]
     fn host_program_tensor_helper_blas_sets_toolchain_requirement() {
-        use chelis_ir::ConcreteHostType as HostType;
-        use chelis_ir::host::{
+        use chelis_ir_core::host::{
             ConcreteHostExpr as HostExpr, ConcreteHostExprKind as HostExprKind,
             ConcreteHostFunction as HostFunction, ConcreteHostParam as HostParam,
             ConcreteHostProgram as HostProgram, HostTensorHelper, HostTensorInput,
         };
+        use chelis_ir_core::host_type_state::ConcreteHostType as HostType;
 
         let a_ty = mat_f32(2, 3);
         let b_ty = mat_f32(3, 4);
@@ -889,7 +893,7 @@ mod tests {
             ret_ty: HostType::Float64,
             body: HostExpr::new(HostExprKind::Float(0.0)),
             tensor_helpers: vec![helper],
-            origin: chelis_ir::host::HostFunctionOrigin::Authored,
+            origin: chelis_ir_core::host::HostFunctionOrigin::Authored,
             specialization: None,
             summary_rejections: Vec::new(),
         };
@@ -4024,12 +4028,12 @@ int main(void) {{
     /// void`, and monomorphized specializations remain translation-unit local.
     #[test]
     fn adv_host_program_with_globals_keeps_authored_exports_external() {
-        use chelis_ir::ConcreteHostType as HostType;
-        use chelis_ir::host::{
+        use chelis_ir_core::host::{
             ConcreteHostBinding as HostBinding, ConcreteHostExpr as HostExpr,
             ConcreteHostExprKind as HostExprKind, ConcreteHostFunction as HostFunction,
             ConcreteHostParam as HostParam, ConcreteHostProgram as HostProgram, HostTensorHelper,
         };
+        use chelis_ir_core::host_type_state::ConcreteHostType as HostType;
 
         let mut helper_dag = Dag::new();
         let helper_dag_decl = helper_dag.declare("test");
@@ -4063,7 +4067,7 @@ int main(void) {{
             ret_ty: HostType::Float64,
             body: HostExpr::new(HostExprKind::Float(0.0)),
             tensor_helpers: vec![helper],
-            origin: chelis_ir::host::HostFunctionOrigin::Authored,
+            origin: chelis_ir_core::host::HostFunctionOrigin::Authored,
             specialization: None,
             summary_rejections: Vec::new(),
         };
@@ -4109,12 +4113,12 @@ int main(void) {{
     /// This confirms that `static` linkage on helpers doesn't break shared-library builds.
     #[test]
     fn adv_host_program_compiles_as_shared_library_with_fpic() {
-        use chelis_ir::ConcreteHostType as HostType;
-        use chelis_ir::host::{
+        use chelis_ir_core::host::{
             ConcreteHostExpr as HostExpr, ConcreteHostExprKind as HostExprKind,
             ConcreteHostFunction as HostFunction, ConcreteHostParam as HostParam,
             ConcreteHostProgram as HostProgram, HostTensorHelper,
         };
+        use chelis_ir_core::host_type_state::ConcreteHostType as HostType;
 
         let mut helper_dag = Dag::new();
         let helper_dag_decl = helper_dag.declare("test");
@@ -4148,7 +4152,7 @@ int main(void) {{
             ret_ty: HostType::Float64,
             body: HostExpr::new(HostExprKind::Float(0.0)),
             tensor_helpers: vec![helper],
-            origin: chelis_ir::host::HostFunctionOrigin::Authored,
+            origin: chelis_ir_core::host::HostFunctionOrigin::Authored,
             specialization: None,
             summary_rejections: Vec::new(),
         };

@@ -7,7 +7,7 @@
 //! refused after the fact ("the kernel body of `case` reaches the host-only
 //! builtin `fold`"). The C lane fell through to host code (chelis#1515) and
 //! built the program; the eval lane, which never falls through, rejected it.
-//! The kernel decision (`chelis_ir::host::host_def_kernel`) must name the
+//! The kernel decision (`chelis_ir_core::host::host_def_kernel`) must name the
 //! class before lowering, so both lanes choose host code for the same reason.
 //!
 //! The callback's result is varied over every source a value can come from:
@@ -24,7 +24,7 @@ use chelis_compiler_api::compiler::{eval, eval_selected};
 use chelis_compiler_api::schema::{
     EvalRequest, EvalResult, ExecutionValue, SourceKind, TensorValue,
 };
-use chelis_ir::host::{HostLoweringSession, host_def_kernel};
+use chelis_ir_core::host::{HostLoweringSession, host_def_kernel};
 
 const ITEMS: &str = "[to_tensor([1.0, 2.0, 3.0], f32), to_tensor([4.0, 5.0, 6.0], f32)]";
 
@@ -72,21 +72,23 @@ fn root_display(result: &EvalResult, name: &str) -> String {
 }
 
 fn kernel_decision(source: &str, name: &str) -> Result<bool, String> {
-    let decls = chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack)
-        .expect("surf parse");
-    let exprs = chelis_macros::expand_program(
-        &chelis_surf::desugar::desugar_program(&decls, &chelis_syntax_host::NativeStack)
-            .expect("Surf fixture must desugar"),
-        &chelis_macros::ExpansionOptions::default(),
-    )
-    .expect("macro expansion")
-    .into_exprs();
-    let checked = chelis_types::check_ir_program(&exprs).expect("type check");
-    let checked = chelis_effects::check_program(&checked).expect("effects");
-    let checked = chelis_types::check_linearity(&checked).expect("linearity");
-    host_def_kernel(&HostLoweringSession::new(&checked), name)
-        .map(|kernel| kernel.is_some())
-        .map_err(|diagnostic| diagnostic.to_string())
+    chelis_ir::resources::with_operation(|operation| {
+        let decls = chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+            .expect("surf parse");
+        let exprs = chelis_macros::expand_program(
+            &chelis_surf::desugar::desugar_program(&decls, &chelis_syntax_host::NativeStack)
+                .expect("Surf fixture must desugar"),
+            &chelis_macros::ExpansionOptions::default(),
+        )
+        .expect("macro expansion")
+        .into_exprs();
+        let checked = chelis_types::check_ir_program(&exprs).expect("type check");
+        let checked = chelis_effects::check_program(&checked).expect("effects");
+        let checked = chelis_types::check_linearity(&checked).expect("linearity");
+        host_def_kernel(&HostLoweringSession::new(checked.facts(), operation), name)
+            .map(|kernel| kernel.is_some())
+            .map_err(|diagnostic| diagnostic.to_string())
+    })
 }
 
 fn tensor(values: [f32; 3]) -> String {

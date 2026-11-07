@@ -8,7 +8,6 @@ A temporary numeric arm then exposes independent effect and runtime consumers.
 Both source owners restore their original bytes.
 
 The separate ABI probe requires exhaustive owner and emitter matches.
-The endpoint scan rejects legacy host-type, expression-emission, Unit, and raw-field paths.
 The oracle refuses mutations when either source owner is dirty.
 """
 
@@ -46,7 +45,7 @@ FOCUSED_COMMANDS: tuple[tuple[str, ...], ...] = (
         "nextest",
         "run",
         "-p",
-        "chelis-ir",
+        "chelis-ir-core",
         "--test",
         "host_type_failure_states",
     ),
@@ -427,98 +426,6 @@ def run_host_abi_mutation(env: dict[str, str]) -> None:
     print("  mutation produced the expected downstream compile failures", flush=True)
 
 
-def endpoint_violations(root: Path) -> list[str]:
-    """Return structural endpoint regressions found in production sources."""
-
-    zero_occurrence = (
-        (Path("crates/chelis-ir/src/host.rs"), "HostType::Unknown"),
-        (Path("crates/chelis-ir/src/host.rs"), "pub fn lower_compiled_program"),
-        (Path("crates/chelis-compiler-api/src/compiler.rs"), "::host::lower_compiled_program"),
-        (Path("crates/chelis-backend-c/src/emitted_expr.rs"), "EmittedExpr::raw"),
-        (Path("crates/chelis-backend-c/src/host_emit.rs"), "EmittedExpr::raw"),
-        (
-            Path("crates/chelis-ir/src/host.rs"),
-            "_ => HostExpr::new(HostExprKind::Unit)",
-        ),
-        (
-            Path("crates/chelis-ir/src/host.rs"),
-            "let placeholder = HostExpr::new(HostExprKind::Unit)",
-        ),
-        (Path("crates/chelis-ir/src/host.rs"), "fn lookup_adt_ctor("),
-        (
-            Path("crates/chelis-ir/src/host.rs"),
-            "fn lookup_adt_ctor_details(",
-        ),
-        (
-            Path("crates/chelis-ir/src/host.rs"),
-            "fn lookup_adt_ctor_details_for_type(",
-        ),
-        (Path("crates/chelis-backend-c/src/host_abi.rs"), '"void*"'),
-        (Path("crates/chelis-backend-c/src/host_abi.rs"), '"void *"'),
-    )
-    required = (
-        (
-            Path("crates/chelis-backend-c/src/host_abi.rs"),
-            "pub(crate) enum HostAbiType",
-        ),
-        (
-            Path("crates/chelis-backend-c/src/host_emit.rs"),
-            'require_same_abi_type(ty, &HostType::Unit, "unit expression")?;',
-        ),
-        (
-            Path("crates/chelis-ir/src/host.rs"),
-            "pub fn try_lower_compiled_program",
-        ),
-        (Path("crates/chelis-ir/src/host.rs"), "fn lower_host_expr("),
-        (Path("crates/chelis-ir/src/host.rs"), "fn lower_host_expr_kind("),
-        (
-            Path("crates/chelis-ir/src/host.rs"),
-            ") -> Result<HostExpr, crate::lower::LowerDiagnostic> {",
-        ),
-        (
-            Path("crates/chelis-ir/src/host.rs"),
-            "struct GenericAdtConstructor",
-        ),
-        (Path("crates/chelis-ir/src/host.rs"), "struct GenericAdtField"),
-        (
-            Path("crates/chelis-ir/src/host.rs"),
-            "struct InstantiatedAdtConstructor",
-        ),
-        (
-            Path("crates/chelis-ir/src/host.rs"),
-            ") -> Result<InstantiatedAdtConstructor, AdtInstantiationError> {",
-        ),
-    )
-    violations: list[str] = []
-    cache: dict[Path, str] = {}
-
-    def read(relative: Path) -> str | None:
-        if relative in cache:
-            return cache[relative]
-        path = root / relative
-        try:
-            cache[relative] = path.read_text(encoding="utf-8")
-        except OSError as error:
-            violations.append(f"missing endpoint source {relative}: {error}")
-            return None
-        return cache[relative]
-
-    for relative, forbidden in zero_occurrence:
-        source = read(relative)
-        if source is not None and forbidden in source:
-            violations.append(f"{relative}: forbidden endpoint token {forbidden!r}")
-    for relative, marker in required:
-        source = read(relative)
-        if source is not None and marker not in source:
-            violations.append(f"{relative}: missing structural marker {marker!r}")
-    return violations
-
-
-def run_endpoint_scan() -> None:
-    violations = endpoint_violations(REPO_ROOT)
-    if violations:
-        raise OracleFailure("Phase 2 endpoint scan failed:\n" + "\n".join(violations))
-    print("+ zero-occurrence and typed-endpoint scan: pass", flush=True)
 
 
 def main() -> int:
@@ -526,7 +433,6 @@ def main() -> int:
     try:
         for command in FOCUSED_COMMANDS:
             run_success(command, env=env)
-        run_endpoint_scan()
         run_vocab_mutation(env)
         run_host_abi_mutation(env)
     except OracleFailure as error:

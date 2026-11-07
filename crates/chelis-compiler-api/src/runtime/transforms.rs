@@ -7,8 +7,8 @@ use chelis_unord::{UnordMap, UnordSet};
 use chelis_dag_core::dag::{DimInfo, TensorType};
 use chelis_deep::Span;
 use chelis_deep::ast::{Atom, Expr, ExprCarrier, Metadata};
-use chelis_ir::eval::{TensorInputDemand, TensorValue as IrTensorValue};
-use chelis_ir::lower::SubexprLoweringContext;
+use chelis_ir_core::eval::{TensorInputDemand, TensorValue as IrTensorValue};
+use chelis_ir_core::lower::SubexprLoweringContext;
 use chelis_numeric_core::prim::Prim;
 use chelis_type_core::{NominalArg, TensorPrec, Type, TypeVar};
 
@@ -375,11 +375,11 @@ impl<'a> EvalContext<'a> {
         repacks: &[ArgRepack],
         gradient: bool,
         claims: &[DeclaredResultClaim],
-    ) -> Result<Vec<chelis_ir::eval::InheritedResultClaim>, String> {
+    ) -> Result<Vec<chelis_ir_core::eval::InheritedResultClaim>, String> {
         if claims.is_empty() {
             return Ok(Vec::new());
         }
-        use chelis_ir::claim_pattern::ClaimStep;
+        use chelis_ir_core::claim_pattern::ClaimStep;
         let shapes = if gradient && !repacks.is_empty() {
             repacks
                 .iter()
@@ -453,7 +453,7 @@ impl<'a> EvalContext<'a> {
     /// Bucket 1 entry point: evaluate `(grad f)(args...)` /
     /// `(vmap f)(args...)` in the host runtime. Synthesizes a Deep
     /// `(app {} <transform-expr> (var __chelis_xform_arg_k))` form and
-    /// routes it through `chelis_ir::lower::lower_subexpr_program` +
+    /// routes it through `chelis_ir_core::lower::try_lower_subexpr_program` +
     /// `chelis_ir::eval::eval_tensor_*`. The IR pipeline already
     /// implements grad and vmap (it's what the C backend uses); we just
     /// reuse it instead of writing a parallel reverse-mode evaluator
@@ -593,7 +593,7 @@ impl<'a> EvalContext<'a> {
         };
         let callee = Expr::node(
             transform_node.tag(),
-            chelis_ir::lower::without_binding_origin(transform_node.meta()),
+            chelis_ir_core::lower::without_binding_origin(transform_node.meta()),
             transform_node.children_slice().to_vec(),
             *transform_span,
         );
@@ -675,28 +675,35 @@ impl<'a> EvalContext<'a> {
         // The context is a pure function of the program's fixed tables, so
         // it is prepared once per evaluation context rather than per
         // application (chelis#2439).
-        let lowering = self.program.transform_lowering_context(|| {
-            if let Some(session) = &self.session {
-                SubexprLoweringContext::from_checked_program(
-                    session.program(),
-                    program_defs.clone(),
-                    self.declared_signatures.clone(),
-                )
-            } else {
-                SubexprLoweringContext::new(
-                    self.program.type_env().clone(),
-                    program_defs.clone(),
-                    self.declared_signatures.clone(),
-                )
-                .with_adt_registry(&self.adt_registry)
-            }
-        });
-        let lowering = lowering.with_runtime_builtin_values(builtin_values)?;
-        let lower_result = chelis_ir::lower::try_lower_subexpr_program_with_context_and_controls(
-            &app_expr,
-            scoped_types,
-            &lowering,
-        );
+        let lowering = self
+            .program
+            .transform_lowering_context(|| {
+                if let Some(session) = &self.session {
+                    SubexprLoweringContext::from_checked_program(
+                        session.program(),
+                        program_defs.clone(),
+                        self.declared_signatures.clone(),
+                        self.operation,
+                    )
+                } else {
+                    SubexprLoweringContext::new(
+                        self.program.type_env().clone(),
+                        program_defs.clone(),
+                        self.declared_signatures.clone(),
+                        self.operation,
+                    )
+                    .map(|context| context.with_adt_registry(&self.adt_registry))
+                }
+            })
+            .map_err(|diagnostic| diagnostic.to_string())?;
+        let lowering = lowering.with_runtime_builtin_values(builtin_values, self.operation)?;
+        let lower_result =
+            chelis_ir_core::lower::try_lower_subexpr_program_with_context_and_controls(
+                &app_expr,
+                scoped_types,
+                &lowering,
+                self.operation,
+            );
         let lowered = match lower_result {
             Ok(result) => result,
             Err(diagnostic) => {
@@ -868,19 +875,22 @@ impl<'a> EvalContext<'a> {
                 }
             }
         };
-        let prepared_inputs =
-            chelis_ir::eval::prepare_tensor_roots_inputs_with_demand(dag, &roots, prepare_input)
-                .map_err(|error| {
-                    if provider_failed || is_numeric_trap_failure(&error) {
-                        error
-                    } else {
-                        let kind_label = match kind {
-                            TransformKind::Grad => "grad",
-                            TransformKind::Vmap => "vmap",
-                        };
-                        format!("host runtime `{kind_label}` evaluation failed: {error}")
-                    }
-                })?;
+        let prepared_inputs = chelis_ir_core::eval::prepare_tensor_roots_inputs_with_demand(
+            dag,
+            &roots,
+            prepare_input,
+        )
+        .map_err(|error| {
+            if provider_failed || is_numeric_trap_failure(&error) {
+                error
+            } else {
+                let kind_label = match kind {
+                    TransformKind::Grad => "grad",
+                    TransformKind::Vmap => "vmap",
+                };
+                format!("host runtime `{kind_label}` evaluation failed: {error}")
+            }
+        })?;
         // A served capture must match its authored-rank `Load`. Capture-aware
         // vmap preserves that raw load and gives its mapped identity an
         // explicit rank-inserting movement, so the batch axis never widens the
@@ -914,10 +924,11 @@ impl<'a> EvalContext<'a> {
             matches!(kind, TransformKind::Grad),
             inherited_claims,
         )?;
-        let result = match lowered.evaluate_with_result_claims(&result_claims, load) {
+        let result = match lowered.evaluate_with_result_claims(&result_claims, load, self.operation)
+        {
             Ok(values) => Ok(values),
-            Err(chelis_ir::lower::LoweredSubexprEvalError::Tensor(error)) => Err(error),
-            Err(chelis_ir::lower::LoweredSubexprEvalError::List(error)) => return Err(error),
+            Err(chelis_ir_core::lower::LoweredSubexprEvalError::Tensor(error)) => Err(error),
+            Err(chelis_ir_core::lower::LoweredSubexprEvalError::List(error)) => return Err(error),
         };
         let result = self.mark_numeric_trap_from_trusted_result(result);
         let values = result.map_err(|err| {
@@ -1394,7 +1405,7 @@ pub(crate) fn reset_staged_frame_values() {
 /// Frame values a transform's lowering reads, staged under fresh names
 /// (chelis#2619).
 struct FrameCaptures<'a> {
-    builtin_values: BTreeMap<String, chelis_ir::callable_value::ResolvedBuiltinValue<Expr>>,
+    builtin_values: BTreeMap<String, chelis_ir_core::callable_value::ResolvedBuiltinValue<Expr>>,
     argument_count: usize,
     placeholder_names: &'a mut Vec<String>,
     placeholder_types: &'a mut Vec<TensorType>,

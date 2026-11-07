@@ -2,8 +2,9 @@
 
 use chelis_dag_core::dag::{DimInfo, TensorType};
 use chelis_deep::{DeepTag, Expr};
-use chelis_ir::eval::{TensorValue, eval_tensor_roots_exact};
-use chelis_ir::lower::try_lower_subexpr_program;
+use chelis_ir::eval::eval_tensor_roots_exact;
+use chelis_ir_core::eval::TensorValue;
+use chelis_ir_core::lower::try_lower_subexpr_program;
 use chelis_numeric_core::dtype_semantics::{ScalarValue, tensor_from_le_payload};
 use chelis_numeric_core::observation::ElementRef;
 use chelis_numeric_core::prim::Prim;
@@ -87,63 +88,66 @@ fn assert_join(
     shape: &[usize],
     words: &[u64],
 ) {
-    let program = checked(source);
-    let Expr::Node(definition, _) = program
-        .annotated_exprs()
-        .iter()
-        .find(|expr| expr.tag() == Some(DeepTag::Def))
-        .expect("checked function definition")
-    else {
-        panic!("expected the checked definition");
-    };
-    assert_eq!(definition.tag(), DeepTag::Def);
-    let Expr::Node(function, _) = &definition.children_slice()[1] else {
-        panic!("expected the checked function");
-    };
-    assert_eq!(function.tag(), DeepTag::Fn);
-    let scope = UnordMap::from([
-        (
-            "x".to_string(),
-            TensorType {
-                dims: first.shape.iter().copied().map(DimInfo::Lit).collect(),
-                precision: first.prim(),
-            },
-        ),
-        (
-            "y".to_string(),
-            TensorType {
-                dims: second.shape.iter().copied().map(DimInfo::Lit).collect(),
-                precision: second.prim(),
-            },
-        ),
-    ]);
-    let dag = try_lower_subexpr_program(
-        function
-            .children_slice()
-            .last()
-            .expect("checked function body"),
-        scope,
-        UnordMap::new(),
-        UnordMap::new(),
-    )
-    .expect("fixed concat lowers to the tensor DAG");
-    let values = eval_tensor_roots_exact(&dag, dag.roots(), |name| match name {
-        "x" => Some(first.clone()),
-        "y" => Some(second.clone()),
-        _ => None,
+    chelis_ir::resources::with_operation(|operation| {
+        let program = checked(source);
+        let Expr::Node(definition, _) = program
+            .annotated_exprs()
+            .iter()
+            .find(|expr| expr.tag() == Some(DeepTag::Def))
+            .expect("checked function definition")
+        else {
+            panic!("expected the checked definition");
+        };
+        assert_eq!(definition.tag(), DeepTag::Def);
+        let Expr::Node(function, _) = &definition.children_slice()[1] else {
+            panic!("expected the checked function");
+        };
+        assert_eq!(function.tag(), DeepTag::Fn);
+        let scope = UnordMap::from([
+            (
+                "x".to_string(),
+                TensorType {
+                    dims: first.shape.iter().copied().map(DimInfo::Lit).collect(),
+                    precision: first.prim(),
+                },
+            ),
+            (
+                "y".to_string(),
+                TensorType {
+                    dims: second.shape.iter().copied().map(DimInfo::Lit).collect(),
+                    precision: second.prim(),
+                },
+            ),
+        ]);
+        let dag = try_lower_subexpr_program(
+            function
+                .children_slice()
+                .last()
+                .expect("checked function body"),
+            scope,
+            UnordMap::new(),
+            UnordMap::new(),
+            operation,
+        )
+        .expect("fixed concat lowers to the tensor DAG");
+        let values = eval_tensor_roots_exact(&dag, dag.roots(), |name| match name {
+            "x" => Some(first.clone()),
+            "y" => Some(second.clone()),
+            _ => None,
+        })
+        .unwrap();
+        assert_eq!(dag.roots().len(), 1);
+        let output = &values[&dag.roots()[0]];
+        assert_eq!(output.shape, shape);
+        assert_eq!(output.prim(), first.prim());
+        let actual: Vec<_> = (0..output.len())
+            .map(|index| word(output.storage().scalar_at(index)))
+            .collect();
+        assert_eq!(
+            actual, words,
+            "concat must preserve each source element's stored bits"
+        );
     })
-    .unwrap();
-    assert_eq!(dag.roots().len(), 1);
-    let output = &values[&dag.roots()[0]];
-    assert_eq!(output.shape, shape);
-    assert_eq!(output.prim(), first.prim());
-    let actual: Vec<_> = (0..output.len())
-        .map(|index| word(output.storage().scalar_at(index)))
-        .collect();
-    assert_eq!(
-        actual, words,
-        "concat must preserve each source element's stored bits"
-    );
 }
 
 #[test]

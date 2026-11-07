@@ -2692,6 +2692,7 @@ packages = [
   "chelis-tide", "chelis-types", "chelis-unord", "chelis-validate",
   "chelis-type-core",
   "chelis-dag-core",
+  "chelis-ir-core",
   "chelis-effects-core",
   "chelis-version", "chelis-vocab", "chelisup", "tree-sitter-chelis",
 ]
@@ -4533,6 +4534,7 @@ packages = [
   "chelis-std-bundle", "chelis-surf", "chelis-tide", "chelis-types",
   "chelis-type-core",
   "chelis-dag-core",
+  "chelis-ir-core",
   "chelis-effects-core",
   "chelis-unord", "chelis-validate", "chelis-version", "chelis-vocab",
   "chelisup", "tree-sitter-chelis",
@@ -4553,6 +4555,7 @@ packages = [
   "chelis-tide", "chelis-types", "chelis-unord", "chelis-validate",
   "chelis-type-core",
   "chelis-dag-core",
+  "chelis-ir-core",
   "chelis-effects-core",
   "chelis-version", "chelis-vocab", "chelisup", "tree-sitter-chelis",
 ]
@@ -5037,6 +5040,7 @@ packages = [
   "chelis-numeric-core",
   "chelis-type-core",
   "chelis-dag-core",
+  "chelis-ir-core",
   "chelis-effects-core",
   "chelis-effects", "chelis-image-id", "chelis-ir", "chelis-lint",
   "chelis-lsp", "chelis-macros", "chelis-pipeline-core", "chelis-pred",
@@ -5330,6 +5334,7 @@ packages = [
   "chelis-tide", "chelis-types", "chelis-unord", "chelis-validate",
   "chelis-type-core",
   "chelis-dag-core",
+  "chelis-ir-core",
   "chelis-effects-core",
   "chelis-version", "chelis-vocab", "chelisup", "tree-sitter-chelis",
 ]
@@ -5692,3 +5697,30 @@ packages = ["chelis-cli"]
 prefix = "examples/float_classification.ch"
 disposition = "packages"
 packages = ["chelis-cli"]
+
+[[path_rule]]
+prefix = "scripts/ir_core_oracle.py"
+disposition = "owner"
+workflow = "heavy-e2e.yml"
+job = "integration-support"
+cadence = "daily and workflow_dispatch"
+reason = "The ir-core slice checks the complete portable IR contract and native authority"
+tracking_issue = "chelis#4120"
+
+[[path_rule]]
+prefix = "scripts/test_ir_core_oracle.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit executes the IR oracle behavioral controls"
+tracking_issue = "chelis#4120"
+
+[[path_rule]]
+prefix = "scripts/fixtures/ir_core/"
+disposition = "owner"
+workflow = "heavy-e2e.yml"
+job = "integration-support"
+cadence = "daily and workflow_dispatch"
+reason = "The ir-core slice uses every IR fixture in the complete acceptance command"
+tracking_issue = "chelis#4120"

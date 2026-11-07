@@ -2,7 +2,8 @@
 
 use chelis_dag_core::dag::*;
 use chelis_dag_core::grad::*;
-use chelis_ir::eval::{TensorValue, eval_scalar};
+use chelis_ir::eval::eval_scalar;
+use chelis_ir_core::eval::TensorValue;
 use chelis_numeric_core::prim::Prim;
 use chelis_unord::UnordMap;
 
@@ -916,7 +917,8 @@ fn grad_accumulation_uses_forward_consumer_order_and_a_balanced_tree() {
 
 #[test]
 fn balanced_adjoint_sum_tracks_runtime_wildcard_shape() {
-    use chelis_ir::eval::{TensorValue, eval_tensor};
+    use chelis_ir::eval::eval_tensor;
+    use chelis_ir_core::eval::TensorValue;
 
     let concrete_ty = TensorType {
         dims: vec![DimInfo::Lit(3)],
@@ -1278,7 +1280,8 @@ fn grad_inactive_conversion_is_a_constant() {
 fn grad_sum_expand() {
     // f(x) = sum(x, axis=0) for a 3-element vector, df/dx_i = 1
     use chelis_dag_core::dag::DimInfo;
-    use chelis_ir::eval::{TensorValue, eval_tensor};
+    use chelis_ir::eval::eval_tensor;
+    use chelis_ir_core::eval::TensorValue;
 
     let vec3_ty = TensorType {
         dims: vec![DimInfo::Lit(3)],
@@ -1505,7 +1508,8 @@ fn grad_cast_integer_source_is_accepted_and_contributes_zero() {
 
 #[test]
 fn grad_reshape_roundtrip() {
-    use chelis_ir::eval::{TensorValue, eval_tensor};
+    use chelis_ir::eval::eval_tensor;
+    use chelis_ir_core::eval::TensorValue;
 
     for source_dim in [
         DimInfo::Lit(6),
@@ -1586,7 +1590,8 @@ fn grad_reshape_roundtrip() {
 
 #[test]
 fn grad_permute_transpose() {
-    use chelis_ir::eval::{TensorValue, eval_tensor};
+    use chelis_ir::eval::eval_tensor;
+    use chelis_ir_core::eval::TensorValue;
 
     let mat23_ty = TensorType {
         dims: vec![DimInfo::Lit(2), DimInfo::Lit(3)],
@@ -1653,7 +1658,8 @@ fn grad_permute_transpose() {
 
 #[test]
 fn scatter_add_adjoint_preserves_target_and_gathers_update_cotangents() {
-    use chelis_ir::eval::{TensorValue, eval_tensor};
+    use chelis_ir::eval::eval_tensor;
+    use chelis_ir_core::eval::TensorValue;
 
     let vec4_ty = TensorType {
         dims: vec![DimInfo::Lit(4)],
@@ -1763,7 +1769,8 @@ fn scatter_add_adjoint_preserves_target_and_gathers_update_cotangents() {
 
 #[test]
 fn grad_expand_sum_roundtrip() {
-    use chelis_ir::eval::{TensorValue, eval_tensor};
+    use chelis_ir::eval::eval_tensor;
+    use chelis_ir_core::eval::TensorValue;
 
     let vec3_ty = TensorType {
         dims: vec![DimInfo::Lit(3)],
@@ -1851,7 +1858,8 @@ fn grad_expand_sum_roundtrip() {
 /// there too. What changed is who can reach the branch.
 #[test]
 fn grad_same_rank_expand_sums_over_the_broadcast_axis() {
-    use chelis_ir::eval::{TensorValue, eval_tensor};
+    use chelis_ir::eval::eval_tensor;
+    use chelis_ir_core::eval::TensorValue;
 
     let col_ty = TensorType {
         dims: vec![DimInfo::Lit(2), DimInfo::Lit(1)],
@@ -2057,7 +2065,8 @@ fn an_untaken_arms_contribution_is_selected_away_by_its_activation() {
 
 #[test]
 fn branch_broadcast_masks_rows_before_reducing_a_scalar_capture() {
-    use chelis_ir::eval::{TensorValue, eval_tensor};
+    use chelis_ir::eval::eval_tensor;
+    use chelis_ir_core::eval::TensorValue;
 
     let mut dag = Dag::new();
     let owner = Owner::from(dag.declare("test"));
@@ -2144,7 +2153,8 @@ fn branch_broadcast_masks_rows_before_reducing_a_scalar_capture() {
 
 #[test]
 fn runtime_recurrence_callback_vjp_uses_explicit_tensor_seed() {
-    use chelis_ir::eval::{TensorValue, eval_tensor};
+    use chelis_ir::eval::eval_tensor;
+    use chelis_ir_core::eval::TensorValue;
 
     let ty = TensorType {
         dims: vec![DimInfo::Lit(2)],
@@ -2529,7 +2539,8 @@ fn adv_deep_neg_chain_odd() {
 fn adv_max_reduce_gradient() {
     // Build a 2x3 tensor, apply max_reduce on axis 0, then sum to scalar.
     // Check gradient via finite differences on each element.
-    use chelis_ir::eval::{TensorValue, eval_tensor};
+    use chelis_ir::eval::eval_tensor;
+    use chelis_ir_core::eval::TensorValue;
 
     let mat23_ty = TensorType {
         dims: vec![DimInfo::Lit(2), DimInfo::Lit(3)],
@@ -2636,7 +2647,8 @@ fn adv_max_reduce_with_ties() {
     // max_reduce(axis=0) = [3, 3]
     // The gradient should flow to ALL elements equal to max (eq mask).
     // So row 0 col 0 AND row 1 col 0 should both get gradient.
-    use chelis_ir::eval::{TensorValue, eval_tensor};
+    use chelis_ir::eval::eval_tensor;
+    use chelis_ir_core::eval::TensorValue;
 
     let mat22_ty = TensorType {
         dims: vec![DimInfo::Lit(2), DimInfo::Lit(2)],
@@ -2692,7 +2704,8 @@ fn adv_max_reduce_with_ties() {
 #[test]
 fn adv_max_reduce_axis1() {
     // Test max_reduce along axis 1 (the last axis)
-    use chelis_ir::eval::{TensorValue, eval_tensor};
+    use chelis_ir::eval::eval_tensor;
+    use chelis_ir_core::eval::TensorValue;
 
     let mat23_ty = TensorType {
         dims: vec![DimInfo::Lit(2), DimInfo::Lit(3)],
@@ -2872,7 +2885,8 @@ fn adv_div_gradient() {
 #[test]
 fn adv_pad_shrink_gradient() {
     // Test pad adjoint: pad then sum, check gradient
-    use chelis_ir::eval::{TensorValue, eval_tensor};
+    use chelis_ir::eval::eval_tensor;
+    use chelis_ir_core::eval::TensorValue;
 
     let vec3_ty = TensorType {
         dims: vec![DimInfo::Lit(3)],
@@ -2928,7 +2942,8 @@ fn adv_pad_shrink_gradient() {
 #[test]
 fn adv_shrink_gradient() {
     // Test shrink adjoint: shrink then sum
-    use chelis_ir::eval::{TensorValue, eval_tensor};
+    use chelis_ir::eval::eval_tensor;
+    use chelis_ir_core::eval::TensorValue;
 
     let vec5_ty = TensorType {
         dims: vec![DimInfo::Lit(5)],
@@ -3049,7 +3064,8 @@ fn adv_stride_gradient_scatters_into_strided_slots() {
     // the strided source slots (zeros elsewhere) using existing
     // movement primitives (reshape/pad/shrink). `f(x) = sum(stride(x,
     // 2)) = x0 + x2`, so `df/dx = [1, 0, 1, 0]`.
-    use chelis_ir::eval::{TensorValue, eval_tensor};
+    use chelis_ir::eval::eval_tensor;
+    use chelis_ir_core::eval::TensorValue;
 
     let vec4_ty = TensorType {
         dims: vec![DimInfo::Lit(4)],
@@ -3149,7 +3165,8 @@ fn adv_min_reduce_gradient() {
     // sum(min) = 6
     // Gradient: 1 where element equals min along axis 0, else 0.
     // Expected: [[1, 0, 1], [0, 1, 0]]
-    use chelis_ir::eval::{TensorValue, eval_tensor};
+    use chelis_ir::eval::eval_tensor;
+    use chelis_ir_core::eval::TensorValue;
 
     let mat23 = TensorType {
         dims: vec![DimInfo::Lit(2), DimInfo::Lit(3)],
@@ -3208,7 +3225,8 @@ fn adv_prod_reduce_gradient_nonzero() {
     // Input: 1D length-4 vector [2, 3, 4, 5]
     // prod = 120
     // ∂prod/∂x_i = prod(x) / x_i = [60, 40, 30, 24]
-    use chelis_ir::eval::{TensorValue, eval_tensor};
+    use chelis_ir::eval::eval_tensor;
+    use chelis_ir_core::eval::TensorValue;
 
     let vec4 = TensorType {
         dims: vec![DimInfo::Lit(4)],
@@ -3260,7 +3278,8 @@ fn adv_prod_reduce_gradient_nonzero() {
 /// ∂prod/∂x_3 = 2*0*4 = 0
 #[test]
 fn adv_prod_reduce_gradient_with_zero_element() {
-    use chelis_ir::eval::{TensorValue, eval_tensor};
+    use chelis_ir::eval::eval_tensor;
+    use chelis_ir_core::eval::TensorValue;
 
     let vec4 = TensorType {
         dims: vec![DimInfo::Lit(4)],

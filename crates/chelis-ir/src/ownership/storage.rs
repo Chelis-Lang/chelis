@@ -3,12 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::marker::PhantomData;
 
-use chelis_vocab::Repr;
-
-use crate::capacity_key::{
-    CapacityKey, CapacityKeyBuild, capacity_key_for_node, shape_capacity_keys_for_node,
-};
-use chelis_dag_core::dag::{DimExpr, DimInfo, NodeId, RiscOp};
+use chelis_dag_core::dag::{NodeId, RiscOp};
 
 use super::{LiveByteBound, OwnershipError, VerifiedDagProgram, VerifiedDagView};
 
@@ -35,289 +30,14 @@ enum StorageLaneKind {
     Hip,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum StorageProvenance {
-    RuntimeOwned,
-    EntryBorrow,
-    SharedView,
-}
-
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub(crate) struct StorageId {
-    key: u32,
-}
-
-impl StorageId {
-    fn from_slot(slot: StorageSlotId) -> Result<Self, OwnershipError> {
-        let key = u32::try_from(slot.index).map_err(|_| OwnershipError::LoweringInvariant {
-            unit: "dag-storage".to_string(),
-            detail: format!(
-                "storage slot {} does not fit the opaque identity",
-                slot.index
-            ),
-        })?;
-        Ok(Self { key })
-    }
-
-    #[cfg(test)]
-    const fn from_index_for_test(key: u32) -> Self {
-        Self { key }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct StorageSlotId {
-    index: usize,
-}
-
-impl StorageSlotId {
-    const UNASSIGNED: Self = Self { index: usize::MAX };
-
-    pub const fn index(self) -> usize {
-        self.index
-    }
-}
-
-#[derive(Clone, Debug)]
-pub struct ExactStorageCapacity {
-    key: CapacityKey,
-    repr: Repr,
-    allocation_bytes: Option<u64>,
-}
-
-impl ExactStorageCapacity {
-    fn for_node(dag: VerifiedDagView<'_>, node: NodeId) -> Result<Self, OwnershipError> {
-        let key = match capacity_key_for_node(dag, node).map_err(|error| {
-            OwnershipError::DagStorageCapacity {
-                node: node.0,
-                detail: error.to_string(),
-            }
-        })? {
-            CapacityKeyBuild::Exact(key) => key,
-            CapacityKeyBuild::NotProven(reason) => {
-                return Err(OwnershipError::DagStorageCapacity {
-                    node: node.0,
-                    detail: reason.to_string(),
-                });
-            }
-        };
-        let precision = dag
-            .get(node)
-            .expect("capacity node was checked above")
-            .output_type
-            .precision;
-        let repr = precision
-            .runtime_dtype()
-            .map_err(|_| OwnershipError::DagStorageDType {
-                node: node.0,
-                dtype: precision.name(),
-            })?
-            .repr();
-        let allocation_bytes = key.literal_allocation_bytes(repr).map_err(|error| {
-            OwnershipError::DagStorageCapacity {
-                node: node.0,
-                detail: error.to_string(),
-            }
-        })?;
-        Ok(Self {
-            key,
-            repr,
-            allocation_bytes,
-        })
-    }
-
-    fn proves_equal(&self, other: &Self) -> bool {
-        self.repr == other.repr && self.key.prove_equal(&other.key).is_ok()
-    }
-
-    pub const fn repr(&self) -> Repr {
-        self.repr
-    }
-
-    pub const fn allocation_bytes(&self) -> Option<u64> {
-        self.allocation_bytes
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum StoragePlacement {
-    BorrowedEntry,
-    InputMirror {
-        slot: StorageSlotId,
-        input_name: String,
-    },
-    OwnedSlot {
-        slot: StorageSlotId,
-    },
-    SharedView {
-        source: NodeId,
-    },
-    TerminalDrop {
-        source: NodeId,
-    },
-    MaterializedStore {
-        source: NodeId,
-        slot: StorageSlotId,
-    },
-    StoreAlias {
-        source: NodeId,
-    },
-    Skipped,
-}
-
-impl StoragePlacement {
-    pub const fn slot(&self) -> Option<StorageSlotId> {
-        match self {
-            Self::InputMirror { slot, .. }
-            | Self::OwnedSlot { slot }
-            | Self::MaterializedStore { slot, .. } => Some(*slot),
-            Self::BorrowedEntry
-            | Self::SharedView { .. }
-            | Self::TerminalDrop { .. }
-            | Self::StoreAlias { .. }
-            | Self::Skipped => None,
-        }
-    }
-}
-
-#[derive(Debug)]
-pub struct StorageSlotPlan {
-    id: StorageSlotId,
-    capacity: ExactStorageCapacity,
-    allocation_elements: DimExpr,
-    first_owner: NodeId,
-    last_use_index: usize,
-}
-
-impl StorageSlotPlan {
-    pub const fn id(&self) -> StorageSlotId {
-        self.id
-    }
-
-    pub const fn capacity(&self) -> &ExactStorageCapacity {
-        &self.capacity
-    }
-
-    /// Renderable allocation extent paired with the exact capacity proof.
-    pub const fn allocation_elements(&self) -> &DimExpr {
-        &self.allocation_elements
-    }
-
-    pub const fn first_owner(&self) -> NodeId {
-        self.first_owner
-    }
-
-    pub const fn last_use_index(&self) -> usize {
-        self.last_use_index
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ReuseProofCondition {
-    OneLiveProgramOwner,
-    UniqueDescriptorAndStorage,
-    RuntimeOwnedAndWritable,
-    NoLiveViewOrBorrow,
-    ExactShapeDtypeCapacityAndOperation,
-    TerminalUse,
-}
-
-impl ReuseProofCondition {
-    #[cfg(test)]
-    pub(crate) const ALL: [Self; 6] = [
-        Self::OneLiveProgramOwner,
-        Self::UniqueDescriptorAndStorage,
-        Self::RuntimeOwnedAndWritable,
-        Self::NoLiveViewOrBorrow,
-        Self::ExactShapeDtypeCapacityAndOperation,
-        Self::TerminalUse,
-    ];
-
-    #[cfg(test)]
-    pub(crate) const fn name(self) -> &'static str {
-        match self {
-            Self::OneLiveProgramOwner => "one live program owner",
-            Self::UniqueDescriptorAndStorage => "unique descriptor and storage",
-            Self::RuntimeOwnedAndWritable => "runtime-owned and writable storage",
-            Self::NoLiveViewOrBorrow => "no live view or borrow",
-            Self::ExactShapeDtypeCapacityAndOperation => {
-                "exact shape, dtype, capacity, and operation requirements"
-            }
-            Self::TerminalUse => "terminal source use",
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct ExactReuseProof(());
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct ReuseCandidateFacts {
-    provenance: StorageProvenance,
-    one_live_program_owner: bool,
-    unique_descriptor_and_storage: bool,
-    writable: bool,
-    no_live_view_or_borrow: bool,
-    exact: Option<ExactReuseProof>,
-    terminal_use: bool,
-}
-
-impl ReuseCandidateFacts {
-    fn first_missing_condition(self) -> Option<ReuseProofCondition> {
-        if !self.one_live_program_owner {
-            return Some(ReuseProofCondition::OneLiveProgramOwner);
-        }
-        if !self.unique_descriptor_and_storage {
-            return Some(ReuseProofCondition::UniqueDescriptorAndStorage);
-        }
-        if self.provenance != StorageProvenance::RuntimeOwned || !self.writable {
-            return Some(ReuseProofCondition::RuntimeOwnedAndWritable);
-        }
-        if !self.no_live_view_or_borrow {
-            return Some(ReuseProofCondition::NoLiveViewOrBorrow);
-        }
-        if self.exact.is_none() {
-            return Some(ReuseProofCondition::ExactShapeDtypeCapacityAndOperation);
-        }
-        if !self.terminal_use {
-            return Some(ReuseProofCondition::TerminalUse);
-        }
-        None
-    }
-
-    #[cfg(test)]
-    const fn complete_for_test(provenance: StorageProvenance) -> Self {
-        Self {
-            provenance,
-            one_live_program_owner: true,
-            unique_descriptor_and_storage: true,
-            writable: true,
-            no_live_view_or_borrow: true,
-            exact: Some(ExactReuseProof(())),
-            terminal_use: true,
-        }
-    }
-
-    #[cfg(test)]
-    fn without_condition_for_test(mut self, condition: ReuseProofCondition) -> Self {
-        match condition {
-            ReuseProofCondition::OneLiveProgramOwner => self.one_live_program_owner = false,
-            ReuseProofCondition::UniqueDescriptorAndStorage => {
-                self.unique_descriptor_and_storage = false;
-            }
-            ReuseProofCondition::RuntimeOwnedAndWritable => self.writable = false,
-            ReuseProofCondition::NoLiveViewOrBorrow => self.no_live_view_or_borrow = false,
-            ReuseProofCondition::ExactShapeDtypeCapacityAndOperation => self.exact = None,
-            ReuseProofCondition::TerminalUse => self.terminal_use = false,
-        }
-        self
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ReuseProofRejection {
-    Missing(ReuseProofCondition),
-}
+#[cfg(test)]
+use chelis_ir_core::ownership::storage::{
+    ReuseCandidateFacts, ReuseProofCondition, ReuseProofRejection, StorageId, StorageProvenance,
+};
+use chelis_ir_core::ownership::storage::{
+    ReuseDecision, StoragePlacement, StoragePolicy, StorageSlotId, StorageSlotPlan,
+    build_storage_plan as calculate_storage_plan,
+};
 
 /// Linear authority for one exact program-owned in-place reuse.
 ///
@@ -345,7 +65,7 @@ enum ReuseProofRejection {
 /// ```
 ///
 /// ```compile_fail
-/// # use chelis_dag_core::dag::NodeId.
+/// # use chelis_dag_core::dag::NodeId;
 /// use chelis_ir::ownership::ReusableOwnedStorage;
 /// fn forge(source: NodeId, consumer: NodeId) -> ReusableOwnedStorage {
 ///     ReusableOwnedStorage { source, storage: todo!(), consumer }
@@ -353,34 +73,26 @@ enum ReuseProofRejection {
 /// ```
 #[derive(Debug, Eq, PartialEq)]
 pub struct ReusableOwnedStorage {
-    source: NodeId,
-    storage: StorageId,
-    consumer: NodeId,
+    data: ReuseDecision,
 }
 
 impl ReusableOwnedStorage {
     pub const fn source(&self) -> NodeId {
-        self.source
+        self.data.source
     }
 
     pub const fn consumer(&self) -> NodeId {
-        self.consumer
+        self.data.consumer
     }
 
+    #[cfg(test)]
     fn mint(
         source: NodeId,
         storage: StorageId,
         consumer: NodeId,
         facts: ReuseCandidateFacts,
     ) -> Result<Self, ReuseProofRejection> {
-        if let Some(condition) = facts.first_missing_condition() {
-            return Err(ReuseProofRejection::Missing(condition));
-        }
-        Ok(Self {
-            source,
-            storage,
-            consumer,
-        })
+        ReuseDecision::calculate(source, storage, consumer, facts).map(|data| Self { data })
     }
 
     #[cfg(test)]
@@ -395,7 +107,7 @@ impl ReusableOwnedStorage {
 
     #[cfg(test)]
     const fn storage_for_test(&self) -> StorageId {
-        self.storage
+        self.data.storage
     }
 }
 
@@ -410,9 +122,9 @@ pub struct VerifiedStoragePlan<L: StorageLane> {
     lane: PhantomData<L>,
 }
 
-/// Borrowing form used when a verified DAG is owned by a verified host
-/// program. It carries the exact parent-owned DAG view and the same linear
-/// token set; standalone backend entry points use [`VerifiedStoragePlan`].
+/// Borrowing form used when a verified DAG is owned by a verified host program.
+/// It carries the exact parent-owned DAG view and the same linear token set.
+/// standalone backend entry points use [`VerifiedStoragePlan`].
 pub struct VerifiedStorageLayout<'a, L: StorageLane> {
     dag: VerifiedDagView<'a>,
     placements: Box<[StoragePlacement]>,
@@ -550,32 +262,13 @@ fn plan_storage<L: StorageLane>(
     })
 }
 
-#[derive(Debug)]
-struct OwnerRequirement {
-    owner: NodeId,
-    birth_index: usize,
-    last_use_index: usize,
-    capacity: ExactStorageCapacity,
-    reusable_slot: bool,
-    dedicated: bool,
-}
-
-struct AssignedSlots {
-    slots: Vec<StorageSlotPlan>,
-    reusable: BTreeMap<NodeId, ReusableOwnedStorage>,
-}
-
-type BuiltStoragePlan = (
-    Box<[StoragePlacement]>,
-    Box<[StorageSlotPlan]>,
-    BTreeMap<NodeId, ReusableOwnedStorage>,
-    LiveByteBound,
-);
-
 fn build_storage_plan(
     dag: VerifiedDagView<'_>,
     lane: StorageLaneKind,
-) -> Result<BuiltStoragePlan, OwnershipError> {
+) -> Result<
+    chelis_ir_core::ownership::storage::BuiltStoragePlan<ReusableOwnedStorage>,
+    OwnershipError,
+> {
     let views = (lane == StorageLaneKind::C).then(|| dag.contraction_views());
     let mut skipped = dag.reduction_inlined_fused_elems();
     if let Some(views) = &views {
@@ -587,7 +280,6 @@ fn build_storage_plan(
         );
     }
     match lane {
-        // The C emitter computes an inlined product inside its sum.
         StorageLaneKind::C => skipped.extend(
             dag.reduction_inlined_products()
                 .iter()
@@ -595,45 +287,36 @@ fn build_storage_plan(
         ),
         StorageLaneKind::Hip => skipped.extend(hip_emission_literals(dag)),
     }
-    let mut placements = classify_nodes(dag, lane, &skipped);
-    if lane == StorageLaneKind::C {
-        check_inlined_product_storage(dag, &placements, views.as_ref())?;
-    }
-    let owner_of = compute_owner_map(&placements);
-    let destructively_dropped = destructively_dropped_owners(&placements, &owner_of);
-    let mut requirements = owner_requirements(dag, &placements, &owner_of)?;
-    extend_lifetimes(
-        dag,
-        lane,
-        &placements,
-        &owner_of,
-        &mut requirements,
-        views.as_ref(),
-    );
-    let AssignedSlots { slots, reusable } = assign_slots(
-        dag,
-        &mut placements,
-        &owner_of,
-        &requirements,
-        &destructively_dropped,
-    )?;
-    let max_live_bytes = physical_live_byte_bound(&slots);
-    Ok((
-        placements.into_boxed_slice(),
-        slots.into_boxed_slice(),
-        reusable,
-        max_live_bytes,
-    ))
+    let policy = match lane {
+        StorageLaneKind::C => StoragePolicy {
+            mirror_inputs: false,
+            shared_views: false,
+            skipped_keys: false,
+            alias_stores: false,
+            recurrence_tape: true,
+        },
+        StorageLaneKind::Hip => StoragePolicy {
+            mirror_inputs: true,
+            shared_views: true,
+            skipped_keys: true,
+            alias_stores: true,
+            recurrence_tape: false,
+        },
+    };
+    calculate_storage_plan(dag.analysis(), policy, &skipped, views.as_ref(), |data| {
+        ReusableOwnedStorage { data }
+    })
 }
 
-/// The constants the HIP emitter reads only as literals while it emits a draw:
-/// a draw key's seed and controls, a key derivation's seed or index, and a
-/// `uniform_like`'s bounds, which the emitter folds into the key it computes
-/// and the kernel's arguments. Such a
-/// constant has no device value, so it takes no slot and no lifetime. A
-/// constant any other operation, dependency or root reads keeps its storage.
+/// The constants the HIP emitter reads only as literals while it emits a draw.
+/// A draw key's seed and controls, a key derivation's seed or index.
+/// And a `uniform_like`'s bounds, which the emitter folds into the key it computes and the kernel's arguments.
+/// Such a constant has no device value, so it takes no slot and no lifetime.
+/// A constant any other operation, dependency or root reads keeps its storage.
+///
 fn hip_emission_literals(dag: VerifiedDagView<'_>) -> Vec<NodeId> {
-    // `None` until a read is seen; then whether every read is a literal one.
+    // `None` until a read is seen.
+    // then whether every read is a literal one.
     let mut literal_only = vec![None::<bool>; dag.len()];
     let mut read = |input: NodeId, literal: bool| {
         if let Some(entry) = literal_only.get_mut(input.0) {
@@ -670,648 +353,6 @@ fn hip_emission_literals(dag: VerifiedDagView<'_>) -> Vec<NodeId> {
         .map(|node| node.id)
         .collect()
 }
-
-/// Every node an inlined product claims has the one storage decision its
-/// kernel needs: the kernel's output owns a slot, each component it computes
-/// in place is skipped, and each reshape it reads in place is a deferred view
-/// or owns a slot, never skipped as a component (chelis#3802).
-fn check_inlined_product_storage(
-    dag: VerifiedDagView<'_>,
-    placements: &[StoragePlacement],
-    views: Option<&crate::contraction_views::ContractionViews>,
-) -> Result<(), OwnershipError> {
-    let conflict = |node: NodeId, detail: &str| OwnershipError::DagStorageConflict {
-        node: node.0,
-        detail: detail.to_string(),
-    };
-    for product in dag.reduction_inlined_products() {
-        let output = product.output();
-        if placements[output.0].slot().is_none()
-            || views.is_some_and(|views| views.is_deferred(output))
-        {
-            return Err(conflict(output, "an inlined product's output owns no slot"));
-        }
-        for node in product.skipped() {
-            if !matches!(placements[node.0], StoragePlacement::Skipped) {
-                return Err(conflict(node, "an inlined product's component is stored"));
-            }
-        }
-        for reshape in product.view_reshapes.iter().flatten() {
-            let deferred = views.is_some_and(|views| views.is_deferred(*reshape));
-            if deferred != matches!(placements[reshape.0], StoragePlacement::Skipped) {
-                return Err(conflict(
-                    *reshape,
-                    "an inlined product's view reshape is neither deferred nor stored",
-                ));
-            }
-        }
-    }
-    Ok(())
-}
-
-fn classify_nodes(
-    dag: VerifiedDagView<'_>,
-    lane: StorageLaneKind,
-    skipped: &chelis_unord::UnordSet<NodeId>,
-) -> Vec<StoragePlacement> {
-    let mut placements = Vec::with_capacity(dag.len());
-    let mut first_load_by_name = BTreeMap::<String, NodeId>::new();
-    for node in dag.nodes() {
-        let placement = if skipped.contains(&node.id) {
-            StoragePlacement::Skipped
-        } else {
-            match &node.op {
-                RiscOp::Load { name } => match lane {
-                    StorageLaneKind::C => StoragePlacement::BorrowedEntry,
-                    StorageLaneKind::Hip => {
-                        if let Some(source) = first_load_by_name.get(name.as_str()) {
-                            StoragePlacement::SharedView { source: *source }
-                        } else {
-                            first_load_by_name.insert(name.as_str().to_string(), node.id);
-                            StoragePlacement::InputMirror {
-                                slot: StorageSlotId::UNASSIGNED,
-                                input_name: name.as_str().to_string(),
-                            }
-                        }
-                    }
-                },
-                // A HIP input can have arbitrary checked strides. Reshape must
-                // materialize logical order, so its bytes and lifetime belong
-                // to the shared plan just as they do on the C lane.
-                RiscOp::Reshape { .. } => StoragePlacement::OwnedSlot {
-                    slot: StorageSlotId::UNASSIGNED,
-                },
-                RiscOp::Permute { .. } | RiscOp::Expand { .. } | RiscOp::Stride { .. } => {
-                    match lane {
-                        StorageLaneKind::C => StoragePlacement::OwnedSlot {
-                            slot: StorageSlotId::UNASSIGNED,
-                        },
-                        StorageLaneKind::Hip => StoragePlacement::SharedView {
-                            source: node.inputs[0],
-                        },
-                    }
-                }
-                // A derived or joined key is an ordinary key tensor on the C
-                // lane. The HIP lane computes rank-0 derivations while it
-                // emits, and refuses the rest, so they take no device
-                // storage.
-                RiscOp::KeyFromSeed
-                | RiscOp::Split { .. }
-                | RiscOp::FoldIn
-                | RiscOp::SplitN { .. }
-                | RiscOp::KeySelect => match lane {
-                    StorageLaneKind::C => StoragePlacement::OwnedSlot {
-                        slot: StorageSlotId::UNASSIGNED,
-                    },
-                    StorageLaneKind::Hip => StoragePlacement::Skipped,
-                },
-                RiscOp::Drop => StoragePlacement::TerminalDrop {
-                    source: node.inputs[0],
-                },
-                RiscOp::Store { .. } => match lane {
-                    StorageLaneKind::C => StoragePlacement::MaterializedStore {
-                        source: node.inputs[0],
-                        slot: StorageSlotId::UNASSIGNED,
-                    },
-                    StorageLaneKind::Hip => StoragePlacement::StoreAlias {
-                        source: node.inputs[0],
-                    },
-                },
-                RiscOp::ListMapCapture { .. }
-                | RiscOp::OrderedAdjointSum { .. }
-                | RiscOp::Iota
-                | RiscOp::Const { .. }
-                | RiscOp::ConstTensor { .. }
-                | RiscOp::Shape { .. }
-                | RiscOp::ExtentWitness { .. }
-                | RiscOp::CheckedExtent { .. }
-                | RiscOp::CheckedUnitAxis { .. }
-                | RiscOp::Add
-                | RiscOp::Sub
-                | RiscOp::Mul
-                | RiscOp::Div
-                | RiscOp::Pow
-                | RiscOp::FloorDiv
-                | RiscOp::TruncDiv
-                | RiscOp::Mod
-                | RiscOp::Bitwise(_)
-                | RiscOp::FloatClassify(_)
-                | RiscOp::Compare(_)
-                | RiscOp::Logical(_)
-                | RiscOp::Where
-                | RiscOp::GuardedFail { .. }
-                | RiscOp::MaxElem
-                | RiscOp::MinElem
-                | RiscOp::ExtremaAdjoint { .. }
-                | RiscOp::Relu
-                | RiscOp::Softmax { .. }
-                | RiscOp::ReluAdjoint
-                | RiscOp::Neg
-                | RiscOp::Recip
-                | RiscOp::Exp
-                | RiscOp::Log
-                | RiscOp::Sin
-                | RiscOp::Sqrt
-                | RiscOp::Cos
-                | RiscOp::Tan
-                | RiscOp::Atan
-                | RiscOp::Tanh
-                | RiscOp::Erf
-                | RiscOp::Erfc
-                | RiscOp::Abs
-                | RiscOp::Floor
-                | RiscOp::Ceil
-                | RiscOp::Round
-                | RiscOp::UniformLike
-                | RiscOp::Dropout
-                | RiscOp::DropoutReplay
-                | RiscOp::UniformBoundAdjoint { .. }
-                | RiscOp::Copy
-                | RiscOp::Cumsum { .. }
-                | RiscOp::Sum { .. }
-                | RiscOp::Count { .. }
-                | RiscOp::MaxReduce { .. }
-                | RiscOp::MinReduce { .. }
-                | RiscOp::ProdReduce { .. }
-                | RiscOp::ReduceWindow { .. }
-                | RiscOp::ReduceWindowGrad { .. }
-                | RiscOp::Argmax { .. }
-                | RiscOp::Argmin { .. }
-                | RiscOp::OneHot { .. }
-                | RiscOp::Realize
-                | RiscOp::Cast { .. }
-                | RiscOp::NamedCast { .. }
-                | RiscOp::FusedElem { .. }
-                | RiscOp::Pad { .. }
-                | RiscOp::Shrink { .. }
-                | RiscOp::BlasMatmul { .. }
-                | RiscOp::Gather { .. }
-                | RiscOp::ScatterAdd { .. }
-                | RiscOp::Scatter { .. }
-                | RiscOp::ScatterElements { .. }
-                | RiscOp::RuntimeRecurrence(_)
-                | RiscOp::RuntimeRecurrenceAdjoint { .. } => StoragePlacement::OwnedSlot {
-                    slot: StorageSlotId::UNASSIGNED,
-                },
-            }
-        };
-        placements.push(placement);
-    }
-    placements
-}
-
-fn compute_owner_map(placements: &[StoragePlacement]) -> Vec<Option<NodeId>> {
-    let mut owners = vec![None; placements.len()];
-    for (index, placement) in placements.iter().enumerate() {
-        let node = NodeId(index);
-        owners[index] = match placement {
-            StoragePlacement::InputMirror { .. }
-            | StoragePlacement::OwnedSlot { .. }
-            | StoragePlacement::MaterializedStore { .. } => Some(node),
-            StoragePlacement::SharedView { source } | StoragePlacement::StoreAlias { source } => {
-                owners[source.0]
-            }
-            StoragePlacement::BorrowedEntry
-            | StoragePlacement::TerminalDrop { .. }
-            | StoragePlacement::Skipped => None,
-        };
-    }
-    owners
-}
-
-fn destructively_dropped_owners(
-    placements: &[StoragePlacement],
-    owner_of: &[Option<NodeId>],
-) -> BTreeSet<NodeId> {
-    placements
-        .iter()
-        .filter_map(|placement| match placement {
-            StoragePlacement::TerminalDrop { source } => owner_of[source.0],
-            _ => None,
-        })
-        .collect()
-}
-
-fn owner_requirements(
-    dag: VerifiedDagView<'_>,
-    placements: &[StoragePlacement],
-    owner_of: &[Option<NodeId>],
-) -> Result<BTreeMap<NodeId, OwnerRequirement>, OwnershipError> {
-    let mut result = BTreeMap::new();
-    for node in dag.nodes() {
-        let (reusable_slot, dedicated) = match placements[node.id.0] {
-            StoragePlacement::OwnedSlot { .. } => (true, false),
-            StoragePlacement::InputMirror { .. } => (false, false),
-            StoragePlacement::MaterializedStore { .. } => (false, true),
-            StoragePlacement::BorrowedEntry
-            | StoragePlacement::SharedView { .. }
-            | StoragePlacement::TerminalDrop { .. }
-            | StoragePlacement::StoreAlias { .. }
-            | StoragePlacement::Skipped => continue,
-        };
-        debug_assert_eq!(owner_of[node.id.0], Some(node.id));
-        result.insert(
-            node.id,
-            OwnerRequirement {
-                owner: node.id,
-                birth_index: node.id.0,
-                last_use_index: node.id.0,
-                capacity: ExactStorageCapacity::for_node(dag, node.id)?,
-                reusable_slot,
-                dedicated,
-            },
-        );
-    }
-    Ok(result)
-}
-
-fn extend_lifetimes(
-    dag: VerifiedDagView<'_>,
-    lane: StorageLaneKind,
-    placements: &[StoragePlacement],
-    owner_of: &[Option<NodeId>],
-    requirements: &mut BTreeMap<NodeId, OwnerRequirement>,
-    views: Option<&crate::contraction_views::ContractionViews>,
-) {
-    let epilogue = dag.len();
-    for node in dag.nodes() {
-        if matches!(placements[node.id.0], StoragePlacement::Skipped)
-            && !views.is_some_and(|views| views.is_deferred(node.id))
-        {
-            continue;
-        }
-        // Deferred storage omits only the payload. Its original operation
-        // still reads runtime bounds, shape/claim witnesses and activation
-        // at this position, before later consumers read the recipe's leaves.
-        let mut effective_inputs = match &node.op {
-            RiscOp::Drop => match placements[node.id.0] {
-                StoragePlacement::TerminalDrop { source } => vec![source],
-                _ => node.inputs.clone(),
-            },
-            // A node computing a skipped input inline reads, at its own
-            // position, everything that input would have read.
-            _ => read_through_skipped(dag, placements, &node.inputs, views),
-        };
-        // Ownership borrows shape dependencies as well as value inputs. A
-        // result-claim witness stores the canonical scalar the producer reads;
-        // reusing its allocation earlier changes the obligation itself.
-        effective_inputs.extend(node.shape_deps.iter().copied());
-        effective_inputs.extend(node.result_claim_deps.iter().copied());
-        // A node reads its activation to decide whether it checks.
-        effective_inputs.extend(node.owner.activation);
-        for input in effective_inputs {
-            if let Some(owner) = owner_of[input.0]
-                && let Some(requirement) = requirements.get_mut(&owner)
-            {
-                requirement.last_use_index = requirement.last_use_index.max(node.id.0);
-            }
-        }
-        if lane == StorageLaneKind::C
-            && let RiscOp::RuntimeRecurrence(recurrence) = &node.op
-        {
-            // The C callback returns every node into its tape. A Load of the
-            // seed or a lexical capture can retain the parent tensor through
-            // tape cleanup, even after the recurrence node's logical use.
-            // The source and columns are gathered into fresh per-row values.
-            let tape_aliases = std::iter::once(node.inputs[1]).chain(
-                node.inputs[recurrence.capture_input_offset()..]
-                    .iter()
-                    .copied(),
-            );
-            for input in tape_aliases {
-                if let Some(owner) = owner_of[input.0]
-                    && let Some(requirement) = requirements.get_mut(&owner)
-                {
-                    requirement.last_use_index = epilogue;
-                }
-            }
-            // A fold returns the final taped state, or the seed at zero
-            // steps. A scan materializes an independent stacked result.
-            if !recurrence.scan
-                && let Some(owner) = owner_of[node.id.0]
-                && let Some(requirement) = requirements.get_mut(&owner)
-            {
-                requirement.last_use_index = epilogue;
-            }
-        }
-    }
-    for root in dag.roots() {
-        if let Some(owner) = owner_of[root.0]
-            && let Some(requirement) = requirements.get_mut(&owner)
-        {
-            requirement.last_use_index = epilogue;
-        }
-    }
-    // The recipe planner propagates deferred reads in one reverse pass.
-    // These are payload borrows even when the original node only carried
-    // metadata at the later consumer; a source slot cannot be repurposed.
-    if let Some(views) = views {
-        for node in dag.nodes() {
-            if let Some(last) = views.base_last_read(node.id)
-                && let Some(owner) = owner_of[node.id.0]
-                && let Some(requirement) = requirements.get_mut(&owner)
-            {
-                requirement.last_use_index = requirement.last_use_index.max(last);
-            }
-        }
-    }
-}
-
-/// `inputs`, with each skipped node replaced by its own reads, transitively.
-fn read_through_skipped(
-    dag: VerifiedDagView<'_>,
-    placements: &[StoragePlacement],
-    inputs: &[NodeId],
-    views: Option<&crate::contraction_views::ContractionViews>,
-) -> Vec<NodeId> {
-    let mut reads = Vec::new();
-    let mut pending = inputs.iter().rev().copied().collect::<Vec<_>>();
-    while let Some(input) = pending.pop() {
-        if views.is_some_and(|views| views.is_deferred(input)) {
-            // Accounted for by the reverse-topological base-retirement pass.
-            continue;
-        }
-        if !matches!(placements[input.0], StoragePlacement::Skipped) {
-            reads.push(input);
-            continue;
-        }
-        let node = dag.get(input).expect("verified skipped input names a node");
-        pending.extend(
-            node.inputs
-                .iter()
-                .chain(&node.shape_deps)
-                .chain(&node.result_claim_deps)
-                .chain(&node.owner.activation)
-                .rev()
-                .copied(),
-        );
-    }
-    reads
-}
-
-fn assign_slots(
-    dag: VerifiedDagView<'_>,
-    placements: &mut [StoragePlacement],
-    owner_of: &[Option<NodeId>],
-    requirements: &BTreeMap<NodeId, OwnerRequirement>,
-    destructively_dropped: &BTreeSet<NodeId>,
-) -> Result<AssignedSlots, OwnershipError> {
-    let mut slots = Vec::<StorageSlotPlan>::new();
-    let mut availability = Vec::<usize>::new();
-    let mut future_reuse_allowed = Vec::<bool>::new();
-    let mut owner_to_slot = BTreeMap::<NodeId, StorageSlotId>::new();
-    let mut reusable = BTreeMap::new();
-
-    for requirement in requirements.values() {
-        let exact_in_place =
-            exact_in_place_candidate(dag, placements, owner_of, requirements, requirement)?;
-        let mut selected = None;
-        let mut token_facts = None;
-        if let Some((source, facts)) = exact_in_place
-            && let Some(slot) = owner_to_slot.get(&source).copied()
-        {
-            selected = Some(slot);
-            token_facts = Some((source, facts));
-        }
-        if selected.is_none() && requirement.reusable_slot && !requirement.dedicated {
-            selected = slots.iter().find_map(|slot| {
-                let index = slot.id.index;
-                (future_reuse_allowed[index]
-                    && availability[index] < requirement.birth_index
-                    && slot.capacity.proves_equal(&requirement.capacity))
-                .then_some(slot.id)
-            });
-        }
-        let slot = match selected {
-            Some(slot) => slot,
-            None => {
-                let slot = StorageSlotId { index: slots.len() };
-                slots.push(StorageSlotPlan {
-                    id: slot,
-                    capacity: requirement.capacity.clone(),
-                    allocation_elements: allocation_elements_for_node(dag, requirement.owner),
-                    first_owner: requirement.owner,
-                    last_use_index: requirement.last_use_index,
-                });
-                availability.push(usize::MIN);
-                future_reuse_allowed.push(
-                    requirement.reusable_slot
-                        && !requirement.dedicated
-                        && !destructively_dropped.contains(&requirement.owner),
-                );
-                slot
-            }
-        };
-        let index = slot.index;
-        availability[index] = requirement.last_use_index;
-        slots[index].last_use_index = slots[index].last_use_index.max(requirement.last_use_index);
-        future_reuse_allowed[index] = requirement.reusable_slot
-            && !requirement.dedicated
-            && !destructively_dropped.contains(&requirement.owner);
-        owner_to_slot.insert(requirement.owner, slot);
-        assign_placement_slot(&mut placements[requirement.owner.0], slot);
-
-        if let Some((source, facts)) = token_facts {
-            let token = ReusableOwnedStorage::mint(
-                source,
-                StorageId::from_slot(slot)?,
-                requirement.owner,
-                facts,
-            )
-            .map_err(|rejection| OwnershipError::LoweringInvariant {
-                unit: "dag-storage".to_string(),
-                detail: format!(
-                    "selected reuse n{} -> n{} without {:?}",
-                    source.0, requirement.owner.0, rejection
-                ),
-            })?;
-            if reusable.insert(requirement.owner, token).is_some() {
-                return Err(OwnershipError::LoweringInvariant {
-                    unit: "dag-storage".to_string(),
-                    detail: format!(
-                        "consumer n{} received two reuse tokens",
-                        requirement.owner.0
-                    ),
-                });
-            }
-        }
-    }
-    Ok(AssignedSlots { slots, reusable })
-}
-
-fn allocation_elements_for_node(dag: VerifiedDagView<'_>, node: NodeId) -> DimExpr {
-    let tensor = &dag
-        .get(node)
-        .expect("storage requirement names a verified node")
-        .output_type;
-    if tensor.dims.is_empty() {
-        return DimExpr::Concrete(1);
-    }
-    tensor
-        .dims
-        .iter()
-        .map(|dim| match dim {
-            DimInfo::Lit(value) | DimInfo::Named(_, Some(value)) => DimExpr::Concrete(*value),
-            DimInfo::Named(name, None) => DimExpr::Sym(name.clone()),
-        })
-        .reduce(|left, right| DimExpr::Mul(Box::new(left), Box::new(right)))
-        .unwrap_or(DimExpr::Concrete(1))
-}
-
-fn assign_placement_slot(placement: &mut StoragePlacement, slot: StorageSlotId) {
-    match placement {
-        StoragePlacement::InputMirror { slot: assigned, .. }
-        | StoragePlacement::OwnedSlot { slot: assigned }
-        | StoragePlacement::MaterializedStore { slot: assigned, .. } => *assigned = slot,
-        StoragePlacement::BorrowedEntry
-        | StoragePlacement::SharedView { .. }
-        | StoragePlacement::TerminalDrop { .. }
-        | StoragePlacement::StoreAlias { .. }
-        | StoragePlacement::Skipped => unreachable!("only allocating placements receive slots"),
-    }
-}
-
-fn exact_in_place_candidate(
-    dag: VerifiedDagView<'_>,
-    placements: &[StoragePlacement],
-    owner_of: &[Option<NodeId>],
-    requirements: &BTreeMap<NodeId, OwnerRequirement>,
-    consumer_requirement: &OwnerRequirement,
-) -> Result<Option<(NodeId, ReuseCandidateFacts)>, OwnershipError> {
-    let consumer = dag
-        .get(consumer_requirement.owner)
-        .expect("storage requirement names a verified node");
-    let Some(source) = consumer.reusable_input else {
-        return Ok(None);
-    };
-    let source_requirement = requirements.get(&source);
-    let aliases_storage = owner_of
-        .iter()
-        .enumerate()
-        .any(|(node, owner)| node != source.0 && *owner == Some(source));
-    let source_occurrences = consumer
-        .inputs
-        .iter()
-        .filter(|input| **input == source)
-        .count();
-    let total_consumers = dag
-        .nodes()
-        .iter()
-        .flat_map(|node| node.inputs.iter())
-        .filter(|input| **input == source)
-        .count()
-        + dag.roots().iter().filter(|root| **root == source).count();
-    let exact = match source_requirement {
-        Some(source_requirement)
-            if matches!(consumer.op, RiscOp::FusedElem { .. })
-                && source_requirement
-                    .capacity
-                    .proves_equal(&consumer_requirement.capacity)
-                && exact_shape_equal(dag, source, consumer.id)? =>
-        {
-            Some(ExactReuseProof(()))
-        }
-        _ => None,
-    };
-    let facts = ReuseCandidateFacts {
-        provenance: match placements.get(source.0) {
-            Some(StoragePlacement::OwnedSlot { .. }) => StorageProvenance::RuntimeOwned,
-            Some(StoragePlacement::BorrowedEntry | StoragePlacement::InputMirror { .. }) => {
-                StorageProvenance::EntryBorrow
-            }
-            Some(StoragePlacement::SharedView { .. } | StoragePlacement::StoreAlias { .. }) => {
-                StorageProvenance::SharedView
-            }
-            Some(
-                StoragePlacement::TerminalDrop { .. }
-                | StoragePlacement::MaterializedStore { .. }
-                | StoragePlacement::Skipped,
-            )
-            | None => StorageProvenance::SharedView,
-        },
-        one_live_program_owner: source_requirement.is_some() && owner_of[source.0] == Some(source),
-        unique_descriptor_and_storage: !aliases_storage,
-        writable: matches!(
-            placements.get(source.0),
-            Some(StoragePlacement::OwnedSlot { .. })
-        ),
-        no_live_view_or_borrow: source_occurrences == 1 && !aliases_storage,
-        exact,
-        terminal_use: source_requirement
-            .is_some_and(|requirement| requirement.last_use_index == consumer.id.0)
-            && total_consumers == 1,
-    };
-    if facts.first_missing_condition().is_some() {
-        Ok(None)
-    } else {
-        Ok(Some((source, facts)))
-    }
-}
-
-fn exact_shape_equal(
-    dag: VerifiedDagView<'_>,
-    source: NodeId,
-    consumer: NodeId,
-) -> Result<bool, OwnershipError> {
-    let source_keys = shape_capacity_keys_for_node(dag, source).map_err(|error| {
-        OwnershipError::DagStorageCapacity {
-            node: source.0,
-            detail: error.to_string(),
-        }
-    })?;
-    let consumer_keys = shape_capacity_keys_for_node(dag, consumer).map_err(|error| {
-        OwnershipError::DagStorageCapacity {
-            node: consumer.0,
-            detail: error.to_string(),
-        }
-    })?;
-    if source_keys.len() != consumer_keys.len() {
-        return Ok(false);
-    }
-    Ok(source_keys
-        .iter()
-        .zip(&consumer_keys)
-        .all(|(source, consumer)| match (source, consumer) {
-            (CapacityKeyBuild::Exact(source), CapacityKeyBuild::Exact(consumer)) => {
-                source.prove_equal(consumer).is_ok()
-            }
-            _ => false,
-        }))
-}
-
-fn physical_live_byte_bound(slots: &[StorageSlotPlan]) -> LiveByteBound {
-    // Logical death permits reuse; it does not release physical storage. HIP
-    // retains its entire slot pool through cleanup, and C retains descriptors
-    // unless explicitly dropped. Count every distinct slot once, including dead
-    // gaps. This is a concrete upper bound, conservative for early C Drops, not
-    // a claim that every lane necessarily observes the same exact peak.
-    exact_physical_live_bytes(slots).unwrap_or_else(|bound| bound)
-}
-
-/// The exact physical total, or the non-exact bound that replaces it. A total
-/// beyond u64 has no finite representable bound and is `Unbounded`, never an
-/// error: each slot's allocation keeps its own checked admission
-/// (chelis#3418). `Unbounded` dominates `Unknown`, as in the verifier's
-/// composition, so the answer does not depend on slot order.
-fn exact_physical_live_bytes(slots: &[StorageSlotPlan]) -> Result<LiveByteBound, LiveByteBound> {
-    let mut total = 0u64;
-    let mut unknown = false;
-    for slot in slots {
-        let Some(bytes) = slot.capacity.allocation_bytes else {
-            unknown = true;
-            continue;
-        };
-        total = total
-            .checked_add(bytes)
-            // Past u64 no finite bound is representable.
-            .ok_or(LiveByteBound::Unbounded)?;
-    }
-    if unknown {
-        return Err(LiveByteBound::Unknown);
-    }
-    Ok(LiveByteBound::Exact(total))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1443,244 +484,9 @@ mod tests {
         }
     }
 
-    fn matrix(rows: usize, columns: usize, precision: Prim) -> TensorType {
-        TensorType {
-            dims: vec![
-                chelis_dag_core::dag::DimInfo::Lit(rows),
-                chelis_dag_core::dag::DimInfo::Lit(columns),
-            ],
-            precision,
-        }
-    }
-
     fn verified(dag: Dag) -> VerifiedDagProgram {
         verify_ownership(lower_dag_ownership(dag).expect("test DAG lowers"))
             .expect("test DAG verifies")
-    }
-
-    fn dropped_then_root(first: TensorType, second: TensorType) -> Dag {
-        let mut dag = Dag::new();
-        let decl = dag.declare("test");
-        let first_node = dag.add_node(
-            decl,
-            RiscOp::synth_const(first.precision, 1.0),
-            vec![],
-            first.clone(),
-            None,
-        );
-        dag.add_node(decl, RiscOp::Drop, vec![first_node], first, None);
-        let second_node = dag.add_node(
-            decl,
-            RiscOp::synth_const(second.precision, 2.0),
-            vec![],
-            second,
-            None,
-        );
-        dag.add_root(second_node);
-        dag
-    }
-
-    #[test]
-    fn deferred_payloads_keep_original_bound_and_claim_reads_live() {
-        for dependency in ["shape", "none"] {
-            let mut dag = Dag::new();
-            let owner = dag.declare("test");
-            let scalar = TensorType {
-                dims: vec![],
-                precision: Prim::Int64,
-            };
-            let source = dag.add_node(
-                owner,
-                RiscOp::Load { name: "x".into() },
-                vec![],
-                TensorType::scalar_f32(),
-                None,
-            );
-            let claim = dag.add_node(
-                owner,
-                RiscOp::synth_const(Prim::Int64, 3.0),
-                vec![],
-                scalar.clone(),
-                None,
-            );
-            let zero = dag.add_node(
-                owner,
-                RiscOp::synth_const(Prim::Int64, 0.0),
-                vec![],
-                scalar.clone(),
-                None,
-            );
-            let bound = dag.add_node(owner, RiscOp::Add, vec![claim, zero], scalar.clone(), None);
-            let intervening = dag.add_node(
-                owner,
-                RiscOp::synth_const(Prim::Int64, 0.0),
-                vec![],
-                scalar,
-                None,
-            );
-            let expanded = dag.add_node(
-                owner,
-                RiscOp::Expand {
-                    axis: 0,
-                    size: chelis_dag_core::dag::RtDim::Node(1),
-                },
-                vec![source, bound],
-                vector(3, Prim::F32),
-                None,
-            );
-            match dependency {
-                "shape" => dag.add_shape_dep(expanded, claim),
-                "none" => (),
-                _ => unreachable!(),
-            }
-            let sum = dag.add_node(
-                owner,
-                RiscOp::Sum {
-                    axis: 0,
-                    accumulator: Prim::F32,
-                },
-                vec![expanded],
-                TensorType::scalar_f32(),
-                None,
-            );
-            dag.set_roots(vec![sum, intervening]);
-            let program = verified(dag);
-            assert!(program.emission().contraction_views().is_deferred(expanded));
-            let emission = program.emission();
-            let views = emission.contraction_views();
-            let placements = classify_nodes(
-                emission,
-                StorageLaneKind::C,
-                &[expanded].into_iter().collect(),
-            );
-            let owners = compute_owner_map(&placements);
-            let mut requirements = owner_requirements(emission, &placements, &owners).unwrap();
-            extend_lifetimes(
-                emission,
-                StorageLaneKind::C,
-                &placements,
-                &owners,
-                &mut requirements,
-                Some(&views),
-            );
-            assert_eq!(requirements[&bound].last_use_index, expanded.0);
-            assert_eq!(
-                requirements[&claim].last_use_index,
-                if dependency == "none" {
-                    bound.0
-                } else {
-                    expanded.0
-                }
-            );
-            let plan = plan_c_storage(program).unwrap();
-            assert!(matches!(
-                plan.placement(expanded),
-                Some(StoragePlacement::Skipped)
-            ));
-            let last = |node| {
-                plan.slot(plan.slot_for_node(node).unwrap())
-                    .unwrap()
-                    .last_use_index()
-            };
-            assert_eq!(
-                last(bound),
-                expanded.0,
-                "runtime bound is read at the original node"
-            );
-            if dependency != "none" {
-                assert!(
-                    last(claim) >= expanded.0,
-                    "{dependency} witness cannot be repurposed before its check"
-                );
-                assert_ne!(plan.slot_for_node(claim), plan.slot_for_node(intervening));
-            }
-        }
-    }
-
-    #[test]
-    fn deferred_product_keeps_result_claim_witness_live() {
-        use chelis_dag_core::dag::{ExtentWitnessSite, RtAxis};
-        let mut dag = Dag::new();
-        let owner = dag.declare("test");
-        let source = dag.add_node(
-            owner,
-            RiscOp::Load { name: "x".into() },
-            vec![],
-            vector(3, Prim::F32),
-            None,
-        );
-        let claim = dag.add_node(
-            owner,
-            RiscOp::ExtentWitness {
-                site: ExtentWitnessSite::LiteralResultClaim,
-                parameter: String::new(),
-                axis: RtAxis::Lit(0),
-                requirements: vec![
-                    chelis_numeric_core::dtype_semantics::scalar_from_i64("test", Prim::Int64, 3)
-                        .unwrap(),
-                ],
-                claims: vec![],
-            },
-            vec![],
-            scalar(Prim::Int64),
-            None,
-        );
-        let intervening = dag.add_node(
-            owner,
-            RiscOp::synth_const(Prim::Int64, 0.0),
-            vec![],
-            scalar(Prim::Int64),
-            None,
-        );
-        let product = dag.add_node(
-            owner,
-            RiscOp::Mul,
-            vec![source, source],
-            vector(3, Prim::F32),
-            None,
-        );
-        dag.add_result_claim_dep(product, claim);
-        let sum = dag.add_node(
-            owner,
-            RiscOp::Sum {
-                axis: 0,
-                accumulator: Prim::F32,
-            },
-            vec![product],
-            TensorType::scalar_f32(),
-            None,
-        );
-        dag.set_roots(vec![sum, intervening]);
-        let program = verified(dag);
-        assert!(program.emission().contraction_views().is_deferred(product));
-        let plan = plan_c_storage(program).unwrap();
-        assert_ne!(plan.slot_for_node(claim), plan.slot_for_node(intervening));
-        assert!(
-            plan.slot(plan.slot_for_node(claim).unwrap())
-                .unwrap()
-                .last_use_index()
-                >= product.0
-        );
-    }
-
-    #[test]
-    fn destructive_drop_retires_an_exact_capacity_slot_in_both_lanes() {
-        let dag = dropped_then_root(matrix(2, 2, Prim::F32), vector(4, Prim::F32));
-        let c = plan_c_storage(verified(dag.clone())).expect("same-byte C capacity plan");
-        let hip = plan_hip_storage(verified(dag)).expect("same-byte HIP capacity plan");
-
-        assert_eq!(c.slots().len(), 2);
-        assert_eq!(hip.slots().len(), 2);
-    }
-
-    #[test]
-    fn equal_width_different_representations_never_share_a_slot() {
-        let plan = plan_c_storage(verified(dropped_then_root(
-            vector(4, Prim::F32),
-            vector(4, Prim::Int32),
-        )))
-        .expect("mixed-representation plan");
-        assert_eq!(plan.slots().len(), 2);
     }
 
     #[test]

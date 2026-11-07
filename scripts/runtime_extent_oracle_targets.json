@@ -26,9 +26,9 @@
     {
       "phase": "a",
       "id": "host_actualization",
-      "package": "chelis-ir",
+      "package": "chelis-ir-core",
       "kind": "lib",
-      "file": "crates/chelis-ir/src/host.rs",
+      "file": "crates/chelis-ir-core/src/host/tests.rs",
       "selector": {
         "mode": "exact"
       },
@@ -726,9 +726,9 @@
     {
       "phase": "b",
       "id": "ir_issue_2110_staged_partition",
-      "package": "chelis-ir",
+      "package": "chelis-ir-core",
       "kind": "lib",
-      "file": "crates/chelis-ir/src/host/staged.rs",
+      "file": "crates/chelis-ir-core/src/host/staged.rs",
       "selector": {
         "mode": "exact"
       },
@@ -1167,9 +1167,9 @@
     },
     {
       "id": "ir_signature_entry_plan",
-      "package": "chelis-ir",
+      "package": "chelis-ir-core",
       "kind": "lib",
-      "file": "crates/chelis-ir/src/host/signature_entry.rs",
+      "file": "crates/chelis-ir-core/src/host/signature_entry.rs",
       "selector": {
         "mode": "substring",
         "value": "host::signature_entry::tests::"
@@ -1376,9 +1376,9 @@
     {
       "phase": "b",
       "id": "gradient_mapping_verifier",
-      "package": "chelis-ir",
+      "package": "chelis-ir-core",
       "kind": "lib",
-      "file": "crates/chelis-ir/src/lower.rs",
+      "file": "crates/chelis-ir-core/src/lower.rs",
       "selector": {
         "mode": "exact"
       },

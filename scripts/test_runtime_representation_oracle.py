@@ -63,7 +63,7 @@ class SourceUniverseTests(unittest.TestCase):
             any(f"|path={source}|" in row["identity"] for row in baseline["active_debt"])
         )
         with moved(
-            REPO_ROOT / source,
+            REPO_ROOT / "crates/chelis-ir-core/src/ownership/verify.rs",
             REPO_ROOT / "crates/chelis-departed-probe/src/verify.rs",
         ), tempfile.TemporaryDirectory() as directory:
             with self.assertRaises(oracle.OracleFailure) as caught:
@@ -397,7 +397,13 @@ class SourceUniverseTests(unittest.TestCase):
         self.assertFalse(
             any(f"|path={source}|" in row["identity"] for row in baseline["active_debt"])
         )
-        with moved(REPO_ROOT / source, REPO_ROOT / "crates/chelis-departed-probe/eval.rs"):
+        with moved(
+            REPO_ROOT / source,
+            REPO_ROOT / "crates/chelis-departed-probe/eval.rs",
+        ), moved(
+            REPO_ROOT / "crates/chelis-ir-core/src/eval.rs",
+            REPO_ROOT / "crates/chelis-departed-probe/core_eval.rs",
+        ):
             with self.assertRaises(oracle.OracleFailure) as caught:
                 oracle.validate_baseline(baseline, oracle.inventory_rows(REPO_ROOT))
         self.assertEqual(caught.exception.code, oracle.DEPARTED_FILE_FAILURE.code)
@@ -662,7 +668,7 @@ class SourceUniverseTests(unittest.TestCase):
             "crates/chelis-backend-hip/runtime/chelis_device_owner.h",
             "crates/chelis-backend-hip/runtime/chelis_hip_runtime.h",
             "crates/chelis-backend-metal/runtime/chelis_metal_runtime.h",
-            "crates/chelis-ir/src/compositions.rs",
+            "crates/chelis-ir-core/src/compositions.rs",
             "crates/chelis-python/src/dlpack.rs",
             "crates/chelis-python/src/native_tensor.rs",
             "crates/chelis-runtime/include/chelis_runtime_views.h",

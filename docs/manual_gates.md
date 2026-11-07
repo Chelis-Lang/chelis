@@ -536,3 +536,22 @@ HIP and Metal source evidence does not establish GPU device execution.
 Thumb compilation does not establish microcontroller execution, stack capacity, or allocator capacity.
 Source lowering, evaluation, host diagnostics, ABI layout admission, and production stage order remain host responsibilities.
 
+
+## Portable IR extraction
+
+Run the complete command from a clean source commit:
+
+```sh
+uv run --managed-python --python 3.11 --no-project python scripts/ir_core_oracle.py
+```
+
+The `ir-core` integration support phase runs the same command.
+Independent Linux and macOS jobs retain complete evidence under `target/agents/ir-core/`.
+The command retains the immutable baseline, exact case identities, semantic corpus, and full evaluation cost witnesses.
+Six other ignored cases retain their historical or manual obligations.
+The complete command has no reduced-selection mode.
+Baseline-only capture does not establish implementation acceptance.
+
+The caller supplies allocation, stack services, cancellation access, and operation-local caches.
+Native authority remains in `chelis-ir`.
+Thumb compile and link checks do not establish device execution or whole-pipeline portability.

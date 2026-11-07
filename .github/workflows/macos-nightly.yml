@@ -537,6 +537,12 @@ jobs:
             evidence: target/agents/checker-core/
             artifact: checker-core-darwin
             timeout: 300
+          - core: ir
+            python: uv run --managed-python --python 3.11 --no-project python
+            script: scripts/ir_core_oracle.py
+            evidence: target/agents/ir-core/
+            artifact: ir-core-darwin
+            timeout: 300
     env:
       CARGO_PROFILE_DEV_DEBUG: 0
       CARGO_PROFILE_TEST_DEBUG: 0
@@ -555,7 +561,7 @@ jobs:
         run: python3 scripts/ci_setup_uv_python.py
 
       - name: Install oracle policy dependency
-        if: matrix.core == 'effect-analysis' || matrix.core == 'checker'
+        if: matrix.core == 'effect-analysis' || matrix.core == 'checker' || matrix.core == 'ir'
         run: uv pip install --python "$PYO3_PYTHON" PyYAML==6.0.3
 
       - name: Cache cargo registry and build

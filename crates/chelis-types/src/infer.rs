@@ -52,18 +52,28 @@ impl chelis_checker_core::CheckObserver for ProfileObserver {
 pub(crate) fn with_resources<R>(
     run: impl FnOnce(&chelis_checker_core::Resources<'_, NativeStack>) -> R,
 ) -> R {
-    with_resources_for(false, run)
+    with_resources_for(false, &NativeStack, run)
 }
 
 fn with_profile_resources<R>(
     run: impl FnOnce(&chelis_checker_core::Resources<'_, NativeStack>) -> R,
 ) -> R {
-    with_resources_for(true, run)
+    with_resources_for(true, &NativeStack, run)
 }
 
-fn with_resources_for<R>(
+/// Borrow native checker policy and cancellation with the caller stack service.
+/// These resources grant no checked-product construction or adoption right.
+pub fn with_resources_on<S: chelis_stack_services::StackServices, R>(
+    stack: &S,
+    run: impl FnOnce(&chelis_checker_core::Resources<'_, S>) -> R,
+) -> R {
+    with_resources_for(false, stack, run)
+}
+
+fn with_resources_for<S: chelis_stack_services::StackServices, R>(
     profile: bool,
-    run: impl FnOnce(&chelis_checker_core::Resources<'_, NativeStack>) -> R,
+    stack: &S,
+    run: impl FnOnce(&chelis_checker_core::Resources<'_, S>) -> R,
 ) -> R {
     let cancellation = crate::cancel::current_cancel_token();
     let observer = profile
@@ -74,7 +84,7 @@ fn with_resources_for<R>(
             phase_start: Cell::new(Instant::now()),
             declaration_start: Cell::new(None),
         });
-    let mut resources = chelis_checker_core::Resources::new(&NativeStack);
+    let mut resources = chelis_checker_core::Resources::new(stack);
     resources.cancellation = cancellation
         .as_ref()
         .map(|token| token as &dyn chelis_checker_core::Cancellation);
@@ -168,6 +178,12 @@ impl<'de> Deserialize<'de> for CheckedProgram {
     }
 }
 
+impl core::borrow::Borrow<CheckFacts> for CheckedProgram {
+    fn borrow(&self) -> &CheckFacts {
+        self.facts()
+    }
+}
+
 impl CheckedProgram {
     fn from_completion(completion: CompletedCheck) -> Self {
         Self {
@@ -176,7 +192,8 @@ impl CheckedProgram {
             context_library_proof_id: None,
         }
     }
-    pub(crate) fn facts(&self) -> &CheckFacts {
+    /// Borrow ordinary facts without native checked-product construction rights.
+    pub fn facts(&self) -> &CheckFacts {
         &self.facts
     }
     pub(crate) fn with_facts(&self, facts: CheckFacts) -> Self {

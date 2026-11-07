@@ -2,9 +2,8 @@ mod support;
 
 use chelis_backend_hip::memory::MemoryPlan;
 use chelis_dag_core::dag::{Dag, DimInfo, RiscOp, TensorType};
-use chelis_ir::ownership::{
-    LiveByteBound, lower_dag_ownership, plan_hip_storage, verify_ownership,
-};
+use chelis_ir::ownership::{lower_dag_ownership, plan_hip_storage, verify_ownership};
+use chelis_ir_core::ownership::LiveByteBound;
 use chelis_numeric_core::prim::Prim;
 
 #[test]

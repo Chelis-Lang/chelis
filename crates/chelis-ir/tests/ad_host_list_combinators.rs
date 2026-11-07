@@ -4,8 +4,9 @@
 #![allow(clippy::disallowed_methods)]
 use chelis_deep::ExprCarrier;
 use chelis_deep::ast::{Atom, Expr};
-use chelis_ir::eval::{TensorValue, eval_tensor_roots_with_strict};
-use chelis_ir::lower::lower_subexpr_program;
+use chelis_ir::eval::eval_tensor_roots_with_strict;
+use chelis_ir_core::eval::TensorValue;
+use chelis_ir_core::lower::try_lower_subexpr_program;
 use chelis_unord::UnordMap;
 
 fn checked_surf(src: &str) -> chelis_types::CheckedProgram {
@@ -44,24 +45,27 @@ fn def_name_and_body(expr: &Expr) -> Option<(String, Expr)> {
 }
 
 fn lower_out(src: &str) -> chelis_dag_core::dag::Dag {
-    let checked = checked_surf(src);
-    let mut defs = UnordMap::new();
-    let mut out_expr = None;
-    for expr in checked.exprs() {
-        if let Some((name, body)) = def_name_and_body(expr) {
-            if name == "out" {
-                out_expr = Some(body.clone());
+    chelis_ir::resources::with_operation(|operation| {
+        let checked = checked_surf(src);
+        let mut defs = UnordMap::new();
+        let mut out_expr = None;
+        for expr in checked.exprs() {
+            if let Some((name, body)) = def_name_and_body(expr) {
+                if name == "out" {
+                    out_expr = Some(body.clone());
+                }
+                defs.insert(name, body);
             }
-            defs.insert(name, body);
         }
-    }
-    let out_expr = out_expr.expect("source must define out");
-    let type_env = checked
-        .type_env()
-        .iter()
-        .map(|(name, ty)| (name.clone(), ty.clone()))
-        .collect();
-    lower_subexpr_program(&out_expr, UnordMap::new(), type_env, defs)
+        let out_expr = out_expr.expect("source must define out");
+        let type_env = checked
+            .type_env()
+            .iter()
+            .map(|(name, ty)| (name.clone(), ty.clone()))
+            .collect();
+        try_lower_subexpr_program(&out_expr, UnordMap::new(), type_env, defs, operation)
+            .expect("subexpression lowers")
+    })
 }
 
 fn eval_out(src: &str) -> TensorValue {

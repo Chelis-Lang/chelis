@@ -24,11 +24,11 @@
 use std::collections::BTreeSet;
 
 use chelis_deep::Expr;
-use chelis_ir::HostTypeTerm;
-use chelis_ir::host::{
+use chelis_ir::host::try_lower_compiled_program;
+use chelis_ir_core::host::{
     CompiledProgram, HostCallback, HostCallbackKind, HostExpr, HostExprKind, HostProgram,
-    try_lower_compiled_program,
 };
+use chelis_ir_core::host_type_state::HostTypeTerm;
 use chelis_types::{CheckedProgram, check_ir_program, check_linearity};
 
 /// Tests in this file provide checked programs that are expected to lower.

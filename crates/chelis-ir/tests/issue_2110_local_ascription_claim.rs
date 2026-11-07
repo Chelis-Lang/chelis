@@ -3,23 +3,28 @@
 
 use chelis_dag_core::dag::{Dag, DimInfo, ExtentWitnessSite, RiscOp, RtAxis, TensorType};
 use chelis_dag_core::optimize::{common_subexpr_eliminate, dead_code_eliminate};
-use chelis_ir::eval::{TensorValue, eval_tensor_with};
-use chelis_ir::specialize::specialize_for_exact_arithmetic;
+use chelis_ir::eval::eval_tensor_with;
+use chelis_ir_core::eval::TensorValue;
+use chelis_ir_core::specialize::specialize_for_exact_arithmetic;
 use chelis_numeric_core::prim::Prim;
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str;
 use chelis_types::check_ir_program;
 
 fn lower(source: &str) -> chelis_dag_core::Dag {
-    let decls = parse_str(source, &chelis_syntax_host::NativeStack).expect("Surf parse");
-    let checked = check_ir_program(
-        &desugar_program(&decls, &chelis_syntax_host::NativeStack)
-            .expect("Surf fixture must desugar"),
-    )
-    .unwrap_or_else(|report| {
-        panic!("type check failed: {:?}", report.errors);
-    });
-    chelis_ir::host::lower_named_tensor_entry_dag(&checked, "f").expect("named tensor entry lowers")
+    chelis_ir::resources::with_operation(|operation| {
+        let decls = parse_str(source, &chelis_syntax_host::NativeStack).expect("Surf parse");
+        let checked = check_ir_program(
+            &desugar_program(&decls, &chelis_syntax_host::NativeStack)
+                .expect("Surf fixture must desugar"),
+        )
+        .unwrap_or_else(|report| {
+            panic!("type check failed: {:?}", report.errors);
+        });
+        chelis_ir_core::host::lower_named_tensor_entry_dag((checked).facts(), "f", operation)
+            .expect("named entry decision")
+            .expect("named tensor entry lowers")
+    })
 }
 
 fn checked(source: &str) -> chelis_types::CheckedProgram {
@@ -441,41 +446,45 @@ fn inferred_metadata_does_not_create_a_local_ascription_site() {
 
 #[test]
 fn host_evaluation_kernel_carries_the_same_local_ascription_site() {
-    let source = direct_source("y: tensor[2, f32] = pad(x, [[0i64, 0i64]], 0.0f32)\n  y");
-    let checked = checked(&source);
-    let session = chelis_ir::host::HostLoweringSession::new(&checked);
-    let kernel = chelis_ir::host::host_def_kernel(&session, "f")
-        .expect("kernel decision")
-        .expect("tensor kernel");
-    assert_eq!(
-        local_claims(&kernel.dag).len(),
-        1,
-        "the actual Eval kernel must retain the checker-owned site: {:?}",
-        kernel.dag
-    );
+    chelis_ir::resources::with_operation(|operation| {
+        let source = direct_source("y: tensor[2, f32] = pad(x, [[0i64, 0i64]], 0.0f32)\n  y");
+        let checked = checked(&source);
+        let session = chelis_ir_core::host::HostLoweringSession::new(checked.facts(), operation);
+        let kernel = chelis_ir_core::host::host_def_kernel(&session, "f")
+            .expect("kernel decision")
+            .expect("tensor kernel");
+        assert_eq!(
+            local_claims(&kernel.dag).len(),
+            1,
+            "the actual Eval kernel must retain the checker-owned site: {:?}",
+            kernel.dag
+        );
+    })
 }
 
 #[test]
 fn staged_host_partition_retains_the_local_ascription_site() {
-    let source = "def f[m, n](source: tensor[m, f32], x: tensor[n, f32]) -> tensor[*, f32] = {\n  \
+    chelis_ir::resources::with_operation(|operation| {
+        let source = "def f[m, n](source: tensor[m, f32], x: tensor[n, f32]) -> tensor[*, f32] = {\n  \
                   y: tensor[2, f32] = reshape(x, [numel(source)])\n  \
                   y\n\
                   }\n";
-    let checked = checked(source);
-    let session = chelis_ir::host::HostLoweringSession::new(&checked);
-    let kernel = chelis_ir::host::host_def_kernel(&session, "f")
-        .expect("kernel decision")
-        .expect("tensor kernel");
-    assert!(
-        kernel.staged.is_some(),
-        "numel-fed reshape must exercise the staged host partition"
-    );
-    assert_eq!(
-        local_claims(&kernel.dag).len(),
-        1,
-        "the partitioned kernel must retain the checker-owned local site: {:?}",
-        kernel.dag
-    );
+        let checked = checked(source);
+        let session = chelis_ir_core::host::HostLoweringSession::new(checked.facts(), operation);
+        let kernel = chelis_ir_core::host::host_def_kernel(&session, "f")
+            .expect("kernel decision")
+            .expect("tensor kernel");
+        assert!(
+            kernel.staged.is_some(),
+            "numel-fed reshape must exercise the staged host partition"
+        );
+        assert_eq!(
+            local_claims(&kernel.dag).len(),
+            1,
+            "the partitioned kernel must retain the checker-owned local site: {:?}",
+            kernel.dag
+        );
+    })
 }
 
 #[test]

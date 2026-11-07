@@ -240,38 +240,41 @@ fn runtime_function_params_reject_nonparameter_carriers_without_filtering() {
 }
 
 fn issue_1125_eval_raw_expr(expr: &Expr) -> Result<RuntimeValue, String> {
-    let empty_tensors: UnordMap<String, RuntimeTensorValue> = UnordMap::new();
-    let mut ctx = EvalContext {
-        #[cfg(feature = "clarabel-provider")]
-        native_clarabel_solve: false,
-        bindings: Frame::new(),
-        result_producer: None,
-        binding_types: chelis_unord::PersistentMap::new(),
-        precision_bindings: UnordMap::new(),
-        declaration_values: UnordMap::new(),
-        named_axis_route_cache: UnordMap::new(),
-        named_axis_route_visiting: UnordSet::new(),
-        program: ProgramScope::new(UnordMap::new(), UnordMap::new()),
-        declared_signatures: UnordMap::new(),
-        adt_fields: UnordMap::new(),
-        constructor_names: UnordMap::new(),
-        adt_registry: chelis_checker_core::adt::AdtRegistry::default(),
-        tensor_bindings: &empty_tensors,
-        session: None,
-        active_declaration_names: Vec::new(),
-        def_kernels: UnordMap::new(),
-        claim_patterns: Default::default(),
-        loop_compositions: Vec::new(),
-        transcript: Vec::new(),
-        transcript_capture: None,
-        resolving_top_levels: Vec::new(),
-        cancel: None,
-        system: system::EvalSystemBoundary::permissive(),
-        failure_kind: RuntimeFailureKind::Ordinary,
-        activation_extents: Default::default(),
-        last_uses: Default::default(),
-    };
-    ctx.eval_expr(expr)
+    chelis_ir::resources::with_operation(|operation| {
+        let empty_tensors: UnordMap<String, RuntimeTensorValue> = UnordMap::new();
+        let mut ctx = EvalContext {
+            operation,
+            #[cfg(feature = "clarabel-provider")]
+            native_clarabel_solve: false,
+            bindings: Frame::new(),
+            result_producer: None,
+            binding_types: chelis_unord::PersistentMap::new(),
+            precision_bindings: UnordMap::new(),
+            declaration_values: UnordMap::new(),
+            named_axis_route_cache: UnordMap::new(),
+            named_axis_route_visiting: UnordSet::new(),
+            program: ProgramScope::new(UnordMap::new(), UnordMap::new()),
+            declared_signatures: UnordMap::new(),
+            adt_fields: UnordMap::new(),
+            constructor_names: UnordMap::new(),
+            adt_registry: chelis_checker_core::adt::AdtRegistry::default(),
+            tensor_bindings: &empty_tensors,
+            session: None,
+            active_declaration_names: Vec::new(),
+            def_kernels: UnordMap::new(),
+            claim_patterns: Default::default(),
+            loop_compositions: Vec::new(),
+            transcript: Vec::new(),
+            transcript_capture: None,
+            resolving_top_levels: Vec::new(),
+            cancel: None,
+            system: system::EvalSystemBoundary::permissive(),
+            failure_kind: RuntimeFailureKind::Ordinary,
+            activation_extents: Default::default(),
+            last_uses: Default::default(),
+        };
+        ctx.eval_expr(expr)
+    })
 }
 
 fn issue_1125_eval_checked_root(
@@ -279,56 +282,62 @@ fn issue_1125_eval_checked_root(
     exprs: &[Expr],
     root: &str,
 ) -> Result<RuntimeValue, String> {
-    let empty_tensors = UnordMap::new();
-    let mut definitions = UnordMap::new();
-    register_top_level_defs(
-        exprs,
-        &BTreeMap::new(),
-        None,
-        &mut definitions,
-        &mut Vec::new(),
-        false,
-    );
-    let mut signatures = UnordMap::new();
-    register_declared_signatures(exprs, &mut signatures);
-    let mut ctx = EvalContext {
-        #[cfg(feature = "clarabel-provider")]
-        native_clarabel_solve: false,
-        bindings: Frame::new(),
-        result_producer: None,
-        binding_types: chelis_unord::PersistentMap::new(),
-        precision_bindings: UnordMap::new(),
-        declaration_values: UnordMap::new(),
-        named_axis_route_cache: UnordMap::new(),
-        named_axis_route_visiting: UnordSet::new(),
-        program: ProgramScope::new(
-            definitions,
-            checked
-                .type_env()
-                .iter()
-                .map(|(name, ty)| (name.clone(), ty.clone()))
-                .collect(),
-        ),
-        declared_signatures: signatures,
-        adt_fields: UnordMap::new(),
-        constructor_names: UnordMap::new(),
-        adt_registry: checked.adt_registry().clone(),
-        tensor_bindings: &empty_tensors,
-        session: Some(chelis_ir::host::HostLoweringSession::new(checked)),
-        active_declaration_names: Vec::new(),
-        def_kernels: UnordMap::new(),
-        claim_patterns: Default::default(),
-        loop_compositions: Vec::new(),
-        transcript: Vec::new(),
-        transcript_capture: None,
-        resolving_top_levels: Vec::new(),
-        cancel: None,
-        system: system::EvalSystemBoundary::permissive(),
-        failure_kind: RuntimeFailureKind::Ordinary,
-        activation_extents: Default::default(),
-        last_uses: Default::default(),
-    };
-    ctx.resolve_top_level(root)
+    chelis_ir::resources::with_operation(|operation| {
+        let empty_tensors = UnordMap::new();
+        let mut definitions = UnordMap::new();
+        register_top_level_defs(
+            exprs,
+            &BTreeMap::new(),
+            None,
+            &mut definitions,
+            &mut Vec::new(),
+            false,
+        );
+        let mut signatures = UnordMap::new();
+        register_declared_signatures(exprs, &mut signatures);
+        let mut ctx = EvalContext {
+            operation,
+            #[cfg(feature = "clarabel-provider")]
+            native_clarabel_solve: false,
+            bindings: Frame::new(),
+            result_producer: None,
+            binding_types: chelis_unord::PersistentMap::new(),
+            precision_bindings: UnordMap::new(),
+            declaration_values: UnordMap::new(),
+            named_axis_route_cache: UnordMap::new(),
+            named_axis_route_visiting: UnordSet::new(),
+            program: ProgramScope::new(
+                definitions,
+                checked
+                    .type_env()
+                    .iter()
+                    .map(|(name, ty)| (name.clone(), ty.clone()))
+                    .collect(),
+            ),
+            declared_signatures: signatures,
+            adt_fields: UnordMap::new(),
+            constructor_names: UnordMap::new(),
+            adt_registry: checked.adt_registry().clone(),
+            tensor_bindings: &empty_tensors,
+            session: Some(chelis_ir_core::host::HostLoweringSession::new(
+                checked.facts(),
+                operation,
+            )),
+            active_declaration_names: Vec::new(),
+            def_kernels: UnordMap::new(),
+            claim_patterns: Default::default(),
+            loop_compositions: Vec::new(),
+            transcript: Vec::new(),
+            transcript_capture: None,
+            resolving_top_levels: Vec::new(),
+            cancel: None,
+            system: system::EvalSystemBoundary::permissive(),
+            failure_kind: RuntimeFailureKind::Ordinary,
+            activation_extents: Default::default(),
+            last_uses: Default::default(),
+        };
+        ctx.resolve_top_level(root)
+    })
 }
 
 fn issue_1125_gradient_values(value: &RuntimeValue) -> Vec<f64> {
@@ -1471,7 +1480,7 @@ fn evaluate_result(source: &str) -> String {
 ///
 /// `apply_n` retains its formal `f`'s contract on `inc`, then applies `f`
 /// once per fold step. The receipt counts every contract normalization
-/// (`chelis_ir::callable_value::contract_normalizations`), which must not
+/// (`chelis_ir::resources::contract_normalizations`), which must not
 /// grow with the number of applications.
 ///
 /// Evidentiary status: REGRESSION TEST, proven failing first. With the
@@ -1486,9 +1495,9 @@ fn issue_3741_retained_contracts_normalize_once_not_per_application() {
              def inc(x: i64) -> i64 = add(x, 1i64)\n\
              result = apply_n(inc, {applications}i64)\n"
         );
-        chelis_ir::callable_value::reset_contract_normalizations();
+        chelis_ir::resources::reset_contract_normalizations();
         let result = evaluate_result(&source);
-        let count = chelis_ir::callable_value::contract_normalizations();
+        let count = chelis_ir::resources::contract_normalizations();
         assert_eq!(
             result,
             applications.to_string(),
@@ -1736,7 +1745,7 @@ fn issue_2204_closure_parameter_shadows_captured_binding() {
 fn manifest_entry_with_path(
     name: &str,
     def_name: &str,
-    path: Vec<chelis_types::manifest::RootPathStep>,
+    path: Vec<chelis_type_core::RootPathStep>,
 ) -> chelis_types::manifest::RootEntry {
     chelis_types::manifest::RootEntry {
         name: name.to_string(),
@@ -1754,7 +1763,7 @@ fn manifest_entry_with_path(
 
 #[test]
 fn manifest_root_lookup_follows_recursive_list_adt_path() {
-    use chelis_types::manifest::RootPathStep::Adt;
+    use chelis_type_core::RootPathStep::Adt;
 
     let entry = manifest_entry_with_path("items.1.0", "items", vec![Adt(1), Adt(0)]);
     let bindings = UnordMap::from([(
@@ -1769,7 +1778,7 @@ fn manifest_root_lookup_follows_recursive_list_adt_path() {
 
 #[test]
 fn manifest_root_lookup_rejects_a_path_step_for_the_wrong_runtime_shape() {
-    use chelis_types::manifest::RootPathStep::Tuple;
+    use chelis_type_core::RootPathStep::Tuple;
 
     let entry = manifest_entry_with_path("value.0", "value", vec![Tuple(0)]);
     let bindings = UnordMap::from([("value".to_string(), RuntimeValue::Bool(true))]);
@@ -2472,53 +2481,56 @@ fn eval_deep_with_bindings(
     surf_expr: &str,
     args: &[(&str, RuntimeValue)],
 ) -> Result<String, String> {
-    let source = format!("probe = {surf_expr}\n");
-    let decls = chelis_surf::parser::parse_str(&source, &chelis_syntax_host::NativeStack)
-        .expect("surf parse");
-    let exprs = chelis_surf::desugar::desugar_program(&decls, &chelis_syntax_host::NativeStack)
-        .expect("Surf fixture must desugar");
-    let Expr::Node(def, _) = &exprs[0] else {
-        panic!("desugaring a top-level binding yields one def form");
-    };
-    // `(def {} <name> <body>)`: the body is the second child.
-    let body = def.children_slice()[1].clone();
+    chelis_ir::resources::with_operation(|operation| {
+        let source = format!("probe = {surf_expr}\n");
+        let decls = chelis_surf::parser::parse_str(&source, &chelis_syntax_host::NativeStack)
+            .expect("surf parse");
+        let exprs = chelis_surf::desugar::desugar_program(&decls, &chelis_syntax_host::NativeStack)
+            .expect("Surf fixture must desugar");
+        let Expr::Node(def, _) = &exprs[0] else {
+            panic!("desugaring a top-level binding yields one def form");
+        };
+        // `(def {} <name> <body>)`: the body is the second child.
+        let body = def.children_slice()[1].clone();
 
-    let empty_tensors: UnordMap<String, RuntimeTensorValue> = UnordMap::new();
-    let mut ctx = EvalContext {
-        #[cfg(feature = "clarabel-provider")]
-        native_clarabel_solve: false,
-        bindings: Frame::new(),
-        result_producer: None,
-        binding_types: chelis_unord::PersistentMap::new(),
-        precision_bindings: UnordMap::new(),
-        declaration_values: UnordMap::new(),
-        named_axis_route_cache: UnordMap::new(),
-        named_axis_route_visiting: UnordSet::new(),
-        program: ProgramScope::new(UnordMap::new(), UnordMap::new()),
-        declared_signatures: UnordMap::new(),
-        adt_fields: UnordMap::new(),
-        constructor_names: UnordMap::new(),
-        adt_registry: chelis_checker_core::adt::AdtRegistry::default(),
-        tensor_bindings: &empty_tensors,
-        session: None,
-        active_declaration_names: Vec::new(),
-        def_kernels: UnordMap::new(),
-        claim_patterns: Default::default(),
-        loop_compositions: Vec::new(),
-        transcript: Vec::new(),
-        transcript_capture: None,
-        resolving_top_levels: Vec::new(),
-        cancel: None,
-        system: system::EvalSystemBoundary::permissive(),
-        failure_kind: RuntimeFailureKind::Ordinary,
-        activation_extents: Default::default(),
-        last_uses: Default::default(),
-    };
-    for (name, value) in args {
-        ctx.bindings.insert((*name).to_string(), value.clone());
-        ctx.binding_types.insert((*name).to_string(), None);
-    }
-    ctx.eval_expr(&body).map(|value| render_value(&value))
+        let empty_tensors: UnordMap<String, RuntimeTensorValue> = UnordMap::new();
+        let mut ctx = EvalContext {
+            operation,
+            #[cfg(feature = "clarabel-provider")]
+            native_clarabel_solve: false,
+            bindings: Frame::new(),
+            result_producer: None,
+            binding_types: chelis_unord::PersistentMap::new(),
+            precision_bindings: UnordMap::new(),
+            declaration_values: UnordMap::new(),
+            named_axis_route_cache: UnordMap::new(),
+            named_axis_route_visiting: UnordSet::new(),
+            program: ProgramScope::new(UnordMap::new(), UnordMap::new()),
+            declared_signatures: UnordMap::new(),
+            adt_fields: UnordMap::new(),
+            constructor_names: UnordMap::new(),
+            adt_registry: chelis_checker_core::adt::AdtRegistry::default(),
+            tensor_bindings: &empty_tensors,
+            session: None,
+            active_declaration_names: Vec::new(),
+            def_kernels: UnordMap::new(),
+            claim_patterns: Default::default(),
+            loop_compositions: Vec::new(),
+            transcript: Vec::new(),
+            transcript_capture: None,
+            resolving_top_levels: Vec::new(),
+            cancel: None,
+            system: system::EvalSystemBoundary::permissive(),
+            failure_kind: RuntimeFailureKind::Ordinary,
+            activation_extents: Default::default(),
+            last_uses: Default::default(),
+        };
+        for (name, value) in args {
+            ctx.bindings.insert((*name).to_string(), value.clone());
+            ctx.binding_types.insert((*name).to_string(), None);
+        }
+        ctx.eval_expr(&body).map(|value| render_value(&value))
+    })
 }
 
 #[test]
@@ -5206,7 +5218,7 @@ fn list_tensor_bridges_require_checked_dtype_and_empty_shape_evidence() {
 /// bounded by the program rather than by the number of lowering ingresses.
 ///
 /// The receipt is a count, not a wall clock, so it cannot flake under machine
-/// load. `chelis_ir::lower::program_context_preparations` rises once per prepared
+/// load. `chelis_ir::resources::program_context_preparations` rises once per prepared
 /// context, which is once per whole-program fold.
 ///
 /// Failing first, measured on this exact test with only the memo in
@@ -5245,7 +5257,7 @@ mod issue_2207_routing_lowering_context {
     /// same sum: a fixture that stopped reaching the named-axis lane would
     /// satisfy the bound below without ever exercising it.
     fn fold_passes_for(routed_reductions: u32) -> u64 {
-        chelis_ir::lower::reset_program_context_preparations();
+        chelis_ir::resources::reset_program_context_preparations();
         super::super::named_axis::reset_named_axis_routes();
         let result = eval_selected(
             EvalRequest {
@@ -5256,7 +5268,7 @@ mod issue_2207_routing_lowering_context {
             &["answer".to_string()],
         )
         .expect("the routed program evaluates");
-        let passes = chelis_ir::lower::program_context_preparations();
+        let passes = chelis_ir::resources::program_context_preparations();
         assert_eq!(
             super::super::named_axis::named_axis_routes(),
             u64::from(routed_reductions),
@@ -5369,7 +5381,7 @@ mod issue_2439_transform_lowering_context {
     /// checking the answer, so an evaluation that failed cannot report a
     /// flattering zero.
     fn fold_passes_for(applications: u32) -> u64 {
-        chelis_ir::lower::reset_program_context_preparations();
+        chelis_ir::resources::reset_program_context_preparations();
         let result = eval_selected(
             EvalRequest {
                 source_kind: SourceKind::Surf,
@@ -5379,7 +5391,7 @@ mod issue_2439_transform_lowering_context {
             &["answer".to_string()],
         )
         .expect("the grad program evaluates");
-        let passes = chelis_ir::lower::program_context_preparations();
+        let passes = chelis_ir::resources::program_context_preparations();
         // d/dx sum(x * x) at [1, 1] is [2, 2], so each application adds 4.
         assert_eq!(
             serde_json::to_value(&result.roots[0].value).unwrap(),

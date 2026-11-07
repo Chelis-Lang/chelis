@@ -18,13 +18,13 @@
 //! defense in depth: the IR `reshape` arm is still public surface
 //! reachable by tooling, by hand-written Deep, and by future lowering
 //! paths that bypass the host-runtime classifier. The acceptance
-//! oracle uses `lower_subexpr_program`, which lowers Deep directly via
+//! oracle uses `try_lower_subexpr_program`, which lowers Deep directly via
 //! `LowerCtx` without consulting the host-runtime filter, exposing the
 //! defect.
 //!
 //! Fixture acceptance:
 //!   1. A Deep `reshape(x, Cons(cast(2, i64), Cons(cast(3, i64), Nil)))`
-//!      lowered through `lower_subexpr_program` does NOT synthesize a
+//!      lowered through `try_lower_subexpr_program` does NOT synthesize a
 //!      `DimInfo::Named("app", _)` (or any other Deep-tag-as-symbol)
 //!      anywhere in the resulting DAG.
 //!   2. The `Reshape` node's `new_shape` is exactly the integer head
@@ -37,7 +37,7 @@ use chelis_unord::UnordMap;
 
 use chelis_dag_core::dag::{DimInfo, RiscOp, TensorType};
 use chelis_deep::Expr;
-use chelis_ir::lower::lower_subexpr_program;
+use chelis_ir_core::lower::try_lower_subexpr_program;
 use chelis_numeric_core::prim::Prim;
 
 /// Hand-built Deep: `reshape(x, Cons(cast(2, i64), Cons(cast(3, i64), Nil)))`.
@@ -68,20 +68,24 @@ fn cons_chain_reshape_expr() -> Expr {
 }
 
 fn lower_with_x_bound() -> chelis_dag_core::dag::Dag {
-    let mut scoped = UnordMap::new();
-    scoped.insert(
-        "x".to_string(),
-        TensorType {
-            dims: vec![DimInfo::Lit(6)],
-            precision: Prim::F32,
-        },
-    );
-    lower_subexpr_program(
-        &cons_chain_reshape_expr(),
-        scoped,
-        UnordMap::new(),
-        UnordMap::new(),
-    )
+    chelis_ir::resources::with_operation(|operation| {
+        let mut scoped = UnordMap::new();
+        scoped.insert(
+            "x".to_string(),
+            TensorType {
+                dims: vec![DimInfo::Lit(6)],
+                precision: Prim::F32,
+            },
+        );
+        try_lower_subexpr_program(
+            &cons_chain_reshape_expr(),
+            scoped,
+            UnordMap::new(),
+            UnordMap::new(),
+            operation,
+        )
+        .expect("subexpression lowers")
+    })
 }
 
 #[test]

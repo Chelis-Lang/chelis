@@ -6,8 +6,9 @@ use chelis_unord::UnordMap;
 
 use chelis_dag_core::dag::{DimInfo, NodeId, TensorType};
 use chelis_deep::Expr;
-use chelis_ir::eval::{TensorValue, eval_tensor_roots_with_strict};
-use chelis_ir::lower::{lower_subexpr_program, try_lower_subexpr_program};
+use chelis_ir::eval::eval_tensor_roots_with_strict;
+use chelis_ir_core::eval::TensorValue;
+use chelis_ir_core::lower::try_lower_subexpr_program;
 use chelis_numeric_core::prim::Prim;
 
 fn f32_vec(n: usize) -> TensorType {
@@ -38,31 +39,40 @@ fn parse_one(src: &str) -> Expr {
 
 #[test]
 fn pipe_unary_builtin_stage_lowers_and_evaluates() {
-    // (pipe {} (var {} x) (var {} relu))
-    let pipe_src = r#"
+    chelis_ir::resources::with_operation(|operation| {
+        // (pipe {} (var {} x) (var {} relu))
+        let pipe_src = r#"
 (app {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))}
   (var {} relu)
   (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))} x))
 "#;
-    let pipe_expr = parse_one(pipe_src);
-    let scoped = UnordMap::from([("x".to_string(), f32_vec(3))]);
-    let dag = lower_subexpr_program(&pipe_expr, scoped, UnordMap::new(), UnordMap::new());
+        let pipe_expr = parse_one(pipe_src);
+        let scoped = UnordMap::from([("x".to_string(), f32_vec(3))]);
+        let dag = try_lower_subexpr_program(
+            &pipe_expr,
+            scoped,
+            UnordMap::new(),
+            UnordMap::new(),
+            operation,
+        )
+        .expect("subexpression lowers");
 
-    let inputs = UnordMap::from([(
-        "x".to_string(),
-        TensorValue::from_vec(vec![3], vec![-1.0, 0.0, 2.5]),
-    )]);
-    let roots: Vec<NodeId> = dag.roots().to_vec();
-    assert!(
-        !roots.is_empty(),
-        "lowered pipe must produce at least one root"
-    );
-    let values = eval_tensor_roots_with_strict(&dag, &roots, |name| inputs.get(name).cloned())
-        .expect("eval succeeds");
-    let out = &values[roots.last().unwrap()];
-    assert_eq!(out.shape, vec![3]);
-    // relu([-1, 0, 2.5]) = [0, 0, 2.5]
-    assert_eq!(out.to_f64_lossy_vec(), vec![0.0, 0.0, 2.5]);
+        let inputs = UnordMap::from([(
+            "x".to_string(),
+            TensorValue::from_vec(vec![3], vec![-1.0, 0.0, 2.5]),
+        )]);
+        let roots: Vec<NodeId> = dag.roots().to_vec();
+        assert!(
+            !roots.is_empty(),
+            "lowered pipe must produce at least one root"
+        );
+        let values = eval_tensor_roots_with_strict(&dag, &roots, |name| inputs.get(name).cloned())
+            .expect("eval succeeds");
+        let out = &values[roots.last().unwrap()];
+        assert_eq!(out.shape, vec![3]);
+        // relu([-1, 0, 2.5]) = [0, 0, 2.5]
+        assert_eq!(out.to_f64_lossy_vec(), vec![0.0, 0.0, 2.5]);
+    })
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -74,7 +84,8 @@ fn pipe_unary_builtin_stage_lowers_and_evaluates() {
 
 #[test]
 fn pipe_plain_callable_with_args_lowers_and_evaluates() {
-    let pipe_src = r#"
+    chelis_ir::resources::with_operation(|operation| {
+        let pipe_src = r#"
 (app {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))}
   (fn {type: (t-fn {}
                 (t-tensor {} (d-lit {} 3) (t-prim {} f32))
@@ -88,27 +99,35 @@ fn pipe_plain_callable_with_args_lowers_and_evaluates() {
       (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))} a)))
   (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))} x))
 "#;
-    let pipe_expr = parse_one(pipe_src);
-    let scoped = UnordMap::from([("x".to_string(), f32_vec(3)), ("a".to_string(), f32_vec(3))]);
-    let dag = lower_subexpr_program(&pipe_expr, scoped, UnordMap::new(), UnordMap::new());
+        let pipe_expr = parse_one(pipe_src);
+        let scoped = UnordMap::from([("x".to_string(), f32_vec(3)), ("a".to_string(), f32_vec(3))]);
+        let dag = try_lower_subexpr_program(
+            &pipe_expr,
+            scoped,
+            UnordMap::new(),
+            UnordMap::new(),
+            operation,
+        )
+        .expect("subexpression lowers");
 
-    let inputs = UnordMap::from([
-        (
-            "x".to_string(),
-            TensorValue::from_vec(vec![3], vec![1.0, 2.0, 3.0]),
-        ),
-        (
-            "a".to_string(),
-            TensorValue::from_vec(vec![3], vec![10.0, 20.0, 30.0]),
-        ),
-    ]);
-    let roots: Vec<NodeId> = dag.roots().to_vec();
-    assert!(!roots.is_empty());
-    let values = eval_tensor_roots_with_strict(&dag, &roots, |name| inputs.get(name).cloned())
-        .expect("eval succeeds");
-    let out = &values[roots.last().unwrap()];
-    assert_eq!(out.shape, vec![3]);
-    assert_eq!(out.to_f64_lossy_vec(), vec![11.0, 22.0, 33.0]);
+        let inputs = UnordMap::from([
+            (
+                "x".to_string(),
+                TensorValue::from_vec(vec![3], vec![1.0, 2.0, 3.0]),
+            ),
+            (
+                "a".to_string(),
+                TensorValue::from_vec(vec![3], vec![10.0, 20.0, 30.0]),
+            ),
+        ]);
+        let roots: Vec<NodeId> = dag.roots().to_vec();
+        assert!(!roots.is_empty());
+        let values = eval_tensor_roots_with_strict(&dag, &roots, |name| inputs.get(name).cloned())
+            .expect("eval succeeds");
+        let out = &values[roots.last().unwrap()];
+        assert_eq!(out.shape, vec![3]);
+        assert_eq!(out.to_f64_lossy_vec(), vec![11.0, 22.0, 33.0]);
+    })
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -120,7 +139,8 @@ fn pipe_plain_callable_with_args_lowers_and_evaluates() {
 
 #[test]
 fn pipe_grad_stage_matches_non_pipe_application() {
-    let fn_src = r#"
+    chelis_ir::resources::with_operation(|operation| {
+        let fn_src = r#"
         (fn {}
           (params {}
             (x {type: (t-tensor {} (d-lit {} 1) (t-prim {} f32))}))
@@ -132,71 +152,81 @@ fn pipe_grad_stage_matches_non_pipe_application() {
               (copy {} (var {} x)))
             (lit {type: (t-prim {} i32)} 0)))
     "#;
-    // `x |> grad(f)` -- the seed is the input tensor, the stage is the
-    // bare `(grad {} (var {} f))` callable (no lambda wrap; Surf does not
-    // wrap `Grad`-stage pipes in a lambda).
-    let pipe_src = r#"
+        // `x |> grad(f)` -- the seed is the input tensor, the stage is the
+        // bare `(grad {} (var {} f))` callable (no lambda wrap; Surf does not
+        // wrap `Grad`-stage pipes in a lambda).
+        let pipe_src = r#"
 (app {type: (t-tensor {} (d-lit {} 1) (t-prim {} f32))}
   (grad {} (var {} loss))
   (var {type: (t-tensor {} (d-lit {} 1) (t-prim {} f32))} input))
 "#;
-    // Non-pipe reference: `grad(f)(x)`.
-    let app_src = r#"
+        // Non-pipe reference: `grad(f)(x)`.
+        let app_src = r#"
         (app {type: (t-tensor {} (d-lit {} 1) (t-prim {} f32))}
           (grad {} (var {} loss))
           (var {type: (t-tensor {} (d-lit {} 1) (t-prim {} f32))} input))
     "#;
 
-    let mut program_defs = UnordMap::new();
-    program_defs.insert("loss".to_string(), parse_one(fn_src));
-    let input_ty = f32_vec(1);
-    let scoped = UnordMap::from([("input".to_string(), input_ty)]);
+        let mut program_defs = UnordMap::new();
+        program_defs.insert("loss".to_string(), parse_one(fn_src));
+        let input_ty = f32_vec(1);
+        let scoped = UnordMap::from([("input".to_string(), input_ty)]);
 
-    let pipe_dag = lower_subexpr_program(
-        &parse_one(pipe_src),
-        scoped.clone(),
-        UnordMap::new(),
-        program_defs.clone(),
-    );
-    let app_dag = lower_subexpr_program(&parse_one(app_src), scoped, UnordMap::new(), program_defs);
+        let pipe_dag = try_lower_subexpr_program(
+            &parse_one(pipe_src),
+            scoped.clone(),
+            UnordMap::new(),
+            program_defs.clone(),
+            operation,
+        )
+        .expect("subexpression lowers");
+        let app_dag = try_lower_subexpr_program(
+            &parse_one(app_src),
+            scoped,
+            UnordMap::new(),
+            program_defs,
+            operation,
+        )
+        .expect("subexpression lowers");
 
-    let inputs = UnordMap::from([(
-        "input".to_string(),
-        TensorValue::from_vec(vec![1], vec![3.0]),
-    )]);
+        let inputs = UnordMap::from([(
+            "input".to_string(),
+            TensorValue::from_vec(vec![1], vec![3.0]),
+        )]);
 
-    let pipe_roots: Vec<NodeId> = pipe_dag.roots().to_vec();
-    let app_roots: Vec<NodeId> = app_dag.roots().to_vec();
-    assert!(!pipe_roots.is_empty(), "pipe DAG must have a root");
-    assert!(!app_roots.is_empty(), "app DAG must have a root");
+        let pipe_roots: Vec<NodeId> = pipe_dag.roots().to_vec();
+        let app_roots: Vec<NodeId> = app_dag.roots().to_vec();
+        assert!(!pipe_roots.is_empty(), "pipe DAG must have a root");
+        assert!(!app_roots.is_empty(), "app DAG must have a root");
 
-    let pipe_values =
-        eval_tensor_roots_with_strict(&pipe_dag, &pipe_roots, |name| inputs.get(name).cloned())
-            .expect("pipe eval");
-    let app_values =
-        eval_tensor_roots_with_strict(&app_dag, &app_roots, |name| inputs.get(name).cloned())
-            .expect("app eval");
+        let pipe_values =
+            eval_tensor_roots_with_strict(&pipe_dag, &pipe_roots, |name| inputs.get(name).cloned())
+                .expect("pipe eval");
+        let app_values =
+            eval_tensor_roots_with_strict(&app_dag, &app_roots, |name| inputs.get(name).cloned())
+                .expect("app eval");
 
-    let pipe_out = &pipe_values[pipe_roots.last().unwrap()];
-    let app_out = &app_values[app_roots.last().unwrap()];
-    assert_eq!(pipe_out.shape, app_out.shape);
-    assert_eq!(pipe_out.shape, vec![1]);
-    // df/dx for f(x) = sum(x*x) at x=[3.0] is [6.0].
-    assert!(
-        (pipe_out.to_f64_lossy_vec()[0] - 6.0).abs() < 1e-6,
-        "pipe grad result at x=3 must be 6.0, got {:?}",
-        pipe_out.to_f64_lossy_vec(),
-    );
-    for (p, a) in pipe_out
-        .to_f64_lossy_vec()
-        .iter()
-        .zip(app_out.to_f64_lossy_vec().iter())
-    {
+        let pipe_out = &pipe_values[pipe_roots.last().unwrap()];
+        let app_out = &app_values[app_roots.last().unwrap()];
+        assert_eq!(pipe_out.shape, app_out.shape);
+        assert_eq!(pipe_out.shape, vec![1]);
+        // df/dx for f(x) = sum(x*x) at x=[3.0] is [6.0].
         assert!(
-            (p - a).abs() < 1e-6,
-            "pipe and non-pipe grad must agree element-wise: pipe={p}, app={a}",
+            (pipe_out.to_f64_lossy_vec()[0] - 6.0).abs() < 1e-6,
+            "pipe grad result at x=3 must be 6.0, got {:?}",
+            pipe_out.to_f64_lossy_vec(),
         );
-    }
+        for (p, a) in pipe_out
+            .to_f64_lossy_vec()
+            .iter()
+            .zip(app_out.to_f64_lossy_vec().iter())
+        {
+            assert!(
+                (p - a).abs() < 1e-6,
+                "pipe and non-pipe grad must agree element-wise: pipe={p}, app={a}",
+            );
+        }
+    })
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -209,7 +239,8 @@ fn pipe_grad_stage_matches_non_pipe_application() {
 
 #[test]
 fn pipe_vmap_grad_stage_matches_non_pipe_application() {
-    let fn_src = r#"
+    chelis_ir::resources::with_operation(|operation| {
+        let fn_src = r#"
         (fn {}
           (params {}
             (x {type: (t-tensor {} (d-lit {} 1) (t-prim {} f32))}))
@@ -221,72 +252,82 @@ fn pipe_vmap_grad_stage_matches_non_pipe_application() {
               (copy {} (var {} x)))
             (lit {type: (t-prim {} i32)} 0)))
     "#;
-    // `xs |> vmap(grad(f))` -- the seed is the batched input, the stage is the
-    // bare `(vmap {} (grad {} f) axis=0)` callable.
-    let pipe_src = r#"
+        // `xs |> vmap(grad(f))` -- the seed is the batched input, the stage is the
+        // bare `(vmap {} (grad {} f) axis=0)` callable.
+        let pipe_src = r#"
 (app {type: (t-tensor {} (d-lit {} 3) (d-lit {} 1) (t-prim {} f32))}
   (vmap {} (grad {} (var {} loss)) (lit {type: (t-prim {} i32)} 0))
   (var {type: (t-tensor {} (d-lit {} 3) (d-lit {} 1) (t-prim {} f32))} xs))
 "#;
-    let app_src = r#"
+        let app_src = r#"
         (app {type: (t-tensor {} (d-lit {} 3) (d-lit {} 1) (t-prim {} f32))}
           (vmap {} (grad {} (var {} loss)) (lit {type: (t-prim {} i32)} 0))
           (var {type: (t-tensor {} (d-lit {} 3) (d-lit {} 1) (t-prim {} f32))} xs))
     "#;
 
-    let mut program_defs = UnordMap::new();
-    program_defs.insert("loss".to_string(), parse_one(fn_src));
-    let xs_ty = f32_mat(3, 1);
-    let scoped = UnordMap::from([("xs".to_string(), xs_ty)]);
+        let mut program_defs = UnordMap::new();
+        program_defs.insert("loss".to_string(), parse_one(fn_src));
+        let xs_ty = f32_mat(3, 1);
+        let scoped = UnordMap::from([("xs".to_string(), xs_ty)]);
 
-    let pipe_dag = lower_subexpr_program(
-        &parse_one(pipe_src),
-        scoped.clone(),
-        UnordMap::new(),
-        program_defs.clone(),
-    );
-    let app_dag = lower_subexpr_program(&parse_one(app_src), scoped, UnordMap::new(), program_defs);
+        let pipe_dag = try_lower_subexpr_program(
+            &parse_one(pipe_src),
+            scoped.clone(),
+            UnordMap::new(),
+            program_defs.clone(),
+            operation,
+        )
+        .expect("subexpression lowers");
+        let app_dag = try_lower_subexpr_program(
+            &parse_one(app_src),
+            scoped,
+            UnordMap::new(),
+            program_defs,
+            operation,
+        )
+        .expect("subexpression lowers");
 
-    let inputs = UnordMap::from([(
-        "xs".to_string(),
-        TensorValue::from_vec(vec![3, 1], vec![1.0, 2.0, 3.0]),
-    )]);
+        let inputs = UnordMap::from([(
+            "xs".to_string(),
+            TensorValue::from_vec(vec![3, 1], vec![1.0, 2.0, 3.0]),
+        )]);
 
-    let pipe_roots: Vec<NodeId> = pipe_dag.roots().to_vec();
-    let app_roots: Vec<NodeId> = app_dag.roots().to_vec();
-    assert!(!pipe_roots.is_empty());
-    assert!(!app_roots.is_empty());
+        let pipe_roots: Vec<NodeId> = pipe_dag.roots().to_vec();
+        let app_roots: Vec<NodeId> = app_dag.roots().to_vec();
+        assert!(!pipe_roots.is_empty());
+        assert!(!app_roots.is_empty());
 
-    let pipe_values =
-        eval_tensor_roots_with_strict(&pipe_dag, &pipe_roots, |name| inputs.get(name).cloned())
-            .expect("pipe eval");
-    let app_values =
-        eval_tensor_roots_with_strict(&app_dag, &app_roots, |name| inputs.get(name).cloned())
-            .expect("app eval");
+        let pipe_values =
+            eval_tensor_roots_with_strict(&pipe_dag, &pipe_roots, |name| inputs.get(name).cloned())
+                .expect("pipe eval");
+        let app_values =
+            eval_tensor_roots_with_strict(&app_dag, &app_roots, |name| inputs.get(name).cloned())
+                .expect("app eval");
 
-    let pipe_out = &pipe_values[pipe_roots.last().unwrap()];
-    let app_out = &app_values[app_roots.last().unwrap()];
-    assert_eq!(pipe_out.shape, app_out.shape);
-    assert_eq!(pipe_out.shape, vec![3, 1]);
-    // vmap(grad(sum(x*x)))([[1],[2],[3]]) = [[2],[4],[6]]
-    let expected = [2.0, 4.0, 6.0];
-    for (i, want) in expected.iter().enumerate() {
-        assert!(
-            (pipe_out.to_f64_lossy_vec()[i] - want).abs() < 1e-6,
-            "pipe vmap-grad[{i}] must be {want}, got {:?}",
-            pipe_out.to_f64_lossy_vec(),
-        );
-    }
-    for (p, a) in pipe_out
-        .to_f64_lossy_vec()
-        .iter()
-        .zip(app_out.to_f64_lossy_vec().iter())
-    {
-        assert!(
-            (p - a).abs() < 1e-6,
-            "pipe and non-pipe vmap-grad must agree element-wise: pipe={p}, app={a}",
-        );
-    }
+        let pipe_out = &pipe_values[pipe_roots.last().unwrap()];
+        let app_out = &app_values[app_roots.last().unwrap()];
+        assert_eq!(pipe_out.shape, app_out.shape);
+        assert_eq!(pipe_out.shape, vec![3, 1]);
+        // vmap(grad(sum(x*x)))([[1],[2],[3]]) = [[2],[4],[6]]
+        let expected = [2.0, 4.0, 6.0];
+        for (i, want) in expected.iter().enumerate() {
+            assert!(
+                (pipe_out.to_f64_lossy_vec()[i] - want).abs() < 1e-6,
+                "pipe vmap-grad[{i}] must be {want}, got {:?}",
+                pipe_out.to_f64_lossy_vec(),
+            );
+        }
+        for (p, a) in pipe_out
+            .to_f64_lossy_vec()
+            .iter()
+            .zip(app_out.to_f64_lossy_vec().iter())
+        {
+            assert!(
+                (p - a).abs() < 1e-6,
+                "pipe and non-pipe vmap-grad must agree element-wise: pipe={p}, app={a}",
+            );
+        }
+    })
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -301,12 +342,13 @@ fn pipe_vmap_grad_stage_matches_non_pipe_application() {
 
 #[test]
 fn pipe_vmap_def_stage_lowers_and_evaluates() {
-    // `relu_row(x: [3]f32) -> [3]f32 = relu(x)` — user-defined row relu so the
-    // resolver finds it in `program_defs` (the builtin `relu` lives in neither
-    // `local_callables` nor `program_defs`, so a bare `(var {} relu)` inside
-    // `(vmap ...)` would itself trip the `None`-resolution path; that case is
-    // a separate gap from G10, see the diagnosis note).
-    let relu_row_src = r#"
+    chelis_ir::resources::with_operation(|operation| {
+        // `relu_row(x: [3]f32) -> [3]f32 = relu(x)` — user-defined row relu so the
+        // resolver finds it in `program_defs` (the builtin `relu` lives in neither
+        // `local_callables` nor `program_defs`, so a bare `(var {} relu)` inside
+        // `(vmap ...)` would itself trip the `None`-resolution path; that case is
+        // a separate gap from G10, see the diagnosis note).
+        let relu_row_src = r#"
         (fn {}
           (params {}
             (x {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))}))
@@ -314,28 +356,36 @@ fn pipe_vmap_def_stage_lowers_and_evaluates() {
             (var {} relu)
             (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))} x)))
     "#;
-    let pipe_src = r#"
+        let pipe_src = r#"
 (app {type: (t-tensor {} (d-lit {} 2) (d-lit {} 3) (t-prim {} f32))}
   (vmap {} (var {} relu_row) (lit {type: (t-prim {} i32)} 0))
   (var {type: (t-tensor {} (d-lit {} 2) (d-lit {} 3) (t-prim {} f32))} xs))
 "#;
-    let mut program_defs = UnordMap::new();
-    program_defs.insert("relu_row".to_string(), parse_one(relu_row_src));
-    let scoped = UnordMap::from([("xs".to_string(), f32_mat(2, 3))]);
-    let dag = lower_subexpr_program(&parse_one(pipe_src), scoped, UnordMap::new(), program_defs);
+        let mut program_defs = UnordMap::new();
+        program_defs.insert("relu_row".to_string(), parse_one(relu_row_src));
+        let scoped = UnordMap::from([("xs".to_string(), f32_mat(2, 3))]);
+        let dag = try_lower_subexpr_program(
+            &parse_one(pipe_src),
+            scoped,
+            UnordMap::new(),
+            program_defs,
+            operation,
+        )
+        .expect("subexpression lowers");
 
-    let inputs = UnordMap::from([(
-        "xs".to_string(),
-        TensorValue::from_vec(vec![2, 3], vec![-1.0, 0.0, 2.5, -3.0, 1.0, 0.5]),
-    )]);
-    let roots: Vec<NodeId> = dag.roots().to_vec();
-    assert!(!roots.is_empty(), "lowered vmap-pipe must produce a root");
-    let values = eval_tensor_roots_with_strict(&dag, &roots, |name| inputs.get(name).cloned())
-        .expect("eval succeeds");
-    let out = &values[roots.last().unwrap()];
-    assert_eq!(out.shape, vec![2, 3]);
-    // vmap(relu_row)([[-1, 0, 2.5], [-3, 1, 0.5]]) = [[0, 0, 2.5], [0, 1, 0.5]]
-    assert_eq!(out.to_f64_lossy_vec(), vec![0.0, 0.0, 2.5, 0.0, 1.0, 0.5]);
+        let inputs = UnordMap::from([(
+            "xs".to_string(),
+            TensorValue::from_vec(vec![2, 3], vec![-1.0, 0.0, 2.5, -3.0, 1.0, 0.5]),
+        )]);
+        let roots: Vec<NodeId> = dag.roots().to_vec();
+        assert!(!roots.is_empty(), "lowered vmap-pipe must produce a root");
+        let values = eval_tensor_roots_with_strict(&dag, &roots, |name| inputs.get(name).cloned())
+            .expect("eval succeeds");
+        let out = &values[roots.last().unwrap()];
+        assert_eq!(out.shape, vec![2, 3]);
+        // vmap(relu_row)([[-1, 0, 2.5], [-3, 1, 0.5]]) = [[0, 0, 2.5], [0, 1, 0.5]]
+        assert_eq!(out.to_f64_lossy_vec(), vec![0.0, 0.0, 2.5, 0.0, 1.0, 0.5]);
+    })
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -378,11 +428,12 @@ fn pipe_vmap_def_stage_lowers_and_evaluates() {
 
 #[test]
 fn pipe_fn_typed_parameter_stage_lowers_standalone_def() {
-    // Standalone def body: `def double_apply(f, x) = x |> f |> f`.
-    // Lowering this in isolation (without a caller to inline `f`) is the
-    // exact path `try_lower_program` takes for every top-level def, which is
-    // what `chelis eval --file` and `chelis build` exercise.
-    let fn_src = r#"
+    chelis_ir::resources::with_operation(|operation| {
+        // Standalone def body: `def double_apply(f, x) = x |> f |> f`.
+        // Lowering this in isolation (without a caller to inline `f`) is the
+        // exact path `try_lower_program` takes for every top-level def, which is
+        // what `chelis eval --file` and `chelis build` exercise.
+        let fn_src = r#"
 (fn {}
   (params {}
     (f
@@ -397,26 +448,29 @@ fn pipe_fn_typed_parameter_stage_lowers_standalone_def() {
       (var {} f)
       (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))} x))))
 "#;
-    let result = try_lower_subexpr_program(
-        &parse_one(fn_src),
-        UnordMap::new(),
-        UnordMap::new(),
-        UnordMap::new(),
-    );
-    assert!(
-        result.is_ok(),
-        "lowering a fn body whose pipe stage is a fn-typed parameter must \
+        let result = try_lower_subexpr_program(
+            &parse_one(fn_src),
+            UnordMap::new(),
+            UnordMap::new(),
+            UnordMap::new(),
+            operation,
+        );
+        assert!(
+            result.is_ok(),
+            "lowering a fn body whose pipe stage is a fn-typed parameter must \
          succeed; today this fires the `pipe stage is not supported by IR \
          evaluation yet` diagnostic. Diagnostic: {:?}",
-        result.err()
-    );
+            result.err()
+        );
+    })
 }
 
 #[test]
 fn pipe_fn_typed_parameter_stage_matches_non_pipe_call_site() {
-    // `doubler(x) = add(x, x)` — distinguishes identity (`x |> f` would
-    // collapse to `x` if the stage no-oped).
-    let doubler_src = r#"
+    chelis_ir::resources::with_operation(|operation| {
+        // `doubler(x) = add(x, x)` — distinguishes identity (`x |> f` would
+        // collapse to `x` if the stage no-oped).
+        let doubler_src = r#"
         (fn {}
           (params {}
             (x {type: (t-ref {} (t-tensor {} (d-lit {} 3) (t-prim {} f32)))}))
@@ -425,11 +479,11 @@ fn pipe_fn_typed_parameter_stage_matches_non_pipe_call_site() {
             (copy {} (var {} x))
             (copy {} (var {} x))))
     "#;
-    // Pipe form: `def apply_one(f, x) = x |> f`. Single pipe stage isolates
-    // the fn-typed-parameter pipe gap from the unrelated `inlining_names`
-    // recursion guard interaction that a nested `f(f(x))` non-pipe shape
-    // would expose (separate bug; out of scope for Item 2-extended).
-    let apply_one_pipe_src = r#"
+        // Pipe form: `def apply_one(f, x) = x |> f`. Single pipe stage isolates
+        // the fn-typed-parameter pipe gap from the unrelated `inlining_names`
+        // recursion guard interaction that a nested `f(f(x))` non-pipe shape
+        // would expose (separate bug; out of scope for Item 2-extended).
+        let apply_one_pipe_src = r#"
 (fn {}
   (params {}
     (f
@@ -442,8 +496,8 @@ fn pipe_fn_typed_parameter_stage_matches_non_pipe_call_site() {
     (var {} f)
     (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))} x)))
 "#;
-    // Non-pipe equivalent: `def apply_one_app(f, x) = f(x)`.
-    let apply_one_app_src = r#"
+        // Non-pipe equivalent: `def apply_one_app(f, x) = f(x)`.
+        let apply_one_app_src = r#"
         (fn {}
           (params {}
             (f {type: (t-fn {}
@@ -454,79 +508,84 @@ fn pipe_fn_typed_parameter_stage_matches_non_pipe_call_site() {
             (var {} f)
             (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))} x)))
     "#;
-    // Call-site app expressions.
-    let pipe_call_src = r#"
+        // Call-site app expressions.
+        let pipe_call_src = r#"
         (app {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))}
           (var {} apply_one_pipe)
           (var {} doubler)
           (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))} seed))
     "#;
-    let app_call_src = r#"
+        let app_call_src = r#"
         (app {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))}
           (var {} apply_one_app)
           (var {} doubler)
           (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))} seed))
     "#;
 
-    let mut program_defs = UnordMap::new();
-    program_defs.insert("apply_one_pipe".to_string(), parse_one(apply_one_pipe_src));
-    program_defs.insert("apply_one_app".to_string(), parse_one(apply_one_app_src));
-    program_defs.insert("doubler".to_string(), parse_one(doubler_src));
+        let mut program_defs = UnordMap::new();
+        program_defs.insert("apply_one_pipe".to_string(), parse_one(apply_one_pipe_src));
+        program_defs.insert("apply_one_app".to_string(), parse_one(apply_one_app_src));
+        program_defs.insert("doubler".to_string(), parse_one(doubler_src));
 
-    let seed_ty = f32_vec(3);
-    let scoped = UnordMap::from([("seed".to_string(), seed_ty)]);
+        let seed_ty = f32_vec(3);
+        let scoped = UnordMap::from([("seed".to_string(), seed_ty)]);
 
-    let pipe_dag = lower_subexpr_program(
-        &parse_one(pipe_call_src),
-        scoped.clone(),
-        UnordMap::new(),
-        program_defs.clone(),
-    );
-    let app_dag = lower_subexpr_program(
-        &parse_one(app_call_src),
-        scoped,
-        UnordMap::new(),
-        program_defs,
-    );
+        let pipe_dag = try_lower_subexpr_program(
+            &parse_one(pipe_call_src),
+            scoped.clone(),
+            UnordMap::new(),
+            program_defs.clone(),
+            operation,
+        )
+        .expect("subexpression lowers");
+        let app_dag = try_lower_subexpr_program(
+            &parse_one(app_call_src),
+            scoped,
+            UnordMap::new(),
+            program_defs,
+            operation,
+        )
+        .expect("subexpression lowers");
 
-    let inputs = UnordMap::from([(
-        "seed".to_string(),
-        TensorValue::from_vec(vec![3], vec![1.0, 2.0, 3.0]),
-    )]);
+        let inputs = UnordMap::from([(
+            "seed".to_string(),
+            TensorValue::from_vec(vec![3], vec![1.0, 2.0, 3.0]),
+        )]);
 
-    let pipe_roots: Vec<NodeId> = pipe_dag.roots().to_vec();
-    let app_roots: Vec<NodeId> = app_dag.roots().to_vec();
-    assert!(!pipe_roots.is_empty(), "pipe DAG must have a root");
-    assert!(!app_roots.is_empty(), "app DAG must have a root");
+        let pipe_roots: Vec<NodeId> = pipe_dag.roots().to_vec();
+        let app_roots: Vec<NodeId> = app_dag.roots().to_vec();
+        assert!(!pipe_roots.is_empty(), "pipe DAG must have a root");
+        assert!(!app_roots.is_empty(), "app DAG must have a root");
 
-    let pipe_values =
-        eval_tensor_roots_with_strict(&pipe_dag, &pipe_roots, |name| inputs.get(name).cloned())
-            .expect("pipe eval succeeds");
-    let app_values =
-        eval_tensor_roots_with_strict(&app_dag, &app_roots, |name| inputs.get(name).cloned())
-            .expect("app eval succeeds");
+        let pipe_values =
+            eval_tensor_roots_with_strict(&pipe_dag, &pipe_roots, |name| inputs.get(name).cloned())
+                .expect("pipe eval succeeds");
+        let app_values =
+            eval_tensor_roots_with_strict(&app_dag, &app_roots, |name| inputs.get(name).cloned())
+                .expect("app eval succeeds");
 
-    let pipe_out = &pipe_values[pipe_roots.last().unwrap()];
-    let app_out = &app_values[app_roots.last().unwrap()];
-    assert_eq!(pipe_out.shape, vec![3]);
-    assert_eq!(pipe_out.shape, app_out.shape);
-    // doubler([1, 2, 3]) = [2, 4, 6].
-    let expected = [2.0, 4.0, 6.0];
-    for (i, want) in expected.iter().enumerate() {
-        assert!(
-            (pipe_out.to_f64_lossy_vec()[i] - want).abs() < 1e-6,
-            "apply_one via pipe must produce {want} at index {i}, got {:?}",
-            pipe_out.to_f64_lossy_vec(),
-        );
-    }
-    for (p, a) in pipe_out
-        .to_f64_lossy_vec()
-        .iter()
-        .zip(app_out.to_f64_lossy_vec().iter())
-    {
-        assert!(
-            (p - a).abs() < 1e-6,
-            "pipe and non-pipe apply_one must agree element-wise: pipe={p}, app={a}",
-        );
-    }
+        let pipe_out = &pipe_values[pipe_roots.last().unwrap()];
+        let app_out = &app_values[app_roots.last().unwrap()];
+        assert_eq!(pipe_out.shape, vec![3]);
+        assert_eq!(pipe_out.shape, app_out.shape);
+        // doubler([1, 2, 3]) = [2, 4, 6].
+        let expected = [2.0, 4.0, 6.0];
+        for (i, want) in expected.iter().enumerate() {
+            assert!(
+                (pipe_out.to_f64_lossy_vec()[i] - want).abs() < 1e-6,
+                "apply_one via pipe must produce {want} at index {i}, got {:?}",
+                pipe_out.to_f64_lossy_vec(),
+            );
+        }
+        for (p, a) in pipe_out
+            .to_f64_lossy_vec()
+            .iter()
+            .zip(app_out.to_f64_lossy_vec().iter())
+        {
+            assert!(
+                (p - a).abs() < 1e-6,
+                "pipe and non-pipe apply_one must agree element-wise: pipe={p}, app={a}",
+            );
+        }
+    })
 }

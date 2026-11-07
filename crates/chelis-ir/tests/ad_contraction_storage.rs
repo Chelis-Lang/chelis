@@ -2,7 +2,8 @@
 use chelis_dag_core::dag::{Dag, DimInfo, NodeId, RiscOp, TensorType};
 use chelis_dag_core::grad::grad_dag_checked;
 use chelis_dag_core::{tier2, tier2_ordered};
-use chelis_ir::eval::{TensorValue, eval_tensor, eval_tensor_roots_with};
+use chelis_ir::eval::{eval_tensor, eval_tensor_roots_with};
+use chelis_ir_core::eval::TensorValue;
 use chelis_numeric_core::prim::Prim;
 use chelis_unord::UnordMap;
 
@@ -165,7 +166,7 @@ fn a_mismatching_load_still_fails_before_ad_views() {
 fn ad_views_admit_metadata_readers_but_keep_exposed_products_dense() {
     for einsum in [false, true] {
         let (dag, roots) = graph([3, 5, 7], einsum, Prim::F32);
-        let plan = chelis_ir::contraction_views::contraction_views(&dag, &roots);
+        let plan = chelis_ir_core::contraction_views::contraction_views(&dag, &roots);
         for node in dag.nodes() {
             if matches!(node.op, RiscOp::Mul) {
                 assert!(
@@ -203,7 +204,7 @@ fn ad_views_admit_metadata_readers_but_keep_exposed_products_dense() {
                 ..
             }
         ) && node.inputs[1] == product));
-        let exposed = chelis_ir::contraction_views::contraction_views(&dag, &[product]);
+        let exposed = chelis_ir_core::contraction_views::contraction_views(&dag, &[product]);
         assert!(!exposed.is_deferred(product));
     }
 }
@@ -291,7 +292,7 @@ fn shared_numeric_diamonds_have_a_materialization_boundary() {
         None,
     );
     dag.add_root(sum);
-    let plan = chelis_ir::contraction_views::contraction_views(&dag, &[sum]);
+    let plan = chelis_ir_core::contraction_views::contraction_views(&dag, &[sum]);
     for boundary in diamonds.iter().take(11) {
         assert!(
             !plan.is_deferred(*boundary),
@@ -304,7 +305,7 @@ fn shared_numeric_diamonds_have_a_materialization_boundary() {
     fn visits(
         dag: &Dag,
         node: NodeId,
-        plan: Option<&chelis_ir::contraction_views::ContractionViews>,
+        plan: Option<&chelis_ir_core::contraction_views::ContractionViews>,
     ) -> usize {
         if matches!(dag.get(node).unwrap().op, RiscOp::Load { .. })
             || plan.is_some_and(|p| !p.is_deferred(node))
@@ -364,7 +365,7 @@ fn scalar_broadcast_multiplication_keeps_its_existing_materialization() {
         None,
     );
     dag.add_root(sum);
-    let plan = chelis_ir::contraction_views::contraction_views(&dag, &[sum]);
+    let plan = chelis_ir_core::contraction_views::contraction_views(&dag, &[sum]);
     assert!(!plan.is_deferred(product));
     let values = [(
         "x".into(),
@@ -429,7 +430,7 @@ fn nonlinear_cotangents_cache_arithmetic_before_broadcasting() {
     );
     let result = grad_dag_checked(&dag, loss, &[a, b]).unwrap();
     let dag = result.dag;
-    let plan = chelis_ir::contraction_views::contraction_views(&dag, dag.roots());
+    let plan = chelis_ir_core::contraction_views::contraction_views(&dag, dag.roots());
     for node in dag
         .nodes()
         .iter()
@@ -458,7 +459,7 @@ fn mapped_ad_contractions_preserve_each_batch_tree_and_empty_batches() {
             for grad_after_map in [false, true] {
                 let (dag, _) = graph([3, 5, 7], einsum, Prim::F32);
                 let mut mapped =
-                    chelis_ir::vmap::vectorize_axis0(&dag, DimInfo::Lit(batch)).unwrap();
+                    chelis_ir_core::vmap::vectorize_axis0(&dag, DimInfo::Lit(batch)).unwrap();
                 if grad_after_map {
                     let owner = mapped.declare("batch_loss");
                     let loss = mapped.add_node(
@@ -515,7 +516,8 @@ fn mapped_ad_contractions_preserve_each_batch_tree_and_empty_batches() {
                 for root in mapped.roots() {
                     same_bits(&rooted[root], &dense[root]);
                 }
-                let plan = chelis_ir::contraction_views::contraction_views(&mapped, mapped.roots());
+                let plan =
+                    chelis_ir_core::contraction_views::contraction_views(&mapped, mapped.roots());
                 let deferred = mapped
                     .nodes()
                     .iter()

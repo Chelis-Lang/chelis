@@ -1,5 +1,5 @@
 //! chelis#3418: in the two scanned host-runtime files, an output-sized
-//! buffer comes only from `chelis_ir::eval::admit_tensor`'s
+//! buffer comes only from `chelis_ir_core::eval::admit_tensor`'s
 //! `AdmittedResult`, which admits the result's metadata and reserves
 //! fallibly, so an unrepresentable result traps and an ungranted one fails as
 //! the C runtime's allocation failure.

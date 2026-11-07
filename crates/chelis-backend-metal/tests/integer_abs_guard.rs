@@ -125,19 +125,26 @@ fn literal_gradient_dag(op: &str) -> Dag {
 }
 
 fn lower_gradient_source(source: &str) -> Dag {
-    let declarations =
-        chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack).expect("parse");
-    let deep =
-        chelis_surf::desugar::desugar_program(&declarations, &chelis_syntax_host::NativeStack)
-            .expect("desugar");
-    let checked =
-        chelis_types::check_typed_program(&deep).unwrap_or_else(|e| panic!("{:?}", e.errors));
-    let checked = chelis_effects::check_program(&checked).expect("effects");
-    let checked = chelis_types::check_linearity(&checked).expect("linearity");
-    let mut dag =
-        chelis_ir::host::lower_named_tensor_entry_dag(&checked, "main").expect("tensor entry");
-    chelis_dag_core::optimize::constant_fold(&mut dag);
-    chelis_dag_core::optimize::dead_code_eliminate(&dag)
+    chelis_ir::resources::with_operation(|operation| {
+        let declarations = chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+            .expect("parse");
+        let deep =
+            chelis_surf::desugar::desugar_program(&declarations, &chelis_syntax_host::NativeStack)
+                .expect("desugar");
+        let checked =
+            chelis_types::check_typed_program(&deep).unwrap_or_else(|e| panic!("{:?}", e.errors));
+        let checked = chelis_effects::check_program(&checked).expect("effects");
+        let checked = chelis_types::check_linearity(&checked).expect("linearity");
+        let mut dag = chelis_ir_core::host::lower_named_tensor_entry_dag(
+            (checked).facts(),
+            "main",
+            operation,
+        )
+        .expect("named entry decision")
+        .expect("tensor entry");
+        chelis_dag_core::optimize::constant_fold(&mut dag);
+        chelis_dag_core::optimize::dead_code_eliminate(&dag)
+    })
 }
 
 #[cfg(target_os = "macos")]

@@ -15,13 +15,13 @@
 //!    they no longer preserve the original index operand.
 //!
 //! 2. The raw backend detector still keys off `Sum -> Mul -> (Expand, Expand)`,
-//!    but M1 added `chelis_ir::specialize`, which runs closed-list no-op
+//!    but M1 added `chelis_ir_core::specialize`, which runs closed-list no-op
 //!    cleanup first. The user-facing contract is that identity `Cast(f32)`
 //!    no longer hides a matmul from BLAS specialization.
 
 use chelis_backend_c::blas::detect_matmul_pattern as detect_verified_matmul_pattern;
 use chelis_dag_core::dag::{Dag, DimExpr, DimInfo, RiscOp, TensorType};
-use chelis_ir::specialize::specialize_for_blas;
+use chelis_ir_core::specialize::specialize_for_blas;
 use chelis_numeric_core::prim::Prim;
 mod support;
 

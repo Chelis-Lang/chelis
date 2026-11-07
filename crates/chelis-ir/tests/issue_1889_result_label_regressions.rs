@@ -5,7 +5,8 @@
 
 use chelis_dag_core::axis_sources::{EntryExtentGuard, entry_extent_guards};
 use chelis_dag_core::dag::{RiscOp, RtAxis};
-use chelis_ir::eval::{TensorValue, eval_tensor_with};
+use chelis_ir::eval::eval_tensor_with;
+use chelis_ir_core::eval::TensorValue;
 
 type NamedAxis = (String, usize);
 type CallerNamedClaim = (String, NamedAxis, NamedAxis);
@@ -36,8 +37,15 @@ fn checked_surf(source: &str) -> chelis_types::CheckedProgram {
 }
 
 fn named_entry(source: &str, name: &str) -> chelis_dag_core::Dag {
-    chelis_ir::host::lower_named_tensor_entry_dag(&checked_surf(source), name)
+    chelis_ir::resources::with_operation(|operation| {
+        chelis_ir_core::host::lower_named_tensor_entry_dag(
+            (checked_surf(source)).facts(),
+            name,
+            operation,
+        )
+        .expect("named entry decision")
         .expect("named tensor entry lowers")
+    })
 }
 
 fn compiled_dags(source: &str) -> Vec<chelis_dag_core::Dag> {
@@ -58,7 +66,7 @@ fn compiled_dags(source: &str) -> Vec<chelis_dag_core::Dag> {
         );
     }
     dags.into_iter()
-        .map(|dag| chelis_ir::specialize::specialize_for_exact_arithmetic(&dag))
+        .map(|dag| chelis_ir_core::specialize::specialize_for_exact_arithmetic(&dag))
         .collect()
 }
 

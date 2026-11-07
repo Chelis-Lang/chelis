@@ -3,7 +3,7 @@ use chelis_dag_core::dag::*;
 use chelis_dag_core::fuse::reduction_inlined_products;
 use chelis_dag_core::tier2_ordered::*;
 use chelis_dag_core::verify;
-use chelis_ir::ordered_layout::einsum_contraction;
+use chelis_ir_core::ordered_layout::einsum_contraction;
 use chelis_numeric_core::prim::Prim;
 
 const LARGE: usize = 1 << 21;
@@ -302,7 +302,7 @@ fn the_contraction_evaluates_to_the_einsum_graph_bits() {
                     )),
                 )
                 .expect("finalized input");
-                chelis_ir::eval::TensorValue::from_storage(
+                chelis_ir_core::eval::TensorValue::from_storage(
                     dims.iter().filter_map(static_extent).collect(),
                     storage,
                 )

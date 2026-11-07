@@ -11,7 +11,7 @@ use chelis_dag_core::dag::{
     FusedStepOp, KeyBranch, LogicalKind, NodeId, ReduceWindowKind, RiscOp, RtAxis, RtDim,
     TensorType, UniformBound,
 };
-use chelis_ir::axis_admission::check_axis_sources;
+use chelis_ir_core::axis_admission::check_axis_sources;
 use chelis_numeric_core::prim::Prim;
 
 fn ty(dims: Vec<DimInfo>, precision: Prim) -> TensorType {

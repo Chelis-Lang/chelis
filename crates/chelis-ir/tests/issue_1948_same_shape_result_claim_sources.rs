@@ -12,7 +12,8 @@ use chelis_dag_core::axis_sources::same_shape_result_agreement;
 use chelis_dag_core::dag::{Dag, DimInfo, ExtentWitnessSite, NodeId, RiscOp, RtAxis, TensorType};
 use chelis_dag_core::optimize::dead_code_eliminate;
 use chelis_dag_core::verify::verify;
-use chelis_ir::eval::{TensorValue, eval_tensor_with};
+use chelis_ir::eval::eval_tensor_with;
+use chelis_ir_core::eval::TensorValue;
 use chelis_numeric_core::dtype_semantics::{scalar_from_f64, scalar_from_i64};
 use chelis_numeric_core::prim::Prim;
 
@@ -314,7 +315,7 @@ fn blas_interior_named_claim_blocks_replacement_and_traps_after_dce() {
     let dag = blas_pattern(InteriorClaim::Named);
     let specialized = assert_specialized_claim_trap(
         &dag,
-        chelis_ir::specialize::specialize_for_blas,
+        chelis_ir_core::specialize::specialize_for_blas,
         |dag| eval_blas_pattern(dag, Some(5)),
         "extent `n`: claimed = 5, mul axis 0 = 2\n\
          numeric trap: domain in mul at i64",
@@ -333,7 +334,7 @@ fn blas_interior_literal_claim_blocks_replacement_and_traps_after_dce() {
     let dag = blas_pattern(InteriorClaim::Literal);
     let specialized = assert_specialized_claim_trap(
         &dag,
-        chelis_ir::specialize::specialize_for_blas,
+        chelis_ir_core::specialize::specialize_for_blas,
         |dag| eval_blas_pattern(dag, None),
         "extent `5`: claimed = 5, mul axis 0 = 2\n\
          numeric trap: domain in mul at i64",
@@ -351,7 +352,7 @@ fn blas_interior_literal_claim_blocks_replacement_and_traps_after_dce() {
 fn unclaimed_blas_region_still_specializes_and_executes() {
     let dag = blas_pattern(InteriorClaim::None);
     let expected = eval_blas_pattern(&dag, None).unwrap();
-    let specialized = chelis_ir::specialize::specialize_for_blas(&dag);
+    let specialized = chelis_ir_core::specialize::specialize_for_blas(&dag);
     assert!(verify(&specialized).is_empty());
     assert!(
         specialized
@@ -367,7 +368,7 @@ fn dense_gather_interior_named_claim_blocks_replacement_and_traps_after_dce() {
     let dag = dense_gather_pattern(InteriorClaim::Named);
     let specialized = assert_specialized_claim_trap(
         &dag,
-        chelis_ir::specialize::specialize_for_exact_arithmetic,
+        chelis_ir_core::specialize::specialize_for_exact_arithmetic,
         |dag| eval_dense_gather_pattern(dag, Some(5)),
         "extent `n`: claimed = 5, mul axis 0 = 4\n\
          numeric trap: domain in mul at i64",
@@ -386,7 +387,7 @@ fn dense_gather_interior_literal_claim_blocks_replacement_and_traps_after_dce() 
     let dag = dense_gather_pattern(InteriorClaim::Literal);
     let specialized = assert_specialized_claim_trap(
         &dag,
-        chelis_ir::specialize::specialize_for_exact_arithmetic,
+        chelis_ir_core::specialize::specialize_for_exact_arithmetic,
         |dag| eval_dense_gather_pattern(dag, None),
         "extent `5`: claimed = 5, mul axis 0 = 4\n\
          numeric trap: domain in mul at i64",
@@ -404,7 +405,7 @@ fn dense_gather_interior_literal_claim_blocks_replacement_and_traps_after_dce() 
 fn unclaimed_dense_gather_region_still_specializes_and_executes() {
     let dag = dense_gather_pattern(InteriorClaim::None);
     let expected = eval_dense_gather_pattern(&dag, None).unwrap();
-    let specialized = chelis_ir::specialize::specialize_for_exact_arithmetic(&dag);
+    let specialized = chelis_ir_core::specialize::specialize_for_exact_arithmetic(&dag);
     assert!(verify(&specialized).is_empty());
     assert!(specialized.nodes().iter().any(|node| matches!(
         node.op,
@@ -618,7 +619,7 @@ fn named_result_claim_traps_after_specialization_and_dce() {
          numeric trap: domain in cast at i64"
     );
 
-    let specialized = chelis_ir::specialize::specialize_for_exact_arithmetic(&dag);
+    let specialized = chelis_ir_core::specialize::specialize_for_exact_arithmetic(&dag);
     assert!(verify(&specialized).is_empty());
     let retained_cast = specialized
         .nodes()
@@ -637,7 +638,7 @@ fn named_result_claim_traps_after_specialization_and_dce() {
 #[test]
 fn agreeing_named_result_claim_survives_specialization_and_dce() {
     let dag = named_claim_identity_cast_dag();
-    let specialized = chelis_ir::specialize::specialize_for_exact_arithmetic(&dag);
+    let specialized = chelis_ir_core::specialize::specialize_for_exact_arithmetic(&dag);
     assert!(verify(&specialized).is_empty());
     let retained_cast = specialized
         .nodes()

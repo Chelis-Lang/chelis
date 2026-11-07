@@ -640,6 +640,8 @@ jobs:
             timeout: 115
           - slice: checker-core
             timeout: 300
+          - slice: ir-core
+            timeout: 300
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -659,7 +661,7 @@ jobs:
         uses: ./.github/actions/setup-project-ci
 
       - name: Install portable core policy dependency
-        if: matrix.slice == 'domain' || matrix.slice == 'effect-analysis-core' || matrix.slice == 'checker-core'
+        if: matrix.slice == 'domain' || matrix.slice == 'effect-analysis-core' || matrix.slice == 'checker-core' || matrix.slice == 'ir-core'
         run: uv pip install --python "$PYO3_PYTHON" PyYAML==6.0.3
 
       - name: Cache cargo registry and build
@@ -700,6 +702,15 @@ jobs:
         with:
           name: checker-core-linux
           path: target/agents/checker-core/
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload IR core evidence
+        if: always() && matrix.slice == 'ir-core'
+        uses: actions/upload-artifact@v7
+        with:
+          name: ir-core-linux
+          path: target/agents/ir-core/
           if-no-files-found: error
           retention-days: 14
 

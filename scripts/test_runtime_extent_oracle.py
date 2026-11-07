@@ -670,33 +670,6 @@ class RuntimeExtentOracleTests(unittest.TestCase):
                 ORACLE.phase_a_targets("python"),
             )
 
-    def test_host_actualization_owner_matrix_is_in_the_automatic_gate(self) -> None:
-        targets = {target.id: target for target in ORACLE.phase_a_targets("python")}
-        target = targets["host_actualization"]
-        # The names follow `--`, where the harness takes any number of
-        # filters. Cargo takes one `[TESTNAME]` positional, so this is the
-        # only placement that works for a row naming more than one test.
-        self.assertEqual(
-            target.argv,
-            (
-                "cargo",
-                "test",
-                "-p",
-                "chelis-ir",
-                "--lib",
-                "--",
-                "--exact",
-                "--nocapture",
-                "host::tests::tensor_helper_actualization_declines_input_axis_for_shrink_and_stride",
-            ),
-        )
-        self.assertEqual(
-            target.expected_tests,
-            (
-                "host::tests::tensor_helper_actualization_declines_input_axis_for_shrink_and_stride",
-            ),
-        )
-
     def test_shared_targets_are_deduplicated_by_command(self) -> None:
         shared = ORACLE.self_test_target("python")
         self.assertIn(shared, ORACLE.phase_a_targets("python"))

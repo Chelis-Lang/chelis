@@ -27,7 +27,8 @@ use chelis_unord::UnordMap;
 use chelis_dag_core::dag::{Dag, RiscOp};
 use chelis_dag_core::grad::{AdError, AdRejectionReason, grad_dag_checked};
 use chelis_dag_core::{DimInfo, TensorType};
-use chelis_ir::eval::{TensorValue, eval_tensor_with};
+use chelis_ir::eval::eval_tensor_with;
+use chelis_ir_core::eval::TensorValue;
 use chelis_numeric_core::prim::Prim;
 
 // chelis#729 Phase 1: f64-typed fixtures. These tests pin the ONNX

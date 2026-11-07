@@ -21,19 +21,26 @@ use chelis_numeric_core::prim::Prim;
 /// Lower `source`'s `main` as `chelis build --target hip` lowers an entry
 /// def before codegen.
 fn lowered(source: &str) -> Dag {
-    let declarations = chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack)
-        .expect("parse source");
-    let deep =
-        chelis_surf::desugar::desugar_program(&declarations, &chelis_syntax_host::NativeStack)
-            .expect("desugar source");
-    let checked = chelis_types::check_typed_program(&deep)
-        .unwrap_or_else(|errors| panic!("check source: {:?}", errors.errors));
-    let checked = chelis_effects::check_program(&checked).expect("effects");
-    let checked = chelis_types::check_linearity(&checked).expect("linearity");
-    let dag = chelis_ir::host::lower_named_tensor_entry_dag(&checked, "main")
+    chelis_ir::resources::with_operation(|operation| {
+        let declarations = chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+            .expect("parse source");
+        let deep =
+            chelis_surf::desugar::desugar_program(&declarations, &chelis_syntax_host::NativeStack)
+                .expect("desugar source");
+        let checked = chelis_types::check_typed_program(&deep)
+            .unwrap_or_else(|errors| panic!("check source: {:?}", errors.errors));
+        let checked = chelis_effects::check_program(&checked).expect("effects");
+        let checked = chelis_types::check_linearity(&checked).expect("linearity");
+        let dag = chelis_ir_core::host::lower_named_tensor_entry_dag(
+            (checked).facts(),
+            "main",
+            operation,
+        )
+        .expect("named entry decision")
         .expect("`main` lowers as a tensor entry");
-    let dag = chelis_dag_core::optimize::dead_code_eliminate(&dag);
-    chelis_dag_core::fuse::fuse(&chelis_ir::specialize::specialize_for_blas(&dag))
+        let dag = chelis_dag_core::optimize::dead_code_eliminate(&dag);
+        chelis_dag_core::fuse::fuse(&chelis_ir_core::specialize::specialize_for_blas(&dag))
+    })
 }
 
 fn emit(source: &str) -> Result<String, Unsupported> {

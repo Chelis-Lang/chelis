@@ -10,7 +10,7 @@ use chelis_effects::realizability::{compute_root_manifest, infer_realizability};
 use chelis_ir::host::{
     try_lower_manifested_execution_program, try_lower_manifested_execution_program_with_trace,
 };
-use chelis_ir::lowering_trace::Value;
+use chelis_ir_core::lowering_trace::Value;
 use chelis_numeric_core::prim::Prim;
 use chelis_surf::{desugar::desugar_program, parser::parse_str};
 use chelis_types::manifest::ManifestedProgram;

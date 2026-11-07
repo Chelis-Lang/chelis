@@ -1102,15 +1102,15 @@ fn cross_backend_bf16_add_mul_chain_agrees_with_evaluator() {
 
     // Evaluator
     let mut inputs = chelis_unord::UnordMap::new();
-    let a_eval = chelis_ir::eval::TensorValue::from_vec(
+    let a_eval = chelis_ir_core::eval::TensorValue::from_vec(
         vec![n],
         vec![0.5, 1.5, 2.5, -0.25, 1.0, 2.0, -1.0, 0.125],
     );
-    let b_eval = chelis_ir::eval::TensorValue::from_vec(
+    let b_eval = chelis_ir_core::eval::TensorValue::from_vec(
         vec![n],
         vec![0.25, 0.5, -1.5, 0.75, 0.125, -0.25, 1.0, 2.0],
     );
-    let c_eval = chelis_ir::eval::TensorValue::from_vec(
+    let c_eval = chelis_ir_core::eval::TensorValue::from_vec(
         vec![n],
         vec![1.0, -1.0, 0.5, 2.0, 0.5, 1.0, -1.0, 1.0],
     );

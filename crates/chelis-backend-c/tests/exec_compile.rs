@@ -15,13 +15,14 @@ use chelis_dag_core::dag::{
 };
 use chelis_dag_core::fuse::fuse;
 use chelis_dag_core::grad::grad_dag_checked;
-use chelis_ir::ConcreteHostType as HostType;
-use chelis_ir::eval::{TensorValue, eval_tensor};
-use chelis_ir::host::{
+use chelis_ir::eval::eval_tensor;
+use chelis_ir_core::eval::TensorValue;
+use chelis_ir_core::host::{
     ConcreteHostExpr as HostExpr, ConcreteHostExprKind as HostExprKind,
     ConcreteHostFunction as HostFunction, ConcreteHostParam as HostParam,
     ConcreteHostProgram as HostProgram, HostFunctionOrigin,
 };
+use chelis_ir_core::host_type_state::ConcreteHostType as HostType;
 use chelis_numeric_core::dtype_semantics::{RawTensor, finalize_tensor};
 use chelis_numeric_core::prim::Prim;
 use chelis_unord::UnordMap;
@@ -251,7 +252,7 @@ int main(void) {{
             .expect_err("malformed literal cardinality must reject before codegen");
             assert_eq!(
                 error,
-                chelis_ir::ownership::OwnershipError::LoweringInvariant {
+                chelis_ir_core::ownership::OwnershipError::LoweringInvariant {
                     unit: "dag".into(),
                     detail: format!(
                         "constant tensor at node 0 stores 4 values but its concrete shape requires {extent}"
@@ -620,7 +621,7 @@ fn checked_blas_batches_scratch_and_empty_domains_execute_under_sanitizers() {
         let mut sources = vec![source];
         if operand == Prim::F32 && output == Prim::F32 {
             use chelis_dag_core::dag::DimExpr;
-            use chelis_ir::host::{
+            use chelis_ir_core::host::{
                 HostBlasMatmulSummary, HostTensorHelper, HostTensorInput, HostTensorSpecialization,
             };
             let dag = checked_blas_dag(operand, output);
@@ -1212,7 +1213,7 @@ int main(void) {{
             );
             let mut sources = vec![source];
             if diagnostic == "scatter" {
-                use chelis_ir::host::{
+                use chelis_ir_core::host::{
                     HostTensorHelper, HostTensorInput, summarize_sparse_helper_for_test,
                 };
                 let inputs = vec![
@@ -1233,9 +1234,7 @@ int main(void) {{
                 let specialization = summarize_sparse_helper_for_test(&dag, &inputs, &output);
                 assert!(matches!(
                     specialization,
-                    Some(chelis_ir::host::HostTensorSpecialization::SparseScatterAdd(
-                        _
-                    ))
+                    Some(chelis_ir_core::host::HostTensorSpecialization::SparseScatterAdd(_))
                 ));
                 let params = inputs
                     .iter()
@@ -2891,7 +2890,7 @@ int main() {{
 // the backend-numerics policy, evaluator-vs-backend agreement needs an
 // actual compile-and-run. These two tests close that gap: the emitted
 // C is compiled with gcc, run, and checked against the exact values
-// the IR evaluator (`chelis_ir::eval::reduce_window`) produces for the
+// the IR evaluator (`chelis_ir_core::eval::reduce_window`) produces for the
 // same 1x1x3x3 input — the canonical oracle per spec §6. Max exercises
 // the `fmaxf` / `-INFINITY` path; Mean exercises the windowed-sum +
 // `acc /= window_volume` division path.
@@ -5211,7 +5210,8 @@ fn run_cmplt_parity(
     a_vals: &[f64],
     b_vals: &[f64],
 ) {
-    use chelis_ir::eval::{TensorValue, eval_tensor};
+    use chelis_ir::eval::eval_tensor;
+    use chelis_ir_core::eval::TensorValue;
     use chelis_unord::UnordMap;
 
     let n = a_vals.len();
@@ -8577,39 +8577,43 @@ fn direct_relu_preserves_input_bits_and_adjoint_uses_strict_positive_mask() {
 /// preempt it - which the disagreeing case below measures rather than
 /// assumes.
 fn runtime_branch_local_ascription_c() -> chelis_backend_c::CodegenResult {
-    let source = "def f(flag: bool, x: tensor[*, f32]) -> tensor[*, f32] = \
+    chelis_ir::resources::with_operation(|operation| {
+        let source = "def f(flag: bool, x: tensor[*, f32]) -> tensor[*, f32] = \
                   if flag then {\n  \
                     y: tensor[2, f32] = pad(x, [[0i64, 0i64]], 0.0f32)\n  \
                     y\n\
                   } else x\n";
-    let decls = chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack)
-        .expect("Surf parse");
-    let checked = chelis_types::check_ir_program(
-        &chelis_surf::desugar::desugar_program(&decls, &chelis_syntax_host::NativeStack)
-            .expect("Surf fixture must desugar"),
-    )
-    .unwrap_or_else(|report| panic!("type check failed: {:?}", report.errors));
-    let dag = chelis_ir::host::lower_named_tensor_entry_dag(&checked, "f")
-        .expect("named tensor entry lowers");
-    let generated = codegen_with_options(
-        &dag,
-        "runtime_branch_local_ascription",
-        CodegenOptions {
-            use_blas: false,
-            static_entry: false,
-        },
-    )
-    .expect("runtime branch codegen");
-    assert_eq!(generated.input_labels, ["flag", "x"]);
-    // The claim is checked under its carrier's owner activation, read from
-    // that Bool's storage row by row (any row active runs the guard).
-    assert!(
+        let decls = chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+            .expect("Surf parse");
+        let checked = chelis_types::check_ir_program(
+            &chelis_surf::desugar::desugar_program(&decls, &chelis_syntax_host::NativeStack)
+                .expect("Surf fixture must desugar"),
+        )
+        .unwrap_or_else(|report| panic!("type check failed: {:?}", report.errors));
+        let dag =
+            chelis_ir_core::host::lower_named_tensor_entry_dag((checked).facts(), "f", operation)
+                .expect("named entry decision")
+                .expect("named tensor entry lowers");
+        let generated = codegen_with_options(
+            &dag,
+            "runtime_branch_local_ascription",
+            CodegenOptions {
+                use_blas: false,
+                static_entry: false,
+            },
+        )
+        .expect("runtime branch codegen");
+        assert_eq!(generated.input_labels, ["flag", "x"]);
+        // The claim is checked under its carrier's owner activation, read from
+        // that Bool's storage row by row (any row active runs the guard).
+        assert!(
+            generated
+                .c_source
+                .contains("__local_guard_active |= (((const "),
+            "the claim's guard reads its carrier's owner activation"
+        );
         generated
-            .c_source
-            .contains("__local_guard_active |= (((const "),
-        "the claim's guard reads its carrier's owner activation"
-    );
-    generated
+    })
 }
 
 fn runtime_branch_local_ascription_harness(flag: bool) -> String {
@@ -9528,7 +9532,8 @@ int main() {{
 #[test]
 fn numeric_local_extent_claims_execute_exactly() {
     use chelis_dag_core::dag::{RtAxis, RtDim};
-    use chelis_ir::eval::{TensorValue, eval_tensor_with};
+    use chelis_ir::eval::eval_tensor_with;
+    use chelis_ir_core::eval::TensorValue;
     let mut failures = Vec::new();
     let mut executions = 0;
     for resolved_name in [false, true] {
@@ -10105,7 +10110,8 @@ fn an_interface_member_with_a_resolved_dim_keeps_its_site_in_a_local_class() {
 #[test]
 fn local_reshape_guards_follow_declaration_order() {
     use chelis_dag_core::dag::RtDim;
-    use chelis_ir::eval::{TensorValue, eval_tensor_with};
+    use chelis_ir::eval::eval_tensor_with;
+    use chelis_ir_core::eval::TensorValue;
     let mut dag = Dag::new();
     let decl = dag.declare("test");
     let n = DimInfo::Named("n".into(), Some(4));
@@ -10460,80 +10466,87 @@ int main(void) {{
 /// a second, silently different extent.
 #[test]
 fn shared_runtime_extent_declares_once_and_rechecks_the_later_carrier() {
-    use chelis_unord::UnordMap;
+    chelis_ir::resources::with_operation(|operation| {
+        use chelis_unord::UnordMap;
 
-    // `let m = cast(shape(x, 0), i64) in concat([reshape(x, [1, m]),
-    //  reshape(x, [1, m])], 0)` - the minimal shape of the #368 window stack.
-    let row = "(app {} (var {} reshape) (var {} x) \
+        // `let m = cast(shape(x, 0), i64) in concat([reshape(x, [1, m]),
+        //  reshape(x, [1, m])], 0)` - the minimal shape of the #368 window stack.
+        let row = "(app {} (var {} reshape) (var {} x) \
        (app {} (var {} Cons) (cast {} (lit {} 1) (t-prim {} i64)) \
          (app {} (var {} Cons) (var {} m) (var {} Nil))))";
-    let src = format!(
-        "(let {{}} (bind {{}} m (cast {{}} (app {{}} (var {{}} shape) (var {{}} x) \
+        let src = format!(
+            "(let {{}} (bind {{}} m (cast {{}} (app {{}} (var {{}} shape) (var {{}} x) \
            (cast {{}} (lit {{}} 0) (t-prim {{}} i32))) (t-prim {{}} i64))) \
          (app {{}} (var {{}} concat) \
            (app {{}} (var {{}} Cons) {row} (app {{}} (var {{}} Cons) {row} (var {{}} Nil))) \
            (cast {{}} (lit {{}} 0) (t-prim {{}} i32))))"
-    );
-    let mut exprs =
-        chelis_deep::parser::parse_str(&src, &chelis_syntax_host::NativeStack).expect("deep parse");
-    assert_eq!(exprs.len(), 1);
-    let expr = exprs.pop().unwrap();
-    let mut scoped = UnordMap::new();
-    scoped.insert(
-        "x".to_string(),
-        TensorType {
-            dims: vec![DimInfo::Named("n".into(), None)],
-            precision: Prim::F32,
-        },
-    );
-    let dag =
-        chelis_ir::lower::lower_subexpr_program(&expr, scoped, UnordMap::new(), UnordMap::new());
+        );
+        let mut exprs = chelis_deep::parser::parse_str(&src, &chelis_syntax_host::NativeStack)
+            .expect("deep parse");
+        assert_eq!(exprs.len(), 1);
+        let expr = exprs.pop().unwrap();
+        let mut scoped = UnordMap::new();
+        scoped.insert(
+            "x".to_string(),
+            TensorType {
+                dims: vec![DimInfo::Named("n".into(), None)],
+                precision: Prim::F32,
+            },
+        );
+        let dag = chelis_ir_core::lower::try_lower_subexpr_program(
+            &expr,
+            scoped,
+            UnordMap::new(),
+            UnordMap::new(),
+            operation,
+        )
+        .expect("subexpression lowers");
 
-    // The premise: one shared symbol across both rows, and a tensor concat
-    // rather than the rank-0 host placeholder. The native checks below prove
-    // its values and the later carrier's independent rejection.
-    let axis_names: Vec<String> = dag
-        .nodes()
-        .iter()
-        .filter(|node| matches!(node.op, RiscOp::Reshape { .. }))
-        .map(|node| match &node.output_type.dims[1] {
-            DimInfo::Named(name, None) => name.clone(),
-            other => panic!("expected a generated runtime dim, got {other:?}"),
-        })
-        .collect();
-    assert_eq!(axis_names.len(), 2, "two rows: {dag:?}");
-    assert_eq!(axis_names[0], axis_names[1], "one extent, one symbol");
-    assert!(
-        dag.roots().iter().any(|root| {
-            dag.get(*root).is_some_and(|node| {
-                node.output_type.dims.len() == 2 && node.output_type.precision == Prim::F32
+        // The premise: one shared symbol across both rows, and a tensor concat
+        // rather than the rank-0 host placeholder. The native checks below prove
+        // its values and the later carrier's independent rejection.
+        let axis_names: Vec<String> = dag
+            .nodes()
+            .iter()
+            .filter(|node| matches!(node.op, RiscOp::Reshape { .. }))
+            .map(|node| match &node.output_type.dims[1] {
+                DimInfo::Named(name, None) => name.clone(),
+                other => panic!("expected a generated runtime dim, got {other:?}"),
             })
-        }),
-        "the concat must retain its tensor result: {dag:?}"
-    );
+            .collect();
+        assert_eq!(axis_names.len(), 2, "two rows: {dag:?}");
+        assert_eq!(axis_names[0], axis_names[1], "one extent, one symbol");
+        assert!(
+            dag.roots().iter().any(|root| {
+                dag.get(*root).is_some_and(|node| {
+                    node.output_type.dims.len() == 2 && node.output_type.precision == Prim::F32
+                })
+            }),
+            "the concat must retain its tensor result: {dag:?}"
+        );
 
-    let generated = codegen(&dag, "shared_extent").expect("shared-extent DAG must emit C");
+        let generated = codegen(&dag, "shared_extent").expect("shared-extent DAG must emit C");
 
-    // The symbol is declared once. Every later mention is a use or a guard.
-    let declarations = generated
-        .c_source
-        .lines()
-        .filter(|line| line.contains(&format!("int64_t {};", axis_names[0])))
-        .count()
-        + generated
+        // The symbol is declared once. Every later mention is a use or a guard.
+        let declarations = generated
             .c_source
             .lines()
-            .filter(|line| line.contains(&format!("int64_t {} =", axis_names[0])))
-            .count();
-    assert_eq!(
-        declarations, 1,
-        "the shared runtime extent is declared exactly once:\n{}",
-        generated.c_source
-    );
+            .filter(|line| line.contains(&format!("int64_t {};", axis_names[0])))
+            .count()
+            + generated
+                .c_source
+                .lines()
+                .filter(|line| line.contains(&format!("int64_t {} =", axis_names[0])))
+                .count();
+        assert_eq!(
+            declarations, 1,
+            "the shared runtime extent is declared exactly once:\n{}",
+            generated.c_source
+        );
 
-    // 1.0f as its exact IEEE-754 binary32 image; the runtime takes scalar
-    // bits, never an untagged double ([04-NUM-11]).
-    let harness = r#"
+        // 1.0f as its exact IEEE-754 binary32 image; the runtime takes scalar
+        // bits, never an untagged double ([04-NUM-11]).
+        let harness = r#"
 #include "chelis_runtime.h"
 void shared_extent(chelis_tensor **, int, chelis_tensor **, int);
 int main(void) {
@@ -10556,54 +10569,55 @@ int main(void) {
 }
 "#;
 
-    let (ok, text) =
-        compile_and_run_kernel_capturing("shared_runtime_extent", &generated.c_source, harness);
-    assert!(ok, "shared-extent kernel must build, link and run: {text}");
-    assert!(
-        text.contains("SHARED EXTENT PASS"),
-        "the stack must materialize as [2, 4]: {text}"
-    );
+        let (ok, text) =
+            compile_and_run_kernel_capturing("shared_runtime_extent", &generated.c_source, harness);
+        assert!(ok, "shared-extent kernel must build, link and run: {text}");
+        assert!(
+            text.contains("SHARED EXTENT PASS"),
+            "the stack must materialize as [2, 4]: {text}"
+        );
 
-    // The later carrier's guard is LIVE, not decorative. Make the second
-    // reshape read a different extent than the declared symbol and the binary
-    // must trap instead of sizing an axis from a second, unequal value. The
-    // guard's own `fprintf` names the node, so find its read by that line and
-    // perturb the read the comparison performs.
-    let guard_line = generated
-        .c_source
-        .lines()
-        .filter(|line| line.contains(&format!("extent `{}`: claimed", axis_names[0])))
-        .nth(1)
-        .expect("the later carrier carries its own equality guard")
-        .to_owned();
-    let carrier = guard_line
-        .split("(long long)(")
-        .nth(2)
-        .and_then(|rest| rest.strip_suffix("));"))
-        .expect("the guard prints the carrier read it compared")
-        .to_owned();
-    assert!(
-        carrier.contains("_data)[0]"),
-        "expected a carrier read, got {carrier}"
-    );
-    let comparison = format!("if (({carrier}) != {})", axis_names[0]);
-    assert!(
-        generated.c_source.contains(&comparison),
-        "the later guard compares the carrier against the declared symbol:\n{}",
-        generated.c_source
-    );
-    let mutated = generated.c_source.replacen(
-        &comparison,
-        &format!("if ((({carrier}) + 1) != {})", axis_names[0]),
-        1,
-    );
-    let (ok, text) =
-        compile_and_run_kernel_capturing("shared_runtime_extent_trap", &mutated, harness);
-    assert!(!ok, "a disagreeing later carrier must abort: {text}");
-    assert!(
-        text.contains("numeric trap: domain in reshape at i64"),
-        "the abort must be the typed reshape domain trap: {text}"
-    );
+        // The later carrier's guard is LIVE, not decorative. Make the second
+        // reshape read a different extent than the declared symbol and the binary
+        // must trap instead of sizing an axis from a second, unequal value. The
+        // guard's own `fprintf` names the node, so find its read by that line and
+        // perturb the read the comparison performs.
+        let guard_line = generated
+            .c_source
+            .lines()
+            .filter(|line| line.contains(&format!("extent `{}`: claimed", axis_names[0])))
+            .nth(1)
+            .expect("the later carrier carries its own equality guard")
+            .to_owned();
+        let carrier = guard_line
+            .split("(long long)(")
+            .nth(2)
+            .and_then(|rest| rest.strip_suffix("));"))
+            .expect("the guard prints the carrier read it compared")
+            .to_owned();
+        assert!(
+            carrier.contains("_data)[0]"),
+            "expected a carrier read, got {carrier}"
+        );
+        let comparison = format!("if (({carrier}) != {})", axis_names[0]);
+        assert!(
+            generated.c_source.contains(&comparison),
+            "the later guard compares the carrier against the declared symbol:\n{}",
+            generated.c_source
+        );
+        let mutated = generated.c_source.replacen(
+            &comparison,
+            &format!("if ((({carrier}) + 1) != {})", axis_names[0]),
+            1,
+        );
+        let (ok, text) =
+            compile_and_run_kernel_capturing("shared_runtime_extent_trap", &mutated, harness);
+        assert!(!ok, "a disagreeing later carrier must abort: {text}");
+        assert!(
+            text.contains("numeric trap: domain in reshape at i64"),
+            "the abort must be the typed reshape domain trap: {text}"
+        );
+    })
 }
 
 /// NEGATIVE CONTROL for the per-scope rename's freshness rule, chelis#1788.
@@ -11417,32 +11431,35 @@ int main(void) {{
 /// compiled C: each lane's value, or its trap text (for C, the emitter's
 /// refusal where it refuses the graph).
 fn tensor_entry_lanes(source: &str, n: usize) -> (Result<f64, String>, Result<f64, String>) {
-    let decls = chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack)
-        .expect("Surf parse");
-    let checked = chelis_types::check_ir_program(
-        &chelis_surf::desugar::desugar_program(&decls, &chelis_syntax_host::NativeStack)
-            .expect("Surf fixture must desugar"),
-    )
-    .unwrap_or_else(|report| panic!("type check failed: {:?}", report.errors));
-    let dag = chelis_ir::host::lower_named_tensor_entry_dag(&checked, "f")
-        .expect("named tensor entry lowers");
-    let mut values = UnordMap::new();
-    values.insert(
-        "x".to_string(),
-        TensorValue::from_storage(
-            vec![n],
-            finalize_tensor("x", Prim::F32, RawTensor::Float(vec![1.0; n])).unwrap(),
-        ),
-    );
-    let root = *dag.roots().last().expect("a root");
-    let eval = eval_tensor(&dag, &values).map(|result| result[&root].to_f64_lossy_vec()[0]);
-    let generated = match codegen(&dag, "claim_arm") {
-        Ok(generated) => generated,
-        Err(refusal) => return (eval, Err(format!("codegen refused: {refusal:?}"))),
-    };
-    assert_eq!(generated.input_labels, ["x"]);
-    let harness = format!(
-        r#"
+    chelis_ir::resources::with_operation(|operation| {
+        let decls = chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+            .expect("Surf parse");
+        let checked = chelis_types::check_ir_program(
+            &chelis_surf::desugar::desugar_program(&decls, &chelis_syntax_host::NativeStack)
+                .expect("Surf fixture must desugar"),
+        )
+        .unwrap_or_else(|report| panic!("type check failed: {:?}", report.errors));
+        let dag =
+            chelis_ir_core::host::lower_named_tensor_entry_dag((checked).facts(), "f", operation)
+                .expect("named entry decision")
+                .expect("named tensor entry lowers");
+        let mut values = UnordMap::new();
+        values.insert(
+            "x".to_string(),
+            TensorValue::from_storage(
+                vec![n],
+                finalize_tensor("x", Prim::F32, RawTensor::Float(vec![1.0; n])).unwrap(),
+            ),
+        );
+        let root = *dag.roots().last().expect("a root");
+        let eval = eval_tensor(&dag, &values).map(|result| result[&root].to_f64_lossy_vec()[0]);
+        let generated = match codegen(&dag, "claim_arm") {
+            Ok(generated) => generated,
+            Err(refusal) => return (eval, Err(format!("codegen refused: {refusal:?}"))),
+        };
+        assert_eq!(generated.input_labels, ["x"]);
+        let harness = format!(
+            r#"
 #include "chelis_runtime.h"
 #include <stdio.h>
 void claim_arm(chelis_tensor **, int, chelis_tensor **, int);
@@ -11458,17 +11475,18 @@ int main(void) {{
     return 0;
 }}
 "#
-    );
-    let run = checked_indexing_run(&generated.c_source, &harness);
-    let c = if run.status.success() {
-        String::from_utf8_lossy(&run.stdout)
-            .trim()
-            .parse::<f64>()
-            .map_err(|error| error.to_string())
-    } else {
-        Err(String::from_utf8_lossy(&run.stderr).to_string())
-    };
-    (eval, c)
+        );
+        let run = checked_indexing_run(&generated.c_source, &harness);
+        let c = if run.status.success() {
+            String::from_utf8_lossy(&run.stdout)
+                .trim()
+                .parse::<f64>()
+                .map_err(|error| error.to_string())
+        } else {
+            Err(String::from_utf8_lossy(&run.stderr).to_string())
+        };
+        (eval, c)
+    })
 }
 
 /// Decisions section 11 for a callee's result claim: a call in a runtime
@@ -11521,43 +11539,46 @@ fn tensor_entry_lanes_over(
     source: &str,
     inputs: &[(&str, usize)],
 ) -> (Result<f64, String>, Result<f64, String>) {
-    let decls = chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack)
-        .expect("Surf parse");
-    let checked = chelis_types::check_ir_program(
-        &chelis_surf::desugar::desugar_program(&decls, &chelis_syntax_host::NativeStack)
-            .expect("Surf fixture must desugar"),
-    )
-    .unwrap_or_else(|report| panic!("type check failed: {:?}", report.errors));
-    let dag = chelis_ir::host::lower_named_tensor_entry_dag(&checked, "f")
-        .expect("named tensor entry lowers");
-    let mut values = UnordMap::new();
-    for (name, n) in inputs {
-        values.insert(
-            name.to_string(),
-            TensorValue::from_storage(
-                vec![*n],
-                finalize_tensor("input", Prim::F32, RawTensor::Float(vec![1.0; *n])).unwrap(),
-            ),
-        );
-    }
-    let root = *dag.roots().last().expect("a root");
-    let eval = eval_tensor(&dag, &values).map(|result| result[&root].to_f64_lossy_vec()[0]);
-    let generated = match codegen(&dag, "claim_arm") {
-        Ok(generated) => generated,
-        Err(refusal) => return (eval, Err(format!("codegen refused: {refusal:?}"))),
-    };
-    let mut allocations = String::new();
-    for label in &generated.input_labels {
-        let (_, n) = inputs
-            .iter()
-            .find(|(name, _)| name == label)
-            .unwrap_or_else(|| panic!("entry slot {label}"));
-        allocations.push_str(&format!(
+    chelis_ir::resources::with_operation(|operation| {
+        let decls = chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+            .expect("Surf parse");
+        let checked = chelis_types::check_ir_program(
+            &chelis_surf::desugar::desugar_program(&decls, &chelis_syntax_host::NativeStack)
+                .expect("Surf fixture must desugar"),
+        )
+        .unwrap_or_else(|report| panic!("type check failed: {:?}", report.errors));
+        let dag =
+            chelis_ir_core::host::lower_named_tensor_entry_dag((checked).facts(), "f", operation)
+                .expect("named entry decision")
+                .expect("named tensor entry lowers");
+        let mut values = UnordMap::new();
+        for (name, n) in inputs {
+            values.insert(
+                name.to_string(),
+                TensorValue::from_storage(
+                    vec![*n],
+                    finalize_tensor("input", Prim::F32, RawTensor::Float(vec![1.0; *n])).unwrap(),
+                ),
+            );
+        }
+        let root = *dag.roots().last().expect("a root");
+        let eval = eval_tensor(&dag, &values).map(|result| result[&root].to_f64_lossy_vec()[0]);
+        let generated = match codegen(&dag, "claim_arm") {
+            Ok(generated) => generated,
+            Err(refusal) => return (eval, Err(format!("codegen refused: {refusal:?}"))),
+        };
+        let mut allocations = String::new();
+        for label in &generated.input_labels {
+            let (_, n) = inputs
+                .iter()
+                .find(|(name, _)| name == label)
+                .unwrap_or_else(|| panic!("entry slot {label}"));
+            allocations.push_str(&format!(
             "    float {label}_data[{n}];\n    for (int i = 0; i < {n}; ++i) {label}_data[i] = 1.0f;\n    int64_t {label}_shape[1] = {{{n}}};\n    chelis_tensor *{label} = chelis_tensor_entry_borrow(1, {label}_shape, CHELIS_DTYPE_F32, {label}_data, sizeof({label}_data));\n"
         ));
-    }
-    let harness = format!(
-        r#"
+        }
+        let harness = format!(
+            r#"
 #include "chelis_runtime.h"
 #include <stdio.h>
 void claim_arm(chelis_tensor **, int, chelis_tensor **, int);
@@ -11569,19 +11590,20 @@ int main(void) {{
     return 0;
 }}
 "#,
-        slots = generated.input_labels.join(", "),
-        count = generated.input_labels.len(),
-    );
-    let run = checked_indexing_run(&generated.c_source, &harness);
-    let c = if run.status.success() {
-        String::from_utf8_lossy(&run.stdout)
-            .trim()
-            .parse::<f64>()
-            .map_err(|error| error.to_string())
-    } else {
-        Err(String::from_utf8_lossy(&run.stderr).to_string())
-    };
-    (eval, c)
+            slots = generated.input_labels.join(", "),
+            count = generated.input_labels.len(),
+        );
+        let run = checked_indexing_run(&generated.c_source, &harness);
+        let c = if run.status.success() {
+            String::from_utf8_lossy(&run.stdout)
+                .trim()
+                .parse::<f64>()
+                .map_err(|error| error.to_string())
+        } else {
+            Err(String::from_utf8_lossy(&run.stderr).to_string())
+        };
+        (eval, c)
+    })
 }
 
 /// #2586 round 2b, decisions section 25: an arm whose extent rests on a

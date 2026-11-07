@@ -773,7 +773,7 @@ impl<'plan> Emitter<'plan> {
             return out;
         }
         if let Some(canonical) = node.span_id.as_deref() {
-            let safe = chelis_ir::span_sanitize::sanitize_for_comment(canonical);
+            let safe = chelis_ir_core::span_sanitize::sanitize_for_comment(canonical);
             out.push(format!("// span: {safe}"));
         }
         let mut merged: Vec<&str> = node
@@ -785,7 +785,7 @@ impl<'plan> Emitter<'plan> {
         merged.sort();
         merged.dedup();
         for span in merged {
-            let safe = chelis_ir::span_sanitize::sanitize_for_comment(span);
+            let safe = chelis_ir_core::span_sanitize::sanitize_for_comment(span);
             out.push(format!("// span: {safe}"));
         }
         out
@@ -886,7 +886,7 @@ impl<'plan> Emitter<'plan> {
         // `spec.label` is producer-supplied (Store name from LoadStoreName,
         // or `root{N}` synthesized internally). Comment-context sanitize
         // for the LoadStoreName case (synthesized labels are clean ASCII).
-        let safe_label = chelis_ir::span_sanitize::sanitize_for_comment(&spec.label);
+        let safe_label = chelis_ir_core::span_sanitize::sanitize_for_comment(&spec.label);
         self.body.push(format!(
             "// root output {idx} = `{safe_label}` (node {})",
             spec.id.0
@@ -1262,7 +1262,7 @@ impl<'plan> Emitter<'plan> {
         // architectural pattern: every
         // producer-supplied string into a comment context goes through
         // `sanitize_for_comment`.
-        let safe_name = chelis_ir::span_sanitize::sanitize_for_comment(name);
+        let safe_name = chelis_ir_core::span_sanitize::sanitize_for_comment(name);
         self.body
             .push(format!("// node {} = Load {safe_name}", node.id.0));
         self.body.push(format!(
@@ -2773,7 +2773,7 @@ impl<'plan> Emitter<'plan> {
         self.push_span_comments(node);
         // Comment-context sanitization for producer-supplied Store name.
         // See `emit_load` for the architectural-pattern rationale.
-        let safe_name = chelis_ir::span_sanitize::sanitize_for_comment(name);
+        let safe_name = chelis_ir_core::span_sanitize::sanitize_for_comment(name);
         self.body
             .push(format!("// node {} = Store `{safe_name}`", node.id.0));
         if in_plan.shape.is_empty() {

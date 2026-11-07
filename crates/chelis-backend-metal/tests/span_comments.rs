@@ -378,7 +378,7 @@ fn s4_metal_oracle_richer_combinations_grep() {
 // Mirror of the C and HIP backend tests. Per `spec/03-deep-syntax.md`
 // §1.1.1 the parser rejects forbidden span chars; programmatic IR
 // construction bypasses that check, so the Metal backend's sanitizer
-// (`chelis_ir::span_sanitize::sanitize_for_comment`) must escape forbidden
+// (`chelis_ir_core::span_sanitize::sanitize_for_comment`) must escape forbidden
 // bytes inside `// span:` comments — both host-side and inside embedded
 // MSL kernel raw-string literals — before emitting `.mm` source.
 //

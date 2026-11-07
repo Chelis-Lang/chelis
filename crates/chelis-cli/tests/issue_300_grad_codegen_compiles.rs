@@ -226,7 +226,7 @@ fn chelis_eval(source: &str, stem: &str) -> String {
 /// `Cast`, and every value lane materialized f32(1.1) first. With the
 /// literal bound at f64 the DAG `Const` is f64-typed and the C emit
 /// fills exact f64 bits. The host-lane `scalar_to_tensor` inference
-/// (`chelis_ir::host::infer_app_expr_host_type`) now also recovers the
+/// (`chelis_ir_core::host::infer_app_expr_host_type`) now also recovers the
 /// operand's float precision from the Deep node so the
 /// `chelis_scalar_tensor_from_f64` storage and the consuming helper's
 /// f64 read stay paired even without a checker annotation.

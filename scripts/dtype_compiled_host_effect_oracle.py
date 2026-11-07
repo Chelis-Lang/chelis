@@ -120,7 +120,7 @@ def source_contracts() -> tuple[SourceContract, ...]:
     contracts = [
         SourceContract(
             "no evaluator-only build roster",
-            "crates/chelis-ir/src/host.rs",
+            "crates/chelis-ir-core/src/host.rs",
             (),
             ("EVAL_ONLY_HOST_BUILTINS", "fn find_eval_only_host_builtin"),
         ),
@@ -161,7 +161,7 @@ def source_contracts() -> tuple[SourceContract, ...]:
         ),
         SourceContract(
             "tensor_scan composes the list scan at the state dtype",
-            "crates/chelis-ir/src/host.rs",
+            "crates/chelis-ir-core/src/host.rs",
             (
                 'chelis_abi::failure::negative_length_prefix("tensor_scan")',
                 'name: "to_tensor".into(),',
@@ -174,7 +174,7 @@ def source_contracts() -> tuple[SourceContract, ...]:
         ),
         SourceContract(
             "tensor_scan callback checks the actual state against the initial type",
-            "crates/chelis-ir/src/host.rs",
+            "crates/chelis-ir-core/src/host.rs",
             (
                 "name: TENSOR_SCAN_STATE.into(),",
                 "HostExprKind::Var(next.clone(), ret_ty.clone())",

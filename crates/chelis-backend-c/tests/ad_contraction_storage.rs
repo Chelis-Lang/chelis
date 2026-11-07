@@ -4,7 +4,8 @@ mod support;
 use chelis_dag_core::dag::{Dag, DimInfo, NodeId, RiscOp, TensorType};
 use chelis_dag_core::grad::grad_dag_checked;
 use chelis_dag_core::{tier2, tier2_ordered};
-use chelis_ir::eval::{TensorValue, eval_tensor};
+use chelis_ir::eval::eval_tensor;
+use chelis_ir_core::eval::TensorValue;
 use chelis_numeric_core::dtype_semantics::{RawTensor, finalize_tensor};
 use chelis_numeric_core::dtype_semantics::{StorageView, TensorStorage};
 use chelis_numeric_core::prim::Prim;
@@ -682,7 +683,7 @@ fn mapped_c_adjoints_keep_batch_trees_and_bounded_storage() {
             for grad_after_map in [false, true] {
                 let (dag, _) = graph([3, 5, 7], einsum, Prim::F32, Prim::F32, false);
                 let mut mapped =
-                    chelis_ir::vmap::vectorize_axis0(&dag, DimInfo::Lit(batch)).unwrap();
+                    chelis_ir_core::vmap::vectorize_axis0(&dag, DimInfo::Lit(batch)).unwrap();
                 if grad_after_map {
                     let owner = mapped.declare("batch_loss");
                     let loss = mapped.add_node(
@@ -783,7 +784,7 @@ fn shared_numeric_diamonds_cache_before_movement_readers() {
         None,
     );
     dag.add_root(sum);
-    let plan = chelis_ir::contraction_views::contraction_views(&dag, &[sum]);
+    let plan = chelis_ir_core::contraction_views::contraction_views(&dag, &[sum]);
     assert!(products[..11].iter().all(|node| !plan.is_deferred(*node)));
     assert!(plan.is_deferred(products[11]));
     let code = support::codegen(&dag, "diamond").unwrap().c_source;
@@ -815,7 +816,8 @@ fn exposed_ad_products_are_owned_dense_outputs() {
         roots.push(product);
         dag.set_roots(roots.clone());
         assert!(
-            !chelis_ir::contraction_views::contraction_views(&dag, &roots).is_deferred(product)
+            !chelis_ir_core::contraction_views::contraction_views(&dag, &roots)
+                .is_deferred(product)
         );
         execute(vec![(dag, roots, inputs([3, 5, 7]), 8 * 105)]);
     }
