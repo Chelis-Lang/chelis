@@ -2852,7 +2852,7 @@
     },
     {
       "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/lower.rs|owner=LowerCtx < 'program >::fold_shape_derived_static_size",
-      "sample": "self . fold_shape_derived_static_size (& operands [0] , sources) ? . checked_mul (self . fold_sha..."
+      "sample": "(match self . fold_shape_derived_static_size (& operands [0] , sources) ? { Some (value) => value..."
     },
     {
       "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/lower.rs|owner=LowerCtx < 'program >::gather_values_rank",
@@ -2868,7 +2868,7 @@
     },
     {
       "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/lower.rs|owner=lower_program_to_library_inner",
-      "sample": "nodes . saturating_sub (last_dag_size)"
+      "sample": "nodes . saturating_sub (profile . previous_nodes . replace (nodes))"
     },
     {
       "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/ownership/last_use.rs|owner=definition_orders",

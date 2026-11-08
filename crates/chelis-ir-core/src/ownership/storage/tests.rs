@@ -1,3 +1,5 @@
+#![cfg(test)]
+
 use super::*;
 use chelis_dag_core::dag::{Dag, TensorType};
 use chelis_numeric_core::prim::Prim;

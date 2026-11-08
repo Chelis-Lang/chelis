@@ -16,7 +16,7 @@
     "expected": ["E0277", "PreparedHostProgram"]
   },
   "private-library-proof": {
-    "source": "pub fn forge(data: chelis_ir_core::lower::LoweredLibrary) -> chelis_ir::lower::LoweredLibrary { chelis_ir::lower::LoweredLibrary { data, library_proof_id: None } }\n",
+    "source": "pub fn forge(inner: chelis_ir_core::lower::LoweredLibrary) -> chelis_ir::lower::LoweredLibrary { chelis_ir::lower::LoweredLibrary { inner, library_proof_id: None } }\n",
     "expected": ["E0451", "private", "LoweredLibrary"]
   },
   "raw-dag-payload": {

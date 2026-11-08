@@ -218,6 +218,13 @@ path = "junit.xml"
 [profile.checker-core-oracle]
 inherits = "ci-full"
 
+# The IR oracle supplies separate JUnit paths for complete and pipeline runs.
+[profile.ir-core-acceptance]
+inherits = "ci-full"
+
+[profile.ir-pipeline-acceptance]
+inherits = "ci-full"
+
 # The nightly `module-oracles` job: the module sweeps and eval-and-C
 # differentials that pull-request CI runs only as canaries. A slow night must
 # not cut one short, so its per-test backstop is two hours, not ci-full's 50

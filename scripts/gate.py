@@ -366,6 +366,11 @@ CLIPPY_NATIVE_CHECKER_NO_DEFAULT_FEATURES: list[str] = [
     "cargo", "clippy", "-p", "chelis-types",
     "--lib", "--no-default-features", "--", "-D", "warnings",
 ]
+# Compile portable IR without host test feature unification.
+CLIPPY_IR_NO_DEFAULT_FEATURES: list[str] = [
+    "cargo", "clippy", "-p", "chelis-ir-core",
+    "--lib", "--no-default-features", "--", "-D", "warnings",
+]
 CLIPPY_SOLVER_FREE_FEATURES: list[str] = [
     "cargo", "clippy", "--workspace", "--all-targets", "--features",
     "chelis-cli/ownership-ledger,"
@@ -690,6 +695,7 @@ STAGES: dict[str, list[list[str]]] = {
         CLIPPY_CHECKER_NO_DEFAULT_FEATURES,
         CLIPPY_CHECKER_SERDE,
         CLIPPY_NATIVE_CHECKER_NO_DEFAULT_FEATURES,
+        CLIPPY_IR_NO_DEFAULT_FEATURES,
         FMT_CHECK,
         CHELIS_LINT_CHECK,
         OPTIMIZED_FLOAT_FINALIZATION_TESTS,
@@ -810,6 +816,7 @@ LOCAL_STATIC_COMMANDS: list[list[str]] = [
     CLIPPY_CHECKER_NO_DEFAULT_FEATURES,
     CLIPPY_CHECKER_SERDE,
     CLIPPY_NATIVE_CHECKER_NO_DEFAULT_FEATURES,
+    CLIPPY_IR_NO_DEFAULT_FEATURES,
     FMT_CHECK,
     CHELIS_LINT_CHECK,
     STD_BUNDLE_REPRODUCIBILITY,

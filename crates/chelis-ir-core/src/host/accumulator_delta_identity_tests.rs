@@ -1,3 +1,5 @@
+#![cfg(test)]
+
 use super::*;
 #[test]
 fn equal_constructor_spelling_in_another_nominal_is_not_component_evidence() {

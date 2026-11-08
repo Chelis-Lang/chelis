@@ -1,3 +1,5 @@
+#![cfg(test)]
+
 use super::*;
 fn find_lambda(expr: &Expr) -> Option<&Expr> {
     if let Expr::MetaExpr(meta, _) = expr {

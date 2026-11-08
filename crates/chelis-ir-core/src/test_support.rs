@@ -1,3 +1,5 @@
+#![cfg(test)]
+
 use crate::resources::{Operation, Resources};
 use chelis_syntax_host::NativeStack;
 

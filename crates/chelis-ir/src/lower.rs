@@ -72,7 +72,7 @@ pub fn install_chelis_panic_hook() {
 // Only native checked ingresses pair ordinary data with a native proof identity.
 #[derive(Debug, Clone)]
 pub struct LoweredLibrary {
-    data: chelis_ir_core::lower::LoweredLibrary,
+    inner: chelis_ir_core::lower::LoweredLibrary,
     library_proof_id: Option<LibraryProofId>,
 }
 
@@ -112,15 +112,15 @@ struct LoweredLibraryWire {
 impl serde::Serialize for LoweredLibrary {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         LoweredLibraryWireRef {
-            dag: &self.data.dag,
-            symbol_table: &self.data.symbol_table,
-            program_defs: &self.data.program_defs,
-            program_signatures: &self.data.program_signatures,
-            program_types: &self.data.program_types,
-            local_ascriptions: &self.data.local_ascriptions,
-            linearity: &self.data.linearity,
-            lowered_names: &self.data.lowered_names,
-            rootless_defs: &self.data.rootless_defs,
+            dag: &self.inner.dag,
+            symbol_table: &self.inner.symbol_table,
+            program_defs: &self.inner.program_defs,
+            program_signatures: &self.inner.program_signatures,
+            program_types: &self.inner.program_types,
+            local_ascriptions: &self.inner.local_ascriptions,
+            linearity: &self.inner.linearity,
+            lowered_names: &self.inner.lowered_names,
+            rootless_defs: &self.inner.rootless_defs,
             library_proof_id: &self.library_proof_id,
         }
         .serialize(serializer)
@@ -131,7 +131,7 @@ impl<'de> serde::Deserialize<'de> for LoweredLibrary {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let wire = LoweredLibraryWire::deserialize(deserializer)?;
         Ok(Self {
-            data: chelis_ir_core::lower::LoweredLibrary {
+            inner: chelis_ir_core::lower::LoweredLibrary {
                 dag: wire.dag,
                 symbol_table: wire.symbol_table,
                 program_defs: wire.program_defs,
@@ -153,49 +153,49 @@ impl LoweredLibrary {
         library_proof_id: Option<LibraryProofId>,
     ) -> Self {
         Self {
-            data,
+            inner: data,
             library_proof_id,
         }
     }
 
     pub fn data(&self) -> &chelis_ir_core::lower::LoweredLibrary {
-        &self.data
+        &self.inner
     }
 
     pub fn dag(&self) -> &Dag {
-        &self.data.dag
+        &self.inner.dag
     }
 
     pub fn symbol_table(&self) -> &UnordMap<String, NodeId> {
-        &self.data.symbol_table
+        &self.inner.symbol_table
     }
 
     pub fn program_defs(&self) -> &BTreeMap<String, Expr> {
-        &self.data.program_defs
+        &self.inner.program_defs
     }
 
     pub fn program_signatures(&self) -> &BTreeMap<String, Expr> {
-        &self.data.program_signatures
+        &self.inner.program_signatures
     }
 
     pub fn program_types(&self) -> &BTreeMap<String, TensorType> {
-        &self.data.program_types
+        &self.inner.program_types
     }
 
     pub fn local_ascriptions(&self) -> &[chelis_checker_core::CheckedLocalAscription] {
-        &self.data.local_ascriptions
+        &self.inner.local_ascriptions
     }
 
     pub fn linearity(&self) -> &LinearityInfo {
-        &self.data.linearity
+        &self.inner.linearity
     }
 
     pub fn lowered_names(&self) -> &BTreeMap<String, bool> {
-        &self.data.lowered_names
+        &self.inner.lowered_names
     }
 
     pub fn rootless_defs(&self) -> &BTreeSet<String> {
-        &self.data.rootless_defs
+        &self.inner.rootless_defs
     }
 
     pub fn library_proof_id(&self) -> Option<LibraryProofId> {
@@ -203,7 +203,7 @@ impl LoweredLibrary {
     }
 
     pub fn into_dag_and_rootless_defs(self) -> (Dag, BTreeSet<String>) {
-        (self.data.dag, self.data.rootless_defs)
+        (self.inner.dag, self.inner.rootless_defs)
     }
 }
 

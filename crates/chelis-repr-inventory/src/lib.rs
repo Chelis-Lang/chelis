@@ -284,6 +284,7 @@ impl SourceClass {
         } else if path.starts_with("crates/chelis-vocab/") {
             Some(Self::Vocab)
         } else if path.starts_with("crates/chelis-ir/")
+            || path.starts_with("crates/chelis-ir-core/")
             || path.starts_with("crates/chelis-dag-core/")
         {
             Some(Self::Ir)
@@ -564,6 +565,12 @@ impl TestItemSpans {
 }
 
 impl<'ast> Visit<'ast> for TestItemSpans {
+    fn visit_file(&mut self, file: &'ast syn::File) {
+        if !self.exclude(&file.attrs, file.span(), false) {
+            visit::visit_file(self, file);
+        }
+    }
+
     fn visit_item(&mut self, item: &'ast syn::Item) {
         if !self.exclude(item_attributes(item), item.span(), false) {
             visit::visit_item(self, item);

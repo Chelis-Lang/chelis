@@ -1,3 +1,5 @@
+#![cfg(test)]
+
 use super::*;
 #[test]
 fn unrepresented_rank_and_precision_witnesses_retain_full_entry_checks() {

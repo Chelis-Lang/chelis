@@ -1645,26 +1645,26 @@
       "args": [
         "--release",
         "-p",
-        "chelis-ir",
+        "chelis-ir-core",
         "--lib",
         "-E",
         "(test(capacity_key::tests::)) & (not test(=an_allocation_above_int32_elements_reports_its_true_extent))"
       ],
       "required": [
-        "chelis-ir::capacity_key::tests::capacity_key_product_regions_flatten_sort_fold_and_remove_identity",
-        "chelis-ir::capacity_key::tests::capacity_key_products_use_arbitrary_precision_without_collision",
-        "chelis-ir::capacity_key::tests::class_supplied_extent_retains_its_origin_through_pass_through",
-        "chelis-ir::capacity_key::tests::compile_surface_remains_opaque",
-        "chelis-ir::capacity_key::tests::exact_literal_quotient_folds_but_symbolic_quotient_is_not_a_proof",
-        "chelis-ir::capacity_key::tests::exact_source_identity_ignores_same_spelled_dimension_names",
-        "chelis-ir::capacity_key::tests::exact_source_identity_is_scoped_to_one_verified_program",
-        "chelis-ir::capacity_key::tests::pass_through_axis_retains_the_exact_source_identity",
-        "chelis-ir::capacity_key::tests::quotient_is_an_ordered_barrier_without_cancellation_or_reassociation",
-        "chelis-ir::capacity_key::tests::retired_rational_identities_do_not_discharge_integer_domains",
-        "chelis-ir::capacity_key::tests::same_spelled_class_supplied_extents_do_not_bypass_source_identity",
-        "chelis-ir::capacity_key::tests::static_zero_divisor_is_rejected_and_unsupported_is_conservative",
-        "chelis-ir::capacity_key::tests::total_products_and_literal_division_are_still_proven",
-        "chelis-ir::capacity_key::tests::zero_does_not_discard_partial_quotient_validity_in_either_order"
+        "chelis-ir-core::capacity_key::tests::capacity_key_product_regions_flatten_sort_fold_and_remove_identity",
+        "chelis-ir-core::capacity_key::tests::capacity_key_products_use_arbitrary_precision_without_collision",
+        "chelis-ir-core::capacity_key::tests::class_supplied_extent_retains_its_origin_through_pass_through",
+        "chelis-ir-core::capacity_key::tests::compile_surface_remains_opaque",
+        "chelis-ir-core::capacity_key::tests::exact_literal_quotient_folds_but_symbolic_quotient_is_not_a_proof",
+        "chelis-ir-core::capacity_key::tests::exact_source_identity_ignores_same_spelled_dimension_names",
+        "chelis-ir-core::capacity_key::tests::exact_source_identity_is_scoped_to_one_verified_program",
+        "chelis-ir-core::capacity_key::tests::pass_through_axis_retains_the_exact_source_identity",
+        "chelis-ir-core::capacity_key::tests::quotient_is_an_ordered_barrier_without_cancellation_or_reassociation",
+        "chelis-ir-core::capacity_key::tests::retired_rational_identities_do_not_discharge_integer_domains",
+        "chelis-ir-core::capacity_key::tests::same_spelled_class_supplied_extents_do_not_bypass_source_identity",
+        "chelis-ir-core::capacity_key::tests::static_zero_divisor_is_rejected_and_unsupported_is_conservative",
+        "chelis-ir-core::capacity_key::tests::total_products_and_literal_division_are_still_proven",
+        "chelis-ir-core::capacity_key::tests::zero_does_not_discard_partial_quotient_validity_in_either_order"
       ]
     },
     {
@@ -1937,26 +1937,26 @@
       "name": "exact capacity key contract (debug)",
       "args": [
         "-p",
-        "chelis-ir",
+        "chelis-ir-core",
         "--lib",
         "-E",
         "(test(capacity_key::tests::)) & (not test(=an_allocation_above_int32_elements_reports_its_true_extent))"
       ],
       "required": [
-        "chelis-ir::capacity_key::tests::capacity_key_product_regions_flatten_sort_fold_and_remove_identity",
-        "chelis-ir::capacity_key::tests::capacity_key_products_use_arbitrary_precision_without_collision",
-        "chelis-ir::capacity_key::tests::class_supplied_extent_retains_its_origin_through_pass_through",
-        "chelis-ir::capacity_key::tests::compile_surface_remains_opaque",
-        "chelis-ir::capacity_key::tests::exact_literal_quotient_folds_but_symbolic_quotient_is_not_a_proof",
-        "chelis-ir::capacity_key::tests::exact_source_identity_ignores_same_spelled_dimension_names",
-        "chelis-ir::capacity_key::tests::exact_source_identity_is_scoped_to_one_verified_program",
-        "chelis-ir::capacity_key::tests::pass_through_axis_retains_the_exact_source_identity",
-        "chelis-ir::capacity_key::tests::quotient_is_an_ordered_barrier_without_cancellation_or_reassociation",
-        "chelis-ir::capacity_key::tests::retired_rational_identities_do_not_discharge_integer_domains",
-        "chelis-ir::capacity_key::tests::same_spelled_class_supplied_extents_do_not_bypass_source_identity",
-        "chelis-ir::capacity_key::tests::static_zero_divisor_is_rejected_and_unsupported_is_conservative",
-        "chelis-ir::capacity_key::tests::total_products_and_literal_division_are_still_proven",
-        "chelis-ir::capacity_key::tests::zero_does_not_discard_partial_quotient_validity_in_either_order"
+        "chelis-ir-core::capacity_key::tests::capacity_key_product_regions_flatten_sort_fold_and_remove_identity",
+        "chelis-ir-core::capacity_key::tests::capacity_key_products_use_arbitrary_precision_without_collision",
+        "chelis-ir-core::capacity_key::tests::class_supplied_extent_retains_its_origin_through_pass_through",
+        "chelis-ir-core::capacity_key::tests::compile_surface_remains_opaque",
+        "chelis-ir-core::capacity_key::tests::exact_literal_quotient_folds_but_symbolic_quotient_is_not_a_proof",
+        "chelis-ir-core::capacity_key::tests::exact_source_identity_ignores_same_spelled_dimension_names",
+        "chelis-ir-core::capacity_key::tests::exact_source_identity_is_scoped_to_one_verified_program",
+        "chelis-ir-core::capacity_key::tests::pass_through_axis_retains_the_exact_source_identity",
+        "chelis-ir-core::capacity_key::tests::quotient_is_an_ordered_barrier_without_cancellation_or_reassociation",
+        "chelis-ir-core::capacity_key::tests::retired_rational_identities_do_not_discharge_integer_domains",
+        "chelis-ir-core::capacity_key::tests::same_spelled_class_supplied_extents_do_not_bypass_source_identity",
+        "chelis-ir-core::capacity_key::tests::static_zero_divisor_is_rejected_and_unsupported_is_conservative",
+        "chelis-ir-core::capacity_key::tests::total_products_and_literal_division_are_still_proven",
+        "chelis-ir-core::capacity_key::tests::zero_does_not_discard_partial_quotient_validity_in_either_order"
       ]
     },
     {
@@ -2008,17 +2008,19 @@
       "args": [
         "-p",
         "chelis-ir",
+        "-p",
+        "chelis-ir-core",
         "--lib",
         "-E",
         "test(ownership::storage::tests::)"
       ],
       "required": [
+        "chelis-ir-core::ownership::storage::tests::destructive_drop_retires_an_exact_capacity_slot_in_both_lanes",
+        "chelis-ir-core::ownership::storage::tests::equal_width_different_representations_never_share_a_slot",
         "chelis-ir::ownership::storage::tests::c_excludes_entry_borrows_while_hip_counts_input_mirrors",
         "chelis-ir::ownership::storage::tests::c_materialized_store_has_storage_independent_of_its_source",
         "chelis-ir::ownership::storage::tests::complete_runtime_owned_proof_mints_one_linear_token",
-        "chelis-ir::ownership::storage::tests::destructive_drop_retires_an_exact_capacity_slot_in_both_lanes",
         "chelis-ir::ownership::storage::tests::entry_borrow_and_shared_view_cannot_mint_reusable_storage",
-        "chelis-ir::ownership::storage::tests::equal_width_different_representations_never_share_a_slot",
         "chelis-ir::ownership::storage::tests::every_missing_proof_condition_rejects",
         "chelis-ir::ownership::storage::tests::hip_reshape_materializes_independent_storage_while_permute_retains_source",
         "chelis-ir::ownership::storage::tests::program_owned_fused_reuse_mints_one_take_only_token"
@@ -2045,17 +2047,19 @@
         "--release",
         "-p",
         "chelis-ir",
+        "-p",
+        "chelis-ir-core",
         "--lib",
         "-E",
         "test(ownership::storage::tests::)"
       ],
       "required": [
+        "chelis-ir-core::ownership::storage::tests::destructive_drop_retires_an_exact_capacity_slot_in_both_lanes",
+        "chelis-ir-core::ownership::storage::tests::equal_width_different_representations_never_share_a_slot",
         "chelis-ir::ownership::storage::tests::c_excludes_entry_borrows_while_hip_counts_input_mirrors",
         "chelis-ir::ownership::storage::tests::c_materialized_store_has_storage_independent_of_its_source",
         "chelis-ir::ownership::storage::tests::complete_runtime_owned_proof_mints_one_linear_token",
-        "chelis-ir::ownership::storage::tests::destructive_drop_retires_an_exact_capacity_slot_in_both_lanes",
         "chelis-ir::ownership::storage::tests::entry_borrow_and_shared_view_cannot_mint_reusable_storage",
-        "chelis-ir::ownership::storage::tests::equal_width_different_representations_never_share_a_slot",
         "chelis-ir::ownership::storage::tests::every_missing_proof_condition_rejects",
         "chelis-ir::ownership::storage::tests::hip_reshape_materializes_independent_storage_while_permute_retains_source",
         "chelis-ir::ownership::storage::tests::program_owned_fused_reuse_mints_one_take_only_token"

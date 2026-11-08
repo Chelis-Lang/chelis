@@ -1,3 +1,5 @@
+#![cfg(test)]
+
 use super::*;
 use chelis_deep::role::{ChildStampRole, child_stamp_role};
 use chelis_deep::tag::DeepTag;

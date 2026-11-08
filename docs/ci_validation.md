@@ -100,7 +100,7 @@ The Linux workspace worker passes `--ignore-default-filter` and deliberately inc
 
 Integration support assigns each canonical gate command to exactly one named slice.
 `frontend` and `domain` retain the short support commands.
-Separate `numeric-core`, `type-unification-core`, `dag-core`, `effect-analysis-core`, and `checker-core` slices execute their complete oracles.
+Separate `numeric-core`, `type-unification-core`, `dag-core`, `effect-analysis-core`, `checker-core`, and `ir-core` slices execute their complete oracles.
 Missing, duplicate, or stale ownership stops sliced execution.
 The unsliced integration gate retains every command in its canonical order.
 
@@ -116,7 +116,7 @@ records the measured isolated timeout.
 
 The Linux `integration-support` matrix gives `frontend` and `domain` 70 minutes each.
 Type, DAG, and effect rows receive 115 minutes each.
-The complete checker row receives 300 minutes.
+The complete checker and IR rows receive 300 minutes each.
 Each row retains the complete oracle and its evidence.
 
 On macOS `macos-numeric-core` runs three required matrix phases, each with a
@@ -157,9 +157,14 @@ The local phase command is `chelis-gate integration --support-only --support-sli
 The fixture directory and oracle have one Linux owner.
 The behavioral controls have one `script-unit` owner.
 
-The checker oracle retains the pinned baseline in the candidate object store.
-It also verifies a separate scratch checkout against the original revision and source digests.
+The checker and IR oracles retain the pinned baseline in the candidate object store.
+Each verifies a separate scratch checkout against the original revision and source digests.
 Later cost and existing-core checks can read the pinned objects after scratch checkout removal.
+
+Both IR nextest profiles inherit `ci-full` deadlines.
+The oracle supplies separate JUnit destinations for complete IR suites and inherited compiler-pipeline commands.
+The IR feature-off Clippy command compiles only the library, without host test dependencies.
+The runtime-representation scanner classifies portable IR sources with the same rules as native IR sources.
 
 Neither numeric owner spends its budget on other support or workspace commands.
 Both use the gate's exit status and upload `target/gate-reports/` with `always()`;

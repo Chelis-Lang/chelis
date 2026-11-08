@@ -291,8 +291,9 @@ def suite(workspace: Path, packages: tuple[str, ...], *, selection="ordinary", r
     with tempfile.TemporaryDirectory(prefix="ir-nextest-") as temporary:
         report = Path(temporary) / "results.xml"
         configuration = (workspace / ".config/nextest.toml").read_text()
-        configuration += ('\n[profile.ir-core-acceptance]\ninherits = "ci-full"\n'
-            '\n[profile.ir-core-acceptance.junit]\n'
+        if "ir-core-acceptance" not in tomllib.loads(configuration)["profile"]:
+            configuration += '\n[profile.ir-core-acceptance]\ninherits = "ci-full"\n'
+        configuration += ('\n[profile.ir-core-acceptance.junit]\n'
             f'path = {json.dumps(str(report))}\nstore-success-output = true\nstore-failure-output = true\n')
         config = Path(temporary) / "nextest.toml"
         config.write_text(configuration)
@@ -317,9 +318,20 @@ def suite(workspace: Path, packages: tuple[str, ...], *, selection="ordinary", r
 
 @contextmanager
 def immutable_checkout(evidence: Evidence):
+    # Later prior-core checks also need the candidate's baseline objects.
+    present = support._execute(("git", "cat-file", "-e", f"{BASELINE}^{{tree}}"), cwd=ROOT)
+    if present.returncode:
+        evidence.accept_negative([BASELINE], present.stderr)
+        support.run(("git", "fetch", "--quiet", "--no-tags", "--depth=1",
+            checker.REPOSITORY, BASELINE), cwd=ROOT)
     with tempfile.TemporaryDirectory(prefix="chelis-ir-baseline-") as temporary:
         workspace = Path(temporary) / "source"
         support.run(("git", "clone", "--quiet", "--shared", "--no-checkout", str(ROOT), str(workspace)))
+        present = support._execute(("git", "cat-file", "-e", f"{BASELINE}^{{tree}}"), cwd=workspace)
+        if present.returncode:
+            evidence.accept_negative([BASELINE], present.stderr)
+            support.run(("git", "fetch", "--quiet", "--no-tags", "--depth=1",
+                checker.REPOSITORY, BASELINE), cwd=workspace)
         support.run(("git", "checkout", "--quiet", "--detach", BASELINE), cwd=workspace)
         require(support.run(("git", "rev-parse", "HEAD"), cwd=workspace).stdout.strip() == BASELINE,
             "The immutable checkout revision differs.")
@@ -725,7 +737,18 @@ def prior_cores(evidence: Evidence) -> None:
 
 def pipeline_authority(evidence: Evidence) -> None:
     def runner(command, *, cwd, env, check):
-        return support._execute(command, cwd=cwd, env=env)
+        if tuple(command[:3]) != ("cargo", "nextest", "run"):
+            return support._execute(command, cwd=cwd, env=env)
+        with tempfile.TemporaryDirectory(prefix="ir-pipeline-nextest-") as temporary:
+            report = Path(temporary) / "results.xml"
+            config = Path(temporary) / "nextest.toml"
+            configuration = (Path(cwd) / ".config/nextest.toml").read_text()
+            configuration += ('\n[profile.ir-pipeline-acceptance.junit]\n'
+                f'path = {json.dumps(str(report))}\n'
+                'store-success-output = true\nstore-failure-output = true\n')
+            config.write_text(configuration)
+            return support._execute((*command, "--config-file", str(config),
+                "--profile", "ir-pipeline-acceptance"), cwd=cwd, env=env)
     pipeline.run_oracle(runner=runner, environment=support._environment())
     evidence.save("compiler-pipeline.json", {"script": digest(ROOT / "scripts/compiler_pipeline_oracle.py"),
         "commands": [list(command) for command in pipeline.FOCUSED_COMMANDS]})

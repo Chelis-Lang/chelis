@@ -1,3 +1,5 @@
+#![cfg(test)]
+
 use super::*;
 
 fn find_fn(expr: &Expr) -> Option<&Expr> {

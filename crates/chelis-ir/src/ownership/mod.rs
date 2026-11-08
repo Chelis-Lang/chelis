@@ -1358,12 +1358,12 @@ pub enum PayloadKind {
 
 #[derive(Debug)]
 pub struct VerifiedLiveSetBound {
-    data: chelis_ir_core::ownership::LiveSetBound,
+    inner: chelis_ir_core::ownership::LiveSetBound,
 }
 
 impl VerifiedLiveSetBound {
     pub fn max_live_heap_owners(&self) -> usize {
-        self.data.max_live_heap_owners
+        self.inner.max_live_heap_owners
     }
 }
 
@@ -1500,7 +1500,7 @@ fn lower_host_ownership_impl(
         let verification =
             last_use::schedule_observed(&mut program, &mut sites, operation.resources.observer)?
                 .into_verification()
-                .map_live_set_bound(|data| VerifiedLiveSetBound { data });
+                .map_live_set_bound(|inner| VerifiedLiveSetBound { inner });
         let nested_dags = lower_nested_dags(&host)?;
         Ok(OwnershipProgram {
             payload: HostEmissionPayload {
@@ -1766,20 +1766,20 @@ fn verify_nested_dags<P: EmissionPayload>(
 
 #[derive(Debug)]
 struct DagOwnershipPlan {
-    data: chelis_ir_core::ownership::dag::DagOwnershipPlan,
+    inner: chelis_ir_core::ownership::dag::DagOwnershipPlan,
     capacity_scope: chelis_ir_core::capacity_key::CapacityScope,
 }
 impl Deref for DagOwnershipPlan {
     type Target = chelis_ir_core::ownership::dag::DagOwnershipPlan;
     fn deref(&self) -> &Self::Target {
-        &self.data
+        &self.inner
     }
 }
 impl DagOwnershipPlan {
     fn lower(dag: &Dag) -> Result<Self, OwnershipError> {
         let data = chelis_ir_core::ownership::dag::DagOwnershipPlan::lower(dag)?;
         Ok(Self {
-            data,
+            inner: data,
             capacity_scope: crate::capacity_key::fresh_capacity_scope(),
         })
     }

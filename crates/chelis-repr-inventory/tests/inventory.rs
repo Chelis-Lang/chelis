@@ -295,7 +295,7 @@ fn the_dtype_contract_covers_variants_and_element_bindings() {
 #[test]
 fn saturating_capacity_folds_and_key_consumers_are_both_seams() {
     let fold = kinds(
-        "crates/chelis-ir/src/capacity_key.rs",
+        "crates/chelis-ir-core/src/capacity_key.rs",
         "fn push(c: &mut usize, v: usize) { *c = c.saturating_mul(v); }",
     );
     assert_eq!(fold, vec!["saturating-capacity-fold".to_string()]);
@@ -316,14 +316,14 @@ fn saturating_capacity_folds_and_key_consumers_are_both_seams() {
 fn checked_capacity_folds_are_distinct_from_saturation() {
     assert_eq!(
         kinds(
-            "crates/chelis-ir/src/capacity_key.rs",
+            "crates/chelis-ir-core/src/capacity_key.rs",
             "fn f(a: usize, b: usize) -> Option<usize> { a.checked_mul(b) }",
         ),
         vec!["normalized-key-arithmetic".to_string()]
     );
     assert_eq!(
         kinds(
-            "crates/chelis-ir/src/capacity_key.rs",
+            "crates/chelis-ir-core/src/capacity_key.rs",
             "fn f(a: usize, b: usize) -> usize { a.saturating_mul(b) }",
         ),
         vec!["saturating-capacity-fold".to_string()]
@@ -451,6 +451,23 @@ fn only_an_exact_cfg_test_module_leaves_the_source_universe() {
     let owners: Vec<&str> = retained.iter().map(|(_, owner)| owner.as_str()).collect();
     assert!(owners.contains(&"shipped::read"), "{owners:?}");
     assert!(owners.contains(&"after"), "{owners:?}");
+}
+
+#[test]
+fn file_level_test_cfg_excludes_helper_seams() {
+    let path = "crates/chelis-ir-core/src/host/tests.rs";
+    let source = r#"
+        #![cfg(test)]
+        fn helper(value: usize) -> usize { value.saturating_mul(2) }
+        #[test]
+        fn exercise() { assert_eq!(helper(3), 6); }
+    "#;
+    assert!(kinds(path, source).is_empty());
+    let production = source.replace("cfg(test)", "cfg(not(test))");
+    assert_eq!(
+        kinds(path, &production),
+        vec!["normalized-key-arithmetic".to_string()]
+    );
 }
 
 #[test]

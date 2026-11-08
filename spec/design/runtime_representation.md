@@ -2220,6 +2220,25 @@ The Phase 1 command must retain its existing test floor and execution receipts.
 No build, test, mutation, or oracle execution supports this amendment at edit time.
 
 
+### IR source ownership amendment
+
+`chelis-ir-core` owns portable IR algorithms and data.
+The native facade retains checked products, proof attachment, and emission authority.
+The exact source relocation map preserves frozen kinds, owners, deletion phases, and active or retired states.
+The Phase 0 foundation and mutation digests remain unchanged.
+
+Phase 1 moves all 14 capacity-key test identities to `chelis-ir-core` in debug and release.
+Its storage legs select both IR crates.
+Two storage test identities move to the core in each profile.
+All existing cases remain.
+Mutation behavior and negative cases stay the same.
+Comparisons, Python floors, native controls, and workloads stay the same.
+
+The storage equality mutations target the canonical core owner and retain their exact negative tests.
+The reviewed Phase 1 manifest digest changes only for these command and identity moves.
+No numbered representation semantics change.
+
+
 ## B2. Invariants at every phase boundary
 
 1. The public C ABI remains [05-OP-31]/[05-OP-44]-exact and

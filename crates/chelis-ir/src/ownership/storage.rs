@@ -73,16 +73,16 @@ use chelis_ir_core::ownership::storage::{
 /// ```
 #[derive(Debug, Eq, PartialEq)]
 pub struct ReusableOwnedStorage {
-    data: ReuseDecision,
+    inner: ReuseDecision,
 }
 
 impl ReusableOwnedStorage {
     pub const fn source(&self) -> NodeId {
-        self.data.source
+        self.inner.source
     }
 
     pub const fn consumer(&self) -> NodeId {
-        self.data.consumer
+        self.inner.consumer
     }
 
     #[cfg(test)]
@@ -92,7 +92,7 @@ impl ReusableOwnedStorage {
         consumer: NodeId,
         facts: ReuseCandidateFacts,
     ) -> Result<Self, ReuseProofRejection> {
-        ReuseDecision::calculate(source, storage, consumer, facts).map(|data| Self { data })
+        ReuseDecision::calculate(source, storage, consumer, facts).map(|inner| Self { inner })
     }
 
     #[cfg(test)]
@@ -107,7 +107,7 @@ impl ReusableOwnedStorage {
 
     #[cfg(test)]
     const fn storage_for_test(&self) -> StorageId {
-        self.data.storage
+        self.inner.storage
     }
 }
 
@@ -303,8 +303,8 @@ fn build_storage_plan(
             recurrence_tape: false,
         },
     };
-    calculate_storage_plan(dag.analysis(), policy, &skipped, views.as_ref(), |data| {
-        ReusableOwnedStorage { data }
+    calculate_storage_plan(dag.analysis(), policy, &skipped, views.as_ref(), |inner| {
+        ReusableOwnedStorage { inner }
     })
 }
 

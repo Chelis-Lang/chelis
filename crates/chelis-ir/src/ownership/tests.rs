@@ -200,7 +200,7 @@ fn stable_operation_ids_survive_reordering_and_duplicates_are_rejected() {
     program.units[0].blocks[0].ops.swap(0, 1);
     let verification = super::verify::verify(&program)
         .unwrap()
-        .map_live_set_bound(|data| super::VerifiedLiveSetBound { data });
+        .map_live_set_bound(|inner| super::VerifiedLiveSetBound { inner });
     super::verify::verify_host_actions(
         &program,
         &super::NativeManifest(&RootManifest { entries: vec![] }),

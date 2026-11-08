@@ -3787,15 +3787,11 @@ pub fn lower_named_tensor_entry_dag<S: StackServices>(
 /// caller asking for many entries of one program derives the program's facts
 /// once rather than once per entry (chelis#3728).
 ///
-/// This is `chelis cost`'s per-entry lowering, and the only lowering that
-/// enforces the unroll budget: an entry whose unroll it rejects yields `None`
-/// (chelis#3864). Every other lowering is unbounded, and the choice cannot be
-/// made outside this crate, so no other caller can enforce it:
-///
-/// ```compile_fail
-// ste-disable-next-line semicolon sentence-length
-/// let _ = chelis_ir_core::lower::UnrollBudget::Unbounded;
-/// ```
+/// This iterator selects the enforced budget for `chelis cost`.
+/// An entry that exceeds the budget returns `None` (chelis#3864).
+/// Nested lowering retains that budget.
+/// Other entry points select an unbounded budget.
+/// The budget callback remains crate-private:
 ///
 /// ```compile_fail
 // ste-disable-next-line semicolon sentence-length

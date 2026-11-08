@@ -271,15 +271,14 @@ dependencies = [
  "chelis-effects",
  "chelis-ir-core",
  "chelis-numeric-core",
+ "chelis-stack-services",
  "chelis-syntax-host",
  "chelis-type-core",
  "chelis-types",
  "chelis-unord",
  "chelis-vocab",
  "critical-section",
- "num-bigint",
  "serde",
- "stacker",
  "thiserror",
 ]
 

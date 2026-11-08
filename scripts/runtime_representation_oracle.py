@@ -138,6 +138,16 @@ def frozen_source_path(path: str) -> str:
             return original
     return path
 
+
+def frozen_source_identity(path: str, owner: str) -> tuple[str, str]:
+    # Resource parameters and native callbacks retain their frozen seam owners.
+    if path == "crates/chelis-ir/src/resources.rs" and owner == "NativeObserver::declaration_end":
+        return "crates/chelis-ir/src/lower.rs", "lower_program_to_library_inner"
+    if path == "crates/chelis-ir-core/src/lower.rs":
+        owner = owner.replace("LowerCtx < 'program , S >::", "LowerCtx < 'program >::", 1)
+    return frozen_source_path(path), owner
+
+
 # Which phase deletes each seam class, from the design's Part III phase map.
 # Phase 1 closes the capacity and dtype-contract vocabulary, Phase 2 the device
 # and binding mirrors, Phase 3 the host field seal, Phase 4 the typed lanes.
@@ -918,11 +928,12 @@ def inventory_rows(root: Path) -> tuple[InventoryRow, ...]:
         kind = row["kind"]
         if owner_module_final_form(kind, row["path"], row["owner"]):
             continue
+        path, owner = frozen_source_identity(row["path"], row["owner"])
         derived = InventoryRow(
             kind=kind,
-            path=frozen_source_path(row["path"]),
-            owner=row["owner"],
-            deletion_phase=_deletion_phase(kind, frozen_source_path(row["path"])),
+            path=path,
+            owner=owner,
+            deletion_phase=_deletion_phase(kind, path),
             sample=row["sample"],
         )
         seen.setdefault(derived.identity, derived)

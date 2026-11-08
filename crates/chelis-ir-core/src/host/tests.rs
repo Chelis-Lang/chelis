@@ -1,3 +1,5 @@
+#![cfg(test)]
+
 use super::*;
 use chelis_types::CheckedProgram;
 struct TestManifest<'a>(&'a chelis_types::manifest::RootManifest);

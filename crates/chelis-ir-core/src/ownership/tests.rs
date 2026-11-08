@@ -1,3 +1,5 @@
+#![cfg(test)]
+
 use super::manifest::{ManifestSource, RootEntryView};
 use crate::prelude::*;
 
