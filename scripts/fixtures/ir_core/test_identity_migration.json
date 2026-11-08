@@ -1,5 +1,8 @@
 {
   "baseline": "23dc12afb7b0404b7f70a9fc2cacc3df7ed77cbe",
+  "external_identities": [
+    "chelis-cli::closed_vocabulary_architecture$added_effect_variant_will_force_every_semantic_consumer_to_decide"
+  ],
   "timing_migrations": {
     "test_timing": {
       "chelis-ir::blas_rejection_cross_product_adversarial::w7_bool_matmul_helper_specializer_locked_and_w6_rejection_fires": "chelis-ir-core::blas_rejection_cross_product_adversarial::w7_bool_matmul_helper_specializer_locked_and_w6_rejection_fires",
@@ -1151,6 +1154,14 @@
     "chelis-ir::host_type_failure_states$raw_decoder_rejects_malformed_and_unknown_syntax_without_a_term": "chelis-ir-core::host_type_failure_states$raw_decoder_rejects_malformed_and_unknown_syntax_without_a_term"
   },
   "retired": {
+    "chelis-cli::closed_vocabulary_architecture$added_effect_variant_will_force_every_semantic_consumer_to_decide": {
+      "reason": "Incidental source-token inventory for former IR ownership. Native resource admission and effect rejection tests remain.",
+      "behavior_identities": [
+        "chelis-compiler-api::resource_target_admission$legacy_value_root_compilation_checks_resource_regions",
+        "chelis-compiler-api::resource_target_admission$selected_tensor_entry_checks_only_its_reachable_resource_regions",
+        "chelis-compiler-api::pipeline_contract$effect_rejection_uses_the_narrow_semantic_error"
+      ]
+    },
     "chelis-ir::host_type_failure_states$c_emitter_has_no_infallible_or_default_host_type_conversion": {
       "reason": "Incidental source-spelling assertion. Behavioral decode and resolution tests remain.",
       "behavior_identities": [

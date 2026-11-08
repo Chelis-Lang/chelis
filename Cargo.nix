@@ -3463,7 +3463,7 @@ rec {
             name = "portable-atomic";
             packageId = "portable-atomic";
             usesDefaultFeatures = false;
-            features = [ "critical-section" ];
+            features = [ "fallback" "critical-section" ];
           }
           {
             name = "serde";

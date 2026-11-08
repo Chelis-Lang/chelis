@@ -27,7 +27,7 @@ chelis-unord = { path = "../chelis-unord", default-features = false }
 chelis-stack-services = { path = "../chelis-stack-services", default-features = false }
 num-bigint = { version = "0.4", default-features = false }
 once_cell = { version = "1.21", default-features = false, features = ["alloc", "critical-section"] }
-portable-atomic = { version = "1", default-features = false, features = ["critical-section"] }
+portable-atomic = { version = "1", default-features = false, features = ["fallback", "critical-section"] }
 serde = { version = "1", default-features = false, features = ["alloc", "derive", "rc"], optional = true }
 thiserror = { version = "2", default-features = false }
 

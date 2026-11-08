@@ -159,6 +159,7 @@ The behavioral controls have one `script-unit` owner.
 
 The checker and IR oracles retain the pinned baseline in the candidate object store.
 Each verifies a separate scratch checkout against the original revision and source digests.
+Each scratch checkout uses a canonical path before Cargo resolves native dependencies.
 Later cost and existing-core checks can read the pinned objects after scratch checkout removal.
 
 Both IR nextest profiles inherit `ci-full` deadlines.

@@ -69,6 +69,7 @@ These authority and host-service dependencies still need `std`.
 It uses unconditional `no_std`, explicit `alloc`, and empty default features.
 Callers supply allocation, enough stack capacity, and cancellation access.
 Operations own temporary analysis state and borrow optional work counters.
+Targets without native 64-bit atomics use the portable atomic fallback.
 
 Portable facts do not grant native checked-product or runtime authority.
 Target compile and link checks do not establish physical device execution.

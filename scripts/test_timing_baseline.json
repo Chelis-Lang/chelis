@@ -1306,7 +1306,6 @@
   "chelis-cli::cli_admits_bf16_f16_target_c::cli_admits_bf16_program_targeting_c": 0.043,
   "chelis-cli::cli_admits_bf16_f16_target_c::cli_admits_f16_program_targeting_c": 0.03,
   "chelis-cli::cli_admits_bf16_f16_target_c::cli_still_rejects_f8e4m3_on_target_c": 0.018,
-  "chelis-cli::closed_vocabulary_architecture::added_effect_variant_will_force_every_semantic_consumer_to_decide": 0.025,
   "chelis-cli::closed_vocabulary_architecture::added_runtime_dtype_will_force_runtime_and_codegen_consumers_to_decide": 0.014,
   "chelis-cli::closed_vocabulary_architecture::vocabulary_owner_has_no_dependencies": 0.005,
   "chelis-cli::compiled_context_env_bridge::parent_removes_compiled_context_tempfile_on_normal_exit": 0.073,

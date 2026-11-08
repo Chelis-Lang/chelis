@@ -353,7 +353,7 @@ def immutable_checkout(evidence: Evidence):
         support.run(("git", "fetch", "--quiet", "--no-tags", "--depth=1",
             checker.REPOSITORY, BASELINE), cwd=ROOT)
     with tempfile.TemporaryDirectory(prefix="chelis-ir-baseline-") as temporary:
-        workspace = Path(temporary) / "source"
+        workspace = (Path(temporary) / "source").resolve()
         support.run(("git", "clone", "--quiet", "--shared", "--no-checkout", str(ROOT), str(workspace)))
         present = support._execute(("git", "cat-file", "-e", f"{BASELINE}^{{tree}}"), cwd=workspace)
         if present.returncode:

@@ -6,3 +6,4 @@ Representation receipts follow the canonical core owners without fewer mandatory
 Command receipts retain original executable bytes after historical rebuilds.
 The IR artifact retains child receipt trees and binds every file digest.
 Test receipts retain known filtered cases without accepting unselected execution.
+Thumb builds use the 64-bit atomic fallback. The oracle uses canonical baseline paths before Cargo resolves native dependencies. Native resource and effect checks remain after removal of the obsolete source-token test.
