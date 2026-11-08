@@ -19,6 +19,7 @@ import xml.etree.ElementTree as ET
 import checker_core_oracle as checker
 import compiler_pipeline_oracle as pipeline
 import dag_core_oracle as dag
+import effect_analysis_core_oracle as effect
 import no_std_core_support as support
 from no_std_core_support import ROOT, TARGET, OracleFailure
 
@@ -35,6 +36,7 @@ FORBIDDEN = (
 )
 PRIOR = ("numeric_core_oracle.py", "type_unification_core_oracle.py", "dag_core_oracle.py",
     "effect_analysis_core_oracle.py", "checker_core_oracle.py")
+CHILD_RECORDERS = {"effect_analysis_core_oracle.py": effect, "checker_core_oracle.py": checker}
 GROUPS = frozenset({"target-graphs", "independent-consumers", "immutable-semantics",
     "native-production", "complete-suites", "compiler-pipeline", "prior-cores",
     "negative-controls", "migration", "resources-caches-costs", "ci-ownership"})
@@ -223,6 +225,7 @@ def validate_artifacts(directory: Path, scope: str) -> None:
     if scope == "implementation":
         compare_exact(previous["snapshot"], load(directory / "candidate-snapshot.json"), "retained semantic fields")
         compare_exact(previous["wire"], load(directory / "candidate-wire.json"), "retained binary wire fields")
+        _validate_child_obligations(directory, load(directory / "prior-core-obligations.json"))
 
 
 def inventory_cases(metadata: dict) -> dict[str, bool]:
@@ -744,6 +747,65 @@ def current_suites(previous: dict, evidence: Evidence) -> None:
     evidence.complete("resources-caches-costs")
 
 
+def _retain_child_evidence(evidence: Evidence, name: str, source: Path) -> dict:
+    relative = Path("prior-cores") / Path(name).stem / source.name
+    destination = evidence.directory / relative
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(source, destination)
+    return {"path": relative.as_posix(), "files": {
+        path.relative_to(destination).as_posix(): digest(path)
+        for path in sorted(destination.rglob("*")) if path.is_file()}}
+
+
+def _validate_child_evidence(directory: Path, name: str, record: dict) -> list[dict]:
+    relative = Path(record["path"])
+    require(set(record) == {"path", "files"} and not relative.is_absolute()
+        and ".." not in relative.parts and len(relative.parts) == 3
+        and relative.parts[:2] == ("prior-cores", Path(name).stem),
+        "A child oracle evidence path is invalid.")
+    child = directory / relative
+    actual = {path.relative_to(child).as_posix(): digest(path)
+        for path in sorted(child.rglob("*")) if path.is_file()}
+    compare_exact(record["files"], actual, "child oracle evidence")
+    document = load(child / "receipts.json")
+    require(document["status"] == "passed" and document["scope"] == "implementation",
+        "A child oracle lacks complete successful execution.")
+    return CHILD_RECORDERS[name].validate_receipts(child)
+
+
+def _validate_child_obligations(directory: Path, obligations: dict) -> None:
+    require(set(obligations) == set(PRIOR), "An earlier core obligation is absent or unexpected.")
+    seen = set()
+    for name in PRIOR:
+        children = obligations[name].get("evidence", {})
+        require(isinstance(children, dict) and children.keys() <= CHILD_RECORDERS.keys(),
+            "A child oracle recorder is absent or unexpected.")
+        expected = Counter({name: 1}) if name in CHILD_RECORDERS else Counter()
+        observed = Counter()
+        for owner, records in children.items():
+            require(isinstance(records, list) and records, "A child oracle receipt list is empty or invalid.")
+            observed[owner] = len(records)
+            for record in records:
+                require(record["path"] not in seen, "A child oracle receipt tree is reused.")
+                seen.add(record["path"])
+                for receipt in _validate_child_evidence(directory, owner, record):
+                    command = receipt["command"]
+                    if len(command) > 1:
+                        nested = Path(command[1])
+                        if nested.parent == ROOT / "scripts" and nested.name in CHILD_RECORDERS:
+                            expected[nested.name] += 1
+        require(observed == expected, "A child oracle command lacks its exact retained receipt tree.")
+
+
+def _retain_child_runs(evidence: Evidence, parents: dict, before: dict) -> dict:
+    children = {}
+    for owner, parent in parents.items():
+        created = sorted(set(parent.glob("run-*")) - before[owner])
+        if created:
+            children[owner] = [_retain_child_evidence(evidence, owner, child) for child in created]
+    return children
+
+
 def prior_cores(evidence: Evidence) -> None:
     identities = {}
     for name in PRIOR:
@@ -752,7 +814,17 @@ def prior_cores(evidence: Evidence) -> None:
         contracts = checker.validate_prior_contracts(name, path.read_text(), original)
         identities[name] = {"candidate": digest(path), "baseline_sha256": hashlib.sha256(original.encode()).hexdigest(),
             "accepted_contracts": contracts}
-        support.run((sys.executable, str(path)))
+        parents = {owner: recorder.ARTIFACTS / sys.platform
+            for owner, recorder in CHILD_RECORDERS.items()}
+        before = {owner: set(parent.glob("run-*")) for owner, parent in parents.items()}
+        try:
+            support.run((sys.executable, str(path)))
+        finally:
+            children = _retain_child_runs(evidence, parents, before)
+            identities[name]["evidence"] = children
+            evidence.save("prior-core-obligations.json", identities)
+        if name in CHILD_RECORDERS:
+            require(len(children.get(name, [])) == 1, "A child oracle lacks one fresh receipt tree.")
     require(dag.GENERATED_SOURCE_BASELINE_REVISION == "ec322a9568c09cf73a4855860227aa9d86fc2d32",
         "The accepted DAG generated-source reference differs.")
     evidence.save("prior-core-obligations.json", identities)

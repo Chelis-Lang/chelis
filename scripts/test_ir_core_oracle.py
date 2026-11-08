@@ -252,6 +252,54 @@ class ReceiptControls(unittest.TestCase):
             with self.assertRaisesRegex(OracleFailure, "executable tool identity"):
                 oracle.validate_receipts(directory)
 
+    def test_changed_child_output_invalidates_parent_evidence(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            child = directory / "run-child"
+            child.mkdir()
+            (child / "receipts.json").write_text(json.dumps(self.document(child)))
+            parent = oracle.Evidence(directory / "parent", "implementation")
+            name = "checker_core_oracle.py"
+            record = oracle._retain_child_evidence(parent, name, child)
+            oracle._validate_child_evidence(parent.directory, name, record)
+            retained = parent.directory / record["path"] / "stdout"
+            retained.write_text("altered child evidence")
+            with self.assertRaisesRegex(OracleFailure, "child oracle evidence"):
+                oracle._validate_child_evidence(parent.directory, name, record)
+
+    def test_missing_nested_child_receipt_fails_complete_obligations(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            parent = oracle.Evidence(directory / "parent", "implementation")
+            records = {}
+            for label, owner in (("direct", "effect_analysis_core_oracle.py"),
+                    ("nested", "effect_analysis_core_oracle.py"), ("checker", "checker_core_oracle.py")):
+                child = directory / ("run-" + label)
+                child.mkdir()
+                document = self.document(child)
+                receipt = document["receipts"][0]
+                receipt["cwd"] = str(child)
+                if owner == "effect_analysis_core_oracle.py":
+                    receipt["files"].pop("inputs")
+                else:
+                    receipt["command"] = [sys.executable, str(oracle.ROOT / "scripts/effect_analysis_core_oracle.py")]
+                    inputs = child / "inputs.json"
+                    inputs.write_text(json.dumps({"command": receipt["command"], "tool": receipt["tool"],
+                        "environment_tools": {}}))
+                    receipt["files"]["inputs"] = {"path": inputs.name, **oracle.digest(inputs)}
+                (child / "receipts.json").write_text(json.dumps(document))
+                records[label] = oracle._retain_child_evidence(parent, owner, child)
+            obligations = {name: {"evidence": {}} for name in oracle.PRIOR}
+            obligations["effect_analysis_core_oracle.py"]["evidence"] = {
+                "effect_analysis_core_oracle.py": [records["direct"]]}
+            obligations["checker_core_oracle.py"]["evidence"] = {
+                "checker_core_oracle.py": [records["checker"]],
+                "effect_analysis_core_oracle.py": [records["nested"]]}
+            oracle._validate_child_obligations(parent.directory, obligations)
+            obligations["checker_core_oracle.py"]["evidence"].pop("effect_analysis_core_oracle.py")
+            with self.assertRaisesRegex(OracleFailure, "exact retained receipt tree"):
+                oracle._validate_child_obligations(parent.directory, obligations)
+
     def test_missing_lock_unrelated_error_and_duplicate_command_fail(self):
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)
