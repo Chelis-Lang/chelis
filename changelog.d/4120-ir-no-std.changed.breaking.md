@@ -5,3 +5,4 @@ CI covers the IR feature-off state and portable source classification.
 Representation receipts follow the canonical core owners without fewer mandatory cases.
 Command receipts retain original executable bytes after historical rebuilds.
 The IR artifact retains child receipt trees and binds every file digest.
+Test receipts retain known filtered cases without accepting unselected execution.

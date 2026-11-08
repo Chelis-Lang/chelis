@@ -228,21 +228,22 @@ def validate_artifacts(directory: Path, scope: str) -> None:
         _validate_child_obligations(directory, load(directory / "prior-core-obligations.json"))
 
 
-def inventory_cases(metadata: dict) -> dict[str, bool]:
-    result = {}
+def inventory_cases(metadata: dict) -> tuple[dict[str, bool], set[str]]:
+    result, filtered = {}, set()
     for suite in metadata["rust-suites"].values():
         prefix = f"{suite['package-name']}::{suite['binary-name']}$"
         for name, case in suite["testcases"].items():
             require(case["kind"] == "test" and case["filter-match"]["status"] in ("matches", "mismatch"),
                 "A test inventory record is invalid.")
-            if case["filter-match"]["status"] != "matches":
-                continue
             identity = prefix + name
-            require(identity not in result, "A selected test identity is duplicate.")
+            require(identity not in result and identity not in filtered, "A selected test identity is duplicate.")
             require(type(case["ignored"]) is bool, "A test ignore state is invalid.")
-            result[identity] = case["ignored"]
+            if case["filter-match"]["status"] == "matches":
+                result[identity] = case["ignored"]
+            else:
+                filtered.add(identity)
     require(bool(result), "The selected test inventory is empty.")
-    return result
+    return result, filtered
 
 
 def execution(stdout: str, selected: set[str], allowed_ignored: set[str]) -> set[str]:
@@ -328,10 +329,10 @@ def suite(workspace: Path, packages: tuple[str, ...], *, selection="ordinary", r
         listed = support.run(("cargo", "nextest", "list", "--locked", *args, *flags,
             "--run-ignored", "all", "--message-format", "json"), cwd=workspace, env=environment(workspace))
         metadata = decode(listed.stdout)
-        cases = inventory_cases(metadata)
+        cases, filtered = inventory_cases(metadata)
         manual = selection != "ordinary"
         selected = {name for name, ignored in cases.items() if ignored == manual}
-        omitted = set(cases) - selected
+        omitted = (set(cases) | filtered) - selected
         require(bool(selected), "A mandatory suite selection is empty.")
         ignore_args = ("--run-ignored", "only") if manual else ()
         run = support._execute(("cargo", "nextest", "run", "--locked", *args, *flags, *ignore_args,
@@ -461,7 +462,7 @@ def capture_baseline(evidence: Evidence) -> dict:
     preserve_history(evidence)
     with immutable_checkout(evidence) as workspace:
         ordinary = suite(workspace, ("chelis-ir",))
-        cases = inventory_cases(ordinary["inventory"])
+        cases, _ = inventory_cases(ordinary["inventory"])
         require(len(cases) == 1788 and len(ordinary["executed"]) == 1778,
             "The immutable complete IR inventory differs.")
         performance = suite(workspace, ("chelis-ir",), selection="performance-manual")
@@ -474,7 +475,8 @@ def capture_baseline(evidence: Evidence) -> dict:
         support.run(("cargo", "test", "--locked", "-p", "chelis-ir", "--features", "lowering-trace", "--doc"),
             cwd=workspace, env=environment(workspace))
         native = suite(workspace, NATIVE_PACKAGES)
-        native_ignored = sorted(identity for identity, ignored in inventory_cases(native["inventory"]).items() if ignored)
+        native_cases, _ = inventory_cases(native["inventory"])
+        native_ignored = sorted(identity for identity, ignored in native_cases.items() if ignored)
         value = {"revision": BASELINE, "fixtures": frozen,
             "tests": {"ordinary": ordinary, "performance-manual": performance,
                 "pointwise-release": pointwise, "native-integration": native},
@@ -714,11 +716,11 @@ def current_suites(previous: dict, evidence: Evidence) -> None:
         "pointwise-release": suite(ROOT, ("chelis-ir", CRATE), selection="pointwise-release", release=True),
         "native-integration": suite(ROOT, NATIVE_PACKAGES)}
     migrations = load(FIXTURES / "test_identity_migration.json")
-    inventory = inventory_cases(current["ordinary"]["inventory"])
+    inventory, _ = inventory_cases(current["ordinary"]["inventory"])
     performed = set(current["performance-manual"]["executed"]) | set(current["pointwise-release"]["executed"])
     obligations = sorted(identity for identity, ignored in inventory.items() if ignored and identity not in performed)
-    native_ignored = sorted(identity for identity, ignored
-        in inventory_cases(current["native-integration"]["inventory"]).items() if ignored)
+    native_inventory, _ = inventory_cases(current["native-integration"]["inventory"])
+    native_ignored = sorted(identity for identity, ignored in native_inventory.items() if ignored)
     require(native_ignored == previous["native_manual_obligations"],
         "A native manual or hardware obligation changed without an exact identity map.")
     external = migrations.get("external_identities", [])

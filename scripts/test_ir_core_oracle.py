@@ -33,8 +33,22 @@ def migrations(**values):
 
 class InventoryControls(unittest.TestCase):
     def test_complete_inventory_keeps_manual_obligations(self):
-        self.assertEqual(oracle.inventory_cases(metadata()), {"owner::binary$passes": False,
-            "owner::binary$manual": True})
+        self.assertEqual(oracle.inventory_cases(metadata()), ({"owner::binary$passes": False,
+            "owner::binary$manual": True}, set()))
+
+    def test_filtered_cases_allow_only_recorded_skips(self):
+        value = metadata((("passes", False), ("filtered", False)))
+        value["rust-suites"]["suite"]["testcases"]["filtered"]["filter-match"]["status"] = "mismatch"
+        cases, filtered = oracle.inventory_cases(value)
+        selected = {"owner::binary$passes"}
+        self.assertEqual(cases, {"owner::binary$passes": False})
+        self.assertEqual(filtered, {"owner::binary$filtered"})
+        output = events(("owner::binary$filtered", "started"), ("owner::binary$filtered", "ignored"),
+            ("owner::binary$passes", "started"), ("owner::binary$passes", "ok"))
+        self.assertEqual(oracle.execution(output, selected, filtered), selected)
+        with self.assertRaises(OracleFailure):
+            oracle.execution(events(("owner::binary$filtered", "started"),
+                ("owner::binary$filtered", "ok")), selected, filtered)
 
     def test_empty_and_duplicate_discovery_fail(self):
         with self.assertRaises(OracleFailure):

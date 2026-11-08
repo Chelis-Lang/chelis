@@ -165,6 +165,9 @@ Both IR nextest profiles inherit `ci-full` deadlines.
 The oracle supplies separate JUnit destinations for complete IR suites and inherited compiler-pipeline commands.
 The IR feature-off Clippy command compiles only the library, without host test dependencies.
 The runtime-representation scanner classifies portable IR sources with the same rules as native IR sources.
+Nextest emits `started` and `ignored` events for cases outside the selected filter.
+IR receipts bind these skipped cases to the complete listed inventory.
+They reject any unselected execution.
 
 Neither numeric owner spends its budget on other support or workspace commands.
 Both use the gate's exit status and upload `target/gate-reports/` with `always()`;
