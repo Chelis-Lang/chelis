@@ -3,3 +3,4 @@ Move portable IR algorithms and data to `chelis-ir-core` with empty default feat
 The oracle retains its fixed baseline in shallow checkouts and records separate pipeline JUnit outputs.
 CI covers the IR feature-off state and portable source classification.
 Representation receipts follow the canonical core owners without fewer mandatory cases.
+Command receipts retain original executable bytes after historical rebuilds.

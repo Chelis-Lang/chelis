@@ -75,23 +75,38 @@ class Evidence(checker.Evidence):
         self.script_identity = digest(Path(__file__))
         self.groups: set[str] = set()
 
+    def _tool_identity(self, tool: Path) -> dict:
+        identity = {"path": str(tool), **digest(tool)}
+        if tool.is_relative_to(ROOT / "target"):
+            artifact = Path("executables") / identity["sha256"]
+            retained = self.directory / artifact
+            retained.parent.mkdir(exist_ok=True)
+            if not retained.exists():
+                shutil.copyfile(tool, retained)
+            require(digest(retained) == {key: identity[key] for key in ("bytes", "sha256")},
+                "A retained executable identity differs.")
+            identity["artifact"] = artifact.as_posix()
+        return identity
+
     def execute(self, command, *, cwd=ROOT, env=None, live_stderr=False):
         selected_env = dict(env) if env is not None else support._environment()
         executable = shutil.which(str(command[0]), path=selected_env.get("PATH"))
         require(executable is not None, "A command executable is absent.")
         tool = Path(executable).resolve()
-        before = {"path": str(tool), **digest(tool)}
+        before = self._tool_identity(tool)
         environment_tools = {}
         for key in ("RUSTC", "RUSTDOC", "CC", "CXX", "AR"):
             path = shutil.which(selected_env.get(key, ""), path=selected_env.get("PATH"))
             if path:
                 resolved = Path(path).resolve()
-                environment_tools[key] = {"path": str(resolved), **digest(resolved)}
+                environment_tools[key] = self._tool_identity(resolved)
         self.save(f"command-{len(self.receipts):05d}.inputs.json",
             {"command": list(map(str, command)), "tool": before, "environment_tools": environment_tools})
         result = super().execute(command, cwd=cwd, env=selected_env, live_stderr=live_stderr)
         receipt = self.receipts[-1]
-        require(receipt["tool"] == before, "A command executable changed during execution.")
+        require(receipt["tool"] == {key: before[key] for key in ("path", "bytes", "sha256")},
+            "A command executable changed during execution.")
+        receipt["tool"] = before
         receipt["environment"] = {key: selected_env.get(key) for key in (
             "RUSTUP_TOOLCHAIN", "RUSTC", "RUSTDOC", "RUSTFLAGS", "CARGO_TARGET_DIR",
             "CARGO_BUILD_JOBS", "SDKROOT", "CC", "CXX", "AR", "CHELIS_IR_CORPUS")}
@@ -147,8 +162,17 @@ def validate_receipts(directory: Path) -> list[dict]:
             "A command duration is invalid.")
         require({"stdout", "stderr"} <= receipt["files"].keys(), "Raw command output is absent.")
         for tool in [receipt["tool"], *receipt.get("environment_tools", {}).values()]:
-            require(Path(tool["path"]).is_absolute()
-                and digest(Path(tool["path"])) == {key: tool[key] for key in ("bytes", "sha256")},
+            path = Path(tool["path"])
+            artifact = tool.get("artifact")
+            require(path.is_absolute(), "An executable tool path is not absolute.")
+            require(not path.is_relative_to(ROOT / "target") or artifact is not None,
+                "A repository executable lacks its retained image.")
+            if artifact is not None:
+                require(re.fullmatch(r"[0-9a-f]{64}", tool["sha256"])
+                    and artifact == f"executables/{tool['sha256']}",
+                    "An executable artifact path is invalid.")
+                path = directory / artifact
+            require(digest(path) == {key: tool[key] for key in ("bytes", "sha256")},
                 "An executable tool identity differs.")
         for value in receipt["files"].values():
             relative = Path(value["path"])

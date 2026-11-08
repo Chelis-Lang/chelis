@@ -228,6 +228,30 @@ class ReceiptControls(unittest.TestCase):
             with self.assertRaises(OracleFailure):
                 oracle.validate_receipts(directory)
 
+    def test_rebuilt_executable_preserves_evidence_but_corrupt_image_fails(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            document = self.document(directory)
+            tool = directory / "compiler"
+            tool.write_bytes(b"original executable")
+            identity = {"path": str(tool), **oracle.digest(tool)}
+            image = directory / "executables" / identity["sha256"]
+            image.parent.mkdir()
+            image.write_bytes(tool.read_bytes())
+            identity["artifact"] = image.relative_to(directory).as_posix()
+            receipt = document["receipts"][0]
+            receipt["tool"] = identity
+            inputs = directory / receipt["files"]["inputs"]["path"]
+            inputs.write_text(json.dumps({"command": receipt["command"], "tool": identity,
+                "environment_tools": {}}))
+            receipt["files"]["inputs"] = {"path": inputs.name, **oracle.digest(inputs)}
+            (directory / "receipts.json").write_text(json.dumps(document))
+            tool.write_bytes(b"later historical rebuild")
+            self.assertEqual(oracle.validate_receipts(directory)[0]["tool"], identity)
+            image.write_bytes(tool.read_bytes())
+            with self.assertRaisesRegex(OracleFailure, "executable tool identity"):
+                oracle.validate_receipts(directory)
+
     def test_missing_lock_unrelated_error_and_duplicate_command_fail(self):
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)
