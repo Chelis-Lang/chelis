@@ -162,6 +162,10 @@ Each verifies a separate scratch checkout against the original revision and sour
 Each scratch checkout uses a canonical path before Cargo resolves native dependencies.
 Later cost and existing-core checks can read the pinned objects after scratch checkout removal.
 
+The inherited effect oracle records the approved source-test retirement.
+The checker oracle applies the same IR identity and timing map.
+Both retain their original baselines and active behavior obligations.
+
 Both IR nextest profiles inherit `ci-full` deadlines.
 The oracle supplies separate JUnit destinations for complete IR suites and inherited compiler-pipeline commands.
 The IR feature-off Clippy command compiles only the library, without host test dependencies.

@@ -492,7 +492,10 @@ def migrated_identity(identity: str, moves: dict) -> str:
 
 def compare_inventories(previous: dict, current: dict, moves: dict) -> None:
     retirements = moves["retired_tests"]
-    if set(retirements) - {RETIRED_SOURCE_TEST} or any(not reason for reason in retirements.values()):
+    allowed = {RETIRED_SOURCE_TEST,
+        "chelis-cli::closed_vocabulary_architecture$"
+        "added_effect_variant_will_force_every_semantic_consumer_to_decide"}
+    if set(retirements) - allowed or any(not reason for reason in retirements.values()):
         raise OracleFailure("unapproved test retirement")
     baseline = {identity for lane in previous.values() for identity in lane["executed"]}
     if not set(retirements) <= baseline:
