@@ -2368,6 +2368,24 @@ reason = "the exact wire operation field registrations are imported by PR script
 tracking_issue = "chelis#1592"
 
 [[path_rule]]
+prefix = "scripts/compiler_front_end_performance.py"
+disposition = "owner"
+workflow = "heavy-e2e.yml"
+job = "integration-support"
+cadence = "daily and workflow_dispatch"
+reason = "The domain support slice executes structural work, callable scope, and CLI performance controls"
+tracking_issue = "chelis#1205"
+
+[[path_rule]]
+prefix = "scripts/test_compiler_front_end_performance.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "PR script-unit checks command failure and the acceptance result"
+tracking_issue = "chelis#1205"
+
+[[path_rule]]
 prefix = "scripts/front_end_performance_fixtures.py"
 disposition = "owner"
 workflow = "ci.yml"

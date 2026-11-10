@@ -2,7 +2,7 @@ Move portable IR algorithms and data to `chelis-ir-core` with empty default feat
 
 The oracle retains its fixed baseline in shallow checkouts and records separate pipeline JUnit outputs.
 CI covers the IR feature-off state and portable source classification.
-Representation receipts follow the canonical core owners without fewer mandatory cases.
+Representation receipts keep behavior tests at their canonical core owners.
 Command receipts retain original executable bytes after historical rebuilds.
 The IR artifact retains child receipt trees and binds every file digest.
 Test receipts retain known filtered cases without accepting unselected execution.
@@ -10,3 +10,6 @@ Thumb builds use the 64-bit atomic fallback. The oracle uses canonical baseline 
 
 Inherited effect and checker oracles apply the existing IR retirement and timing maps.
 Frozen baselines and active behavior obligations remain unchanged.
+
+Domain performance checks select the portable IR owner.
+Representation floors retain native rejection, ownership, and projection behavior after source-assertion retirement.

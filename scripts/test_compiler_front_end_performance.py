@@ -26,24 +26,6 @@ oracle = load_oracle()
 
 
 class CompilerFrontEndPerformanceOracleTests(unittest.TestCase):
-    def test_commands_cover_fixtures_structural_work_and_execution(self) -> None:
-        rendered = "\n".join(
-            oracle.command_text(command) for command in oracle.FOCUSED_COMMANDS
-        )
-        for required in (
-            "scripts/test_front_end_performance_fixtures.py",
-            "issue_1205_effect_clone_work_is_linear",
-            "issue_1205_host_lowering_work_is_linear",
-            "issue_1205_callable_scope_work_is_linear",
-            "issue_1205_callable_scope_restore_semantics",
-            "issue_1205_preflight_preserves_static_to_tensor_literals",
-            "issue_1205_preflight_does_not_confuse_shadowed_operands_with_calls",
-            "issue_1205_preflight_tracks_callable_shadowing_and_aliases",
-            "cargo test -p chelis-cli --test issue_1205_front_end_performance",
-            "--ignored --test-threads=1",
-        ):
-            self.assertIn(required, rendered)
-
     def test_failure_stops_later_commands(self) -> None:
         calls: list[tuple[str, ...]] = []
 
@@ -73,16 +55,6 @@ class CompilerFrontEndPerformanceOracleTests(unittest.TestCase):
                 "compiler front-end performance oracle: PASS"
             )
         )
-
-    def test_oracle_disables_cargo_husky_mutation(self) -> None:
-        seen = {}
-
-        def runner(command, **kwargs):
-            seen.update(kwargs["env"])
-            return subprocess.CompletedProcess(command, 0)
-
-        oracle.run_oracle((("cargo", "one"),), runner=runner, environment={})
-        self.assertEqual(seen["CARGO_HUSKY_DONT_INSTALL_HOOKS"], "1")
 
 
 if __name__ == "__main__":

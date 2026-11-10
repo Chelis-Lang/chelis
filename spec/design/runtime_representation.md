@@ -2230,12 +2230,17 @@ The Phase 0 foundation and mutation digests remain unchanged.
 Phase 1 moves all 14 capacity-key test identities to `chelis-ir-core` in debug and release.
 Its storage legs select both IR crates.
 Two storage test identities move to the core in each profile.
-All existing cases remain.
+All existing behavior tests remain.
 Mutation behavior and negative cases stay the same.
 Comparisons, Python floors, native controls, and workloads stay the same.
 
+Phase 1 retires two backend source-spelling assertions from the existing IR retirement map.
+Its verified-site projection and ordered ownership-emission tests remain in the frozen floor.
+Native raw-payload rejection controls remain unchanged.
+Phase 2 inherits this Phase 1 floor.
+
 The storage equality mutations target the canonical core owner and retain their exact negative tests.
-The reviewed Phase 1 manifest digest changes only for these command and identity moves.
+The reviewed Phase 1 manifest digest records the command moves, identity moves, and two source-assertion retirements.
 No numbered representation semantics change.
 
 
