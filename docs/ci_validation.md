@@ -419,6 +419,10 @@ On a pull request or trusted exact-candidate dispatch, `Integration Tests (Linux
 
 The baseline combines authenticated plan and receipt artifacts from complete package-expansion runs with change-owned sources. Replaying a run's measured target work through the refreshed assignment, with its observed workspace-build durations, gives a modelled schedule rather than an observed run: grouping, cache state and nested census builds can change it, so the next complete dispatch after a refresh is its acceptance measurement. Random assignment by whole package would leave the large `chelis-cli` package indivisible, and the four independent hosted jobs have no shared work queue to support work stealing.
 
+Receipt import validates each recorded warning budget and its exceeded flag.
+It does not apply the current execution policy to historical receipts.
+Digest and sidecar checks remain unchanged.
+
 For an accepted targeted rebase, the planner compares the prior receipt's
 synthetic candidate with the current synthetic candidate. It maps every code
 path in that exact delta to an exact package or reviewed owner, expands package
