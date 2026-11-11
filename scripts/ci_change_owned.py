@@ -2699,12 +2699,21 @@ def _validate_receipt_shape(receipt: Mapping[str, Any]) -> None:
         or elapsed < 0
     ):
         raise ValueError("receipt elapsed_seconds must be finite and nonnegative")
-    expected_budget = SOFT_BUDGET_SECONDS if lane == "package-expansion" else None
-    if receipt.get("soft_budget_seconds") != expected_budget:
+    # Receipts retain the warning policy in force when their commands ran.
+    budget = receipt.get("soft_budget_seconds")
+    if lane == "package-expansion":
+        if (
+            isinstance(budget, bool)
+            or not isinstance(budget, (int, float))
+            or not math.isfinite(budget)
+            or budget <= 0
+        ):
+            raise ValueError("receipt soft_budget_seconds must be finite and positive")
+    elif budget is not None:
         raise ValueError("receipt soft_budget_seconds does not match its lane")
     exceeded = receipt.get("soft_budget_exceeded")
     if type(exceeded) is not bool or exceeded != (
-        expected_budget is not None and elapsed > expected_budget
+        budget is not None and elapsed > budget
     ):
         raise ValueError("receipt soft_budget_exceeded is inconsistent")
     sidecars = receipt.get("sidecars")

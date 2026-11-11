@@ -2041,6 +2041,60 @@ class DurationBaselineTests(unittest.TestCase):
                 len(owned._strict_json_object(seed)["sources"]) + 1,
             )
 
+    def test_builder_imports_the_recorded_expansion_warning_budget(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(owned, "SOFT_BUDGET_SECONDS", 70 * 60):
+                sample = self._write_expansion_sample(Path(tmp))
+            _, receipts = sample
+            receipt_path = next(
+                path for path in receipts.rglob("receipt.json")
+                if owned.load_json(path)["selected_targets"]
+            )
+            receipt = owned.load_json(receipt_path)
+            receipt["elapsed_seconds"] = 5000.0
+            receipt["soft_budget_exceeded"] = True
+            timings_path = receipt_path.parent / "timings.json"
+            timings = owned.load_json(timings_path)
+            timings["elapsed_seconds"] = 5000.0
+            timings_path.write_bytes(owned.canonical_json(timings))
+            receipt["sidecars"]["timings.json"] = owned.sha256_file(timings_path)
+            owned.attach_receipt_digest(receipt)
+            receipt_path.write_bytes(owned.canonical_json(receipt))
+            result = owned.build_duration_baseline([sample])
+            self.assertEqual(
+                result["targets"],
+                {
+                    "p::alpha": {"milliseconds": 4000, "samples": 1},
+                    "p::beta": {"milliseconds": 4000, "samples": 1},
+                },
+            )
+
+    def test_builder_rejects_invalid_recorded_expansion_budgets(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _, receipts = sample = self._write_expansion_sample(Path(tmp))
+            receipt_path = next(receipts.rglob("receipt.json"))
+            original = owned.load_json(receipt_path)
+            for budget in (None, True, "4200", 0, -1, float("inf"), float("nan")):
+                with self.subTest(budget=budget):
+                    receipt = {**original, "soft_budget_seconds": budget}
+                    owned.attach_receipt_digest(receipt)
+                    receipt_path.write_bytes(owned.canonical_json(receipt))
+                    with self.assertRaisesRegex(ValueError, "soft_budget_seconds"):
+                        owned.build_duration_baseline([sample])
+
+    def test_builder_rejects_a_warning_that_differs_from_the_recorded_budget(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _, receipts = sample = self._write_expansion_sample(Path(tmp))
+            receipt_path = next(receipts.rglob("receipt.json"))
+            receipt = owned.load_json(receipt_path)
+            receipt["soft_budget_seconds"] = 4200
+            receipt["elapsed_seconds"] = 5000.0
+            receipt["soft_budget_exceeded"] = False
+            owned.attach_receipt_digest(receipt)
+            receipt_path.write_bytes(owned.canonical_json(receipt))
+            with self.assertRaisesRegex(ValueError, "soft_budget_exceeded"):
+                owned.build_duration_baseline([sample])
+
     def test_builder_rejects_incomplete_expansion_receipt(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             _, receipts = sample = self._write_expansion_sample(Path(tmp))
