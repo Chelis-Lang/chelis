@@ -113,6 +113,11 @@ Resolve failures introduced by the candidate. Record inherited failures and
 missing, timed-out or otherwise incomplete coverage explicitly; a summary
 without complete successful receipts is not evidence that the selected tests
 passed.
+
+Each worker has a 170-minute execution allowance and a 180-minute job limit.
+The remaining ten minutes cover setup and receipt upload.
+The execution deadline preserves partial receipts and reports unfinished coverage as unrun.
+
 A review round does not run package expansion merely because it exists.
 Intermediate review candidates use required CI; expansion starts once on the
 settled reviewed head. An ordinary content change after expansion, a

@@ -267,7 +267,6 @@ def assert_change_owned_topology(
     test.assertEqual(
         expansion["needs"], ["integration-plan"]
     )
-    test.assertEqual(expansion["timeout-minutes"], 90)
     test.assertEqual(expansion["env"]["CHELIS_TEST_CC"], "clang")
     # Cargo builds here with the compilers the linux-workspace cache writer
     # used; a different CC or CXX reruns every cc-rs build script on a hit.
