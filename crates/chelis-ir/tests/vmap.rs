@@ -1,6 +1,7 @@
 use chelis_dag_core::dag::{Dag, DimInfo, RiscOp, TensorType};
-use chelis_ir::eval::{TensorValue, eval_tensor_roots_with_strict};
-use chelis_ir::vmap::{
+use chelis_ir::eval::eval_tensor_roots_with_strict;
+use chelis_ir_core::eval::TensorValue;
+use chelis_ir_core::vmap::{
     vectorize_axis0, vectorize_axis0_with_node_map, vectorize_axis0_with_node_map_and_captures,
 };
 use chelis_numeric_core::prim::Prim;
@@ -83,7 +84,7 @@ fn vmap_ordinary_shape_roots_and_consumers_keep_the_scalar_operation() {
         assert!(reads[0].output_type.dims.is_empty());
         assert!(matches!(reads[0].op, RiscOp::Shape { axis: 1 }));
         assert!(chelis_dag_core::verify::verify(&mapped).is_empty());
-        chelis_ir::axis_admission::check_axis_sources(
+        chelis_ir_core::axis_admission::check_axis_sources(
             &mapped,
             chelis_checker_core::unsupported::Stage::Runtime,
         )
@@ -992,7 +993,7 @@ fn check_effects_linearity_deep(deep_src: &str) -> chelis_types::CheckedProgram 
     chelis_types::check_linearity(&checked).expect("linearity")
 }
 
-fn lower_surf_program(src: &str) -> Result<Dag, chelis_ir::lower::LowerDiagnostic> {
+fn lower_surf_program(src: &str) -> Result<Dag, chelis_ir_core::lower::LowerDiagnostic> {
     let decls =
         chelis_surf::parser::parse_str(src, &chelis_syntax_host::NativeStack).expect("surf parse");
     let exprs = chelis_macros::expand_program(
@@ -1137,7 +1138,7 @@ fn issue524_explicit_nonzero_constant_vmap_axis_via_surf_lowers() {
 #[test]
 fn the_vmap_node_map_names_every_input_nodes_batched_id() {
     use chelis_dag_core::dag::{NodeId, RtDim};
-    use chelis_ir::vmap::vectorize_axis0_with_node_map;
+    use chelis_ir_core::vmap::vectorize_axis0_with_node_map;
 
     let int64_scalar = TensorType {
         dims: vec![],

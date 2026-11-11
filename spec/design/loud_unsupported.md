@@ -893,7 +893,7 @@ The source-policy migration uses accepted base
 The table records exact relocations, not site fixes or new allowances.
 All addresses below are relative to the repository root.
 
-| Pattern | Accepted source and count | Current source and count |
+| Pattern | Accepted source and count | Source and count after graph extraction |
 |---|---|---|
 | `unwrap-or-default` | `crates/chelis-ir/src/lower.rs`: 5 | `crates/chelis-ir/src/lower.rs`: 4, `crates/chelis-dag-core/src/ownership.rs`: 1 |
 | `unwrap-or-numeric-literal` | `crates/chelis-ir/src/dag.rs`: 0 | `crates/chelis-dag-core/src/dag.rs`: 0 |
@@ -914,6 +914,36 @@ The formatter oracle uses the same exact host address.
 
 These moves retain the census row 8 history, frozen allowances, diagnostics, and mutation controls.
 They change no primitive rule, runtime-representation foundation row, active debt, or digest.
+
+### Portable IR source ownership
+
+The IR extraction uses immutable base `23dc12afb7b0404b7f70a9fc2cacc3df7ed77cbe` (chelis#4120).
+All remaining sites retain their existing policy and annotations.
+The preceding graph table records the intermediate source owners.
+
+| Pattern | Immutable source and count | Current source and count |
+|---|---|---|
+| `unwrap-or-default` | `crates/chelis-ir/src/lower.rs`: 4 | `crates/chelis-ir-core/src/lower.rs`: 2 |
+| `unwrap-or-default` | `crates/chelis-ir/src/host.rs`: 4 | `crates/chelis-ir-core/src/host.rs`: 4 |
+| `unwrap-or-default` | `crates/chelis-ir/src/eval.rs`: 3 | `crates/chelis-ir-core/src/eval.rs`: 3 |
+| `unwrap-or-numeric-literal` | `crates/chelis-ir/src/lower.rs`: 8 | `crates/chelis-ir-core/src/lower.rs`: 8 |
+| `unwrap-or-numeric-literal` | `crates/chelis-ir/src/eval.rs`: 2 | `crates/chelis-ir-core/src/eval.rs`: 2 |
+| `rust-format-narrowing` | `crates/chelis-ir/src/lower.rs`: 2 | `crates/chelis-ir/src/resources.rs`: 2 |
+
+The two removed defaults extracted panic messages at immutable `lower.rs` lines 33464 and 33520.
+The tests are `extract_rank_var_bindings_rejects_out_of_range_position` and `extract_rank_var_bindings_ambiguous_reorder_fails_loud`.
+Both tests now get a typed diagnostic with `expect_err` and format that diagnostic directly.
+Their assertions still demand `absent from monomorphized actual` and `chelis#549`, respectively.
+This site fix reduces the complete `unwrap-or-default` baseline from 16 to 14 under section B1.
+The complete `unwrap-or-numeric-literal` baseline remains 16.
+
+The two native duration reports retain the exact count of two and their non-exit annotation.
+The faithful-observation oracle accepts only their new exact resource address, not either former lowerer address.
+The three scoped `UnwrapOr*` classes scan every Rust source under `crates/chelis-ir-core/src/`.
+The seven applicable token classes retain planted-site controls for the complete portable IR source tree.
+New files and extra sites remain subject to the existing zero baseline and exact-count rules.
+These changes grant no numeric-observation permission.
+
 
 
 ## C6. Phase 2 ownership and consumer contract

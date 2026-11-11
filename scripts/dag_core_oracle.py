@@ -87,7 +87,8 @@ extern crate std;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
-use chelis_ir::eval::{TensorValue, eval_tensor_roots_with_strict};
+use chelis_ir_core::eval::TensorValue;
+use chelis_ir::eval::eval_tensor_roots_with_strict;
 const EXPECT_SYMBOLIC_PRODUCT_PANIC: bool = false;
 static ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
 static BYTES: AtomicUsize = AtomicUsize::new(0);
@@ -377,6 +378,8 @@ def fixture_dependencies(workspace: Path, *, host: bool = False) -> str:
     if host:
         extra += (f'chelis-ir = {{ path = {json.dumps(str(workspace / "crates/chelis-ir"))} }}\n'
             f'chelis-unord = {{ path = {json.dumps(str(workspace / "crates/chelis-unord"))} }}\n')
+        if (workspace / "crates/chelis-ir-core").is_dir():
+            extra += f'chelis-ir-core = {{ path = {json.dumps(str(workspace / "crates/chelis-ir-core"))} }}\n'
     return extra
 
 
@@ -398,6 +401,8 @@ def wire_snapshot(workspace: Path, *, baseline: bool) -> dict:
 def host_snapshot(workspace: Path, *, baseline: bool) -> list[dict]:
     source = HOST_SOURCE
     if baseline:
+        source = source.replace("use chelis_ir_core::eval::TensorValue;",
+            "use chelis_ir::eval::TensorValue;")
         source = source.replace("use chelis_dag_core::{Dag, DimInfo, NodeId, RiscOp, TensorType};",
             "use chelis_ir::dag::{Dag, DimInfo, NodeId, RiscOp, TensorType};")
         source = source.replace("use chelis_dag_core::{analysis, fuse, grad, ownership, tier2, verify};",

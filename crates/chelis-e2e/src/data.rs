@@ -1,4 +1,4 @@
-use chelis_ir::eval::TensorValue;
+use chelis_ir_core::eval::TensorValue;
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};

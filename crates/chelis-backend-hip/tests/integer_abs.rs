@@ -4,26 +4,33 @@ use chelis_dag_core::dag::{Dag, DimInfo, RiscOp, TensorType};
 use chelis_numeric_core::prim::Prim;
 
 fn gradient_dag() -> Dag {
-    let source = "def loss(x: tensor[4, f32], w: tensor[4, i64]) -> tensor[f32] = sum(mul(x, cast(abs(w), f32)), 0i32)\ndef main(x: tensor[4, f32], w: tensor[4, i64]) -> tensor[4, f32] = (grad(loss, wrt=x))(x, w)\n";
-    let declarations =
-        chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack).expect("parse");
-    let deep =
-        chelis_surf::desugar::desugar_program(&declarations, &chelis_syntax_host::NativeStack)
-            .expect("desugar");
-    let checked =
-        chelis_types::check_typed_program(&deep).unwrap_or_else(|e| panic!("{:?}", e.errors));
-    let checked = chelis_effects::check_program(&checked).expect("effects");
-    let checked = chelis_types::check_linearity(&checked).expect("linearity");
-    let mut dag =
-        chelis_ir::host::lower_named_tensor_entry_dag(&checked, "main").expect("tensor entry");
-    chelis_dag_core::optimize::constant_fold(&mut dag);
-    chelis_dag_core::optimize::dead_code_eliminate(&dag)
+    chelis_ir::resources::with_operation(|operation| {
+        let source = "def loss(x: tensor[4, f32], w: tensor[4, i64]) -> tensor[f32] = sum(mul(x, cast(abs(w), f32)), 0i32)\ndef main(x: tensor[4, f32], w: tensor[4, i64]) -> tensor[4, f32] = (grad(loss, wrt=x))(x, w)\n";
+        let declarations = chelis_surf::parser::parse_str(source, &chelis_syntax_host::NativeStack)
+            .expect("parse");
+        let deep =
+            chelis_surf::desugar::desugar_program(&declarations, &chelis_syntax_host::NativeStack)
+                .expect("desugar");
+        let checked =
+            chelis_types::check_typed_program(&deep).unwrap_or_else(|e| panic!("{:?}", e.errors));
+        let checked = chelis_effects::check_program(&checked).expect("effects");
+        let checked = chelis_types::check_linearity(&checked).expect("linearity");
+        let mut dag = chelis_ir_core::host::lower_named_tensor_entry_dag(
+            (checked).facts(),
+            "main",
+            operation,
+        )
+        .expect("named entry decision")
+        .expect("tensor entry");
+        chelis_dag_core::optimize::constant_fold(&mut dag);
+        chelis_dag_core::optimize::dead_code_eliminate(&dag)
+    })
 }
 
 #[test]
 fn lowered_integer_abs_gradient_emits_checked_hip_kernel_and_typed_cast() {
     let dag = gradient_dag();
-    let dag = chelis_dag_core::fuse::fuse(&chelis_ir::specialize::specialize_for_blas(&dag));
+    let dag = chelis_dag_core::fuse::fuse(&chelis_ir_core::specialize::specialize_for_blas(&dag));
     assert!(!dag.nodes().iter().any(|node| matches!(&node.op, RiscOp::FusedElem { ops } if ops.iter().any(|step| step.op == chelis_dag_core::dag::FusedStepOp::Abs))));
     let result = support::codegen_hip(&dag, "integer_gradient").expect("typed gradient emission");
     assert!(

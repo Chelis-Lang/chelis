@@ -17,12 +17,12 @@
 //! `[N]` array form must still be emitted when there *are* elements.
 
 mod support;
-use chelis_ir::ConcreteHostType as HostType;
-use chelis_ir::host::{
+use chelis_ir_core::host::{
     ConcreteHostExpr as HostExpr, ConcreteHostExprKind as HostExprKind,
     ConcreteHostFunction as HostFunction, ConcreteHostParam as HostParam,
     ConcreteHostProgram as HostProgram,
 };
+use chelis_ir_core::host_type_state::ConcreteHostType as HostType;
 use std::path::PathBuf;
 use std::process::Command;
 use support::emit_host_program;
@@ -49,7 +49,7 @@ fn program_with_body(ret_ty: HostType, body: HostExpr) -> HostProgram {
             ret_ty,
             body,
             tensor_helpers: Vec::new(),
-            origin: chelis_ir::host::HostFunctionOrigin::Authored,
+            origin: chelis_ir_core::host::HostFunctionOrigin::Authored,
             specialization: None,
             summary_rejections: Vec::new(),
         }],

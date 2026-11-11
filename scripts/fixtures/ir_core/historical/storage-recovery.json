@@ -1,0 +1,93 @@
+{
+  "approval": "Clear completed-task compiler outputs",
+  "source_changes": false,
+  "retained_hashes_match": true,
+  "commands": [
+    {
+      "command": [
+        "/Users/brittonr/.rustup/toolchains/1.98.0-aarch64-apple-darwin/bin/cargo",
+        "clean",
+        "--locked",
+        "--offline",
+        "--manifest-path",
+        "/Users/brittonr/git/chelis/.worktrees/checker-no-std/Cargo.toml",
+        "--target-dir",
+        "/Users/brittonr/git/chelis/.worktrees/checker-no-std/target/checker-core",
+        "--profile",
+        "dev"
+      ],
+      "exit": 101,
+      "stdout": "",
+      "stderr": "error: process didn't exit successfully: `/nix/store/awvcn20dscvqazlv72jaf3iw4vmc62h8-kache-1.2.2/bin/kache rustc -vV` (exit status: 1)\n--- stderr\nerror: executing rustc: No such file or directory (os error 2)\n\n"
+    },
+    {
+      "command": [
+        "/Users/brittonr/.rustup/toolchains/1.98.0-aarch64-apple-darwin/bin/cargo",
+        "clean",
+        "--locked",
+        "--offline",
+        "--manifest-path",
+        "/Users/brittonr/git/chelis/.worktrees/checker-no-std/Cargo.toml",
+        "--target-dir",
+        "/Users/brittonr/git/chelis/.worktrees/checker-no-std/target/checker-core",
+        "--profile",
+        "dev"
+      ],
+      "exit": 0,
+      "stdout": "",
+      "stderr": "     Removed 34011 files, 14.5GiB total\n"
+    },
+    {
+      "command": [
+        "/Users/brittonr/.rustup/toolchains/1.98.0-aarch64-apple-darwin/bin/cargo",
+        "clean",
+        "--locked",
+        "--offline",
+        "--manifest-path",
+        "/Users/brittonr/git/chelis/.claude/worktrees/numeric-census-profile-b824/Cargo.toml",
+        "--target-dir",
+        "/Users/brittonr/git/chelis/.claude/worktrees/numeric-census-profile-b824/target/agents/schema-command-attribution/cargo-target",
+        "--profile",
+        "dev"
+      ],
+      "exit": 0,
+      "stdout": "",
+      "stderr": "     Removed 4301 files, 2.7GiB total\n"
+    },
+    {
+      "command": [
+        "/Users/brittonr/.rustup/toolchains/1.98.0-aarch64-apple-darwin/bin/cargo",
+        "clean",
+        "--locked",
+        "--offline",
+        "--manifest-path",
+        "/Users/brittonr/git/chelis/.claude/worktrees/numeric-census-profile-b824/Cargo.toml",
+        "--target-dir",
+        "/Users/brittonr/git/chelis/.claude/worktrees/numeric-census-profile-b824/target/agents/schema-command-attribution-ready/cargo-target",
+        "--profile",
+        "dev"
+      ],
+      "exit": 0,
+      "stdout": "",
+      "stderr": "     Removed 4308 files, 2.7GiB total\n"
+    },
+    {
+      "command": [
+        "/Users/brittonr/.rustup/toolchains/1.98.0-aarch64-apple-darwin/bin/cargo",
+        "clean",
+        "--locked",
+        "--offline",
+        "--manifest-path",
+        "/Users/brittonr/git/chelis/.claude/worktrees/numeric-census-profile-40b/Cargo.toml",
+        "--target-dir",
+        "/Users/brittonr/git/chelis/.claude/worktrees/numeric-census-profile-40b/target/agents/schema-command-attribution-ready/cargo-target",
+        "--profile",
+        "dev"
+      ],
+      "exit": 0,
+      "stdout": "",
+      "stderr": "     Removed 4496 files, 2.7GiB total\n"
+    }
+  ],
+  "classification": "Environment cleanup. This is not an IR runtime or baseline execution failure."
+}

@@ -8299,7 +8299,7 @@ fn check_single_file_keeps_legacy_report_shape() {
 //
 // These cover the closure of "host runtime does not support `grad`" /
 // "...`vmap`" / "...`realize`" — `chelis test` and `chelis eval` now
-// route those forms through `lower_subexpr_program` + the forward DAG
+// route those forms through `try_lower_subexpr_program` + the forward DAG
 // evaluator (the same machinery the C backend uses) so the two lanes
 // agree on programs that pass `chelis check`.
 //

@@ -1,0 +1,135 @@
+use crate::prelude::*;
+use core::fmt;
+
+use chelis_numeric_core::prim::Prim;
+
+use crate::host_type_state::ConcreteHostType;
+
+/// Closed heap universe from compiled-value-ownership C4. Tensor storage has
+/// no `ConcreteHostType`. it remains listed so downstream planners cannot grow
+/// a second heap-kind vocabulary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum HeapKind {
+    String,
+    Tensor,
+    TensorStorage,
+    List,
+    Tuple,
+    Dict,
+    Adt,
+    Option,
+    MappedFile,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum NonHeapKind {
+    Scalar(Prim),
+    Unit,
+    ContextualCallback,
+    FirstClassFunction,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ValueClass {
+    NonHeap(NonHeapKind),
+    Heap(HeapKind),
+}
+
+impl ValueClass {
+    pub fn is_heap(self) -> bool {
+        matches!(self, Self::Heap(_))
+    }
+
+    pub fn is_callback(self) -> bool {
+        matches!(self, Self::NonHeap(NonHeapKind::ContextualCallback))
+    }
+}
+
+impl fmt::Display for ValueClass {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{self:?}")
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Placement {
+    Parameter,
+    Value,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClassifyError {
+    FirstClassFunction,
+    FunctionContainer,
+}
+
+impl fmt::Display for ClassifyError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::FirstClassFunction => f.write_str("first-class function value (chelis#879)"),
+            Self::FunctionContainer => {
+                f.write_str("container recursively holds a function value (chelis#879)")
+            }
+        }
+    }
+}
+
+pub fn classify(ty: &ConcreteHostType, placement: Placement) -> Result<ValueClass, ClassifyError> {
+    use ConcreteHostType as T;
+    Ok(match ty {
+        T::Scalar(prim) => classify_prim(*prim),
+        T::Function(_, _) if placement == Placement::Parameter => {
+            ValueClass::NonHeap(NonHeapKind::ContextualCallback)
+        }
+        // The target ABI still rejects first-class function values under
+        // chelis#879.  Ownership nevertheless models their logical identity
+        // so the sealed payload can reach that target-capability boundary.
+        T::Function(_, _) | T::CheckedCallableChoice(_) => {
+            ValueClass::NonHeap(NonHeapKind::FirstClassFunction)
+        }
+        // The closed key operation has no captured payload. its resolved
+        // identity is in the host type and a call specializes it explicitly.
+        T::CheckedBuiltinCallable(_) => ValueClass::NonHeap(NonHeapKind::Unit),
+        T::Adt(_, children) => container(children.iter(), HeapKind::Adt)?,
+        T::List(child) => container(core::iter::once(child.as_ref()), HeapKind::List)?,
+        T::Dict(key, value) => {
+            container([key.as_ref(), value.as_ref()].into_iter(), HeapKind::Dict)?
+        }
+        T::Tuple(children) => container(children.iter(), HeapKind::Tuple)?,
+        T::Tensor(_) => ValueClass::Heap(HeapKind::Tensor),
+        T::Option(child) => container(core::iter::once(child.as_ref()), HeapKind::Option)?,
+        T::MappedFile => ValueClass::Heap(HeapKind::MappedFile),
+        T::Unit | T::Dimension(_) => ValueClass::NonHeap(NonHeapKind::Unit),
+    })
+}
+
+fn classify_prim(prim: Prim) -> ValueClass {
+    match prim {
+        Prim::String => ValueClass::Heap(HeapKind::String),
+        Prim::F32
+        | Prim::F64
+        | Prim::F16
+        | Prim::Bf16
+        | Prim::F8e4m3
+        | Prim::Int8
+        | Prim::Int16
+        | Prim::Int32
+        | Prim::Int64
+        | Prim::Bool
+        | Prim::Key => ValueClass::NonHeap(NonHeapKind::Scalar(prim)),
+    }
+}
+
+fn container<'a>(
+    _children: impl Iterator<Item = &'a ConcreteHostType>,
+    kind: HeapKind,
+) -> Result<ValueClass, ClassifyError> {
+    Ok(ValueClass::Heap(kind))
+}
+
+pub fn render_type(ty: &ConcreteHostType) -> String {
+    match ty {
+        ConcreteHostType::Scalar(prim) => prim.name().to_string(),
+        other => format!("{other:?}"),
+    }
+}

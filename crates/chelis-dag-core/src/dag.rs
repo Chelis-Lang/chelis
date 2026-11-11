@@ -1160,7 +1160,7 @@ pub enum RiscOp {
     /// `eq` / `to_list` / `tensor_to_scalar` see a matching precision
     /// label.
     ///
-    /// The IR-level evaluator (`chelis_ir::eval::reduce_argcmp`) keeps
+    /// The IR-level evaluator (`chelis_ir_core::eval::reduce_argcmp`) keeps
     /// the precision-erased f64 representation other reductions use; the
     /// storage widening lives in the host-runtime adapter that attaches
     /// the precision tag.

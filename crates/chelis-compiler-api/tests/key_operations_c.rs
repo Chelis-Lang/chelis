@@ -8,7 +8,8 @@ mod ownership_support;
 use chelis_dag_core::dag::{
     Dag, DimInfo, KeyBranch, NodeId, RiscOp, RtDim, TensorType, UniformBound,
 };
-use chelis_ir::eval::{TensorValue, eval_tensor_roots_exact};
+use chelis_ir::eval::eval_tensor_roots_exact;
+use chelis_ir_core::eval::TensorValue;
 use chelis_numeric_core::dtype_semantics::{RandomKey, scalar_from_i64};
 use chelis_numeric_core::dtype_semantics::{
     RawTensor, StorageView, TensorStorage, finalize_tensor,
@@ -890,8 +891,8 @@ fn vmap_of_vmap_of_a_draw_agrees_in_c_and_eval() {
         prim,
     );
     dag.add_root(sampled);
-    let once = chelis_ir::vmap::vectorize_axis0(&dag, DimInfo::Lit(3)).unwrap();
-    let twice = chelis_ir::vmap::vectorize_axis0(&once, DimInfo::Lit(2)).unwrap();
+    let once = chelis_ir_core::vmap::vectorize_axis0(&dag, DimInfo::Lit(3)).unwrap();
+    let twice = chelis_ir_core::vmap::vectorize_axis0(&once, DimInfo::Lit(2)).unwrap();
     // key_ref.py's split_n(split_n(key(7), 2)[i], 3)[j].
     let keys = [
         0x3460_149a_1d8e_2fa2,
@@ -2374,7 +2375,7 @@ fn grad_of_per_row_uniform_bounds_over_a_runtime_count_split_agrees_in_c_and_eva
 /// The error names the stage that refused.
 fn hip_build(dag: &Dag) -> Result<(), String> {
     let dag = chelis_dag_core::optimize::dead_code_eliminate(dag);
-    let specialized = chelis_ir::specialize::specialize_for_blas(&dag);
+    let specialized = chelis_ir_core::specialize::specialize_for_blas(&dag);
     chelis_compiler_api::compiler::reject_unsupported_hip_ops(&specialized)
         .map_err(|error| format!("gate: {error:?}"))?;
     let selected =

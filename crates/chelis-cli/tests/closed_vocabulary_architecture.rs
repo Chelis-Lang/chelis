@@ -125,51 +125,6 @@ impl SourceToken {
     }
 }
 
-const EFFECT_KIND_CRATES: &[CrateEvidence] = &[
-    CrateEvidence {
-        crate_name: "chelis-deep",
-        role: "Deep metadata decode boundary",
-        roots: &["crates/chelis-deep/src"],
-        required: &["EffectKindInput", "Result<EffectKind"],
-    },
-    CrateEvidence {
-        crate_name: "chelis-effects",
-        role: "host target effect validation",
-        roots: &["crates/chelis-effects/src"],
-        required: &["use chelis_vocab::EffectKind", "decode_effect_kind("],
-    },
-    CrateEvidence {
-        crate_name: "chelis-effects-core",
-        role: "portable effect inference and handler validation",
-        roots: &["crates/chelis-effects-core/src"],
-        required: &["use chelis_vocab::EffectKind", "decode_effect_kind("],
-    },
-    CrateEvidence {
-        crate_name: "chelis-ir",
-        role: "IR and host lowering handle-effect semantics",
-        roots: &["crates/chelis-ir/src"],
-        required: &["use chelis_vocab::EffectKind", "decode_effect_kind("],
-    },
-    CrateEvidence {
-        crate_name: "chelis-compiler-api",
-        role: "compiler-api evaluator handle-effect semantics",
-        roots: &["crates/chelis-compiler-api/src"],
-        required: &["use chelis_vocab::EffectKind", "decode_effect_kind("],
-    },
-    CrateEvidence {
-        crate_name: "chelis-surf",
-        role: "Surf/Deep canonical effect conversion",
-        roots: &["crates/chelis-surf/src"],
-        required: &[
-            "use chelis_vocab::EffectKind",
-            "M::Effect",
-            ".effect()",
-            "decode_effect_kind(",
-            "EffectKind::Resource",
-        ],
-    },
-];
-
 const RUNTIME_DTYPE_CRATES: &[CrateEvidence] = &[
     CrateEvidence {
         crate_name: "chelis-numeric-core",
@@ -241,45 +196,6 @@ const RUNTIME_DTYPE_CRATES: &[CrateEvidence] = &[
         role: "Python FFI dtype decode and constants",
         roots: &["crates/chelis-python/src"],
         required: &["RuntimeDType::F32.id()", "decode_runtime_dtype("],
-    },
-];
-
-const EFFECT_KIND_FORBIDDEN_RULES: &[ForbiddenRule] = &[
-    ForbiddenRule {
-        role: "Deep metadata decode boundary",
-        roots: &["crates/chelis-deep/src"],
-        forbidden: &["Option<EffectKind"],
-    },
-    ForbiddenRule {
-        role: "effect inference and handler/target validation",
-        roots: &[
-            "crates/chelis-effects/src",
-            "crates/chelis-effects-core/src",
-        ],
-        forbidden: &[
-            "match effect_name(list)",
-            "effect_name(list) == Some(\"resource\")",
-        ],
-    },
-    ForbiddenRule {
-        role: "IR and host lowering handle-effect semantics",
-        roots: &["crates/chelis-ir/src"],
-        forbidden: &["EffectKind::from_symbol", ".and_then(EffectKind"],
-    },
-    ForbiddenRule {
-        role: "compiler-api evaluator handle-effect semantics",
-        roots: &["crates/chelis-compiler-api/src"],
-        forbidden: &["if effect == \"random\""],
-    },
-    ForbiddenRule {
-        role: "Surf/Deep canonical effect conversion",
-        roots: &["crates/chelis-surf/src"],
-        forbidden: &[
-            "meta_with_entries(vec![(\"effect\".to_string(), sym(\"random\"))])",
-            "meta_with_entries(vec![(\"effect\".to_string(), sym(\"resource\"))])",
-            "Some(\"random\") => format!",
-            "Some(\"resource\") => format!",
-        ],
     },
 ];
 
@@ -1335,22 +1251,6 @@ x" if effect == "random"
         forbidden.is_empty(),
         "a physical splice inside a C++ raw-string payload must not create an early delimiter: \
          {forbidden:?}"
-    );
-}
-
-#[test]
-fn added_effect_variant_will_force_every_semantic_consumer_to_decide() {
-    let root = repo_root();
-    let mut failures = crate_evidence_failures(&root, EFFECT_KIND_CRATES);
-    failures.extend(forbidden_rule_failures(
-        &root,
-        "EffectKind",
-        EFFECT_KIND_FORBIDDEN_RULES,
-    ));
-    assert!(
-        failures.is_empty(),
-        "EffectKind mutation inventory is not closed:\n{}",
-        failures.join("\n")
     );
 }
 

@@ -366,6 +366,11 @@ CLIPPY_NATIVE_CHECKER_NO_DEFAULT_FEATURES: list[str] = [
     "cargo", "clippy", "-p", "chelis-types",
     "--lib", "--no-default-features", "--", "-D", "warnings",
 ]
+# Compile portable IR without host test feature unification.
+CLIPPY_IR_NO_DEFAULT_FEATURES: list[str] = [
+    "cargo", "clippy", "-p", "chelis-ir-core",
+    "--lib", "--no-default-features", "--", "-D", "warnings",
+]
 CLIPPY_SOLVER_FREE_FEATURES: list[str] = [
     "cargo", "clippy", "--workspace", "--all-targets", "--features",
     "chelis-cli/ownership-ledger,"
@@ -564,6 +569,10 @@ CHECKER_CORE_ORACLE: list[str] = [
     "uv", "run", "--managed-python", "--python", "3.11", "--no-project", "python",
     "scripts/checker_core_oracle.py",
 ]
+IR_CORE_ORACLE: list[str] = [
+    "uv", "run", "--managed-python", "--python", "3.11", "--no-project", "python",
+    "scripts/ir_core_oracle.py",
+]
 # Generated chelis-std files stay out of the index: the bundle crate's build
 # script packs the runtime, so a tracked dist pair or a lock recording the
 # bundled runtime would go stale with the first std edit. Pure git and Python.
@@ -686,6 +695,7 @@ STAGES: dict[str, list[list[str]]] = {
         CLIPPY_CHECKER_NO_DEFAULT_FEATURES,
         CLIPPY_CHECKER_SERDE,
         CLIPPY_NATIVE_CHECKER_NO_DEFAULT_FEATURES,
+        CLIPPY_IR_NO_DEFAULT_FEATURES,
         FMT_CHECK,
         CHELIS_LINT_CHECK,
         OPTIMIZED_FLOAT_FINALIZATION_TESTS,
@@ -724,6 +734,7 @@ STAGES: dict[str, list[list[str]]] = {
         DAG_CORE_ORACLE,
         EFFECT_ANALYSIS_CORE_ORACLE,
         CHECKER_CORE_ORACLE,
+        IR_CORE_ORACLE,
         OWNERSHIP_LEDGER_CLI_TESTS,
     ],
     "runtime-representation": [
@@ -756,6 +767,7 @@ INTEGRATION_SUPPORT_SLICES: dict[str, tuple[list[str], ...]] = {
     "dag-core": (DAG_CORE_ORACLE,),
     "effect-analysis-core": (EFFECT_ANALYSIS_CORE_ORACLE,),
     "checker-core": (CHECKER_CORE_ORACLE,),
+    "ir-core": (IR_CORE_ORACLE,),
 }
 
 
@@ -804,6 +816,7 @@ LOCAL_STATIC_COMMANDS: list[list[str]] = [
     CLIPPY_CHECKER_NO_DEFAULT_FEATURES,
     CLIPPY_CHECKER_SERDE,
     CLIPPY_NATIVE_CHECKER_NO_DEFAULT_FEATURES,
+    CLIPPY_IR_NO_DEFAULT_FEATURES,
     FMT_CHECK,
     CHELIS_LINT_CHECK,
     STD_BUNDLE_REPRODUCIBILITY,
@@ -835,6 +848,7 @@ LOCAL_STATIC_COMMANDS: list[list[str]] = [
     DAG_CORE_ORACLE,
     EFFECT_ANALYSIS_CORE_ORACLE,
     CHECKER_CORE_ORACLE,
+    IR_CORE_ORACLE,
     OWNERSHIP_LEDGER_CLI_TESTS,
 ]
 

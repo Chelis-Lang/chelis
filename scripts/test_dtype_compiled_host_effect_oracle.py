@@ -91,7 +91,7 @@ class OracleMutationTests(unittest.TestCase):
 
     def test_restored_evaluator_only_routing_fails(self):
         self.assert_mutation_fails(
-            "crates/chelis-ir/src/host.rs",
+            "crates/chelis-ir-core/src/host.rs",
             "pub fn find_direct_builtin_call(",
             'pub const EVAL_ONLY_HOST_BUILTINS: &[&str] = &["process_run"];\n'
             "pub fn find_direct_builtin_call(",
@@ -129,7 +129,7 @@ class OracleMutationTests(unittest.TestCase):
 
     def assert_scan_owner_mutation_fails(self, owner: str, old: str, new: str) -> None:
         with MutatedTree() as root:
-            path = root / "crates/chelis-ir/src/host.rs"
+            path = root / "crates/chelis-ir-core/src/host.rs"
             source = path.read_text()
             start, end = oracle.rust_owner_span(source, owner)
             body = source[start:end]
@@ -147,7 +147,7 @@ class OracleMutationTests(unittest.TestCase):
 
     def test_unrelated_generic_conversion_cannot_mask_scan_dtype_erasure(self):
         with MutatedTree() as root:
-            path = root / "crates/chelis-ir/src/host.rs"
+            path = root / "crates/chelis-ir-core/src/host.rs"
             source = path.read_text()
             start, end = oracle.rust_owner_span(source, oracle.TENSOR_SCAN_OWNER)
             self.assertIn('name: "to_tensor".into(),', source[:start])
@@ -197,7 +197,7 @@ class OracleMutationTests(unittest.TestCase):
         for owner in (oracle.TENSOR_SCAN_OWNER, oracle.TENSOR_SCAN_CALLBACK_OWNER):
             for replacement in ("missing_owner", owner + " {}\n" + owner):
                 with self.subTest(owner=owner, replacement=replacement), MutatedTree() as root:
-                    mutate(root, "crates/chelis-ir/src/host.rs", owner, replacement)
+                    mutate(root, "crates/chelis-ir-core/src/host.rs", owner, replacement)
                     with self.assertRaisesRegex(oracle.OracleFailure, "owner.*exactly one"):
                         oracle.validate_source_contracts(root)
 
@@ -210,7 +210,7 @@ class OracleMutationTests(unittest.TestCase):
 
     def test_comment_and_literal_owner_decoys_are_not_owners(self):
         with MutatedTree() as root:
-            path = root / "crates/chelis-ir/src/host.rs"
+            path = root / "crates/chelis-ir-core/src/host.rs"
             source = path.read_text()
             for owner in (oracle.TENSOR_SCAN_OWNER, oracle.TENSOR_SCAN_CALLBACK_OWNER):
                 source = f'// {owner} {{}}\nconst DECOY: &str = r#"{owner} {{}}"#;\n' + source
@@ -219,7 +219,7 @@ class OracleMutationTests(unittest.TestCase):
 
     def test_reordered_tensor_scan_bounds_check_fails(self):
         self.assert_mutation_fails(
-            "crates/chelis-ir/src/host.rs",
+            "crates/chelis-ir-core/src/host.rs",
             'chelis_abi::failure::negative_length_prefix("tensor_scan")',
             '"tensor_scan length "',
         )

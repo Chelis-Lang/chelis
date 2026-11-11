@@ -6,7 +6,7 @@
 use crate::compiler::{CompiledExecutionArtifact, CompilerError};
 use crate::emission_observer::EmissionObservation;
 use crate::schema::{GeneralKind, stage_error};
-use chelis_ir::lowering_trace::HelperLoweringTrace;
+use chelis_ir_core::lowering_trace::HelperLoweringTrace;
 
 type Result<T> = std::result::Result<T, CompilerError>;
 

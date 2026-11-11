@@ -9,29 +9,35 @@ pub(crate) fn root_metadata(
     program: &CheckedProgram,
     lowered_names: Option<&BTreeMap<String, bool>>,
 ) -> RootMetadata {
-    let all_names = AllRootNames(root_names_from_checked_exprs(
-        program.exprs(),
-        program.type_env(),
-        None,
-    ));
-    let owned_lowered_names;
-    let lowered_names = match lowered_names {
-        Some(map) => Some(map),
-        None => {
-            owned_lowered_names =
-                chelis_ir::lower::top_level_lowering_map(program.exprs(), program.type_env());
-            Some(&owned_lowered_names)
+    chelis_ir::resources::with_operation(|operation| {
+        let all_names = AllRootNames(root_names_from_checked_exprs(
+            program.exprs(),
+            program.type_env(),
+            None,
+        ));
+        let owned_lowered_names;
+        let lowered_names = match lowered_names {
+            Some(map) => Some(map),
+            None => {
+                owned_lowered_names = chelis_ir_core::lower::top_level_lowering_map(
+                    program.exprs(),
+                    program.type_env(),
+                    operation,
+                )
+                .unwrap_or_else(|diagnostic| std::panic::panic_any(diagnostic));
+                Some(&owned_lowered_names)
+            }
+        };
+        let tensor_names = TensorRootNames(root_names_from_checked_exprs(
+            program.exprs(),
+            program.type_env(),
+            lowered_names,
+        ));
+        RootMetadata {
+            all_names,
+            tensor_names,
         }
-    };
-    let tensor_names = TensorRootNames(root_names_from_checked_exprs(
-        program.exprs(),
-        program.type_env(),
-        lowered_names,
-    ));
-    RootMetadata {
-        all_names,
-        tensor_names,
-    }
+    })
 }
 
 fn root_names_from_checked_exprs(

@@ -461,6 +461,15 @@ class MigrationControls(unittest.TestCase):
         with self.assertRaisesRegex(OracleFailure, "original baseline execution"):
             oracle.compare_inventories(self.lane([self.before]), self.lane([self.after]), self.moves)
 
+    def test_vocabulary_retirement_keeps_live_execution_mandatory(self):
+        retired = ("chelis-cli::closed_vocabulary_architecture$"
+            "added_effect_variant_will_force_every_semantic_consumer_to_decide")
+        self.moves["retired_tests"] = {retired: "The source-token assertion retires."}
+        previous = self.lane([self.before, retired])
+        with self.assertRaises(OracleFailure) as error:
+            oracle.compare_inventories(previous, self.lane([]), self.moves)
+        self.assertIn(self.after, str(error.exception))
+
     def test_behavior_test_cannot_retire(self):
         self.moves["retired_tests"] = {self.before: "Remove a behavior test."}
         with self.assertRaisesRegex(OracleFailure, "unapproved test retirement"):

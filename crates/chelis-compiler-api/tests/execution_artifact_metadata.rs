@@ -485,7 +485,7 @@ fn independent_global_computation_survives_host_lane_routing() {
 /// the old lowered-artifact check saw "no globals", the entry lane CLAIMED
 /// the program, and `glb`'s computation vanished from the emitted C. The
 /// decline is keyed on SOURCE-LEVEL top-level value bindings
-/// (`chelis_ir::host::program_has_top_level_value_bindings`), so ANY
+/// (`chelis_ir_core::host::program_has_top_level_value_bindings`), so ANY
 /// top-level value binding declines regardless of its lowered
 /// classification.
 ///

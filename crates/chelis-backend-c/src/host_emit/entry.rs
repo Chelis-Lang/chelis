@@ -6,8 +6,8 @@
 
 use super::*;
 use chelis_dag_core::axis_sources::EntryExtentGuard;
-use chelis_ir::host::SignatureEntryPlan;
 use chelis_ir::ownership::VerifiedHostTensorHelperView;
+use chelis_ir_core::host::SignatureEntryPlan;
 use std::collections::BTreeMap;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -467,7 +467,7 @@ impl<'a> Walker<'a> {
 mod tests {
     use super::*;
     use chelis_dag_core::{Dag, TensorType};
-    use chelis_ir::host::{HostFunctionOrigin, HostParam};
+    use chelis_ir_core::host::{HostFunctionOrigin, HostParam};
     use chelis_numeric_core::prim::Prim;
 
     fn verified_host_from_source(source: &str) -> chelis_ir::ownership::VerifiedHostProgram {
@@ -562,7 +562,7 @@ mod tests {
                 dag,
                 inputs: ["a", "b"]
                     .into_iter()
-                    .map(|name| chelis_ir::host::HostTensorInput {
+                    .map(|name| chelis_ir_core::host::HostTensorInput {
                         name: name.into(),
                         ty: ty.clone(),
                     })

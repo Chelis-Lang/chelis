@@ -43,7 +43,7 @@ fn disconnected_top_level_actual_keeps_every_axis() {
         let values =
             chelis_ir::eval::eval_tensor_roots_with_strict(library.dag(), &[root], |name| {
                 (name == "x").then(|| {
-                    chelis_ir::eval::TensorValue::from_storage(
+                    chelis_ir_core::eval::TensorValue::from_storage(
                         shape.clone(),
                         chelis_numeric_core::dtype_semantics::finalize_tensor(
                             "test",
@@ -86,7 +86,7 @@ fn disconnected_actual_still_checks_its_declared_input_extent() {
     let root = library.symbol_table()["derivative"];
     let error = chelis_ir::eval::eval_tensor_roots_with_strict(library.dag(), &[root], |name| {
         (name == "x").then(|| {
-            chelis_ir::eval::TensorValue::from_storage(
+            chelis_ir_core::eval::TensorValue::from_storage(
                 vec![2],
                 chelis_numeric_core::dtype_semantics::finalize_tensor(
                     "test",

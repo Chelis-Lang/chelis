@@ -19,7 +19,8 @@ use chelis_dag_core::dag::{
     TensorType,
 };
 use chelis_dag_core::fuse::fuse;
-use chelis_ir::eval::{TensorValue, eval_tensor_roots_with_strict};
+use chelis_ir::eval::eval_tensor_roots_with_strict;
+use chelis_ir_core::eval::TensorValue;
 use chelis_numeric_core::prim::Prim;
 use chelis_unord::UnordMap;
 use std::env;

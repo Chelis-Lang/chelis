@@ -1,0 +1,3 @@
+{
+  "stderr": "Traceback (most recent call last):\n  File \"/Users/brittonr/git/chelis/.claude/worktrees/ir-no-std-core/target/agents/ir-baseline-run.py\", line 139, in <module>\n    main()\n  File \"/Users/brittonr/git/chelis/.claude/worktrees/ir-no-std-core/target/agents/ir-baseline-run.py\", line 123, in main\n    execution(stdout.read_text(), expected)\n  File \"/Users/brittonr/git/chelis/.claude/worktrees/ir-no-std-core/target/agents/ir-baseline-run.py\", line 58, in execution\n    assert set(started) == selected == set(completed)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError\n"
+}

@@ -659,6 +659,23 @@ class FormatNarrowingTests(unittest.TestCase):
         )
         self.assertEqual(oracle.format_narrowing_violations(source), [])
 
+    def test_native_timing_rows_use_only_the_resource_owner(self) -> None:
+        for path, permitted in (
+            ("crates/chelis-ir/src/resources.rs", True),
+            ("crates/chelis-ir/src/lower.rs", False),
+            ("crates/chelis-ir-core/src/lower.rs", False),
+        ):
+            source = (
+                "(\n"
+                "    Pat::RustFormatNarrowing,\n"
+                f'    "{path}",\n'
+                "    2,\n"
+                '    "native duration reports",\n'
+                "),\n"
+            )
+            violations = oracle.format_narrowing_violations(source)
+            self.assertEqual(not violations, permitted, (path, violations))
+
 
 class DocCitationParityTests(unittest.TestCase):
     def _tripwire(self) -> str:

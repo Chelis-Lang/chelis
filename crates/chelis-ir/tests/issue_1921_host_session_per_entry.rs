@@ -5,10 +5,8 @@
 //! with many. The count is process-wide, and nextest runs each test in its
 //! own process.
 
-use chelis_ir::host::{
-    host_lowering_sessions, lower_named_tensor_entry_dag, lower_named_tensor_entry_dags,
-    try_lower_compiled_program,
-};
+use chelis_ir::host::{host_lowering_sessions, try_lower_compiled_program};
+use chelis_ir_core::host::{lower_named_tensor_entry_dag, lower_named_tensor_entry_dags};
 
 fn checked_surf(src: &str) -> chelis_types::CheckedProgram {
     let decls =
@@ -50,28 +48,36 @@ fn sessions_during<T>(entry: impl FnOnce() -> T) -> (T, u64) {
 /// counter catches opening one session per entry.
 #[test]
 fn named_entries_of_one_program_share_one_session() {
-    for definitions in [1, 8] {
-        let (program, names) = chain(definitions);
-        let (batched, sessions) =
-            sessions_during(|| lower_named_tensor_entry_dags(&program, &names).collect::<Vec<_>>());
-        assert_eq!(
-            sessions, 1,
-            "{definitions} entries opened {sessions} sessions"
-        );
+    chelis_ir::resources::with_operation(|operation| {
+        for definitions in [1, 8] {
+            let (program, names) = chain(definitions);
+            let (batched, sessions) = sessions_during(|| {
+                lower_named_tensor_entry_dags((program).facts(), &names, operation)
+                    .map(|result| result.expect("named entry decision"))
+                    .collect::<Vec<_>>()
+            });
+            assert_eq!(
+                sessions, 1,
+                "{definitions} entries opened {sessions} sessions"
+            );
 
-        let (one_by_one, per_entry_sessions) = sessions_during(|| {
-            names
-                .iter()
-                .map(|name| lower_named_tensor_entry_dag(&program, name))
-                .collect::<Vec<_>>()
-        });
-        assert_eq!(
-            per_entry_sessions, definitions as u64,
-            "negative control: a session per entry is counted"
-        );
-        assert!(batched.iter().all(Option::is_some), "every entry lowers");
-        assert_eq!(batched, one_by_one, "sharing the session changes no DAG");
-    }
+            let (one_by_one, per_entry_sessions) = sessions_during(|| {
+                names
+                    .iter()
+                    .map(|name| {
+                        lower_named_tensor_entry_dag((program).facts(), name, operation)
+                            .expect("named entry decision")
+                    })
+                    .collect::<Vec<_>>()
+            });
+            assert_eq!(
+                per_entry_sessions, definitions as u64,
+                "negative control: a session per entry is counted"
+            );
+            assert!(batched.iter().all(Option::is_some), "every entry lowers");
+            assert_eq!(batched, one_by_one, "sharing the session changes no DAG");
+        }
+    })
 }
 
 /// Disposition lock: the whole-program lowering opens one session however

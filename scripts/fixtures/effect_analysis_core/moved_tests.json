@@ -15,6 +15,7 @@
     "decode_once_producer_tests::effect_annotation_reaches_registered_expressions_and_preserves_data"
   ],
   "retired_tests": {
+    "chelis-cli::closed_vocabulary_architecture$added_effect_variant_will_force_every_semantic_consumer_to_decide": "Incidental source-token inventory for former IR ownership. Native resource admission and effect rejection tests remain.",
     "chelis-effects::chelis_effects$tests::declared_effect_reader_has_no_local_optional_carrier_adapter": "Main explicitly retires this source-wording test. All consumer-visible carrier behavior tests remain mandatory."
   }
 }

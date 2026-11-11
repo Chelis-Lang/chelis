@@ -16,7 +16,8 @@ use chelis_dag_core::dag::{Dag, RiscOp, TensorType};
 use chelis_dag_core::grad::grad_dag;
 use chelis_deep::ast::Expr;
 use chelis_e2e::pipeline::compile_surf;
-use chelis_ir::eval::{TensorValue, eval_scalar, eval_tensor, eval_tensor_roots_with_strict};
+use chelis_ir::eval::{eval_scalar, eval_tensor, eval_tensor_roots_with_strict};
+use chelis_ir_core::eval::TensorValue;
 
 // ---------------------------------------------------------------------------
 // Helpers

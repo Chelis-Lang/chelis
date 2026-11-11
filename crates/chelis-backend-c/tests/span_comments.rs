@@ -300,7 +300,7 @@ fn s4_c_oracle_richer_combinations_compile_and_grep() {
 // control characters are spec-illegal and the Deep parser rejects them.
 // Programmatic IR construction bypasses the parser, so the C backend
 // applies a defense-in-depth sanitizer
-// (`chelis_ir::span_sanitize::sanitize_for_comment`) before interpolating
+// (`chelis_ir_core::span_sanitize::sanitize_for_comment`) before interpolating
 // spans into `// span: <id>` line comments. These tests cover that fallback
 // directly: build a `DagNode` with a forbidden span_id and assert the
 // emitted C is comment-safe (no `\n` terminating the comment line) and

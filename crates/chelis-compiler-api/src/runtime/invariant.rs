@@ -774,123 +774,126 @@ fn revalidate_adt_value_inner(
     adt_fields: &UnordMap<String, Vec<String>>,
     module_constants: &UnordMap<String, Expr>,
 ) -> Result<(), InvariantViolation> {
-    let RuntimeValue::Adt { ctor, fields, .. } = value else {
-        // Non-ADT values carry no opaque invariant; structural decode has
-        // already vetted their shape. Recurse into containers so an opaque
-        // value nested in a tuple/list is still checked.
-        match value {
-            RuntimeValue::List(items) | RuntimeValue::Tuple(items) => {
-                for item in items {
-                    revalidate_adt_value(item, invariants, adt_fields, module_constants)?;
+    chelis_ir::resources::with_operation(|operation| {
+        let RuntimeValue::Adt { ctor, fields, .. } = value else {
+            // Non-ADT values carry no opaque invariant; structural decode has
+            // already vetted their shape. Recurse into containers so an opaque
+            // value nested in a tuple/list is still checked.
+            match value {
+                RuntimeValue::List(items) | RuntimeValue::Tuple(items) => {
+                    for item in items {
+                        revalidate_adt_value(item, invariants, adt_fields, module_constants)?;
+                    }
                 }
-            }
-            RuntimeValue::Dict(entries) => {
-                for (key, val) in entries {
-                    revalidate_adt_value(key, invariants, adt_fields, module_constants)?;
-                    revalidate_adt_value(val, invariants, adt_fields, module_constants)?;
+                RuntimeValue::Dict(entries) => {
+                    for (key, val) in entries {
+                        revalidate_adt_value(key, invariants, adt_fields, module_constants)?;
+                        revalidate_adt_value(val, invariants, adt_fields, module_constants)?;
+                    }
                 }
+                _ => {}
             }
-            _ => {}
+            return Ok(());
+        };
+
+        // Recurse into fields first so an inner opaque violation is reported
+        // before the outer predicate (inner-most failure is the precise cause).
+        for field in fields {
+            revalidate_adt_value(field, invariants, adt_fields, module_constants)?;
         }
-        return Ok(());
-    };
 
-    // Recurse into fields first so an inner opaque violation is reported
-    // before the outer predicate (inner-most failure is the precise cause).
-    for field in fields {
-        revalidate_adt_value(field, invariants, adt_fields, module_constants)?;
-    }
+        // Match the constructor's table entry:
+        // - absent  => no declared invariant; nothing to check (Ok).
+        // - Malformed => the deftype declared an invariant whose metadata is
+        //   malformed. The predicate cannot be evaluated, so the value cannot
+        //   be safely materialized: fail CLOSED (spec/10 §4.1). Dropping this
+        //   case (the old `continue`-skip in `collect_type_invariants`) made
+        //   the constructor look invariant-free and decoded the payload with
+        //   zero check -- a fail-OPEN. Reject before any representation walk.
+        // - Predicate => evaluate it (the everyday path).
+        let pred = match invariants.get(ctor) {
+            None => return Ok(()),
+            Some(InvariantEntry::Malformed { type_name }) => {
+                return Err(InvariantViolation::MalformedInvariant {
+                    type_name: type_name.clone(),
+                });
+            }
+            Some(InvariantEntry::Predicate(pred)) => pred,
+        };
 
-    // Match the constructor's table entry:
-    // - absent  => no declared invariant; nothing to check (Ok).
-    // - Malformed => the deftype declared an invariant whose metadata is
-    //   malformed. The predicate cannot be evaluated, so the value cannot
-    //   be safely materialized: fail CLOSED (spec/10 §4.1). Dropping this
-    //   case (the old `continue`-skip in `collect_type_invariants`) made
-    //   the constructor look invariant-free and decoded the payload with
-    //   zero check -- a fail-OPEN. Reject before any representation walk.
-    // - Predicate => evaluate it (the everyday path).
-    let pred = match invariants.get(ctor) {
-        None => return Ok(()),
-        Some(InvariantEntry::Malformed { type_name }) => {
-            return Err(InvariantViolation::MalformedInvariant {
-                type_name: type_name.clone(),
-            });
+        // (1) Representation sanity pre-check (RFC H1). Walk the WHOLE value
+        // (including nested record fields of this opaque type) and reject any
+        // non-finite numeric component before evaluating the predicate.
+        check_representation_finite(value, &pred.type_name, invariants, adt_fields, "")?;
+
+        // (2) Predicate evaluation through the interpreter's own eval_expr.
+        // In-module zero-argument constants (CR-3) are registered as
+        // top_level_defs so a predicate referencing e.g. a tolerance `eps`
+        // resolves it to its value instead of dying on "unknown runtime name".
+        let empty_tensors: UnordMap<String, RuntimeTensorValue> = UnordMap::new();
+        let mut ctx = EvalContext {
+            operation,
+            #[cfg(feature = "clarabel-provider")]
+            native_clarabel_solve: false,
+            bindings: Frame::new(),
+            result_producer: None,
+            binding_types: chelis_unord::PersistentMap::new(),
+            precision_bindings: UnordMap::new(),
+            declaration_values: UnordMap::new(),
+            named_axis_route_cache: UnordMap::new(),
+            named_axis_route_visiting: UnordSet::new(),
+            program: super::ProgramScope::new(module_constants.clone(), UnordMap::new()),
+            declared_signatures: UnordMap::new(),
+            adt_registry: chelis_checker_core::adt::AdtRegistry::default(),
+            adt_fields: adt_fields.clone(),
+            // A predicate returns a verdict; a value it builds is never rendered
+            // at an exit, so its constructors keep their checked names.
+            constructor_names: UnordMap::new(),
+            tensor_bindings: &empty_tensors,
+            session: None,
+            active_declaration_names: Vec::new(),
+            def_kernels: UnordMap::new(),
+            claim_patterns: Default::default(),
+            loop_compositions: Vec::new(),
+            transcript: Vec::new(),
+            transcript_capture: None,
+            resolving_top_levels: Vec::new(),
+            // Invariant predicates run inside an enclosing evaluation, so they
+            // honour whatever token that evaluation installed (chelis#914).
+            cancel: chelis_types::current_cancel_token(),
+            system: super::system::EvalSystemBoundary::deny_all(),
+            failure_kind: RuntimeFailureKind::Ordinary,
+            activation_extents: Default::default(),
+            last_uses: Default::default(),
+        };
+        ctx.bindings.insert(pred.binder.clone(), value.clone());
+
+        let invariant_text = render_invariant_body(pred);
+        match ctx.eval_expr(&pred.body) {
+            Ok(RuntimeValue::Bool(true)) => Ok(()),
+            Ok(RuntimeValue::Bool(false)) => Err(InvariantViolation::PredicateFalse {
+                type_name: pred.type_name.clone(),
+                invariant: invariant_text,
+                value: render_value_for_diagnostic(value),
+            }),
+            Ok(other) => Err(InvariantViolation::PredicateError {
+                type_name: pred.type_name.clone(),
+                invariant: invariant_text,
+                reason: format!("predicate did not evaluate to a boolean (got {other:?})"),
+            }),
+            // Cancellation is the enclosing evaluation's state, not a defect in
+            // this predicate: pass the sentinel through before the attributing
+            // arm below can claim it (chelis#914 review).
+            Err(reason) if chelis_types::is_cancellation(&reason) => {
+                Err(InvariantViolation::Cancelled { reason })
+            }
+            Err(reason) => Err(InvariantViolation::PredicateError {
+                type_name: pred.type_name.clone(),
+                invariant: invariant_text,
+                reason,
+            }),
         }
-        Some(InvariantEntry::Predicate(pred)) => pred,
-    };
-
-    // (1) Representation sanity pre-check (RFC H1). Walk the WHOLE value
-    // (including nested record fields of this opaque type) and reject any
-    // non-finite numeric component before evaluating the predicate.
-    check_representation_finite(value, &pred.type_name, invariants, adt_fields, "")?;
-
-    // (2) Predicate evaluation through the interpreter's own eval_expr.
-    // In-module zero-argument constants (CR-3) are registered as
-    // top_level_defs so a predicate referencing e.g. a tolerance `eps`
-    // resolves it to its value instead of dying on "unknown runtime name".
-    let empty_tensors: UnordMap<String, RuntimeTensorValue> = UnordMap::new();
-    let mut ctx = EvalContext {
-        #[cfg(feature = "clarabel-provider")]
-        native_clarabel_solve: false,
-        bindings: Frame::new(),
-        result_producer: None,
-        binding_types: chelis_unord::PersistentMap::new(),
-        precision_bindings: UnordMap::new(),
-        declaration_values: UnordMap::new(),
-        named_axis_route_cache: UnordMap::new(),
-        named_axis_route_visiting: UnordSet::new(),
-        program: super::ProgramScope::new(module_constants.clone(), UnordMap::new()),
-        declared_signatures: UnordMap::new(),
-        adt_registry: chelis_checker_core::adt::AdtRegistry::default(),
-        adt_fields: adt_fields.clone(),
-        // A predicate returns a verdict; a value it builds is never rendered
-        // at an exit, so its constructors keep their checked names.
-        constructor_names: UnordMap::new(),
-        tensor_bindings: &empty_tensors,
-        session: None,
-        active_declaration_names: Vec::new(),
-        def_kernels: UnordMap::new(),
-        claim_patterns: Default::default(),
-        loop_compositions: Vec::new(),
-        transcript: Vec::new(),
-        transcript_capture: None,
-        resolving_top_levels: Vec::new(),
-        // Invariant predicates run inside an enclosing evaluation, so they
-        // honour whatever token that evaluation installed (chelis#914).
-        cancel: chelis_types::current_cancel_token(),
-        system: super::system::EvalSystemBoundary::deny_all(),
-        failure_kind: RuntimeFailureKind::Ordinary,
-        activation_extents: Default::default(),
-        last_uses: Default::default(),
-    };
-    ctx.bindings.insert(pred.binder.clone(), value.clone());
-
-    let invariant_text = render_invariant_body(pred);
-    match ctx.eval_expr(&pred.body) {
-        Ok(RuntimeValue::Bool(true)) => Ok(()),
-        Ok(RuntimeValue::Bool(false)) => Err(InvariantViolation::PredicateFalse {
-            type_name: pred.type_name.clone(),
-            invariant: invariant_text,
-            value: render_value_for_diagnostic(value),
-        }),
-        Ok(other) => Err(InvariantViolation::PredicateError {
-            type_name: pred.type_name.clone(),
-            invariant: invariant_text,
-            reason: format!("predicate did not evaluate to a boolean (got {other:?})"),
-        }),
-        // Cancellation is the enclosing evaluation's state, not a defect in
-        // this predicate: pass the sentinel through before the attributing
-        // arm below can claim it (chelis#914 review).
-        Err(reason) if chelis_types::is_cancellation(&reason) => {
-            Err(InvariantViolation::Cancelled { reason })
-        }
-        Err(reason) => Err(InvariantViolation::PredicateError {
-            type_name: pred.type_name.clone(),
-            invariant: invariant_text,
-            reason,
-        }),
-    }
+    })
 }
 
 #[cfg(test)]

@@ -37,6 +37,21 @@ thread_local! {
     };
 }
 
+/// Borrow the native free-variable work counter for one operation.
+#[doc(hidden)]
+pub fn with_free_variable_walk_work<R>(
+    run: impl FnOnce(Option<&chelis_checker_core::linearity::FreeVariableWalkWork>) -> R,
+) -> R {
+    #[cfg(feature = "test-instrumentation")]
+    {
+        WALK_WORK.with(|work| run(Some(work)))
+    }
+    #[cfg(not(feature = "test-instrumentation"))]
+    {
+        run(None)
+    }
+}
+
 pub fn free_runtime_variables(expr: &Expr) -> Vec<String> {
     #[cfg(feature = "test-instrumentation")]
     {

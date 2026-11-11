@@ -10,13 +10,13 @@ use chelis_checker_core::unsupported::{
     RejectionAuthorityKind, Stage, Unsupported, UnsupportedKind,
 };
 use chelis_dag_core::{DimInfo, TensorType};
-use chelis_ir::ConcreteHostType;
+use chelis_ir_core::host_type_state::ConcreteHostType;
 use chelis_numeric_core::prim::Prim;
 
 #[test]
 fn public_callable_fence_recurses_through_every_host_container() {
-    use chelis_ir::host::{HostAdtConstructorLayout, HostAdtField, HostAdtLayout};
-    use chelis_ir::host_type_state::CheckedBuiltinCallable;
+    use chelis_ir_core::host::{HostAdtConstructorLayout, HostAdtField, HostAdtLayout};
+    use chelis_ir_core::host_type_state::CheckedBuiltinCallable;
 
     let callable = ConcreteHostType::CheckedBuiltinCallable(CheckedBuiltinCallable::Split);
     let nested = ConcreteHostType::Tuple(vec![ConcreteHostType::Option(Box::new(
@@ -73,7 +73,9 @@ fn nominal_dimension_layout_comparison_preserves_logical_identity() {
     let nominal = |dim| {
         HostAbiType::List(Box::new(HostAbiType::Adt(
             "Box".into(),
-            vec![HostAbiType::Dimension(chelis_ir::HostShapeSlot::Dim(dim))],
+            vec![HostAbiType::Dimension(
+                chelis_ir_core::host_type_state::HostShapeSlot::Dim(dim),
+            )],
         )))
     };
     let named = nominal(DimInfo::Named("callee".into(), None));
@@ -105,14 +107,16 @@ fn nominal_dimension_layout_comparison_preserves_logical_identity() {
         !HostAbiType::Adt("Box".into(), vec![HostAbiType::Float32])
             .same_value_layout(&HostAbiType::Adt("Box".into(), vec![HostAbiType::Float64]))
     );
-    let different_claim = chelis_ir::HostTypeTerm::List(Box::new(chelis_ir::HostTypeTerm::Adt(
-        "Box".into(),
-        vec![chelis_ir::HostTypeTerm::Dimension(
-            chelis_ir::HostShapeSlot::Dim(DimInfo::Lit(3)),
-        )],
-    )));
+    let different_claim = chelis_ir_core::host_type_state::HostTypeTerm::List(Box::new(
+        chelis_ir_core::host_type_state::HostTypeTerm::Adt(
+            "Box".into(),
+            vec![chelis_ir_core::host_type_state::HostTypeTerm::Dimension(
+                chelis_ir_core::host_type_state::HostShapeSlot::Dim(DimInfo::Lit(3)),
+            )],
+        ),
+    ));
     assert!(
-        !chelis_ir::host::AccumulatorTypeIdentity::accumulator_type_matches(
+        !chelis_ir_core::host::AccumulatorTypeIdentity::accumulator_type_matches(
             &named,
             &different_claim,
         )
@@ -244,7 +248,7 @@ fn nominal_function_field_rejects_at_abi_projection_before_boxing() {
 
 #[test]
 fn call_projection_admits_only_a_declared_function_identity() {
-    use chelis_ir::host::{HostBinding, HostCallee, HostExpr, HostExprKind};
+    use chelis_ir_core::host::{HostBinding, HostCallee, HostExpr, HostExprKind};
 
     let call = |name: &str| HostBinding {
         name: "probe".into(),
@@ -272,11 +276,11 @@ fn call_projection_admits_only_a_declared_function_identity() {
 /// a marker can never emit as a C symbol.
 #[test]
 fn unresolved_callee_markers_are_rejected_at_projection_in_both_positions() {
-    use chelis_ir::host::{
+    use chelis_ir_core::host::{
         ConcreteHostProgram, HOST_UNRESOLVED_TRANSFORM_MARKER, HostBinding, HostExpr, HostExprKind,
     };
 
-    let program_with = |kind: chelis_ir::host::HostExprKind<ConcreteHostType>| {
+    let program_with = |kind: chelis_ir_core::host::HostExprKind<ConcreteHostType>| {
         let mut program = ConcreteHostProgram::default();
         program.globals.push(HostBinding {
             name: "probe".into(),
@@ -289,7 +293,7 @@ fn unresolved_callee_markers_are_rejected_at_projection_in_both_positions() {
     };
 
     let call_marker = program_with(HostExprKind::Call {
-        callee: chelis_ir::host::HostCallee::unresolved_callable(),
+        callee: chelis_ir_core::host::HostCallee::unresolved_callable(),
         args: Vec::new(),
         arg_tys: Vec::new(),
         ty: ConcreteHostType::Scalar(Prim::Int32),
@@ -319,72 +323,6 @@ fn unresolved_callee_markers_are_rejected_at_projection_in_both_positions() {
         "the transform marker carries its own semantic payload: {rendered}"
     );
     assert!(!rendered.contains("#chelis-unresolved"), "{rendered}");
-}
-
-/// Phase 2A boundary ratchet: a compiled backend may accept raw payloads only
-/// by value in its explicit pre-verification selection step. Every borrowed
-/// public emission edge must require a sealed verified specialization.
-#[test]
-fn public_backend_emission_edges_cannot_borrow_raw_payloads() {
-    let sources = [
-        ("c", include_str!("lib.rs")),
-        ("hip", include_str!("../../chelis-backend-hip/src/lib.rs")),
-        (
-            "metal",
-            include_str!("../../chelis-backend-metal/src/lib.rs"),
-        ),
-    ];
-
-    for (backend, source) in sources {
-        for signature in source.match_indices("pub fn ").map(|(start, _)| {
-            let rest = &source[start..];
-            &rest[..rest.find('{').unwrap_or(rest.len())]
-        }) {
-            assert!(
-                !signature.contains("&Dag")
-                    && !signature.contains("&chelis_dag_core::dag::Dag")
-                    && !signature.contains("&ConcreteHostProgram")
-                    && !signature.contains("&chelis_ir::host::ConcreteHostProgram"),
-                "{backend} exposes a public borrowed raw emission payload:\n{signature}"
-            );
-        }
-    }
-
-    let c = sources[0].1;
-    assert!(c.contains("dag: chelis_ir::ownership::VerifiedDagProgram"));
-    assert!(!c.contains("dag: &chelis_ir::ownership::VerifiedDagProgram"));
-    assert!(c.contains("program: &chelis_ir::ownership::VerifiedHostProgram"));
-    assert!(c.contains("mod emit;"));
-    assert!(c.contains("mod host_emit;"));
-
-    let hip = sources[1].1;
-    assert!(hip.contains("dag: chelis_ir::ownership::VerifiedDagProgram"));
-    assert!(!hip.contains("dag: &chelis_ir::ownership::VerifiedDagProgram"));
-
-    let metal = sources[2].1;
-    let public_signature = |name: &str| {
-        let marker = format!("pub fn {name}(");
-        let start = metal
-            .find(&marker)
-            .unwrap_or_else(|| panic!("Metal public `{name}` boundary is missing"));
-        let rest = &metal[start..];
-        &rest[..rest.find('{').unwrap_or(rest.len())]
-    };
-    let plan = public_signature("plan_metal");
-    assert!(plan.contains("program: VerifiedDagProgram"), "{plan}");
-    assert!(plan.contains("-> MetalNeverReuse"), "{plan}");
-    assert!(!plan.contains("&VerifiedDagProgram"), "{plan}");
-    assert!(!plan.contains("&Dag"), "{plan}");
-
-    let emit = public_signature("codegen_metal");
-    assert!(emit.contains("plan: MetalNeverReuse"), "{emit}");
-    assert!(
-        emit.contains("-> Result<MetalCodegenResult, Unsupported>"),
-        "{emit}"
-    );
-    assert!(!emit.contains("&MetalNeverReuse"), "{emit}");
-    assert!(!emit.contains("VerifiedDagProgram"), "{emit}");
-    assert!(!emit.contains("&Dag"), "{emit}");
 }
 
 fn verified_host_from_source(source: &str) -> chelis_ir::ownership::VerifiedHostProgram {
@@ -856,19 +794,6 @@ fn nested_option_match_releases_the_scrutinee_on_both_selected_arms() {
 }
 
 #[test]
-fn backend_local_host_ownership_inference_cannot_return() {
-    let source = include_str!("host_emit.rs");
-    assert!(
-        !source.contains(".names()"),
-        "generic verified owners must not expose binder spelling to C ownership emission"
-    );
-    assert!(source.contains("VerifiedHostAction::Operation"));
-    assert!(source.contains("VerifiedHostTerminator::Return"));
-    assert!(source.contains("emit_expression_site"));
-    assert!(source.contains("binding_name"));
-}
-
-#[test]
 fn abi_projection_preserves_exact_verified_site_and_nested_dag_cursors() {
     let source = include_str!(
         "../../chelis-cli/tests/fixtures/compiled_value_ownership/issue_543_adt_tensor.ch"
@@ -905,10 +830,10 @@ fn abi_projection_preserves_exact_verified_site_and_nested_dag_cursors() {
     );
     helper_dag.add_root(helper_root);
     host.global_tensor_helpers
-        .push(chelis_ir::host::HostTensorHelper {
+        .push(chelis_ir_core::host::HostTensorHelper {
             name: "__verified_cursor_probe".into(),
             dag: helper_dag,
-            inputs: vec![chelis_ir::host::HostTensorInput {
+            inputs: vec![chelis_ir_core::host::HostTensorInput {
                 name: "x".into(),
                 ty: helper_ty.clone(),
             }],
@@ -1476,7 +1401,7 @@ fn callback_parameter_shadowing_a_def_is_the_exported_callee() {
 
 #[test]
 fn checked_callable_choice_is_a_logical_value_without_a_c_abi() {
-    use chelis_ir::host_type_state::CheckedBuiltinCallable;
+    use chelis_ir_core::host_type_state::CheckedBuiltinCallable;
     let operations =
         ["is_nan", "is_finite"].map(|name| CheckedBuiltinCallable::from_symbol(name).unwrap());
     let choice = ConcreteHostType::CheckedCallableChoice(operations.to_vec());

@@ -31,7 +31,8 @@ use chelis_unord::UnordMap;
 
 use chelis_dag_core::dag::{Dag, DimInfo, RiscOp, TensorType};
 use chelis_dag_core::grad::grad_dag_checked;
-use chelis_ir::eval::{TensorValue, eval_tensor_with};
+use chelis_ir::eval::eval_tensor_with;
+use chelis_ir_core::eval::TensorValue;
 use chelis_numeric_core::prim::Prim;
 
 fn t(dims: Vec<usize>) -> TensorType {

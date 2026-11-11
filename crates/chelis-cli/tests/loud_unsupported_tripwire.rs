@@ -188,6 +188,7 @@ impl Pat {
         const ALL_CRATE_SRC: &[&str] = &["crates/"];
         const LOWERING_AND_EMISSION: &[&str] = &[
             "crates/chelis-ir/src/",
+            "crates/chelis-ir-core/src/",
             "crates/chelis-dag-core/src/",
             MOVED_GRAD_HOST_SOURCE,
             "crates/chelis-backend-c/src/",
@@ -196,6 +197,7 @@ impl Pat {
         ];
         const LOWERING_EMISSION_AND_RUNTIME_PACKING: &[&str] = &[
             "crates/chelis-ir/src/",
+            "crates/chelis-ir-core/src/",
             "crates/chelis-dag-core/src/",
             MOVED_GRAD_HOST_SOURCE,
             "crates/chelis-backend-c/src/",
@@ -381,15 +383,20 @@ const BASELINE: &[Entry] = &[
     // converted at Phase 1 (both print arms and the to_string catch-all
     // are Err(Unsupported)) ---------------------------------------------
     // -- unwrap-or-default --------------------------------------------------
-    // The accepted lower.rs cohort splits into four host sites and one
-    // portable ownership site. The total allowance remains five.
+    // The Result cutover removes two panic-payload defaults from tests.
+    // Two portable IR sites and one DAG ownership site remain.
     (
         Pat::UnwrapOrDefault,
-        "crates/chelis-ir/src/lower.rs",
-        4,
+        "crates/chelis-ir-core/src/lower.rs",
+        2,
         "census row 8's two reduce_window extraction uses converted at \
-         Phase 1 (chelis#725); the remaining 5 pre-existing non-censused \
-         uses stay frozen at the P0 baseline for the Phase 2 lint audit",
+         Phase 1 (chelis#725); the portable graph extraction moved one \
+         site to ownership.rs. The Result cutover (chelis#4120) removes \
+         two panic-payload extraction defaults from \
+         extract_rank_var_bindings_rejects_out_of_range_position and \
+         extract_rank_var_bindings_ambiguous_reorder_fails_loud. Both \
+         tests retain their diagnostic assertions. The remaining two \
+         non-censused sites stay frozen for the Phase 2 lint audit",
     ),
     (
         Pat::UnwrapOrDefault,
@@ -401,7 +408,7 @@ const BASELINE: &[Entry] = &[
     ),
     (
         Pat::UnwrapOrDefault,
-        "crates/chelis-ir/src/host.rs",
+        "crates/chelis-ir-core/src/host.rs",
         4,
         "one effect-kind extraction fallback removed by the Phase 2 typed \
          decoder and one generic-ADT substitution default removed by the \
@@ -414,7 +421,7 @@ const BASELINE: &[Entry] = &[
     ),
     (
         Pat::UnwrapOrDefault,
-        "crates/chelis-ir/src/eval.rs",
+        "crates/chelis-ir-core/src/eval.rs",
         3,
         "pre-existing at the P0 baseline; not censused as substituting",
     ),
@@ -456,7 +463,7 @@ const BASELINE: &[Entry] = &[
     // index sites chelis#782 flagged were CONVERTED, not baselined) -----
     (
         Pat::UnwrapOrNumericLiteral,
-        "crates/chelis-ir/src/lower.rs",
+        "crates/chelis-ir-core/src/lower.rs",
         8,
         "structural at the P1 baseline: recursion-depth counter and \
          desync-guarded rank/extent reads. The uniform-ConstTensor \
@@ -489,7 +496,7 @@ const BASELINE: &[Entry] = &[
     ),
     (
         Pat::UnwrapOrNumericLiteral,
-        "crates/chelis-ir/src/eval.rs",
+        "crates/chelis-ir-core/src/eval.rs",
         2,
         "P1-frozen (shrink extent reads); Phase 2 lint audits them",
     ),
@@ -650,7 +657,7 @@ const BASELINE: &[Entry] = &[
     ),
     (
         Pat::RustFormatNarrowing,
-        "crates/chelis-ir/src/lower.rs",
+        "crates/chelis-ir/src/resources.rs",
         2,
         "lowering-phase timing eprintln ({:>8.4}s) - duration displays, \
          not stored-value exits",
@@ -1302,6 +1309,7 @@ fn pattern_ids_are_unique() {
 fn tripwire_covers_portable_graph_and_exact_moved_host_sources() {
     for rel in [
         "crates/chelis-dag-core/src/planted.rs",
+        "crates/chelis-ir-core/src/planted.rs",
         MOVED_GRAD_HOST_SOURCE,
     ] {
         for pat in [

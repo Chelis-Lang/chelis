@@ -7,7 +7,8 @@ use chelis_dag_core::dag::{
 use chelis_dag_core::fuse::fuse;
 use chelis_dag_core::grad::{AdError, AdRejectionReason, grad_dag_checked};
 use chelis_dag_core::{tier2, verify};
-use chelis_ir::eval::{TensorValue, eval_tensor};
+use chelis_ir::eval::eval_tensor;
+use chelis_ir_core::eval::TensorValue;
 use chelis_numeric_core::dtype_semantics::{RawTensor, finalize_tensor};
 use chelis_numeric_core::prim::Prim;
 use chelis_unord::UnordMap;
@@ -1907,8 +1908,8 @@ fn comparison_logical_and_where_are_fusion_barriers_and_vmap_shape_preserving() 
             .all(|node| !matches!(node.op, RiscOp::FusedElem { .. }))
     );
 
-    let vmapped =
-        chelis_ir::vmap::vectorize_axis0(&dag, DimInfo::Lit(3)).expect("vmap typed predicates");
+    let vmapped = chelis_ir_core::vmap::vectorize_axis0(&dag, DimInfo::Lit(3))
+        .expect("vmap typed predicates");
     for node in vmapped.nodes().iter().filter(|node| {
         matches!(
             node.op,

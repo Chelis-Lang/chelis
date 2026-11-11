@@ -15,8 +15,9 @@ use chelis_dag_core::dag::{
 };
 use chelis_dag_core::grad::grad_dag_checked;
 use chelis_dag_core::verify::verify;
-use chelis_ir::eval::{TensorValue, eval_tensor_roots_exact};
-use chelis_ir::vmap::vectorize_axis0;
+use chelis_ir::eval::eval_tensor_roots_exact;
+use chelis_ir_core::eval::TensorValue;
+use chelis_ir_core::vmap::vectorize_axis0;
 use chelis_numeric_core::dtype_semantics::{RandomKey, scalar_from_i64};
 use chelis_numeric_core::dtype_semantics::{
     RawTensor, StorageView, TensorStorage, finalize_tensor,

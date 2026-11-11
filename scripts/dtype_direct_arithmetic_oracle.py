@@ -251,7 +251,7 @@ def source_contracts() -> tuple[SourceContract, ...]:
         ),
         SourceContract(
             "current lowering direct arithmetic grouping",
-            "crates/chelis-ir/src/lower.rs",
+            "crates/chelis-ir-core/src/lower.rs",
             (
                 '"max_elem" | "min_elem" if args.len() == 2 => {',
                 "let node = tier2::lower_extrema(",

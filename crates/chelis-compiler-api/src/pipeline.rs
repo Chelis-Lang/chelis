@@ -62,7 +62,7 @@
 use std::fmt;
 
 use chelis_deep::Expr as DeepExpr;
-use chelis_ir::lower::LowerDiagnostic;
+use chelis_ir_core::lower::LowerDiagnostic;
 use chelis_pipeline_core::CoreLowerError;
 use chelis_types::{FitnessReport, TypeAnalysisOutcome};
 
@@ -503,7 +503,7 @@ pub fn lower_checked_for_c_execution(
 ) -> Result<
     (
         LoweredCompilation,
-        Option<chelis_ir::host::ConcreteHostProgram>,
+        Option<chelis_ir_core::host::ConcreteHostProgram>,
         Option<chelis_ir::host::HostExecutionPlan>,
     ),
     PipelineRejection,
@@ -524,7 +524,7 @@ pub(crate) fn lower_checked_for_c_execution_with_trace(
 ) -> Result<
     (
         LoweredCompilation,
-        Option<chelis_ir::host::ConcreteHostProgram>,
+        Option<chelis_ir_core::host::ConcreteHostProgram>,
         Option<chelis_ir::host::HostExecutionPlan>,
     ),
     PipelineRejection,

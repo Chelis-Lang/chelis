@@ -48,11 +48,12 @@
 //! summarized callsite, this section flags it before any downstream
 //! consumer trusts the structured surface.
 
-use chelis_ir::host::{
+use chelis_ir::host::try_lower_compiled_program;
+use chelis_ir_core::host::{
     HostFunctionSpecialization, SparseOpKind, SummaryRejection, SummaryRejectionClass,
-    SummaryRejectionDetail, host_program_summary_rejections, try_lower_compiled_program,
+    SummaryRejectionDetail, host_program_summary_rejections,
 };
-use chelis_ir::{PayloadRole, WildcardLocation};
+use chelis_ir_core::host::{PayloadRole, WildcardLocation};
 use chelis_numeric_core::prim::Prim;
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str;

@@ -20,6 +20,14 @@ use chelis_numeric_core::prim::Prim;
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
+/// One structural step from a root value to its observed leaf.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub enum RootPathStep {
+    Tuple(usize),
+    Adt(usize),
+}
+
 /// A unique identifier for a type variable.
 ///
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]

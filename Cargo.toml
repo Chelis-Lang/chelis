@@ -14,6 +14,7 @@ members = [
     "crates/chelis-effects-core",
     "crates/chelis-checker-core",
     "crates/chelis-dag-core",
+    "crates/chelis-ir-core",
     "crates/chelis-certificate-core",
     "crates/chelis-prove",
     "crates/chelis-runtime",
@@ -79,6 +80,7 @@ chelis-type-core = { path = "crates/chelis-type-core", default-features = false 
 chelis-effects-core = { path = "crates/chelis-effects-core", default-features = false }
 chelis-checker-core = { path = "crates/chelis-checker-core", default-features = false }
 chelis-dag-core = { path = "crates/chelis-dag-core", default-features = false }
+chelis-ir-core = { path = "crates/chelis-ir-core", default-features = false }
 chelis-certificate-core = { path = "crates/chelis-certificate-core", default-features = false }
 chelis-image-id = { path = "crates/chelis-image-id" }
 chelis-deep = { path = "crates/chelis-deep" }

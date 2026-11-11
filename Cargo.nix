@@ -233,6 +233,16 @@ rec {
       # File a bug if you depend on any for non-debug work!
       debug = internal.debugCrate { inherit packageId; };
     };
+    "chelis-ir-core" = rec {
+      packageId = "chelis-ir-core";
+      build = internal.buildRustCrateWithFeatures {
+        packageId = "chelis-ir-core";
+      };
+
+      # Debug support which might change between releases.
+      # File a bug if you depend on any for non-debug work!
+      debug = internal.debugCrate { inherit packageId; };
+    };
     "chelis-lint" = rec {
       packageId = "chelis-lint";
       build = internal.buildRustCrateWithFeatures {
@@ -1817,10 +1827,20 @@ rec {
             packageId = "chelis-ir";
           }
           {
+            name = "chelis-ir-core";
+            packageId = "chelis-ir-core";
+            usesDefaultFeatures = false;
+          }
+          {
             name = "chelis-numeric-core";
             packageId = "chelis-numeric-core";
             usesDefaultFeatures = false;
             features = [ "alloc" "serde" ];
+          }
+          {
+            name = "chelis-type-core";
+            packageId = "chelis-type-core";
+            usesDefaultFeatures = false;
           }
           {
             name = "chelis-types";
@@ -1911,6 +1931,11 @@ rec {
             packageId = "chelis-ir";
           }
           {
+            name = "chelis-ir-core";
+            packageId = "chelis-ir-core";
+            usesDefaultFeatures = false;
+          }
+          {
             name = "chelis-numeric-core";
             packageId = "chelis-numeric-core";
             usesDefaultFeatures = false;
@@ -1986,6 +2011,11 @@ rec {
           {
             name = "chelis-ir";
             packageId = "chelis-ir";
+          }
+          {
+            name = "chelis-ir-core";
+            packageId = "chelis-ir-core";
+            usesDefaultFeatures = false;
           }
           {
             name = "chelis-numeric-core";
@@ -2294,6 +2324,11 @@ rec {
             packageId = "chelis-ir";
           }
           {
+            name = "chelis-ir-core";
+            packageId = "chelis-ir-core";
+            usesDefaultFeatures = false;
+          }
+          {
             name = "chelis-lint";
             packageId = "chelis-lint";
           }
@@ -2571,6 +2606,11 @@ rec {
             packageId = "chelis-ir";
           }
           {
+            name = "chelis-ir-core";
+            packageId = "chelis-ir-core";
+            usesDefaultFeatures = false;
+          }
+          {
             name = "chelis-macros";
             packageId = "chelis-macros";
           }
@@ -2706,7 +2746,7 @@ rec {
         ];
         features = {
           "clarabel-provider" = [ "dep:chelis-clarabel-provider" "dep:chelis-runtime-bundle" "chelis-runtime-bundle/clarabel-provider" ];
-          "compilation-trace" = [ "emission-observer" "chelis-ir/lowering-trace" "chelis-pipeline-core/lowering-trace" ];
+          "compilation-trace" = [ "emission-observer" "chelis-ir/lowering-trace" "chelis-ir-core/lowering-trace" "chelis-pipeline-core/lowering-trace" ];
           "ownership-ledger" = [ "chelis-runtime/ownership-ledger" ];
         };
         resolvedDefaultFeatures = [ "clarabel-provider" ];
@@ -3012,6 +3052,11 @@ rec {
             packageId = "chelis-ir";
           }
           {
+            name = "chelis-ir-core";
+            packageId = "chelis-ir-core";
+            usesDefaultFeatures = false;
+          }
+          {
             name = "chelis-macros";
             packageId = "chelis-macros";
           }
@@ -3187,7 +3232,7 @@ rec {
         features = {
           "serde" = [ "chelis-type-core/serde" "chelis-unord/serde" ];
         };
-        resolvedDefaultFeatures = [ "test-instrumentation" ];
+        resolvedDefaultFeatures = [ "serde" "test-instrumentation" ];
       };
       "chelis-image-id" = rec {
         crateName = "chelis-image-id";
@@ -3249,10 +3294,20 @@ rec {
             packageId = "chelis-effects";
           }
           {
+            name = "chelis-ir-core";
+            packageId = "chelis-ir-core";
+            usesDefaultFeatures = false;
+            features = [ "serde" ];
+          }
+          {
             name = "chelis-numeric-core";
             packageId = "chelis-numeric-core";
             usesDefaultFeatures = false;
             features = [ "alloc" "serde" ];
+          }
+          {
+            name = "chelis-stack-services";
+            packageId = "chelis-stack-services";
           }
           {
             name = "chelis-syntax-host";
@@ -3278,17 +3333,14 @@ rec {
             usesDefaultFeatures = false;
           }
           {
-            name = "num-bigint";
-            packageId = "num-bigint";
+            name = "critical-section";
+            packageId = "critical-section";
+            features = [ "std" ];
           }
           {
             name = "serde";
             packageId = "serde";
             features = [ "derive" "rc" ];
-          }
-          {
-            name = "stacker";
-            packageId = "stacker";
           }
           {
             name = "thiserror";
@@ -3299,6 +3351,12 @@ rec {
           {
             name = "bincode";
             packageId = "bincode";
+          }
+          {
+            name = "chelis-ir-core";
+            packageId = "chelis-ir-core";
+            usesDefaultFeatures = false;
+            features = [ "serde" "test-instrumentation" ];
           }
           {
             name = "chelis-macros";
@@ -3324,7 +3382,151 @@ rec {
           }
         ];
         features = {
+          "lowering-trace" = [ "chelis-ir-core/lowering-trace" ];
         };
+      };
+      "chelis-ir-core" = rec {
+        crateName = "chelis-ir-core";
+        version = "0.23.1";
+        edition = "2024";
+        src = lib.cleanSourceWith { filter = sourceFilter;  src = ./crates/chelis-ir-core; };
+        libName = "chelis_ir_core";
+        dependencies = [
+          {
+            name = "chelis-abi";
+            packageId = "chelis-abi";
+            usesDefaultFeatures = false;
+          }
+          {
+            name = "chelis-checker-core";
+            packageId = "chelis-checker-core";
+            usesDefaultFeatures = false;
+          }
+          {
+            name = "chelis-dag-core";
+            packageId = "chelis-dag-core";
+            usesDefaultFeatures = false;
+          }
+          {
+            name = "chelis-deep";
+            packageId = "chelis-deep";
+            usesDefaultFeatures = false;
+          }
+          {
+            name = "chelis-effects-core";
+            packageId = "chelis-effects-core";
+            usesDefaultFeatures = false;
+          }
+          {
+            name = "chelis-numeric-core";
+            packageId = "chelis-numeric-core";
+            usesDefaultFeatures = false;
+            features = [ "alloc" ];
+          }
+          {
+            name = "chelis-pred";
+            packageId = "chelis-pred";
+            usesDefaultFeatures = false;
+          }
+          {
+            name = "chelis-stack-services";
+            packageId = "chelis-stack-services";
+            usesDefaultFeatures = false;
+          }
+          {
+            name = "chelis-type-core";
+            packageId = "chelis-type-core";
+            usesDefaultFeatures = false;
+          }
+          {
+            name = "chelis-unord";
+            packageId = "chelis-unord";
+            usesDefaultFeatures = false;
+          }
+          {
+            name = "chelis-vocab";
+            packageId = "chelis-vocab";
+            usesDefaultFeatures = false;
+          }
+          {
+            name = "num-bigint";
+            packageId = "num-bigint";
+            usesDefaultFeatures = false;
+          }
+          {
+            name = "once_cell";
+            packageId = "once_cell";
+            usesDefaultFeatures = false;
+            features = [ "alloc" "critical-section" ];
+          }
+          {
+            name = "portable-atomic";
+            packageId = "portable-atomic";
+            usesDefaultFeatures = false;
+            features = [ "fallback" "critical-section" ];
+          }
+          {
+            name = "serde";
+            packageId = "serde";
+            optional = true;
+            usesDefaultFeatures = false;
+            features = [ "alloc" "derive" "rc" ];
+          }
+          {
+            name = "thiserror";
+            packageId = "thiserror 2.0.18";
+            usesDefaultFeatures = false;
+          }
+        ];
+        devDependencies = [
+          {
+            name = "bincode";
+            packageId = "bincode";
+          }
+          {
+            name = "chelis-effects";
+            packageId = "chelis-effects";
+          }
+          {
+            name = "chelis-ir";
+            packageId = "chelis-ir";
+          }
+          {
+            name = "chelis-macros";
+            packageId = "chelis-macros";
+          }
+          {
+            name = "chelis-surf";
+            packageId = "chelis-surf";
+          }
+          {
+            name = "chelis-syntax-host";
+            packageId = "chelis-syntax-host";
+          }
+          {
+            name = "chelis-types";
+            packageId = "chelis-types";
+            features = [ "test-instrumentation" ];
+          }
+          {
+            name = "critical-section";
+            packageId = "critical-section";
+            features = [ "std" ];
+          }
+          {
+            name = "serde_json";
+            packageId = "serde_json";
+          }
+          {
+            name = "syn";
+            packageId = "syn 2.0.117";
+            features = [ "full" "visit" "extra-traits" ];
+          }
+        ];
+        features = {
+          "serde" = [ "dep:serde" "chelis-checker-core/serde" "chelis-type-core/serde" "chelis-numeric-core/serde" "chelis-effects-core/serde" "chelis-unord/serde" ];
+        };
+        resolvedDefaultFeatures = [ "serde" "test-instrumentation" ];
       };
       "chelis-lint" = rec {
         crateName = "chelis-lint";
@@ -3584,6 +3786,11 @@ rec {
             packageId = "chelis-ir";
           }
           {
+            name = "chelis-ir-core";
+            packageId = "chelis-ir-core";
+            usesDefaultFeatures = false;
+          }
+          {
             name = "chelis-types";
             packageId = "chelis-types";
           }
@@ -3604,7 +3811,7 @@ rec {
           }
         ];
         features = {
-          "lowering-trace" = [ "chelis-ir/lowering-trace" ];
+          "lowering-trace" = [ "chelis-ir/lowering-trace" "chelis-ir-core/lowering-trace" ];
         };
       };
       "chelis-pred" = rec {
@@ -5412,6 +5619,17 @@ rec {
           "default" = [ "std" ];
         };
         resolvedDefaultFeatures = [ "default" "std" ];
+      };
+      "critical-section" = rec {
+        crateName = "critical-section";
+        version = "1.2.0";
+        edition = "2018";
+        sha256 = "02ylhcykxjc40xrfhk1lwc21jqgz4dbwv3jr49ymw733c51yl3kr";
+        libName = "critical_section";
+        features = {
+          "std" = [ "restore-state-bool" ];
+        };
+        resolvedDefaultFeatures = [ "restore-state-bool" "std" ];
       };
       "crossbeam-deque" = rec {
         crateName = "crossbeam-deque";
@@ -9498,6 +9716,26 @@ rec {
         authors = [
           "Aleksey Kladov <aleksey.kladov@gmail.com>"
         ];
+        dependencies = [
+          {
+            name = "critical-section";
+            packageId = "critical-section";
+            optional = true;
+          }
+          {
+            name = "portable-atomic";
+            packageId = "portable-atomic";
+            optional = true;
+            usesDefaultFeatures = false;
+          }
+        ];
+        devDependencies = [
+          {
+            name = "critical-section";
+            packageId = "critical-section";
+            features = [ "std" ];
+          }
+        ];
         features = {
           "alloc" = [ "race" ];
           "atomic-polyfill" = [ "critical-section" ];
@@ -9507,7 +9745,7 @@ rec {
           "portable-atomic" = [ "dep:portable-atomic" ];
           "std" = [ "alloc" ];
         };
-        resolvedDefaultFeatures = [ "alloc" "default" "race" "std" ];
+        resolvedDefaultFeatures = [ "alloc" "critical-section" "default" "portable-atomic" "race" "std" ];
       };
       "once_cell_polyfill" = rec {
         crateName = "once_cell_polyfill";
@@ -9826,12 +10064,19 @@ rec {
         edition = "2018";
         sha256 = "0j8vlar3n5acyigq8q6f4wjx3k3s5yz0rlpqrv76j73gi5qr8fn3";
         libName = "portable_atomic";
+        dependencies = [
+          {
+            name = "critical-section";
+            packageId = "critical-section";
+            optional = true;
+          }
+        ];
         features = {
           "critical-section" = [ "dep:critical-section" ];
           "default" = [ "fallback" ];
           "serde" = [ "dep:serde" ];
         };
-        resolvedDefaultFeatures = [ "default" "fallback" "require-cas" "std" ];
+        resolvedDefaultFeatures = [ "critical-section" "default" "fallback" "require-cas" "std" ];
       };
       "postcard" = rec {
         crateName = "postcard";

@@ -168,10 +168,10 @@ fn the_detector_rejects_a_name_set_copied_per_definition() {
 
 /// Declarations examined to find a body's owner while host lowering `program`.
 fn declaration_visits(program: &CheckedProgram) -> u64 {
-    let before = chelis_ir::lower::declaration_body_visits();
+    let before = chelis_ir::resources::declaration_body_visits();
     let lowered = chelis_ir::host::try_lower_compiled_program(program).expect("the probe lowers");
     drop(lowered);
-    chelis_ir::lower::declaration_body_visits() - before
+    chelis_ir::resources::declaration_body_visits() - before
 }
 
 #[test]

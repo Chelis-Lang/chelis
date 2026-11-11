@@ -4,8 +4,8 @@ use chelis_unord::UnordMap;
 use chelis_dag_core::dag::{Dag, DimInfo, NodeId, TensorType};
 use chelis_deep::Span;
 use chelis_deep::ast::{Expr, Metadata};
-use chelis_ir::eval::{TensorInputDemand, TensorValue as IrTensorValue};
-use chelis_ir::lower::type_expr_has_rank_var;
+use chelis_ir_core::eval::{TensorInputDemand, TensorValue as IrTensorValue};
+use chelis_ir_core::lower::type_expr_has_rank_var;
 use chelis_numeric_core::prim::Prim;
 
 use super::transforms::*;
@@ -323,20 +323,26 @@ impl<'a> EvalContext<'a> {
                     .to_string(),
             )
         })?;
-        let lowering_context = self
-            .program
-            .routing_lowering_context(checked.program(), &self.declared_signatures);
-        let dag = chelis_ir::lower::try_lower_subexpr_program_with_context(
-            routed_expr,
-            scoped_types,
-            &lowering_context,
-        )
-        .map_err(|diagnostic| {
-            NamedAxisRouteError::NotLowerable(format!(
-                "host runtime could not lower the named-axis `{context_label}` call for \
+        let lowering_context = self.program.routing_lowering_context(
+            checked.program(),
+            &self.declared_signatures,
+            self.operation,
+        );
+        let dag = lowering_context
+            .and_then(|lowering_context| {
+                chelis_ir_core::lower::try_lower_subexpr_program_with_context(
+                    routed_expr,
+                    scoped_types,
+                    &lowering_context,
+                    self.operation,
+                )
+            })
+            .map_err(|diagnostic| {
+                NamedAxisRouteError::NotLowerable(format!(
+                    "host runtime could not lower the named-axis `{context_label}` call for \
                  evaluation (chelis#338): {diagnostic}"
-            ))
-        })?;
+                ))
+            })?;
         let roots: Vec<NodeId> = dag.roots().to_vec();
         if roots.is_empty() {
             return Err(NamedAxisRouteError::Fatal(format!(
@@ -349,7 +355,7 @@ impl<'a> EvalContext<'a> {
                 .inspect_err(|_| provider_failed = true)
         };
         let prepared =
-            chelis_ir::eval::prepare_tensor_roots_inputs_with_demand(&dag, &roots, prepare)
+            chelis_ir_core::eval::prepare_tensor_roots_inputs_with_demand(&dag, &roots, prepare)
                 .map_err(|err| {
                     if provider_failed || super::transforms::is_numeric_trap_failure(&err) {
                         NamedAxisRouteError::Fatal(err)

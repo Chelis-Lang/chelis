@@ -1,7 +1,8 @@
 //! [04] section 4.7: independently observed extents precede shape refinement.
 use chelis_dag_core::dag::{Dag, DimInfo, NodeId, RiscOp, RtAxis, TensorType};
 use chelis_dag_core::optimize::{common_subexpr_eliminate, constant_fold, dead_code_eliminate};
-use chelis_ir::eval::{TensorValue, eval_tensor_with};
+use chelis_ir::eval::eval_tensor_with;
+use chelis_ir_core::eval::TensorValue;
 use chelis_numeric_core::dtype_semantics::scalar_from_i64;
 use chelis_numeric_core::prim::Prim;
 
@@ -214,14 +215,14 @@ fn result_claim_witnesses_survive_rebuilds_without_joining_same_labels() {
         declared_producer(&mut dag, decl, "right", actual);
         let mut folded = dag.clone();
         constant_fold(&mut folded);
-        let mapped = chelis_ir::vmap::vectorize_axis0(&dag, DimInfo::Lit(2)).unwrap();
+        let mapped = chelis_ir_core::vmap::vectorize_axis0(&dag, DimInfo::Lit(2)).unwrap();
         for (rebuilt, batched) in [
             (dag.clone(), false),
             (common_subexpr_eliminate(&dag), false),
             (dead_code_eliminate(&dag), false),
             (folded, false),
             (
-                chelis_ir::specialize::specialize_for_exact_arithmetic(&dag),
+                chelis_ir_core::specialize::specialize_for_exact_arithmetic(&dag),
                 false,
             ),
             (mapped, true),
@@ -650,7 +651,7 @@ fn vectorization_transports_checked_shapes_and_shifts_observed_axes() {
         let decl = dag.declare("test");
         let (_, _, checked) = unit_axis(&mut dag, decl);
         dag.add_root(checked);
-        let mapped = chelis_ir::vmap::vectorize_axis0(&dag, DimInfo::Lit(2)).unwrap();
+        let mapped = chelis_ir_core::vmap::vectorize_axis0(&dag, DimInfo::Lit(2)).unwrap();
         assert!(chelis_dag_core::verify::verify(&mapped).is_empty());
         let result = eval_tensor_with(&mapped, |_| {
             Some(TensorValue::from_vec(
@@ -669,7 +670,7 @@ fn vectorization_transports_checked_shapes_and_shifts_observed_axes() {
     }
     for actual in [4, 6] {
         let (dag, _, _) = computed_reshape();
-        let mapped = chelis_ir::vmap::vectorize_axis0(&dag, DimInfo::Lit(2)).unwrap();
+        let mapped = chelis_ir_core::vmap::vectorize_axis0(&dag, DimInfo::Lit(2)).unwrap();
         assert!(chelis_dag_core::verify::verify(&mapped).is_empty());
         let result = eval_tensor_with(&mapped, |_| {
             Some(TensorValue::from_vec(
@@ -710,7 +711,7 @@ fn concat_extent_owner_survives_vmap_and_grad_as_an_original_scalar_check() {
     };
     *owner = ExtentCheckOwner::Concat;
     node.span_id = Some("concat-call".into());
-    let mapped = chelis_ir::vmap::vectorize_axis0(&dag, DimInfo::Lit(2)).unwrap();
+    let mapped = chelis_ir_core::vmap::vectorize_axis0(&dag, DimInfo::Lit(2)).unwrap();
     assert!(chelis_dag_core::verify::verify(&mapped).is_empty());
     let mapped_check = mapped
         .nodes()
@@ -805,7 +806,7 @@ fn vectorization_keeps_local_unit_failure_at_the_observed_node() {
             *site = chelis_dag_core::dag::ExtentWitnessSite::LocalExpand;
         }
         dag.add_root(checked);
-        let mapped = chelis_ir::vmap::vectorize_axis0(&dag, DimInfo::Lit(2)).unwrap();
+        let mapped = chelis_ir_core::vmap::vectorize_axis0(&dag, DimInfo::Lit(2)).unwrap();
         assert!(chelis_dag_core::verify::verify(&mapped).is_empty());
         let result = eval_tensor_with(&mapped, |_| {
             Some(TensorValue::from_vec(
@@ -928,7 +929,7 @@ fn remainder_rebuild_retains_exact_values_and_rejects_invalid_types() {
             Some(-1)
         );
     }
-    let mapped = chelis_ir::vmap::vectorize_axis0(&dag, DimInfo::Lit(2)).unwrap();
+    let mapped = chelis_ir_core::vmap::vectorize_axis0(&dag, DimInfo::Lit(2)).unwrap();
     assert!(chelis_dag_core::verify::verify(&mapped).is_empty());
     let values = eval_tensor_with(&mapped, |_| None).unwrap();
     assert_eq!(values[&mapped.roots()[0]].shape, vec![2]);

@@ -100,7 +100,7 @@ The Linux workspace worker passes `--ignore-default-filter` and deliberately inc
 
 Integration support assigns each canonical gate command to exactly one named slice.
 `frontend` and `domain` retain the short support commands.
-Separate `numeric-core`, `type-unification-core`, `dag-core`, `effect-analysis-core`, and `checker-core` slices execute their complete oracles.
+Separate `numeric-core`, `type-unification-core`, `dag-core`, `effect-analysis-core`, `checker-core`, and `ir-core` slices execute their complete oracles.
 Missing, duplicate, or stale ownership stops sliced execution.
 The unsliced integration gate retains every command in its canonical order.
 
@@ -116,7 +116,7 @@ records the measured isolated timeout.
 
 The Linux `integration-support` matrix gives `frontend` and `domain` 70 minutes each.
 Type, DAG, and effect rows receive 115 minutes each.
-The complete checker row receives 300 minutes.
+The complete checker and IR rows receive 300 minutes each.
 Each row retains the complete oracle and its evidence.
 
 On macOS `macos-numeric-core` runs three required matrix phases, each with a
@@ -141,18 +141,38 @@ it. `macos-smoke` requires its success alongside the workspace shards, censuses,
 ownership ledger, and numeric-core matrix; failure, cancellation, or skipping
 fails the aggregate.
 
-`macos-core-portability` runs separate type, effect, and checker rows.
+`macos-core-portability` runs separate type, effect, checker, and IR rows.
 Type and effect rows receive 120 minutes each.
-The complete checker row receives 300 minutes.
+The complete checker and IR rows receive 300 minutes each.
 Each row executes its unchanged complete command outside the workspace shard budget.
 `macos-smoke` needs successful execution from every row.
 Artifact uploads retain complete outputs and oracle evidence.
 The bootstrap step selects managed Python for the venv.
 The managed oracle commands then use the same interpreter and installed policy dependencies.
 
-The checker oracle retains the pinned baseline in the candidate object store.
-It also verifies a separate scratch checkout against the original revision and source digests.
+Linux gives the complete IR command an independent `integration-support` matrix row named `ir-core`.
+The row receives 300 minutes and retains `target/agents/ir-core/` evidence.
+Both platform owners execute `scripts/ir_core_oracle.py` without a reduced selection.
+The local phase command is `chelis-gate integration --support-only --support-slice ir-core`.
+The fixture directory and oracle have one Linux owner.
+The behavioral controls have one `script-unit` owner.
+
+The checker and IR oracles retain the pinned baseline in the candidate object store.
+Each verifies a separate scratch checkout against the original revision and source digests.
+Each scratch checkout uses a canonical path before Cargo resolves native dependencies.
 Later cost and existing-core checks can read the pinned objects after scratch checkout removal.
+
+The inherited effect oracle records the approved source-test retirement.
+The checker oracle applies the same IR identity and timing map.
+Both retain their original baselines and active behavior obligations.
+
+Both IR nextest profiles inherit `ci-full` deadlines.
+The oracle supplies separate JUnit destinations for complete IR suites and inherited compiler-pipeline commands.
+The IR feature-off Clippy command compiles only the library, without host test dependencies.
+The runtime-representation scanner classifies portable IR sources with the same rules as native IR sources.
+Nextest emits `started` and `ignored` events for cases outside the selected filter.
+IR receipts bind these skipped cases to the complete listed inventory.
+They reject any unselected execution.
 
 Neither numeric owner spends its budget on other support or workspace commands.
 Both use the gate's exit status and upload `target/gate-reports/` with `always()`;

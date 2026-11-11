@@ -3,12 +3,12 @@
 mod support;
 
 use chelis_dag_core::{Dag, DimInfo, RiscOp, TensorType};
-use chelis_ir::ConcreteHostType as Ty;
-use chelis_ir::host::{
+use chelis_ir_core::host::{
     ConcreteHostBinding as Binding, ConcreteHostExpr as Expr, ConcreteHostExprKind as Kind,
     ConcreteHostFunction as Function, ConcreteHostParam as Param, ConcreteHostProgram as Program,
     HostFunctionOrigin, HostTensorHelper, HostTensorInput,
 };
+use chelis_ir_core::host_type_state::ConcreteHostType as Ty;
 use chelis_numeric_core::prim::Prim;
 use std::{
     fs,
@@ -253,7 +253,8 @@ fn run(binary: &std::path::Path, args: &[&str]) -> Output {
 
 #[test]
 fn compiled_shared_sites_match_eval() {
-    use chelis_ir::eval::{TensorValue, eval_tensor};
+    use chelis_ir::eval::eval_tensor;
+    use chelis_ir_core::eval::TensorValue;
     let program = program(8);
     let mut value = TensorValue::from_vec(vec![4], vec![1.0, -2.0, 3.0, -4.0]);
     for helper in &program.functions[0].tensor_helpers {

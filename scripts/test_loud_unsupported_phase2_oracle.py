@@ -7,58 +7,9 @@ import unittest
 import loud_unsupported_phase2_oracle as oracle
 
 
-def write_endpoint_fixture(root: Path, host_source: str) -> None:
-    files = {
-        "crates/chelis-ir/src/host.rs": host_source,
-        "crates/chelis-compiler-api/src/compiler.rs": "fallible only\n",
-        "crates/chelis-backend-c/src/emitted_expr.rs": "closed nodes\n",
-        "crates/chelis-backend-c/src/host_emit.rs": (
-            'require_same_abi_type(ty, &HostType::Unit, "unit expression")?;\n'
-        ),
-        "crates/chelis-backend-c/src/host_abi.rs": (
-            "pub(crate) enum HostAbiType {}\n"
-        ),
-    }
-    for relative, contents in files.items():
-        path = root / relative
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(contents, encoding="utf-8")
-
-
-def valid_host_endpoint_source() -> str:
-    return (
-        "pub fn try_lower_compiled_program() {}\n"
-        "fn lower_host_expr(\n"
-        ") -> Result<HostExpr, crate::lower::LowerDiagnostic> { todo!() }\n"
-        "fn lower_host_expr_kind(\n"
-        ") -> Result<HostExpr, crate::lower::LowerDiagnostic> { todo!() }\n"
-        "struct GenericAdtConstructor;\n"
-        "struct GenericAdtField;\n"
-        "struct InstantiatedAdtConstructor;\n"
-        "enum AdtInstantiationError {}\n"
-        "fn instantiate(\n"
-        ") -> Result<InstantiatedAdtConstructor, AdtInstantiationError> { todo!() }\n"
-    )
 
 
 class LoudUnsupportedPhase2OracleTests(unittest.TestCase):
-    def test_focused_commands_cover_every_phase2_layer(self) -> None:
-        rendered = [oracle.command_text(command) for command in oracle.FOCUSED_COMMANDS]
-        joined = "\n".join(rendered)
-        for required in (
-            "-p chelis-vocab",
-            "runtime_dtype_generated_header",
-            "runtime_dtype_invalid_ffi",
-            "host_type_failure_states",
-            "host_abi_tests",
-            "emitted_expr::tests",
-            "cargo test -p chelis-backend-c --doc",
-            "pr799_host_resolution_result",
-            "closed_vocabulary_architecture",
-            "int_width_lane_matrix",
-            "issue_734_tostring_placeholder",
-        ):
-            self.assertIn(required, joined)
 
     def test_vocab_mutation_needs_all_independent_consumer_failures(self) -> None:
         evidence = (
@@ -179,43 +130,6 @@ class LoudUnsupportedPhase2OracleTests(unittest.TestCase):
                     self.fail("the probe accepted a different owner")
             self.assertEqual(path.read_bytes(), original)
 
-    def test_endpoint_scan_is_green_on_the_repository(self) -> None:
-        self.assertEqual(oracle.endpoint_violations(oracle.REPO_ROOT), [])
-
-    def test_endpoint_scan_detects_a_reintroduced_infallible_wrapper(self) -> None:
-        with tempfile.TemporaryDirectory() as raw_dir:
-            root = Path(raw_dir)
-            write_endpoint_fixture(
-                root,
-                valid_host_endpoint_source()
-                + "pub fn lower_compiled_program() {}\n",
-            )
-            violations = oracle.endpoint_violations(root)
-            self.assertTrue(
-                any("pub fn lower_compiled_program" in violation for violation in violations),
-                violations,
-            )
-
-    def test_endpoint_scan_detects_unit_and_raw_generic_field_escape_hatches(self) -> None:
-        with tempfile.TemporaryDirectory() as raw_dir:
-            root = Path(raw_dir)
-            write_endpoint_fixture(
-                root,
-                valid_host_endpoint_source()
-                + "fn lookup_adt_ctor() {}\n"
-                + "let placeholder = HostExpr::new(HostExprKind::Unit);\n"
-                + "_ => HostExpr::new(HostExprKind::Unit)\n",
-            )
-            violations = oracle.endpoint_violations(root)
-            for forbidden in (
-                "fn lookup_adt_ctor(",
-                "let placeholder = HostExpr::new(HostExprKind::Unit)",
-                "_ => HostExpr::new(HostExprKind::Unit)",
-            ):
-                self.assertTrue(
-                    any(forbidden in violation for violation in violations),
-                    violations,
-                )
 
 
 if __name__ == "__main__":

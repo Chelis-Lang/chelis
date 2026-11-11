@@ -2,7 +2,8 @@
 mod common;
 mod support;
 use chelis_dag_core::dag::{Dag, DimInfo, RiscOp, TensorType};
-use chelis_ir::eval::{TensorValue, eval_tensor};
+use chelis_ir::eval::eval_tensor;
+use chelis_ir_core::eval::TensorValue;
 use chelis_numeric_core::dtype_semantics::{FloatClassify, classify_float, tensor_from_le_payload};
 use chelis_numeric_core::prim::Prim;
 use chelis_unord::UnordMap;

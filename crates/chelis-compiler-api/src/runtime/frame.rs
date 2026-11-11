@@ -712,7 +712,7 @@ mod tests {
     #[test]
     fn aggregate_interface_load_stamps_only_tensor_leaves() {
         let tensor = RuntimeValue::Tensor(super::super::RuntimeTensorValue::new(
-            chelis_ir::eval::TensorValue::from_vec(vec![1], vec![1.0]),
+            chelis_ir_core::eval::TensorValue::from_vec(vec![1], vec![1.0]),
         ));
         let value = RuntimeValue::Tuple(
             vec![

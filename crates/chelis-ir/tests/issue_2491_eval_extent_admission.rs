@@ -13,7 +13,8 @@
 use chelis_dag_core::dag::{
     Dag, DimExpr, DimInfo, NodeId, RiscOp, RtDim, TensorType, UniformBound,
 };
-use chelis_ir::eval::{TensorValue, eval_tensor_roots_with, eval_tensor_roots_with_strict};
+use chelis_ir::eval::{eval_tensor_roots_with, eval_tensor_roots_with_strict};
+use chelis_ir_core::eval::TensorValue;
 use chelis_numeric_core::dtype_semantics::{RawTensor, finalize_tensor, scalar_from_i64};
 use chelis_numeric_core::prim::Prim;
 use chelis_unord::UnordMap;

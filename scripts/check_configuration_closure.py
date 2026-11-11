@@ -294,6 +294,16 @@ CLIPPY_MATRIX: tuple[ClippyRun, ...] = (
         cadence=PER_PULL_REQUEST,
     ),
     ClippyRun(
+        label="ir-without-default-features",
+        command=(
+            "cargo", "clippy", "-p", "chelis-ir-core",
+            "--lib", "--no-default-features", "--", "-D", "warnings",
+        ),
+        owner="scripts/gate.py",
+        hosts=("linux",),
+        cadence=PER_PULL_REQUEST,
+    ),
+    ClippyRun(
         label="clarabel-provider",
         command=(
             "cargo", "clippy", "--workspace", "--all-targets", "--features",
@@ -443,6 +453,22 @@ UNCOMPILED_EXCEPTIONS: tuple[UncompiledException, ...] = (
             "scripts/fixtures/checker_core/host_core.rs",
             "scripts/fixtures/checker_core/pipeline_forgery.rs",
             "scripts/fixtures/checker_core/target.rs",
+        ),
+    ),
+    UncompiledException(
+        directory="scripts/fixtures/ir_core",
+        reason="Independent IR consumers use the complete IR oracle.",
+        owning_gate="scripts/ir_core_oracle.py",
+        sources=(
+            "scripts/fixtures/ir_core/baseline_snapshot.rs",
+            "scripts/fixtures/ir_core/evaluation.rs",
+            "scripts/fixtures/ir_core/host.rs",
+            "scripts/fixtures/ir_core/lowering.rs",
+            "scripts/fixtures/ir_core/ownership.rs",
+            "scripts/fixtures/ir_core/resources.rs",
+            "scripts/fixtures/ir_core/serde.rs",
+            "scripts/fixtures/ir_core/snapshot.rs",
+            "scripts/fixtures/ir_core/target.rs",
         ),
     ),
     UncompiledException(
@@ -606,9 +632,10 @@ def resolved_configuration(
             package["name"]
             for package in metadata["packages"] if package["id"] in members
         }
+        edges = "normal,build" if "--lib" in run.command and "--all-targets" not in run.command else "normal,build,dev"
         completed = subprocess.run(
             ("cargo", "tree", *selection, *run.cargo_feature_flags(),
-             "--edges", "normal,build,dev", "--prefix", "none", "--no-dedupe",
+             "--edges", edges, "--prefix", "none", "--no-dedupe",
              "--format", "{p}|{f}"),
             cwd=repo_root, check=True, capture_output=True, text=True,
         )

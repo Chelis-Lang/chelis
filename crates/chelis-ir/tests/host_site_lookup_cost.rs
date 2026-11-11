@@ -25,7 +25,8 @@ use std::fmt::Write as _;
 
 use chelis_effects::realizability::{compute_root_manifest, infer_realizability};
 use chelis_ir::host::try_lower_compiled_program_with_manifest;
-use chelis_ir::ownership::{counting_site_lookup_entries, lower_host_ownership, verify_ownership};
+use chelis_ir::ownership::counting_site_lookup_entries;
+use chelis_ir::ownership::{lower_host_ownership, verify_ownership};
 use chelis_numeric_core::prim::Prim;
 use chelis_types::manifest::ManifestedProgram;
 use chelis_types::types::Target;

@@ -10,7 +10,7 @@
 
 use chelis_dag_core::dag::{Dag, RiscOp};
 use chelis_deep::ast::Expr;
-use chelis_ir::lower::{
+use chelis_ir_core::lower::{
     SubexprLoweringContext, try_lower_subexpr_program, try_lower_subexpr_program_with_context,
 };
 use chelis_unord::UnordMap;
@@ -72,57 +72,77 @@ fn root_inputs(dag: &Dag) -> Vec<String> {
 
 #[test]
 fn checked_subexpression_lowering_binds_positional_patterns_by_declared_order() {
-    let checked = checked_surf(TYPES);
-    let context =
-        SubexprLoweringContext::from_checked_program(&checked, UnordMap::new(), UnordMap::new());
-    for written in [["w", "b"], ["b", "w"]] {
-        for (binder, declared) in [("first", "in_w"), ("second", "in_b")] {
-            let dag = try_lower_subexpr_program_with_context(
-                &positional_match(written, binder),
-                UnordMap::new(),
-                &context,
-            )
-            .unwrap_or_else(|diagnostic| panic!("{written:?}: {diagnostic}"));
-            assert_eq!(
-                root_inputs(&dag),
-                [declared],
-                "written order {written:?}: `{binder}` is declared field `{declared}`"
-            );
+    chelis_ir::resources::with_operation(|operation| {
+        let checked = checked_surf(TYPES);
+        let context = SubexprLoweringContext::from_checked_program(
+            checked.facts(),
+            UnordMap::new(),
+            UnordMap::new(),
+            operation,
+        )
+        .expect("subexpression context");
+        for written in [["w", "b"], ["b", "w"]] {
+            for (binder, declared) in [("first", "in_w"), ("second", "in_b")] {
+                let dag = try_lower_subexpr_program_with_context(
+                    &positional_match(written, binder),
+                    UnordMap::new(),
+                    &context,
+                    operation,
+                )
+                .unwrap_or_else(|diagnostic| panic!("{written:?}: {diagnostic}"));
+                assert_eq!(
+                    root_inputs(&dag),
+                    [declared],
+                    "written order {written:?}: `{binder}` is declared field `{declared}`"
+                );
+            }
         }
-    }
+    })
 }
 
 #[test]
 fn a_lowering_without_declarations_rejects_a_positional_pattern_over_a_record() {
-    for written in [["w", "b"], ["b", "w"]] {
-        let diagnostic = try_lower_subexpr_program(
-            &positional_match(written, "first"),
-            UnordMap::new(),
-            UnordMap::new(),
-            UnordMap::new(),
-        )
-        .expect_err("an unknown record layout must not answer a positional pattern");
-        assert!(
-            diagnostic
-                .to_string()
-                .contains("declared field order is unknown"),
-            "{written:?}: {diagnostic}"
-        );
-    }
+    chelis_ir::resources::with_operation(|operation| {
+        for written in [["w", "b"], ["b", "w"]] {
+            let diagnostic = try_lower_subexpr_program(
+                &positional_match(written, "first"),
+                UnordMap::new(),
+                UnordMap::new(),
+                UnordMap::new(),
+                operation,
+            )
+            .expect_err("an unknown record layout must not answer a positional pattern");
+            assert!(
+                diagnostic
+                    .to_string()
+                    .contains("declared field order is unknown"),
+                "{written:?}: {diagnostic}"
+            );
+        }
+    })
 }
 
 #[test]
 fn a_registry_supplied_to_a_bare_context_restores_declared_order() {
-    // `chelis eval` without a host session builds its transform context from
-    // type and definition tables, then supplies the checked registry.
-    let checked = checked_surf(TYPES);
-    let context = SubexprLoweringContext::new(UnordMap::new(), UnordMap::new(), UnordMap::new())
+    chelis_ir::resources::with_operation(|operation| {
+        // `chelis eval` without a host session builds its transform context from
+        // type and definition tables, then supplies the checked registry.
+        let checked = checked_surf(TYPES);
+        let context = SubexprLoweringContext::new(
+            UnordMap::new(),
+            UnordMap::new(),
+            UnordMap::new(),
+            operation,
+        )
+        .expect("subexpression context")
         .with_adt_registry(checked.adt_registry());
-    let dag = try_lower_subexpr_program_with_context(
-        &positional_match(["b", "w"], "first"),
-        UnordMap::new(),
-        &context,
-    )
-    .unwrap_or_else(|diagnostic| panic!("{diagnostic}"));
-    assert_eq!(root_inputs(&dag), ["in_w"]);
+        let dag = try_lower_subexpr_program_with_context(
+            &positional_match(["b", "w"], "first"),
+            UnordMap::new(),
+            &context,
+            operation,
+        )
+        .unwrap_or_else(|diagnostic| panic!("{diagnostic}"));
+        assert_eq!(root_inputs(&dag), ["in_w"]);
+    })
 }

@@ -6,9 +6,10 @@ use chelis_dag_core::dag::{Dag, DimInfo, RiscOp, TensorType};
 use chelis_dag_core::fuse::fuse;
 use chelis_dag_core::grad::{AdError, AdRejectionReason, grad_dag_checked};
 use chelis_dag_core::verify;
-use chelis_ir::eval::{TensorValue, eval_tensor};
+use chelis_ir::eval::eval_tensor;
 use chelis_ir::lower::try_lower_program;
-use chelis_ir::vmap::vectorize_axis0;
+use chelis_ir_core::eval::TensorValue;
+use chelis_ir_core::vmap::vectorize_axis0;
 use chelis_numeric_core::prim::Prim;
 use chelis_types::check_typed_program;
 
@@ -73,7 +74,7 @@ fn evaluator_returns_zero_for_a_selected_zero_extent() {
 
 #[test]
 fn evaluator_count_only_plans_groups_and_calls_the_typed_kernel() {
-    let source = include_str!("../src/eval.rs");
+    let source = include_str!("../../chelis-ir-core/src/eval.rs");
     let count_body = source
         .split_once("pub fn count_tensor")
         .expect("Count evaluator exists")

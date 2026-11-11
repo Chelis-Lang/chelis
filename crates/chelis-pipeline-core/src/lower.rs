@@ -1,7 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use chelis_dag_core::Dag;
-use chelis_ir::lower::{LowerDiagnostic, LoweredLibrary as IrLoweredLibrary};
+use chelis_ir::lower::LoweredLibrary as IrLoweredLibrary;
+use chelis_ir_core::lower::LowerDiagnostic;
 
 use crate::artifacts::RootBindingMode;
 use crate::roots::root_metadata;
@@ -72,7 +73,7 @@ pub fn lower_checked_for_c_execution(
 ) -> Result<
     (
         LoweredCompilation,
-        Option<chelis_ir::host::ConcreteHostProgram>,
+        Option<chelis_ir_core::host::ConcreteHostProgram>,
         Option<chelis_ir::host::HostExecutionPlan>,
     ),
     CoreLowerError,
@@ -93,7 +94,7 @@ pub fn lower_checked_for_c_execution_with_trace(
 ) -> Result<
     (
         LoweredCompilation,
-        Option<chelis_ir::host::ConcreteHostProgram>,
+        Option<chelis_ir_core::host::ConcreteHostProgram>,
         Option<chelis_ir::host::HostExecutionPlan>,
     ),
     CoreLowerError,
@@ -113,16 +114,15 @@ fn finish_c_execution_lowering(
 ) -> Result<
     (
         LoweredCompilation,
-        Option<chelis_ir::host::ConcreteHostProgram>,
+        Option<chelis_ir_core::host::ConcreteHostProgram>,
         Option<chelis_ir::host::HostExecutionPlan>,
     ),
     CoreLowerError,
 > {
     let mode = if mode == LoweringMode::AllowHostBackend
-        && !host
-            .as_ref()
-            .is_some_and(|plan| chelis_ir::host::host_program_requires_host_backend(plan.program()))
-    {
+        && !host.as_ref().is_some_and(|plan| {
+            chelis_ir_core::host::host_program_requires_host_backend(plan.program())
+        }) {
         LoweringMode::Strict
     } else {
         mode
@@ -156,8 +156,8 @@ impl From<IrLoweredLibrary> for LoweredProgram {
     }
 }
 
-impl From<chelis_ir::lower::ComposedLowering> for LoweredProgram {
-    fn from(composed: chelis_ir::lower::ComposedLowering) -> Self {
+impl From<chelis_ir_core::lower::ComposedLowering> for LoweredProgram {
+    fn from(composed: chelis_ir_core::lower::ComposedLowering) -> Self {
         Self {
             dag: composed.dag,
             rootless_defs: composed.rootless_defs,
@@ -205,29 +205,33 @@ pub fn lower_checked_with_context(
     library: &LoweredLibrary,
     mode: LoweringMode,
 ) -> Result<LoweredCompilation, CoreLowerError> {
-    if library.library_proof_id() != checked.library().program().library_proof_id() {
-        return Err(CoreLowerError::Lower(
-            LowerDiagnostic::new(
-                "the lowered library does not match the context-checked program",
-                None,
-                None,
-            )
-            .fatal(),
-        ));
-    }
-    let mut checked = checked.into_extension();
-    let lowered_map = chelis_ir::lower::top_level_lowering_map_with_context(
-        library.raw(),
-        checked.program.exprs(),
-        checked.program.type_env(),
-    );
-    checked.set_root_metadata(root_metadata(&checked.program, Some(&lowered_map)));
-    let tensor_names = checked.root_metadata().tensor_names.clone();
+    chelis_ir::resources::with_operation(|operation| {
+        if library.library_proof_id() != checked.library().program().library_proof_id() {
+            return Err(CoreLowerError::Lower(
+                LowerDiagnostic::new(
+                    "the lowered library does not match the context-checked program",
+                    None,
+                    None,
+                )
+                .fatal(),
+            ));
+        }
+        let mut checked = checked.into_extension();
+        let lowered_map = chelis_ir_core::lower::top_level_lowering_map_with_context(
+            library.raw().data(),
+            checked.program.exprs(),
+            checked.program.type_env(),
+            operation,
+        )
+        .map_err(CoreLowerError::Lower)?;
+        checked.set_root_metadata(root_metadata(&checked.program, Some(&lowered_map)));
+        let tensor_names = checked.root_metadata().tensor_names.clone();
 
-    let lower_result =
-        chelis_ir::lower::try_lower_program_with_context(library.raw(), &checked.program)
-            .map(LoweredProgram::from);
-    finish_contextual_lowering(checked, library.dag(), mode, lower_result, &tensor_names)
+        let lower_result =
+            chelis_ir::lower::try_lower_program_with_context(library.raw(), &checked.program)
+                .map(LoweredProgram::from);
+        finish_contextual_lowering(checked, library.dag(), mode, lower_result, &tensor_names)
+    })
 }
 
 /// Bind new-code roots after contextual lowering, applying the same host

@@ -3,8 +3,9 @@
 use chelis_dag_core::dag::{Dag, DimInfo, ReduceWindowKind, RiscOp, TensorType};
 use chelis_dag_core::grad::{AdError, AdRejectionReason, grad_dag_checked};
 use chelis_dag_core::tier2;
-use chelis_ir::eval::{TensorValue, eval_tensor};
+use chelis_ir::eval::eval_tensor;
 use chelis_ir::lower::try_lower_program;
+use chelis_ir_core::eval::TensorValue;
 use chelis_numeric_core::dtype_semantics::{RawTensor, StorageView, finalize_tensor};
 use chelis_numeric_core::prim::Prim;
 use chelis_types::check_ir_program;

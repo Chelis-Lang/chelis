@@ -6,7 +6,7 @@ use chelis_checker_core::InferResult;
 use chelis_dag_core::Dag;
 use chelis_dag_core::dag::NodeId;
 use chelis_deep::Expr as DeepExpr;
-use chelis_ir::lower::LowerDiagnostic;
+use chelis_ir_core::lower::LowerDiagnostic;
 use chelis_types::{CheckedProgram, FitnessReport, TypeEnv};
 
 /// A closed policy for nonfatal lowering failures.

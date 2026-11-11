@@ -340,6 +340,21 @@ class MatrixCoverageTests(unittest.TestCase):
                                     "chelis-numeric-core/serde"):
             CLOSURE.check_matrix_covers_declared_features(REPO_ROOT, matrix)
 
+    def test_ir_off_row_excludes_host_feature_unification(self) -> None:
+        rows = {run.label: run for run in CLOSURE.CLIPPY_MATRIX}
+        compiled, enabled = CLOSURE.resolved_configuration(
+            rows["ir-without-default-features"], REPO_ROOT,
+        )
+        self.assertIn("chelis-ir-core", compiled)
+        self.assertNotIn("chelis-ir", compiled)
+        for feature in ("serde", "test-instrumentation"):
+            self.assertNotIn(("chelis-ir-core", feature), enabled)
+        matrix = tuple(run for run in CLOSURE.CLIPPY_MATRIX
+                       if run.label != "ir-without-default-features")
+        with self.assertRaisesRegex(CLOSURE.ConfigurationClosureFailure,
+                                    "chelis-ir-core/serde"):
+            CLOSURE.check_matrix_covers_declared_features(REPO_ROOT, matrix)
+
     def test_effect_rows_resolve_all_three_isolated_feature_states(self) -> None:
         rows = {
             run.label: run for run in CLOSURE.CLIPPY_MATRIX

@@ -840,8 +840,9 @@ def host_controls(previous: dict, evidence: Evidence, external: set[str]) -> Non
     current["portable-unit"] = tests(("-p", CRATE, "--all-targets", "--features",
         "serde,generalize-sweep-oracle"), ROOT)
     mapping = reconcile_inventories(previous["tests"], current, migrations, external=external)
+    ir_migrations = load(ROOT / "scripts/fixtures/ir_core/test_identity_migration.json")
     check_timing(previous["timing"], load(ROOT / "scripts/test_timing_baseline.json"),
-        mapping, migrations["retired"])
+        mapping | ir_migrations["renamed"], migrations["retired"] | ir_migrations["retired"])
     evidence.save("current-tests.json", current)
     evidence.save("cost-observations.json", {"baseline": previous["cost_observations"],
         "candidate": cost_observations(current)})

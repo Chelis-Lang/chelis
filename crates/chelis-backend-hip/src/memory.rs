@@ -3,7 +3,9 @@
 use chelis_unord::UnordMap;
 
 use chelis_dag_core::dag::{DimExpr, NodeId, RiscOp};
-use chelis_ir::ownership::{HipStorageLane, LiveByteBound, StoragePlacement, VerifiedStoragePlan};
+use chelis_ir::ownership::{HipStorageLane, VerifiedStoragePlan};
+use chelis_ir_core::ownership::LiveByteBound;
+use chelis_ir_core::ownership::storage::StoragePlacement;
 use chelis_numeric_core::prim::Prim;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

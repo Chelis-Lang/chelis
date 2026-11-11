@@ -97,6 +97,8 @@ def oracle_legs(python: str) -> tuple[OracleLeg, ...]:
                 "run",
                 "-p",
                 "chelis-ir",
+                "-p",
+                "chelis-ir-core",
                 "-E",
                 "test(load_ingress_)",
             ),

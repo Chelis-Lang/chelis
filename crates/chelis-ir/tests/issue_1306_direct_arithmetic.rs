@@ -3,7 +3,8 @@ use chelis_unord::UnordMap;
 use chelis_dag_core::dag::{ComparisonKind, Dag, ExtremaKind, ExtremaOperand, RiscOp, TensorType};
 use chelis_dag_core::grad::{AdError, AdRejectionReason, grad_dag_checked};
 use chelis_dag_core::{tier2, verify};
-use chelis_ir::eval::{TensorValue, eval_tensor};
+use chelis_ir::eval::eval_tensor;
+use chelis_ir_core::eval::TensorValue;
 use chelis_numeric_core::dtype_semantics::{RawTensor, finalize_tensor};
 use chelis_numeric_core::prim::Prim;
 

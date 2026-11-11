@@ -1,0 +1,335 @@
+{
+  "version": 1,
+  "source_revision": "23dc12afb7b0404b7f70a9fc2cacc3df7ed77cbe",
+  "cases": [
+    {
+      "id": "host/contextual_callback.ch",
+      "frontend": "surf",
+      "source": "def apply(callback: i8 -> i8, value: i8) -> i8 = callback(value)\nout = apply(fn (item: i8) -> add(item, cast(1, i8)), cast(6, i8))\n",
+      "origin": "crates/chelis-cli/tests/fixtures/compiled_value_ownership/contextual_callback.ch"
+    },
+    {
+      "id": "host/control_recursive_scalar.ch",
+      "frontend": "surf",
+      "source": "def step(state: i64, index: i64) -> i64 = if gte(index, 288i64) then state else (state |> add(1i64) |> step(add(index, 1i64)))\nvalue = step(0i64, 0i64)\nout: List[i64] = [value, value]\n",
+      "origin": "crates/chelis-cli/tests/fixtures/compiled_value_ownership/control_recursive_scalar.ch"
+    },
+    {
+      "id": "host/control_scalar_aggregate.ch",
+      "frontend": "surf",
+      "source": "out: List[(i64, i64)] = [(1i64, 2i64), (3i64, 4i64)]\n",
+      "origin": "crates/chelis-cli/tests/fixtures/compiled_value_ownership/control_scalar_aggregate.ch"
+    },
+    {
+      "id": "host/issue_1206_depth_1.ch",
+      "frontend": "surf",
+      "source": "def step(state: tensor[4, f32], index: i64) -> tensor[4, f32] =\n  if gte(index, 1i64) then state else {\n    offset = to_tensor([1.0, 1.0, 1.0, 1.0], f32)\n    shifted = add(state, offset)\n    scaled = mul(shifted, offset)\n    step(scaled, add(index, 1i64))\n  }\nout = [0.0, 0.0, 0.0, 0.0] |> to_tensor(f32) |> step(0i64)\n",
+      "origin": "crates/chelis-cli/tests/fixtures/compiled_value_ownership/issue_1206_depth_1.ch"
+    },
+    {
+      "id": "host/issue_1206_depth_128.ch",
+      "frontend": "surf",
+      "source": "def step(state: tensor[4, f32], index: i64) -> tensor[4, f32] =\n  if gte(index, 128i64) then state else {\n    offset = to_tensor([1.0, 1.0, 1.0, 1.0], f32)\n    shifted = add(state, offset)\n    scaled = mul(shifted, offset)\n    step(scaled, add(index, 1i64))\n  }\nout = [0.0, 0.0, 0.0, 0.0] |> to_tensor(f32) |> step(0i64)\n",
+      "origin": "crates/chelis-cli/tests/fixtures/compiled_value_ownership/issue_1206_depth_128.ch"
+    },
+    {
+      "id": "host/issue_1206_depth_288.ch",
+      "frontend": "surf",
+      "source": "def step(state: tensor[4, f32], index: i64) -> tensor[4, f32] =\n  if gte(index, 288i64) then state else {\n    offset = to_tensor([1.0, 1.0, 1.0, 1.0], f32)\n    shifted = add(state, offset)\n    scaled = mul(shifted, offset)\n    step(scaled, add(index, 1i64))\n  }\nout = [0.0, 0.0, 0.0, 0.0] |> to_tensor(f32) |> step(0i64)\n",
+      "origin": "crates/chelis-cli/tests/fixtures/compiled_value_ownership/issue_1206_depth_288.ch"
+    },
+    {
+      "id": "host/issue_1206_depth_32.ch",
+      "frontend": "surf",
+      "source": "def step(state: tensor[4, f32], index: i64) -> tensor[4, f32] =\n  if gte(index, 32i64) then state else {\n    offset = to_tensor([1.0, 1.0, 1.0, 1.0], f32)\n    shifted = add(state, offset)\n    scaled = mul(shifted, offset)\n    step(scaled, add(index, 1i64))\n  }\nout = [0.0, 0.0, 0.0, 0.0] |> to_tensor(f32) |> step(0i64)\n",
+      "origin": "crates/chelis-cli/tests/fixtures/compiled_value_ownership/issue_1206_depth_32.ch"
+    },
+    {
+      "id": "host/issue_1222_distinct_roots.ch",
+      "frontend": "surf",
+      "source": "first: List[i64] = [1i64]\nsecond: List[i64] = [2i64]\n",
+      "origin": "crates/chelis-cli/tests/fixtures/compiled_value_ownership/issue_1222_distinct_roots.ch"
+    },
+    {
+      "id": "host/issue_1222_root_alias.ch",
+      "frontend": "surf",
+      "source": "original: List[i64] = [1i64, 2i64]\nalias = original\n",
+      "origin": "crates/chelis-cli/tests/fixtures/compiled_value_ownership/issue_1222_root_alias.ch"
+    },
+    {
+      "id": "host/issue_1339_list_forward_capture.ch",
+      "frontend": "surf",
+      "source": "def capture() -> List[i64] = later\nlater: List[i64] = [1i64, 2i64]\n",
+      "origin": "crates/chelis-cli/tests/fixtures/compiled_value_ownership/issue_1339_list_forward_capture.ch"
+    },
+    {
+      "id": "host/issue_1339_tensor_forward_capture.ch",
+      "frontend": "surf",
+      "source": "def capture() -> tensor[2, f32] = later\nlater: tensor[2, f32] = to_tensor([1.0, 2.0], f32)\n",
+      "origin": "crates/chelis-cli/tests/fixtures/compiled_value_ownership/issue_1339_tensor_forward_capture.ch"
+    },
+    {
+      "id": "host/issue_1339_unannotated_control.ch",
+      "frontend": "surf",
+      "source": "def capture() -> List[i64] = later\nlater = [1i64, 2i64]\n",
+      "origin": "crates/chelis-cli/tests/fixtures/compiled_value_ownership/issue_1339_unannotated_control.ch"
+    },
+    {
+      "id": "host/issue_1344_captured_copy.ch",
+      "frontend": "surf",
+      "source": "global_values: List[i64] = [1i64, 2i64]\ndef take_length() -> i64 = {\n  local_alias = global_values\n  len(local_alias)\n}\nout = take_length()\n",
+      "origin": "crates/chelis-cli/tests/fixtures/compiled_value_ownership/issue_1344_captured_copy.ch"
+    },
+    {
+      "id": "host/issue_1344_fresh_binding.ch",
+      "frontend": "surf",
+      "source": "def make_length() -> i64 = {\n  values: List[i64] = [1i64, 2i64]\n  len(values)\n}\nout = make_length()\n",
+      "origin": "crates/chelis-cli/tests/fixtures/compiled_value_ownership/issue_1344_fresh_binding.ch"
+    },
+    {
+      "id": "host/issue_1346_fold_alias.ch",
+      "frontend": "surf",
+      "source": "values: List[i64] = [1i64, 2i64]\nbase = (0.0, 0.0)\npicked = fold(fn (acc: (f32, f32), value: i64) -> acc, base, values)\n",
+      "origin": "crates/chelis-cli/tests/fixtures/compiled_value_ownership/issue_1346_fold_alias.ch"
+    },
+    {
+      "id": "host/issue_1346_fold_fresh.ch",
+      "frontend": "surf",
+      "source": "values: List[i64] = [1i64, 2i64]\nbase = (0.0, 0.0)\npicked = fold(fn (acc: (f32, f32), value: i64) -> (cast(value, f32), cast(value, f32)), base, values)\n",
+      "origin": "crates/chelis-cli/tests/fixtures/compiled_value_ownership/issue_1346_fold_fresh.ch"
+    },
+    {
+      "id": "host/issue_1352_if_alias.ch",
+      "frontend": "surf",
+      "source": "original: List[i64] = [1i64]\nselected = if true then original else [2i64, 3i64]\n",
+      "origin": "crates/chelis-cli/tests/fixtures/compiled_value_ownership/issue_1352_if_alias.ch"
+    },
+    {
+      "id": "host/issue_1352_if_fresh.ch",
+      "frontend": "surf",
+      "source": "original: List[i64] = [1i64]\nselected = if false then original else [2i64, 3i64]\n",
+      "origin": "crates/chelis-cli/tests/fixtures/compiled_value_ownership/issue_1352_if_fresh.ch"
+    },
+    {
+      "id": "host/issue_1352_match_adt_fresh.ch",
+      "frontend": "surf",
+      "source": "type Choice =\n  | Existing\n  | Fresh\ndef choose(original: List[i64]) -> List[i64] = {\n  choice = Fresh\n  match choice with {\n    | Existing => original\n    | Fresh => [2i64, 3i64]\n  }\n}\nselected = choose([1i64])\n",
+      "origin": "crates/chelis-cli/tests/fixtures/compiled_value_ownership/issue_1352_match_adt_fresh.ch"
+    },
+    {
+      "id": "host/issue_1352_match_option_fresh.ch",
+      "frontend": "surf",
+      "source": "def choose(original: List[i64]) -> List[i64] = {\n  choice: Option[bool] = Some(false)\n  match choice with {\n    | None => original\n    | Some(flag) => if flag then original else [2i64, 3i64]\n  }\n}\nselected = choose([1i64])\n",
+      "origin": "crates/chelis-cli/tests/fixtures/compiled_value_ownership/issue_1352_match_option_fresh.ch"
+    },
+    {
+      "id": "host/issue_1356_fresh_argument.ch",
+      "frontend": "surf",
+      "source": "def identity(values: List[i64]) -> List[i64] = values\nout = identity([1i64, 2i64])\n",
+      "origin": "crates/chelis-cli/tests/fixtures/compiled_value_ownership/issue_1356_fresh_argument.ch"
+    },
+    {
+      "id": "host/issue_1356_nested_fresh_argument.ch",
+      "frontend": "surf",
+      "source": "def identity(values: List[List[i64]]) -> List[List[i64]] = values\nout = identity([[1i64], [2i64]])\n",
+      "origin": "crates/chelis-cli/tests/fixtures/compiled_value_ownership/issue_1356_nested_fresh_argument.ch"
+    },
+    {
+      "id": "host/issue_1356_variable_argument.ch",
+      "frontend": "surf",
+      "source": "def identity(values: List[i64]) -> List[i64] = values\nsource: List[i64] = [1i64, 2i64]\nout = identity(source)\n",
+      "origin": "crates/chelis-cli/tests/fixtures/compiled_value_ownership/issue_1356_variable_argument.ch"
+    },
+    {
+      "id": "host/issue_543_adt_tensor.ch",
+      "frontend": "surf",
+      "source": "type TensorBox =\n  | TensorBox { value: tensor[2, f32] }\nout = TensorBox { value: to_tensor([1.0, 2.0], f32) }\n",
+      "origin": "crates/chelis-cli/tests/fixtures/compiled_value_ownership/issue_543_adt_tensor.ch"
+    },
+    {
+      "id": "host/issue_543_dict_tensor.ch",
+      "frontend": "surf",
+      "source": "out: Dict[string, tensor[2, f32]] = dict_of([(\"first\", to_tensor([1.0, 2.0], f32)), (\"second\", to_tensor([3.0, 4.0], f32))])\n",
+      "origin": "crates/chelis-cli/tests/fixtures/compiled_value_ownership/issue_543_dict_tensor.ch"
+    },
+    {
+      "id": "host/issue_543_list_tensor.ch",
+      "frontend": "surf",
+      "source": "def make() -> List[tensor[2, f32]] = {\n  first = to_tensor([1.0, 2.0], f32)\n  second = to_tensor([3.0, 4.0], f32)\n  [first, second]\n}\nout = make()\n",
+      "origin": "crates/chelis-cli/tests/fixtures/compiled_value_ownership/issue_543_list_tensor.ch"
+    },
+    {
+      "id": "host/issue_543_nested_repeated_tensor.ch",
+      "frontend": "surf",
+      "source": "def make() -> List[List[tensor[2, f32]]] = {\n  value = to_tensor([1.0, 2.0], f32)\n  inner: List[tensor[2, f32]] = [value, value]\n  [inner, inner]\n}\nout = make()\n",
+      "origin": "crates/chelis-cli/tests/fixtures/compiled_value_ownership/issue_543_nested_repeated_tensor.ch"
+    },
+    {
+      "id": "host/issue_543_tuple_tensor.ch",
+      "frontend": "surf",
+      "source": "def make() -> List[(tensor[2, f32], i64)] = {\n  first = to_tensor([1.0, 2.0], f32)\n  second = to_tensor([3.0, 4.0], f32)\n  [(first, 1i64), (second, 2i64)]\n}\nout = make()\n",
+      "origin": "crates/chelis-cli/tests/fixtures/compiled_value_ownership/issue_543_tuple_tensor.ch"
+    },
+    {
+      "id": "host/issue_544_dict_string_1.ch",
+      "frontend": "surf",
+      "source": "values: Dict[string, i64] = dict_of([(\"a\", 1i64)])\nout = len(values)\n",
+      "origin": "crates/chelis-cli/tests/fixtures/compiled_value_ownership/issue_544_dict_string_1.ch"
+    },
+    {
+      "id": "host/issue_544_dict_string_2.ch",
+      "frontend": "surf",
+      "source": "values: Dict[string, i64] = dict_of([(\"a\", 1i64), (\"b\", 2i64)])\nout = len(values)\n",
+      "origin": "crates/chelis-cli/tests/fixtures/compiled_value_ownership/issue_544_dict_string_2.ch"
+    },
+    {
+      "id": "host/issue_544_list_string_4.ch",
+      "frontend": "surf",
+      "source": "values: List[string] = [\"a\", \"b\", \"c\", \"d\"]\nout = len(values)\n",
+      "origin": "crates/chelis-cli/tests/fixtures/compiled_value_ownership/issue_544_list_string_4.ch"
+    },
+    {
+      "id": "host/issue_544_list_string_5.ch",
+      "frontend": "surf",
+      "source": "values: List[string] = [\"a\", \"b\", \"c\", \"d\", \"e\"]\nout = len(values)\n",
+      "origin": "crates/chelis-cli/tests/fixtures/compiled_value_ownership/issue_544_list_string_5.ch"
+    },
+    {
+      "id": "host/issue_544_nested_string_1.ch",
+      "frontend": "surf",
+      "source": "values: List[List[string]] = [[\"a\", \"b\"]]\nout = len(values)\n",
+      "origin": "crates/chelis-cli/tests/fixtures/compiled_value_ownership/issue_544_nested_string_1.ch"
+    },
+    {
+      "id": "host/issue_544_nested_string_2.ch",
+      "frontend": "surf",
+      "source": "values: List[List[string]] = [[\"a\", \"b\"], [\"c\", \"d\"]]\nout = len(values)\n",
+      "origin": "crates/chelis-cli/tests/fixtures/compiled_value_ownership/issue_544_nested_string_2.ch"
+    },
+    {
+      "id": "host/issue_544_tuple_string_1.ch",
+      "frontend": "surf",
+      "source": "values: List[(string, i64)] = [(\"a\", 1i64)]\nout = len(values)\n",
+      "origin": "crates/chelis-cli/tests/fixtures/compiled_value_ownership/issue_544_tuple_string_1.ch"
+    },
+    {
+      "id": "host/issue_544_tuple_string_2.ch",
+      "frontend": "surf",
+      "source": "values: List[(string, i64)] = [(\"a\", 1i64), (\"b\", 2i64)]\nout = len(values)\n",
+      "origin": "crates/chelis-cli/tests/fixtures/compiled_value_ownership/issue_544_tuple_string_2.ch"
+    },
+    {
+      "id": "host/mapped_file_direct.ch",
+      "frontend": "surf",
+      "source": "def mapped_length(path: string) -> i64 ! { IO } = {\n  mapped = mmap_file(path)\n  mmap_len(mapped)\n}\nout = mapped_length(\"__MAPPED_FILE_PATH__\")\n",
+      "origin": "crates/chelis-cli/tests/fixtures/compiled_value_ownership/mapped_file_direct.ch"
+    },
+    {
+      "id": "host/option_mapped_file.ch",
+      "frontend": "surf",
+      "source": "def mapped_length(path: string) -> i64 ! { IO } = {\n  value: Option[MappedFile] = path |> mmap_file |> Some\n  match value with {\n    | None => 0i64\n    | Some(mapped) => mmap_len(mapped)\n  }\n}\nout = mapped_length(\"__MAPPED_FILE_PATH__\")\n",
+      "origin": "crates/chelis-cli/tests/fixtures/compiled_value_ownership/option_mapped_file.ch"
+    },
+    {
+      "id": "host/option_nested_mapped_file.ch",
+      "frontend": "surf",
+      "source": "def mapped_length(path: string) -> i64 ! { IO } = {\n  value: Option[Option[MappedFile]] = Some(Some(mmap_file(path)))\n  match value with {\n    | None => 0i64\n    | Some(inner) => match inner with {\n    | None => 0i64\n    | Some(mapped) => mmap_len(mapped)\n  }\n  }\n}\nout = mapped_length(\"__MAPPED_FILE_PATH__\")\n",
+      "origin": "crates/chelis-cli/tests/fixtures/compiled_value_ownership/option_nested_mapped_file.ch"
+    },
+    {
+      "id": "host/option_nested_string.ch",
+      "frontend": "surf",
+      "source": "def option_length() -> i64 = {\n  value: Option[Option[string]] = Some(Some(string_concat(\"abc\", \"def\")))\n  match value with {\n    | None => 0i64\n    | Some(inner) => match inner with {\n    | None => 0i64\n    | Some(text) => string_len(text)\n  }\n  }\n}\nout = option_length()\n",
+      "origin": "crates/chelis-cli/tests/fixtures/compiled_value_ownership/option_nested_string.ch"
+    },
+    {
+      "id": "host/option_scalar_none.ch",
+      "frontend": "surf",
+      "source": "def option_value() -> i64 = {\n  value: Option[i64] = None\n  match value with {\n    | None => 0i64\n    | Some(inner) => inner\n  }\n}\nout = option_value()\n",
+      "origin": "crates/chelis-cli/tests/fixtures/compiled_value_ownership/option_scalar_none.ch"
+    },
+    {
+      "id": "host/option_scalar_some.ch",
+      "frontend": "surf",
+      "source": "def option_value() -> i64 = {\n  value: Option[i64] = Some(7i64)\n  match value with {\n    | None => 0i64\n    | Some(inner) => inner\n  }\n}\nout = option_value()\n",
+      "origin": "crates/chelis-cli/tests/fixtures/compiled_value_ownership/option_scalar_some.ch"
+    },
+    {
+      "id": "host/option_string.ch",
+      "frontend": "surf",
+      "source": "def option_length() -> i64 = {\n  value: Option[string] = \"abc\" |> string_concat(\"def\") |> Some\n  match value with {\n    | None => 0i64\n    | Some(inner) => string_len(inner)\n  }\n}\nout = option_length()\n",
+      "origin": "crates/chelis-cli/tests/fixtures/compiled_value_ownership/option_string.ch"
+    },
+    {
+      "id": "host/reject_adt_function.ch",
+      "frontend": "surf",
+      "source": "type CallbackBox =\n  | CallbackBox { callback: i8 -> i8 }\ndef identity(item: i8) -> i8 = item\nvalue = CallbackBox { callback: identity }\nout = \"unreachable\"\n",
+      "origin": "crates/chelis-cli/tests/fixtures/compiled_value_ownership/reject_adt_function.ch"
+    },
+    {
+      "id": "host/reject_dict_function.ch",
+      "frontend": "surf",
+      "source": "def identity(item: i8) -> i8 = item\nvalue: Dict[string, i8 -> i8] = dict_of([(\"callback\", identity)])\nout = \"unreachable\"\n",
+      "origin": "crates/chelis-cli/tests/fixtures/compiled_value_ownership/reject_dict_function.ch"
+    },
+    {
+      "id": "host/reject_list_function.ch",
+      "frontend": "surf",
+      "source": "def identity(item: i8) -> i8 = item\nvalue: List[i8 -> i8] = [identity]\nout = \"unreachable\"\n",
+      "origin": "crates/chelis-cli/tests/fixtures/compiled_value_ownership/reject_list_function.ch"
+    },
+    {
+      "id": "host/reject_option_function.ch",
+      "frontend": "surf",
+      "source": "def identity(item: i8) -> i8 = item\nvalue: Option[i8 -> i8] = Some(identity)\nout = \"unreachable\"\n",
+      "origin": "crates/chelis-cli/tests/fixtures/compiled_value_ownership/reject_option_function.ch"
+    },
+    {
+      "id": "host/reject_tuple_function.ch",
+      "frontend": "surf",
+      "source": "def identity(item: i8) -> i8 = item\nvalue: (i8 -> i8, i64) = (identity, 1i64)\nout = \"unreachable\"\n",
+      "origin": "crates/chelis-cli/tests/fixtures/compiled_value_ownership/reject_tuple_function.ch"
+    },
+    {
+      "id": "numeric/single-round-f32",
+      "frontend": "surf",
+      "source": "def main() -> tensor[2, f32] =\n  [18014399583223809, 3]\n",
+      "origin": "crates/chelis-ir/tests/const_tensor_lowering.rs:45-49"
+    },
+    {
+      "id": "numeric/single-round-bf16",
+      "frontend": "surf",
+      "source": "def main() -> tensor[2, bf16] =\n  [18084767253659649, 3]\n",
+      "origin": "crates/chelis-ir/tests/const_tensor_lowering.rs:73-77"
+    },
+    {
+      "id": "trace/gradient",
+      "frontend": "surf",
+      "source": "def loss(x: tensor[3, f32]) -> f32 = tensor_to_scalar(sum(mul(x, x), 0))\ndef derivative(x: tensor[3, f32]) -> tensor[3, f32] = grad(loss)(x)\n",
+      "origin": "crates/chelis-ir/tests/lowering_trace.rs:17-20"
+    },
+    {
+      "id": "numeric/literal-overflow",
+      "frontend": "deep",
+      "source": "(defsig {} main (t-fn {} (t-tensor {} (d-lit {} 2) (t-prim {} i8))))\n(def {} main (fn {} (params {}) (app {} (var {} to_tensor) (app {} (var {} Cons) (app {} (var {} neg) (lit {type: (t-prim {} i8)} -128)) (app {} (var {} Cons) (lit {type: (t-prim {} i8)} 1) (var {} Nil))))))\n",
+      "origin": "crates/chelis-ir/tests/const_tensor_lowering.rs:108-117"
+    }
+  ],
+  "contexts": [
+    {
+      "id": "context/library-constant",
+      "library": "(def {} lib_const (lit {type: (t-tensor {} (t-prim {} f32))} 7.0))",
+      "snippet": "(def {} y (app {type: (t-tensor {} (t-prim {} f32))} (var {} mul) (var {type: (t-tensor {} (t-prim {} f32))} lib_const) (lit {type: (t-tensor {} (t-prim {} f32))} 3.0)))"
+    },
+    {
+      "id": "context/library-function",
+      "library": "(defsig {} double (t-fn {} (t-tensor {} (t-prim {} f32)) (t-tensor {} (t-prim {} f32)))) (def {} double (fn {} (params {} (x {type: (t-tensor {} (t-prim {} f32))})) (app {type: (t-tensor {} (t-prim {} f32))} (var {} mul) (var {type: (t-tensor {} (t-prim {} f32))} x) (lit {type: (t-tensor {} (t-prim {} f32))} 2.0))))",
+      "snippet": "(def {} a (app {type: (t-tensor {} (t-prim {} f32))} (var {} double) (lit {type: (t-tensor {} (t-prim {} f32))} 5.0)))"
+    },
+    {
+      "id": "context/library-affine",
+      "library": "(def {} bias (lit {type: (t-tensor {} (t-prim {} f32))} 1.5)) (defsig {} affine (t-fn {} (t-tensor {} (t-prim {} f32)) (t-tensor {} (t-prim {} f32)))) (def {} affine (fn {} (params {} (x {type: (t-tensor {} (t-prim {} f32))})) (app {type: (t-tensor {} (t-prim {} f32))} (var {} add) (app {type: (t-tensor {} (t-prim {} f32))} (var {} mul) (var {type: (t-tensor {} (t-prim {} f32))} x) (lit {type: (t-tensor {} (t-prim {} f32))} 4.0)) (var {type: (t-tensor {} (t-prim {} f32))} bias))))",
+      "snippet": "(def {} z (app {type: (t-tensor {} (t-prim {} f32))} (var {} affine) (lit {type: (t-tensor {} (t-prim {} f32))} 2.0)))"
+    }
+  ]
+}

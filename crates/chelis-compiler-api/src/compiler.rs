@@ -1094,22 +1094,22 @@ const EXECUTION_ENTRY_C_SYMBOL: &str = "chelis_main";
 
 /// The tensor-signature top-level defs of a program, in source order —
 /// the candidate set the entry-scoped metadata lane can select from.
-fn tensor_signature_defs(host_program: &chelis_ir::host::ConcreteHostProgram) -> Vec<&str> {
+fn tensor_signature_defs(host_program: &chelis_ir_core::host::ConcreteHostProgram) -> Vec<&str> {
     host_program
         .functions
         .iter()
         .filter(|function| {
-            chelis_ir::host::function_has_tensor_signature(host_program, &function.name)
+            chelis_ir_core::host::function_has_tensor_signature(host_program, &function.name)
         })
         .map(|function| function.name.as_str())
         .collect()
 }
 
 fn project_host_program_to_entry(
-    program: &chelis_ir::host::ConcreteHostProgram,
+    program: &chelis_ir_core::host::ConcreteHostProgram,
     entry: &str,
-) -> Option<chelis_ir::host::ConcreteHostProgram> {
-    use chelis_ir::host::{
+) -> Option<chelis_ir_core::host::ConcreteHostProgram> {
+    use chelis_ir_core::host::{
         ConcreteHostCallback, ConcreteHostExpr, ConcreteHostExprKind, HostCallbackKind, HostCallee,
         HostCalleeView,
     };
@@ -1300,7 +1300,7 @@ fn project_host_program_to_entry(
         .iter()
         .flat_map(|function| function.summary_rejections.iter().cloned())
         .collect();
-    Some(chelis_ir::host::ConcreteHostProgram {
+    Some(chelis_ir_core::host::ConcreteHostProgram {
         globals: Vec::new(),
         global_tensor_helpers: Vec::new(),
         functions,
@@ -1336,7 +1336,7 @@ fn project_host_program_to_entry(
 ///   (`main`, else last), preserving existing host-lane selection.
 fn resolve_execution_entry<'a>(
     entry_name: Option<&'a str>,
-    host_program: &'a chelis_ir::host::ConcreteHostProgram,
+    host_program: &'a chelis_ir_core::host::ConcreteHostProgram,
     host_only: bool,
     strictness: EntryStrictness,
 ) -> Result<Option<&'a str>> {
@@ -1376,7 +1376,9 @@ fn resolve_execution_entry<'a>(
                 // Host-requiring program: keep the historical selection
                 // (`main` else last tensor-signature def). The host lane,
                 // not the entry-scoped kernel, will emit it.
-                Ok(chelis_ir::host::preferred_tensor_entry_name(host_program))
+                Ok(chelis_ir_core::host::preferred_tensor_entry_name(
+                    host_program,
+                ))
             } else {
                 // Clean tensor program: Fix 3 default-selection rule.
                 let candidates = tensor_signature_defs(host_program);
@@ -1428,14 +1430,14 @@ fn resolve_execution_entry<'a>(
 #[serde(tag = "reason", rename_all = "snake_case")]
 pub enum EntryLaneDecline {
     /// The SOURCE program has top-level (non-`def`) value bindings. The
-    /// host lane owns those: [`chelis_ir::host::lower_named_tensor_entry_dag`]
+    /// host lane owns those: [`chelis_ir_core::host::lower_named_tensor_entry_dag`]
     /// seeds its scope with the entry's params only, so a free reference to
     /// a global would lower as a phantom `Load` — silently demoting the
     /// global to a required caller-supplied runtime input — and an
     /// independent global's computation would vanish from the emitted
     /// artifact entirely. Declining restores the pre-#817 routing for this
     /// program class. Detection is source-level
-    /// ([`chelis_ir::host::program_has_top_level_value_bindings`]), not
+    /// ([`chelis_ir_core::host::program_has_top_level_value_bindings`]), not
     /// `host_program.globals`: lowering drops a DAG-lowerable, uncaptured
     /// scalar global (e.g. `glb = 2.0`) from `host.globals` entirely, and
     /// exactly that shape used to slip past the lowered check.
@@ -1533,80 +1535,85 @@ enum EntryLaneOutcome<'a> {
 fn entry_lane_decision<'a>(
     entry_name: Option<&'a str>,
     checked: &CheckedProgram,
-    host_program: &'a chelis_ir::host::ConcreteHostProgram,
+    host_program: &'a chelis_ir_core::host::ConcreteHostProgram,
     host_only: bool,
     strictness: EntryStrictness,
     allow_execution: bool,
 ) -> Result<EntryLaneOutcome<'a>> {
-    use EntryLaneOutcome::Decline;
+    chelis_ir::resources::with_operation(|operation| {
+        use EntryLaneOutcome::Decline;
 
-    // The `HasGlobals` decline is keyed on SOURCE-LEVEL top-level value
-    // bindings, not on the lowered `host_program.globals`: lowering drops
-    // a DAG-lowerable, uncaptured value binding from `host.globals` when
-    // the program emits no host `main` (`skip_for_lowered`), so a scalar
-    // global like `glb = 2.0` in a multi-def program was invisible to the
-    // lowered check — the lane claimed the program and `glb`'s computation
-    // vanished from the emitted C. ANY top-level value binding declines,
-    // regardless of how lowering classified it. The lowered check stays as
-    // belt-and-braces (it is a strict subset of the source-level one).
-    if chelis_ir::host::program_has_top_level_value_bindings(checked)
-        || !host_program.globals.is_empty()
-    {
-        return Ok(Decline(EntryLaneDecline::HasGlobals));
-    }
-    // A callable the C execution lane selected for its dropout must not
-    // inherit the legacy host default of silently choosing the last tensor
-    // def.
-    let legacy_host_selection =
-        host_only && !(allow_execution && strictness == EntryStrictness::Strict);
-    let Some(entry) =
-        resolve_execution_entry(entry_name, host_program, legacy_host_selection, strictness)?
-    else {
-        return Ok(Decline(EntryLaneDecline::NoEntryResolved));
-    };
-    if !chelis_ir::host::function_has_tensor_signature(host_program, entry) {
-        return Ok(Decline(EntryLaneDecline::NotTensorSignature {
-            entry: entry.to_string(),
-        }));
-    }
-    let Some(dag) = chelis_ir::host::lower_named_tensor_entry_dag(checked, entry) else {
-        return Ok(Decline(EntryLaneDecline::LoweringFailed {
-            entry: entry.to_string(),
-        }));
-    };
-    let dag = chelis_dag_core::optimize::dead_code_eliminate(&dag);
-    if dag.roots().is_empty() {
-        return Ok(Decline(EntryLaneDecline::EmptyAfterDce {
-            entry: entry.to_string(),
-        }));
-    }
-    if dag.roots().len() != 1 {
-        return Ok(Decline(EntryLaneDecline::LoweringFailed {
-            entry: entry.to_string(),
-        }));
-    }
-    let declared_params: UnordSet<&str> = host_program
-        .functions
-        .iter()
-        .find(|function| function.name == entry)
-        .map(|function| function.params.iter().map(|p| p.name.as_str()).collect())
-        .unwrap_or_default();
-    let mut extra: Vec<String> = Vec::new();
-    for node in dag.nodes() {
-        if let RiscOp::Load { name } = &node.op
-            && !declared_params.contains(name.as_str())
-            && !extra.iter().any(|seen| seen == name.as_str())
+        // The `HasGlobals` decline is keyed on SOURCE-LEVEL top-level value
+        // bindings, not on the lowered `host_program.globals`: lowering drops
+        // a DAG-lowerable, uncaptured value binding from `host.globals` when
+        // the program emits no host `main` (`skip_for_lowered`), so a scalar
+        // global like `glb = 2.0` in a multi-def program was invisible to the
+        // lowered check — the lane claimed the program and `glb`'s computation
+        // vanished from the emitted C. ANY top-level value binding declines,
+        // regardless of how lowering classified it. The lowered check stays as
+        // belt-and-braces (it is a strict subset of the source-level one).
+        if chelis_ir_core::host::program_has_top_level_value_bindings(checked.facts())
+            || !host_program.globals.is_empty()
         {
-            extra.push(name.as_str().to_string());
+            return Ok(Decline(EntryLaneDecline::HasGlobals));
         }
-    }
-    if !extra.is_empty() {
-        return Ok(Decline(EntryLaneDecline::InputsOutsideParams {
-            entry: entry.to_string(),
-            extra,
-        }));
-    }
-    Ok(EntryLaneOutcome::Claim { entry, dag })
+        // A callable the C execution lane selected for its dropout must not
+        // inherit the legacy host default of silently choosing the last tensor
+        // def.
+        let legacy_host_selection =
+            host_only && !(allow_execution && strictness == EntryStrictness::Strict);
+        let Some(entry) =
+            resolve_execution_entry(entry_name, host_program, legacy_host_selection, strictness)?
+        else {
+            return Ok(Decline(EntryLaneDecline::NoEntryResolved));
+        };
+        if !chelis_ir_core::host::function_has_tensor_signature(host_program, entry) {
+            return Ok(Decline(EntryLaneDecline::NotTensorSignature {
+                entry: entry.to_string(),
+            }));
+        }
+        let Some(dag) =
+            chelis_ir_core::host::lower_named_tensor_entry_dag((checked).facts(), entry, operation)
+                .map_err(lower_diagnostic_to_compiler_error)?
+        else {
+            return Ok(Decline(EntryLaneDecline::LoweringFailed {
+                entry: entry.to_string(),
+            }));
+        };
+        let dag = chelis_dag_core::optimize::dead_code_eliminate(&dag);
+        if dag.roots().is_empty() {
+            return Ok(Decline(EntryLaneDecline::EmptyAfterDce {
+                entry: entry.to_string(),
+            }));
+        }
+        if dag.roots().len() != 1 {
+            return Ok(Decline(EntryLaneDecline::LoweringFailed {
+                entry: entry.to_string(),
+            }));
+        }
+        let declared_params: UnordSet<&str> = host_program
+            .functions
+            .iter()
+            .find(|function| function.name == entry)
+            .map(|function| function.params.iter().map(|p| p.name.as_str()).collect())
+            .unwrap_or_default();
+        let mut extra: Vec<String> = Vec::new();
+        for node in dag.nodes() {
+            if let RiscOp::Load { name } = &node.op
+                && !declared_params.contains(name.as_str())
+                && !extra.iter().any(|seen| seen == name.as_str())
+            {
+                extra.push(name.as_str().to_string());
+            }
+        }
+        if !extra.is_empty() {
+            return Ok(Decline(EntryLaneDecline::InputsOutsideParams {
+                entry: entry.to_string(),
+                extra,
+            }));
+        }
+        Ok(EntryLaneOutcome::Claim { entry, dag })
+    })
 }
 
 /// Compile to a callable execution artifact: the CALLABLE surface
@@ -1955,146 +1962,360 @@ fn execution_artifact_from_compiled_observed(
         crate::emission_observer::Observer<'_>,
     >,
 ) -> Result<CompiledExecutionArtifact> {
-    let build_target = BuildTarget::from(target);
-    #[cfg(feature = "compilation-trace")]
-    let collect_trace = observer
-        .as_ref()
-        .is_some_and(crate::emission_observer::Observer::captures_lowering);
-    let (mut legacy_host, mut execution_host) = if target == CompileTarget::C
-        && (compiled.host_execution.is_some() || compiled.host_ordinary.is_some())
-    {
-        (
-            compiled.host_ordinary.take(),
-            compiled.host_execution.take(),
-        )
-    } else {
-        let lowered = chelis_ir::host::try_lower_manifested_program(&compiled.program)
-            .map_err(lower_diagnostic_to_compiler_error)?;
-        (lowered.host, None)
-    };
-    let host_program = execution_host
-        .as_ref()
-        .map(|plan| plan.program())
-        .or(legacy_host.as_ref());
-    // Preserve the actual lowering, not a second independently lowered program.
-    // Ordinary compilation does not clone it, even with the feature enabled.
-    #[cfg(feature = "emission-observer")]
-    let observed_host = observer.as_ref().and_then(|_| host_program.cloned());
-    let func_name = execution_c_symbol(entry_name);
+    chelis_ir::resources::with_operation(|operation| {
+        let build_target = BuildTarget::from(target);
+        #[cfg(feature = "compilation-trace")]
+        let collect_trace = observer
+            .as_ref()
+            .is_some_and(crate::emission_observer::Observer::captures_lowering);
+        let (mut legacy_host, mut execution_host) = if target == CompileTarget::C
+            && (compiled.host_execution.is_some() || compiled.host_ordinary.is_some())
+        {
+            (
+                compiled.host_ordinary.take(),
+                compiled.host_execution.take(),
+            )
+        } else {
+            let lowered = chelis_ir::host::try_lower_manifested_program(&compiled.program)
+                .map_err(lower_diagnostic_to_compiler_error)?;
+            (lowered.host, None)
+        };
+        let host_program = execution_host
+            .as_ref()
+            .map(|plan| plan.program())
+            .or(legacy_host.as_ref());
+        // Preserve the actual lowering, not a second independently lowered program.
+        // Ordinary compilation does not clone it, even with the feature enabled.
+        #[cfg(feature = "emission-observer")]
+        let observed_host = observer.as_ref().and_then(|_| host_program.cloned());
+        let func_name = execution_c_symbol(entry_name);
 
-    match target {
-        CompileTarget::C => {
-            let host_only = host_program
-                .map(chelis_ir::host::host_program_requires_host_backend)
-                .unwrap_or(false);
+        match target {
+            CompileTarget::C => {
+                let host_only = host_program
+                    .map(chelis_ir_core::host::host_program_requires_host_backend)
+                    .unwrap_or(false);
 
-            // Entry-scoped compiled-execution metadata (#817, #818).
-            //
-            // The legacy path below compiles the WHOLE program: every
-            // lowerable top-level `def`'s body becomes a DAG root and every
-            // def's params become `Load`s, so `execution_input_specs` reports
-            // all defs' inputs merged (#817). And when the entry's body uses a
-            // syntactic host-runtime builtin such as `concat`, the def is
-            // excluded from the pure DAG entirely, `roots()` is empty, and the
-            // host-lane early-return hands back an EMPTY manifest (#818).
-            //
-            // Both are fixed by lowering the single resolved ENTRY def into a
-            // standalone DAG and taking its metadata. The gate is scoped to
-            // the ENTRY, not the whole program: the original `!host_only`
-            // whole-program gate meant any host-flavored SIBLING def (or a
-            // helper the entry calls that itself uses `concat`) disabled the
-            // lane even when the requested entry lowers cleanly — the #817/#818
-            // regression this PR round fixes.
-            //
-            // The claim/decline predicate lives in `entry_lane_decision` (see
-            // its doc for the full rule set). Anything the entry lane declines
-            // falls through to the host lane below, carrying the decline
-            // reason on the artifact so downstream surfaces can report it
-            // instead of guessing from an empty manifest. For a single-def
-            // tensor program the scoped DAG equals the whole-program DAG, so
-            // this is a no-op there.
-            let mut entry_lane_decline = None;
-            let scoped_entry = if compiled.library_runtime.is_some() {
-                // In-context (#816): a clean tensor entry lowers straight into
-                // `compiled.dag` as a DAG root — it is NOT a host-program
-                // function, so `entry_lane_decision` (which reads the host
-                // program) can't see it. Resolve against the new-code tensor
-                // roots instead and slice `compiled.dag` to the entry's root,
-                // so the metadata / dim checks run on the entry's reachable
-                // subgraph only (not unreachable library helper nodes, which
-                // may carry polymorphic symbolic dims). NOTE: this branch does
-                // not consult `strictness` — `resolve_in_context_entry` is
-                // strict by construction (exact-name errors, ambiguity errors,
-                // no decline fallthrough), and no LEGACY caller routes
-                // in-context today. A future `compile()`-in-context surface
-                // must decide its own policy here rather than inherit this.
+                // Entry-scoped compiled-execution metadata (#817, #818).
                 //
-                // Invariant guard, symmetric to Fix A in
-                // `resolve_in_context_entry` (#822 review): a RESOLVED entry
-                // whose scoped DAG comes back rootless (set_roots + DCE
-                // emptied it) must fail loudly, not be silently dropped. The
-                // previous `.filter(!roots.is_empty())` did exactly that
-                // silent drop: with the claim gone, execution skips the
-                // rootless in-context reject below (`compiled.dag.roots()` is
-                // still non-empty — only the SCOPED dag is rootless) and
-                // falls through to whole-DAG codegen with every new-code
-                // root's inputs merged — the same #817 class Fix A closes,
-                // via a different door. Should be unreachable: the root the
-                // entry was scoped to IS a root, so DCE keeps it. The
-                // legitimate paths are untouched: no entry resolved with a
-                // rootless DAG still reaches the friendly scalar/host-only
-                // reject below.
-                match resolve_in_context_entry(&compiled, entry_name)? {
-                    Some((entry, dag)) if dag.roots().is_empty() => {
-                        return Err(stage_error(
-                            "compile",
-                            format!(
-                                "internal: in-context entry `{entry}` resolved but its \
+                // The legacy path below compiles the WHOLE program: every
+                // lowerable top-level `def`'s body becomes a DAG root and every
+                // def's params become `Load`s, so `execution_input_specs` reports
+                // all defs' inputs merged (#817). And when the entry's body uses a
+                // syntactic host-runtime builtin such as `concat`, the def is
+                // excluded from the pure DAG entirely, `roots()` is empty, and the
+                // host-lane early-return hands back an EMPTY manifest (#818).
+                //
+                // Both are fixed by lowering the single resolved ENTRY def into a
+                // standalone DAG and taking its metadata. The gate is scoped to
+                // the ENTRY, not the whole program: the original `!host_only`
+                // whole-program gate meant any host-flavored SIBLING def (or a
+                // helper the entry calls that itself uses `concat`) disabled the
+                // lane even when the requested entry lowers cleanly — the #817/#818
+                // regression this PR round fixes.
+                //
+                // The claim/decline predicate lives in `entry_lane_decision` (see
+                // its doc for the full rule set). Anything the entry lane declines
+                // falls through to the host lane below, carrying the decline
+                // reason on the artifact so downstream surfaces can report it
+                // instead of guessing from an empty manifest. For a single-def
+                // tensor program the scoped DAG equals the whole-program DAG, so
+                // this is a no-op there.
+                let mut entry_lane_decline = None;
+                let scoped_entry = if compiled.library_runtime.is_some() {
+                    // In-context (#816): a clean tensor entry lowers straight into
+                    // `compiled.dag` as a DAG root — it is NOT a host-program
+                    // function, so `entry_lane_decision` (which reads the host
+                    // program) can't see it. Resolve against the new-code tensor
+                    // roots instead and slice `compiled.dag` to the entry's root,
+                    // so the metadata / dim checks run on the entry's reachable
+                    // subgraph only (not unreachable library helper nodes, which
+                    // may carry polymorphic symbolic dims). NOTE: this branch does
+                    // not consult `strictness` — `resolve_in_context_entry` is
+                    // strict by construction (exact-name errors, ambiguity errors,
+                    // no decline fallthrough), and no LEGACY caller routes
+                    // in-context today. A future `compile()`-in-context surface
+                    // must decide its own policy here rather than inherit this.
+                    //
+                    // Invariant guard, symmetric to Fix A in
+                    // `resolve_in_context_entry` (#822 review): a RESOLVED entry
+                    // whose scoped DAG comes back rootless (set_roots + DCE
+                    // emptied it) must fail loudly, not be silently dropped. The
+                    // previous `.filter(!roots.is_empty())` did exactly that
+                    // silent drop: with the claim gone, execution skips the
+                    // rootless in-context reject below (`compiled.dag.roots()` is
+                    // still non-empty — only the SCOPED dag is rootless) and
+                    // falls through to whole-DAG codegen with every new-code
+                    // root's inputs merged — the same #817 class Fix A closes,
+                    // via a different door. Should be unreachable: the root the
+                    // entry was scoped to IS a root, so DCE keeps it. The
+                    // legitimate paths are untouched: no entry resolved with a
+                    // rootless DAG still reaches the friendly scalar/host-only
+                    // reject below.
+                    match resolve_in_context_entry(&compiled, entry_name)? {
+                        Some((entry, dag)) if dag.roots().is_empty() => {
+                            return Err(stage_error(
+                                "compile",
+                                format!(
+                                    "internal: in-context entry `{entry}` resolved but its \
                                  entry-scoped DAG has no roots after scoping/DCE; refusing to \
                                  fall through to whole-program codegen, which would merge every \
                                  root's inputs (#817). This indicates a root-scoping vs DCE \
                                  mismatch; please report it."
-                            ),
-                            GeneralKind::CompileError,
-                        ));
+                                ),
+                                GeneralKind::CompileError,
+                            ));
+                        }
+                        Some((entry, ordinary)) => Some((entry, ordinary)),
+                        None => None,
                     }
-                    Some((entry, ordinary)) => Some((entry, ordinary)),
-                    None => None,
-                }
-            } else if let Some(host_program) = host_program {
-                match entry_lane_decision(
-                    entry_name,
-                    compiled.checked(),
-                    host_program,
-                    host_only,
-                    strictness,
-                    execution_host.is_some(),
-                )? {
-                    EntryLaneOutcome::Claim { entry, dag } => Some((entry, dag)),
-                    EntryLaneOutcome::Decline(reason) => {
-                        entry_lane_decline = Some(reason);
-                        None
+                } else if let Some(host_program) = host_program {
+                    match entry_lane_decision(
+                        entry_name,
+                        compiled.checked(),
+                        host_program,
+                        host_only,
+                        strictness,
+                        execution_host.is_some(),
+                    )? {
+                        EntryLaneOutcome::Claim { entry, dag } => Some((entry, dag)),
+                        EntryLaneOutcome::Decline(reason) => {
+                            entry_lane_decline = Some(reason);
+                            None
+                        }
                     }
-                }
-            } else {
-                None
-            };
+                } else {
+                    None
+                };
 
-            if let Some((entry, entry_dag)) = scoped_entry {
-                validate_compiled_resource_target(&compiled, build_target, Some(entry))?;
-                // Fix 2: the entry-scoped symbol is the fixed, collision-free
-                // `chelis_main` so a def named `main`/`free`/`chelis_*` links.
-                let entry_symbol = EXECUTION_ENTRY_C_SYMBOL;
-                reject_unsupported_effect_ops(&entry_dag, BuildTarget::C)?;
-                reject_symbolic_windowed_reduce(&entry_dag, BuildTarget::C)?;
-                reject_unsupported_reduce_window_precision(&entry_dag, BuildTarget::C)?;
-                // The C emitter validates each axis's extent source and each
-                // rendered dimension's origin after backend preparation. A
-                // runtime extent is representable when those checks succeed;
-                // rejecting every unsized dimension here also rejects valid
-                // transformed entries with runtime pad/shrink intermediates.
+                if let Some((entry, entry_dag)) = scoped_entry {
+                    validate_compiled_resource_target(&compiled, build_target, Some(entry))?;
+                    // Fix 2: the entry-scoped symbol is the fixed, collision-free
+                    // `chelis_main` so a def named `main`/`free`/`chelis_*` links.
+                    let entry_symbol = EXECUTION_ENTRY_C_SYMBOL;
+                    reject_unsupported_effect_ops(&entry_dag, BuildTarget::C)?;
+                    reject_symbolic_windowed_reduce(&entry_dag, BuildTarget::C)?;
+                    reject_unsupported_reduce_window_precision(&entry_dag, BuildTarget::C)?;
+                    // The C emitter validates each axis's extent source and each
+                    // rendered dimension's origin after backend preparation. A
+                    // runtime extent is representable when those checks succeed;
+                    // rejecting every unsized dimension here also rejects valid
+                    // transformed entries with runtime pad/shrink intermediates.
+                    let specialized =
+                        chelis_ir_core::specialize::specialize_for_exact_arithmetic(&entry_dag);
+                    let fused = chelis_dag_core::fuse::fuse(&specialized);
+                    let options = chelis_backend_c::CodegenOptions {
+                        use_blas: true,
+                        ..chelis_backend_c::CodegenOptions::default()
+                    };
+                    let selected = chelis_backend_c::prepare_dag_for_codegen(fused, options);
+                    let verified = chelis_ir::ownership::verify_ownership(
+                        chelis_ir::ownership::lower_dag_ownership(selected).map_err(|error| {
+                            stage_error("ownership", error.to_string(), GeneralKind::CompileError)
+                        })?,
+                    )
+                    .map_err(|error| {
+                        stage_error("ownership", error.to_string(), GeneralKind::CompileError)
+                    })?;
+                    #[cfg(feature = "emission-observer")]
+                    crate::emission_observer::observe(
+                        &mut observer,
+                        &compiled.program,
+                        observed_host.as_ref(),
+                        crate::emission_observer::SelectedEmission::Dag {
+                            unfused: &entry_dag,
+                            selected: verified.emission(),
+                        },
+                        #[cfg(feature = "compilation-trace")]
+                        crate::compilation_trace::SelectedLowering::Unavailable,
+                    );
+                    let result =
+                        chelis_backend_c::codegen_with_options(verified, entry_symbol, options)
+                            .map_err(unsupported_stage_error)?;
+                    return Ok(compiled_execution_artifact(
+                        entry_symbol,
+                        None,
+                        compile_result_c(target, entry_symbol, &result)?,
+                        manifest_result(&compiled.program),
+                        execution_input_specs(&entry_dag, &result.input_labels)?,
+                        execution_output_specs(&entry_dag, &result.output_labels)?,
+                        result.symbolic_dims,
+                    ));
+                }
+
+                // In-context reef path (#816): a clean tensor entry lowers straight
+                // into `compiled.dag` (its roots are the new-code tensor roots), so
+                // the whole-program fallthrough below codegens it correctly — the
+                // entry lane above declines because such a def is a DAG root, not a
+                // host-program function. But when `compiled.dag` has NO roots, the
+                // new source produced no tensor kernel at all: a scalar-signature
+                // entry (`def main(s: f32, ...) -> f32`), a host-only entry, or one
+                // whose body needs the host runtime. The monolithic fallthrough
+                // would then codegen a root-less DAG into unbuildable C. Reject
+                // cleanly with actionable guidance instead. `eval`/`eval_in_context`
+                // still run these programs. (Gated on `library_runtime` so the
+                // monolithic path — which routes these to the host lane below — is
+                // byte-for-byte unchanged.)
+                if compiled.library_runtime.is_some() && compiled.dag.roots().is_empty() {
+                    // Name the explicitly-requested entry when the user passed one:
+                    // "the selected entry" is opaque if they asked for `entry_name=foo`
+                    // and foo has no tensor form (review round 2).
+                    let selected = match entry_name {
+                        Some(name) => format!("the selected entry `{name}`"),
+                        None => "the selected entry".to_string(),
+                    };
+                    return Err(stage_error(
+                        "compile",
+                        format!(
+                            "{selected} has no callable tensor-kernel form: it is scalar-\
+                         signature (e.g. `def main(s: f32, ...) -> f32`), host-only (top-level \
+                         bindings/globals, string/record/effect ops), or otherwise does not \
+                         lower to a tensor entry. Give it a tensor-in/tensor-out signature by \
+                         wrapping scalars as rank-1 tensors (`tensor[1, f32]`), or use `eval` to \
+                         run it (`eval` supports scalar and host-only programs)."
+                        ),
+                        GeneralKind::CompileError,
+                    ));
+                }
+
+                if let Some(host_program) = host_program
+                    && (host_only || compiled.dag.roots().is_empty())
+                {
+                    let projected_host_program = match (&entry_lane_decline, strictness) {
+                        (
+                            Some(EntryLaneDecline::NotTensorSignature { entry }),
+                            EntryStrictness::Strict,
+                        ) => Some(
+                            project_host_program_to_entry(host_program, entry).ok_or_else(
+                                || {
+                                    stage_error(
+                                        "compile",
+                                        format!(
+                                            "internal: selected scalar entry `{entry}` disappeared \
+                                     before host-program projection; please report it"
+                                        ),
+                                        GeneralKind::CompileError,
+                                    )
+                                },
+                            )?,
+                        ),
+                        _ => None,
+                    };
+                    let host_program = projected_host_program.as_ref().unwrap_or(host_program);
+                    let resource_entry = match (&entry_lane_decline, strictness) {
+                        (
+                            Some(EntryLaneDecline::NotTensorSignature { entry }),
+                            EntryStrictness::Strict,
+                        ) => Some(entry.as_str()),
+                        _ => None,
+                    };
+                    validate_compiled_resource_target(&compiled, build_target, resource_entry)?;
+                    reject_unsupported_windowed_reductions_in_host_program(
+                        host_program,
+                        BuildTarget::C,
+                    )?;
+                    let scalar_only_globals = host_program.globals.iter().all(|global| {
+                        matches!(
+                            &global.ty,
+                            chelis_ir_core::host_type_state::ConcreteHostType::Scalar(_)
+                        )
+                    });
+                    #[cfg(feature = "compilation-trace")]
+                    let mut selected_host_trace = None;
+                    let ownership = if let Some(plan) = execution_host.take() {
+                        let selected = match projected_host_program {
+                            Some(projected) => plan
+                                .project_functions(
+                                    &projected
+                                        .functions
+                                        .iter()
+                                        .map(|function| function.name.clone())
+                                        .collect::<Vec<_>>(),
+                                )
+                                .map_err(|message| {
+                                    stage_error("ownership", message, GeneralKind::CompileError)
+                                })?,
+                            None => plan,
+                        };
+                        reject_unsupported_effect_ops_in_host_execution_plan(
+                            &selected,
+                            BuildTarget::C,
+                        )?;
+                        let selected =
+                            chelis_backend_c::prepare_host_execution_plan_for_codegen(selected)
+                                .map_err(unsupported_stage_error)?;
+                        #[cfg(feature = "compilation-trace")]
+                        if collect_trace {
+                            selected_host_trace = Some(
+                                crate::compilation_trace::HostLoweringTrace::snapshot(&selected)?,
+                            );
+                        }
+                        chelis_ir::ownership::lower_host_execution_ownership(
+                            &compiled.program,
+                            selected,
+                        )
+                    } else {
+                        let selected = projected_host_program.unwrap_or_else(|| {
+                            legacy_host.take().expect("ordinary C host selected")
+                        });
+                        reject_unsupported_effect_ops_in_host_program(&selected, BuildTarget::C)?;
+                        let selected = chelis_backend_c::prepare_host_program_for_codegen(selected)
+                            .map_err(unsupported_stage_error)?;
+                        chelis_ir::ownership::lower_host_ownership(&compiled.program, selected)
+                    }
+                    .map_err(|error| {
+                        stage_error("ownership", error.to_string(), GeneralKind::CompileError)
+                    })?;
+                    let verified =
+                        chelis_ir::ownership::verify_ownership(ownership).map_err(|error| {
+                            stage_error("ownership", error.to_string(), GeneralKind::CompileError)
+                        })?;
+                    #[cfg(feature = "emission-observer")]
+                    crate::emission_observer::observe(
+                        &mut observer,
+                        &compiled.program,
+                        observed_host.as_ref(),
+                        crate::emission_observer::SelectedEmission::Host(verified.emission()),
+                        #[cfg(feature = "compilation-trace")]
+                        selected_host_trace.as_ref().map_or(
+                            crate::compilation_trace::SelectedLowering::Unavailable,
+                            crate::compilation_trace::SelectedLowering::Host,
+                        ),
+                    );
+                    let result = chelis_backend_c::codegen_host_program(&verified, &func_name)
+                        .map_err(unsupported_stage_error)?;
+                    // Preserve a more specific host-emitter rejection (for
+                    // example the function-value ABI) when one exists. The
+                    // scalar-global shape is the one strict #817 fallback that
+                    // remains unsafe here: source-level detection sees the global,
+                    // while host lowering has no global product to expose. Real
+                    // host globals retain their established host-lane artifact
+                    // with an explicit decline reason.
+                    if strictness == EntryStrictness::Strict
+                        && matches!(entry_lane_decline, Some(EntryLaneDecline::HasGlobals))
+                        && scalar_only_globals
+                    {
+                        return Err(strict_entry_decline_error(EntryLaneDecline::HasGlobals));
+                    }
+                    let mut artifact = compiled_execution_artifact(
+                        &func_name,
+                        None,
+                        compile_result_c(target, &func_name, &result)?,
+                        manifest_result(&compiled.program),
+                        Vec::new(),
+                        Vec::new(),
+                        Vec::new(),
+                    );
+                    artifact.entry_lane_decline = entry_lane_decline;
+                    return Ok(artifact);
+                }
+                validate_compiled_resource_target(&compiled, build_target, None)?;
+                reject_unsupported_effect_ops(&compiled.dag, BuildTarget::C)?;
+                reject_symbolic_windowed_reduce(&compiled.dag, BuildTarget::C)?;
+                reject_unsupported_reduce_window_precision(&compiled.dag, BuildTarget::C)?;
+                reject_unsized_named_dims(&compiled.dag, "c")?;
                 let specialized =
-                    chelis_ir::specialize::specialize_for_exact_arithmetic(&entry_dag);
+                    chelis_ir_core::specialize::specialize_for_exact_arithmetic(&compiled.dag);
                 let fused = chelis_dag_core::fuse::fuse(&specialized);
                 let options = chelis_backend_c::CodegenOptions {
                     use_blas: true,
@@ -2115,307 +2336,157 @@ fn execution_artifact_from_compiled_observed(
                     &compiled.program,
                     observed_host.as_ref(),
                     crate::emission_observer::SelectedEmission::Dag {
-                        unfused: &entry_dag,
+                        unfused: &compiled.dag,
                         selected: verified.emission(),
                     },
                     #[cfg(feature = "compilation-trace")]
                     crate::compilation_trace::SelectedLowering::Unavailable,
                 );
-                let result =
-                    chelis_backend_c::codegen_with_options(verified, entry_symbol, options)
-                        .map_err(unsupported_stage_error)?;
-                return Ok(compiled_execution_artifact(
-                    entry_symbol,
-                    None,
-                    compile_result_c(target, entry_symbol, &result)?,
-                    manifest_result(&compiled.program),
-                    execution_input_specs(&entry_dag, &result.input_labels)?,
-                    execution_output_specs(&entry_dag, &result.output_labels)?,
-                    result.symbolic_dims,
-                ));
-            }
-
-            // In-context reef path (#816): a clean tensor entry lowers straight
-            // into `compiled.dag` (its roots are the new-code tensor roots), so
-            // the whole-program fallthrough below codegens it correctly — the
-            // entry lane above declines because such a def is a DAG root, not a
-            // host-program function. But when `compiled.dag` has NO roots, the
-            // new source produced no tensor kernel at all: a scalar-signature
-            // entry (`def main(s: f32, ...) -> f32`), a host-only entry, or one
-            // whose body needs the host runtime. The monolithic fallthrough
-            // would then codegen a root-less DAG into unbuildable C. Reject
-            // cleanly with actionable guidance instead. `eval`/`eval_in_context`
-            // still run these programs. (Gated on `library_runtime` so the
-            // monolithic path — which routes these to the host lane below — is
-            // byte-for-byte unchanged.)
-            if compiled.library_runtime.is_some() && compiled.dag.roots().is_empty() {
-                // Name the explicitly-requested entry when the user passed one:
-                // "the selected entry" is opaque if they asked for `entry_name=foo`
-                // and foo has no tensor form (review round 2).
-                let selected = match entry_name {
-                    Some(name) => format!("the selected entry `{name}`"),
-                    None => "the selected entry".to_string(),
-                };
-                return Err(stage_error(
-                    "compile",
-                    format!(
-                        "{selected} has no callable tensor-kernel form: it is scalar-\
-                         signature (e.g. `def main(s: f32, ...) -> f32`), host-only (top-level \
-                         bindings/globals, string/record/effect ops), or otherwise does not \
-                         lower to a tensor entry. Give it a tensor-in/tensor-out signature by \
-                         wrapping scalars as rank-1 tensors (`tensor[1, f32]`), or use `eval` to \
-                         run it (`eval` supports scalar and host-only programs)."
-                    ),
-                    GeneralKind::CompileError,
-                ));
-            }
-
-            if let Some(host_program) = host_program
-                && (host_only || compiled.dag.roots().is_empty())
-            {
-                let projected_host_program = match (&entry_lane_decline, strictness) {
-                    (
-                        Some(EntryLaneDecline::NotTensorSignature { entry }),
-                        EntryStrictness::Strict,
-                    ) => Some(
-                        project_host_program_to_entry(host_program, entry).ok_or_else(|| {
-                            stage_error(
-                                "compile",
-                                format!(
-                                    "internal: selected scalar entry `{entry}` disappeared \
-                                     before host-program projection; please report it"
-                                ),
-                                GeneralKind::CompileError,
-                            )
-                        })?,
-                    ),
-                    _ => None,
-                };
-                let host_program = projected_host_program.as_ref().unwrap_or(host_program);
-                let resource_entry = match (&entry_lane_decline, strictness) {
-                    (
-                        Some(EntryLaneDecline::NotTensorSignature { entry }),
-                        EntryStrictness::Strict,
-                    ) => Some(entry.as_str()),
-                    _ => None,
-                };
-                validate_compiled_resource_target(&compiled, build_target, resource_entry)?;
-                reject_unsupported_windowed_reductions_in_host_program(
-                    host_program,
-                    BuildTarget::C,
-                )?;
-                let scalar_only_globals = host_program
-                    .globals
-                    .iter()
-                    .all(|global| matches!(&global.ty, chelis_ir::ConcreteHostType::Scalar(_)));
-                #[cfg(feature = "compilation-trace")]
-                let mut selected_host_trace = None;
-                let ownership = if let Some(plan) = execution_host.take() {
-                    let selected = match projected_host_program {
-                        Some(projected) => plan
-                            .project_functions(
-                                &projected
-                                    .functions
-                                    .iter()
-                                    .map(|function| function.name.clone())
-                                    .collect::<Vec<_>>(),
-                            )
-                            .map_err(|message| {
-                                stage_error("ownership", message, GeneralKind::CompileError)
-                            })?,
-                        None => plan,
-                    };
-                    reject_unsupported_effect_ops_in_host_execution_plan(
-                        &selected,
-                        BuildTarget::C,
-                    )?;
-                    let selected =
-                        chelis_backend_c::prepare_host_execution_plan_for_codegen(selected)
-                            .map_err(unsupported_stage_error)?;
-                    #[cfg(feature = "compilation-trace")]
-                    if collect_trace {
-                        selected_host_trace = Some(
-                            crate::compilation_trace::HostLoweringTrace::snapshot(&selected)?,
-                        );
-                    }
-                    chelis_ir::ownership::lower_host_execution_ownership(
-                        &compiled.program,
-                        selected,
-                    )
-                } else {
-                    let selected = projected_host_program
-                        .unwrap_or_else(|| legacy_host.take().expect("ordinary C host selected"));
-                    reject_unsupported_effect_ops_in_host_program(&selected, BuildTarget::C)?;
-                    let selected = chelis_backend_c::prepare_host_program_for_codegen(selected)
-                        .map_err(unsupported_stage_error)?;
-                    chelis_ir::ownership::lower_host_ownership(&compiled.program, selected)
-                }
-                .map_err(|error| {
-                    stage_error("ownership", error.to_string(), GeneralKind::CompileError)
-                })?;
-                let verified =
-                    chelis_ir::ownership::verify_ownership(ownership).map_err(|error| {
-                        stage_error("ownership", error.to_string(), GeneralKind::CompileError)
-                    })?;
-                #[cfg(feature = "emission-observer")]
-                crate::emission_observer::observe(
-                    &mut observer,
-                    &compiled.program,
-                    observed_host.as_ref(),
-                    crate::emission_observer::SelectedEmission::Host(verified.emission()),
-                    #[cfg(feature = "compilation-trace")]
-                    selected_host_trace.as_ref().map_or(
-                        crate::compilation_trace::SelectedLowering::Unavailable,
-                        crate::compilation_trace::SelectedLowering::Host,
-                    ),
-                );
-                let result = chelis_backend_c::codegen_host_program(&verified, &func_name)
+                let result = chelis_backend_c::codegen_with_options(verified, &func_name, options)
                     .map_err(unsupported_stage_error)?;
-                // Preserve a more specific host-emitter rejection (for
-                // example the function-value ABI) when one exists. The
-                // scalar-global shape is the one strict #817 fallback that
-                // remains unsafe here: source-level detection sees the global,
-                // while host lowering has no global product to expose. Real
-                // host globals retain their established host-lane artifact
-                // with an explicit decline reason.
-                if strictness == EntryStrictness::Strict
-                    && matches!(entry_lane_decline, Some(EntryLaneDecline::HasGlobals))
-                    && scalar_only_globals
-                {
-                    return Err(strict_entry_decline_error(EntryLaneDecline::HasGlobals));
-                }
                 let mut artifact = compiled_execution_artifact(
                     &func_name,
                     None,
                     compile_result_c(target, &func_name, &result)?,
                     manifest_result(&compiled.program),
-                    Vec::new(),
-                    Vec::new(),
-                    Vec::new(),
+                    execution_input_specs(&compiled.dag, &result.input_labels)?,
+                    execution_output_specs(&compiled.dag, &result.output_labels)?,
+                    result.symbolic_dims,
                 );
-                artifact.entry_lane_decline = entry_lane_decline;
-                return Ok(artifact);
-            }
-            validate_compiled_resource_target(&compiled, build_target, None)?;
-            reject_unsupported_effect_ops(&compiled.dag, BuildTarget::C)?;
-            reject_symbolic_windowed_reduce(&compiled.dag, BuildTarget::C)?;
-            reject_unsupported_reduce_window_precision(&compiled.dag, BuildTarget::C)?;
-            reject_unsized_named_dims(&compiled.dag, "c")?;
-            let specialized = chelis_ir::specialize::specialize_for_exact_arithmetic(&compiled.dag);
-            let fused = chelis_dag_core::fuse::fuse(&specialized);
-            let options = chelis_backend_c::CodegenOptions {
-                use_blas: true,
-                ..chelis_backend_c::CodegenOptions::default()
-            };
-            let selected = chelis_backend_c::prepare_dag_for_codegen(fused, options);
-            let verified = chelis_ir::ownership::verify_ownership(
-                chelis_ir::ownership::lower_dag_ownership(selected).map_err(|error| {
-                    stage_error("ownership", error.to_string(), GeneralKind::CompileError)
-                })?,
-            )
-            .map_err(|error| {
-                stage_error("ownership", error.to_string(), GeneralKind::CompileError)
-            })?;
-            #[cfg(feature = "emission-observer")]
-            crate::emission_observer::observe(
-                &mut observer,
-                &compiled.program,
-                observed_host.as_ref(),
-                crate::emission_observer::SelectedEmission::Dag {
-                    unfused: &compiled.dag,
-                    selected: verified.emission(),
-                },
-                #[cfg(feature = "compilation-trace")]
-                crate::compilation_trace::SelectedLowering::Unavailable,
-            );
-            let result = chelis_backend_c::codegen_with_options(verified, &func_name, options)
-                .map_err(unsupported_stage_error)?;
-            let mut artifact = compiled_execution_artifact(
-                &func_name,
-                None,
-                compile_result_c(target, &func_name, &result)?,
-                manifest_result(&compiled.program),
-                execution_input_specs(&compiled.dag, &result.input_labels)?,
-                execution_output_specs(&compiled.dag, &result.output_labels)?,
-                result.symbolic_dims,
-            );
-            // On this legacy whole-DAG path a `Some(decline)` co-occurs with
-            // a real (whole-program, merged) manifest — see the
-            // `entry_lane_decline` field doc. Every decline reason that
-            // leaves the whole-program DAG rooted can get here. On the STRICT
-            // (callable) surface a merged manifest is the #817 defect, so
-            // any decline here is a loud error; on the LEGACY (C-source)
-            // surface the whole-program emission is the product contract
-            // and the decline reason rides along on the artifact.
-            if strictness == EntryStrictness::Strict
-                && let Some(reason) = entry_lane_decline
-            {
-                return Err(strict_entry_decline_error(reason));
-            }
-            artifact.entry_lane_decline = entry_lane_decline;
-            Ok(artifact)
-        }
-        CompileTarget::Hip => {
-            // Reef-context (#816) HIP is not supported: the entry-scoped DAG
-            // selection the C arm applies (`resolve_in_context_entry`, gated on
-            // `library_runtime.is_some()`) is not implemented for HIP, which
-            // still clones the whole composed DAG and treats `entry_name` only
-            // as the emitted symbol. Compiling a multi-def reef context to HIP
-            // would therefore merge every reef-linked def's inputs/outputs into
-            // one kernel or ignore the requested entry — the #817/#818 class the
-            // C path fixes. Reject explicitly with actionable guidance rather
-            // than silently emit a mis-scoped kernel (an undocumented false
-            // promise, since the public API accepts `CompileTarget` and Python
-            // exposes `target="hip"`). Tracked as chelis#829 (apply the same
-            // entry-scoped selection to HIP, then lift this reject).
-            if compiled.library_runtime.is_some() {
-                return Err(reef_context_hip_unsupported_error());
-            }
-            validate_compiled_resource_target(&compiled, build_target, None)?;
-            let host_requires_host_backend = host_program
-                .map(chelis_ir::host::host_program_requires_host_backend)
-                .unwrap_or(false);
-            let preferred_entry =
-                host_program.and_then(chelis_ir::host::preferred_tensor_entry_name);
-            let preferred_entry_is_host = match preferred_entry {
-                Some(name) => {
-                    crate::target_capability::hip_entry_lane(compiled.checked(), name)
-                        .map_err(unsupported_stage_error)?
-                        == chelis_types::types::Lane::Host
+                // On this legacy whole-DAG path a `Some(decline)` co-occurs with
+                // a real (whole-program, merged) manifest — see the
+                // `entry_lane_decline` field doc. Every decline reason that
+                // leaves the whole-program DAG rooted can get here. On the STRICT
+                // (callable) surface a merged manifest is the #817 defect, so
+                // any decline here is a loud error; on the LEGACY (C-source)
+                // surface the whole-program emission is the product contract
+                // and the decline reason rides along on the artifact.
+                if strictness == EntryStrictness::Strict
+                    && let Some(reason) = entry_lane_decline
+                {
+                    return Err(strict_entry_decline_error(reason));
                 }
-                None => false,
-            };
-            let preferred_entry_dag = preferred_entry.and_then(|name| {
-                chelis_ir::host::lower_named_tensor_entry_dag(compiled.checked(), name)
-            });
-            let has_host_roots = compiled
-                .manifest()
-                .entries
-                .iter()
-                .any(|entry| entry.lane == chelis_types::types::Lane::Host);
-            if (has_host_roots
-                || preferred_entry_is_host
-                || (compiled.dag.roots().is_empty()
-                    && preferred_entry_dag.is_none()
-                    && host_requires_host_backend))
-                && let Some(host_program) = host_program
-            {
-                reject_unsupported_effect_ops_in_host_program(host_program, BuildTarget::Hip)?;
-                reject_unsupported_hip_ops_in_host_program(host_program)?;
-                let selected = legacy_host.take().expect("host branch selected");
-                // The helper manifest is read before C payload selection so a
-                // Count-bearing helper reaches the HIP backend as its source
-                // DAG and is lowered exactly like a HIP tensor entry.
-                let (helpers, selected) =
-                    chelis_backend_c::host_tensor_helper_codegen(selected, &func_name)
+                artifact.entry_lane_decline = entry_lane_decline;
+                Ok(artifact)
+            }
+            CompileTarget::Hip => {
+                // Reef-context (#816) HIP is not supported: the entry-scoped DAG
+                // selection the C arm applies (`resolve_in_context_entry`, gated on
+                // `library_runtime.is_some()`) is not implemented for HIP, which
+                // still clones the whole composed DAG and treats `entry_name` only
+                // as the emitted symbol. Compiling a multi-def reef context to HIP
+                // would therefore merge every reef-linked def's inputs/outputs into
+                // one kernel or ignore the requested entry — the #817/#818 class the
+                // C path fixes. Reject explicitly with actionable guidance rather
+                // than silently emit a mis-scoped kernel (an undocumented false
+                // promise, since the public API accepts `CompileTarget` and Python
+                // exposes `target="hip"`). Tracked as chelis#829 (apply the same
+                // entry-scoped selection to HIP, then lift this reject).
+                if compiled.library_runtime.is_some() {
+                    return Err(reef_context_hip_unsupported_error());
+                }
+                validate_compiled_resource_target(&compiled, build_target, None)?;
+                let host_requires_host_backend = host_program
+                    .map(chelis_ir_core::host::host_program_requires_host_backend)
+                    .unwrap_or(false);
+                let preferred_entry =
+                    host_program.and_then(chelis_ir_core::host::preferred_tensor_entry_name);
+                let preferred_entry_is_host = match preferred_entry {
+                    Some(name) => {
+                        crate::target_capability::hip_entry_lane(compiled.checked(), name)
+                            .map_err(unsupported_stage_error)?
+                            == chelis_types::types::Lane::Host
+                    }
+                    None => false,
+                };
+                let preferred_entry_dag = preferred_entry
+                    .map(|name| {
+                        chelis_ir_core::host::lower_named_tensor_entry_dag(
+                            (compiled.checked()).facts(),
+                            name,
+                            operation,
+                        )
+                    })
+                    .transpose()
+                    .map_err(lower_diagnostic_to_compiler_error)?
+                    .flatten();
+                let has_host_roots = compiled
+                    .manifest()
+                    .entries
+                    .iter()
+                    .any(|entry| entry.lane == chelis_types::types::Lane::Host);
+                if (has_host_roots
+                    || preferred_entry_is_host
+                    || (compiled.dag.roots().is_empty()
+                        && preferred_entry_dag.is_none()
+                        && host_requires_host_backend))
+                    && let Some(host_program) = host_program
+                {
+                    reject_unsupported_effect_ops_in_host_program(host_program, BuildTarget::Hip)?;
+                    reject_unsupported_hip_ops_in_host_program(host_program)?;
+                    let selected = legacy_host.take().expect("host branch selected");
+                    // The helper manifest is read before C payload selection so a
+                    // Count-bearing helper reaches the HIP backend as its source
+                    // DAG and is lowered exactly like a HIP tensor entry.
+                    let (helpers, selected) =
+                        chelis_backend_c::host_tensor_helper_codegen(selected, &func_name)
+                            .map_err(unsupported_stage_error)?;
+                    let selected = chelis_backend_c::prepare_host_program_for_codegen(selected)
                         .map_err(unsupported_stage_error)?;
-                let selected = chelis_backend_c::prepare_host_program_for_codegen(selected)
+                    let verified = chelis_ir::ownership::verify_ownership(
+                        chelis_ir::ownership::lower_host_ownership(&compiled.program, selected)
+                            .map_err(|error| {
+                                stage_error(
+                                    "ownership",
+                                    error.to_string(),
+                                    GeneralKind::CompileError,
+                                )
+                            })?,
+                    )
+                    .map_err(|error| {
+                        stage_error("ownership", error.to_string(), GeneralKind::CompileError)
+                    })?;
+                    #[cfg(feature = "emission-observer")]
+                    crate::emission_observer::observe(
+                        &mut observer,
+                        &compiled.program,
+                        observed_host.as_ref(),
+                        crate::emission_observer::SelectedEmission::Host(verified.emission()),
+                        #[cfg(feature = "compilation-trace")]
+                        crate::compilation_trace::SelectedLowering::Unavailable,
+                    );
+                    let result = chelis_backend_hip::codegen_hip_host_program(
+                        &verified, &func_name, helpers,
+                    )
                     .map_err(unsupported_stage_error)?;
+                    return Ok(compiled_execution_artifact(
+                        &func_name,
+                        None,
+                        compile_result_hip_host(target, &func_name, &result)?,
+                        manifest_result(&compiled.program),
+                        Vec::new(),
+                        Vec::new(),
+                        Vec::new(),
+                    ));
+                }
+                let mut hip_dag = if !compiled.dag.roots().is_empty() {
+                    compiled.dag.clone()
+                } else if let Some(entry_dag) = preferred_entry_dag {
+                    entry_dag
+                } else {
+                    compiled.dag.clone()
+                };
+                hip_dag = chelis_dag_core::optimize::dead_code_eliminate(&hip_dag);
+                reject_unsupported_effect_ops(&hip_dag, BuildTarget::Hip)?;
+                reject_unsized_named_dims(&hip_dag, "hip")?;
+                let specialized = chelis_ir_core::specialize::specialize_for_blas(&hip_dag);
+                reject_unsupported_hip_ops(&specialized)?;
+                let fused = chelis_dag_core::fuse::fuse(&specialized);
+                let selected = chelis_backend_hip::prepare_dag_for_codegen(fused);
                 let verified = chelis_ir::ownership::verify_ownership(
-                    chelis_ir::ownership::lower_host_ownership(&compiled.program, selected)
-                        .map_err(|error| {
-                            stage_error("ownership", error.to_string(), GeneralKind::CompileError)
-                        })?,
+                    chelis_ir::ownership::lower_dag_ownership(selected).map_err(|error| {
+                        stage_error("ownership", error.to_string(), GeneralKind::CompileError)
+                    })?,
                 )
                 .map_err(|error| {
                     stage_error("ownership", error.to_string(), GeneralKind::CompileError)
@@ -2425,70 +2496,27 @@ fn execution_artifact_from_compiled_observed(
                     &mut observer,
                     &compiled.program,
                     observed_host.as_ref(),
-                    crate::emission_observer::SelectedEmission::Host(verified.emission()),
+                    crate::emission_observer::SelectedEmission::Dag {
+                        unfused: &hip_dag,
+                        selected: verified.emission(),
+                    },
                     #[cfg(feature = "compilation-trace")]
                     crate::compilation_trace::SelectedLowering::Unavailable,
                 );
-                let result =
-                    chelis_backend_hip::codegen_hip_host_program(&verified, &func_name, helpers)
-                        .map_err(unsupported_stage_error)?;
-                return Ok(compiled_execution_artifact(
+                let result = chelis_backend_hip::codegen_hip(verified, &func_name)
+                    .map_err(unsupported_stage_error)?;
+                Ok(compiled_execution_artifact(
                     &func_name,
-                    None,
-                    compile_result_hip_host(target, &func_name, &result)?,
+                    Some(format!("{func_name}_device")),
+                    compile_result_hip(target, &func_name, &result)?,
                     manifest_result(&compiled.program),
-                    Vec::new(),
-                    Vec::new(),
-                    Vec::new(),
-                ));
+                    execution_input_specs(&hip_dag, &result.input_labels)?,
+                    execution_output_specs(&hip_dag, &result.output_labels)?,
+                    result.symbolic_dims,
+                ))
             }
-            let mut hip_dag = if !compiled.dag.roots().is_empty() {
-                compiled.dag.clone()
-            } else if let Some(entry_dag) = preferred_entry_dag {
-                entry_dag
-            } else {
-                compiled.dag.clone()
-            };
-            hip_dag = chelis_dag_core::optimize::dead_code_eliminate(&hip_dag);
-            reject_unsupported_effect_ops(&hip_dag, BuildTarget::Hip)?;
-            reject_unsized_named_dims(&hip_dag, "hip")?;
-            let specialized = chelis_ir::specialize::specialize_for_blas(&hip_dag);
-            reject_unsupported_hip_ops(&specialized)?;
-            let fused = chelis_dag_core::fuse::fuse(&specialized);
-            let selected = chelis_backend_hip::prepare_dag_for_codegen(fused);
-            let verified = chelis_ir::ownership::verify_ownership(
-                chelis_ir::ownership::lower_dag_ownership(selected).map_err(|error| {
-                    stage_error("ownership", error.to_string(), GeneralKind::CompileError)
-                })?,
-            )
-            .map_err(|error| {
-                stage_error("ownership", error.to_string(), GeneralKind::CompileError)
-            })?;
-            #[cfg(feature = "emission-observer")]
-            crate::emission_observer::observe(
-                &mut observer,
-                &compiled.program,
-                observed_host.as_ref(),
-                crate::emission_observer::SelectedEmission::Dag {
-                    unfused: &hip_dag,
-                    selected: verified.emission(),
-                },
-                #[cfg(feature = "compilation-trace")]
-                crate::compilation_trace::SelectedLowering::Unavailable,
-            );
-            let result = chelis_backend_hip::codegen_hip(verified, &func_name)
-                .map_err(unsupported_stage_error)?;
-            Ok(compiled_execution_artifact(
-                &func_name,
-                Some(format!("{func_name}_device")),
-                compile_result_hip(target, &func_name, &result)?,
-                manifest_result(&compiled.program),
-                execution_input_specs(&hip_dag, &result.input_labels)?,
-                execution_output_specs(&hip_dag, &result.output_labels)?,
-                result.symbolic_dims,
-            ))
         }
-    }
+    })
 }
 
 pub fn eval(request: EvalRequest) -> Result<EvalResult> {
@@ -3757,7 +3785,7 @@ pub fn grad(request: GradRequest) -> Result<GradResult> {
     // floating output" message (or, worse, a silent zero gradient
     // for floor/ceil under the unchecked variant).
     let grad_result = if request.fuse {
-        chelis_ir::grad_then_fuse_checked(&compiled.dag, output, &wrt_nodes)
+        chelis_ir_core::pipeline::grad_then_fuse_checked(&compiled.dag, output, &wrt_nodes)
     } else {
         chelis_dag_core::grad::grad_dag_checked(&compiled.dag, output, &wrt_nodes)
     }
@@ -3920,7 +3948,7 @@ pub(crate) fn pipeline_rejection_to_compiler_error(
 }
 
 fn lower_diagnostic_to_compiler_error(
-    diagnostic: chelis_ir::lower::LowerDiagnostic,
+    diagnostic: chelis_ir_core::lower::LowerDiagnostic,
 ) -> CompilerError {
     if let Some(unsupported) = diagnostic.unsupported() {
         let mut error = unsupported_stage_error(unsupported.clone());
@@ -3958,7 +3986,7 @@ struct CompiledSource {
     // Private C carrier: no second host lowering may replace its execution
     // metadata between source ingress and selected artifact emission.
     host_execution: Option<chelis_ir::host::HostExecutionPlan>,
-    host_ordinary: Option<chelis_ir::host::ConcreteHostProgram>,
+    host_ordinary: Option<chelis_ir_core::host::ConcreteHostProgram>,
     dag: Dag,
     // Callable function-entry selection is a separate surface from value-root
     // observation. Keep the pipeline's typed set for that API; eval/build
@@ -4120,219 +4148,224 @@ fn manifest_for_eval<'a>(
     selected_root_names: Option<&[String]>,
     call: Option<&crate::runtime::HostCall>,
 ) -> Result<std::sync::Arc<RootManifest>> {
-    let available = binding_names.collect::<UnordSet<_>>();
-    let candidate_names = selected_root_names
-        .map(|names| {
-            names
-                .iter()
-                .filter_map(|name| name.split('.').next())
-                .collect::<BTreeSet<_>>()
-        })
-        .unwrap_or_else(|| BTreeSet::from(["main"]));
-    let facts = compiled.eval_facts();
-    let realizability = &facts.realizability;
-    let mut specialized: Vec<RootEntry> = Vec::new();
-    // One session over the prepared host program answers every candidate's
-    // kernel query, rather than a fresh session per candidate (chelis#3728).
-    let mut demand_session = None;
-
-    for candidate in candidate_names {
-        if facts.base_def_names.contains(candidate)
-            || specialized.iter().any(|entry| entry.def_name == candidate)
-        {
-            continue;
-        }
-        let Some(signature) = compiled
-            .checked()
-            .signature_inference()
-            .functions
-            .get(candidate)
-        else {
-            continue;
-        };
-        if signature.params.is_empty() {
-            continue;
-        }
-        let Some(function_ty) = compiled.checked().type_env().get(candidate) else {
-            continue;
-        };
-        let Some(return_ty) = deep_tagged_children(function_ty)
-            .filter(|(tag, _)| *tag == DeepTag::TFn)
-            .and_then(|(_, children)| children.last())
-            .cloned()
-        else {
-            continue;
-        };
-        let template = RootEntry {
-            name: candidate.to_string(),
-            path: Vec::new(),
-            def_name: candidate.to_string(),
-            ty: return_ty,
-            lane: Lane::Tensor,
-            required_inputs: BTreeSet::new(),
-            reasons: Vec::new(),
-        };
-        let Some(body) = selected_callable_result_expr(compiled.checked(), candidate) else {
-            continue;
-        };
-        let mut selected_entries = chelis_effects::realizability::expand_manifest_root(
-            template,
-            Some(body),
-            compiled.checked().adt_registry(),
-        );
-        let selected_roots = selected_entries
-            .iter()
-            .filter_map(|entry| {
-                compiled
-                    .named_roots
-                    .get(&crate::pipeline::IrName::new(entry.name.as_str()))
-                    .copied()
+    chelis_ir::resources::with_operation(|operation| {
+        let available = binding_names.collect::<UnordSet<_>>();
+        let candidate_names = selected_root_names
+            .map(|names| {
+                names
+                    .iter()
+                    .filter_map(|name| name.split('.').next())
+                    .collect::<BTreeSet<_>>()
             })
-            .collect::<Vec<_>>();
-        let parameter_names = signature
-            .params
-            .iter()
-            .map(|param| param.name.clone())
-            .collect::<BTreeSet<_>>();
-        // A call's argument values supply its non-tensor parameters; they are
-        // call inputs, never required inputs ([05-OBS-9]).
-        let arguments = call
-            .filter(|call| call.root == candidate)
-            .map(|call| &call.arguments);
-        let argued = |name: &str| arguments.is_some_and(|arguments| arguments.contains_key(name));
-        let live_parameter_names =
-            chelis_effects::realizability::referenced_runtime_inputs(body, &parameter_names)
-                .into_iter()
-                .filter(|name| !argued(name))
-                .collect::<BTreeSet<_>>();
-        if live_parameter_names.iter().any(|name| {
-            signature
+            .unwrap_or_else(|| BTreeSet::from(["main"]));
+        let facts = compiled.eval_facts();
+        let realizability = &facts.realizability;
+        let mut specialized: Vec<RootEntry> = Vec::new();
+        // One session over the prepared host program answers every candidate's
+        // kernel query, rather than a fresh session per candidate (chelis#3728).
+        let mut demand_session = None;
+
+        for candidate in candidate_names {
+            if facts.base_def_names.contains(candidate)
+                || specialized.iter().any(|entry| entry.def_name == candidate)
+            {
+                continue;
+            }
+            let Some(signature) = compiled
+                .checked()
+                .signature_inference()
+                .functions
+                .get(candidate)
+            else {
+                continue;
+            };
+            if signature.params.is_empty() {
+                continue;
+            }
+            let Some(function_ty) = compiled.checked().type_env().get(candidate) else {
+                continue;
+            };
+            let Some(return_ty) = deep_tagged_children(function_ty)
+                .filter(|(tag, _)| *tag == DeepTag::TFn)
+                .and_then(|(_, children)| children.last())
+                .cloned()
+            else {
+                continue;
+            };
+            let template = RootEntry {
+                name: candidate.to_string(),
+                path: Vec::new(),
+                def_name: candidate.to_string(),
+                ty: return_ty,
+                lane: Lane::Tensor,
+                required_inputs: BTreeSet::new(),
+                reasons: Vec::new(),
+            };
+            let Some(body) = selected_callable_result_expr(compiled.checked(), candidate) else {
+                continue;
+            };
+            let mut selected_entries = chelis_effects::realizability::expand_manifest_root(
+                template,
+                Some(body),
+                compiled.checked().adt_registry(),
+            );
+            let selected_roots = selected_entries
+                .iter()
+                .filter_map(|entry| {
+                    compiled
+                        .named_roots
+                        .get(&crate::pipeline::IrName::new(entry.name.as_str()))
+                        .copied()
+                })
+                .collect::<Vec<_>>();
+            let parameter_names = signature
                 .params
                 .iter()
-                .find(|param| param.name == *name)
-                .is_none_or(|param| !type_is_tensor_runtime_input(&param.checked_type))
-        }) {
-            // EvalRequest bindings carry tensors. A live scalar/container
-            // parameter that no call argument supplies leaves the callable a
-            // declaration.
-            continue;
-        }
-        let mut required_inputs = selected_roots
-            .iter()
-            .flat_map(|root| required_inputs_for_dag_root(&compiled.dag, *root))
-            .collect::<BTreeSet<_>>();
-        required_inputs.extend(live_parameter_names);
-        if let Some(top_level_inputs) = realizability.required_inputs_by_def.get(candidate) {
-            required_inputs.extend(top_level_inputs.iter().cloned());
-        }
-        // The callable's lowered body reads an argued parameter as a graph
-        // input; the call supplies it, so it is never a required input.
-        required_inputs.retain(|input| !argued(input));
-        if !required_inputs
-            .iter()
-            .all(|input| available.contains(input.as_str()))
-        {
-            continue;
-        }
+                .map(|param| param.name.clone())
+                .collect::<BTreeSet<_>>();
+            // A call's argument values supply its non-tensor parameters; they are
+            // call inputs, never required inputs ([05-OBS-9]).
+            let arguments = call
+                .filter(|call| call.root == candidate)
+                .map(|call| &call.arguments);
+            let argued =
+                |name: &str| arguments.is_some_and(|arguments| arguments.contains_key(name));
+            let live_parameter_names =
+                chelis_effects::realizability::referenced_runtime_inputs(body, &parameter_names)
+                    .into_iter()
+                    .filter(|name| !argued(name))
+                    .collect::<BTreeSet<_>>();
+            if live_parameter_names.iter().any(|name| {
+                signature
+                    .params
+                    .iter()
+                    .find(|param| param.name == *name)
+                    .is_none_or(|param| !type_is_tensor_runtime_input(&param.checked_type))
+            }) {
+                // EvalRequest bindings carry tensors. A live scalar/container
+                // parameter that no call argument supplies leaves the callable a
+                // declaration.
+                continue;
+            }
+            let mut required_inputs = selected_roots
+                .iter()
+                .flat_map(|root| required_inputs_for_dag_root(&compiled.dag, *root))
+                .collect::<BTreeSet<_>>();
+            required_inputs.extend(live_parameter_names);
+            if let Some(top_level_inputs) = realizability.required_inputs_by_def.get(candidate) {
+                required_inputs.extend(top_level_inputs.iter().cloned());
+            }
+            // The callable's lowered body reads an argued parameter as a graph
+            // input; the call supplies it, so it is never a required input.
+            required_inputs.retain(|input| !argued(input));
+            if !required_inputs
+                .iter()
+                .all(|input| available.contains(input.as_str()))
+            {
+                continue;
+            }
 
-        if selected_roots.len() != selected_entries.len() {
-            let session = demand_session.get_or_insert_with(|| {
-                compiled
-                    .host_program()
-                    .map(crate::runtime::PreparedHostEvaluation::session)
-            });
-            match selected_host_input_demand(session.as_ref(), candidate, &parameter_names) {
-                Ok(Some(inputs)) => {
-                    let inputs = inputs
-                        .into_iter()
-                        .filter(|name| !argued(name))
-                        .collect::<BTreeSet<_>>();
-                    if inputs.iter().any(|name| {
-                        signature
-                            .params
+            if selected_roots.len() != selected_entries.len() {
+                let session = demand_session.get_or_insert_with(|| {
+                    compiled
+                        .host_program()
+                        .map(|prepared| prepared.session(operation))
+                });
+                match selected_host_input_demand(session.as_ref(), candidate, &parameter_names) {
+                    Ok(Some(inputs)) => {
+                        let inputs = inputs
+                            .into_iter()
+                            .filter(|name| !argued(name))
+                            .collect::<BTreeSet<_>>();
+                        if inputs.iter().any(|name| {
+                            signature
+                                .params
+                                .iter()
+                                .find(|param| param.name == *name)
+                                .is_none_or(|param| {
+                                    !type_is_tensor_runtime_input(&param.checked_type)
+                                })
+                        }) {
+                            continue;
+                        }
+                        required_inputs.extend(inputs);
+                        if !required_inputs
                             .iter()
-                            .find(|param| param.name == *name)
-                            .is_none_or(|param| !type_is_tensor_runtime_input(&param.checked_type))
-                    }) {
-                        continue;
+                            .all(|input| available.contains(input.as_str()))
+                        {
+                            continue;
+                        }
                     }
-                    required_inputs.extend(inputs);
-                    if !required_inputs
-                        .iter()
-                        .all(|input| available.contains(input.as_str()))
-                    {
-                        continue;
+                    Ok(None) => {}
+                    Err(_deferred_lowering) => {
+                        // A failed metadata query does not change admission or
+                        // choose an interpreter fallback. Decode the original
+                        // demanded inputs normally; the unchanged runtime still
+                        // owns lowering and its error at the entered-call boundary.
                     }
                 }
-                Ok(None) => {}
-                Err(_deferred_lowering) => {
-                    // A failed metadata query does not change admission or
-                    // choose an interpreter fallback. Decode the original
-                    // demanded inputs normally; the unchanged runtime still
-                    // owns lowering and its error at the entered-call boundary.
+            }
+            let unsupported_prim = selected_roots.iter().find_map(|root| {
+                compiled
+                    .dag
+                    .get(*root)
+                    .map(|node| node.output_type.precision)
+                    .filter(|prim| {
+                        !crate::target_capability::tensor_capable_prims(compiled.program.target())
+                            .contains(prim)
+                    })
+            });
+            // Argument values enter the host program, so a call that supplies any
+            // runs on the Host lane (docs/design/issue_912_root_boundary_plan.md,
+            // decision 20).
+            let argument_call = arguments.is_some_and(|arguments| !arguments.is_empty());
+            let lane = if unsupported_prim.is_some()
+                || argument_call
+                || selected_roots.len() != selected_entries.len()
+            {
+                Lane::Host
+            } else {
+                Lane::Tensor
+            };
+            for entry in &mut selected_entries {
+                entry.lane = lane;
+                entry.required_inputs.clone_from(&required_inputs);
+                if let Some(prim) = unsupported_prim {
+                    entry.reasons.push(
+                        chelis_types::manifest::HostReason::PrecisionExceedsCapability { prim },
+                    );
+                } else if argument_call {
+                    entry
+                        .reasons
+                        .push(chelis_types::manifest::HostReason::StructuralForm {
+                            tag: "selected-callable-arguments".to_string(),
+                        });
+                } else if lane == Lane::Host {
+                    entry
+                        .reasons
+                        .push(chelis_types::manifest::HostReason::StructuralForm {
+                            tag: "selected-callable-result".to_string(),
+                        });
                 }
             }
+            specialized.extend(selected_entries);
         }
-        let unsupported_prim = selected_roots.iter().find_map(|root| {
-            compiled
-                .dag
-                .get(*root)
-                .map(|node| node.output_type.precision)
-                .filter(|prim| {
-                    !crate::target_capability::tensor_capable_prims(compiled.program.target())
-                        .contains(prim)
-                })
-        });
-        // Argument values enter the host program, so a call that supplies any
-        // runs on the Host lane (docs/design/issue_912_root_boundary_plan.md,
-        // decision 20).
-        let argument_call = arguments.is_some_and(|arguments| !arguments.is_empty());
-        let lane = if unsupported_prim.is_some()
-            || argument_call
-            || selected_roots.len() != selected_entries.len()
-        {
-            Lane::Host
-        } else {
-            Lane::Tensor
-        };
-        for entry in &mut selected_entries {
-            entry.lane = lane;
-            entry.required_inputs.clone_from(&required_inputs);
-            if let Some(prim) = unsupported_prim {
-                entry
-                    .reasons
-                    .push(chelis_types::manifest::HostReason::PrecisionExceedsCapability { prim });
-            } else if argument_call {
-                entry
-                    .reasons
-                    .push(chelis_types::manifest::HostReason::StructuralForm {
-                        tag: "selected-callable-arguments".to_string(),
-                    });
-            } else if lane == Lane::Host {
-                entry
-                    .reasons
-                    .push(chelis_types::manifest::HostReason::StructuralForm {
-                        tag: "selected-callable-result".to_string(),
-                    });
-            }
+        if specialized.is_empty() {
+            return Ok(facts.base_manifest.clone());
         }
-        specialized.extend(selected_entries);
-    }
-    if specialized.is_empty() {
-        return Ok(facts.base_manifest.clone());
-    }
 
-    let mut manifest = compiled.manifest().clone();
-    manifest.entries.extend(specialized);
-    route_tensor_inputs_from_dag(&mut manifest, &compiled.dag, &compiled.named_roots);
-    let declaration_order = checked_def_order(compiled.checked());
-    manifest.entries.sort_by_key(|entry| {
-        declaration_order
-            .get(entry.def_name.as_str())
-            .copied()
-            .unwrap_or(usize::MAX)
-    });
-    Ok(std::sync::Arc::new(manifest))
+        let mut manifest = compiled.manifest().clone();
+        manifest.entries.extend(specialized);
+        route_tensor_inputs_from_dag(&mut manifest, &compiled.dag, &compiled.named_roots);
+        let declaration_order = checked_def_order(compiled.checked());
+        manifest.entries.sort_by_key(|entry| {
+            declaration_order
+                .get(entry.def_name.as_str())
+                .copied()
+                .unwrap_or(usize::MAX)
+        });
+        Ok(std::sync::Arc::new(manifest))
+    })
 }
 
 /// Refine selected Host-call admission from the same kernel input carrier
@@ -4343,18 +4376,20 @@ fn manifest_for_eval<'a>(
 /// `session` is over the host program the evaluation runs, the library
 /// composed with the source; `None` when the two do not compose.
 fn selected_host_input_demand(
-    session: Option<&chelis_ir::host::HostLoweringSession<'_>>,
+    session: Option<
+        &chelis_ir_core::host::HostLoweringSession<'_, chelis_syntax_host::NativeStack>,
+    >,
     name: &str,
     parameters: &BTreeSet<String>,
-) -> std::result::Result<Option<BTreeSet<String>>, chelis_ir::lower::LowerDiagnostic> {
+) -> std::result::Result<Option<BTreeSet<String>>, chelis_ir_core::lower::LowerDiagnostic> {
     let session = session.ok_or_else(|| {
-        chelis_ir::lower::LowerDiagnostic::new(
+        chelis_ir_core::lower::LowerDiagnostic::new(
             "runtime kernel program lost its checked library proof".to_owned(),
             None,
             None,
         )
     })?;
-    chelis_ir::host::host_def_kernel(session, name).map(|kernel| {
+    chelis_ir_core::host::host_def_kernel(session, name).map(|kernel| {
         kernel.map(|kernel| {
             kernel
                 .inputs
@@ -4472,7 +4507,7 @@ fn required_inputs_for_dag_root(dag: &Dag, root: NodeId) -> BTreeSet<String> {
     // closure: a discarded trapping node of the root's declaration demands
     // its parameter, so routing by data dependencies alone would drop a
     // binding the evaluator then reports missing.
-    chelis_ir::eval::required_load_names(dag, &[root])
+    chelis_ir_core::eval::required_load_names(dag, &[root])
 }
 
 /// The library payload threaded through `eval_compiled` so the host
@@ -5493,7 +5528,7 @@ pub fn reject_unsupported_effect_ops(
 }
 
 fn for_each_host_helper_dag(
-    program: &chelis_ir::host::ConcreteHostProgram,
+    program: &chelis_ir_core::host::ConcreteHostProgram,
     mut visit: impl FnMut(&Dag) -> std::result::Result<(), CompilerError>,
 ) -> std::result::Result<(), CompilerError> {
     for helper in &program.global_tensor_helpers {
@@ -5510,7 +5545,7 @@ fn for_each_host_helper_dag(
 /// Reject unsupported effects in every tensor-helper DAG emitted with a host
 /// program. The shared traversal keeps all callers aligned on helper scope.
 pub fn reject_unsupported_effect_ops_in_host_program(
-    program: &chelis_ir::host::ConcreteHostProgram,
+    program: &chelis_ir_core::host::ConcreteHostProgram,
     target: BuildTarget,
 ) -> std::result::Result<(), CompilerError> {
     let _fp_env = chelis_runtime::FpEnvGuard::enter();
@@ -5530,7 +5565,7 @@ pub fn reject_unsupported_effect_ops_in_host_execution_plan(
 /// Apply both C windowed-reduction gates to every tensor-helper DAG emitted
 /// with a host program.
 pub fn reject_unsupported_windowed_reductions_in_host_program(
-    program: &chelis_ir::host::ConcreteHostProgram,
+    program: &chelis_ir_core::host::ConcreteHostProgram,
     target: BuildTarget,
 ) -> std::result::Result<(), CompilerError> {
     let _fp_env = chelis_runtime::FpEnvGuard::enter();
@@ -5555,7 +5590,7 @@ fn helper_is_device_emitted(dag: &Dag) -> bool {
 /// inexact reduction through C. Count-bearing helpers receive the full HIP
 /// device capability policy because they are emitted as HIP code.
 pub fn reject_unsupported_hip_ops_in_host_program(
-    program: &chelis_ir::host::ConcreteHostProgram,
+    program: &chelis_ir_core::host::ConcreteHostProgram,
 ) -> std::result::Result<(), CompilerError> {
     let _fp_env = chelis_runtime::FpEnvGuard::enter();
     for_each_host_helper_dag(program, |dag| {
@@ -5592,7 +5627,7 @@ pub fn reject_unsupported_hip_ops_in_host_program(
 /// full Metal device capability policy because they are emitted as Metal
 /// code.
 pub fn reject_unsupported_metal_ops_in_host_program(
-    program: &chelis_ir::host::ConcreteHostProgram,
+    program: &chelis_ir_core::host::ConcreteHostProgram,
 ) -> std::result::Result<(), CompilerError> {
     let _fp_env = chelis_runtime::FpEnvGuard::enter();
     for_each_host_helper_dag(program, |dag| {
@@ -7906,7 +7941,7 @@ mod tests {
             "ordinary lowering failure",
             "unsupported: ordinary lowering failure",
         ] {
-            let diagnostic = chelis_ir::lower::LowerDiagnostic::new(message, None, None);
+            let diagnostic = chelis_ir_core::lower::LowerDiagnostic::new(message, None, None);
             let error = lower_diagnostic_to_compiler_error(diagnostic);
             assert_eq!(error.stage, "lower");
             assert_eq!(error.errors.len(), 1);
@@ -7923,101 +7958,103 @@ mod tests {
 
     #[test]
     fn selected_host_failed_demand_query_preserves_wire_and_entered_error_boundaries() {
-        // This checked helper has an actual fatal static-DAG lowering, not a
-        // mocked diagnostic. Tensorizing its scalar sink makes every live
-        // parameter admissible through EvalRequest without changing the concat.
-        let mut source = include_str!("../../../tests/support/helper_summary_fatal.ch")
-            .split("def zero_qk()")
-            .next()
-            .unwrap()
-            .replace("causal_sdpa_with_sink", "bad")
-            .replace(
-                "-> f32 -> tensor[s, d, f32]",
-                "-> &tensor[f32] -> tensor[s, d, f32]",
-            )
-            .replace("scalar_to_tensor(sink)", "copy(sink)");
-        source.push_str("def entry[s, d](q: &tensor[s, d, f32], k: &tensor[s, d, f32], v: &tensor[s, d, f32], scale: &tensor[s, s, f32], mask: &tensor[s, s, f32], sink: &tensor[f32]) -> tensor[s, d, f32] = { _ = print(\"entry\")\n bad(q, k, v, scale, mask, sink) }\ndef good() -> i32 = 7i32\n");
-        let compiled = compile_source(SourceKind::Surf, &source).unwrap();
-        let parameters = ["q", "k", "v", "scale", "mask", "sink"]
-            .map(str::to_owned)
-            .into();
-        let lowering_message = "tensor concat cannot be represented by the static tensor DAG; use its host execution path (chelis#1906) at source span `surf:940..946`";
-        assert_eq!(
-            selected_host_input_demand(
-                compiled
-                    .host_program()
-                    .map(crate::runtime::PreparedHostEvaluation::session)
-                    .as_ref(),
-                "bad",
-                &parameters
-            )
-            .unwrap_err()
-            .to_string(),
-            lowering_message,
-        );
-        let tensor = |shape: &[i64], data| crate::schema::TensorValue {
-            shape: shape.into(),
-            data: wire_values::storage_f32(data),
-        };
-        for (root, q_shape) in [
-            ("bad", None),
-            ("bad", Some(vec![2, 3])),
-            ("bad", Some(vec![-1])),
-            ("good", Some(vec![-1])),
-            ("entry", Some(vec![2, 3])),
-        ] {
-            let mut bindings = BTreeMap::from([
-                ("k".into(), tensor(&[2, 3], vec![0.0; 6])),
-                (
-                    "v".into(),
-                    tensor(&[2, 3], vec![2.0, 4.0, 6.0, 8.0, 10.0, 12.0]),
-                ),
-                ("scale".into(), tensor(&[2, 2], vec![1.0; 4])),
-                ("mask".into(), tensor(&[2, 2], vec![0.0; 4])),
-                ("sink".into(), tensor(&[], vec![0.0])),
-            ]);
-            if let Some(shape) = &q_shape {
-                bindings.insert("q".into(), tensor(shape, vec![0.0; 6]));
-            }
-            let result = eval_compiled(&compiled, bindings, Some(&[root.into()]));
-            if q_shape.is_none() || root == "good" {
-                let result = result.unwrap();
-                assert!(result.transcript.is_empty(), "{result:?}");
-                assert_eq!(result.manifest.entries.len(), 1, "{result:?}");
-                assert_eq!(result.manifest.entries[0].name, "good");
-                assert!(result.manifest.entries[0].required_inputs.is_empty());
-                if root == "good" {
-                    assert_eq!(result.roots.len(), 1, "{result:?}");
-                    assert_eq!(result.roots[0].name.as_deref(), Some("good"));
-                    assert_eq!(
-                        serde_json::to_value(&result.roots[0].value).unwrap(),
-                        serde_json::json!({"type":"scalar","value":{"dtype":"int32","value":7}})
-                    );
-                } else {
-                    assert!(result.roots.is_empty(), "{result:?}");
+        chelis_ir::resources::with_operation(|operation| {
+            // This checked helper has an actual fatal static-DAG lowering, not a
+            // mocked diagnostic. Tensorizing its scalar sink makes every live
+            // parameter admissible through EvalRequest without changing the concat.
+            let mut source = include_str!("../../../tests/support/helper_summary_fatal.ch")
+                .split("def zero_qk()")
+                .next()
+                .unwrap()
+                .replace("causal_sdpa_with_sink", "bad")
+                .replace(
+                    "-> f32 -> tensor[s, d, f32]",
+                    "-> &tensor[f32] -> tensor[s, d, f32]",
+                )
+                .replace("scalar_to_tensor(sink)", "copy(sink)");
+            source.push_str("def entry[s, d](q: &tensor[s, d, f32], k: &tensor[s, d, f32], v: &tensor[s, d, f32], scale: &tensor[s, s, f32], mask: &tensor[s, s, f32], sink: &tensor[f32]) -> tensor[s, d, f32] = { _ = print(\"entry\")\n bad(q, k, v, scale, mask, sink) }\ndef good() -> i32 = 7i32\n");
+            let compiled = compile_source(SourceKind::Surf, &source).unwrap();
+            let parameters = ["q", "k", "v", "scale", "mask", "sink"]
+                .map(str::to_owned)
+                .into();
+            let lowering_message = "tensor concat cannot be represented by the static tensor DAG; use its host execution path (chelis#1906) at source span `surf:940..946`";
+            assert_eq!(
+                selected_host_input_demand(
+                    compiled
+                        .host_program()
+                        .map(|prepared| prepared.session(operation))
+                        .as_ref(),
+                    "bad",
+                    &parameters
+                )
+                .unwrap_err()
+                .to_string(),
+                lowering_message,
+            );
+            let tensor = |shape: &[i64], data| crate::schema::TensorValue {
+                shape: shape.into(),
+                data: wire_values::storage_f32(data),
+            };
+            for (root, q_shape) in [
+                ("bad", None),
+                ("bad", Some(vec![2, 3])),
+                ("bad", Some(vec![-1])),
+                ("good", Some(vec![-1])),
+                ("entry", Some(vec![2, 3])),
+            ] {
+                let mut bindings = BTreeMap::from([
+                    ("k".into(), tensor(&[2, 3], vec![0.0; 6])),
+                    (
+                        "v".into(),
+                        tensor(&[2, 3], vec![2.0, 4.0, 6.0, 8.0, 10.0, 12.0]),
+                    ),
+                    ("scale".into(), tensor(&[2, 2], vec![1.0; 4])),
+                    ("mask".into(), tensor(&[2, 2], vec![0.0; 4])),
+                    ("sink".into(), tensor(&[], vec![0.0])),
+                ]);
+                if let Some(shape) = &q_shape {
+                    bindings.insert("q".into(), tensor(shape, vec![0.0; 6]));
                 }
-            } else {
-                let error = result.unwrap_err();
-                assert_eq!(error.stage, "eval");
-                assert_eq!(error.errors.len(), 1, "{error:?}");
-                assert_eq!(
-                    error.errors[0].message,
-                    if q_shape == Some(vec![-1]) {
-                        "binding `q`: tensor extent must be a nonnegative int64"
+                let result = eval_compiled(&compiled, bindings, Some(&[root.into()]));
+                if q_shape.is_none() || root == "good" {
+                    let result = result.unwrap();
+                    assert!(result.transcript.is_empty(), "{result:?}");
+                    assert_eq!(result.manifest.entries.len(), 1, "{result:?}");
+                    assert_eq!(result.manifest.entries[0].name, "good");
+                    assert!(result.manifest.entries[0].required_inputs.is_empty());
+                    if root == "good" {
+                        assert_eq!(result.roots.len(), 1, "{result:?}");
+                        assert_eq!(result.roots[0].name.as_deref(), Some("good"));
+                        assert_eq!(
+                            serde_json::to_value(&result.roots[0].value).unwrap(),
+                            serde_json::json!({"type":"scalar","value":{"dtype":"int32","value":7}})
+                        );
                     } else {
-                        lowering_message
+                        assert!(result.roots.is_empty(), "{result:?}");
                     }
-                );
-                assert_eq!(
-                    error.transcript,
-                    if root == "entry" {
-                        vec!["entry"]
-                    } else {
-                        vec![]
-                    }
-                );
+                } else {
+                    let error = result.unwrap_err();
+                    assert_eq!(error.stage, "eval");
+                    assert_eq!(error.errors.len(), 1, "{error:?}");
+                    assert_eq!(
+                        error.errors[0].message,
+                        if q_shape == Some(vec![-1]) {
+                            "binding `q`: tensor extent must be a nonnegative int64"
+                        } else {
+                            lowering_message
+                        }
+                    );
+                    assert_eq!(
+                        error.transcript,
+                        if root == "entry" {
+                            vec!["entry"]
+                        } else {
+                            vec![]
+                        }
+                    );
+                }
             }
-        }
+        })
     }
 
     fn native_wire_witness_fixture() -> Dag {
@@ -8473,86 +8510,107 @@ mod tests {
 
     #[test]
     fn native_wire_projection_preserves_live_local_ascription_claims() {
-        let declarations = chelis_surf::parser::parse_str(
-            "def f(x: tensor[*, f32]) -> tensor[*, f32] = {\n  \
+        chelis_ir::resources::with_operation(|operation| {
+            let declarations = chelis_surf::parser::parse_str(
+                "def f(x: tensor[*, f32]) -> tensor[*, f32] = {\n  \
          y: tensor[2, f32] = pad(x, [[0i64, 0i64]], 0.0f32)\n  \
          y\n\
          }\n",
-            &chelis_syntax_host::NativeStack,
-        )
-        .unwrap();
-        let deep =
-            chelis_surf::desugar::desugar_program(&declarations, &chelis_syntax_host::NativeStack)
-                .expect("Surf fixture must desugar");
-        let checked = chelis_types::check_ir_program(&deep).unwrap();
-        let dag = chelis_ir::host::lower_named_tensor_entry_dag(&checked, "f").unwrap();
-        let projected = wire_dag(&dag).unwrap();
-        let json = serde_json::to_value(&projected).unwrap();
-        let site = json["nodes"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find_map(|node| node["op"]["site"].get("local_ascription_claim"))
-            .expect("native lowering projects the local claim into WireDag");
-        assert_eq!(site["ascription_id"], 0);
-        assert_eq!(site["binding"], "y");
-        assert_eq!(site["claim"], "2");
-        assert_eq!(site["axis"], serde_json::json!({"axis": "lit", "value": 0}));
-        let decoded = WireDag::from_validated_json(&serde_json::to_string(&projected).unwrap())
-            .expect("the projected current-version artifact validates");
-        assert_eq!(serde_json::to_value(decoded).unwrap(), json);
+                &chelis_syntax_host::NativeStack,
+            )
+            .unwrap();
+            let deep = chelis_surf::desugar::desugar_program(
+                &declarations,
+                &chelis_syntax_host::NativeStack,
+            )
+            .expect("Surf fixture must desugar");
+            let checked = chelis_types::check_ir_program(&deep).unwrap();
+            let dag = chelis_ir_core::host::lower_named_tensor_entry_dag(
+                (checked).facts(),
+                "f",
+                operation,
+            )
+            .expect("named entry decision")
+            .unwrap();
+            let projected = wire_dag(&dag).unwrap();
+            let json = serde_json::to_value(&projected).unwrap();
+            let site = json["nodes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find_map(|node| node["op"]["site"].get("local_ascription_claim"))
+                .expect("native lowering projects the local claim into WireDag");
+            assert_eq!(site["ascription_id"], 0);
+            assert_eq!(site["binding"], "y");
+            assert_eq!(site["claim"], "2");
+            assert_eq!(site["axis"], serde_json::json!({"axis": "lit", "value": 0}));
+            let decoded = WireDag::from_validated_json(&serde_json::to_string(&projected).unwrap())
+                .expect("the projected current-version artifact validates");
+            assert_eq!(serde_json::to_value(decoded).unwrap(), json);
+        })
     }
 
     #[test]
     fn native_wire_projection_preserves_local_claim_runtime_branch_activation() {
-        let declarations = chelis_surf::parser::parse_str(
-            "def f(flag: bool, x: tensor[*, f32]) -> tensor[*, f32] = \
+        chelis_ir::resources::with_operation(|operation| {
+            let declarations = chelis_surf::parser::parse_str(
+                "def f(flag: bool, x: tensor[*, f32]) -> tensor[*, f32] = \
          if flag then {\n  \
            y: tensor[2, f32] = pad(x, [[0i64, 0i64]], 0.0f32)\n  \
            y\n\
          } else x\n",
-            &chelis_syntax_host::NativeStack,
-        )
-        .unwrap();
-        let deep =
-            chelis_surf::desugar::desugar_program(&declarations, &chelis_syntax_host::NativeStack)
-                .expect("Surf fixture must desugar");
-        let checked = chelis_types::check_ir_program(&deep).unwrap();
-        let dag = chelis_ir::host::lower_named_tensor_entry_dag(&checked, "f").unwrap();
-        let projected = wire_dag(&dag).unwrap();
-        let claim = projected
-            .nodes
-            .iter()
-            .find(|node| {
-                matches!(
-                    node.op,
-                    WireRiscOp::ExtentWitness {
-                        site: WireExtentWitnessSite::LocalAscriptionClaim { .. },
-                        ..
-                    }
-                )
-            })
-            .expect("native lowering projects the path-local claim");
-        let owner = projected
-            .nodes
-            .iter()
-            .find(|node| node.shape_deps.contains(&claim.id))
-            .expect("the initializer owns the projected claim");
-        // The claim's activation is its carrier's owner activation (spec/10
-        // section 3.2), so it crosses the boundary as that node's
-        // `activation`, one exact scalar Bool.
-        let activation = owner
-            .activation
-            .and_then(|activation| projected.nodes.get(usize::try_from(activation).ok()?))
-            .expect("the claim's carrier crosses the boundary under the arm's activation");
-        assert!(
-            activation.output_type.dims.is_empty() && activation.output_type.precision == "bool",
-            "one exact scalar Bool activation crosses the artifact boundary"
-        );
-        let json = serde_json::to_value(&projected).unwrap();
-        let decoded = WireDag::from_validated_json(&serde_json::to_string(&projected).unwrap())
-            .expect("the projected path-local artifact validates");
-        assert_eq!(serde_json::to_value(decoded).unwrap(), json);
+                &chelis_syntax_host::NativeStack,
+            )
+            .unwrap();
+            let deep = chelis_surf::desugar::desugar_program(
+                &declarations,
+                &chelis_syntax_host::NativeStack,
+            )
+            .expect("Surf fixture must desugar");
+            let checked = chelis_types::check_ir_program(&deep).unwrap();
+            let dag = chelis_ir_core::host::lower_named_tensor_entry_dag(
+                (checked).facts(),
+                "f",
+                operation,
+            )
+            .expect("named entry decision")
+            .unwrap();
+            let projected = wire_dag(&dag).unwrap();
+            let claim = projected
+                .nodes
+                .iter()
+                .find(|node| {
+                    matches!(
+                        node.op,
+                        WireRiscOp::ExtentWitness {
+                            site: WireExtentWitnessSite::LocalAscriptionClaim { .. },
+                            ..
+                        }
+                    )
+                })
+                .expect("native lowering projects the path-local claim");
+            let owner = projected
+                .nodes
+                .iter()
+                .find(|node| node.shape_deps.contains(&claim.id))
+                .expect("the initializer owns the projected claim");
+            // The claim's activation is its carrier's owner activation (spec/10
+            // section 3.2), so it crosses the boundary as that node's
+            // `activation`, one exact scalar Bool.
+            let activation = owner
+                .activation
+                .and_then(|activation| projected.nodes.get(usize::try_from(activation).ok()?))
+                .expect("the claim's carrier crosses the boundary under the arm's activation");
+            assert!(
+                activation.output_type.dims.is_empty()
+                    && activation.output_type.precision == "bool",
+                "one exact scalar Bool activation crosses the artifact boundary"
+            );
+            let json = serde_json::to_value(&projected).unwrap();
+            let decoded = WireDag::from_validated_json(&serde_json::to_string(&projected).unwrap())
+                .expect("the projected path-local artifact validates");
+            assert_eq!(serde_json::to_value(decoded).unwrap(), json);
+        })
     }
 
     #[test]
@@ -10725,9 +10783,10 @@ year = mk_date.year
 
     #[test]
     fn host_lowering_preserves_rich_host_function_types() {
-        let compiled = compile_source(
-            SourceKind::Surf,
-            r#"
+        chelis_ir::resources::with_operation(|operation| {
+            let compiled = compile_source(
+                SourceKind::Surf,
+                r#"
 module Std.Test
 
 type Jsonish =
@@ -10755,62 +10814,65 @@ def json_string(value: Option[Jsonish]) -> Option[string] =
 def load_index_bundle(path: string) -> Option[IndexBundle] =
   Some(IndexBundle(dict_of([]), dict_of([]), dict_of([]), cast(0, i64)))
 "#,
-        )
-        .expect("compile");
+            )
+            .expect("compile");
 
-        let host = chelis_ir::host::try_lower_compiled_program(compiled.checked())
-            .expect("checked host program must lower")
-            .host
-            .expect("host lowering");
-        let lowered = chelis_ir::lower::top_level_lowering_map(
-            compiled.checked().exprs(),
-            compiled.checked().type_env(),
-        );
-        let checked_text = chelis_deep::printer::print_canonical(compiled.checked().exprs());
+            let host = chelis_ir::host::try_lower_compiled_program(compiled.checked())
+                .expect("checked host program must lower")
+                .host
+                .expect("host lowering");
+            let lowered = chelis_ir_core::lower::top_level_lowering_map(
+                compiled.checked().exprs(),
+                compiled.checked().type_env(),
+                operation,
+            )
+            .expect("lowering classification");
+            let checked_text = chelis_deep::printer::print_canonical(compiled.checked().exprs());
 
-        let find_ret = |suffix: &str| {
-            host.functions
+            let find_ret = |suffix: &str| {
+                host.functions
+                    .iter()
+                    .find(|function| function.name == suffix || function.name.ends_with(suffix))
+                    .map(|function| function.ret_ty.clone())
+            };
+
+            let available = host
+                .functions
                 .iter()
-                .find(|function| function.name == suffix || function.name.ends_with(suffix))
-                .map(|function| function.ret_ty.clone())
-        };
+                .map(|function| format!("{} -> {:?}", function.name, function.ret_ty))
+                .collect::<Vec<_>>();
+            let lowered_debug = lowered
+                .iter()
+                .map(|(name, lowered)| format!("{name}={lowered}"))
+                .collect::<Vec<_>>();
 
-        let available = host
-            .functions
-            .iter()
-            .map(|function| format!("{} -> {:?}", function.name, function.ret_ty))
-            .collect::<Vec<_>>();
-        let lowered_debug = lowered
-            .iter()
-            .map(|(name, lowered)| format!("{name}={lowered}"))
-            .collect::<Vec<_>>();
-
-        assert_eq!(
-            find_ret("parse_line"),
-            Some(chelis_ir::host_type_state::ConcreteHostType::Option(
-                Box::new(chelis_ir::host_type_state::ConcreteHostType::List(
-                    Box::new(chelis_ir::host_type_state::ConcreteHostType::String)
-                ))
-            )),
-            "available functions: {available:#?}\nlowered: {lowered_debug:#?}\nchecked:\n{checked_text}"
-        );
-        assert_eq!(
-            find_ret("json_string"),
-            Some(chelis_ir::host_type_state::ConcreteHostType::Option(
-                Box::new(chelis_ir::host_type_state::ConcreteHostType::String)
-            )),
-            "available functions: {available:#?}\nlowered: {lowered_debug:#?}\nchecked:\n{checked_text}"
-        );
-        assert_eq!(
-            find_ret("load_index_bundle"),
-            Some(chelis_ir::host_type_state::ConcreteHostType::Option(
-                Box::new(chelis_ir::host_type_state::ConcreteHostType::Adt(
-                    "IndexBundle".to_string(),
-                    Vec::new()
-                ))
-            )),
-            "available functions: {available:#?}\nlowered: {lowered_debug:#?}\nchecked:\n{checked_text}"
-        );
+            assert_eq!(
+                find_ret("parse_line"),
+                Some(chelis_ir_core::host_type_state::ConcreteHostType::Option(
+                    Box::new(chelis_ir_core::host_type_state::ConcreteHostType::List(
+                        Box::new(chelis_ir_core::host_type_state::ConcreteHostType::String)
+                    ))
+                )),
+                "available functions: {available:#?}\nlowered: {lowered_debug:#?}\nchecked:\n{checked_text}"
+            );
+            assert_eq!(
+                find_ret("json_string"),
+                Some(chelis_ir_core::host_type_state::ConcreteHostType::Option(
+                    Box::new(chelis_ir_core::host_type_state::ConcreteHostType::String)
+                )),
+                "available functions: {available:#?}\nlowered: {lowered_debug:#?}\nchecked:\n{checked_text}"
+            );
+            assert_eq!(
+                find_ret("load_index_bundle"),
+                Some(chelis_ir_core::host_type_state::ConcreteHostType::Option(
+                    Box::new(chelis_ir_core::host_type_state::ConcreteHostType::Adt(
+                        "IndexBundle".to_string(),
+                        Vec::new()
+                    ))
+                )),
+                "available functions: {available:#?}\nlowered: {lowered_debug:#?}\nchecked:\n{checked_text}"
+            );
+        })
     }
 
     #[test]

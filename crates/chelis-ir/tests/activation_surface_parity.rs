@@ -2,7 +2,8 @@ use chelis_dag_core::dag::{Dag, RiscOp, TensorType};
 use chelis_dag_core::tier2::{
     lower_gelu, lower_gelu_tanh, lower_sigmoid, lower_silu, lower_standard_normal_cdf,
 };
-use chelis_ir::eval::{TensorValue, eval_tensor_roots_with_strict};
+use chelis_ir::eval::eval_tensor_roots_with_strict;
+use chelis_ir_core::eval::TensorValue;
 use chelis_numeric_core::dtype_semantics::{
     FloatUnOp, ScalarValue, float_unop, scalar_from_f64, tensor_from_scalars,
 };

@@ -3367,7 +3367,7 @@ _CLAIM_BARRIER_NAMED_AND_LITERAL = """\
                         site: crate::dag::ExtentWitnessSite::ResultClaim { .. }
                             | crate::dag::ExtentWitnessSite::LiteralResultClaim,
 """
-_SPECIALIZER_SOURCE = REPO_ROOT / "crates/chelis-ir/src/specialize.rs"
+_SPECIALIZER_SOURCE = REPO_ROOT / "crates/chelis-ir-core/src/specialize.rs"
 _BLAS_REGION_BARRIER = """\
         if let Some(info) = detect_matmul_pattern(dag, node.id)
             && matched_region_is_claim_free(
@@ -3420,7 +3420,7 @@ _LOCAL_ASCRIPTION_CHECKER_TRANSPORT_REMOVED = """\
     checked
 }
 """
-_LOCAL_ASCRIPTION_LOWER_SOURCE = REPO_ROOT / "crates/chelis-ir/src/lower.rs"
+_LOCAL_ASCRIPTION_LOWER_SOURCE = REPO_ROOT / "crates/chelis-ir-core/src/lower.rs"
 _LOCAL_ASCRIPTION_LIBRARY_CARRIER = """\
         local_ascriptions: program.local_ascriptions().to_vec(),
 """
@@ -3443,7 +3443,7 @@ _LOCAL_ASCRIPTION_ATTACHMENT = """\
 _LOCAL_ASCRIPTION_ATTACHMENT_REMOVED = """\
                                 // Controlled mutation: omit initializer ownership.
 """
-_LOCAL_ASCRIPTION_EVAL_SOURCE = REPO_ROOT / "crates/chelis-ir/src/eval.rs"
+_LOCAL_ASCRIPTION_EVAL_SOURCE = REPO_ROOT / "crates/chelis-ir-core/src/eval.rs"
 _LOCAL_ASCRIPTION_EVAL_OBSERVATION = """\
     if observed != claimed {
         let canonical = match &claim.source {

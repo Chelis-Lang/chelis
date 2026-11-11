@@ -59,12 +59,21 @@ This portable dependency does not make the pipeline core portable.
 
 ### `chelis-ir`
 
-`chelis-ir` uses standard collections, thread-local state, and `OnceLock`. Lowering uses `std::panic::catch_unwind` to convert selected panic payloads into diagnostics.
+`chelis-ir` retains native checked-product authority, wire admission, panic adapters, and runtime seals.
+Its native resource provider uses `chelis-syntax-host::NativeStack` and borrowed cancellation access.
+These authority and host-service dependencies still need `std`.
 
-Lowering uses `stacker::grow` and `stacker::maybe_grow`. The IR crate also retains panic paths for internal compiler invariants.
-Checked-product reconstruction uses `chelis-syntax-host::NativeStack` for portable checker operations.
+### `chelis-ir-core`
 
-The default dependencies include `serde`, `thiserror`, and `stacker`. `chelis-ir` also inherits blockers from `chelis-types` and `chelis-effects`.
+`chelis-ir-core` owns lowering, host analysis, tensor evaluation, ownership transforms, and trace data.
+It uses unconditional `no_std`, explicit `alloc`, and empty default features.
+Callers supply allocation, enough stack capacity, and cancellation access.
+Operations own temporary analysis state and borrow optional work counters.
+Targets without native 64-bit atomics use the portable atomic fallback.
+
+Portable facts do not grant native checked-product or runtime authority.
+Target compile and link checks do not establish physical device execution.
+Neither this core nor its native facade makes `chelis-pipeline-core` portable.
 
 ### `chelis-unord`
 

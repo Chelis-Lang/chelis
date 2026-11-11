@@ -1,6 +1,7 @@
 //! [05-OP-33] ordered scans retain first-leaf and accumulator semantics.
 use chelis_dag_core::dag::{Dag, DimInfo, RiscOp, ScanDirection, TensorType};
-use chelis_ir::eval::{TensorValue, eval_tensor};
+use chelis_ir::eval::eval_tensor;
+use chelis_ir_core::eval::TensorValue;
 use chelis_numeric_core::dtype_semantics::cumsum_tensor_lanes;
 use chelis_numeric_core::dtype_semantics::{RawTensor, finalize_tensor};
 use chelis_numeric_core::prim::Prim;
@@ -151,7 +152,7 @@ fn scan_integer_forward_overflow_and_bool_rejection() {
 fn vmap_scan_shifts_axis_and_retains_direction() {
     let (dag, _) = graph(&[5], Prim::F32, 0, ScanDirection::Decreasing, false);
     let (batched, _) =
-        chelis_ir::vmap::vectorize_axis0_with_node_map(&dag, DimInfo::Lit(3)).unwrap();
+        chelis_ir_core::vmap::vectorize_axis0_with_node_map(&dag, DimInfo::Lit(3)).unwrap();
     assert!(batched.nodes().iter().any(|node| matches!(
         node.op,
         RiscOp::Cumsum {

@@ -104,14 +104,22 @@ fn lowering_bytes(program: &CheckedProgram) -> usize {
 }
 
 fn classification_bytes(program: &CheckedProgram) -> usize {
-    let (verdicts, bytes) =
-        allocated(|| chelis_ir::lower::top_level_lowering_map(program.exprs(), program.type_env()));
-    assert_eq!(
-        verdicts.get("f"),
-        Some(&true),
-        "the chain lowers to the DAG"
-    );
-    bytes
+    chelis_ir::resources::with_operation(|operation| {
+        let (verdicts, bytes) = allocated(|| {
+            chelis_ir_core::lower::top_level_lowering_map(
+                program.exprs(),
+                program.type_env(),
+                operation,
+            )
+            .expect("lowering classification")
+        });
+        assert_eq!(
+            verdicts.get("f"),
+            Some(&true),
+            "the chain lowers to the DAG"
+        );
+        bytes
+    })
 }
 
 fn on_measuring_thread<R: Send + 'static>(work: impl FnOnce() -> R + Send + 'static) -> R {

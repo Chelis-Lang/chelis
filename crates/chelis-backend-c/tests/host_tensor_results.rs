@@ -2,12 +2,12 @@
 //! resolved host type, preserving dtype, rank and ownership.
 mod support;
 use chelis_dag_core::{Dag, RiscOp, TensorType};
-use chelis_ir::ConcreteHostType as Ty;
-use chelis_ir::host::{
+use chelis_ir_core::host::{
     ConcreteHostExpr as Expr, ConcreteHostExprKind as Kind, ConcreteHostFunction as Function,
     ConcreteHostParam as Param, ConcreteHostProgram as Program, HostFunctionOrigin,
     HostTensorHelper, HostTensorInput,
 };
+use chelis_ir_core::host_type_state::ConcreteHostType as Ty;
 use chelis_numeric_core::prim::Prim;
 use std::{fs, process::Command};
 

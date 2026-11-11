@@ -2,7 +2,7 @@
 
 #[test]
 fn ir_elementwise_arithmetic_cannot_reintroduce_raw_numeric_closures() {
-    let source = include_str!("../src/eval.rs");
+    let source = include_str!("../../chelis-ir-core/src/eval.rs");
     for forbidden in [
         "impl Fn(f64, f64) -> f64",
         "impl Fn(f64) -> f64",
@@ -42,7 +42,7 @@ fn source_slice<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
 
 #[test]
 fn ir_reductions_can_only_plan_groups_and_call_typed_kernels() {
-    let source = include_str!("../src/eval.rs");
+    let source = include_str!("../../chelis-ir-core/src/eval.rs");
     let window = source_slice(source, "fn reduce_window(", "fn reduce_window_grad(");
     let window_grad = source_slice(source, "fn reduce_window_grad(", "fn for_each_window_pos(");
     let axis = source_slice(source, "fn axis_reduction_groups(", "fn reshape(");
@@ -101,7 +101,7 @@ fn ir_reductions_can_only_plan_groups_and_call_typed_kernels() {
 
 #[test]
 fn static_condition_fold_keeps_values_sealed() {
-    let source = include_str!("../src/lower.rs");
+    let source = include_str!("../../chelis-ir-core/src/lower.rs");
     let start = source
         .find("fn fold_static_cond")
         .expect("static condition fold must remain present");
@@ -125,7 +125,7 @@ fn static_condition_fold_keeps_values_sealed() {
 /// binary64 funnel is reachable from it ([05-OP-33]).
 #[test]
 fn ir_scatter_add_can_only_plan_leaves_and_call_the_typed_kernel() {
-    let source = include_str!("../src/eval.rs");
+    let source = include_str!("../../chelis-ir-core/src/eval.rs");
     let body = source_slice(source, "fn scatter_add(", "fn scatter_replace(");
     assert!(body.contains("scatter_add_tensor_groups"));
     for forbidden in [".to_f64_lossy_vec()", "finalize_wide", "as_f64_lossy", "+="] {

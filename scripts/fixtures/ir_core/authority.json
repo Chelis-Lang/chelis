@@ -1,0 +1,51 @@
+{
+  "raw-library-adoption": {
+    "source": "pub fn forge(raw: chelis_ir_core::lower::LoweredLibrary) -> chelis_ir::lower::LoweredLibrary { raw.into() }\n",
+    "expected": ["E0277", "From<", "LoweredLibrary"]
+  },
+  "foreign-completion-adoption": {
+    "source": "pub fn forge(raw: chelis_checker_core::CompletedCheck) -> chelis_types::CheckedProgram { raw.into() }\n",
+    "expected": ["E0277", "From<CompletedCheck>", "CheckedProgram"]
+  },
+  "raw-host-adoption": {
+    "source": "pub fn forge(raw: chelis_ir_core::host::ConcreteHostProgram) -> chelis_ir::host::HostExecutionPlan { raw.into() }\n",
+    "expected": ["E0277", "From<", "HostExecutionPlan"]
+  },
+  "raw-prepared-adoption": {
+    "source": "pub fn forge(raw: chelis_ir_core::host::PreparedHostFacts<chelis_checker_core::CheckFacts>) -> chelis_ir::host::PreparedHostProgram { raw.into() }\n",
+    "expected": ["E0277", "PreparedHostProgram"]
+  },
+  "private-library-proof": {
+    "source": "pub fn forge(inner: chelis_ir_core::lower::LoweredLibrary) -> chelis_ir::lower::LoweredLibrary { chelis_ir::lower::LoweredLibrary { inner, library_proof_id: None } }\n",
+    "expected": ["E0451", "private", "LoweredLibrary"]
+  },
+  "raw-dag-payload": {
+    "source": "pub fn forge(dag: chelis_dag_core::dag::Dag) -> chelis_ir::ownership::DagEmissionPayload { chelis_ir::ownership::DagEmissionPayload { dag } }\n",
+    "expected": ["E0451", "private", "DagEmissionPayload"]
+  },
+  "foreign-host-verification": {
+    "source": "pub fn forge(raw: chelis_ir_core::ownership::verify::HostVerification) -> chelis_ir::ownership::VerifiedLiveSetBound { raw.into() }\n",
+    "expected": ["E0277", "HostVerification", "VerifiedLiveSetBound"]
+  },
+  "foreign-storage-proof": {
+    "source": "pub fn forge(raw: chelis_ir_core::ownership::storage::ReuseDecision) -> chelis_ir::ownership::ReusableOwnedStorage { raw.into() }\n",
+    "expected": ["E0277", "ReuseDecision", "ReusableOwnedStorage"]
+  },
+  "private-verified-wrapper": {
+    "source": "pub fn forge(raw: chelis_ir::ownership::OwnershipProgram<chelis_ir::ownership::DagEmissionPayload>) -> chelis_ir::ownership::VerifiedOwnershipProgram<chelis_ir::ownership::DagEmissionPayload> { chelis_ir::ownership::VerifiedOwnershipProgram(raw, unreachable!()) }\n",
+    "expected": ["E0603", "private", "VerifiedOwnershipProgram"]
+  },
+  "stale-transform-owner": {
+    "source": "use chelis_ir::vmap;\n",
+    "expected": ["E0432", "vmap", "chelis_ir"]
+  },
+  "raw-checker-facts-at-native-entry": {
+    "source": "pub fn forge(raw: chelis_checker_core::CheckFacts) -> chelis_ir::host::PreparedHostProgram { chelis_ir::host::PreparedHostProgram::new(raw) }\n",
+    "expected": ["E0308", "CheckedProgram", "CheckFacts"]
+  },
+  "serde-disabled": {
+    "source": "pub fn transport(raw: &chelis_ir_core::lower::LoweredLibrary) { let _ = bincode::serialize(raw); }\n",
+    "expected": ["E0277", "Serialize", "LoweredLibrary"],
+    "portable_only": true
+  }
+}

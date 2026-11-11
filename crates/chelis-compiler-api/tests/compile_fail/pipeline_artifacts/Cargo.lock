@@ -114,7 +114,9 @@ dependencies = [
  "chelis-crmath",
  "chelis-dag-core",
  "chelis-ir",
+ "chelis-ir-core",
  "chelis-numeric-core",
+ "chelis-type-core",
  "chelis-types",
  "chelis-unord",
  "chelis-vocab",
@@ -132,6 +134,7 @@ dependencies = [
  "chelis-checker-core",
  "chelis-dag-core",
  "chelis-ir",
+ "chelis-ir-core",
  "chelis-numeric-core",
  "chelis-types",
  "chelis-unord",
@@ -171,6 +174,7 @@ dependencies = [
  "chelis-effects-core",
  "chelis-image-id",
  "chelis-ir",
+ "chelis-ir-core",
  "chelis-macros",
  "chelis-numeric-core",
  "chelis-pipeline-core",
@@ -265,15 +269,38 @@ dependencies = [
  "chelis-dag-core",
  "chelis-deep",
  "chelis-effects",
+ "chelis-ir-core",
  "chelis-numeric-core",
+ "chelis-stack-services",
  "chelis-syntax-host",
  "chelis-type-core",
  "chelis-types",
  "chelis-unord",
  "chelis-vocab",
- "num-bigint",
+ "critical-section",
  "serde",
- "stacker",
+ "thiserror",
+]
+
+[[package]]
+name = "chelis-ir-core"
+version = "0.23.1"
+dependencies = [
+ "chelis-abi",
+ "chelis-checker-core",
+ "chelis-dag-core",
+ "chelis-deep",
+ "chelis-effects-core",
+ "chelis-numeric-core",
+ "chelis-pred",
+ "chelis-stack-services",
+ "chelis-type-core",
+ "chelis-unord",
+ "chelis-vocab",
+ "num-bigint",
+ "once_cell",
+ "portable-atomic",
+ "serde",
  "thiserror",
 ]
 
@@ -307,6 +334,7 @@ dependencies = [
  "chelis-effects",
  "chelis-effects-core",
  "chelis-ir",
+ "chelis-ir-core",
  "chelis-types",
  "chelis-unord",
 ]
@@ -511,6 +539,12 @@ checksum = "8498c871161e1742aaa9d52551b2d6ebdd4c3d45a3be423e3728f33b955be550"
 dependencies = [
  "cfg-if",
 ]
+
+[[package]]
+name = "critical-section"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "790eea4361631c5e7d22598ecd5723ff611904e3344ce8720784c93e3d83d40b"
 
 [[package]]
 name = "crunchy"
@@ -1092,6 +1126,10 @@ name = "once_cell"
 version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
+dependencies = [
+ "critical-section",
+ "portable-atomic",
+]
 
 [[package]]
 name = "openssl-probe"
@@ -1165,6 +1203,15 @@ name = "pkg-config"
 version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f6b464fbc74e149a392436b17d523f769e057cb6877f6a5c4618bc6f11800548"
+
+[[package]]
+name = "portable-atomic"
+version = "1.15.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "05c8b63e8d9609db387f0324918f81d68fe27748f084ef092fb35954d0539a85"
+dependencies = [
+ "critical-section",
+]
 
 [[package]]
 name = "potential_utf"

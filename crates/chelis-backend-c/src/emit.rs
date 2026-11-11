@@ -33,7 +33,7 @@ fn unsupported_verified_dag_action(node: NodeId, detail: &str) -> Unsupported {
     )
 }
 
-fn unsupported_storage_plan(error: chelis_ir::ownership::OwnershipError) -> Unsupported {
+fn unsupported_storage_plan(error: chelis_ir_core::ownership::OwnershipError) -> Unsupported {
     Unsupported::new(
         UnsupportedKind::Op("storage planning".to_string()),
         error.to_string(),
@@ -87,7 +87,7 @@ pub struct CEmitter {
     /// without the axis.
     unstored_sums: BTreeMap<usize, (usize, usize)>,
     /// Additional recipes preserve the specialized forward-product path.
-    deferred_views: chelis_ir::contraction_views::ContractionViews,
+    deferred_views: chelis_ir_core::contraction_views::ContractionViews,
     deferred_ranks: BTreeMap<usize, usize>,
     deferred_metadata: BTreeSet<NodeId>,
     deferred_cursor: usize,
@@ -1310,7 +1310,7 @@ impl CEmitter {
             ("%s".into(), ", __chelis_helper_site")
         } else {
             (
-                chelis_ir::span_sanitize::sanitize_for_format_string(func_name),
+                chelis_ir_core::span_sanitize::sanitize_for_format_string(func_name),
                 "",
             )
         };
@@ -1862,11 +1862,11 @@ impl CEmitter {
     }
 
     /// Give every anonymous extent its identity by
-    /// [`chelis_ir::anonymous_dims::anonymous_axis_names`], in node order, so
+    /// [`chelis_ir_core::anonymous_dims::anonymous_axis_names`], in node order, so
     /// an axis that reads another node's reads it already named. The runtime
     /// `if` join reads the same rule to decide which arms share an extent.
     pub(crate) fn rename_anonymous_dims(dag: Dag) -> Dag {
-        use chelis_ir::anonymous_dims::{
+        use chelis_ir_core::anonymous_dims::{
             AnonymousAxisName, anonymous_axis_names, fresh_anonymous_dim,
         };
         let mut out = dag;
@@ -2217,7 +2217,8 @@ impl CEmitter {
                 let input = node.inputs[0].0;
                 let parameter = match site {
                     chelis_dag_core::dag::ExtentWitnessSite::Caller => {
-                        chelis_ir::span_sanitize::sanitize_for_format_string(parameter).to_string()
+                        chelis_ir_core::span_sanitize::sanitize_for_format_string(parameter)
+                            .to_string()
                     }
                     chelis_dag_core::dag::ExtentWitnessSite::LocalExpand => format!("node {input}"),
                     chelis_dag_core::dag::ExtentWitnessSite::ResultClaim { .. } => {
@@ -2270,10 +2271,13 @@ impl CEmitter {
                     };
                     let required_input = required.inputs[0].0;
                     let required_parameter =
-                        chelis_ir::span_sanitize::sanitize_for_format_string(required_parameter)
-                            .to_string();
-                    let label = chelis_ir::span_sanitize::sanitize_for_format_string(&claim.claim)
+                        chelis_ir_core::span_sanitize::sanitize_for_format_string(
+                            required_parameter,
+                        )
                         .to_string();
+                    let label =
+                        chelis_ir_core::span_sanitize::sanitize_for_format_string(&claim.claim)
+                            .to_string();
                     let here = format!("{parameter} axis {axis} = %lld");
                     let there = format!("{required_parameter} axis {required_axis} = %lld");
                     let here_value = format!("(long long)chelis_tensor_shape(t{input}, {axis})");
@@ -2310,7 +2314,7 @@ impl CEmitter {
                 let actual = node.inputs[0].0;
                 for (claim, input) in claims.iter().zip(&node.inputs[1..]) {
                     let required = input.0;
-                    let claim = chelis_ir::span_sanitize::sanitize_for_format_string(claim);
+                    let claim = chelis_ir_core::span_sanitize::sanitize_for_format_string(claim);
                     let differs = self.gated_check(&format!(
                         "((const int64_t*)t{actual}_data)[0] != ((const int64_t*)t{required}_data)[0]"
                     ));
@@ -2960,7 +2964,7 @@ impl CEmitter {
             return;
         }
         if let Some(canonical) = node.span_id.as_deref() {
-            let safe = chelis_ir::span_sanitize::sanitize_for_comment(canonical);
+            let safe = chelis_ir_core::span_sanitize::sanitize_for_comment(canonical);
             self.line(&format!("// span: {safe}"));
         }
         let mut merged: Vec<&str> = node
@@ -2972,7 +2976,7 @@ impl CEmitter {
         merged.sort();
         merged.dedup();
         for span in merged {
-            let safe = chelis_ir::span_sanitize::sanitize_for_comment(span);
+            let safe = chelis_ir_core::span_sanitize::sanitize_for_comment(span);
             self.line(&format!("// span: {safe}"));
         }
     }
@@ -3353,7 +3357,8 @@ impl CEmitter {
                     unreachable!()
                 };
                 let slot = input_slots[name.as_str()];
-                let label = chelis_ir::span_sanitize::sanitize_for_format_string(name.as_str());
+                let label =
+                    chelis_ir_core::span_sanitize::sanitize_for_format_string(name.as_str());
                 (node, slot, label)
             };
             match step {
@@ -3428,7 +3433,7 @@ impl CEmitter {
                             let (left, canonical_label, canonical_axis) = input_read(canonical);
                             let (right, label, axis) = input_read(observed);
                             let claim =
-                                chelis_ir::span_sanitize::sanitize_for_format_string(&claim);
+                                chelis_ir_core::span_sanitize::sanitize_for_format_string(&claim);
                             let diagnostic = format!(
                                 "fprintf(stderr, \"extent `{claim}`: {canonical_label} axis {canonical_axis} = %lld, {label} axis {axis} = %lld\\n\", (long long)({left}), (long long)({right}));"
                             );
@@ -5999,7 +6004,7 @@ impl CEmitter {
         match dim {
             DimInfo::Lit(value) => value.to_string(),
             DimInfo::Named(name, _) => {
-                chelis_ir::span_sanitize::sanitize_for_format_string(name).into_owned()
+                chelis_ir_core::span_sanitize::sanitize_for_format_string(name).into_owned()
             }
         }
     }
@@ -10365,7 +10370,7 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
                 mismatch.clone()
             };
             let (name, op) = (site.claim, site.op);
-            let name_fmt = chelis_ir::span_sanitize::sanitize_for_format_string(&name);
+            let name_fmt = chelis_ir_core::span_sanitize::sanitize_for_format_string(&name);
             self.line(&format!("if ({predicate}) {{"));
             self.indent += 1;
             self.line(&format!(
@@ -11500,7 +11505,7 @@ mod tests {
     #[test]
     fn inlined_product_storage_decisions_are_exclusive_and_emit() {
         use chelis_dag_core::dag::{NodeId, Owner};
-        use chelis_ir::ownership::StoragePlacement;
+        use chelis_ir_core::ownership::storage::StoragePlacement;
         let lit = |dims: &[usize]| dims.iter().map(|&n| DimInfo::Lit(n)).collect::<Vec<_>>();
         let runtime = |name: &str| DimInfo::Named(name.into(), None);
         let mut emitted = 0usize;
@@ -11527,7 +11532,7 @@ mod tests {
                         dims: dims.to_vec(),
                         precision: p,
                     };
-                    let contraction = chelis_ir::ordered_layout::einsum_contraction(
+                    let contraction = chelis_ir_core::ordered_layout::einsum_contraction(
                         equation,
                         &ty(&a),
                         &ty(&b),
@@ -11708,9 +11713,10 @@ mod tests {
                              equation: &str,
                              a: (NodeId, &TensorType),
                              b: (NodeId, &TensorType)| {
-                    let contraction =
-                        chelis_ir::ordered_layout::einsum_contraction(equation, a.1, b.1, None)
-                            .unwrap_or_else(|| panic!("`{equation}` contraction form"));
+                    let contraction = chelis_ir_core::ordered_layout::einsum_contraction(
+                        equation, a.1, b.1, None,
+                    )
+                    .unwrap_or_else(|| panic!("`{equation}` contraction form"));
                     chelis_dag_core::tier2_ordered::lower_einsum_contraction(
                         owner,
                         dag,
@@ -11798,7 +11804,7 @@ mod tests {
         ] {
             let c = emit_test_dag(&doubled_named("n", &span), "f")
                 .unwrap_or_else(|error| panic!("{span:?}: {error}"));
-            let escaped = chelis_ir::span_sanitize::sanitize_for_comment(&span);
+            let escaped = chelis_ir_core::span_sanitize::sanitize_for_comment(&span);
             assert!(
                 c.contains(&format!("// span: {escaped}\n")),
                 "{span:?}:\n{c}"

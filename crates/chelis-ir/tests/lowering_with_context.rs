@@ -13,10 +13,11 @@ use chelis_unord::UnordMap;
 
 use chelis_dag_core::dag::{Dag, NodeId};
 use chelis_deep::Expr;
-use chelis_ir::eval::{TensorValue, eval_tensor_roots_with};
+use chelis_ir::eval::eval_tensor_roots_with;
 use chelis_ir::{
     LoweredLibrary, lower_program, lower_program_to_library, lower_program_with_context,
 };
+use chelis_ir_core::eval::TensorValue;
 use chelis_types::{
     CheckedProgram, TypeEnv, build_type_env_from_library, check_ir_program, check_ir_with_context,
     check_linearity,

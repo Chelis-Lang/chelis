@@ -14,18 +14,19 @@
 //! ```
 
 use chelis_checker_core::unsupported::{RejectionAuthority, Stage, Unsupported, UnsupportedKind};
-use chelis_ir::ConcreteHostType;
-use chelis_ir::host::{
+use chelis_ir::ownership::{
+    VerifiedHostAction, VerifiedHostEmission, VerifiedHostFunctionView, VerifiedHostSiteActionKind,
+    VerifiedHostTensorHelperView,
+};
+use chelis_ir_core::host::{
     ConcreteHostBinding, ConcreteHostCallback, ConcreteHostCallbackKind, ConcreteHostExpr,
     ConcreteHostExprKind, ConcreteHostParam, HostBinding, HostCallback, HostCallbackKind,
     HostCallee, HostCalleeView, HostExpr, HostExprKind, HostFunction, HostMatchArm, HostParam,
     HostPatternBinding, HostProgram, HostTensorHelper,
 };
-use chelis_ir::host_type_state::{CheckedBuiltinCallable, HostTypeTerm};
-use chelis_ir::ownership::{
-    HostSiteId, HostSiteKind, VerifiedHostAction, VerifiedHostEmission, VerifiedHostFunctionView,
-    VerifiedHostSiteActionKind, VerifiedHostTensorHelperView,
-};
+use chelis_ir_core::host_type_state::ConcreteHostType;
+use chelis_ir_core::host_type_state::{CheckedBuiltinCallable, HostTypeTerm};
+use chelis_ir_core::ownership::{HostSiteId, HostSiteKind};
 use chelis_numeric_core::prim::Prim;
 use chelis_unord::UnordSet;
 
@@ -65,7 +66,7 @@ pub(crate) enum HostAbiType {
     CheckedBuiltinCallable(CheckedBuiltinCallable),
     Adt(String, Vec<HostAbiType>),
     /// A nominal dimension constrains fields and has no C value representation.
-    Dimension(chelis_ir::HostShapeSlot),
+    Dimension(chelis_ir_core::host_type_state::HostShapeSlot),
     List(Box<HostAbiType>),
     Dict(Box<HostAbiType>, Box<HostAbiType>),
     Tuple(Vec<HostAbiType>),
@@ -75,7 +76,7 @@ pub(crate) enum HostAbiType {
     Unit,
 }
 
-impl chelis_ir::host::FixedEntryType for HostAbiType {
+impl chelis_ir_core::host::FixedEntryType for HostAbiType {
     type Tensor = chelis_dag_core::TensorType;
 
     fn entry_tensor(&self) -> Option<&chelis_dag_core::TensorType> {
@@ -93,7 +94,7 @@ impl chelis_ir::host::FixedEntryType for HostAbiType {
     }
 }
 
-impl chelis_ir::host::AccumulatorTypeIdentity for HostAbiType {
+impl chelis_ir_core::host::AccumulatorTypeIdentity for HostAbiType {
     fn accumulator_nominal_identity(&self) -> Option<&str> {
         match self {
             Self::Adt(name, _) => Some(name),
@@ -168,7 +169,7 @@ pub(crate) struct ProjectedHostProgram<'a> {
 
 impl Drop for ProjectedHostProgram<'_> {
     fn drop(&mut self) {
-        chelis_ir::host::drain_host_program_expressions(&mut self.program);
+        chelis_ir_core::host::drain_host_program_expressions(&mut self.program);
     }
 }
 
@@ -512,8 +513,8 @@ pub(crate) fn project_program(
 /// function, is walked past, so it projects as `Unit` when its own type has
 /// no C representation; a field that holds a tensor must project exactly.
 fn project_adt_layout(
-    layout: &chelis_ir::host::HostAdtLayout<ConcreteHostType>,
-) -> Result<Option<chelis_ir::host::HostAdtLayout<HostAbiType>>, Unsupported> {
+    layout: &chelis_ir_core::host::HostAdtLayout<ConcreteHostType>,
+) -> Result<Option<chelis_ir_core::host::HostAdtLayout<HostAbiType>>, Unsupported> {
     fn carries_tensor(ty: &ConcreteHostType) -> bool {
         match ty {
             ConcreteHostType::Tensor(_) => true,
@@ -543,19 +544,22 @@ fn project_adt_layout(
                         Err(_) if !carries_tensor(&field.ty) => HostAbiType::Unit,
                         Err(error) => return Err(error),
                     };
-                    Ok(chelis_ir::host::HostAdtField {
+                    Ok(chelis_ir_core::host::HostAdtField {
                         name: field.name.clone(),
                         ty,
                     })
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-            Ok(chelis_ir::host::HostAdtConstructorLayout {
+            Ok(chelis_ir_core::host::HostAdtConstructorLayout {
                 name: constructor.name.clone(),
                 fields,
             })
         })
         .collect::<Result<Vec<_>, Unsupported>>()?;
-    Ok(Some(chelis_ir::host::HostAdtLayout { ty, constructors }))
+    Ok(Some(chelis_ir_core::host::HostAdtLayout {
+        ty,
+        constructors,
+    }))
 }
 
 fn project_site<'a>(site: chelis_ir::ownership::VerifiedHostSiteView<'a>) -> ProjectedHostSite<'a> {
@@ -619,13 +623,13 @@ pub(crate) fn project_binding(
 fn project_function(
     function: VerifiedHostFunctionView<'_>,
     declared_callbacks: &AllowedCallees,
-    adt_layouts: &[chelis_ir::host::HostAdtLayout<ConcreteHostType>],
+    adt_layouts: &[chelis_ir_core::host::HostAdtLayout<ConcreteHostType>],
 ) -> Result<HostAbiFunction, Unsupported> {
     // Authored functions are externally declared even if unused by the
     // program's main. A closed builtin witness has no public callable ABI:
     // exporting it inside a tuple, option, collection or ADT would publish
     // an inert value and lose the operation selected by the checker.
-    if function.origin() == chelis_ir::host::HostFunctionOrigin::Authored
+    if function.origin() == chelis_ir_core::host::HostFunctionOrigin::Authored
         && public_type_contains_checked_callable(function.ret_ty(), adt_layouts)
     {
         return Err(unsupported_function_value(
@@ -633,7 +637,7 @@ fn project_function(
             "C host public function result",
         ));
     }
-    if function.origin() == chelis_ir::host::HostFunctionOrigin::Authored {
+    if function.origin() == chelis_ir_core::host::HostFunctionOrigin::Authored {
         for param in function.params() {
             if public_type_contains_checked_callable(&param.ty, adt_layouts) {
                 return Err(unsupported_function_value(
@@ -685,11 +689,11 @@ fn project_function(
 /// authored function declaration crosses this boundary.
 pub(crate) fn public_type_contains_checked_callable(
     ty: &ConcreteHostType,
-    layouts: &[chelis_ir::host::HostAdtLayout<ConcreteHostType>],
+    layouts: &[chelis_ir_core::host::HostAdtLayout<ConcreteHostType>],
 ) -> bool {
     fn contains(
         ty: &ConcreteHostType,
-        layouts: &[chelis_ir::host::HostAdtLayout<ConcreteHostType>],
+        layouts: &[chelis_ir_core::host::HostAdtLayout<ConcreteHostType>],
         visited: &mut UnordSet<String>,
     ) -> bool {
         match ty {
@@ -961,7 +965,7 @@ fn project_expr(
             lists: lists
                 .into_iter()
                 .map(|entry| {
-                    Ok(chelis_ir::host::HostListEntry {
+                    Ok(chelis_ir_core::host::HostListEntry {
                         position: entry.position,
                         name: entry.name,
                         ty: HostAbiType::try_from_concrete(&entry.ty)?,
@@ -972,7 +976,7 @@ fn project_expr(
                 .collect::<Result<Vec<_>, Unsupported>>()?,
         },
         ConcreteHostExprKind::Builtin { name, args, ty } => {
-            if chelis_ir::host::is_host_unresolved_marker(&name) {
+            if chelis_ir_core::host::is_host_unresolved_marker(&name) {
                 return Err(unsupported_callable_use(&name));
             }
             let abi_ty = if args.is_empty()
@@ -1240,7 +1244,7 @@ fn unsupported_function_symbol(name: &str) -> Unsupported {
 /// marker spelling never enters the diagnostic; the payload names the
 /// semantic class instead, per marker kind.
 fn unsupported_callable_use(marker: &str) -> Unsupported {
-    if marker == chelis_ir::host::HOST_UNRESOLVED_TRANSFORM_MARKER {
+    if marker == chelis_ir_core::host::HOST_UNRESOLVED_TRANSFORM_MARKER {
         return Unsupported::new(
             UnsupportedKind::HostAbi("unresolved `grad`/`vmap` transform application".to_string()),
             "C host ABI callable-use projection",

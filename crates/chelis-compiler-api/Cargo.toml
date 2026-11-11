@@ -10,7 +10,7 @@ repository.workspace = true
 # Native immutable views at the actual code-generation boundary; default off.
 emission-observer = []
 # Same-compilation helper captures and a final-success-bound projection; default off.
-compilation-trace = ["emission-observer", "chelis-ir/lowering-trace", "chelis-pipeline-core/lowering-trace"]
+compilation-trace = ["emission-observer", "chelis-ir/lowering-trace", "chelis-ir-core/lowering-trace", "chelis-pipeline-core/lowering-trace"]
 # Test-only: instruments the runtime these tests link with the ownership ledger.
 # The targets that use tests/ownership_support require it, stage the runtime
 # this build carries, and read the ledger it records.
@@ -21,6 +21,7 @@ clarabel-provider = ["dep:chelis-clarabel-provider", "dep:chelis-runtime-bundle"
 chelis-type-core = { workspace = true, default-features = false, features = ["serde"] }
 chelis-checker-core = { workspace = true, features = ["serde"] }
 chelis-dag-core.workspace = true
+chelis-ir-core.workspace = true
 chelis-numeric-core = { workspace = true, default-features = false, features = ["alloc", "serde"] }
 chelis-abi.workspace = true
 chelis-clarabel-provider = { path = "../chelis-clarabel-provider", optional = true, features = ["solver"] }

@@ -8,10 +8,11 @@ repository.workspace = true
 publish = false
 
 [features]
-lowering-trace = ["chelis-ir/lowering-trace"]
+lowering-trace = ["chelis-ir/lowering-trace", "chelis-ir-core/lowering-trace"]
 
 [dependencies]
 chelis-dag-core.workspace = true
+chelis-ir-core.workspace = true
 chelis-checker-core = { workspace = true, features = ["serde"] }
 chelis-unord.workspace = true
 chelis-deep.workspace = true

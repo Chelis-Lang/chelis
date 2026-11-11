@@ -19,7 +19,7 @@ CORE_MANIFEST = REPO_ROOT / "crates" / CORE_PACKAGE / "Cargo.toml"
 APPROVED_DIRECT_DEPENDENCIES = frozenset(
     {
         "chelis-deep", "chelis-types", "chelis-effects", "chelis-effects-core",
-        "chelis-ir", "chelis-unord", "chelis-dag-core", "chelis-checker-core",
+        "chelis-ir", "chelis-ir-core", "chelis-unord", "chelis-dag-core", "chelis-checker-core",
     }
 )
 # chelis-abi is the leaf checked-metadata authority (it depends only on

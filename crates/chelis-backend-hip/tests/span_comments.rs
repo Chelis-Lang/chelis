@@ -418,7 +418,7 @@ fn s4_hip_oracle_richer_combinations_compile_and_grep() {
 // Per `spec/03-deep-syntax.md` §1.1.1 the parser rejects forbidden span
 // chars; this test class exercises programmatic IR construction that
 // bypasses the parser, so the HIP backend's sanitizer
-// (`chelis_ir::span_sanitize::sanitize_for_comment`) must escape forbidden
+// (`chelis_ir_core::span_sanitize::sanitize_for_comment`) must escape forbidden
 // bytes inside `// span:` comments — both host-side and inside embedded
 // kernel source strings — before emitting C/HIP source.
 

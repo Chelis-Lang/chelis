@@ -505,10 +505,12 @@ dependencies = [
  "chelis-deep",
  "chelis-effects",
  "chelis-ir",
+ "chelis-ir-core",
  "chelis-numeric-core",
  "chelis-runtime-bundle",
  "chelis-surf",
  "chelis-syntax-host",
+ "chelis-type-core",
  "chelis-types",
  "chelis-unord",
  "chelis-vocab",
@@ -529,6 +531,7 @@ dependencies = [
  "chelis-dag-core",
  "chelis-effects",
  "chelis-ir",
+ "chelis-ir-core",
  "chelis-numeric-core",
  "chelis-runtime-bundle",
  "chelis-surf",
@@ -551,6 +554,7 @@ dependencies = [
  "chelis-dag-core",
  "chelis-effects",
  "chelis-ir",
+ "chelis-ir-core",
  "chelis-numeric-core",
  "chelis-runtime-bundle",
  "chelis-surf",
@@ -627,6 +631,7 @@ dependencies = [
  "chelis-effects",
  "chelis-effects-core",
  "chelis-ir",
+ "chelis-ir-core",
  "chelis-lint",
  "chelis-lsp",
  "chelis-macros",
@@ -685,6 +690,7 @@ dependencies = [
  "chelis-effects-core",
  "chelis-image-id",
  "chelis-ir",
+ "chelis-ir-core",
  "chelis-macros",
  "chelis-numeric-core",
  "chelis-pipeline-core",
@@ -791,6 +797,7 @@ dependencies = [
  "chelis-deep",
  "chelis-effects",
  "chelis-ir",
+ "chelis-ir-core",
  "chelis-macros",
  "chelis-numeric-core",
  "chelis-reef",
@@ -855,18 +862,51 @@ dependencies = [
  "chelis-dag-core",
  "chelis-deep",
  "chelis-effects",
+ "chelis-ir-core",
  "chelis-macros",
  "chelis-numeric-core",
+ "chelis-stack-services",
  "chelis-surf",
  "chelis-syntax-host",
  "chelis-type-core",
  "chelis-types",
  "chelis-unord",
  "chelis-vocab",
- "num-bigint",
+ "critical-section",
  "serde",
  "serde_json",
- "stacker",
+ "syn 2.0.117",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "chelis-ir-core"
+version = "0.23.1"
+dependencies = [
+ "bincode",
+ "chelis-abi",
+ "chelis-checker-core",
+ "chelis-dag-core",
+ "chelis-deep",
+ "chelis-effects",
+ "chelis-effects-core",
+ "chelis-ir",
+ "chelis-macros",
+ "chelis-numeric-core",
+ "chelis-pred",
+ "chelis-stack-services",
+ "chelis-surf",
+ "chelis-syntax-host",
+ "chelis-type-core",
+ "chelis-types",
+ "chelis-unord",
+ "chelis-vocab",
+ "critical-section",
+ "num-bigint",
+ "once_cell",
+ "portable-atomic",
+ "serde",
+ "serde_json",
  "syn 2.0.117",
  "thiserror 2.0.18",
 ]
@@ -943,6 +983,7 @@ dependencies = [
  "chelis-effects",
  "chelis-effects-core",
  "chelis-ir",
+ "chelis-ir-core",
  "chelis-numeric-core",
  "chelis-syntax-host",
  "chelis-types",
@@ -1453,6 +1494,12 @@ checksum = "9481c1c90cbf2ac953f07c8d4a58aa3945c425b7185c9154d67a65e4230da511"
 dependencies = [
  "cfg-if",
 ]
+
+[[package]]
+name = "critical-section"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "790eea4361631c5e7d22598ecd5723ff611904e3344ce8720784c93e3d83d40b"
 
 [[package]]
 name = "crossbeam-deque"
@@ -2905,6 +2952,10 @@ name = "once_cell"
 version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
+dependencies = [
+ "critical-section",
+ "portable-atomic",
+]
 
 [[package]]
 name = "once_cell_polyfill"
@@ -3069,6 +3120,9 @@ name = "portable-atomic"
 version = "1.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c33a9471896f1c69cecef8d20cbe2f7accd12527ce60845ff44c153bb2a21b49"
+dependencies = [
+ "critical-section",
+]
 
 [[package]]
 name = "postcard"

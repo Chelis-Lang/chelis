@@ -25,7 +25,7 @@ ROOT = phase0.REPO_ROOT
 OracleFailure = phase0.OracleFailure
 PROFILE = 'runtime-representation'
 MANIFEST = ROOT / 'spec/design/runtime_representation_phase1_tests.json'
-MANIFEST_SHA256 = 'ff3e2cd2273b0d94155e5db4adec9bcdba3e30596f67403644e15b489cf69c08'
+MANIFEST_SHA256 = '50b995a3b642105ce8c2597cc82a3f3fee5716d92f37688a013391a925f23b31'
 MANUAL_TEST = 'an_allocation_above_int32_elements_reports_its_true_extent'
 
 
@@ -244,7 +244,7 @@ def phase1_legs():
             legs.append((name + ' (debug)', tuple(x for x in args if x != '--release')))
     for profile, flags in (('debug', ()), ('release', ('--release',))):
         legs.append((f'exact storage proof and representation controls {profile}',
-                     (*flags, '-p', 'chelis-ir', '--lib', '-E', 'test(ownership::storage::tests::)')))
+                     (*flags, '-p', 'chelis-ir', '-p', 'chelis-ir-core', '--lib', '-E', 'test(ownership::storage::tests::)')))
         legs.append((f'Metal no-reuse projection {profile}',
                      (*flags, '-p', 'chelis-backend-metal', '--test', 'never_reuse_boundary')))
     legs.append(('closed representation vocabulary release',
@@ -457,7 +457,7 @@ def planner_mutations():
 
 
 def execute_planner_mutations(directory):
-    source = ROOT / 'crates/chelis-ir/src/ownership/storage.rs'
+    source = ROOT / 'crates/chelis-ir-core/src/ownership/storage.rs'
     receipts = []
     for name, before, after, test in planner_mutations():
         def mutate(text):

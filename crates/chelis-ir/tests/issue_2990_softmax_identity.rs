@@ -1,5 +1,5 @@
 use chelis_dag_core::{Dag, DimInfo, RiscOp, TensorType, tier2, verify};
-use chelis_ir::{compositions, vmap};
+use chelis_ir_core::{compositions, vmap};
 use chelis_numeric_core::prim::Prim;
 
 fn graph(precision: Prim, axis: usize) -> Dag {
@@ -167,7 +167,8 @@ fn decomposition_refuses_an_unmapped_metadata_dependency() {
 #[test]
 fn empty_axis_traps_only_when_the_retained_softmax_is_active() {
     use chelis_dag_core::dag::Owner;
-    use chelis_ir::eval::{self, TensorValue};
+    use chelis_ir::eval;
+    use chelis_ir_core::eval::TensorValue;
     use chelis_numeric_core::dtype_semantics::{RawTensor, finalize_tensor};
     let mut dag = Dag::new();
     let owner = dag.declare("empty");

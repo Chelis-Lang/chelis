@@ -369,7 +369,7 @@ fn verified_host_helper_dag(
     helper_name: &str,
     dag: chelis_dag_core::dag::Dag,
 ) -> Result<VerifiedDagProgram, Unsupported> {
-    let unsupported = |error: chelis_ir::ownership::OwnershipError| {
+    let unsupported = |error: chelis_ir_core::ownership::OwnershipError| {
         Unsupported::new(
             chelis_checker_core::unsupported::UnsupportedKind::Construct(format!(
                 "Metal device helper `{helper_name}` ownership lowering"
@@ -390,7 +390,8 @@ fn verified_host_helper_dag(
 
 #[cfg(test)]
 pub(crate) mod testing {
-    use chelis_ir::ownership::{OwnershipError, VerifiedDagProgram};
+    use chelis_ir::ownership::VerifiedDagProgram;
+    use chelis_ir_core::ownership::OwnershipError;
 
     pub(crate) fn verified_dag(
         dag: &chelis_dag_core::dag::Dag,

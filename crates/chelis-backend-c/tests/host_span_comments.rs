@@ -15,12 +15,12 @@
 //! Mirrors the DAG-side coverage in `span_comments.rs`.
 
 mod support;
-use chelis_ir::ConcreteHostType as HostType;
-use chelis_ir::host::{
+use chelis_ir_core::host::{
     ConcreteHostExpr as HostExpr, ConcreteHostExprKind as HostExprKind,
     ConcreteHostFunction as HostFunction, ConcreteHostParam as HostParam,
     ConcreteHostProgram as HostProgram,
 };
+use chelis_ir_core::host_type_state::ConcreteHostType as HostType;
 use support::emit_host_program;
 
 fn make_program(body: HostExpr) -> HostProgram {
@@ -40,7 +40,7 @@ fn make_program(body: HostExpr) -> HostProgram {
             ret_ty: HostType::Float64,
             body,
             tensor_helpers: Vec::new(),
-            origin: chelis_ir::host::HostFunctionOrigin::Authored,
+            origin: chelis_ir_core::host::HostFunctionOrigin::Authored,
             specialization: None,
             summary_rejections: Vec::new(),
         }],
@@ -140,7 +140,7 @@ fn s6_host_no_spans_emits_no_comment_block() {
 fn s6_host_forbidden_newline_in_span_is_escaped_at_emit() {
     // The injection probe — without sanitization, `// span: op\nint
     // INJECTED = 42;` would terminate the line comment and emit live C.
-    // The shared `chelis_ir::span_sanitize::sanitize_for_comment` must
+    // The shared `chelis_ir_core::span_sanitize::sanitize_for_comment` must
     // apply on the host path too.
     let body = HostExpr::with_span(
         HostExprKind::Var("x".to_string(), HostType::Float64),

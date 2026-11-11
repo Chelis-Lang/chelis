@@ -35,7 +35,8 @@
 //! it before.
 
 use chelis_dag_core::dag::{Dag, DimInfo, NodeId, RiscOp, RtAxis, RtDim, TensorType};
-use chelis_ir::eval::{TensorValue, eval_tensor_roots_with_strict};
+use chelis_ir::eval::eval_tensor_roots_with_strict;
+use chelis_ir_core::eval::TensorValue;
 use chelis_numeric_core::prim::Prim;
 
 fn ty(dims: Vec<DimInfo>, precision: Prim) -> TensorType {

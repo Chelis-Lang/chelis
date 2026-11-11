@@ -1,5 +1,6 @@
 use assert_cmd::Command;
-use chelis_ir::eval::{TensorValue, eval_tensor};
+use chelis_ir_core::eval::TensorValue;
+use chelis_ir::eval::eval_tensor;
 use chelis_numeric_core::prim::Prim;
 use chelis_numeric_core::dtype_semantics::{RawTensor, finalize_tensor};
 use chelis_unord::UnordMap;
@@ -365,21 +366,18 @@ fn compiled(directory: &Path, stem: &str, source: &str) -> Outcome {
 }
 
 fn dag(cell: &Cell) -> Outcome {
+    chelis_ir::resources::with_operation(|operation| {
     let declarations = chelis_surf::parser::parse_str(&cell.source,&chelis_syntax_host::NativeStack).expect("Surf parse");
     let checked = chelis_types::check_ir_program(
         &chelis_surf::desugar::desugar_program(&declarations,&chelis_syntax_host::NativeStack).expect("Surf desugar"),
     )
     .unwrap_or_else(|report| panic!("type check failed: {:?}", report.errors));
-    // A fatal lowering diagnostic (one raised inside a transform body)
-    // unwinds with the diagnostic as its payload.
-    let lowered = std::panic::catch_unwind(|| {
-        chelis_ir::host::lower_named_tensor_entry_dag(&checked, "selected")
-    });
+    let lowered = chelis_ir_core::host::lower_named_tensor_entry_dag(checked.facts(), "selected", operation);
     let dag = match lowered {
         Ok(Some(dag)) => dag,
         Ok(None) => {
-            let kernel = chelis_ir::host::host_def_kernel(
-                &chelis_ir::host::HostLoweringSession::new(&checked),
+            let kernel = chelis_ir_core::host::host_def_kernel(
+                &chelis_ir_core::host::HostLoweringSession::new(checked.facts(), operation),
                 "selected",
             );
             return Outcome::Refused(match kernel {
@@ -387,10 +385,7 @@ fn dag(cell: &Cell) -> Outcome {
                 Ok(_) => "`selected` does not lower as a tensor entry".to_owned(),
             });
         }
-        Err(payload) => match payload.downcast::<chelis_ir::lower::LowerDiagnostic>() {
-            Ok(diagnostic) => return Outcome::Refused(diagnostic.to_string()),
-            Err(payload) => std::panic::resume_unwind(payload),
-        },
+        Err(diagnostic) => return Outcome::Refused(diagnostic.to_string()),
     };
     let root = *dag.roots().last().expect("a root");
     match eval_tensor(&dag, &cell.bindings) {
@@ -404,6 +399,7 @@ fn dag(cell: &Cell) -> Outcome {
         ),
         Ok(values) => Outcome::Trapped(format!("result shape {:?}", values[&root].shape)),
     }
+    })
 }
 
 /// Whether `outcome` is `expected`: the same elements, or the typed extent

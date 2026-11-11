@@ -11,13 +11,13 @@ use std::process::Command;
 
 mod support;
 use chelis_dag_core::dag::{Dag, DimInfo, RiscOp, TensorType};
-use chelis_ir::ConcreteHostType as HostType;
-use chelis_ir::host::{
+use chelis_ir_core::host::{
     ConcreteHostBinding as HostBinding, ConcreteHostExpr as HostExpr,
     ConcreteHostExprKind as HostExprKind, ConcreteHostFunction as HostFunction,
     ConcreteHostParam as HostParam, ConcreteHostProgram as HostProgram, HostFunctionOrigin,
     HostTensorHelper, HostTensorInput,
 };
+use chelis_ir_core::host_type_state::ConcreteHostType as HostType;
 use chelis_numeric_core::prim::Prim;
 use support::emit_host_program;
 

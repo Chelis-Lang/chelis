@@ -15,7 +15,8 @@ use chelis_dag_core::dag::{
     Dag, DimInfo, NodeId, ReduceWindowKind, RiscOp, RtAxis, RtDim, TensorType,
 };
 use chelis_dag_core::tier2;
-use chelis_ir::eval::{TensorValue, eval_tensor};
+use chelis_ir::eval::eval_tensor;
+use chelis_ir_core::eval::TensorValue;
 use chelis_numeric_core::dtype_semantics::{RawTensor, finalize_tensor};
 use chelis_numeric_core::dtype_semantics::{StorageView, TensorStorage};
 use chelis_numeric_core::prim::Prim;

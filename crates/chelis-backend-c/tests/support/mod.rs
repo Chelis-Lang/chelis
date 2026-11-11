@@ -3,7 +3,7 @@
 use chelis_backend_c::{CodegenOptions, CodegenResult};
 use chelis_checker_core::unsupported::Unsupported;
 use chelis_dag_core::dag::Dag;
-use chelis_ir::host::ConcreteHostProgram;
+use chelis_ir_core::host::ConcreteHostProgram;
 
 pub fn codegen(dag: &Dag, name: &str) -> Result<CodegenResult, Unsupported> {
     codegen_with_options(dag, name, CodegenOptions::default())
@@ -71,7 +71,7 @@ fn codegen_host_fixture(
             .enumerate()
             .map(|(index, param)| {
                 let ty = match &param.ty {
-                    chelis_ir::ConcreteHostType::Function(inputs, _) => {
+                    chelis_ir_core::host_type_state::ConcreteHostType::Function(inputs, _) => {
                         let mut parts = vec!["f64"; inputs.len()];
                         parts.push("f64");
                         format!("({})", parts.join(" -> "))

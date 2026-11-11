@@ -1,6 +1,6 @@
 //! Issue #254 surface acceptance — the host runtime dispatches the
 //! four `reduce_window_*` builtins to a windowed reduction that
-//! matches `chelis_ir::eval::reduce_window` byte-for-byte.
+//! matches `chelis_ir_core::eval::reduce_window` byte-for-byte.
 //!
 //! Spec source of truth: `spec/05-risc-primitives.md` §2.3.1.
 

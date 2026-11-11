@@ -111,6 +111,43 @@ DAG_SOURCE_RELOCATIONS = (
     ("crates/chelis-ir/src/span_merge.rs", "crates/chelis-dag-core/src/span_merge.rs"),
 )
 
+IR_SOURCE_RELOCATIONS = tuple(
+    (f"crates/chelis-ir/src/{module}", f"crates/chelis-ir-core/src/{module}")
+    for module in (
+        "anonymous_dims.rs", "axis_admission.rs", "callable_value.rs", "capacity_key.rs", "claim_pattern.rs",
+        "compositions.rs", "contraction_views.rs", "eval.rs", "host.rs",
+        "host/callee.rs", "host/signature_entry.rs", "host/staged.rs",
+        "host_type_state.rs", "lower.rs", "lowering_trace.rs", "ordered_layout.rs",
+        "ownership/classify.rs", "ownership/error.rs", "ownership/ir.rs",
+        "ownership/last_use.rs", "ownership/last_use/index.rs",
+        "ownership/last_use/postdominators.rs", "ownership/last_use/reference.rs",
+        "ownership/locations.rs", "ownership/lower.rs", "ownership/render.rs",
+        "ownership/storage.rs", "ownership/verify.rs", "ownership/verify/live.rs",
+        "pipeline.rs", "span_sanitize.rs", "specialize.rs", "vmap.rs",
+    )
+)
+IR_INVENTORY_ROOTS = (
+    "crates/chelis-ir-core/src/**/*.rs",
+    "crates/chelis-ir-core/build.rs",
+)
+
+
+def frozen_source_path(path: str) -> str:
+    for original, canonical in IR_SOURCE_RELOCATIONS:
+        if path == canonical:
+            return original
+    return path
+
+
+def frozen_source_identity(path: str, owner: str) -> tuple[str, str]:
+    # Resource parameters and native callbacks retain their frozen seam owners.
+    if path == "crates/chelis-ir/src/resources.rs" and owner == "NativeObserver::declaration_end":
+        return "crates/chelis-ir/src/lower.rs", "lower_program_to_library_inner"
+    if path == "crates/chelis-ir-core/src/lower.rs":
+        owner = owner.replace("LowerCtx < 'program , S >::", "LowerCtx < 'program >::", 1)
+    return frozen_source_path(path), owner
+
+
 # Which phase deletes each seam class, from the design's Part III phase map.
 # Phase 1 closes the capacity and dtype-contract vocabulary, Phase 2 the device
 # and binding mirrors, Phase 3 the host field seal, Phase 4 the typed lanes.
@@ -127,7 +164,7 @@ DELETION_PHASE_BY_KIND: dict[str, int] = {
     "load-store-template": 4,
 }
 
-CAPACITY_KEY_OWNER = "crates/chelis-ir/src/capacity_key.rs"
+CAPACITY_KEY_OWNER = "crates/chelis-ir-core/src/capacity_key.rs"
 CAPACITY_KEY_EXACT_PRODUCT_OWNER = "ExactLiteralProduct::include"
 VOCAB_OWNER = "crates/chelis-vocab/src/lib.rs"
 ELEMENT_OWNER = "crates/chelis-runtime/src/element.rs"
@@ -737,7 +774,7 @@ def _inventory_candidates(root: Path) -> tuple[str, ...]:
     deleted from disk is not.
     """
 
-    return tuple(_visible_files(root, INVENTORY_ROOTS))
+    return tuple(_visible_files(root, (*INVENTORY_ROOTS, *IR_INVENTORY_ROOTS)))
 
 
 def _root_directory(pattern: str) -> str:
@@ -891,11 +928,12 @@ def inventory_rows(root: Path) -> tuple[InventoryRow, ...]:
         kind = row["kind"]
         if owner_module_final_form(kind, row["path"], row["owner"]):
             continue
+        path, owner = frozen_source_identity(row["path"], row["owner"])
         derived = InventoryRow(
             kind=kind,
-            path=row["path"],
-            owner=row["owner"],
-            deletion_phase=_deletion_phase(kind, row["path"]),
+            path=path,
+            owner=owner,
+            deletion_phase=_deletion_phase(kind, path),
             sample=row["sample"],
         )
         seen.setdefault(derived.identity, derived)
@@ -987,7 +1025,7 @@ def mutation_manifest(probes: Sequence[MutationProbe]) -> list[dict[str, object]
         {
             "witness_id": probe.witness_id,
             "expected_kind": probe.expected_kind,
-            "path": probe.path.as_posix(),
+            "path": frozen_source_path(probe.path.as_posix()),
             "implementation_sha256": _mutation_implementation_sha256(probe.mutate),
             "expected_failure": {
                 "code": probe.expected_failure.code,
@@ -1111,6 +1149,9 @@ def _validate_referenced_files(
     """
 
     universe = set(inventory_sources(root))
+    universe.update(
+        original for original, canonical in IR_SOURCE_RELOCATIONS if canonical in universe
+    )
     referenced = referenced_files(baseline)
     recorded = set(baseline["retired_files"])
     returned = sorted(recorded & universe)
@@ -1175,7 +1216,7 @@ def _owner_module_final_forms_manifest() -> dict[str, list[dict[str, str]]]:
     ]
     by_path: dict[str, list[dict[str, str]]] = {}
     for path, kind, owner in rows:
-        by_path.setdefault(path, []).append({"kind": kind, "owner": owner})
+        by_path.setdefault(frozen_source_path(path), []).append({"kind": kind, "owner": owner})
     return {
         path: sorted(path_rows, key=lambda row: (row["kind"], row["owner"]))
         for path, path_rows in sorted(by_path.items())
@@ -1670,6 +1711,13 @@ def validate_dag_source_relocations(root: Path) -> tuple[InventoryRow, ...]:
                 f"empty canonical DAG source: {canonical}",
                 code="source_relocation.empty_destination",
                 details=(canonical,),
+            )
+    for original, canonical in IR_SOURCE_RELOCATIONS:
+        if not (root / canonical).is_file() or not (root / canonical).read_text(encoding="utf-8").strip():
+            raise OracleFailure(
+                f"missing canonical IR source: {canonical}",
+                code="source_relocation.missing_destination",
+                details=(original, canonical),
             )
 
     baseline = load_baseline()
@@ -2609,7 +2657,7 @@ def _expect_mutation_rejected(probe: MutationProbe) -> None:
                     f"row: {sorted(error.details)[:5]}"
                 ) from error
             expected = {
-                f"kind={probe.expected_kind}|path={probe.path.as_posix()}|owner={owner}"
+                f"kind={probe.expected_kind}|path={frozen_source_path(probe.path.as_posix())}|owner={owner}"
                 for owner in probe.expected_owners
             }
             missing = expected - set(error.details)
@@ -2967,11 +3015,11 @@ def phase0_legs() -> tuple[OracleLeg, ...]:
         ),
         OracleLeg(
             "exact capacity key contract",
-            ("cargo", "test", "--release", "-p", "chelis-ir", "capacity_key::tests::"),
+            ("cargo", "test", "--release", "-p", "chelis-ir-core", "capacity_key::tests::"),
         ),
         OracleLeg(
             "opaque capacity key public surface",
-            ("cargo", "test", "--release", "-p", "chelis-ir", "--doc", "capacity_key"),
+            ("cargo", "test", "--release", "-p", "chelis-ir-core", "--doc", "capacity_key"),
         ),
         # The private CapacityKey leg above inverts #888's original key-level
         # witness. These shared-plan and backend-adapter legs preserve its

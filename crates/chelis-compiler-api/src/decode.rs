@@ -95,9 +95,9 @@ impl std::error::Error for DecodeError {}
 /// Reconstruct validated, already tagged storage without arithmetic finalization.
 pub(crate) fn wire_tensor_to_ir(
     value: &crate::schema::TensorValue,
-) -> Result<chelis_ir::eval::TensorValue, String> {
+) -> Result<chelis_ir_core::eval::TensorValue, String> {
     let shape = value.host_shape()?;
-    Ok(chelis_ir::eval::TensorValue::from_storage(
+    Ok(chelis_ir_core::eval::TensorValue::from_storage(
         shape,
         value.data.clone(),
     ))

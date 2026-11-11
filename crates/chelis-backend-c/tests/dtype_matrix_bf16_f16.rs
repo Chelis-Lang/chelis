@@ -741,7 +741,7 @@ fn build_f16_matmul_dag() -> Dag {
 #[test]
 fn bf16_matmul_routes_through_convert_then_sgemm() {
     let dag = build_bf16_matmul_dag();
-    let specialized = chelis_ir::specialize::specialize_for_blas(&dag);
+    let specialized = chelis_ir_core::specialize::specialize_for_blas(&dag);
     let result = codegen(&specialized, "bf16_matmul_routing").unwrap();
     assert!(
         result.c_source.contains("chelis_bf16_to_f32"),
@@ -763,7 +763,7 @@ fn bf16_matmul_routes_through_convert_then_sgemm() {
 #[test]
 fn f16_matmul_routes_through_convert_then_sgemm() {
     let dag = build_f16_matmul_dag();
-    let specialized = chelis_ir::specialize::specialize_for_blas(&dag);
+    let specialized = chelis_ir_core::specialize::specialize_for_blas(&dag);
     let result = codegen(&specialized, "f16_matmul_routing").unwrap();
     assert!(
         result.c_source.contains("chelis_f16_to_f32"),
@@ -785,7 +785,7 @@ fn f16_matmul_routes_through_convert_then_sgemm() {
 #[test]
 fn bf16_matmul_agrees_with_evaluator() {
     let dag = build_bf16_matmul_dag();
-    let specialized = chelis_ir::specialize::specialize_for_blas(&dag);
+    let specialized = chelis_ir_core::specialize::specialize_for_blas(&dag);
     let result = codegen(&specialized, "bf16_matmul_exec").unwrap();
     let main_c = format!(
         r#"{HARNESS}
@@ -845,7 +845,7 @@ int main(void) {{
 #[test]
 fn f16_matmul_agrees_with_evaluator() {
     let dag = build_f16_matmul_dag();
-    let specialized = chelis_ir::specialize::specialize_for_blas(&dag);
+    let specialized = chelis_ir_core::specialize::specialize_for_blas(&dag);
     let result = codegen(&specialized, "f16_matmul_exec").unwrap();
     let main_c = format!(
         r#"{HARNESS}

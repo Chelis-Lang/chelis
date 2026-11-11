@@ -31,7 +31,7 @@ const METAL_TENSOR_CAPABLE_PRIMS: &[Prim] = &[
 pub fn tensor_capable_prims(target: Target) -> &'static [Prim] {
     let _fp_env = chelis_runtime::FpEnvGuard::enter();
     match target {
-        Target::Eval => chelis_ir::EVAL_TENSOR_CAPABLE_PRIMS,
+        Target::Eval => chelis_ir_core::EVAL_TENSOR_CAPABLE_PRIMS,
         Target::C => chelis_backend_c::TENSOR_CAPABLE_PRIMS,
         Target::Hip => chelis_backend_hip::TENSOR_CAPABLE_PRIMS,
         Target::Metal => METAL_TENSOR_CAPABLE_PRIMS,

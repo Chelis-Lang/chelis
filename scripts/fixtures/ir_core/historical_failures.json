@@ -1,0 +1,31 @@
+{
+  "baseline": "23dc12afb7b0404b7f70a9fc2cacc3df7ed77cbe",
+  "failures": [
+    {
+      "identity": "ir-baseline-execution/ordinary/capture-parser",
+      "outcome": "failed",
+      "reason": "The first parser counts ignored start events as selected execution. The repair retains the raw ordinary command.",
+      "artifacts": {
+        "historical/parser-failure.json": {
+          "bytes": 618,
+          "sha256": "1de409003f5ac59c498f8fc9074567185fbbee2c59a5601576ba0d81331f7dcc"
+        }
+      }
+    },
+    {
+      "identity": "ir-storage-recovery/retention.json/commands/0",
+      "outcome": "failed",
+      "exit": 101,
+      "classification": "environment-cleanup",
+      "recovery_identity": "ir-storage-recovery/retention.json/commands/1",
+      "recovery_exit": 0,
+      "reason": "The compiler cache wrapper cannot locate rustc. A later cleanup succeeds. This is not an IR runtime failure.",
+      "artifacts": {
+        "historical/storage-recovery.json": {
+          "bytes": 3266,
+          "sha256": "2c6f42874e39949a82ca90b4540c36745861f6b46d350413639895e69995ee55"
+        }
+      }
+    }
+  ]
+}

@@ -15,6 +15,7 @@ hip-local-gpu = []
 
 [dependencies]
 chelis-dag-core.workspace = true
+chelis-ir-core.workspace = true
 chelis-numeric-core = { workspace = true, default-features = false, features = ["alloc", "serde"] }
 chelis-unord.workspace = true
 chelis-compiler-api.workspace = true
